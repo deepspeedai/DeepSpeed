@@ -1,0 +1,5 @@
+*.pyc
+.idea/
+*~
+*.swp
+deepspeed/version_info.py
