@@ -34,15 +34,11 @@ setup(name='deepspeed',
       author='DeepSpeed Team',
       author_email='deepspeed@microsoft.com',
       url='http://aka.ms/deepspeed',
-      packages=find_packages(exclude=[
-          "docker",
-          "third_party",
-          "csrc"
-      ]),
-      scripts=[
-          'bin/deepspeed',
-          'bin/ds'
-      ],
+      packages=find_packages(exclude=["docker",
+                                      "third_party",
+                                      "csrc"]),
+      scripts=['bin/deepspeed',
+               'bin/ds'],
       classifiers=['Programming Language :: Python :: 3.6'],
       ext_modules=ext_modules,
       cmdclass=cmdclass)
