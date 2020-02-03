@@ -46,8 +46,8 @@ jobs:
     displayName: 'Unit tests'
 
   - script: |
-      ln -s /data/Megatron-LM/data examples/Megatron-LM/
-      pip install --user -r examples/Megatron-LM/requirements.txt
+      ln -s /data/Megatron-LM/data DeepSpeedExamples/Megatron-LM/
+      pip install --user -r DeepSpeedExamples/Megatron-LM/requirements.txt
       cd tests/model/
       pytest -s run_sanity_check.py
     displayName: 'Model tests'
