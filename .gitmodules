@@ -1,3 +1,6 @@
 [submodule "third_party/apex"]
 	path = third_party/apex
 	url = https://github.com/NVIDIA/apex.git
+[submodule "DeepSpeedExamples"]
+	path = DeepSpeedExamples
+	url = git@github.com:microsoft/DeepSpeedExamples.git
