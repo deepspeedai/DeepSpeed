@@ -1,0 +1,8 @@
+torch==1.2
+torchvision==0.4.0
+tqdm
+psutil
+tensorboardX==1.8
+tensorflow-gpu==1.14.0
+nvidia-ml-py3
+pre-commit
