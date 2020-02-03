@@ -6,17 +6,12 @@
 import sys
 import unittest
 
-sys.path.append('../examples/Megatron_GPT2')
-sys.path.append('../examples/BingBertSquad')
-sys.path.append('../examples/QANet-Pytorch')
-sys.path.append('../examples/bing_bert')
+sys.path.append('../DeepSpeedExamples/Megatron_GPT2')
 
 import os
 
 # Import the test cases here.
 import Megatron_GPT2
-import BingBertSquad
-import bing_bert
 
 
 def pytest_hack(runner_result):
@@ -38,9 +33,6 @@ def test_run():
     # Add test suites here.
     pytest_hack(runner.run(Megatron_GPT2.suite()))
     pytest_hack(runner.run(Megatron_GPT2.checkpoint_suite()))
-    #pytest_hack(runner.run(BingBertSquad.suite()))
-    #pytest_hack(runner.run(bing_bert.checkpoint_suite()))
-    #pytest_hack(runner.run(bing_bert.pretrain_suite()))
 
 
 if __name__ == '__main__':
