@@ -1,0 +1,97 @@
+trigger:
+- master
+
+pr:
+- master
+
+
+jobs:
+- job: Default
+  timeoutInMinutes: 360
+  pool:
+    name: 'GPU_testing'
+
+  strategy:
+    matrix:
+      Python36:
+        python.version: '3.6'
+      #Python35:
+      #  python.version: '3.5'
+      #Python37:
+      #  python.version: '3.7'
+      #Python38:
+      #  python.version: '3.8'
+
+
+  steps:
+  - task: UsePythonVersion@0
+    inputs:
+      versionSpec: '$(python.version)'
+      addToPath: true
+      architecture: 'x64'
+    displayName: 'Use Python $(python.version)'
+
+  - script: |
+      python -m pip install --upgrade pip
+      pip install --user -r requirements.txt
+      ./install.sh
+    displayName: 'Install dependencies'
+
+  - script: |
+      pre-commit run --all-files
+    displayName: 'Formatting checks'
+
+  - script: |
+      pip install --user pylint
+      pylint --exit-zero deepspeed/
+    displayName: 'Code linter'
+
+  - script: |
+      pip install --user pytest
+      pytest --verbose tests/unit/
+    displayName: 'Unit tests'
+
+  - script: |
+      ln -s /data/Megatron-LM/data examples/Megatron-LM/
+      pip install --user -r examples/Megatron-LM/requirements.txt
+      cd tests/model/
+      pytest -s run_sanity_check.py
+    displayName: 'Model tests'
+
+  # BingBertSquad logs
+  #- task: PublishPipelineArtifact@1
+  #  inputs:
+  #    targetPath: '$(Build.SourcesDirectory)/tests/model/BingBertSquad/test/'
+  #    artifactName: BingBertSquad_logs
+  #  displayName: 'BingBertSquad logs'
+  #  condition: always()
+
+  #BingBert logs
+  #- task: PublishPipelineArtifact@1
+  #  inputs:
+  #    targetPath: '$(Build.SourcesDirectory)/tests/model/bing_bert/pretrain_test/'
+  #    artifactName: BingBert_pretrain_logs
+  #  displayName: 'BingBert pretrain logs'
+  #  condition: always()
+
+  #- task: PublishPipelineArtifact@1
+  #  inputs:
+  #    targetPath: '$(Build.SourcesDirectory)/tests/model/bing_bert/checkpoint_test_logs/'
+  #    artifactName: BingBert_checkpoint_logs
+  #  displayName: 'BingBert checkpoint logs'
+  #  condition: always()
+
+  # Megatron test logs
+  - task: PublishPipelineArtifact@1
+    inputs:
+      targetPath: '$(Build.SourcesDirectory)/tests/model/Megatron_GPT2/test/'
+      artifactName: Megatron_GPT2_logs
+    displayName: 'Megatron GPT2 logs'
+    condition: always()
+
+  - task: PublishPipelineArtifact@1
+    inputs:
+      targetPath: '$(Build.SourcesDirectory)/tests/model/Megatron_GPT2/checkpoint_test_logs/'
+      artifactName: Megatron_GPT2_checkpoint_logs
+    displayName: 'Megatron GPT2 checkpoint logs'
+    condition: always()
