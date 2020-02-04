@@ -18,6 +18,7 @@ hostfile (hostfile: /job/hostfile). If no hostfile exists, will only install loc
     -d, --deepspeed_only    Install only deepspeed and no third party dependencies
     -t, --third_party_only  Install only third party dependencies and not deepspeed
     -l, --local_only        Installs only on local machine
+    -H, --hostfile          Path to MPI-style hostfile (default: /job/hostfile)
     -h, --help              This help text
   """
 }
@@ -28,6 +29,7 @@ deepspeed_install=1
 third_party_install=1
 local_only=0
 entire_dlts_job=1
+hostfile=/job/hostfile
 
 while [[ $# -gt 0 ]]
 do
@@ -47,6 +49,15 @@ case $key in
     ;;
     -l|--local_only)
     local_only=1;
+    shift
+    ;;
+    -H|--hostfile)
+    hostfile=$2
+    if [ ! -f $2 ]; then
+        echo "User provided hostfile does not exist at $hostfile, exiting"
+        exit 1
+    fi
+    shift
     shift
     ;;
     -h|--help)
@@ -75,37 +86,42 @@ cat deepspeed/version_info.py
 
 install_apex='sudo -H pip install -v --no-cache-dir --global-option="--cpp_ext" --global-option="--cuda_ext" third_party/apex'
 
-if [ ! -f /job/hostfile ]; then
-        echo "No hostfile exists at /job/hostfile, installing locally"
+if [ ! -f $hostfile ]; then
+        echo "No hostfile exists at $hostfile, installing locally"
         local_only=1
 fi
 
+# Build wheels
+if [ "$third_party_install" == "1" ]; then
+    echo "Checking out sub-module(s)"
+    git submodule update --init --recursive
+
+    echo "Building apex wheel"
+    cd third_party/apex
+    python setup.py --cpp_ext --cuda_ext bdist_wheel
+    cd -
+fi
+if [ "$deepspeed_install" == "1" ]; then
+    echo "Installing deepspeed"
+    python setup.py bdist_wheel
+fi
+
+
 if [ "$local_only" == "1" ]; then
     if [ "$third_party_install" == "1" ]; then
-        echo "Checking out sub-module(s)"
-        git submodule update --init --recursive
-
-        echo "Building apex wheel"
-        cd third_party/apex
-        python setup.py --cpp_ext --cuda_ext bdist_wheel
-        cd -
-
         echo "Installing apex"
         sudo -H pip uninstall -y apex
         sudo -H pip install third_party/apex/dist/apex*.whl
     fi
     if [ "$deepspeed_install" == "1" ]; then
         echo "Installing deepspeed"
-        python setup.py bdist_wheel
         sudo -H pip uninstall -y deepspeed
         sudo -H pip install dist/deepspeed*.whl
-
         python -c 'import deepspeed; print("deepspeed info:", deepspeed.__version__, deepspeed.__git_branch__, deepspeed.__git_hash__)'
         echo "Installation is successful"
     fi
 else
     local_path=`pwd`
-    hostfile=/job/hostfile
     if [ -f $hostfile ]; then
         hosts=`cat $hostfile | awk '{print $1}' | paste -sd "," -`;
     else
@@ -113,25 +129,22 @@ else
         exit 1
     fi
     export PDSH_RCMD_TYPE=ssh;
+    tmp_wheel_path="/tmp/deepspeed_wheels"
 
+    pdsh -w $hosts "if [ -d $tmp_wheel_path ]; then rm $tmp_wheel_path/*.whl; else mkdir -pv $tmp_wheel_path; fi"
     if [ "$third_party_install" == "1" ]; then
-        echo "Checking out sub-module(s)"
-        git submodule update --init --recursive
-
-        echo "Installing apex"
-        cd third_party/apex
-        python setup.py --cpp_ext --cuda_ext bdist_wheel
-        cd -
         pdsh -w $hosts "sudo -H pip uninstall -y apex"
-        pdsh -w $hosts "cd $local_path; sudo -H pip install third_party/apex/dist/apex*.whl"
+        pdcp -w $hosts third_party/apex/dist/apex*.whl $tmp_wheel_path/
+        pdsh -w $hosts "sudo -H pip install $tmp_wheel_path/apex*.whl"
         pdsh -w $hosts 'python -c "import apex"'
     fi
     if [ "$deepspeed_install" == "1" ]; then
         echo "Installing deepspeed"
-        python setup.py bdist_wheel
         pdsh -w $hosts "sudo -H pip uninstall -y deepspeed"
-        pdsh -w $hosts "cd $local_path; sudo -H pip install dist/deepspeed*.whl"
+        pdcp -w $hosts dist/deepspeed*.whl $tmp_wheel_path/
+        pdsh -w $hosts "sudo -H pip install $tmp_wheel_path/deepspeed*.whl"
         pdsh -w $hosts "python -c 'import deepspeed; print(\"deepspeed info:\", deepspeed.__version__, deepspeed.__git_branch__, deepspeed.__git_hash__)'"
         echo "Installation is successful"
     fi
+    pdsh -w $hosts "if [ -d $tmp_wheel_path ]; then rm $tmp_wheel_path/*.whl; rmdir $tmp_wheel_path; fi"
 fi
