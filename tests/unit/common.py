@@ -11,7 +11,7 @@ import pytest
 DEEPSPEED_UNIT_WORKER_TIMEOUT = 5
 
 
-def distributed_test(world_size=2):
+def distributed_test(world_size=2, backend='gloo'):
     """A decorator for executing a function (e.g., a unit test) in a distributed manner.
     This decorator manages the spawning and joining of processes, initialization of
     torch.distributed, and catching of errors.
@@ -33,14 +33,14 @@ def distributed_test(world_size=2):
             """Initialize torch.distributed and execute the user function. """
             os.environ['MASTER_ADDR'] = '127.0.0.1'
             os.environ['MASTER_PORT'] = '29500'
-            dist.init_process_group(backend='nccl',
+            dist.init_process_group(backend=backend,
                                     init_method='env://',
                                     rank=local_rank,
                                     world_size=num_procs)
 
             # XXX temporarily disabled due to CUDA runtime error?
             #if torch.cuda.is_available():
-            #   torch.cuda.set_device(local_rank)
+            #    torch.cuda.set_device(local_rank)
 
             run_func(*func_args, **func_kwargs)
 

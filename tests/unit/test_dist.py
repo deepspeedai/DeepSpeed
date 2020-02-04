@@ -1,3 +1,4 @@
+import torch
 import torch.distributed as dist
 
 from common import distributed_test
@@ -26,3 +27,11 @@ def test_dist_args(number, color):
 
     """Ensure that we can parse args to distributed_test decorated functions. """
     _test_dist_args_helper(number, color=color)
+
+
+@distributed_test(world_size=2)
+def test_dist_allreduce():
+    x = torch.ones(1, 3) * (dist.get_rank() + 1)
+    result = torch.ones(1, 3) * 3
+    dist.all_reduce(x)
+    assert torch.all(x == result)
