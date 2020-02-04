@@ -49,7 +49,7 @@ jobs:
       ln -s /data/Megatron-LM/data DeepSpeedExamples/Megatron-LM/
       pip install --user -r DeepSpeedExamples/Megatron-LM/requirements.txt
       cd tests/model/
-      pytest -s run_sanity_check.py
+      #pytest -s run_sanity_check.py
     displayName: 'Model tests'
 
   # BingBertSquad logs
@@ -75,17 +75,20 @@ jobs:
   #  displayName: 'BingBert checkpoint logs'
   #  condition: always()
 
-  # Megatron test logs
-  - task: PublishPipelineArtifact@1
-    inputs:
-      targetPath: '$(Build.SourcesDirectory)/tests/model/Megatron_GPT2/test/'
-      artifactName: Megatron_GPT2_logs
-    displayName: 'Megatron GPT2 logs'
-    condition: always()
 
-  - task: PublishPipelineArtifact@1
-    inputs:
-      targetPath: '$(Build.SourcesDirectory)/tests/model/Megatron_GPT2/checkpoint_test_logs/'
-      artifactName: Megatron_GPT2_checkpoint_logs
-    displayName: 'Megatron GPT2 checkpoint logs'
-    condition: always()
+  # XXX temporarily disabled
+
+  # Megatron test logs
+  #- task: PublishPipelineArtifact@1
+  #  inputs:
+  #    targetPath: '$(Build.SourcesDirectory)/tests/model/Megatron_GPT2/test/'
+  #    artifactName: Megatron_GPT2_logs
+  #  displayName: 'Megatron GPT2 logs'
+  #  condition: always()
+
+  #- task: PublishPipelineArtifact@1
+  #  inputs:
+  #    targetPath: '$(Build.SourcesDirectory)/tests/model/Megatron_GPT2/checkpoint_test_logs/'
+  #    artifactName: Megatron_GPT2_checkpoint_logs
+  #  displayName: 'Megatron GPT2 checkpoint logs'
+  #  condition: always()
