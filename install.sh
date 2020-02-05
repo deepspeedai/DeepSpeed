@@ -91,6 +91,9 @@ if [ ! -f $hostfile ]; then
         local_only=1
 fi
 
+# Ensure dependencies are installed locally
+sudo -H pip install -r requirements.txt
+
 # Build wheels
 if [ "$third_party_install" == "1" ]; then
     echo "Checking out sub-module(s)"
@@ -132,6 +135,8 @@ else
     tmp_wheel_path="/tmp/deepspeed_wheels"
 
     pdsh -w $hosts "if [ -d $tmp_wheel_path ]; then rm $tmp_wheel_path/*.whl; else mkdir -pv $tmp_wheel_path; fi"
+    pdcp -w $hosts requirements.txt ${tmp_wheel_path}/
+    pdsh -w $hosts "sudo -H pip install -r ${tmp_wheel_path}/requirements.txt"
     if [ "$third_party_install" == "1" ]; then
         pdsh -w $hosts "sudo -H pip uninstall -y apex"
         pdcp -w $hosts third_party/apex/dist/apex*.whl $tmp_wheel_path/
@@ -146,5 +151,5 @@ else
         pdsh -w $hosts "python -c 'import deepspeed; print(\"deepspeed info:\", deepspeed.__version__, deepspeed.__git_branch__, deepspeed.__git_hash__)'"
         echo "Installation is successful"
     fi
-    pdsh -w $hosts "if [ -d $tmp_wheel_path ]; then rm $tmp_wheel_path/*.whl; rmdir $tmp_wheel_path; fi"
+    pdsh -w $hosts "if [ -d $tmp_wheel_path ]; then rm $tmp_wheel_path/*.whl $tmp_wheel_path/requirements.txt; rmdir $tmp_wheel_path; fi"
 fi
