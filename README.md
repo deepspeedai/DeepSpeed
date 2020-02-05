@@ -14,13 +14,14 @@ model convergence tests are found in `tests/model/`.
 
 ### Unit Tests
 [PyTest](https://docs.pytest.org/en/latest/) is used to execute tests. PyTest can be
-installed from PyPI via `pip install pytest`. Simply invoke `pytest` to run the unit
-tests:
+installed from PyPI via `pip install pytest`. Simply invoke `pytest --forked` to run the
+unit tests:
 
-    pytest tests/unit/
+    pytest --forked tests/unit/
 
 You can also provide the `-v` flag to `pytest` to see additional information about the
-tests.
+tests. Note that [pytest-forked](https://github.com/pytest-dev/pytest-forked) and the
+`--forked` flag are required to test CUDA functionality in distributed tests.
 
 ### Model Tests
 To execute model tests, first [install DeepSpeed](#installation). The

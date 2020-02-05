@@ -41,8 +41,7 @@ jobs:
     displayName: 'Code linter'
 
   - script: |
-      pip install --user pytest
-      pytest --verbose tests/unit/
+      pytest --forked --verbose tests/unit/
     displayName: 'Unit tests'
 
   - script: |

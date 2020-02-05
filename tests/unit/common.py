@@ -7,11 +7,11 @@ from torch.multiprocessing import Process
 
 import pytest
 
-# Worker timeout _after_ the first worker has completed.
-DEEPSPEED_UNIT_WORKER_TIMEOUT = 5
+# Worker timeout *after* the first worker has completed.
+DEEPSPEED_UNIT_WORKER_TIMEOUT = 10
 
 
-def distributed_test(world_size=2, backend='gloo'):
+def distributed_test(world_size=2, backend='nccl'):
     """A decorator for executing a function (e.g., a unit test) in a distributed manner.
     This decorator manages the spawning and joining of processes, initialization of
     torch.distributed, and catching of errors.
@@ -38,9 +38,8 @@ def distributed_test(world_size=2, backend='gloo'):
                                     rank=local_rank,
                                     world_size=num_procs)
 
-            # XXX temporarily disabled due to CUDA runtime error?
-            #if torch.cuda.is_available():
-            #    torch.cuda.set_device(local_rank)
+            if torch.cuda.is_available():
+                torch.cuda.set_device(local_rank)
 
             run_func(*func_args, **func_kwargs)
 

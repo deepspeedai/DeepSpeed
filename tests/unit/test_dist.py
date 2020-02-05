@@ -29,9 +29,10 @@ def test_dist_args(number, color):
     _test_dist_args_helper(number, color=color)
 
 
-@distributed_test(world_size=2)
+@distributed_test(world_size=[1, 2, 4])
 def test_dist_allreduce():
-    x = torch.ones(1, 3) * (dist.get_rank() + 1)
-    result = torch.ones(1, 3) * 3
+    x = torch.ones(1, 3).cuda() * (dist.get_rank() + 1)
+    sum_of_ranks = (dist.get_world_size() * (dist.get_world_size() + 1)) // 2
+    result = torch.ones(1, 3).cuda() * sum_of_ranks
     dist.all_reduce(x)
     assert torch.all(x == result)

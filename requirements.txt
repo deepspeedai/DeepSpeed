@@ -6,4 +6,5 @@ tensorboardX==1.8
 tensorflow-gpu==1.14.0
 nvidia-ml-py3
 pytest
+pytest-forked
 pre-commit
