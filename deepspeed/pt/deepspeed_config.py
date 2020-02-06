@@ -256,7 +256,8 @@ class DeepSpeedConfig(object):
         self.dynamic_loss_scale_args = get_dynamic_loss_scale_args(param_dict)
 
         self.optimizer_name = get_optimizer_name(param_dict)
-        if self.optimizer_name.lower() in DEEPSPEED_OPTIMIZERS:
+        if self.optimizer_name is not None and \
+            self.optimizer_name.lower() in DEEPSPEED_OPTIMIZERS:
             self.optimizer_name = self.optimizer_name.lower()
 
         self.optimizer_params = get_optimizer_params(param_dict)
