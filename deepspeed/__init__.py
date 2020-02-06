@@ -37,7 +37,7 @@ def initialize(args,
         optimizer: Optional: a user defined optimizer, this is typically used instead of defining
             an optimizer in the DeepSpeed json config.
 
-        model_parameters: Optional: An iterable of torch.Tensor s or dicts.
+        model_parameters: Optional: An iterable of torch.Tensors or dicts.
             Specifies what Tensors should be optimized.
 
         training_data: Optional: Dataset of type torch.utils.data.Dataset
@@ -55,7 +55,19 @@ def initialize(args,
             map-style dataset.
 
     Return:
+        The following tuple is returned by this function.
         tuple: engine, engine.optimizer, engine.training_dataloader, engine.lr_scheduler
+
+        engine: DeepSpeed runtime engine which wraps the client model for distributed training.
+
+        engine.optimizer: Wrapped optimizer if a user defined optimizer is passed or
+            if optimizer is specified in json config else None.
+
+        engine.training_dataloader: DeepSpeed dataloader if training data was passed else None.
+
+        engine.lr_scheduler: Wrapped lr scheduler if user lr scheduler is passed
+            or if lr scheduler specified in json config else None.
+
 
     """
     print("DeepSpeed info: version={}, git-hash={}, git-branch={}".format(
@@ -83,8 +95,13 @@ def initialize(args,
     return tuple(return_items)
 
 
-def add_core_arguments(parser):
-    r"""Adds argument group for enabling deepspeed and providing deepspeed config file
+def _add_core_arguments(parser):
+    r"""Helper (internal) function to update an argument parser with an argument group of the core DeepSpeed arguments.
+        The core set of DeepSpeed arguments include the following:
+        1) --deepspeed: boolean flag to enable DeepSpeed
+        2) --deepspeed_config <json file path>: path of a json configuration file to configure DeepSpeed runtime.
+
+        This is a helper function to the public add_config_arguments()
 
     Arguments:
         parser: argument parser
@@ -107,13 +124,16 @@ def add_core_arguments(parser):
 
 
 def add_config_arguments(parser):
-    r"""Updates the parser to parse DeepSpeed arguments
+    r"""Update the argument parser to enabling parsing of DeepSpeed command line arguments.
+        The set of DeepSpeed arguments include the following:
+        1) --deepspeed: boolean flag to enable DeepSpeed
+        2) --deepspeed_config <json file path>: path of a json configuration file to configure DeepSpeed runtime.
 
     Arguments:
         parser: argument parser
     Return:
         parser: Updated Parser
     """
-    parser = add_core_arguments(parser)
+    parser = _add_core_arguments(parser)
 
     return parser
