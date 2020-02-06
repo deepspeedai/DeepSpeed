@@ -1,7 +1,8 @@
 # DeepSpeed
 
 [![Build Status](https://msdlserving.visualstudio.com/DeepScale/_apis/build/status/DeepSpeed%20GPU%20CI?branchName=master)](https://msdlserving.visualstudio.com/DeepScale/_build/latest?definitionId=36&branchName=master)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![License MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://github.com/Microsoft/DeepSpeed/blob/master/LICENSE)
+
 
 ## Installation
 
