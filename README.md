@@ -8,37 +8,11 @@ efficient, and effective.
 <p align="center"><i><b>5x Faster Training</b></i></p>
 <p align="center"><i><b>Minimal Code Change</b></i></p>
 
-DeepSpeed can train DL models with over a hundred billion parameters on current generation of GPU clusters, while achieving over 5x in system performance compared to the state-of-art. Early adopters of DeepSpeed have already produced language model (LM) with over 17B parameters establishing new SOTA in the LM category.
-
-Below we provide a brief feature list, see our detailed [feature
-overview](#deepspeed-feature-overview) for descriptions and usage guide.
-
-* [Distributed Training with Mixed Precision](#distributed-training-with-mixed-precision)
-    * 16-bit mixed precision
-    * Single-GPU/Multi-GPU/Multi-Node
-* [Model Parallelism](#model-parallelism)
-    * Support for Custom Model Parallelism
-    * Integration with Megatron-LM
-* [Memory and Bandwidth Optimizations](#memory-and-bandwidth-optimizations)
-    * The Zero Redundancy Optimizer (ZeRO)
-    * Constant Buffer Optimization (CBO)
-    * Smart Gradient Accumulation
-* [Training Features](#training-features)
-    * Simplified training API
-    * Gradient Clipping
-    * Automatic loss scaling with mixed precision
-* [Training Optimizers](#training-optimizers)
-    * Fused Adam optimizer and arbitrary `torch.optim.Optimizer`
-    * Memory bandwidth optimized FP16 Optimizer
-    * Large Batch Training with LAMB Optimizer
-    * Memory efficient Training with ZeRO Optimizer
-* [Training Agnostic Checkpointing](#training-agnostic-checkpointing)
-* [Advanced Parameter Search](#advanced-parameter-search)
-    * Learning Rate Range Test
-    * 1Cycle Learning Rate Schedule
-* [Simplified Data Loader](#simplified-data-loader)
-* [Performance Analysis and Debugging](#performance-analysis-and-debugging)
-
+DeepSpeed can train DL models with over a hundred billion parameters on current
+generation of GPU clusters, while achieving over 5x in system performance
+compared to the state-of-art. Early adopters of DeepSpeed have already produced
+a language model (LM) with over 17B parameters establishing a new SOTA in the LM
+category.
 
 
 ## Table of Contents
@@ -46,11 +20,10 @@ overview](#deepspeed-feature-overview) for descriptions and usage guide.
 | Section                                 | Description                                 |
 | --------------------------------------- | ------------------------------------------- |
 | [Why DeepSpeed?](#why-deepspeed)        |  DeepSpeed overview                         |
-| [Installation](#installation)           |  Installation instructions                  |
-| [Feature Overview](#feature-overview)   |  Preview of DeepSpeed's features            |
+| [Getting Started](#getting-started)     |  DeepSpeed first steps                      |
+| [Further Reading](#further-reading)     |  Additional DeepSpeed documentation         |
 | [Testing](#testing)                     |  Instructions for testing DeepSpeed         |
 | [Contributing](#contributing)           |  Instructions for contributing to DeepSpeed |
-
 
 
 
@@ -98,7 +71,7 @@ optimizations on advanced hyperparameter tuning and optimizers. For example:
 * DeepSpeed trains GPT2 (1.5 billion parameters) 3.75x faster than state-of-art, NVIDIA
   Megatron on Azure GPUs.
 
-  *Read more*: [GPT tutorial](../../Tutorials/Megatron_GPT2/MegatronGPT2Tutorial.md)
+  *Read more*: [GPT tutorial](./docs/tutorials/MegatronGPT2Tutorial.md)
 
 
 
@@ -112,10 +85,11 @@ DeepSpeed reduces the training memory footprint through a novel solution called 
 Redundancy Optimizer (ZeRO). Unlike basic data parallelism where memory states are
 replicated across data-parallel processes, ZeRO partitions model states to save
 significant memory. The current implementation (stage 1 of ZeRO) reduces memory by up to
-4x relative to the state-of-art. You can read more about ZeRO in our [technical
-report](https://arxiv.org/abs/1910.02054).
+4x relative to the state-of-art. You can read more about ZeRO in our [paper](https://arxiv.org/abs/1910.02054).
 
-With this impressive memory reduction, early adopters of DeepSpeed have already produced language model (LM) with over 17B parameters called [Turing-NLG](link-to-turing-blog) establishing new SOTA in the LM category.
+With this impressive memory reduction, early adopters of DeepSpeed have already
+produced  alanguage model (LM) with over 17B parameters called
+[Turing-NLG](link-to-turing-blog), establishing a new SOTA in the LM category.
 
 ### Scalability
 DeepSpeed supports efficient data parallelism, model parallelism, and their
@@ -123,13 +97,19 @@ combination. ZeRO boosts the scaling capability and efficiency further.
 * DeepSpeed provides system support to run models up to 100 billion parameters,
   10x larger than the state-of-art (8 billion NVIDIA GPT, 11 billion Google T5).
 * DeepSpeed can run large models more efficiently, up to 6x faster for models with
-  various sizes spanning 1.5B to 100B.
+  various sizes spanning 1.5B to 100B.  More specifically, the data parallelism powered by ZeRO
+  is complementary and can be combined with different types of model parallelism.  It allows
+  DeepSpeed to fit models using lower degree of model parallelism and higher batch size, offering
+  significant performance gains compared to using model parallelism alone.
 
   *Read more*: [technical report](https://arxiv.org/abs/1910.02054),
-  [GPT tutorial](../../Tutorials/Megatron_GPT2/MegatronGPT2Tutorial.md),
-  and [QANet tutorial](../../Tutorials/QANet/QANetTutorial.md).
+  and [GPT tutorial](./docs/tutorials/Megatron_GPT2/MegatronGPT2Tutorial.md).
+  <!-- and [QANet tutorial](../../Tutorials/QANet/QANetTutorial.md). -->
 
 ![DeepSpeed-vs-Megatron](./docs/figures/DeepSpeed-vs-Megatron.png)
+<p align="center">
+<em>The figure depicts system throughput improvements of DeepSpeed (combining ZeRO-powered data parallelism with model parallelism of Nvidia Megatron-LM) over using Megatron-LM alone.</em>
+</p>
 
 
 ### Fast convergence for effectiveness
@@ -138,195 +118,256 @@ optimizers such as [LAMB](https://arxiv.org/abs/1904.00962). These improve the
 effectiveness of model training and reduce the number of samples required to
 convergence to desired accuracy.
 
-*Read more*: [Tuning tutorial](../../Tutorials/1cycle/1Cycle.md), [QANet
-tutorial](../../Tutorials/QANet/QANetTutorial.md) and *BERT Tutorial*: Coming Soon
-<!---[BERT
-tutorial](../../Tutorials/BingBertSquad/BingBertSquadTutorial.md),
+<!---
+*Read more*: [Tuning tutorial](../../Tutorials/1cycle/1Cycle.md),
+ and *BERT Tutorial*: Coming Soon.
+
+[BERT tutorial](../../Tutorials/BingBertSquad/BingBertSquadTutorial.md),
+[QANet tutorial](../../Tutorials/QANet/QANetTutorial.md)
 -->
 
-## Installation
+### Good Usability
+Only a few lines of code changes are needed to enable a PyTorch model to use DeepSpeed and ZeRO. Compared to current model parallelism libraries, DeepSpeed does not require a code redesign or model refactoring. It also does not put limitations on model dimensions (such as number of attention heads, hidden sizes, and others), batch size, or any other training parameters. For models of up to six billion parameters, you can use ZeRO-powered data parallelism conveniently without requiring model parallelism, while in contrast, standard data parallelism will run out of memory for models with more than 1.3 billion parameters. In addition, DeepSpeed conveniently supports flexible combination of ZeRO-powered data parallelism with custome model parallelisms, such as tensor slicing of Nvidia Megatron-LM.  
+
+
+### Features
+
+Below we provide a brief feature list, see our detailed [feature
+overview](./docs/features.md) for descriptions and usage.
+
+* [Distributed Training with Mixed Precision](./docs/features.md#distributed-training-with-mixed-precision)
+    * 16-bit mixed precision
+    * Single-GPU/Multi-GPU/Multi-Node
+* [Model Parallelism](./docs/features.md#model-parallelism)
+    * Support for Custom Model Parallelism
+    * Integration with Megatron-LM
+* [Memory and Bandwidth Optimizations](./docs/features.md#memory-and-bandwidth-optimizations)
+    * The Zero Redundancy Optimizer (ZeRO)
+    * Constant Buffer Optimization (CBO)
+    * Smart Gradient Accumulation
+* [Training Features](./docs/features.md#training-features)
+    * Simplified training API
+    * Gradient Clipping
+    * Automatic loss scaling with mixed precision
+* [Training Optimizers](./docs/features.md#training-optimizers)
+    * Fused Adam optimizer and arbitrary `torch.optim.Optimizer`
+    * Memory bandwidth optimized FP16 Optimizer
+    * Large Batch Training with LAMB Optimizer
+    * Memory efficient Training with ZeRO Optimizer
+* [Training Agnostic Checkpointing](./docs/features.md#training-agnostic-checkpointing)
+* [Advanced Parameter Search](./docs/features.md#advanced-parameter-search)
+    * Learning Rate Range Test
+    * 1Cycle Learning Rate Schedule
+* [Simplified Data Loader](./docs/features.md#simplified-data-loader)
+* [Performance Analysis and Debugging](./docs/features.md#performance-analysis-and-debugging)
+
+
+## Getting Started
+
+
+### Installation
 **TODO**
 
 
-## Feature Overview
+### Writing DeepSpeed Models
+DeepSpeed model training is accomplished using the DeepSpeed engine. The engine
+can wrap any arbitrary model of type `torch.nn.module` and has a minimal set of APIs
+for training and checkpointing the model. Please see the tutorials for detailed
+examples.
 
-### Distributed Training with Mixed Precision
+To initialize the DeepSpeed engine:
+```python
+model_engine, optimizer, _, _ = deepspeed.initialize(args=cmd_args,
+                                                     model=model,
+                                                     model_parameters=params)
+```
 
-#### Mixed Precision Training
-Enable 16-bit (FP16) training by in the `deepspeed_config` JSON.
+`deepspeed.inialize` ensures that all of the necessary setup required for
+distributed data parallel or mixed precision training are done
+appropriately under the hood.  In addition to wrapping the model, DeepSpeed can
+construct and manage the training optimizer, data loader, and the learning rate
+scheduler based on the parameters passed to `deepspeed.initialze` and the
+DeepSpeed [configuration file](#deepspeed-configuration).
+
+
+#### Training
+
+Once the DeepSpeed engine has been initialized, it can be used to train the
+model using three simple APIs for forward propagation (`()`), backward
+propagation (`backward`), and weight updates (`step`).
+
+```python
+for step, batch in enumerate(data_loader):
+    #forward() method
+    loss = model_engine(batch)
+
+    #runs backpropagation
+    model_engine.backward(loss)
+
+    #weight update
+    model_engine.step()
+```
+
+
+Under the hood, DeepSpeed automatically performs the necessary operations
+required for distributed data parallel training, in mixed precision, with a
+pre-defined learning rate schedule:
+
+* **Gradient Averaging**: in distributed data parallel training, `backward`
+  ensures that gradients are averaged across data parallel processes after
+  training on an `effective_batch_size`.
+
+* **Loss Scaling**: in FP16/mixed precision training, the DeepSpeed
+  engine automatically handles scaling the loss to avoid precision loss in the
+  gradients.
+
+* **Learning Rate Schedule**: if using DeepSpeed's learning rate
+  schedule, then DeepSpeed automatically handles any updates to the learning
+  rate when `step` is executed.
+
+
+
+#### Model Checkpointing
+Saving and loading the training state is handled via the `save_checkpoint` and
+`load_checkpoint` API in DeepSpeed which takes two arguments to uniquely
+identify a checkpoint:
+  * `ckpt_dir`: the directory where checkpoints will be saved.
+  * `ckpt_id`: an identifier that uniquely identifies a checkpoint in the directory.
+    In the following code snippet, we use the loss value as the checkpoint identifier.
+
+```python
+#load checkpoint
+_, client_sd = model_engine.load_checkpoint(args.load_dir, args.ckpt_id)
+step = client_sd['step']
+
+#advance data loader to ckpt step
+dataloader_to_step(data_loader, step + 1)
+
+for step, batch in enumerate(data_loader):
+
+    #forward() method
+    loss = model_engine(batch)
+
+    #runs backpropagation
+    model_engine.backward(loss)
+
+    #weight update
+    model_engine.step()
+
+    #save checkpoint
+    if step % args.save_interval:
+        client_sd['step'] = step
+        ckpt_id = loss.item()
+        model_engine.save_checkpoint(args.save_dir, ckpt_id, client_sd = client_sd)
+```
+
+DeepSpeed can automatically save and restore the model, optimizer, and the
+learning rate scheduler states while hiding away these details from the user.
+However, the user may want to save other data in addition to these that are
+unique to a given model training. To support these items, `save_checkpoint`
+accepts a client state dictionary `client_sd` for saving. These items can be
+retrieved from `load_checkpoint` as a return argument. In the example above,
+the `step` value is stored as part of the `client_sd`.
+
+
+### DeepSpeed Configuration
+DeepSpeed featureds can be enabled, disabled, or configured using a config JSON
+file that should be specified as `args.deepspeed_config`. A sample config file
+is shown below. For a full set of features see [core API
+doc](../../API/core_api/core_api.md).
+
 ```json
-"fp16": {
+{
+  "train_batch_size": 8,
+  "gradient_accumulation_steps": 1,
+  "steps_per_print": 1,
+  "zero_optimization": true,
+  "disable_allgather": true,
+  "optimizer": {
+    "type": "Adam",
+    "params": {
+      "lr": 0.00015,
+      "max_grad_norm": 1.0
+    }
+  },
+
+  "fp16": {
     "enabled": true,
     "loss_scale": 0,
     "loss_scale_window": 1000,
     "hysteresis": 2,
     "min_loss_scale": 1
+  }
 }
 ```
 
-#### Single-GPU, Multi-GPU, and Multi-Node Training
-Easily switch between single-GPU, single-node multi-GPU, or multi-node multi-GPU
-execution by specifying resources with a hostfile.
+## Launching DeepSpeed Training
+DeepSpeed installs the entry point `deepspeed` to launch distributed training.
+We illustrate an example usage of DeepSpeed with the following assumptions:
+
+1. You have already integrated DeepSpeed into your model
+2. `client_entry.py` is the entry script for your model
+3. `client args` is the `argparse` command line arguments
+4. `ds_config.json` is the configuration file for DeepSpeed
+
+
+### Resource Configuration
+DeepSpeed configures compute resources with hostfiles that are compatible with
+[OpenMPI](https://www.open-mpi.org/) and [Horovod](https://github.com/horovod/horovod).
+A hostfile is a list of *hostnames*, which are machines accessible via passwordless
+SSH, and *slot counts*, which specify the number of GPUs available on the system. For
+example,
+```
+worker-1 slots=4
+worker-2 slots=4
+```
+specifies that two machines named *worker-1* and *worker-2* each have four GPUs to use
+for training.
+
+Hostfiles are specified with the `--hostfile` command line option. If no hostfile is
+specified, DeepSpeed searches for `/job/hostfile`. If no hostfile is specified or found,
+DeepSpeed queries the number of GPUs on the local machine.
+
+
+The following command launches a PyTorch training job across all available nodes and GPUs
+specified in `myhostfile`:
 ```bash
-deepspeed --hostfile=<hostfile> \
+deepspeed <client_entry.py> <client args> \
+  --deepspeed --deepspeed_config ds_config.json --hostfile=myhostfile
+```
+
+Alternatively, DeepSpeed allows you to restrict distributed training of your model to a
+subset of the available nodes and GPUs. This feature is enabled through two command line
+arguments: `--num_nodes` and `--num_gpus`. For example, distributed training can be
+restricted to use only two nodes with the following command:
+```bash
+deepspeed --num_nodes=2 \
+	<client_entry.py> <client args> \
+	--deepspeed --deepspeed_config ds_config.json
+```
+You can instead include or exclude specific resources using the `--include` and
+`--exclude` flags. For example, to use all available resources **except** GPU 0 on node
+*worker-2* and GPUs 0 and 1 on *worker-3*:
+```bash
+deepspeed --exclude="worker-2:0@worker-3:0,1" \
+	<client_entry.py> <client args> \
+	--deepspeed --deepspeed_config ds_config.json
+```
+Similarly, you can use **only** GPUs 0 and 1 on *worker-2*:
+```bash
+deepspeed --include="worker-2:0,1" \
 	<client_entry.py> <client args> \
 	--deepspeed --deepspeed_config ds_config.json
 ```
 
-The script `<client_entry.py>` will execute on the resources specified in `<hostfile>`.
 
-**TODO: explain hostfile formatting**
+## Further Reading
 
-
-### Model Parallelism
-
-#### Support for Custom Model Parallelism
-DeepSpeed is supports all forms of model parallelism including tensor slicing based
-approaches such as the [Megatron-LM](https://github.com/NVIDIA/Megatron-LM), or a
-pipelined parallelism approach such as
-[PipeDream](https://github.com/msr-fiddle/pipedream) or
-[GPipe](https://github.com/kakaobrain/torchgpipe). It does so by only requiring the model
-parallelism framework to provide a *model parallelism unit* (`mpu`) that implements a few
-bookkeeping functionalities:
-
-```python
-mpu.get_model_parallel_rank()
-mpu.get_model_parallel_group()
-mpu.get_model_parallel_world_size()
-
-mpu.get_data_parallel_rank/group/world_size()
-mpu.get_data_parallel_group()
-mpu.get_data_parallel_world_size()
-```
-#### Integration with Megatron-LM
-**TODO: port tutorial to its own page**
-DeepSpeed is fully compatible with [Megatron](https://github.com/NVIDIA/Megatron-LM).
-Please see the [Megatron-LM tutorial](docs/tutorials/MegatronGPT2Tutorial.md) for details.
-
-
-
-### Memory and Bandwidth Optimizations
-
-#### The Zero Redundancy Optimizer (ZeRO)
-[ZeRO](https://arxiv.org/abs/1910.02054) is at the heart of DeepSpeed and
-enables large model training at a scale that is simply not possible with model
-parallelism alone. When enabled, ZeRO allows training models with
-over 6 billion parameters without any model parallelism, and up to 100 billion
-parameter models with model parallelism on current generation hardware.
-
-For more details see the [ZeRO paper](https://arxiv.org/abs/1910.02054), [GPT
-tutorial](../../Tutorials/Megatron_GPT2/MegatronGPT2Tutorial.md) on integration with
-DeepSpeed. Additional tutorals including *BERT Tutorial*: Coming Soon.
-<!---[BERT
-tutorial](../../Tutorials/BingBertSquad/BingBertSquadTutorial.md),
--->
-#### Constant Buffer Optimization (CBO)
-CBO enables high network and memory throughput while restricting memory usage to a
-constant size. For memory- and network-bound operations such as normalization or
-allreduce collectives, the performance depends on the size of the operand. Simply fusing
-all operands into a single large operand can enable great throughput at the expense of
-unnecessary memory overhead. CBO in DeepSpeed fuses smaller operands into approximately a
-pre-defined sized buffer large enough to achieve great performance without the
-unnecessary memory overhead.
-
-#### Smart Gradient Accumulation
-Gradient accumulation allows running larger batch size with limited memory by breaking an
-effective batch into several sequential micro-batches, and averaging the parameter
-gradients across these micro-batches. Furthermore, instead of averaging the gradients of
-each micro-batch across all GPUs, the gradients are averaged locally during each step of
-the sequence, and a single `allreduce` is done at the end of the sequence to produce the
-averaged gradients for the effective batch across all GPUs. This strategy significantly
-reduces the communication involved over the approach of averaging globally for each
-micro-batch, specially when the number of micro-batches per effective batch is large.
-
-
-### Training Features
-
-#### Simplified training API
-The DeepSpeed core API consists of just a handful of methods:
-* initialization: `initialize`
-* training: `backward` and `step`
-* argument parsing: `add_config_arguments`
-* checkpointing : `load_checkpoint` and `store_checkpoint`
-
-DeepSpeed supports all the features described in this document, via the use of these API,
-along with a `deepspeed_config` JSON file for enabling and disabling the features. Please
-see [core API doc](../../API/core_api/core_api.md) for more details.
-
-
-#### Gradient Clipping
-DeepSpeed handles gradient clipping under the hood based on the max gradient norm
-specified by the user. See [core API doc](../../API/core_api/core_api.md) for more
-details.
-
-#### Automatic loss scaling with mixed precision
-DeepSpeed internally handles loss scaling for mixed precision training. The parameters
-for loss scaling can be specified in the `deepspeed_config` JSON file. See [core API
-  doc](../../API/core_api/core_api.md) for more details.
-
-### Training Optimizers
-
-#### Fused Adam optimizer and arbitrary torch.optim.Optimizer
-With DeepSpeed, the user can choose to use a high performance implementation of ADAM from
-NVIDIA, or any training optimizer that extends torch's `torch.optim.Optimizer` class.
-
-#### Memory bandwidth optimized FP16 Optimizer
-Mixed precision training is handled by the DeepSpeed FP16 Optimizer. This optimizer not
-only handles FP16 training but is also highly efficient. The performance of weight update
-is primarily dominated by the memory bandwidth, and the achieved memory bandwidth is
-dependent on the size of the input operands. The FP16 Optimizer is designed to maximize
-the achievable memory bandwidth by merging all the parameters of the model into a single
-large buffer, and applying the weight updates in a single kernel, allowing it to achieve
-high memory bandwidth.
-
-#### Large Batch Training with LAMB Optimizer
-**TODO: port tutorial**
-DeepSpeed makes it easy to train with large batch sizes by enabling the LAMB Optimizer.
-For more details on LAMB, see the [BERT
-tutorial](../../Tutorials/BingBertSquad/BingBertSquadTutorial.md)  and the [LAMB
-paper](https://arxiv.org/pdf/1904.00962.pdf).
-
-#### Memory-Efficient Training with ZeRO Optimizer
-DeepSpeed can train models up with up to 6 billion parameters without parallelism, and
-models with up to 100 billion parameters with 16-way model parallelism. This leap in
-model size is possible though the memory efficiency achieved via the ZeRO Optimizer. For
-more details see [ZeRO paper](https://arxiv.org/abs/1910.02054) .
-
-
-
-### Training Agnostic Checkpointing
-**TODO: API documentation**
-DeepSpeed can simplify checkpointing for you regardless of whether you are using data
-parallel training, model parallel training, mixed-precision training, a mix of these
-three, or using the zero optimizer to enable larger model sizes. See the [getting
-started](../../Onboard/onboard/onboard.md) or [core API
-doc](../../API/core_api/core_api.md) for details.
-
-### Advanced parameter search
-DeepSpeed supports multiple Learning Rate Schedules to enable faster convergence for
-large batch scaling.
-
-#### Learning Rate Range Test
-Please refer to [Learning Rate Range Test](../../Tutorials/lrrt/lrrt.md).
-
-#### 1Cycle Learning Rate Schedule
-Please refer to [1Cycle Learning Rate Schedule](../../Tutorials/1cycle/1Cycle.md).
-
-
-### Simplified Data Loader
-DeepSpeed abstracts away data parallelism and model parallelism from the user when it
-comes to data loading. Users simply provide a PyTorch dataset, and DeepSpeed data loader
-can automatically handle batch creation appropriately.
-
-### Performance Analysis and Debugging
-For performance debugging, DeepSpeed can give you a detailed breakdown of the time spent
-in different parts of the training with by simply enabling it in the `deepspeed_config`
-file. See [core API doc](../../API/core_api/core_api.md).
-```json
-{
-  "wallclock_breakdwon": true
-}
-```
+| Article                                                          | Description                                  |
+| ---------------------------------------------------------------- | -------------------------------------------- |
+| [DeepSpeed Features](./docs/features.md)                         |  DeepSpeed features                          |
+| [CIFAR-10 Tutorial](./docs/tutorials/CIFAR-10.md)                |  Getting started with CIFAR-10 and DeepSpeed |
+| [Megatron-LM Tutorial](./docs/tutorials/MegatronGPT2Tutorial.md) |  Train GPT2 with DeepSpeed and Megatron-LM   |
 
 
 
@@ -378,6 +419,9 @@ can also run these manually:
 ```bash
 pre-commit run --all-files
 ```
+If a formatting test fails, it will fix the modified code in place and abort
+the `git commit`. After looking over the changes, you can `git add <modified files>`
+and then repeat the previous `git commit` command.
 
 ### Contributor License Agreement
 This project welcomes contributions and suggestions. Most contributions require you to

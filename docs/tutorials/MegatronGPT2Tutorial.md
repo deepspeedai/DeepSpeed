@@ -335,7 +335,7 @@ start training.
 
 
 
-## 3 DeepSpeed Improvements over Megatron
+## 3 Performance Improvements
 DeepSpeed enables training very large models effectively via the advanced [ZeRO
 optimizer](https://arxiv.org/abs/1910.02054v2). ZeRO significantly reduces the memory
 footprint for training large models which means large models can be trained with i) less
@@ -345,8 +345,9 @@ multiplication where performance is directly related to the size of the matrices
 Furthermore, less model parallelism also results in less communication between model
 parallel GPUs, which further boosts performance.  Larger batch size has a similar effect
 of increasing the computational granularity as well as reducing communication, also
-resulting in better performance. Therefore, using DeepSpeed with Megatron can be
-significantly faster than using Megatron without DeepSpeed.
+resulting in better performance. Therefore, DeepSpeed combines ZeRO-powered data parallelism with
+Megatron-LM tensor-slicing model parallelism, which is
+significantly faster than using Megatron-LM alone.
 
 The observed performance improvements depend on several factors such as the memory per
 GPU, the local GPU interconnect (i.e., PCI-E vs NVLINK vs NVSwitch), the model size,
@@ -366,9 +367,9 @@ interconnects GPUs within a node, and 40 Gbps infiniband across nodes.
 
 The performance improvement comes from lower model parallelism degree and
 larger batch size as discussed earlier. Training 1.5B parameter model with
-Megatron alone requires 4-way model parallelism, and can only fit an effective
+Megatron-LM alone requires 4-way model parallelism, and can only fit an effective
 batch size of 32 using all 16 GPUs. On the other hand, DeepSpeed does not
-require any model-parallelism to train this model, and can support and
+require any model-parallelism to train this model, and can support an
 effective batch size of 128 without running out of memory, resulting in
 significantly higher performance.
 
@@ -376,11 +377,11 @@ significantly higher performance.
 ### 3.2 On High bandwidth DGX-2 GPU Cluster
 Each GPU on the DGX-2 cluster has 32 GB of memory, and GPUs inside a box is connected via
 the high-bandwidth NVSwitch. DGX-2 nodes are connected to each other via 800 Gbps (8 x 100Gbps) infiniband interconnect. As such, running a 1.5B model on DGX-2 requires less model
-parallelism, and the performance improvement from DeepSpeed for this model size is not
+parallelism, and the performance improvement from DeepSpeed for this model size is less
 significant. However, at larger model sizes, Megatron still requires significantly larger
 model parallelism degree, and can only run much smaller batch sizes than DeepSpeed.
-Therefore, as the model sizes get larger, DeepSpeed starts to significantly outperform
-Megatron.
+Therefore, as the model sizes get larger, DeepSpeed, by coming ZeRO with Megatron model parallelism, starts to significantly outperform
+using Megatron-LM alone.
 
 
 ### 3.3 Performance Improvements with Configuration Details
@@ -389,8 +390,8 @@ DGX-2 nodes. To give the readers a clear idea of source of the performance
 improvements, we also present the configuration table for both Megatron and
 DeepSpeed. It shows the smallest model parallelism degree and the largest batch
 size that can be used to train these models without running out of memory. As
-discussed above, the tables demonstrate that DeepSpeed can run with smaller
-achieve better performance than Megatron.
+discussed above, the tables demonstrate that DeepSpeed runs with smaller model parallelism degree
+and achieves better performance.
 
 ![DeepSpeed Performance SpeedUp](../figures/megatron-gpt2-perf-test.png)
 
