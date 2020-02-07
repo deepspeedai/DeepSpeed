@@ -270,60 +270,81 @@ class DeepSpeedConfig(object):
         self.tensorboard_output_path = get_tensorboard_output_path(param_dict)
         self.tensorboard_job_name = get_tensorboard_job_name(param_dict)
 
-    def _do_batch_size_sanity_check(self):
-        assert self.train_batch_size >= self.world_size, \
-            'DeepSpeedConfig: {} {} is smaller than device count {}' \
-            .format(TRAIN_BATCH_SIZE, self.train_batch_size, self.world_size)
+    def _batch_assertion(self):
 
-        assert self.train_batch_size % self.world_size == 0, \
-            'DeepSpeedConfig: {} {} is not divisible by device count {}' \
-            .format(TRAIN_BATCH_SIZE, self.train_batch_size, self.world_size)
+        train_batch = self.train_batch_size
+        micro_batch = self.train_micro_batch_size_per_gpu
+        grad_acc = self.gradient_accumulation_steps
 
-        per_device_batch_size = self.train_batch_size // self.world_size
+        assert train_batch > 0, \
+            f'Train batch size: {train_batch} has to be greater than 0'
 
-        if self.train_micro_batch_size_per_gpu is not None:
-            assert self.gradient_accumulation_steps is None, \
-                'DeepSpeedConfig: {} and {} should not be defined together' \
-                .format(TRAIN_MICRO_BATCH_SIZE_PER_GPU, GRADIENT_ACCUMULATION_STEPS)
+        assert micro_batch > 0, \
+            f'Micro batch size per gpu: {micro_batch} has to be greater than 0'
 
-            assert self.train_micro_batch_size_per_gpu <= self.train_batch_size, \
-                'DeepSpeedConfig: {} {} is greater than {} {}' \
-                .format(TRAIN_MICRO_BATCH_SIZE_PER_GPU, self.train_micro_batch_size_per_gpu, TRAIN_BATCH_SIZE, self.train_batch_size)
+        assert grad_acc > 0, \
+            f'Gradient accumulation steps: {grad_acc} has to be greater than 0'
 
-            assert self.train_batch_size % self.train_micro_batch_size_per_gpu == 0, \
-                'DeepSpeedConfig: {} {} is not divisible by {} {}' \
-                .format(TRAIN_BATCH_SIZE, self.train_batch_size, TRAIN_MICRO_BATCH_SIZE_PER_GPU, self.train_micro_batch_size_per_gpu)
+        assert train_batch == micro_batch * grad_acc * self.world_size, \
+                (f'Check batch related parameters. Train_batch_size is not equal'
+                'to micro_batch_per_gpu * gradient_acc_step * world_size'
+                f'{train_batch} != {micro_batch} * {grad_acc} * {self.world_size}')
 
-            if per_device_batch_size > self.train_micro_batch_size_per_gpu:
-                assert per_device_batch_size % self.train_micro_batch_size_per_gpu == 0, \
-                    'DeepSpeedConfig: Per device batch size {} is not divisible by {} {}' \
-                    .format(per_device_batch_size, TRAIN_MICRO_BATCH_SIZE_PER_GPU, self.train_micro_batch_size_per_gpu)
+    def _set_batch_related_parameters(self):
 
-        if self.gradient_accumulation_steps is not None:
-            assert self.train_batch_size % self.gradient_accumulation_steps == 0, \
-                'DeepSpeedConfig: {} {} is not divisible by {} {}' \
-                .format(TRAIN_BATCH_SIZE, self.train_batch_size, GRADIENT_ACCUMULATION_STEPS, self.gradient_accumulation_steps)
+        train_batch = self.train_batch_size
+        micro_batch = self.train_micro_batch_size_per_gpu
+        grad_acc = self.gradient_accumulation_steps
 
-            assert per_device_batch_size % self.gradient_accumulation_steps == 0, \
-                'DeepSpeedConfig: Per device batch size {} is not divisible by {} {}' \
-                .format(per_device_batch_size, GRADIENT_ACCUMULATION_STEPS, self.gradient_accumulation_steps)
+        #all values are provided nothing needs to be set
+        if train_batch is not None and \
+            micro_batch is not None and \
+            grad_acc is not None:
+            return
+
+        #global_accumulation_steps needs to be set
+        elif train_batch is not None and \
+            micro_batch is not None:
+            grad_acc = train_batch // micro_batch
+            grad_acc = grad_acc // self.world_size
+            self.gradient_accumulation_steps = grad_acc
+
+        #micro_batch_per_gpu needs to be set
+        elif train_batch is not None and \
+            grad_acc is not None:
+            micro_batch = train_batch // self.world_size
+            micro_batch = micro_batch // grad_acc
+            self.train_micro_batch_size_per_gpu = micro_batch
+
+        #train_batch_size needs to be set
+        elif micro_batch is not None and \
+            grad_acc is not None:
+            train_batch_size = micro_batch * grad_acc
+            train_batch_size = train_batch_size * self.world_size
+            self.train_batch_size = train_batch_size
+
+        #gradient_accumulation_steps and micro_batch_per_gpus is set
+        elif train_batch is not None:
+            self.gradient_accumulation_steps = 1
+            self.train_micro_batch_size_per_gpu = train_batch // self.world_size
+
+        #train_batch_size and gradient_accumulation_step is set
+        elif micro_batch is not None:
+            self.train_batch_size = micro_batch * self.world_size
+            self.gradient_accumulation_steps = 1
+
+        #either none of the three parameters are provided or just gradient_accumulation_step is provided
+        else:
+            assert False, \
+                'Either train_batch_size or micro_batch_per_gpu needs to be provided'
+
+        print(
+            f' After Train batch {self.train_batch_size} micro_batch {self.train_micro_batch_size_per_gpu} and grad_acc {self.gradient_accumulation_steps}'
+        )
 
     def _configure_train_batch_size(self):
-        self._do_batch_size_sanity_check()
-        if self.train_micro_batch_size_per_gpu is None and \
-                self.gradient_accumulation_steps is None:
-            self.train_micro_batch_size_per_gpu = self.train_batch_size
-            self.gradient_accumulation_steps = 1
-        elif self.train_micro_batch_size_per_gpu is not None:
-            per_device_batch_size = self.train_batch_size // self.world_size
-            if self.train_micro_batch_size_per_gpu > per_device_batch_size:
-                self.train_micro_batch_size_per_gpu = per_device_batch_size
-                self.gradient_accumulation_steps = 1
-            else:
-                self.gradient_accumulation_steps = per_device_batch_size // self.train_micro_batch_size_per_gpu
-        else:
-            self.train_micro_batch_size_per_gpu = self.train_batch_size // (
-                self.gradient_accumulation_steps * self.world_size)
+        self._set_batch_related_parameters()
+        self._batch_assertion()
 
     def _do_sanity_check(self):
         self._do_error_check()
