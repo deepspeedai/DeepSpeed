@@ -358,6 +358,10 @@ present performance improvement on a 64 GPU cluster along with detailed configur
 analysis to show where the improvements come from.
 
 ![DeepSpeed-vs-Megatron](../figures/DeepSpeed-vs-Megatron.png)
+<p align="center">
+<em>The figure depicts system throughput improvements of DeepSpeed (combining ZeRO-powered data parallelism with model parallelism of Nvidia Megatron-LM) over using Megatron-LM alone.</em>
+</p>
+
 
 ### 3.1 On Low Bandwidth GPU Cluster
 The figure above shows that training 1.5B parameter model with DeepSpeed is
@@ -394,6 +398,10 @@ discussed above, the tables demonstrate that DeepSpeed runs with smaller model p
 and achieves better performance.
 
 ![DeepSpeed Performance SpeedUp](../figures/megatron-gpt2-perf-test.png)
+<p align="center">
+<em>The figure depicts system throughput improvements of DeepSpeed (combining ZeRO-powered data parallelism with model parallelism of Nvidia Megatron-LM) over using Megatron-LM alone.</em>
+</p>
+
 
 **a ) Megatron-LM GPT2 Baseline**
 
