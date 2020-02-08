@@ -124,19 +124,19 @@ The DeepSpeed core API consists of just a handful of methods:
 * checkpointing : `load_checkpoint` and `store_checkpoint`
 
 DeepSpeed supports all the features described in this document, via the use of these API,
-along with a `deepspeed_config` JSON file for enabling and disabling the features. Please
-see [core API doc](../../API/core_api/core_api.md) for more details.
+along with a `deepspeed_config` JSON file for enabling and disabling the features.
+Please see the [core API doc](https://microsoft.github.io/DeepSpeed/docs/htmlfiles/api/full/index.html) for more details.
 
 
 ### Gradient Clipping
 DeepSpeed handles gradient clipping under the hood based on the max gradient norm
-specified by the user. See [core API doc](../../API/core_api/core_api.md) for more
-details.
+specified by the user.
+Please see the [core API doc](https://microsoft.github.io/DeepSpeed/docs/htmlfiles/api/full/index.html) for more details.
 
 ### Automatic loss scaling with mixed precision
 DeepSpeed internally handles loss scaling for mixed precision training. The parameters
-for loss scaling can be specified in the `deepspeed_config` JSON file. See [core API
-  doc](../../API/core_api/core_api.md) for more details.
+for loss scaling can be specified in the `deepspeed_config` JSON file.
+Please see the [core API doc](https://microsoft.github.io/DeepSpeed/docs/htmlfiles/api/full/index.html) for more details.
 
 ## Training Optimizers
 
@@ -169,12 +169,12 @@ more details see [ZeRO paper](https://arxiv.org/abs/1910.02054) .
 
 
 ## Training Agnostic Checkpointing
-**TODO: API documentation**
 DeepSpeed can simplify checkpointing for you regardless of whether you are using data
 parallel training, model parallel training, mixed-precision training, a mix of these
-three, or using the zero optimizer to enable larger model sizes. See the [getting
-started](../../Onboard/onboard/onboard.md) or [core API
-doc](../../API/core_api/core_api.md) for details.
+three, or using the zero optimizer to enable larger model sizes.
+Please see the [Getting Started](../README.md#getting-started) guide
+and the
+[core API doc](https://microsoft.github.io/DeepSpeed/docs/htmlfiles/api/full/index.html) for more details.
 
 ## Advanced parameter search
 DeepSpeed supports multiple Learning Rate Schedules to enable faster convergence for
@@ -195,9 +195,10 @@ can automatically handle batch creation appropriately.
 ## Performance Analysis and Debugging
 For performance debugging, DeepSpeed can give you a detailed breakdown of the time spent
 in different parts of the training with by simply enabling it in the `deepspeed_config`
-file. See [core API doc](../../API/core_api/core_api.md).
+file.
+Please see the [core API doc](https://microsoft.github.io/DeepSpeed/docs/htmlfiles/api/full/index.html) for more details.
 ```json
 {
-  "wallclock_breakdwon": true
+  "wallclock_breakdown": true
 }
 ```

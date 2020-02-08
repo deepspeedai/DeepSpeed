@@ -215,7 +215,7 @@ pre-defined learning rate schedule:
 
 * **Gradient Averaging**: in distributed data parallel training, `backward`
   ensures that gradients are averaged across data parallel processes after
-  training on an `effective_batch_size`.
+  training on an `train_batch_size`.
 
 * **Loss Scaling**: in FP16/mixed precision training, the DeepSpeed
   engine automatically handles scaling the loss to avoid precision loss in the
@@ -274,7 +274,7 @@ the `step` value is stored as part of the `client_sd`.
 DeepSpeed featureds can be enabled, disabled, or configured using a config JSON
 file that should be specified as `args.deepspeed_config`. A sample config file
 is shown below. For a full set of features see [core API
-doc](../../API/core_api/core_api.md).
+doc](https://microsoft.github.io/DeepSpeed/docs/htmlfiles/api/full/index.html).
 
 ```json
 {
@@ -363,11 +363,12 @@ deepspeed --include="worker-2:0,1" \
 
 ## Further Reading
 
-| Article                                                          | Description                                  |
-| ---------------------------------------------------------------- | -------------------------------------------- |
-| [DeepSpeed Features](./docs/features.md)                         |  DeepSpeed features                          |
-| [CIFAR-10 Tutorial](./docs/tutorials/CIFAR-10.md)                |  Getting started with CIFAR-10 and DeepSpeed |
-| [Megatron-LM Tutorial](./docs/tutorials/MegatronGPT2Tutorial.md) |  Train GPT2 with DeepSpeed and Megatron-LM   |
+| Article                                                                                        | Description                                  |
+| ---------------------------------------------------------------------------------------------- | -------------------------------------------- |
+| [DeepSpeed Features](./docs/features.md)                                                       |  DeepSpeed features                          |
+| [CIFAR-10 Tutorial](./docs/tutorials/CIFAR-10.md)                                              |  Getting started with CIFAR-10 and DeepSpeed |
+| [Megatron-LM Tutorial](./docs/tutorials/MegatronGPT2Tutorial.md)                               |  Train GPT2 with DeepSpeed and Megatron-LM   |
+| [API Documentation]( https://microsoft.github.io/DeepSpeed/docs/htmlfiles/api/full/index.html) |  Generated DeepSpeed API documentation       |
 
 
 
