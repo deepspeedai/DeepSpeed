@@ -16,8 +16,8 @@ resource_group=deepspeed_rg_$location
 
 for i in `seq 0 $(( num_vms - 1))`; do
     vm_name=${base_vm_name}_$i
-    echo "shutting down $vm_name"
-    az vm stop --resource-group $resource_group --name $vm_name
+    echo "deallocating $vm_name"
+    az vm deallocate --resource-group $resource_group --name $vm_name
     echo "deleting $vm_name"
     az vm delete -y --resource-group $resource_group --name $vm_name
 done

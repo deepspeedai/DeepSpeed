@@ -33,14 +33,20 @@ for node_id in `seq 0 $((num_vms - 1))`; do
     " >> ${ssh_config}
 done
 
+update_script="
+sudo mkdir -p /job;
+sudo chmod -R 777 /job;
+mkdir -p workdir;
+git clone https://github.com/microsoft/DeepSpeed.git workdir/DeepSpeed;
+"
+
 for node_id in `seq 0 $((num_vms - 1))`; do
     ip_addr=`az vm list-ip-addresses | jq .[${node_id}].virtualMachine.network.publicIpAddresses[0].ipAddress | sed 's/"//g'`
     addr=${username}@${ip_addr}
     echo "copying ssh keys, ssh config, hostfile to worker-${node_id}"
+    ssh $args ${addr} $update_script
     scp $args ${ssh_key}* ${addr}:.ssh/
     scp $args ${ssh_config} ${addr}:.ssh/
-    ssh $args ${addr} "sudo mkdir -p /job/; sudo chmod -R 777 /job; mkdir -p workdir"
     scp $args ${hostfile} ${addr}:/job/
-    ssh $args ${addr} 'git clone https://github.com/microsoft/DeepSpeed.git workdir/DeepSpeed'
 done
 rm $hostfile $ssh_config

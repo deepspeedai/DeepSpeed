@@ -1,0 +1,20 @@
+#!/bin/bash
+
+# Copyright 2020 The Microsoft DeepSpeed Team
+
+command -v pdsh
+if [ $? != 0 ]; then
+    echo "Cannot find pdsh, please install via 'apt-get install -y pdsh'"
+    exit 1
+fi
+
+hostfile=/job/hostfile
+
+if [ -f $hostfile ]; then
+    hosts=`cat $hostfile | awk '{print $1}' | paste -sd "," -`
+    export PDSH_RCMD_TYPE=ssh
+    pdsh -w ${hosts} $@
+else
+    echo "Missing hostfile at ${hostfile}, executing command locally"
+    $@
+fi
