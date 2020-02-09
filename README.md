@@ -18,7 +18,7 @@ compared to the state-of-art.
 | --------------------------------------- | ------------------------------------------- |
 | [Why DeepSpeed?](#why-deepspeed)        |  DeepSpeed overview                         |
 | [Getting Started](#getting-started)     |  DeepSpeed first steps                      |
-| [Further Reading](#further-reading)     |  Additional DeepSpeed documentation         |
+| [Further Reading](#further-reading)     |  DeepSpeed features, tutorials, etc.        |
 | [Testing](#testing)                     |  Instructions for testing DeepSpeed         |
 | [Contributing](#contributing)           |  Instructions for contributing to DeepSpeed |
 
@@ -306,10 +306,10 @@ We illustrate an example usage of DeepSpeed with the following assumptions:
 4. `ds_config.json` is the configuration file for DeepSpeed
 
 
-### Resource Configuration
-DeepSpeed configures compute resources with hostfiles that are compatible with
+### Resource Configuration (multi-node)
+DeepSpeed configures multi-node compute resources with hostfiles that are compatible with
 [OpenMPI](https://www.open-mpi.org/) and [Horovod](https://github.com/horovod/horovod).
-A hostfile is a list of *hostnames*, which are machines accessible via passwordless
+A hostfile is a list of *hostnames* (or SSH aliases), which are machines accessible via passwordless
 SSH, and *slot counts*, which specify the number of GPUs available on the system. For
 example,
 ```
@@ -321,7 +321,8 @@ for training.
 
 Hostfiles are specified with the `--hostfile` command line option. If no hostfile is
 specified, DeepSpeed searches for `/job/hostfile`. If no hostfile is specified or found,
-DeepSpeed queries the number of GPUs on the local machine.
+DeepSpeed queries the number of GPUs on the local machine to discover the number of local
+slots available.
 
 
 The following command launches a PyTorch training job across all available nodes and GPUs
@@ -354,6 +355,14 @@ deepspeed --include="worker-2:0,1" \
 	<client_entry.py> <client args> \
 	--deepspeed --deepspeed_config ds_config.json
 ```
+
+### Resource Configuration (single-node)
+In the case that we are only running on a single node (with one or more GPUs)
+DeepSpeed *does not* require a hostfile as described above. If a hostfile is
+not detected or passed in then DeepSpeed will query the number of GPUs on the
+local machine to discover the number of slots available. The `--include` and
+`--exclude` arguments work as normal, but the user should specify 'localhost'
+as the hostname.
 
 
 ## Further Reading
