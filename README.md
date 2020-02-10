@@ -372,6 +372,7 @@ as the hostname.
 | [DeepSpeed Features](./docs/features.md)                                                       |  DeepSpeed features                          |
 | [CIFAR-10 Tutorial](./docs/tutorials/CIFAR-10.md)                                              |  Getting started with CIFAR-10 and DeepSpeed |
 | [Megatron-LM Tutorial](./docs/tutorials/MegatronGPT2Tutorial.md)                               |  Train GPT2 with DeepSpeed and Megatron-LM   |
+| [DeepSpeed JSON Configuration](./docs/config_json.md)                                          |  Configuring DeepSpeed                       |
 | [API Documentation]( https://microsoft.github.io/DeepSpeed/docs/htmlfiles/api/full/index.html) |  Generated DeepSpeed API documentation       |
 
 
