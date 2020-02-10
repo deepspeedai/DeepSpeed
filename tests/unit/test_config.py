@@ -17,6 +17,9 @@ def test_check_version():
     assert hasattr(deepspeed, "__git_hash__")
     assert hasattr(deepspeed, "__git_branch__")
     assert hasattr(deepspeed, "__version__")
+    assert hasattr(deepspeed, "__version_major__")
+    assert hasattr(deepspeed, "__version_minor__")
+    assert hasattr(deepspeed, "__version_patch__")
 
 
 def _run_batch_config(ds_config, train_batch=None, micro_batch=None, gas=None):

@@ -9,6 +9,7 @@ The wheel will be located at: dist/*.whl
 """
 
 import torch
+from deepspeed import __version__ as ds_version
 from setuptools import setup, find_packages
 from torch.utils.cpp_extension import CUDAExtension, BuildExtension
 
@@ -29,7 +30,7 @@ ext_modules.append(
                   }))
 
 setup(name='deepspeed',
-      version='0.1',
+      version=ds_version,
       description='DeepSpeed library',
       author='DeepSpeed Team',
       author_email='deepspeed@microsoft.com',

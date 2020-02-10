@@ -80,9 +80,9 @@ if [ "$ds_only" == "1" ] && [ "$tp_only" == "1" ]; then
 fi
 
 echo "Updating git hash/branch info"
-echo "git_hash = '$(git rev-parse --short HEAD)'" > deepspeed/version_info.py
-echo "git_branch = '$(git rev-parse --abbrev-ref HEAD)'" >> deepspeed/version_info.py
-cat deepspeed/version_info.py
+echo "git_hash = '$(git rev-parse --short HEAD)'" > deepspeed/git_version_info.py
+echo "git_branch = '$(git rev-parse --abbrev-ref HEAD)'" >> deepspeed/git_version_info.py
+cat deepspeed/git_version_info.py
 
 install_apex='sudo -H pip install -v --no-cache-dir --global-option="--cpp_ext" --global-option="--cuda_ext" third_party/apex'
 
