@@ -4,7 +4,7 @@ If you haven't already stepped through [DeepSpeed Model Training](../../Onboard/
 
 In this tutorial we will be adding DeepSpeed to CIFAR-10 model, which is small image classification model.
 
-First we will go over how to run original CIRAR-10. Then we will proceed step-by-step in enabling this model to run with DeepSpeed.
+First we will go over how to run original CIFAR-10. Then we will proceed step-by-step in enabling this model to run with DeepSpeed.
 
 
 

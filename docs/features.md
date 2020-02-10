@@ -73,9 +73,8 @@ mpu.get_data_parallel_group()
 mpu.get_data_parallel_world_size()
 ```
 ### Integration with Megatron-LM
-**TODO: port tutorial to its own page**
 DeepSpeed is fully compatible with [Megatron](https://github.com/NVIDIA/Megatron-LM).
-Please see the [Megatron-LM tutorial](docs/tutorials/MegatronGPT2Tutorial.md) for details.
+Please see the [Megatron-LM tutorial](tutorials/MegatronGPT2Tutorial.md) for details.
 
 
 
@@ -89,8 +88,8 @@ over 6 billion parameters without any model parallelism, and up to 100 billion
 parameter models with model parallelism on current generation hardware.
 
 For more details see the [ZeRO paper](https://arxiv.org/abs/1910.02054), [GPT
-tutorial](../../Tutorials/Megatron_GPT2/MegatronGPT2Tutorial.md) on integration with
-DeepSpeed. Additional tutorals including *BERT Tutorial*: Coming Soon.
+tutorial](tutorials/MegatronGPT2Tutorial.md) on integration with
+DeepSpeed. Additional tutorials including *BERT Tutorial*: Coming Soon.
 <!---[BERT
 tutorial](../../Tutorials/BingBertSquad/BingBertSquadTutorial.md),
 -->
@@ -157,7 +156,7 @@ high memory bandwidth.
 **TODO: port tutorial**
 DeepSpeed makes it easy to train with large batch sizes by enabling the LAMB Optimizer.
 For more details on LAMB, see the [BERT
-tutorial](../../Tutorials/BingBertSquad/BingBertSquadTutorial.md)  and the [LAMB
+tutorial](tutorials/BingBertSquadTutorial.md)  and the [LAMB
 paper](https://arxiv.org/pdf/1904.00962.pdf).
 
 ### Memory-Efficient Training with ZeRO Optimizer
@@ -181,10 +180,10 @@ DeepSpeed supports multiple Learning Rate Schedules to enable faster convergence
 large batch scaling.
 
 ### Learning Rate Range Test
-Please refer to [Learning Rate Range Test](../../Tutorials/lrrt/lrrt.md).
+Please refer to the [Learning Rate Range Test](tutorials/lrrt.md) tutorial.
 
 ### 1Cycle Learning Rate Schedule
-Please refer to [1Cycle Learning Rate Schedule](../../Tutorials/1cycle/1Cycle.md).
+Please refer to the [1Cycle Learning Rate Schedule](tutorials/1Cycle.md) tutorial.
 
 
 ## Simplified Data Loader

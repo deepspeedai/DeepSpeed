@@ -101,12 +101,11 @@ USER deepspeed
 
 ##############################################################################
 # DeepSpeed
-# TODO: once repo is public we can install latest deepspeed via this command
 ##############################################################################
-#RUN git clone https://github.com/microsoft/DeepSpeed.git ${STAGE_DIR}/DeepSpeed
-#RUN cd ${STAGE_DIR}/DeepSpeed && \
-#    git checkout . && \
-#    git checkout master && \
-#    sudo ./install.sh
-#RUN rm -rf ${STAGE_DIR}/DeepSpeed
-#RUN python -c "import deepspeed; print(deepspeed.__version__)"
+RUN git clone https://github.com/microsoft/DeepSpeed.git ${STAGE_DIR}/DeepSpeed
+RUN cd ${STAGE_DIR}/DeepSpeed && \
+    git checkout . && \
+    git checkout master && \
+    ./install.sh
+RUN rm -rf ${STAGE_DIR}/DeepSpeed
+RUN python -c "import deepspeed; print(deepspeed.__version__)"

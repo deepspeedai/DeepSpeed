@@ -100,7 +100,7 @@ combination. ZeRO boosts the scaling capability and efficiency further.
 
 ![DeepSpeed-vs-Megatron](./docs/figures/DeepSpeed-vs-Megatron.png)
 <p align="center">
-<em>The figure depicts system throughput improvements of DeepSpeed (combining ZeRO-powered data parallelism with model parallelism of Nvidia Megatron-LM) over using Megatron-LM alone.</em>
+<em>The figure depicts system throughput improvements of DeepSpeed (combining ZeRO-powered data parallelism with model parallelism of NVIDIA Megatron-LM) over using Megatron-LM alone.</em>
 </p>
 
 
@@ -119,7 +119,7 @@ convergence to desired accuracy.
 -->
 
 ## Good Usability
-Only a few lines of code changes are needed to enable a PyTorch model to use DeepSpeed and ZeRO. Compared to current model parallelism libraries, DeepSpeed does not require a code redesign or model refactoring. It also does not put limitations on model dimensions (such as number of attention heads, hidden sizes, and others), batch size, or any other training parameters. For models of up to six billion parameters, you can use ZeRO-powered data parallelism conveniently without requiring model parallelism, while in contrast, standard data parallelism will run out of memory for models with more than 1.3 billion parameters. In addition, DeepSpeed conveniently supports flexible combination of ZeRO-powered data parallelism with custome model parallelisms, such as tensor slicing of Nvidia Megatron-LM.  
+Only a few lines of code changes are needed to enable a PyTorch model to use DeepSpeed and ZeRO. Compared to current model parallelism libraries, DeepSpeed does not require a code redesign or model refactoring. It also does not put limitations on model dimensions (such as number of attention heads, hidden sizes, and others), batch size, or any other training parameters. For models of up to six billion parameters, you can use ZeRO-powered data parallelism conveniently without requiring model parallelism, while in contrast, standard data parallelism will run out of memory for models with more than 1.3 billion parameters. In addition, DeepSpeed conveniently supports flexible combination of ZeRO-powered data parallelism with custom model parallelisms, such as tensor slicing of NVIDIA's Megatron-LM.
 
 
 ## Features
@@ -265,7 +265,7 @@ the `step` value is stored as part of the `client_sd`.
 
 
 ## DeepSpeed Configuration
-DeepSpeed featureds can be enabled, disabled, or configured using a config JSON
+DeepSpeed features can be enabled, disabled, or configured using a config JSON
 file that should be specified as `args.deepspeed_config`. A sample config file
 is shown below. For a full set of features see [core API
 doc](https://microsoft.github.io/DeepSpeed/docs/htmlfiles/api/full/index.html).
@@ -377,56 +377,9 @@ as the hostname.
 
 
 # Contributing
-DeepSpeed welcomes your contributions!
-
-
-## Prerequisites
-DeepSpeed uses [pre-commit](https://pre-commit.com/) to ensure that formatting is
-consistent across DeepSpeed. First, ensure that `pre-commit` is installed from either
-installing DeepSpeed or `pip install pre-commit`. Next, the pre-commit hooks must be
-installed once before commits can be made:
-```bash
-pre-commit install
-```
-
-Afterwards, our suite of formatting tests run automatically before each `git commit`. You
-can also run these manually:
-```bash
-pre-commit run --all-files
-```
-If a formatting test fails, it will fix the modified code in place and abort
-the `git commit`. After looking over the changes, you can `git add <modified files>`
-and then repeat the previous `git commit` command.
-
-
-## Testing
-DeepSpeed tracks two types of tests: unit tests and more costly model convergence tests.
-The model convergence tests train
-[DeepSpeedExamples](https://github.com/microsoft/DeepSpeedExamples/) and measure
-end-to-end convergence and related metrics. Unit tests are found in `tests/unit/` and
-the model convergence tests are found in `tests/model/`.
-
-### Unit Tests
-[PyTest](https://docs.pytest.org/en/latest/) is used to execute tests. PyTest can be
-installed from PyPI via `pip install pytest`. Simply invoke `pytest --forked` to run the
-unit tests:
-```bash
-pytest --forked tests/unit/
-```
-You can also provide the `-v` flag to `pytest` to see additional information about the
-tests. Note that [pytest-forked](https://github.com/pytest-dev/pytest-forked) and the
-`--forked` flag are required to test CUDA functionality in distributed tests.
-
-### Model Tests
-To execute model tests, first [install DeepSpeed](#installation). The
-[DeepSpeedExamples](https://github.com/microsoft/DeepSpeedExamples/) repository is cloned
-as part of this process. Next, execute the model test driver:
-```bash
-cd tests/model/
-pytest run_sanity_check.py
-```
-Note that the `--forked` flag is not necessary for the model tests.
-
+DeepSpeed welcomes your contributions! Please see our
+[contributing](CONTRIBUTING.md) guide for more details on formatting, testing,
+etc.
 
 ## Contributor License Agreement
 This project welcomes contributions and suggestions. Most contributions require you to
@@ -445,3 +398,6 @@ Conduct](https://opensource.microsoft.com/codeofconduct/). For more information 
 [Code of Conduct FAQ](https://opensource.microsoft.com/codeofconduct/faq/) or contact
 [opencode@microsoft.com](mailto:opencode@microsoft.com) with any additional questions or
 comments.
+
+## Publications
+1. Samyam Rajbhandari, Jeff Rasley, Olatunji Ruwase, Yuxiong He. (2019) ZeRO: Memory Optimization Towards Training A Trillion Parameter Models. [ArXiv:1910.02054](https://arxiv.org/abs/1910.02054)
