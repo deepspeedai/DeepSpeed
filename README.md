@@ -89,7 +89,7 @@ significant memory. The current implementation (stage 1 of ZeRO) reduces memory 
 4x relative to the state-of-art. You can read more about ZeRO in our [paper](https://arxiv.org/abs/1910.02054).
 
 With this impressive memory reduction, early adopters of DeepSpeed have already
-produced  alanguage model (LM) with over 17B parameters called
+produced  a language model (LM) with over 17B parameters called
 [Turing-NLG](https://www.microsoft.com/en-us/research/blog/turing-nlg-a-17-billion-parameter-language-model-by-microsoft),
 establishing a new SOTA in the LM category.
 
