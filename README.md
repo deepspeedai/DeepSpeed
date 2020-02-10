@@ -20,6 +20,7 @@ compared to the state-of-art.
 | [Getting Started](#getting-started)     |  DeepSpeed first steps                      |
 | [Further Reading](#further-reading)     |  DeepSpeed features, tutorials, etc.        |
 | [Contributing](#contributing)           |  Instructions for contributing to DeepSpeed |
+| [Publications](#publications)           |  DeepSpeed publications                     |
 
 
 
@@ -399,5 +400,5 @@ Conduct](https://opensource.microsoft.com/codeofconduct/). For more information 
 [opencode@microsoft.com](mailto:opencode@microsoft.com) with any additional questions or
 comments.
 
-## Publications
+# Publications
 1. Samyam Rajbhandari, Jeff Rasley, Olatunji Ruwase, Yuxiong He. (2019) ZeRO: Memory Optimization Towards Training A Trillion Parameter Models. [ArXiv:1910.02054](https://arxiv.org/abs/1910.02054)
