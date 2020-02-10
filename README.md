@@ -121,13 +121,14 @@ optimizers such as [LAMB](https://arxiv.org/abs/1904.00962). These improve the
 effectiveness of model training and reduce the number of samples required to
 convergence to desired accuracy.
 
+*Read more*: [Tuning tutorial](./docs/tutorials/1Cycle.md),
 <!---
-*Read more*: [Tuning tutorial](../../Tutorials/1cycle/1Cycle.md),
  and *BERT Tutorial*: Coming Soon.
 
 [BERT tutorial](../../Tutorials/BingBertSquad/BingBertSquadTutorial.md),
 [QANet tutorial](../../Tutorials/QANet/QANetTutorial.md)
 -->
+
 
 ## Good Usability
 Only a few lines of code changes are needed to enable a PyTorch model to use DeepSpeed and ZeRO. Compared to current model parallelism libraries, DeepSpeed does not require a code redesign or model refactoring. It also does not put limitations on model dimensions (such as number of attention heads, hidden sizes, and others), batch size, or any other training parameters. For models of up to six billion parameters, you can use ZeRO-powered data parallelism conveniently without requiring model parallelism, while in contrast, standard data parallelism will run out of memory for models with more than 1.3 billion parameters. In addition, DeepSpeed conveniently supports flexible combination of ZeRO-powered data parallelism with custom model parallelisms, such as tensor slicing of NVIDIA's Megatron-LM.
@@ -160,7 +161,7 @@ overview](./docs/features.md) for descriptions and usage.
 * [Training Agnostic Checkpointing](./docs/features.md#training-agnostic-checkpointing)
 * [Advanced Parameter Search](./docs/features.md#advanced-parameter-search)
     * Learning Rate Range Test
-    * 1Cycle Learning Rate Schedule
+    * [1Cycle Learning Rate Schedule](./docs/tutorials/lrrd.md)
 * [Simplified Data Loader](./docs/features.md#simplified-data-loader)
 * [Performance Analysis and Debugging](./docs/features.md#performance-analysis-and-debugging)
 
@@ -380,10 +381,11 @@ as the hostname.
 | Article                                                                                        | Description                                  |
 | ---------------------------------------------------------------------------------------------- | -------------------------------------------- |
 | [DeepSpeed Features](./docs/features.md)                                                       |  DeepSpeed features                          |
-| [CIFAR-10 Tutorial](./docs/tutorials/CIFAR-10.md)                                              |  Getting started with CIFAR-10 and DeepSpeed |
-| [Megatron-LM Tutorial](./docs/tutorials/MegatronGPT2Tutorial.md)                               |  Train GPT2 with DeepSpeed and Megatron-LM   |
 | [DeepSpeed JSON Configuration](./docs/config_json.md)                                          |  Configuring DeepSpeed                       |
 | [API Documentation]( https://microsoft.github.io/DeepSpeed/docs/htmlfiles/api/full/index.html) |  Generated DeepSpeed API documentation       |
+| [CIFAR-10 Tutorial](./docs/tutorials/CIFAR-10.md)                                              |  Getting started with CIFAR-10 and DeepSpeed |
+| [Megatron-LM Tutorial](./docs/tutorials/MegatronGPT2Tutorial.md)                               |  Train GPT2 with DeepSpeed and Megatron-LM   |
+| [1Cycle Tutorial](./docs/tutorials/1Cycle.md)                                                  |  SOTA learning schedule in DeepSpeed         |
 
 
 
