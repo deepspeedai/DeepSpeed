@@ -153,11 +153,9 @@ large buffer, and applying the weight updates in a single kernel, allowing it to
 high memory bandwidth.
 
 ### Large Batch Training with LAMB Optimizer
-**TODO: port tutorial**
+<!-- **TODO: port tutorial** -->
 DeepSpeed makes it easy to train with large batch sizes by enabling the LAMB Optimizer.
-For more details on LAMB, see the [BERT
-tutorial](tutorials/BingBertSquadTutorial.md)  and the [LAMB
-paper](https://arxiv.org/pdf/1904.00962.pdf).
+For more details on LAMB, see the [LAMB paper](https://arxiv.org/pdf/1904.00962.pdf).
 
 ### Memory-Efficient Training with ZeRO Optimizer
 DeepSpeed can train models up with up to 6 billion parameters without parallelism, and
