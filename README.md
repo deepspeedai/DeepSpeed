@@ -161,7 +161,7 @@ overview](./docs/features.md) for descriptions and usage.
 * [Training Agnostic Checkpointing](./docs/features.md#training-agnostic-checkpointing)
 * [Advanced Parameter Search](./docs/features.md#advanced-parameter-search)
     * Learning Rate Range Test
-    * [1Cycle Learning Rate Schedule](./docs/tutorials/lrrd.md)
+    * 1Cycle Learning Rate Schedule
 * [Simplified Data Loader](./docs/features.md#simplified-data-loader)
 * [Performance Analysis and Debugging](./docs/features.md#performance-analysis-and-debugging)
 
