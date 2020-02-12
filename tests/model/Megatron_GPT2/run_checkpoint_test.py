@@ -106,12 +106,7 @@ class GPT2CheckpointTestCase(BaseTestCase):
         try:
             cmd = f"rm -rf {checkpoint_name}"
             print(f"{self.id()} cmd: {cmd}")
-            subprocess.run(cmd,
-                           shell=True,
-                           check=False,
-                           executable='/bin/bash',
-                           stdout=f,
-                           stderr=f)
+            subprocess.run(cmd, shell=True, check=False, executable='/bin/bash')
         except:
             print("No old checkpoint")
 
