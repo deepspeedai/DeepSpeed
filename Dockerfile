@@ -36,7 +36,7 @@ RUN apt-get install -y python3 python3-dev && \
 ##############################################################################
 # TensorFlow
 ##############################################################################
-ENV TENSORFLOW_VERSION=1.14.0
+ENV TENSORFLOW_VERSION=1.15.2
 RUN pip install tensorflow-gpu==${TENSORFLOW_VERSION}
 
 ##############################################################################
