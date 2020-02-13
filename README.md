@@ -34,7 +34,7 @@ model scientists also need to set up the state-of-the-art training techniques
 such as distributed training, mixed precision, gradient accumulation, and
 checkpointing. Yet still, scientists may not achieve the desired system
 performance and convergence rate. Large model sizes are even more challenging:
-a large model easily runs out of memory with pure data paralelism and it is
+a large model easily runs out of memory with pure data parallelism and it is
 difficult to use model parallelism. DeepSpeed addresses these challenges to
 accelerate model development *and* training.
 
