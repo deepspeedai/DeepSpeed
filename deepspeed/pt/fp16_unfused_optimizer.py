@@ -116,8 +116,13 @@ class FP16_UnfusedOptimizer(object):
         grads_groups = []
         norm_groups = []
         for i, group in enumerate(self.fp16_groups):
-            grads_groups.append([p.grad for p in group])
-            grads_groups_flat.append(_flatten_dense_tensors(grads_groups[i]))
+            grads = [
+                torch.zeros(p.size(),
+                            dtype=p.dtype,
+                            device=p.device) if p.grad is None else p.grad for p in group
+            ]
+            grads_groups.append(grads)
+            grads_groups_flat.append(_flatten_dense_tensors(grads))
             norm_groups.append(get_weight_norm(grads_groups_flat[i], mpu=self.mpu))
 
         self.overflow = self.overflow_checker.check_using_norm(norm_groups)
@@ -162,7 +167,12 @@ class FP16_UnfusedOptimizer(object):
 
             # copying gradients to fp32 to work with fp32 parameters
             for fp32_param, fp16_param in zip(self.fp32_groups[i], self.fp16_groups[i]):
-                fp32_param.grad = fp16_param.grad.to(fp32_param.dtype)
+                if fp16_param.grad is None:
+                    fp32_param.grad = torch.zeros(fp16_param.size(),
+                                                  dtype=fp32_param.dtype,
+                                                  device=fp32_param.device)
+                else:
+                    fp32_param.grad = fp16_param.grad.to(fp32_param.dtype)
 
         self.unscale_and_clip_grads(norm_groups)
 
