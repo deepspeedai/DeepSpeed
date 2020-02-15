@@ -18,6 +18,12 @@ Original model code from [CIFAR-10 Tutorial](https://github.com/pytorch/tutorial
 git submodule update --init --recursive
 ```
 
+To install requirements for CIFAR-10:
+```
+cd DeepSpeedExamples/cifar
+pip install -r requirements.txt
+```
+
 Run `python cifar10_tutorial.py`, it downloads the training data set at first run.
 ```less
 Downloading https://www.cs.toronto.edu/~kriz/cifar-10-python.tar.gz to ./data/cifar-10-python.tar.gz
