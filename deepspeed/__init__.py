@@ -128,6 +128,10 @@ def _add_core_arguments(parser):
                        type=str,
                        help='DeepSpeed json configuration file.')
 
+    group.add_argument('--deepscale_config',
+                       default=None,
+                       type=str,
+                       help='Deprecated DeepSpeed json configuration file.')
     return parser
 
 

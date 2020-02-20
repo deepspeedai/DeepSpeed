@@ -109,16 +109,11 @@ if [ "$third_party_install" == "1" ]; then
     sudo -H pip install third_party/apex/dist/apex*.whl
 fi
 if [ "$deepspeed_install" == "1" ]; then
-    echo "Installing deepspeed"
+    echo "Building deepspeed wheel"
     python setup.py bdist_wheel
 fi
 
 if [ "$local_only" == "1" ]; then
-    if [ "$third_party_install" == "1" ]; then
-        echo "Installing apex locally"
-        sudo -H pip uninstall -y apex
-        sudo -H pip install third_party/apex/dist/apex*.whl
-    fi
     if [ "$deepspeed_install" == "1" ]; then
         echo "Installing deepspeed"
         sudo -H pip uninstall -y deepspeed

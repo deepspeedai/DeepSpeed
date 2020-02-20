@@ -1,7 +1,10 @@
 # A test on its own
 import torch
 import pytest
+import json
+import argparse
 from common import distributed_test
+from simple_model import SimpleModel, create_config_from_dict, random_dataloader
 import torch.distributed as dist
 
 # A test on its own
@@ -100,3 +103,54 @@ def test_batch_config(num_ranks, batch, micro_batch, gas, success):
 
     """Run batch config test """
     _test_batch_config(num_ranks, batch, micro_batch, gas, success)
+
+
+def test_temp_config_json(tmpdir):
+    config_dict = {
+        "train_batch_size": 1,
+    }
+    config_path = create_config_from_dict(tmpdir, config_dict)
+    config_json = json.load(open(config_path, 'r'))
+    assert 'train_batch_size' in config_json
+
+
+def test_deprecated_deepscale_config(tmpdir):
+    config_dict = {
+        "train_batch_size": 1,
+        "optimizer": {
+            "type": "Adam",
+            "params": {
+                "lr": 0.00015
+            }
+        },
+        "fp16": {
+            "enabled": True
+        }
+    }
+
+    config_path = create_config_from_dict(tmpdir, config_dict)
+    parser = argparse.ArgumentParser()
+    args = parser.parse_args(args='')
+    args.deepscale_config = config_path
+    args.local_rank = 0
+
+    hidden_dim = 10
+
+    model = SimpleModel(hidden_dim)
+
+    @distributed_test(world_size=[1])
+    def _test_deprecated_deepscale_config(args, model, hidden_dim):
+        model, _, _,_ = deepspeed.initialize(args=args,
+                                             model=model,
+                                             model_parameters=model.parameters(),
+                                             dist_init_required=False)
+        data_loader = random_dataloader(model=model,
+                                        total_samples=5,
+                                        hidden_dim=hidden_dim,
+                                        device=model.device)
+        for n, batch in enumerate(data_loader):
+            loss = model(batch[0], batch[1])
+            model.backward(loss)
+            model.step()
+
+    _test_deprecated_deepscale_config(args=args, model=model, hidden_dim=hidden_dim)
