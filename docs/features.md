@@ -68,10 +68,11 @@ mpu.get_model_parallel_rank()
 mpu.get_model_parallel_group()
 mpu.get_model_parallel_world_size()
 
-mpu.get_data_parallel_rank/group/world_size()
+mpu.get_data_parallel_rank()
 mpu.get_data_parallel_group()
 mpu.get_data_parallel_world_size()
 ```
+
 ### Integration with Megatron-LM
 DeepSpeed is fully compatible with [Megatron](https://github.com/NVIDIA/Megatron-LM).
 Please see the [Megatron-LM tutorial](tutorials/MegatronGPT2Tutorial.md) for details.
