@@ -5,9 +5,9 @@
   "zero_optimization": false,
   "optimizer": {
     "type": "Adam",
+    "legacy_fusion": false,
     "params": {
-      "lr": 0.00015,
-      "max_grad_norm": 1.0
+      "lr": 0.00015
     }
   },
 

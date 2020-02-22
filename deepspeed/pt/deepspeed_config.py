@@ -157,6 +157,14 @@ def get_optimizer_gradient_clipping(param_dict):
         return None
 
 
+def get_optimizer_legacy_fusion(param_dict):
+    if OPTIMIZER in param_dict.keys() and \
+        LEGACY_FUSION in param_dict[OPTIMIZER].keys():
+        return param_dict[OPTIMIZER][LEGACY_FUSION]
+    else:
+        return LEGACY_FUSION_DEFAULT
+
+
 def get_scheduler_name(param_dict):
     if SCHEDULER in param_dict.keys() and \
             TYPE in param_dict[SCHEDULER].keys():
@@ -261,6 +269,7 @@ class DeepSpeedConfig(object):
             self.optimizer_name = self.optimizer_name.lower()
 
         self.optimizer_params = get_optimizer_params(param_dict)
+        self.optimizer_legacy_fusion = get_optimizer_legacy_fusion(param_dict)
 
         self.scheduler_name = get_scheduler_name(param_dict)
         self.scheduler_params = get_scheduler_params(param_dict)

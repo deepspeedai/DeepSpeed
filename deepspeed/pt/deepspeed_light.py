@@ -211,6 +211,9 @@ class DeepSpeedLight(Module):
     def optimizer_params(self):
         return self._config.optimizer_params
 
+    def optimizer_legacy_fusion(self):
+        return self._config.optimizer_legacy_fusion
+
     def scheduler_name(self):
         return self._config.scheduler_name
 
@@ -419,21 +422,23 @@ class DeepSpeedLight(Module):
         if self.optimizer_name() == ADAM_OPTIMIZER:
             if self.dynamic_loss_scale():
                 logging.info('Creating fp16 optimizer with dynamic loss scale')
-                optimizer = FP16_Optimizer(optimizer,
-                                           dynamic_loss_scale=True,
-                                           initial_dynamic_scale=initial_dynamic_scale,
-                                           dynamic_loss_args=dynamic_loss_args,
-                                           mpu=self.mpu,
-                                           clip_grad=clip_grad,
-                                           fused_adam_legacy=True)
+                optimizer = FP16_Optimizer(
+                    optimizer,
+                    dynamic_loss_scale=True,
+                    initial_dynamic_scale=initial_dynamic_scale,
+                    dynamic_loss_args=dynamic_loss_args,
+                    mpu=self.mpu,
+                    clip_grad=clip_grad,
+                    fused_adam_legacy=self.optimizer_legacy_fusion())
             else:
                 logging.info('Creating fp16 optimizer with static loss scale: {}'.format(
                     self.loss_scale()))
-                optimizer = FP16_Optimizer(optimizer,
-                                           static_loss_scale=self.loss_scale(),
-                                           mpu=self.mpu,
-                                           clip_grad=clip_grad,
-                                           fused_adam_legacy=True)
+                optimizer = FP16_Optimizer(
+                    optimizer,
+                    static_loss_scale=self.loss_scale(),
+                    mpu=self.mpu,
+                    clip_grad=clip_grad,
+                    fused_adam_legacy=self.optimizer_legacy_fusion())
         else:
             logging.info('Creating fp16 unfused optimizer with dynamic loss scale')
             optimizer = FP16_UnfusedOptimizer(
@@ -442,7 +447,7 @@ class DeepSpeedLight(Module):
                 dynamic_loss_args=dynamic_loss_args,
                 mpu=self.mpu,
                 clip_grad=clip_grad,
-                fused_lamb_legacy=True
+                fused_lamb_legacy=self.optimizer_legacy_fusion()
                 if self.optimizer_name() == LAMB_OPTIMIZER else False)
 
         return optimizer
