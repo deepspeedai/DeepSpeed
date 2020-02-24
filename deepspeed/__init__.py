@@ -118,15 +118,25 @@ def _add_core_arguments(parser):
     """
     group = parser.add_argument_group('DeepSpeed', 'DeepSpeed configurations')
 
-    group.add_argument('--deepspeed',
-                       default=False,
-                       action='store_true',
-                       help='Enable DeepSpeed')
+    group.add_argument(
+        '--deepspeed',
+        default=False,
+        action='store_true',
+        help=
+        'Enable DeepSpeed (helper flag for user code, no impact on DeepSpeed backend)')
 
     group.add_argument('--deepspeed_config',
                        default=None,
                        type=str,
                        help='DeepSpeed json configuration file.')
+
+    group.add_argument(
+        '--deepscale',
+        default=False,
+        action='store_true',
+        help=
+        'Deprecated enable DeepSpeed (helper flag for user code, no impact on DeepSpeed backend)'
+    )
 
     group.add_argument('--deepscale_config',
                        default=None,
