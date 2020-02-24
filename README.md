@@ -106,8 +106,8 @@ combination. ZeRO boosts the scaling capability and efficiency further.
   significant performance gains compared to using model parallelism alone.
 
   *Read more*: [technical report](https://arxiv.org/abs/1910.02054),
-  and [GPT tutorial](./docs/tutorials/Megatron_GPT2/MegatronGPT2Tutorial.md).
-  <!-- and [QANet tutorial](../../Tutorials/QANet/QANetTutorial.md). -->
+  and [GPT tutorial](./docs/tutorials/MegatronGPT2Tutorial.md).
+  <!-- and [QANet tutorial](../../Tutorials/QANetTutorial.md). -->
 
 ![DeepSpeed-vs-Megatron](./docs/figures/DeepSpeed-vs-Megatron.png)
 <p align="center">
