@@ -5,6 +5,8 @@ if [ ! -f ${azure_config} ]; then
     echo "Cannot find $azure_config"
     exit 1
 fi
+location=`cat ${azure_config} | jq .location | sed 's/"//g'`
+rg=deepspeed_rg_$location
 
 parallel=true
 command -v pdsh
@@ -34,14 +36,14 @@ if [ $parallel == true ]; then
     echo "parallel docker pull"
     hosts=""
     for node_id in {0..1}; do
-        addr=`az vm list-ip-addresses | jq .[${node_id}].virtualMachine.network.publicIpAddresses[0].ipAddress | sed 's/"//g'`
+        addr=`az vm list-ip-addresses  -g $rg | jq .[${node_id}].virtualMachine.network.publicIpAddresses[0].ipAddress | sed 's/"//g'`
         hosts="${addr},${hosts}"
     done
-    PDSH_SSH_ARGS_APPEND=${args} pdsh -w $hosts -l ${username} $update_script
+     PDSH_RCMD_TYPE=ssh  PDSH_SSH_ARGS_APPEND=${args} pdsh -w $hosts -l ${username} $update_script
 else
     echo "sequential docker pull"
     for node_id in `seq 0 $((num_vms - 1))`; do
-        ip_addr=`az vm list-ip-addresses | jq .[${node_id}].virtualMachine.network.publicIpAddresses[0].ipAddress | sed 's/"//g'`
+        ip_addr=`az vm list-ip-addresses  -g $rg | jq .[${node_id}].virtualMachine.network.publicIpAddresses[0].ipAddress | sed 's/"//g'`
         addr=${username}@${ip_addr}
         ssh ${args} $addr $update_script
     done
