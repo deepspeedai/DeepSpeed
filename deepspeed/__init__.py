@@ -32,7 +32,7 @@ def initialize(args,
                training_data=None,
                lr_scheduler=None,
                mpu=None,
-               dist_init_required=True,
+               dist_init_required=None,
                collate_fn=None):
     r"""Initialize the DeepSpeed Engine.
 
@@ -56,7 +56,8 @@ def initialize(args,
         mpu: Optional: A model parallelism unit object that implements
             get_{model,data}_parallel_{rank,group,world_size}()
 
-        dist_init_required: Optional: Initializes torch.distributed
+        dist_init_required: Optional: None will auto-initialize torch.distributed if needed,
+            otherwise the user can force it to be initialized or not via boolean.
 
         collate_fn: Optional: Merges a list of samples to form a
             mini-batch of Tensor(s).  Used when using batched loading from a

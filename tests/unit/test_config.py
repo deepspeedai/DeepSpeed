@@ -142,8 +142,7 @@ def test_deprecated_deepscale_config(tmpdir):
     def _test_deprecated_deepscale_config(args, model, hidden_dim):
         model, _, _,_ = deepspeed.initialize(args=args,
                                              model=model,
-                                             model_parameters=model.parameters(),
-                                             dist_init_required=False)
+                                             model_parameters=model.parameters())
         data_loader = random_dataloader(model=model,
                                         total_samples=5,
                                         hidden_dim=hidden_dim,
@@ -154,3 +153,45 @@ def test_deprecated_deepscale_config(tmpdir):
             model.step()
 
     _test_deprecated_deepscale_config(args=args, model=model, hidden_dim=hidden_dim)
+
+
+def test_dist_init_true(tmpdir):
+    config_dict = {
+        "train_batch_size": 1,
+        "optimizer": {
+            "type": "Adam",
+            "params": {
+                "lr": 0.00015
+            }
+        },
+        "fp16": {
+            "enabled": True
+        }
+    }
+
+    config_path = create_config_from_dict(tmpdir, config_dict)
+    parser = argparse.ArgumentParser()
+    args = parser.parse_args(args='')
+    args.deepscale_config = config_path
+    args.local_rank = 0
+
+    hidden_dim = 10
+
+    model = SimpleModel(hidden_dim)
+
+    @distributed_test(world_size=[1])
+    def _test_dist_init_true(args, model, hidden_dim):
+        model, _, _,_ = deepspeed.initialize(args=args,
+                                             model=model,
+                                             model_parameters=model.parameters(),
+                                             dist_init_required=True)
+        data_loader = random_dataloader(model=model,
+                                        total_samples=5,
+                                        hidden_dim=hidden_dim,
+                                        device=model.device)
+        for n, batch in enumerate(data_loader):
+            loss = model(batch[0], batch[1])
+            model.backward(loss)
+            model.step()
+
+    _test_dist_init_true(args=args, model=model, hidden_dim=hidden_dim)

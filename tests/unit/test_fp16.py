@@ -32,8 +32,7 @@ def test_lamb_fp16_basic(tmpdir):
     def _test_lamb_fp16_basic(args, model, hidden_dim):
         model, _, _,_ = deepspeed.initialize(args=args,
                                              model=model,
-                                             model_parameters=model.parameters(),
-                                             dist_init_required=False)
+                                             model_parameters=model.parameters())
         data_loader = random_dataloader(model=model,
                                         total_samples=50,
                                         hidden_dim=hidden_dim,
@@ -70,8 +69,7 @@ def test_lamb_fp16_empty_grad(tmpdir):
     def _test_lamb_fp16_empty_grad(args, model, hidden_dim):
         model, _, _,_ = deepspeed.initialize(args=args,
                                              model=model,
-                                             model_parameters=model.parameters(),
-                                             dist_init_required=False)
+                                             model_parameters=model.parameters())
         data_loader = random_dataloader(model=model,
                                         total_samples=50,
                                         hidden_dim=hidden_dim,
@@ -102,8 +100,7 @@ def test_adamw_fp16_basic(tmpdir):
         optimizer = torch.optim.AdamW(params=model.parameters())
         model, _, _,_ = deepspeed.initialize(args=args,
                                              model=model,
-                                             optimizer=optimizer,
-                                             dist_init_required=False)
+                                             optimizer=optimizer)
         data_loader = random_dataloader(model=model,
                                         total_samples=50,
                                         hidden_dim=hidden_dim,
@@ -134,8 +131,7 @@ def test_adamw_fp16_empty_grad(tmpdir):
         optimizer = torch.optim.AdamW(params=model.parameters())
         model, _, _,_ = deepspeed.initialize(args=args,
                                              model=model,
-                                             optimizer=optimizer,
-                                             dist_init_required=False)
+                                             optimizer=optimizer)
         data_loader = random_dataloader(model=model,
                                         total_samples=50,
                                         hidden_dim=hidden_dim,

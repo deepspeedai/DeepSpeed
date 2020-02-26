@@ -97,7 +97,7 @@ class DeepSpeedLight(Module):
                  training_data=None,
                  lr_scheduler=None,
                  mpu=None,
-                 dist_init_required=True,
+                 dist_init_required=None,
                  collate_fn=None):
         super(DeepSpeedLight, self).__init__()
 
@@ -119,8 +119,19 @@ class DeepSpeedLight(Module):
         self.gradient_average = True
         self.warn_unscaled_loss = True
 
+        if dist_init_required is None:
+            dist_init_required = not dist.is_initialized()
+
+        self.dist_backend = "nccl"
         if dist_init_required:
-            dist.init_process_group(backend="nccl")
+            if not dist.is_initialized():
+                logging.info("Initializing torch distributed with backend: {}".format(
+                    self.dist_backend))
+                dist.init_process_group(backend=self.dist_backend)
+            else:
+                logging.warning(
+                    "Was given dist_init_required=True but detected that torch"
+                    "distributed was already initialized, cannot initialize twice.")
 
         self._do_args_sanity_check(args)
         self._configure_with_arguments(args, mpu)
