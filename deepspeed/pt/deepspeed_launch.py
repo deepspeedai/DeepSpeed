@@ -5,19 +5,16 @@ Copyright 2020 The Microsoft DeepSpeed Team: deepspeed@microsoft.com
 import sys
 import subprocess
 import os
-import socket
 import json
 import base64
 from collections import defaultdict
 from argparse import ArgumentParser, REMAINDER
 
-import torch
-
 
 def parse_args():
-    parser = ArgumentParser(description="DeepSpeed distributed training launch "
-                            "utilty that creates multiple distributed "
-                            "processes on a single node")
+    parser = ArgumentParser(description="DeepSpeed distributed training launch"
+                            " utility that creates multiple distributed"
+                            " processes on a single node")
 
     # Optional arguments for the launch helper
     parser.add_argument("--node_rank",
@@ -28,15 +25,15 @@ def parse_args():
     parser.add_argument("--master_addr",
                         default="127.0.0.1",
                         type=str,
-                        help="Master node (rank 0)'s address, should be either "
-                        "the IP address or the hostname of node 0, for "
-                        "single node multi-proc training, the "
-                        "--master_addr can simply be 127.0.0.1")
+                        help="Master node (rank 0)'s address, should be either"
+                        " the IP address or the hostname of node 0, for"
+                        " single node multi-proc training, the"
+                        " --master_addr can simply be 127.0.0.1")
     parser.add_argument("--master_port",
                         default=29500,
                         type=int,
                         help="Master node (rank 0)'s free port that needs to "
-                        "be used for communciation during distributed "
+                        "be used for communication during distributed "
                         "training")
     parser.add_argument("--world_info",
                         default="None",

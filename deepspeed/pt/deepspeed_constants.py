@@ -31,6 +31,11 @@ SCHEDULER_TYPE_DEFAULT = None
 SCHEDULER_PARAMS = "params"
 MAX_GRAD_NORM = 'max_grad_norm'
 
+#############################################
+# Torch distributed constants
+#############################################
+TORCH_DISTRIBUTED_DEFAULT_PORT = "29500"
+
 # Steps
 STEPS_PER_PRINT = "steps_per_print"
 STEPS_PER_PRINT_DEFAULT = 10

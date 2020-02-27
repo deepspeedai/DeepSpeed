@@ -21,7 +21,7 @@ from deepspeed.pt.deepspeed_config import DeepSpeedConfig, \
 
 from deepspeed.pt.deepspeed_dataloader import DeepSpeedDataLoader
 from deepspeed.pt.deepspeed_constants import ROUTE_TRAIN, ROUTE_PREDICT, \
-    ROUTE_EVAL
+    ROUTE_EVAL, TORCH_DISTRIBUTED_DEFAULT_PORT
 
 import deepspeed.pt.deepspeed_lr_schedules as lr_schedules
 from deepspeed.pt.deepspeed_csr_tensor import CSRTensor
@@ -119,6 +119,8 @@ class DeepSpeedLight(Module):
         self.gradient_average = True
         self.warn_unscaled_loss = True
 
+        self._mpi_check(args)
+
         if dist_init_required is None:
             dist_init_required = not dist.is_initialized()
 
@@ -183,6 +185,40 @@ class DeepSpeedLight(Module):
             self._config.print('DeepSpeedLight configuration')
             if self.dump_state():
                 print_configuration(self, 'DeepSpeedLight')
+
+    def _mpi_check(self, args):
+        if hasattr(args, 'deepspeed_mpi') and args.deepspeed_mpi:
+            from mpi4py import MPI
+            import subprocess
+            comm = MPI.COMM_WORLD
+            rank = comm.Get_rank()
+            world_size = comm.Get_size()
+
+            master_addr = None
+            if rank == 0:
+                hostname_cmd = ["hostname -I"]
+                result = subprocess.check_output(hostname_cmd, shell=True)
+                master_addr = result.decode('utf-8').split()[0]
+            master_addr = comm.bcast(master_addr, root=0)
+
+            # Determine local rank by assuming hostnames are unique
+            proc_name = MPI.Get_processor_name()
+            all_procs = comm.allgather(proc_name)
+            local_rank = sum([i == proc_name for i in all_procs[:rank]])
+
+            os.environ['RANK'] = str(rank)
+            os.environ['WORLD_SIZE'] = str(world_size)
+            args.local_rank = local_rank
+            os.environ['MASTER_ADDR'] = master_addr
+            os.environ['MASTER_PORT'] = TORCH_DISTRIBUTED_DEFAULT_PORT
+
+            logging.info(
+                "Discovered MPI settings of world_rank={}, local_rank={}, world_size={}, master_addr={}, master_port={}"
+                .format(os.environ['RANK'],
+                        args.local_rank,
+                        os.environ['WORLD_SIZE'],
+                        os.environ['MASTER_ADDR'],
+                        os.environ['MASTER_PORT']))
 
     def tensorboard_enabled(self):
         return self._config.tensorboard_enabled

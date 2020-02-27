@@ -13,6 +13,7 @@ import argparse
 import subprocess
 import collections
 from copy import deepcopy
+from deepspeed.pt.deepspeed_constants import TORCH_DISTRIBUTED_DEFAULT_PORT
 
 DLTS_HOSTFILE = "/job/hostfile"
 EXPORT_ENVS = ["NCCL", "PYTHONPATH"]
@@ -61,7 +62,7 @@ def parse_args(args=None):
     parser.add_argument("--num_gpus", type=int, default=-1, help="")
 
     parser.add_argument("--master_port",
-                        default=29500,
+                        default=int(TORCH_DISTRIBUTED_DEFAULT_PORT),
                         type=int,
                         help="(optional) Port used by PyTorch distributed for "
                         "communication during training.")
