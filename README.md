@@ -367,6 +367,26 @@ deepspeed --include="worker-2:0,1" \
 	--deepspeed --deepspeed_config ds_config.json
 ```
 
+### MPI Compatibility
+As described above, DeepSpeed provides its own parallel launcher to help launch
+multi-node/multi-gpu training jobs. If you prefer to launch your training job
+using MPI (e.g., mpirun), we provide support for this. It should be noted that
+DeepSpeed will still use the torch distributed NCCL backend and *not* the MPI
+backend. To launch your training job with mpirun + DeepSpeed you simply pass us
+an additional flag `--deepspeed_mpi`. DeepSpeed will then use
+[mpi4py](https://pypi.org/project/mpi4py/) to discover the MPI environment (e.g.,
+rank, world size) and properly initialize torch distributed for training. In this
+case you will explicitly invoke `python` to launch your model script instead of using
+the `deepspeed` launcher, here is an example:
+```bash
+mpirun <mpi-args> python \
+	<client_entry.py> <client args> \
+	--deepspeed_mpi --deepspeed --deepspeed_config ds_config.json
+```
+
+If you want to use this feature of DeepSpeed, please ensure that mpi4py is
+installed via `pip install mpi4py`.
+
 ## Resource Configuration (single-node)
 In the case that we are only running on a single node (with one or more GPUs)
 DeepSpeed *does not* require a hostfile as described above. If a hostfile is
