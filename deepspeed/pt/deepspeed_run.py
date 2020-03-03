@@ -17,6 +17,8 @@ from deepspeed.pt.deepspeed_constants import TORCH_DISTRIBUTED_DEFAULT_PORT
 
 DLTS_HOSTFILE = "/job/hostfile"
 EXPORT_ENVS = ["NCCL", "PYTHONPATH"]
+DEEPSPEED_ENVIRONMENT_NAME = ".deepspeed_env"
+DEEPSPEED_ENVIRONMENT_PATHS = [os.path.expanduser("~"), '.']
 
 
 def parse_args(args=None):
@@ -316,6 +318,13 @@ def main(args=None):
         for var in env.keys():
             if any(map(lambda name: name in var, EXPORT_ENVS)):
                 exports += "export {}={}; ".format(var, env[var])
+
+        for environ_path in DEEPSPEED_ENVIRONMENT_PATHS:
+            environ_file = os.path.join(environ_path, DEEPSPEED_ENVIRONMENT_NAME)
+            if os.path.isfile(environ_file):
+                with open(environ_file, 'r') as fd:
+                    for var in fd.readlines():
+                        exports += "export {}; ".format(var.strip())
 
         deepspeed_launch = [
             exports,
