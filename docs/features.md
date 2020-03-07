@@ -197,6 +197,6 @@ file.
 Please see the [core API doc](https://microsoft.github.io/DeepSpeed/docs/htmlfiles/api/full/index.html) for more details.
 ```json
 {
-  "wallclock_breakdown": true
+  "wall_clock_breakdown": true
 }
 ```
