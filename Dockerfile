@@ -106,6 +106,6 @@ RUN git clone https://github.com/microsoft/DeepSpeed.git ${STAGE_DIR}/DeepSpeed
 RUN cd ${STAGE_DIR}/DeepSpeed && \
     git checkout . && \
     git checkout master && \
-    ./install.sh
+    ./install.sh --pip_sudo
 RUN rm -rf ${STAGE_DIR}/DeepSpeed
 RUN python -c "import deepspeed; print(deepspeed.__version__)"

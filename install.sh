@@ -17,7 +17,9 @@ hostfile (hostfile: /job/hostfile). If no hostfile exists, will only install loc
 [optional]
     -d, --deepspeed_only    Install only deepspeed and no third party dependencies
     -t, --third_party_only  Install only third party dependencies and not deepspeed
-    -l, --local_only        Installs only on local machine
+    -l, --local_only        Install only on local machine
+    -s, --pip_sudo          Run pip with sudo (default: no sudo)
+    -m, --pip_mirror        Use the specified pip mirror (default: the default pip mirror)
     -H, --hostfile          Path to MPI-style hostfile (default: /job/hostfile)
     -h, --help              This help text
   """
@@ -28,8 +30,10 @@ tp_only=0
 deepspeed_install=1
 third_party_install=1
 local_only=0
+pip_sudo=0
 entire_dlts_job=1
 hostfile=/job/hostfile
+pip_mirror=""
 
 while [[ $# -gt 0 ]]
 do
@@ -49,6 +53,15 @@ case $key in
     ;;
     -l|--local_only)
     local_only=1;
+    shift
+    ;;
+    -s|--pip_sudo)
+    pip_sudo=1;
+    shift
+    ;;
+    -m|--pip_mirror)
+    pip_mirror=$2;
+    shift
     shift
     ;;
     -H|--hostfile)
@@ -84,7 +97,21 @@ echo "git_hash = '$(git rev-parse --short HEAD)'" > deepspeed/git_version_info.p
 echo "git_branch = '$(git rev-parse --abbrev-ref HEAD)'" >> deepspeed/git_version_info.py
 cat deepspeed/git_version_info.py
 
-install_apex='sudo -H pip install -v --no-cache-dir --global-option="--cpp_ext" --global-option="--cuda_ext" third_party/apex'
+if [ "$pip_sudo" == "1" ]; then
+  PIP_SUDO="sudo -H"
+else
+  PIP_SUDO=""
+fi
+
+if [ "$pip_mirror" != "" ]; then
+  PIP_INSTALL="pip install -i $pip_mirror"
+else
+  PIP_INSTALL="pip install"
+fi
+
+
+
+install_apex="$PIP_SUDO"" $PIP_INSTALL "'-v --no-cache-dir --global-option="--cpp_ext" --global-option="--cuda_ext" third_party/apex'
 
 if [ ! -f $hostfile ]; then
         echo "No hostfile exists at $hostfile, installing locally"
@@ -92,7 +119,7 @@ if [ ! -f $hostfile ]; then
 fi
 
 # Ensure dependencies are installed locally
-sudo -H pip install -r requirements.txt
+$PIP_SUDO $PIP_INSTALL -r requirements.txt
 
 # Build wheels
 if [ "$third_party_install" == "1" ]; then
@@ -105,8 +132,8 @@ if [ "$third_party_install" == "1" ]; then
     cd -
 
     echo "Installing apex locally so that deepspeed will build"
-    sudo -H pip uninstall -y apex
-    sudo -H pip install third_party/apex/dist/apex*.whl
+    $PIP_SUDO pip uninstall -y apex
+    $PIP_SUDO $PIP_INSTALL third_party/apex/dist/apex*.whl
 fi
 if [ "$deepspeed_install" == "1" ]; then
     echo "Building deepspeed wheel"
@@ -116,8 +143,8 @@ fi
 if [ "$local_only" == "1" ]; then
     if [ "$deepspeed_install" == "1" ]; then
         echo "Installing deepspeed"
-        sudo -H pip uninstall -y deepspeed
-        sudo -H pip install dist/deepspeed*.whl
+        $PIP_SUDO pip uninstall -y deepspeed
+        $PIP_SUDO $PIP_INSTALL dist/deepspeed*.whl
         python -c 'import deepspeed; print("deepspeed info:", deepspeed.__version__, deepspeed.__git_branch__, deepspeed.__git_hash__)'
         echo "Installation is successful"
     fi
@@ -134,18 +161,18 @@ else
 
     pdsh -w $hosts "if [ -d $tmp_wheel_path ]; then rm $tmp_wheel_path/*.whl; else mkdir -pv $tmp_wheel_path; fi"
     pdcp -w $hosts requirements.txt ${tmp_wheel_path}/
-    pdsh -w $hosts "sudo -H pip install -r ${tmp_wheel_path}/requirements.txt"
+    pdsh -w $hosts "$PIP_SUDO $PIP_INSTALL -r ${tmp_wheel_path}/requirements.txt"
     if [ "$third_party_install" == "1" ]; then
-        pdsh -w $hosts "sudo -H pip uninstall -y apex"
+        pdsh -w $hosts "$PIP_SUDO pip uninstall -y apex"
         pdcp -w $hosts third_party/apex/dist/apex*.whl $tmp_wheel_path/
-        pdsh -w $hosts "sudo -H pip install $tmp_wheel_path/apex*.whl"
+        pdsh -w $hosts "$PIP_SUDO $PIP_INSTALL $tmp_wheel_path/apex*.whl"
         pdsh -w $hosts 'python -c "import apex"'
     fi
     if [ "$deepspeed_install" == "1" ]; then
         echo "Installing deepspeed"
-        pdsh -w $hosts "sudo -H pip uninstall -y deepspeed"
+        pdsh -w $hosts "$PIP_SUDO pip uninstall -y deepspeed"
         pdcp -w $hosts dist/deepspeed*.whl $tmp_wheel_path/
-        pdsh -w $hosts "sudo -H pip install $tmp_wheel_path/deepspeed*.whl"
+        pdsh -w $hosts "$PIP_SUDO $PIP_INSTALL $tmp_wheel_path/deepspeed*.whl"
         pdsh -w $hosts "python -c 'import deepspeed; print(\"deepspeed info:\", deepspeed.__version__, deepspeed.__git_branch__, deepspeed.__git_hash__)'"
         echo "Installation is successful"
     fi

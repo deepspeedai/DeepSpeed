@@ -28,7 +28,7 @@ jobs:
   - script: |
       python -m pip install --upgrade pip
       pip install --user -r requirements.txt
-      ./install.sh
+      ./install.sh --pip_sudo
     displayName: 'Install dependencies'
 
   - script: |
