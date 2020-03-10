@@ -58,7 +58,7 @@
 
 | Fields | Value                                                        | Example                        |
 | ------ | ------------------------------------------------------------ | ------------------------------ |
-| type   | The scheduler name. See here for list of support schedulers. | `"1Cycle"`                      |
+| type   | The scheduler name. See [here](https://microsoft.github.io/DeepSpeed/docs/htmlfiles/api/full/pt/deepspeed_lr_schedules.m.html) for list of support schedulers. | `"1Cycle"`                      |
 | params | Dictionary of parameters to instantiate scheduler. The parameter names should match scheduler constructor signature. | `{"lr": 0.001, "eps": 1e-8}` |
 
 Example of ***scheduler***
