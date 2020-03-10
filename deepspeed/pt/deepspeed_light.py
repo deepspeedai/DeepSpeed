@@ -933,26 +933,28 @@ class DeepSpeedLight(Module):
         if not os.path.exists(dirname):
             os.makedirs(dirname)
 
-    def load_checkpoint(self, load_dir, tag):
+    def load_checkpoint(self, load_dir, tag, load_optimizer_states=True):
         r"""Load training checkpoint
 
         Arguments:
             load_dir: Required. Directory to load the checkpoint from
             tag: Required. Checkpoint tag used as a unique identifier for the checkpoint. Ex. Global Step.
-
+            load_optimizer_states: Optional. Boolean to load the training optimizer states from Checkpoint. Ex. ADAM's momentum and variance
         Return:
             load_path: Path of the loaded checkpoint. None if loading the checkpoint failed
             client_state: State dictionary used for loading required training states in the client code.
         """
 
-        load_path, client_states = self._load_checkpoint(load_dir, tag)
+        load_path, client_states = self._load_checkpoint(load_dir, tag, load_optimizer_states=load_optimizer_states)
 
         if self.zero_optimization() and load_path is not None:
-            self._load_zero_checkpoint(load_dir, tag)
+            self._load_zero_checkpoint(load_dir,
+                                       tag,
+                                       load_optimizer_states=load_optimizer_states)
 
         return load_path, client_states
 
-    def _load_checkpoint(self, load_dir, tag):
+    def _load_checkpoint(self, load_dir, tag, load_optimizer_states=True):
 
         load_path = self._get_ckpt_name(load_dir, tag)
 
@@ -967,7 +969,8 @@ class DeepSpeedLight(Module):
 
         self.load_module_state_dict(checkpoint['module'])
         if not self.zero_optimization():
-            self.optimizer.load_state_dict(checkpoint['optimizer'])
+            self.optimizer.load_state_dict(checkpoint['optimizer'],
+                                           load_optimizer_states=load_optimizer_states)
 
         if self.lr_scheduler is not None:
             self.lr_scheduler.load_state_dict(checkpoint['lr_scheduler'])
@@ -990,7 +993,7 @@ class DeepSpeedLight(Module):
 
         return load_path, client_state
 
-    def _load_zero_checkpoint(self, load_dir, tag):
+    def _load_zero_checkpoint(self, load_dir, tag, load_optimizer_states=True):
         zero_checkpoint_name = self._get_zero_ckpt_name(load_dir, tag)
 
         if not os.path.exists(zero_checkpoint_name):
@@ -1000,7 +1003,8 @@ class DeepSpeedLight(Module):
             return None
 
         zero_sd = torch.load(zero_checkpoint_name, map_location='cpu')
-        self.optimizer.load_state_dict(zero_sd['optimizer_state_dict'])
+        self.optimizer.load_state_dict(zero_sd['optimizer_state_dict'],
+                                       load_optimizer_states=load_optimizer_states)
         logging.info('loading zero checkpoint {}'.format(zero_checkpoint_name))
 
     def save_checkpoint(self, save_dir, tag, client_state={}):

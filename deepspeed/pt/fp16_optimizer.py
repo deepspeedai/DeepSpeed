@@ -294,7 +294,7 @@ class FP16_Optimizer(object):
         state_dict['clip_grad'] = self.clip_grad
         return state_dict
 
-    def load_state_dict(self, state_dict):
+    def load_state_dict(self, state_dict, load_optimizer_states=True):
         """
         Loads a state_dict created by an earlier call to state_dict().
         If ``fp16_optimizer_instance`` was constructed from some ``init_optimizer``,
@@ -318,7 +318,8 @@ class FP16_Optimizer(object):
             self.last_overflow_iter = state_dict['last_overflow_iter']
             self.scale_factor = state_dict['scale_factor']
             self.scale_window = state_dict['scale_window']
-        self.optimizer.load_state_dict(state_dict['optimizer_state_dict'])
+        if load_optimizer_states:
+            self.optimizer.load_state_dict(state_dict['optimizer_state_dict'])
         self.clip_grad = state_dict['clip_grad']
         # At this point, the optimizer's references to the model's fp32 parameters are up to date.
         # The optimizer's hyperparameters and internal buffers are also up to date.
