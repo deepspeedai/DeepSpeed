@@ -21,6 +21,7 @@ hostfile (hostfile: /job/hostfile). If no hostfile exists, will only install loc
     -s, --pip_sudo          Run pip with sudo (default: no sudo)
     -m, --pip_mirror        Use the specified pip mirror (default: the default pip mirror)
     -H, --hostfile          Path to MPI-style hostfile (default: /job/hostfile)
+    -a, --apex_commit       Install a specific commit hash of apex, instead of the one deepspeed points to
     -h, --help              This help text
   """
 }
@@ -34,6 +35,7 @@ pip_sudo=0
 entire_dlts_job=1
 hostfile=/job/hostfile
 pip_mirror=""
+apex_commit=""
 
 while [[ $# -gt 0 ]]
 do
@@ -61,6 +63,11 @@ case $key in
     ;;
     -m|--pip_mirror)
     pip_mirror=$2;
+    shift
+    shift
+    ;;
+    -a|--apex_commit)
+    apex_commit=$2;
     shift
     shift
     ;;
@@ -110,9 +117,6 @@ else
 fi
 
 
-
-install_apex="$PIP_SUDO"" $PIP_INSTALL "'-v --no-cache-dir --global-option="--cpp_ext" --global-option="--cuda_ext" third_party/apex'
-
 if [ ! -f $hostfile ]; then
         echo "No hostfile exists at $hostfile, installing locally"
         local_only=1
@@ -128,6 +132,13 @@ if [ "$third_party_install" == "1" ]; then
 
     echo "Building apex wheel"
     cd third_party/apex
+
+    if [ "$apex_commit" != "" ]; then
+        echo "Installing a non-standard version of apex at commit: $apex_commit"
+        git fetch
+        git checkout $apex_commit
+    fi
+
     python setup.py --cpp_ext --cuda_ext bdist_wheel
     cd -
 
