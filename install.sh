@@ -22,6 +22,7 @@ hostfile (hostfile: /job/hostfile). If no hostfile exists, will only install loc
     -m, --pip_mirror        Use the specified pip mirror (default: the default pip mirror)
     -H, --hostfile          Path to MPI-style hostfile (default: /job/hostfile)
     -a, --apex_commit       Install a specific commit hash of apex, instead of the one deepspeed points to
+    -k, --skip_requirements Skip installing DeepSpeed requirements
     -h, --help              This help text
   """
 }
@@ -36,6 +37,7 @@ entire_dlts_job=1
 hostfile=/job/hostfile
 pip_mirror=""
 apex_commit=""
+skip_requirements=0
 
 while [[ $# -gt 0 ]]
 do
@@ -69,6 +71,10 @@ case $key in
     -a|--apex_commit)
     apex_commit=$2;
     shift
+    shift
+    ;;
+    -k|--skip_requirements)
+    skip_requirements=1;
     shift
     ;;
     -H|--hostfile)
@@ -122,8 +128,10 @@ if [ ! -f $hostfile ]; then
         local_only=1
 fi
 
-# Ensure dependencies are installed locally
-$PIP_SUDO $PIP_INSTALL -r requirements.txt
+if [ "$skip_requirements" == "0" ]; then
+    # Ensure dependencies are installed locally
+    $PIP_SUDO $PIP_INSTALL -r requirements.txt
+fi
 
 # Build wheels
 if [ "$third_party_install" == "1" ]; then
@@ -172,7 +180,9 @@ else
 
     pdsh -w $hosts "if [ -d $tmp_wheel_path ]; then rm $tmp_wheel_path/*.whl; else mkdir -pv $tmp_wheel_path; fi"
     pdcp -w $hosts requirements.txt ${tmp_wheel_path}/
-    pdsh -w $hosts "$PIP_SUDO $PIP_INSTALL -r ${tmp_wheel_path}/requirements.txt"
+    if [ "$skip_requirements" == "0" ]; then
+        pdsh -w $hosts "$PIP_SUDO $PIP_INSTALL -r ${tmp_wheel_path}/requirements.txt"
+    fi
     if [ "$third_party_install" == "1" ]; then
         pdsh -w $hosts "$PIP_SUDO pip uninstall -y apex"
         pdcp -w $hosts third_party/apex/dist/apex*.whl $tmp_wheel_path/
