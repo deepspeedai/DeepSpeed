@@ -26,9 +26,6 @@ from deepspeed.pt.deepspeed_constants import ROUTE_TRAIN, ROUTE_PREDICT, \
 import deepspeed.pt.deepspeed_lr_schedules as lr_schedules
 from deepspeed.pt.deepspeed_csr_tensor import CSRTensor
 
-from apex import amp
-from apex.optimizers.fused_adam import FusedAdam
-
 MEMORY_OPT_ALLREDUCE_SIZE = 500000000
 SUMMARY_WRITER_DIR_NAME = "JobId"
 
@@ -458,6 +455,7 @@ class DeepSpeedLight(Module):
         if self.fp16_enabled() and 'max_grad_norm' in optimizer_parameters.keys():
             optimizer_parameters['max_grad_norm'] = 0.0
         if self.optimizer_name() == ADAM_OPTIMIZER:
+            from apex.optimizers.fused_adam import FusedAdam
             optimizer = FusedAdam(model_parameters, **optimizer_parameters)
         elif self.optimizer_name() == LAMB_OPTIMIZER:
             optimizer = FusedLamb(model_parameters, **optimizer_parameters)
