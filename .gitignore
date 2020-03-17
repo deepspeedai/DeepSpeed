@@ -9,3 +9,10 @@ build/
 dist/
 fused_lamb_*.so
 deepspeed.egg-info/
+
+# Website
+docs/_site/
+docs/code-docs/build
+.sass-cache/
+.jekyll-cache/
+.jekyll-metadata

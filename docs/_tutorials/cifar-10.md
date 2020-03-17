@@ -1,4 +1,7 @@
-# Tutorial: CIFAR-10 with DeepSpeed
+---
+title: "CIFAR-10 Tutorial"
+excerpt: "Train your first model with DeepSpeed!"
+---
 
 If you haven't already, we advise you to first read through the [Getting
 Started](../../README.md#getting-started) guide before stepping through this
@@ -10,22 +13,22 @@ First we will go over how to run original CIFAR-10. Then we will proceed step-by
 
 
 
-## 1 Running Original CIFAR-10
+## Running Original CIFAR-10
 
 Original model code from [CIFAR-10 Tutorial](https://github.com/pytorch/tutorials/blob/master/beginner_source/blitz/cifar10_tutorial.py), We've copied this repo under [DeepSpeedExamples/cifar/](https://github.com/microsoft/DeepSpeedExamples/tree/master/cifar) and made it available as a submodule. To download, execute:
 
-```
+```bash
 git submodule update --init --recursive
 ```
 
 To install requirements for CIFAR-10:
-```
+```bash
 cd DeepSpeedExamples/cifar
 pip install -r requirements.txt
 ```
 
 Run `python cifar10_tutorial.py`, it downloads the training data set at first run.
-```less
+```
 Downloading https://www.cs.toronto.edu/~kriz/cifar-10-python.tar.gz to ./data/cifar-10-python.tar.gz
 170500096it [00:02, 61124868.24it/s]
 Extracting ./data/cifar-10-python.tar.gz to ./data
@@ -63,10 +66,10 @@ cuda:0
 
 
 
-## 2 Enabling DeepSpeed
+## Enabling DeepSpeed
 
 
-### 2.1 Argument Parsing
+### Argument Parsing
 
 The first step to apply DeepSpeed is adding DeepSpeed arguments to CIFAR-10 model, using `deepspeed.add_config_arguments()` function as below.
 
@@ -103,7 +106,7 @@ The first step to apply DeepSpeed is adding DeepSpeed arguments to CIFAR-10 mode
 
 
 
-### 2.2 Initialization
+### Initialization
 
 We use `deepspeed.initialize` to create `model_engine`, `optimizer` and `trainloader`. Below is its definition.
 
@@ -144,27 +147,28 @@ The original device and optimizer can be removed after initializing DeepSpeed.
 
 
 
-### 2.3 Training API
+### Training API
 
 The `model` returned by `deepspeed.initialize` is the _DeepSpeed Model Engine_ that we will use to train the model using the forward, backward and step API.
 
-   ```python
+```python
      for i, data in enumerate(trainloader):
          # get the inputs; data is a list of [inputs, labels]
-         inputs, labels = data[0].to(model_engine.local_rank), data[1].to(model_engine.local_rank)
+         inputs = data[0].to(model_engine.device)
+         labels = data[1].to(model_engine.device)
 
          outputs = model_engine(inputs)
          loss = criterion(outputs, labels)
 
          model_engine.backward(loss)
          model_engine.step()
-   ```
+```
 
 Zeroing the gradients is handled automatically by DeepSpeed after the weights have been updated using a mini-batch.
 
 
 
-### 2.4 Configuration
+### Configuration
 
 The next step to use DeepSpeed is to create a configuration JSON file (ds_config.json). This file provides DeepSpeed specific parameters defined by the user, e.g., batch size, optimizer, scheduler and other parameters.
 
@@ -198,20 +202,17 @@ The next step to use DeepSpeed is to create a configuration JSON file (ds_config
 
 
 
-### 2.6 Run CIFAR-10 Model with DeepSpeed Enabled
+### Run CIFAR-10 Model with DeepSpeed Enabled
 
 To start training CIFAR-10 model with DeepSpeed applied, execute the following command, it will use all detected GPUs by default.
 
 ```bash
-deepspeed cifar10_deepspeed.py --deepspeed --deepspeed_config ds_config.json
+deepspeed cifar10_deepspeed.py --deepspeed_config ds_config.json
 ```
 
-
-
 DeepSpeed usually prints more training details for user to monitor, including training settings, performance statistics and loss trends.
-
-```less
-deepspeed.pt --num_nodes 1 --num_gpus 1 cifar10_deepspeed.py --deepspeed --deepspeed_config ds_config.json
+```
+deepspeed.pt cifar10_deepspeed.py --deepspeed_config ds_config.json
 Warning: Permanently added '[192.168.0.22]:42227' (ECDSA) to the list of known hosts.
 cmd=['pdsh', '-w', 'worker-0', 'export NCCL_VERSION=2.4.2; ', 'cd /data/users/deepscale/test/ds_v2/examples/cifar;', '/usr/bin/python', '-u', '-m', 'deepspeed.pt.deepspeed_launch', '--world_info=eyJ3b3JrZXItMCI6IFswXX0=', '--node_rank=%n', '--master_addr=192.168.0.22', '--master_port=29500', 'cifar10_deepspeed.py', '--deepspeed', '--deepspeed_config', 'ds_config.json']
 worker-0: Warning: Permanently added '[192.168.0.22]:42227' (ECDSA) to the list of known hosts.

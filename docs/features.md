@@ -1,4 +1,9 @@
-# Feature Overview
+---
+title: "Feature Overview"
+layout: single
+toc: true
+toc_label: "Contents"
+---
 
 * [Distributed Training with Mixed Precision](#distributed-training-with-mixed-precision)
     * 16-bit mixed precision
