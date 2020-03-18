@@ -213,7 +213,7 @@ deepspeed --include="worker-2:0,1" \
 	<client_entry.py> <client args> \
 	--deepspeed --deepspeed_config ds_config.json
 ```
-
+This is a floating nav bar.
 ### MPI Compatibility
 As described above, DeepSpeed provides its own parallel launcher to help launch
 multi-node/multi-gpu training jobs. If you prefer to launch your training job

@@ -37,10 +37,11 @@ defaults:
     values:
       layout: single
       author_profile: false
-      read_time: true
+      read_time: false
       comments: false
       share: true
       related: false
+      sneak_preview: false
   # _tutorials
   - scope:
       path: ""

@@ -1,6 +1,7 @@
 ---
 title: "Feature Overview"
 layout: single
+permalink: /features/
 toc: true
 toc_label: "Contents"
 ---

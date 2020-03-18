@@ -1,17 +1,17 @@
 main:
   - title: "Getting Started"
     url: /getting-started/
-  - title: "Blog"
-    url: /blog/
+  - title: "News"
+    url: /news/
   - title: "Tutorials"
     url: /tutorials/
   - title: "Documentation"
-    url: https://ghpages-test.readthedocs.io/
+    url: https://deepspeed.readthedocs.io/
   - title: "GitHub"
     url: https://github.com/microsoft/DeepSpeed
 
 lnav:
-  - title: "This is a floating nav bar."
+  - title: "DeepSpeed Documentation"
   - title: "Getting Started"
     url: /getting-started/
     children:
@@ -19,3 +19,5 @@ lnav:
         url: /getting-started/#installation
       - title: "Configuration"
         url: /getting-started/#deepspeed-configuration
+  - title: "DeepSpeed Features"
+    url: /features/

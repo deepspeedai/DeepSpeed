@@ -1,0 +1,48 @@
+---
+# Only the main Sass file needs front matter (the dashes are enough)
+---
+
+@charset "utf-8";
+
+@import "minimal-mistakes/skins/{{ site.minimal_mistakes_skin | default: 'default' }}"; // skin
+@import "minimal-mistakes"; // main partials
+
+//
+// DeepSpeed customizations
+//
+
+
+.site-title {
+  display: -webkit-box;
+  display: -ms-flexbox;
+  display: flex;
+  -ms-flex-item-align: center;
+  align-self: center;
+  font-weight: bold;
+  font-size: $type-size-2; // DeepSpeed: increase size
+}
+
+
+.toc {
+  font-family: $sans-serif-narrow;
+  color: $gray;
+  background-color: $background-color;
+  border: 1px solid $border-color;
+  border-radius: $border-radius;
+  -webkit-box-shadow: $box-shadow;
+  box-shadow: $box-shadow;
+	position: fixed;
+
+  .nav__title {
+    color: #fff;
+    font-size: $type-size-6;
+    background: $primary-color;
+    border-top-left-radius: $border-radius;
+    border-top-right-radius: $border-radius;
+  }
+
+  // Scrollspy marks toc items as .active when they are in focus
+  .active a {
+    @include yiq-contrasted($active-color);
+  }
+}
