@@ -33,25 +33,28 @@ collections:
 defaults:
   - scope:
       path: ""
-      type: posts
     values:
       layout: single
       author_profile: false
       read_time: false
       comments: false
-      share: true
+      share: false
       related: false
       sneak_preview: false
-  # _tutorials
-  - scope:
-      path: ""
-      type: tutorials
-    values:
-      layout: single
       toc: true
       toc_label: "Contents"
       sidebar:
         nav: "lnav"
+  - scope:
+      path: "_pages"
+    values:
+      permalink: /docs/:title:output_ext
+  - scope:
+      path: ""
+      type: posts
+    values:
+      layout: single
+      share: true
 
 timezone: America/Los_Angeles
 breadcrumbs: true

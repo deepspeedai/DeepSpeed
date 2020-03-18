@@ -1,1 +1,1 @@
-../docs/azure.md
+../docs/_tutorials/azure.md

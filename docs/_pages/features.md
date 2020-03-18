@@ -6,33 +6,6 @@ toc: true
 toc_label: "Contents"
 ---
 
-* [Distributed Training with Mixed Precision](#distributed-training-with-mixed-precision)
-    * 16-bit mixed precision
-    * Single-GPU/Multi-GPU/Multi-Node
-* [Model Parallelism](#model-parallelism)
-    * Support for Custom Model Parallelism
-    * Integration with Megatron-LM
-* [Memory and Bandwidth Optimizations](#memory-and-bandwidth-optimizations)
-    * The Zero Redundancy Optimizer (ZeRO)
-    * Constant Buffer Optimization (CBO)
-    * Smart Gradient Accumulation
-* [Training Features](#training-features)
-    * Simplified training API
-    * Gradient Clipping
-    * Automatic loss scaling with mixed precision
-* [Training Optimizers](#training-optimizers)
-    * Fused Adam optimizer and arbitrary `torch.optim.Optimizer`
-    * Memory bandwidth optimized FP16 Optimizer
-    * Large Batch Training with LAMB Optimizer
-    * Memory efficient Training with ZeRO Optimizer
-* [Training Agnostic Checkpointing](#training-agnostic-checkpointing)
-* [Advanced Parameter Search](#advanced-parameter-search)
-    * Learning Rate Range Test
-    * 1Cycle Learning Rate Schedule
-* [Simplified Data Loader](#simplified-data-loader)
-* [Performance Analysis and Debugging](#performance-analysis-and-debugging)
-
-
 ## Distributed Training with Mixed Precision
 
 ### Mixed Precision Training
@@ -81,7 +54,7 @@ mpu.get_data_parallel_world_size()
 
 ### Integration with Megatron-LM
 DeepSpeed is fully compatible with [Megatron](https://github.com/NVIDIA/Megatron-LM).
-Please see the [Megatron-LM tutorial](tutorials/MegatronGPT2Tutorial.md) for details.
+Please see the [Megatron-LM tutorial](/tutorials/megatron/) for details.
 
 
 
@@ -95,11 +68,9 @@ over 6 billion parameters without any model parallelism, and up to 100 billion
 parameter models with model parallelism on current generation hardware.
 
 For more details see the [ZeRO paper](https://arxiv.org/abs/1910.02054), [GPT
-tutorial](tutorials/MegatronGPT2Tutorial.md) on integration with
+tutorial](/tutorials/megatron/) on integration with
 DeepSpeed. Additional tutorials including *BERT Tutorial*: Coming Soon.
-<!---[BERT
-tutorial](../../Tutorials/BingBertSquad/BingBertSquadTutorial.md),
--->
+
 ### Constant Buffer Optimization (CBO)
 CBO enables high network and memory throughput while restricting memory usage to a
 constant size. For memory- and network-bound operations such as normalization or
@@ -131,18 +102,18 @@ The DeepSpeed core API consists of just a handful of methods:
 
 DeepSpeed supports all the features described in this document, via the use of these API,
 along with a `deepspeed_config` JSON file for enabling and disabling the features.
-Please see the [core API doc](https://microsoft.github.io/DeepSpeed/docs/htmlfiles/api/full/index.html) for more details.
+Please see the [core API doc](https://deepspeed.readthedocs.io/) for more details.
 
 
 ### Gradient Clipping
 DeepSpeed handles gradient clipping under the hood based on the max gradient norm
 specified by the user.
-Please see the [core API doc](https://microsoft.github.io/DeepSpeed/docs/htmlfiles/api/full/index.html) for more details.
+Please see the [core API doc](https://deepspeed.readthedocs.io/) for more details.
 
 ### Automatic loss scaling with mixed precision
 DeepSpeed internally handles loss scaling for mixed precision training. The parameters
 for loss scaling can be specified in the `deepspeed_config` JSON file.
-Please see the [core API doc](https://microsoft.github.io/DeepSpeed/docs/htmlfiles/api/full/index.html) for more details.
+Please see the [core API doc](https://deepspeed.readthedocs.io/) for more details.
 
 ## Training Optimizers
 
@@ -176,19 +147,19 @@ more details see [ZeRO paper](https://arxiv.org/abs/1910.02054) .
 DeepSpeed can simplify checkpointing for you regardless of whether you are using data
 parallel training, model parallel training, mixed-precision training, a mix of these
 three, or using the zero optimizer to enable larger model sizes.
-Please see the [Getting Started](../README.md#getting-started) guide
+Please see the [Getting Started](/getting-started/) guide
 and the
-[core API doc](https://microsoft.github.io/DeepSpeed/docs/htmlfiles/api/full/index.html) for more details.
+Please see the [core API doc](https://deepspeed.readthedocs.io/) for more details.
 
 ## Advanced parameter search
 DeepSpeed supports multiple Learning Rate Schedules to enable faster convergence for
 large batch scaling.
 
 ### Learning Rate Range Test
-Please refer to the [Learning Rate Range Test](tutorials/lrrt.md) tutorial.
+Please refer to the [Learning Rate Range Test](/tutorials/lrrt/) tutorial.
 
 ### 1Cycle Learning Rate Schedule
-Please refer to the [1Cycle Learning Rate Schedule](tutorials/1Cycle.md) tutorial.
+Please refer to the [1Cycle Learning Rate Schedule](/tutorials/1Cycle/) tutorial.
 
 
 ## Simplified Data Loader
@@ -200,7 +171,7 @@ can automatically handle batch creation appropriately.
 For performance debugging, DeepSpeed can give you a detailed breakdown of the time spent
 in different parts of the training with by simply enabling it in the `deepspeed_config`
 file.
-Please see the [core API doc](https://microsoft.github.io/DeepSpeed/docs/htmlfiles/api/full/index.html) for more details.
+Please see the [core API doc](https://deepspeed.readthedocs.io/) for more details.
 ```json
 {
   "wall_clock_breakdown": true

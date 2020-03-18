@@ -71,7 +71,7 @@ optimizations on advanced hyperparameter tuning and optimizers. For example:
 * DeepSpeed trains GPT2 (1.5 billion parameters) 3.75x faster than state-of-art, NVIDIA
   Megatron on Azure GPUs.
 
-  *Read more*: [GPT tutorial](./docs/tutorials/MegatronGPT2Tutorial.md)
+  *Read more*: [GPT tutorial](/tutorials/megatron/)
 
 
 
@@ -105,8 +105,7 @@ combination. ZeRO boosts the scaling capability and efficiency further.
   significant performance gains compared to using model parallelism alone.
 
   *Read more*: [technical report](https://arxiv.org/abs/1910.02054),
-  and [GPT tutorial](./docs/tutorials/MegatronGPT2Tutorial.md).
-  <!-- and [QANet tutorial](../../Tutorials/QANetTutorial.md). -->
+  and [GPT tutorial](/tutorials/megatron).
 
 ![DeepSpeed-vs-Megatron](/assets/images/DeepSpeed-vs-Megatron.png)
 <p align="center">
@@ -120,13 +119,7 @@ optimizers such as [LAMB](https://arxiv.org/abs/1904.00962). These improve the
 effectiveness of model training and reduce the number of samples required to
 convergence to desired accuracy.
 
-*Read more*: [Tuning tutorial](./docs/tutorials/1Cycle.md),
-<!---
- and *BERT Tutorial*: Coming Soon.
-
-[BERT tutorial](../../Tutorials/BingBertSquad/BingBertSquadTutorial.md),
-[QANet tutorial](../../Tutorials/QANet/QANetTutorial.md)
--->
+*Read more*: [Tuning tutorial](/tutorials/1Cycle).
 
 
 ## Good Usability
@@ -165,24 +158,9 @@ overview](features) for descriptions and usage.
 * [Performance Analysis and Debugging](features.md#performance-analysis-and-debugging)
 
 
-
-# Further Reading
-
-| Article                                                                                        | Description                                  |
-| ---------------------------------------------------------------------------------------------- | -------------------------------------------- |
-| [DeepSpeed Features](features.md)                                                              |  DeepSpeed features                          |
-| [DeepSpeed JSON Configuration](config_json.md)                                                 |  Configuring DeepSpeed                       |
-| [API Documentation](/code-docs/)                                                               |  Generated DeepSpeed API documentation       |
-| [CIFAR-10 Tutorial](./docs/tutorials/CIFAR-10.md)                                              |  Getting started with CIFAR-10 and DeepSpeed |
-| [Megatron-LM Tutorial](./docs/tutorials/MegatronGPT2Tutorial.md)                               |  Train GPT2 with DeepSpeed and Megatron-LM   |
-| [Learning Rate Range Test Tutorial](./docs/tutorials/lrrt.md)                                  |  Faster training with large learning rates   |
-| [1Cycle Tutorial](./docs/tutorials/1Cycle.md)                                                  |  SOTA learning schedule in DeepSpeed         |
-
-
-
 # Contributing
 DeepSpeed welcomes your contributions! Please see our
-[contributing](CONTRIBUTING.md) guide for more details on formatting, testing,
+[contributing](/contributing/) guide for more details on formatting, testing,
 etc.
 
 ## Contributor License Agreement

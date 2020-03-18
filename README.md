@@ -72,7 +72,7 @@ optimizations on advanced hyperparameter tuning and optimizers. For example:
 * DeepSpeed trains GPT2 (1.5 billion parameters) 3.75x faster than state-of-art, NVIDIA
   Megatron on Azure GPUs.
 
-  *Read more*: [GPT tutorial](./docs/tutorials/MegatronGPT2Tutorial.md)
+  *Read more*: [GPT tutorial](https://www.deepspeed.ai/tutorials/megatron/)
 
 
 
@@ -106,10 +106,10 @@ combination. ZeRO boosts the scaling capability and efficiency further.
   significant performance gains compared to using model parallelism alone.
 
   *Read more*: [technical report](https://arxiv.org/abs/1910.02054),
-  and [GPT tutorial](./docs/tutorials/MegatronGPT2Tutorial.md).
+  and [GPT tutorial](https://www.deepspeed.ai/tutorials/megatron/).
   <!-- and [QANet tutorial](../../Tutorials/QANetTutorial.md). -->
 
-![DeepSpeed-vs-Megatron](./docs/figures/DeepSpeed-vs-Megatron.png)
+![DeepSpeed-vs-Megatron](./docs/assets/images/DeepSpeed-vs-Megatron.png)
 <p align="center">
 <em>The figure depicts system throughput improvements of DeepSpeed (combining ZeRO-powered data parallelism with model parallelism of NVIDIA Megatron-LM) over using Megatron-LM alone.</em>
 </p>
@@ -121,7 +121,7 @@ optimizers such as [LAMB](https://arxiv.org/abs/1904.00962). These improve the
 effectiveness of model training and reduce the number of samples required to
 convergence to desired accuracy.
 
-*Read more*: [Tuning tutorial](./docs/tutorials/1Cycle.md),
+*Read more*: [Tuning tutorial](https://www.deepspeed.ai/tutorials/1Cycle/),
 <!---
  and *BERT Tutorial*: Coming Soon.
 
@@ -137,33 +137,33 @@ Only a few lines of code changes are needed to enable a PyTorch model to use Dee
 ## Features
 
 Below we provide a brief feature list, see our detailed [feature
-overview](./docs/features.md) for descriptions and usage.
+overview](https://www.deepspeed.ai/features/) for descriptions and usage.
 
-* [Distributed Training with Mixed Precision](./docs/features.md#distributed-training-with-mixed-precision)
+* [Distributed Training with Mixed Precision](https://www.deepspeed.ai/features/#distributed-training-with-mixed-precision)
     * 16-bit mixed precision
     * Single-GPU/Multi-GPU/Multi-Node
-* [Model Parallelism](./docs/features.md#model-parallelism)
+* [Model Parallelism](https://www.deepspeed.ai/features/#model-parallelism)
     * Support for Custom Model Parallelism
     * Integration with Megatron-LM
-* [Memory and Bandwidth Optimizations](./docs/features.md#memory-and-bandwidth-optimizations)
+* [Memory and Bandwidth Optimizations](https://www.deepspeed.ai/features/#memory-and-bandwidth-optimizations)
     * The Zero Redundancy Optimizer (ZeRO)
     * Constant Buffer Optimization (CBO)
     * Smart Gradient Accumulation
-* [Training Features](./docs/features.md#training-features)
+* [Training Features](https://www.deepspeed.ai/features/#training-features)
     * Simplified training API
     * Gradient Clipping
     * Automatic loss scaling with mixed precision
-* [Training Optimizers](./docs/features.md#training-optimizers)
+* [Training Optimizers](https://www.deepspeed.ai/features/#training-optimizers)
     * Fused Adam optimizer and arbitrary `torch.optim.Optimizer`
     * Memory bandwidth optimized FP16 Optimizer
     * Large Batch Training with LAMB Optimizer
     * Memory efficient Training with ZeRO Optimizer
-* [Training Agnostic Checkpointing](./docs/features.md#training-agnostic-checkpointing)
-* [Advanced Parameter Search](./docs/features.md#advanced-parameter-search)
+* [Training Agnostic Checkpointing](https://www.deepspeed.ai/features/#training-agnostic-checkpointing)
+* [Advanced Parameter Search](https://www.deepspeed.ai/features/#advanced-parameter-search)
     * Learning Rate Range Test
     * 1Cycle Learning Rate Schedule
-* [Simplified Data Loader](./docs/features.md#simplified-data-loader)
-* [Performance Analysis and Debugging](./docs/features.md#performance-analysis-and-debugging)
+* [Simplified Data Loader](https://www.deepspeed.ai/features/#simplified-data-loader)
+* [Performance Analysis and Debugging](https://www.deepspeed.ai/features/#performance-analysis-and-debugging)
 
 
 # Getting Started
@@ -171,9 +171,9 @@ overview](./docs/features.md) for descriptions and usage.
 
 ## Installation
 
-* Please see our [Azure tutorial](docs/azure.md) to get started with DeepSpeed on Azure!
+* Please see our [Azure tutorial](https://www.deepspeed.ai/tutorials/azure/) to get started with DeepSpeed on Azure!
 * If you're not on Azure, we recommend using our docker image via `docker pull deepspeed/deepspeed:latest` which contains a pre-installed version of DeepSpeed and all the necessary dependencies.
-* If you want to install DeepSpeed manually, we provide an install script [install.sh](install.sh) to help install on a local machine or across an entire cluster.
+* If you want to install DeepSpeed manually, we provide an install script `install.sh` to help install on a local machine or across an entire cluster.
 
 ## Writing DeepSpeed Models
 DeepSpeed model training is accomplished using the DeepSpeed engine. The engine
@@ -280,7 +280,7 @@ the `step` value is stored as part of the `client_sd`.
 DeepSpeed features can be enabled, disabled, or configured using a config JSON
 file that should be specified as `args.deepspeed_config`. A sample config file
 is shown below. For a full set of features see [core API
-doc](https://microsoft.github.io/DeepSpeed/docs/htmlfiles/api/full/index.html).
+doc](https://deepspeed.readthedocs.io/en/latest/).
 
 ```json
 {
@@ -412,13 +412,13 @@ as the hostname.
 
 | Article                                                                                        | Description                                  |
 | ---------------------------------------------------------------------------------------------- | -------------------------------------------- |
-| [DeepSpeed Features](./docs/features.md)                                                       |  DeepSpeed features                          |
-| [DeepSpeed JSON Configuration](./docs/config_json.md)                                          |  Configuring DeepSpeed                       |
-| [API Documentation]( https://microsoft.github.io/DeepSpeed/docs/htmlfiles/api/full/index.html) |  Generated DeepSpeed API documentation       |
-| [CIFAR-10 Tutorial](./docs/tutorials/CIFAR-10.md)                                              |  Getting started with CIFAR-10 and DeepSpeed |
-| [Megatron-LM Tutorial](./docs/tutorials/MegatronGPT2Tutorial.md)                               |  Train GPT2 with DeepSpeed and Megatron-LM   |
-| [Learning Rate Range Test Tutorial](./docs/tutorials/lrrt.md)                                  |  Faster training with large learning rates   |
-| [1Cycle Tutorial](./docs/tutorials/1Cycle.md)                                                  |  SOTA learning schedule in DeepSpeed         |
+| [DeepSpeed Features](https://www.deepspeed.ai/features/)                                       |  DeepSpeed features                          |
+| [DeepSpeed JSON Configuration](https://www.deepspeed.ai/docs/config_json/)                     |  Configuring DeepSpeed                       |
+| [API Documentation](https://deepspeed.readthedocs.io/en/latest/)                               |  Generated DeepSpeed API documentation       |
+| [CIFAR-10 Tutorial](https://www.deepspeed.ai/tutorials/CIFAR-10)                               |  Getting started with CIFAR-10 and DeepSpeed |
+| [Megatron-LM Tutorial](https://www.deepspeed.ai/tutorials/megatron/)                           |  Train GPT2 with DeepSpeed and Megatron-LM   |
+| [Learning Rate Range Test Tutorial](https://www.deepspeed.ai/tutorials/lrrt/)                  |  Faster training with large learning rates   |
+| [1Cycle Tutorial](https://www.deepspeed.ai/tutorials/1Cycle/)                                  |  SOTA learning schedule in DeepSpeed         |
 
 
 
