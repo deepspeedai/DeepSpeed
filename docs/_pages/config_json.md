@@ -1,6 +1,5 @@
 ---
 title: "DeepSpeed Configuration JSON"
-permalink: /docs/config_json.html
 ---
 ## REQUIRED DeepSpeed Config JSON Parameters
 
