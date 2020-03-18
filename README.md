@@ -413,7 +413,7 @@ as the hostname.
 | Article                                                                                        | Description                                  |
 | ---------------------------------------------------------------------------------------------- | -------------------------------------------- |
 | [DeepSpeed Features](https://www.deepspeed.ai/features/)                                       |  DeepSpeed features                          |
-| [DeepSpeed JSON Configuration](https://www.deepspeed.ai/docs/config_json/)                     |  Configuring DeepSpeed                       |
+| [DeepSpeed JSON Configuration](https://www.deepspeed.ai/docs/config-json/)                     |  Configuring DeepSpeed                       |
 | [API Documentation](https://deepspeed.readthedocs.io/en/latest/)                               |  Generated DeepSpeed API documentation       |
 | [CIFAR-10 Tutorial](https://www.deepspeed.ai/tutorials/cifar-10)                               |  Getting started with CIFAR-10 and DeepSpeed |
 | [Megatron-LM Tutorial](https://www.deepspeed.ai/tutorials/megatron/)                           |  Train GPT2 with DeepSpeed and Megatron-LM   |

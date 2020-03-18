@@ -48,7 +48,7 @@ defaults:
   - scope:
       path: "_pages"
     values:
-      permalink: /docs/:basename
+      permalink: /docs/:basename/
   - scope:
       path: ""
       type: posts

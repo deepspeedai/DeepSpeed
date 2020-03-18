@@ -25,7 +25,20 @@ lnav:
       - title: "Launching"
         url: /getting-started/#launching-deepspeed-training
   - title: "Configuration"
-    url: /docs/config_json/
+    url: /docs/config-json/
+    children:
+      - title: "Batch size"
+        url: /docs/config-json/#batch-size-related-parameters
+      - title: "Optimizer"
+        url: /docs/config-json/#optimizer-parameters
+      - title: "Scheduler"
+        url: /docs/config-json/#scheduler-parameters
+      - title: "Communication"
+        url: /docs/config-json/#communication-options
+      - title: "FP16"
+        url: /docs/config-json/#fp16-training-options
+      - title: "Logging"
+        url: /docs/config-json/#logging
   - title: "Tutorials"
     url: /tutorials/
     children:

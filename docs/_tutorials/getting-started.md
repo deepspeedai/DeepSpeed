@@ -116,7 +116,7 @@ the `step` value is stored as part of the `client_sd`.
 DeepSpeed features can be enabled, disabled, or configured using a config JSON
 file that should be specified as `args.deepspeed_config`. A sample config file
 is shown below. For a full set of features see [ API
-doc](/docs/config_json/).
+doc](/docs/config-json/).
 
 ```json
 {
