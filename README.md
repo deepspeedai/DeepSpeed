@@ -278,8 +278,9 @@ the `step` value is stored as part of the `client_sd`.
 
 ## DeepSpeed Configuration
 DeepSpeed features can be enabled, disabled, or configured using a config JSON
-file that should be specified as `args.deepspeed_config`. A sample config file
-is shown below. For a full set of features see [core API
+file that should be specified as `args.deepspeed_config`. Available configs are at
+[deepspeed/pt/deepspeed_constants.py](deepspeed/pt/deepspeed_constants.py).
+A sample config file is shown below. For a full set of features see [core API
 doc](https://deepspeed.readthedocs.io/en/latest/).
 
 ```json
