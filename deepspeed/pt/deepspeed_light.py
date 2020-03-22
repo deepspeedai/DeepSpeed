@@ -441,7 +441,11 @@ class DeepSpeedLight(Module):
 
         logging.info('DeepSpeed Basic Optimizer = {}'.format(basic_optimizer))
 
-        if self.zero_optimization() and self.optimizer_name() == ADAM_OPTIMIZER:
+        if self.zero_optimization():
+            if self.optimizer_name != ADAM_OPTIMIZER:
+                logging.warning(
+                    "**** You are using ZeRO with an untested optimizer, proceed with caution *****"
+                )
             self.optimizer = self._configure_zero_optimizer(basic_optimizer)
         elif self.fp16_enabled():
             self.optimizer = self._configure_fp16_optimizer(basic_optimizer)
