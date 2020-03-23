@@ -18,7 +18,7 @@ import torch.cuda
 from deepspeed.pt.deepspeed_constants import TORCH_DISTRIBUTED_DEFAULT_PORT
 
 DLTS_HOSTFILE = "/job/hostfile"
-EXPORT_ENVS = ["NCCL", "PYTHONPATH"]
+EXPORT_ENVS = ["NCCL", "PYTHON"]
 DEEPSPEED_ENVIRONMENT_NAME = ".deepspeed_env"
 DEEPSPEED_ENVIRONMENT_PATHS = [os.path.expanduser("~"), '.']
 
@@ -305,7 +305,7 @@ def main(args=None):
 
         exports = ""
         for var in env.keys():
-            if any(map(lambda name: name in var, EXPORT_ENVS)):
+            if any(map(lambda name: var.startswith(name), EXPORT_ENVS)):
                 exports += "export {}={}; ".format(var, env[var])
 
         for environ_path in DEEPSPEED_ENVIRONMENT_PATHS:
