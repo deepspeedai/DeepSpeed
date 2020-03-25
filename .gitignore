@@ -16,3 +16,5 @@ docs/code-docs/build
 .sass-cache/
 .jekyll-cache/
 .jekyll-metadata
+
+tests/unit/saved_checkpoint/

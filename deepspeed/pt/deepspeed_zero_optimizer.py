@@ -12,7 +12,7 @@ import torch.distributed as dist
 import math
 from torch._six import inf
 
-from deepspeed.pt.loss_scaler import DynamicLossScaler
+from deepspeed.pt.loss_scaler import LossScaler, DynamicLossScaler
 from deepspeed.pt.deepspeed_utils import get_grad_norm, CheckOverflow
 
 
@@ -175,15 +175,14 @@ class FP16_DeepSpeedZeroOptimizer(object):
 
         # we may have a way of fusing dynamic scale. Do not support for now
         if dynamic_loss_scale:
+            self.dynamic_loss_scale = True
             if dynamic_loss_args is None:
                 self.loss_scaler = DynamicLossScaler()
             else:
                 self.loss_scaler = DynamicLossScaler(**dynamic_loss_args)
-
-            self.dynamic_loss_scale = True
-
         else:
             self.dynamic_loss_scale = False
+            self.loss_scaler = LossScaler(scale=static_loss_scale)
             self.cur_iter = 0
 
         self.mpu = mpu
