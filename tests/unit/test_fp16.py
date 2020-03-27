@@ -5,7 +5,7 @@ import pytest
 import json
 import os
 from common import distributed_test
-from simple_model import SimpleModel, random_dataloader, args_from_dict
+from simple_model import SimpleModel, SimpleOptimizer, random_dataloader, args_from_dict
 
 
 def test_lamb_fp16_basic(tmpdir):
@@ -289,3 +289,29 @@ def test_zero_static_scale(tmpdir):
             model.step()
 
     _test_zero_static_scale(args)
+
+
+def test_zero_allow_untested_optimizer(tmpdir):
+    config_dict = {
+        "train_batch_size": 4,
+        "steps_per_print": 1,
+        "fp16": {
+            "enabled": True,
+        },
+        "zero_optimization": True,
+        "zero_allow_untested_optimizer": False
+    }
+    args = args_from_dict(tmpdir, config_dict)
+
+    @distributed_test(world_size=[1])
+    def _test_zero_allow_untested_optimizer(args):
+        hidden_dim = 10
+        model = SimpleModel(hidden_dim, empty_grad=True)
+        optimizer = SimpleOptimizer(model.parameters())
+        with pytest.raises(AssertionError):
+            model, optim, _,_ = deepspeed.initialize(args=args,
+                                                    model=model,
+                                                    optimizer=optimizer,
+                                                    model_parameters=model.parameters())
+
+    _test_zero_allow_untested_optimizer(args)

@@ -165,6 +165,12 @@ def get_optimizer_legacy_fusion(param_dict):
         return LEGACY_FUSION_DEFAULT
 
 
+def get_zero_allow_untested_optimizer(param_dict):
+    return get_scalar_param(param_dict,
+                            ZERO_ALLOW_UNTESTED_OPTIMIZER,
+                            ZERO_ALLOW_UNTESTED_OPTIMIZER_DEFAULT)
+
+
 def get_scheduler_name(param_dict):
     if SCHEDULER in param_dict.keys() and \
             TYPE in param_dict[SCHEDULER].keys():
@@ -270,6 +276,9 @@ class DeepSpeedConfig(object):
 
         self.optimizer_params = get_optimizer_params(param_dict)
         self.optimizer_legacy_fusion = get_optimizer_legacy_fusion(param_dict)
+
+        self.zero_allow_untested_optimizer = get_zero_allow_untested_optimizer(
+            param_dict)
 
         self.scheduler_name = get_scheduler_name(param_dict)
         self.scheduler_params = get_scheduler_params(param_dict)

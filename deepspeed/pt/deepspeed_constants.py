@@ -32,6 +32,12 @@ SCHEDULER_PARAMS = "params"
 MAX_GRAD_NORM = 'max_grad_norm'
 
 #############################################
+# Optimizer and lr scheduler
+#############################################
+ZERO_ALLOW_UNTESTED_OPTIMIZER = "zero_allow_untested_optimizer"
+ZERO_ALLOW_UNTESTED_OPTIMIZER_DEFAULT = False
+
+#############################################
 # Torch distributed constants
 #############################################
 TORCH_DISTRIBUTED_DEFAULT_PORT = "29500"
