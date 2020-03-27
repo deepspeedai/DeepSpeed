@@ -33,8 +33,8 @@ def test_run():
     runner = unittest.TextTestRunner(failfast=True)
 
     # Add test suites here.
-    #pytest_hack(runner.run(Megatron_GPT2.suite()))
-    #pytest_hack(runner.run(Megatron_GPT2.checkpoint_suite()))
+    pytest_hack(runner.run(Megatron_GPT2.suite()))
+    pytest_hack(runner.run(Megatron_GPT2.checkpoint_suite()))
     pytest_hack(runner.run(BingBertSquad.suite()))
 
 
