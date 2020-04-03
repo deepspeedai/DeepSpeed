@@ -337,3 +337,6 @@ class FP16_Optimizer(object):
         # are guaranteed to exist, so we can just copy_() from the saved master params.
         for current, saved in zip(self.fp32_groups_flat, state_dict['fp32_groups_flat']):
             current.data.copy_(saved.data)
+
+    def __repr__(self):
+        return repr(self.optimizer)

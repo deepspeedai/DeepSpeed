@@ -325,3 +325,6 @@ class FP16_UnfusedOptimizer(object):
         for current_group, saved_group in zip(self.fp32_groups, state_dict['fp32_groups']):
             for current, saved in zip(current_group, saved_group):
                 current.data.copy_(saved.data)
+
+    def __repr__(self):
+        return repr(self.optimizer)

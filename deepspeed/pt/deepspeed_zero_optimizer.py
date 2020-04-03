@@ -531,3 +531,6 @@ class FP16_DeepSpeedZeroOptimizer(object):
 
         for current, saved in zip(self.single_partition_of_fp32_groups, state_dict['single_partition_of_fp32_groups']):
             current.data.copy_(saved.data)
+
+    def __repr__(self):
+        return repr(self.optimizer)
