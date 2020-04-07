@@ -324,21 +324,21 @@ class DeepSpeedConfig(object):
         elif train_batch is not None and \
             micro_batch is not None:
             grad_acc = train_batch // micro_batch
-            grad_acc = grad_acc // self.world_size
+            grad_acc //= self.world_size
             self.gradient_accumulation_steps = grad_acc
 
         #micro_batch_per_gpu needs to be set
         elif train_batch is not None and \
             grad_acc is not None:
             micro_batch = train_batch // self.world_size
-            micro_batch = micro_batch // grad_acc
+            micro_batch //= grad_acc
             self.train_micro_batch_size_per_gpu = micro_batch
 
         #train_batch_size needs to be set
         elif micro_batch is not None and \
             grad_acc is not None:
             train_batch_size = micro_batch * grad_acc
-            train_batch_size = train_batch_size * self.world_size
+            train_batch_size *= self.world_size
             self.train_batch_size = train_batch_size
 
         #gradient_accumulation_steps and micro_batch_per_gpus is set
