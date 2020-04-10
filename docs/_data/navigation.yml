@@ -48,6 +48,8 @@ lnav:
         url: /tutorials/cifar-10/
       - title: "Megatron-LM GPT2"
         url: /tutorials/megatron/
+      - title: "BERT Pre-training"
+        url: /tutorials/bert-pretraining/
       - title: "1-Cycle Schedule"
         url: /tutorials/1Cycle/
       - title: "Learning Rate Range Test"

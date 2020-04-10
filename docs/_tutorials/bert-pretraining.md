@@ -1,5 +1,5 @@
 ---
-title: "Pre-training Bing BERT"
+title: "BERT Pre-training"
 excerpt: ""
 ---
 
