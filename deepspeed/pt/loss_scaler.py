@@ -23,8 +23,7 @@ import torch
 def to_python_float(t):
     if hasattr(t, 'item'):
         return t.item()
-    else:
-        return t[0]
+    return t[0]
 
 
 class LossScaler:
