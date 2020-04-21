@@ -384,9 +384,8 @@ class FP16_DeepSpeedZeroOptimizer(object):
         for group in self.single_partition_of_fp32_groups:
             group.grad = None
 
-        for i in range(len(norm_groups)):
-            for fp16_partitions, fp32_partition in zip(self.parallel_partitioned_fp16_groups, self.single_partition_of_fp32_groups):
-                fp16_partitions[partition_id].data.copy_(fp32_partition.data)
+        for fp16_partitions, fp32_partition in zip(self.parallel_partitioned_fp16_groups, self.single_partition_of_fp32_groups):
+            fp16_partitions[partition_id].data.copy_(fp32_partition.data)
 
         dp_world_size = dist.get_world_size(group=self.dp_process_group)
         #gather the updated weights from everyone
