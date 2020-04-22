@@ -16,8 +16,8 @@ import sys
 # -- Project information -----------------------------------------------------
 
 project = 'DeepSpeed'
-copyright = '2020, Microsoft AI & Research'
-author = 'Microsoft AI & Research'
+copyright = '2020, Microsoft'
+author = 'Microsoft'
 
 # The full version, including alpha/beta/rc tags
 release = '0.1.0'
@@ -35,6 +35,8 @@ extensions = [
     'recommonmark',
     'sphinx_rtd_theme',
 ]
+
+pygments_style = 'sphinx'
 
 # Add any paths that contain templates here, relative to this directory.
 templates_path = ['_templates']

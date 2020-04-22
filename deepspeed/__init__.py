@@ -34,7 +34,7 @@ def initialize(args,
                mpu=None,
                dist_init_required=None,
                collate_fn=None):
-    r"""Initialize the DeepSpeed Engine.
+    """Initialize the DeepSpeed Engine.
 
     Arguments:
         args: a dictionary containing local_rank and deepspeed_config
@@ -63,21 +63,19 @@ def initialize(args,
             mini-batch of Tensor(s).  Used when using batched loading from a
             map-style dataset.
 
-    Return:
-        The following tuple is returned by this function.
-        tuple: engine, engine.optimizer, engine.training_dataloader, engine.lr_scheduler
+    Returns:
+        A tuple of ``engine``, ``optimizer``, ``training_dataloader``, ``lr_scheduler``
 
-        engine: DeepSpeed runtime engine which wraps the client model for distributed training.
+        * ``engine``: DeepSpeed runtime engine which wraps the client model for distributed training.
 
-        engine.optimizer: Wrapped optimizer if a user defined optimizer is passed or
-            if optimizer is specified in json config else None.
+        * ``optimizer``: Wrapped optimizer if a user defined ``optimizer`` is supplied, or if
+          optimizer is specified in json config else ``None``.
 
-        engine.training_dataloader: DeepSpeed dataloader if training data was passed else None.
+        * ``training_dataloader``: DeepSpeed dataloader if ``training_data`` was supplied,
+          otherwise ``None``.
 
-        engine.lr_scheduler: Wrapped lr scheduler if user lr scheduler is passed
-            or if lr scheduler specified in json config else None.
-
-
+        * ``lr_scheduler``: Wrapped lr scheduler if user ``lr_scheduler`` is passed, or
+          if ``lr_scheduler`` specified in JSON configuration. Otherwise ``None``.
     """
     print("DeepSpeed info: version={}, git-hash={}, git-branch={}".format(
         __version__,

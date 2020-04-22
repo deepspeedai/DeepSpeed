@@ -5,8 +5,7 @@ DeepSpeed
    :maxdepth: 2
    :caption: Contents:
 
-   modules
-
+   initialize
 
 
 Indices and tables
