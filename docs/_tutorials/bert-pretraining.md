@@ -110,7 +110,8 @@ def prepare_model_optimizer(args):
     # Optimizer parameters
     optimizer_parameters = prepare_optimizer_parameters(args, model)
     model.network, optimizer, _, _ = deepspeed.initialize(args=args,
-                                         model=model.network,                                                                      model_parameters=optimizer_parameters,
+                                         model=model.network,
+                                         model_parameters=optimizer_parameters,
                                          dist_init_required=False)
     return model, optimizer
 ```
