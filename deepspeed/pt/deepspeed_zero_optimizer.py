@@ -264,6 +264,13 @@ class FP16_DeepSpeedZeroOptimizer(object):
         flat_tensor_list = []
         current_size = 0
 
+        if not tensor_list:
+            flat_tensor_list.append(
+                torch.zeros(int(partition_size),
+                            dtype=dtype,
+                            device=torch.cuda.current_device()))
+            return _flatten_dense_tensors(flat_tensor_list)
+
         if dtype is None:
             dtype = tensor_list[0].dtype
 

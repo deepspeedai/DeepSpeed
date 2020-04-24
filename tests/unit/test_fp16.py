@@ -315,3 +315,33 @@ def test_zero_allow_untested_optimizer(tmpdir):
                                                     model_parameters=model.parameters())
 
     _test_zero_allow_untested_optimizer(args)
+
+
+def test_zero_empty_partition(tmpdir):
+    config_dict = {
+        "train_batch_size": 3,
+        "fp16": {
+            "enabled": True
+        },
+        "optimizer": {
+            "type": "Adam",
+            "params": {
+                "lr": 0.00015
+            }
+        },
+        "zero_optimization": True
+    }
+    args = args_from_dict(tmpdir, config_dict)
+
+    @distributed_test(world_size=[3])
+    def _test_zero_empty_partition(args):
+        hidden_dim = 1
+        model = SimpleModel(hidden_dim)
+        # Ensure model has 2 parameters, to cause empty partition with DP=3
+        assert len(list(model.parameters())) == 2
+        model, _, _, _ = deepspeed.initialize(args=args,
+                                              model=model,
+                                              model_parameters=model.parameters())
+        model.step()
+
+    _test_zero_empty_partition(args)
