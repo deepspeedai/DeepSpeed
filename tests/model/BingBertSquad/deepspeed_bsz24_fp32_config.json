@@ -6,11 +6,11 @@
     "type": "Adam",
     "params": {
       "lr": 3e-5,
-      "max_grad_norm": 1.0,
       "weight_decay": 0.0,
       "bias_correction": false
     }
   },
+  "gradient_clipping": 1.0,
   "fp16": {
     "enabled": false
   }
