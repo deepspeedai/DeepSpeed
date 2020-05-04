@@ -866,9 +866,8 @@ class DeepSpeedLight(Module):
         for param_name, param in self.module.named_parameters():
             if param.grad is not None:
                 grad_data = param.grad.data
-                param_name_root = param_name.split('.', 1)[0]
                 if self.sparse_gradients_enabled(
-                ) and param_name_root in self.csr_tensor_module_names:
+                ) and param_name in self.csr_tensor_module_names:
                     grads.append(CSRTensor(grad_data))
                 else:
                     grads.append(grad_data)
