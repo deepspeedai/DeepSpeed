@@ -164,8 +164,12 @@ if [ "$local_only" == "1" ]; then
         echo "Installing deepspeed"
         $PIP_SUDO pip uninstall -y deepspeed
         $PIP_SUDO $PIP_INSTALL dist/deepspeed*.whl
-        python -c 'import deepspeed; print("deepspeed info:", deepspeed.__version__, deepspeed.__git_branch__, deepspeed.__git_hash__)'
-        echo "Installation is successful"
+        python basic_install_test.py
+        if [ $? == 0 ]; then
+            echo "Installation is successful"
+        else
+            echo "Installation failed"
+        fi
     fi
 else
     local_path=`pwd`
@@ -193,9 +197,10 @@ else
         echo "Installing deepspeed"
         pdsh -w $hosts "$PIP_SUDO pip uninstall -y deepspeed"
         pdcp -w $hosts dist/deepspeed*.whl $tmp_wheel_path/
+        pdcp -w $hosts basic_install_test.py $tmp_wheel_path/
         pdsh -w $hosts "$PIP_SUDO $PIP_INSTALL $tmp_wheel_path/deepspeed*.whl"
-        pdsh -w $hosts "python -c 'import deepspeed; print(\"deepspeed info:\", deepspeed.__version__, deepspeed.__git_branch__, deepspeed.__git_hash__)'"
+        pdsh -w $hosts "python $tmp_wheel_path/basic_install_test.py"
         echo "Installation is successful"
     fi
-    pdsh -w $hosts "if [ -d $tmp_wheel_path ]; then rm $tmp_wheel_path/*.whl $tmp_wheel_path/requirements.txt; rmdir $tmp_wheel_path; fi"
+    pdsh -w $hosts "if [ -d $tmp_wheel_path ]; then rm $tmp_wheel_path/*.whl $tmp_wheel_path/basic_install_test.py $tmp_wheel_path/requirements.txt; rmdir $tmp_wheel_path; fi"
 fi
