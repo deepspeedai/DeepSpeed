@@ -8,7 +8,7 @@ efficient, and effective.
 <p align="center"><i><b>5x Faster Training</b></i></p>
 <p align="center"><i><b>Minimal Code Change</b></i></p>
 
-DeepSpeed can train DL models with over a hundred billion parameters on current
+DeepSpeed can train deep learning models with over a hundred billion parameters on current
 generation of GPU clusters, while achieving over 5x in system performance
 compared to the state-of-art. Early adopters of DeepSpeed have already produced
 a language model (LM) with over 17B parameters called

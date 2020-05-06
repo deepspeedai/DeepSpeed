@@ -1021,7 +1021,7 @@ class DeepSpeedLight(Module):
             'optimizer',
             'csr_tensor_module_names',
             'skipped_steps',
-            'global_step'
+            'global_steps'
         ]
         client_state = {
             key: value
