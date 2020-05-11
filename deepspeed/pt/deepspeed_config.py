@@ -7,6 +7,7 @@ import torch
 import logging
 import json
 from deepspeed.pt.deepspeed_constants import *
+from deepspeed.pt.loss_scaler import INITIAL_LOSS_SCALE, SCALE_WINDOW, DELAYED_SHIFT, MIN_LOSS_SCALE
 
 TENSOR_CORE_ALIGN_SIZE = 8
 ADAM_OPTIMIZER = 'adam'
@@ -72,10 +73,10 @@ def get_dynamic_loss_scale_args(param_dict):
                                               FP16_MIN_LOSS_SCALE,
                                               FP16_MIN_LOSS_SCALE_DEFAULT)
             loss_scale_args = {
-                'init_scale': 2**init_scale,
-                'scale_window': scale_window,
-                'delayed_shift': delayed_shift,
-                'min_scale': min_loss_scale
+                INITIAL_LOSS_SCALE: 2**init_scale,
+                SCALE_WINDOW: scale_window,
+                DELAYED_SHIFT: delayed_shift,
+                MIN_LOSS_SCALE: min_loss_scale
             }
 
     return loss_scale_args

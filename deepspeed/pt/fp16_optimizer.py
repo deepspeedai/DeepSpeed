@@ -7,9 +7,11 @@ This file is adapted from FP16_Optimizer in NVIDIA/apex
 
 import torch
 import logging
-from torch._utils import _flatten_dense_tensors, _unflatten_dense_tensors
-from deepspeed.pt.deepspeed_utils import get_grad_norm, CheckOverflow, get_weight_norm
 import math
+from torch._utils import _flatten_dense_tensors, _unflatten_dense_tensors
+
+from deepspeed.pt.deepspeed_utils import get_grad_norm, CheckOverflow, get_weight_norm
+from deepspeed.pt.loss_scaler import INITIAL_LOSS_SCALE, SCALE_WINDOW, MIN_LOSS_SCALE
 
 
 class FP16_Optimizer(object):
@@ -63,14 +65,19 @@ class FP16_Optimizer(object):
 
         # we may have a way of fusing dynamic scale. Do not support for now
         if dynamic_loss_scale:
-            if dynamic_loss_args is not None:
-                logging.warning("Do not support dynamic loss scale args for now.")
             self.dynamic_loss_scale = True
-            self.cur_scale = initial_dynamic_scale
             self.cur_iter = 0
             self.last_overflow_iter = -1
             self.scale_factor = 2
-            self.scale_window = 1000
+
+            if dynamic_loss_args is None:
+                self.cur_scale = initial_dynamic_scale
+                self.scale_window = 1000
+                self.min_loss_scale = 1
+            else:
+                self.cur_scale = dynamic_loss_args[INITIAL_LOSS_SCALE]
+                self.scale_window = dynamic_loss_args[SCALE_WINDOW]
+                self.min_loss_scale = dynamic_loss_args[MIN_LOSS_SCALE]
         else:
             self.dynamic_loss_scale = False
             self.cur_iter = 0
@@ -126,8 +133,9 @@ class FP16_Optimizer(object):
 
         self.overflow = self.overflow_checker.check_using_norm(norm_groups)
         prev_scale = self.cur_scale
+        self._update_scale(self.overflow)
+
         if self.overflow:
-            self._update_scale(self.overflow)
             if self.verbose:
                 print("[deepspeed] OVERFLOW! Skipping step. Attempted loss "
                       "scale: {}, reducing to {}".format(prev_scale,
@@ -178,8 +186,9 @@ class FP16_Optimizer(object):
 
         self.overflow = self.overflow_checker.check_using_norm(norm_groups)
         prev_scale = self.cur_scale
+        self._update_scale(self.overflow)
+
         if self.overflow:
-            self._update_scale(self.overflow)
             if self.verbose:
                 print("[deepspeed] OVERFLOW! Skipping step. Attempted loss "
                       "scale: {}, reducing to {}".format(prev_scale,
@@ -235,15 +244,26 @@ class FP16_Optimizer(object):
 
     def _update_scale(self, skip):
         if self.dynamic_loss_scale:
+            prev_scale = self.cur_scale
             if skip:
-                if self.verbose:
-                    print("\nGrad overflow on iteration", self.cur_iter)
-                    print("Using dynamic loss scale of", self.cur_scale)
-                self.cur_scale = max(self.cur_scale / self.scale_factor, 1)
+                self.cur_scale = max(self.cur_scale / self.scale_factor,
+                                     self.min_loss_scale)
                 self.last_overflow_iter = self.cur_iter
+                if self.verbose:
+                    print(f"\nGrad overflow on iteration {self.cur_iter}")
+                    print(
+                        f"Reducing dynamic loss scale from {prev_scale} to {self.cur_scale}"
+                    )
             else:
-                if (self.cur_iter - self.last_overflow_iter) % self.scale_window == 0:
+                # Ensure self.scale_window updates since last overflow
+                stable_interval = (self.cur_iter - self.last_overflow_iter) - 1
+                if (stable_interval > 0) and (stable_interval % self.scale_window == 0):
                     self.cur_scale *= self.scale_factor
+                    if self.verbose:
+                        print(f"\nNo Grad overflow for {self.scale_window} iterations")
+                        print(
+                            f"Increasing dynamic loss scale from {prev_scale} to {self.cur_scale}"
+                        )
         else:
             if skip:
                 print("\nGrad overflow on iteration", self.cur_iter)
