@@ -79,7 +79,7 @@ RUN mkdir -p ${STAGE_DIR} && \
     cd ${STAGE_DIR}/nvidia-peer-memory-1.0 && \
     apt-get install -y dkms && \
     dpkg-buildpackage -us -uc && \
-    dpkg -i ${STAGE_DIR}/nvidia-peer-memory_1.0-8_all.deb
+    dpkg -i ${STAGE_DIR}/nvidia-peer-memory_1.0-9_all.deb
 
 ##############################################################################
 ## Ucomment and set SSH Daemon port
