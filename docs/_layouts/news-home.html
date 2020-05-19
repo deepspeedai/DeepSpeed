@@ -12,12 +12,6 @@ layout: archive
 {% endif %}
 
 
-<h2>Features Coming Soon</h2>
-{% assign soon = posts | where: "sneak_preview", "true" %}
-{% for post in soon %}
-  {% include archive-single.html %}
-{% endfor %}
-
 <h2>{{ site.data.ui-text[site.locale].recent_posts | default: "Recent Posts" }}</h2>
 {% assign news = posts | where: "sneak_preview", "false" %}
 {% for post in news %}

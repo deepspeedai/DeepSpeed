@@ -1,9 +1,10 @@
 {
-  "train_batch_size": 16,
+  "train_batch_size": 8,
   "gradient_accumulation_steps": 1,
   "steps_per_print": 1,
-  "zero_optimization": 1,
-  "disable_allgather": true,
+  "zero_optimization": {
+    "stage":2
+  },
   "optimizer": {
     "type": "Adam",
     "params": {
@@ -18,5 +19,10 @@
     "loss_scale_window": 1000,
     "hysteresis": 2,
     "min_loss_scale": 1
+  },
+  "activation_checkpointing": {
+    "partition_activations": true,
+    "contiguous_memory_optimization": true
   }
+
 }

@@ -29,6 +29,14 @@ collections:
   tutorials:
     output: true
     permalink: /:collection/:path/
+    order:
+      - getting-started.md
+      - azure.md
+      - cifar-10.md
+      - bert-pretraining.md
+      - megatron.md
+      - 1Cycle.md
+      - lrrt.md
 
 defaults:
   - scope:

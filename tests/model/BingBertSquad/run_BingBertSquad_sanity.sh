@@ -122,7 +122,7 @@ echo "deepspeed: ${enable_deepspeed}"
 echo "other_args: ${other_args}"
 
 EFFECTIVE_BATCH_SIZE=${batch_size}
-MAX_GPU_BATCH_SIZE=3
+MAX_GPU_BATCH_SIZE=6
 PER_GPU_BATCH_SIZE=$((EFFECTIVE_BATCH_SIZE/num_gpus))
 if [[ $PER_GPU_BATCH_SIZE -lt $MAX_GPU_BATCH_SIZE ]]; then
        GRAD_ACCUM_STEPS=1

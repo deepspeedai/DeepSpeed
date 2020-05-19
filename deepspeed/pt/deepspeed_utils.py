@@ -12,9 +12,10 @@ from torch._six import inf
 
 class CheckOverflow(object):
     '''Checks for overflow in gradient across parallel process'''
-    def __init__(self, param_groups=None, mpu=None):
+    def __init__(self, param_groups=None, mpu=None, zero_reduce_scatter=False):
         self.mpu = mpu
         self.params = [] if param_groups else None
+        self.zero_reduce_scatter = zero_reduce_scatter
         if param_groups:
             for group in param_groups:
                 for param in group:
@@ -54,8 +55,8 @@ class CheckOverflow(object):
 
     # `params` is a list / generator of torch.Variable
     def has_overflow_serial(self, params):
-        for p in params:
-            if p.grad is not None and self._has_inf_or_nan(p.grad.data):
+        for i, p in enumerate(params):
+            if p.grad is not None and self._has_inf_or_nan(p.grad.data, i):
                 return True
         return False
 
@@ -67,7 +68,11 @@ class CheckOverflow(object):
         #torch.distributed.all_reduce(overflow_gpu,
         #                             op=torch.distributed.ReduceOp.MAX,
         #                             group=mpu.get_model_parallel_group())
-        if self.mpu is not None:
+        if self.zero_reduce_scatter:
+            torch.distributed.all_reduce(overflow_gpu,
+                                         op=torch.distributed.ReduceOp.MAX,
+                                         group=torch.distributed.group.WORLD)
+        elif self.mpu is not None:
             torch.distributed.all_reduce(overflow_gpu,
                                          op=torch.distributed.ReduceOp.MAX,
                                          group=self.mpu.get_model_parallel_group())
@@ -76,7 +81,7 @@ class CheckOverflow(object):
 
     # `x` is a torch.Tensor
     @staticmethod
-    def _has_inf_or_nan(x):
+    def _has_inf_or_nan(x, i):
         try:
             # if x is half, the .float() incurs an additional deep copy, but it's necessary if
             # Pytorch's .sum() creates a one-element tensor of the same type as x
@@ -93,8 +98,23 @@ class CheckOverflow(object):
             return True
         else:
             if cpu_sum == float('inf') or cpu_sum == -float('inf') or cpu_sum != cpu_sum:
+                _handle_overflow(cpu_sum, x, i)
                 return True
             return False
+
+
+def _handle_overflow(cpu_sum, x, i):
+    import math
+    rank = torch.distributed.get_rank()
+    if rank == 0:
+        t_i = -1
+        for v_i, v in enumerate(x.data.contiguous().view(-1)):
+            if not math.isfinite(float(v)):
+                t_i = v_i
+                break
+        print(
+            f"rank {rank} detected overflow {cpu_sum} in tensor {i}:{t_i} shape {x.shape}"
+        )
 
 
 def get_grad_norm(parameters, norm_type=2, mpu=None):
@@ -221,3 +241,33 @@ def get_weight_norm(parameters, norm_type=2, mpu=None):
         total_norm = -1
 
     return total_norm
+
+
+def is_model_parallel_parameter(p):
+    return hasattr(p, 'model_parallel') and p.model_parallel
+
+
+def see_memory_usage(message):
+    return
+    if torch.distributed.is_initialized() and not torch.distributed.get_rank() == 0:
+        return
+
+    # Print message except when distributed but not rank 0
+    print(message, flush=True)
+    print("Memory Allocated ",
+          torch.cuda.memory_allocated() / (1024 * 1024 * 1024),
+          "GigaBytes",
+          flush=True)
+    print("Max Memory Allocated ",
+          torch.cuda.max_memory_allocated() / (1024 * 1024 * 1024),
+          "GigaBytes",
+          flush=True)
+    print("Cache Allocated ",
+          torch.cuda.memory_cached() / (1024 * 1024 * 1024),
+          "GigaBytes",
+          flush=True)
+    print("Max cache Allocated ",
+          torch.cuda.max_memory_cached() / (1024 * 1024 * 1024),
+          "GigaBytes",
+          flush=True)
+    print(" ", flush=True)

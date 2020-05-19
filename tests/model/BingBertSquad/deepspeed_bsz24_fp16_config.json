@@ -1,14 +1,6 @@
 {
-  "tensorboard": {
-    "enabled": false,
-    "job_name": "MyJob"
-  },
-  "zero_optimization": true,
-  "disable_allgather": false,
-  "allgather_size": 200000,
-  "wall_clock_breakdown": false,
   "train_batch_size": 24,
-  "train_micro_batch_size_per_gpu": 3,
+  "train_micro_batch_size_per_gpu": 6,
   "steps_per_print": 1,
   "optimizer": {
     "type": "Adam",
@@ -21,5 +13,8 @@
   "gradient_clipping": 1.0,
   "fp16": {
     "enabled": true
+  },
+  "zero_optimization": {
+      "stage": 1
   }
 }

@@ -43,7 +43,7 @@ class GPT2CheckpointTestCase(BaseTestCase):
     def tearDown(self):
         os.chdir(self.save_dir)
 
-    def test_mp4_gpu16_node1_with_zero(self):
+    def test_mp4_gpu16_node1_with_zero1(self):
         test_config = {
             "mp": 2,
             "gpus": 4,
@@ -55,12 +55,34 @@ class GPT2CheckpointTestCase(BaseTestCase):
             "seq_length": 256,
             "heads": 16,
             "deepspeed": True,
-            "tag": "ds_zero",
+            "tag": "ds_zero1",
             "zero": True,
             "other_args": "",
-            "checkpoint_name": "ckpt_mp4_gpu16_w_zero",
+            "checkpoint_name": "ckpt_mp4_gpu16_w_zero1",
             "checkpoint_interval": 1000,
-            "json": "ds_config_func_bs8.json",
+            "json": "ds_config_func_bs8_zero1.json",
+        }
+        succ = self.run_test(test_config, 0.01)
+        self.assertTrue(succ)
+
+    def test_mp4_gpu16_node1_with_zero2(self):
+        test_config = {
+            "mp": 2,
+            "gpus": 4,
+            "nodes": 1,
+            "bs": 8,
+            "steps": 1100,
+            "layers": 2,
+            "hidden_size": 256,
+            "seq_length": 256,
+            "heads": 16,
+            "deepspeed": True,
+            "tag": "ds_zero2",
+            "zero": True,
+            "other_args": "",
+            "checkpoint_name": "ckpt_mp4_gpu16_w_zero2",
+            "checkpoint_interval": 1000,
+            "json": "ds_config_func_bs8_zero2.json",
         }
         succ = self.run_test(test_config, 0.01)
         self.assertTrue(succ)
@@ -184,7 +206,8 @@ class GPT2CheckpointTestCase(BaseTestCase):
 
 def checkpoint_suite():
     suite = unittest.TestSuite()
-    suite.addTest(GPT2CheckpointTestCase('test_mp4_gpu16_node1_with_zero'))
+    suite.addTest(GPT2CheckpointTestCase('test_mp4_gpu16_node1_with_zero1'))
+    suite.addTest(GPT2CheckpointTestCase('test_mp4_gpu16_node1_with_zero2'))
     suite.addTest(GPT2CheckpointTestCase('test_mp4_gpu16_node1_without_zero'))
 
     return suite

@@ -12,6 +12,9 @@
   },
   "gradient_clipping": 1.0,
   "fp16": {
-    "enabled": false
+    "enabled": true
+  },
+  "zero_optimization": {
+      "stage": 2
   }
 }

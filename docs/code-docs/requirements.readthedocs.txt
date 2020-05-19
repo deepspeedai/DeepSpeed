@@ -1,3 +1,2 @@
 tqdm
 psutil
-tensorboardX==1.8

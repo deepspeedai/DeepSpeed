@@ -18,7 +18,7 @@ lnav:
     children:
       - title: "Installation"
         url: /getting-started/#installation
-      - title: "Writing Models"
+      - title: "Writing models"
         url: /getting-started/#writing-deepspeed-models
       - title: "Training"
         url: /getting-started/#training
@@ -37,19 +37,25 @@ lnav:
         url: /docs/config-json/#communication-options
       - title: "FP16"
         url: /docs/config-json/#fp16-training-options
+      - title: "ZeRO optimizations"
+        url: /docs/config-json/#zero-optimizations-for-fp16-training
       - title: "Logging"
         url: /docs/config-json/#logging
+      - title: "Activation checkpointing"
+        url: /docs/config-json/#activation-checkpointing
   - title: "Tutorials"
     url: /tutorials/
     children:
-      - title: "Getting Started on Azure"
+      - title: "Getting started"
+        url: /getting-started/
+      - title: "Getting started on Azure"
         url: /tutorials/azure/
       - title: "CIFAR-10"
         url: /tutorials/cifar-10/
-      - title: "Megatron-LM GPT2"
-        url: /tutorials/megatron/
       - title: "BERT Pre-training"
         url: /tutorials/bert-pretraining/
+      - title: "Megatron-LM GPT2"
+        url: /tutorials/megatron/
       - title: "1-Cycle Schedule"
         url: /tutorials/1Cycle/
       - title: "Learning Rate Range Test"

@@ -56,6 +56,19 @@ class BingBertSquadFuncTestCase(BaseTestCase):
         succ = self.run_test(test_config, 0.01)
         self.assertTrue(succ)
 
+    def test_gpu4_fp16_zero2(self):
+        test_config = {
+            "gpus": 4,
+            "deepspeed": False,
+            "json": "deepspeed_bsz24_fp16_zero2_config.json",
+            "max_steps": 8,
+            "max_epoch_steps": 4,
+            "other_args": "--fp16 --print_steps 1"
+        }
+
+        succ = self.run_test(test_config, 0.01)
+        self.assertTrue(succ)
+
     def test_gpu1_fp16(self):
         test_config = {
             "gpus": 1,
@@ -151,6 +164,7 @@ class BingBertSquadFuncTestCase(BaseTestCase):
 def suite():
     suite = unittest.TestSuite()
     suite.addTest(BingBertSquadFuncTestCase('test_gpu4_fp16'))
+    suite.addTest(BingBertSquadFuncTestCase('test_gpu4_fp16_zero2'))
     suite.addTest(BingBertSquadFuncTestCase('test_gpu1_fp16'))
     suite.addTest(BingBertSquadFuncTestCase('test_gpu4_fp32'))
     suite.addTest(BingBertSquadFuncTestCase('test_gpu1_fp32'))

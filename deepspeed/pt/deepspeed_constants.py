@@ -15,7 +15,7 @@ ROUTE_ENCODE = "encode"
 # Batch size
 #############################################
 TRAIN_BATCH_SIZE = "train_batch_size"
-TRAIN_BATCH_SIZE_DEFAULT = 1
+TRAIN_BATCH_SIZE_DEFAULT = None
 
 #############################################
 # Optimizer and lr scheduler
@@ -133,14 +133,27 @@ GRADIENT_CLIPPING_DEFAULT = 0.
 # ZeRO optimization
 #########################################
 # ZeRO optimization. By default, this optimization is not enabled.
-# Users can configure in ds_config.json as below example:
+# Users have to configure the desired optimization (0 means disabled) in params.json as below example:
 ZERO_FORMAT = '''
 ZeRO optimization should be enabled as:
-"zero_optimization": true,
-"zero_all_gather_size": 200
+"session_params": {
+  "zero_optimization": [0|1|2],
+  "zero_all_gather_size": 200
+}
 '''
+
 ZERO_OPTIMIZATION = 'zero_optimization'
-ZERO_OPTIMIZATION_DEFAULT = False
+ZERO_OPTIMIZATION_DEFAULT = 0
+ZERO_OPTIMIZATION_OPTIMIZER_STATES = 1
+ZERO_OPTIMIZATION_GRADIENTS = 2
+ZERO_OPTIMIZATION_WEIGHTS = 3
+MAX_STAGE_ZERO_OPTIMIZATION = ZERO_OPTIMIZATION_GRADIENTS
+
+ZERO_REDUCE_SCATTER = "zero_reduce_scatter"
+ZERO_REDUCE_SCATTER_DEFAULT = True
+
+ZERO_MAX_ELEMENTS_PER_COMM = "zero_max_elements_per_comm"
+ZERO_MAX_ELEMENTS_PER_COMM_DEFAULT = 5e8
 
 ALLGATHER_SIZE = 'allgather_size'
 ALLGATHER_SIZE_DEFAULT = 500000000
@@ -216,6 +229,9 @@ Wall block breakdown should be enabled as:
 '''
 WALL_CLOCK_BREAKDOWN = 'wall_clock_breakdown'
 WALL_CLOCK_BREAKDOWN_DEFAULT = False
+
+MEMORY_BREAKDOWN = 'memory_breakdown'
+MEMORY_BREAKDOWN_DEFAULT = False
 
 #########################################
 # Tensorboard

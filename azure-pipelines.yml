@@ -36,11 +36,6 @@ jobs:
     displayName: 'Formatting checks'
 
   - script: |
-      pip install --user pylint
-      pylint --exit-zero deepspeed/
-    displayName: 'Code linter'
-
-  - script: |
       pytest --forked --verbose tests/unit/
     displayName: 'Unit tests'
 

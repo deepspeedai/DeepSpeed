@@ -29,14 +29,16 @@ def pytest_hack(runner_result):
         assert runner_result.wasSuccessful()  # fail the test
 
 
-def test_run():
+#def test_megatron():
+#    runner = unittest.TextTestRunner(failfast=True)
+#    pytest_hack(runner.run(Megatron_GPT2.suite()))
+#
+#
+#def test_megatron_checkpoint():
+#    runner = unittest.TextTestRunner(failfast=True)
+#    pytest_hack(runner.run(Megatron_GPT2.checkpoint_suite()))
+
+
+def test_squad():
     runner = unittest.TextTestRunner(failfast=True)
-
-    # Add test suites here.
-    pytest_hack(runner.run(Megatron_GPT2.suite()))
-    pytest_hack(runner.run(Megatron_GPT2.checkpoint_suite()))
     pytest_hack(runner.run(BingBertSquad.suite()))
-
-
-if __name__ == '__main__':
-    test_run()

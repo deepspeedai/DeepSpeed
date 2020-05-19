@@ -73,7 +73,7 @@ def test_two_output_model(tmpdir):
 
             summed_loss = sum(loss_tuple)
             scaled_loss = model.backward(summed_loss)
-            expected_scaled_loss = summed_loss / gradient_accumulation_steps
+            expected_scaled_loss = summed_loss.float() / gradient_accumulation_steps
             assert scaled_loss.item() == approx(expected_scaled_loss.item())
 
             model.step()
@@ -131,7 +131,7 @@ def test_three_output_model(tmpdir):
 
             summed_loss = sum(loss_tuple)
             scaled_loss = model.backward(summed_loss)
-            expected_scaled_loss = summed_loss / gradient_accumulation_steps
+            expected_scaled_loss = summed_loss.float() / gradient_accumulation_steps
             assert scaled_loss.item() == approx(expected_scaled_loss.item())
 
             model.step()

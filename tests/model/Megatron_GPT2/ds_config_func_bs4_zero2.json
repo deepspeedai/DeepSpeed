@@ -1,9 +1,10 @@
 {
-  "train_batch_size": 16,
+  "train_batch_size": 4,
   "gradient_accumulation_steps": 1,
   "steps_per_print": 1,
-  "zero_optimization": 1,
-  "disable_allgather": true,
+  "zero_optimization": {
+    "stage":2
+  },
   "optimizer": {
     "type": "Adam",
     "params": {

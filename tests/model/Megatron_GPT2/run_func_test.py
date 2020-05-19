@@ -43,7 +43,7 @@ class GPT2FuncTestCase(BaseTestCase):
     def tearDown(self):
         os.chdir(self.save_dir)
 
-    def test_mp1_gpu1_node1(self):
+    def test_mp1_gpu1_node1_zero1(self):
         test_config = {
             "mp": 1,
             "gpus": 1,
@@ -55,13 +55,13 @@ class GPT2FuncTestCase(BaseTestCase):
             "seq_length": 256,
             "heads": 12,
             "deepspeed": False,
-            "json": "ds_config_func_bs4.json",
+            "json": "ds_config_func_bs4_zero1.json",
         }
 
         succ = self.run_test(test_config, 0.01)
         self.assertTrue(succ)
 
-    def test_mp1_gpu2_node1(self):
+    def test_mp1_gpu2_node1_zero1(self):
         test_config = {
             "mp": 1,
             "gpus": 2,
@@ -73,13 +73,13 @@ class GPT2FuncTestCase(BaseTestCase):
             "seq_length": 256,
             "heads": 12,
             "deepspeed": False,
-            "json": "ds_config_func_bs8.json",
+            "json": "ds_config_func_bs8_zero1.json",
         }
 
         succ = self.run_test(test_config, 0.01)
         self.assertTrue(succ)
 
-    def test_mp2_gpu4_node1(self):
+    def test_mp2_gpu4_node1_zero1(self):
         test_config = {
             "mp": 2,
             "gpus": 4,
@@ -91,16 +91,13 @@ class GPT2FuncTestCase(BaseTestCase):
             "seq_length": 256,
             "heads": 12,
             "deepspeed": False,
-            "json": "ds_config_func_bs8.json",
+            "json": "ds_config_func_bs8_zero1.json",
         }
 
         succ = self.run_test(test_config, 0.01)
         self.assertTrue(succ)
 
-        succ = self.run_partition_activations_test(test_config, 0.01)
-        self.assertTrue(succ)
-
-    def test_mp4_gpu4_node1(self):
+    def test_mp4_gpu4_node1_zero1(self):
         test_config = {
             "mp": 4,
             "gpus": 4,
@@ -112,7 +109,82 @@ class GPT2FuncTestCase(BaseTestCase):
             "seq_length": 256,
             "heads": 12,
             "deepspeed": False,
-            "json": "ds_config_func_bs8.json",
+            "json": "ds_config_func_bs8_zero1.json",
+        }
+
+        succ = self.run_test(test_config, 0.01)
+        self.assertTrue(succ)
+
+    def test_mp1_gpu1_node1_zero2(self):
+        test_config = {
+            "mp": 1,
+            "gpus": 1,
+            "nodes": 1,
+            "bs": 4,
+            "steps": 1000,
+            "layers": 12,
+            "hidden_size": 768,
+            "seq_length": 256,
+            "heads": 12,
+            "deepspeed": False,
+            "json": "ds_config_func_bs4_zero2.json",
+        }
+
+        succ = self.run_test(test_config, 0.01)
+        self.assertTrue(succ)
+
+    def test_mp1_gpu2_node1_zero2(self):
+        test_config = {
+            "mp": 1,
+            "gpus": 2,
+            "nodes": 1,
+            "bs": 8,
+            "steps": 1000,
+            "layers": 12,
+            "hidden_size": 768,
+            "seq_length": 256,
+            "heads": 12,
+            "deepspeed": False,
+            "json": "ds_config_func_bs8_zero2.json",
+        }
+
+        succ = self.run_test(test_config, 0.01)
+        self.assertTrue(succ)
+
+    def test_mp2_gpu4_node1_zero2(self):
+        test_config = {
+            "mp": 2,
+            "gpus": 4,
+            "nodes": 1,
+            "bs": 8,
+            "steps": 1000,
+            "layers": 12,
+            "hidden_size": 768,
+            "seq_length": 256,
+            "heads": 12,
+            "deepspeed": False,
+            "json": "ds_config_func_bs8_zero2.json",
+        }
+
+        succ = self.run_test(test_config, 0.01)
+        self.assertTrue(succ)
+
+        succ = self.run_partition_activations_test(test_config, 0.01)
+        self.assertTrue(succ)
+
+    def test_mp4_gpu4_node1_zero2(self):
+        test_config = {
+            "mp": 4,
+            "gpus": 4,
+            "nodes": 1,
+            "bs": 8,
+            "steps": 1000,
+            "layers": 12,
+            "hidden_size": 768,
+            "seq_length": 256,
+            "heads": 12,
+            "deepspeed": False,
+            "json": "ds_config_func_bs8_zero2.json",
         }
 
         succ = self.run_test(test_config, 0.01)
@@ -144,11 +216,12 @@ class GPT2FuncTestCase(BaseTestCase):
         print("\n")
         print("{0}: starting......".format(self.id()))
 
+        baseline_prefix = "gpt2_func_"
         prefix = "gpt2_partition_activation_"
 
         # baseline run...
         test_config["deepspeed"] = False
-        base_file = self.gen_output_name(test_config, prefix)
+        base_file = self.gen_output_name(test_config, baseline_prefix)
 
         # skip baseline run if it exists.
         if not self.has_loss_data(base_file):
@@ -159,7 +232,7 @@ class GPT2FuncTestCase(BaseTestCase):
 
         # DeepSpeed run...
         test_config["deepspeed"] = True
-        test_config["other_args"] = "--partition-activations"
+        test_config["other_args"] = "--deepspeed-activation-checkpointing"
         print("{0}: DeepSpeed run.".format(self.id()))
         test_file = self.gen_output_name(test_config, prefix)
         self.run_gpt2_test(test_config, test_file)
@@ -217,10 +290,16 @@ class GPT2FuncTestCase(BaseTestCase):
 
 def suite():
     suite = unittest.TestSuite()
-    suite.addTest(GPT2FuncTestCase('test_mp1_gpu1_node1'))
-    suite.addTest(GPT2FuncTestCase('test_mp1_gpu2_node1'))
-    suite.addTest(GPT2FuncTestCase('test_mp2_gpu4_node1'))
-    suite.addTest(GPT2FuncTestCase('test_mp4_gpu4_node1'))
+    suite.addTest(GPT2FuncTestCase('test_mp1_gpu1_node1_zero1'))
+    suite.addTest(GPT2FuncTestCase('test_mp1_gpu2_node1_zero1'))
+    suite.addTest(GPT2FuncTestCase('test_mp2_gpu4_node1_zero1'))
+    suite.addTest(GPT2FuncTestCase('test_mp4_gpu4_node1_zero1'))
+
+    suite.addTest(GPT2FuncTestCase('test_mp1_gpu1_node1_zero2'))
+    suite.addTest(GPT2FuncTestCase('test_mp1_gpu2_node1_zero2'))
+    suite.addTest(GPT2FuncTestCase('test_mp2_gpu4_node1_zero2'))
+    suite.addTest(GPT2FuncTestCase('test_mp4_gpu4_node1_zero2'))
+
     suite.addTest(GPT2FuncTestCase('test_optimizer_scheduler'))
     return suite
 

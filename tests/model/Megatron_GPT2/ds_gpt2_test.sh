@@ -85,6 +85,7 @@ gpt_options=" \
        --checkpoint-activations \
        --checkpoint-num-layers ${ckpt_num_layers} \
        --fp16 \
+       --cache-dir /tmp/cache_dir \
        --log-interval 1 \
        ${other_args} \
        ${ds_opt} \
@@ -92,7 +93,7 @@ gpt_options=" \
 "
 
 work_dir="../../../DeepSpeedExamples/Megatron-LM/"
-run_cmd="(cd ${work_dir} && deepspeed --num_gpus $gpus pretrain_gpt2.py ${gpt_options})"
+run_cmd="(cd ${work_dir} && deepspeed --num_nodes $nodes --num_gpus $gpus pretrain_gpt2.py ${gpt_options})"
 echo ${run_cmd}
 eval ${run_cmd}
 

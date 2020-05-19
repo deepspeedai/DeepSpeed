@@ -69,13 +69,27 @@ class SynchronizedWallClockTimer:
             self.timers[name] = self.Timer(name)
         return self.timers[name]
 
-    def log(self, names, normalizer=1.0, reset=True):
+    @staticmethod
+    def memory_usage():
+        alloc = "mem_allocated: {:.4f} GB".format(torch.cuda.memory_allocated() /
+                                                  (1024 * 1024 * 1024))
+        max_alloc = "max_mem_allocated: {:.4f} GB".format(
+            torch.cuda.max_memory_allocated() / (1024 * 1024 * 1024))
+        cache = "cache_allocated: {:.4f} GB".format(torch.cuda.memory_cached() /
+                                                    (1024 * 1024 * 1024))
+        max_cache = "max_cache_allocated: {:.4f} GB".format(
+            torch.cuda.max_memory_cached() / (1024 * 1024 * 1024))
+        return " | {} | {} | {} | {}".format(alloc, max_alloc, cache, max_cache)
+
+    def log(self, names, normalizer=1.0, reset=True, memory_breakdown=False):
         """Log a group of timers."""
         assert normalizer > 0.0
         string = 'time (ms)'
         for name in names:
             elapsed_time = self.timers[name].elapsed(reset=reset) * 1000.0 / normalizer
             string += ' | {}: {:.2f}'.format(name, elapsed_time)
+        if memory_breakdown:
+            string += self.memory_usage()
         print_rank_0(string)
 
 

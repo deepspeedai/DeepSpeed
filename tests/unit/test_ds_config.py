@@ -17,3 +17,19 @@ def test_only_required_fields(tmpdir):
     assert run_cfg.train_batch_size == 64
     assert run_cfg.train_micro_batch_size_per_gpu == 64
     assert run_cfg.gradient_accumulation_steps == 1
+
+
+def test_config_duplicate_key(tmpdir):
+    config_dict = '''
+    {
+        "train_batch_size": 24,
+        "train_batch_size": 24,
+    }
+    '''
+    config_path = os.path.join(tmpdir, 'temp_config.json')
+
+    with open(config_path, 'w') as jf:
+        jf.write("%s" % config_dict)
+
+    with pytest.raises(ValueError):
+        run_cfg = ds_config.DeepSpeedConfig(config_path)

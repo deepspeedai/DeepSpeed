@@ -8,7 +8,7 @@ from torch.multiprocessing import Process
 import pytest
 
 # Worker timeout *after* the first worker has completed.
-DEEPSPEED_UNIT_WORKER_TIMEOUT = 10
+DEEPSPEED_UNIT_WORKER_TIMEOUT = 120
 
 
 def distributed_test(world_size=2, backend='nccl'):

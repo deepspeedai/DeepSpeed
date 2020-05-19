@@ -320,6 +320,43 @@ and return the states for the client model.
 
 ```
 
+### DeepSpeed Activation Checkpoints (Optional)
+
+DeepSpeed can reduce the activation memory during model parallel training by partitioning activation checkpoints across model parallel GPUs, or offloading them to CPU. These optimization are optional, and can be skipped unless activation memory becomes a memory bottlenck. To enable partition activation, we use the `deepspeed.checkpointing` API to replace Megatron's activation checkpointing and random state tracker APIs. The replacement should happen before the first invocation of these APIs.
+
+a) Replace in `pretrain_gpt.py` :
+
+ ```python
+    # Optional DeepSpeed Activation Checkpointing Features
+    #
+    if args.deepspeed and args.deepspeed_activation_checkpointing:
+        set_deepspeed_activation_checkpointing(args)
+
+def set_deepspeed_activation_checkpointing(args):
+
+    deepspeed.checkpointing.configure(mpu,
+                            deepspeed_config=args.deepspeed_config,
+                            partition_activation=True)
+
+    mpu.checkpoint = deepspeed.checkpointing.checkpoint
+    mpu.get_cuda_rng_tracker = deepspeed.checkpointing.get_cuda_rng_tracker
+    mpu.model_parallel_cuda_manual_seed =
+                    deepspeed.checkpointing.model_parallel_cuda_manual_seed
+```
+
+b) Replace in `mpu/transformer.py`:
+
+```python
+if deepspeed.checkpointing.is_configured():
+            global get_cuda_rng_tracker, checkpoint
+            get_cuda_rng_tracker = deepspeed.checkpoint.get_cuda_rng_tracker
+            checkpoint = deepspeed.checkpointing.checkpoint
+
+```
+
+With these replacements, various DeepSpeed activation checkpointing optimizations such as activation partitioning, contiguous checkpointing, and CPU checkpointing, can be specified with either `deepspeed.checkpointing.configure` or in the `deepspeed_config` file.
+
+
 ### Train  scripts
 Assume webtext data was prepared in previous step, to start training
 Megatron-LM GPT2 model with DeepSpeed applied, execute the following command to
@@ -328,13 +365,18 @@ start training.
 - Single GPU run
   - run `bash scripts/ds_pretrain_gpt2.sh`
 - Multiple GPUs/Nodes run
-  - run `bash scripts/ds_pretrain_gpt2_model_parallel.sh`
+  - run `bash scripts/ds_zero2_pretrain_gpt2_model_parallel.sh`
 
+## DeepSpeed Evaluation using GPT-2
 
-
-## Performance Improvements
 DeepSpeed enables training very large models effectively via the advanced [ZeRO
-optimizer](https://arxiv.org/abs/1910.02054v2). ZeRO significantly reduces the memory
+optimizer](https://arxiv.org/abs/1910.02054v2). In February, we released a sub-set
+of optimizations from ZeRO in DeepSpeed that performs optimizer state partitioning.
+We refer to them as ZeRO-1. In May, 2020 we extended ZeRO-1 in DeepSpeed to include
+additional optimizations from ZeRO including gradient and activation partitioning,
+as well as contiguous memory optimizations. We refer to this release as ZeRO-2.  
+
+ZeRO-2 significantly reduces the memory
 footprint for training large models which means large models can be trained with i) less
 model parallelism and ii) larger batch sizes. A lower model parallelism degree improves
 training efficiency by increasing the granularity of the computation such as the matrix
@@ -342,80 +384,25 @@ multiplication where performance is directly related to the size of the matrices
 Furthermore, less model parallelism also results in less communication between model
 parallel GPUs, which further boosts performance.  Larger batch size has a similar effect
 of increasing the computational granularity as well as reducing communication, also
-resulting in better performance. Therefore, DeepSpeed combines ZeRO-powered data parallelism with
-Megatron-LM tensor-slicing model parallelism, which is
-significantly faster than using Megatron-LM alone.
+resulting in better performance. Therefore, with DeepSpeed and ZeRO-2 integration into Megatron,
+we elevate the model scale and speed to an entirely new level compared to Megatron alone.
 
-The observed performance improvements depend on several factors such as the memory per
-GPU, the local GPU interconnect (i.e., PCI-E vs NVLINK vs NVSwitch), the model size,
-inter node network interconnect, etc. Below, we show some of the performance improvements
-from using DeepSpeed over Megatron on a 16 GPU Low Bandwidth (40 Gbps) cluster and a 400 GPU DGX-2 High Bandwidth (800 Gbps) cluster.
-For details please see the [ZeRO Paper](https://arxiv.org/abs/1910.02054v2). We also
-present performance improvement on a 64 GPU cluster along with detailed configuration
-analysis to show where the improvements come from.
-
-![DeepSpeed-vs-Megatron](/assets/images/DeepSpeed-vs-Megatron.png)
+![DeepSpeed-vs-Megatron](../assets/images/zero-full.png)
 <p align="center">
-<em>The figure depicts system throughput improvements of DeepSpeed (combining ZeRO-powered data parallelism with model parallelism of Nvidia Megatron-LM) over using Megatron-LM alone.</em>
+<em>Figure 2: ZeRO-2 scales to 170 billion parameters, has up to 10x higher throughput, obtains super linear speedup, and improves usability by avoiding the need for code refactoring for models up to 13 billion parameters.</em>
 </p>
 
-
-### On Low Bandwidth GPU Cluster
-The figure above shows that training 1.5B parameter model with DeepSpeed is
-nearly 4x faster than without DeepSpeed on a cluster with 4 nodes, 4 GPU per
-node, and 16 GPUs total. These GPUs have 16GB of memory each, and PCI-E
-interconnects GPUs within a node, and 40 Gbps infiniband across nodes.
-
-The performance improvement comes from lower model parallelism degree and
-larger batch size as discussed earlier. Training 1.5B parameter model with
-Megatron-LM alone requires 4-way model parallelism, and can only fit an effective
-batch size of 32 using all 16 GPUs. On the other hand, DeepSpeed does not
-require any model-parallelism to train this model, and can support an
-effective batch size of 128 without running out of memory, resulting in
-significantly higher performance.
+More concretely, DeepSpeed and ZeRO-2 excel in four aspects (as visualized in Figure 2), supporting an order-of-magnitude bigger models, up to 10x faster, with superlinear scalability, and improved usability to democratize large model training. These four aspects are detailed below.
 
 
-### On High bandwidth DGX-2 GPU Cluster
-Each GPU on the DGX-2 cluster has 32 GB of memory, and GPUs inside a box is connected via
-the high-bandwidth NVSwitch. DGX-2 nodes are connected to each other via 800 Gbps (8 x 100Gbps) infiniband interconnect. As such, running a 1.5B model on DGX-2 requires less model
-parallelism, and the performance improvement from DeepSpeed for this model size is less
-significant. However, at larger model sizes, Megatron still requires significantly larger
-model parallelism degree, and can only run much smaller batch sizes than DeepSpeed.
-Therefore, as the model sizes get larger, DeepSpeed, by coming ZeRO with Megatron model parallelism, starts to significantly outperform
-using Megatron-LM alone.
+Figure 2: ZeRO-2 scales to 170 billion parameters, has up to 10x higher throughput, obtains super linear speedup, and improves usability by avoiding the need for code refactoring for models up to 13 billion parameters.
 
+Model size: State-of-the-art large models such as OpenAI GPT-2, NVIDIA Megatron-LM, Google T5, and Microsoft Turing-NLG have sizes of 1.5B, 8.3B, 11B, and 17B parameters respectively. ZeRO-2 provides system support to efficiently run models of 170 billion parameters, an order-of-magnitude bigger than these largest models (Figure 2, top left).
 
-### Performance Improvements with Configuration Details
-The figure below compares DeepSpeed with Megatron on a 64 GPU cluster with 4
-DGX-2 nodes. To give the readers a clear idea of source of the performance
-improvements, we also present the configuration table for both Megatron and
-DeepSpeed. It shows the smallest model parallelism degree and the largest batch
-size that can be used to train these models without running out of memory. As
-discussed above, the tables demonstrate that DeepSpeed runs with smaller model parallelism degree
-and achieves better performance.
+Speed: Improved memory efficiency powers higher throughput and faster training. Figure 2 (bottom left) shows system throughput of ZeRO-2 and ZeRO-1 (both combining ZeRO-powered data parallelism with NVIDIA Megatron-LM model parallelism) as well as using the state-of-the-art model parallelism approach Megatron-LM alone (baseline in Figure 2, bottom left). ZeRO-2 runs 100-billion-parameter models on a 400 NVIDIA V100 GPU cluster with over 38 teraflops per GPU and aggregated performance over 15 petaflops. For models of the same size, ZeRO-2 is 10x faster in training speed when compared with using Megatron-LM alone and 5x faster when compared with ZeRO-1.
 
-![DeepSpeed Performance SpeedUp](/assets/images/megatron-gpt2-perf-test.png)
-<p align="center">
-<em>The figure depicts system throughput improvements of DeepSpeed (combining ZeRO-powered data parallelism with model parallelism of Nvidia Megatron-LM) over using Megatron-LM alone.</em>
-</p>
+Scalability: We observe superlinear speedup (Figure 2, top right), where the performance more than doubles when the number of GPUs are doubled. ZeRO-2 reduces the memory footprint of the model states as we increase the data parallelism degree, allowing us to fit larger batch sizes per GPU and resulting in better performance.
 
+Democratizing large model training: ZeRO-2 empowers model scientists to train models up to 13 billion parameters efficiently without any model parallelism that typically requires model refactoring (Figure 2, bottom right). 13 billion parameters is larger than most of the largest state-of-the-art models (such as Google T5, with 11 billion parameters). Model scientists can therefore experiment freely with large models without worrying about model parallelism. In comparison, the implementations of classic data-parallelism approaches (such as PyTorch Distributed Data Parallel) run out of memory with 1.4-billion-parameter models, while ZeRO-1 supports up to 6 billion parameters for comparison.
 
-**a ) Megatron-LM GPT2 Baseline**
-
-|      | Model Parallelism | Data Parallelism | #gpus | batch size | layers | hidden size | attention heads | samples / sec |
-| ---- | ----------------: | ---------------: | ----: | ---------: | -----: | -----------:| --------------: | ------------: |
-| 1.5B | 2                 | 32               | 64    | 512        | 48     | 1600        | 16              | 128.56        |
-| 4B   | 4                 | 16               | 64    | 128        | 64     | 2304        | 16              | 49.36         |
-| 8B   | 4                 | 16               | 64    | 128        | 72     | 3072        | 24              | 24.57         |
-| 20B  | 16                | 4                | 64    | 16         | 111    | 3808        | 32              | 3.42          |
-
-
-
-**b ) Megatron-LM GPT2 with DeepSpeed**
-
-|      | Model Parallelism | Data Parallelism | #gpus | batch size | layers | hidden size | attention heads | samples / sec |
-| ---- | ----------------: | ---------------: | ----: | ---------: | -----: | -----------:| --------------: | ------------: |
-| 1.5B | 1                 | 64               | 64    | 2048       | 48     | 1600        | 16              | 151.35        |
-| 4B   | 1                 | 64               | 64    | 512        | 64     | 2304        | 16              | 75.13         |
-| 8B   | 2                 | 32               | 64    | 512        | 72     | 3072        | 24              | 43.52         |
-| 20B  | 4                 | 16               | 64    | 128        | 111    | 3808        | 32              | 12.65         |
+Furthermore, in the absence of model parallelism, these models can be trained on low bandwidth clusters while still achieving significantly better throughput compared to using model parallelism. For example, the GPT-2 model can be trained nearly 4x faster with ZeRO powered data parallelism compared to using model parallelism on a four node cluster connected with 40 Gbps Infiniband interconnect, where each node have four NVIDIA 16GB V100 GPUs connected with PCI-E. Therefore, with this performance improvement, large model training is no longer limited to GPU clusters with ultra fast interconnect but also accesible on modest clusters with limited bandwidth.

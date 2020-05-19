@@ -2,11 +2,12 @@
   "train_batch_size": 32,
   "gradient_accumulation_steps": 1,
   "steps_per_print": 1,
-  "zero_optimization": true,
+  "zero_optimization": {
+    "stage":1
+  },
   "disable_allgather": true,
   "optimizer": {
     "type": "Adam",
-    "legacy_fusion": false,
     "params": {
       "lr": 0.00015,
       "max_grad_norm": 1.0

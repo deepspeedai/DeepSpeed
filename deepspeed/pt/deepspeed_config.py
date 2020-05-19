@@ -8,18 +8,14 @@ import logging
 import json
 from deepspeed.pt.deepspeed_constants import *
 from deepspeed.pt.loss_scaler import INITIAL_LOSS_SCALE, SCALE_WINDOW, DELAYED_SHIFT, MIN_LOSS_SCALE
+from deepspeed.pt.deepspeed_config_utils import get_scalar_param, dict_raise_error_on_duplicate_keys
+from deepspeed.pt.deepspeed_zero_config import DeepSpeedZeroConfig
+from deepspeed.pt.deepspeed_checkpointing_config import DeepSpeedActivationCheckpointingConfig
 
 TENSOR_CORE_ALIGN_SIZE = 8
 ADAM_OPTIMIZER = 'adam'
 LAMB_OPTIMIZER = 'lamb'
 DEEPSPEED_OPTIMIZERS = [ADAM_OPTIMIZER, LAMB_OPTIMIZER]
-
-
-def get_scalar_param(param_dict, param_name, param_default_value):
-    if param_name in param_dict.keys():
-        return param_dict[param_name]
-    else:
-        return param_default_value
 
 
 def get_fp16_enabled(param_dict):
@@ -92,8 +88,18 @@ def get_sparse_gradients_enabled(param_dict):
     return get_scalar_param(param_dict, SPARSE_GRADIENTS, SPARSE_GRADIENTS_DEFAULT)
 
 
-def get_zero_enabled(param_dict):
+def get_zero_optimization(param_dict):
     return get_scalar_param(param_dict, ZERO_OPTIMIZATION, ZERO_OPTIMIZATION_DEFAULT)
+
+
+def get_zero_reduce_scatter(param_dict):
+    return get_scalar_param(param_dict, ZERO_REDUCE_SCATTER, ZERO_REDUCE_SCATTER_DEFAULT)
+
+
+def get_zero_max_elements_per_comm(param_dict):
+    return get_scalar_param(param_dict,
+                            ZERO_MAX_ELEMENTS_PER_COMM,
+                            ZERO_MAX_ELEMENTS_PER_COMM_DEFAULT)
 
 
 def get_allgather_size(param_dict):
@@ -204,6 +210,10 @@ def get_wall_clock_breakdown(param_dict):
                             WALL_CLOCK_BREAKDOWN_DEFAULT)
 
 
+def get_memory_breakdown(param_dict):
+    return get_scalar_param(param_dict, MEMORY_BREAKDOWN, MEMORY_BREAKDOWN_DEFAULT)
+
+
 def get_tensorboard_enabled(param_dict):
     if TENSORBOARD in param_dict.keys():
         return get_scalar_param(param_dict[TENSORBOARD],
@@ -231,10 +241,39 @@ def get_tensorboard_job_name(param_dict):
         return TENSORBOARD_JOB_NAME_DEFAULT
 
 
+'''Write deepspeed config files by modifying basic templates.
+Can be used for quicly changing parameters via command line parameters.'''
+
+
+class DeepSpeedConfigWriter:
+    def __init__(self, data=None):
+        self.data = data if data is not None else {}
+
+    def add_config(self, key, value):
+        self.data[key] = value
+
+    def load_config(self, filename):
+        self.data = json.load(open(filename,
+                                   'r'),
+                              object_pairs_hook=dict_raise_error_on_duplicate_keys)
+
+    def write_config(self, filename):
+        with open(filename, 'w') as outfile:
+            json.dump(self.data, outfile)
+
+
 class DeepSpeedConfig(object):
-    def __init__(self, json_file, mpu=None):
+    def __init__(self, json_file, mpu=None, param_dict=None):
         super(DeepSpeedConfig, self).__init__()
-        self._param_dict = json.load(open(json_file, 'r'))
+
+        if param_dict is None:
+            self._param_dict = json.load(
+                open(json_file,
+                     'r'),
+                object_pairs_hook=dict_raise_error_on_duplicate_keys)
+        else:
+            self._param_dict = param_dict
+
         try:
             self.global_rank = torch.distributed.get_rank()
             if mpu is None:
@@ -263,7 +302,14 @@ class DeepSpeedConfig(object):
         self.sparse_gradients_enabled = get_sparse_gradients_enabled(param_dict)
 
         self.allgather_size = get_allgather_size(param_dict)
-        self.zero_enabled = get_zero_enabled(param_dict)
+
+        self.zero_config = DeepSpeedZeroConfig(param_dict)
+        self.zero_optimization_stage = self.zero_config.stage
+        self.zero_enabled = self.zero_optimization_stage > 0
+
+        self.activation_checkpointing_config = DeepSpeedActivationCheckpointingConfig(
+            param_dict)
+
         self.gradient_clipping = get_gradient_clipping(param_dict)
         self.fp16_enabled = get_fp16_enabled(param_dict)
         self.loss_scale = get_loss_scale(param_dict)
@@ -285,6 +331,7 @@ class DeepSpeedConfig(object):
         self.scheduler_params = get_scheduler_params(param_dict)
 
         self.wall_clock_breakdown = get_wall_clock_breakdown(param_dict)
+        self.memory_breakdown = get_memory_breakdown(param_dict)
         self.tensorboard_enabled = get_tensorboard_enabled(param_dict)
         self.tensorboard_output_path = get_tensorboard_output_path(param_dict)
         self.tensorboard_job_name = get_tensorboard_job_name(param_dict)
@@ -305,8 +352,8 @@ class DeepSpeedConfig(object):
             f'Gradient accumulation steps: {grad_acc} has to be greater than 0'
 
         assert train_batch == micro_batch * grad_acc * self.world_size, \
-                (f'Check batch related parameters. Train_batch_size is not equal'
-                'to micro_batch_per_gpu * gradient_acc_step * world_size'
+                (f'Check batch related parameters. train_batch_size is not equal'
+                ' to micro_batch_per_gpu * gradient_acc_step * world_size'
                 f'{train_batch} != {micro_batch} * {grad_acc} * {self.world_size}')
 
     def _set_batch_related_parameters(self):
@@ -387,6 +434,7 @@ class DeepSpeedConfig(object):
     def _do_error_check(self):
         if self.zero_enabled:
             assert self.fp16_enabled, "DeepSpeedConfig: ZeRO is only supported if fp16 is enabled"
+            assert self.zero_optimization_stage <= MAX_STAGE_ZERO_OPTIMIZATION, "DeepSpeedConfig: Maximum supported ZeRO stage is {}".format(MAX_STAGE_ZERO_OPTIMIZATION)
 
         assert self.train_micro_batch_size_per_gpu, "DeepSpeedConfig: {} is not defined".format(TRAIN_MICRO_BATCH_SIZE_PER_GPU)
 

@@ -102,14 +102,7 @@ Example of ***scheduler***
 | ------------------------------------------------------------ | ------- |
 | Enable sparse compression of [torch.nn.Embedding](https://pytorch.org/docs/stable/nn.html#torch.nn.Embedding) gradients. | `false`    |
 
-
 ### FP16 training options
-
-***zero\_optimization***: [boolean]
-
-| Description                                                  | Default |
-| ------------------------------------------------------------ | ------- |
-| Enable ZeRO memory optimization wrapper for FP16 Training. Currently compatible only with Adam optimizer. | `false`   |
 
 ***fp16***: [dictionary]
 
@@ -172,6 +165,66 @@ Example of ***scheduler***
 | ----------------------------------- | ------- |
 | Enable gradient clipping with value | `0`      |
 
+
+
+### ZeRO Optimizations for FP16 Training
+
+Enabling and configure ZeRO memory optimizations
+```json
+  "zero_optimization": {
+    "stage": [0|1|2],
+    "allgather_partitions": [true|false],
+    "allgather_bucket_size": 500000000,
+    "reduce_scatter": [true|false],
+    "reduce_bucket_size": 500000000,
+    "contiguous_gradients" : [true|false]
+    }
+```
+
+***zero\_optimization***: [dictionary]
+
+| Description                                                  | Default |
+| ------------------------------------------------------------ | ------- |
+| Enable ZeRO memory optimization wrapper for FP16 Training. Currently compatible only with Adam optimizer. | `false`   |
+
+***stage***: [integer]
+
+| Description                                                  | Default |
+| ------------------------------------------------------------ | ------- |
+| Chooses different stages of ZeRO Optimizer. Stage 0, 1, and 2 refer to disabled, optimizer state partitioning, and optimizer+gradient state partitiong, respectively. | `0`   |
+
+***allgather_partitions***: [boolean]
+
+| Description                                                  | Default |
+| ------------------------------------------------------------ | ------- |
+| Chooses between allgather collective or a series of broadcast collectives to gather updated parameters from all the GPUs at the end of each step  | `true`   |
+
+***allgather_bucket_size***: [boolean]
+
+| Description                                                  | Default |
+| ------------------------------------------------------------ | ------- |
+| Number of elements allgathered at a time. Limits the memory required for the allgather for large model sizes   | `500000000`   |
+
+***reduce_scatter***: [boolean]
+
+| Description                                                  | Default |
+| ------------------------------------------------------------ | ------- |
+| Uses reduce or reduce scatter instead of allreduce to average gradients   | `true`   |
+
+***reduce_bucket_size***: [boolean]
+
+| Description                                                  | Default |
+| ------------------------------------------------------------ | ------- |
+| Number of elements reduced/allreduced at a time. Limits the memory required for the allgather for large model sizes   | `500000000`   |
+
+***contiguous_gradients***: [boolean]
+
+| Description                                                  | Default |
+| ------------------------------------------------------------ | ------- |
+| Copies the gradients to a contiguous buffer as they are produced. Avoids memory fragmentation during backward pass. Only useful when running very large models.   | `False`   |
+
+
+
 ### Logging
 
 ***steps\_per\_print***: [integer]
@@ -191,3 +244,52 @@ Example of ***scheduler***
 | Description                                                  | Default |
 | ------------------------------------------------------------ | ------- |
 | Print out state information of DeepSpeed object after initialization | `false`   |
+
+### Activation Checkpointing
+```json
+  "activation_checkpointing": {
+    "partition_activations": false,
+    "cpu_checkpointing": false,
+    "contiguous_memory_optimization": false,
+    "number_checkpoints": null,
+    "synchronize_checkpoint_boundary": false,
+    "profile": false
+    }
+```
+***partition\_activations***: [boolean]
+
+| Description                                                  | Default |
+| ------------------------------------------------------------ | ------- |
+| Enables partition activation when used with model parallelism | `false`   |
+
+***cpu\_checkpointing***: [boolean]
+
+| Description                                                  | Default |
+| ------------------------------------------------------------ | ------- |
+| Offloads partitioned activations to CPU if partition_activations is enabled| `false`   |
+
+
+***contiguous\_memory\_optimization***: [boolean]
+
+| Description                                                  | Default |
+| ------------------------------------------------------------ | ------- |
+| Copies partitioned activations so that they are contiguous in memory | `false`   |
+
+***number_checkpoints***: [integer]
+
+| Description                                                  | Default |
+| ------------------------------------------------------------ | ------- |
+| Total number of activation checkpoints used to allocate memory buffer for contiguous_memoty_optimization | `None`   |
+
+***synchronize\_checkpoint\_boundary***: [boolean]
+
+| Description                                                  | Default |
+| ------------------------------------------------------------ | ------- |
+| Inserts torch.cuda.synchronize() at each checkpoint boundary. | `false`   |
+
+
+***profile***: [boolean]
+
+| Description                                                  | Default |
+| ------------------------------------------------------------ | ------- |
+| Logs the forward and backward time for each checkpoint function | `false`   |

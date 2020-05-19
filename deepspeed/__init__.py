@@ -6,6 +6,8 @@ from deepspeed.pt.deepspeed_light import DeepSpeedLight
 from deepspeed.pt.deepspeed_light import ADAM_OPTIMIZER, LAMB_OPTIMIZER
 from deepspeed.pt.deepspeed_lr_schedules import add_tuning_arguments
 
+import deepspeed.pt.deepspeed_checkpointing as checkpointing
+
 try:
     from deepspeed.git_version_info import git_hash, git_branch
 except ImportError:
@@ -14,7 +16,7 @@ except ImportError:
 
 # Export version information
 __version_major__ = 0
-__version_minor__ = 1
+__version_minor__ = 2
 __version_patch__ = 0
 __version__ = '.'.join(
     map(str,
@@ -33,7 +35,8 @@ def initialize(args,
                lr_scheduler=None,
                mpu=None,
                dist_init_required=None,
-               collate_fn=None):
+               collate_fn=None,
+               config_params=None):
     """Initialize the DeepSpeed Engine.
 
     Arguments:
@@ -91,7 +94,8 @@ def initialize(args,
                             lr_scheduler=lr_scheduler,
                             mpu=mpu,
                             dist_init_required=dist_init_required,
-                            collate_fn=collate_fn)
+                            collate_fn=collate_fn,
+                            config_params=config_params)
 
     return_items = [
         engine,

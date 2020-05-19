@@ -1,15 +1,35 @@
 DeepSpeed
 =========
 
+Model Setup
+-----------
+
 .. toctree::
    :maxdepth: 2
-   :caption: Contents:
 
    initialize
+   checkpointing
+
+Training API
+------------
+
+.. toctree::
+   :maxdepth: 2
+
+   training
+
+
+Checkpointing API
+-----------------
+.. toctree::
+   :maxdepth: 2
+
+   model-checkpointing
+   activation-checkpointing
 
 
 Indices and tables
-==================
+------------------
 
 * :ref:`genindex`
 * :ref:`modindex`
