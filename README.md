@@ -20,6 +20,9 @@ establishing a new SOTA in the LM category.
 
 
 # News
+
+* [2020/05/19] [ZeRO-2 & DeepSpeed: Shattering Barriers of Deep Learning Speed & Scale](https://www.microsoft.com/en-us/research/blog/zero-2-deepspeed-shattering-barriers-of-deep-learning-speed-scale/)
+<span style="color:dodgerblue">**[_NEW_]**</span>
 * [2020/05/19] [An Order-of-Magnitude Larger and Faster Training with ZeRO-2](https://www.deepspeed.ai/news/2020/05/19/zero-stage2.html)
 <span style="color:dodgerblue">**[_NEW_]**</span>
 * [2020/05/19] [The Fastest and Most Efficient BERT Training through Optimized Transformer Kernels](https://www.deepspeed.ai/news/2020/05/19/bert-record.html)

@@ -17,6 +17,6 @@ DeepSpeed achieves the fastest BERT training record: 44 minutes on 1,024
 NVIDIA V100 GPUs**, compared with the best published result of 67 minutes on
 the same number and generation of GPUs.
 
-For a technical overview, see our [blog post](linklink).
+For a technical overview, see our [blog post](https://www.microsoft.com/en-us/research/blog/zero-2-deepspeed-shattering-barriers-of-deep-learning-speed-scale/).
 
 **Code and tutorials are coming soon!**
