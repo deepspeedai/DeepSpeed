@@ -20,8 +20,8 @@ helpFunction()
     exit 1
 }
 
-layers=24
-hidden_size=1024
+layers=2
+hidden_size=128
 seq_length=1024
 ckpt_num_layers=1
 other_args=""

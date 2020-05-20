@@ -10,6 +10,16 @@ import time
 import re
 from .test_common import BaseTestCase
 
+LAYERS = 2
+HIDDEN_SIZE = 128
+ATTN_HEADS = 8
+
+
+def remove_file(test_id, filename):
+    cmd = f"if [ -f {filename} ] ; then rm -v {filename}; fi"
+    print(f"{test_id} cmd: {cmd}")
+    subprocess.run(cmd, shell=True, check=False, executable='/bin/bash')
+
 
 def grep_loss_from_file(file_name):
     loss = 0.0
@@ -50,10 +60,10 @@ class GPT2CheckpointTestCase(BaseTestCase):
             "nodes": 1,
             "bs": 8,
             "steps": 1100,
-            "layers": 2,
-            "hidden_size": 256,
+            "layers": LAYERS,
+            "hidden_size": HIDDEN_SIZE,
             "seq_length": 256,
-            "heads": 16,
+            "heads": ATTN_HEADS,
             "deepspeed": True,
             "tag": "ds_zero1",
             "zero": True,
@@ -72,10 +82,10 @@ class GPT2CheckpointTestCase(BaseTestCase):
             "nodes": 1,
             "bs": 8,
             "steps": 1100,
-            "layers": 2,
-            "hidden_size": 256,
+            "layers": LAYERS,
+            "hidden_size": HIDDEN_SIZE,
             "seq_length": 256,
-            "heads": 16,
+            "heads": ATTN_HEADS,
             "deepspeed": True,
             "tag": "ds_zero2",
             "zero": True,
@@ -94,10 +104,10 @@ class GPT2CheckpointTestCase(BaseTestCase):
             "nodes": 1,
             "bs": 8,
             "steps": 1100,
-            "layers": 2,
-            "hidden_size": 256,
+            "layers": LAYERS,
+            "hidden_size": HIDDEN_SIZE,
             "seq_length": 256,
-            "heads": 16,
+            "heads": ATTN_HEADS,
             "deepspeed": True,
             "zero": False,
             "other_args": "",

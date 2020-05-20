@@ -10,6 +10,11 @@ import time
 import re
 from .test_common import BaseTestCase
 
+LAYERS = 2
+HIDDEN_SIZE = 128
+ATTN_HEADS = 8
+SEQ_LEN = 64
+
 
 def grep_loss_from_file(file_name):
     loss = 0.0
@@ -50,10 +55,10 @@ class GPT2FuncTestCase(BaseTestCase):
             "nodes": 1,
             "bs": 4,
             "steps": 1000,
-            "layers": 12,
-            "hidden_size": 768,
-            "seq_length": 256,
-            "heads": 12,
+            "layers": LAYERS,
+            "hidden_size": HIDDEN_SIZE,
+            "seq_length": SEQ_LEN,
+            "heads": ATTN_HEADS,
             "deepspeed": False,
             "json": "ds_config_func_bs4_zero1.json",
         }
@@ -68,10 +73,10 @@ class GPT2FuncTestCase(BaseTestCase):
             "nodes": 1,
             "bs": 8,
             "steps": 1000,
-            "layers": 12,
-            "hidden_size": 768,
-            "seq_length": 256,
-            "heads": 12,
+            "layers": LAYERS,
+            "hidden_size": HIDDEN_SIZE,
+            "seq_length": SEQ_LEN,
+            "heads": ATTN_HEADS,
             "deepspeed": False,
             "json": "ds_config_func_bs8_zero1.json",
         }
@@ -86,10 +91,10 @@ class GPT2FuncTestCase(BaseTestCase):
             "nodes": 1,
             "bs": 8,
             "steps": 1000,
-            "layers": 12,
-            "hidden_size": 768,
-            "seq_length": 256,
-            "heads": 12,
+            "layers": LAYERS,
+            "hidden_size": HIDDEN_SIZE,
+            "seq_length": SEQ_LEN,
+            "heads": ATTN_HEADS,
             "deepspeed": False,
             "json": "ds_config_func_bs8_zero1.json",
         }
@@ -104,10 +109,10 @@ class GPT2FuncTestCase(BaseTestCase):
             "nodes": 1,
             "bs": 8,
             "steps": 1000,
-            "layers": 12,
-            "hidden_size": 768,
-            "seq_length": 256,
-            "heads": 12,
+            "layers": LAYERS,
+            "hidden_size": HIDDEN_SIZE,
+            "seq_length": SEQ_LEN,
+            "heads": ATTN_HEADS,
             "deepspeed": False,
             "json": "ds_config_func_bs8_zero1.json",
         }
@@ -122,10 +127,10 @@ class GPT2FuncTestCase(BaseTestCase):
             "nodes": 1,
             "bs": 4,
             "steps": 1000,
-            "layers": 12,
-            "hidden_size": 768,
-            "seq_length": 256,
-            "heads": 12,
+            "layers": LAYERS,
+            "hidden_size": HIDDEN_SIZE,
+            "seq_length": SEQ_LEN,
+            "heads": ATTN_HEADS,
             "deepspeed": False,
             "json": "ds_config_func_bs4_zero2.json",
         }
@@ -140,10 +145,10 @@ class GPT2FuncTestCase(BaseTestCase):
             "nodes": 1,
             "bs": 8,
             "steps": 1000,
-            "layers": 12,
-            "hidden_size": 768,
-            "seq_length": 256,
-            "heads": 12,
+            "layers": LAYERS,
+            "hidden_size": HIDDEN_SIZE,
+            "seq_length": SEQ_LEN,
+            "heads": ATTN_HEADS,
             "deepspeed": False,
             "json": "ds_config_func_bs8_zero2.json",
         }
@@ -158,10 +163,10 @@ class GPT2FuncTestCase(BaseTestCase):
             "nodes": 1,
             "bs": 8,
             "steps": 1000,
-            "layers": 12,
-            "hidden_size": 768,
-            "seq_length": 256,
-            "heads": 12,
+            "layers": LAYERS,
+            "hidden_size": HIDDEN_SIZE,
+            "seq_length": SEQ_LEN,
+            "heads": ATTN_HEADS,
             "deepspeed": False,
             "json": "ds_config_func_bs8_zero2.json",
         }
@@ -179,10 +184,10 @@ class GPT2FuncTestCase(BaseTestCase):
             "nodes": 1,
             "bs": 8,
             "steps": 1000,
-            "layers": 12,
-            "hidden_size": 768,
-            "seq_length": 256,
-            "heads": 12,
+            "layers": LAYERS,
+            "hidden_size": HIDDEN_SIZE,
+            "seq_length": SEQ_LEN,
+            "heads": ATTN_HEADS,
             "deepspeed": False,
             "json": "ds_config_func_bs8_zero2.json",
         }
@@ -200,10 +205,10 @@ class GPT2FuncTestCase(BaseTestCase):
             "nodes": 1,
             "bs": 4,
             "steps": 20,
-            "layers": 12,
-            "hidden_size": 768,
-            "seq_length": 256,
-            "heads": 12,
+            "layers": LAYERS,
+            "hidden_size": HIDDEN_SIZE,
+            "seq_length": SEQ_LEN,
+            "heads": ATTN_HEADS,
             "deepspeed": False,
             "json": "ds_config_func_scheduler.json",
         }
