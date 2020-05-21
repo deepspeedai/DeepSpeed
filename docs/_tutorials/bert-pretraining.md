@@ -3,6 +3,12 @@ title: "BERT Pre-training"
 excerpt: ""
 ---
 
+**Note:**
+This tutorial is being updated to include new details for reproducing the
+recent 44-minute [BERT pre-training record](https://www.microsoft.com/en-us/research/blog/zero-2-deepspeed-shattering-barriers-of-deep-learning-speed-scale/).
+Please check again soon!
+{: .notice--warning}
+
 In this tutorial we will apply DeepSpeed to pre-train the BERT
 (**B**idirectional **E**ncoder **R**epresentations from **T**ransformers),
 which is widely used for many Natural Language Processing (NLP) tasks. The
