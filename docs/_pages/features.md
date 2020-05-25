@@ -95,7 +95,7 @@ pre-defined sized buffer large enough to achieve great performance without the
 unnecessary memory overhead.
 
 ### Contiguous Memory Optimization (CMO)
-CMO reduces reduces memory fragmentation during training, preventing out of memory errors
+CMO reduces memory fragmentation during training, preventing out of memory errors
 due to lack of contiguous memory. Memory fragmentation is a result of interleaving between
 short lived and long lived memory objects. During the forward propagation activation
 checkpoints are long lived but the activations that recomputed are short lived. Similarly,
