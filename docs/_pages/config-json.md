@@ -84,17 +84,17 @@ Example of ***scheduler***
 | ------------------------------------ | ------- |
 | During gradient averaging perform allreduce with 32 bit values | `false`   |
 
-***disable\_allgather***: [boolean]
-
-| Description                  | Default |
-| ---------------------------- | ------- |
-| Disable allgather when using ZeRO optimizer and instead use broadcast | `false`  
-
 ***prescale\_gradients***: [boolean]
 
 | Description                            | Default |
 | -------------------------------------- | ------- |
 | Scale gradients before doing allreduce | `false`   |
+
+***gradient_predivide_factor***: [float]
+
+| Description                  | Default |
+| ---------------------------- | ------- |
+| Before gradient averaging predivide gradients by a specified factor, can sometimes help with fp16 stability when scaling to large numbers of GPUs | `1.0`
 
 ***sparse\_gradients***: [boolean]
 

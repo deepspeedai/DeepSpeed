@@ -119,6 +119,12 @@ def get_prescale_gradients(param_dict):
     return get_scalar_param(param_dict, PRESCALE_GRADIENTS, PRESCALE_GRADIENTS_DEFAULT)
 
 
+def get_gradient_predivide_factor(param_dict):
+    return get_scalar_param(param_dict,
+                            GRADIENT_PREDIVIDE_FACTOR,
+                            GRADIENT_PREDIVIDE_FACTOR_DEFAULT)
+
+
 def get_steps_per_print(param_dict):
     return get_scalar_param(param_dict, STEPS_PER_PRINT, STEPS_PER_PRINT_DEFAULT)
 
@@ -295,6 +301,7 @@ class DeepSpeedConfig(object):
         self.disable_allgather = get_disable_allgather(param_dict)
         self.allreduce_always_fp32 = get_allreduce_always_fp32(param_dict)
         self.prescale_gradients = get_prescale_gradients(param_dict)
+        self.gradient_predivide_factor = get_gradient_predivide_factor(param_dict)
         self.sparse_gradients_enabled = get_sparse_gradients_enabled(param_dict)
 
         self.allgather_size = get_allgather_size(param_dict)

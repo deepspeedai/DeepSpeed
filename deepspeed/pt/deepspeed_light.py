@@ -119,7 +119,6 @@ class DeepSpeedLight(Module):
         self.global_steps = 0
         self.micro_steps = 0
         self.skipped_steps = 0
-        self.gradient_predivide_factor = 1.0
         self.gradient_average = True
         self.warn_unscaled_loss = True
         self.config_params = config_params
@@ -326,6 +325,9 @@ class DeepSpeedLight(Module):
 
     def postscale_gradients(self):
         return not self._config.prescale_gradients
+
+    def gradient_predivide_factor(self):
+        return self._config.gradient_predivide_factor
 
     def steps_per_print(self):
         return self._config.steps_per_print
@@ -587,7 +589,9 @@ class DeepSpeedLight(Module):
                 dp_process_group=self.data_parallel_group,
                 reduce_scatter=self.zero_reduce_scatter(),
                 overlap_comm=self.zero_overlap_comm(),
-                mpu=self.mpu)
+                mpu=self.mpu,
+                postscale_gradients=self.postscale_gradients(),
+                gradient_predivide_factor=self.gradient_predivide_factor())
         else:
             raise NotImplementedError("ZeRO stage {} not implemented".format(zero_stage))
         logging.info('Creating fp16 zero stage {} optimizer'.format(zero_stage))
@@ -690,7 +694,7 @@ class DeepSpeedLight(Module):
                 assert self.zero_reduce_scatter()
                 self.optimizer.reduce_scatter_gradients(
                     postscale_gradients=self.postscale_gradients(),
-                    gradient_predivide_factor=self.gradient_predivide_factor,
+                    gradient_predivide_factor=self.gradient_predivide_factor(),
                     gradient_average=self.gradient_average)
             elif self.zero_optimization_partition_gradients():
                 self.optimizer.overlapping_partition_gradients_reduce_epilogue()
@@ -905,14 +909,14 @@ class DeepSpeedLight(Module):
             tensor_to_allreduce = tensor.float()
 
         if self.postscale_gradients():
-            if self.gradient_predivide_factor != 1.0:
-                tensor_to_allreduce.mul_(1. / self.gradient_predivide_factor)
+            if self.gradient_predivide_factor() != 1.0:
+                tensor_to_allreduce.mul_(1. / self.gradient_predivide_factor())
 
             dist.all_reduce(tensor_to_allreduce, group=self.data_parallel_group)
 
             if self.gradient_average:
-                if self.gradient_predivide_factor != self.dp_world_size:
-                    tensor_to_allreduce.mul_(self.gradient_predivide_factor /
+                if self.gradient_predivide_factor() != self.dp_world_size:
+                    tensor_to_allreduce.mul_(self.gradient_predivide_factor() /
                                              self.dp_world_size)
         else:
             tensor_to_allreduce.div_(self.dp_world_size)

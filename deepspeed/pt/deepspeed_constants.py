@@ -171,7 +171,7 @@ FP32_ALLREDUCE = "fp32_allreduce"
 FP32_ALLREDUCE_DEFAULT = False
 
 #########################################
-# Scale gradients before allreduce
+# Scale/predivide gradients before allreduce
 #########################################
 # Prescale gradients. By default, this feature is not enabled.
 # Users can configure in ds_config.json as below example:
@@ -181,6 +181,13 @@ Gradient prescaling should be enabled as:
 '''
 PRESCALE_GRADIENTS = "prescale_gradients"
 PRESCALE_GRADIENTS_DEFAULT = False
+
+GRADIENT_PREDIVIDE_FACTOR_FORMAT = '''
+Gradient predivide factor should be enabled as:
+"gradient_predivide_factor": 1.0
+'''
+GRADIENT_PREDIVIDE_FACTOR = "gradient_predivide_factor"
+GRADIENT_PREDIVIDE_FACTOR_DEFAULT = 1.0
 
 #########################################
 # Disable AllGather
