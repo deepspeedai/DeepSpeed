@@ -1112,36 +1112,29 @@ class FP16_DeepSpeedZeroOptimizer(object):
                 1,
                 partitioned_params[partition_id].numel() * dp_world_size //
                 self.allgather_bucket_size)
-            if num_shards == 1:
-                dist.all_gather(partitioned_params,
-                                partitioned_params[partition_id],
+
+            shard_size = partitioned_params[partition_id].numel() // num_shards
+            num_elements = shard_size
+
+            assert shard_size * num_shards <= partitioned_params[partition_id].numel()
+
+            for shard_id in range(num_shards):
+
+                if shard_id == (num_shards - 1):
+                    num_elements = partitioned_params[partition_id].numel(
+                    ) - shard_id * shard_size
+
+                shard_list = []
+                for dp_id in range(dp_world_size):
+                    curr_shard = partitioned_params[dp_id].narrow(
+                        0,
+                        shard_id * shard_size,
+                        num_elements).detach()
+                    shard_list.append(curr_shard)
+
+                dist.all_gather(shard_list,
+                                shard_list[partition_id],
                                 group=self.dp_process_group)
-            else:
-                shard_size = partitioned_params[partition_id].numel() // num_shards
-                num_elements = shard_size
-
-                for shard_id in range(num_shards):
-
-                    #boundary condition
-                    #TODO: Check correctness of boundary condition
-                    if shard_id == (num_shards - 1):
-                        if shard_size * num_shards >= partitioned_params[
-                                partition_id].numel():
-                            break
-                        else:
-                            num_elements = partitioned_params[partition_id].numel(
-                            ) - shard_id * shard_size
-
-                    shard_list = []
-                    for dp_id in range(dp_world_size):
-                        curr_shard = partitioned_params[dp_id].narrow(
-                            0,
-                            shard_id * shard_size,
-                            num_elements)
-                        shard_list.append(curr_shard)
-                    dist.all_gather(shard_list,
-                                    shard_list[partition_id],
-                                    group=self.dp_process_group)
         timers('optimizer_allgather').stop()
 
         # TODO: we probably don't need this? just to be safe

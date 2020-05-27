@@ -331,7 +331,7 @@ class FP16_DeepSpeedZeroOptimizer_Stage1(object):
             list)  # [rank] -> [(start,end), (start,end), ...]
         for idx in range(num_sub_partitions):
             rank_id = idx % world_size
-            sub_partition = tensor.narrow(0, start, sub_partition_size)
+            sub_partition = tensor.narrow(0, start, sub_partition_size).detach()
             element_intervals[rank_id].append((start, start + sub_partition_size))
             comm_partitions[comm_id].append(sub_partition)
             start = start + sub_partition_size
