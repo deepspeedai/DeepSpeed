@@ -136,10 +136,10 @@ def test_checkpoint_unfused_optimizer(tmpdir):
         "optimizer": {
             "type": "Lamb",
             "params": {
-                "lr": 0.00015,
-                "max_grad_norm": 1.0
+                "lr": 0.00015
             }
         },
+        "gradient_clipping": 1.0,
         "fp16": {
             "enabled": True
         },

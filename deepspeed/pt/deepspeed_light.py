@@ -503,11 +503,10 @@ class DeepSpeedLight(Module):
 
     def _configure_basic_optimizer(self, model_parameters):
         optimizer_parameters = self.optimizer_params()
-        if self.fp16_enabled() and 'max_grad_norm' in optimizer_parameters.keys():
-            warnings.warn(
+        if 'max_grad_norm' in optimizer_parameters.keys():
+            raise ValueError(
                 "'max_grad_norm' is not supported as an optimizer parameter, please switch to using the deepspeed parameter 'gradient_clipping' see: https://www.deepspeed.ai/docs/config-json/#gradient-clipping for more details"
             )
-            optimizer_parameters['max_grad_norm'] = 0.0
         if self.optimizer_name() == ADAM_OPTIMIZER:
             from apex.optimizers.fused_adam import FusedAdam
             optimizer = FusedAdam(model_parameters, **optimizer_parameters)
@@ -778,6 +777,10 @@ class DeepSpeedLight(Module):
         for param_name, param in self.module.named_parameters():
             param.grad = None
 
+    def clip_fp32_gradients(self):
+        torch.nn.utils.clip_grad_norm_(parameters=self.module.parameters(),
+                                       max_norm=self.gradient_clipping())
+
     def step(self):
         r"""Execute the weight update step after forward and backward propagation on effective_train_batch
         """
@@ -790,6 +793,10 @@ class DeepSpeedLight(Module):
         report_progress = self.global_rank == 0 if self.global_rank else True
 
         if self.is_gradient_accumulation_boundary():
+
+            if not self.fp16_enabled() and self.gradient_clipping() > 0.0:
+                self.clip_fp32_gradients()
+
             self.optimizer.step()
 
             #zero grad in basic optimizer could be unreliable and may not exhibit

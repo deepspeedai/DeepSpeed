@@ -8,6 +8,40 @@ from common import distributed_test
 from simple_model import SimpleModel, SimpleOptimizer, random_dataloader, args_from_dict
 
 
+def test_lamb_fp32_grad_clip(tmpdir):
+    config_dict = {
+        "train_batch_size": 2,
+        "steps_per_print": 1,
+        "optimizer": {
+            "type": "Lamb",
+            "params": {
+                "lr": 0.00015
+            }
+        },
+        "gradient_clipping": 1.0
+    }
+    args = args_from_dict(tmpdir, config_dict)
+    hidden_dim = 10
+
+    model = SimpleModel(hidden_dim, empty_grad=False)
+
+    @distributed_test(world_size=[1, 2])
+    def _test_lamb_fp32_grad_clip(args, model, hidden_dim):
+        model, _, _,_ = deepspeed.initialize(args=args,
+                                             model=model,
+                                             model_parameters=model.parameters())
+        data_loader = random_dataloader(model=model,
+                                        total_samples=50,
+                                        hidden_dim=hidden_dim,
+                                        device=model.device)
+        for n, batch in enumerate(data_loader):
+            loss = model(batch[0].float(), batch[1])
+            model.backward(loss)
+            model.step()
+
+    _test_lamb_fp32_grad_clip(args=args, model=model, hidden_dim=hidden_dim)
+
+
 def test_lamb_fp16_basic(tmpdir):
     config_dict = {
         "train_batch_size": 2,
@@ -15,10 +49,10 @@ def test_lamb_fp16_basic(tmpdir):
         "optimizer": {
             "type": "Lamb",
             "params": {
-                "lr": 0.00015,
-                "max_grad_norm": 1.0
+                "lr": 0.00015
             }
         },
+        "gradient_clipping": 1.0,
         "fp16": {
             "enabled": True
         }
@@ -52,10 +86,10 @@ def test_lamb_fp16_empty_grad(tmpdir):
         "optimizer": {
             "type": "Lamb",
             "params": {
-                "lr": 0.00015,
-                "max_grad_norm": 1.0
+                "lr": 0.00015
             }
         },
+        "gradient_clipping": 1.0,
         "fp16": {
             "enabled": True
         }

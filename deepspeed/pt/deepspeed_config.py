@@ -132,11 +132,7 @@ def get_dump_state(param_dict):
 
 
 def get_gradient_clipping(param_dict):
-    grad_clip = get_optimizer_gradient_clipping(param_dict)
-    if grad_clip is not None:
-        return grad_clip
-    else:
-        return get_scalar_param(param_dict, GRADIENT_CLIPPING, GRADIENT_CLIPPING_DEFAULT)
+    return get_scalar_param(param_dict, GRADIENT_CLIPPING, GRADIENT_CLIPPING_DEFAULT)
 
 
 def get_optimizer_name(param_dict):
@@ -443,9 +439,6 @@ class DeepSpeedConfig(object):
 
     def _do_warning_check(self):
         fp16_enabled = self.fp16_enabled or self.zero_enabled
-        if self.gradient_clipping > 0. and not fp16_enabled:
-            logging.warning(
-                'DeepSpeedConfig: gradient clipping enabled without FP16 enabled.')
 
         vocabulary_size = self._param_dict.get(VOCABULARY_SIZE, VOCABULARY_SIZE_DEFAULT)
         if vocabulary_size and vocabulary_size % TENSOR_CORE_ALIGN_SIZE != 0:

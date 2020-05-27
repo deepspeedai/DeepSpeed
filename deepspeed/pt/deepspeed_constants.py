@@ -123,7 +123,7 @@ FP16_MIN_LOSS_SCALE_DEFAULT = 1
 # Gradient clipping. By default, this feature is not enabled.
 # Users can configure in ds_config.json as below example:
 GRADIENT_CLIPPING_FORMAT = '''
-Dump state should be enabled as:
+Gradient clipping should be enabled as:
 "gradient_clipping": 1.0
 '''
 GRADIENT_CLIPPING = 'gradient_clipping'
