@@ -551,8 +551,7 @@ class DeepSpeedLight(Module):
                 dynamic_loss_args=dynamic_loss_args,
                 mpu=self.mpu,
                 clip_grad=clip_grad,
-                fused_lamb_legacy=self.optimizer_legacy_fusion()
-                if self.optimizer_name() == LAMB_OPTIMIZER else False)
+                fused_lamb_legacy=self.optimizer_name() == LAMB_OPTIMIZER)
 
         return optimizer
 
