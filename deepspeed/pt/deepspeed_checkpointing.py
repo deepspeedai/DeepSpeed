@@ -14,6 +14,7 @@ b886b7bb972afe72bac0f5de4f42a4a7bae8ebef
 # Parts of the code here are adapted from PyTorch
 # repo: https://github.com/pytorch/pytorch
 import contextlib
+import copy
 import torch.distributed as dist
 import torch
 from torch import _C
@@ -108,7 +109,7 @@ def detach_variable(inputs, device=None):
 def _set_cuda_rng_state(new_state, device=-1):
     """Sets the random number generator state of the current GPU.
 
-    Argumentss:
+    Arguments:
         new_state (torch.ByteTensor): The desired state
     This function is adapted from PyTorch repo (torch.cuda.set_rng_state)
     with a single change: the input state is not cloned. Cloning caused
@@ -160,10 +161,7 @@ class CudaRNGStatesTracker:
     def get_states(self):
         """Get rng states. Copy the dictionary so we have direct
         pointers to the states, not just a pointer to the dictionary."""
-        states = {}
-        for name in self.states_:
-            states[name] = self.states_[name]
-        return states
+        return copy.copy(self.states_)
 
     def set_states(self, states):
         """Set the rng states. For efficiency purposes, we do not check
@@ -720,5 +718,4 @@ def is_configured():
     Return:
         True of configured, else False
     """
-    global deepspeed_checkpointing_enabled
     return deepspeed_checkpointing_enabled
