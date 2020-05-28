@@ -141,15 +141,6 @@ class DynamicLossScaler:
 
     # `overflow` is boolean indicating whether the gradient overflowed
     def update_scale(self, overflow):
-
-        if not hasattr(self, 'min_scale'):
-            self.min_scale = 1
-        if not hasattr(self, 'delayed_shift'):
-            self.delayed_shift = 1
-        if not hasattr(self, 'cur_hysteresis'):
-            self.cur_hysteresis = 1
-        if not hasattr(self, 'consecutive_hysteresis'):
-            self.consecutive_hysteresis = True
         if overflow:
             # self.cur_scale /= self.scale_factor
             if self.delayed_shift == 1 or self.cur_hysteresis == 1:
