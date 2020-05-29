@@ -301,7 +301,9 @@ Note:
   generated with transformer kernel must to be loaded by the model with
   transformer kernel enabled (such as in fine-tuning).
 
-For more details about the transformer kernel, please see [DeepSpeed Transformer Kernel](/transformer_kernel/) and [DeepSpeed Fast-Bert Training](/fast_bert/).
+For more details about the transformer kernel, please see [DeepSpeed
+Transformer Kernel](/tutorials/transformer_kernel/) and [DeepSpeed Fast-Bert
+Training](https://www.deepspeed.ai/news/2020/05/27/fastest-bert-training.html).
 
 
 ### Start Training
