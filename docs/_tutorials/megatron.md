@@ -387,7 +387,7 @@ of increasing the computational granularity as well as reducing communication, a
 resulting in better performance. Therefore, with DeepSpeed and ZeRO-2 integration into Megatron,
 we elevate the model scale and speed to an entirely new level compared to Megatron alone.
 
-![DeepSpeed-vs-Megatron](../assets/images/zero-full.png)
+![DeepSpeed-vs-Megatron](/assets/images/zero-full.png)
 <p align="center">
 <em>Figure 2: ZeRO-2 scales to 170 billion parameters, has up to 10x higher throughput, obtains super linear speedup, and improves usability by avoiding the need for code refactoring for models up to 13 billion parameters.</em>
 </p>
