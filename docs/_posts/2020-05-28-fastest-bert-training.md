@@ -57,7 +57,7 @@ practical scenarios range from a few hundred to a few thousand.
 
 ![Transformer-Kernel-Throughput-128](/assets/images/transformer_kernel_perf_seq128.PNG){: .align-center}
 
-![Transformer-Kernel-Throughput-512](/assets/images/transformer_kernel_perf_seq512.PNG) {: .align-center}
+![Transformer-Kernel-Throughput-512](/assets/images/transformer_kernel_perf_seq512.PNG){: .align-center}
 
 Figure 1: Performance evaluation of BERT-Large on a single V100 GPU, comparing
 DeepSpeed with NVIDIA and HuggingFace versions of BERT in mixed-sequence length
@@ -102,7 +102,7 @@ approach the GPU peak performance,  we employ two lines of optimizations in our
 own Transformer kernel implementation: advanced fusion, and invertible
 operators.
 
-![Transformer-PreLN-Arch](/assets/images/transformer_preln_arch.png) {: .align-center}
+![Transformer-PreLN-Arch](/assets/images/transformer_preln_arch.png){: .align-center}
 
 Figure 2: Transformer Layer with Pre-LayerNorm Architecture
 
@@ -133,7 +133,7 @@ shared memory, we reduce the cost of uncoalesced access to main memory to
 better exploit memory bandwidth, resulting in 3% to 5% performance improvement
 in the end-to-end training.  
 
-![QKV-Fusion](/assets/images/qkv_fusion.png) {: .align-center}
+![QKV-Fusion](/assets/images/qkv_fusion.png){: .align-center}
 
 Figure 3: QKV’s GEMM and transform Kernel-Fusion
 
@@ -198,15 +198,15 @@ optimization, we are able to reduce the activation memory of the operator by
 half, and the reduced memory allows us to train with larger batch sizes, which
 once again improves GPU efficiency.
 
-![Softmax-torch](/assets/images/softmax_pytorch.gif) {: .align-center}
+![Softmax-torch](/assets/images/softmax_pytorch.gif){: .align-center}
 
-![Softmax-DS](/assets/images/softmax_deepspeed.gif) {: .align-center}
+![Softmax-DS](/assets/images/softmax_deepspeed.gif){: .align-center}
 
 Figure 4: DeepSpeed invertible SoftMax operation versus Default PyTorch SoftMax operation
 
-![LayerNorm-DS](/assets/images/layernorm_pytorch.gif) {: .align-center}
+![LayerNorm-DS](/assets/images/layernorm_pytorch.gif){: .align-center}
 
-![LayerNorm-DS](/assets/images/layernorm_deepspeed.gif) {: .align-center}
+![LayerNorm-DS](/assets/images/layernorm_deepspeed.gif){: .align-center}
 
 Figure 5: DeepSpeed invertible LayerNorm operation versus Default PyTorch LayerNorm operation
 
