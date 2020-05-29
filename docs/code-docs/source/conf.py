@@ -76,4 +76,11 @@ add_module_names = True
 
 autoclass_content = 'both'
 
-autodoc_mock_imports = ["torch", "apex", "mpi4py", "tensorboardX"]
+autodoc_mock_imports = [
+    "torch",
+    "apex",
+    "mpi4py",
+    "tensorboardX",
+    "deepspeed_transformer_cuda",
+    "deepspeed_stochastic_transformer_cuda",
+]

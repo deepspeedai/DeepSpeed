@@ -8,3 +8,4 @@ tensorflow-gpu==1.15.2
 pytest
 pytest-forked
 pre-commit
+clang-format

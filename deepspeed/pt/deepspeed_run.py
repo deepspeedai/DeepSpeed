@@ -283,7 +283,9 @@ def main(args=None):
             "-u",
             "-m",
             "deepspeed.pt.deepspeed_launch",
-            "--world_info={}".format(world_info_base64)
+            "--world_info={}".format(world_info_base64),
+            "--master_addr={}".format(args.master_addr),
+            "--master_port={}".format(args.master_port)
         ]
         cmd = deepspeed_launch + [args.user_script] + args.user_args
     else:

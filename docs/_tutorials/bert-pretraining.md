@@ -3,12 +3,6 @@ title: "BERT Pre-training"
 excerpt: ""
 ---
 
-**Note:**
-This tutorial will be updated to include new details for reproducing the
-recent 44-minute [BERT pre-training record](https://www.microsoft.com/en-us/research/blog/zero-2-deepspeed-shattering-barriers-of-deep-learning-speed-scale/).
-Please check again soon!
-{: .notice--warning}
-
 In this tutorial we will apply DeepSpeed to pre-train the BERT
 (**B**idirectional **E**ncoder **R**epresentations from **T**ransformers),
 which is widely used for many Natural Language Processing (NLP) tasks. The
@@ -29,6 +23,7 @@ We work from adaptations of
 We have forked this repo under
 [DeepSpeedExamples/bing_bert](https://github.com/microsoft/DeepSpeedExamples/tree/master/bing_bert)
 and made several modifications in their script:
+
   * We adopted the modeling code from NVIDIA's BERT under `bing_bert/nvidia/`.
   * We extended the data pipeline from [Project Turing](https://msturing.org/)
     under `bing_bert/turing/`.
@@ -246,13 +241,76 @@ modifications. We have included a modified `train.py` file called
 applied.
 
 
+
+### Enabling DeepSpeed's Transformer Kernel
+
+To enable the transformer kernel for higher performance, first add an argument
+`--deepspeed_transformer_kernel` in `utils.py`, we can set it as `False` by
+default, for easily turning on/off.
+
+```python
+ parser.add_argument('--deepspeed_transformer_kernel',
+                     default=False,
+                     action='store_true',
+                     help='Use DeepSpeed transformer kernel to accelerate.')
+```
+Then in the `BertEncoder` class of the modeling source file, instantiate
+transformer layers using DeepSpeed transformer kernel as below.
+
+```python
+     if args.deepspeed_transformer_kernel:
+         from deepspeed import DeepSpeedTransformerLayer, DeepSpeedTransformerConfig, DeepSpeedConfig
+
+         if hasattr(args, 'deepspeed_config') and args.deepspeed_config:
+             ds_config = DeepSpeedConfig(args.deepspeed_config)
+         else:
+             raise RuntimeError('deepspeed_config is not found in args.')
+
+         cuda_config = DeepSpeedTransformerConfig(
+             batch_size = ds_config.train_micro_batch_size_per_gpu,
+             max_seq_length = args.max_seq_length,
+             hidden_size = config.hidden_size,
+             heads = config.num_attention_heads,
+             attn_dropout_ratio = config.attention_probs_dropout_prob,
+             hidden_dropout_ratio = config.hidden_dropout_prob,
+             num_hidden_layers = config.num_hidden_layers,
+             initializer_range = config.initializer_range,
+             local_rank = args.local_rank if hasattr(args, 'local_rank') else -1,
+             seed = args.seed,
+             fp16 = ds_config.fp16_enabled,
+             pre_layer_norm=True,
+             attn_dropout_checkpoint=args.attention_dropout_checkpoint,
+             normalize_invertible=args.normalize_invertible,
+             gelu_checkpoint=args.gelu_checkpoint,
+             stochastic_mode=True)
+
+         self.layer = nn.ModuleList([copy.deepcopy(DeepSpeedTransformerLayer(i, cuda_config)) for i in range(config.num_hidden_layers)])
+     else:
+         layer = BertLayer(config)
+         self.layer = nn.ModuleList([copy.deepcopy(layer) for _ in range(config.num_hidden_layers)])
+```
+All configuration settings come from the DeepSpeed configuration file and
+command arguments and thus we must pass the `args` variable to here in this model.
+
+Note:
+
+1. `batch_size` is the maximum bath size of input data, all fine-tuning training data or prediction data shouldn't exceed this threshold, otherwise it will throw an exception. In the DeepSpeed configuration file micro batch size is defined as `train_micro_batch_size_per_gpu`, e.g. if it is set as 8 and prediction uses batch size of 12, we can use 12 as transformer kernel batch size, or using "--predict_batch_size" argument to set prediction batch size to 8 or a smaller number.
+2. `local_rank` in DeepSpeedTransformerConfig is used to assign the transformer kernel to the correct device. Since the model already runs set_device() before here, so does not need to be set here.
+3. `stochastic_mode` has higher performance when it is enabled, we enable it in pre-training, and disable it in fine-tuning.
+4. The transformer kernel has its own parameters and so the checkpoint files
+  generated with transformer kernel must to be loaded by the model with
+  transformer kernel enabled (such as in fine-tuning).
+
+For more details about the transformer kernel, please see [DeepSpeed Transformer Kernel](/transformer_kernel/) and [DeepSpeed Fast-Bert Training](/fast_bert/).
+
+
 ### Start Training
 An example of launching `deepspeed_train.py` on four nodes with four GPUs each would be:
 ```bash
 deepspeed --num_nodes 4  \
     deepspeed_train.py \
     --deepspeed \
-    --deepspeed_config  deepspeed_bsz4096_adam_config.json
+    --deepspeed_config  deepspeed_bsz4096_adam_config.json \
     --cf /path-to-deepspeed/examples/tests/bing_bert/bert_large_adam_seq128.json \
     --train_batch_size 4096  \
     --max_seq_length 128 \
@@ -263,6 +321,7 @@ deepspeed --num_nodes 4  \
     --delay_allreduce \
     --max_steps 32 \
     --print_steps 1 \
+    --deepspeed_transformer_kernel \
     --output_dir <output_directory>
 ```
 See the [Getting Started](/getting-started/) guide for more information on
@@ -270,57 +329,52 @@ launching DeepSpeed.
 
 ------
 
-## Reproducing BERT Training Results with DeepSpeed
+## Reproducing Fastest BERT Training Results with DeepSpeed
 
-Our BERT training result is competitive across the industry in terms of
-achieving F1 score of 90.5 or better on the SQUAD 1.1 dev set:
+We achieve the fastest BERT training time while remaining competitive across the industry in terms of achieving F1 score of 90.5 or better on the SQUAD 1.1 dev set. Please follow the [Fine-tuning](/bert-finetuning/) tutorial to finetune your model pretrained by transformer kernel and reprodue the SQUAD F1 score.
 
+- We complete BERT pretraining in 44 minutes using 1024 V100 GPUs (64 NVIDIA DGX-2 nodes). In comparison, the previous SOTA from NVIDIA takes 47 mins using 1472 V100 GPUs. DeepSpeed is not only faster but also uses 30% less resources. Using the same 1024 GPUS, NVIDIA BERT is 52% slower than DeepSpeed, taking 67 minutes to train.
 - Comparing with the original BERT training time from Google, it took them
-about 96 hours to reach parity on 64 TPU2 chips, while it took us 14 hours on
+about 96 hours to reach parity on 64 TPU2 chips, while it took us less than 9 hours on
 4 DGX-2 nodes of 64 V100 GPUs.
-- On 256 GPUs, it took us 3.7 hours, faster than state-of-art result (3.9
+- On 256 GPUs, it took us 2.4, faster than state-of-art result (3.9
 hours) from Nvidia using their superpod on the same number of GPUs
 ([link](https://devblogs.nvidia.com/training-bert-with-gpus/)).
 
-![BERT Training Time](/assets/images/bert-large-training-time.png){: .align-center}
+![DeepSpeed BERT Training Time](/assets/images/end-to-end-bert-training.png){: .align-center}
 
 Our configuration for the BERT training result above can be reproduced with
-the scripts/json configs in our DeepSpeed repo. Below is a table containing a
+the scripts/json configs in our DeepSpeedExamples repo. Below is a table containing a
 summary of the configurations. Specifically see the
-`ds_train_bert_bsz16k_seq128.sh` and `ds_train_bert_bsz16k_seq512.sh` scripts
+`ds_train_bert_bsz64k_seq128.sh` and `ds_train_bert_bsz32k_seq512.sh` scripts
 for more details in
 [DeepSpeedExamples](https://github.com/microsoft/DeepSpeedExamples/tree/master/bing_bert).
 
 
 | Parameters               | 128 Sequence              | 512 Sequence              |
 | ------------------------ | ------------------------- | ------------------------- |
-| Total batch size         | 16K                       | 16K                       |
+| Total batch size         | 64K                       | 32K                       |
 | Train micro batch size per gpu | 64                  | 8                         |
 | Optimizer                | Lamb                      | Lamb                      |
-| Learning rate            | 4e-3                      | 1e-3                      |
-| Min Lamb coefficient     | 0.08                      | 0.08                      |
-| Max Lamb coefficient     | 0.5                       | 0.5                       |
-| Learning rate scheduler  | `warmup_linear_decay_exp` | `warmup_linear_decay_exp` |
-| Warmup proportion        | 0.02                      | 0.01                      |
-| Decay rate               | 0.90                      | 0.70                      |
-| Decay step               | 1000                      | 1000                      |
-| Max Training steps       | 187000                    | 18700                     |
-| Rewarm LR                | N/A                       | True                      |
-| Output checkpoint number | 150                       | 162                       |
-| Sample count             | 402679081                 | 34464170                  |
-| Iteration count          | 24430                     | 2089                      |
+| Learning rate            | 11e-3                     | 2e-3                      |
+| Initial learning rate (`lr_offset`)   | 10e-4        | 0.0                       |
+| Min Lamb coefficient     | 0.01                      | 0.01                      |
+| Max Lamb coefficient     | 0.3                       | 0.3                       |
+| Learning rate scheduler  | `warmup_exp_decay_exp`    | `warmup_exp_decay_exp`    |
+| Warmup proportion        | 0.02                      | 0.02                      |
+| Decay rate               | 0.90                      | 0.90                      |
+| Decay step               | 250                       | 150                       |
+| Max training steps       | 7500                      | 7500                      |
+| Rewarm learning rate     | N/A                       | True                      |
+| Output checkpoint number | 150                       | 160-162                   |
+| Sample count             | 403M                      | 18-22M                    |
+| Epoch count              | 150                       | 160-162                   |
 
 
-## DeepSpeed Throughput Results
+## DeepSpeed Single GPU Throughput Results
 
-We have measured the throughput results of DeepSpeed using both the Adam
-optimizer and LAMB optimizer. We measure the throughput by measuring the wall
-clock time to process one mini-batch and dividing the mini-batch size with
-the elapsed wall clock time. The table below shows that for sequence length 128,
-DeepSpeed achieves 200 samples/sec throughput on a single V100 GPU, and it
-obtains 53X and 57.4X speedups over the single GPU run for Adam and LAMB
-respectively:
+![DeepSpeed Single GPU Bert Training Throughput](/assets/images/single-gpu-throughput.png){: .align-center}
 
-![](/assets/images/deepspeed-throughput-seq128.png){: .align-center}
+Compared to SOTA, DeepSpeed significantly improves single GPU performance for transformer-based model like BERT. Figure above shows the single GPU throughput of training BertBERT-Large optimized through DeepSpeed, compared with two well-known Pytorch implementations, NVIDIA BERT and HuggingFace BERT. DeepSpeed reaches as high as 64 and 53 teraflops throughputs (corresponding to 272 and 52 samples/second) for sequence lengths of 128 and 512, respectively, exhibiting up to 28% throughput improvements over NVIDIA BERT and up to 62% over HuggingFace BERT.  We also support up to 1.8x larger batch size without running out of memory.
 
-![](/assets/images/deepspeed-throughput-seq512.png){: .align-center}
+For more details on how we achieve the record breaking BERT training time please check out deep dive into DeepSpeed BERT [Fastest BERT Training](https://www.deepspeed.ai/news/2020/05/18/bert-record.html)

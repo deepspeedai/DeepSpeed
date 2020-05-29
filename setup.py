@@ -10,12 +10,10 @@ The wheel will be located at: dist/*.whl
 
 import os
 import torch
-from deepspeed import __version__ as ds_version
 from setuptools import setup, find_packages
 from torch.utils.cpp_extension import CUDAExtension, BuildExtension
 
 cmdclass = {}
-ext_modules = []
 cmdclass['build_ext'] = BuildExtension
 
 TORCH_MAJOR = int(torch.__version__.split('.')[0])
@@ -42,20 +40,84 @@ if (TORCH_MAJOR > 1) or (TORCH_MAJOR == 1 and TORCH_MINOR > 4):
     version_ge_1_5 = ['-DVERSION_GE_1_5']
 version_dependent_macros = version_ge_1_1 + version_ge_1_3 + version_ge_1_5
 
-ext_modules.append(
-    CUDAExtension(name='fused_lamb_cuda',
-                  sources=['csrc/fused_lamb_cuda.cpp',
-                           'csrc/fused_lamb_cuda_kernel.cu'],
+ext_modules = [
+    CUDAExtension(
+        name='deepspeed_lamb_cuda',
+        sources=['csrc/lamb/fused_lamb_cuda.cpp',
+                 'csrc/lamb/fused_lamb_cuda_kernel.cu'],
+        include_dirs=['csrc/includes'],
+        extra_compile_args={
+            'cxx': [
+                '-O3',
+            ] + version_dependent_macros,
+            'nvcc': ['-O3',
+                     '--use_fast_math'] + version_dependent_macros
+        }),
+    CUDAExtension(name='deepspeed_transformer_cuda',
+                  sources=[
+                      'csrc/transformer/ds_transformer_cuda.cpp',
+                      'csrc/transformer/cublas_wrappers.cu',
+                      'csrc/transformer/transform_kernels.cu',
+                      'csrc/transformer/gelu_kernels.cu',
+                      'csrc/transformer/dropout_kernels.cu',
+                      'csrc/transformer/normalize_kernels.cu',
+                      'csrc/transformer/softmax_kernels.cu',
+                      'csrc/transformer/general_kernels.cu'
+                  ],
+                  include_dirs=['csrc/includes'],
                   extra_compile_args={
-                      'cxx': [
+                      'cxx': ['-O3',
+                              '-std=c++14',
+                              '-g',
+                              '-Wno-reorder'],
+                      'nvcc': [
                           '-O3',
-                      ] + version_dependent_macros,
-                      'nvcc': ['-O3',
-                               '--use_fast_math'] + version_dependent_macros
-                  }))
+                          '--use_fast_math',
+                          '-gencode',
+                          'arch=compute_61,code=compute_61',
+                          '-gencode',
+                          'arch=compute_70,code=compute_70',
+                          '-std=c++14',
+                          '-U__CUDA_NO_HALF_OPERATORS__',
+                          '-U__CUDA_NO_HALF_CONVERSIONS__',
+                          '-U__CUDA_NO_HALF2_OPERATORS__'
+                      ]
+                  }),
+    CUDAExtension(name='deepspeed_stochastic_transformer_cuda',
+                  sources=[
+                      'csrc/transformer/ds_transformer_cuda.cpp',
+                      'csrc/transformer/cublas_wrappers.cu',
+                      'csrc/transformer/transform_kernels.cu',
+                      'csrc/transformer/gelu_kernels.cu',
+                      'csrc/transformer/dropout_kernels.cu',
+                      'csrc/transformer/normalize_kernels.cu',
+                      'csrc/transformer/softmax_kernels.cu',
+                      'csrc/transformer/general_kernels.cu'
+                  ],
+                  include_dirs=['csrc/includes'],
+                  extra_compile_args={
+                      'cxx': ['-O3',
+                              '-std=c++14',
+                              '-g',
+                              '-Wno-reorder'],
+                      'nvcc': [
+                          '-O3',
+                          '--use_fast_math',
+                          '-gencode',
+                          'arch=compute_61,code=compute_61',
+                          '-gencode',
+                          'arch=compute_70,code=compute_70',
+                          '-std=c++14',
+                          '-U__CUDA_NO_HALF_OPERATORS__',
+                          '-U__CUDA_NO_HALF_CONVERSIONS__',
+                          '-U__CUDA_NO_HALF2_OPERATORS__',
+                          '-D__STOCHASTIC_MODE__'
+                      ]
+                  }),
+]
 
 setup(name='deepspeed',
-      version=ds_version,
+      version='0.2.0',
       description='DeepSpeed library',
       author='DeepSpeed Team',
       author_email='deepspeed@microsoft.com',
