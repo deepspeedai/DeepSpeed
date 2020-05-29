@@ -175,6 +175,7 @@ Enabling and configure ZeRO memory optimizations
     "stage": [0|1|2],
     "allgather_partitions": [true|false],
     "allgather_bucket_size": 500000000,
+    "overlap_comm": false,
     "reduce_scatter": [true|false],
     "reduce_bucket_size": 500000000,
     "contiguous_gradients" : [true|false]
@@ -204,6 +205,12 @@ Enabling and configure ZeRO memory optimizations
 | Description                                                  | Default |
 | ------------------------------------------------------------ | ------- |
 | Number of elements allgathered at a time. Limits the memory required for the allgather for large model sizes   | `500000000`   |
+
+***overlap_comm***: [boolean]
+
+| Description                                                  | Default |
+| ------------------------------------------------------------ | ------- |
+| Attempts to overlap the reduction of the gradients with backward computation   | `false`   |
 
 ***reduce_scatter***: [boolean]
 
