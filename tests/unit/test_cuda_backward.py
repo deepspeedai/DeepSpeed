@@ -285,38 +285,39 @@ def test_backward(batch_size,
 
     run_backward(ds_config, atol=atol)
 
-@pytest.mark.parametrize('batch_size, hidden_size, seq_len, heads, num_layers, is_preln, use_fp16, atol',
-                         [
-                             (3,1024,128,16,24,True,False, 0.07),
-                             (3,1024,128,16,24,True,True, 0.05),
-                             (3,1024,128,16,24,False,False, 0.1),
-                             (3,1024,128,16,24,False,True, 0.2),
-                         ]) # yapf: disable
-def test_backward_stochastic(batch_size,
-                             hidden_size,
-                             seq_len,
-                             heads,
-                             num_layers,
-                             is_preln,
-                             use_fp16,
-                             atol):
-    # Only run fp16 test cases on devices with 7+ capability.
-    major, _ = torch.cuda.get_device_capability()
-    if major < 7 and (use_fp16 is True or is_preln is False):
-        return
 
-    ds_config = DeepSpeedTransformerConfig()
-    ds_config.layer_id = None
-    ds_config.batch_size = batch_size
-    ds_config.hidden_size = hidden_size
-    ds_config.max_seq_length = seq_len
-    ds_config.heads = heads
-    ds_config.attn_dropout_ratio = 0.0
-    ds_config.hidden_dropout_ratio = 0.0
-    ds_config.num_hidden_layers = num_layers
-    ds_config.pre_layer_norm = is_preln
-    ds_config.initializer_range = 0.02
-    ds_config.fp16 = use_fp16
-    ds_config.stochastic_mode = True
-
-    run_backward(ds_config, atol=atol)
+#@pytest.mark.parametrize('batch_size, hidden_size, seq_len, heads, num_layers, is_preln, use_fp16, atol',
+#                         [
+#                             (3,1024,128,16,24,True,False, 0.07),
+#                             (3,1024,128,16,24,True,True, 0.05),
+#                             (3,1024,128,16,24,False,False, 0.1),
+#                             (3,1024,128,16,24,False,True, 0.2),
+#                         ]) # yapf: disable
+#def test_backward_stochastic(batch_size,
+#                             hidden_size,
+#                             seq_len,
+#                             heads,
+#                             num_layers,
+#                             is_preln,
+#                             use_fp16,
+#                             atol):
+#    # Only run fp16 test cases on devices with 7+ capability.
+#    major, _ = torch.cuda.get_device_capability()
+#    if major < 7 and (use_fp16 is True or is_preln is False):
+#        return
+#
+#    ds_config = DeepSpeedTransformerConfig()
+#    ds_config.layer_id = None
+#    ds_config.batch_size = batch_size
+#    ds_config.hidden_size = hidden_size
+#    ds_config.max_seq_length = seq_len
+#    ds_config.heads = heads
+#    ds_config.attn_dropout_ratio = 0.0
+#    ds_config.hidden_dropout_ratio = 0.0
+#    ds_config.num_hidden_layers = num_layers
+#    ds_config.pre_layer_norm = is_preln
+#    ds_config.initializer_range = 0.02
+#    ds_config.fp16 = use_fp16
+#    ds_config.stochastic_mode = True
+#
+#    run_backward(ds_config, atol=atol)
