@@ -7,7 +7,19 @@ In this tutorial we will be adding DeepSpeed to the BingBert model for the SQuAD
 
 ## Overview
 
-Please clone the repository and go to the `examples/BingBertSquad` folder to follow along.
+Please clone the DeepSpeed repository and change to deepspeed directory
+
+`git clone https://github.com/microsoft/deepspeed`
+
+`cd deepspeed`
+
+The DeepSpeedExamples are submodules so you need to initialize and update them using the following commands
+
+`git submodule init`
+
+`git submodule update`
+
+Go to the `DeepSpeedExamples/BingBertSquad` folder to follow along.
 
 ### Pre-requisites
 
@@ -24,7 +36,7 @@ Note that the BERT model in the file `train-v1.1.json_bert-large-uncased_384_128
 
 ### Running BingBertSquad
 
-- **Unmodified (BaseLine):** If you would like to run unmodified BingBertSquad with the pre-processed data, there is a helper script which you can invoke via: `bash run_squad_baseline.sh 8 <PATH_TO_CHECKPOINT>/training_state_checkpoint_162.tar` where the first argument `8` is the number of GPUs and the second argument is the path to the pre-training checkpoint. This bash script sets the parameters and invokes `nvidia_run_squad_baseline.py`.
+- **Unmodified (BaseLine):** If you would like to run unmodified BingBertSquad with the pre-processed data, there is a helper script which you can invoke via: `bash run_squad_baseline.sh 8 <PATH_TO_CHECKPOINT>/training_state_checkpoint_162.tar <PATH_TO_DATA_DIR> <PATH_TO_OUTPUT_DIR> ` where the first argument `8` is the number of GPUs, second argument is the path to the pre-training checkpoint, third is the path to training and validation sets (e.g. train-v1.1.json), and fourth is path to an output folder (e.g. ~/output). This bash script sets the parameters and invokes `nvidia_run_squad_baseline.py`.
 - **Modified (DeepSpeed):** This is similar to baseline;  just substitute `run_squad_baseline.sh` with `run_squad_deepspeed.sh` which invokes `nvidia_run_squad_deepspeed.py`.
 
 ## DeepSpeed Integration
