@@ -16,13 +16,17 @@ class DeepSpeedDataLoader(object):
                  tput_timer,
                  collate_fn=None,
                  num_local_io_workers=None,
-                 data_sampler=None):
+                 data_sampler=None,
+                 data_parallel_world_size=None,
+                 data_parallel_rank=None):
         self.tput_timer = tput_timer
         self.batch_size = batch_size
 
         if local_rank >= 0:
             if data_sampler is None:
-                data_sampler = DistributedSampler(dataset)
+                data_sampler = DistributedSampler(dataset=dataset,
+                                                  num_replicas=data_parallel_world_size,
+                                                  rank=data_parallel_rank)
             device_count = 1
         else:
             if data_sampler is None:

@@ -620,6 +620,13 @@ class DeepSpeedLight(Module):
         if route == ROUTE_TRAIN:
             deepspeed_io_timer = self.tput_timer
 
+        # If mpu is provied, forward world size and parallel rank to sampler.
+        data_parallel_world_size = None
+        data_parallel_rank = None
+        if self.mpu is not None:
+            data_parallel_world_size = mpu.get_data_parallel_world_size()
+            data_parallel_rank = mpu.get_data_parallel_rank()
+
         return DeepSpeedDataLoader(dataset=dataset,
                                    batch_size=batch_size,
                                    pin_memory=pin_memory,
@@ -627,7 +634,9 @@ class DeepSpeedLight(Module):
                                    local_rank=self.local_rank,
                                    tput_timer=deepspeed_io_timer,
                                    num_local_io_workers=num_local_io_workers,
-                                   data_sampler=data_sampler)
+                                   data_sampler=data_sampler,
+                                   data_parallel_world_size=data_parallel_world_size,
+                                   data_parallel_rank=data_parallel_rank)
 
     def train(self):
         r"""
