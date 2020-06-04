@@ -135,38 +135,38 @@ Only a few lines of code changes are needed to enable a PyTorch model to use Dee
 ## Features
 
 Below we provide a brief feature list, see our detailed [feature
-overview](features) for descriptions and usage.
+overview](/features/) for descriptions and usage.
 
-* [Distributed Training with Mixed Precision](features.md#distributed-training-with-mixed-precision)
+* [Distributed Training with Mixed Precision](/features/#distributed-training-with-mixed-precision)
     * 16-bit mixed precision
     * Single-GPU/Multi-GPU/Multi-Node
-* [Model Parallelism](features.md#model-parallelism)
+* [Model Parallelism](/features/#model-parallelism)
     * Support for Custom Model Parallelism
     * Integration with Megatron-LM
-* [The Zero Redundancy Optimizer (ZeRO)](features.md#the-zero-redundancy-optimizer)
+* [The Zero Redundancy Optimizer (ZeRO)](/features/#the-zero-redundancy-optimizer)
     * Optimizer State and Gradient Partitioning
     * Activation Partitioning
     * Constant Buffer Optimization
     * Contiguous Memory Optimization
-* [Additional Memory and Bandwidth Optimizations](features.md#additional-memory-and-bandwidth-optimizations)
+* [Additional Memory and Bandwidth Optimizations](/features/#additional-memory-and-bandwidth-optimizations)
     * Smart Gradient Accumulation
     * Communication/Computation Overlap
-* [Training Features](features.md#training-features)
+* [Training Features](/features/#training-features)
     * Simplified training API
     * Activation Checkpointing API
     * Gradient Clipping
     * Automatic loss scaling with mixed precision
-* [Training Optimizers](features.md#training-optimizers)
+* [Training Optimizers](/features/#training-optimizers)
     * Fused Adam optimizer and arbitrary `torch.optim.Optimizer`
     * Memory bandwidth optimized FP16 Optimizer
     * Large Batch Training with LAMB Optimizer
     * Memory efficient Training with ZeRO Optimizer
-* [Training Agnostic Checkpointing](features.md#training-agnostic-checkpointing)
-* [Advanced Parameter Search](features.md#advanced-parameter-search)
+* [Training Agnostic Checkpointing](/features/#training-agnostic-checkpointing)
+* [Advanced Parameter Search](/features/#advanced-parameter-search)
     * Learning Rate Range Test
     * 1Cycle Learning Rate Schedule
-* [Simplified Data Loader](features.md#simplified-data-loader)
-* [Performance Analysis and Debugging](features.md#performance-analysis-and-debugging)
+* [Simplified Data Loader](/features/#simplified-data-loader)
+* [Performance Analysis and Debugging](/features/#performance-analysis-and-debugging)
 
 
 # Contributing

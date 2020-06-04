@@ -11,7 +11,9 @@ requires to be highly efficient in term of performance, in order to allow scient
 explore different models across various application domains in a reasonable amount of time.
 To this end, we have developed a new kernel for transformer networks which includes several
 optimizations specific to these layers, which boost the training throughput on single GPU and scales
-well as we increase the number of GPUs. For more information on the details of transformer kernel, please visit our recent blog post on the [fastest Bert training](/fast_bert/).
+well as we increase the number of GPUs. For more information on the details
+of transformer kernel, please visit our recent blog post on the [fastest BERT
+training](https://www.deepspeed.ai/news/2020/05/27/fastest-bert-training.html).
 
 ## Prerequisites
 
@@ -68,11 +70,11 @@ The environment parameters of the transformer kernel includes:
 1. `local_rank`: The rank of the current GPU running the transformer kernel
 2. `seed`: The random seed for the dropout layer
 3. `fp16`: Enable half-precision computation
-4. `initializer_range`: Bert's initializer range
+4. `initializer_range`: BERT's initializer range
 
 High-performance optimization flag:
 
-1. `stochastic_mode`: By turning on this flag, the training can run faster by 2% on average. Note, that this flag has some level of non-determinism and can produce different results on different runs. However, we have seen that by enabling it, the pretraining tasks such as BERT are not affected and can obtain a high accuracy level. On the other hand, for the downstream tasks, such as fine-tuning, we recommend to turn it off in order to be able to reproduce the same result through the regular kernel execution.
+1. `stochastic_mode`: By turning on this flag, the training can run faster by 2% on average. Note, that this flag has some level of non-determinism and can produce different results on different runs. However, we have seen that by enabling it, the pre-training tasks such as BERT are not affected and can obtain a high accuracy level. On the other hand, for the downstream tasks, such as fine-tuning, we recommend to turn it off in order to be able to reproduce the same result through the regular kernel execution.
 
 The memory-optimization flags consist of:
 
@@ -80,7 +82,7 @@ The memory-optimization flags consist of:
 2. `normalize_invertible`: Enable invertible LayerNorm execution (dropping the input activation)
 3. `gelu_checkpoint`: Enable checkpointing of Gelu activation output to save memory
 
-To illustrate the required model configuration changes to use transformer kernel in model training, we use a Bert model and go through the different configurations in order to support the different sequence lengths and batch sizes. Please see the instruction at [Bert training tutorial](/bert-pretraining/).
+To illustrate the required model configuration changes to use transformer kernel in model training, we use a BERT model and go through the different configurations in order to support the different sequence lengths and batch sizes. Please see the instruction at [BERT training tutorial](/tutorials/bert-pretraining/).
 
 ### **Memory Optimization Flags**
 
@@ -90,7 +92,7 @@ By setting the `normalize_invertible` flag, we force the kernel to drop the inpu
 
 The `attn_dropout_checkpoint` and `gelu_checkpoint` flags refer to the checkpointing approach, in which we drop the inputs to some parts of the transformer layer, attention dropout and Gelu, in order to save an important part of the activation memory. Based on our performance profiling, the performance cost of rematerializing these two are negligible and finally the performance benefit that we gain from running larger batch size compensate for that.
 
-The following table shows which memory optimization flags need to be turned on when running Bert-Large on NVIDIA V100 GPU with 32GB of memory, considering different micro-batch sizes and sequence lengths. For the two sequence lengths, 128 and 512, used in our experiments, we have seen that larger batch size improves the overall training performance for both. Please see our [Bert-Fast](/fast-bert/) blog post for more information regarding the performance evaluation of these configurations.
+The following table shows which memory optimization flags need to be turned on when running BERT-Large on NVIDIA V100 GPU with 32GB of memory, considering different micro-batch sizes and sequence lengths. For the two sequence lengths, 128 and 512, used in our experiments, we have seen that larger batch size improves the overall training performance for both. Please see our [blog post](https://www.deepspeed.ai/news/2020/05/27/fastest-bert-training.html) for more information regarding the performance evaluation of these configurations.
 
 | Micro-batch size |    128 sequence-length    |           512 sequence-length            |
 | :--------------: | :-----------------------: | :--------------------------------------: |
@@ -103,7 +105,7 @@ The following table shows which memory optimization flags need to be turned on w
 
 ### **Enable Transformer Kernel**
 
-As mentioned earlier, in order to run the transformer network using the custom DeepSpeed kernel, we only need to pass the `deepspeed_transformer_kernel` option when running the training script. Below, we show an example of how we pass this parameter to the `deepspeed` launcher, besides the rest of parameters for the Bert pre-training task.
+As mentioned earlier, in order to run the transformer network using the custom DeepSpeed kernel, we only need to pass the `deepspeed_transformer_kernel` option when running the training script. Below, we show an example of how we pass this parameter to the `deepspeed` launcher, besides the rest of parameters for the BERT pre-training task.
 
 ```bash
 deepspeed deepspeed_train.py \

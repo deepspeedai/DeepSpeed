@@ -333,14 +333,14 @@ launching DeepSpeed.
 
 ## Reproducing Fastest BERT Training Results with DeepSpeed
 
-We achieve the fastest BERT training time while remaining competitive across the industry in terms of achieving F1 score of 90.5 or better on the SQUAD 1.1 dev set. Please follow the [Fine-tuning](/bert-finetuning/) tutorial to finetune your model pretrained by transformer kernel and reprodue the SQUAD F1 score.
+We achieve the fastest BERT training time while remaining competitive across the industry in terms of achieving F1 score of 90.5 or better on the SQUAD 1.1 dev set. Please follow the [BERT fine-tuning](/tutorials/bert-finetuning/) tutorial to fine-tune your model that was pre-trained by transformer kernel and reproduce the SQUAD F1 score.
 
-- We complete BERT pretraining in 44 minutes using 1024 V100 GPUs (64 NVIDIA DGX-2 nodes). In comparison, the previous SOTA from NVIDIA takes 47 mins using 1472 V100 GPUs. DeepSpeed is not only faster but also uses 30% less resources. Using the same 1024 GPUS, NVIDIA BERT is 52% slower than DeepSpeed, taking 67 minutes to train.
-- Comparing with the original BERT training time from Google, it took them
-about 96 hours to reach parity on 64 TPU2 chips, while it took us less than 9 hours on
+- We complete BERT pre-training in 44 minutes using 1024 V100 GPUs (64 NVIDIA DGX-2 nodes). In comparison, the previous SOTA from NVIDIA takes 47 mins using 1472 V100 GPUs. DeepSpeed is not only faster but also uses 30% less resources. Using the same 1024 GPUS, NVIDIA BERT is 52% slower than DeepSpeed, taking 67 minutes to train.
+- Comparing with the original BERT training time from Google in which it took
+about 96 hours to reach parity on 64 TPU2 chips, we train in less than 9 hours on
 4 DGX-2 nodes of 64 V100 GPUs.
-- On 256 GPUs, it took us 2.4, faster than state-of-art result (3.9
-hours) from Nvidia using their superpod on the same number of GPUs
+- On 256 GPUs, it took us 2.4 hours, faster than state-of-art result (3.9
+hours) from NVIDIA using their superpod on the same number of GPUs
 ([link](https://devblogs.nvidia.com/training-bert-with-gpus/)).
 
 ![DeepSpeed BERT Training Time](/assets/images/end-to-end-bert-training.png){: .align-center}
