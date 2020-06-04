@@ -8,10 +8,10 @@ This file is adapted from FP16_Optimizer in NVIDIA/apex
 import torch
 from torch._utils import _flatten_dense_tensors, _unflatten_dense_tensors
 import math
-import logging
 
 from deepspeed.pt.deepspeed_utils import get_grad_norm, CheckOverflow, get_weight_norm
 from deepspeed.pt.loss_scaler import INITIAL_LOSS_SCALE, SCALE_WINDOW, MIN_LOSS_SCALE
+from deepspeed.pt.log_utils import logger
 
 
 class FP16_UnfusedOptimizer(object):
@@ -33,7 +33,7 @@ class FP16_UnfusedOptimizer(object):
         self.fused_lamb_legacy = fused_lamb_legacy
 
         if torch.distributed.get_rank() == 0:
-            logging.info(f'Fused Lamb Legacy : {self.fused_lamb_legacy} ')
+            logger.info(f'Fused Lamb Legacy : {self.fused_lamb_legacy} ')
 
         if not torch.cuda.is_available:
             raise SystemError("Cannot use fp16 without CUDA.")
@@ -137,9 +137,10 @@ class FP16_UnfusedOptimizer(object):
         self._update_scale(self.overflow)
         if self.overflow:
             if self.verbose:
-                print("[deepspeed] OVERFLOW! Skipping step. Attempted loss "
-                      "scale: {}, reducing to {}".format(prev_scale,
-                                                         self.cur_scale))
+                logger.info("[deepspeed] OVERFLOW! Skipping step. Attempted loss "
+                            "scale: {}, reducing to {}".format(
+                                prev_scale,
+                                self.cur_scale))
             return self.overflow
 
         combined_scale = self.unscale_and_clip_grads(norm_groups, apply_scale=False)
@@ -162,9 +163,10 @@ class FP16_UnfusedOptimizer(object):
         self._update_scale(self.overflow)
         if self.overflow:
             if self.verbose:
-                print("[deepspeed] OVERFLOW! Skipping step. Attempted loss "
-                      "scale: {}, reducing to {}".format(prev_scale,
-                                                         self.cur_scale))
+                logger.info("[deepspeed] OVERFLOW! Skipping step. Attempted loss "
+                            "scale: {}, reducing to {}".format(
+                                prev_scale,
+                                self.cur_scale))
             return self.overflow
 
         norm_groups = []
@@ -236,8 +238,8 @@ class FP16_UnfusedOptimizer(object):
                                      self.min_loss_scale)
                 self.last_overflow_iter = self.cur_iter
                 if self.verbose:
-                    print("\nGrad overflow on iteration", self.cur_iter)
-                    print(
+                    logger.info("Grad overflow on iteration: %s", self.cur_iter)
+                    logger.info(
                         f"Reducing dynamic loss scale from {prev_scale} to {self.cur_scale}"
                     )
             else:
@@ -246,14 +248,15 @@ class FP16_UnfusedOptimizer(object):
                 if (stable_interval > 0) and (stable_interval % self.scale_window == 0):
                     self.cur_scale *= self.scale_factor
                     if self.verbose:
-                        print(f"\nNo Grad overflow for {self.scale_window} iterations")
-                        print(
+                        logger.info(
+                            f"No Grad overflow for {self.scale_window} iterations")
+                        logger.info(
                             f"Increasing dynamic loss scale from {prev_scale} to {self.cur_scale}"
                         )
         else:
             if skip:
-                print("\nGrad overflow on iteration", self.cur_iter)
-                print("Using static loss scale of", self.cur_scale)
+                logger.info("Grad overflow on iteration %s", self.cur_iter)
+                logger.info("Using static loss scale of %s", self.cur_scale)
         self.cur_iter += 1
         return
 

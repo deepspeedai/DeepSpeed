@@ -13,7 +13,7 @@ from torch.optim import Optimizer
 from typing import Union, List
 import math
 from deepspeed.pt.deepspeed_constants import *
-import logging
+from deepspeed.pt.log_utils import logger
 
 LR_SCHEDULE = 'lr_schedule'
 LR_RANGE_TEST = 'LRRangeTest'
@@ -550,7 +550,7 @@ class OneCycle(object):
                              last_batch_iteration):
         if 'betas' not in optimizer.defaults:
             optimizer_name = type(optimizer).__name__
-            logging.warn(
+            logger.warn(
                 f"cycle_momentum is disabled because optimizer {optimizer_name} does not support momentum, no betas attribute in defaults"
             )
             self.cycle_momentum = False

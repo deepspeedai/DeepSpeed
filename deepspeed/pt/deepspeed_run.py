@@ -7,7 +7,6 @@ import sys
 import json
 import shutil
 import base64
-import logging
 import argparse
 import subprocess
 import collections
@@ -16,6 +15,7 @@ from copy import deepcopy
 import torch.cuda
 
 from deepspeed.pt.deepspeed_constants import TORCH_DISTRIBUTED_DEFAULT_PORT
+from deepspeed.pt.log_utils import logger
 
 DLTS_HOSTFILE = "/job/hostfile"
 EXPORT_ENVS = ["NCCL", "PYTHON"]
@@ -87,8 +87,8 @@ def parse_args(args=None):
 
 def fetch_hostfile(hostfile_path):
     if not os.path.isfile(hostfile_path):
-        logging.warning("Unable to find hostfile, will proceed with training "
-                        "with local resources only.")
+        logger.warning("Unable to find hostfile, will proceed with training "
+                       "with local resources only.")
         return None
 
     # e.g., worker-0 slots=16
@@ -101,12 +101,12 @@ def fetch_hostfile(hostfile_path):
                 _, slot_count = slots.split("=")
                 slot_count = int(slot_count)
             except ValueError as err:
-                logging.error("Hostfile is not formatted correctly, unable to "
-                              "proceed with training.")
+                logger.error("Hostfile is not formatted correctly, unable to "
+                             "proceed with training.")
                 raise err
             if hostname in resource_pool:
-                logging.error("Hostfile contains duplicate hosts, unable to "
-                              "proceed with training.")
+                logger.error("Hostfile contains duplicate hosts, unable to "
+                             "proceed with training.")
                 raise ValueError("host {} is already defined".format(hostname))
             resource_pool[hostname] = slot_count
 
@@ -169,7 +169,7 @@ def parse_resource_filter(host_info, include_str="", exclude_str=""):
                 filtered_hosts[hostname] = slots
             elif exclude_str:
                 for s in slots:
-                    print('removing {} from {}'.format(s, hostname))
+                    logger.info('removing {} from {}'.format(s, hostname))
                     filtered_hosts[hostname].remove(s)
 
         # User just specified the whole node
@@ -256,7 +256,7 @@ def main(args=None):
         hostname_cmd = ["ssh {} hostname -I".format(first_host)]
         result = subprocess.check_output(hostname_cmd, shell=True)
         args.master_addr = result.decode('utf-8').split()[0]
-        logging.info("Using IP address of {} for node {}".format(
+        logger.info("Using IP address of {} for node {}".format(
             args.master_addr,
             first_host))
 
@@ -292,7 +292,7 @@ def main(args=None):
         env['PDSH_RCMD_TYPE'] = 'ssh'
 
         active_workers = ",".join(active_resources.keys())
-        logging.info("Running on the following workers: %s" % active_workers)
+        logger.info("Running on the following workers: %s" % active_workers)
 
         pdsh_cmd_args = ['pdsh', '-w', active_workers]
 
@@ -330,13 +330,10 @@ def main(args=None):
             "--master_port={}".format(args.master_port)
         ]
         cmd = pdsh_cmd_args + deepspeed_launch + [args.user_script] + args.user_args
-    print("cmd={}".format(cmd), flush=True)
+    logger.info("cmd={}".format(cmd))
     result = subprocess.Popen(cmd, env=env)
     result.wait()
 
 
 if __name__ == "__main__":
-    logging.basicConfig(level=logging.INFO,
-                        format="[%(levelname)s %(asctime)s] %(message)s",
-                        datefmt="%Y-%m-%d %H:%M:%S")
     main()

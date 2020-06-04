@@ -4,8 +4,8 @@ import torch.distributed as dist
 from torch._utils import _flatten_dense_tensors, _unflatten_dense_tensors
 from collections import defaultdict
 
-from deepspeed.pt.zero_utils import _initialize_parameter_parallel_groups, \
-    pprint
+from deepspeed.pt.zero_utils import _initialize_parameter_parallel_groups
+from deepspeed.pt.log_utils import log_dist, logger
 from deepspeed.pt.loss_scaler import LossScaler, DynamicLossScaler
 from deepspeed.pt.deepspeed_utils import get_grad_norm, CheckOverflow
 
@@ -18,9 +18,10 @@ def flatten_dense_tensors_sub_partition_aligned(tensor_list,
     for tensor in tensor_list:
         num_elements = num_elements + tensor.numel()
 
-    pprint("Total number of elements in model: {}, max elements per com: {}".format(
+    log_dist("Total number of elements in model: {}, max elements per com: {}".format(
         num_elements,
-        max_elements_per_comm))
+        max_elements_per_comm),
+             ranks=[0])
 
     max_elements_per_comm = min(max_elements_per_comm, num_elements)
     sub_partition_size = int(max_elements_per_comm // dp)
@@ -41,10 +42,11 @@ def flatten_dense_tensors_sub_partition_aligned(tensor_list,
     if remaining:
         elements_to_add = alignment - remaining
         # adding padded tensor later after we check comm alignment
-        pprint("adding pad tensor for alignment, {} + {}->{}".format(
+        log_dist("adding pad tensor for alignment, {} + {}->{}".format(
             num_elements,
             elements_to_add,
-            num_elements + elements_to_add))
+            num_elements + elements_to_add),
+                 ranks=[0])
         #num_elements = num_elements + elements_to_add
     else:
         padded_tensor_list = tensor_list
@@ -55,11 +57,12 @@ def flatten_dense_tensors_sub_partition_aligned(tensor_list,
                                                                        "size"
     num_comm_intervals = int(num_partitions // dp)
     partition_remaining = int(num_partitions % dp)
-    pprint("num_comm_intervals={}, partition_remaining={}".format(
+    log_dist("num_comm_intervals={}, partition_remaining={}".format(
         num_comm_intervals,
-        partition_remaining))
+        partition_remaining),
+             ranks=[0])
     if partition_remaining != 0:
-        pprint("adding pad tensor and/or extra sub partition")
+        log_dist("adding pad tensor and/or extra sub partition", ranks=[0])
         # add pad tensor for alignment of comm interval, this overrules previous possibly sub-partition alignment
         num_comm_intervals += 1
         aligned_comm_elements = num_comm_intervals * sub_partition_size * dp
@@ -69,10 +72,11 @@ def flatten_dense_tensors_sub_partition_aligned(tensor_list,
                                  device=tensor_list[0].device,
                                  dtype=tensor_list[0].dtype)
         padded_tensor_list = tensor_list + [pad_tensor]
-        pprint("adding pad tensor and/or extra sub partition, {} + {}->{}".format(
+        log_dist("adding pad tensor and/or extra sub partition, {} + {}->{}".format(
             num_elements,
             elements_to_add,
-            num_elements + elements_to_add))
+            num_elements + elements_to_add),
+                 ranks=[0])
         num_elements += elements_to_add
     elif elements_to_add > 0:
         # add pad tensor for just alignment of sub-partition
@@ -83,7 +87,7 @@ def flatten_dense_tensors_sub_partition_aligned(tensor_list,
         num_elements += elements_to_add
 
     if pg is None or dist.get_rank(group=pg) == 0:
-        print("Number of Elements (w. padding) is ", num_elements)
+        logger.info("Number of Elements (w. padding) is %s", num_elements)
 
     padded_num_elems = 0
     for p in padded_tensor_list:
@@ -161,7 +165,7 @@ class FP16_DeepSpeedZeroOptimizer_Stage1(object):
         self.allgather_size = allgather_size
 
         self.max_elements_per_comm = max_elements_per_comm
-        print("max_elements_per_comm={}".format(max_elements_per_comm))
+        logger.info("max_elements_per_comm={}".format(max_elements_per_comm))
 
         # param flattened by groups
         self.fp16_groups = []
@@ -311,14 +315,14 @@ class FP16_DeepSpeedZeroOptimizer_Stage1(object):
         assert num_sub_partitions % world_size == 0, "{} % {} != 0".format(num_sub_partitions, world_size)
 
         if not dist.is_initialized() or dist.get_rank(group=dp_process_group) == 0:
-            print("**** partition info:")
-            print("\t total_num_elements=", total_num_elements)
-            print("\t world_size=", world_size)
-            print("\t max_elements_per_comm=", max_elements_per_comm)
-            print("\t sub_partition_size=", sub_partition_size)
-            print("\t num_sub_partitions=", num_sub_partitions)
-            print("\t num_comm_intervals=", num_comm_intervals)
-            print("****")
+            logger.info("**** partition info:")
+            logger.info("\t total_num_elements=%s", total_num_elements)
+            logger.info("\t world_size=%s", world_size)
+            logger.info("\t max_elements_per_comm=%s", max_elements_per_comm)
+            logger.info("\t sub_partition_size=%s", sub_partition_size)
+            logger.info("\t num_sub_partitions=%s", num_sub_partitions)
+            logger.info("\t num_comm_intervals=%s", num_comm_intervals)
+            logger.info("****")
 
         # [comm_id] -> [rank]
         comm_partitions = []
@@ -369,14 +373,14 @@ class FP16_DeepSpeedZeroOptimizer_Stage1(object):
             for iii, tensor in enumerate(tensor_list):
                 tensor_size = tensor.numel()
                 #if local_rank == 0:
-                #    #print("rank={}, current_index={}, tensor_size={}, tensor-idx={}".format(rank,
+                #    # logger.info("rank={}, current_index={}, tensor_size={}, tensor-idx={}".format(rank,
                 #        current_index, tensor_size, iii))
                 results_list = _range_check(current_index,
                                             all_element_intervals[rank],
                                             tensor_size)
                 for contained, offset, comm_idx in results_list:
                     #if local_rank == 0:
-                    #    print("rank={}, contained={}, offset={}, comm_idx={}".format(rank, contained,
+                    #    logger.info("rank={}, contained={}, offset={}, comm_idx={}".format(rank, contained,
                     #        offset, comm_idx))
                     if contained:
                         if prev_comm_idx != comm_idx:
@@ -479,7 +483,7 @@ class FP16_DeepSpeedZeroOptimizer_Stage1(object):
             flat_sub_partitions.append(_flatten_dense_tensors(flat_tensor_list))
         if num_comm_intervals is not None and len(
                 flat_sub_partitions) < num_comm_intervals:
-            #print("padding w. sub partitions to ensure uniform communication")
+            # logger.info("padding w. sub partitions to ensure uniform communication")
             device = flat_sub_partitions[0].device
             for _ in range(num_comm_intervals - len(flat_sub_partitions)):
                 flat_sub_partitions.append(
@@ -611,9 +615,10 @@ class FP16_DeepSpeedZeroOptimizer_Stage1(object):
         if self.overflow:
             self.zero_grad()
             if self.verbose:
-                print("[deepspeed] OVERFLOW! Skipping step. Attempted loss "
-                      "scale: {}, reducing to {}".format(prev_scale,
-                                                         self.loss_scale))
+                logger.info("[deepspeed] OVERFLOW! Skipping step. Attempted loss "
+                            "scale: {}, reducing to {}".format(
+                                prev_scale,
+                                self.loss_scale))
             return self.overflow
 
         norm_groups = []
@@ -649,7 +654,7 @@ class FP16_DeepSpeedZeroOptimizer_Stage1(object):
                 default_device=self.local_sub_partitions_of_fp32_groups[i][0].device)
 
             #RS: update all our local params with sub-partition grads
-            #print("self.local_sub_partitions_of_fp32_groups[i]={}, local_grad_sub_partitions={}".format(len(self.local_sub_partitions_of_fp32_groups[i]), len(local_grad_sub_partitions)))
+            #logger. info("self.local_sub_partitions_of_fp32_groups[i]={}, local_grad_sub_partitions={}".format(len(self.local_sub_partitions_of_fp32_groups[i]), len(local_grad_sub_partitions)))
             for idx, sub_partition_param in enumerate(self.local_sub_partitions_of_fp32_groups[i]):
                 sub_partition_param.grad = local_grad_sub_partitions[idx]
             #self.single_partition_of_fp32_groups[i].grad = single_grad_partition

@@ -3,9 +3,9 @@ Copyright (c) Microsoft Corporation
 Licensed under the MIT license.
 """
 
-import logging
 #from deepspeed.pt.deepspeed_constants import *
 from deepspeed.pt.deepspeed_config_utils import get_scalar_param
+from deepspeed.pt.log_utils import logger
 
 #########################################
 # ZeRO optimization
@@ -104,7 +104,7 @@ class DeepSpeedZeroConfig(object):
                 ZERO_OPTIMIZATION_ALLGATHER_BUCKET_SIZE_DEPRECATED,
                 ZERO_OPTIMIZATION_ALLGATHER_BUCKET_SIZE_DEFAULT)
 
-        logging.warning(
+        logger.warning(
             'DeepSpeedConfig: this format of ZeRO optimization setup is deprecated. Please use the following format: {}'
             .format(ZERO_FORMAT))
         return zero_config_dict

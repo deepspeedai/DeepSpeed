@@ -3,17 +3,18 @@ Copyright 2019 The Microsoft DeepSpeed Team
 '''
 
 import time
-import logging
 import psutil
 import torch
+
+from deepspeed.pt.log_utils import logger
 
 
 def print_rank_0(message):
     if torch.distributed.is_initialized():
         if torch.distributed.get_rank() == 0:
-            print(message, flush=True)
+            logger.info(message)
     else:
-        print(message, flush=True)
+        logger.info(message)
 
 
 class SynchronizedWallClockTimer:
@@ -117,7 +118,7 @@ class ThroughputTimer():
         self.monitor_memory = monitor_memory
         self.logging = logging_fn
         if self.logging is None:
-            self.logging = logging.info
+            self.logging = logger.info
         self.initialized = False
 
     def update_epoch_count(self):

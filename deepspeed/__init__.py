@@ -5,6 +5,7 @@ Copyright 2020 The Microsoft DeepSpeed Team
 from deepspeed.pt.deepspeed_light import DeepSpeedLight
 from deepspeed.pt.deepspeed_light import ADAM_OPTIMIZER, LAMB_OPTIMIZER
 from deepspeed.pt.deepspeed_lr_schedules import add_tuning_arguments
+from deepspeed.pt.log_utils import logger
 from deepspeed.pt.deepspeed_cuda import DeepSpeedTransformerLayer, DeepSpeedTransformerConfig
 from deepspeed.pt.deepspeed_config import DeepSpeedConfig
 
@@ -82,11 +83,12 @@ def initialize(args,
         * ``lr_scheduler``: Wrapped lr scheduler if user ``lr_scheduler`` is passed, or
           if ``lr_scheduler`` specified in JSON configuration. Otherwise ``None``.
     """
-    print("DeepSpeed info: version={}, git-hash={}, git-branch={}".format(
-        __version__,
-        __git_hash__,
-        __git_branch__),
-          flush=True)
+    logger.info(
+        "DeepSpeed info: version={}, git-hash={}, git-branch={}".format(
+            __version__,
+            __git_hash__,
+            __git_branch__),
+    )
 
     engine = DeepSpeedLight(args=args,
                             model=model,

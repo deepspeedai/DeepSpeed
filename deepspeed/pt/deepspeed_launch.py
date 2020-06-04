@@ -10,6 +10,8 @@ import base64
 from collections import defaultdict
 from argparse import ArgumentParser, REMAINDER
 
+from deepspeed.pt.log_utils import logger
+
 
 def parse_args():
     parser = ArgumentParser(description="DeepSpeed distributed training launch"
@@ -59,24 +61,24 @@ def main():
 
     for k in current_env.keys():
         if "NCCL" in k:
-            print(args.node_rank, k, current_env[k], flush=True)
+            logger.info("%s %s %s", args.node_rank, k, current_env[k])
 
     world_info = None
     assert args.world_info != "None", "must provide world info dict"
     world_info = base64.urlsafe_b64decode(args.world_info)
     world_info = json.loads(world_info)
 
-    print("WORLD INFO DICT: {}".format(world_info), flush=True)
+    logger.info("WORLD INFO DICT: {}".format(world_info))
     node_list = list(world_info.keys())
     args.nnodes = len(node_list)
     local_node = node_list[args.node_rank]
     local_gpu_ids = world_info[local_node]
     num_local_procs = len(local_gpu_ids)
-    print("nnodes={}, num_local_procs={}, node_rank={}".format(
-        args.nnodes,
-        num_local_procs,
-        args.node_rank),
-          flush=True)
+    logger.info(
+        "nnodes={}, num_local_procs={}, node_rank={}".format(args.nnodes,
+                                                             num_local_procs,
+                                                             args.node_rank),
+    )
 
     global_rank_mapping = defaultdict(list)
     curr_global_rank = 0
@@ -87,11 +89,11 @@ def main():
         for gid in gids:
             global_rank_mapping[node_id].append(curr_global_rank)
             curr_global_rank += 1
-    print("global_rank_mapping={}".format(global_rank_mapping), flush=True)
-    print("dist_world_size={}".format(dist_world_size), flush=True)
+    logger.info("global_rank_mapping={}".format(global_rank_mapping))
+    logger.info("dist_world_size={}".format(dist_world_size))
     current_env["CUDA_VISIBLE_DEVICES"] = ",".join(map(str, local_gpu_ids))
-    print("Setting CUDA_VISIBLE_DEVICES={}".format(current_env["CUDA_VISIBLE_DEVICES"]),
-          flush=True)
+    logger.info("Setting CUDA_VISIBLE_DEVICES={}".format(
+        current_env["CUDA_VISIBLE_DEVICES"]))
     exclusion_counts_per_node = None
 
     # set PyTorch distributed related environmental variables

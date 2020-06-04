@@ -9,6 +9,8 @@ Helper functions and classes from multiple sources.
 import torch
 from torch._six import inf
 
+from deepspeed.pt.log_utils import logger
+
 
 class CheckOverflow(object):
     '''Checks for overflow in gradient across parallel process'''
@@ -112,7 +114,7 @@ def _handle_overflow(cpu_sum, x, i):
             if not math.isfinite(float(v)):
                 t_i = v_i
                 break
-        print(
+        logger.info(
             f"rank {rank} detected overflow {cpu_sum} in tensor {i}:{t_i} shape {x.shape}"
         )
 
@@ -253,21 +255,20 @@ def see_memory_usage(message):
         return
 
     # Print message except when distributed but not rank 0
-    print(message, flush=True)
-    print("Memory Allocated ",
-          torch.cuda.memory_allocated() / (1024 * 1024 * 1024),
-          "GigaBytes",
-          flush=True)
-    print("Max Memory Allocated ",
-          torch.cuda.max_memory_allocated() / (1024 * 1024 * 1024),
-          "GigaBytes",
-          flush=True)
-    print("Cache Allocated ",
-          torch.cuda.memory_cached() / (1024 * 1024 * 1024),
-          "GigaBytes",
-          flush=True)
-    print("Max cache Allocated ",
-          torch.cuda.max_memory_cached() / (1024 * 1024 * 1024),
-          "GigaBytes",
-          flush=True)
-    print(" ", flush=True)
+    logger.info(message)
+    logger.info(
+        "Memory Allocated %s GigaBytes ",
+        torch.cuda.memory_allocated() / (1024 * 1024 * 1024),
+    )
+    logger.info(
+        "Max Memory Allocated %s GigaBytes",
+        torch.cuda.max_memory_allocated() / (1024 * 1024 * 1024),
+    )
+    logger.info(
+        "Cache Allocated %s GigaBytes",
+        torch.cuda.memory_cached() / (1024 * 1024 * 1024),
+    )
+    logger.info(
+        "Max cache Allocated %s GigaBytes",
+        torch.cuda.max_memory_cached() / (1024 * 1024 * 1024),
+    )

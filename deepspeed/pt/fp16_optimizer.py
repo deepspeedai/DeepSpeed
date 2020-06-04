@@ -6,12 +6,12 @@ This file is adapted from FP16_Optimizer in NVIDIA/apex
 '''
 
 import torch
-import logging
 import math
 from torch._utils import _flatten_dense_tensors, _unflatten_dense_tensors
 
 from deepspeed.pt.deepspeed_utils import get_grad_norm, CheckOverflow, get_weight_norm
 from deepspeed.pt.loss_scaler import INITIAL_LOSS_SCALE, SCALE_WINDOW, MIN_LOSS_SCALE
+from deepspeed.pt.log_utils import logger
 
 
 class FP16_Optimizer(object):
@@ -137,9 +137,10 @@ class FP16_Optimizer(object):
 
         if self.overflow:
             if self.verbose:
-                print("[deepspeed] OVERFLOW! Skipping step. Attempted loss "
-                      "scale: {}, reducing to {}".format(prev_scale,
-                                                         self.cur_scale))
+                logger.info("[deepspeed] OVERFLOW! Skipping step. Attempted loss "
+                            "scale: {}, reducing to {}".format(
+                                prev_scale,
+                                self.cur_scale))
             return self.overflow
         combined_scale = self.unscale_and_clip_grads(grads_groups_flat,
                                                      norm_groups,
@@ -190,9 +191,10 @@ class FP16_Optimizer(object):
 
         if self.overflow:
             if self.verbose:
-                print("[deepspeed] OVERFLOW! Skipping step. Attempted loss "
-                      "scale: {}, reducing to {}".format(prev_scale,
-                                                         self.cur_scale))
+                logger.info("[deepspeed] OVERFLOW! Skipping step. Attempted loss "
+                            "scale: {}, reducing to {}".format(
+                                prev_scale,
+                                self.cur_scale))
             return self.overflow
 
         self.unscale_and_clip_grads(grads_groups_flat, norm_groups)
@@ -250,8 +252,8 @@ class FP16_Optimizer(object):
                                      self.min_loss_scale)
                 self.last_overflow_iter = self.cur_iter
                 if self.verbose:
-                    print(f"\nGrad overflow on iteration {self.cur_iter}")
-                    print(
+                    logger.info(f"\nGrad overflow on iteration {self.cur_iter}")
+                    logger.info(
                         f"Reducing dynamic loss scale from {prev_scale} to {self.cur_scale}"
                     )
             else:
@@ -260,14 +262,15 @@ class FP16_Optimizer(object):
                 if (stable_interval > 0) and (stable_interval % self.scale_window == 0):
                     self.cur_scale *= self.scale_factor
                     if self.verbose:
-                        print(f"\nNo Grad overflow for {self.scale_window} iterations")
-                        print(
+                        logger.info(
+                            f"No Grad overflow for {self.scale_window} iterations")
+                        logger.info(
                             f"Increasing dynamic loss scale from {prev_scale} to {self.cur_scale}"
                         )
         else:
             if skip:
-                print("\nGrad overflow on iteration", self.cur_iter)
-                print("Using static loss scale of", self.cur_scale)
+                logger.info("Grad overflow on iteration: %s", self.cur_iter)
+                logger.info("Using static loss scale of: %s", self.cur_scale)
         self.cur_iter += 1
         return
 

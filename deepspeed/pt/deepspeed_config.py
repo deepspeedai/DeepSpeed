@@ -4,13 +4,13 @@ Licensed under the MIT license.
 """
 
 import torch
-import logging
 import json
 from deepspeed.pt.deepspeed_constants import *
 from deepspeed.pt.loss_scaler import INITIAL_LOSS_SCALE, SCALE_WINDOW, DELAYED_SHIFT, MIN_LOSS_SCALE
 from deepspeed.pt.deepspeed_config_utils import get_scalar_param, dict_raise_error_on_duplicate_keys
 from deepspeed.pt.deepspeed_zero_config import DeepSpeedZeroConfig
 from deepspeed.pt.deepspeed_checkpointing_config import DeepSpeedActivationCheckpointingConfig
+from deepspeed.pt.log_utils import logger
 
 TENSOR_CORE_ALIGN_SIZE = 8
 ADAM_OPTIMIZER = 'adam'
@@ -407,7 +407,7 @@ class DeepSpeedConfig(object):
             assert False, \
                 'Either train_batch_size or micro_batch_per_gpu needs to be provided'
 
-        print(
+        logger.info(
             f' After Train batch {self.train_batch_size} micro_batch {self.train_micro_batch_size_per_gpu} and grad_acc {self.gradient_accumulation_steps}'
         )
 
@@ -421,13 +421,13 @@ class DeepSpeedConfig(object):
         self._do_warning_check()
 
     def print(self, name):
-        print('{}:'.format(name), flush=True)
+        logger.info('{}:'.format(name))
         for arg in sorted(vars(self)):
             if arg != '_param_dict':
                 dots = '.' * (29 - len(arg))
-                print('  {} {} {}'.format(arg, dots, getattr(self, arg)), flush=True)
+                logger.info('  {} {} {}'.format(arg, dots, getattr(self, arg)))
 
-        print('  json = {}'.format(
+        logger.info('  json = {}'.format(
             json.dumps(self._param_dict,
                        sort_keys=True,
                        indent=4,
@@ -449,7 +449,7 @@ class DeepSpeedConfig(object):
 
         vocabulary_size = self._param_dict.get(VOCABULARY_SIZE, VOCABULARY_SIZE_DEFAULT)
         if vocabulary_size and vocabulary_size % TENSOR_CORE_ALIGN_SIZE != 0:
-            logging.warning(
+            logger.warning(
                 "DeepSpeedConfig: vocabulary size {} is not aligned to {}, may import tensor core utilization."
                 .format(vocabulary_size,
                         TENSOR_CORE_ALIGN_SIZE))
@@ -458,12 +458,12 @@ class DeepSpeedConfig(object):
             MAX_GRAD_NORM in self.optimizer_params.keys() and \
                 self.optimizer_params[MAX_GRAD_NORM] > 0:
             if fp16_enabled:
-                logging.warning(
+                logger.warning(
                     'DeepSpeedConfig: In FP16 mode, DeepSpeed will pass {}:{} to FP16 wrapper'
                     .format(MAX_GRAD_NORM,
                             self.optimizer_params[MAX_GRAD_NORM]))
             else:
-                logging.warning(
+                logger.warning(
                     'DeepSpeedConfig: In FP32 mode, DeepSpeed does not permit MAX_GRAD_NORM ({}) > 0, setting to zero'
                     .format(self.optimizer_params[MAX_GRAD_NORM]))
                 self.optimizer_params[MAX_GRAD_NORM] = 0.0
