@@ -106,7 +106,7 @@ class DeepSpeedTransformerConfig(TransformerConfig):
                              num_hidden_layers,
                              initializer_range)
         self.fp16 = fp16
-        self.pre_layer_norm = pre_layer_norm = True
+        self.pre_layer_norm = pre_layer_norm
         self.local_rank = local_rank
         self.seed = seed
         self.normalize_invertible = normalize_invertible
