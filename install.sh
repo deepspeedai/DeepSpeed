@@ -18,7 +18,9 @@ hostfile (hostfile: /job/hostfile). If no hostfile exists, will only install loc
     -d, --deepspeed_only    Install only deepspeed and no third party dependencies
     -t, --third_party_only  Install only third party dependencies and not deepspeed
     -l, --local_only        Install only on local machine
-    -s, --pip_sudo          Run pip with sudo (default: no sudo)
+    -s, --pip_sudo          Run pip install with sudo (default: no sudo)
+    -r, --allow_sudo        Allow script to be run by root (probably don't want this, instead use --pip_sudo)
+    -n, --no_clean          Do not clean prior build state, by default prior build files are removed before building wheels
     -m, --pip_mirror        Use the specified pip mirror (default: the default pip mirror)
     -H, --hostfile          Path to MPI-style hostfile (default: /job/hostfile)
     -a, --apex_commit       Install a specific commit hash of apex, instead of the one deepspeed points to
@@ -38,6 +40,8 @@ hostfile=/job/hostfile
 pip_mirror=""
 apex_commit=""
 skip_requirements=0
+allow_sudo=0
+no_clean=0
 
 while [[ $# -gt 0 ]]
 do
@@ -77,6 +81,14 @@ case $key in
     skip_requirements=1;
     shift
     ;;
+    -r|--allow_sudo)
+    allow_sudo=1;
+    shift
+    ;;
+    -n|--no_clean)
+    no_clean=1;
+    shift
+    ;;
     -H|--hostfile)
     hostfile=$2
     if [ ! -f $2 ]; then
@@ -99,10 +111,40 @@ case $key in
 esac
 done
 
+user=`whoami`
+if [ "$allow_sudo" == "0" ]; then
+    if [ "$user" == "root" ]; then
+        echo "WARNING: running as root, if you want to install DeepSpeed with sudo please use -s/--pip_sudo instead"
+        usage
+        exit 1
+    fi
+fi
+
 if [ "$ds_only" == "1" ] && [ "$tp_only" == "1" ]; then
     echo "-d and -t are mutually exclusive, only choose one or none"
     usage
     exit 1
+fi
+
+rm_if_exist() {
+    echo "Attempting to remove $1"
+    if [ -f $1 ]; then
+        rm -v $1
+    elif [ -d $1 ]; then
+        rm -vr $1
+    fi
+}
+
+if [ "$no_clean" == "0" ]; then
+    # remove deepspeed build files
+    rm_if_exist deepspeed/git_version_info.py
+    rm_if_exist dist
+    rm_if_exist build
+    rm_if_exist deepspeed.egg-info
+    # remove apex build files
+    rm_if_exist third_party/apex/dist
+    rm_if_exist third_party/apex/build
+    rm_if_exist third_party/apex/apex.egg-info
 fi
 
 echo "Updating git hash/branch info"
@@ -111,21 +153,20 @@ echo "git_branch = '$(git rev-parse --abbrev-ref HEAD)'" >> deepspeed/git_versio
 cat deepspeed/git_version_info.py
 
 if [ "$pip_sudo" == "1" ]; then
-  PIP_SUDO="sudo -H"
+    PIP_SUDO="sudo -H"
 else
-  PIP_SUDO=""
+    PIP_SUDO=""
 fi
 
 if [ "$pip_mirror" != "" ]; then
-  PIP_INSTALL="pip install -i $pip_mirror"
+    PIP_INSTALL="pip install -v -i $pip_mirror"
 else
-  PIP_INSTALL="pip install"
+    PIP_INSTALL="pip install -v"
 fi
 
-
 if [ ! -f $hostfile ]; then
-        echo "No hostfile exists at $hostfile, installing locally"
-        local_only=1
+    echo "No hostfile exists at $hostfile, installing locally"
+    local_only=1
 fi
 
 if [ "$skip_requirements" == "0" ]; then
@@ -147,7 +188,7 @@ if [ "$third_party_install" == "1" ]; then
         git checkout $apex_commit
     fi
 
-    python setup.py --cpp_ext --cuda_ext bdist_wheel
+    python setup.py -v --cpp_ext --cuda_ext bdist_wheel
     cd -
 
     echo "Installing apex locally so that deepspeed will build"
@@ -156,7 +197,7 @@ if [ "$third_party_install" == "1" ]; then
 fi
 if [ "$deepspeed_install" == "1" ]; then
     echo "Building deepspeed wheel"
-    python setup.py bdist_wheel
+    python setup.py -v bdist_wheel
 fi
 
 if [ "$local_only" == "1" ]; then
