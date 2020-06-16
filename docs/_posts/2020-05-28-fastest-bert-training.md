@@ -24,9 +24,9 @@ DeepSpeed to achieve this record-breaking BERT training time.
 4.  Layer-norm reordering for training stability and faster convergence
 
 These optimizations not only benefit BERT; they are also applicable to many
-other transformer-based models such as RoBERTa, XLNet, and UniLM.
+other transformer-based models such as RoBERTa, XLNet, and UniLM. Furthermore, besides the improvements mentioned for pre-training, DeepSpeed achieves up to 1.5x speedups for the downstream tasks, such as the fine-tuning for Bing-BERT SQuAD.
 
-## Overview of Performance Results
+## Performance Results for BERT Pretraining
 
 Compared to SOTA, DeepSpeed significantly improves single GPU performance for
 transformer-based model like BERT. Figure 1 shows the single GPU throughput of
@@ -66,8 +66,8 @@ in teraflops (Tflops). DeepSpeed boosts throughput and allows for higher batch
 sizes without running out-of-memory.
 
 Looking at distributed training across GPUs, Table 1 shows our end-to-end
-BERT-Large pretraining time (F1 score of 90.5 for SQUAD) using 16 to 1024 GPUs.
-We complete BERT pretraining in 44 minutes using 1024 V100 GPUs (64 NVIDIA
+BERT-Large pre-training time (F1 score of 90.5 for SQUAD) using 16 to 1024 GPUs.
+We complete BERT pre-training in 44 minutes using 1024 V100 GPUs (64 NVIDIA
 DGX-2 nodes). In comparison, the previous SOTA from NVIDIA takes 47 mins using
 1472 V100 GPUs. DeepSpeed is not only faster but also uses  30% less resources.
 Using the same 1024 GPUS,NVIDIA BERT takes 67 minutes using the same 1024 GPUs
@@ -75,12 +75,12 @@ Using the same 1024 GPUS,NVIDIA BERT takes 67 minutes using the same 1024 GPUs
 Similarly, on 256 GPUs, NVIDIA BERT takes 236 minutes while DeepSpeed takes 144
 minutes (39% faster).
 
-| Number of nodes   | Number of V100 GPUs  | Time         |
-| ----------------- | -------------------- | ------------ |
-| 1 DGX-2           | 16                   | 33 hr 13 min |
-| 4 DGX-2           | 64                   | 8 hr 41 min  |
-| 16 DGX-2          | 256                  | 144 min      |
-| 64 DGX-2          | 1024                 | 44 min       |
+| Number of nodes | Number of V100 GPUs | Time         |
+| --------------- | ------------------- | ------------ |
+| 1 DGX-2         | 16                  | 33 hr 13 min |
+| 4 DGX-2         | 64                  | 8 hr 41 min  |
+| 16 DGX-2        | 256                 | 144 min      |
+| 64 DGX-2        | 1024                | 44 min       |
 
 Table 1: BERT-Large training time using 1 to 64 DGX-2's with DeepSpeed.
 
@@ -91,6 +91,35 @@ performance (50%) as we obtained on V100 GPUs, we expect to obtain even higher
 throughput by combining our software optimizations with the new hardware. We
 project it would reduce BERT training time further to less than 25 minutes on a
 cluster of 1024 A100 GPUs.
+
+## Performance Results for Fine-Tuning Tasks
+
+In addition to the performance benefits we show for the pre-training,
+we have evaluated the performance of our customized kernel for fine-tuning the
+downstream tasks. Tables 2 and 3 show the samples-per-second achieved when running
+Bing-BERT SQuAD on NVIDIA V100 using 16 and 32 GB of memory, using PyTorch and DeepSpeed transformer kernels.
+For the 16-GB V100, we can achieve up to 1.5x speedup while supporting 2x larger batch size per GPU.
+On the other hand, we can support as large as 32 batch size (2.6x more than Pytorch) using 32GB of memory, while providing 1.3x speedup for the end-to-end fine-tune training. Note, that we use the best
+samples-per-second to compute speedup for the cases that PyTorch runs out-of-memory (OOM).
+
+| Micro batch size | PyTorch | DeepSpeed | Speedup (x) |
+| ---------------- | ------- | --------- | ----------- |
+| 4                | 36.34   | 50.76     | 1.4         |
+| 6                | OOM     | 54.28     | 1.5         |
+| 8                | OOM     | 54.16     | 1.5         |
+
+Table 2. Samples/second for running SQuAD fine-tuning on NVIDIA V100 (16-GB) using PyTorch and DeepSpeed transformer kernels.
+
+| Micro batch size | PyTorch | DeepSpeed | Speedup (x) |
+| ---------------- | ------- | --------- | ----------- |
+| 4                | 37.78    | 50.82      | 1.3        |
+| 6                | 43.81    | 55.97      | 1.3         |
+| 12               | 49.32    | 61.41      | 1.2         |
+| 24               | OOM      | 60.70      | 1.2         |
+| 32               | OOM      | 63.01      | 1.3         |
+
+Table 3: Samples/second for running SQuAD fine-tuning on NVIDIA V100 (32-GB) using PyTorch and DeepSpeed transformer kernels.
+
 
 ## BERT Highly Optimized Transformer Kernels
 
@@ -170,7 +199,7 @@ between the two versions depending on their usage scenarios: Stochastic version
 pursues ultimate training performance goal, and deterministic version may save
 development time by better facilitating experimentation and debugging.
 
-In our experiments, we use stochastic kernels for the pretraining BERT, while
+In our experiments, we use stochastic kernels for the pre-training BERT, while
 using non-stochastic kernels for fine-tuning to achieve fully reproducible
 results. We recommend using stochastic kernels for training tasks involving
 massive amounts of data such as pre-training, while using non-stochastic
