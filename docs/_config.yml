@@ -64,5 +64,10 @@ defaults:
       layout: single
       share: true
 
+analytics:
+  provider: "google-gtag"
+  google:
+    tracking_id: "UA-169781858-1"
+
 timezone: America/Los_Angeles
 breadcrumbs: true
