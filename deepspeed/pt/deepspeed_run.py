@@ -329,7 +329,10 @@ def main(args=None):
             "--master_addr={}".format(args.master_addr),
             "--master_port={}".format(args.master_port)
         ]
-        cmd = pdsh_cmd_args + deepspeed_launch + [args.user_script] + args.user_args
+        user_args = list(
+            map(lambda x: x if x.startswith("-") else "'{}'".format(x),
+                args.user_args))
+        cmd = pdsh_cmd_args + deepspeed_launch + [args.user_script] + user_args
     logger.info("cmd={}".format(cmd))
     result = subprocess.Popen(cmd, env=env)
     result.wait()
