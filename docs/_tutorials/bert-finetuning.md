@@ -301,7 +301,7 @@ Table 4. The setting of memory-optimization flags for a range of micro-batch siz
 
 ### FineTuning model pre-trained with DeepSpeed Transformer Kernels
 
-Fine-tuning the model pre-trained using DeepSpeed Transformer and the recipe in [DeepSpeed Fast-Bert Training](/fast_bert/) should yield F1 score of 90.5 and is expected to increase if you let the pre-training longer than suggested in the tutorial.
+Fine-tuning the model pre-trained using DeepSpeed Transformer and the recipe in [DeepSpeed Fast-Bert Training](https://www.deepspeed.ai/news/2020/05/27/fastest-bert-training.html) should yield F1 score of 90.5 and is expected to increase if you let the pre-training longer than suggested in the tutorial.
 
 To get these results, we do require some tuning of the dropout settings as described below:
 
