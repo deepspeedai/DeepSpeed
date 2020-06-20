@@ -1269,8 +1269,6 @@ class FP16_DeepSpeedZeroOptimizer(object):
             return True
         else:
             if cpu_sum == float('inf') or cpu_sum == -float('inf') or cpu_sum != cpu_sum:
-                if dist.get_rank() == 0 and j is not None:
-                    _handle_overflow(cpu_sum, x, j)
                 return True
             return False
 

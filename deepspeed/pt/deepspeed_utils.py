@@ -100,7 +100,6 @@ class CheckOverflow(object):
             return True
         else:
             if cpu_sum == float('inf') or cpu_sum == -float('inf') or cpu_sum != cpu_sum:
-                _handle_overflow(cpu_sum, x, i)
                 return True
             return False
 
