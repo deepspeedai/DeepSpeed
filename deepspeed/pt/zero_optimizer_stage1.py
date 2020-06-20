@@ -10,6 +10,24 @@ from deepspeed.pt.loss_scaler import LossScaler, DynamicLossScaler
 from deepspeed.pt.deepspeed_utils import get_grad_norm, CheckOverflow
 
 
+def flatten_dense_tensors_sub_partition_aligned_(tensor_list,
+                                                dp,
+                                                max_elements_per_comm,
+                                                pg):
+    num_elements = sum(t.numel() for t in tensor_list)
+    log_dist("Total number of elements in model: {}, max elements per com: {}".format(
+        num_elements,
+        max_elements_per_comm),
+        ranks=[0])
+
+    # Compute aligned partition size based on parameter count
+    aligned_param_partition_size = math.ceil(num_elements / dp)
+
+    # Compute aligned partition size based on communication size
+    aligned_comm_partition_size = int(max_elements_per_comm // dp)
+
+
+
 def flatten_dense_tensors_sub_partition_aligned(tensor_list,
                                                 dp,
                                                 max_elements_per_comm,
@@ -779,6 +797,14 @@ class FP16_DeepSpeedZeroOptimizer_Stage1(object):
         state_dict[
             'local_sub_partitions_of_fp32_groups'] = self.local_sub_partitions_of_fp32_groups
         return state_dict
+
+    # Refresh the fp32 master params from the fp16 copies.
+    def refresh_fp32_params(self):
+        partition_id = dist.get_rank(group=self.dp_process_group)
+        for fp16_all_sub_partitions, fp32_local_sub_partitions in zip(self.parallel_sub_partitioned_fp16_groups, self.local_sub_partitions_of_fp32_groups):
+            for local_sub_partition_param_fp16, local_sub_partition_param_fp32 in zip(fp16_all_sub_partitions[partition_id], fp32_local_sub_partitions):
+                local_sub_partition_param_fp32.data.copy_(
+                    local_sub_partition_param_fp16.data)
 
     def load_state_dict(self, state_dict, load_optimizer_states=True):
         """
