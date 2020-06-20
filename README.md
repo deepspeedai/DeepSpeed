@@ -16,6 +16,11 @@ a language model (LM) with over 17B parameters called
 [Turing-NLG](https://www.microsoft.com/en-us/research/blog/turing-nlg-a-17-billion-parameter-language-model-by-microsoft),
 establishing a new SOTA in the LM category.
 
+DeepSpeed is an important part of Microsoft’s new
+[AI at Scale](https://www.microsoft.com/en-us/research/project/ai-at-scale/)
+initiative to enable next-generation AI capabilities at scale, where you can find more
+information [here](https://innovation.microsoft.com/en-us/exploring-ai-at-scale).
+
 **_For further documentation, tutorials, and technical deep-dives please see [deepspeed.ai](https://www.deepspeed.ai/)!_**
 
 
