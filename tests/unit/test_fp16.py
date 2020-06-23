@@ -353,34 +353,45 @@ def test_zero_allow_untested_optimizer(tmpdir, zero_stage):
     _test_zero_allow_untested_optimizer(args)
 
 
-# @pytest.mark.parametrize("zero_stage", [1])
-# def test_zero_empty_partition(tmpdir, zero_stage):
-#     config_dict = {
-#         "train_batch_size": 3,
-#         "fp16": {
-#             "enabled": True
-#         },
-#         "optimizer": {
-#             "type": "Adam",
-#             "params": {
-#                 "lr": 0.00015
-#             }
-#         },
-#         "zero_optimization": {
-#             "stage": zero_stage
-#         }
-#     }
-#     args = args_from_dict(tmpdir, config_dict)
+@pytest.mark.parametrize("zero_stage", [1])
+def test_zero_empty_partition(tmpdir, zero_stage):
+    config_dict = {
+        "train_micro_batch_size_per_gpu": 1,
+        "gradient_accumulation_steps": 1,
+        "fp16": {
+            "enabled": True,
+            "initial_scale_power": 8
+        },
+        "optimizer": {
+            "type": "Adam",
+            "params": {
+                "lr": 0.00015
+            }
+        },
+        "zero_optimization": {
+            "stage": zero_stage
+        }
+    }
+    args = args_from_dict(tmpdir, config_dict)
 
-#     @distributed_test(world_size=[3])
-#     def _test_zero_empty_partition(args):
-#         hidden_dim = 1
-#         model = SimpleModel(hidden_dim)
-#         # Ensure model has 2 parameters, to cause empty partition with DP=3
-#         assert len(list(model.parameters())) == 2
-#         model, _, _, _ = deepspeed.initialize(args=args,
-#                                               model=model,
-#                                               model_parameters=model.parameters())
-#         model.step()
+    @distributed_test(world_size=[3])
+    def _test_zero_empty_partition(args):
+        hidden_dim = 1
+        model = SimpleModel(hidden_dim)
+        # Ensure model has 2 parameters, to cause empty partition with DP=3
+        assert len(list(model.parameters())) == 2
+        model, _, _, _ = deepspeed.initialize(args=args,
+                                              model=model,
+                                              model_parameters=model.parameters())
 
-#     _test_zero_empty_partition(args)
+        # Now make sure things work..
+        data_loader = random_dataloader(model=model,
+                                        total_samples=1,
+                                        hidden_dim=hidden_dim,
+                                        device=model.device)
+        for n, batch in enumerate(data_loader):
+            loss = model(batch[0], batch[1])
+            model.backward(loss)
+            model.step()
+
+    _test_zero_empty_partition(args)

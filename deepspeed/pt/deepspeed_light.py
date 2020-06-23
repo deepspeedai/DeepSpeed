@@ -561,7 +561,6 @@ class DeepSpeedLight(Module):
 
         if zero_stage == ZERO_OPTIMIZATION_OPTIMIZER_STATES:
             assert self.zero_reduce_scatter(), 'Stage 1 only supports reduce scatter mode'
-            logger.info('Creating fp16 ZeRO Optimizer Stage 1')
             optimizer = FP16_DeepSpeedZeroOptimizer_Stage1(
                 optimizer,
                 static_loss_scale=self.loss_scale(),
@@ -593,7 +592,6 @@ class DeepSpeedLight(Module):
                 gradient_predivide_factor=self.gradient_predivide_factor())
         else:
             raise NotImplementedError("ZeRO stage {} not implemented".format(zero_stage))
-        logger.info('Creating fp16 zero stage {} optimizer'.format(zero_stage))
 
         return optimizer
 

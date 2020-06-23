@@ -353,6 +353,7 @@ class FP16_Optimizer(object):
         state_dict['clip_grad'] = self.clip_grad
         return state_dict
 
+    # Refresh fp32 master params from fp16 copies
     def refresh_fp32_params(self):
         for current, saved in zip(self.fp32_groups_flat, self.fp16_groups_flat):
             current.data.copy_(saved.data)
