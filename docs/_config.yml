@@ -34,6 +34,8 @@ collections:
       - azure.md
       - cifar-10.md
       - bert-pretraining.md
+      - bert-finetuning.md
+      - transformer_kernel.md
       - megatron.md
       - 1Cycle.md
       - lrrt.md

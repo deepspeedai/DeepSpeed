@@ -46,7 +46,7 @@ tests. Note that [pytest-forked](https://github.com/pytest-dev/pytest-forked) an
 Model tests require four GPUs and training data downloaded for
 [DeepSpeedExamples](https://github.com/microsoft/DeepSpeedExamples/).
 
-To execute model tests, first [install DeepSpeed](#installation). The
+To execute model tests, first [install DeepSpeed](/getting-started/#installation). The
 [DeepSpeedExamples](https://github.com/microsoft/DeepSpeedExamples/) repository is cloned
 as part of this process. Next, execute the model test driver:
 ```bash
@@ -59,7 +59,7 @@ Note that the `--forked` flag is not necessary for the model tests.
 This project welcomes contributions and suggestions. Most contributions require you to
 agree to a Contributor License Agreement (CLA) declaring that you have the right to, and
 actually do, grant us the rights to use your contribution. For details, visit
-https://cla.opensource.microsoft.com.
+[https://cla.opensource.microsoft.com](https://cla.opensource.microsoft.com).
 
 When you submit a pull request, a CLA bot will automatically determine whether you need
 to provide a CLA and decorate the PR appropriately (e.g., status check, comment). Simply

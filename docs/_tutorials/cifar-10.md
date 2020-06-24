@@ -3,8 +3,8 @@ title: "CIFAR-10 Tutorial"
 excerpt: "Train your first model with DeepSpeed!"
 ---
 
-If you haven't already, we advise you to first read through the [Getting
-Started](../../README.md#getting-started) guide before stepping through this
+If you haven't already, we advise you to first read through the
+[Getting Started](/getting-started/) guide before stepping through this
 tutorial.
 
 In this tutorial we will be adding DeepSpeed to CIFAR-10 model, which is small image classification model.

@@ -54,6 +54,10 @@ lnav:
         url: /tutorials/cifar-10/
       - title: "BERT Pre-training"
         url: /tutorials/bert-pretraining/
+      - title: "BingBertSQuAD Fine-tuning"
+        url: /tutorials/bert-finetuning/
+      - title: "DeepSpeed Transformer Kernel"
+        url: /tutorials/transformer_kernel/
       - title: "Megatron-LM GPT2"
         url: /tutorials/megatron/
       - title: "1-Cycle Schedule"
