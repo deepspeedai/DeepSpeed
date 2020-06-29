@@ -4,7 +4,6 @@ pillow==6.2.2
 tqdm
 psutil
 tensorboardX==1.8
-tensorflow-gpu==1.15.2
 pytest
 pytest-forked
 pre-commit
