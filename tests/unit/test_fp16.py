@@ -353,7 +353,7 @@ def test_zero_allow_untested_optimizer(tmpdir, zero_stage):
     _test_zero_allow_untested_optimizer(args)
 
 
-@pytest.mark.parametrize("zero_stage", [1])
+@pytest.mark.parametrize("zero_stage", [1, 2])
 def test_zero_empty_partition(tmpdir, zero_stage):
     config_dict = {
         "train_micro_batch_size_per_gpu": 1,
