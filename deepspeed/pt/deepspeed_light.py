@@ -8,6 +8,7 @@ import warnings
 import torch.distributed as dist
 from torch.nn.modules import Module
 from torch.distributed.distributed_c10d import _get_global_rank
+from apex import amp
 
 from tensorboardX import SummaryWriter
 
@@ -312,6 +313,12 @@ class DeepSpeedLight(Module):
     def fp16_enabled(self):
         return self._config.fp16_enabled
 
+    def amp_enabled(self):
+        return self._config.amp_enabled
+
+    def amp_params(self):
+        return self._config.amp_params
+
     def loss_scale(self):
         return self._config.loss_scale
 
@@ -449,28 +456,33 @@ class DeepSpeedLight(Module):
             assert self.dynamic_loss_scale(), \
                 'DeepSpeed {} optimizer requires dynamic loss scaling'.format(self.optimizer_name())
 
+    def _broadcast_model(self):
+        for p in self.module.parameters():
+            if torch.is_tensor(p):
+                dist.broadcast(p,
+                               self.broadcast_src_rank,
+                               group=self.data_parallel_group)
+
     def _configure_distributed_model(self, model):
         self.module = model
         if self.fp16_enabled():
             self.module.half()
         self.module.to(self.device)
+
         if self.mpu is None:
             self.data_parallel_group = _initialize_parameter_parallel_groups()
             self.dp_world_size = dist.get_world_size()
-            src_rank = 0
+            self.broadcast_src_rank = 0
         else:
             self.data_parallel_group = self.mpu.get_data_parallel_group()
             self.dp_world_size = self.mpu.get_data_parallel_world_size()
-            src_rank = _get_global_rank(self.mpu.get_data_parallel_group(), 0)
-            logger.info(f"global src_rank={src_rank}")
-        for p in self.module.parameters():
-            if torch.is_tensor(p):
-                dist.broadcast(p, src_rank, group=self.data_parallel_group)
+            self.broadcast_src_rank = _get_global_rank(
+                self.mpu.get_data_parallel_group(),
+                0)
+            logger.info(f"global src_rank={self.broadcast_src_rank}")
 
-        # TODO: support new AMP optimizer
-        # self.module.half()
-        # self.module.to(self.local_rank)
-        #self.module, self.optimizer = amp.initialize(self.module, self.optimizer, opt_level="O2")
+        if not self.amp_enabled():
+            self._broadcast_model()
 
     # Configure optimizer
     def _configure_optimizer(self, client_optimizer, model_parameters):
@@ -486,6 +498,7 @@ class DeepSpeedLight(Module):
         logger.info('DeepSpeed Basic Optimizer = {}'.format(basic_optimizer))
 
         if self.zero_optimization():
+            assert not self.amp_enabled(), "Amp and ZeRO are not currently compatible, please use (legacy) fp16 mode which performs similar to amp opt_mode=O2"
             if self.optimizer_name() != ADAM_OPTIMIZER:
                 assert self.zero_allow_untested_optimizer(), \
                 'You are using an untested ZeRO Optimizer. Please add <"zero_allow_untested_optimizer": true> in the configuration file to use it.'
@@ -494,6 +507,12 @@ class DeepSpeedLight(Module):
                     "**** You are using ZeRO with an untested optimizer, proceed with caution *****"
                 )
             self.optimizer = self._configure_zero_optimizer(basic_optimizer)
+        elif self.amp_enabled():
+            assert not self.fp16_enabled(), "Cannot enable both amp with (legacy) fp16 mode"
+            amp_params = self.amp_params()
+            logger.info(f"Initializing AMP with these params: {amp_params}")
+            self.module, self.optimizer = amp.initialize(self.module, basic_optimizer, **amp_params)
+            self._broadcast_model()
         elif self.fp16_enabled():
             self.optimizer = self._configure_fp16_optimizer(basic_optimizer)
         else:
@@ -748,12 +767,11 @@ class DeepSpeedLight(Module):
 
         if self.zero_optimization():
             self.optimizer.backward(loss)
+        elif self.amp_enabled():
+            with amp.scale_loss(loss, self.optimizer) as scaled_loss:
+                scaled_loss.backward()
         elif self.fp16_enabled():
             self.optimizer.backward(loss)
-
-            # TODO: Use new AMP semantics as below
-            # with amp.scale_loss(loss, self.optimizer) as scaled_loss:
-            #    scaled_loss.backward()
         else:
             loss.backward()
 

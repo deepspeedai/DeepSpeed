@@ -395,3 +395,103 @@ def test_zero_empty_partition(tmpdir, zero_stage):
             model.step()
 
     _test_zero_empty_partition(args)
+
+
+def test_adam_amp_basic(tmpdir):
+    config_dict = {"train_batch_size": 1, "steps_per_print": 1, "amp": {"enabled": True}}
+    args = args_from_dict(tmpdir, config_dict)
+    hidden_dim = 10
+
+    model = SimpleModel(hidden_dim, empty_grad=False)
+
+    @distributed_test(world_size=[1])
+    def _test_adam_amp_basic(args, model, hidden_dim):
+        optimizer = torch.optim.Adam(params=model.parameters())
+        model, _, _,_ = deepspeed.initialize(args=args,
+                                             model=model,
+                                             optimizer=optimizer)
+        data_loader = random_dataloader(model=model,
+                                        total_samples=50,
+                                        hidden_dim=hidden_dim,
+                                        device=model.device)
+        for n, batch in enumerate(data_loader):
+            loss = model(batch[0], batch[1])
+            model.backward(loss)
+            model.step()
+
+    _test_adam_amp_basic(args=args, model=model, hidden_dim=hidden_dim)
+
+
+def test_lamb_amp_basic(tmpdir):
+    config_dict = {
+        "train_batch_size": 2,
+        "steps_per_print": 1,
+        "optimizer": {
+            "type": "Lamb",
+            "params": {
+                "lr": 0.00015
+            }
+        },
+        "gradient_clipping": 1.0,
+        "amp": {
+            "enabled": True,
+        }
+    }
+    args = args_from_dict(tmpdir, config_dict)
+    hidden_dim = 10
+
+    model = SimpleModel(hidden_dim, empty_grad=False)
+
+    @distributed_test(world_size=[1, 2])
+    def _test_lamb_amp_basic(args, model, hidden_dim):
+        model, _, _,_ = deepspeed.initialize(args=args,
+                                             model=model,
+                                             model_parameters=model.parameters())
+        data_loader = random_dataloader(model=model,
+                                        total_samples=50,
+                                        hidden_dim=hidden_dim,
+                                        device=model.device)
+        for n, batch in enumerate(data_loader):
+            loss = model(batch[0], batch[1])
+            model.backward(loss)
+            model.step()
+
+    _test_lamb_amp_basic(args=args, model=model, hidden_dim=hidden_dim)
+
+
+def test_adam_amp_o2(tmpdir):
+    config_dict = {
+        "train_batch_size": 2,
+        "steps_per_print": 1,
+        "optimizer": {
+            "type": "Adam",
+            "params": {
+                "lr": 0.00015
+            }
+        },
+        "gradient_clipping": 1.0,
+        "amp": {
+            "enabled": True,
+            "opt_level": "O2"
+        }
+    }
+    args = args_from_dict(tmpdir, config_dict)
+    hidden_dim = 10
+
+    model = SimpleModel(hidden_dim, empty_grad=False)
+
+    @distributed_test(world_size=[1, 2])
+    def _test_adam_amp_o2(args, model, hidden_dim):
+        model, _, _,_ = deepspeed.initialize(args=args,
+                                             model=model,
+                                             model_parameters=model.parameters())
+        data_loader = random_dataloader(model=model,
+                                        total_samples=50,
+                                        hidden_dim=hidden_dim,
+                                        device=model.device)
+        for n, batch in enumerate(data_loader):
+            loss = model(batch[0], batch[1])
+            model.backward(loss)
+            model.step()
+
+    _test_adam_amp_o2(args=args, model=model, hidden_dim=hidden_dim)

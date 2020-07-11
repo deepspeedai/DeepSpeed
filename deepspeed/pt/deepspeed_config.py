@@ -5,6 +5,7 @@ Licensed under the MIT license.
 
 import torch
 import json
+import copy
 from deepspeed.pt.deepspeed_constants import *
 from deepspeed.pt.loss_scaler import INITIAL_LOSS_SCALE, SCALE_WINDOW, DELAYED_SHIFT, MIN_LOSS_SCALE
 from deepspeed.pt.deepspeed_config_utils import get_scalar_param, dict_raise_error_on_duplicate_keys
@@ -16,6 +17,22 @@ TENSOR_CORE_ALIGN_SIZE = 8
 ADAM_OPTIMIZER = 'adam'
 LAMB_OPTIMIZER = 'lamb'
 DEEPSPEED_OPTIMIZERS = [ADAM_OPTIMIZER, LAMB_OPTIMIZER]
+
+
+def get_amp_enabled(param_dict):
+    if AMP in param_dict.keys():
+        return get_scalar_param(param_dict[AMP], AMP_ENABLED, AMP_ENABLED_DEFAULT)
+    else:
+        return False
+
+
+def get_amp_params(param_dict):
+    if AMP in param_dict.keys():
+        amp_params = copy.copy(param_dict[AMP])
+        amp_params.pop(AMP_ENABLED)
+        return amp_params
+    else:
+        return False
 
 
 def get_fp16_enabled(param_dict):
@@ -315,6 +332,8 @@ class DeepSpeedConfig(object):
 
         self.gradient_clipping = get_gradient_clipping(param_dict)
         self.fp16_enabled = get_fp16_enabled(param_dict)
+        self.amp_enabled = get_amp_enabled(param_dict)
+        self.amp_params = get_amp_params(param_dict)
         self.loss_scale = get_loss_scale(param_dict)
         self.initial_dynamic_scale = get_initial_dynamic_scale(param_dict)
         self.dynamic_loss_scale_args = get_dynamic_loss_scale_args(param_dict)
