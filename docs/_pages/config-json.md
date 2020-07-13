@@ -104,11 +104,14 @@ Example of ***scheduler***
 
 ### FP16 training options
 
+**Note:** this mode cannot be combined with the `amp` mode described below.
+{: .notice--warning}
+
 ***fp16***: [dictionary]
 
 | Description                                                  | Default |
 | ------------------------------------------------------------ | ------- |
-| Configuration for using mixed precision/FP16 training that leverages [NVIDIA's Apex package](https://nvidia.github.io/apex/). An example, including the available dictionary keys is illustrated below. | None    |
+| Configuration for using mixed precision/FP16 training that leverages [NVIDIA's Apex package](https://nvidia.github.io/apex/). An example, including the available dictionary keys is illustrated below. NOTE: this does not use Apex's AMP mode that allows for more flexibility in mixed precision training modes, this mode is similar to AMP's O2 mode. Please see AMP support below if you want to use more complex mixed precision modes. If you want to use ZeRO (currently) you must use this mode. | None    |
 
 ```json
 "fp16": {
@@ -117,7 +120,7 @@ Example of ***scheduler***
     "initial_scale_power": 32,
     "loss_scale_window": 1000,
     "hysteresis": 2,
- 	"min_loss_scale": 1
+    "min_loss_scale": 1
 }
 ```
 
@@ -156,6 +159,38 @@ Example of ***scheduler***
 | Description                                                  | Default |
 | ------------------------------------------------------------ | ------- |
 | ***min\_loss\_scale*** is  a **fp16** parameter representing the minimum dynamic loss scale value. | `1000`    |
+
+### Automatic mixed precision (AMP) training options
+
+**Note:** this mode cannot be combined with the `fp16` mode described above. In addition this mode is not currently compatible with ZeRO.
+{: .notice--warning}
+
+***amp***: [dictionary]
+
+| Description                                                  | Default |
+| ------------------------------------------------------------ | ------- |
+| Configuration for using automatic mixed precision (AMP) training that leverages [NVIDIA's Apex AMP package](https://nvidia.github.io/apex/). An example, including the available dictionary keys is illustrated below. Is not compatible with `fp16` mode above or ZeRO. Any parameters outside of "enabled" will be passed to AMP's initialize call, see the API and descriptions here at the [apex.amp.initialize documentation](https://nvidia.github.io/apex/amp.html#apex.amp.initialize). | None    |
+
+```json
+"amp": {
+    "enabled": true,
+    ...
+    "opt_level": "O1",
+    ...
+}
+```
+
+***amp:enabled***: [boolean]
+
+| Description                                                  | Default |
+| ------------------------------------------------------------ | ------- |
+| ***enabled*** is an **amp** parameter indicating whether or not AMP training is enabled. | `false`   |
+
+***amp params***: [various]
+
+| Description                         | Default |
+| ----------------------------------- | ------- |
+| Any parameters outside of "enabled" will be passed to AMP's initialize call, see the API and descriptions here at the [apex.amp.initialize documentation](https://nvidia.github.io/apex/amp.html#apex.amp.initialize). | None    |
 
 ### Gradient Clipping
 
