@@ -8,6 +8,32 @@ from deepspeed.pt.zero_utils import _initialize_parameter_parallel_groups
 from deepspeed.pt.log_utils import log_dist, logger
 from deepspeed.pt.loss_scaler import LossScaler, DynamicLossScaler
 from deepspeed.pt.deepspeed_utils import get_grad_norm, CheckOverflow
+from deepspeed.pt.deepspeed_zero_config import ZERO_OPTIMIZATION_OPTIMIZER_STATES
+
+
+def get_alignment_padding(flattened_lean_size, sub_partition_id, sub_partition_size):
+    sub_partition_high_limit = (sub_partition_id + 1) * sub_partition_size
+    if sub_partition_high_limit <= flattened_lean_size:
+        return 0
+    else:
+        return min(sub_partition_size, sub_partition_high_limit - flattened_lean_size)
+
+
+def get_group_alignment_padding(tensor_list, sub_partition_size, sub_partition_count):
+    group_paddings = []
+    flattened_size = sum([tensor.numel() for tensor in tensor_list])
+    for i in range(sub_partition_count):
+        padding = get_alignment_padding(flattened_size, i, sub_partition_size)
+        group_paddings.append(padding)
+
+    logger.info("****Padding information*****")
+    logger.info(f"tensor_size = {flattened_size}")
+    logger.info(f"sub_partition_size = {sub_partition_size}")
+    logger.info(f"sub_partition_count = {sub_partition_count}")
+    for i, padding in enumerate(group_paddings):
+        logger.info(f"padding[{i}] = {padding}")
+
+    return group_paddings
 
 
 def flatten_dense_tensors_sub_partition_aligned(tensor_list,
@@ -164,6 +190,9 @@ class FP16_DeepSpeedZeroOptimizer_Stage1(object):
 
         local_rank = dist.get_rank(group=self.dp_process_group)
 
+        self.group_paddings = []
+        self.partition_count = dist.get_world_size(group=self.dp_process_group)
+
         # loop to deal with groups
         for i, param_group in enumerate(self.optimizer.param_groups):
             # push this group to list before modify
@@ -215,6 +244,13 @@ class FP16_DeepSpeedZeroOptimizer_Stage1(object):
                 local_sub_partitions.append(fp32_sub_partition)
             self.local_sub_partitions_of_fp32_groups.append(local_sub_partitions)
 
+            # Compute sub_partition paddings
+            sub_partition_paddings = get_group_alignment_padding(
+                tensor_list=self.fp16_groups[i],
+                sub_partition_size=sub_partition_size,
+                sub_partition_count=num_comm_intervals * self.partition_count)
+            self.group_paddings.append(sub_partition_paddings)
+
             # modify optimizer of have flat master weight
             # self.single_partition_of_fp32_groups[i].requires_grad = True # keep this in case internal optimizer uses it
             param_group['params'] = self.local_sub_partitions_of_fp32_groups[i]
@@ -255,6 +291,22 @@ class FP16_DeepSpeedZeroOptimizer_Stage1(object):
         self.overflow_checker = CheckOverflow(self.fp16_groups,
                                               mpu=self.mpu,
                                               zero_reduce_scatter=True)
+
+        self._initialize_optimizer_states()
+
+    def _initialize_optimizer_states(self):
+        for group_idx, group in enumerate(self.local_sub_partitions_of_fp32_groups):
+            for idx, sub_partition_param in enumerate(group):
+                sub_partition_grad = torch.zeros(int(
+                    self.sub_partition_sizes[group_idx]),
+                                                 dtype=sub_partition_param.dtype).cuda()
+                sub_partition_param.grad = sub_partition_grad
+
+        self.optimizer.step()
+
+        for group in self.local_sub_partitions_of_fp32_groups:
+            for idx, sub_partition_param in enumerate(group):
+                sub_partition_param.grad = None
 
     @staticmethod
     def get_data_parallel_sub_partitions(tensor,
@@ -721,6 +773,51 @@ class FP16_DeepSpeedZeroOptimizer_Stage1(object):
     loss_scale = property(_get_loss_scale, _set_loss_scale)
     cur_scale = property(_get_loss_scale, _set_loss_scale)
 
+    # Return group tensor after removing paddings that are added for alignment to DP world size.
+    # This method works on the assumption that each group contains sub partitions.
+    def _get_groups_without_padding(self, groups_with_padding):
+        groups_without_padding = []
+        local_rank = dist.get_rank(group=self.dp_process_group)
+        for i, group in enumerate(groups_with_padding):
+            low_index = local_rank * len(group)
+            high_index = (local_rank + 1) * len(group)
+            group_paddings = self.group_paddings[i][low_index:high_index]
+            lean_sub_partitions = []
+            for j, sub_partition in enumerate(group):
+                lean_length = sub_partition.numel() - group_paddings[j]
+                lean_sub_partitions.append(sub_partition[:lean_length])
+            groups_without_padding.append(lean_sub_partitions)
+
+        return groups_without_padding
+
+    # Return optimizer state after removing paddings that are added for alignment.
+    def _get_state_without_padding(self, state_with_padding, padding):
+        lean_state = {}
+        for key, value in state_with_padding.items():
+            lean_length = value.numel() - padding
+            lean_state[key] = value[:lean_length]
+
+        return lean_state
+
+    # Return base optimizer states.
+    # This method assumes that each param group contains a single flattened tensor.
+    def _get_base_optimizer_state(self):
+        optimizer_groups_state = []
+        local_rank = dist.get_rank(group=self.dp_process_group)
+        for group_idx, group in enumerate(self.optimizer.param_groups):
+            group_lean_state = []
+            low_index = local_rank * self.num_comm_intervals_per_group[group_idx]
+            high_index = (local_rank + 1) * self.num_comm_intervals_per_group[group_idx]
+            param_paddings = self.group_paddings[group_idx][low_index:high_index]
+            for param_idx, param in enumerate(group['params']):
+                lean_state = self._get_state_without_padding(self.optimizer.state[param],
+                                                             param_paddings[param_idx])
+                group_lean_state.append(lean_state)
+
+            optimizer_groups_state.append(group_lean_state)
+
+        return optimizer_groups_state
+
     def state_dict(self):
         """
         Returns a dict containing the current state of this :class:`FP16_Optimizer` instance.
@@ -736,20 +833,140 @@ class FP16_DeepSpeedZeroOptimizer_Stage1(object):
         state_dict['loss_scaler'] = self.loss_scaler
         state_dict['dynamic_loss_scale'] = self.dynamic_loss_scale
         state_dict['overflow'] = self.overflow
-        state_dict['optimizer_state_dict'] = self.optimizer.state_dict()
-        state_dict[
-            'local_sub_partitions_of_fp32_groups'] = self.local_sub_partitions_of_fp32_groups
+        state_dict['base_optimizer_state'] = self._get_base_optimizer_state()
+
+        state_dict['zero_stage'] = ZERO_OPTIMIZATION_OPTIMIZER_STATES
+        state_dict['partition_count'] = self.partition_count
+        state_dict['num_comm_intervals_per_group'] = self.num_comm_intervals_per_group
+
+        # Remove paddings for DP alignment to enable loading for other alignment values
+        fp32_groups_without_padding = self._get_groups_without_padding(
+            self.local_sub_partitions_of_fp32_groups)
+        state_dict['local_sub_partitions_of_fp32_groups'] = fp32_groups_without_padding
+
         return state_dict
+
+    def _retrieve_group_sub_partition_weights(self, all_partition_fp32_weights):
+        partition_id = dist.get_rank(group=self.dp_process_group)
+
+        all_sub_partition_weights = []
+        for partition_weights in all_partition_fp32_weights:
+            for sub_partition_weights in partition_weights:
+                all_sub_partition_weights.append(sub_partition_weights)
+
+        flat_merged_weights = flatten_dense_tensors_sub_partition_aligned(
+            tensor_list=all_sub_partition_weights,
+            dp=dist.get_world_size(group=self.dp_process_group),
+            max_elements_per_comm=self.max_elements_per_comm,
+            pg=self.dp_process_group)
+
+        comm_partitions, dp_sub_partitions, element_intervals, sub_partition_size, num_comm_intervals = \
+            self.get_data_parallel_sub_partitions(
+                tensor=flat_merged_weights,
+                max_elements_per_comm=self.max_elements_per_comm,
+                world_size=dist.get_world_size(group=self.dp_process_group),
+                dp_process_group=self.dp_process_group
+            )
+
+        return [sub_partition for sub_partition in dp_sub_partitions[partition_id]]
+
+    # Restore base optimizer fp32 weights from checkpoint by:
+    # 1) Merging fp32 weights from checkpoints of all partitions
+    # 2) Extracting fp32 weights for current partition from merged weights
+    # 3) Using extracted weights to update base optimizer weights directly.
+    def _restore_from_fp32_weights(self, all_state_dict):
+        sub_partition_of_fp32_groups = []
+        for group_idx in range(len(self.local_sub_partitions_of_fp32_groups)):
+            all_partition_fp32_weights = [
+                sd['local_sub_partitions_of_fp32_groups'][group_idx]
+                for sd in all_state_dict
+            ]
+            sub_partition_weights = self._retrieve_group_sub_partition_weights(
+                all_partition_fp32_weights)
+            sub_partition_of_fp32_groups.append(sub_partition_weights)
+
+        for current_group, saved_group in zip(self.local_sub_partitions_of_fp32_groups, sub_partition_of_fp32_groups):
+            for current_sub_part, saved_sub_part in zip(current_group, saved_group):
+                current_sub_part.data.copy_(saved_sub_part.data)
+
+    # Extract optimizer state for current partition from merged states of all partitions
+    def _partition_base_optimizer_state(self, state_key, all_partition_states):
+        partition_id = dist.get_rank(group=self.dp_process_group)
+        alignment = dist.get_world_size(group=self.dp_process_group)
+
+        flat_merged_partitions = flatten_dense_tensors_sub_partition_aligned(
+            tensor_list=all_partition_states,
+            dp=dist.get_world_size(group=self.dp_process_group),
+            max_elements_per_comm=self.max_elements_per_comm,
+            pg=self.dp_process_group)
+
+        comm_partitions, dp_sub_partitions, element_intervals, sub_partition_size, num_comm_intervals = \
+            self.get_data_parallel_sub_partitions(
+                tensor=flat_merged_partitions,
+                max_elements_per_comm=self.max_elements_per_comm,
+                world_size=dist.get_world_size(group=self.dp_process_group),
+                dp_process_group=self.dp_process_group
+            )
+
+        return [sub_partition for sub_partition in dp_sub_partitions[partition_id]]
+
+    # Compute the optimizer state partitions for the group by
+    # 1) Merging state values across the previous partitioning.
+    # 2) Repartition state values for the new partitioning
+    # 3) Return state corresponding to local partition
+    def _retrieve_group_optimizer_states(self, all_partition_states):
+        merged_optimizer_states = {}
+        for partition_state in all_partition_states:
+            for sub_partition_state in partition_state:
+                for key, value in sub_partition_state.items():
+                    if not key in merged_optimizer_states.keys():
+                        merged_optimizer_states[key] = [value]
+                    else:
+                        merged_optimizer_states[key].append(value)
+
+        group_optimizer_states = {}
+        for key, value in merged_optimizer_states.items():
+            group_optimizer_states[key] = self._partition_base_optimizer_state(
+                key,
+                value)
+
+        return group_optimizer_states
+
+    # Restore base optimizer state from checkpoint by
+    # 1) Merging optimizer state from checkpoints of all partitions
+    # 2) Extracting optimizer state for current partition from the merged state
+    # 3) Using the extracted value to directly update the base optimizer.
+    def _restore_base_optimizer_state(self, state_dict_list):
+        base_optimizer_group_states = []
+        for group_idx in range(len(self.optimizer.param_groups)):
+            all_partition_group_states = [
+                sd['base_optimizer_state'][group_idx] for sd in state_dict_list
+            ]
+            group_optimizer_states = self._retrieve_group_optimizer_states(
+                all_partition_group_states)
+            base_optimizer_group_states.append(group_optimizer_states)
+
+        for group_idx, group in enumerate(self.optimizer.param_groups):
+            for param_idx, param in enumerate(group['params']):
+                for key, saved in base_optimizer_group_states[group_idx].items():
+                    current = self.optimizer.state[param][key]
+                    current.data.copy_(saved[param_idx].data)
+
+    # Restore base optimizer fp32 weights from ZeRO fp16 weights
+    def _restore_from_fp16_weights(self):
+        partition_id = dist.get_rank(group=self.dp_process_group)
+        for fp16_partitions, fp32_partitions in zip(self.parallel_sub_partitioned_fp16_groups, self.local_sub_partitions_of_fp32_groups):
+            for fp16_sub_partition, fp32_sub_partition in zip(fp16_partitions[partition_id], fp32_partitions):
+                fp32_sub_partition.data.copy_(fp16_sub_partition.data)
 
     # Refresh the fp32 master params from the fp16 copies.
     def refresh_fp32_params(self):
-        partition_id = dist.get_rank(group=self.dp_process_group)
-        for fp16_all_sub_partitions, fp32_local_sub_partitions in zip(self.parallel_sub_partitioned_fp16_groups, self.local_sub_partitions_of_fp32_groups):
-            for local_sub_partition_param_fp16, local_sub_partition_param_fp32 in zip(fp16_all_sub_partitions[partition_id], fp32_local_sub_partitions):
-                local_sub_partition_param_fp32.data.copy_(
-                    local_sub_partition_param_fp16.data)
+        self._restore_from_fp16_weights()
 
-    def load_state_dict(self, state_dict, load_optimizer_states=True):
+    def load_state_dict(self,
+                        state_dict_list,
+                        load_optimizer_states=True,
+                        load_from_fp32_weights=False):
         """
         Loads a state_dict created by an earlier call to state_dict().
         If ``fp16_optimizer_instance`` was constructed from some ``init_optimizer``,
@@ -766,12 +983,14 @@ class FP16_DeepSpeedZeroOptimizer_Stage1(object):
             optimizer.load_state_dict(checkpoint['optimizer'])
         """
         # I think it should actually be ok to reload the optimizer before the model.
-        self.loss_scaler = state_dict['loss_scaler']
-        self.dynamic_loss_scale = state_dict['dynamic_loss_scale']
-        self.overflow = state_dict['overflow']
-        if load_optimizer_states:
-            self.optimizer.load_state_dict(state_dict['optimizer_state_dict'])
+        self.loss_scaler = state_dict_list[0]['loss_scaler']
+        self.dynamic_loss_scale = state_dict_list[0]['dynamic_loss_scale']
+        self.overflow = state_dict_list[0]['overflow']
 
-        for curr_group, saved_group in zip(self.local_sub_partitions_of_fp32_groups, state_dict['local_sub_partitions_of_fp32_groups']):
-            for curr_param, saved_param in zip(curr_group, saved_group):
-                curr_param.data.copy_(saved_param.data)
+        if load_optimizer_states:
+            self._restore_base_optimizer_state(state_dict_list)
+
+        if load_from_fp32_weights:
+            self._restore_from_fp32_weights(state_dict_list)
+        else:
+            self._restore_from_fp16_weights()

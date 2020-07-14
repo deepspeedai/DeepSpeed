@@ -121,6 +121,8 @@ class DeepSpeedLight(Module):
         self.gradient_average = True
         self.warn_unscaled_loss = True
         self.config_params = config_params
+        self.loaded_checkpoint_mp_world_size = None
+        self.loaded_checkpoint_dp_world_size = None
 
         if dist_init_required is None:
             dist_init_required = not dist.is_initialized()
@@ -289,9 +291,6 @@ class DeepSpeedLight(Module):
     def zero_overlap_comm(self):
         return self._config.zero_config.overlap_comm
 
-    def zero_max_elements_per_comm(self):
-        return self._config.zero_max_elements_per_comm
-
     def zero_optimization_stage(self):
         return self._config.zero_optimization_stage
 
@@ -306,6 +305,9 @@ class DeepSpeedLight(Module):
 
     def zero_contiguous_gradients(self):
         return self._config.zero_config.contiguous_gradients
+
+    def zero_load_from_fp32_weights(self):
+        return self._config.zero_config.load_from_fp32_weights
 
     def allgather_size(self):
         return self._config.allgather_size
@@ -472,10 +474,12 @@ class DeepSpeedLight(Module):
         if self.mpu is None:
             self.data_parallel_group = _initialize_parameter_parallel_groups()
             self.dp_world_size = dist.get_world_size()
+            self.mp_world_size = 1
             self.broadcast_src_rank = 0
         else:
             self.data_parallel_group = self.mpu.get_data_parallel_group()
             self.dp_world_size = self.mpu.get_data_parallel_world_size()
+            self.mp_world_size = self.mpu.get_model_parallel_world_size()
             self.broadcast_src_rank = _get_global_rank(
                 self.mpu.get_data_parallel_group(),
                 0)
@@ -1057,17 +1061,18 @@ class DeepSpeedLight(Module):
     def load_module_state_dict(self, state_dict, strict=True):
         self.module.load_state_dict(state_dict, strict=strict)
 
-    def _get_zero_ckpt_name(self, checkpoints_path, tag):
-
-        mp_rank = 0 if self.mpu is None else self.mpu.get_model_parallel_rank()
-        pp_rank = torch.distributed.get_rank(group=self.optimizer.dp_process_group)
-
-        filename = 'zero_pp_rank_{}'.format(pp_rank)
+    def _get_rank_zero_ckpt_name(self, checkpoints_path, tag, mp_rank, dp_rank):
+        filename = 'zero_pp_rank_{}'.format(dp_rank)
         zero_ckpt_name = os.path.join(
             checkpoints_path,
             str(tag),
             filename + '_mp_rank_{:02d}'.format(mp_rank) + 'optim_states.pt')
         return zero_ckpt_name
+
+    def _get_zero_ckpt_name(self, checkpoints_path, tag):
+        mp_rank = 0 if self.mpu is None else self.mpu.get_model_parallel_rank()
+        pp_rank = torch.distributed.get_rank(group=self.optimizer.dp_process_group)
+        return self._get_rank_zero_ckpt_name(checkpoints_path, tag, mp_rank, pp_rank)
 
     def _get_ckpt_name(self, checkpoints_path, tag):
 
@@ -1144,13 +1149,17 @@ class DeepSpeedLight(Module):
         self.csr_tensor_module_names = checkpoint['csr_tensor_module_names']
         self.global_steps = checkpoint['global_steps']
         self.skipped_steps = checkpoint['skipped_steps']
+        self.loaded_checkpoint_mp_world_size = checkpoint['mp_world_size']
+        self.loaded_checkpoint_dp_world_size = checkpoint['dp_world_size']
         deepspeed_states = [
             'module',
             'optimizer',
             'lr_scheduler',
             'csr_tensor_module_names',
             'skipped_steps',
-            'global_steps'
+            'global_steps',
+            'dp_world_size',
+            'mp_world_size'
         ]
         client_state = {
             key: value
@@ -1161,18 +1170,72 @@ class DeepSpeedLight(Module):
         return load_path, client_state
 
     def _load_zero_checkpoint(self, load_dir, tag, load_optimizer_states=True):
-        zero_checkpoint_name = self._get_zero_ckpt_name(load_dir, tag)
+        zero_sd_list = self._get_all_zero_checkpoints(load_dir, tag)
+        if zero_sd_list is None:
+            return
 
-        if not os.path.exists(zero_checkpoint_name):
-            logger.warn(
-                'Client provided checkpoint load path: {} does not exist ... skip checkpoint load'
-                .format(zero_checkpoint_name))
+        self.optimizer.load_state_dict(
+            state_dict_list=zero_sd_list,
+            load_optimizer_states=load_optimizer_states,
+            load_from_fp32_weights=self.zero_load_from_fp32_weights())
+        print(
+            f'loading {len(zero_sd_list)} zero partition checkpoints for rank {self.global_rank}'
+        )
+
+    def _get_mp_rank_zero_checkpoint_names(self, load_dir, tag, mp_rank, dp_world_size):
+        zero_ckpt_names = []
+        for dp_rank in range(dp_world_size):
+            ckpt_name = self._get_rank_zero_ckpt_name(checkpoints_path=load_dir,
+                                                      tag=tag,
+                                                      mp_rank=mp_rank,
+                                                      dp_rank=dp_rank)
+            zero_ckpt_names.append(ckpt_name)
+
+        return zero_ckpt_names
+
+    def _get_all_zero_checkpoint_names(self,
+                                       load_dir,
+                                       tag,
+                                       mp_world_size,
+                                       dp_world_size):
+        zero_ckpt_names = []
+        for mp_rank in range(mp_world_size):
+            mp_rank_ckpt_names = self._get_mp_rank_zero_checkpoint_names(
+                load_dir=load_dir,
+                tag=tag,
+                mp_rank=mp_rank,
+                dp_world_size=dp_world_size)
+            zero_ckpt_names += mp_rank_ckpt_names
+
+        return zero_ckpt_names
+
+    def _get_all_zero_checkpoints(self, load_dir, tag):
+        mp_rank = 0 if self.mpu is None else self.mpu.get_model_parallel_rank()
+        zero_ckpt_names = self._get_mp_rank_zero_checkpoint_names(
+            load_dir=load_dir,
+            tag=tag,
+            mp_rank=mp_rank,
+            dp_world_size=self.loaded_checkpoint_dp_world_size)
+        invalid_zero_ckpt_paths = []
+        for ckpt_name in zero_ckpt_names:
+            if not os.path.exists(ckpt_name):
+                invalid_zero_ckpt_paths.append(ckpt_name)
+
+        if len(invalid_zero_ckpt_paths) > 0:
+            logging.warn(
+                f"Client provided zero checkpoint load paths: {invalid_zero_ckpt_paths} does not exist"
+            )
             return None
 
-        zero_sd = torch.load(zero_checkpoint_name, map_location='cpu')
-        self.optimizer.load_state_dict(zero_sd['optimizer_state_dict'],
-                                       load_optimizer_states=load_optimizer_states)
-        logger.info('loading zero checkpoint {}'.format(zero_checkpoint_name))
+        zero_sd_list = []
+        for ckpt_name in zero_ckpt_names:
+            zero_sd_list.append(torch.load(ckpt_name, map_location='cpu'))
+
+        zero_optimizer_sd = [sd['optimizer_state_dict'] for sd in zero_sd_list]
+        print(
+            f"successfully loaded {len(zero_optimizer_sd)} ZeRO state_dicts for rank {self.global_rank}"
+        )
+        return zero_optimizer_sd
 
     def save_checkpoint(self, save_dir, tag, client_state={}):
         r"""Save training checkpoint
@@ -1232,6 +1295,10 @@ class DeepSpeedLight(Module):
             self.skipped_steps,
             'global_steps':
             self.global_steps,
+            'dp_world_size':
+            self.dp_world_size,
+            'mp_world_size':
+            self.mp_world_size
         }
         state.update(client_state)
 
