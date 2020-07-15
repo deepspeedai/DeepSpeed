@@ -33,9 +33,10 @@ def test_lamb_fp32_grad_clip(tmpdir):
         data_loader = random_dataloader(model=model,
                                         total_samples=50,
                                         hidden_dim=hidden_dim,
-                                        device=model.device)
+                                        device=model.device,
+                                        dtype=torch.float)
         for n, batch in enumerate(data_loader):
-            loss = model(batch[0].float(), batch[1])
+            loss = model(batch[0], batch[1])
             model.backward(loss)
             model.step()
 
@@ -81,7 +82,7 @@ def test_lamb_fp16_basic(tmpdir):
 
 def test_lamb_fp16_empty_grad(tmpdir):
     config_dict = {
-        "train_batch_size": 1,
+        "train_batch_size": 2,
         "steps_per_print": 1,
         "optimizer": {
             "type": "Lamb",
@@ -97,9 +98,9 @@ def test_lamb_fp16_empty_grad(tmpdir):
     args = args_from_dict(tmpdir, config_dict)
     hidden_dim = 10
 
-    model = SimpleModel(hidden_dim, empty_grad=True)
+    model = SimpleModel(hidden_dim, empty_grad=True, rank=args.local_rank)
 
-    @distributed_test(world_size=[1])
+    @distributed_test(world_size=[2])
     def _test_lamb_fp16_empty_grad(args, model, hidden_dim):
         model, _, _,_ = deepspeed.initialize(args=args,
                                              model=model,
@@ -114,6 +115,44 @@ def test_lamb_fp16_empty_grad(tmpdir):
             model.step()
 
     _test_lamb_fp16_empty_grad(args=args, model=model, hidden_dim=hidden_dim)
+
+
+def test_adam_fp32_empty_grad(tmpdir):
+    config_dict = {
+        "train_batch_size": 2,
+        "steps_per_print": 1,
+        "optimizer": {
+            "type": "Adam",
+            "params": {
+                "lr": 0.00015
+            }
+        },
+        "gradient_clipping": 1.0,
+        "fp16": {
+            "enabled": False
+        }
+    }
+    args = args_from_dict(tmpdir, config_dict)
+    hidden_dim = 10
+
+    model = SimpleModel(hidden_dim, empty_grad=True, rank=args.local_rank)
+
+    @distributed_test(world_size=[2])
+    def _test_adam_fp32_empty_grad(args, model, hidden_dim):
+        model, _, _,_ = deepspeed.initialize(args=args,
+                                             model=model,
+                                             model_parameters=model.parameters())
+        data_loader = random_dataloader(model=model,
+                                        total_samples=50,
+                                        hidden_dim=hidden_dim,
+                                        device=model.device,
+                                        dtype=torch.float)
+        for n, batch in enumerate(data_loader):
+            loss = model(batch[0], batch[1])
+            model.backward(loss)
+            model.step()
+
+    _test_adam_fp32_empty_grad(args=args, model=model, hidden_dim=hidden_dim)
 
 
 def test_adamw_fp16_basic(tmpdir):
@@ -495,3 +534,41 @@ def test_adam_amp_o2(tmpdir):
             model.step()
 
     _test_adam_amp_o2(args=args, model=model, hidden_dim=hidden_dim)
+
+
+def test_adam_amp_o2_empty_grad(tmpdir):
+    config_dict = {
+        "train_batch_size": 2,
+        "steps_per_print": 1,
+        "optimizer": {
+            "type": "Adam",
+            "params": {
+                "lr": 0.00015
+            }
+        },
+        "gradient_clipping": 1.0,
+        "amp": {
+            "enabled": True,
+            "opt_level": "O2"
+        }
+    }
+    args = args_from_dict(tmpdir, config_dict)
+    hidden_dim = 10
+
+    model = SimpleModel(hidden_dim, empty_grad=False, rank=args.local_rank)
+
+    @distributed_test(world_size=[2])
+    def _test_adam_amp_o2_empty_grad(args, model, hidden_dim):
+        model, _, _,_ = deepspeed.initialize(args=args,
+                                             model=model,
+                                             model_parameters=model.parameters())
+        data_loader = random_dataloader(model=model,
+                                        total_samples=50,
+                                        hidden_dim=hidden_dim,
+                                        device=model.device)
+        for n, batch in enumerate(data_loader):
+            loss = model(batch[0], batch[1])
+            model.backward(loss)
+            model.step()
+
+    _test_adam_amp_o2_empty_grad(args=args, model=model, hidden_dim=hidden_dim)
