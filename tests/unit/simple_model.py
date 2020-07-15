@@ -41,9 +41,9 @@ class SimpleOptimizer(torch.optim.Optimizer):
         return loss
 
 
-def random_dataloader(model, total_samples, hidden_dim, device):
+def random_dataloader(model, total_samples, hidden_dim, device, dtype=torch.half):
     batch_size = model.train_micro_batch_size_per_gpu()
-    train_data = torch.randn(total_samples, hidden_dim, device=device, dtype=torch.half)
+    train_data = torch.randn(total_samples, hidden_dim, device=device, dtype=dtype)
     train_label = torch.empty(total_samples,
                               dtype=torch.long,
                               device=device).random_(hidden_dim)
