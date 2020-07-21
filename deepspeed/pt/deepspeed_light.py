@@ -144,11 +144,11 @@ class DeepSpeedLight(Module):
         self._configure_with_arguments(args, mpu)
         self._do_sanity_check()
 
-        self.sample_count = 0
-        if self.tensorboard_enabled():
-            self.summary_writer = self.get_summary_writer()
-
         self._init_distributed(dist_init_required)
+
+        self.sample_count = 0
+        if self.tensorboard_enabled() and self.global_rank == 0:
+            self.summary_writer = self.get_summary_writer()
 
         # Configure distributed model
         self._configure_distributed_model(model)
