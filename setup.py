@@ -14,7 +14,7 @@ from setuptools import setup, find_packages
 from torch.utils.cpp_extension import CUDAExtension, BuildExtension
 
 cmdclass = {}
-cmdclass['build_ext'] = BuildExtension
+cmdclass['build_ext'] = BuildExtension.with_options(use_ninja=False)
 
 TORCH_MAJOR = int(torch.__version__.split('.')[0])
 TORCH_MINOR = int(torch.__version__.split('.')[1])
