@@ -160,6 +160,7 @@ class DeepSpeedLight(Module):
         self.tput_timer = ThroughputTimer(
             batch_size=self.train_micro_batch_size_per_gpu(),
             num_workers=self.dp_world_size,
+            steps_per_output=self.steps_per_print(),
             monitor_memory=False)
 
         self.training_dataloader = self.deepspeed_io(
