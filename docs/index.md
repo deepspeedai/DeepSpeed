@@ -27,9 +27,13 @@ information [here](https://innovation.microsoft.com/en-us/exploring-ai-at-scale)
 {% assign news = site.posts | where: "sneak_preview", "false" %}
 {% for post in news limit:5 %}
   {% if post.link %}
-  * [{{ post.date | date: "%Y/%m/%d"  }}] [{{ post.title }}]({{ post.link }}) {% if post.new_post %} <span style="color:dodgerblue">**NEW!**</span> {% endif %}
+    {% if post.image %}
+* [{{ post.date | date: "%Y/%m/%d"  }}] [ {{ post.title }} {% if post.new_post %} <span style="color:dodgerblue">**NEW!**</span> {% endif %} ![]({{ post.image }}) ]({{ post.link }})
+    {% else %}
+* [{{ post.date | date: "%Y/%m/%d"  }}] [{{ post.title }}]({{ post.link }}) {% if post.new_post %} <span style="color:dodgerblue">**NEW!**</span> {% endif %}
+    {% endif %}
   {% else %}
-  * [{{ post.date | date: "%Y/%m/%d"}}] [{{ post.title }}]({{ post.url }}) {% if post.new_post %} <span style="color:dodgerblue">**NEW!**</span> {% endif %}
+* [{{ post.date | date: "%Y/%m/%d"}}] [{{ post.title }}]({{ post.url }}) {% if post.new_post %} <span style="color:dodgerblue">**NEW!**</span> {% endif %}
   {% endif %}
 {% endfor %}
 
