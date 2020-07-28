@@ -25,7 +25,7 @@ model_engine, optimizer, _, _ = deepspeed.initialize(args=cmd_args,
                                                      model_parameters=params)
 ```
 
-`deepspeed.inialize` ensures that all of the necessary setup required for
+`deepspeed.initialize` ensures that all of the necessary setup required for
 distributed data parallel or mixed precision training are done
 appropriately under the hood.  In addition to wrapping the model, DeepSpeed can
 construct and manage the training optimizer, data loader, and the learning rate
