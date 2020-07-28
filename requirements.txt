@@ -1,6 +1,5 @@
 torch>=1.2
 torchvision>=0.4.0
-pillow==6.2.2
 tqdm
 psutil
 tensorboardX==1.8
