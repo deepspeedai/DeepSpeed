@@ -650,8 +650,8 @@ class DeepSpeedLight(Module):
         data_parallel_world_size = None
         data_parallel_rank = None
         if self.mpu is not None:
-            data_parallel_world_size = mpu.get_data_parallel_world_size()
-            data_parallel_rank = mpu.get_data_parallel_rank()
+            data_parallel_world_size = self.mpu.get_data_parallel_world_size()
+            data_parallel_rank = self.mpu.get_data_parallel_rank()
 
         return DeepSpeedDataLoader(dataset=dataset,
                                    batch_size=batch_size,
