@@ -40,8 +40,7 @@ def flatten_dense_tensors_sub_partition_aligned(tensor_list,
                                                 dp,
                                                 max_elements_per_comm,
                                                 pg):
-    assert (max_elements_per_comm >= dp,
-            f"max_elements_per_comm {max_elements_per_comm} < dp {dp}")
+    assert max_elements_per_comm >= dp, f"max_elements_per_comm {max_elements_per_comm} < dp {dp}"
 
     num_elements = sum(t.numel() for t in tensor_list)
     log_dist("Total number of elements in model: {}, max elements per com: {}".format(
