@@ -1013,10 +1013,10 @@ class DeepSpeedLight(Module):
                 # rank is reducing the same size. In some cases it may make
                 # sense in the future to support the ability to average not
                 # w.r.t. world size but with a different value.
-                grads.append(
-                    torch.zeros(param.size(),
-                                dtype=param.dtype,
-                                device=param.device))
+                param.grad = torch.zeros(param.size(),
+                                         dtype=param.dtype,
+                                         device=param.device)
+                grads.append(param.grad.data)
             else:
                 grad_data = param.grad.data
                 if self.sparse_gradients_enabled(
