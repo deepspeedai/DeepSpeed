@@ -20,4 +20,5 @@ docs/code-docs/build
 .jekyll-cache/
 .jekyll-metadata
 
+# Testing data
 tests/unit/saved_checkpoint/
