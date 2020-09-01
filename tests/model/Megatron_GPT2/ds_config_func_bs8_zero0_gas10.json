@@ -1,0 +1,30 @@
+{
+  "train_micro_batch_size_per_gpu":8,
+  "gradient_accumulation_steps": 3,
+  "steps_per_print": 1,
+  "zero_optimization": {
+    "stage":0,
+    "reduce_bucket_size": 7000000,
+    "allgather_bucket_size": 7000000,
+    "reduce_scatter": true
+  },
+  "optimizer": {
+    "type": "Adam",
+    "params": {
+      "lr": 0.00015
+    }
+  },
+  "gradient_clipping": 1.0,
+  "fp16": {
+    "enabled": true,
+    "loss_scale": 0,
+    "loss_scale_window": 1000,
+    "hysteresis": 2,
+    "min_loss_scale": 1
+  },
+  "activation_checkpointing": {
+    "partition_activations": true,
+    "contiguous_memory_optimization": true
+  }
+
+}

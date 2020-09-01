@@ -446,16 +446,34 @@ class FP16_DeepSpeedZeroOptimizer(object):
             torch.cuda.synchronize()
 
         for i, _ in enumerate(self.fp16_groups):
-            self.averaged_gradients[i] = self.get_flat_partition(
-                self.params_in_partition[i],
-                self.first_offset[i],
-                self.partition_size[i],
-                dtype=torch.half,
-                device=torch.cuda.current_device(),
-                return_tensor_list=True)
+            if not i in self.averaged_gradients or self.averaged_gradients[i] is None:
+                self.averaged_gradients[i] = self.get_flat_partition(
+                    self.params_in_partition[i],
+                    self.first_offset[i],
+                    self.partition_size[i],
+                    dtype=torch.half,
+                    device=torch.cuda.current_device(),
+                    return_tensor_list=True)
+            else:
+                #When gradient accumulation is greater that 1
+                #This code path will be triggered and will add
+                #to the accumulated averaged gradients
+                avg_new = self.get_flat_partition(self.params_in_partition[i],
+                                                  self.first_offset[i],
+                                                  self.partition_size[i],
+                                                  dtype=torch.half,
+                                                  device=torch.cuda.current_device(),
+                                                  return_tensor_list=True)
+
+                for accumulated_grad, new_avg_grad in zip(self.averaged_gradients[i],avg_new):
+                    accumulated_grad.add_(new_avg_grad)
 
         self._release_ipg_buffers()
 
+        # No need to keep the gradients anymore.
+        # All gradients required by the step
+        # are in self.averaged_gradients
+        self.zero_grad()
         see_memory_usage(f"End ipg_epilogue")
 
     # resets all partition to no reduced
@@ -1103,6 +1121,9 @@ class FP16_DeepSpeedZeroOptimizer(object):
         if self.overflow:
             see_memory_usage('After overflow before clearing gradients')
             self.zero_grad()
+            for key in self.averaged_gradients:
+                self.averaged_gradients[key] = None
+
             see_memory_usage('After overflow after clearing gradients')
 
             logger.info(

@@ -16,7 +16,7 @@ class BaseTestCase(unittest.TestCase):
         self.baseline_dir = "./baseline"
         self.timestr = time.strftime("%Y%m%d-%H%M%S")
 
-    def gen_output_name(self, test_config, prefix):
+    def gen_output_name(self, test_config, prefix, baseline_config=False):
         other_args = test_config["other_args"] if "other_args" in test_config else ""
         zero_args = "_zero" if "zero" in test_config and test_config["zero"] else ""
         other_args = other_args.strip(' -\\').replace(" ", "").replace("\"", "")
@@ -24,7 +24,7 @@ class BaseTestCase(unittest.TestCase):
         if other_args:
             other_args = "_" + other_args
 
-        if test_config["deepspeed"]:
+        if test_config["deepspeed"] and not baseline_config:
             file_name = "_mp{0}_gpu{1}_node{2}_bs{3}_step{4}_layer{5}_hidden{6}_seq{7}_head{8}{9}_ds{10}-{11}.log".format(
                 test_config["mp"],
                 test_config["gpus"],
