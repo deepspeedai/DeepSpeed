@@ -210,8 +210,8 @@ class GPT2FuncTestCase(BaseTestCase):
             "seq_length": SEQ_LEN,
             "heads": ATTN_HEADS,
             "deepspeed": True,
-            "json": "ds_config_func_bs8_zero2_gas10.json",
-            "baseline": "ds_config_func_bs8_zero0_gas10.json",
+            "json": "ds_config_func_bs8_zero2_gas3.json",
+            "baseline": "ds_config_func_bs8_zero0_gas3.json",
         }
 
         succ = self.run_test(test_config, 0.01)
