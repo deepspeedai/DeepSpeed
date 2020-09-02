@@ -8,8 +8,8 @@ RUN apt-get update && \
     software-properties-common \
     openssh-client openssh-server \
     pdsh curl sudo net-tools \
-    vim iputils-ping wget \
-    llvm-9-dev cmake
+    vim iputils-ping wget
+    #llvm-9-dev cmake
 
 ##############################################################################
 # Installation Latest Git
