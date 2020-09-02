@@ -147,11 +147,6 @@ if [ "$no_clean" == "0" ]; then
     rm_if_exist third_party/apex/apex.egg-info
 fi
 
-echo "Updating git hash/branch info"
-echo "git_hash = '$(git rev-parse --short HEAD)'" > deepspeed/git_version_info.py
-echo "git_branch = '$(git rev-parse --abbrev-ref HEAD)'" >> deepspeed/git_version_info.py
-cat deepspeed/git_version_info.py
-
 if [ "$pip_sudo" == "1" ]; then
     PIP_SUDO="sudo -H"
 else
@@ -159,7 +154,7 @@ else
 fi
 
 if [ "$pip_mirror" != "" ]; then
-    PIP_INSTALL="pip install -v -i $pip_mirror"
+    PIP_INSTALL="pip install --use-feature=2020-resolver -v -i $pip_mirror"
 else
     PIP_INSTALL="pip install -v"
 fi
@@ -169,10 +164,10 @@ if [ ! -f $hostfile ]; then
     local_only=1
 fi
 
-if [ "$skip_requirements" == "0" ]; then
-    # Ensure dependencies are installed locally
-    $PIP_SUDO $PIP_INSTALL -r requirements.txt
-fi
+#if [ "$skip_requirements" == "0" ]; then
+#    # Ensure dependencies are installed locally
+#    $PIP_SUDO $PIP_INSTALL -r requirements.txt
+#fi
 
 # Build wheels
 if [ "$third_party_install" == "1" ]; then
@@ -205,7 +200,8 @@ if [ "$local_only" == "1" ]; then
         echo "Installing deepspeed"
         $PIP_SUDO pip uninstall -y deepspeed
         $PIP_SUDO $PIP_INSTALL dist/deepspeed*.whl
-        python basic_install_test.py
+	# -I to exclude local directory files
+        python -I basic_install_test.py
         if [ $? == 0 ]; then
             echo "Installation is successful"
         else
@@ -224,10 +220,10 @@ else
     tmp_wheel_path="/tmp/deepspeed_wheels"
 
     pdsh -w $hosts "if [ -d $tmp_wheel_path ]; then rm $tmp_wheel_path/*.whl; else mkdir -pv $tmp_wheel_path; fi"
-    pdcp -w $hosts requirements.txt ${tmp_wheel_path}/
-    if [ "$skip_requirements" == "0" ]; then
-        pdsh -w $hosts "$PIP_SUDO $PIP_INSTALL -r ${tmp_wheel_path}/requirements.txt"
-    fi
+    #pdcp -w $hosts requirements/*.txt ${tmp_wheel_path}/
+    #if [ "$skip_requirements" == "0" ]; then
+    #    pdsh -w $hosts "$PIP_SUDO $PIP_INSTALL -r ${tmp_wheel_path}/requirements.txt"
+    #fi
     if [ "$third_party_install" == "1" ]; then
         pdsh -w $hosts "$PIP_SUDO pip uninstall -y apex"
         pdcp -w $hosts third_party/apex/dist/apex*.whl $tmp_wheel_path/

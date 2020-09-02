@@ -1,33 +1,47 @@
 '''
 Copyright 2020 The Microsoft DeepSpeed Team
 '''
+import sys
+import types
 
-from deepspeed.pt.deepspeed_light import DeepSpeedLight
-from deepspeed.pt.deepspeed_light import ADAM_OPTIMIZER, LAMB_OPTIMIZER
-from deepspeed.pt.deepspeed_lr_schedules import add_tuning_arguments
-from deepspeed.pt.log_utils import logger
-from deepspeed.pt.deepspeed_cuda import DeepSpeedTransformerLayer, DeepSpeedTransformerConfig
-from deepspeed.pt.deepspeed_config import DeepSpeedConfig
-
-import deepspeed.pt.deepspeed_checkpointing as checkpointing
+from deepspeed.runtime.engine import DeepSpeedEngine
+from deepspeed.runtime.engine import ADAM_OPTIMIZER, LAMB_OPTIMIZER
+from deepspeed.runtime.lr_schedules import add_tuning_arguments
+from deepspeed.runtime.config import DeepSpeedConfig
+from deepspeed.runtime.activation_checkpointing import checkpointing
+from deepspeed.ops.transformer import DeepSpeedTransformerLayer, DeepSpeedTransformerConfig
+from deepspeed.utils import logger
 
 try:
-    from deepspeed.git_version_info import git_hash, git_branch
+    from deepspeed.git_version_info import version, git_hash, git_branch
 except ImportError:
+    version = "0.0.0+unknown"
     git_hash = None
     git_branch = None
 
 # Export version information
-__version_major__ = 0
-__version_minor__ = 2
-__version_patch__ = 0
+version, __version_tag__ = version.split('+')
+__version_major__ = int(version.split('.')[0])
+__version_minor__ = int(version.split('.')[1])
+__version_patch__ = int(version.split('.')[2])
 __version__ = '.'.join(
     map(str,
         [__version_major__,
          __version_minor__,
          __version_patch__]))
+__version__ = f"{__version__}+{__version_tag__}"
 __git_hash__ = git_hash
 __git_branch__ = git_branch
+
+# Provide backwards compatability with old deepspeed.pt module structure, should hopefully not be used
+pt = types.ModuleType('pt', 'dummy pt module for backwards compatability')
+deepspeed = sys.modules[__name__]
+setattr(deepspeed, 'pt', pt)
+setattr(deepspeed.pt, 'deepspeed_utils', deepspeed.runtime.utils)
+sys.modules['deepspeed.pt'] = deepspeed.pt
+sys.modules['deepspeed.pt.deepspeed_utils'] = deepspeed.runtime.utils
+setattr(deepspeed.pt, 'deepspeed_config', deepspeed.runtime.config)
+sys.modules['deepspeed.pt.deepspeed_config'] = deepspeed.runtime.config
 
 
 def initialize(args,
@@ -90,16 +104,16 @@ def initialize(args,
             __git_branch__),
     )
 
-    engine = DeepSpeedLight(args=args,
-                            model=model,
-                            optimizer=optimizer,
-                            model_parameters=model_parameters,
-                            training_data=training_data,
-                            lr_scheduler=lr_scheduler,
-                            mpu=mpu,
-                            dist_init_required=dist_init_required,
-                            collate_fn=collate_fn,
-                            config_params=config_params)
+    engine = DeepSpeedEngine(args=args,
+                             model=model,
+                             optimizer=optimizer,
+                             model_parameters=model_parameters,
+                             training_data=training_data,
+                             lr_scheduler=lr_scheduler,
+                             mpu=mpu,
+                             dist_init_required=dist_init_required,
+                             collate_fn=collate_fn,
+                             config_params=config_params)
 
     return_items = [
         engine,

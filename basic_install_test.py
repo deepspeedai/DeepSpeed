@@ -18,7 +18,7 @@ except Exception as err:
     raise err
 
 try:
-    fused_lamb = importlib.import_module('deepspeed_lamb_cuda')
+    fused_lamb = importlib.import_module('deepspeed.ops.lamb.fused_lamb_cuda')
     print('deepspeed fused lamb kernels successfully installed')
 except Exception as err:
     raise err
@@ -30,7 +30,8 @@ except ImportError:
     print("using new-style apex")
 
 try:
-    ds_transformer = importlib.import_module('deepspeed_transformer_cuda')
+    ds_transformer = importlib.import_module(
+        'deepspeed.ops.transformer.transformer_cuda')
     print('deepspeed transformer kernels successfully installed')
 except Exception as err:
     raise err

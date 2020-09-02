@@ -1,6 +1,6 @@
 import torch
 import random
-from deepspeed.pt.deepspeed_csr_tensor import CSRTensor
+from deepspeed.runtime.csr_tensor import CSRTensor
 
 
 def test_csr_addition_self():

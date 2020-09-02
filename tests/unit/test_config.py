@@ -9,7 +9,7 @@ import torch.distributed as dist
 
 # A test on its own
 import deepspeed
-from deepspeed.pt.deepspeed_config import DeepSpeedConfig
+from deepspeed.runtime.config import DeepSpeedConfig
 
 
 def test_cuda():

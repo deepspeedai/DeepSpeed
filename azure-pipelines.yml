@@ -1,49 +1,83 @@
 
 jobs:
-- job: Default
+- job: DeepSpeed_Tests
   timeoutInMinutes: 360
   pool:
-    name: 'GPU_testing'
+    name: 'DS_testing'
 
   strategy:
     matrix:
-      Python36:
+      PyTorch12-CUDA100:
         python.version: '3.6'
-      #Python35:
-      #  python.version: '3.5'
-      #Python37:
+        cuda.version: '10.0'
+        pytorch.version: '1.2'
+        torchvision.version: '0.4.0'
+        runmodeltests: true
+      #PyTorch15-CUDA101:
       #  python.version: '3.7'
-      #Python38:
-      #  python.version: '3.8'
+      #  cuda.version: '10.1'
+      #  pytorch.version: '1.5.0+cu101'
+      #  torchvision.version: '0.6.0+cu101'
+      #  runmodeltests: true
+      ##PyTorch15-CUDA102:
+      #  python.version: '3.7'
+      #  cuda.version: '10.2'
+      #  pytorch.version: '1.5'
+      #  torchvision.version: '0.6.1'
+      #  runmodeltests: true
 
+  variables:
+    conda_env: 'ds_test_py$(python.version)_cuda$(cuda.version)_pytorch$(pytorch.version)'
 
   steps:
-  - task: UsePythonVersion@0
-    inputs:
-      versionSpec: '$(python.version)'
-      addToPath: true
-      architecture: 'x64'
-    displayName: 'Use Python $(python.version)'
+    # Unfortunately nvidia's nvcc_linux-64=<version> seems to install 10.1 regardless?
+    # Most of this complexity is a workaround to get the compiler toolchain to match the
+    # cudatoolkit runtime
+  - script: |
+      conda create --force --yes -n $(conda_env) python=$(python.version) cudatoolkit=$(cuda.version)
+      source activate $(conda_env)
+      conda install -q --yes conda
+      conda install -q --yes pip
+      conda install -q --yes gxx_linux-64
+      if [[ $(cuda.version) != "10.2" ]]; then conda install --yes -c conda-forge cudatoolkit-dev=$(cuda.version) ; fi
+    displayName: 'Setup environment python=$(python.version) pytorch=$(pytorch.version) cuda=$(cuda.version)'
+
+    # Manually install torch/torchvision first to enforce versioning.
+  - script: |
+      source activate $(conda_env)
+      pip install --progress-bar=off torch==$(pytorch.version) torchvision==$(torchvision.version)
+      #-f https://download.pytorch.org/whl/torch_stable.html
+      ./install.sh --local_only
+      #python -I basic_install_test.py
+    displayName: 'Install DeepSpeed'
 
   - script: |
-      python -m pip install --upgrade pip
-      pip install --user -r requirements.txt
-      ./install.sh --pip_sudo
-    displayName: 'Install dependencies'
+      source activate $(conda_env)
+      which python
+      python --version
+      which nvcc
+      nvcc --version
+      which deepspeed
+      python -c "import torch; print('torch:', torch.__version__, torch)"
+      python -c "import torch; print('CUDA available:', torch.cuda.is_available())"
+      python -c "import deepspeed; print('deepspeed:', deepspeed.__version__)"
+    displayName: 'Show environment'
+
 
   - script: |
-      pre-commit run --all-files
-    displayName: 'Formatting checks'
-
-  - script: |
-      pytest --forked --verbose tests/unit/
+      source activate $(conda_env)
+      pytest --durations=0 --forked --verbose -x tests/unit/
     displayName: 'Unit tests'
 
   - script: |
+      source activate $(conda_env)
       ln -s /data/Megatron-LM/data DeepSpeedExamples/Megatron-LM/
-      pip install --user -r DeepSpeedExamples/Megatron-LM/requirements.txt
+      pip install --progress-bar=off -r DeepSpeedExamples/Megatron-LM/requirements.txt
       cd tests/model/
-      pytest -s run_sanity_check.py
+      rm -rf BingBertSquad/baseline
+      rm -rf Megatron_GPT2/baseline
+      pytest --durations=0 -s run_sanity_check.py
+    condition: and(succeeded(), eq(variables['runmodeltests'], true))
     displayName: 'Model tests'
 
    #BingBertSquad logs
@@ -52,35 +86,29 @@ jobs:
       targetPath: '$(Build.SourcesDirectory)/tests/model/BingBertSquad/test/'
       artifactName: BingBertSquad_logs
     displayName: 'BingBertSquad log uploads'
-    condition: always()
-
-  # Megatron test logs
-  #- task: PublishPipelineArtifact@1
-  #  inputs:
-  #    targetPath: '$(Build.SourcesDirectory)/tests/model/Megatron_GPT2/test/'
-  #    artifactName: Megatron_GPT2_logs
-  #  displayName: 'Megatron GPT2 log uploads'
-  #  condition: always()
-
-  #- task: PublishPipelineArtifact@1
-  #  inputs:
-  #    targetPath: '$(Build.SourcesDirectory)/tests/model/Megatron_GPT2/checkpoint_test_logs/'
-  #    artifactName: Megatron_GPT2_checkpoint_logs
-  #  displayName: 'Megatron GPT2 checkpoint log uploads'
-  #  condition: always()
+    condition: eq(variables['runmodeltests'], true)
 
 
-  #BingBert logs
-  #- task: PublishPipelineArtifact@1
-  #  inputs:
-  #    targetPath: '$(Build.SourcesDirectory)/tests/model/bing_bert/pretrain_test/'
-  #    artifactName: BingBert_pretrain_logs
-  #  displayName: 'BingBert pretrain logs'
-  #  condition: always()
+- job: Code_Quality_Checks
+  pool:
+    name: 'DS_testing'
+  variables:
+    conda_env: 'ds_codetest'
 
-  #- task: PublishPipelineArtifact@1
-  #  inputs:
-  #    targetPath: '$(Build.SourcesDirectory)/tests/model/bing_bert/checkpoint_test_logs/'
-  #    artifactName: BingBert_checkpoint_logs
-  #  displayName: 'BingBert checkpoint logs'
-  #  condition: always()
+  steps:
+  - script: |
+      conda create --force --yes -n $(conda_env) python=3.7
+      source activate $(conda_env)
+    displayName: 'Create code test environment'
+
+  - script: |
+      source activate $(conda_env)
+      pip install pre-commit
+      pre-commit run --all-files
+    displayName: 'Formatting checks'
+
+  - script: |
+      source activate $(conda_env)
+      pip install pylint
+      pylint --exit-zero deepspeed/
+    displayName: 'Code linter'

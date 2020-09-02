@@ -1,10 +1,10 @@
 import torch
 import deepspeed
-from deepspeed.pt.deepspeed_zero_optimizer import FP16_DeepSpeedZeroOptimizer
-from deepspeed.pt.zero_optimizer_stage1 import FP16_DeepSpeedZeroOptimizer_Stage1
+from deepspeed.runtime.zero.stage2 import FP16_DeepSpeedZeroOptimizer
+from deepspeed.runtime.zero.stage1 import FP16_DeepSpeedZeroOptimizer_Stage1
 
-from deepspeed.pt.fp16_optimizer import FP16_Optimizer
-from deepspeed.pt.fp16_unfused_optimizer import FP16_UnfusedOptimizer
+from deepspeed.runtime.fp16.fused_optimizer import FP16_Optimizer
+from deepspeed.runtime.fp16.unfused_optimizer import FP16_UnfusedOptimizer
 
 import argparse
 import pytest

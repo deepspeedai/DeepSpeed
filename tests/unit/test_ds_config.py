@@ -1,7 +1,7 @@
 import pytest
 import os
 import json
-from deepspeed.pt import deepspeed_config as ds_config
+from deepspeed.runtime import config as ds_config
 
 
 def test_only_required_fields(tmpdir):

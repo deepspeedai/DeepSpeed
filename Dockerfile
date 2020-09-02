@@ -8,7 +8,8 @@ RUN apt-get update && \
     software-properties-common \
     openssh-client openssh-server \
     pdsh curl sudo net-tools \
-    vim iputils-ping wget
+    vim iputils-ping wget \
+    llvm-9-dev cmake
 
 ##############################################################################
 # Installation Latest Git
@@ -85,7 +86,7 @@ RUN mkdir -p ${STAGE_DIR} && \
     dpkg -i ${STAGE_DIR}/nvidia-peer-memory_${NV_PEER_MEM_TAG}_all.deb
 
 ##############################################################################
-## Ucomment and set SSH Daemon port
+## SSH daemon port inside container cannot conflict with host OS port
 ###############################################################################
 ENV SSH_PORT=2222
 RUN cat /etc/ssh/sshd_config > ${STAGE_DIR}/sshd_config && \

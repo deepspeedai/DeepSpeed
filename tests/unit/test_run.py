@@ -1,6 +1,6 @@
 import pytest
 
-from deepspeed.pt import deepspeed_run as dsrun
+from deepspeed.launcher import runner as dsrun
 
 
 def test_parser_mutual_exclusive():

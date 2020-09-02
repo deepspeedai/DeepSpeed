@@ -1,9 +1,0 @@
-torch>=1.2
-torchvision>=0.4.0
-tqdm
-psutil
-tensorboardX==1.8
-pytest
-pytest-forked
-pre-commit
-clang-format

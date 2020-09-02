@@ -19,6 +19,9 @@ training](https://www.deepspeed.ai/news/2020/05/27/fastest-bert-training.html).
 
 To use transformer kernel for training a model, you should Integrate DeepSpeed into your training script using the [Getting Started](/getting-started/) guide.
 
+**Note:** Currently DeepSpeed Transformer Kernels do not support Sparse Attention. To use Sparse Attention, you need to disable Transformer Kernels!
+{: .notice--warning}
+
 ### **Integrate Transformer Kernel**
 
 First of all, you need to integrate transformer kernel into the top-level model. Here, we show an example of instantiating the transformer kernel using the Pre-LN BERT-Large configuration settings. This configuration has 24 layers with 1024 hidden-dimension and uses the sequence length of 128 and batch size of 64. To add all these layers, we copy the same layer specification `num_hidden_layer`  times with different IDs inside a ModuleList.
