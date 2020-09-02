@@ -33,6 +33,7 @@ RUN apt-get install -y python3 python3-dev && \
     pip install --upgrade pip && \
     # Print python an pip version
     python -V && pip -V
+RUN pip install pyyaml
 
 ##############################################################################
 # TensorFlow
