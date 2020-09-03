@@ -64,5 +64,7 @@ lnav:
         url: /tutorials/1Cycle/
       - title: "Learning Rate Range Test"
         url: /tutorials/lrrt/
+      - title: "DeepSpeed Sparse Attention"
+        url: /tutorials/sparse_attention/
   - title: "Contributing"
     url: /contributing/
