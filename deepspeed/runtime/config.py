@@ -205,7 +205,7 @@ def get_sparse_fixed_config(sparsity):
         sparsity,
         SPARSE_HORIZONTAL_GLOBAL_ATTENTION,
         SPARSE_HORIZONTAL_GLOBAL_ATTENTION_DEFAULT)
-    num_differnt_global_patterns = get_scalar_param(
+    num_different_global_patterns = get_scalar_param(
         sparsity,
         SPARSE_NUM_DIFFERENT_GLOBAL_PATTERNS,
         SPARSE_NUM_DIFFERENT_GLOBAL_PATTERNS_DEFAULT)
@@ -218,7 +218,7 @@ def get_sparse_fixed_config(sparsity):
         SPARSE_NUM_GLOBAL_BLOCKS: num_global_blocks,
         SPARSE_ATTENTION_TYPE: attention,
         SPARSE_HORIZONTAL_GLOBAL_ATTENTION: horizontal_global_attention,
-        SPARSE_NUM_DIFFERENT_GLOBAL_PATTERNS: num_differnt_global_patterns
+        SPARSE_NUM_DIFFERENT_GLOBAL_PATTERNS: num_different_global_patterns
     }
 
 
