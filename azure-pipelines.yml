@@ -91,11 +91,14 @@ jobs:
 
 - job: Code_Quality_Checks
   pool:
-    name: 'DS_testing'
+    vmImage: 'ubuntu-latest'
   variables:
     conda_env: 'ds_codetest'
 
   steps:
+  - bash: echo "##vso[task.prependpath]$CONDA/bin"
+    displayName: Add conda to PATH
+
   - script: |
       conda create --force --yes -n $(conda_env) python=3.7
       source activate $(conda_env)
