@@ -29,7 +29,15 @@ gem install jekyll bundler
 ```
 
 ### Start a local webserver
-We now need to install the required Ruby packages for the website. **NOTE**: this step frequently hangs when connected to a VPN (including MSVPN). Simply disconnect for the package installation.
+We now need to install the required Ruby packages for the website.
+
+**NOTE**: you should change to this folder (i.e., docs) before running the installation command to avoid this [error](https://stackoverflow.com/questions/10012181/bundle-install-returns-could-not-locate-gemfile/35157872):
+
+> Could not locate Gemfile
+
+**NOTE**: this step frequently hangs when connected to a VPN (including MSVPN). Simply disconnect for the package installation.
+
+
 ```
 bundle install
 ```
