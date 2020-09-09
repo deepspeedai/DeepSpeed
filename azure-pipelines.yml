@@ -69,24 +69,24 @@ jobs:
       pytest --durations=0 --forked --verbose -x tests/unit/
     displayName: 'Unit tests'
 
-  - script: |
-      source activate $(conda_env)
-      ln -s /data/Megatron-LM/data DeepSpeedExamples/Megatron-LM/
-      pip install --progress-bar=off -r DeepSpeedExamples/Megatron-LM/requirements.txt
-      cd tests/model/
-      rm -rf BingBertSquad/baseline
-      rm -rf Megatron_GPT2/baseline
-      pytest --durations=0 -s run_sanity_check.py
-    condition: and(succeeded(), eq(variables['runmodeltests'], true))
-    displayName: 'Model tests'
+#   - script: |
+#       source activate $(conda_env)
+#       ln -s /data/Megatron-LM/data DeepSpeedExamples/Megatron-LM/
+#       pip install --progress-bar=off -r DeepSpeedExamples/Megatron-LM/requirements.txt
+#       cd tests/model/
+#       rm -rf BingBertSquad/baseline
+#       rm -rf Megatron_GPT2/baseline
+#       pytest --durations=0 -s run_sanity_check.py
+#     condition: and(succeeded(), eq(variables['runmodeltests'], true))
+#     displayName: 'Model tests'
 
-   #BingBertSquad logs
-  - task: PublishPipelineArtifact@1
-    inputs:
-      targetPath: '$(Build.SourcesDirectory)/tests/model/BingBertSquad/test/'
-      artifactName: BingBertSquad_logs
-    displayName: 'BingBertSquad log uploads'
-    condition: eq(variables['runmodeltests'], true)
+#   #BingBertSquad logs
+#   - task: PublishPipelineArtifact@1
+#     inputs:
+#       targetPath: '$(Build.SourcesDirectory)/tests/model/BingBertSquad/test/'
+#       artifactName: BingBertSquad_logs
+#     displayName: 'BingBertSquad log uploads'
+#     condition: eq(variables['runmodeltests'], true)
 
 
 - job: Code_Quality_Checks
