@@ -221,3 +221,22 @@ Please see the [core API doc](https://deepspeed.readthedocs.io/) for more detail
   }
 }
 ```
+## Sparse Attention
+DeepSpeed offers sparse attention to support long sequences. Please refer to the [Sparse Attention](/tutorials/sparse_attention/) tutorial.
+
+```python
+--deepspeed_sparse_attention
+```
+
+```python
+"sparse_attention": {
+    "mode": "fixed",
+    "block": 16,
+    "different_layout_per_head": true,
+    "num_local_blocks": 4,
+    "num_global_blocks": 1,
+    "attention": "bidirectional",
+    "horizontal_global_attention": false,
+    "num_different_global_patterns": 4
+}
+```
