@@ -12,7 +12,7 @@ jobs:
         cuda.version: '10.0'
         pytorch.version: '1.2'
         torchvision.version: '0.4.0'
-        runmodeltests: true
+        runmodeltests: false
       #PyTorch15-CUDA101:
       #  python.version: '3.7'
       #  cuda.version: '10.1'
@@ -40,6 +40,7 @@ jobs:
       conda install -q --yes pip
       conda install -q --yes gxx_linux-64
       if [[ $(cuda.version) != "10.2" ]]; then conda install --yes -c conda-forge cudatoolkit-dev=$(cuda.version) ; fi
+      echo "PATH=$PATH, LD_LIBRARY_PATH=$LD_LIBRARY_PATH"
     displayName: 'Setup environment python=$(python.version) pytorch=$(pytorch.version) cuda=$(cuda.version)'
 
     # Manually install torch/torchvision first to enforce versioning.

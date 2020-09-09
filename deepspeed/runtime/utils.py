@@ -8,6 +8,7 @@ Helper functions and classes from multiple sources.
 
 import torch
 from torch._six import inf
+import torch.distributed as dist
 
 from deepspeed.utils import logger
 
@@ -23,7 +24,8 @@ class CheckOverflow(object):
                 for param in group:
                     self.params.append(param)
 
-    def check_using_norm(self, norm_group):
+    def check_using_norm(self, norm_group, reduce_overflow=True):
+        #TODO: I don't think reduce_overflow is needed if mpu is None
         overflow = -1 in norm_group
 
         if self.mpu is not None:
@@ -32,6 +34,11 @@ class CheckOverflow(object):
                                          op=torch.distributed.ReduceOp.MAX,
                                          group=self.mpu.get_model_parallel_group())
             overflow = overflow_gpu[0].item()
+        elif reduce_overflow:
+            cuda_overflow = torch.cuda.FloatTensor([overflow])
+            dist.all_reduce(cuda_overflow, op=torch.distributed.ReduceOp.MAX)
+            dist.barrier()
+            overflow = cuda_overflow[0].item()
 
         return bool(overflow)
 

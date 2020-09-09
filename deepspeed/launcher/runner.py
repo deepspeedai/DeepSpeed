@@ -1,5 +1,9 @@
+# Copyright 2020 The Microsoft DeepSpeed Team
 """
-Copyright 2020 The Microsoft DeepSpeed Team
+DeepSpeed runner is the main front-end to launching multi-worker
+training jobs with DeepSpeed. By default this uses pdsh to parallel
+ssh into multiple worker nodes and launch all the neccisary processes
+per rank for training.
 """
 
 import os
@@ -14,11 +18,13 @@ from copy import deepcopy
 
 import torch.cuda
 
-from deepspeed.runtime.constants import TORCH_DISTRIBUTED_DEFAULT_PORT
-from deepspeed.utils import logger
+from .multinode_runner import PDSHRunner, OpenMPIRunner, MVAPICHRunner
+from .constants import TORCH_DISTRIBUTED_DEFAULT_PORT, \
+    PDSH_LAUNCHER, OPENMPI_LAUNCHER, MVAPICH_LAUNCHER
+from ..utils import logger
 
 DLTS_HOSTFILE = "/job/hostfile"
-EXPORT_ENVS = ["NCCL", "PYTHON"]
+EXPORT_ENVS = ["NCCL", "PYTHON", "MV2", 'UCX']
 DEEPSPEED_ENVIRONMENT_NAME = ".deepspeed_env"
 DEEPSPEED_ENVIRONMENT_PATHS = [os.path.expanduser("~"), '.']
 PDSH_MAX_FAN_OUT = 1024
@@ -62,12 +68,20 @@ def parse_args(args=None):
                         resources except slot 0 on worker-1.
                         ''')
 
-    parser.add_argument("--num_nodes", type=int, default=-1, help="")
+    parser.add_argument("--num_nodes",
+                        type=int,
+                        default=-1,
+                        help="Total number of worker nodes to run on, this will use "
+                        "the top N hosts from the given hostfile.")
 
-    parser.add_argument("--num_gpus", type=int, default=-1, help="")
+    parser.add_argument("--num_gpus",
+                        type=int,
+                        default=-1,
+                        help="Max number of GPUs to use on each node, will use "
+                        "[0:N) GPU ids on each node.")
 
     parser.add_argument("--master_port",
-                        default=int(TORCH_DISTRIBUTED_DEFAULT_PORT),
+                        default=TORCH_DISTRIBUTED_DEFAULT_PORT,
                         type=int,
                         help="(optional) Port used by PyTorch distributed for "
                         "communication during training.")
@@ -77,6 +91,18 @@ def parse_args(args=None):
                         type=str,
                         help="(optional) IP address of node 0, will be "
                         "inferred via 'hostname -I' if not specified.")
+
+    parser.add_argument("--launcher",
+                        default=PDSH_LAUNCHER,
+                        type=str,
+                        help="(optional) choose launcher backend for multi-node"
+                        "training. Options currently include PDSH, OpenMPI, MVAPICH.")
+
+    parser.add_argument("--launcher_args",
+                        default="",
+                        type=str,
+                        help="(optional) pass launcher specific arguments as a "
+                        "single quoted argument.")
 
     parser.add_argument("user_script",
                         type=str,
@@ -292,17 +318,18 @@ def main(args=None):
         ]
         cmd = deepspeed_launch + [args.user_script] + args.user_args
     else:
-        env['PDSH_RCMD_TYPE'] = 'ssh'
+        args.launcher = args.launcher.lower()
+        if args.launcher == PDSH_LAUNCHER:
+            runner = PDSHRunner(args, world_info_base64)
+        elif args.launcher == OPENMPI_LAUNCHER:
+            runner = OpenMPIRunner(args, world_info_base64, resource_pool)
+        elif args.launcher == MVAPICH_LAUNCHER:
+            runner = MVAPICHRunner(args, world_info_base64, resource_pool)
+        else:
+            raise NotImplementedError(f"Unknown launcher {args.launcher}")
 
-        active_workers = ",".join(active_resources.keys())
-        logger.info("Running on the following workers: %s" % active_workers)
-
-        # PDSH flags for max node fan out and specific hosts to launch on
-        # See https://linux.die.net/man/1/pdsh for flag details
-        pdsh_cmd_args = ['pdsh', '-f', str(PDSH_MAX_FAN_OUT), '-w', active_workers]
-
-        num_nodes = len(active_resources.keys())
-        num_gpus_per_node = None
+        if not runner.backend_exists():
+            raise RuntimeError(f"launcher '{args.launcher}' not installed.")
 
         curr_path = os.path.abspath('.')
         if 'PYTHONPATH' in env:
@@ -312,33 +339,20 @@ def main(args=None):
 
         exports = ""
         for var in env.keys():
-            if any(map(lambda name: var.startswith(name), EXPORT_ENVS)):
-                exports += "export {}={}; ".format(var, env[var])
+            if any([var.startswith(name) for name in EXPORT_ENVS]):
+                runner.add_export(var, env[var])
 
         for environ_path in DEEPSPEED_ENVIRONMENT_PATHS:
             environ_file = os.path.join(environ_path, DEEPSPEED_ENVIRONMENT_NAME)
             if os.path.isfile(environ_file):
                 with open(environ_file, 'r') as fd:
                     for var in fd.readlines():
-                        exports += "export {}; ".format(var.strip())
+                        key, val = var.split('=')
+                        runner.add_export(key, val)
 
-        deepspeed_launch = [
-            exports,
-            "cd {};".format(curr_path),
-            sys.executable,
-            "-u",
-            "-m",
-            "deepspeed.launcher.launch",
-            '--world_info={}'.format(world_info_base64),
-            "--node_rank=%n",
-            "--master_addr={}".format(args.master_addr),
-            "--master_port={}".format(args.master_port)
-        ]
-        user_args = list(
-            map(lambda x: x if x.startswith("-") else "'{}'".format(x),
-                args.user_args))
-        cmd = pdsh_cmd_args + deepspeed_launch + [args.user_script] + user_args
-    logger.info("cmd={}".format(cmd))
+        cmd = runner.get_cmd(env, active_resources)
+
+    logger.info("cmd = {}".format(' '.join(cmd)))
     result = subprocess.Popen(cmd, env=env)
     result.wait()
 

@@ -14,9 +14,10 @@ from deepspeed.runtime.activation_checkpointing.config import DeepSpeedActivatio
 from deepspeed.utils import logger
 
 TENSOR_CORE_ALIGN_SIZE = 8
+ONEBIT_ADAM_OPTIMIZER = 'onebitadam'
 ADAM_OPTIMIZER = 'adam'
 LAMB_OPTIMIZER = 'lamb'
-DEEPSPEED_OPTIMIZERS = [ADAM_OPTIMIZER, LAMB_OPTIMIZER]
+DEEPSPEED_OPTIMIZERS = [ADAM_OPTIMIZER, LAMB_OPTIMIZER, ONEBIT_ADAM_OPTIMIZER]
 
 
 def get_amp_enabled(param_dict):

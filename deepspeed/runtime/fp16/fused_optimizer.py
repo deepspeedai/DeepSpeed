@@ -101,6 +101,20 @@ class FP16_Optimizer(object):
 
         self.overflow = False
         self.overflow_checker = CheckOverflow(self.fp16_groups, mpu=self.mpu)
+        self.initialize_optimizer_states()
+
+    def initialize_optimizer_states(self):
+        for i, group in enumerate(self.fp16_groups):
+            self.fp32_groups_flat[i].grad = torch.zeros(
+                self.fp32_groups_flat[i].size(),
+                device=self.fp32_groups_flat[i].device)
+
+        self.optimizer.step()
+
+        for i, group in enumerate(self.fp16_groups):
+            self.fp32_groups_flat[i].grad = None
+
+        return
 
     def zero_grad(self, set_grads_to_None=True):
         """
@@ -204,6 +218,9 @@ class FP16_Optimizer(object):
                     if p.grad is None else p.grad.to(data_type) for p in group
                 ]))
 
+            for p in group:
+                p.grad = None
+
             self.fp32_groups_flat[i].grad = grads_groups_flat[i]
 
         self.start_timers([COMPUTE_NORM])
@@ -223,6 +240,7 @@ class FP16_Optimizer(object):
                       "scale: {}, reducing to {}".format(prev_scale,
                                                          self.cur_scale))
             self.log_timers(OVERFLOW_TIMERS)
+            grads_groups_flat = None
             return self.overflow
 
         self.start_timers([UNSCALE_AND_CLIP])

@@ -9,8 +9,7 @@ date: 2020-05-15
 
 * Please see our [Azure tutorial](/tutorials/azure/) to get started with DeepSpeed on Azure!
 * If you're not on Azure, we recommend using our docker image via `docker pull deepspeed/deepspeed:latest` which contains a pre-installed version of DeepSpeed and all the necessary dependencies.
-* If you want to install DeepSpeed manually, we provide an install script
-* `install.sh` to help install on a local machine or across an entire cluster.
+* If you want to install DeepSpeed manually, we provide an install script `install.sh` to help install on a local machine or across an entire cluster.
 
 ## Writing DeepSpeed Models
 DeepSpeed model training is accomplished using the DeepSpeed engine. The engine

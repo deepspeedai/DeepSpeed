@@ -1,5 +1,11 @@
+# Copyright 2020 The Microsoft DeepSpeed Team
 """
-Copyright 2020 The Microsoft DeepSpeed Team: deepspeed@microsoft.com
+DeepSpeed launcher, this is similar to torch.distributed.launch but supports
+additional features such as abitrary gpu exclusion.
+
+deepspeed.launcher.launch is intended to be run on a single worker node and
+will spawn several worker sub-processes depending on how many devices/ranks
+are on the worker.
 """
 
 import sys
@@ -10,7 +16,8 @@ import base64
 from collections import defaultdict
 from argparse import ArgumentParser, REMAINDER
 
-from deepspeed.utils import logger
+from .constants import TORCH_DISTRIBUTED_DEFAULT_PORT
+from ..utils import logger
 
 
 def parse_args():
@@ -32,7 +39,7 @@ def parse_args():
                         " single node multi-proc training, the"
                         " --master_addr can simply be 127.0.0.1")
     parser.add_argument("--master_port",
-                        default=29500,
+                        default=TORCH_DISTRIBUTED_DEFAULT_PORT,
                         type=int,
                         help="Master node (rank 0)'s free port that needs to "
                         "be used for communication during distributed "
