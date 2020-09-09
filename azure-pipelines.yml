@@ -1,4 +1,8 @@
-
+trigger:
+  paths:
+    exclude:
+      - docs
+      - azure
 jobs:
 - job: DeepSpeed_Tests
   timeoutInMinutes: 360
