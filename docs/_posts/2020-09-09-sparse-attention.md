@@ -20,7 +20,7 @@ Block-sparse computations handled by DeepSpeed Sparse Attention kernels are illu
 
 ![Sparse attention backward pass](/assets/images/sa_backward_pass.png){: .align-center}
 
-To learn more about Sparsity Config, and also how to use this library, please check our [tutorial](/tutorials/sparse_attention/) that provides detailed information about it.
+To learn more about Sparsity Config, and also how to use this library, please check our [tutorial](/tutorials/sparse-attention/) that provides detailed information about it.
 
 ## Performance Results
 
@@ -81,4 +81,4 @@ DeepSpeed Sparse Attention suite does not target at any specific sparse structur
   * [BigBird](https://arxiv.org/pdf/2007.14062.pdf) (from Google)
   * BSLongformer (Block-Sparse implementation of [Longformer](https://arxiv.org/pdf/2004.05150.pdf) from AI2)
 
-We also define a template to have `variable` structure (top figure), which can be used to simply customize any block-sparse random/local/global attention pattern. In addition to this list, user can add any other sparsity structure as described in [tutorial](https://www.deepspeed.ai/tutorials/sparse_attention/) section.
+We also define a template to have `variable` structure (top figure), which can be used to simply customize any block-sparse random/local/global attention pattern. In addition to this list, user can add any other sparsity structure as described in [tutorial](https://www.deepspeed.ai/tutorials/sparse-attention/) section.
