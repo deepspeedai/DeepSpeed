@@ -10,14 +10,21 @@ from deepspeed.runtime.constants import *
 from deepspeed.runtime.fp16.loss_scaler import INITIAL_LOSS_SCALE, SCALE_WINDOW, DELAYED_SHIFT, MIN_LOSS_SCALE
 from deepspeed.runtime.config_utils import get_scalar_param, dict_raise_error_on_duplicate_keys
 from deepspeed.runtime.zero.config import DeepSpeedZeroConfig
+from deepspeed.runtime.zero.constants import *
 from deepspeed.runtime.activation_checkpointing.config import DeepSpeedActivationCheckpointingConfig
 from deepspeed.utils import logger
 
 TENSOR_CORE_ALIGN_SIZE = 8
-ONEBIT_ADAM_OPTIMIZER = 'onebitadam'
 ADAM_OPTIMIZER = 'adam'
 LAMB_OPTIMIZER = 'lamb'
-DEEPSPEED_OPTIMIZERS = [ADAM_OPTIMIZER, LAMB_OPTIMIZER, ONEBIT_ADAM_OPTIMIZER]
+ONEBIT_ADAM_OPTIMIZER = 'onebitadam'
+DEEPSPEED_ADAM = 'deepspeed_adam'
+DEEPSPEED_OPTIMIZERS = [
+    ADAM_OPTIMIZER,
+    LAMB_OPTIMIZER,
+    ONEBIT_ADAM_OPTIMIZER,
+    DEEPSPEED_ADAM
+]
 
 
 def get_amp_enabled(param_dict):
@@ -111,22 +118,9 @@ def get_zero_optimization(param_dict):
 
 
 def get_zero_reduce_scatter(param_dict):
-    return get_scalar_param(param_dict, ZERO_REDUCE_SCATTER, ZERO_REDUCE_SCATTER_DEFAULT)
-
-
-def get_zero_max_elements_per_comm(param_dict):
     return get_scalar_param(param_dict,
-                            ZERO_MAX_ELEMENTS_PER_COMM,
-                            ZERO_MAX_ELEMENTS_PER_COMM_DEFAULT)
-
-
-def get_allgather_size(param_dict):
-    return get_scalar_param(param_dict,
-                            ALLGATHER_SIZE,
-                            ALLGATHER_SIZE_DEFAULT) if get_scalar_param(
-                                param_dict,
-                                ALLGATHER_SIZE,
-                                ALLGATHER_SIZE_DEFAULT) > 0 else ALLGATHER_SIZE_DEFAULT
+                            ZERO_OPTIMIZATION_REDUCE_SCATTER,
+                            ZERO_OPTIMIZATION_REDUCE_SCATTER_DEFAULT)
 
 
 def get_allreduce_always_fp32(param_dict):
@@ -493,8 +487,6 @@ class DeepSpeedConfig(object):
         self.gradient_predivide_factor = get_gradient_predivide_factor(param_dict)
         self.sparse_gradients_enabled = get_sparse_gradients_enabled(param_dict)
 
-        self.allgather_size = get_allgather_size(param_dict)
-
         self.zero_config = DeepSpeedZeroConfig(param_dict)
         self.zero_optimization_stage = self.zero_config.stage
         self.zero_enabled = self.zero_optimization_stage > 0
@@ -628,14 +620,17 @@ class DeepSpeedConfig(object):
                                    ':'))))
 
     def _do_error_check(self):
+        assert self.train_micro_batch_size_per_gpu, "DeepSpeedConfig: {} is not defined".format(TRAIN_MICRO_BATCH_SIZE_PER_GPU)
+
+        assert self.gradient_accumulation_steps, "DeepSpeedConfig: {} is not defined".format(
+            GRADIENT_ACCUMULATION_STEPS)
+
         if self.zero_enabled:
             assert self.fp16_enabled, "DeepSpeedConfig: ZeRO is only supported if fp16 is enabled"
             assert self.zero_optimization_stage <= MAX_STAGE_ZERO_OPTIMIZATION, "DeepSpeedConfig: Maximum supported ZeRO stage is {}".format(MAX_STAGE_ZERO_OPTIMIZATION)
-
-        assert self.train_micro_batch_size_per_gpu, "DeepSpeedConfig: {} is not defined".format(TRAIN_MICRO_BATCH_SIZE_PER_GPU)
-
-        assert self.gradient_accumulation_steps, 'DeepSpeedConfig: {} is not defined'.format(
-            GRADIENT_ACCUMULATION_STEPS)
+            if self.zero_config.cpu_offload is True:
+                assert self.zero_optimization_stage == ZERO_OPTIMIZATION_GRADIENTS, "DeepSpeedConfig: cpu-offload supported ZeRO stage is {}".format(ZERO_OPTIMIZATION_GRADIENTS)
+                #assert self.gradient_accumulation_steps == 1, "DeepSpeedConfig: {}is not supported for {}".format(GRADIENT_ACCUMULATION_STEPS, ZERO_OPTIMIZATION_CPU_OFFLOAD)
 
     def _do_warning_check(self):
         fp16_enabled = self.fp16_enabled or self.zero_enabled

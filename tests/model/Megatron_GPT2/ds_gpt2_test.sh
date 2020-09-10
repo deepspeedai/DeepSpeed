@@ -3,7 +3,7 @@
 helpFunction()
 {
     echo ""
-    echo "Usage: $0 -m model-parallelism -g gpu-per-node -n node# -b batch-size -s stpes -l layers -h hidden_size -q seq_length -e heads -c ckpt_num_layers [-d]"
+    echo "Usage: $0 -m model-parallelism -g gpu-per-node -n node# -b batch-size -s stpes -l layers -h hidden_size -q seq_length -e heads -c ckpt_num_layers -p [-d]"
     echo -e "\t-m model parallelism"
     echo -e "\t-g gpus per node"
     echo -e "\t-n node count"
@@ -17,6 +17,7 @@ helpFunction()
     echo -e "\t-o other args"
     echo -e "\t-d DeepSpeed config json file"
     echo -e "\t-z Enable Zero optimization"
+    echo -e "\t-p DeepSpeed master port"
     exit 1
 }
 
@@ -27,6 +28,7 @@ ckpt_num_layers=1
 other_args=""
 ds_opt=""
 zero_opt=""
+master_port=29600
 
 script_path=$(realpath $0)
 script_dir=$(dirname $script_path)
@@ -44,6 +46,7 @@ do
         q ) seq_length="$OPTARG" ;;
         e ) heads="$OPTARG" ;;
         c ) ckpt_num_layers="$OPTARG" ;;
+        p ) master_port="$OPTARG" ;;
         o ) other_args="$OPTARG" ;;
         d ) ds_opt="--deepspeed --deepspeed_config $script_dir/$OPTARG" ;;
         z ) zero_opt="--zero_optimization" ;;
@@ -93,7 +96,7 @@ gpt_options=" \
 "
 
 work_dir="../../../DeepSpeedExamples/Megatron-LM/"
-run_cmd="(cd ${work_dir} && deepspeed --num_nodes $nodes --num_gpus $gpus pretrain_gpt2.py ${gpt_options})"
+run_cmd="(cd ${work_dir} && deepspeed --master_port ${master_port} --num_nodes $nodes --num_gpus $gpus pretrain_gpt2.py ${gpt_options})"
 echo ${run_cmd}
 eval ${run_cmd}
 

@@ -14,11 +14,12 @@ LAYERS = 2
 HIDDEN_SIZE = 128
 ATTN_HEADS = 8
 SEQ_LEN = 64
+MASTER_PORT = 29700
 
 
 def grep_loss_from_file(file_name):
     loss = 0.0
-
+    print(f'grepping {file_name}')
     with open(file_name, 'r') as f:
         lines = f.readlines()
         line_filter = "validation loss at the end of training for test data | LM loss:"
@@ -47,6 +48,24 @@ class GPT2FuncTestCase(BaseTestCase):
 
     def tearDown(self):
         os.chdir(self.save_dir)
+
+    def test_mp1_gpu2_node1_fp16(self):
+        test_config = {
+            "mp": 1,
+            "gpus": 2,
+            "nodes": 1,
+            "bs": 8,
+            "steps": 1000,
+            "layers": LAYERS,
+            "hidden_size": HIDDEN_SIZE,
+            "seq_length": SEQ_LEN,
+            "heads": ATTN_HEADS,
+            "deepspeed": False,
+            "json": "ds_config_func_bs8_no_zero.json",
+        }
+
+        succ = self.run_test(test_config, 0.01)
+        self.assertTrue(succ)
 
     def test_mp1_gpu1_node1_zero1(self):
         test_config = {
@@ -171,10 +190,12 @@ class GPT2FuncTestCase(BaseTestCase):
             "json": "ds_config_func_bs8_zero2.json",
         }
 
-        succ = self.run_test(test_config, 0.01)
+        basic_run_config = test_config
+        succ = self.run_test(basic_run_config, 0.01)
         self.assertTrue(succ)
 
-        succ = self.run_partition_activations_test(test_config, 0.01)
+        partition_activation_config = test_config
+        succ = self.run_partition_activations_test(partition_activation_config, 0.01)
         self.assertTrue(succ)
 
     def test_mp4_gpu4_node1_zero2(self):
@@ -192,10 +213,48 @@ class GPT2FuncTestCase(BaseTestCase):
             "json": "ds_config_func_bs8_zero2.json",
         }
 
-        succ = self.run_test(test_config, 0.01)
+        basic_run_config = test_config
+        succ = self.run_test(basic_run_config, 0.01)
         self.assertTrue(succ)
 
-        succ = self.run_partition_activations_test(test_config, 0.01)
+        partition_activation_config = test_config
+        succ = self.run_partition_activations_test(partition_activation_config, 0.01)
+        self.assertTrue(succ)
+
+    def test_mp1_gpu1_node1_zero2_ds_offload(self):
+        test_config = {
+            "mp": 1,
+            "gpus": 1,
+            "nodes": 1,
+            "bs": 4,
+            "steps": 1000,
+            "layers": LAYERS,
+            "hidden_size": HIDDEN_SIZE,
+            "seq_length": SEQ_LEN,
+            "heads": ATTN_HEADS,
+            "deepspeed": False,
+            "json": "ds_config_func_bs4_zero2_offload.json",
+            "cpu_optimizer": True,
+        }
+        succ = self.run_test(test_config, 0.02)
+        self.assertTrue(succ)
+
+    def test_mp1_gpu2_node1_zero2_ds_offload(self):
+        test_config = {
+            "mp": 1,
+            "gpus": 2,
+            "nodes": 1,
+            "bs": 8,
+            "steps": 1000,
+            "layers": LAYERS,
+            "hidden_size": HIDDEN_SIZE,
+            "seq_length": SEQ_LEN,
+            "heads": ATTN_HEADS,
+            "deepspeed": False,
+            "json": "ds_config_func_bs8_zero2_offload.json",
+            "cpu_optimizer": True,
+        }
+        succ = self.run_test(test_config, 0.02)
         self.assertTrue(succ)
 
     def test_mp2_gpu4_node1_zero2_gas(self):
@@ -219,6 +278,143 @@ class GPT2FuncTestCase(BaseTestCase):
 
         succ = self.run_partition_activations_test(test_config, 0.01)
         self.assertTrue(succ)
+
+    def test_mp2_gpu4_node1_zero2_ds_offload(self):
+        test_config = {
+            "mp": 2,
+            "gpus": 4,
+            "nodes": 1,
+            "bs": 8,
+            "steps": 1000,
+            "layers": LAYERS,
+            "hidden_size": HIDDEN_SIZE,
+            "seq_length": SEQ_LEN,
+            "heads": ATTN_HEADS,
+            "deepspeed": False,
+            "json": "ds_config_func_bs8_zero2_offload.json",
+            "cpu_optimizer": True,
+        }
+
+        basic_run_config = test_config
+        succ = self.run_test(basic_run_config, 0.02)
+        self.assertTrue(succ)
+
+        partition_activation_config = test_config
+        succ = self.run_partition_activations_test(partition_activation_config, 0.02)
+        self.assertTrue(succ)
+
+    def test_mp4_gpu4_node1_zero2_ds_offload(self):
+        test_config = {
+            "mp": 4,
+            "gpus": 4,
+            "nodes": 1,
+            "bs": 8,
+            "steps": 1000,
+            "layers": LAYERS,
+            "hidden_size": HIDDEN_SIZE,
+            "seq_length": SEQ_LEN,
+            "heads": ATTN_HEADS,
+            "deepspeed": False,
+            "json": "ds_config_func_bs8_zero2_offload.json",
+            "cpu_optimizer": True,
+        }
+
+        basic_run_config = test_config
+        succ = self.run_test(basic_run_config, 0.02)
+        self.assertTrue(succ)
+
+        partition_activation_config = test_config
+        succ = self.run_partition_activations_test(partition_activation_config, 0.02)
+        self.assertTrue(succ)
+
+    def test_mp1_gpu1_node1_zero2_torch_offload(self):
+        test_config = {
+            "mp": 1,
+            "gpus": 1,
+            "nodes": 1,
+            "bs": 4,
+            "steps": 1000,
+            "layers": LAYERS,
+            "hidden_size": HIDDEN_SIZE,
+            "seq_length": SEQ_LEN,
+            "heads": ATTN_HEADS,
+            "deepspeed": False,
+            "json": "ds_config_func_bs4_zero2_offload.json",
+            "cpu_optimizer": True,
+            "test_torch_offload": True,
+        }
+
+        succ = self.run_test(test_config, 0.01)
+        self.assertTrue(succ)
+
+    def test_mp1_gpu2_node1_zero2_torch_offload(self):
+        test_config = {
+            "mp": 1,
+            "gpus": 2,
+            "nodes": 1,
+            "bs": 8,
+            "steps": 1000,
+            "layers": LAYERS,
+            "hidden_size": HIDDEN_SIZE,
+            "seq_length": SEQ_LEN,
+            "heads": ATTN_HEADS,
+            "deepspeed": False,
+            "json": "ds_config_func_bs8_zero2_offload.json",
+            "cpu_optimizer": True,
+            "test_torch_offload": True,
+        }
+
+        succ = self.run_test(test_config, 0.01)
+        self.assertTrue(succ)
+
+    def test_mp2_gpu4_node1_zero2_torch_offload(self):
+        test_config = {
+            "mp": 2,
+            "gpus": 4,
+            "nodes": 1,
+            "bs": 8,
+            "steps": 1000,
+            "layers": LAYERS,
+            "hidden_size": HIDDEN_SIZE,
+            "seq_length": SEQ_LEN,
+            "heads": ATTN_HEADS,
+            "deepspeed": False,
+            "json": "ds_config_func_bs8_zero2_offload.json",
+            "cpu_optimizer": True,
+            "test_torch_offload": True,
+        }
+
+        basic_run_config = test_config
+        succ = self.run_test(basic_run_config, 0.01)
+        self.assertTrue(succ)
+
+        partition_activation_config = test_config
+        succ = self.run_partition_activations_test(partition_activation_config, 0.01)
+        self.assertTrue(succ)
+
+    def test_mp4_gpu4_node1_zero2_torch_offload(self):
+        test_config = {
+            "mp": 4,
+            "gpus": 4,
+            "nodes": 1,
+            "bs": 8,
+            "steps": 1000,
+            "layers": LAYERS,
+            "hidden_size": HIDDEN_SIZE,
+            "seq_length": SEQ_LEN,
+            "heads": ATTN_HEADS,
+            "deepspeed": False,
+            "json": "ds_config_func_bs8_zero2_offload.json",
+            "cpu_optimizer": True,
+            "test_torch_offload": True,
+        }
+
+        basic_run_config = test_config
+        succ = self.run_test(basic_run_config, 0.01)
+        self.assertTrue(succ)
+
+        partition_activation_config = test_config
+        succ = self.run_partition_activations_test(partition_activation_config, 0.01)
 
     def test_optimizer_scheduler(self):
         test_config = {
@@ -248,6 +444,7 @@ class GPT2FuncTestCase(BaseTestCase):
 
         deepspeed_config = test_config["json"]
         baseline_deepspeed_config = False
+        cpu_optimizer_flag = self.gen_cpu_optimizer_flag(test_config, True)
 
         # baseline run...
         # turnoff deepspeed if baseline deepspeed config
@@ -259,6 +456,7 @@ class GPT2FuncTestCase(BaseTestCase):
             baseline_prefix += test_config["json"][0:-5]
             baseline_deepspeed_config = True
 
+        test_config["other_args"] = f"\"{cpu_optimizer_flag}\""
         base_file = self.gen_output_name(test_config,
                                          baseline_prefix,
                                          baseline_config=baseline_deepspeed_config)
@@ -272,8 +470,11 @@ class GPT2FuncTestCase(BaseTestCase):
 
         # DeepSpeed run...
         test_config["deepspeed"] = True
-        test_config["other_args"] = "--deepspeed-activation-checkpointing"
+        cpu_optimizer_flag = self.gen_cpu_optimizer_flag(test_config, False)
+        test_config[
+            "other_args"] = f"\"--deepspeed-activation-checkpointing {cpu_optimizer_flag}\""
         test_config["json"] = deepspeed_config
+
         print("{0}: DeepSpeed run.".format(self.id()))
         test_file = self.gen_output_name(test_config, prefix)
         self.run_gpt2_test(test_config, test_file)
@@ -289,6 +490,7 @@ class GPT2FuncTestCase(BaseTestCase):
 
         deepspeed_config = test_config["json"]
         baseline_deepspeed_config = False
+        cpu_optimizer_flag = self.gen_cpu_optimizer_flag(test_config, True)
 
         # baseline run...
         # turn off deepspeed if a baseline deepspeed config
@@ -299,6 +501,8 @@ class GPT2FuncTestCase(BaseTestCase):
             test_config["json"] = test_config["baseline"]
             baseline_prefix = prefix + test_config["json"][0:-5]
             baseline_deepspeed_config = True
+
+        test_config["other_args"] = f"\"{cpu_optimizer_flag}\""
 
         # baseline run...
         base_file = self.gen_output_name(test_config,
@@ -314,7 +518,8 @@ class GPT2FuncTestCase(BaseTestCase):
 
         # DeepSpeed run...
         test_config["deepspeed"] = True
-        test_config["json"] = deepspeed_config
+        cpu_optimizer_flag = self.gen_cpu_optimizer_flag(test_config, False)
+        test_config["other_args"] = f"\"{cpu_optimizer_flag}\""
 
         print("{0}: DeepSpeed run.".format(self.id()))
         test_file = self.gen_output_name(test_config, prefix)
@@ -345,9 +550,40 @@ class GPT2FuncTestCase(BaseTestCase):
 
         return True
 
+    def gen_cpu_optimizer_flag(self, test_config, is_baseline):
+        if 'cpu_optimizer' in test_config and test_config['cpu_optimizer']:
+            cpu_optimizer_flag = "--cpu-optimizer"
+            if is_baseline:
+                cpu_optimizer_flag += " --cpu_torch_adam"
+                return cpu_optimizer_flag
+            if 'test_torch_offload' in test_config and test_config['test_torch_offload']:
+                cpu_optimizer_flag += " --cpu_torch_adam"
+                return cpu_optimizer_flag
+        else:
+            cpu_optimizer_flag = ""
+
+        return cpu_optimizer_flag
+
 
 def suite():
     suite = unittest.TestSuite()
+
+    suite.addTest(GPT2FuncTestCase('test_mp1_gpu2_node1_fp16'))
+
+    # Baseline = Megatron + Torch.Optim.Adam
+    # Test = Megatron + Torch.Optim.Adam + ZeRO-Offload
+    suite.addTest(GPT2FuncTestCase('test_mp1_gpu1_node1_zero2_torch_offload'))
+    suite.addTest(GPT2FuncTestCase('test_mp1_gpu2_node1_zero2_torch_offload'))
+    suite.addTest(GPT2FuncTestCase('test_mp2_gpu4_node1_zero2_torch_offload'))
+    suite.addTest(GPT2FuncTestCase('test_mp4_gpu4_node1_zero2_torch_offload'))
+
+    # Baseline = Megatron + Torch.Optim.Adam
+    # Test = Megatron + DeepSpeedAdam + ZeRO-Offload
+    suite.addTest(GPT2FuncTestCase('test_mp1_gpu1_node1_zero2_ds_offload'))
+    suite.addTest(GPT2FuncTestCase('test_mp1_gpu2_node1_zero2_ds_offload'))
+    suite.addTest(GPT2FuncTestCase('test_mp2_gpu4_node1_zero2_ds_offload'))
+    suite.addTest(GPT2FuncTestCase('test_mp4_gpu4_node1_zero2_ds_offload'))
+
     suite.addTest(GPT2FuncTestCase('test_mp1_gpu1_node1_zero1'))
     suite.addTest(GPT2FuncTestCase('test_mp1_gpu2_node1_zero1'))
     suite.addTest(GPT2FuncTestCase('test_mp2_gpu4_node1_zero1'))

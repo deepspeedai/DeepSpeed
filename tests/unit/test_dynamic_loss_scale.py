@@ -191,7 +191,6 @@ def test_unfused_no_overflow(tmpdir):
         model, optim, _, _ = deepspeed.initialize(args=args,
                                                   model=model,
                                                   model_parameters=model.parameters())
-
         expected_loss_scale = 2**8
         expected_scale_window = 2
         # Ensure the dynamic loss scaler is correctly configured.

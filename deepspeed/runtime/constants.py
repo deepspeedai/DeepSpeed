@@ -184,35 +184,6 @@ GRADIENT_CLIPPING = 'gradient_clipping'
 GRADIENT_CLIPPING_DEFAULT = 0.
 
 #########################################
-# ZeRO optimization
-#########################################
-# ZeRO optimization. By default, this optimization is not enabled.
-# Users have to configure the desired optimization (0 means disabled) in params.json as below example:
-ZERO_FORMAT = '''
-ZeRO optimization should be enabled as:
-"session_params": {
-  "zero_optimization": [0|1|2],
-  "zero_all_gather_size": 200
-}
-'''
-
-ZERO_OPTIMIZATION = 'zero_optimization'
-ZERO_OPTIMIZATION_DEFAULT = 0
-ZERO_OPTIMIZATION_OPTIMIZER_STATES = 1
-ZERO_OPTIMIZATION_GRADIENTS = 2
-ZERO_OPTIMIZATION_WEIGHTS = 3
-MAX_STAGE_ZERO_OPTIMIZATION = ZERO_OPTIMIZATION_GRADIENTS
-
-ZERO_REDUCE_SCATTER = "zero_reduce_scatter"
-ZERO_REDUCE_SCATTER_DEFAULT = True
-
-ZERO_MAX_ELEMENTS_PER_COMM = "zero_max_elements_per_comm"
-ZERO_MAX_ELEMENTS_PER_COMM_DEFAULT = 5e8
-
-ALLGATHER_SIZE = 'allgather_size'
-ALLGATHER_SIZE_DEFAULT = 500000000
-
-#########################################
 # FP32 AllReduce
 #########################################
 # FP32 All reduce. By default, this feature is not enabled.

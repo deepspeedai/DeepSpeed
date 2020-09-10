@@ -3,16 +3,10 @@
   "gradient_accumulation_steps": 1,
   "steps_per_print": 1,
   "zero_optimization": {
-    "stage":2,
+    "stage": 2,
     "reduce_bucket_size": 7000000,
     "allgather_bucket_size": 7000000,
     "reduce_scatter": true
-  },
-  "optimizer": {
-    "type": "Adam",
-    "params": {
-      "lr": 0.00015
-    }
   },
   "gradient_clipping": 1.0,
   "fp16": {

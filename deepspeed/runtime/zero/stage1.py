@@ -793,8 +793,11 @@ class FP16_DeepSpeedZeroOptimizer_Stage1(object):
     def _get_state_without_padding(self, state_with_padding, padding):
         lean_state = {}
         for key, value in state_with_padding.items():
-            lean_length = value.numel() - padding
-            lean_state[key] = value[:lean_length]
+            if torch.is_tensor(value):
+                lean_length = value.numel() - padding
+                lean_state[key] = value[:lean_length]
+            else:
+                lean_state[key] = value
 
         return lean_state
 

@@ -3,13 +3,7 @@
   "gradient_accumulation_steps": 1,
   "steps_per_print": 1,
   "zero_optimization": {
-    "stage":2
-  },
-  "optimizer": {
-    "type": "Adam",
-    "params": {
-      "lr": 0.00015
-    }
+    "stage": 2
   },
   "gradient_clipping": 1.0,
   "scheduler": {
@@ -20,7 +14,6 @@
       "warmup_num_steps": 10
     }
   },
-
   "fp16": {
     "enabled": true,
     "loss_scale": 0,

@@ -167,6 +167,7 @@ overview](/features/) for descriptions and usage.
     * Automatic loss scaling with mixed precision
 * [Training Optimizers](/features/#training-optimizers)
     * Fused Adam optimizer and arbitrary `torch.optim.Optimizer`
+    * CPU-Adam: High-Performance vectorized Adam
     * Memory bandwidth optimized FP16 Optimizer
     * Large Batch Training with LAMB Optimizer
     * Memory efficient Training with ZeRO Optimizer

@@ -2,14 +2,10 @@
   "train_batch_size": 8,
   "gradient_accumulation_steps": 1,
   "steps_per_print": 1,
-  "zero_optimization": 1,
-  "disable_allgather": true,
-  "optimizer": {
-    "type": "Adam",
-    "params": {
-      "lr": 0.00015
-    }
+  "zero_optimization": {
+    "stage": 1
   },
+  "disable_allgather": true,
   "gradient_clipping": 1.0,
   "fp16": {
     "enabled": true,

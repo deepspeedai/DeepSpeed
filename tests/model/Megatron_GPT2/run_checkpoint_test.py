@@ -97,6 +97,29 @@ class GPT2CheckpointTestCase(BaseTestCase):
         succ = self.run_test(test_config, 0.01)
         self.assertTrue(succ)
 
+    def test_mp2_gpu4_node1_with_zero2_offload(self):
+        test_config = {
+            "mp": 2,
+            "gpus": 4,
+            "nodes": 1,
+            "bs": 8,
+            "steps": 1100,
+            "layers": LAYERS,
+            "hidden_size": HIDDEN_SIZE,
+            "seq_length": 256,
+            "heads": ATTN_HEADS,
+            "deepspeed": True,
+            "tag": "ds_zero2_offload",
+            "zero": True,
+            "other_args": "",
+            "checkpoint_name": "ckpt_mp2_gpu8_w_zero2_offload",
+            "checkpoint_interval": 1000,
+            "json": "ds_config_func_bs8_zero2_offload.json",
+            "cpu_optimizer": True,
+        }
+        succ = self.run_test(test_config, 0.01)
+        self.assertTrue(succ)
+
     def test_mp1_gpu2_load_gpu1_node1_with_zero1(self):
         test_config = {
             "mp": 1,
@@ -110,7 +133,7 @@ class GPT2CheckpointTestCase(BaseTestCase):
             "seq_length": 256,
             "heads": ATTN_HEADS,
             "deepspeed": True,
-            "tag": "ds_zero2",
+            "tag": "ds_zero1",
             "zero": True,
             "other_args": "",
             "checkpoint_name": "ckpt_mp1_gpu2_gpu1_w_zero1",
@@ -133,7 +156,7 @@ class GPT2CheckpointTestCase(BaseTestCase):
             "seq_length": 256,
             "heads": ATTN_HEADS,
             "deepspeed": True,
-            "tag": "ds_zero2",
+            "tag": "ds_zero1",
             "zero": True,
             "other_args": "",
             "checkpoint_name": "ckpt_mp1_gpu2_gpu4_w_zero1",
@@ -166,6 +189,30 @@ class GPT2CheckpointTestCase(BaseTestCase):
         succ = self.run_test(test_config, 0.01)
         self.assertTrue(succ)
 
+    def test_mp1_gpu2_load_gpu1_node1_with_zero2_offload(self):
+        test_config = {
+            "mp": 1,
+            "gpus": 2,
+            "load_gpus": 1,
+            "nodes": 1,
+            "bs": 8,
+            "steps": 1100,
+            "layers": LAYERS,
+            "hidden_size": HIDDEN_SIZE,
+            "seq_length": 256,
+            "heads": ATTN_HEADS,
+            "deepspeed": True,
+            "tag": "ds_zero2_offload",
+            "zero": True,
+            "other_args": "",
+            "checkpoint_name": "ckpt_mp1_gpu2_gpu1_w_zero2_offload",
+            "checkpoint_interval": 1000,
+            "json": "ds_config_func_bs8_zero2_offload.json",
+            "cpu_optimizer": True,
+        }
+        succ = self.run_test(test_config, 0.01)
+        self.assertTrue(succ)
+
     def test_mp1_gpu2_load_gpu4_node1_with_zero2(self):
         test_config = {
             "mp": 1,
@@ -185,6 +232,30 @@ class GPT2CheckpointTestCase(BaseTestCase):
             "checkpoint_name": "ckpt_mp1_gpu2_gpu4_w_zero2",
             "checkpoint_interval": 1000,
             "json": "ds_config_func_bs8_zero2.json",
+        }
+        succ = self.run_test(test_config, 0.01)
+        self.assertTrue(succ)
+
+    def test_mp1_gpu2_load_gpu4_node1_with_zero2_offload(self):
+        test_config = {
+            "mp": 1,
+            "gpus": 2,
+            "load_gpus": 4,
+            "nodes": 1,
+            "bs": 8,
+            "steps": 1100,
+            "layers": LAYERS,
+            "hidden_size": HIDDEN_SIZE,
+            "seq_length": 256,
+            "heads": ATTN_HEADS,
+            "deepspeed": True,
+            "tag": "ds_zero2_offload",
+            "zero": True,
+            "other_args": "",
+            "checkpoint_name": "ckpt_mp1_gpu2_gpu4_w_zero2_offload",
+            "checkpoint_interval": 1000,
+            "json": "ds_config_func_bs8_zero2_offload.json",
+            "cpu_optimizer": True,
         }
         succ = self.run_test(test_config, 0.01)
         self.assertTrue(succ)
@@ -258,6 +329,30 @@ class GPT2CheckpointTestCase(BaseTestCase):
         succ = self.run_test(test_config, 0.01)
         self.assertTrue(succ)
 
+    def test_mp2_gpu4_load_gpu2_node1_with_zero2_offload(self):
+        test_config = {
+            "mp": 2,
+            "gpus": 4,
+            "load_gpus": 2,
+            "nodes": 1,
+            "bs": 8,
+            "steps": 1100,
+            "layers": LAYERS,
+            "hidden_size": HIDDEN_SIZE,
+            "seq_length": 256,
+            "heads": ATTN_HEADS,
+            "deepspeed": True,
+            "tag": "ds_zero2_offload",
+            "zero": True,
+            "other_args": "",
+            "checkpoint_name": "ckpt_mp2_gpu4_gpu2_w_zero2_offload",
+            "checkpoint_interval": 1000,
+            "json": "ds_config_func_bs8_zero2_offload.json",
+            "cpu_optimizer": True,
+        }
+        succ = self.run_test(test_config, 0.01)
+        self.assertTrue(succ)
+
     def test_mp2_gpu2_load_gpu4_node1_with_zero2(self):
         test_config = {
             "mp": 2,
@@ -277,6 +372,30 @@ class GPT2CheckpointTestCase(BaseTestCase):
             "checkpoint_name": "ckpt_mp2_gpu2_gpu4_w_zero2",
             "checkpoint_interval": 1000,
             "json": "ds_config_func_bs8_zero2.json",
+        }
+        succ = self.run_test(test_config, 0.01)
+        self.assertTrue(succ)
+
+    def test_mp2_gpu2_load_gpu4_node1_with_zero2_offload(self):
+        test_config = {
+            "mp": 2,
+            "gpus": 2,
+            "load_gpus": 4,
+            "nodes": 1,
+            "bs": 8,
+            "steps": 1100,
+            "layers": LAYERS,
+            "hidden_size": HIDDEN_SIZE,
+            "seq_length": 256,
+            "heads": ATTN_HEADS,
+            "deepspeed": True,
+            "tag": "ds_zero2_offload",
+            "zero": True,
+            "other_args": "",
+            "checkpoint_name": "ckpt_mp2_gpu2_gpu4_w_zero2_offload",
+            "checkpoint_interval": 1000,
+            "json": "ds_config_func_bs8_zero2_offload.json",
+            "cpu_optimizer": True,
         }
         succ = self.run_test(test_config, 0.01)
         self.assertTrue(succ)
@@ -306,7 +425,8 @@ class GPT2CheckpointTestCase(BaseTestCase):
     def gen_name(self, test_config, prefix):
         save_dir = "checkpoint_test_logs"
         tag = test_config["tag"]
-        file_name = f"_{tag}.log"
+        checkpoint_name = test_config["checkpoint_name"]
+        file_name = f"_{tag}_{checkpoint_name}.log"
         return os.path.join(save_dir, prefix + file_name)
 
     def run_test(self, test_config, r_tol):
@@ -334,10 +454,15 @@ class GPT2CheckpointTestCase(BaseTestCase):
         except:
             print("No old checkpoint")
 
+        if "cpu_optimizer" in test_config and test_config["cpu_optimizer"]:
+            cpu_optimizer_flag = " --cpu-optimizer"
+        else:
+            cpu_optimizer_flag = ""
+
         #-----------------Saving Checkpoint-----------------#
-        #building checkpoint arguments
+        # building checkpoint arguments
         test_config[
-            "other_args"] = f"\"--save {checkpoint_folder} --save-interval {checkpoint_interval}\""
+            "other_args"] = f"\"--save {checkpoint_folder} --save-interval {checkpoint_interval} {cpu_optimizer_flag}\""
 
         prefix = "gpt2_saving_checkpoint"
 
@@ -356,10 +481,11 @@ class GPT2CheckpointTestCase(BaseTestCase):
 
         #-----------------Loading Checkpoint-----------------#
 
-        #building checkpoint arguments
-        test_config["other_args"] = f"\"--load {checkpoint_folder}\""
+        # building checkpoint arguments
+        test_config[
+            "other_args"] = f"\"--load {checkpoint_folder} {cpu_optimizer_flag} \""
 
-        #set checkpoint load iteration
+        # set checkpoint load iteration
         try:
             cmd = f"echo {checkpoint_interval} > {checkpoint_name}/latest_checkpointed_iteration.txt"
             print(f"{self.id()} running cmd: {cmd}")
@@ -411,20 +537,32 @@ class GPT2CheckpointTestCase(BaseTestCase):
 
 def checkpoint_suite():
     suite = unittest.TestSuite()
+
     suite.addTest(GPT2CheckpointTestCase('test_mp2_gpu4_node1_with_zero1'))
     suite.addTest(GPT2CheckpointTestCase('test_mp2_gpu4_node1_with_zero2'))
+    suite.addTest(GPT2CheckpointTestCase('test_mp2_gpu4_node1_with_zero2_offload'))
 
     # Shrink DP
     suite.addTest(GPT2CheckpointTestCase('test_mp1_gpu2_load_gpu1_node1_with_zero1'))
     suite.addTest(GPT2CheckpointTestCase('test_mp1_gpu2_load_gpu1_node1_with_zero2'))
+    suite.addTest(
+        GPT2CheckpointTestCase('test_mp1_gpu2_load_gpu1_node1_with_zero2_offload'))
+
     suite.addTest(GPT2CheckpointTestCase('test_mp2_gpu4_load_gpu2_node1_with_zero1'))
     suite.addTest(GPT2CheckpointTestCase('test_mp2_gpu4_load_gpu2_node1_with_zero2'))
+    suite.addTest(
+        GPT2CheckpointTestCase('test_mp2_gpu4_load_gpu2_node1_with_zero2_offload'))
 
     # Expand DP
     suite.addTest(GPT2CheckpointTestCase('test_mp1_gpu2_load_gpu4_node1_with_zero1'))
     suite.addTest(GPT2CheckpointTestCase('test_mp1_gpu2_load_gpu4_node1_with_zero2'))
+    suite.addTest(
+        GPT2CheckpointTestCase('test_mp1_gpu2_load_gpu4_node1_with_zero2_offload'))
+
     suite.addTest(GPT2CheckpointTestCase('test_mp2_gpu2_load_gpu4_node1_with_zero1'))
     suite.addTest(GPT2CheckpointTestCase('test_mp2_gpu2_load_gpu4_node1_with_zero2'))
+    suite.addTest(
+        GPT2CheckpointTestCase('test_mp2_gpu2_load_gpu4_node1_with_zero2_offload'))
 
     suite.addTest(GPT2CheckpointTestCase('test_mp2_gpu4_node1_without_zero'))
 

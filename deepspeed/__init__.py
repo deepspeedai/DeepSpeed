@@ -4,16 +4,18 @@ Copyright 2020 The Microsoft DeepSpeed Team
 import sys
 import types
 
-from deepspeed.runtime.engine import DeepSpeedEngine
-from deepspeed.runtime.engine import ADAM_OPTIMIZER, LAMB_OPTIMIZER
-from deepspeed.runtime.lr_schedules import add_tuning_arguments
-from deepspeed.runtime.config import DeepSpeedConfig
-from deepspeed.runtime.activation_checkpointing import checkpointing
-from deepspeed.ops.transformer import DeepSpeedTransformerLayer, DeepSpeedTransformerConfig
-from deepspeed.utils import logger
+from . import ops
+
+from .runtime.engine import DeepSpeedEngine
+from .runtime.engine import ADAM_OPTIMIZER, LAMB_OPTIMIZER, DEEPSPEED_ADAM
+from .runtime.lr_schedules import add_tuning_arguments
+from .runtime.config import DeepSpeedConfig
+from .runtime.activation_checkpointing import checkpointing
+from .ops.transformer import DeepSpeedTransformerLayer, DeepSpeedTransformerConfig
+from .utils import logger
 
 try:
-    from deepspeed.git_version_info import version, git_hash, git_branch
+    from .git_version_info import version, git_hash, git_branch
 except ImportError:
     version = "0.0.0+unknown"
     git_hash = None

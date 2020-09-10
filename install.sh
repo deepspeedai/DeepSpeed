@@ -164,10 +164,10 @@ if [ ! -f $hostfile ]; then
     local_only=1
 fi
 
-#if [ "$skip_requirements" == "0" ]; then
-#    # Ensure dependencies are installed locally
-#    $PIP_SUDO $PIP_INSTALL -r requirements.txt
-#fi
+if [ "$skip_requirements" == "0" ]; then
+   # Ensure dependencies are installed locally
+   $PIP_SUDO $PIP_INSTALL -r requirements/requirements.txt
+fi
 
 # Build wheels
 if [ "$third_party_install" == "1" ]; then
@@ -220,10 +220,10 @@ else
     tmp_wheel_path="/tmp/deepspeed_wheels"
 
     pdsh -w $hosts "if [ -d $tmp_wheel_path ]; then rm $tmp_wheel_path/*.whl; else mkdir -pv $tmp_wheel_path; fi"
-    #pdcp -w $hosts requirements/*.txt ${tmp_wheel_path}/
-    #if [ "$skip_requirements" == "0" ]; then
-    #    pdsh -w $hosts "$PIP_SUDO $PIP_INSTALL -r ${tmp_wheel_path}/requirements.txt"
-    #fi
+    pdcp -w $hosts requirements/requirements.txt ${tmp_wheel_path}/
+    if [ "$skip_requirements" == "0" ]; then
+       pdsh -w $hosts "$PIP_SUDO $PIP_INSTALL -r ${tmp_wheel_path}/requirements.txt"
+    fi
     if [ "$third_party_install" == "1" ]; then
         pdsh -w $hosts "$PIP_SUDO pip uninstall -y apex"
         pdcp -w $hosts third_party/apex/dist/apex*.whl $tmp_wheel_path/
