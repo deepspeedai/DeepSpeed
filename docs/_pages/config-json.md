@@ -34,7 +34,7 @@ title: "DeepSpeed Configuration JSON"
 
 | Fields | Value                                                        | Example                        |
 | ------ | ------------------------------------------------------------ | ------------------------------ |
-| type   | The optimizer name. DeepSpeed natively supports Adam and LAMB optimizers and will import other optimizers from [torch](https://pytorch.org/docs/stable/optim.html). | `"Adam"`                         |
+| type   | The optimizer name. DeepSpeed natively supports Adam, OneBitAdam, and LAMB optimizers and will import other optimizers from [torch](https://pytorch.org/docs/stable/optim.html). | `"Adam"`                         |
 | params | Dictionary of parameters to instantiate optimizer. The parameter names must match the optimizer constructor signature (e.g., for [Adam](https://pytorch.org/docs/stable/optim.html#torch.optim.Adam)). | `{"lr": 0.001, "eps": 1e-8}` |
 
   Example of ***optimizer***
@@ -50,6 +50,24 @@ title: "DeepSpeed Configuration JSON"
       ],
       "eps": 1e-8,
       "weight_decay": 3e-7
+    }
+  }
+```
+  Another example of ***optimizer*** with 1-bit Adam specific parameters is as follows.
+
+```json
+"optimizer": {
+    "type": "OneBitAdam",
+    "params": {
+      "lr": 0.001,
+      "betas": [
+        0.8,
+        0.999
+      ],
+      "eps": 1e-8,
+      "weight_decay": 3e-7,
+      "freeze_step": 400,
+      "cuda_aware": true
     }
   }
 ```

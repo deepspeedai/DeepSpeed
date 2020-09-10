@@ -158,6 +158,16 @@ Please see the [core API doc](https://deepspeed.readthedocs.io/) for more detail
 
 ## Training Optimizers
 
+### 1-bit Adam optimizer with up to 5x less communication
+
+DeepSpeed has an efficient implementation of a novel algorithm called 1-bit Adam.
+It offers the same convergence as Adam, incurs up to 5x less communication that enables
+up to 3.5x higher throughput for BERT-Large pretraining and up to 2.7x higher throughput
+for SQuAD fine-tuning on bandwidth-limited clusters. For more details on usage and performance,
+please refer to the detailed [tutorial](https://www.deepspeed.ai/tutorials/onebit-adam) and
+[blog post](https://www.deepspeed.ai/news/2020/09/09/onebit-adam-blog-post.md), respectively.
+<!-- **TODO: add paper link when it is ready ** -->
+
 ### Fused Adam optimizer and arbitrary torch.optim.Optimizer
 With DeepSpeed, the user can choose to use a high performance implementation of ADAM from
 NVIDIA, or any training optimizer that extends torch's `torch.optim.Optimizer` class.
