@@ -30,7 +30,7 @@ information [here](https://innovation.microsoft.com/en-us/exploring-ai-at-scale)
 # What's New?
 * [2020/09/10] [DeepSpeed: Extreme-scale model training for everyone]({{ site.press_release_v3 }})
   * [Powering 10x longer sequences and 6x faster execution through DeepSpeed Sparse Attention](https://www.deepspeed.ai/news/2020/09/08/sparse-attention-news.html)
-  * [Training a trillion parameters with pipeline parallelism](https://www.deepspeed.ai/news/2020/09/09/pipeline-parallelism.html)
+  * [Training a trillion parameters with pipeline parallelism](https://www.deepspeed.ai/news/2020/09/08/pipeline-parallelism.html)
   * [Up to 5x less communication and 3.4x faster training through 1-bit Adam](https://www.deepspeed.ai/news/2020/09/08/onebit-adam-news.html)
   * [10x bigger model training on a single GPU with ZeRO-Offload](https://www.deepspeed.ai/news/2020/09/08/ZeRO-Offload.html)
 
@@ -168,7 +168,7 @@ Below we provide a brief feature list, see our detailed [feature overview](https
   * Support 10B model training on a single GPU
 * [Ultra-fast dense transformer kernels](https://www.deepspeed.ai/news/2020/05/18/bert-record.html)
 * [Sparse attention](https://www.deepspeed.ai/news/2020/09/08/sparse-attention.html)
-  * Memory- and compute-efficient sparse kernels 
+  * Memory- and compute-efficient sparse kernels
   * Support 10x long sequences than dense
   * Flexible support to different sparse structures
 * [1-bit Adam](https://www.deepspeed.ai/news/2020/09/08/onebit-adam-blog-post.html)
