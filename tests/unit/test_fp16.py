@@ -445,7 +445,9 @@ def test_zero_empty_partition(tmpdir, zero_stage, use_cpu_offload):
         },
         "zero_optimization": {
             "stage": zero_stage,
-            "cpu_offload": use_cpu_offload
+            "cpu_offload": use_cpu_offload,
+            "reduce_bucket_size": 100,
+            "allgather_bucket_size": 100
         }
     }
     args = args_from_dict(tmpdir, config_dict)

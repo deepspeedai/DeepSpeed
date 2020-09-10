@@ -1585,6 +1585,7 @@ class FP16_DeepSpeedZeroOptimizer(object):
         if self.cpu_offload:
             torch.cuda.current_stream().wait_stream(self.migration_stream)
 
+        #TODO: we need to revist this and remove the magic 4.5x multiplier here
         if self.contiguous_gradients:
             self.ipg_buffer = []
             buf_0 = torch.empty(int(self.reduce_bucket_size * 4.5),
