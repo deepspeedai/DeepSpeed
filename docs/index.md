@@ -10,7 +10,6 @@ efficient, and effective.
 <p align="center"><i><b>10x Larger Models</b></i></p>
 <p align="center"><i><b>10x Faster Training</b></i></p>
 <p align="center"><i><b>Minimal Code Change</b></i></p>
-
 DeepSpeed can train DL models with over a hundred billion parameters on current
 generation of GPU clusters, while achieving over 10x in system performance
 compared to the state-of-art. Early adopters of DeepSpeed have already produced
@@ -157,6 +156,9 @@ overview](/features/) for descriptions and usage.
     * Activation Partitioning
     * Constant Buffer Optimization
     * Contiguous Memory Optimization
+* [ZeRO-Offload](/features/#zero-offload)
+    * Leverage both CPU/GPU memory for model training
+    * Support 10B model training on a single GPU
 * [Additional Memory and Bandwidth Optimizations](/features/#additional-memory-and-bandwidth-optimizations)
     * Smart Gradient Accumulation
     * Communication/Computation Overlap
