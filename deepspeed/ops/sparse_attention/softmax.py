@@ -234,7 +234,7 @@ class Softmax:
              bench: optional: set if you want to do benchmarking
         """
 
-        self.num_blocks = layout.sum()
+        self.num_blocks = layout.sum().item()
         self.spdims = layout.shape
         self.layout = layout
         self.block = block
