@@ -93,10 +93,12 @@ class FP16_UnfusedOptimizer(object):
         else:
             self.clip_grad_norm = torch.nn.utils.clip_grad_norm_
 
-        self.mpu = None
+        self.mpu = mpu
 
         self.overflow = False
         self.overflow_checker = CheckOverflow(self.fp16_groups, mpu=self.mpu)
+
+        self.initialize_optimizer_states()
 
     def zero_grad(self, set_grads_to_None=True):
         """
@@ -349,3 +351,26 @@ class FP16_UnfusedOptimizer(object):
 
     def __repr__(self):
         return repr(self.optimizer)
+
+    def initialize_optimizer_states(self):
+        for i, group in enumerate(self.fp16_groups):
+            for param in group:
+                param.grad = torch.zeros(param.size(),
+                                         dtype=param.dtype,
+                                         device=torch.cuda.current_device())
+
+        for i, group in enumerate(self.fp32_groups):
+            for param in group:
+                param.grad = torch.zeros(param.size(),
+                                         dtype=param.dtype,
+                                         device=torch.cuda.current_device())
+
+        self.optimizer.step()
+
+        for i, group in enumerate(self.fp16_groups):
+            for param in group:
+                param.grad = None
+
+        for i, group in enumerate(self.fp32_groups):
+            for param in group:
+                param.grad = None

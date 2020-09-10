@@ -24,6 +24,8 @@ release = '0.1.0'
 
 master_doc = 'index'
 
+autodoc_member_order = 'bysource'
+
 # -- General configuration ---------------------------------------------------
 
 # Add any Sphinx extension module names here, as strings. They can be

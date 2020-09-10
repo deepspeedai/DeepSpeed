@@ -156,7 +156,7 @@ fi
 if [ "$pip_mirror" != "" ]; then
     PIP_INSTALL="pip install --use-feature=2020-resolver -v -i $pip_mirror"
 else
-    PIP_INSTALL="pip install -v"
+    PIP_INSTALL="pip install --use-feature=2020-resolver -v"
 fi
 
 if [ ! -f $hostfile ]; then

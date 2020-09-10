@@ -480,6 +480,10 @@ class CheckpointFunction(torch.autograd.Function):
             timers.log(['forward'])
         if SYNCHRONIZE:
             torch.cuda.synchronize()
+
+        # Tensors returned from forward() may not be differentiable, e.g., attention mask
+        non_grad_outputs = [o for o in outputs if not o.is_floating_point()]
+        ctx.mark_non_differentiable(*non_grad_outputs)
         return outputs
 
     @staticmethod
@@ -548,7 +552,20 @@ class CheckpointFunction(torch.autograd.Function):
 
         if isinstance(outputs, torch.Tensor):
             outputs = (outputs, )
-        torch.autograd.backward(outputs, args)
+
+        # Go over args and build the list of gradient tensors. This is usually just args,
+        # but if the forward pass returns tensors that do not require_grad then we should
+        # adjust the arguments to autograd.backward() too. This happens when forward()
+        # returns indices or a mask (such as an attention mask).
+        # We skip the first needs_input_grad because it corresponds to run_function.
+        output_tensors = []
+        grad_tensors = []
+        for idx, need_grad in enumerate(ctx.needs_input_grad[1:]):
+            if need_grad:
+                output_tensors.append(outputs[idx])
+                grad_tensors.append(args[idx])
+
+        torch.autograd.backward(output_tensors, grad_tensors)
 
         if PROFILE_TIME:
             timers('backward').stop()

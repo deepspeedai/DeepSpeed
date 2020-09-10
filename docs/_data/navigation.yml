@@ -66,5 +66,7 @@ lnav:
         url: /tutorials/lrrt/
       - title: "DeepSpeed Sparse Attention"
         url: /tutorials/sparse-attention/
+      - title: "Pipeline Parallelism"
+        url: /tutorials/pipeline/
   - title: "Contributing"
     url: /contributing/

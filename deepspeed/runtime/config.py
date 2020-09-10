@@ -324,6 +324,20 @@ def get_sparse_attention_type(param_dict):
         return SPARSE_ATTENTION_TYPE_DEFAULT
 
 
+def get_pipeline_config(param_dict):
+    '''Parses pipeline engine configuration. '''
+    default_pipeline = {
+        'stages': 'auto',
+        'partition': 'best',
+        'seed_layers': False,
+        'activation_checkpoint_interval': 0
+    }
+    config = default_pipeline
+    for key, val in param_dict.get('pipeline', {}).items():
+        config[key] = val
+    return config
+
+
 def get_optimizer_name(param_dict):
     if OPTIMIZER in param_dict.keys() and \
             TYPE in param_dict[OPTIMIZER].keys():
@@ -523,6 +537,7 @@ class DeepSpeedConfig(object):
         self.tensorboard_job_name = get_tensorboard_job_name(param_dict)
 
         self.sparse_attention = get_sparse_attention(param_dict)
+        self.pipeline = get_pipeline_config(param_dict)
 
     def _batch_assertion(self):
 
@@ -592,10 +607,6 @@ class DeepSpeedConfig(object):
             assert False, \
                 'Either train_batch_size or micro_batch_per_gpu needs to be provided'
 
-        logger.info(
-            f' After Train batch {self.train_batch_size} micro_batch {self.train_micro_batch_size_per_gpu} and grad_acc {self.gradient_accumulation_steps}'
-        )
-
     def _configure_train_batch_size(self):
         self._set_batch_related_parameters()
         self._batch_assertion()
@@ -646,12 +657,14 @@ class DeepSpeedConfig(object):
             MAX_GRAD_NORM in self.optimizer_params.keys() and \
                 self.optimizer_params[MAX_GRAD_NORM] > 0:
             if fp16_enabled:
-                logger.warning(
-                    'DeepSpeedConfig: In FP16 mode, DeepSpeed will pass {}:{} to FP16 wrapper'
-                    .format(MAX_GRAD_NORM,
-                            self.optimizer_params[MAX_GRAD_NORM]))
+                if self.global_rank == 0:
+                    logger.warning(
+                        'DeepSpeedConfig: In FP16 mode, DeepSpeed will pass {}:{} to FP16 wrapper'
+                        .format(MAX_GRAD_NORM,
+                                self.optimizer_params[MAX_GRAD_NORM]))
             else:
-                logger.warning(
-                    'DeepSpeedConfig: In FP32 mode, DeepSpeed does not permit MAX_GRAD_NORM ({}) > 0, setting to zero'
-                    .format(self.optimizer_params[MAX_GRAD_NORM]))
+                if self.global_rank == 0:
+                    logger.warning(
+                        'DeepSpeedConfig: In FP32 mode, DeepSpeed does not permit MAX_GRAD_NORM ({}) > 0, setting to zero'
+                        .format(self.optimizer_params[MAX_GRAD_NORM]))
                 self.optimizer_params[MAX_GRAD_NORM] = 0.0

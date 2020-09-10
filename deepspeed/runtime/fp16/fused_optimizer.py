@@ -97,7 +97,7 @@ class FP16_Optimizer(object):
             self.clip_grad_norm = torch.nn.utils.clip_grad_norm_
 
         #model parallel object
-        self.mpu = None
+        self.mpu = mpu
 
         self.overflow = False
         self.overflow_checker = CheckOverflow(self.fp16_groups, mpu=self.mpu)
@@ -237,8 +237,8 @@ class FP16_Optimizer(object):
         if self.overflow:
             if self.verbose:
                 print("[deepspeed] OVERFLOW! Skipping step. Attempted loss "
-                      "scale: {}, reducing to {}".format(prev_scale,
-                                                         self.cur_scale))
+                      "scale: {}, reducing to {} ".format(prev_scale,
+                                                          self.cur_scale))
             self.log_timers(OVERFLOW_TIMERS)
             grads_groups_flat = None
             return self.overflow
