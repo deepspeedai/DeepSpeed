@@ -11,9 +11,13 @@ library that makes distributed training easy, efficient, and effective.
 <p align="center"><i><b>10x Faster Training</b></i></p>
 <p align="center"><i><b>Minimal Code Change</b></i></p>
 
-DeepSpeed can train deep learning models with over a hundred billion parameters on current
-generation of GPU clusters, while achieving over 10x in system performance
-compared to the state-of-art. Early adopters of DeepSpeed have already produced
+DeepSpeed delivers extreme-scale model training for everyone, from data scientists training on massive supercomputers to those training on low-end clusters or even on a single GPU:
+* Extreme scale: Using current generation of GPU clusters with hundreds of devices,  3D parallelism of DeepSpeed can efficiently train deep learning models with trillions of parameters.  
+* Extremely memory efficient: With just a single GPU, ZeRO-Offload of DeepSpeed can train models with over 10B parameters, 10x bigger than the state of arts, democratizing multi-billion-parameter model training such that many deep learning scientists can explore bigger and better models.
+* Extremely long sequence length: Sparse attention of DeepSpeed powers an order-of-magnitude longer input sequence and obtains up to 6x faster execution comparing with dense transformers.  
+* Extremely communication efficient: 3D parallelism improves communication efficiency allows users to train multi-billion-parameter models 2–7x faster on clusters with limited network bandwidth.  1-bit Adam reduces communication volume by up to 5x while achieving similar convergence efficiency to Adam, allowing for scaling to different types of GPU clusters and networks.
+
+Early adopters of DeepSpeed have already produced
 a language model (LM) with over 17B parameters called
 [Turing-NLG](https://www.microsoft.com/en-us/research/blog/turing-nlg-a-17-billion-parameter-language-model-by-microsoft),
 establishing a new SOTA in the LM category.
@@ -27,7 +31,11 @@ information [here](https://innovation.microsoft.com/en-us/exploring-ai-at-scale)
 
 
 # News
-
+* [2020/09/10] [DeepSpeed: Extreme-scale model training for everyone](linklink)
+  * [Powering 10x longer sequences and 6x faster execution through DeepSpeed Sparse Attention](https://www.deepspeed.ai/news/2020/09/08/sparse-attention-news.html)
+  * [Training a trillion parameters with pipeline parallelism](https://www.deepspeed.ai/news/2020/09/09/pipeline-parallelism.html)
+  * [Up to 5x less communication and 3.4x faster training through 1-bit Adam](https://www.deepspeed.ai/news/2020/09/08/onebit-adam-news.html)
+  * [10x bigger model training on a single GPU with ZeRO-Offload](https://www.deepspeed.ai/news/2020/09/08/ZeRO-Offload.html)
 * [2020/08/07] [DeepSpeed Microsoft Research Webinar](https://note.microsoft.com/MSR-Webinar-DeepSpeed-Registration-On-Demand.html) is now available on-demand <span style="color:dodgerblue">**[_NEW_]**</span>
 * [2020/07/24] [DeepSpeed Microsoft Research Webinar](https://note.microsoft.com/MSR-Webinar-DeepSpeed-Registration-On-Demand.html) on August 6th, 2020 <span style="color:dodgerblue">**[_NEW_]**</span>
   [![DeepSpeed webinar](docs/assets/images/webinar-aug2020.png)](https://note.microsoft.com/MSR-Webinar-DeepSpeed-Registration-Live.html)
@@ -68,10 +76,27 @@ overview](https://www.deepspeed.ai/features/) for descriptions and usage.
 * [Model Parallelism](https://www.deepspeed.ai/features/#model-parallelism)
   * Support for Custom Model Parallelism
   * Integration with Megatron-LM
-* [Memory and Bandwidth Optimizations](https://www.deepspeed.ai/features/#memory-and-bandwidth-optimizations)
-  * The Zero Redundancy Optimizer (ZeRO)
-  * Constant Buffer Optimization (CBO)
+* [Pipeline Parallelism](https://www.deepspeed.ai/tutorials/pipeline/)
+  * 3D Parallelism
+* [The Zero Redundancy Optimizer (ZeRO)](https://www.deepspeed.ai/tutorials/zero/)
+  * Optimizer State and Gradient Partitioning
+  * Activation Partitioning
+  * Constant Buffer Optimization
+  * Contiguous Memory Optimization
+* [ZeRO-Offload](https://www.deepspeed.ai/tutorials/zero-offload/)
+  * Leverage both CPU/GPU memory for model training
+  * Support 10B model training on a single GPU
+* [Ultra-fast dense transformer kernels](https://www.deepspeed.ai/news/2020/05/18/bert-record.html)
+* [Sparse attention](https://www.deepspeed.ai/news/2020/09/08/sparse-attention.html)
+  * Memory- and compute-efficient sparse kernels 
+  * Support 10x long sequences than dense
+  * Flexible support to different sparse structures
+* [1-bit Adam](https://www.deepspeed.ai/news/2020/09/08/onebit-adam-blog-post.html)
+  * Custom communication collective
+  * Up to 5x communication volume saving
+* [Additional Memory and Bandwidth Optimizations](https://www.deepspeed.ai/features/#additional-memory-and-bandwidth-optimizations)
   * Smart Gradient Accumulation
+  * Communication/Computation Overlap
 * [Training Features](https://www.deepspeed.ai/features/#training-features)
   * Simplified training API
   * Gradient Clipping
@@ -81,6 +106,7 @@ overview](https://www.deepspeed.ai/features/) for descriptions and usage.
   * Memory bandwidth optimized FP16 Optimizer
   * Large Batch Training with LAMB Optimizer
   * Memory efficient Training with ZeRO Optimizer
+  * CPU-Adam
 * [Training Agnostic Checkpointing](https://www.deepspeed.ai/features/#training-agnostic-checkpointing)
 * [Advanced Parameter Search](https://www.deepspeed.ai/features/#advanced-parameter-search)
   * Learning Rate Range Test
