@@ -39,6 +39,7 @@ collections:
       - megatron.md
       - 1Cycle.md
       - lrrt.md
+      - zero.md
 
 defaults:
   - scope:

@@ -231,7 +231,8 @@ Enabling and configure ZeRO memory optimizations
     "overlap_comm": false,
     "reduce_scatter": [true|false],
     "reduce_bucket_size": 500000000,
-    "contiguous_gradients" : [true|false]
+    "contiguous_gradients" : [true|false],
+    "cpu_offload": [true|false]
     }
 ```
 
@@ -283,6 +284,11 @@ Enabling and configure ZeRO memory optimizations
 | ------------------------------------------------------------ | ------- |
 | Copies the gradients to a contiguous buffer as they are produced. Avoids memory fragmentation during backward pass. Only useful when running very large models.   | `False`   |
 
+***cpu_offload***: [boolean]
+
+| Description                                                  | Default |
+| ------------------------------------------------------------ | ------- |
+| Enable offloading of optimizer memory and computation to CPU. This frees up GPU memory for larger models or batch sizes.  | `False`   |
 
 
 ### Logging
