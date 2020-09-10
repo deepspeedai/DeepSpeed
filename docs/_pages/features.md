@@ -240,13 +240,13 @@ Please see the [core API doc](https://deepspeed.readthedocs.io/) for more detail
 }
 ```
 ## Sparse Attention
-DeepSpeed offers sparse attention to support long sequences. Please refer to the [Sparse Attention](/tutorials/sparse_attention/) tutorial.
+DeepSpeed offers sparse attention to support long sequences. Please refer to the [Sparse Attention](/tutorials/sparse-attention/) tutorial.
 
-```python
+```bash
 --deepspeed_sparse_attention
 ```
 
-```python
+```json
 "sparse_attention": {
     "mode": "fixed",
     "block": 16,

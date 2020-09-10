@@ -115,7 +115,7 @@ if self.sparse_attention_config is not None and pad_len > 0:
 
 * **Enable sparse attention*: To use DeepSpeed Sparse Attention, you need to enable it in the launcher script through `deepspeed_sparse_attention` argument:
 
-```python
+```bash
 --deepspeed_sparse_attention
 ```
 
@@ -123,7 +123,7 @@ Please check [our bing_bert runner script](https://github.com/microsoft/DeepSpee
 
 * **Add sparsity config**: The sparsity config can be set through the [DeepSpeed JSON config file](https://github.com/microsoft/DeepSpeedExamples/blob/master/bing_bert/deepspeed_bsz64k_lamb_config_seq128.json). In this example, we have used `fixed` sparsity mode that will be described in [How to config sparsity structures](/tutorials/sparse-attention/#how-to-config-sparsity-structures) section.
 
-```python
+```json
 "sparse_attention": {
     "mode": "fixed",
     "block": 16,
