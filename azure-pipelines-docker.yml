@@ -29,7 +29,7 @@ stages:
       displayName: Build and Push
       inputs:
         command: buildAndPush
-        dockerfile: '$(Build.SourcesDirectory)/Dockerfile'
+        dockerfile: '$(Build.SourcesDirectory)/docker/Dockerfile'
         repository: deepspeed/deepspeed
         tags: |
           $(tag)
