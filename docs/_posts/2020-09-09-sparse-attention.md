@@ -25,7 +25,7 @@ To learn more about Sparsity Config, and also how to use this library, please ch
 ## Performance Results
 
 * **Power over 10x longer sequences**
-In a pre-training experiment, we ran BERT model under three settings: dense, dense with activation checkpoint, and sparse (SA) with activation checkpoint. SA empowers 10x and 16x longer sequences comparing with dense for BERT base and large, respectively. Following figure shows the longest sequence length runnable in BERT base and large model; experiment is performed with batch size 1 on a single Nvidia V100 GPU-32GB memory.
+In a pre-training experiment, we ran BERT model under three settings: dense, dense with activation checkpoint, and sparse (SA) with activation checkpoint. SA empowers 10x and 16x longer sequences comparing with dense for BERT base and large, respectively. Following figure shows the longest sequence length runnable in BERT base and large model; experiment is performed with batch size 1 on a single NVIDIA V100 GPU-32GB memory.
 
 ![Maximum sequence runnable on BERT](/assets/images/sa_maximum_sequence_runnable_on_bert.png){: .align-center}
 

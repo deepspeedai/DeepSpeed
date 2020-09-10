@@ -4,7 +4,7 @@ title: "DeepSpeed  Sparse Attention"
 
 In this tutorial we describe how to use DeepSpeed Sparse Attention (SA) and its building-block kernels. The easiest way to use SA is through DeepSpeed launcher. We will describe this through an example in [How to use sparse attention with DeepSpeed launcher](/tutorials/sparse-attention/#how-to-use-sparse-attention-with-deepspeed-launcher) section. But before that, we introduce modules provided by DeepSpeed SA in the [next](/tutorials/sparse-attention/#sparse-attention-modules) section.
 
-**Note:** Currently DeepSpeed Sparse Attention can be used only on Nvidia V100 GPU using Torch >= 1.5 and Cuda 10.1 or 10.2.
+**Note:** Currently DeepSpeed Sparse Attention can be used only on NVIDIA V100 GPU using Torch >= 1.5 and Cuda 10.1 or 10.2.
 {: .notice--warning}
 
 ## Sparse attention modules
