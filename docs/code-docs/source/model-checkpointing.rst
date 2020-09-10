@@ -5,8 +5,8 @@ DeepSpeed provides routines for checkpointing model state during training.
 
 Loading Training Checkpoints
 ----------------------------
-.. autofunction:: deepspeed.DeepSpeedLight.load_checkpoint
+.. autofunction:: deepspeed.DeepSpeedEngine.load_checkpoint
 
 Saving Training Checkpoints
 ---------------------------
-.. autofunction:: deepspeed.DeepSpeedLight.save_checkpoint
+.. autofunction:: deepspeed.DeepSpeedEngine.save_checkpoint

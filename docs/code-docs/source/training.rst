@@ -1,8 +1,8 @@
 Training API
 ============
 
-:func:`deepspeed.initialize` returns a *model engine* in its first argument
-of type ``DeepSpeedLight``. This engine is used to progress training:
+:func:`deepspeed.initialize` returns a *training engine* in its first argument
+of type :class:`DeepSpeedEngine`. This engine is used to progress training:
 
 .. code-block:: python
 
@@ -18,12 +18,17 @@ of type ``DeepSpeedLight``. This engine is used to progress training:
 
 Forward Propagation
 -------------------
-.. autofunction:: deepspeed.DeepSpeedLight.forward
+.. autofunction:: deepspeed.DeepSpeedEngine.forward
 
 Backward Propagation
 --------------------
-.. autofunction:: deepspeed.DeepSpeedLight.backward
+.. autofunction:: deepspeed.DeepSpeedEngine.backward
 
 Optimizer Step
 --------------
-.. autofunction:: deepspeed.DeepSpeedLight.step
+.. autofunction:: deepspeed.DeepSpeedEngine.step
+
+
+Gradient Accumulation
+---------------------
+.. autofunction:: deepspeed.DeepSpeedEngine.is_gradient_accumulation_boundary

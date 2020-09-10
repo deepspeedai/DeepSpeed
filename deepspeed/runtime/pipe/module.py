@@ -26,12 +26,16 @@ class LayerSpec:
     LayerSpec stores the type information and parameters for each stage in a
     PipelineModule. For example:
 
+    .. code-block:: python
+
         nn.Sequence(
             torch.nn.Linear(self.in_dim, self.hidden_dim, bias=False),
             torch.nn.Linear(self.hidden_hidden, self.out_dim)
         )
 
     becomes
+
+    .. code-block:: python
 
         layer_specs = [
             LayerSpec(torch.nn.Linear, self.in_dim, self.hidden_dim, bias=False),
@@ -79,44 +83,46 @@ class TiedLayerSpec(LayerSpec):
 
 
 class PipelineModule(nn.Module):
-    """Base class for modules to be parallelized with pipeline parallelism.
-
-    Users should subclass PipelineModule and provide layer_specs(), which returns a list
-    of LayerSpec objects. Thes sequence of layers represents the pipeline-parallel model.
-    After initialization, a PipelineModule can be used as a traditional torch.nn.Module.
-
-    The forward pass is already provided by this base class. The key assumption is that
-    the output of each layer can be directly fed as input to the next, like a
-    torch.nn.Sequence.
-
-    The key constraint that enables pipeline parallelism is the representation of the
-    forward pass as a sequence of layers (i.e., stages) and the enforcement of a
-    simple interface between them.
-
-    Example:
-
-    class LinearPipeline(PipelineModule):
-        def __init__(self, in_dim, hidden_dim, out_dim):
-            self.in_dim = in_dim
-            self.hidden_dim = hidden_dim
-            self.out_dim = out_dim
-            super().__init__()
-
-        def layer_specs(self):
-            return [LayerSpec(torch.nn.Linear, self.in_dim, self.hidden_dim, bias=False),
-                    LayerSpec(torch.nn.Linear, self.hidden_hidden, self.out_dim)]
-    """
     def __init__(self,
                  layers,
                  num_stages=None,
-                 loss_fn=None,
                  topology=None,
+                 loss_fn=None,
                  seed_layers=False,
                  seed_fn=None,
                  base_seed=1234,
                  partition_method='parameters',
                  activation_checkpoint_interval=0,
                  activation_checkpoint_func=checkpointing.checkpoint):
+        """Modules to be parallelized with pipeline parallelism.
+
+        The key constraint that enables pipeline parallelism is the
+        representation of the forward pass as a sequence of layers
+        and the enforcement of a simple interface between them. The
+        forward pass is implicitly defined by the module ``layers``. The key
+        assumption is that the output of each layer can be directly fed as
+        input to the next, like a ``torch.nn.Sequence``. The forward pass is
+        implicitly:
+
+        .. code-block:: python
+
+            def forward(self, inputs):
+                x = inputs
+                for layer in self.layers:
+                    x = layer(x)
+                return x
+
+        Args:
+            layers (Iterable): A sequence of layers defining pipeline structure. Can be a ``torch.nn.Sequential`` module.
+            num_stages (int, optional): The degree of pipeline parallelism. If not specified, ``topology`` must be provided.
+            topology (``deepseed.pipe.ProcessTopology``, optional): Defines the axes of parallelism axes for training. Must be provided if ``num_stages`` is ``None``.
+            loss_fn (callable, optional): Loss is computed ``loss = loss_fn(outputs, label)``
+            base_seed (int, optional): [description]. Defaults to 1234.
+            partition_method (str, optional): [description]. Defaults to 'parameters'.
+            activation_checkpoint_interval (int, optional): The granularity activation checkpointing in terms of number of layers. 0 disables activation checkpointing.
+            activation_checkpoint_func (callable, optional): The function to use for activation checkpointing. Defaults to ``deepspeed.checkpointing.checkpoint``.
+        """
+
         super().__init__()
 
         if num_stages is None and topology is None:
@@ -488,7 +494,6 @@ class PipelineModule(nn.Module):
         self._local_stop = stop
 
     def set_checkpoint_interval(self, interval):
-        """ Checkpoint activations after each ``interval`` layers. Use 0 to disable. """
         assert interval >= 0
         self.checkpoint_interval = interval
 

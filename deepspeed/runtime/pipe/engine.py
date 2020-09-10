@@ -43,10 +43,10 @@ def _tensor_bytes(tensor):
 
 
 class PipelineEngine(DeepSpeedEngine):
-    """ A model wrapper for pipeline-parallel execution.
+    """ A training engine hybrid pipeline, data, and model parallel training.
 
-    Parallelism is achieved by executing micro-batches in a pipelined fashion with
-    gradient accumulation.
+    This engine is created by ``deepspeed.initialize()`` when a :class:`PipelineModule`
+    is provided.
     """
     def __init__(self, *super_args, **super_kwargs):
         super().__init__(*super_args, **super_kwargs)
@@ -227,10 +227,28 @@ class PipelineEngine(DeepSpeedEngine):
         self.num_pipe_buffers = num_buffers
 
     def train_batch(self, data_iter=None):
-        """Progress the pipeline to train the next batch of data.
+        """Progress the pipeline to train the next batch of data. The engine will ingest
+        ``self.train_batch_size()`` total samples collectively across all workers.
+
+
+        An iterator that over training data should be provided as an argument
+        unless ``deepspeed.initialize()`` was provided a training set. In that event,
+        the training data will automatically be read.
+
+
+        .. warning::
+            A total of ``self.gradient_accumulation_steps()`` entries will be pulled
+            from ``data_iter`` by each pipeline. There must be sufficient
+            data left in ``data_iter`` or else a ``StopIteration`` will halt training.
+
+            DeepSpeed provides a convenience class :class:`deepspeed.utils.RepeatingLoader`
+            that wraps data loaders to automatically restart upon a ``StopIteration``.
+
+        Args:
+            data_iter (Iterator, optional): Iterator of training data.
 
         Returns:
-            The arithmetic mean of the losses over all micro-batches.
+            The arithmetic mean of the losses computed this batch.
         """
         if not torch._C.is_grad_enabled():
             raise RuntimeError(
@@ -286,7 +304,9 @@ class PipelineEngine(DeepSpeedEngine):
         return self.agg_train_loss
 
     def eval_batch(self, data_iter):
-        """Evaluate the pipeline on a batch of data from ``data_iter``.
+        """Evaluate the pipeline on a batch of data from ``data_iter``. The
+        engine will evaluate ``self.train_batch_size()`` total samples
+        collectively across all workers.
 
         This method is equivalent to:
 
@@ -296,9 +316,21 @@ class PipelineEngine(DeepSpeedEngine):
             with torch.no_grad():
                 output = module(batch)
 
+        .. warning::
+            A total of ``self.gradient_accumulation_steps()`` entries will be pulled
+            from ``data_iter`` by each pipeline. There must be sufficient
+            data left in ``data_iter`` or else a ``StopIteration`` will halt training.
+
+            DeepSpeed provides a convenience class :class:`deepspeed.utils.RepeatingLoader`
+            that wraps data loaders to automatically restart upon a ``StopIteration``.
+
+        Args:
+            data_iter (Iterator): Iterator of data to evaluate.
+
         Returns:
-            The arithmetic mean of the losses over all micro-batches.
+            The arithmetic mean of the losses computed this batch.
         """
+
         self.module.eval()
         self.total_loss = None
 
@@ -330,6 +362,14 @@ class PipelineEngine(DeepSpeedEngine):
         #ds_checkpointing.reset()
 
         return self.agg_eval_loss
+
+    def is_first_stage(self):
+        """True if this process is in the first stage in the pipeline."""
+        return self.stage_id == 0
+
+    def is_last_stage(self):
+        """True if this process is in the last stage in the pipeline."""
+        return self.stage_id == self.num_stages - 1
 
     def _aggregate_total_loss(self):
         # Scale loss, average among DP ranks, and bcast loss to the rest of my DP group
@@ -364,7 +404,7 @@ class PipelineEngine(DeepSpeedEngine):
         return agg_loss
 
     def set_dataloader(self, loader):
-        """ Store a DataLoader to sample for training data. """
+        """"""
         if self.is_first_stage() or self.is_last_stage():
             self.training_dataloader = loader
             self.data_iterator = iter(self.training_dataloader)
@@ -993,12 +1033,15 @@ class PipelineEngine(DeepSpeedEngine):
         return buffers
 
     def forward(self, *args, **kwargs):
+        """Disabled for pipeline parallel training. See ``train_batch()``. """
         raise PipelineError("Only train_batch() is accessible in pipeline mode.")
 
     def backward(self, *args, **kwargs):
+        """Disabled for pipeline parallel training. See ``train_batch()``. """
         raise PipelineError("Only train_batch() is accessible in pipeline mode.")
 
     def step(self, *args, **kwargs):
+        """Disabled for pipeline parallel training. See ``train_batch()``. """
         raise PipelineError("Only train_batch() is accessible in pipeline mode.")
 
     def mem_status(self, msg, print_rank=-1, reset_max=False):
@@ -1083,14 +1126,6 @@ class PipelineEngine(DeepSpeedEngine):
             return
 
         self.module.load_state_dir(state_dict, strict=strict)
-
-    def is_first_stage(self):
-        """True if this process is in the first stage in the pipeline."""
-        return self.stage_id == 0
-
-    def is_last_stage(self):
-        """True if this process is in the last stage in the pipeline."""
-        return self.stage_id == self.num_stages - 1
 
     # A map of PipeInstruction types to methods. Each method will be executed with the
     # kwargs provided to the PipeInstruction from the scheduler.

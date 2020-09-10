@@ -40,7 +40,6 @@ Pipeline Parallelism
    :maxdepth: 2
 
    pipeline
-   pipeline-extending
 
 
 Indices and tables
