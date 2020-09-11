@@ -20,13 +20,14 @@ template <typename T>
 size_t get_workspace_size(int maxBatchSize,
                           int seq_len,
                           int hidden_size,
+                          int intermediate_size,
                           int heads,
                           bool training,
                           bool gelu_checkpoint)
 {
     size_t workSpacesize = 4 * (size_t(maxBatchSize) * seq_len * hidden_size);
     if (training) {
-        workSpacesize += (std::max((4 * size_t(maxBatchSize) * seq_len * hidden_size),
+        workSpacesize += (std::max((size_t(maxBatchSize) * seq_len * intermediate_size),
                                    2 * (size_t(maxBatchSize) * heads * seq_len * seq_len)));
         if (gelu_checkpoint) workSpacesize += 2 * (size_t(maxBatchSize) * seq_len * hidden_size);
     }
@@ -92,15 +93,15 @@ BertTransformerLayer<T>::BertTransformerLayer(int layer_id,
                                                        false,
                                                        !normalize_invertible)),
       _ff1(typename FeedForward<T>::Config(batch_size * seq_length,
-                                           4 * hidden_size,
+                                           intermediate_size,
                                            hidden_size,
                                            gemm_algos[1])),
       _ff2(typename FeedForward<T>::Config(batch_size * seq_length,
                                            hidden_size,
-                                           4 * hidden_size,
+                                           intermediate_size,
                                            gemm_algos[2])),
       _softmax(typename Softmax<T>::Config(batch_size, num_heads, seq_length)),
-      _gelu(typename Gelu<T>::Config(_batch_size, _seq_length, _intermediate_size)),
+      _gelu(typename Gelu<T>::Config(_batch_size, _seq_length, intermediate_size)),
       _attn_prob_dropout(typename Dropout<T>::Config(attn_prob_dropout_ratio,
                                                      _batch_size * _heads * _seq_length,
                                                      _seq_length)),
@@ -143,8 +144,13 @@ BertTransformerLayer<T>::~BertTransformerLayer()
 template <typename T>
 void BertTransformerLayer<T>::Initialize()
 {
-    Context::Instance().GenWorkSpace(get_workspace_size<T>(
-        _batch_size, _seq_length, _hidden_size, _heads, _training, _gelu_checkpoint));
+    Context::Instance().GenWorkSpace(get_workspace_size<T>(_batch_size,
+                                                           _seq_length,
+                                                           _hidden_size,
+                                                           _intermediate_size,
+                                                           _heads,
+                                                           _training,
+                                                           _gelu_checkpoint));
 
     if (std::is_same<T, __half>::value) cublasSetMathMode(_cublasHandle, CUBLAS_TENSOR_OP_MATH);
 }
@@ -343,7 +349,7 @@ void BertTransformerLayer<T>::Backward(int bsz,
     T* buf_2 = buf_1 + small_buf_size;
     T* buf_3 = buf_2 + small_buf_size;
 
-    T* ff2_buf = buf_3 + (_gelu_checkpoint ? 3 : 1) * small_buf_size;
+    T* ff2_buf = (_gelu_checkpoint ? (buf_2 + _intermediate_size) : (buf_3 + small_buf_size));
     T* ctx_bufB_ptr_recomp = ff2_buf + (_seq_length * _seq_length * bsz * _heads);
 
     cudaStream_t streams[2] = {_stream, _stream};

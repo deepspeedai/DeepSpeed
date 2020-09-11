@@ -142,7 +142,7 @@ def create_models(ds_config):
                              hidden_size=ds_config.hidden_size,
                              num_hidden_layers=ds_config.num_hidden_layers,
                              num_attention_heads=ds_config.heads,
-                             intermediate_size=4 * ds_config.hidden_size,
+                             intermediate_size=ds_config.intermediate_size,
                              hidden_act="gelu",
                              hidden_dropout_prob=ds_config.hidden_dropout_ratio,
                              attention_probs_dropout_prob=ds_config.attn_dropout_ratio,
@@ -162,12 +162,12 @@ def create_models(ds_config):
     weights.append(nn.Parameter(torch.Tensor(ds_config.hidden_size)))
     weights[4].data.fill_(1.0)
     weights.append(
-        nn.Parameter(torch.Tensor(4 * ds_config.hidden_size,
+        nn.Parameter(torch.Tensor(ds_config.intermediate_size,
                                   ds_config.hidden_size)))
     weights[5].data.normal_(mean=0.0, std=ds_config.initializer_range)
     weights.append(
         nn.Parameter(torch.Tensor(ds_config.hidden_size,
-                                  4 * ds_config.hidden_size)))
+                                  ds_config.intermediate_size)))
     weights[6].data.normal_(mean=0.0, std=ds_config.initializer_range)
     weights.append(nn.Parameter(torch.Tensor(ds_config.hidden_size)))
     weights[7].data.fill_(1.0)
@@ -177,7 +177,7 @@ def create_models(ds_config):
     for i in range(4):
         biases.append(nn.Parameter(torch.Tensor(ds_config.hidden_size)))
         biases[i + 1].data.zero_()
-    biases.append(nn.Parameter(torch.Tensor(4 * ds_config.hidden_size)))
+    biases.append(nn.Parameter(torch.Tensor(ds_config.intermediate_size)))
     biases[5].data.zero_()
     biases.append(nn.Parameter(torch.Tensor(ds_config.hidden_size)))
     biases[6].data.zero_()
@@ -274,6 +274,7 @@ def test_backward(batch_size,
     ds_config.layer_id = None
     ds_config.batch_size = batch_size
     ds_config.hidden_size = hidden_size
+    ds_config.intermediate_size = hidden_size
     ds_config.max_seq_length = seq_len
     ds_config.heads = heads
     ds_config.attn_dropout_ratio = 0.0
