@@ -260,9 +260,8 @@ class PipelineEngine(DeepSpeedEngine):
         self.module.train()
         self.total_loss = None
 
-        self.timers('train_batch').start()
-
         # Do the work
+        self.timers('train_batch').start()
         sched = schedule.TrainSchedule(micro_batches=self.micro_batches,
                                        stages=self.num_stages,
                                        stage_id=self.stage_id)
@@ -274,7 +273,7 @@ class PipelineEngine(DeepSpeedEngine):
             if self.global_rank == 0:
                 elapsed = self.timers('train_batch').elapsed(reset=True)
                 iter_time = elapsed / self.steps_per_print()
-                tput = self.train_batch_size() / elapsed
+                tput = self.train_batch_size() / iter_time
                 print(f'steps: {self.global_steps} '
                       f'loss: {self.agg_train_loss:0.4f} '
                       f'iter time (s): {iter_time:0.3f} '
