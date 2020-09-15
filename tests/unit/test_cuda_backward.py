@@ -12,8 +12,12 @@ from modelingpreln import BertEncoder as BertEncoderPreln
 from modeling import BertEncoder as BertEncoderPostln
 from modeling import BertConfig, BertLayerNorm
 from deepspeed import DeepSpeedTransformerLayer, DeepSpeedTransformerConfig
+import deepspeed
 
 import sys
+
+if not deepspeed.ops.__installed_ops__['transformer']:
+    pytest.skip("transformer kernels are not installed", allow_module_level=True)
 
 
 def check_equal(first, second, atol=1e-2, verbose=False):

@@ -8,6 +8,9 @@ import numpy as np
 from common import distributed_test
 from simple_model import SimpleModel, args_from_dict
 
+lamb_available = pytest.mark.skipif(not deepspeed.ops.__installed_ops__['lamb'],
+                                    reason="lamb is not installed")
+
 
 def run_model_step(model, gradient_list):
     for value in gradient_list:
@@ -165,6 +168,7 @@ def test_fused_some_overflow(tmpdir):
     _test_fused_some_overflow(args)
 
 
+@lamb_available
 def test_unfused_no_overflow(tmpdir):
     config_dict = {
         "train_batch_size": 1,
@@ -208,6 +212,7 @@ def test_unfused_no_overflow(tmpdir):
     _test_unfused_no_overflow(args)
 
 
+@lamb_available
 def test_unfused_all_overflow(tmpdir):
     config_dict = {
         "train_batch_size": 1,
@@ -253,6 +258,7 @@ def test_unfused_all_overflow(tmpdir):
     _test_unfused_all_overflow(args)
 
 
+@lamb_available
 def test_unfused_some_overflow(tmpdir):
     config_dict = {
         "train_batch_size": 1,
