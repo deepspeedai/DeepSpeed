@@ -78,8 +78,8 @@ title: "DeepSpeed Configuration JSON"
 
 | Fields | Value                                                        | Example                        |
 | ------ | ------------------------------------------------------------ | ------------------------------ |
-| type   | The scheduler name. See [here](https://deepspeed.readthedocs.io/en/latest/deepspeed.pt.html) for list of support schedulers. | `"1Cycle"`                      |
-| params | Dictionary of parameters to instantiate scheduler. The parameter names should match scheduler constructor signature. | `{"lr": 0.001, "eps": 1e-8}` |
+| type   | The scheduler name. See [here](https://deepspeed.readthedocs.io/en/latest/deepspeed.pt.html) for list of support schedulers. | `"WarmupLR"`                      |
+| params | Dictionary of parameters to instantiate scheduler. The parameter names should match scheduler constructor signature. | `{"warmup_min_lr": 0, "warmup_max_lr": 0.001}` |
 
 Example of ***scheduler***
 
