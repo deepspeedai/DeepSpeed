@@ -34,6 +34,7 @@ autodoc_member_order = 'bysource'
 extensions = [
     'sphinx.ext.autodoc',
     'sphinx.ext.napoleon',
+    'sphinx.ext.viewcode',
     'recommonmark',
     'sphinx_rtd_theme',
 ]
@@ -78,11 +79,4 @@ add_module_names = True
 
 autoclass_content = 'both'
 
-autodoc_mock_imports = [
-    "torch",
-    "apex",
-    "mpi4py",
-    "tensorboardX",
-    "deepspeed_transformer_cuda",
-    "deepspeed_stochastic_transformer_cuda",
-]
+autodoc_mock_imports = ["torch", "apex", "mpi4py", "tensorboardX", "numpy"]

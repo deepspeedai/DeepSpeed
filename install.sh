@@ -137,7 +137,7 @@ rm_if_exist() {
 
 if [ "$no_clean" == "0" ]; then
     # remove deepspeed build files
-    rm_if_exist deepspeed/git_version_info.py
+    rm_if_exist deepspeed/git_version_info_installed.py
     rm_if_exist dist
     rm_if_exist build
     rm_if_exist deepspeed.egg-info

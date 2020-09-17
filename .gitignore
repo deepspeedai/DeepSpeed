@@ -3,7 +3,7 @@
 *~
 *.swp
 *.log
-deepspeed/git_version_info.py
+deepspeed/git_version_info_installed.py
 
 # Build + installation data
 build/

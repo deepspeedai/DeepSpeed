@@ -10,7 +10,7 @@ DeepSpeed's training engine provides hybrid data and pipeline parallelism and
 can be further combined with model parallelism such as
 [Megatron-LM](https://github.com/NVIDIA/Megatron-LM).
 An illustration of
-3D parallelism is shown below. Our latest [results](linklinklink)
+3D parallelism is shown below. Our latest [results]({{ site.press_release_v3 }})
 demonstrate that this 3D parallelism enables training models with over a
 **trillion** parameters.
 

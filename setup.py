@@ -297,7 +297,7 @@ else:
     git_hash = "unknown"
     git_branch = "unknown"
 print(f"version={VERSION}+{git_hash}, git_hash={git_hash}, git_branch={git_branch}")
-with open('deepspeed/git_version_info.py', 'w') as fd:
+with open('deepspeed/git_version_info_installed.py', 'w') as fd:
     fd.write(f"version='{VERSION}+{git_hash}'\n")
     fd.write(f"git_hash='{git_hash}'\n")
     fd.write(f"git_branch='{git_branch}'\n")

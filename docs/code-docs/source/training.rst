@@ -28,7 +28,6 @@ Optimizer Step
 --------------
 .. autofunction:: deepspeed.DeepSpeedEngine.step
 
-
 Gradient Accumulation
 ---------------------
 .. autofunction:: deepspeed.DeepSpeedEngine.is_gradient_accumulation_boundary

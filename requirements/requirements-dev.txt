@@ -2,3 +2,6 @@ pytest
 pytest-forked
 pre-commit
 clang-format
+sphinx
+recommonmark
+sphinx-rtd-theme
