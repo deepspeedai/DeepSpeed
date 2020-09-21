@@ -69,7 +69,7 @@ public:
         if (!_workspace) {
             assert(_workspace == nullptr);
             cudaMalloc(&_workspace, size);
-        } else if (_workSpaceSize != size) {
+        } else if (_workSpaceSize < size) {
             cudaFree(_workspace);
             cudaMalloc(&_workspace, size);
         }

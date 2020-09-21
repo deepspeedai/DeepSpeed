@@ -18,6 +18,7 @@ class TransformerConfig():
                  batch_size,
                  max_seq_length,
                  hidden_size,
+                 intermediate_size,
                  heads,
                  attn_dropout_ratio,
                  hidden_dropout_ratio,
@@ -26,6 +27,7 @@ class TransformerConfig():
         self.layer_id = -1
         self.batch_size = batch_size
         self.hidden_size = hidden_size
+        self.intermediate_size = intermediate_size
         self.max_seq_length = max_seq_length
         self.heads = heads
         self.attn_dropout_ratio = attn_dropout_ratio
@@ -43,6 +45,8 @@ class DeepSpeedTransformerConfig(TransformerConfig):
             max_seq_length: The sequence-length of the model being trained with DeepSpeed
 
             hidden_size: The hidden size of the transformer layer
+
+            intermediate_size: The intermediate size of the feed-forward part of transformer layer
 
             heads: The number of heads in the self-attention of the transformer layer
 
@@ -88,6 +92,7 @@ class DeepSpeedTransformerConfig(TransformerConfig):
                  batch_size=-1,
                  max_seq_length=-1,
                  hidden_size=-1,
+                 intermediate_size=-1,
                  heads=-1,
                  attn_dropout_ratio=-1,
                  hidden_dropout_ratio=-1,
@@ -103,14 +108,16 @@ class DeepSpeedTransformerConfig(TransformerConfig):
                  attn_dropout_checkpoint=False,
                  stochastic_mode=False):
         super(DeepSpeedTransformerConfig,
-              self).__init__(batch_size,
-                             max_seq_length,
-                             hidden_size,
-                             heads,
-                             attn_dropout_ratio,
-                             hidden_dropout_ratio,
-                             num_hidden_layers,
-                             initializer_range)
+              self).__init__(
+                  batch_size,
+                  max_seq_length,
+                  hidden_size,
+                  (intermediate_size if intermediate_size > 0 else 4 * hidden_size),
+                  heads,
+                  attn_dropout_ratio,
+                  hidden_dropout_ratio,
+                  num_hidden_layers,
+                  initializer_range)
         self.fp16 = fp16
         self.pre_layer_norm = pre_layer_norm
         self.local_rank = local_rank
@@ -432,12 +439,12 @@ class DeepSpeedTransformerLayer(nn.Module):
             self.attn_nw = nn.Parameter(torch.Tensor(self.config.hidden_size))
             self.attn_nb = nn.Parameter(torch.Tensor(self.config.hidden_size))
             self.inter_w = nn.Parameter(
-                torch.Tensor(4 * self.config.hidden_size,
+                torch.Tensor(self.config.intermediate_size,
                              self.config.hidden_size))
-            self.inter_b = nn.Parameter(torch.Tensor(4 * self.config.hidden_size))
+            self.inter_b = nn.Parameter(torch.Tensor(self.config.intermediate_size))
             self.output_w = nn.Parameter(
                 torch.Tensor(self.config.hidden_size,
-                             4 * self.config.hidden_size))
+                             self.config.intermediate_size))
             self.output_b = nn.Parameter(torch.Tensor(self.config.hidden_size))
             self.norm_w = nn.Parameter(torch.Tensor(self.config.hidden_size))
             self.norm_b = nn.Parameter(torch.Tensor(self.config.hidden_size))
@@ -485,7 +492,7 @@ class DeepSpeedTransformerLayer(nn.Module):
                           self.config.batch_size,
                           self.config.hidden_size,
                           self.config.heads,
-                          4 * self.config.hidden_size,
+                          self.config.intermediate_size,
                           self.config.max_seq_length,
                           self.config.attn_dropout_ratio,
                           self.config.hidden_dropout_ratio,
