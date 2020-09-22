@@ -14,15 +14,18 @@ __global__ void column_sum_reduce(const T* __restrict__ inp,
     cg::thread_block_tile<TILE_DIM> g = cg::tiled_partition<TILE_DIM>(b);
 
     int idx = blockDim.x * blockIdx.x + threadIdx.x;
-    int offset = threadIdx.y * width + idx;
+
     int y_stride = width * TILE_DIM;
 
     float localSum = 0;
 
     // Loop across matrix height
-    for (int r = threadIdx.y; r < rows; r += TILE_DIM) {
-        localSum += (float)inp[offset];
-        offset += y_stride;
+    if (idx < width) {
+        int offset = threadIdx.y * width + idx;
+        for (int r = threadIdx.y; r < rows; r += TILE_DIM) {
+            localSum += (float)inp[offset];
+            offset += y_stride;
+        }
     }
 
     tile[threadIdx.x][threadIdx.y] = localSum;
@@ -40,7 +43,7 @@ __global__ void column_sum_reduce(const T* __restrict__ inp,
 
     if (threadIdx.x == 0) {
         int pos = blockIdx.x * TILE_DIM + threadIdx.y;
-        out[pos] = sum;
+        if (pos < (rows * width)) out[pos] = sum;
     }
 }
 
@@ -58,10 +61,10 @@ void launch_fuse_transpose_bias_kernel<float>(const float* inp,
                                               int cols,
                                               cudaStream_t stream)
 {
-    assert(rows % TILE_DIM == 0);
-    assert(cols % TILE_DIM == 0);
+    // assert(rows % TILE_DIM == 0);
+    // assert(cols % TILE_DIM == 0);
 
-    dim3 grid_dim(cols / TILE_DIM);
+    dim3 grid_dim((cols - 1) / TILE_DIM + 1);
     dim3 block_dim(TILE_DIM, TILE_DIM);
 
     column_sum_reduce<float><<<grid_dim, block_dim, 0, stream>>>(inp, out, rows, cols);
@@ -74,10 +77,10 @@ void launch_fuse_transpose_bias_kernel<__half>(const __half* inp,
                                                int cols,
                                                cudaStream_t stream)
 {
-    assert(rows % TILE_DIM == 0);
-    assert(cols % TILE_DIM == 0);
+    // assert(rows % TILE_DIM == 0);
+    // assert(cols % TILE_DIM == 0);
 
-    dim3 grid_dim(cols / TILE_DIM);
+    dim3 grid_dim((cols - 1) / TILE_DIM + 1);
     dim3 block_dim(TILE_DIM, TILE_DIM);
 
     column_sum_reduce<__half><<<grid_dim, block_dim, 0, stream>>>(inp, out, rows, cols);

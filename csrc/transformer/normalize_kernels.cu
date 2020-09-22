@@ -27,10 +27,9 @@ __global__ void fused_bias_residual_layer_norm(float* vals,
                                                const float* beta,
                                                float epsilon,
                                                bool preLayerNorm,
-                                               bool training = false,
-                                               float* vars = nullptr,
-                                               float* means = nullptr,
-                                               float* vals_hat = nullptr)
+                                               bool training,
+                                               float* vars,
+                                               float* means)
 {
     constexpr int iteration_stride = row_stride / iterations;
 
@@ -108,10 +107,9 @@ __global__ void fused_bias_residual_layer_norm(__half* vals,
                                                const __half* beta,
                                                float epsilon,
                                                bool preLayerNorm,
-                                               bool training = false,
-                                               __half* vars = nullptr,
-                                               __half* means = nullptr,
-                                               __half* vals_hat = nullptr)
+                                               bool training,
+                                               __half* vars,
+                                               __half* means)
 {
 #if __CUDA_ARCH__ >= 700
     constexpr int iteration_stride = row_stride / iterations;
@@ -204,14 +202,12 @@ void launch_bias_residual_layer_norm(T* vals,
                                      const T* beta,
                                      float epsilon,
                                      int batch_size,
-                                     int sequence_length,
                                      int hidden_dim,
                                      cudaStream_t stream,
                                      bool preLayerNorm,
                                      bool training,
                                      T* vars,
-                                     T* means,
-                                     T* vals_hat);
+                                     T* means);
 
 template <>
 void launch_bias_residual_layer_norm<float>(float* vals,
@@ -220,40 +216,38 @@ void launch_bias_residual_layer_norm<float>(float* vals,
                                             const float* beta,
                                             float epsilon,
                                             int batch_size,
-                                            int sequence_length,
                                             int hidden_dim,
                                             cudaStream_t stream,
                                             bool preLayerNorm,
                                             bool training,
                                             float* vars,
-                                            float* means,
-                                            float* vals_hat)
+                                            float* means)
 {
     constexpr int threads = THREADS;
 
-    dim3 grid_dim(batch_size * sequence_length);
+    dim3 grid_dim(batch_size);
 
     dim3 block_dim(threads);
 
     // There are some limitations to call below functions, now just enumerate the situations.
     if (hidden_dim == 768)
         fused_bias_residual_layer_norm<768, 3><<<grid_dim, block_dim, 0, stream>>>(
-            vals, residual, gamma, beta, epsilon, preLayerNorm, training, vars, means, vals_hat);
+            vals, residual, gamma, beta, epsilon, preLayerNorm, training, vars, means);
     else if (hidden_dim == 512)
         fused_bias_residual_layer_norm<512, 2><<<grid_dim, block_dim, 0, stream>>>(
-            vals, residual, gamma, beta, epsilon, preLayerNorm, training, vars, means, vals_hat);
+            vals, residual, gamma, beta, epsilon, preLayerNorm, training, vars, means);
     else if (hidden_dim == 1024)
         fused_bias_residual_layer_norm<1024, 4><<<grid_dim, block_dim, 0, stream>>>(
-            vals, residual, gamma, beta, epsilon, preLayerNorm, training, vars, means, vals_hat);
+            vals, residual, gamma, beta, epsilon, preLayerNorm, training, vars, means);
     else if (hidden_dim == 1536)
         fused_bias_residual_layer_norm<1536, 6><<<grid_dim, block_dim, 0, stream>>>(
-            vals, residual, gamma, beta, epsilon, preLayerNorm, training, vars, means, vals_hat);
+            vals, residual, gamma, beta, epsilon, preLayerNorm, training, vars, means);
     else if (hidden_dim == 2048)
         fused_bias_residual_layer_norm<2048, 8><<<grid_dim, block_dim, 0, stream>>>(
-            vals, residual, gamma, beta, epsilon, preLayerNorm, training, vars, means, vals_hat);
+            vals, residual, gamma, beta, epsilon, preLayerNorm, training, vars, means);
     else if (hidden_dim == 2560)
         fused_bias_residual_layer_norm<2560, 10><<<grid_dim, block_dim, 0, stream>>>(
-            vals, residual, gamma, beta, epsilon, preLayerNorm, training, vars, means, vals_hat);
+            vals, residual, gamma, beta, epsilon, preLayerNorm, training, vars, means);
     else
         throw std::runtime_error("Unsupport hidden_dim.");
 }
@@ -265,39 +259,37 @@ void launch_bias_residual_layer_norm<__half>(__half* vals,
                                              const __half* beta,
                                              float epsilon,
                                              int batch_size,
-                                             int sequence_length,
                                              int hidden_dim,
                                              cudaStream_t stream,
                                              bool preLayerNorm,
                                              bool training,
                                              __half* vars,
-                                             __half* means,
-                                             __half* vals_hat)
+                                             __half* means)
 {
     constexpr int threads = 128;
 
-    dim3 grid_dim(batch_size * sequence_length);
+    dim3 grid_dim(batch_size);
     dim3 block_dim(threads);
 
     // There are some limitations to call below functions, now just enumerate the situations.
     if (hidden_dim == 768)
         fused_bias_residual_layer_norm<384, 3><<<grid_dim, block_dim, 0, stream>>>(
-            vals, residual, gamma, beta, epsilon, preLayerNorm, training, vars, means, vals_hat);
+            vals, residual, gamma, beta, epsilon, preLayerNorm, training, vars, means);
     else if (hidden_dim == 512)
         fused_bias_residual_layer_norm<256, 2><<<grid_dim, block_dim, 0, stream>>>(
-            vals, residual, gamma, beta, epsilon, preLayerNorm, training, vars, means, vals_hat);
+            vals, residual, gamma, beta, epsilon, preLayerNorm, training, vars, means);
     else if (hidden_dim == 1024)
         fused_bias_residual_layer_norm<512, 4><<<grid_dim, block_dim, 0, stream>>>(
-            vals, residual, gamma, beta, epsilon, preLayerNorm, training, vars, means, vals_hat);
+            vals, residual, gamma, beta, epsilon, preLayerNorm, training, vars, means);
     else if (hidden_dim == 1536)
         fused_bias_residual_layer_norm<768, 6><<<grid_dim, block_dim, 0, stream>>>(
-            vals, residual, gamma, beta, epsilon, preLayerNorm, training, vars, means, vals_hat);
+            vals, residual, gamma, beta, epsilon, preLayerNorm, training, vars, means);
     else if (hidden_dim == 2048)
         fused_bias_residual_layer_norm<1024, 8><<<grid_dim, block_dim, 0, stream>>>(
-            vals, residual, gamma, beta, epsilon, preLayerNorm, training, vars, means, vals_hat);
+            vals, residual, gamma, beta, epsilon, preLayerNorm, training, vars, means);
     else if (hidden_dim == 2560)
         fused_bias_residual_layer_norm<1280, 10><<<grid_dim, block_dim, 0, stream>>>(
-            vals, residual, gamma, beta, epsilon, preLayerNorm, training, vars, means, vals_hat);
+            vals, residual, gamma, beta, epsilon, preLayerNorm, training, vars, means);
     else
         throw std::runtime_error("Unsupport hidden_dim.");
 }
@@ -309,10 +301,8 @@ __global__ void fused_bias_residual_layer_norm(float* vals,
                                                const float* beta,
                                                float epsilon,
                                                bool preLayerNorm,
-                                               bool training = false,
-                                               float* vars = nullptr,
-                                               float* vals_hat = nullptr,
-                                               bool save_vals = false)
+                                               bool training,
+                                               float* vars)
 {
     constexpr int iteration_stride = row_stride / iterations;
 
@@ -388,10 +378,8 @@ __global__ void fused_bias_residual_layer_norm(__half* vals,
                                                const __half* beta,
                                                float epsilon,
                                                bool preLayerNorm,
-                                               bool training = false,
-                                               __half* vars = nullptr,
-                                               __half* vals_hat = nullptr,
-                                               bool save_vals = false)
+                                               bool training,
+                                               __half* vars)
 {
 #if __CUDA_ARCH__ >= 700
     constexpr int iteration_stride = row_stride / iterations;
@@ -481,14 +469,11 @@ void launch_bias_residual_layer_norm(T* vals,
                                      const T* beta,
                                      float epsilon,
                                      int batch_size,
-                                     int sequence_length,
                                      int hidden_dim,
                                      cudaStream_t stream,
                                      bool preLayerNorm,
                                      bool training,
-                                     T* vars,
-                                     T* vals_hat,
-                                     bool save_vals);
+                                     T* vars);
 
 /*
 To tune this launch the following restrictions must be met:
@@ -512,88 +497,37 @@ void launch_bias_residual_layer_norm<float>(float* vals,
                                             const float* beta,
                                             float epsilon,
                                             int batch_size,
-                                            int sequence_length,
                                             int hidden_dim,
                                             cudaStream_t stream,
                                             bool preLayerNorm,
                                             bool training,
-                                            float* vars,
-                                            float* vals_hat,
-                                            bool save_vals)
+                                            float* vars)
 {
     constexpr int threads = THREADS;
 
-    dim3 grid_dim(batch_size * sequence_length);
+    dim3 grid_dim(batch_size);
 
     dim3 block_dim(threads);
 
     // There are some limitations to call below functions, now just enumerate the situations.
     if (hidden_dim == 768)
-        fused_bias_residual_layer_norm<768, 3><<<grid_dim, block_dim, 0, stream>>>(vals,
-                                                                                   residual,
-                                                                                   gamma,
-                                                                                   beta,
-                                                                                   epsilon,
-                                                                                   preLayerNorm,
-                                                                                   training,
-                                                                                   vars,
-                                                                                   vals_hat,
-                                                                                   save_vals);
+        fused_bias_residual_layer_norm<768, 3><<<grid_dim, block_dim, 0, stream>>>(
+            vals, residual, gamma, beta, epsilon, preLayerNorm, training, vars);
     else if (hidden_dim == 512)
-        fused_bias_residual_layer_norm<512, 2><<<grid_dim, block_dim, 0, stream>>>(vals,
-                                                                                   residual,
-                                                                                   gamma,
-                                                                                   beta,
-                                                                                   epsilon,
-                                                                                   preLayerNorm,
-                                                                                   training,
-                                                                                   vars,
-                                                                                   vals_hat,
-                                                                                   save_vals);
+        fused_bias_residual_layer_norm<512, 2><<<grid_dim, block_dim, 0, stream>>>(
+            vals, residual, gamma, beta, epsilon, preLayerNorm, training, vars);
     else if (hidden_dim == 1024)
-        fused_bias_residual_layer_norm<1024, 4><<<grid_dim, block_dim, 0, stream>>>(vals,
-                                                                                    residual,
-                                                                                    gamma,
-                                                                                    beta,
-                                                                                    epsilon,
-                                                                                    preLayerNorm,
-                                                                                    training,
-                                                                                    vars,
-                                                                                    vals_hat,
-                                                                                    save_vals);
+        fused_bias_residual_layer_norm<1024, 4><<<grid_dim, block_dim, 0, stream>>>(
+            vals, residual, gamma, beta, epsilon, preLayerNorm, training, vars);
     else if (hidden_dim == 1536)
-        fused_bias_residual_layer_norm<1536, 6><<<grid_dim, block_dim, 0, stream>>>(vals,
-                                                                                    residual,
-                                                                                    gamma,
-                                                                                    beta,
-                                                                                    epsilon,
-                                                                                    preLayerNorm,
-                                                                                    training,
-                                                                                    vars,
-                                                                                    vals_hat,
-                                                                                    save_vals);
+        fused_bias_residual_layer_norm<1536, 6><<<grid_dim, block_dim, 0, stream>>>(
+            vals, residual, gamma, beta, epsilon, preLayerNorm, training, vars);
     else if (hidden_dim == 2048)
-        fused_bias_residual_layer_norm<2048, 8><<<grid_dim, block_dim, 0, stream>>>(vals,
-                                                                                    residual,
-                                                                                    gamma,
-                                                                                    beta,
-                                                                                    epsilon,
-                                                                                    preLayerNorm,
-                                                                                    training,
-                                                                                    vars,
-                                                                                    vals_hat,
-                                                                                    save_vals);
+        fused_bias_residual_layer_norm<2048, 8><<<grid_dim, block_dim, 0, stream>>>(
+            vals, residual, gamma, beta, epsilon, preLayerNorm, training, vars);
     else if (hidden_dim == 2560)
-        fused_bias_residual_layer_norm<2560, 10><<<grid_dim, block_dim, 0, stream>>>(vals,
-                                                                                     residual,
-                                                                                     gamma,
-                                                                                     beta,
-                                                                                     epsilon,
-                                                                                     preLayerNorm,
-                                                                                     training,
-                                                                                     vars,
-                                                                                     vals_hat,
-                                                                                     save_vals);
+        fused_bias_residual_layer_norm<2560, 10><<<grid_dim, block_dim, 0, stream>>>(
+            vals, residual, gamma, beta, epsilon, preLayerNorm, training, vars);
     else
         throw std::runtime_error("Unsupport hidden_dim.");
 }
@@ -605,87 +539,36 @@ void launch_bias_residual_layer_norm<__half>(__half* vals,
                                              const __half* beta,
                                              float epsilon,
                                              int batch_size,
-                                             int sequence_length,
                                              int hidden_dim,
                                              cudaStream_t stream,
                                              bool preLayerNorm,
                                              bool training,
-                                             __half* vars,
-                                             __half* vals_hat,
-                                             bool save_vals)
+                                             __half* vars)
 {
     constexpr int threads = 128;
 
-    dim3 grid_dim(batch_size * sequence_length);
+    dim3 grid_dim(batch_size);
     dim3 block_dim(threads);
 
     // There are some limitations to call below functions, now just enumerate the situations.
     if (hidden_dim == 768)
-        fused_bias_residual_layer_norm<384, 3><<<grid_dim, block_dim, 0, stream>>>(vals,
-                                                                                   residual,
-                                                                                   gamma,
-                                                                                   beta,
-                                                                                   epsilon,
-                                                                                   preLayerNorm,
-                                                                                   training,
-                                                                                   vars,
-                                                                                   vals_hat,
-                                                                                   save_vals);
+        fused_bias_residual_layer_norm<384, 3><<<grid_dim, block_dim, 0, stream>>>(
+            vals, residual, gamma, beta, epsilon, preLayerNorm, training, vars);
     else if (hidden_dim == 512)
-        fused_bias_residual_layer_norm<256, 2><<<grid_dim, block_dim, 0, stream>>>(vals,
-                                                                                   residual,
-                                                                                   gamma,
-                                                                                   beta,
-                                                                                   epsilon,
-                                                                                   preLayerNorm,
-                                                                                   training,
-                                                                                   vars,
-                                                                                   vals_hat,
-                                                                                   save_vals);
+        fused_bias_residual_layer_norm<256, 2><<<grid_dim, block_dim, 0, stream>>>(
+            vals, residual, gamma, beta, epsilon, preLayerNorm, training, vars);
     else if (hidden_dim == 1024)
-        fused_bias_residual_layer_norm<512, 4><<<grid_dim, block_dim, 0, stream>>>(vals,
-                                                                                   residual,
-                                                                                   gamma,
-                                                                                   beta,
-                                                                                   epsilon,
-                                                                                   preLayerNorm,
-                                                                                   training,
-                                                                                   vars,
-                                                                                   vals_hat,
-                                                                                   save_vals);
+        fused_bias_residual_layer_norm<512, 4><<<grid_dim, block_dim, 0, stream>>>(
+            vals, residual, gamma, beta, epsilon, preLayerNorm, training, vars);
     else if (hidden_dim == 1536)
-        fused_bias_residual_layer_norm<768, 6><<<grid_dim, block_dim, 0, stream>>>(vals,
-                                                                                   residual,
-                                                                                   gamma,
-                                                                                   beta,
-                                                                                   epsilon,
-                                                                                   preLayerNorm,
-                                                                                   training,
-                                                                                   vars,
-                                                                                   vals_hat,
-                                                                                   save_vals);
+        fused_bias_residual_layer_norm<768, 6><<<grid_dim, block_dim, 0, stream>>>(
+            vals, residual, gamma, beta, epsilon, preLayerNorm, training, vars);
     else if (hidden_dim == 2048)
-        fused_bias_residual_layer_norm<1024, 8><<<grid_dim, block_dim, 0, stream>>>(vals,
-                                                                                    residual,
-                                                                                    gamma,
-                                                                                    beta,
-                                                                                    epsilon,
-                                                                                    preLayerNorm,
-                                                                                    training,
-                                                                                    vars,
-                                                                                    vals_hat,
-                                                                                    save_vals);
+        fused_bias_residual_layer_norm<1024, 8><<<grid_dim, block_dim, 0, stream>>>(
+            vals, residual, gamma, beta, epsilon, preLayerNorm, training, vars);
     else if (hidden_dim == 2560)
-        fused_bias_residual_layer_norm<1280, 10><<<grid_dim, block_dim, 0, stream>>>(vals,
-                                                                                     residual,
-                                                                                     gamma,
-                                                                                     beta,
-                                                                                     epsilon,
-                                                                                     preLayerNorm,
-                                                                                     training,
-                                                                                     vars,
-                                                                                     vals_hat,
-                                                                                     save_vals);
+        fused_bias_residual_layer_norm<1280, 10><<<grid_dim, block_dim, 0, stream>>>(
+            vals, residual, gamma, beta, epsilon, preLayerNorm, training, vars);
     else
         throw std::runtime_error("Unsupport hidden_dim.");
 }
@@ -1037,15 +920,13 @@ void launch_layerNorm_backward<float>(const float* out_grad,
                                       float* gamma_grad,
                                       float* betta_grad,
                                       float* inp_grad,
-                                      int batch_size,
-                                      int sequence_length,
+                                      int batch,
                                       int hidden_dim,
                                       cudaStream_t stream[2],
                                       bool invertible,
                                       const float* betta)
 {
     constexpr int threads = THREADS;
-    int batch = batch_size * sequence_length;
 
     dim3 grid_dim(hidden_dim / TILE_DIM);
     dim3 block_dim(TILE_DIM, TILE_DIM);
@@ -1086,15 +967,13 @@ void launch_layerNorm_backward<__half>(const __half* out_grad,
                                        __half* gamma_grad,
                                        __half* betta_grad,
                                        __half* inp_grad,
-                                       int batch_size,
-                                       int sequence_length,
+                                       int batch,
                                        int hidden_dim,
                                        cudaStream_t stream[2],
                                        bool invertible,
                                        const __half* betta)
 {
     constexpr int threads = THREADS;
-    int batch = batch_size * sequence_length;
 
     dim3 grid_dim(hidden_dim / TILE_DIM);
     dim3 block_dim(TILE_DIM, TILE_DIM);
@@ -1336,13 +1215,11 @@ void launch_layerNorm_backward<float>(const float* out_grad,
                                       float* gamma_grad,
                                       float* betta_grad,
                                       float* inp_grad,
-                                      int batch_size,
-                                      int sequence_length,
+                                      int batch,
                                       int hidden_dim,
                                       cudaStream_t stream[2])
 {
     constexpr int threads = THREADS;
-    int batch = batch_size * sequence_length;
 
     dim3 grid_dim(hidden_dim / TILE_DIM);
     dim3 block_dim(TILE_DIM, TILE_DIM);
@@ -1384,13 +1261,11 @@ void launch_layerNorm_backward<__half>(const __half* out_grad,
                                        __half* gamma_grad,
                                        __half* betta_grad,
                                        __half* inp_grad,
-                                       int batch_size,
-                                       int sequence_length,
+                                       int batch,
                                        int hidden_dim,
                                        cudaStream_t stream[2])
 {
     constexpr int threads = THREADS;
-    int batch = batch_size * sequence_length;
 
     dim3 grid_dim(hidden_dim / TILE_DIM);
     dim3 block_dim(TILE_DIM, TILE_DIM);
@@ -1759,15 +1634,13 @@ void launch_layerNorm_backward_fused_add<float>(const float* out_grad1,
                                                 float* gamma_grad,
                                                 float* betta_grad,
                                                 float* inp_grad,
-                                                int batch_size,
-                                                int sequence_length,
+                                                int batch,
                                                 int hidden_dim,
                                                 cudaStream_t stream[2],
                                                 bool invertible,
                                                 const float* betta)
 {
     constexpr int threads = THREADS;
-    int batch = batch_size * sequence_length;
 
     dim3 grid_dim(hidden_dim / TILE_DIM);
     dim3 block_dim(TILE_DIM, TILE_DIM);
@@ -1808,15 +1681,13 @@ void launch_layerNorm_backward_fused_add<__half>(const __half* out_grad1,
                                                  __half* gamma_grad,
                                                  __half* betta_grad,
                                                  __half* inp_grad,
-                                                 int batch_size,
-                                                 int sequence_length,
+                                                 int batch,
                                                  int hidden_dim,
                                                  cudaStream_t stream[2],
                                                  bool invertible,
                                                  const __half* betta)
 {
     constexpr int threads = THREADS;
-    int batch = batch_size * sequence_length;
 
     dim3 grid_dim(hidden_dim / TILE_DIM);
     dim3 block_dim(TILE_DIM, TILE_DIM);
@@ -2070,13 +1941,11 @@ void launch_layerNorm_backward_fused_add<float>(const float* out_grad1,
                                                 float* gamma_grad,
                                                 float* betta_grad,
                                                 float* inp_grad,
-                                                int batch_size,
-                                                int sequence_length,
+                                                int batch,
                                                 int hidden_dim,
                                                 cudaStream_t stream[2])
 {
     constexpr int threads = THREADS;
-    int batch = batch_size * sequence_length;
 
     dim3 grid_dim(hidden_dim / TILE_DIM);
     dim3 block_dim(TILE_DIM, TILE_DIM);
@@ -2119,13 +1988,11 @@ void launch_layerNorm_backward_fused_add<__half>(const __half* out_grad1,
                                                  __half* gamma_grad,
                                                  __half* betta_grad,
                                                  __half* inp_grad,
-                                                 int batch_size,
-                                                 int sequence_length,
+                                                 int batch,
                                                  int hidden_dim,
                                                  cudaStream_t stream[2])
 {
     constexpr int threads = THREADS;
-    int batch = batch_size * sequence_length;
 
     dim3 grid_dim(hidden_dim / TILE_DIM);
     dim3 block_dim(TILE_DIM, TILE_DIM);

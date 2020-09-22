@@ -3,6 +3,7 @@
 #include <cuda.h>
 #include <cuda_fp16.h>
 #include <stdio.h>
+#include "context.h"
 
 template <typename T>
 class StridedBatchGemm {
@@ -37,6 +38,12 @@ public:
               op_B(opB),
               gemm_algos(algos)
         {
+        }
+        void SetConfig(int mm, int nn, int kk)
+        {
+            m = mm;
+            n = nn;
+            k = kk;
         }
     };
 
@@ -162,6 +169,8 @@ public:
     inline const T* GetBufferA() const { return k_buf; }
 
     inline const T* GetBufferB() const { return q_buf; }
+
+    inline void SetConfig(int m, int n, int k) { _config.SetConfig(m, n, k); }
 
 private:
     Config _config;

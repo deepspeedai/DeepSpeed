@@ -279,13 +279,12 @@ void launch_bias_gelu(const T* input,
                       T* output,
                       int intermediate_size,
                       int batch_size,
-                      int sequence_length,
                       cudaStream_t stream)
 {
     int iterations = (intermediate_size + 1023) / 1024;
     int threads = intermediate_size / iterations / 4;
     dim3 block_dims(threads);
-    dim3 grid_dims(sequence_length * batch_size);
+    dim3 grid_dims(batch_size);
 
     fused_bias_gelu<<<grid_dims, block_dims, 0, stream>>>(input, bias, output, intermediate_size);
 }
@@ -295,24 +294,26 @@ void launch_gelu(const T* input,
                  T* output,
                  int intermediate_size,
                  int batch_size,
-                 int sequence_length,
                  cudaStream_t stream)
 {
     int iterations = (intermediate_size + 1023) / 1024;
     int threads = intermediate_size / iterations / 4;
     dim3 block_dims(threads);
-    dim3 grid_dims(sequence_length * batch_size);
+    dim3 grid_dims(batch_size);
 
     gelu_kernel<<<grid_dims, block_dims, 0, stream>>>(input, output, intermediate_size);
 }
 
-template void
-launch_bias_gelu<float>(const float*, const float*, float*, int, int, int, cudaStream_t);
-template void
-launch_bias_gelu<__half>(const __half*, const __half*, __half*, int, int, int, cudaStream_t);
+template void launch_bias_gelu<float>(const float*, const float*, float*, int, int, cudaStream_t);
+template void launch_bias_gelu<__half>(const __half*,
+                                       const __half*,
+                                       __half*,
+                                       int,
+                                       int,
+                                       cudaStream_t);
 
-template void launch_gelu<float>(const float*, float*, int, int, int, cudaStream_t);
-template void launch_gelu<__half>(const __half*, __half*, int, int, int, cudaStream_t);
+template void launch_gelu<float>(const float*, float*, int, int, cudaStream_t);
+template void launch_gelu<__half>(const __half*, __half*, int, int, cudaStream_t);
 
 template <typename T>
 void launch_d_gelu(T* d_output,
@@ -320,17 +321,15 @@ void launch_d_gelu(T* d_output,
                    const T* bias,
                    int intermediate_size,
                    int batch_size,
-                   int sequence_length,
                    cudaStream_t stream)
 {
     int iterations = (intermediate_size + 1023) / 1024;
     int threads = intermediate_size / iterations / 4;
     dim3 block_dims(threads);
-    dim3 grid_dims(sequence_length * batch_size);
+    dim3 grid_dims(batch_size);
 
     d_gelu_func<<<grid_dims, block_dims, 0, stream>>>(d_output, input, bias, intermediate_size);
 }
 
-template void launch_d_gelu<float>(float*, const float*, const float*, int, int, int, cudaStream_t);
-template void
-launch_d_gelu<__half>(__half*, const __half*, const __half*, int, int, int, cudaStream_t);
+template void launch_d_gelu<float>(float*, const float*, const float*, int, int, cudaStream_t);
+template void launch_d_gelu<__half>(__half*, const __half*, const __half*, int, int, cudaStream_t);

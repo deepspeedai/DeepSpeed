@@ -9,15 +9,13 @@ class Dropout {
 public:
     struct Config {
         float ratio;
-        uint32_t batch, dim;
+        uint32_t dim;
         bool training;
 
-        Config(float r, uint32_t batch, uint32_t dim)
-            : ratio(r), batch(batch), dim(dim), training(true)
-        {
-        }
+        Config(float r, uint32_t d) : ratio(r), dim(d), training(true) {}
 
         float RATIO() const { return training ? ratio : 0.0; }
+        inline void SetDim(uint32_t d) { dim = d; }
     };
 
     Dropout(const Config& config) : _config(config), _mask(nullptr) {}
@@ -69,6 +67,8 @@ public:
     }
 
     Config GetConfig() const { return _config; }
+
+    inline void SetDimension(uint32_t dim) { _config.SetDim(dim); }
 
 private:
     uint8_t* _mask;

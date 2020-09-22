@@ -16,57 +16,27 @@ public:
         uint32_t seqLength;
         uint32_t hiddenDim;
         float epsilon;
-        bool training, save_vals;
-        bool allocateGrad;
+        bool training;
         bool useMean;
-        Config(uint32_t batch,
-               uint32_t seq,
-               uint32_t h,
-               bool training,
-               bool save_vals = true,
-               bool allocateGrad = true,
-               bool useMean = true)
+        Config(uint32_t batch, uint32_t seq, uint32_t h, bool training, bool useMean = true)
             : batchSize(batch),
               seqLength(seq),
               hiddenDim(h),
               epsilon(1e-12),
               training(training),
-              save_vals(save_vals),
-              allocateGrad(allocateGrad),
               useMean(useMean)
         {
         }
     };
 
-    Normalize_Layer(Config config) : config_(config), vars(nullptr), vals_hat(nullptr)
+    Normalize_Layer(Config config)
+        : config_(config), vars(nullptr), means(nullptr), vals_hat(nullptr)
     {
-        if (config_.training) {
-            cudaMalloc((void**)&vars, config_.batchSize * config_.seqLength * sizeof(T));
-
-            if (config_.useMean)
-                cudaMalloc((void**)&means, config_.batchSize * config_.seqLength * sizeof(T));
-
-            if (config_.save_vals)
-                cudaMalloc((void**)&vals_hat,
-                           config_.batchSize * config_.seqLength * config_.hiddenDim * sizeof(T));
-
-            if (config_.allocateGrad)
-                cudaMalloc((void**)&inp_grad,
-                           config_.batchSize * config_.seqLength * config_.hiddenDim * sizeof(T));
-        }
     }
 
-    ~Normalize_Layer()
-    {
-        if (config_.training) {
-            cudaFree(vars);
-            if (config_.useMean) cudaFree(means);
-            if (config_.save_vals) cudaFree(vals_hat);
-            if (config_.allocateGrad) cudaFree(inp_grad);
-        }
-    }
+    ~Normalize_Layer() {}
 
-    void ForwardCheckpoint(int bsz,
+    void ForwardCheckpoint(int bsz,  // batch * seq
                            T* vals,
                            const T* residual,
                            const T* gamma,
@@ -80,14 +50,12 @@ public:
                                         betta,
                                         config_.epsilon,
                                         bsz,
-                                        config_.seqLength,
                                         config_.hiddenDim,
                                         stream,
                                         preLayerNorm,
                                         config_.training,
                                         vars,
-                                        means,
-                                        vals_hat);
+                                        means);
     }
 
     void Forward(int bsz,
@@ -104,14 +72,11 @@ public:
                                         betta,
                                         config_.epsilon,
                                         bsz,
-                                        config_.seqLength,
                                         config_.hiddenDim,
                                         stream,
                                         preLayerNorm,
                                         config_.training,
-                                        vars,
-                                        vals_hat,
-                                        config_.save_vals);
+                                        vars);
     }
 
     void Backward(int bsz,
@@ -120,7 +85,7 @@ public:
                   T* gamma_grad,
                   T* betta_grad,
                   cudaStream_t stream[2],
-                  T* inp_grad_out = nullptr,
+                  T* inp_grad_out,
                   const T* norm_in = nullptr)
     {
         launch_layerNorm_backward(out_grad,
@@ -130,9 +95,8 @@ public:
                                   gamma,
                                   gamma_grad,
                                   betta_grad,
-                                  (config_.allocateGrad ? inp_grad : inp_grad_out),
+                                  inp_grad_out,
                                   bsz,
-                                  config_.seqLength,
                                   config_.hiddenDim,
                                   stream);
     }
@@ -144,21 +108,20 @@ public:
                   T* gamma_grad,
                   T* betta_grad,
                   cudaStream_t stream[2],
-                  T* inp_grad_out = nullptr,
-                  const T* norm_out = nullptr)
+                  T* inp_grad_out,
+                  const T* norm_out)
     {
         launch_layerNorm_backward(out_grad,
-                                  (config_.save_vals ? vals_hat : norm_out),
+                                  norm_out,
                                   vars,
                                   gamma,
                                   gamma_grad,
                                   betta_grad,
-                                  (config_.allocateGrad ? inp_grad : inp_grad_out),
+                                  inp_grad_out,
                                   bsz,
-                                  config_.seqLength,
                                   config_.hiddenDim,
                                   stream,
-                                  config_.save_vals,
+                                  !config_.useMean,
                                   betta);
     }
 
@@ -169,7 +132,7 @@ public:
                           T* gamma_grad,
                           T* betta_grad,
                           cudaStream_t stream[2],
-                          T* inp_grad_out = nullptr,
+                          T* inp_grad_out,
                           const T* norm_in = nullptr)
     {
         launch_layerNorm_backward_fused_add(out_grad1,
@@ -180,9 +143,8 @@ public:
                                             gamma,
                                             gamma_grad,
                                             betta_grad,
-                                            (config_.allocateGrad ? inp_grad : inp_grad_out),
+                                            inp_grad_out,
                                             bsz,
-                                            config_.seqLength,
                                             config_.hiddenDim,
                                             stream);
     }
@@ -195,33 +157,41 @@ public:
                           T* gamma_grad,
                           T* betta_grad,
                           cudaStream_t stream[2],
-                          T* inp_grad_out = nullptr,
-                          const T* norm_out = nullptr)
+                          T* inp_grad_out,
+                          const T* norm_out)
     {
         launch_layerNorm_backward_fused_add(out_grad1,
                                             out_grad2,
-                                            (config_.save_vals ? vals_hat : norm_out),
+                                            norm_out,
                                             vars,
                                             gamma,
                                             gamma_grad,
                                             betta_grad,
-                                            (config_.allocateGrad ? inp_grad : inp_grad_out),
+                                            inp_grad_out,
                                             bsz,
-                                            config_.seqLength,
                                             config_.hiddenDim,
                                             stream,
-                                            config_.save_vals,
+                                            !config_.useMean,
                                             betta);
     }
 
-    inline T* GetInputGrad() const { return inp_grad; }
-
     inline bool UseMean() const { return config_.useMean; }
+
+    inline void SetVar(T* variance)
+    {
+        if (!variance) { throw std::runtime_error("Normalize variance is null."); }
+        vars = variance;
+    }
+
+    inline void SetMean(T* mean)
+    {
+        if (!mean) { throw std::runtime_error("Normalize mean is null."); }
+        means = mean;
+    }
 
 private:
     Config config_;
     T* vars;
     T* means;
     T* vals_hat;
-    T* inp_grad;
 };

@@ -1,3 +1,4 @@
+#include <math.h>
 #include "custom_cuda_layers.h"
 #include "general_kernels.h"
 
@@ -282,7 +283,7 @@ __global__ void attn_softmax(__half* vals,
 }
 
 template <typename T>
-void launch_attn_softmax(T*, const T*, int, int, int, cudaStream_t, bool);
+void launch_attn_softmax(T*, const T*, int, int, int, cudaStream_t);
 
 template <>
 void launch_attn_softmax<float>(float* vals,
@@ -294,11 +295,10 @@ void launch_attn_softmax<float>(float* vals,
 {
     const int threads = 128;
     int seq_length4 = sequence_length / 4;
-    int seq2 = sequence_length * seq_length4;
 
     int block_compute_size =
-        (seq_length4 < threads ? ((threads / seq_length4) * seq_length4) : seq_length4);
-    dim3 grid_dim(batch_size, heads * seq2 / block_compute_size);
+        (seq_length4 < threads ? (int)pow(2.0, floor(log2((float)(threads / seq_length4)))) : 1);
+    dim3 grid_dim(batch_size, heads * sequence_length / block_compute_size);
 
     int subblock_max_workload = MAX_THREAD_ITERATIONS * 4 * threads;
 
@@ -330,8 +330,9 @@ void launch_attn_softmax<float>(float* vals,
     else {
         const int threads = 256;
         block_compute_size =
-            (seq_length4 < threads ? ((threads / seq_length4) * seq_length4) : seq_length4);
-        dim3 grid_dim(batch_size, heads * seq2 / block_compute_size);
+            (seq_length4 < threads ? (int)pow(2.0, floor(log2((float)(threads / seq_length4))))
+                                   : 1);
+        dim3 grid_dim(batch_size, heads * sequence_length / block_compute_size);
 
         int subblock_max_workload = MAX_THREAD_ITERATIONS * 4 * threads;
 
@@ -362,11 +363,10 @@ void launch_attn_softmax<__half>(__half* vals,
 {
     const int threads = 128;
     int seq_length4 = sequence_length / 4;
-    int seq2 = sequence_length * seq_length4;
 
     int block_compute_size =
-        (seq_length4 < threads ? ((threads / seq_length4) * seq_length4) : seq_length4);
-    dim3 grid_dim(batch_size, heads * seq2 / block_compute_size);
+        (seq_length4 < threads ? (int)pow(2.0, floor(log2((float)(threads / seq_length4)))) : 1);
+    dim3 grid_dim(batch_size, heads * sequence_length / block_compute_size);
 
     int subblock_max_workload = MAX_THREAD_ITERATIONS * 4 * threads;
 
@@ -399,8 +399,9 @@ void launch_attn_softmax<__half>(__half* vals,
     else {
         const int threads = 256;
         block_compute_size =
-            (seq_length4 < threads ? ((threads / seq_length4) * seq_length4) : seq_length4);
-        dim3 grid_dim(batch_size, heads * seq2 / block_compute_size);
+            (seq_length4 < threads ? (int)pow(2.0, floor(log2((float)(threads / seq_length4))))
+                                   : 1);
+        dim3 grid_dim(batch_size, heads * sequence_length / block_compute_size);
 
         int subblock_max_workload = MAX_THREAD_ITERATIONS * 4 * threads;
 
@@ -531,55 +532,41 @@ void launch_attn_softmax_backward_v2(T* out_grad,
                                      int seq_length,
                                      cudaStream_t stream)
 {
-    if ((seq_length % WARP_SIZE) != 0 || seq_length > 2048)
-        throw std::runtime_error("Invalid sequence length found in softmax backward.");
-
     const int warps_per_block = 4;
     dim3 grid_dim(batch_size * heads * seq_length / warps_per_block);
     dim3 block_dim(WARP_SIZE, warps_per_block);
 
-    switch (seq_length) {
-        case 32:
-            softmax_backward_kernel_v2<T, 1>
-                <<<grid_dim, block_dim, 0, stream>>>(out_grad, soft_inp, seq_length);
-            break;
-        case 64:
-            softmax_backward_kernel_v2<T, 2>
-                <<<grid_dim, block_dim, 0, stream>>>(out_grad, soft_inp, seq_length);
-            break;
-        case 128:
-            softmax_backward_kernel_v2<T, 4>
-                <<<grid_dim, block_dim, 0, stream>>>(out_grad, soft_inp, seq_length);
-            break;
-        case 256:
-            softmax_backward_kernel_v2<T, 8>
-                <<<grid_dim, block_dim, 0, stream>>>(out_grad, soft_inp, seq_length);
-            break;
-        case 384:
-            softmax_backward_kernel_v2<T, 12>
-                <<<grid_dim, block_dim, 0, stream>>>(out_grad, soft_inp, seq_length);
-            break;
-        case 512:
-            softmax_backward_kernel_v2<T, 16>
-                <<<grid_dim, block_dim, 0, stream>>>(out_grad, soft_inp, seq_length);
-            break;
-        case 768:
-            softmax_backward_kernel_v2<T, 24>
-                <<<grid_dim, block_dim, 0, stream>>>(out_grad, soft_inp, seq_length);
-            break;
-        case 1024:
-            softmax_backward_kernel_v2<T, 32>
-                <<<grid_dim, block_dim, 0, stream>>>(out_grad, soft_inp, seq_length);
-            break;
-        case 2048:
-            softmax_backward_kernel_v2<T, 64>
-                <<<grid_dim, block_dim, 0, stream>>>(out_grad, soft_inp, seq_length);
-            break;
-        default:
-            throw std::runtime_error(
-                std::string("Special sequence length found in softmax backward, seq_length: ") +
-                std::to_string(seq_length));
-    }
+    if (seq_length <= 32)
+        softmax_backward_kernel_v2<T, 1>
+            <<<grid_dim, block_dim, 0, stream>>>(out_grad, soft_inp, seq_length);
+    else if (seq_length <= 64)
+        softmax_backward_kernel_v2<T, 2>
+            <<<grid_dim, block_dim, 0, stream>>>(out_grad, soft_inp, seq_length);
+    else if (seq_length <= 128)
+        softmax_backward_kernel_v2<T, 4>
+            <<<grid_dim, block_dim, 0, stream>>>(out_grad, soft_inp, seq_length);
+    else if (seq_length <= 256)
+        softmax_backward_kernel_v2<T, 8>
+            <<<grid_dim, block_dim, 0, stream>>>(out_grad, soft_inp, seq_length);
+    else if (seq_length <= 384)
+        softmax_backward_kernel_v2<T, 12>
+            <<<grid_dim, block_dim, 0, stream>>>(out_grad, soft_inp, seq_length);
+    else if (seq_length <= 512)
+        softmax_backward_kernel_v2<T, 16>
+            <<<grid_dim, block_dim, 0, stream>>>(out_grad, soft_inp, seq_length);
+    else if (seq_length <= 768)
+        softmax_backward_kernel_v2<T, 24>
+            <<<grid_dim, block_dim, 0, stream>>>(out_grad, soft_inp, seq_length);
+    else if (seq_length <= 1024)
+        softmax_backward_kernel_v2<T, 32>
+            <<<grid_dim, block_dim, 0, stream>>>(out_grad, soft_inp, seq_length);
+    else if (seq_length <= 2048)
+        softmax_backward_kernel_v2<T, 64>
+            <<<grid_dim, block_dim, 0, stream>>>(out_grad, soft_inp, seq_length);
+    else
+        throw std::runtime_error(
+            std::string("Special sequence length found in softmax backward, seq_length: ") +
+            std::to_string(seq_length));
 }
 
 template void launch_attn_softmax_backward_v2<__half>(__half* out_grad,

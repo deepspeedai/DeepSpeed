@@ -45,13 +45,15 @@ public:
             out_grad, soft_out, bsz, config_.heads, config_.seq_length, stream);
     }
 
-    inline int GetProbDepth() const { return config_.prob_depth; }
+    inline size_t GetProbDepth() const { return config_.prob_depth; }
 
-    inline int GetBatchSize() const { return config_.batchSize; }
+    inline size_t GetBatchSize() const { return config_.batchSize; }
 
-    inline int GetNumHeads() const { return config_.heads; }
+    inline size_t GetNumHeads() const { return config_.heads; }
 
-    inline int GetSeqLength() const { return config_.seq_length; }
+    inline size_t GetSeqLength() const { return config_.seq_length; }
+
+    inline void SetSeqLength(size_t seq_len) { config_.seq_length = seq_len; }
 
 private:
     Config config_;

@@ -29,7 +29,7 @@
         for (size_t j = blockIdx.y * blockDim.y + threadIdx.y; j < (m); j += blockDim.y * gridDim.y)
 
 #define DS_CUDA_NUM_THREADS 512
-#define DS_MAXIMUM_NUM_BLOCKS 4096
+#define DS_MAXIMUM_NUM_BLOCKS 262144
 
 inline int DS_GET_BLOCKS(const int N)
 {

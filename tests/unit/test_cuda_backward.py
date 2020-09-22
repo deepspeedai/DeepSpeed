@@ -256,10 +256,10 @@ def run_backward(ds_config, atol=1e-2, verbose=False):
 
 @pytest.mark.parametrize('batch_size, hidden_size, seq_len, heads, num_layers, is_preln, use_fp16, atol',
                          [
-                             (3,1024,128,16,24,True,False, 0.05),
-                             (3,1024,128,16,24,True,True, 0.05),
-                             (3,1024,128,16,24,False,False, 0.1),
-                             (3,1024,128,16,24,False,True, 0.2),
+                             (3,1024,120,16,24,True,False, 0.05),
+                             (3,1024,120,16,24,True,True, 0.05),
+                             (3,1024,56,16,24,False,False, 0.1),
+                             (3,1024,56,16,24,False,True, 0.2),
                          ]) # yapf: disable
 def test_backward(batch_size,
                   hidden_size,
