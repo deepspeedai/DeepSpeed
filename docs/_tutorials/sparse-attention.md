@@ -2,7 +2,7 @@
 title: "DeepSpeed  Sparse Attention"
 ---
 
-In this tutorial we describe how to use DeepSpeed Sparse Attention (SA) and its building-block kernels. The easiest way to use SA is through DeepSpeed launcher. We will describe this through an example in [How to use sparse attention with DeepSpeed launcher](/tutorials/sparse-attention/#how-to-use-sparse-attention-with-deepspeed-launcher) section. But before that, we introduce modules provided by DeepSpeed SA in the [next](/tutorials/sparse-attention/#sparse-attention-modules) section.
+In this tutorial we describe how to use DeepSpeed Sparse Attention (SA) and its building-block kernels. The easiest way to use SA is through DeepSpeed launcher. We will describe this through an example in [How to use sparse attention with DeepSpeed launcher](#how-to-use-sparse-attention-with-deepspeed-launcher) section. But before that, we introduce modules provided by DeepSpeed SA in the [next](#sparse-attention-modules) section.
 
 **Note:** Currently DeepSpeed Sparse Attention can be used only on NVIDIA V100 GPU using Torch >= 1.5 and Cuda 10.1 or 10.2.
 {: .notice--warning}
@@ -22,7 +22,7 @@ on the intermediate attention scores. For more details about self attention, ple
   * `extend_position_embedding`: This function extends the position embedding based on the current values. For example, if you have a 128 max sequence length model and extending it to a 1k sequence length, it replicates current embeddings 8 times to initialize new embedding. Experimentally we have seen such initialization works much better than initializing from scratch; leads to faster convergence.
   * `pad_to_block_size`: This function pads input tokens and attention mask on sequence length dimension to be multiple of block size; this is a requirement for SA.
   * `unpad_sequence_output`: This function unpads sequence output if inputs of the model were padded.
-* **SparsityConfig**: this is an abstract class for sparsity structure. Any sparsity structure needs to extend this class and writes its own sparsity pattern construction; `make_layout` function. DeepSpeed currently provides the following structures that will be described in [How to config sparsity structures](/tutorials/sparse-attention/#how-to-config-sparsity-structures) section:
+* **SparsityConfig**: this is an abstract class for sparsity structure. Any sparsity structure needs to extend this class and writes its own sparsity pattern construction; `make_layout` function. DeepSpeed currently provides the following structures that will be described in [How to config sparsity structures](#how-to-config-sparsity-structures) section:
   * `FixedSparsityConfig`
   * `BSLongformerSparsityConfig`
   * `BigBirdSparsityConfig`
@@ -91,7 +91,7 @@ if sparse_attention_config is not None:
          config, sparsity_config=sparse_attention_config)
 ```
 
-* **Pad and unpad input data**: Also you may need to pad sequence dimension of `input_ids` and `attention_mask` to be multiple of sparse block size. As mentioned in [module](/tutorials/sparse-attention/#sparse-attention-modules) section above, DeepSpeed provides utility functions for padding and unpadding. Please check our [bing_bert example](https://github.com/microsoft/DeepSpeedExamples/blob/master/bing_bert/nvidia/modelingpreln.py) to see where and how pad and unpad the inputs or outputs of the model.
+* **Pad and unpad input data**: Also you may need to pad sequence dimension of `input_ids` and `attention_mask` to be multiple of sparse block size. As mentioned in [module](#sparse-attention-modules) section above, DeepSpeed provides utility functions for padding and unpadding. Please check our [bing_bert example](https://github.com/microsoft/DeepSpeedExamples/blob/master/bing_bert/nvidia/modelingpreln.py) to see where and how pad and unpad the inputs or outputs of the model.
 
 ```python
 if self.sparse_attention_config is not None:
@@ -121,7 +121,7 @@ if self.sparse_attention_config is not None and pad_len > 0:
 
 Please check [our bing_bert runner script](https://github.com/microsoft/DeepSpeedExamples/blob/master/bing_bert/ds_sa_train_bert_bsz64k_seq128.sh) as an example of how to enable SA with DeepSpeed launcher.
 
-* **Add sparsity config**: The sparsity config can be set through the [DeepSpeed JSON config file](https://github.com/microsoft/DeepSpeedExamples/blob/master/bing_bert/deepspeed_bsz64k_lamb_config_seq128.json). In this example, we have used `fixed` sparsity mode that will be described in [How to config sparsity structures](/tutorials/sparse-attention/#how-to-config-sparsity-structures) section.
+* **Add sparsity config**: The sparsity config can be set through the [DeepSpeed JSON config file](https://github.com/microsoft/DeepSpeedExamples/blob/master/bing_bert/deepspeed_bsz64k_lamb_config_seq128.json). In this example, we have used `fixed` sparsity mode that will be described in [How to config sparsity structures](#how-to-config-sparsity-structures) section.
 
 ```json
 "sparse_attention": {
@@ -137,7 +137,7 @@ Please check [our bing_bert runner script](https://github.com/microsoft/DeepSpee
 ```
 
 ## How to use individual kernels
-DeepSpeed Sparse Attention can be used as a feature through DeepSpeed, as described above, or simply integrated with any Transformer model as a self-attention module alone. Further, the building block kernels, matrix multiplication and softmax can be used separately. To use sparse attention alone, you can simply install DeepSpeed and import any of the modules described in [modules](/tutorials/sparse-attention/#sparse-attention-modules) section; example:
+DeepSpeed Sparse Attention can be used as a feature through DeepSpeed, as described above, or simply integrated with any Transformer model as a self-attention module alone. Further, the building block kernels, matrix multiplication and softmax can be used separately. To use sparse attention alone, you can simply install DeepSpeed and import any of the modules described in [modules](#sparse-attention-modules) section; example:
 
 ```python
 from deepspeed.ops.sparse_attention import SparseSelfAttention
