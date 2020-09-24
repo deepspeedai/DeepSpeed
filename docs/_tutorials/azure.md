@@ -14,7 +14,7 @@ To help with launching Azure instances we suggest using the [Azure
 CLI](https://docs.microsoft.com/en-us/cli/azure/?view=azure-cli-latest). We have created
 several helper scripts to get you quickly started using DeepSpeed with Azure.
  * Install Azure CLI on your local box: [https://docs.microsoft.com/en-us/cli/azure/install-azure-cli](https://docs.microsoft.com/en-us/cli/azure/install-azure-cli).
- * Alternatively you can use the Azure in-browser shell: [https://shell.azure.com/](https://shell.azure.com/).
+ * Alternatively, you can use the Azure in-browser shell: [https://shell.azure.com/](https://shell.azure.com/).
 
 ## Create an SSH key
 Generate an SSH key that will be used across this tutorial to SSH into your VMs and
