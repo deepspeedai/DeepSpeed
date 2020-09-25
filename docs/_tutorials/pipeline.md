@@ -82,7 +82,7 @@ are present, DeepSpeed will also use hybrid data parallelism.
 stages.
 {: .notice--info}
 
-**Note:** For large model training, see [memory-efficient model construction](#memory-efficient-model-initialization).
+**Note:** For large model training, see [memory-efficient model construction](#memory-efficient-model-construction).
 {: .notice--info}
 
 ### AlexNet
