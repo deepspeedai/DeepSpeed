@@ -31,7 +31,7 @@ def check_equal(first, second, atol=1e-2, verbose=False):
                              (1024),
                              (1048576),
                          ]) # yapf: disable
-def test_adam_opt(model_size):
+def test_cpu_adam_opt(model_size):
     device = 'cpu'
     rng_state = torch.get_rng_state()
     param = torch.nn.Parameter(torch.randn(model_size, device=device))
