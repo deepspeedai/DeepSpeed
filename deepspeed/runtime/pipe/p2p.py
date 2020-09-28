@@ -14,7 +14,7 @@ def init_process_groups(grid):
     global _groups, _grid
     _grid = grid
 
-    assert _grid.pipe_parallel_size > 1, "There is no model parallelism"
+    assert _grid.pipe_parallel_size > 1, "There is no pipeline parallelism"
 
     _groups = [dist.new_group(ranks=group) for group in _grid.p2p_groups]
 

@@ -260,7 +260,7 @@ class FP16_DeepSpeedZeroOptimizer(object):
             for p, q in zip(self.fp16_groups[i], updated_params):
                 p.data = q.data
 
-            #divide the flat weights into near equal paritition equal to the data parallel degree
+            #divide the flat weights into near equal partition equal to the data parallel degree
             #each process will compute on a different part of the partition
             data_parallel_partitions = self.get_data_parallel_partitions(
                 self.fp16_groups_flat[i])
@@ -367,10 +367,10 @@ class FP16_DeepSpeedZeroOptimizer(object):
         #stores the offset at which a parameter gradient needs to be inserted in a partition
         self.grad_partition_insertion_offset = {}
 
-        #the offset in the gradient at which it must be inserted at the beginning of the paritition
+        #the offset in the gradient at which it must be inserted at the beginning of the partition
         self.grad_start_offset = {}
 
-        #will store the averaged gradients required by this parititon
+        #will store the averaged gradients required by this partition
         self.averaged_gradients = {}
 
         # store index of first parameter in each partition
