@@ -13,7 +13,6 @@ import torch
 import shutil
 import subprocess
 import warnings
-import cpufeature
 from setuptools import setup, find_packages
 from torch.utils.cpp_extension import CUDAExtension, BuildExtension, CppExtension
 
@@ -23,6 +22,27 @@ VERSION = "0.3.0"
 def fetch_requirements(path):
     with open(path, 'r') as fd:
         return [r.strip() for r in fd.readlines()]
+
+
+def available_vector_instructions():
+    try:
+        import cpufeature
+    except ImportError:
+        warnings.warn(
+            f'import cpufeature failed - CPU vector optimizations are not available for CPUAdam'
+        )
+        return {}
+
+    cpu_vector_instructions = {}
+    try:
+        cpu_vector_instructions = cpufeature.CPUFeature
+    except _:
+        warnings.warn(
+            f'cpufeature.CPUFeature failed - CPU vector optimizations are not available for CPUAdam'
+        )
+        return {}
+
+    return cpu_vector_instructions
 
 
 install_requires = fetch_requirements('requirements/requirements.txt')
@@ -43,29 +63,26 @@ TRANSFORMER = "transformer"
 SPARSE_ATTN = "sparse-attn"
 CPU_ADAM = "cpu-adam"
 
+cpu_vector_instructions = available_vector_instructions()
+
 # Build environment variables for custom builds
 DS_BUILD_LAMB_MASK = 1
 DS_BUILD_TRANSFORMER_MASK = 10
 DS_BUILD_SPARSE_ATTN_MASK = 100
 DS_BUILD_CPU_ADAM_MASK = 1000
-DS_BUILD_AVX512_MASK = 10000
 
 # Allow for build_cuda to turn on or off all ops
-DS_BUILD_ALL_OPS = DS_BUILD_LAMB_MASK | DS_BUILD_TRANSFORMER_MASK | DS_BUILD_SPARSE_ATTN_MASK | DS_BUILD_CPU_ADAM_MASK | DS_BUILD_AVX512_MASK
+DS_BUILD_ALL_OPS = DS_BUILD_LAMB_MASK | DS_BUILD_TRANSFORMER_MASK | DS_BUILD_SPARSE_ATTN_MASK | DS_BUILD_CPU_ADAM_MASK
 DS_BUILD_CUDA = int(os.environ.get('DS_BUILD_CUDA', 1)) * DS_BUILD_ALL_OPS
 
 # Set default of each op based on if build_cuda is set
 OP_DEFAULT = DS_BUILD_CUDA == DS_BUILD_ALL_OPS
-DS_BUILD_CPU_ADAM = int(os.environ.get('DS_BUILD_CPU_ADAM',
-                                       OP_DEFAULT)) * DS_BUILD_CPU_ADAM_MASK
+DS_BUILD_CPU_ADAM = int(os.environ.get('DS_BUILD_CPU_ADAM', 0)) * DS_BUILD_CPU_ADAM_MASK
 DS_BUILD_LAMB = int(os.environ.get('DS_BUILD_LAMB', OP_DEFAULT)) * DS_BUILD_LAMB_MASK
 DS_BUILD_TRANSFORMER = int(os.environ.get('DS_BUILD_TRANSFORMER',
                                           OP_DEFAULT)) * DS_BUILD_TRANSFORMER_MASK
 DS_BUILD_SPARSE_ATTN = int(os.environ.get('DS_BUILD_SPARSE_ATTN',
                                           OP_DEFAULT)) * DS_BUILD_SPARSE_ATTN_MASK
-DS_BUILD_AVX512 = int(os.environ.get(
-    'DS_BUILD_AVX512',
-    cpufeature.CPUFeature['AVX512f'])) * DS_BUILD_AVX512_MASK
 
 # Final effective mask is the bitwise OR of each op
 BUILD_MASK = (DS_BUILD_LAMB | DS_BUILD_TRANSFORMER | DS_BUILD_SPARSE_ATTN
@@ -111,11 +128,10 @@ if (TORCH_MAJOR > 1) or (TORCH_MAJOR == 1 and TORCH_MINOR > 4):
     version_ge_1_5 = ['-DVERSION_GE_1_5']
 version_dependent_macros = version_ge_1_1 + version_ge_1_3 + version_ge_1_5
 
-cpu_info = cpufeature.CPUFeature
 SIMD_WIDTH = ''
-if cpu_info['AVX512f'] and DS_BUILD_AVX512:
+if cpu_vector_instructions.get('AVX512f', False):
     SIMD_WIDTH = '-D__AVX512__'
-elif cpu_info['AVX2']:
+elif cpu_vector_instructions.get('AVX2', False):
     SIMD_WIDTH = '-D__AVX256__'
 print("SIMD_WIDTH = ", SIMD_WIDTH)
 

@@ -15,7 +15,6 @@ import collections
 from deepspeed.runtime.fp16.loss_scaler import LossScaler, DynamicLossScaler
 from deepspeed.runtime.utils import see_memory_usage, is_model_parallel_parameter
 from deepspeed.runtime.zero.config import ZERO_OPTIMIZATION_GRADIENTS
-from deepspeed.ops.adam import DeepSpeedCPUAdam
 
 from deepspeed.utils import logger
 #Toggle this to true to enable correctness test
@@ -1416,6 +1415,7 @@ class FP16_DeepSpeedZeroOptimizer(object):
         #torch.set_num_threads(12)
         timers('optimizer_step').start()
         if self.deepspeed_adam_offload:
+            from deepspeed.ops.adam import DeepSpeedCPUAdam
             self.optimizer.step(fp16_param_groups=self.parallel_partitioned_fp16_groups)
             #self.optimizer.step()
             #for fp16_partitions, fp32_partition in zip(self.parallel_partitioned_fp16_groups, self.single_partition_of_fp32_groups):

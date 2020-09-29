@@ -7,10 +7,10 @@ import pytest
 import copy
 
 import deepspeed
-from deepspeed.ops.adam import DeepSpeedCPUAdam
-
 if not deepspeed.ops.__installed_ops__['cpu-adam']:
     pytest.skip("cpu-adam is not installed", allow_module_level=True)
+else:
+    from deepspeed.ops.adam import DeepSpeedCPUAdam
 
 
 def check_equal(first, second, atol=1e-2, verbose=False):
