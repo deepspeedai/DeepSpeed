@@ -97,7 +97,7 @@ public:
     template <typename Func>
     int Run(int loops, Func f)
     {
-        float fast_latency = std::numeric_limits<float>::max();
+        float fast_latency = (std::numeric_limits<float>::max)();
         int fast_algo = 0;
 
         for (int algo = (int)CUBLAS_GEMM_DEFAULT_TENSOR_OP;
@@ -252,7 +252,7 @@ public:
     template <typename Func>
     int Run(int loops, Func f)
     {
-        float fast_latency = std::numeric_limits<float>::max();
+        float fast_latency = (std::numeric_limits<float>::max)();
         int fast_algo = 0;
 
         for (int algo = (int)CUBLAS_GEMM_DEFAULT_TENSOR_OP;

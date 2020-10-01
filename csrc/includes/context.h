@@ -33,8 +33,8 @@
 
 inline int DS_GET_BLOCKS(const int N)
 {
-    return std::max(
-        std::min((N + DS_CUDA_NUM_THREADS - 1) / DS_CUDA_NUM_THREADS, DS_MAXIMUM_NUM_BLOCKS),
+    return (std::max)(
+        (std::min)((N + DS_CUDA_NUM_THREADS - 1) / DS_CUDA_NUM_THREADS, DS_MAXIMUM_NUM_BLOCKS),
         // Use at least 1 block, since CUDA does not allow empty block
         1);
 }
