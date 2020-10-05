@@ -1227,7 +1227,7 @@ class DeepSpeedEngine(Module):
                 self.optimizer.load_state_dict(
                     checkpoint['optimizer'],
                     load_optimizer_states=load_optimizer_states)
-            else:
+            elif load_optimizer_states:
                 self.optimizer.load_state_dict(checkpoint['optimizer'])
 
         if load_lr_scheduler_states and self.lr_scheduler is not None:
