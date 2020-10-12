@@ -50,7 +50,7 @@ self.layer = nn.ModuleList([
 ### Transformer kernel Parameters
 
 The transformer kernel is configured by a number of parameters which allow users to
-explore different settings. We partition these parameters into three categories:
+explore different settings. We partition these parameters into four categories:
 
 1. General configuration, used by different types of transformer layers
 2. Environment parameters, specifying the system's setting
