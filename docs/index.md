@@ -125,7 +125,7 @@ combinations, which we call 3D parallelism.
 
 ## Communication efficiency
 Pipeline parallelism of DeepSpeed reduce communication volume during distributed training, which allows users to train multi-billion-parameter models 2–7x faster on clusters with limited network bandwidth.
-![PP Figure](/assests/images/pp-lowbw-gpt2.png)
+![Low-bandwidth GPT-2 Performance](/assets/images/pp-lowbw-gpt2.png)
 
 1-bit Adam reduces communication volume by up to 5x while achieving similar convergence efficiency to Adam, allowing for scaling to different types of GPU clusters and networks.  [Read more here](https://www.deepspeed.ai/news/2020/09/08/onebit-adam-blog-post.html).
 
