@@ -1,3 +1,7 @@
+'''
+Copyright 2020 The Microsoft DeepSpeed Team
+'''
+
 import math
 import torch
 import importlib
@@ -6,6 +10,40 @@ ds_opt_adam = None
 
 
 class DeepSpeedCPUAdam(torch.optim.Optimizer):
+    """Fast vectorized implementation of two variations of Adam optimizer on CPU:
+
+        - Adam: A Method for Stochastic Optimization: (https://arxiv.org/abs/1412.6980);
+        - AdamW: FIXING WEIGHT DECAY REGULARIZATION IN ADAM (https://arxiv.org/abs/1711.05101v1)
+
+       DeepSpeed CPU Adam(W) provides between 5x to 7x speedu over torch.optim.adam(W).
+       In order to apply this optimizer, the model requires to have its master parameter (in FP32)
+       reside on the CPU memory.
+
+       To train on a hetrogeneous system, such as coordinating CPU and GPU, DeepSpeed offers
+       the ZeRO-Offload technology which efficiently offloads the optimizer states into CPU memory,
+       with minimal impact on training througput. DeepSpeedCPUAdam plays an important role to minimize
+       the overhead of the optimizer's latency on CPU. Please refer to ZeRO-Offload tutorial
+       (https://www.deepspeed.ai/tutorials/zero-offload/) for more information on how to enable this technology.
+
+       For calling step function, there are two options available: (1) update optimizer's states and (2) update
+       optimizer's states and copy the parameters back to GPU at the same time. We have seen that the second
+       option can bring 30% higher throughput than the doing the copy separately using option one.
+
+
+    Arguments:
+        model_params (iterable): iterable of parameters to optimize or dicts defining
+            parameter groups.
+        lr (float, optional): learning rate. (default: 1e-3)
+        betas (Tuple[float, float], optional): coefficients used for computing
+            running averages of gradient and its square. (default: (0.9, 0.999))
+        eps (float, optional): term added to the denominator to improve
+            numerical stability. (default: 1e-8)
+        weight_decay (float, optional): weight decay (L2 penalty) (default: 0)
+        amsgrad (boolean, optional): whether to use the AMSGrad variant of this
+            algorithm from the paper `On the Convergence of Adam and Beyond`_
+            (default: False) NOT SUPPORTED in DeepSpeed CPUAdam!
+        adamw_mode: select between Adam and AdamW implementations (default: AdamW)
+    """
 
     optimizer_id = 0
 
@@ -16,7 +54,8 @@ class DeepSpeedCPUAdam(torch.optim.Optimizer):
                         0.999),
                  eps=1e-8,
                  weight_decay=0,
-                 amsgrad=False):
+                 amsgrad=False,
+                 adamw_mode=True):
 
         default_args = dict(lr=lr,
                             betas=betas,
@@ -30,7 +69,13 @@ class DeepSpeedCPUAdam(torch.optim.Optimizer):
 
         global ds_opt_adam
         ds_opt_adam = importlib.import_module('deepspeed.ops.adam.cpu_adam_op')
-        ds_opt_adam.create_adam(self.opt_id, lr, betas[0], betas[1], eps, weight_decay)
+        ds_opt_adam.create_adam(self.opt_id,
+                                lr,
+                                betas[0],
+                                betas[1],
+                                eps,
+                                weight_decay,
+                                adamw_mode)
 
     def __setstate__(self, state):
         super(DeepSpeedCPUAdam, self).__setstate__(state)

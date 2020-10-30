@@ -1,6 +1,6 @@
 import argparse
 import torch
-
+import apex
 import time
 import numpy as np
 import pytest
@@ -37,8 +37,12 @@ def test_cpu_adam_opt(model_size):
     param = torch.nn.Parameter(torch.randn(model_size, device=device))
     torch.set_rng_state(rng_state)
     param1 = torch.nn.Parameter(torch.randn(model_size, device=device))
+    torch.set_rng_state(rng_state)
+    param2_data = torch.randn(model_size, device=device).cuda()
+    param2 = torch.nn.Parameter(param2_data)
 
-    optimizer1 = torch.optim.Adam([param1])
+    optimizer1 = torch.optim.AdamW([param1])
+    optimizer2 = apex.optimizers.FusedAdam([param2])
     optimizer = DeepSpeedCPUAdam([param])
 
     for i in range(10):
@@ -46,8 +50,12 @@ def test_cpu_adam_opt(model_size):
         param.grad = torch.randn(model_size, device=device)
         torch.set_rng_state(rng_state)
         param1.grad = torch.randn(model_size, device=device)
+        torch.set_rng_state(rng_state)
+        param2.grad = torch.randn(model_size, device=device).cuda()
 
         optimizer.step()
+        optimizer2.step()
         optimizer1.step()
 
     check_equal(param, param1, atol=1e-2, verbose=True)
+    check_equal(param, param2.cpu(), atol=1e-2, verbose=True)

@@ -50,7 +50,8 @@ public:
                    float betta1 = 0.9,
                    float betta2 = 0.999,
                    float eps = 1e-8,
-                   float weight_decay = 0)
+                   float weight_decay = 0,
+                   bool adamw_mode = true)
         : _alpha(alpha),
           _betta1(betta1),
           _betta2(betta2),
@@ -58,7 +59,8 @@ public:
           _weight_decay(weight_decay),
           _betta1_t(1.0),
           _betta2_t(1.0),
-          _buf_index(false)
+          _buf_index(false),
+          _adamw_mode(adamw_mode)
     {
         cudaMallocHost((void**)_doubled_buffer, TILE * sizeof(float));
         cudaMallocHost((void**)(_doubled_buffer + 1), TILE * sizeof(float));
@@ -115,4 +117,5 @@ private:
 
     float* _doubled_buffer[2];
     bool _buf_index;
+    bool _adamw_mode;
 };

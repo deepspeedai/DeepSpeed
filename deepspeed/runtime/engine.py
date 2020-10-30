@@ -19,8 +19,10 @@ from deepspeed.runtime.zero.utils import is_zero_supported_optimizer
 from deepspeed.runtime.activation_checkpointing import checkpointing as activation_checkpointing
 from deepspeed.runtime.fp16.fused_optimizer import FP16_Optimizer
 from deepspeed.runtime.fp16.unfused_optimizer import FP16_UnfusedOptimizer
-from deepspeed.runtime.config import DeepSpeedConfig, \
-    ADAM_OPTIMIZER, LAMB_OPTIMIZER, ONEBIT_ADAM_OPTIMIZER, DEEPSPEED_ADAM, DEEPSPEED_OPTIMIZERS
+from deepspeed.runtime.config import DeepSpeedConfig, DEEPSPEED_OPTIMIZERS, \
+    ADAM_OPTIMIZER, LAMB_OPTIMIZER, ONEBIT_ADAM_OPTIMIZER, \
+    TORCH_ADAM_PARAM, ADAM_W_MODE_PARAM
+
 from deepspeed.runtime.dataloader import DeepSpeedDataLoader
 from deepspeed.runtime.constants import \
     ROUTE_TRAIN, ROUTE_PREDICT, ROUTE_EVAL, \
@@ -548,15 +550,30 @@ class DeepSpeedEngine(Module):
             raise ValueError(
                 "'max_grad_norm' is not supported as an optimizer parameter, please switch to using the deepspeed parameter 'gradient_clipping' see: https://www.deepspeed.ai/docs/config-json/#gradient-clipping for more details"
             )
+
         if self.optimizer_name() == ADAM_OPTIMIZER:
-            if self.zero_cpu_offload():
+            torch_adam = optimizer_parameters.pop(TORCH_ADAM_PARAM, False)
+            adam_w_mode = optimizer_parameters.pop(ADAM_W_MODE_PARAM, True)
+
+            # zero-offload  torch-adam  adam_w_mode optimizer
+            # T|F           T           T           torch.optim.AdamW
+            # T|F           T           F           torch.optim.Adam
+            # T             F           T|F         DeepSpeedCPUAdam(adam_w_mode)
+            # F             F           T|F         FusedAdam(adam_w_mode)
+            if torch_adam and adam_w_mode:
+                optimizer = torch.optim.AdamW(model_parameters, **optimizer_parameters)
+            elif torch_adam and not adam_w_mode:
                 optimizer = torch.optim.Adam(model_parameters, **optimizer_parameters)
-            else:
+            elif self.zero_cpu_offload() and not torch_adam:
+                from deepspeed.ops.adam import DeepSpeedCPUAdam
+                optimizer = DeepSpeedCPUAdam(model_parameters,
+                                             **optimizer_parameters,
+                                             adamw_mode=adam_w_mode)
+            elif not self.zero_cpu_offload() and not torch_adam:
                 from apex.optimizers.fused_adam import FusedAdam
+                optimizer_parameters[ADAM_W_MODE_PARAM] = adam_w_mode
                 optimizer = FusedAdam(model_parameters, **optimizer_parameters)
-        elif self.optimizer_name() == DEEPSPEED_ADAM:
-            from deepspeed.ops.adam import DeepSpeedCPUAdam
-            optimizer = DeepSpeedCPUAdam(model_parameters, **optimizer_parameters)
+
         elif self.optimizer_name() == LAMB_OPTIMIZER:
             from deepspeed.ops.lamb import FusedLamb
             optimizer = FusedLamb(model_parameters, **optimizer_parameters)

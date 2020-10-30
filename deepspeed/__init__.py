@@ -7,7 +7,7 @@ import types
 from . import ops
 
 from .runtime.engine import DeepSpeedEngine
-from .runtime.engine import ADAM_OPTIMIZER, LAMB_OPTIMIZER, DEEPSPEED_ADAM
+from .runtime.engine import ADAM_OPTIMIZER, LAMB_OPTIMIZER
 from .runtime.pipe.engine import PipelineEngine
 from .runtime.lr_schedules import add_tuning_arguments
 from .runtime.config import DeepSpeedConfig

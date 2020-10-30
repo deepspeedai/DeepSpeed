@@ -34,10 +34,10 @@ title: "DeepSpeed Configuration JSON"
 
 | Fields | Value                                                        | Example                        |
 | ------ | ------------------------------------------------------------ | ------------------------------ |
-| type   | The optimizer name. DeepSpeed natively supports **Adam**, **DeepSpeedAdam**, **OneBitAdam**, and **LAMB** optimizers and will import other optimizers from [torch](https://pytorch.org/docs/stable/optim.html). | `"Adam"`                         |
+| type   | The optimizer name. DeepSpeed natively supports **Adam**, **OneBitAdam**, and **Lamb** optimizers and will import other optimizers from [torch](https://pytorch.org/docs/stable/optim.html). | `"Adam"`                         |
 | params | Dictionary of parameters to instantiate optimizer. The parameter names must match the optimizer constructor signature (e.g., for [Adam](https://pytorch.org/docs/stable/optim.html#torch.optim.Adam)). | `{"lr": 0.001, "eps": 1e-8}` |
 
-  Example of ***optimizer***
+  Example of ***optimizer*** with Adam
 
 ```json
 "optimizer": {
@@ -53,6 +53,12 @@ title: "DeepSpeed Configuration JSON"
     }
   }
 ```
+The Adam optimizer also supports the following two params keys/values in addition to the standard parameters from [torch.optim.Adam](https://pytorch.org/docs/stable/_modules/torch/optim/adam.html#Adam):
+| "params" key  | Description                                                                 | Default |
+| ------------- | --------------------------------------------------------------------------- | --------|
+| torch\_adam   | Use torch's implementation of adam instead of our fused adam implementation | false   |
+| adam\_w\_mode | Apply L2 regularization (also known as AdamW)                               | true    |
+
   Another example of ***optimizer*** with 1-bit Adam specific parameters is as follows.
 
 ```json

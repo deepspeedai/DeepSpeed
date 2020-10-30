@@ -32,7 +32,7 @@ void Adam_Optimizer::Step(float* _params,
     float bias_correction2 = 1 / sqrt(1 - _betta2_t);
 
     float step_size = -1 * _alpha / bias_correction1;
-
+    float w_decay = -1 * _alpha * _weight_decay;
     size_t rounded_size = 0;
 
 #if defined(__AVX512__) or defined(__AVX256__)
@@ -57,8 +57,8 @@ void Adam_Optimizer::Step(float* _params,
     step_size_4.data = SIMD_SET(step_size);
 
     AVX_Data weight_decay4;
-    if (_weight_decay > 0) weight_decay4.data = SIMD_SET(_weight_decay);
-
+    if (_weight_decay > 0)
+        weight_decay4.data = (_adamw_mode ? SIMD_SET(w_decay) : SIMD_SET(_weight_decay));
     rounded_size = ROUND_DOWN(_param_size, SIMD_WIDTH);
 
     for (size_t t = 0; t < rounded_size; t += TILE) {
@@ -78,9 +78,9 @@ void Adam_Optimizer::Step(float* _params,
             AVX_Data param_4;
             param_4.data = SIMD_LOAD(_params + i);
 
-            if (_weight_decay > 0)
+            if (_weight_decay > 0 && !_adamw_mode) {
                 grad_4.data = SIMD_FMA(param_4.data, weight_decay4.data, grad_4.data);
-
+            }
             momentum_4.data = SIMD_MUL(momentum_4.data, betta1_4.data);
             momentum_4.data = SIMD_FMA(grad_4.data, betta1_minus1_4.data, momentum_4.data);
 
@@ -91,7 +91,9 @@ void Adam_Optimizer::Step(float* _params,
             grad_4.data = SIMD_SQRT(variance_4.data);
             grad_4.data = SIMD_FMA(grad_4.data, bias2_sqrt.data, eps_4.data);
             grad_4.data = SIMD_DIV(momentum_4.data, grad_4.data);
-
+            if (_weight_decay > 0 && _adamw_mode) {
+                param_4.data = SIMD_FMA(param_4.data, weight_decay4.data, param_4.data);
+            }
             param_4.data = SIMD_FMA(grad_4.data, step_size_4.data, param_4.data);
 
             SIMD_STORE(_params + i, param_4.data);
@@ -119,8 +121,7 @@ void Adam_Optimizer::Step(float* _params,
             float param = _params[k];
             float momentum = _exp_avg[k];
             float variance = _exp_avg_sq[k];
-            if (_weight_decay > 0) grad = param * _weight_decay + grad;
-
+            if (_weight_decay > 0 && !_adamw_mode) { grad = param * _weight_decay + grad; }
             momentum *= momentum * _betta1;
             momentum = grad * betta1_minus1 + momentum;
 
@@ -131,7 +132,7 @@ void Adam_Optimizer::Step(float* _params,
             grad = sqrt(variance);
             grad = grad * bias_correction2 + _eps;
             grad = momentum / grad;
-
+            if (_weight_decay > 0 && _adamw_mode) { param += w_decay * param; }
             param = grad * step_size + param;
             if (dev_params) _doubled_buffer[_buf_index][k - rounded_size] = (__half)param;
 
@@ -184,6 +185,10 @@ void Adam_Optimizer::Step_4(float* _params,
     AVX_Data step_size_4;
     step_size_4.data = SIMD_SET(step_size);
 
+    float w_decay = -1 * _alpha * _weight_decay;
+    AVX_Data weight_decay4;
+    if (_weight_decay > 0)
+        weight_decay4.data = (_adamw_mode ? SIMD_SET(w_decay) : SIMD_SET(_weight_decay));
     rounded_size = ROUND_DOWN(_param_size, (SIMD_WIDTH << 2));
 
     for (size_t t = 0; t < rounded_size; t += TILE) {
@@ -216,9 +221,7 @@ void Adam_Optimizer::Step_4(float* _params,
             param_4[2].data = SIMD_LOAD(_params + i + (SIMD_WIDTH << 1));
             param_4[3].data = SIMD_LOAD(_params + i + SIMD_WIDTH * 3);
 
-            if (_weight_decay > 0) {
-                AVX_Data weight_decay4;
-                weight_decay4.data = SIMD_SET(_weight_decay);
+            if (_weight_decay > 0 && !_adamw_mode) {
                 grad_4[0].data = SIMD_FMA(param_4[0].data, weight_decay4.data, grad_4[0].data);
                 grad_4[1].data = SIMD_FMA(param_4[1].data, weight_decay4.data, grad_4[1].data);
                 grad_4[2].data = SIMD_FMA(param_4[2].data, weight_decay4.data, grad_4[2].data);
@@ -260,6 +263,13 @@ void Adam_Optimizer::Step_4(float* _params,
             grad_4[1].data = SIMD_DIV(momentum_4[1].data, grad_4[1].data);
             grad_4[2].data = SIMD_DIV(momentum_4[2].data, grad_4[2].data);
             grad_4[3].data = SIMD_DIV(momentum_4[3].data, grad_4[3].data);
+
+            if (_weight_decay > 0 && _adamw_mode) {
+                param_4[0].data = SIMD_FMA(param_4[0].data, weight_decay4.data, param_4[0].data);
+                param_4[1].data = SIMD_FMA(param_4[1].data, weight_decay4.data, param_4[1].data);
+                param_4[2].data = SIMD_FMA(param_4[2].data, weight_decay4.data, param_4[2].data);
+                param_4[3].data = SIMD_FMA(param_4[3].data, weight_decay4.data, param_4[3].data);
+            }
 
             param_4[0].data = SIMD_FMA(grad_4[0].data, step_size_4.data, param_4[0].data);
             param_4[1].data = SIMD_FMA(grad_4[1].data, step_size_4.data, param_4[1].data);
@@ -313,9 +323,11 @@ int create_adam_optimizer(int optimizer_id,
                           float betta1 = 0.9,
                           float betta2 = 0.999,
                           float eps = 1e-8,
-                          float weight_decay = 0)
+                          float weight_decay = 0,
+                          bool adamw_mode = true)
 {
-    auto opt = std::make_shared<Adam_Optimizer>(alpha, betta1, betta2, eps, weight_decay);
+    auto opt =
+        std::make_shared<Adam_Optimizer>(alpha, betta1, betta2, eps, weight_decay, adamw_mode);
 
     s_optimizers[optimizer_id] = opt;
 #if defined(__AVX512__)
@@ -369,6 +381,11 @@ void Adam_Optimizer::Step_8(float* _params,
     AVX_Data step_size_4;
     step_size_4.data = SIMD_SET(step_size);
 
+    float w_decay = -1 * _alpha * _weight_decay;
+    AVX_Data weight_decay4;
+    if (_weight_decay > 0)
+        weight_decay4.data =
+            (_adamw_mode ? _mm512_set1_ps(w_decay) : _mm512_set1_ps(_weight_decay));
     rounded_size = ROUND_DOWN(_param_size, (SIMD_WIDTH << 3));
 
     for (size_t t = 0; t < rounded_size; t += TILE) {
@@ -417,7 +434,7 @@ void Adam_Optimizer::Step_8(float* _params,
             param_4[6].data = SIMD_LOAD(_params + i + SIMD_WIDTH * 6);
             param_4[7].data = SIMD_LOAD(_params + i + SIMD_WIDTH * 7);
 
-            if (_weight_decay > 0) {
+            if (_weight_decay > 0 && !_adamw_mode) {
                 AVX_Data weight_decay4;
                 weight_decay4.data = SIMD_SET(_weight_decay);
                 grad_4[0].data = SIMD_FMA(param_4[0].data, weight_decay4.data, grad_4[0].data);
@@ -497,6 +514,17 @@ void Adam_Optimizer::Step_8(float* _params,
             grad_4[5].data = SIMD_DIV(momentum_4[5].data, grad_4[5].data);
             grad_4[6].data = SIMD_DIV(momentum_4[6].data, grad_4[6].data);
             grad_4[7].data = SIMD_DIV(momentum_4[7].data, grad_4[7].data);
+
+            if (_weight_decay > 0 && _adamw_mode) {
+                param_4[0].data = SIMD_FMA(param_4[0].data, weight_decay4.data, param_4[0].data);
+                param_4[1].data = SIMD_FMA(param_4[1].data, weight_decay4.data, param_4[1].data);
+                param_4[2].data = SIMD_FMA(param_4[2].data, weight_decay4.data, param_4[2].data);
+                param_4[3].data = SIMD_FMA(param_4[3].data, weight_decay4.data, param_4[3].data);
+                param_4[4].data = SIMD_FMA(param_4[4].data, weight_decay4.data, param_4[4].data);
+                param_4[5].data = SIMD_FMA(param_4[5].data, weight_decay4.data, param_4[5].data);
+                param_4[6].data = SIMD_FMA(param_4[6].data, weight_decay4.data, param_4[6].data);
+                param_4[7].data = SIMD_FMA(param_4[7].data, weight_decay4.data, param_4[7].data);
+            }
 
             param_4[0].data = SIMD_FMA(grad_4[0].data, step_size_4.data, param_4[0].data);
             param_4[1].data = SIMD_FMA(grad_4[1].data, step_size_4.data, param_4[1].data);
