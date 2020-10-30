@@ -384,8 +384,7 @@ void Adam_Optimizer::Step_8(float* _params,
     float w_decay = -1 * _alpha * _weight_decay;
     AVX_Data weight_decay4;
     if (_weight_decay > 0)
-        weight_decay4.data =
-            (_adamw_mode ? _mm512_set1_ps(w_decay) : _mm512_set1_ps(_weight_decay));
+        weight_decay4.data = (_adamw_mode ? SIMD_SET(w_decay) : SIMD_SET(_weight_decay));
     rounded_size = ROUND_DOWN(_param_size, (SIMD_WIDTH << 3));
 
     for (size_t t = 0; t < rounded_size; t += TILE) {
