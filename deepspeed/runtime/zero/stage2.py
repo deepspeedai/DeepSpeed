@@ -1416,8 +1416,11 @@ class FP16_DeepSpeedZeroOptimizer(object):
         if self.deepspeed_adam_offload:
             from deepspeed.ops.adam import DeepSpeedCPUAdam
             if type(self.optimizer) == DeepSpeedCPUAdam:
-                self.optimizer.step(
-                    fp16_param_groups=self.parallel_partitioned_fp16_groups)
+                fp16_param_groups = [
+                    fp16_partitions[partition_id]
+                    for fp16_partitions in self.parallel_partitioned_fp16_groups
+                ]
+                self.optimizer.step(fp16_param_groups=fp16_param_groups)
             else:
                 self.optimizer.step()
                 for fp16_partitions, fp32_partition in zip(self.parallel_partitioned_fp16_groups, self.single_partition_of_fp32_groups):

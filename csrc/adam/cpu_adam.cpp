@@ -122,7 +122,7 @@ void Adam_Optimizer::Step(float* _params,
             float momentum = _exp_avg[k];
             float variance = _exp_avg_sq[k];
             if (_weight_decay > 0 && !_adamw_mode) { grad = param * _weight_decay + grad; }
-            momentum *= momentum * _betta1;
+            momentum = momentum * _betta1;
             momentum = grad * betta1_minus1 + momentum;
 
             variance = variance * _betta2;
@@ -333,13 +333,31 @@ int create_adam_optimizer(int optimizer_id,
 #if defined(__AVX512__)
     std::cout << "Adam Optimizer #" << optimizer_id
               << " is created with AVX512 arithmetic capability." << std::endl;
+    printf("Config: alpha=%f, betas=(%f, %f), weight_decay=%f, adam_w=%d\n",
+           alpha,
+           betta1,
+           betta2,
+           weight_decay,
+           (int)adamw_mode);
 #else
 #if defined(__AVX256__)
     std::cout << "Adam Optimizer #" << optimizer_id
               << " is created with AVX2 arithmetic capability." << std::endl;
+    printf("Config: alpha=%f, betas=(%f, %f), weight_decay=%f, adam_w=%d\n",
+           alpha,
+           betta1,
+           betta2,
+           weight_decay,
+           (int)adamw_mode);
 #else
     std::cout << "Adam Optimizer #" << optimizer_id
               << " is created with scalar arithmetic capability." << std::endl;
+    printf("Config: alpha=%f, betas=(%f, %f), weight_decay=%f, adam_w=%d\n",
+           alpha,
+           betta1,
+           betta2,
+           weight_decay,
+           (int)adamw_mode);
 #endif
 #endif
     return 0;
@@ -434,8 +452,6 @@ void Adam_Optimizer::Step_8(float* _params,
             param_4[7].data = SIMD_LOAD(_params + i + SIMD_WIDTH * 7);
 
             if (_weight_decay > 0 && !_adamw_mode) {
-                AVX_Data weight_decay4;
-                weight_decay4.data = SIMD_SET(_weight_decay);
                 grad_4[0].data = SIMD_FMA(param_4[0].data, weight_decay4.data, grad_4[0].data);
                 grad_4[1].data = SIMD_FMA(param_4[1].data, weight_decay4.data, grad_4[1].data);
                 grad_4[2].data = SIMD_FMA(param_4[2].data, weight_decay4.data, grad_4[2].data);
@@ -593,6 +609,8 @@ void Adam_Optimizer::Step_8(float* _params,
 }
 
 int ds_adam_step(int optimizer_id,
+                 size_t step,
+                 float lr,
                  torch::Tensor& params,
                  torch::Tensor& grads,
                  torch::Tensor& exp_avg,
@@ -610,13 +628,16 @@ int ds_adam_step(int optimizer_id,
 
     std::shared_ptr<Adam_Optimizer> opt =
         std::static_pointer_cast<Adam_Optimizer>(s_optimizers[optimizer_id]);
-    opt->IncrementStep();
+    opt->IncrementStep(step);
+    opt->update_lr(lr);
     opt->Step_8(params_ptr, grads_ptr, exp_avg_ptr, exp_avg_sq_ptr, params_c.size(0));
 
     return 0;
 }
 
 int ds_adam_step_plus_copy(int optimizer_id,
+                           size_t step,
+                           float lr,
                            torch::Tensor& params,
                            torch::Tensor& grads,
                            torch::Tensor& exp_avg,
@@ -637,7 +658,8 @@ int ds_adam_step_plus_copy(int optimizer_id,
 
     std::shared_ptr<Adam_Optimizer> opt =
         std::static_pointer_cast<Adam_Optimizer>(s_optimizers[optimizer_id]);
-    opt->IncrementStep();
+    opt->IncrementStep(step);
+    opt->update_lr(lr);
     opt->Step_8(
         params_ptr, grads_ptr, exp_avg_ptr, exp_avg_sq_ptr, params_c.size(0), gpu_params_ptr);
 
