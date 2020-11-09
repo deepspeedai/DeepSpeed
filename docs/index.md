@@ -28,7 +28,8 @@ initiative to enable next-generation AI capabilities at scale, where you can fin
 information [here](https://innovation.microsoft.com/en-us/exploring-ai-at-scale).
 
 # What's New?
-* [2020/09/10] [DeepSpeed: Extreme-scale model training for everyone]({{ site.press_release_v3 }})
+* [2020/10/28] [Efficient and robust compressed training through progressive layer dropping](https://www.deepspeed.ai/news/2020/10/28/progressive-layer-dropping-news.html)
+  * [DeepSpeed: Extreme-scale model training for everyone]({{ site.press_release_v3 }})
   * [Powering 10x longer sequences and 6x faster execution through DeepSpeed Sparse Attention](https://www.deepspeed.ai/news/2020/09/08/sparse-attention-news.html)
   * [Training a trillion parameters with pipeline parallelism](https://www.deepspeed.ai/news/2020/09/08/pipeline-parallelism.html)
   * [Up to 5x less communication and 3.4x faster training through 1-bit Adam](https://www.deepspeed.ai/news/2020/09/08/onebit-adam-news.html)
@@ -192,6 +193,9 @@ Below we provide a brief feature list, see our detailed [feature overview](https
   * Learning Rate Range Test
   * 1Cycle Learning Rate Schedule
 * [Simplified Data Loader](https://www.deepspeed.ai/features/#simplified-data-loader)
+* [Progressive Layer Dropping](https://www.deepspeed.ai/news/2020/10/28/progressive_layer_dropping.html)
+  * Efficient and robust compressed training
+  * Up to 2.5x convergence speedup for pre-training
 * [Performance Analysis and Debugging](https://www.deepspeed.ai/features/#performance-analysis-and-debugging)
 
 

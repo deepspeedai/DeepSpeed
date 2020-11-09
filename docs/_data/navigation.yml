@@ -76,5 +76,7 @@ lnav:
         url: /tutorials/onebit-adam/
       - title: "Pipeline Parallelism"
         url: /tutorials/pipeline/
+      - title: "Progressive Layer Dropping"
+        url: /tutorials/progressive_layer_dropping/
   - title: "Contributing"
     url: /contributing/
