@@ -193,7 +193,7 @@ Below we provide a brief feature list, see our detailed [feature overview](https
   * Learning Rate Range Test
   * 1Cycle Learning Rate Schedule
 * [Simplified Data Loader](https://www.deepspeed.ai/features/#simplified-data-loader)
-* [Progressive Layer Dropping](https://www.deepspeed.ai/news/2020/10/28/progressive_layer_dropping.html)
+* [Progressive Layer Dropping](https://www.deepspeed.ai/news/2020/10/28/progressive-layer-dropping-news.html)
   * Efficient and robust compressed training
   * Up to 2.5x convergence speedup for pre-training
 * [Performance Analysis and Debugging](https://www.deepspeed.ai/features/#performance-analysis-and-debugging)
