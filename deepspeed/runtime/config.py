@@ -30,6 +30,24 @@ TORCH_ADAM_PARAM = "torch_adam"
 ADAM_W_MODE_PARAM = "adam_w_mode"
 
 
+def get_pld_enabled(param_dict):
+    if PROGRESSIVE_LAYER_DROP in param_dict.keys():
+        return get_scalar_param(param_dict[PROGRESSIVE_LAYER_DROP],
+                                PLD_ENABLED,
+                                PLD_ENABLED_DEFAULT)
+    else:
+        return False
+
+
+def get_pld_params(param_dict):
+    if PROGRESSIVE_LAYER_DROP in param_dict.keys():
+        pld_params = copy.copy(param_dict[PROGRESSIVE_LAYER_DROP])
+        pld_params.pop(PLD_ENABLED)
+        return pld_params
+    else:
+        return False
+
+
 def get_amp_enabled(param_dict):
     if AMP in param_dict.keys():
         return get_scalar_param(param_dict[AMP], AMP_ENABLED, AMP_ENABLED_DEFAULT)
@@ -541,6 +559,9 @@ class DeepSpeedConfig(object):
 
         self.sparse_attention = get_sparse_attention(param_dict)
         self.pipeline = get_pipeline_config(param_dict)
+
+        self.pld_enabled = get_pld_enabled(param_dict)
+        self.pld_params = get_pld_params(param_dict)
 
     def _batch_assertion(self):
 

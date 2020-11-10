@@ -26,13 +26,14 @@ from deepspeed.runtime.config import DeepSpeedConfig, DEEPSPEED_OPTIMIZERS, \
 from deepspeed.runtime.dataloader import DeepSpeedDataLoader
 from deepspeed.runtime.constants import \
     ROUTE_TRAIN, ROUTE_PREDICT, ROUTE_EVAL, \
-    TORCH_DISTRIBUTED_DEFAULT_PORT
+    TORCH_DISTRIBUTED_DEFAULT_PORT, PLD_THETA, PLD_GAMMA
 from deepspeed.runtime.zero.constants import \
     ZERO_OPTIMIZATION_OPTIMIZER_STATES, ZERO_OPTIMIZATION_GRADIENTS
 from deepspeed.runtime.csr_tensor import CSRTensor
 import deepspeed.runtime.lr_schedules as lr_schedules
 from deepspeed.utils import logger, log_dist
 from deepspeed.utils.timer import ThroughputTimer, SynchronizedWallClockTimer
+from deepspeed.runtime.progressive_layer_drop import ProgressiveLayerDrop
 
 from .utils import ensure_directory_exists
 
@@ -127,6 +128,7 @@ class DeepSpeedEngine(Module):
         self.loaded_checkpoint_mp_world_size = None
         self.loaded_checkpoint_dp_world_size = None
         self.enable_backward_allreduce = True
+        self.progressive_layer_drop = None
 
         if dist_init_required is None:
             dist_init_required = not dist.is_initialized()
@@ -192,10 +194,13 @@ class DeepSpeedEngine(Module):
         self.save_zero_checkpoint = False
         self._configure_checkpointing(dist_init_required)
 
+        if self.pld_enabled():
+            self.progressive_layer_drop = self._configure_progressive_layer_drop()
+
         if self.global_rank == 0:
-            self._config.print('DeepSpeedLight configuration')
+            self._config.print('DeepSpeedEngine configuration')
             if self.dump_state():
-                print_configuration(self, 'DeepSpeedLight')
+                print_configuration(self, 'DeepSpeedEngine')
 
     def _mpi_check(self, args, dist_init_required):
         if hasattr(args, 'deepspeed_mpi') and args.deepspeed_mpi:
@@ -235,6 +240,18 @@ class DeepSpeedEngine(Module):
                 assert dist.get_rank() == rank, "MPI rank {} does not match torch rank {}".format(rank, dist.get_rank())
                 assert dist.get_world_size() == world_size, "MPI world size {} does not match torch world size {}".format(
                     world_size, dist.get_world_size())
+
+    def pld_enabled(self):
+        return self._config.pld_enabled
+
+    def pld_params(self):
+        return self._config.pld_params
+
+    def pld_theta(self):
+        return self.pld_params()[PLD_THETA]
+
+    def pld_gamma(self):
+        return self.pld_params()[PLD_GAMMA]
 
     def tensorboard_enabled(self):
         return self._config.tensorboard_enabled
@@ -666,6 +683,11 @@ class DeepSpeedEngine(Module):
 
         return optimizer
 
+    def _configure_progressive_layer_drop(self):
+        pld = ProgressiveLayerDrop(theta=self.pld_theta(), gamma=self.pld_gamma())
+
+        return pld
+
     def deepspeed_io(self,
                      dataset,
                      batch_size=None,
@@ -750,6 +772,9 @@ class DeepSpeedEngine(Module):
             *inputs: Variable length input list
             **kwargs: variable length keyword arguments
         """
+
+        if self.module.training and self.progressive_layer_drop:
+            kwargs.update(self.progressive_layer_drop.get_state())
 
         if self.wall_clock_breakdown():
             self.timers('forward_microstep').start()
@@ -931,6 +956,9 @@ class DeepSpeedEngine(Module):
 
         # Update the model when we reach gradient accumulation boundaries
         if self.is_gradient_accumulation_boundary():
+            if self.progressive_layer_drop:
+                self.progressive_layer_drop.update_state(self.global_steps)
+
             self._take_model_step()
 
         self.tput_timer.stop(report_progress)
@@ -1023,6 +1051,12 @@ class DeepSpeedEngine(Module):
             return self._get_optimizer_param('momentum')
         else:
             return self._get_optimizer_param('betas')
+
+    def get_pld_theta(self):
+        if self.progressive_layer_drop:
+            return self.progressive_layer_drop.get_theta()
+        else:
+            return None
 
     def _report_progress(self, step):
         lr = self.get_lr()

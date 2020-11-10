@@ -291,3 +291,16 @@ TENSORBOARD_OUTPUT_PATH_DEFAULT = ""
 # Tensorboard job name
 TENSORBOARD_JOB_NAME = "job_name"
 TENSORBOARD_JOB_NAME_DEFAULT = "DeepSpeedJobName"
+
+# Progressive Layer Drop (PLD)
+PROGRESSIVE_LAYER_DROP = "progressive_layer_drop"
+
+# PLD enable signal
+PLD_ENABLED = "enabled"
+PLD_ENABLED_DEFAULT = False
+
+PLD_THETA = "theta"
+PLD_THETA_DEFAULT = 1.0
+
+PLD_GAMMA = "gamma"
+PLD_GAMMA_DEFAULT = 0.001

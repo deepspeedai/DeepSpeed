@@ -101,6 +101,17 @@ class SimpleOptimizer(torch.optim.Optimizer):
         return loss
 
 
+class PLD_SimpleModel(SimpleModel):
+    def __init__(self, hidden_dim, empty_grad=False, rank=0):
+        super(PLD_SimpleModel, self).__init__(hidden_dim, empty_grad, rank)
+
+    def forward(self, x, y, **kwargs):
+        pld = kwargs.get('progressive_layer_drop', False)
+        theta = kwargs.get('pld_theta', 1.0)
+        hidden_dim = super(PLD_SimpleModel, self).forward(x, y)
+        return hidden_dim
+
+
 def random_dataloader(model, total_samples, hidden_dim, device, dtype=torch.half):
     batch_size = model.train_micro_batch_size_per_gpu()
     train_data = torch.randn(total_samples, hidden_dim, device=device, dtype=dtype)
