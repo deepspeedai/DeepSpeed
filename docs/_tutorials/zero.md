@@ -27,7 +27,6 @@ We demonstrate the benefits of ZeRO stage 1 by showing that it enables data para
        --hidden-size 1600 \
        --num-attention-heads 16 \
        --batch-size 1 \
-       --d \
        --deepspeed_config ds_zero_stage_1.config \
 ```
 
@@ -53,7 +52,7 @@ As seen above, we set two fields in the **zero_optimization** key. Specifically 
 From the nvidia-smi screenshot above we can see that that only GPUs 0--7 are being used for training the model. With ZeRO stage 1 we can further reduce the per-device memory consumption by increasing the data parallelism degree. These memory savings can be leveraged to either increase model size and/or batch size. In contrast, such benefits are not possible with data parallelism alone.  
 
 ### Training a 10B Parameter GPT-2 model
-ZeRO stage 2 optimizations further increases the size of models that can be trained using data parallelism. We show this training a model with 10B parameters using 32 V100 GPUs. First, we need to configure a 10B parameter model. This can be done by applying the following GPT-2 model configuration changes to the DeepSpeed launch script.
+ZeRO stage 2 optimizations further increases the size of models that can be trained using data parallelism. We show this training a model with 10B parameters using 32 V100 GPUs. First, we need to configure a 10B parameter model with activation checkpointing enabled. This can be done by applying the following GPT-2 model configuration changes to the DeepSpeed launch script.
 
 ```bash
        --model-parallel-size 1 \
@@ -61,8 +60,8 @@ ZeRO stage 2 optimizations further increases the size of models that can be trai
        --hidden-size 4096 \
        --num-attention-heads 32 \
        --batch-size 1 \
-       --d \
        --deepspeed_config ds_zero_stage_2.config \
+       --checkpoint-activations
 ```
 
 Next, we need to update the DeepSpeed json configuration, as shown below, to enable ZeRO stage 2 optimizations:  
@@ -80,7 +79,7 @@ Next, we need to update the DeepSpeed json configuration, as shown below, to ena
 }
 ```
 
-In the above changes, we have set the _stage_ field to 2, and configured other optimization knobs that are available in ZeRO stage 2. For example, we have enabled _contiguous_gradients_ to reduce memory fragmenation during backward pass. A full description of these optimization knobs is available [here](/docs/config-json/#zero-optimizations-for-fp16-training). With these changes, we can now run the launch the training run.
+In the above changes, we have set the _stage_ field to 2, and configured other optimization knobs that are available in ZeRO stage 2. For example, we have enabled _contiguous_gradients_ to reduce memory fragmenation during backward pass. A full description of these optimization knobs is available [here](/docs/config-json/#zero-optimizations-for-fp16-training). With these changes, we can now launch the training run.
 
 Here is a screenshot of the training log:
 

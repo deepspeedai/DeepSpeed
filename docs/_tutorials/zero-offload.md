@@ -15,7 +15,7 @@ For this tutorial, we will configure a 10 billion parameter GPT-2 model using th
 We need to make changes to the Megatron-LM launch script and to the DeepSpeed configuration json.
 
 ### Megatron-LM GPT-2 launch script changes
-We need to apply two changes to the launch script for the DeepSpeed Megatron-LM GPT-2 model. The first change is to configure a 10B parameter GPT-2 model, which can be achieved by the following set of changes:
+We need to apply two changes to the launch script for the DeepSpeed Megatron-LM GPT-2 model. The first change is to configure a 10B parameter GPT-2 model with activation checkpointing enabled, which can be achieved by the following set of changes:
 
 ```bash
        --model-parallel-size 1 \
@@ -23,9 +23,9 @@ We need to apply two changes to the launch script for the DeepSpeed Megatron-LM 
        --hidden-size 4096 \
        --num-attention-heads 32 \
        --batch-size 10 \
-       --d \
        --deepspeed_config ds_zero_offload.config \
        --cpu_optimizer \
+       --checkpoint-activations
 ```
 
 Most of the flags in the changes above should be familiar if you have stepped through the Megatron-LM [tutorial](/tutorials/megatron/), except for the **_--cpu_optimizer_**. This flag informs the model script to pass a CPU-based Adam optimizer, rather than a GPU-based one, to DeepSpeed as the client optimizer. It is very important that this flag be used when training with ZeRO-Offload to ensure correct operation of the DeepSpeed engine.  
