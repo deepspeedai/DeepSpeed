@@ -38,7 +38,6 @@ from deepspeed.runtime.progressive_layer_drop import ProgressiveLayerDrop
 from .utils import ensure_directory_exists
 
 MEMORY_OPT_ALLREDUCE_SIZE = 500000000
-SUMMARY_WRITER_DIR_NAME = "JobId"
 
 try:
     from apex_C import flatten
@@ -271,9 +270,17 @@ class DeepSpeedEngine(Module):
         else:
             if self.tensorboard_job_name():
                 name = self.tensorboard_job_name()
+
+            # Infrastructure-specific job-id
             if 'DLWS_JOB_ID' in os.environ:
-                SUMMARY_WRITER_DIR_NAME = os.path.join(os.environ['DLWS_JOB_ID'], "logs")
-            log_dir = os.path.join(base, SUMMARY_WRITER_DIR_NAME, name)
+                infra_job_id = os.environ['DLWS_JOB_ID']
+            elif 'DLTS_JOB_ID' in os.environ:
+                infra_job_id = os.environ['DLTS_JOB_ID']
+            else:
+                infra_job_id = 'unknown-job-id'
+
+            summary_writer_dir_name = os.path.join(infra_job_id, "logs")
+            log_dir = os.path.join(base, summary_writer_dir_name, name)
 
         os.makedirs(log_dir, exist_ok=True)
 
