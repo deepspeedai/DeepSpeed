@@ -7,8 +7,6 @@ import torch
 import warnings
 import torch.distributed as dist
 
-import apex
-from apex import amp
 from torch.nn.modules import Module
 from torch.distributed.distributed_c10d import _get_global_rank
 from tensorboardX import SummaryWriter
@@ -36,22 +34,17 @@ from deepspeed.utils.timer import ThroughputTimer, SynchronizedWallClockTimer
 from deepspeed.runtime.progressive_layer_drop import ProgressiveLayerDrop
 
 from .utils import ensure_directory_exists
+from ..ops.op_builder import UtilsBuilder
+from ..ops.adam import DeepSpeedCPUAdam
+from ..ops.adam import FusedAdam
 
 MEMORY_OPT_ALLREDUCE_SIZE = 500000000
 
 try:
-    from apex_C import flatten
-    from apex_C import unflatten
+    from apex import amp
 except ImportError:
-    try:
-        _ = warned_flatten
-    except NameError:
-        logger.warning(
-            "Warning:  apex was installed without --cpp_ext.  Falling back to Python flatten and unflatten."
-        )
-        warned_flatten = True
-    from torch._utils import _flatten_dense_tensors as flatten
-    from torch._utils import _unflatten_dense_tensors as unflatten
+    # Fail silently so we don't spam logs unnecessarily if user isn't using amp
+    pass
 
 
 def split_half_float_double_csr(tensors):
@@ -200,6 +193,11 @@ class DeepSpeedEngine(Module):
             self._config.print('DeepSpeedEngine configuration')
             if self.dump_state():
                 print_configuration(self, 'DeepSpeedEngine')
+
+        # Load pre-installed or JIT compile (un)flatten ops
+        util_ops = UtilsBuilder().load()
+        self.flatten = util_ops.flatten
+        self.unflatten = util_ops.unflatten
 
     def _mpi_check(self, args, dist_init_required):
         if hasattr(args, 'deepspeed_mpi') and args.deepspeed_mpi:
@@ -558,6 +556,12 @@ class DeepSpeedEngine(Module):
             amp_params = self.amp_params()
             if self.global_rank == 0:
                 logger.info(f"Initializing AMP with these params: {amp_params}")
+            try:
+                logger.info("Initializing Apex amp from: {}".format(amp.__path__))
+            except NameError:
+                # If apex/amp is available it will be imported above
+                raise RuntimeError(
+                    "Unable to import apex/amp, please make sure it is installed")
             self.module, self.optimizer = amp.initialize(self.module, basic_optimizer, **amp_params)
             self._broadcast_model()
         elif self.fp16_enabled():
@@ -584,17 +588,18 @@ class DeepSpeedEngine(Module):
             # T|F           T           F           torch.optim.Adam
             # T             F           T|F         DeepSpeedCPUAdam(adam_w_mode)
             # F             F           T|F         FusedAdam(adam_w_mode)
-            if torch_adam and adam_w_mode:
-                optimizer = torch.optim.AdamW(model_parameters, **optimizer_parameters)
-            elif torch_adam and not adam_w_mode:
-                optimizer = torch.optim.Adam(model_parameters, **optimizer_parameters)
-            elif self.zero_cpu_offload() and not torch_adam:
-                from deepspeed.ops.adam import DeepSpeedCPUAdam
+            if torch_adam:
+                if adam_w_mode:
+                    optimizer = torch.optim.AdamW(model_parameters,
+                                                  **optimizer_parameters)
+                else:
+                    optimizer = torch.optim.Adam(model_parameters,
+                                                 **optimizer_parameters)
+            elif self.zero_cpu_offload():
                 optimizer = DeepSpeedCPUAdam(model_parameters,
                                              **optimizer_parameters,
                                              adamw_mode=adam_w_mode)
-            elif not self.zero_cpu_offload() and not torch_adam:
-                from apex.optimizers.fused_adam import FusedAdam
+            else:
                 optimizer_parameters[ADAM_W_MODE_PARAM] = adam_w_mode
                 optimizer = FusedAdam(model_parameters, **optimizer_parameters)
 
@@ -614,8 +619,7 @@ class DeepSpeedEngine(Module):
         dynamic_loss_args = self.dynamic_loss_scale_args()
         clip_grad = self.gradient_clipping()
         if isinstance(optimizer,
-                      apex.optimizers.FusedAdam) or self.optimizer_name(
-                      ) == ONEBIT_ADAM_OPTIMIZER:
+                      FusedAdam) or self.optimizer_name() == ONEBIT_ADAM_OPTIMIZER:
             if self.dynamic_loss_scale():
                 logger.info('Creating fp16 optimizer with dynamic loss scale')
                 timers = self.timers if self.wall_clock_breakdown() else None
@@ -1072,7 +1076,7 @@ class DeepSpeedEngine(Module):
                  ranks=[0])
 
     def allreduce_bucket(self, bucket):
-        tensor = flatten(bucket)
+        tensor = self.flatten(bucket)
 
         tensor_to_allreduce = tensor
 
@@ -1100,7 +1104,7 @@ class DeepSpeedEngine(Module):
 
     def allreduce_and_copy(self, small_bucket):
         allreduced = self.allreduce_bucket(small_bucket)
-        for buf, synced in zip(small_bucket, unflatten(allreduced, small_bucket)):
+        for buf, synced in zip(small_bucket, self.unflatten(allreduced, small_bucket)):
             buf.copy_(synced)
 
     def allreduce_no_retain(self, bucket, numel_per_bucket=500000000):

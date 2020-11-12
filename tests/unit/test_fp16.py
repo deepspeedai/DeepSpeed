@@ -1,18 +1,21 @@
 import torch
-import apex
 import deepspeed
 import argparse
 import pytest
 import json
 import os
+from deepspeed.ops.adam import FusedAdam
 from common import distributed_test
 from simple_model import SimpleModel, SimpleOptimizer, random_dataloader, args_from_dict
 
-lamb_available = pytest.mark.skipif(not deepspeed.ops.__installed_ops__['lamb'],
-                                    reason="lamb is not installed")
+try:
+    from apex import amp
+    _amp_available = True
+except ImportError:
+    _amp_available = False
+amp_available = pytest.mark.skip(_amp_available, reason="apex/amp is not installed")
 
 
-@lamb_available
 def test_lamb_fp32_grad_clip(tmpdir):
     config_dict = {
         "train_batch_size": 2,
@@ -48,7 +51,6 @@ def test_lamb_fp32_grad_clip(tmpdir):
     _test_lamb_fp32_grad_clip(args=args, model=model, hidden_dim=hidden_dim)
 
 
-@lamb_available
 def test_lamb_fp16_basic(tmpdir):
     config_dict = {
         "train_batch_size": 2,
@@ -86,7 +88,6 @@ def test_lamb_fp16_basic(tmpdir):
     _test_lamb_fp16_basic(args=args, model=model, hidden_dim=hidden_dim)
 
 
-@lamb_available
 def test_lamb_fp16_empty_grad(tmpdir):
     config_dict = {
         "train_batch_size": 2,
@@ -234,8 +235,8 @@ def test_adamw_fp16_empty_grad(tmpdir):
                               True),
                          ])
 def test_adam_fp16_zero_onecycle_compatibility(tmpdir, zero_stage, use_cpu_offload):
-    if use_cpu_offload and not deepspeed.ops.__installed_ops__['cpu-adam']:
-        pytest.skip("cpu-adam is not installed")
+    #if use_cpu_offload and not deepspeed.ops.__installed_ops__['cpu-adam']:
+    #    pytest.skip("cpu-adam is not installed")
     config_dict = {
         "train_batch_size": 1,
         "steps_per_print": 1,
@@ -302,8 +303,8 @@ def test_adam_fp16_zero_onecycle_compatibility(tmpdir, zero_stage, use_cpu_offlo
                               True),
                          ])
 def test_zero_static_scale(tmpdir, zero_stage, use_cpu_offload):
-    if use_cpu_offload and not deepspeed.ops.__installed_ops__['cpu-adam']:
-        pytest.skip("cpu-adam is not installed")
+    #if use_cpu_offload and not deepspeed.ops.__installed_ops__['cpu-adam']:
+    #    pytest.skip("cpu-adam is not installed")
     config_dict = {
         "train_batch_size": 4,
         "steps_per_print": 1,
@@ -402,8 +403,8 @@ def test_zero_static_scale_deprecated_format(tmpdir):
                               True),
                          ])
 def test_zero_allow_untested_optimizer(tmpdir, zero_stage, use_cpu_offload):
-    if use_cpu_offload and not deepspeed.ops.__installed_ops__['cpu-adam']:
-        pytest.skip("cpu-adam is not installed")
+    #if use_cpu_offload and not deepspeed.ops.__installed_ops__['cpu-adam']:
+    #    pytest.skip("cpu-adam is not installed")
     config_dict = {
         "train_batch_size": 4,
         "steps_per_print": 1,
@@ -442,8 +443,8 @@ def test_zero_allow_untested_optimizer(tmpdir, zero_stage, use_cpu_offload):
                               True),
                          ])
 def test_zero_empty_partition(tmpdir, zero_stage, use_cpu_offload):
-    if use_cpu_offload and not deepspeed.ops.__installed_ops__['cpu-adam']:
-        pytest.skip("cpu-adam is not installed")
+    #if use_cpu_offload and not deepspeed.ops.__installed_ops__['cpu-adam']:
+    #    pytest.skip("cpu-adam is not installed")
     config_dict = {
         "train_micro_batch_size_per_gpu": 1,
         "gradient_accumulation_steps": 1,
@@ -489,6 +490,7 @@ def test_zero_empty_partition(tmpdir, zero_stage, use_cpu_offload):
     _test_zero_empty_partition(args)
 
 
+@amp_available
 def test_adam_amp_basic(tmpdir):
     config_dict = {"train_batch_size": 1, "steps_per_print": 1, "amp": {"enabled": True}}
     args = args_from_dict(tmpdir, config_dict)
@@ -514,7 +516,7 @@ def test_adam_amp_basic(tmpdir):
     _test_adam_amp_basic(args=args, model=model, hidden_dim=hidden_dim)
 
 
-@lamb_available
+@amp_available
 def test_lamb_amp_basic(tmpdir):
     config_dict = {
         "train_batch_size": 2,
@@ -552,6 +554,7 @@ def test_lamb_amp_basic(tmpdir):
     _test_lamb_amp_basic(args=args, model=model, hidden_dim=hidden_dim)
 
 
+@amp_available
 def test_adam_amp_o2(tmpdir):
     config_dict = {
         "train_batch_size": 2,
@@ -590,6 +593,7 @@ def test_adam_amp_o2(tmpdir):
     _test_adam_amp_o2(args=args, model=model, hidden_dim=hidden_dim)
 
 
+@amp_available
 def test_adam_amp_o2_empty_grad(tmpdir):
     config_dict = {
         "train_batch_size": 2,
@@ -630,11 +634,11 @@ def test_adam_amp_o2_empty_grad(tmpdir):
 
 @pytest.mark.parametrize('zero_stage, optimizer_constructor',
                          [(1,
-                           apex.optimizers.FusedAdam),
+                           FusedAdam),
                           (2,
                            torch.optim.Adam),
                           (2,
-                           apex.optimizers.FusedAdam)])
+                           FusedAdam)])
 def test_zero_supported_client_optimizer(tmpdir, zero_stage, optimizer_constructor):
     config_dict = {
         "train_batch_size": 2,

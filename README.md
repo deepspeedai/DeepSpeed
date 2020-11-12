@@ -1,4 +1,5 @@
 [![Build Status](https://dev.azure.com/DeepSpeedMSFT/DeepSpeed/_apis/build/status/microsoft.DeepSpeed?branchName=master)](https://dev.azure.com/DeepSpeedMSFT/DeepSpeed/_build/latest?definitionId=1&branchName=master)
+[![PyPI version](https://badge.fury.io/py/deepspeed.svg)](https://badge.fury.io/py/deepspeed)
 [![Documentation Status](https://readthedocs.org/projects/deepspeed/badge/?version=latest)](https://deepspeed.readthedocs.io/en/latest/?badge=latest)
 [![License MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://github.com/Microsoft/DeepSpeed/blob/master/LICENSE)
 [![Docker Pulls](https://img.shields.io/docker/pulls/deepspeed/deepspeed)](https://hub.docker.com/r/deepspeed/deepspeed)
@@ -31,29 +32,25 @@ information [here](https://innovation.microsoft.com/en-us/exploring-ai-at-scale)
 
 
 # News
-* [2020/09/10] [DeepSpeed: Extreme-scale model training for everyone](https://www.microsoft.com/en-us/research/blog/deepspeed-extreme-scale-model-training-for-everyone/)
+* [2020/11/12] [Simplified install, JIT compiled ops, PyPI releases, and reduced dependencies](#installation)
+* [2020/11/10] [Efficient and robust compressed training through progressive layer dropping](https://www.deepspeed.ai/news/2020/10/28/progressive-layer-dropping-news.html)
+* [2020/09/10] [DeepSpeed v0.3: Extreme-scale model training for everyone](https://www.microsoft.com/en-us/research/blog/deepspeed-extreme-scale-model-training-for-everyone/)
   * [Powering 10x longer sequences and 6x faster execution through DeepSpeed Sparse Attention](https://www.deepspeed.ai/news/2020/09/08/sparse-attention-news.html)
   * [Training a trillion parameters with pipeline parallelism](https://www.deepspeed.ai/news/2020/09/08/pipeline-parallelism.html)
   * [Up to 5x less communication and 3.4x faster training through 1-bit Adam](https://www.deepspeed.ai/news/2020/09/08/onebit-adam-news.html)
   * [10x bigger model training on a single GPU with ZeRO-Offload](https://www.deepspeed.ai/news/2020/09/08/ZeRO-Offload.html)
 * [2020/08/07] [DeepSpeed Microsoft Research Webinar](https://note.microsoft.com/MSR-Webinar-DeepSpeed-Registration-On-Demand.html) is now available on-demand
-* [2020/07/24] [DeepSpeed Microsoft Research Webinar](https://note.microsoft.com/MSR-Webinar-DeepSpeed-Registration-On-Demand.html) on August 6th, 2020
-  [![DeepSpeed webinar](docs/assets/images/webinar-aug2020.png)](https://note.microsoft.com/MSR-Webinar-DeepSpeed-Registration-Live.html)
-* [2020/05/19] [ZeRO-2 & DeepSpeed: Shattering Barriers of Deep Learning Speed & Scale](https://www.microsoft.com/en-us/research/blog/zero-2-deepspeed-shattering-barriers-of-deep-learning-speed-scale/)
-* [2020/05/19] [An Order-of-Magnitude Larger and Faster Training with ZeRO-2](https://www.deepspeed.ai/news/2020/05/18/zero-stage2.html)
-* [2020/05/19] [The Fastest and Most Efficient BERT Training through Optimized Transformer Kernels](https://www.deepspeed.ai/news/2020/05/18/bert-record.html)
-* [2020/02/13] [Turing-NLG: A 17-billion-parameter language model by Microsoft](https://www.microsoft.com/en-us/research/blog/turing-nlg-a-17-billion-parameter-language-model-by-microsoft/)
-* [2020/02/13] [ZeRO & DeepSpeed: New system optimizations enable training models with over 100 billion parameters](https://www.microsoft.com/en-us/research/blog/zero-deepspeed-new-system-optimizations-enable-training-models-with-over-100-billion-parameters/)
 
 
 # Table of Contents
 | Section                                 | Description                                 |
 | --------------------------------------- | ------------------------------------------- |
 | [Why DeepSpeed?](#why-deepspeed)        |  DeepSpeed overview                         |
-| [Features](#features)                   |  DeepSpeed features                         |
-| [Further Reading](#further-reading)     |  DeepSpeed documentation, tutorials, etc.   |
-| [Contributing](#contributing)           |  Instructions for contributing to DeepSpeed |
-| [Publications](#publications)           |  DeepSpeed publications                     |
+| [Install](#installation)                |  Installation details                       |
+| [Features](#features)                   |  Feature list and overview                  |
+| [Further Reading](#further-reading)     |  Documentation, tutorials, etc.             |
+| [Contributing](#contributing)           |  Instructions for contributing              |
+| [Publications](#publications)           |  Publications related to DeepSpeed          |
 
 # Why DeepSpeed?
 Training advanced deep learning models is challenging. Beyond model design,
@@ -65,8 +62,32 @@ a large model easily runs out of memory with pure data parallelism and it is
 difficult to use model parallelism. DeepSpeed addresses these challenges to
 accelerate model development *and* training.
 
-# Features
+# Installation
 
+The quickest way to get started with DeepSpeed is via pip, this will install
+the latest release of DeepSpeed which is not tied to specific PyTorch or CUDA
+versions. DeepSpeed includes several C++/CUDA extensions that we commonly refer
+to as our 'ops'.  By default, all of these extensions/ops will be built
+just-in-time (JIT) using [torch's JIT C++ extension loader that relies on
+ninja](https://pytorch.org/docs/stable/cpp_extension.html) to build and
+dynamically link them at runtime.
+
+```bash
+pip install deepspeed
+```
+
+After installation you can validate your install and see which extensions/ops
+your machine is compatible with via the DeepSpeed environment report.
+
+```bash
+ds_report
+```
+
+If you would like to pre-install any of the DeepSpeed extensions/ops (instead
+of JIT compiling) or install pre-compiled ops via PyPI please see our [advanced
+installation instructions](https://www.deepspeed.ai/tutorials/advanced-install/).
+
+# Features
 Below we provide a brief feature list, see our detailed [feature
 overview](https://www.deepspeed.ai/features/) for descriptions and usage.
 

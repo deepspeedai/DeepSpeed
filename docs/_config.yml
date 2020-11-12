@@ -30,6 +30,7 @@ collections:
     output: true
     permalink: /:collection/:path/
     order:
+      - advanced-install.md
       - getting-started.md
       - azure.md
       - cifar-10.md

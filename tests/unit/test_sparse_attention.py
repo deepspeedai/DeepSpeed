@@ -6,9 +6,11 @@
 import pytest
 import torch
 import deepspeed
+from deepspeed.ops.op_builder import SparseAttnBuilder
 
-if not deepspeed.ops.__installed_ops__['sparse-attn']:
-    pytest.skip("cpu-adam is not installed", allow_module_level=True)
+if not deepspeed.ops.__compatible_ops__[SparseAttnBuilder.NAME]:
+    pytest.skip("sparse attention op is not compatible on this system",
+                allow_module_level=True)
 
 
 def test_sparse_attention_module_availability():
@@ -236,7 +238,7 @@ def init_softmax_inputs(Z, H, M, N, scale, rho, block, dtype, dense_x=True, layo
 
 
 def _skip_on_cuda_compatability():
-    pytest.skip("Skip these tests for now until we get our docker image fixed.")
+    #pytest.skip("Skip these tests for now until we get our docker image fixed.")
     if torch.cuda.get_device_capability()[0] != 7:
         pytest.skip("needs compute capability 7; v100")
     cuda_major = int(torch.version.cuda.split('.')[0]) * 10

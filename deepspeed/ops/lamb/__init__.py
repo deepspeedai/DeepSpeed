@@ -1,1 +1,1 @@
-from deepspeed.ops.lamb.fused_lamb import FusedLamb
+from .fused_lamb import FusedLamb

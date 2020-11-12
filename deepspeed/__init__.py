@@ -17,24 +17,19 @@ from .utils import log_dist
 
 from .pipe import PipelineModule
 
-try:
-    from .git_version_info import version, git_hash, git_branch
-except ImportError:
-    version = "0.0.0+unknown"
-    git_hash = None
-    git_branch = None
+from .git_version_info import version, git_hash, git_branch
+
+
+def _parse_version(version_str):
+    '''Parse a version string and extract the major, minor, and patch versions.'''
+    import re
+    matched = re.search('^(\d+)\.(\d+)\.(\d+)', version_str)
+    return int(matched.group(1)), int(matched.group(2)), int(matched.group(3))
+
 
 # Export version information
-version, __version_tag__ = version.split('+')
-__version_major__ = int(version.split('.')[0])
-__version_minor__ = int(version.split('.')[1])
-__version_patch__ = int(version.split('.')[2])
-__version__ = '.'.join(
-    map(str,
-        [__version_major__,
-         __version_minor__,
-         __version_patch__]))
-__version__ = f"{__version__}+{__version_tag__}"
+__version__ = version
+__version_major__, __version_minor__, __version_patch__ = _parse_version(__version__)
 __git_hash__ = git_hash
 __git_branch__ = git_branch
 

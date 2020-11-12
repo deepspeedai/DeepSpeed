@@ -1,1 +1,1 @@
-from deepspeed.ops.transformer.transformer import DeepSpeedTransformerLayer, DeepSpeedTransformerConfig
+from .transformer import DeepSpeedTransformerLayer, DeepSpeedTransformerConfig

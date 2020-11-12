@@ -2,5 +2,6 @@ torch>=1.2
 torchvision>=0.4.0
 tqdm
 psutil
-cpufeature
 tensorboardX==1.8
+ninja
+cpufeature

@@ -363,10 +363,18 @@ except ImportError:
             self.variance_epsilon = eps
 
         def forward(self, x):
+            pdtype = x.dtype
+            x = x.float()
             u = x.mean(-1, keepdim=True)
             s = (x - u).pow(2).mean(-1, keepdim=True)
             x = (x - u) / torch.sqrt(s + self.variance_epsilon)
-            return self.weight * x + self.bias
+            return self.weight * x.to(pdtype) + self.bias
+
+        #def forward(self, x):
+        #    u = x.mean(-1, keepdim=True)
+        #    s = (x - u).pow(2).mean(-1, keepdim=True)
+        #    x = (x - u) / torch.sqrt(s + self.variance_epsilon)
+        #    return self.weight * x + self.bias
 
 
 class BertEmbeddings(nn.Module):

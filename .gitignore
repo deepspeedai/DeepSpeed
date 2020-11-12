@@ -10,6 +10,7 @@ build/
 dist/
 *.so
 deepspeed.egg-info/
+build.txt
 
 # Website
 docs/_site/
@@ -23,3 +24,7 @@ docs/code-docs/build
 
 # Testing data
 tests/unit/saved_checkpoint/
+
+# Dev/IDE data
+.vscode
+.theia

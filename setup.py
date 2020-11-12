@@ -16,7 +16,7 @@ import warnings
 from setuptools import setup, find_packages
 from torch.utils.cpp_extension import CUDAExtension, BuildExtension, CppExtension
 
-VERSION = "0.3.0"
+import op_builder
 
 
 def fetch_requirements(path):
@@ -24,88 +24,33 @@ def fetch_requirements(path):
         return [r.strip() for r in fd.readlines()]
 
 
-def available_vector_instructions():
-    try:
-        import cpufeature
-    except ImportError:
-        warnings.warn(
-            f'import cpufeature failed - CPU vector optimizations are not available for CPUAdam'
-        )
-        return {}
-
-    cpu_vector_instructions = {}
-    try:
-        cpu_vector_instructions = cpufeature.CPUFeature
-    except _:
-        warnings.warn(
-            f'cpufeature.CPUFeature failed - CPU vector optimizations are not available for CPUAdam'
-        )
-        return {}
-
-    return cpu_vector_instructions
-
-
 install_requires = fetch_requirements('requirements/requirements.txt')
-dev_requires = fetch_requirements('requirements/requirements-dev.txt')
-sparse_attn_requires = fetch_requirements('requirements/requirements-sparse-attn.txt')
+extras_require = {
+    '1bit_adam': fetch_requirements('requirements/requirements-1bit-adam.txt'),
+    'readthedocs': fetch_requirements('requirements/requirements-readthedocs.txt'),
+    'dev': fetch_requirements('requirements/requirements-dev.txt'),
+}
 
 # If MPI is available add 1bit-adam requirements
 if torch.cuda.is_available():
     if shutil.which('ompi_info') or shutil.which('mpiname'):
-        onebit_adam_requires = fetch_requirements(
-            'requirements/requirements-1bit-adam.txt')
-        onebit_adam_requires.append(f"cupy-cuda{torch.version.cuda.replace('.','')[:3]}")
-        install_requires += onebit_adam_requires
+        cupy = f"cupy-cuda{torch.version.cuda.replace('.','')[:3]}"
+        extras_require['1bit_adam'].append(cupy)
 
-# Constants for each op
-LAMB = "lamb"
-TRANSFORMER = "transformer"
-SPARSE_ATTN = "sparse-attn"
-CPU_ADAM = "cpu-adam"
-
-cpu_vector_instructions = available_vector_instructions()
-
-# Build environment variables for custom builds
-DS_BUILD_LAMB_MASK = 1
-DS_BUILD_TRANSFORMER_MASK = 10
-DS_BUILD_SPARSE_ATTN_MASK = 100
-DS_BUILD_CPU_ADAM_MASK = 1000
-
-# Allow for build_cuda to turn on or off all ops
-DS_BUILD_ALL_OPS = DS_BUILD_LAMB_MASK | DS_BUILD_TRANSFORMER_MASK | DS_BUILD_SPARSE_ATTN_MASK | DS_BUILD_CPU_ADAM_MASK
-DS_BUILD_CUDA = int(os.environ.get('DS_BUILD_CUDA', 1)) * DS_BUILD_ALL_OPS
-
-# Set default of each op based on if build_cuda is set
-OP_DEFAULT = DS_BUILD_CUDA == DS_BUILD_ALL_OPS
-DS_BUILD_CPU_ADAM = int(os.environ.get('DS_BUILD_CPU_ADAM', 0)) * DS_BUILD_CPU_ADAM_MASK
-DS_BUILD_LAMB = int(os.environ.get('DS_BUILD_LAMB', OP_DEFAULT)) * DS_BUILD_LAMB_MASK
-DS_BUILD_TRANSFORMER = int(os.environ.get('DS_BUILD_TRANSFORMER',
-                                          OP_DEFAULT)) * DS_BUILD_TRANSFORMER_MASK
-DS_BUILD_SPARSE_ATTN = int(os.environ.get('DS_BUILD_SPARSE_ATTN',
-                                          OP_DEFAULT)) * DS_BUILD_SPARSE_ATTN_MASK
-
-# Final effective mask is the bitwise OR of each op
-BUILD_MASK = (DS_BUILD_LAMB | DS_BUILD_TRANSFORMER | DS_BUILD_SPARSE_ATTN
-              | DS_BUILD_CPU_ADAM)
-
-install_ops = dict.fromkeys([LAMB, TRANSFORMER, SPARSE_ATTN, CPU_ADAM], False)
-if BUILD_MASK & DS_BUILD_LAMB:
-    install_ops[LAMB] = True
-if BUILD_MASK & DS_BUILD_CPU_ADAM:
-    install_ops[CPU_ADAM] = True
-if BUILD_MASK & DS_BUILD_TRANSFORMER:
-    install_ops[TRANSFORMER] = True
-if BUILD_MASK & DS_BUILD_SPARSE_ATTN:
-    install_ops[SPARSE_ATTN] = True
-if len(install_ops) == 0:
-    print("Building without any cuda/cpp extensions")
-print(f'BUILD_MASK={BUILD_MASK}, install_ops={install_ops}')
+# Make an [all] extra that installs all needed dependencies
+all_extras = set()
+for extra in extras_require.items():
+    for req in extra[1]:
+        all_extras.add(req)
+extras_require['all'] = list(all_extras)
 
 cmdclass = {}
+
+# For any pre-installed ops force disable ninja
 cmdclass['build_ext'] = BuildExtension.with_options(use_ninja=False)
 
-TORCH_MAJOR = int(torch.__version__.split('.')[0])
-TORCH_MINOR = int(torch.__version__.split('.')[1])
+TORCH_MAJOR = torch.__version__.split('.')[0]
+TORCH_MINOR = torch.__version__.split('.')[1]
 
 if not torch.cuda.is_available():
     # Fix to allow docker buils, similar to https://github.com/NVIDIA/apex/issues/486
@@ -116,230 +61,118 @@ if not torch.cuda.is_available():
     if os.environ.get("TORCH_CUDA_ARCH_LIST", None) is None:
         os.environ["TORCH_CUDA_ARCH_LIST"] = "6.0;6.1;6.2;7.0;7.5"
 
-# Fix from apex that might be relevant for us as well, related to https://github.com/NVIDIA/apex/issues/456
-version_ge_1_1 = []
-if (TORCH_MAJOR > 1) or (TORCH_MAJOR == 1 and TORCH_MINOR > 0):
-    version_ge_1_1 = ['-DVERSION_GE_1_1']
-version_ge_1_3 = []
-if (TORCH_MAJOR > 1) or (TORCH_MAJOR == 1 and TORCH_MINOR > 2):
-    version_ge_1_3 = ['-DVERSION_GE_1_3']
-version_ge_1_5 = []
-if (TORCH_MAJOR > 1) or (TORCH_MAJOR == 1 and TORCH_MINOR > 4):
-    version_ge_1_5 = ['-DVERSION_GE_1_5']
-version_dependent_macros = version_ge_1_1 + version_ge_1_3 + version_ge_1_5
-
-SIMD_WIDTH = ''
-if cpu_vector_instructions.get('AVX512f', False):
-    SIMD_WIDTH = '-D__AVX512__'
-elif cpu_vector_instructions.get('AVX2', False):
-    SIMD_WIDTH = '-D__AVX256__'
-print("SIMD_WIDTH = ", SIMD_WIDTH)
-
 ext_modules = []
 
-## Lamb ##
-if BUILD_MASK & DS_BUILD_LAMB:
-    ext_modules.append(
-        CUDAExtension(name='deepspeed.ops.lamb.fused_lamb_cuda',
-                      sources=[
-                          'csrc/lamb/fused_lamb_cuda.cpp',
-                          'csrc/lamb/fused_lamb_cuda_kernel.cu'
-                      ],
-                      include_dirs=['csrc/includes'],
-                      extra_compile_args={
-                          'cxx': [
-                              '-O3',
-                          ] + version_dependent_macros,
-                          'nvcc': ['-O3',
-                                   '--use_fast_math'] + version_dependent_macros
-                      }))
+from op_builder import ALL_OPS
 
-## Adam ##
-if BUILD_MASK & DS_BUILD_CPU_ADAM:
-    ext_modules.append(
-        CUDAExtension(name='deepspeed.ops.adam.cpu_adam_op',
-                      sources=[
-                          'csrc/adam/cpu_adam.cpp',
-                          'csrc/adam/custom_cuda_kernel.cu',
-                      ],
-                      include_dirs=['csrc/includes',
-                                    '/usr/local/cuda/include'],
-                      extra_compile_args={
-                          'cxx': [
-                              '-O3',
-                              '-std=c++14',
-                              '-L/usr/local/cuda/lib64',
-                              '-lcudart',
-                              '-lcublas',
-                              '-g',
-                              '-Wno-reorder',
-                              '-march=native',
-                              '-fopenmp',
-                              SIMD_WIDTH
-                          ],
-                          'nvcc': [
-                              '-O3',
-                              '--use_fast_math',
-                              '-gencode',
-                              'arch=compute_61,code=compute_61',
-                              '-gencode',
-                              'arch=compute_70,code=compute_70',
-                              '-std=c++14',
-                              '-U__CUDA_NO_HALF_OPERATORS__',
-                              '-U__CUDA_NO_HALF_CONVERSIONS__',
-                              '-U__CUDA_NO_HALF2_OPERATORS__'
-                          ]
-                      }))
-
-## Transformer ##
-if BUILD_MASK & DS_BUILD_TRANSFORMER:
-    ext_modules.append(
-        CUDAExtension(name='deepspeed.ops.transformer.transformer_cuda',
-                      sources=[
-                          'csrc/transformer/ds_transformer_cuda.cpp',
-                          'csrc/transformer/cublas_wrappers.cu',
-                          'csrc/transformer/transform_kernels.cu',
-                          'csrc/transformer/gelu_kernels.cu',
-                          'csrc/transformer/dropout_kernels.cu',
-                          'csrc/transformer/normalize_kernels.cu',
-                          'csrc/transformer/softmax_kernels.cu',
-                          'csrc/transformer/general_kernels.cu'
-                      ],
-                      include_dirs=['csrc/includes'],
-                      extra_compile_args={
-                          'cxx': ['-O3',
-                                  '-std=c++14',
-                                  '-g',
-                                  '-Wno-reorder'],
-                          'nvcc': [
-                              '-O3',
-                              '--use_fast_math',
-                              '-gencode',
-                              'arch=compute_61,code=compute_61',
-                              '-gencode',
-                              'arch=compute_60,code=compute_60',
-                              '-gencode',
-                              'arch=compute_70,code=compute_70',
-                              '-std=c++14',
-                              '-U__CUDA_NO_HALF_OPERATORS__',
-                              '-U__CUDA_NO_HALF_CONVERSIONS__',
-                              '-U__CUDA_NO_HALF2_OPERATORS__'
-                          ]
-                      }))
-    ext_modules.append(
-        CUDAExtension(name='deepspeed.ops.transformer.stochastic_transformer_cuda',
-                      sources=[
-                          'csrc/transformer/ds_transformer_cuda.cpp',
-                          'csrc/transformer/cublas_wrappers.cu',
-                          'csrc/transformer/transform_kernels.cu',
-                          'csrc/transformer/gelu_kernels.cu',
-                          'csrc/transformer/dropout_kernels.cu',
-                          'csrc/transformer/normalize_kernels.cu',
-                          'csrc/transformer/softmax_kernels.cu',
-                          'csrc/transformer/general_kernels.cu'
-                      ],
-                      include_dirs=['csrc/includes'],
-                      extra_compile_args={
-                          'cxx': ['-O3',
-                                  '-std=c++14',
-                                  '-g',
-                                  '-Wno-reorder'],
-                          'nvcc': [
-                              '-O3',
-                              '--use_fast_math',
-                              '-gencode',
-                              'arch=compute_61,code=compute_61',
-                              '-gencode',
-                              'arch=compute_60,code=compute_60',
-                              '-gencode',
-                              'arch=compute_70,code=compute_70',
-                              '-std=c++14',
-                              '-U__CUDA_NO_HALF_OPERATORS__',
-                              '-U__CUDA_NO_HALF_CONVERSIONS__',
-                              '-U__CUDA_NO_HALF2_OPERATORS__',
-                              '-D__STOCHASTIC_MODE__'
-                          ]
-                      }))
+# Default to pre-install kernels to false so we rely on JIT
+BUILD_OP_DEFAULT = int(os.environ.get('DS_BUILD_OPS', 0))
+print(f"DS_BUILD_OPS={BUILD_OP_DEFAULT}")
 
 
 def command_exists(cmd):
-    if '|' in cmd:
-        cmds = cmd.split("|")
-    else:
-        cmds = [cmd]
-    valid = False
-    for cmd in cmds:
-        result = subprocess.Popen(f'type {cmd}', stdout=subprocess.PIPE, shell=True)
-        valid = valid or result.wait() == 0
-    return valid
+    result = subprocess.Popen(f'type {cmd}', stdout=subprocess.PIPE, shell=True)
+    return result.wait() == 0
 
 
-## Sparse transformer ##
-if BUILD_MASK & DS_BUILD_SPARSE_ATTN:
-    # Check to see if llvm and cmake are installed since they are dependencies
-    required_commands = ['llvm-config|llvm-config-9', 'cmake']
+def op_enabled(op_name):
+    assert hasattr(ALL_OPS[op_name], 'BUILD_VAR'), \
+        f"{op_name} is missing BUILD_VAR field"
+    env_var = ALL_OPS[op_name].BUILD_VAR
+    return int(os.environ.get(env_var, BUILD_OP_DEFAULT))
 
-    command_status = list(map(command_exists, required_commands))
-    if not all(command_status):
-        zipped_status = list(zip(required_commands, command_status))
-        warnings.warn(
-            f'Missing non-python requirements, please install the missing packages: {zipped_status}'
-        )
-        warnings.warn(
-            'Skipping sparse attention installation due to missing required packages')
-        # remove from installed ops list
-        install_ops[SPARSE_ATTN] = False
-    elif TORCH_MAJOR == 1 and TORCH_MINOR >= 5:
-        ext_modules.append(
-            CppExtension(name='deepspeed.ops.sparse_attention.cpp_utils',
-                         sources=['csrc/sparse_attention/utils.cpp'],
-                         extra_compile_args={'cxx': ['-O2',
-                                                     '-fopenmp']}))
-        # Add sparse attention requirements
-        install_requires += sparse_attn_requires
-    else:
-        warnings.warn('Unable to meet requirements to install sparse attention')
-        # remove from installed ops list
-        install_ops[SPARSE_ATTN] = False
 
-# Add development requirements
-install_requires += dev_requires
+install_ops = dict.fromkeys(ALL_OPS.keys(), False)
+for op_name, builder in ALL_OPS.items():
+    op_compatible = builder.is_compatible()
+
+    # If op is compatible update install reqs so it can potentially build/run later
+    if op_compatible:
+        reqs = builder.python_requirements()
+        install_requires += builder.python_requirements()
+
+    # If op install enabled, add builder to extensions
+    if op_enabled(op_name) and op_compatible:
+        install_ops[op_name] = op_enabled(op_name)
+        ext_modules.append(builder.builder())
+
+compatible_ops = {op_name: op.is_compatible() for (op_name, op) in ALL_OPS.items()}
+
+print(f'Install Ops={install_ops}')
 
 # Write out version/git info
 git_hash_cmd = "git rev-parse --short HEAD"
 git_branch_cmd = "git rev-parse --abbrev-ref HEAD"
-if command_exists('git'):
-    result = subprocess.check_output(git_hash_cmd, shell=True)
-    git_hash = result.decode('utf-8').strip()
-    result = subprocess.check_output(git_branch_cmd, shell=True)
-    git_branch = result.decode('utf-8').strip()
+if command_exists('git') and 'DS_BUILD_STRING' not in os.environ:
+    try:
+        result = subprocess.check_output(git_hash_cmd, shell=True)
+        git_hash = result.decode('utf-8').strip()
+        result = subprocess.check_output(git_branch_cmd, shell=True)
+        git_branch = result.decode('utf-8').strip()
+    except subprocess.CalledProcessError:
+        git_hash = "unknown"
+        git_branch = "unknown"
 else:
     git_hash = "unknown"
     git_branch = "unknown"
-print(f"version={VERSION}+{git_hash}, git_hash={git_hash}, git_branch={git_branch}")
+
+# Parse the DeepSpeed version string from version.txt
+version_str = open('version.txt', 'r').read().strip()
+
+# Build specifiers like .devX can be added at install time. Otherwise, add the git hash.
+# example: DS_BUILD_STR=".dev20201022" python setup.py sdist bdist_wheel
+#version_str += os.environ.get('DS_BUILD_STRING', f'+{git_hash}')
+
+# Building wheel for distribution, update version file
+
+if 'DS_BUILD_STRING' in os.environ:
+    # Build string env specified, probably building for distribution
+    with open('build.txt', 'w') as fd:
+        fd.write(os.environ.get('DS_BUILD_STRING'))
+    version_str += os.environ.get('DS_BUILD_STRING')
+elif os.path.isfile('build.txt'):
+    # build.txt exists, probably installing from distribution
+    with open('build.txt', 'r') as fd:
+        version_str += fd.read().strip()
+else:
+    # None of the above, probably installing from source
+    version_str += f'+{git_hash}'
+
+torch_version = ".".join([TORCH_MAJOR, TORCH_MINOR])
+cuda_version = ".".join(torch.version.cuda.split('.')[:2])
+torch_info = {"version": torch_version, "cuda_version": cuda_version}
+
+print(f"version={version_str}, git_hash={git_hash}, git_branch={git_branch}")
 with open('deepspeed/git_version_info_installed.py', 'w') as fd:
-    fd.write(f"version='{VERSION}+{git_hash}'\n")
+    fd.write(f"version='{version_str}'\n")
     fd.write(f"git_hash='{git_hash}'\n")
     fd.write(f"git_branch='{git_branch}'\n")
     fd.write(f"installed_ops={install_ops}\n")
+    fd.write(f"compatible_ops={compatible_ops}\n")
+    fd.write(f"torch_info={torch_info}\n")
 
 print(f'install_requires={install_requires}')
+print(f'compatible_ops={compatible_ops}')
+print(f'ext_modules={ext_modules}')
 
 setup(name='deepspeed',
-      version=f"{VERSION}+{git_hash}",
+      version=version_str,
       description='DeepSpeed library',
       author='DeepSpeed Team',
       author_email='deepspeed@microsoft.com',
       url='http://deepspeed.ai',
       install_requires=install_requires,
+      extras_require=extras_require,
       packages=find_packages(exclude=["docker",
-                                      "third_party",
-                                      "csrc"]),
-      package_data={'deepspeed.ops.sparse_attention.trsrc': ['*.tr']},
-      scripts=['bin/deepspeed',
-               'bin/deepspeed.pt',
-               'bin/ds',
-               'bin/ds_ssh'],
+                                      "third_party"]),
+      include_package_data=True,
+      scripts=[
+          'bin/deepspeed',
+          'bin/deepspeed.pt',
+          'bin/ds',
+          'bin/ds_ssh',
+          'bin/ds_report'
+      ],
       classifiers=[
           'Programming Language :: Python :: 3.6',
           'Programming Language :: Python :: 3.7',

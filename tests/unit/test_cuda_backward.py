@@ -16,8 +16,8 @@ import deepspeed
 
 import sys
 
-if not deepspeed.ops.__installed_ops__['transformer']:
-    pytest.skip("transformer kernels are not installed", allow_module_level=True)
+#if not deepspeed.ops.__installed_ops__['transformer']:
+#    pytest.skip("transformer kernels are not installed", allow_module_level=True)
 
 
 def check_equal(first, second, atol=1e-2, verbose=False):
@@ -254,6 +254,7 @@ def run_backward(ds_config, atol=1e-2, verbose=False):
     check_equal(base_grads, ds_grads, atol=atol, verbose=verbose)
 
 
+#test_backward[3-1024-120-16-24-True-True-0.05]
 @pytest.mark.parametrize('batch_size, hidden_size, seq_len, heads, num_layers, is_preln, use_fp16, atol',
                          [
                              (3,1024,120,16,24,True,False, 0.05),

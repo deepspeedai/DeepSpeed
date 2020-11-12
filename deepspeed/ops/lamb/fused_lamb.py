@@ -5,8 +5,8 @@ Copyright NVIDIA/apex
 This file is adapted from NVIDIA/apex/optimizer/fused_adam and implements the LAMB optimizer
 '''
 import types
-import importlib
 import torch
+from ..op_builder import FusedLambBuilder
 
 
 class FusedLamb(torch.optim.Optimizer):
@@ -48,15 +48,7 @@ class FusedLamb(torch.optim.Optimizer):
                  max_coeff=10.0,
                  min_coeff=0.01,
                  amsgrad=False):
-        global fused_lamb_cuda
-        try:
-            fused_lamb_cuda = importlib.import_module(
-                "deepspeed.ops.lamb.fused_lamb_cuda")
-        except ImportError as err:
-            print(
-                "Unable to import Lamb cuda extension, please build DeepSpeed with cuda/cpp extensions."
-            )
-            raise err
+        self.fused_lamb_cuda = FusedLambBuilder().load()
 
         if amsgrad:
             raise RuntimeError('FusedLamb does not support the AMSGrad variant.')
@@ -173,22 +165,22 @@ class FusedLamb(torch.optim.Optimizer):
                 out_p = torch.tensor(
                     [],
                     dtype=torch.float) if output_param is None else output_param
-                lamb_coeff = fused_lamb_cuda.lamb(p.data,
-                                                  out_p,
-                                                  exp_avg,
-                                                  exp_avg_sq,
-                                                  grad,
-                                                  group['lr'],
-                                                  beta1,
-                                                  beta2,
-                                                  max_coeff,
-                                                  min_coeff,
-                                                  group['eps'],
-                                                  combined_scale,
-                                                  state['step'],
-                                                  self.eps_mode,
-                                                  bias_correction,
-                                                  group['weight_decay'])
+                lamb_coeff = self.fused_lamb_cuda.lamb(p.data,
+                                                       out_p,
+                                                       exp_avg,
+                                                       exp_avg_sq,
+                                                       grad,
+                                                       group['lr'],
+                                                       beta1,
+                                                       beta2,
+                                                       max_coeff,
+                                                       min_coeff,
+                                                       group['eps'],
+                                                       combined_scale,
+                                                       state['step'],
+                                                       self.eps_mode,
+                                                       bias_correction,
+                                                       group['weight_decay'])
                 self.lamb_coeffs.append(lamb_coeff)
         return loss
 

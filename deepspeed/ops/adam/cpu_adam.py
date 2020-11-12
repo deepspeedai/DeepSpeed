@@ -4,9 +4,9 @@ Copyright 2020 The Microsoft DeepSpeed Team
 
 import math
 import torch
-import importlib
-
-ds_opt_adam = None
+import time
+from pathlib import Path
+from ..op_builder import CPUAdamBuilder
 
 
 class DeepSpeedCPUAdam(torch.optim.Optimizer):
@@ -67,15 +67,15 @@ class DeepSpeedCPUAdam(torch.optim.Optimizer):
         self.opt_id = DeepSpeedCPUAdam.optimizer_id
         DeepSpeedCPUAdam.optimizer_id = DeepSpeedCPUAdam.optimizer_id + 1
 
-        global ds_opt_adam
-        ds_opt_adam = importlib.import_module('deepspeed.ops.adam.cpu_adam_op')
-        ds_opt_adam.create_adam(self.opt_id,
-                                lr,
-                                betas[0],
-                                betas[1],
-                                eps,
-                                weight_decay,
-                                adamw_mode)
+        self.ds_opt_adam = CPUAdamBuilder().load()
+
+        self.ds_opt_adam.create_adam(self.opt_id,
+                                     lr,
+                                     betas[0],
+                                     betas[1],
+                                     eps,
+                                     weight_decay,
+                                     adamw_mode)
 
     def __setstate__(self, state):
         super(DeepSpeedCPUAdam, self).__setstate__(state)
@@ -101,18 +101,20 @@ class DeepSpeedCPUAdam(torch.optim.Optimizer):
                     print(f'group {group_id} param {param_id} = {p.numel()}')
                     state['step'] = 0
                     # gradient momentums
-                    state['exp_avg'] = torch.zeros_like(
-                        p.data,
-                        memory_format=torch.preserve_format)
+                    state['exp_avg'] = torch.zeros_like(p.data,
+                                                        dtype=p.dtype,
+                                                        device='cpu')
+                    #memory_format=torch.preserve_format)
                     # gradient variances
-                    state['exp_avg_sq'] = torch.zeros_like(
-                        p.data,
-                        memory_format=torch.preserve_format)
+                    state['exp_avg_sq'] = torch.zeros_like(p.data,
+                                                           dtype=p.dtype,
+                                                           device='cpu')
+                    #memory_format=torch.preserve_format)
 
                 state['step'] += 1
 
                 if fp16_param_groups is not None:
-                    ds_opt_adam.adam_update_copy(
+                    self.ds_opt_adam.adam_update_copy(
                         self.opt_id,
                         state['step'],
                         group['lr'],
@@ -122,11 +124,11 @@ class DeepSpeedCPUAdam(torch.optim.Optimizer):
                         state['exp_avg_sq'],
                         fp16_param_groups[group_id][param_id].data)
                 else:
-                    ds_opt_adam.adam_update(self.opt_id,
-                                            state['step'],
-                                            group['lr'],
-                                            p.data,
-                                            p.grad.data,
-                                            state['exp_avg'],
-                                            state['exp_avg_sq'])
+                    self.ds_opt_adam.adam_update(self.opt_id,
+                                                 state['step'],
+                                                 group['lr'],
+                                                 p.data,
+                                                 p.grad.data,
+                                                 state['exp_avg'],
+                                                 state['exp_avg_sq'])
         return loss

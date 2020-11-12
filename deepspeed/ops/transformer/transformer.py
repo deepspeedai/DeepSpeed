@@ -8,6 +8,8 @@ import torch
 from torch import nn
 from torch.autograd import Function
 
+from ..op_builder import TransformerBuilder, StochasticTransformerBuilder
+
 # Cuda modules will be imported if needed
 transformer_cuda_module = None
 stochastic_transformer_cuda_module = None
@@ -483,19 +485,12 @@ class DeepSpeedTransformerLayer(nn.Module):
             self.norm_w = initial_weights[7]
             self.norm_b = initial_biases[7]
 
-        # Import cuda modules if needed
+        # Load cuda modules if needed
         global transformer_cuda_module, stochastic_transformer_cuda_module
-        if transformer_cuda_module is None or stochastic_transformer_cuda_module is None:
-            try:
-                transformer_cuda_module = importlib.import_module(
-                    "deepspeed.ops.transformer.transformer_cuda")
-                stochastic_transformer_cuda_module = importlib.import_module(
-                    "deepspeed.ops.transformer.stochastic_transformer_cuda")
-            except ImportError as err:
-                print(
-                    "Unable to import transformer cuda extension, please build DeepSpeed with cuda/cpp extensions."
-                )
-                raise err
+        if transformer_cuda_module is None and not self.config.stochastic_mode:
+            transformer_cuda_module = TransformerBuilder().load()
+        if stochastic_transformer_cuda_module is None and self.config.stochastic_mode:
+            stochastic_transformer_cuda_module = StochasticTransformerBuilder().load()
 
         # create the layer in cuda kernels.
         cuda_module = stochastic_transformer_cuda_module if self.config.stochastic_mode else transformer_cuda_module

@@ -2,13 +2,12 @@
 # https://github.com/ptillet/torch-blocksparse/blob/master/torch_blocksparse/matmul.py
 import importlib
 import warnings
-try:
-    import triton
-except ImportError:
-    warnings.warn("Unable to import triton, sparse attention will not be accessible")
 import torch
 import math
-from deepspeed.ops.sparse_attention.trsrc import matmul
+from .trsrc import matmul
+from ..op_builder import SparseAttnBuilder
+
+triton = None
 
 
 ##############
@@ -27,6 +26,9 @@ class _sparse_matmul(torch.autograd.Function):
     # between `seg_size` elements
     @staticmethod
     def load_balance(sizes, block):
+        global triton
+        if triton is None:
+            triton = importlib.import_module('triton')
         # segment size
         # heuristics taken from OpenAI blocksparse code
         # https://github.com/openai/blocksparse/blob/master/blocksparse/matmul.py#L95
@@ -83,11 +85,18 @@ class _sparse_matmul(torch.autograd.Function):
     ##########################
     # SPARSE = DENSE x DENSE #
     ##########################
-    cpp_utils = importlib.import_module('deepspeed.ops.sparse_attention.cpp_utils')
-    sdd_segment = cpp_utils.sdd_segment
+    cpp_utils = None
+    sdd_segment = None
+
+    @staticmethod
+    def _load_utils():
+        if _sparse_matmul.cpp_utils is None:
+            _sparse_matmul.cpp_utils = SparseAttnBuilder().load()
+            _sparse_matmul.sdd_segment = _sparse_matmul.cpp_utils.sdd_segment
 
     @staticmethod
     def make_sdd_lut(layout, block, dtype, device):
+        _sparse_matmul._load_utils()
         start_width = 64 // block
         segmented = _sparse_matmul.sdd_segment(layout.type(torch.int32), start_width)
         luts, widths, packs = [], [], []
@@ -118,6 +127,10 @@ class _sparse_matmul(torch.autograd.Function):
                     packs,
                     bench,
                     time):
+        global triton
+        if triton is None:
+            triton = importlib.import_module('triton')
+
         if trans_c:
             a, b = b, a
             trans_a, trans_b = not trans_b, not trans_a
@@ -332,6 +345,10 @@ class _sparse_matmul(torch.autograd.Function):
                     packs,
                     bench,
                     time):
+        global triton
+        if triton is None:
+            triton = importlib.import_module('triton')
+
         # shapes / dtypes
         AS0 = a.size(0)
         AS1 = a.size(1)
@@ -413,6 +430,10 @@ class _sparse_matmul(torch.autograd.Function):
                     packs,
                     bench,
                     time):
+        global triton
+        if triton is None:
+            triton = importlib.import_module('triton')
+
         # shapes / dtypes
         AS0 = spdims[0]
         AS1 = block * spdims[2 if trans_a else 1]
