@@ -9,12 +9,17 @@ The wheel will be located at: dist/*.whl
 """
 
 import os
-import torch
 import shutil
 import subprocess
 import warnings
 from setuptools import setup, find_packages
-from torch.utils.cpp_extension import CUDAExtension, BuildExtension, CppExtension
+
+try:
+    import torch
+    from torch.utils.cpp_extension import BuildExtension
+except ImportError:
+    raise ImportError('Unable to import torch, please visit https://pytorch.org/ '
+                      'to see how to properly install torch on your system.')
 
 import op_builder
 

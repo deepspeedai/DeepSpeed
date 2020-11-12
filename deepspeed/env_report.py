@@ -62,6 +62,8 @@ def ninja_installed():
 def nvcc_version():
     import torch.utils.cpp_extension
     cuda_home = torch.utils.cpp_extension.CUDA_HOME
+    if cuda_home is None:
+        return f"{RED} [FAIL] cannot find CUDA_HOME via torch.utils.cpp_extension.CUDA_HOME={torch.utils.cpp_extension.CUDA_HOME} {END}"
     try:
         output = subprocess.check_output([cuda_home + "/bin/nvcc",
                                           "-V"],
