@@ -11,11 +11,15 @@ just-in-time (JIT) using [torch's JIT C++ extension loader that relies on
 ninja](https://pytorch.org/docs/stable/cpp_extension.html) to build and
 dynamically link them at runtime.
 
+**Note:** [PyTorch](https://pytorch.org/) must be installed _before_ installing
+DeepSpeed.
+{: .notice--info}
+
 ```bash
 pip install deepspeed
 ```
 
-After installation you can validate your install and see which ops your machine
+After installation, you can validate your install and see which ops your machine
 is compatible with via the DeepSpeed environment report with `ds_report` or
 `python -m deepspeed.env_report`. We've found this report useful when debugging
 DeepSpeed install or compatibility issues.
@@ -24,9 +28,47 @@ DeepSpeed install or compatibility issues.
 ds_report
 ```
 
+## Pre-install DeepSpeed Ops
+
+Sometimes we have found it useful to pre-install either some or all DeepSpeed
+C++/CUDA ops instead of using the JIT compiled path. In order to support
+pre-installation we introduce build environment flags to turn on/off building
+specific ops.
+
+You can indicate to our installer (either install.sh or pip install) that you
+want to attempt to install all of our ops by setting the `DS_BUILD_OPS`
+environment variable to 1, for example:
+
+```bash
+DS_BUILD_OPS=1 pip install deepspeed
+```
+
+DeepSpeed will only install any ops that are compatible with your machine.
+For more details on which ops are compatible with your system please try our
+`ds_report` tool described above.
+
+If you want to install only a specific op (e.g., FusedLamb), you can toggle
+with `DS_BUILD` environment variables at installation time. For example, to
+install DeepSpeed with only the FusedLamb op use:
+
+```bash
+DS_BUILD_FUSED_LAMB=1 pip install deepspeed
+```
+
+Available `DS_BUILD` options include:
+* `DS_BUILD_OPS` toggles all ops
+* `DS_BUILD_CPU_ADAM` builds the CPUAdam op
+* `DS_BUILD_FUSED_ADAM` builds the FusedAdam op (from [apex](https://github.com/NVIDIA/apex))
+* `DS_BUILD_FUSED_LAMB` builds the FusedLamb op
+* `DS_BUILD_SPARSE_ATTN` builds the sparse attention op
+* `DS_BUILD_TRANSFORMER` builds the transformer op
+* `DS_BUILD_STOCHASTIC_TRANSFORMER` builds the stochastic transformer op
+* `DS_BUILD_UTILS` builds various optimized utilities
+
+
 ## Install DeepSpeed from source
 
-After cloning the DeepSpeed repo from github you can install DeepSpeed in
+After cloning the DeepSpeed repo from GitHub, you can install DeepSpeed in
 JIT mode via pip (see below). This install should complete
 quickly since it is not compiling any C++/CUDA source files.
 
@@ -41,34 +83,6 @@ script in the repo. This will build a python wheel locally and copy it to all
 the nodes listed in your hostfile (either given via --hostfile, or defaults to
 /job/hostfile).
 
-## Pre-install DeepSpeed Ops
-
-Sometimes we have found it useful to pre-install either some or all DeepSpeed
-C++/CUDA ops instead of using the JIT compiled path. In order to support
-pre-installation we introduce build environment flags to turn on/off building
-specific ops.
-
-You can indicate to our installer (either install.sh or pip install) that you
-want to attempt to install all of our ops by setting the `DS_BUILD_OPS`
-environment variable to 1, for example:
-
-```bash
-DS_BUILD_OPS=1 pip install .
-```
-
-We will only install any ops that are compatible with your machine, for more
-details on which ops are compatible with your system please try our `ds_report`
-tool described above.
-
-If you want to install only a specific op (e.g., FusedLamb) you can view the op
-specific build environment variable (set as `BUILD_VAR`) in the corresponding
-op builder class in the
-[op\_builder](https://github.com/microsoft/DeepSpeed/tree/master/op_builder)
-directory. For example to install only the Fused Lamb op you would install via:
-
-```bash
-DS_BUILD_FUSED_LAMB=1 pip install .
-```
 
 ## Feature specific dependencies
 

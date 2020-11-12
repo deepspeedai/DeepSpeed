@@ -72,11 +72,14 @@ just-in-time (JIT) using [torch's JIT C++ extension loader that relies on
 ninja](https://pytorch.org/docs/stable/cpp_extension.html) to build and
 dynamically link them at runtime.
 
+**Note:** [PyTorch](https://pytorch.org/) must be installed _before_ installing
+DeepSpeed.
+
 ```bash
 pip install deepspeed
 ```
 
-After installation you can validate your install and see which extensions/ops
+After installation, you can validate your install and see which extensions/ops
 your machine is compatible with via the DeepSpeed environment report.
 
 ```bash
