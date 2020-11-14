@@ -1,6 +1,6 @@
 import os
 import torch
-import warnings
+import subprocess
 from .builder import CUDAOpBuilder
 
 
@@ -21,35 +21,26 @@ class CPUAdamBuilder(CUDAOpBuilder):
         CUDA_INCLUDE = os.path.join(torch.utils.cpp_extension.CUDA_HOME, "include")
         return ['csrc/includes', CUDA_INCLUDE]
 
-    def available_vector_instructions(self):
-        try:
-            import cpufeature
-        except ImportError:
-            warnings.warn(
-                f'import cpufeature failed - CPU vector optimizations are not available for CPUAdam'
-            )
-            return {}
+    def simd_width(self):
+        if not self.command_exists('lscpu'):
+            self.warning(
+                "CPUAdam attempted to query 'lscpu' to detect the existence "
+                "of AVX instructions. However, 'lscpu' does not appear to exist on "
+                "your system, will fall back to non-vectorized execution.")
+            return ''
 
-        cpu_vector_instructions = {}
-        try:
-            cpu_vector_instructions = cpufeature.CPUFeature
-        except _:
-            warnings.warn(
-                f'cpufeature.CPUFeature failed - CPU vector optimizations are not available for CPUAdam'
-            )
-            return {}
-
-        return cpu_vector_instructions
+        result = subprocess.check_output('lscpu', shell=True)
+        result = result.decode('utf-8').strip().lower()
+        if 'genuineintel' in result:
+            if 'avx512' in result:
+                return '-D__AVX512__'
+            elif 'avx2' in result:
+                return '-D__AVX256__'
+        return ''
 
     def cxx_args(self):
         CUDA_LIB64 = os.path.join(torch.utils.cpp_extension.CUDA_HOME, "lib64")
-        cpu_info = self.available_vector_instructions()
-        SIMD_WIDTH = ''
-        if 'Intel' in cpu_info.get('VendorId', ''):
-            if cpu_info.get('AVX512f', False):
-                SIMD_WIDTH = '-D__AVX512__'
-            elif cpu_info.get('AVX2', False):
-                SIMD_WIDTH = '-D__AVX256__'
+        SIMD_WIDTH = self.simd_width()
 
         return [
             '-O3',

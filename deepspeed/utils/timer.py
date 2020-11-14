@@ -3,10 +3,16 @@ Copyright 2019 The Microsoft DeepSpeed Team
 '''
 
 import time
-import psutil
 import torch
 
 from deepspeed.utils import logger
+
+try:
+    import psutil
+    PSUTILS_INSTALLED = True
+except ImportError:
+    PSUTILS_INSTALLED = False
+    pass
 
 
 def print_rank_0(message):
@@ -103,7 +109,7 @@ class ThroughputTimer():
                  num_workers,
                  start_step=2,
                  steps_per_output=50,
-                 monitor_memory=True,
+                 monitor_memory=False,
                  logging_fn=None):
         self.start_time = 0
         self.end_time = 0
@@ -123,6 +129,9 @@ class ThroughputTimer():
         if self.logging is None:
             self.logging = logger.info
         self.initialized = False
+
+        if self.monitor_memory and not PSUTILS_INSTALLED:
+            raise ImportError("Unable to import 'psutils', please install package")
 
     def update_epoch_count(self):
         self.epoch_count += 1
