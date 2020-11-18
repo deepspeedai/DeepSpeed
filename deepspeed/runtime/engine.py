@@ -264,7 +264,9 @@ class DeepSpeedEngine(Module):
                            base=os.path.join(os.environ["HOME"],
                                              "tensorboard")):
         if self.tensorboard_output_path():
-            log_dir = self.tensorboard_output_path()
+            base_dir = self.tensorboard_output_path()
+            job_name = self.tensorboard_job_name()
+            log_dir = os.path.join(base_dir, job_name)
         else:
             if self.tensorboard_job_name():
                 name = self.tensorboard_job_name()
