@@ -21,6 +21,7 @@ class DeepSpeedZeroConfig(object):
         self.overlap_comm = None
         self.load_from_fp32_weights = None
         self.cpu_offload = None
+        self.elastic_checkpoint = None
 
         if ZERO_OPTIMIZATION in param_dict.keys():
             zero_config_dict = param_dict[ZERO_OPTIMIZATION]
@@ -94,3 +95,8 @@ class DeepSpeedZeroConfig(object):
         self.cpu_offload = get_scalar_param(zero_config_dict,
                                             ZERO_OPTIMIZATION_CPU_OFFLOAD,
                                             ZERO_OPTIMIZATION_CPU_OFFLOAD_DEFAULT)
+
+        self.elastic_checkpoint = get_scalar_param(
+            zero_config_dict,
+            ZERO_OPTIMIZATION_ELASTIC_CHECKPOINT,
+            ZERO_OPTIMIZATION_ELASTIC_CHECKPOINT_DEFAULT)

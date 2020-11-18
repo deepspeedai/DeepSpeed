@@ -347,6 +347,9 @@ class DeepSpeedEngine(Module):
     def zero_load_from_fp32_weights(self):
         return self._config.zero_config.load_from_fp32_weights
 
+    def zero_elastic_checkpoint(self):
+        return self._config.zero_config.elastic_checkpoint
+
     def fp16_enabled(self):
         return self._config.fp16_enabled
 
@@ -669,6 +672,7 @@ class DeepSpeedEngine(Module):
                 allgather_size=self.zero_allgather_bucket_size(),
                 max_elements_per_comm=self.zero_reduce_bucket_size(),
                 dp_process_group=self.data_parallel_group,
+                elastic_checkpoint=self.zero_elastic_checkpoint(),
                 mpu=self.mpu)
         elif zero_stage == ZERO_OPTIMIZATION_GRADIENTS:
             optimizer = FP16_DeepSpeedZeroOptimizer(
