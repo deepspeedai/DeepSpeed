@@ -68,12 +68,6 @@ class CheckOverflow(object):
         return bool(overflow)
 
     def check(self, param_groups=None):
-
-        #TODO: what's the equivalent here? do we need this?
-        # for group in self.fp32_from_fp32_groups:
-        #     for param in group:
-        #         params.append(param)
-
         params = []
         if param_groups is None:
             params = self.params
