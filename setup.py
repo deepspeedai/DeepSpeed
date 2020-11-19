@@ -58,9 +58,9 @@ TORCH_MAJOR = torch.__version__.split('.')[0]
 TORCH_MINOR = torch.__version__.split('.')[1]
 
 if not torch.cuda.is_available():
-    # Fix to allow docker buils, similar to https://github.com/NVIDIA/apex/issues/486
+    # Fix to allow docker builds, similar to https://github.com/NVIDIA/apex/issues/486
     print(
-        "[WARNING] Torch did not find cuda available, if cross-compling or running with cpu only "
+        "[WARNING] Torch did not find cuda available, if cross-compiling or running with cpu only "
         "you can ignore this message. Adding compute capability for Pascal, Volta, and Turing "
         "(compute capabilities 6.0, 6.1, 6.2)")
     if os.environ.get("TORCH_CUDA_ARCH_LIST", None) is None:
@@ -144,7 +144,10 @@ else:
     version_str += f'+{git_hash}'
 
 torch_version = ".".join([TORCH_MAJOR, TORCH_MINOR])
-cuda_version = ".".join(torch.version.cuda.split('.')[:2])
+# Set cuda_version to 0.0 if cpu-only
+cuda_version = "0.0"
+if torch.version.cuda is not None:
+    cuda_version = ".".join(torch.version.cuda.split('.')[:2])
 torch_info = {"version": torch_version, "cuda_version": cuda_version}
 
 print(f"version={version_str}, git_hash={git_hash}, git_branch={git_branch}")
