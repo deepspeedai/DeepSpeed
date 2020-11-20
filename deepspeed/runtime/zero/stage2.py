@@ -1273,7 +1273,7 @@ class FP16_DeepSpeedZeroOptimizer(object):
         current_size = 0
         for i, tensor in enumerate(tensor_list):
             if tensor.grad is None:
-                continue
+                tensor.grad = torch.zeros_like(tensor)
 
             tensor = tensor.grad
             num_elements = tensor.numel()
