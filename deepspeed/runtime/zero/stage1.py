@@ -947,9 +947,10 @@ class FP16_DeepSpeedZeroOptimizer_Stage1(object):
                                         state_key,
                                         all_partition_states,
                                         max_elems_per_comm):
-        partition_id = dist.get_rank(group=self.dp_process_group)
-        alignment = dist.get_world_size(group=self.dp_process_group)
+        if not torch.is_tensor(all_partition_states[0]):
+            return all_partition_states[0]
 
+        alignment = dist.get_world_size(group=self.dp_process_group)
         flat_merged_partitions = flatten_dense_tensors_sub_partition_aligned(
             tensor_list=all_partition_states,
             dp=dist.get_world_size(group=self.dp_process_group),
@@ -964,6 +965,7 @@ class FP16_DeepSpeedZeroOptimizer_Stage1(object):
                 dp_process_group=self.dp_process_group
             )
 
+        partition_id = dist.get_rank(group=self.dp_process_group)
         return [sub_partition for sub_partition in dp_sub_partitions[partition_id]]
 
     # Compute the optimizer state partitions for the group by
@@ -1013,8 +1015,11 @@ class FP16_DeepSpeedZeroOptimizer_Stage1(object):
         for group_idx, group in enumerate(self.optimizer.param_groups):
             for param_idx, param in enumerate(group['params']):
                 for key, saved in base_optimizer_group_states[group_idx].items():
-                    current = self.optimizer.state[param][key]
-                    current.data.copy_(saved[param_idx].data)
+                    if torch.is_tensor(self.optimizer.state[param][key]):
+                        current = self.optimizer.state[param][key]
+                        current.data.copy_(saved[param_idx].data)
+                    else:
+                        self.optimizer.state[param][key] = saved
 
     # Restore base optimizer fp32 weights from ZeRO fp16 weights
     def _restore_from_fp16_weights(self):
