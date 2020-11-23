@@ -696,6 +696,7 @@ class DeepSpeedEngine(Module):
             logger.info('Creating fp16 unfused optimizer with dynamic loss scale')
             optimizer = FP16_UnfusedOptimizer(
                 optimizer,
+                static_loss_scale=self.loss_scale(),
                 dynamic_loss_scale=self.dynamic_loss_scale(),
                 dynamic_loss_args=dynamic_loss_args,
                 mpu=self.mpu,
