@@ -878,6 +878,11 @@ class DeepSpeedEngine(Module):
             allreduce_gradients: If this is False, then gradient averaging will be skipped. Default is True.
         """
 
+        if not allreduce_gradients:
+            logger.warning(
+                f'Argument `allreduce_gradients` is deprecated, ignored, and will soon be removed'
+            )
+
         # scale loss w.r.t. gradient accumulation if needed
         if self.gradient_accumulation_steps() > 1:
             loss = self._scale_loss(loss.float())
@@ -931,7 +936,7 @@ class DeepSpeedEngine(Module):
             self.timers('backward_allreduce_microstep').start()
             self.timers('backward_allreduce').start()
 
-        if allreduce_gradients and self.enable_backward_allreduce:
+        if self.enable_backward_allreduce:
             self.allreduce_gradients()
 
         if self.wall_clock_breakdown():

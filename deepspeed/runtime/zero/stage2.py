@@ -955,6 +955,12 @@ class FP16_DeepSpeedZeroOptimizer(object):
 
         with torch.cuda.stream(stream):
             for _, param, param_id in self.params_in_ipg_bucket:
+
+                assert self.params_already_reduced[param_id] == False, \
+                    f"The parameter {param_id} has already been reduced. \
+                    Gradient computed twice for this partition. \
+                    Multiple gradient reduction is currently not supported"
+
                 self.params_already_reduced[param_id] = True
 
                 if not self.is_param_in_current_partition[param_id]:
