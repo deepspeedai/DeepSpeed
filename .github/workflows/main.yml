@@ -2,7 +2,7 @@
 
 name: CI
 
-# Controls when the action will run. 
+# Controls when the action will run.
 on:
   # Triggers the workflow on push or pull request events but only for the master branch
   push:
@@ -29,22 +29,25 @@ jobs:
       - name: environment
         run: |
           nvidia-smi
-          echo $GITHUB_WORKSPACE
-          pwd
+          which python
+          python --version
+          which nvcc
+          nvcc --version
+          python -c "import torch; print('torch:', torch.__version__, torch)"
+          python -c "import torch; print('CUDA available:', torch.cuda.is_available())"
 
       # Runs a set of commands using the runners shell
       - name: Install deepspeed
         run: |
           pip install .[dev]
           ds_report
-  
+
       - name: Formatting checks
         run: |
-           pip install pre-commit
            pre-commit run --all-files
-      
+
       # Runs a set of commands using the runners shell
-      - name: Run unit tests
+      - name: Unit tests
         run: |
           if [[ -d ./torch-extensions ]]; then rm -rf ./torch-extensions; fi
           TORCH_EXTENSIONS_DIR=./torch-extensions pytest --durations=0 --forked --verbose -x tests/unit/
