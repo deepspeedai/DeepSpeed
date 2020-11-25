@@ -17,10 +17,6 @@ from deepspeed.runtime.pipe.module import LayerSpec
 
 from common import distributed_test
 
-pytest.skip(
-    "skipping until we can figure out what's causing these to hang inside our CI",
-    allow_module_level=True)
-
 
 def rel_diff(A, B):
     return abs(A - B) / abs(A)
