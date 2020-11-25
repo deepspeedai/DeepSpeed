@@ -163,9 +163,16 @@ print(f'install_requires={install_requires}')
 print(f'compatible_ops={compatible_ops}')
 print(f'ext_modules={ext_modules}')
 
+# Parse README.md to make long_description for PyPI page.
+thisdir = os.path.abspath(os.path.dirname(__file__))
+with open(os.path.join(thisdir, 'README.md'), encoding='utf-8') as fin:
+    readme_text = fin.read()
+
 setup(name='deepspeed',
       version=version_str,
       description='DeepSpeed library',
+      long_description=readme_text,
+      long_description_content_type='text/markdown',
       author='DeepSpeed Team',
       author_email='deepspeed@microsoft.com',
       url='http://deepspeed.ai',
