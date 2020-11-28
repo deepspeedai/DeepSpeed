@@ -28,14 +28,14 @@ model_engine, optimizer, _, _ = deepspeed.initialize(args=cmd_args,
 distributed data parallel or mixed precision training are done
 appropriately under the hood.  In addition to wrapping the model, DeepSpeed can
 construct and manage the training optimizer, data loader, and the learning rate
-scheduler based on the parameters passed to `deepspeed.initialze` and the
+scheduler based on the parameters passed to `deepspeed.initialize` and the
 DeepSpeed [configuration file](#deepspeed-configuration).
 
 
 ### Training
 
 Once the DeepSpeed engine has been initialized, it can be used to train the
-model using three simple APIs for forward propagation (`()`), backward
+model using three simple APIs for forward propagation (callable object), backward
 propagation (`backward`), and weight updates (`step`).
 
 ```python
