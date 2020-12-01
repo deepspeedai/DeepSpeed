@@ -133,7 +133,8 @@ int cublas_strided_batched_gemm(cublasHandle_t handle,
 
     if (status != CUBLAS_STATUS_SUCCESS) {
         fprintf(stderr,
-                "!!!! kernel execution error. (m: %d, n: %d, k: %d, error: %d) \n",
+                "!!!! kernel execution error. (batch: %d, m: %d, n: %d, k: %d, error: %d) \n",
+                batch,
                 m,
                 n,
                 k,

@@ -213,6 +213,8 @@ def run_forward(ds_config, seq_len, atol=1e-2, verbose=False, test_bsz=None):
 # FP16 test cases can only run on the devices support FP16.
 @pytest.mark.parametrize('batch_size, hidden_size, seq_len, heads, num_layers, is_preln, use_fp16',
                          [
+                             (8,256,128,4,3,True,False),
+                             (8,256,128,4,3,True,True),
                              (64,1024,128,16,3,True,False),
                              (64,1024,128,16,3,True,True),
                              (8,1024,384,16,3,True,False),
@@ -236,6 +238,10 @@ def run_forward(ds_config, seq_len, atol=1e-2, verbose=False, test_bsz=None):
                              (8,2048,128,32,3,False,True),
                              (8,2560,128,40,3,False,False),
                              (8,2560,128,40,3,False,True),
+                             (8,128,128,2,3,True,False),
+                             (8,128,128,2,3,True,True),
+                             (8,4096,128,64,3,True,True),
+                             (8,8192,128,64,3,False,True),
                          ]) # yapf: disable
 def test_forward(batch_size,
                  hidden_size,

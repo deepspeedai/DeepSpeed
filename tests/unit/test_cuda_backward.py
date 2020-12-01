@@ -261,6 +261,8 @@ def run_backward(ds_config, atol=1e-2, verbose=False):
                              (3,1024,120,16,24,True,True, 0.05),
                              (3,1024,56,16,24,False,False, 0.1),
                              (3,1024,56,16,24,False,True, 0.2),
+                             (3,128,56,2,24,False,False, 0.1),
+                             (3,128,56,2,24,False,True, 0.2),
                          ]) # yapf: disable
 def test_backward(batch_size,
                   hidden_size,
