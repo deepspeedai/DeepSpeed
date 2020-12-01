@@ -50,6 +50,7 @@ class DeepSpeedCPUAdam(torch.optim.Optimizer):
     def __init__(self,
                  model_params,
                  lr=1e-3,
+                 bias_correction=True,
                  betas=(0.9,
                         0.999),
                  eps=1e-8,
@@ -61,6 +62,7 @@ class DeepSpeedCPUAdam(torch.optim.Optimizer):
                             betas=betas,
                             eps=eps,
                             weight_decay=weight_decay,
+                            bias_correction=bias_correction,
                             amsgrad=amsgrad)
         super(DeepSpeedCPUAdam, self).__init__(model_params, default_args)
 
@@ -112,12 +114,18 @@ class DeepSpeedCPUAdam(torch.optim.Optimizer):
                     #memory_format=torch.preserve_format)
 
                 state['step'] += 1
+                beta1, beta2 = group['betas']
 
                 if fp16_param_groups is not None:
                     self.ds_opt_adam.adam_update_copy(
                         self.opt_id,
                         state['step'],
                         group['lr'],
+                        beta1,
+                        beta2,
+                        group['eps'],
+                        group['weight_decay'],
+                        group['bias_correction'],
                         p.data,
                         p.grad.data,
                         state['exp_avg'],
@@ -127,6 +135,11 @@ class DeepSpeedCPUAdam(torch.optim.Optimizer):
                     self.ds_opt_adam.adam_update(self.opt_id,
                                                  state['step'],
                                                  group['lr'],
+                                                 beta1,
+                                                 beta2,
+                                                 group['eps'],
+                                                 group['weight_decay'],
+                                                 group['bias_correction'],
                                                  p.data,
                                                  p.grad.data,
                                                  state['exp_avg'],

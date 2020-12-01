@@ -28,10 +28,7 @@ void Adam_Optimizer::Step(float* _params,
     float betta1_minus1 = 1 - _betta1;
     float betta2_minus1 = 1 - _betta2;
 
-    float bias_correction1 = 1 - _betta1_t;
-    float bias_correction2 = 1 / sqrt(1 - _betta2_t);
-
-    float step_size = -1 * _alpha / bias_correction1;
+    float step_size = -1 * _alpha / _bias_correction1;
     float w_decay = -1 * _alpha * _weight_decay;
     size_t rounded_size = 0;
 
@@ -48,7 +45,7 @@ void Adam_Optimizer::Step(float* _params,
     betta2_minus1_4.data = SIMD_SET(betta2_minus1);
 
     AVX_Data bias2_sqrt;
-    bias2_sqrt.data = SIMD_SET(bias_correction2);
+    bias2_sqrt.data = SIMD_SET(_bias_correction2);
 
     AVX_Data eps_4;
     eps_4.data = SIMD_SET(_eps);
@@ -130,7 +127,7 @@ void Adam_Optimizer::Step(float* _params,
             variance = grad * betta2_minus1 + variance;
 
             grad = sqrt(variance);
-            grad = grad * bias_correction2 + _eps;
+            grad = grad * _bias_correction2 + _eps;
             grad = momentum / grad;
             if (_weight_decay > 0 && _adamw_mode) { param += w_decay * param; }
             param = grad * step_size + param;
@@ -172,16 +169,13 @@ void Adam_Optimizer::Step_4(float* _params,
     AVX_Data betta2_minus1_4;
     betta2_minus1_4.data = SIMD_SET(betta2_minus1);
 
-    float bias_correction1 = 1 - _betta1_t;
-    float bias_correction2 = 1 / sqrt(1 - _betta2_t);
-    // AVX_Data bias_correction1_4 = SIMD_SET(bias_correction1);
     AVX_Data bias2_sqrt;
-    bias2_sqrt.data = SIMD_SET(bias_correction2);
+    bias2_sqrt.data = SIMD_SET(_bias_correction2);
 
     AVX_Data eps_4;
     eps_4.data = SIMD_SET(_eps);
 
-    float step_size = -1 * _alpha / bias_correction1;
+    float step_size = -1 * _alpha / _bias_correction1;
     AVX_Data step_size_4;
     step_size_4.data = SIMD_SET(step_size);
 
@@ -386,16 +380,13 @@ void Adam_Optimizer::Step_8(float* _params,
     AVX_Data betta2_minus1_4;
     betta2_minus1_4.data = SIMD_SET(betta2_minus1);
 
-    float bias_correction1 = 1 - _betta1_t;
-    float bias_correction2 = 1 / sqrt(1 - _betta2_t);
-    // AVX_Data bias_correction1_4 = SIMD_SET(bias_correction1);
     AVX_Data bias2_sqrt;
-    bias2_sqrt.data = SIMD_SET(bias_correction2);
+    bias2_sqrt.data = SIMD_SET(_bias_correction2);
 
     AVX_Data eps_4;
     eps_4.data = SIMD_SET(_eps);
 
-    float step_size = -1 * _alpha / bias_correction1;
+    float step_size = -1 * _alpha / _bias_correction1;
     AVX_Data step_size_4;
     step_size_4.data = SIMD_SET(step_size);
 
@@ -611,6 +602,11 @@ void Adam_Optimizer::Step_8(float* _params,
 int ds_adam_step(int optimizer_id,
                  size_t step,
                  float lr,
+                 float beta1,
+                 float beta2,
+                 float epsilon,
+                 float weight_decay,
+                 bool bias_correction,
                  torch::Tensor& params,
                  torch::Tensor& grads,
                  torch::Tensor& exp_avg,
@@ -628,8 +624,8 @@ int ds_adam_step(int optimizer_id,
 
     std::shared_ptr<Adam_Optimizer> opt =
         std::static_pointer_cast<Adam_Optimizer>(s_optimizers[optimizer_id]);
-    opt->IncrementStep(step);
-    opt->update_lr(lr);
+    opt->IncrementStep(step, beta1, beta2);
+    opt->update_state(lr, epsilon, weight_decay, bias_correction);
     opt->Step_8(params_ptr, grads_ptr, exp_avg_ptr, exp_avg_sq_ptr, params_c.size(0));
 
     return 0;
@@ -638,6 +634,11 @@ int ds_adam_step(int optimizer_id,
 int ds_adam_step_plus_copy(int optimizer_id,
                            size_t step,
                            float lr,
+                           float beta1,
+                           float beta2,
+                           float epsilon,
+                           float weight_decay,
+                           bool bias_correction,
                            torch::Tensor& params,
                            torch::Tensor& grads,
                            torch::Tensor& exp_avg,
@@ -658,8 +659,8 @@ int ds_adam_step_plus_copy(int optimizer_id,
 
     std::shared_ptr<Adam_Optimizer> opt =
         std::static_pointer_cast<Adam_Optimizer>(s_optimizers[optimizer_id]);
-    opt->IncrementStep(step);
-    opt->update_lr(lr);
+    opt->IncrementStep(step, beta1, beta2);
+    opt->update_state(lr, epsilon, weight_decay, bias_correction);
     opt->Step_8(
         params_ptr, grads_ptr, exp_avg_ptr, exp_avg_sq_ptr, params_c.size(0), gpu_params_ptr);
 

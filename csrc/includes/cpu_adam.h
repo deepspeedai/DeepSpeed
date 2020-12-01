@@ -89,18 +89,40 @@ public:
                 float* _exp_avg_sq,
                 size_t _param_size,
                 __half* dev_params = nullptr);
-    inline void IncrementStep(size_t step)
+
+    inline void IncrementStep(size_t step, float beta1, float beta2)
     {
-        if (_step < step) {
+        if (beta1 != _betta1 || beta2 != _betta2) {
+            _step = step;
+            _betta1 = beta1;
+            _betta2 = beta2;
+            _betta1_t = std::pow(_betta1, step);
+            _betta2_t = std::pow(_betta2, step);
+        } else {
             _step++;
             if (_step != step) {
-                throw std::runtime_error("Optimizer lost track of step count!\n");
+                _betta1_t = std::pow(_betta1, step);
+                _betta2_t = std::pow(_betta2, step);
+                _step = step;
+            } else {
+                _betta1_t *= _betta1;
+                _betta2_t *= _betta2;
             }
-            _betta1_t *= _betta1;
-            _betta2_t *= _betta2;
         }
     }
-    inline void update_lr(float lr) { _alpha = lr; }
+    inline void update_state(float lr, float epsilon, float weight_decay, bool bias_correction)
+    {
+        _alpha = lr;
+        _eps = epsilon;
+        _weight_decay = weight_decay;
+
+        _bias_correction1 = 1.0f;
+        _bias_correction2 = 1.0f;
+        if (bias_correction == 1) {
+            _bias_correction1 = 1 - _betta1_t;
+            _bias_correction2 = 1 / sqrt(1 - _betta2_t);
+        }
+    }
 
 private:
 #if defined(__AVX512__) or defined(__AVX256__)
@@ -123,6 +145,9 @@ private:
     float _betta1_t;
     float _betta2_t;
     size_t _step;
+
+    float _bias_correction1;
+    float _bias_correction2;
 
     float* _doubled_buffer[2];
     bool _buf_index;
