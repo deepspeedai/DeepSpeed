@@ -108,7 +108,7 @@ The first step to apply DeepSpeed is adding DeepSpeed arguments to CIFAR-10 mode
 
 ### Initialization
 
-We use `deepspeed.initialize` to create `model_engine`, `optimizer` and `trainloader`. Below is its definition.
+We create `model_engine`, `optimizer` and `trainloader` with the help of `deepspeed.initialize`, which is defined as following:
 
 ```python
 def initialize(args,
@@ -122,7 +122,7 @@ def initialize(args,
                collate_fn=None):
 ```
 
-For CIFAR-10 model, we initialize DeepSpeed its model (net) is created as below, to pass the raw `model`, `optimizer`, `args`, `parametersnd` and `trainset`.
+Here we initialize DeepSpeed with CIFAR-10 model (`net`), `args`, `parameters` and `trainset`:
 
 ```python
  parameters = filter(lambda p: p.requires_grad, net.parameters())
@@ -132,11 +132,11 @@ For CIFAR-10 model, we initialize DeepSpeed its model (net) is created as below,
  # 1) Distributed model
  # 2) Distributed data loader
  # 3) DeepSpeed optimizer
- model_engine, optimizer, trainloader, __ = deepspeed.initialize(args=args, model=net, model_parameters=parameters, training_data=trainset)
+ model_engine, optimizer, trainloader, _ = deepspeed.initialize(args=args, model=net, model_parameters=parameters, training_data=trainset)
 
 ```
 
-The original device and optimizer can be removed after initializing DeepSpeed.
+After initializing DeepSpeed, the original `device` and `optimizer` are removed:
 
 ```python
  #device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
