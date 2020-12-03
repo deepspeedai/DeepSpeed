@@ -800,12 +800,12 @@ class DeepSpeedEngine(Module):
                                    data_parallel_world_size=data_parallel_world_size,
                                    data_parallel_rank=data_parallel_rank)
 
-    def train(self):
+    def train(self, mode=True):
         r"""
         """
 
         self.warn_unscaled_loss = True
-        self.module.train()
+        self.module.train(mode)
 
     def eval(self):
         r"""
