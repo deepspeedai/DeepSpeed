@@ -216,25 +216,53 @@ class OpBuilder(ABC):
 
 class CUDAOpBuilder(OpBuilder):
     def compute_capability_args(self, cross_compile_archs=None):
-        if cross_compile_archs is None:
-            cross_compile_archs = get_default_compute_capatabilities()
+        """
+        Returns nvcc compute capability compile flags.
 
-        args = []
+        1. `TORCH_CUDA_ARCH_LIST` takes priority over `cross_compile_archs`.
+        2. If neither is set default compute capabilities will be used
+        3. Under `jit_mode` compute capabilities of all visible cards will be used.
+
+        Format:
+
+        - `TORCH_CUDA_ARCH_LIST` may use ; or whitespace separators. Examples:
+
+        TORCH_CUDA_ARCH_LIST="6.1;7.5;8.6" pip install ...
+        TORCH_CUDA_ARCH_LIST="5.2 6.0 6.1 7.0 7.5 8.0 8.6+PTX" pip install ...
+
+        - `cross_compile_archs` uses ; separator.
+
+        """
+
+        ccs = []
         if self.jit_mode:
-            # Compile for underlying architecture since we know it at runtime
-            CC_MAJOR, CC_MINOR = torch.cuda.get_device_capability()
-            compute_capability = f"{CC_MAJOR}{CC_MINOR}"
-            args.append('-gencode')
-            args.append(
-                f'arch=compute_{compute_capability},code=compute_{compute_capability}')
+            # Compile for underlying architectures since we know those at runtime
+            for i in range(torch.cuda.device_count()):
+                CC_MAJOR, CC_MINOR = torch.cuda.get_device_capability(i)
+                cc = f"{CC_MAJOR}.{CC_MINOR}"
+                if cc not in ccs:
+                    ccs.append(cc)
+            ccs = sorted(ccs)
         else:
             # Cross-compile mode, compile for various architectures
-            for compute_capability in cross_compile_archs.split(';'):
-                compute_capability = compute_capability.replace('.', '')
-                args.append('-gencode')
-                args.append(
-                    f'arch=compute_{compute_capability},code=compute_{compute_capability}'
-                )
+            # env override takes priority
+            cross_compile_archs_env = os.environ.get('TORCH_CUDA_ARCH_LIST', None)
+            if cross_compile_archs_env is not None:
+                if cross_compile_archs is not None:
+                    print(
+                        f"{WARNING} env var `TORCH_CUDA_ARCH_LIST={cross_compile_archs_env}` overrides `cross_compile_archs={cross_compile_archs}`"
+                    )
+                cross_compile_archs = cross_compile_archs_env.replace(' ', ';')
+            else:
+                if cross_compile_archs is None:
+                    cross_compile_archs = get_default_compute_capatabilities()
+            ccs = cross_compile_archs.split(';')
+
+        args = []
+        for cc in ccs:
+            cc = cc.replace('.', '')
+            args.append(f'-gencode=arch=compute_{cc},code=compute_{cc}')
+
         return args
 
     def version_dependent_macros(self):

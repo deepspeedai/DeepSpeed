@@ -84,6 +84,29 @@ the nodes listed in your hostfile (either given via --hostfile, or defaults to
 /job/hostfile).
 
 
+## Building for the correct architectures
+
+If you're getting the following error:
+
+```python
+RuntimeError: CUDA error: no kernel image is available for execution on the device
+```
+when running deepspeed that means that the cuda extensions weren't built for the card you're trying to use it for.
+
+When building from source deepspeed will try to support a wide range of architectures, but under jit-mode it'll only support the archs visible at the time of building.
+
+You can build specifically for a desired range of architectures by setting a `TORCH_CUDA_ARCH_LIST` env variable, like so:
+
+```bash
+TORCH_CUDA_ARCH_LIST="6.1;7.5;8.6" pip install ...
+```
+
+It will also make the build faster when you only build for a few architectures.
+
+This is also recommended to do to ensure your exact architecture is used. Due to a variety of technical reasons a distributed pytorch binary isn't built to fully support all architectures, skipping binary compatible ones, at a potential cost of underutilizing your full card's compute capabilities. To see which archs get included during the deepspeed build from source - save the log and grep for `-gencode` arguments.
+
+The full list of nvidia gpus and their compute capabilities can be found [here](https://developer.nvidia.com/cuda-gpus).
+
 ## Feature specific dependencies
 
 Some DeepSpeed features require specific dependencies outside of the general

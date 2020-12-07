@@ -22,4 +22,7 @@ class FusedLambBuilder(CUDAOpBuilder):
         return ['-O3'] + self.version_dependent_macros()
 
     def nvcc_args(self):
-        return ['-lineinfo', '-O3', '--use_fast_math'] + self.version_dependent_macros()
+        return ['-lineinfo',
+                '-O3',
+                '--use_fast_math'
+                ] + self.version_dependent_macros() + self.compute_capability_args()
