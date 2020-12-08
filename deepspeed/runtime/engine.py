@@ -33,6 +33,7 @@ from deepspeed.utils import logger, log_dist
 from deepspeed.utils.timer import ThroughputTimer, SynchronizedWallClockTimer
 from deepspeed.runtime.progressive_layer_drop import ProgressiveLayerDrop
 
+from .pipe.module import PipelineModule
 from .utils import ensure_directory_exists
 from ..ops.op_builder import UtilsBuilder
 from ..ops.adam import DeepSpeedCPUAdam
@@ -1355,6 +1356,10 @@ class DeepSpeedEngine(Module):
         logger.info(f'rank: {self.global_rank} loading checkpoint: {load_path}')
         checkpoint = torch.load(load_path, map_location=lambda storage, loc: storage)
 
+        if isinstance(self.module, PipelineModule):
+            # Pipeline parallelism uses this to load its own checkpoint files.
+            self._curr_ckpt_path = os.path.join(load_dir, tag)
+
         self.load_module_state_dict(state_dict=checkpoint['module'],
                                     strict=load_module_strict)
         if not self.zero_optimization():
@@ -1522,8 +1527,8 @@ class DeepSpeedEngine(Module):
         save_path = self._get_ckpt_name(save_dir, tag)
         # A hack to save the checkpointing directory. Pipeline parallelism overrides
         # module_state_dict() and uses this path to save the model. module_state_dict()
-        # then instead just returns self._curr_save_path.
-        self._curr_save_path = os.path.dirname(save_path)
+        # then instead just returns None.
+        self._curr_ckpt_path = os.path.join(save_dir, tag)
 
         state = {
             'module':
