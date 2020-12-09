@@ -197,3 +197,4 @@ Conduct](https://opensource.microsoft.com/codeofconduct/). For more information 
 2. Microsoft Research Webinar
     * Registration is free and all videos are available on-demand.
     * [ZeRO & Fastest BERT: Increasing the scale and speed of deep learning training in DeepSpeed](https://note.microsoft.com/MSR-Webinar-DeepSpeed-Registration-On-Demand.html).
+3. [DeepSpeed on AzureML](https://youtu.be/yBVXR8G8Bg8)
