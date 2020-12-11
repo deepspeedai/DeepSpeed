@@ -221,7 +221,7 @@ class CUDAOpBuilder(OpBuilder):
 
         1. `TORCH_CUDA_ARCH_LIST` takes priority over `cross_compile_archs`.
         2. If neither is set default compute capabilities will be used
-        3. Under `jit_mode` compute capabilities of all visible cards will be used.
+        3. Under `jit_mode` compute capabilities of all visible cards will be used plus PTX
 
         Format:
 
@@ -243,6 +243,7 @@ class CUDAOpBuilder(OpBuilder):
                 if cc not in ccs:
                     ccs.append(cc)
             ccs = sorted(ccs)
+            ccs[-1] += '+PTX'
         else:
             # Cross-compile mode, compile for various architectures
             # env override takes priority
@@ -260,8 +261,10 @@ class CUDAOpBuilder(OpBuilder):
 
         args = []
         for cc in ccs:
-            cc = cc.replace('.', '')
-            args.append(f'-gencode=arch=compute_{cc},code=compute_{cc}')
+            num = cc[0] + cc[2]
+            args.append(f'-gencode=arch=compute_{num},code=sm_{num}')
+            if cc.endswith('+PTX'):
+                args.append(f'-gencode=arch=compute_{num},code=compute_{num}')
 
         return args
 
