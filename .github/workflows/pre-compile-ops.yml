@@ -1,0 +1,47 @@
+# This is a basic workflow to help you get started with Actions
+
+name: Tests-w-precompiled-ops
+
+# Controls when the action will run.
+on:
+  # Allows you to run this workflow manually from the Actions tab
+  workflow_dispatch:
+
+# A workflow run is made up of one or more jobs that can run sequentially or in parallel
+jobs:
+  # This workflow contains a single job called "build"
+  build:
+    # The type of runner that the job will run on
+    runs-on: self-hosted
+
+    # Steps represent a sequence of tasks that will be executed as part of the job
+    steps:
+      # Checks-out your repository under $GITHUB_WORKSPACE, so your job can access it
+      - uses: actions/checkout@v2
+
+      # Runs a single command using the runners shell
+      - name: environment
+        run: |
+          nvidia-smi
+          which python
+          python --version
+          which nvcc
+          nvcc --version
+          python -c "import torch; print('torch:', torch.__version__, torch)"
+          python -c "import torch; print('CUDA available:', torch.cuda.is_available())"
+
+      # Runs a set of commands using the runners shell
+      - name: Install deepspeed
+        run: |
+          DS_BUILD_OPS=1 pip install .[dev]
+          ds_report
+
+      - name: Formatting checks
+        run: |
+           pre-commit run --all-files
+
+      # Runs a set of commands using the runners shell
+      - name: Unit tests
+        run: |
+          if [[ -d ./torch-extensions ]]; then rm -rf ./torch-extensions; fi
+          TORCH_EXTENSIONS_DIR=./torch-extensions pytest --durations=0 --forked --verbose -x tests/unit/
