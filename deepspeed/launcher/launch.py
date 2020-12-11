@@ -113,6 +113,7 @@ def main():
         # each process's rank
         dist_rank = global_rank_mapping[local_node][local_rank]
         current_env["RANK"] = str(dist_rank)
+        current_env["LOCAL_RANK"] = str(local_rank)
 
         # spawn the processes
         cmd = [
