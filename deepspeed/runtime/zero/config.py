@@ -6,6 +6,7 @@ Licensed under the MIT license.
 from deepspeed.runtime.config_utils import get_scalar_param
 from deepspeed.utils import logger
 from deepspeed.runtime.zero.constants import *
+import json
 
 
 class DeepSpeedZeroConfig(object):
@@ -53,6 +54,9 @@ class DeepSpeedZeroConfig(object):
 
     def repr(self):
         return self.__dict__
+
+    def __repr__(self):
+        return json.dumps(self.__dict__, sort_keys=True, indent=4)
 
     def _initialize(self, zero_config_dict):
         self.stage = get_scalar_param(zero_config_dict,
