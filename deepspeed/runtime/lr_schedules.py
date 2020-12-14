@@ -381,6 +381,12 @@ class LRRangeTest(object):
             lr_range_test_min_lr * lr_increase for lr_range_test_min_lr in self.min_lr
         ]
 
+    def get_last_lr(self):
+        """ Return last computed learning rate by current scheduler.
+        """
+        assert getattr(self, '_last_lr', None) is not None, "need to call step() first"
+        return self._last_lr
+
     def _update_optimizer(self, group_lrs):
         for param_group, lr in zip(self.optimizer.param_groups, group_lrs):
             param_group['lr'] = lr
@@ -390,6 +396,7 @@ class LRRangeTest(object):
             batch_iteration = self.last_batch_iteration + 1
         self.last_batch_iteration = batch_iteration
         self._update_optimizer(self.get_lr())
+        self._last_lr = [group['lr'] for group in self.optimizer.param_groups]
 
     def state_dict(self):
         return {'last_batch_iteration': self.last_batch_iteration}
@@ -628,12 +635,19 @@ class OneCycle(object):
             return self._get_cycle_lr()
         return self._get_decay_lr(self.last_batch_iteration - self.total_size)
 
+    def get_last_lr(self):
+        """ Return last computed learning rate by current scheduler.
+        """
+        assert getattr(self, '_last_lr', None) is not None, "need to call step() first"
+        return self._last_lr
+
     def step(self, batch_iteration=None):
         if batch_iteration is None:
             batch_iteration = self.last_batch_iteration + 1
         self.last_batch_iteration = batch_iteration
         for param_group, lr in zip(self.optimizer.param_groups, self.get_lr()):
             param_group['lr'] = lr
+        self._last_lr = [group['lr'] for group in self.optimizer.param_groups]
 
     def state_dict(self):
         return {'last_batch_iteration': self.last_batch_iteration}
@@ -690,12 +704,19 @@ class WarmupLR(object):
                             self.delta_lrs)
         ]
 
+    def get_last_lr(self):
+        """ Return last computed learning rate by current scheduler.
+        """
+        assert getattr(self, '_last_lr', None) is not None, "need to call step() first"
+        return self._last_lr
+
     def step(self, last_batch_iteration=None):
         if last_batch_iteration is None:
             last_batch_iteration = self.last_batch_iteration + 1
         self.last_batch_iteration = last_batch_iteration
         for param_group, lr in zip(self.optimizer.param_groups, self.get_lr()):
             param_group['lr'] = lr
+        self._last_lr = [group['lr'] for group in self.optimizer.param_groups]
 
     def state_dict(self):
         return {'last_batch_iteration': self.last_batch_iteration}
