@@ -28,7 +28,8 @@ deepspeed --hostfile=<hostfile> \
 	<client_entry.py> <client args> \
 	--deepspeed --deepspeed_config ds_config.json
 ```
-The script `<client_entry.py>` will execute on the resources specified in `<hostfile>`.
+The script `<client_entry.py>` will execute on the resources specified in
+[`<hostfile>`](/getting-started/#resource-configuration-multi-node).
 
 ## Pipeline Parallelism
 DeepSpeed provides [pipeline parallelism](/tutorials/pipeline/) for memory-
