@@ -18,7 +18,6 @@ stochastic_transformer_cuda_module = None
 class TransformerConfig():
     def __init__(self,
                  batch_size,
-                 max_seq_length,
                  hidden_size,
                  intermediate_size,
                  heads,
@@ -30,7 +29,6 @@ class TransformerConfig():
         self.batch_size = batch_size
         self.hidden_size = hidden_size
         self.intermediate_size = intermediate_size
-        self.max_seq_length = max_seq_length
         self.heads = heads
         self.attn_dropout_ratio = attn_dropout_ratio
         self.hidden_dropout_ratio = hidden_dropout_ratio
@@ -92,7 +90,6 @@ class DeepSpeedTransformerConfig(TransformerConfig):
     """
     def __init__(self,
                  batch_size=-1,
-                 max_seq_length=-1,
                  hidden_size=-1,
                  intermediate_size=-1,
                  heads=-1,
@@ -112,7 +109,6 @@ class DeepSpeedTransformerConfig(TransformerConfig):
         super(DeepSpeedTransformerConfig,
               self).__init__(
                   batch_size,
-                  max_seq_length,
                   hidden_size,
                   (intermediate_size if intermediate_size > 0 else 4 * hidden_size),
                   heads,
@@ -142,7 +138,7 @@ class DeepSpeedTransformerConfig(TransformerConfig):
 
     @classmethod
     def from_json_file(cls, json_file):
-        with open(json_file, "r", encoding='utf-8') as reader:
+        with open(json_file, "r", encoding='utf-16') as reader:
             text = reader.read()
         return cls.from_dict(json.loads(text))
 
@@ -176,6 +172,18 @@ class DeepSpeedTransformerFunction(Function):
 
         cuda_module = stochastic_transformer_cuda_module if config.stochastic_mode else transformer_cuda_module
         forward_func = cuda_module.forward_fp16 if config.fp16 else cuda_module.forward_fp32
+
+        inp_size = input.size()
+        if inp_size[1] % 16 != 0:
+            input = torch.cat((input,
+                               torch.randn((inp_size[0],
+                                            (16 - (inp_size[1] % 16)),
+                                            inp_size[2]),
+                                           device=input.device,
+                                           dtype=input.dtype)),
+                              1)
+            input_mask = torch.cat((input_mask, torch.ones((inp_size[0], input_mask.shape[1], input_mask.shape[2], \
+                                            (16 - (inp_size[1] % 16))), device=input_mask.device, dtype=input_mask.dtype) * -10000), 3)
 
         (output,
          inp_norm,
@@ -303,11 +311,17 @@ class DeepSpeedTransformerFunction(Function):
             ctx.attn_layer_norm_var = attn_layer_norm_var
             ctx.layer_norm_var = layer_norm_var
 
+        if inp_size[1] % 16 != 0:
+            output = torch.narrow(output, 1, 0, inp_size[1])
         return output
 
     @staticmethod
     def backward(ctx, grad_output):
         bsz = grad_output.shape[0]
+        grad_output_shape = grad_output.size()
+        if grad_output_shape[1] % 16 != 0:
+            grad_output = torch.cat((grad_output, torch.zeros((bsz, (16 - (grad_output_shape[1] % 16)), \
+                                        grad_output_shape[2]), device=grad_output.device, dtype=grad_output.dtype)), 1)
 
         if bsz > ctx.config.batch_size:
             raise ValueError('grad_output batch size exceeds the limit.')
@@ -397,6 +411,9 @@ class DeepSpeedTransformerFunction(Function):
              output_b,
              norm_w,
              norm_b)
+
+        if grad_output_shape[1] % 16 != 0:
+            grad_input = torch.narrow(grad_input, 1, 0, grad_output_shape[1])
 
         return (grad_input,
                 None,
@@ -501,7 +518,6 @@ class DeepSpeedTransformerLayer(nn.Module):
                           self.config.hidden_size,
                           self.config.heads,
                           self.config.intermediate_size,
-                          self.config.max_seq_length,
                           self.config.attn_dropout_ratio,
                           self.config.hidden_dropout_ratio,
                           self.config.seed,

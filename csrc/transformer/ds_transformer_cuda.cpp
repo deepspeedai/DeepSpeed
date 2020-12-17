@@ -14,6 +14,8 @@
 
 static std::unordered_map<int, std::shared_ptr<void>> s_transformer_layers;
 
+const int init_seq_length = 128;
+
 // C++ interface
 
 template <typename T>
@@ -591,7 +593,6 @@ int create_transformer_layer(int layer_id,
                              int hidden_dim,
                              int num_heads,
                              int intermediate_size,
-                             int seq_length,
                              float attn_dropout_ratio,
                              float hidden_dropout_ratio,
                              int seed,
@@ -604,14 +605,14 @@ int create_transformer_layer(int layer_id,
 {
     Context::Instance().SetSeed(seed);
     Context::Instance().TestGemmFP16(
-        test_gemm, batch_size, seq_length, num_heads, hidden_dim / num_heads);
+        test_gemm, batch_size, init_seq_length, num_heads, hidden_dim / num_heads);
 
     auto layer = std::make_shared<BertTransformerLayer<T>>(layer_id,
                                                            batch_size,
                                                            hidden_dim,
                                                            num_heads,
                                                            intermediate_size,
-                                                           seq_length,
+                                                           init_seq_length,
                                                            attn_dropout_ratio,
                                                            hidden_dropout_ratio,
                                                            pre_or_postLayerNorm,
@@ -872,6 +873,12 @@ std::vector<torch::Tensor> ds_transformer_backward(int layer_id,
 
     std::shared_ptr<BertTransformerLayer<T>> layer =
         std::static_pointer_cast<BertTransformerLayer<T>>(s_transformer_layers[layer_id]);
+
+    int seq_len = layer->GetSeqLength();
+    if (g_output.size(1) != seq_len) {
+        seq_len = g_output.size(1);
+        layer->SetSeqLength(seq_len, bsz);
+    }
 
     auto grad_input = torch::empty_like(input);
     auto grad_attn_qkvw = torch::empty_like(attn_qkvw);

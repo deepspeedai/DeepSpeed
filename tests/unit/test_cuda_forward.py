@@ -117,7 +117,7 @@ def create_models(ds_config):
                              hidden_act="gelu",
                              hidden_dropout_prob=ds_config.hidden_dropout_ratio,
                              attention_probs_dropout_prob=ds_config.attn_dropout_ratio,
-                             max_position_embeddings=ds_config.max_seq_length,
+                             max_position_embeddings=512,
                              type_vocab_size=2,
                              initializer_range=ds_config.initializer_range,
                              fp16=ds_config.fp16)
@@ -186,13 +186,8 @@ def run_forward(ds_config, seq_len, atol=1e-2, verbose=False, test_bsz=None):
 
     # prepare test data
     kwargs = kwargs_fp16 if ds_config.fp16 else kwargs_fp32
-    hidden_states = torch.randn(bsz,
-                                seq_len, #ds_config.max_seq_length,
-                                ds_config.hidden_size,
-                                **kwargs)
-    input_mask = torch.randn(bsz, 1, 1,
-                             seq_len, #ds_config.max_seq_length,
-                             **kwargs)
+    hidden_states = torch.randn(bsz, seq_len, ds_config.hidden_size, **kwargs)
+    input_mask = torch.randn(bsz, 1, 1, seq_len, **kwargs)
 
     # run baseline
     base_results = bert_encoder(hidden_states,
@@ -213,25 +208,25 @@ def run_forward(ds_config, seq_len, atol=1e-2, verbose=False, test_bsz=None):
 # FP16 test cases can only run on the devices support FP16.
 @pytest.mark.parametrize('batch_size, hidden_size, seq_len, heads, num_layers, is_preln, use_fp16',
                          [
-                             (8,256,128,4,3,True,False),
-                             (8,256,128,4,3,True,True),
-                             (64,1024,128,16,3,True,False),
-                             (64,1024,128,16,3,True,True),
-                             (8,1024,384,16,3,True,False),
+                             (8,256,53,4,3,True,False),
+                             (8,256,52,4,3,True,True),
+                             (3,1024,51,16,3,True,False),
+                             (3,1024,54,16,3,True,True),
+                             (8,1024,381,16,3,True,False),
                              (8,1024,384,16,3,True,True),
                              (8,1024,384,16,3,True,True),
-                             (8,1024,120,16,3,True,False),
+                             (8,1024,119,16,3,True,False),
                              (8,1024,120,16,3,True,True),
-                             (8,1024,512,16,3,True,False),
+                             (8,1024,509,16,3,True,False),
                              (8,1024,512,16,3,True,True),
                              (64,1024,56,16,3,False,False),
-                             (64,1024,56,16,3,False,True),
+                             (64,1024,53,16,3,False,True),
                              (64,1024,24,16,3,False,False),
-                             (64,1024,24,16,3,False,True),
+                             (64,1024,21,16,3,False,True),
                              (8,1024,384,16,3,False,False),
                              (8,1024,384,16,3,False,True),
                              (8,1024,512,16,3,False,False),
-                             (8,1024,512,16,3,False,True),
+                             (8,1024,511,16,3,False,True),
                              (8,1536,128,24,3,False,False),
                              (8,1536,128,24,3,False,True),
                              (8,2048,128,32,3,False,False),
@@ -259,7 +254,6 @@ def test_forward(batch_size,
     ds_config.layer_id = None
     ds_config.batch_size = batch_size
     ds_config.hidden_size = hidden_size
-    ds_config.max_seq_length = 128  #seq_len
     ds_config.intermediate_size = 4 * hidden_size
     ds_config.heads = heads
     ds_config.attn_dropout_ratio = 0.0
@@ -297,7 +291,6 @@ def test_forward_with_small_bsz(batch_size,
     ds_config.batch_size = batch_size
     ds_config.hidden_size = hidden_size
     ds_config.intermediate_size = 4 * hidden_size
-    ds_config.max_seq_length = seq_len
     ds_config.heads = heads
     ds_config.attn_dropout_ratio = 0.0
     ds_config.hidden_dropout_ratio = 0.0
@@ -332,7 +325,6 @@ def test_forward_stochastic(batch_size,
     ds_config.batch_size = batch_size
     ds_config.hidden_size = hidden_size
     ds_config.intermediate_size = 4 * hidden_size
-    ds_config.max_seq_length = seq_len
     ds_config.heads = heads
     ds_config.attn_dropout_ratio = 0.0
     ds_config.hidden_dropout_ratio = 0.0
