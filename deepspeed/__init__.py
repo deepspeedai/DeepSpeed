@@ -14,6 +14,7 @@ from .runtime.config import DeepSpeedConfig
 from .runtime.activation_checkpointing import checkpointing
 from .ops.transformer import DeepSpeedTransformerLayer, DeepSpeedTransformerConfig
 from .utils import log_dist
+from .utils.distributed import init_distributed
 
 from .pipe import PipelineModule
 

@@ -5,6 +5,8 @@ import torch
 import torch.distributed as dist
 from torch.multiprocessing import Process
 
+import deepspeed
+
 import pytest
 
 # Worker timeout *after* the first worker has completed.
@@ -33,10 +35,12 @@ def distributed_test(world_size=2, backend='nccl'):
             """Initialize torch.distributed and execute the user function. """
             os.environ['MASTER_ADDR'] = '127.0.0.1'
             os.environ['MASTER_PORT'] = '29503'
-            dist.init_process_group(backend=backend,
-                                    init_method='env://',
-                                    rank=local_rank,
-                                    world_size=num_procs)
+            os.environ['LOCAL_RANK'] = str(local_rank)
+            # NOTE: unit tests don't support multi-node so local_rank == global rank
+            os.environ['RANK'] = str(local_rank)
+            os.environ['WORLD_SIZE'] = str(num_procs)
+
+            deepspeed.init_distributed(dist_backend=backend)
 
             if torch.cuda.is_available():
                 torch.cuda.set_device(local_rank)

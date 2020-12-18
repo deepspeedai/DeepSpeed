@@ -16,7 +16,7 @@ import base64
 from collections import defaultdict
 from argparse import ArgumentParser, REMAINDER
 
-from .constants import TORCH_DISTRIBUTED_DEFAULT_PORT
+from ..constants import TORCH_DISTRIBUTED_DEFAULT_PORT
 from ..utils import logger
 
 

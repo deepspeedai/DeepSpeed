@@ -19,8 +19,8 @@ from copy import deepcopy
 import torch.cuda
 
 from .multinode_runner import PDSHRunner, OpenMPIRunner, MVAPICHRunner
-from .constants import TORCH_DISTRIBUTED_DEFAULT_PORT, \
-    PDSH_LAUNCHER, OPENMPI_LAUNCHER, MVAPICH_LAUNCHER
+from .constants import PDSH_LAUNCHER, OPENMPI_LAUNCHER, MVAPICH_LAUNCHER
+from ..constants import TORCH_DISTRIBUTED_DEFAULT_PORT
 from ..utils import logger
 
 DLTS_HOSTFILE = "/job/hostfile"
