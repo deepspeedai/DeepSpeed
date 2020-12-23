@@ -137,6 +137,10 @@ class DeepSpeedEngine(Module):
         self._configure_with_arguments(args, mpu)
         self._do_sanity_check()
 
+        if mpu is not None:
+            assert not self.elasticity_enabled(), "Elasticity is not currently supported" \
+                " with model parallelism."
+
         self._set_distributed_vars()
 
         if self.tensorboard_enabled() and self.global_rank == 0:
@@ -193,6 +197,22 @@ class DeepSpeedEngine(Module):
         util_ops = UtilsBuilder().load()
         self.flatten = util_ops.flatten
         self.unflatten = util_ops.unflatten
+
+    def get_batch_info(self):
+        """ Get all training batch related settings.
+
+        Returns:
+            train_batch_size (int): The effective training batch size. This is the amount of data
+                samples that leads to one step of model update.
+            train_micro_batch_size_per_gpu (int): Batch size to be processed by one GPU in one
+                step (without gradient accumulation).
+            gradient_accumulation_steps (int): Number of training steps to accumulate gradients
+                before averaging and applying them.
+        """
+        return self.train_batch_size, self.train_micro_batch_size_per_gpu, self.gradient_accumulation_steps
+
+    def elasticity_enabled(self):
+        return self._config.elasticity_enabled
 
     def pld_enabled(self):
         return self._config.pld_enabled
@@ -1224,10 +1244,13 @@ class DeepSpeedEngine(Module):
 
         if tag is None:
             latest_path = os.path.join(load_dir, 'latest')
-            assert os.path.isfile(latest_path), f"Unable to find latest file at {latest_path}, if trying to load latest " \
-                "checkpoint please ensure this file exists or pass an explicit checkpoint tag when loading a checkpoint."
-            with open(latest_path, 'r') as fd:
-                tag = fd.read().strip()
+            if os.path.isfile(latest_path):
+                with open(latest_path, 'r') as fd:
+                    tag = fd.read().strip()
+            else:
+                logger.warning(f"Unable to find latest file at {latest_path}, if trying to load latest " \
+                "checkpoint please ensure this file exists or pass an explicit checkpoint tag when loading a checkpoint.")
+                return None, None
 
         load_path, client_states = self._load_checkpoint(load_dir,
                                                          tag,

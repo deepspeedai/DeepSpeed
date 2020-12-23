@@ -13,6 +13,10 @@ def get_scalar_param(param_dict, param_name, param_default_value):
     return param_dict.get(param_name, param_default_value)
 
 
+def get_list_param(param_dict, param_name, param_default_value):
+    return param_dict.get(param_name, param_default_value)
+
+
 def dict_raise_error_on_duplicate_keys(ordered_pairs):
     """Reject duplicate keys."""
     d = dict((k, v) for k, v in ordered_pairs)

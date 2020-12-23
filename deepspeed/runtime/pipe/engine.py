@@ -54,6 +54,8 @@ class PipelineEngine(DeepSpeedEngine):
 
         # We schedule the all-reduces, so disable it in super().backward()
         self.enable_backward_allreduce = False
+        assert not self.elasticity_enabled(), "Elasticity is not currently supported" \
+            " with pipeline parallelism."
 
         # pipeline step for logging
         self.log_batch_step_id = -1

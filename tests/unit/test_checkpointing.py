@@ -757,7 +757,7 @@ def test_checkpoint_missing_latest(tmpdir):
         model, _, _,_ = deepspeed.initialize(args=args,
                                              model=model,
                                              model_parameters=model.parameters())
-        with pytest.raises(AssertionError):
-            model.load_checkpoint(tmpdir)
+        # should be no-op, since latest doesn't exist
+        model.load_checkpoint(tmpdir)
 
     _helper(args=args, model=model, hidden_dim=hidden_dim)

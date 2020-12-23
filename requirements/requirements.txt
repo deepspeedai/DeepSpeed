@@ -3,3 +3,4 @@ torchvision>=0.4.0
 tqdm
 tensorboardX==1.8
 ninja
+numpy
