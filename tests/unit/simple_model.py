@@ -161,16 +161,21 @@ def create_config_from_dict(tmpdir, config_dict):
     return config_path
 
 
-def args_from_dict(tmpdir, config_dict):
-    config_path = create_config_from_dict(tmpdir, config_dict)
+def create_deepspeed_args():
     parser = argparse.ArgumentParser()
     args = parser.parse_args(args='')
     args.deepspeed = True
-    args.deepspeed_config = config_path
     if torch.distributed.is_initialized():
         # We assume up to one full node executing unit tests
         assert torch.distributed.get_world_size() <= torch.cuda.device_count()
         args.local_rank = torch.distributed.get_rank()
     else:
         args.local_rank = 0
+    return args
+
+
+def args_from_dict(tmpdir, config_dict):
+    args = create_deepspeed_args()
+    config_path = create_config_from_dict(tmpdir, config_dict)
+    args.deepspeed_config = config_path
     return args

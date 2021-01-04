@@ -6,7 +6,7 @@ import json
 import os
 from deepspeed.ops.adam import FusedAdam
 from common import distributed_test
-from simple_model import SimpleModel, SimpleOptimizer, random_dataloader, args_from_dict
+from simple_model import SimpleModel, SimpleOptimizer, random_dataloader, args_from_dict, create_deepspeed_args
 
 try:
     from apex import amp
@@ -192,6 +192,41 @@ def test_adamw_fp16_basic(tmpdir):
             model.step()
 
     _test_adamw_fp16_basic(args=args, model=model, hidden_dim=hidden_dim)
+
+
+def test_dict_config_adamw_fp16_basic():
+    config_dict = {
+        "train_batch_size": 1,
+        "steps_per_print": 1,
+        "fp16": {
+            "enabled": True
+        }
+    }
+    args = create_deepspeed_args()
+    hidden_dim = 10
+
+    model = SimpleModel(hidden_dim, empty_grad=False)
+
+    @distributed_test(world_size=[1])
+    def _test_adamw_fp16_basic(args, model, hidden_dim, config_dict):
+        optimizer = torch.optim.AdamW(params=model.parameters())
+        model, _, _,_ = deepspeed.initialize(args=args,
+                                             model=model,
+                                             optimizer=optimizer,
+                                             config_params=config_dict)
+        data_loader = random_dataloader(model=model,
+                                        total_samples=50,
+                                        hidden_dim=hidden_dim,
+                                        device=model.device)
+        for n, batch in enumerate(data_loader):
+            loss = model(batch[0], batch[1])
+            model.backward(loss)
+            model.step()
+
+    _test_adamw_fp16_basic(args=args,
+                           model=model,
+                           hidden_dim=hidden_dim,
+                           config_dict=config_dict)
 
 
 def test_adamw_fp16_empty_grad(tmpdir):

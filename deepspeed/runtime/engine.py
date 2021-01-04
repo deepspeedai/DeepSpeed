@@ -435,9 +435,9 @@ class DeepSpeedEngine(Module):
     # Configure based on command line arguments
     def _configure_with_arguments(self, args, mpu):
         self.local_rank = args.local_rank if hasattr(args, 'local_rank') else 0
-        self._config = DeepSpeedConfig(args.deepspeed_config,
-                                       mpu,
-                                       param_dict=self.config_params)
+        config_file = args.deepspeed_config if hasattr(args,
+                                                       'deepspeed_config') else None
+        self._config = DeepSpeedConfig(config_file, mpu, param_dict=self.config_params)
 
     # Validate command line arguments
     def _do_args_sanity_check(self, args):
