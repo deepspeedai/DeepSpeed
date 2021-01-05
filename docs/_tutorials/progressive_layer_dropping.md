@@ -95,7 +95,7 @@ Note that the above configuration assumes training on 64 X 32GB V100 GPUs. Each 
 
 Table 1. Pre-training hyperparameters
 
-**Note:** DeepSpeed now supports PreLayerNorm as the default way for training BERT, because of its ability to avoid vanishing gradient, stablize optimization, and performance gains, as described in our fastest BERT training [blog post](https://www.deepspeed.ai/news/2020/05/27/fastest-bert-training.html). We therefore support the switchable Transformer block directly on the the BERT with PreLayerNorm. The implementation can be found at "example\bing_bert\nvidia\modelingpreln_layerdrop.py".
+**Note:** DeepSpeed now supports PreLayerNorm as the default way for training BERT, because of its ability to avoid vanishing gradient, stabilize optimization, and performance gains, as described in our fastest BERT training [blog post](https://www.deepspeed.ai/news/2020/05/27/fastest-bert-training.html). We therefore support the switchable Transformer block directly on the the BERT with PreLayerNorm. The implementation can be found at "example\bing_bert\nvidia\modelingpreln_layerdrop.py".
 
 ## Fine-tuning with DeepSpeed on GLUE Tasks
 

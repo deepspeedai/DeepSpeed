@@ -120,7 +120,7 @@ Alternatively, we show how the standard `mpirun` launcher can be used for launch
 mpirun -np [#processes] -ppn [#GPUs on each node] -hostfile [hostfile] [MPI flags] bash run_squad_mpi_onebitadam.sh
 ```
 
-For example, in order to use 32 GPUs (4GPUs/node, 8 nodes in total), with the support of InfiniBand, you can use the `mpirun` launcher packaged with the MVAPICH2 library. Please run the folowing command:
+For example, in order to use 32 GPUs (4GPUs/node, 8 nodes in total), with the support of InfiniBand, you can use the `mpirun` launcher packaged with the MVAPICH2 library. Please run the following command:
 
 ```shell
 mpirun -np 32 -ppn 4 -hostfile hosts -env MV2_USE_CUDA=1 -env MV2_SUPPORT_DL=1 -env MV2_ENABLE_AFFINITY=0 -env MV2_SMP_USE_CMA=0 bash run_squad_mpi_onebitadam.sh
@@ -166,7 +166,7 @@ We fixed the learning rate to 3e-5. The table below shows the F1 and the EM scor
 
 ***Training Speed and Scalability:***
 
-1-bit Adam enables up to 2.7x overall speedup in training speed for SQuAD fine-tuning. This is made possible by up to 6.2x faster througput during the compressed stage of the algorithm as shown in Figure 1.
+1-bit Adam enables up to 2.7x overall speedup in training speed for SQuAD fine-tuning. This is made possible by up to 6.2x faster throughput during the compressed stage of the algorithm as shown in Figure 1.
 
 ![SQuAD Finetuning](/assets/images/squad-scaling.png){: .align-center}
 

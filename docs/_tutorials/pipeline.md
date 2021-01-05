@@ -75,7 +75,7 @@ net = PipelineModule(layers=net, num_stages=2)
 ```
 `PipelineModule` uses its `layers` argument as the sequence of layers that
 comprise the model. After initialization, `net` is divided into two pipeline
-stages and its layers moved to the correpsonding GPUs. If more than two GPUs
+stages and its layers moved to the corresponding GPUs. If more than two GPUs
 are present, DeepSpeed will also use hybrid data parallelism.
 
 **Note:** The total number of GPUs must be divisible by the number of pipeline
