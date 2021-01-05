@@ -466,10 +466,9 @@ class DeepSpeedEngine(Module):
     # Validate configuration based on command line arguments
     def _do_sanity_check(self):
         if not self.client_optimizer:
-            assert self._is_supported_optimizer(self.optimizer_name()), \
-                '{} is not a supported DeepSpeed Optimizer'.format(self.optimizer_name())
-            assert self.client_model_parameters, \
-                'DeepSpeed {} optimizer requires parameters in initialize() call'.format(self.optimizer_name())
+            if self.optimizer_name() is not None:
+                assert self._is_supported_optimizer(self.optimizer_name()), \
+                    '{} is not a supported DeepSpeed Optimizer'.format(self.optimizer_name())
 
         if self.optimizer_name() == LAMB_OPTIMIZER:
             assert self.dynamic_loss_scale(), \
@@ -1289,7 +1288,7 @@ class DeepSpeedEngine(Module):
 
         self.load_module_state_dict(state_dict=checkpoint['module'],
                                     strict=load_module_strict)
-        if not self.zero_optimization():
+        if self.optimizer is not None and not self.zero_optimization():
             if self.fp16_enabled():
                 self.optimizer.load_state_dict(
                     checkpoint['optimizer'],
