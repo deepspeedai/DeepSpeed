@@ -43,8 +43,8 @@ config = DeepSpeedTransformerConfig(batch_size = 64,
                                     normalize_invertible=False,
                                     gelu_checkpoint=False)
 self.layer = nn.ModuleList([
-    copy.deepcopy(DeepSpeedTransformerLayer(i, cuda_config))
-    for i in range(config.num_hidden_layers)
+    copy.deepcopy(DeepSpeedTransformerLayer(cuda_config))
+    for _ in range(config.num_hidden_layers)
 ])
 ```
 ### Transformer kernel Parameters

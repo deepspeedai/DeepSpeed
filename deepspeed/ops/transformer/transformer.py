@@ -87,6 +87,10 @@ class DeepSpeedTransformerConfig(TransformerConfig):
                 that by enabling it, the pretraining tasks such as BERT are not affected and can obtain
                 a high accuracy level. On the other hand, for the downstream tasks, such as fine-tuning, we recommend
                 to turn it off in order to be able to reproduce the same result through the regular kernel execution.
+
+            huggingface: Enbale if using the HuggingFace interface style for sending out the forward results.
+
+            training: Enable for training rather than inference.
     """
     def __init__(self,
                  batch_size=-1,
@@ -105,7 +109,9 @@ class DeepSpeedTransformerConfig(TransformerConfig):
                  gelu_checkpoint=False,
                  adjust_init_range=True,
                  attn_dropout_checkpoint=False,
-                 stochastic_mode=False):
+                 stochastic_mode=False,
+                 huggingface=False,
+                 training=True):
         super(DeepSpeedTransformerConfig,
               self).__init__(
                   batch_size,
@@ -124,10 +130,11 @@ class DeepSpeedTransformerConfig(TransformerConfig):
         self.gelu_checkpoint = gelu_checkpoint  # True: if higher batch size is required
         self.adjust_init_range = adjust_init_range
         self.test_gemm = False
-        self.training = True
+        self.training = training
         self.is_grad_enabled = True
         self.attn_dropout_checkpoint = attn_dropout_checkpoint
         self.stochastic_mode = stochastic_mode
+        self.huggingface = huggingface
 
     @classmethod
     def from_dict(cls, json_object):
@@ -252,7 +259,7 @@ class DeepSpeedTransformerFunction(Function):
             norm_w.register_hook(lambda x, self=self: grads.append([x, "norm_W"]))
             norm_b.register_hook(lambda x, self=self: grads.append([x, "norm_B"]))
 
-        if config.is_grad_enabled:
+        if config.is_grad_enabled and config.training:
             if (config.pre_layer_norm and config.normalize_invertible):
                 ctx.save_for_backward(input_mask,
                                       attn_qkvw,
@@ -313,7 +320,11 @@ class DeepSpeedTransformerFunction(Function):
 
         if inp_size[1] % 16 != 0:
             output = torch.narrow(output, 1, 0, inp_size[1])
-        return output
+
+        if config.huggingface:
+            return (output, )  # outputs -> (output) : outputs[0] = output
+        else:
+            return output
 
     @staticmethod
     def backward(ctx, grad_output):
@@ -412,6 +423,25 @@ class DeepSpeedTransformerFunction(Function):
              norm_w,
              norm_b)
 
+        # This appears to be an effective way to release context memory
+        ctx.qkv_tf = None
+        ctx.soft_inp = None
+        ctx.ctx_bufB = None
+        ctx.gelu_inp = None
+        ctx.ff2_inp = None
+        ctx.attn_o_inp = None
+        ctx.ff1_inp = None
+        ctx.add_res = None
+        ctx.inp_norm = None
+        ctx.config = None
+        ctx.attn_layer_norm_mean = None
+        ctx.layer_norm_mean = None
+        ctx.attn_prob_dropout_mask = None
+        ctx.attn_output_dropout_mask = None
+        ctx.layer_output_dropout_mask = None
+        ctx.attn_layer_norm_var = None
+        ctx.layer_norm_var = None
+
         if grad_output_shape[1] % 16 != 0:
             grad_input = torch.narrow(grad_input, 1, 0, grad_output_shape[1])
 
@@ -438,21 +468,24 @@ class DeepSpeedTransformerFunction(Function):
 class DeepSpeedTransformerLayer(nn.Module):
     """Initialize the DeepSpeed Transformer Layer.
 
+        Static variable:
+            layer_id: The layer-index counter starting from 0 and incrementing by 1 every time a layer object is instantiated,
+            e.g. if a model has 24 transformer layers, layer_id goes from 0 to 23.
         Arguments:
-            layer_id: The layer index starting from 0, e.g. if model has 24 transformer layers,
-                layer_id will be 0,1,2...23 when each layer object is instantiated
-
             config: An object of DeepSpeedTransformerConfig
 
             initial_weights: Optional: Only used for unit test
 
             initial_biases: Optional: Only used for unit test
     """
-    def __init__(self, layer_id, config, initial_weights=None, initial_biases=None):
+    layer_id = 0
+
+    def __init__(self, config, initial_weights=None, initial_biases=None):
         super(DeepSpeedTransformerLayer, self).__init__()
 
         self.config = config
-        self.config.layer_id = layer_id
+        self.config.layer_id = DeepSpeedTransformerLayer.layer_id
+        DeepSpeedTransformerLayer.layer_id = DeepSpeedTransformerLayer.layer_id + 1
 
         print("DeepSpeed Transformer config is ", self.config.__dict__)
 
@@ -548,11 +581,18 @@ class DeepSpeedTransformerLayer(nn.Module):
         self.norm_w.data.fill_(1.0)
         self.norm_b.data.zero_()
 
-    def forward(self, input, input_mask, grads=None):
+    def forward(self,
+                hidden_states,
+                attention_mask=None,
+                head_mask=None,
+                encoder_hidden_states=None,
+                encoder_attention_mask=None,
+                output_attentions=False,
+                grads=None):
         self.config.training = self.training
         self.config.is_grad_enabled = torch.is_grad_enabled()
-        return DeepSpeedTransformerFunction.apply(input,
-                                                  input_mask,
+        return DeepSpeedTransformerFunction.apply(hidden_states,
+                                                  attention_mask,
                                                   self,
                                                   grads,
                                                   self.config.layer_id,

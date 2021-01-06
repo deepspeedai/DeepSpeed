@@ -284,10 +284,10 @@ transformer layers using DeepSpeed transformer kernel as below.
              gelu_checkpoint=args.gelu_checkpoint,
              stochastic_mode=True)
 
-         self.layer = nn.ModuleList([copy.deepcopy(DeepSpeedTransformerLayer(i, cuda_config)) for i in range(config.num_hidden_layers)])
+         layer = DeepSpeedTransformerLayer(cuda_config)
      else:
          layer = BertLayer(config)
-         self.layer = nn.ModuleList([copy.deepcopy(layer) for _ in range(config.num_hidden_layers)])
+     self.layer = nn.ModuleList([copy.deepcopy(layer) for _ in range(config.num_hidden_layers)])
 ```
 All configuration settings come from the DeepSpeed configuration file and
 command arguments and thus we must pass the `args` variable to here in this model.

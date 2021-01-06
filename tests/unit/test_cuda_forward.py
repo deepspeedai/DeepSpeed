@@ -48,11 +48,10 @@ class DSEncoder(nn.Module):
         super(DSEncoder, self).__init__()
         self.FinalLayerNorm = BertLayerNorm(config.hidden_size, eps=1e-12)
         self.layer = nn.ModuleList([
-            copy.deepcopy(DeepSpeedTransformerLayer(i,
-                                                    config,
+            copy.deepcopy(DeepSpeedTransformerLayer(config,
                                                     weights,
                                                     biases))
-            for i in range(config.num_hidden_layers)
+            for _ in range(config.num_hidden_layers)
         ])
         self.grads = []
         self.pre_or_post = config.pre_layer_norm
@@ -88,11 +87,6 @@ class DSEncoder(nn.Module):
         else:
             for i, layer_module in enumerate(self.layer):
                 hidden_states = layer_module(hidden_states, attention_mask)
-                hidden_states.register_hook(
-                    lambda x,
-                    i=i,
-                    self=self: self.grads.append([x,
-                                                  "hidden_state"]))
 
                 if output_all_encoded_layers:
                     all_encoder_layers.append(hidden_states)
@@ -102,9 +96,6 @@ class DSEncoder(nn.Module):
                 hidden_states = self.FinalLayerNorm(hidden_states)
             all_encoder_layers.append(hidden_states)
         return all_encoder_layers
-
-    def get_grads(self):
-        return self.grads
 
 
 def create_models(ds_config):
@@ -201,7 +192,7 @@ def run_forward(ds_config, seq_len, atol=1e-2, verbose=False, test_bsz=None):
                             output_all_encoded_layers=False,
                             checkpoint_activations=False)
 
-    # check grads
+    # check forward evaluation
     check_equal(base_results, ds_results, atol=atol, verbose=verbose)
 
 

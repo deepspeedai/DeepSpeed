@@ -83,11 +83,10 @@ class DSEncoder(nn.Module):
         super(DSEncoder, self).__init__()
         self.FinalLayerNorm = BertLayerNorm(config.hidden_size, eps=1e-12)
         self.layer = nn.ModuleList([
-            copy.deepcopy(DeepSpeedTransformerLayer(i,
-                                                    config,
+            copy.deepcopy(DeepSpeedTransformerLayer(config,
                                                     weights,
                                                     biases))
-            for i in range(config.num_hidden_layers)
+            for _ in range(config.num_hidden_layers)
         ])
         self.grads = []
         self.pre_or_post = config.pre_layer_norm
@@ -122,7 +121,9 @@ class DSEncoder(nn.Module):
             # decoder layers
         else:
             for i, layer_module in enumerate(self.layer):
-                hidden_states = layer_module(hidden_states, attention_mask, self.grads)
+                hidden_states = layer_module(hidden_states,
+                                             attention_mask,
+                                             grads=self.grads)
                 hidden_states.register_hook(
                     lambda x,
                     self=self: self.grads.append([x,
