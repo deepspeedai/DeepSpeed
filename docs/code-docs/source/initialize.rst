@@ -25,7 +25,7 @@ to add DeepSpeed's builtin arguments to your application's parser.
 
 Training Initialization
 -----------------------
-The entrypoint for all training with DeepSpeed is ``deepspeed.initialize()``.
+The entrypoint for all training with DeepSpeed is ``deepspeed.initialize()``. Will initialize distributed backend if it is not intialized already.
 
 Example usage:
 
@@ -36,3 +36,9 @@ Example usage:
                                                          model_parameters=net.parameters())
 
 .. autofunction:: deepspeed.initialize
+
+Distributed Initialization
+-----------------------
+Optional distributed backend initializating separate from ``deepspeed.initialize()``. Useful in scenarios where the user wants to use torch distributed calls before calling ``deepspeed.initialize()``, such as when using model parallelism, pipeline parallelism, or certain data loader scenarios.
+
+.. autofunction:: deepspeed.init_distributed
