@@ -46,9 +46,9 @@ MIN_GPUS_DEFAULT = 1
 MAX_GPUS = 'max_gpus'
 MAX_GPUS_DEFAULT = 10000
 
-# Minimum running time (minutes) before the scheduler will scale us
+# Minimum running time (minutes) before the scheduler will scale us, 0 implies it's unknown
 MIN_TIME = "min_time"
-MIN_TIME_DEFAULT = "20"
+MIN_TIME_DEFAULT = 0
 
 # When finding a suitable batch size, attempt to find one that is closest
 # to the max train batch size given.

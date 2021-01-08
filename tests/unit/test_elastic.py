@@ -107,6 +107,35 @@ def test_empty_config():
                                                     target_deepspeed_version=ds_version)
 
 
+@pytest.mark.parametrize('key, value',
+                         [('micro_batch_sizes',
+                           [1,
+                            4,
+                            -1,
+                            2,
+                            -10]),
+                          ('min_gpus',
+                           -1),
+                          ('max_gpus',
+                           -1),
+                          ('micro_batch_sizes',
+                           5),
+                          ('micro_batch_sizes',
+                           ['a',
+                            None,
+                            0.5]),
+                          ('micro_batch_sizes',
+                           [2,
+                            0.5,
+                            4])])
+def test_invalid_config_values(key, value):
+    ds_config = base_ds_config.copy()
+    ds_config['elasticity'][key] = value
+    with pytest.raises(deepspeed.elasticity.config.ElasticityError):
+        deepspeed.elasticity.compute_elastic_config(ds_config=ds_config,
+                                                    target_deepspeed_version=ds_version)
+
+
 def test_proper_mbsz():
     ds_config = base_ds_config.copy()
     ds_config["elasticity"]["max_train_batch_size"] = 32
