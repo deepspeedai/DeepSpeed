@@ -10,6 +10,7 @@ import pytest
 import deepspeed
 import deepspeed.runtime.utils as ds_utils
 
+
 from deepspeed.runtime.pipe.topology import PipeDataParallelTopology, PipeModelDataParallelTopology
 PipeTopo = PipeDataParallelTopology
 import deepspeed.runtime.pipe.module as PipelineModule
