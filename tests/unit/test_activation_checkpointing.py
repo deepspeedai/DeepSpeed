@@ -23,13 +23,25 @@ def _compute(module, *inputs, do_checkpoint=False):
 
     sum(o.sum() for o in outputs if o.requires_grad).backward()
     grads = [p.grad for p in module.parameters()]
-    input_grads = [inp.grad for inp in inputs]
+    input_grads = [inp.grad for inp in inputs if torch.is_tensor(inp)]
 
     return {
         'outputs': outputs,
         'module_grads': grads,
         'input_grads': input_grads,
     }
+
+
+def _prep_inputs(*inputs):
+    _inputs = []
+
+    for inp in inputs:
+        inp = deepcopy(inp)
+        if torch.is_tensor(inp):
+            inp = inp.cuda()
+        _inputs.append(inp)
+
+    return tuple(_inputs)
 
 
 # This is distributed because checkpoint() assumes that torch.distributed is initialized.
@@ -43,11 +55,11 @@ def _test_activation_checkpoint(module, *inputs):
     module.eval()
 
     module_ = deepcopy(module)
-    inputs_ = tuple(deepcopy(inp).cuda() for inp in inputs)
+    inputs_ = _prep_inputs(*inputs)
     base = _compute(module_, *inputs_, do_checkpoint=False)
 
     module_ = deepcopy(module)
-    inputs_ = tuple(deepcopy(inp).cuda() for inp in inputs)
+    inputs_ = _prep_inputs(*inputs)
     test = _compute(module_, *inputs_, do_checkpoint=True)
 
     for group in base.keys():
@@ -155,3 +167,15 @@ def test_ckpt_inputs2_outputs3(mask):
     inputs = torch.rand(HIDDEN_DIM)
     inputs.requires_grad = True
     _test_activation_checkpoint(module, inputs, mask)
+
+
+class DropMaskLinear(torch.nn.Linear):
+    def forward(self, x, mask):
+        return super().forward(x)
+
+
+def test_ckpt_arg_none():
+    module = DropMaskLinear(HIDDEN_DIM, HIDDEN_DIM)
+    inputs = (torch.rand(HIDDEN_DIM), None)
+    inputs[0].requires_grad = True
+    _test_activation_checkpoint(module, *inputs)

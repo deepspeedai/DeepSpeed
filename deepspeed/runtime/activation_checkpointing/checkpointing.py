@@ -373,6 +373,10 @@ class CheckpointFunction(torch.autograd.Function):
 
             inputs = []
             for i, item in enumerate(args[:-1]):
+                if not torch.is_tensor(item):
+                    inputs.append(item)
+                    continue
+
                 partition_size = get_partition_size(item)
                 partition = item.detach().contiguous().view(-1).narrow(
                     0,
@@ -413,7 +417,12 @@ class CheckpointFunction(torch.autograd.Function):
             inputs.append(args[-1])
 
         #just in case something funky is happening such as reuse of inputs
-        inputs_cuda = [item.to(cuda_device) for item in args]
+        inputs_cuda = []
+        for item in args:
+            if torch.is_tensor(item):
+                inputs_cuda.append(item.to(cuda_device))
+            else:
+                inputs_cuda.append(item)
 
         # Copy the rng states.
         ctx.fwd_cpu_rng_state = torch.get_rng_state()
@@ -439,6 +448,10 @@ class CheckpointFunction(torch.autograd.Function):
         if PARTITION_ACTIVATIONS:
             new_args = []
             for i, (arg, inp) in enumerate(zip(args, inputs)):
+                if not torch.is_tensor(arg):
+                    new_args.append(arg)
+                    continue
+
                 size = torch.tensor(arg.size())
 
                 arg.data = inp.data
@@ -573,7 +586,14 @@ class CheckpointFunction(torch.autograd.Function):
             timers.log(['backward'])
         if SYNCHRONIZE:
             torch.cuda.synchronize()
-        return (None, ) + tuple(inp.grad for inp in detached_inputs)
+        ret_list = [None]  # first None for ctx
+        for inp in detached_inputs:
+            if torch.is_tensor(inp):
+                ret_list.append(inp.grad)
+            else:
+                ret_list.append(None)
+
+        return tuple(ret_list)
 
 
 def checkpoint(function, *args):
