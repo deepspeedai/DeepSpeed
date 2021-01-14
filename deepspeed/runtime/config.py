@@ -40,6 +40,10 @@ TORCH_ADAM_PARAM = "torch_adam"
 ADAM_W_MODE_PARAM = "adam_w_mode"
 
 
+class DeepSpeedConfigError(Exception):
+    pass
+
+
 def get_pld_enabled(param_dict):
     if PROGRESSIVE_LAYER_DROP in param_dict.keys():
         return get_scalar_param(param_dict[PROGRESSIVE_LAYER_DROP],
@@ -471,6 +475,21 @@ def get_tensorboard_job_name(param_dict):
         return TENSORBOARD_JOB_NAME_DEFAULT
 
 
+def get_checkpoint_params(param_dict):
+    return param_dict.get(CHECKPOINT, {})
+
+
+def get_checkpoint_tag_validation_mode(checkpoint_params):
+    tag_validation_mode = checkpoint_params.get(CHECKPOINT_TAG_VALIDATION,
+                                                CHECKPOINT_TAG_VALIDATION_DEFAULT)
+    tag_validation_mode = tag_validation_mode.upper()
+    if tag_validation_mode in CHECKPOINT_TAG_VALIDATION_MODES:
+        return tag_validation_mode
+    else:
+        raise DeepSpeedConfigError("Checkpoint config contains invalid tag_validation " \
+            f"value of {tag_validation_mode}, expecting one of {CHECKPOINT_TAG_VALIDATION_MODES}")
+
+
 '''Write deepspeed config files by modifying basic templates.
 Can be used for quicly changing parameters via command line parameters.'''
 
@@ -626,6 +645,11 @@ class DeepSpeedConfig(object):
 
         self.pld_enabled = get_pld_enabled(param_dict)
         self.pld_params = get_pld_params(param_dict)
+
+        checkpoint_params = get_checkpoint_params(param_dict)
+        validation_mode = get_checkpoint_tag_validation_mode(checkpoint_params)
+        self.checkpoint_tag_validation_enabled = validation_mode != ValidationMode.IGNORE
+        self.checkpoint_tag_validation_fail = validation_mode == ValidationMode.FAIL
 
     def _batch_assertion(self):
 

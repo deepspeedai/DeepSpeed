@@ -761,3 +761,68 @@ def test_checkpoint_missing_latest(tmpdir):
         model.load_checkpoint(tmpdir)
 
     _helper(args=args, model=model, hidden_dim=hidden_dim)
+
+
+@pytest.mark.parametrize('valid_mode', ["FAIL", "WARN", "IGNORE"])
+def test_checkpoint_unique_tag(tmpdir, valid_mode):
+    config_dict = {
+        "train_batch_size": 2,
+        "steps_per_print": 1,
+        "optimizer": {
+            "type": "Adam",
+            "params": {
+                "lr": 0.00015
+            }
+        },
+        "checkpoint": {
+            "tag_validation": valid_mode
+        }
+    }
+    hidden_dim = 10
+    args = args_from_dict(tmpdir, config_dict)
+
+    model = SimpleModel(hidden_dim, rank=args.local_rank)
+
+    @distributed_test(world_size=[2])
+    def _helper(args, model, hidden_dim):
+        model, _, _,_ = deepspeed.initialize(args=args,
+                                             model=model,
+                                             model_parameters=model.parameters())
+        if valid_mode == "FAIL":
+            with pytest.raises(AssertionError):
+                model.save_checkpoint(save_dir=tmpdir,
+                                      tag=f"tag-{torch.distributed.get_rank()}")
+        else:
+            model.save_checkpoint(save_dir=tmpdir,
+                                  tag=f"tag-{torch.distributed.get_rank()}")
+
+    _helper(args=args, model=model, hidden_dim=hidden_dim)
+
+
+def test_checkpoint_unknown_tag_validation(tmpdir):
+    config_dict = {
+        "train_batch_size": 2,
+        "steps_per_print": 1,
+        "optimizer": {
+            "type": "Adam",
+            "params": {
+                "lr": 0.00015
+            }
+        },
+        "checkpoint": {
+            "tag_validation": "foo"
+        }
+    }
+    hidden_dim = 10
+    args = args_from_dict(tmpdir, config_dict)
+
+    model = SimpleModel(hidden_dim, rank=args.local_rank)
+
+    @distributed_test(world_size=[1])
+    def _helper(args, model, hidden_dim):
+        with pytest.raises(deepspeed.DeepSpeedConfigError):
+            model, _, _,_ = deepspeed.initialize(args=args,
+                                                 model=model,
+                                                 model_parameters=model.parameters())
+
+    _helper(args=args, model=model, hidden_dim=hidden_dim)
