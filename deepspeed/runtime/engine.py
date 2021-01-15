@@ -19,8 +19,8 @@ from deepspeed.runtime.activation_checkpointing import checkpointing as activati
 from deepspeed.runtime.fp16.fused_optimizer import FP16_Optimizer
 from deepspeed.runtime.fp16.unfused_optimizer import FP16_UnfusedOptimizer
 from deepspeed.runtime.config import DeepSpeedConfig, DEEPSPEED_OPTIMIZERS, \
-    ADAM_OPTIMIZER, LAMB_OPTIMIZER, ONEBIT_ADAM_OPTIMIZER, \
-    TORCH_ADAM_PARAM, ADAM_W_MODE_PARAM
+    ADAM_OPTIMIZER, ADAMW_OPTIMIZER, LAMB_OPTIMIZER, ONEBIT_ADAM_OPTIMIZER, \
+    TORCH_ADAM_PARAM
 
 from deepspeed.runtime.dataloader import DeepSpeedDataLoader
 from deepspeed.runtime.constants import \
@@ -582,10 +582,9 @@ class DeepSpeedEngine(Module):
                 "'max_grad_norm' is not supported as an optimizer parameter, please switch to using the deepspeed parameter 'gradient_clipping' see: https://www.deepspeed.ai/docs/config-json/#gradient-clipping for more details"
             )
 
-        if self.optimizer_name() == ADAM_OPTIMIZER:
+        if self.optimizer_name() in [ADAM_OPTIMIZER, ADAMW_OPTIMIZER]:
             torch_adam = optimizer_parameters.pop(TORCH_ADAM_PARAM, False)
-            adam_w_mode = optimizer_parameters.pop(ADAM_W_MODE_PARAM, True)
-
+            adam_w_mode = self.optimizer_name() == ADAMW_OPTIMIZER
             # zero-offload  torch-adam  adam_w_mode optimizer
             # T|F           T           T           torch.optim.AdamW
             # T|F           T           F           torch.optim.Adam
@@ -603,7 +602,7 @@ class DeepSpeedEngine(Module):
                                              **optimizer_parameters,
                                              adamw_mode=adam_w_mode)
             else:
-                optimizer_parameters[ADAM_W_MODE_PARAM] = adam_w_mode
+                optimizer_parameters['adam_w_mode'] = adam_w_mode
                 optimizer = FusedAdam(model_parameters, **optimizer_parameters)
 
         elif self.optimizer_name() == LAMB_OPTIMIZER:
