@@ -120,9 +120,12 @@ def fetch_hostfile(hostfile_path):
 
     # e.g., worker-0 slots=16
     with open(hostfile_path, 'r') as fd:
-
         resource_pool = collections.OrderedDict()
         for line in fd.readlines():
+            line = line.strip()
+            if line == '':
+                # skip empty lines
+                continue
             try:
                 hostname, slots = line.split()
                 _, slot_count = slots.split("=")
