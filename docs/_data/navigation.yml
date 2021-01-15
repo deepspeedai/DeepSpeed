@@ -37,12 +37,18 @@ lnav:
         url: /docs/config-json/#communication-options
       - title: "FP16"
         url: /docs/config-json/#fp16-training-options
+      - title: "AMP"
+        url: /docs/config-json/#automatic-mixed-precision-amp-training-options
+      - title: "Gradient Clipping"
+        url: /docs/config-json/#gradient-clipping
       - title: "ZeRO optimizations"
         url: /docs/config-json/#zero-optimizations-for-fp16-training
       - title: "Logging"
         url: /docs/config-json/#logging
       - title: "Activation checkpointing"
         url: /docs/config-json/#activation-checkpointing
+      - title: "Sparse Attention"
+        url: /docs/config-json/#sparse-attention
   - title: "Tutorials"
     url: /tutorials/
     children:
