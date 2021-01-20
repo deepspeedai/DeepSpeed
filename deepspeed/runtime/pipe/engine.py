@@ -206,6 +206,16 @@ class PipelineEngine(DeepSpeedEngine):
         self.set_dataloader(pipe_dataloader)
 
     def _exec_reduce_tied_grads(self):
+        # We need to run this first to write to self.averaged_gradients;
+        # since this class turns `enable_backward_allreduce` off,
+        # `self.overlapping_partition_gradients_reduce_epilogue()` defined in the DeepSpeedEngine
+        # never actually runs. I suspect this is because of efficiency problems; get_flat_partition in
+        # stage2.py might do something expensive; someone will have to look into that later. But
+        # in the meantime, this fixes ZeRO2 + Pipelining enough to run a demo. Further profiling
+        # needed to decide if it actually breaks everything.
+        # (see https://github.com/EleutherAI/gpt-neox/issues/62#issuecomment-761471944)
+        if self.zero_optimization_partition_gradients():
+            self.optimizer.overlapping_partition_gradients_reduce_epilogue()
         self.module.allreduce_tied_weight_gradients()
 
     def _exec_reduce_grads(self):
