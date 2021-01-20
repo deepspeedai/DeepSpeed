@@ -229,15 +229,15 @@ Example of ***scheduler***
 
 ### ZeRO Optimizations for FP16 Training
 
-Enabling and configure ZeRO memory optimizations
+Enabling and configuring ZeRO memory optimizations
 ```json
   "zero_optimization": {
     "stage": [0|1|2],
     "allgather_partitions": [true|false],
-    "allgather_bucket_size": 500000000,
+    "allgather_bucket_size": 5e8,
     "overlap_comm": false,
     "reduce_scatter": [true|false],
-    "reduce_bucket_size": 500000000,
+    "reduce_bucket_size": 5e8,
     "contiguous_gradients" : [true|false],
     "cpu_offload": [true|false]
     }
@@ -265,7 +265,7 @@ Enabling and configure ZeRO memory optimizations
 
 | Description                                                  | Default |
 | ------------------------------------------------------------ | ------- |
-| Number of elements allgathered at a time. Limits the memory required for the allgather for large model sizes   | `500000000`   |
+| Number of elements allgathered at a time. Limits the memory required for the allgather for large model sizes   | `5e8`   |
 
 ***overlap_comm***: [boolean]
 
@@ -283,7 +283,7 @@ Enabling and configure ZeRO memory optimizations
 
 | Description                                                  | Default |
 | ------------------------------------------------------------ | ------- |
-| Number of elements reduced/allreduced at a time. Limits the memory required for the allgather for large model sizes   | `500000000`   |
+| Number of elements reduced/allreduced at a time. Limits the memory required for the allgather for large model sizes   | `5e8`   |
 
 ***contiguous_gradients***: [boolean]
 
