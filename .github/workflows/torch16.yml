@@ -4,9 +4,9 @@ name: Torch16
 
 # Controls when the action will run.
 on:
-  pull_request:
-    paths-ignore:
-    - 'docs/**'
+  #pull_request:
+  #  paths-ignore:
+  #  - 'docs/**'
   # Allows you to run this workflow manually from the Actions tab
   workflow_dispatch:
   
