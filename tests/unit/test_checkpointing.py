@@ -750,7 +750,7 @@ def test_checkpoint_missing_latest(tmpdir):
     hidden_dim = 10
     args = args_from_dict(tmpdir, config_dict)
 
-    model = SimpleModel(hidden_dim, rank=args.local_rank)
+    model = SimpleModel(hidden_dim)
 
     @distributed_test(world_size=[1])
     def _helper(args, model, hidden_dim):
@@ -781,7 +781,7 @@ def test_checkpoint_unique_tag(tmpdir, valid_mode):
     hidden_dim = 10
     args = args_from_dict(tmpdir, config_dict)
 
-    model = SimpleModel(hidden_dim, rank=args.local_rank)
+    model = SimpleModel(hidden_dim)
 
     @distributed_test(world_size=[2])
     def _helper(args, model, hidden_dim):
@@ -816,7 +816,7 @@ def test_checkpoint_unknown_tag_validation(tmpdir):
     hidden_dim = 10
     args = args_from_dict(tmpdir, config_dict)
 
-    model = SimpleModel(hidden_dim, rank=args.local_rank)
+    model = SimpleModel(hidden_dim)
 
     @distributed_test(world_size=[1])
     def _helper(args, model, hidden_dim):

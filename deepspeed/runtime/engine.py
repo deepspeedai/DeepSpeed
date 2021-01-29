@@ -458,7 +458,11 @@ class DeepSpeedEngine(Module):
 
     # Configure based on command line arguments
     def _configure_with_arguments(self, args, mpu):
-        self.local_rank = args.local_rank if hasattr(args, 'local_rank') else 0
+        self.local_rank = args.local_rank if hasattr(
+            args,
+            'local_rank') else int(os.environ.get("LOCAL_RANK",
+                                                  -1))
+
         config_file = args.deepspeed_config if hasattr(args,
                                                        'deepspeed_config') else None
         self._config = DeepSpeedConfig(config_file, mpu, param_dict=self.config_params)
@@ -473,8 +477,15 @@ class DeepSpeedEngine(Module):
                 assert args.deepspeed_config is None, "Not sure how to proceed, we were given both a deepscale_config and deepspeed_config"
             args.deepspeed_config = args.deepscale_config
 
-        assert hasattr(args, 'local_rank') and type(args.local_rank) == int, \
-            'DeepSpeed requires integer command line parameter --local_rank'
+        local_rank_err = "DeepSpeed requires a command line parameter of --local_rank [int] and/or setting the LOCAL_RANK environment variable."
+        if hasattr(args, 'local_rank'):
+            assert type(args.local_rank) == int, local_rank_err
+            if "LOCAL_RANK" in os.environ:
+                env_local_rank = int(os.environ.get("LOCAL_RANK", -1))
+                assert env_local_rank == args.local_rank, \
+                    f"Mismatch in local rank setting, args.local_rank={args.local_rank} but env['LOCAL_RANK']={env_local_rank}."
+        else:
+            assert "LOCAL_RANK" in os.environ, local_rank_err
 
         if self.config_params is None:
             assert hasattr(args, 'deepspeed_config') and args.deepspeed_config is not None, \

@@ -31,7 +31,7 @@ def test_lamb_fp32_grad_clip(tmpdir):
     args = args_from_dict(tmpdir, config_dict)
     hidden_dim = 10
 
-    model = SimpleModel(hidden_dim, empty_grad=False)
+    model = SimpleModel(hidden_dim)
 
     @distributed_test(world_size=[1, 2])
     def _test_lamb_fp32_grad_clip(args, model, hidden_dim):
@@ -69,7 +69,7 @@ def test_lamb_fp16_basic(tmpdir):
     args = args_from_dict(tmpdir, config_dict)
     hidden_dim = 10
 
-    model = SimpleModel(hidden_dim, empty_grad=False)
+    model = SimpleModel(hidden_dim)
 
     @distributed_test(world_size=[1, 2])
     def _test_lamb_fp16_basic(args, model, hidden_dim):
@@ -106,7 +106,7 @@ def test_lamb_fp16_empty_grad(tmpdir):
     args = args_from_dict(tmpdir, config_dict)
     hidden_dim = 10
 
-    model = SimpleModel(hidden_dim, empty_grad=True, rank=args.local_rank)
+    model = SimpleModel(hidden_dim, empty_grad=True)
 
     @distributed_test(world_size=[2])
     def _test_lamb_fp16_empty_grad(args, model, hidden_dim):
@@ -143,7 +143,7 @@ def test_adam_fp32_empty_grad(tmpdir):
     args = args_from_dict(tmpdir, config_dict)
     hidden_dim = 10
 
-    model = SimpleModel(hidden_dim, empty_grad=True, rank=args.local_rank)
+    model = SimpleModel(hidden_dim, empty_grad=True)
 
     @distributed_test(world_size=[2])
     def _test_adam_fp32_empty_grad(args, model, hidden_dim):
@@ -174,7 +174,7 @@ def test_adamw_fp16_basic(tmpdir):
     args = args_from_dict(tmpdir, config_dict)
     hidden_dim = 10
 
-    model = SimpleModel(hidden_dim, empty_grad=False)
+    model = SimpleModel(hidden_dim)
 
     @distributed_test(world_size=[1])
     def _test_adamw_fp16_basic(args, model, hidden_dim):
@@ -205,7 +205,7 @@ def test_dict_config_adamw_fp16_basic():
     args = create_deepspeed_args()
     hidden_dim = 10
 
-    model = SimpleModel(hidden_dim, empty_grad=False)
+    model = SimpleModel(hidden_dim)
 
     @distributed_test(world_size=[1])
     def _test_adamw_fp16_basic(args, model, hidden_dim, config_dict):
@@ -240,7 +240,7 @@ def test_adamw_fp16_empty_grad(tmpdir):
     args = args_from_dict(tmpdir, config_dict)
     hidden_dim = 10
 
-    model = SimpleModel(hidden_dim, empty_grad=True)
+    model = SimpleModel(hidden_dim)
 
     @distributed_test(world_size=[1])
     def _test_adamw_fp16_empty_grad(args, model, hidden_dim):
@@ -307,7 +307,7 @@ def test_adam_fp16_zero_onecycle_compatibility(tmpdir, zero_stage, use_cpu_offlo
     args = args_from_dict(tmpdir, config_dict)
     hidden_dim = 10
 
-    model = SimpleModel(hidden_dim, empty_grad=True)
+    model = SimpleModel(hidden_dim)
 
     @distributed_test(world_size=[1])
     def _test_adam_fp16_zero_onecycle_compatibility(args, model, hidden_dim):
@@ -363,7 +363,7 @@ def test_zero_static_scale(tmpdir, zero_stage, use_cpu_offload):
     @distributed_test(world_size=2)
     def _test_zero_static_scale(args):
         hidden_dim = 10
-        model = SimpleModel(hidden_dim, empty_grad=True)
+        model = SimpleModel(hidden_dim)
         model, optim, _, _ = deepspeed.initialize(args=args,
                                                   model=model,
                                                   model_parameters=model.parameters())
@@ -406,7 +406,7 @@ def test_zero_static_scale_deprecated_format(tmpdir):
     @distributed_test(world_size=2)
     def _test_zero_static_scale(args):
         hidden_dim = 10
-        model = SimpleModel(hidden_dim, empty_grad=True)
+        model = SimpleModel(hidden_dim)
         model, optim, _, _ = deepspeed.initialize(args=args,
                                                   model=model,
                                                   model_parameters=model.parameters())
@@ -457,7 +457,7 @@ def test_zero_allow_untested_optimizer(tmpdir, zero_stage, use_cpu_offload):
     @distributed_test(world_size=[1])
     def _test_zero_allow_untested_optimizer(args):
         hidden_dim = 10
-        model = SimpleModel(hidden_dim, empty_grad=True)
+        model = SimpleModel(hidden_dim)
         optimizer = SimpleOptimizer(model.parameters())
         with pytest.raises(AssertionError):
             model, optim, _, _ = deepspeed.initialize(args=args,
@@ -531,7 +531,7 @@ def test_adam_amp_basic(tmpdir):
     args = args_from_dict(tmpdir, config_dict)
     hidden_dim = 10
 
-    model = SimpleModel(hidden_dim, empty_grad=False)
+    model = SimpleModel(hidden_dim)
 
     @distributed_test(world_size=[1])
     def _test_adam_amp_basic(args, model, hidden_dim):
@@ -570,7 +570,7 @@ def test_lamb_amp_basic(tmpdir):
     args = args_from_dict(tmpdir, config_dict)
     hidden_dim = 10
 
-    model = SimpleModel(hidden_dim, empty_grad=False)
+    model = SimpleModel(hidden_dim)
 
     @distributed_test(world_size=[1, 2])
     def _test_lamb_amp_basic(args, model, hidden_dim):
@@ -609,7 +609,7 @@ def test_adam_amp_o2(tmpdir):
     args = args_from_dict(tmpdir, config_dict)
     hidden_dim = 10
 
-    model = SimpleModel(hidden_dim, empty_grad=False)
+    model = SimpleModel(hidden_dim)
 
     @distributed_test(world_size=[1, 2])
     def _test_adam_amp_o2(args, model, hidden_dim):
@@ -648,7 +648,7 @@ def test_adam_amp_o2_empty_grad(tmpdir):
     args = args_from_dict(tmpdir, config_dict)
     hidden_dim = 10
 
-    model = SimpleModel(hidden_dim, empty_grad=False, rank=args.local_rank)
+    model = SimpleModel(hidden_dim)
 
     @distributed_test(world_size=[2])
     def _test_adam_amp_o2_empty_grad(args, model, hidden_dim):
@@ -688,7 +688,7 @@ def test_zero_supported_client_optimizer(tmpdir, zero_stage, optimizer_construct
     args = args_from_dict(tmpdir, config_dict)
     hidden_dim = 10
 
-    model = SimpleModel(hidden_dim, empty_grad=False)
+    model = SimpleModel(hidden_dim)
 
     @distributed_test(world_size=[1])
     def _test_zero_supported_client_optimizer(args, model, optimizer_constructor):
@@ -728,7 +728,7 @@ def test_zero2_reduce_scatter_off(tmpdir):
     args = args_from_dict(tmpdir, config_dict)
     hidden_dim = 10
 
-    model = SimpleModel(hidden_dim, rank=args.local_rank)
+    model = SimpleModel(hidden_dim)
 
     @distributed_test(world_size=[2])
     def _helper(args, model, hidden_dim):
@@ -775,7 +775,7 @@ def test_fp16_adam_types(tmpdir, adam_type, torch_impl):
     args = args_from_dict(tmpdir, config_dict)
     hidden_dim = 10
 
-    model = SimpleModel(hidden_dim, empty_grad=False)
+    model = SimpleModel(hidden_dim)
 
     @distributed_test(world_size=[1])
     def _test_fp16_adam_types(args, model, hidden_dim):

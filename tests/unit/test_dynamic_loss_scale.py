@@ -39,7 +39,7 @@ def test_fused_no_overflow(tmpdir):
     @distributed_test(world_size=1)
     def _test_fused_no_overflow(args):
         hidden_dim = 1
-        model = SimpleModel(hidden_dim, empty_grad=True)
+        model = SimpleModel(hidden_dim)
         model, optim, _, _ = deepspeed.initialize(args=args,
                                                   model=model,
                                                   model_parameters=model.parameters())
@@ -83,7 +83,7 @@ def test_fused_all_overflow(tmpdir):
     @distributed_test(world_size=1)
     def _test_fused_all_overflow(args):
         hidden_dim = 1
-        model = SimpleModel(hidden_dim, empty_grad=True)
+        model = SimpleModel(hidden_dim)
         model, optim, _, _ = deepspeed.initialize(args=args,
                                                   model=model,
                                                   model_parameters=model.parameters())
@@ -125,7 +125,7 @@ def test_fused_some_overflow(tmpdir):
     @distributed_test(world_size=1)
     def _test_fused_some_overflow(args):
         hidden_dim = 1
-        model = SimpleModel(hidden_dim, empty_grad=True)
+        model = SimpleModel(hidden_dim)
         model, optim, _, _ = deepspeed.initialize(args=args,
                                                   model=model,
                                                   model_parameters=model.parameters())
@@ -187,7 +187,7 @@ def test_unfused_no_overflow(tmpdir):
     @distributed_test(world_size=1)
     def _test_unfused_no_overflow(args):
         hidden_dim = 1
-        model = SimpleModel(hidden_dim, empty_grad=True)
+        model = SimpleModel(hidden_dim)
         model, optim, _, _ = deepspeed.initialize(args=args,
                                                   model=model,
                                                   model_parameters=model.parameters())
@@ -231,7 +231,7 @@ def test_unfused_all_overflow(tmpdir):
     @distributed_test(world_size=1)
     def _test_unfused_all_overflow(args):
         hidden_dim = 1
-        model = SimpleModel(hidden_dim, empty_grad=True)
+        model = SimpleModel(hidden_dim)
         model, optim, _, _ = deepspeed.initialize(args=args,
                                                   model=model,
                                                   model_parameters=model.parameters())
@@ -275,7 +275,7 @@ def test_unfused_some_overflow(tmpdir):
     @distributed_test(world_size=1)
     def _test_unfused_some_overflow(args):
         hidden_dim = 1
-        model = SimpleModel(hidden_dim, empty_grad=True)
+        model = SimpleModel(hidden_dim)
         model, optim, _, _ = deepspeed.initialize(args=args,
                                                   model=model,
                                                   model_parameters=model.parameters())
