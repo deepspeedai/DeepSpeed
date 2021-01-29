@@ -478,17 +478,6 @@ class PipelineEngine(DeepSpeedEngine):
         if self.batch_fn:
             batch = self.batch_fn(batch)
 
-        # Sanity check dimensions.
-        # XXX: the last minibatch with size < micro_batch_size kills us
-        if torch.is_tensor(batch[0]):
-            if batch[0].size(0) != self.micro_batch_size:
-                print(f'size mismatch: {batch[0].size(0)} mb: {self.micro_batch_size}')
-                return self._next_batch()
-        else:
-            assert torch.is_tensor(batch[0][0])
-            if batch[0][0].size(0) != self.micro_batch_size:
-                return self._next_batch()
-
         return batch
 
     def _exec_forward_pass(self, buffer_id):
@@ -1170,3 +1159,11 @@ class PipelineEngine(DeepSpeedEngine):
                 # Equivalent to: self._exec_forward_pass(buffer_id=0)
                 self._exec_instr = MethodType(self._INSTRUCTION_MAP[type(cmd)], self)
                 self._exec_instr(**cmd.kwargs)
+
+    def set_batch_fn(self, fn):
+        """Execute a post-processing function on input data.
+
+        Args:
+            fn (function): The function to run.
+        """
+        self.batch_fn = fn
