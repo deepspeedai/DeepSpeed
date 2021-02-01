@@ -6,11 +6,14 @@ import json
 import deepspeed
 from deepspeed.elasticity import compute_elastic_config
 
-
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('-c', '--config', type=str, help="DeepSpeed config json")
-    parser.add_argument('-w', '--world-size', type=int, default=0, help="Intended/current world size")
+    parser.add_argument('-w',
+                        '--world-size',
+                        type=int,
+                        default=0,
+                        help="Intended/current world size")
     args = parser.parse_args()
     ds_config = json.load(open(args.config, 'r'))
 
