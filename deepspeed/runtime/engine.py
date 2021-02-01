@@ -480,7 +480,7 @@ class DeepSpeedEngine(Module):
         local_rank_err = "DeepSpeed requires a command line parameter of --local_rank [int] and/or setting the LOCAL_RANK environment variable."
         if hasattr(args, 'local_rank'):
             assert type(args.local_rank) == int, local_rank_err
-            if "LOCAL_RANK" in os.environ:
+            if "LOCAL_RANK" in os.environ and args.local_rank >= 0:
                 env_local_rank = int(os.environ.get("LOCAL_RANK", -1))
                 assert env_local_rank == args.local_rank, \
                     f"Mismatch in local rank setting, args.local_rank={args.local_rank} but env['LOCAL_RANK']={env_local_rank}."
