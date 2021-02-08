@@ -727,12 +727,13 @@ def get_model_profile(
         else:
             try:
                 batch = torch.ones(()).new_empty(
-                    (*input_res),
+                    (*input_res,
+                     ),
                     dtype=next(model.parameters()).dtype,
                     device=next(model.parameters()).device,
                 )
             except StopIteration:
-                batch = torch.ones(()).new_empty((*input_res))
+                batch = torch.ones(()).new_empty((*input_res, ))
             _ = model(batch)
 
     prof.start_profile(ignore_list=ignore_modules)
@@ -744,12 +745,13 @@ def get_model_profile(
         else:
             try:
                 batch = torch.ones(()).new_empty(
-                    (*input_res),
+                    (*input_res,
+                     ),
                     dtype=next(model.parameters()).dtype,
                     device=next(model.parameters()).device,
                 )
             except StopIteration:
-                batch = torch.ones(()).new_empty((*input_res))
+                batch = torch.ones(()).new_empty((*input_res, ))
             _ = model(batch)
 
     flops = prof.get_total_flops()
