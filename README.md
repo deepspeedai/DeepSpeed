@@ -113,7 +113,7 @@ overview](https://www.deepspeed.ai/features/) for descriptions and usage.
 * [Ultra-fast dense transformer kernels](https://www.deepspeed.ai/news/2020/05/18/bert-record.html)
 * [Sparse attention](https://www.deepspeed.ai/news/2020/09/08/sparse-attention.html)
   * Memory- and compute-efficient sparse kernels
-  * Support 10x long sequences than dense
+  * Support 10x longer sequences than dense
   * Flexible support to different sparse structures
 * [1-bit Adam](https://www.deepspeed.ai/news/2020/09/08/onebit-adam-blog-post.html)
   * Custom communication collective
