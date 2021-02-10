@@ -31,7 +31,10 @@ We demonstrate the benefits of ZeRO stage 1 by showing that it enables data para
 ```
 
 Training this model without ZeRO fails with an out-of-memory (OOM) error as shown below:
-![OOM_DP8_1.5B_model](/assets/images/oom_dp8_1.5B_log.png)
+
+<a href="/assets/images/oom_dp8_1.5B_log.png">
+<img src="/assets/images/oom_dp8_1.5B_log.png">
+</a>
 
 A key reason why this model does not fit in GPU memory is that the Adam optimizer states for the model consume 18GB; a significant portion of the 32GB RAM. By using ZeRO stage 1 to partition the optimizer state among eight data parallel ranks, the per-device memory consumption can be reduced to 2.25GB, thus making the model trainable. To enable ZeRO stage 1, we simply update the DeepSpeed json config file as below:
 
@@ -45,9 +48,15 @@ A key reason why this model does not fit in GPU memory is that the Adam optimize
 ```
 As seen above, we set two fields in the **zero_optimization** key. Specifically we set the _stage_ field to 1, and the optional _reduce_bucket_size_ for gradient reduction to 500M. With ZeRO stage 1 enabled, the model can now train smoothly on 8 GPUs without running out of memory.   Below we provide some screenshots of the model training:
 
-![ZERO1_DP8_1.5B_LOG](/assets/images/zero1_dp8_1.5B_log.png)
 
-![ZERO1_DP8_1.5B_SMI](/assets/images/zero1_dp8_1.5B_smi.png)
+<a href="/assets/images/zero1_dp8_1.5B_log.png">
+<img src="/assets/images/zero1_dp8_1.5B_log.png">
+</a>
+
+<a href="/assets/images/zero1_dp8_1.5B_smi.png">
+<img src="/assets/images/zero1_dp8_1.5B_smi.png">
+</a>
+
 
 From the nvidia-smi screenshot above we can see that only GPUs 6-7 are being used for training the model. With ZeRO stage 1 we can further reduce the per-device memory consumption by increasing the data parallelism degree. These memory savings can be leveraged to either increase model size and/or batch size. In contrast, such benefits are not possible with data parallelism alone.
 
@@ -85,10 +94,14 @@ In the above changes, we have set the _stage_ field to 2, and configured other o
 
 Here is a screenshot of the training log:
 
-![ZERO2_DP32_10B_LOG](/assets/images/zero2_dp32_10B_log.png)
+<a href="/assets/images/zero2_dp32_10B_log.png">
+<img src="/assets/images/zero2_dp32_10B_log.png">
+</a>
 
 Here is a screenshot of nvidia-smi showing GPU activity during training:
 
-![ZERO2_DP32_10B_SMI](/assets/images/zero2_dp32_10B_smi.png)
+<a href="/assets/images/zero2_dp32_10B_smi.png">
+<img src="/assets/images/zero2_dp32_10B_smi.png">
+</a>
 
 Congratulations! You have completed the ZeRO tutorial.
