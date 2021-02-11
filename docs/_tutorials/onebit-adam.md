@@ -2,7 +2,7 @@
 title: "1-bit Adam: Up to 5x less communication volume and up to 2x faster training"
 ---
 
-In this tutorial, we are going to introduce the 1-bit Adam optimizer in DeepSpeed. 1-bit Adam can improve model training speed on communication-constrained clusters, especially for communication-intensive large models by reducing the overall communication volume by up to 5x. Detailed description of the 1-bit Adam algorithm, its implementation in DeepSpeed, and performance evaluation is available from our [blog post](https://www.deepspeed.ai/news/2020/09/08/onebit-adam-blog-post.html).
+In this tutorial, we are going to introduce the 1-bit Adam optimizer in DeepSpeed. 1-bit Adam can improve model training speed on communication-constrained clusters, especially for communication-intensive large models by reducing the overall communication volume by up to 5x. Detailed description of the 1-bit Adam algorithm, its implementation in DeepSpeed, and performance evaluation is available from our [blog post](https://www.deepspeed.ai/news/2020/09/08/onebit-adam-blog-post.html). We also have a [paper](https://arxiv.org/abs/2102.02888) which provides the most complete details including algorithm, system implementation, theoretical analysis, and more evaluations.
 
 To illustrate the benefits and usage of 1-bit Adam optimizer in DeepSpeed, we use the following two training tasks as examples:
 
@@ -42,6 +42,8 @@ An example launch command for 1-bit Adam using the `deepspeed` launcher is as fo
 ```shell
 deepspeed --launcher=[mvapich|openmpi] script.py
 ```
+
+Please note that because 1-bit Adam uses MPI backend to communicate during the compression stage, the `--launcher=[mvapich|openmpi]` flag is required when using the `deepspeed` launcher.
 
 Alternatively, the standard mpirun launcher can also be used as follows:
 
@@ -108,7 +110,7 @@ The first argument is the number of GPUs to train with, second argument is the p
 
 - **DeepSpeed with 1-bit Adam enabled:** In order to run with 1-bit Adam feature enabled, the same script (`nvidia_run_squad_deepspeed.py`) can be used but there are two options for launching this properly: 1) Launch using deepspeed launcher and 2) Launch with mpirun.
 
-To enable the 1-bit compressed training, 1-bit Adam uses an MPI library (E.g. MVAPICH2-GDR, OpenMPI, etc.) as the communication backend, which means that we can use `mpirun` to launchg the training job. However, our user-friendly launcher called `deepspeed` has been enhanced to launch MPI jobs as well.
+To enable the 1-bit compressed training, 1-bit Adam uses an MPI library (E.g. MVAPICH2-GDR, OpenMPI, etc.) as the communication backend, which means that we can use `mpirun` to launch the training job. However, our user-friendly launcher called `deepspeed` has been enhanced to launch MPI jobs as well.
 
 ### Launch with deepspeed
 
@@ -218,7 +220,7 @@ For example, in order to use 32 GPUs (4GPUs/node, 8 nodes in total), with the su
 mpirun -np 32 -ppn 4 -hostfile hosts -env MV2_USE_CUDA=1 -env MV2_SUPPORT_DL=1 -env MV2_ENABLE_AFFINITY=0 -env MV2_SMP_USE_CMA=0 bash ds_train_bert_onebit_bsz4k_seq128.sh
 ```
 
-### 3.2 Configuration for BingBertSQuAD with DeepSpeed and 1-bit Adam enabled
+### 3.2 Configuration for BERT Pre-training with DeepSpeed and 1-bit Adam enabled
 
 The `deepspeed_bsz4k_onebit_config_seq128.json` file gives the user the ability to specify DeepSpeed
 options in terms of batch size, micro batch size, optimizer, learning rate, and other parameters.
@@ -230,17 +232,18 @@ Below is the DeepSpeed configuration file for running BERT-large pre-training wi
   "train_batch_size": 4096,
   "train_micro_batch_size_per_gpu": 16,
   "steps_per_print": 100,
+  "prescale_gradients": false,
   "optimizer": {
     "type": "OneBitAdam",
     "params": {
-      "lr": 2e-4,
-      "max_grad_norm": 1.0,
+      "lr": 4e-4,
       "weight_decay": 0.01,
       "bias_correction": false,
       "freeze_step": 23000,
       "cuda_aware": true
     }
   },
+  "gradient_clipping": 1.0,
   "fp16": {
     "enabled": true,
     "loss_scale": 0,
@@ -248,7 +251,7 @@ Below is the DeepSpeed configuration file for running BERT-large pre-training wi
   }
 }
 ```
-The above file is for BERT-large but for BERT-base training (sequence length 128), the suggested freeze_step will need to be changed to 16000. For the rest of the pre-training using sequence 512, we suggest to use a freeze_step of 1500.
+The above file is for BERT-large but for BERT-base training (sequence length 128), the suggested `freeze_step` will need to be changed to 16000. For the rest of the pre-training using sequence 512, we suggest to use a `freeze_step` of 1500. And make sure to set the `cuda_aware` correctly as described above.
 
 ### 3.3 Performance Results for BERT Pre-training
 
