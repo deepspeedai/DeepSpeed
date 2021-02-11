@@ -1,6 +1,9 @@
-# DeepSpeed Flops Profiler
+---
+title: "Flops Profiler"
+excerpt: "Measure the parameters, latency, and floating point operations of your model"
+---
 
-> Measures the parameters, latency, and floating point operations of your model.
+In this tutorial, we introduce the DeepSpeed flops profiler and provide examples of its usage.
 
   - [Overview](#overview)
   - [Supported Models](#supported-models)
@@ -441,5 +444,4 @@ for step, batch in enumerate(data_loader):
 
   # weight update
   optimizer.step()
-
 ```

@@ -41,6 +41,7 @@ collections:
       - 1Cycle.md
       - lrrt.md
       - zero.md
+      - flops-profiler.md
 
 defaults:
   - scope:

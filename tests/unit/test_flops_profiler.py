@@ -24,8 +24,7 @@ def test_flops_profiler_in_ds_trainning(tmpdir):
         },
         "flops_profiler": {
             "enabled": True,
-            "start_step": 2,
-            "end_step": 3,
+            "step": 1,
             "module_depth": -1,
             "top_modules": 3,
         },
@@ -100,18 +99,17 @@ def test_flops_profiler_in_inference():
     mod = LeNet5(10)
     batch_size = 1024
     input = torch.randn(batch_size, 1, 32, 32)
-    macs, params, steps = get_model_profile(
+    macs, params = get_model_profile(
         mod,
         tuple(input.shape),
         print_profile=True,
-        print_aggregated_profile=True,
+        detailed=True,
         module_depth=-1,
         top_modules=3,
-        warm_up=5,
-        num_steps=10,
-        as_strings=True,
+        warm_up=1,
+        as_string=True,
         ignore_modules=None,
     )
-    print(macs, params, steps)
-    assert macs == "439.55 MMACs"
+    print(macs, params)
+    assert macs == "439.56 MMACs"
     assert params == "61.71 k"

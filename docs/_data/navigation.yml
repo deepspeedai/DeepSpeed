@@ -45,6 +45,8 @@ lnav:
         url: /docs/config-json/#zero-optimizations-for-fp16-training
       - title: "Logging"
         url: /docs/config-json/#logging
+      - title: "Flops Profiler"
+        url: /docs/config-json/#flops-profiler
       - title: "Activation checkpointing"
         url: /docs/config-json/#activation-checkpointing
       - title: "Sparse Attention"
@@ -84,5 +86,7 @@ lnav:
         url: /tutorials/pipeline/
       - title: "Progressive Layer Dropping"
         url: /tutorials/progressive_layer_dropping/
+      - title: "Flops Profiler"
+        url: /tutorials/flops-profiler/
   - title: "Contributing"
     url: /contributing/
