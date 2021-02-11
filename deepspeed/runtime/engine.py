@@ -131,10 +131,10 @@ class DeepSpeedEngine(Module):
             dist_init_required = not dist.is_initialized()
 
         if dist_init_required is False:
-            assert (dist.is_initialized()==True), "Torch distributed not initialized. Please set dist_init_required to True or initialize before calling deepspeed.initialize()"
-
-        # Initialize torch distributed if needed
-        init_distributed(dist_backend=self.dist_backend)
+            assert dist.is_initialized() is True, "Torch distributed not initialized. Please set dist_init_required to True or initialize before calling deepspeed.initialize()"
+        else:
+            # Initialize torch distributed if needed
+            init_distributed(dist_backend=self.dist_backend)
 
         self._do_args_sanity_check(args)
         self._configure_with_arguments(args, mpu)
