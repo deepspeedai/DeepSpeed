@@ -38,6 +38,28 @@ def set_random_seed(seed):
     torch.manual_seed(seed)
 
 
+def move_to_device(item, device):
+    """
+    Move tensor onto device. Works on individual tensors, and tensors contained/nested in lists, tuples, and dicts.
+    Parameters:
+        item: tensor to move or (possibly nested) container of tensors to move.
+        device: target device
+
+    Returns:
+        None
+    """
+    if torch.is_tensor(item):
+        return item.to(device)
+    elif isinstance(item, list):
+        return [move_to_device(v, device) for v in item]
+    elif isinstance(item, tuple):
+        return tuple([move_to_device(v, device) for v in item])
+    elif isinstance(item, dict):
+        return {k: move_to_device(v, device) for k, v in item.items()}
+    else:
+        return item
+
+
 class CheckOverflow(object):
     '''Checks for overflow in gradient across parallel process'''
     def __init__(self, param_groups=None, mpu=None, zero_reduce_scatter=False):
