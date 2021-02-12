@@ -21,25 +21,23 @@ hostfile (hostfile: /job/hostfile). If no hostfile exists, will only install loc
     -n, --no_clean          Do not clean prior build state, by default prior build files are removed before building wheels
     -m, --pip_mirror        Use the specified pip mirror (default: the default pip mirror)
     -H, --hostfile          Path to MPI-style hostfile (default: /job/hostfile)
+    -e, --examples          Checkout deepspeed example submodule (no install)
     -v, --verbose           Verbose logging
     -h, --help              This help text
   """
 }
 
 ds_only=0
-tp_only=0
-deepspeed_install=1
-third_party_install=1
 local_only=0
 pip_sudo=0
 entire_dlts_job=1
 hostfile=/job/hostfile
 pip_mirror=""
-apex_commit=""
 skip_requirements=0
 allow_sudo=0
 no_clean=0
 verbose=0
+examples=0
 
 while [[ $# -gt 0 ]]
 do
@@ -79,6 +77,10 @@ case $key in
     shift
     shift
     ;;
+    -e|--examples)
+    examples=1
+    shift
+    ;;
     -h|--help)
     usage
     exit 0
@@ -101,16 +103,17 @@ if [ "$allow_sudo" == "0" ]; then
     fi
 fi
 
-if [ "$ds_only" == "1" ] && [ "$tp_only" == "1" ]; then
-    echo "-d and -t are mutually exclusive, only choose one of the two"
-    usage
-    exit 1
+if [ "$examples" == "1" ]; then
+    git submodule update --init --recursive
+    exit 0
 fi
 
 if [ "$verbose" == "1" ]; then
     VERBOSE="-v"
+    PIP_VERBOSE=""
 else
     VERBOSE=""
+    PIP_VERBOSE="--disable-pip-version-check"
 fi
 
 rm_if_exist() {
@@ -137,9 +140,9 @@ else
 fi
 
 if [ "$pip_mirror" != "" ]; then
-    PIP_INSTALL="pip install $VERBOSE -i $pip_mirror"
+    PIP_INSTALL="pip install $VERBOSE $PIP_VERBOSE -i $pip_mirror"
 else
-    PIP_INSTALL="pip install $VERBOSE"
+    PIP_INSTALL="pip install $VERBOSE $PIP_VERBOSE"
 fi
 
 
