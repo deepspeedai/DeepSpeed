@@ -11,7 +11,7 @@ usage() {
   echo """
 Usage: install.sh [options...]
 
-By default will install deepspeed and all third party dependecies accross all machines listed in
+By default will install deepspeed and all third party dependencies across all machines listed in
 hostfile (hostfile: /job/hostfile). If no hostfile exists, will only install locally
 
 [optional]
@@ -45,6 +45,10 @@ while [[ $# -gt 0 ]]
 do
 key="$1"
 case $key in
+    -l|--local_only)
+    local_only=1;
+    shift
+    ;;
     -s|--pip_sudo)
     pip_sudo=1;
     shift
@@ -69,7 +73,7 @@ case $key in
     -H|--hostfile)
     hostfile=$2
     if [ ! -f $2 ]; then
-        echo "User provided hostfile does not exist at $hostfile, exiting"
+        echo "User-provided hostfile does not exist at $hostfile, exiting"
         exit 1
     fi
     shift
@@ -80,7 +84,7 @@ case $key in
     exit 0
     ;;
     *)
-    echo "Unkown argument(s)"
+    echo "Unknown argument(s)"
     usage
     exit 1
     shift
@@ -98,7 +102,7 @@ if [ "$allow_sudo" == "0" ]; then
 fi
 
 if [ "$ds_only" == "1" ] && [ "$tp_only" == "1" ]; then
-    echo "-d and -t are mutually exclusive, only choose one or none"
+    echo "-d and -t are mutually exclusive, only choose one of the two"
     usage
     exit 1
 fi

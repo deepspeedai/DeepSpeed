@@ -65,6 +65,14 @@ Available `DS_BUILD` options include:
 * `DS_BUILD_STOCHASTIC_TRANSFORMER` builds the stochastic transformer op
 * `DS_BUILD_UTILS` builds various optimized utilities
 
+To speed up the build-all process, you can parallelize the compilation process with:
+
+```bash
+DS_BUILD_OPS=1 pip install deepspeed --global-option="build_ext" --global-option="-j8"
+```
+
+This should complete the full build 2-3 times faster. You can adjust `-j` to specify how many cpu-cores are to be used during the build. In the example it is set to 8 cores.
+
 
 ## Install DeepSpeed from source
 
