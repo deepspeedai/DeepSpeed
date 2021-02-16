@@ -49,19 +49,26 @@ ZeRO-Offload leverages much for ZeRO stage 2 mechanisms, and so the configuratio
 }
 ```
 
-As seen above, in addition to setting the _stage_ field to **2** (to enable ZeRO stage 2), we also need to set _cpu_offload_ flag to **true** enable ZeRO-Offload optimizations. In addition, we can  set other ZeRO stage 2 optimization flags, such as _overlap_comm_ to tune ZeRO-Offload performance.  With these changes we can now run the model. We share some screenshots of the training below.
+As seen above, in addition to setting the _stage_ field to **2** (to enable ZeRO stage 2), we also need to set _cpu_offload_ flag to **true** to enable ZeRO-Offload optimizations. In addition, we can  set other ZeRO stage 2 optimization flags, such as _overlap_comm_ to tune ZeRO-Offload performance.  With these changes we can now run the model. We share some screenshots of the training below.
 
 Here is a screenshot of the training log:
 
-![ZERO_OFFLOAD_DP1_10B_LOG](/assets/images/zero_offload_dp1_10B_log.png)
+<a href="/assets/images/zero_offload_dp1_10B_log.png">
+<img src="/assets/images/zero_offload_dp1_10B_log.png">
+</a>
+
 
 Here is a screenshot of nvidia-smi showing that only GPU 0 is active during training:
 
-![ZERO_OFFLOAD_DP1_10B_SMI](/assets/images/zero_offload_dp1_10B_smi.png)
+<a href="/assets/images/zero_offload_dp1_10B_smi.png">
+<img src="/assets/images/zero_offload_dp1_10B_smi.png">
+</a>
 
 Finally, here is a screenshot of htop showing host CPU and memory activity during optimizer computation:
 
-![ZERO_OFFLOAD_DP1_10B_SMI](/assets/images/zero_offload_dp1_10B_cpu.png)
+<a href="/assets/images/zero_offload_dp1_10B_cpu.png">
+<img src="/assets/images/zero_offload_dp1_10B_cpu.png">
+</a>
 
 Congratulations! You have completed the ZeRO-Offload tutorial.
 

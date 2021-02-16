@@ -58,35 +58,35 @@ lnav:
         url: /getting-started/
       - title: "Getting started on Azure"
         url: /tutorials/azure/
-      - title: "CIFAR-10"
-        url: /tutorials/cifar-10/
-      - title: "GAN"
-        url: /tutorials/gan/
-      - title: "BERT Pre-training"
-        url: /tutorials/bert-pretraining/
       - title: "BingBertSQuAD Fine-tuning"
         url: /tutorials/bert-finetuning/
-      - title: "DeepSpeed Transformer Kernel"
-        url: /tutorials/transformer_kernel/
-      - title: "Megatron-LM GPT2"
-        url: /tutorials/megatron/
-      - title: "1-Cycle Schedule"
-        url: /tutorials/1Cycle/
+      - title: "BERT Pre-training"
+        url: /tutorials/bert-pretraining/
+      - title: "CIFAR-10"
+        url: /tutorials/cifar-10/
+      - title: "Flops Profiler"
+        url: /tutorials/flops-profiler/
+      - title: "GAN"
+        url: /tutorials/gan/
       - title: "Learning Rate Range Test"
         url: /tutorials/lrrt/
-      - title: "DeepSpeed Sparse Attention"
-        url: /tutorials/sparse-attention/
-      - title: "ZeRO-Offload"
-        url: /tutorials/zero-offload/
-      - title: "ZeRO Redundancy Optimizer (ZeRO)"
-        url: /tutorials/zero/
-      - title: "DeepSpeed with 1-bit Adam"
+      - title: "Megatron-LM GPT2"
+        url: /tutorials/megatron/
+      - title: "One-Cycle Schedule"
+        url: /tutorials/one-cycle/
+      - title: "One-Bit Adam"
         url: /tutorials/onebit-adam/
       - title: "Pipeline Parallelism"
         url: /tutorials/pipeline/
       - title: "Progressive Layer Dropping"
         url: /tutorials/progressive_layer_dropping/
-      - title: "Flops Profiler"
-        url: /tutorials/flops-profiler/
+      - title: "Sparse Attention"
+        url: /tutorials/sparse-attention/
+      - title: "Transformer Kernel"
+        url: /tutorials/transformer_kernel/
+      - title: "ZeRO-Offload"
+        url: /tutorials/zero-offload/
+      - title: "ZeRO Redundancy Optimizer (ZeRO)"
+        url: /tutorials/zero/
   - title: "Contributing"
     url: /contributing/
