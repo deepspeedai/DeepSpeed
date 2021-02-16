@@ -37,7 +37,7 @@ def split_half_float_double(tensors):
     ]
     buckets = []
     for i, dtype in enumerate(dtypes):
-        bucket = [t for t in tensors if t.type() == dtype]
+        bucket = [t for t in tensors if t is not None and t.type() == dtype]
         if bucket:
             buckets.append(bucket)
     return buckets
