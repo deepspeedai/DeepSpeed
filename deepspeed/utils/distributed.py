@@ -89,7 +89,8 @@ def mpi_discovery(distributed_port=TORCH_DISTRIBUTED_DEFAULT_PORT, verbose=True)
                     os.environ['MASTER_PORT']))
 
     if torch.distributed.is_initialized():
-        assert torch.distributed.get_rank() == rank, "MPI rank {} does not match torch rank {}".format(rank, dist.get_rank())
+        assert torch.distributed.get_rank() == rank, "MPI rank {} does not match torch rank {}".format(
+            rank, torch.distributed.get_rank())
         assert torch.distributed.get_world_size() == world_size, "MPI world size {} does not match torch world size {}".format(
             world_size, torch.distributed.get_world_size())
 
