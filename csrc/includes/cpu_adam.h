@@ -65,6 +65,9 @@ public:
     {
         cudaMallocHost((void**)_doubled_buffer, TILE * sizeof(float));
         cudaMallocHost((void**)(_doubled_buffer + 1), TILE * sizeof(float));
+
+        _streams[0] = Context::Instance().GetCurrentStream();
+        _streams[1] = Context::Instance().GetNewStream();
     }
     ~Adam_Optimizer()
     {
@@ -89,7 +92,10 @@ public:
                 float* _exp_avg_sq,
                 size_t _param_size,
                 __half* dev_params = nullptr);
-
+    inline void SynchronizeStreams()
+    {
+        for (int i = 0; i < 2; i++) cudaStreamSynchronize(_streams[i]);
+    }
     inline void IncrementStep(size_t step, float beta1, float beta2)
     {
         if (beta1 != _betta1 || beta2 != _betta2) {
@@ -152,4 +158,6 @@ private:
     float* _doubled_buffer[2];
     bool _buf_index;
     bool _adamw_mode;
+
+    cudaStream_t _streams[2];
 };

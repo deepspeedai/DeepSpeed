@@ -81,6 +81,8 @@ public:
         return stream;
     }
 
+    cudaStream_t GetNewStream() { return at::cuda::getStreamFromPool(); }
+
     cublasHandle_t GetCublasHandle() { return _cublasHandle; }
 
     std::pair<uint64_t, uint64_t> IncrementOffset(uint64_t offset_inc)
