@@ -1482,6 +1482,9 @@ class DeepSpeedEngine(Module):
         if tag is None:
             tag = f"global_step{self.global_steps}"
 
+        # Ensure tag is a string
+        tag = str(tag)
+
         # Ensure checkpoint tag is consistent across ranks
         self._checkpoint_tag_validation(tag)
 
