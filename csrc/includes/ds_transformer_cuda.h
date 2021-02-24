@@ -42,6 +42,7 @@ public:
                          int seq_length,
                          float attn_dropout_ratio,
                          float hidden_output_dropout_ratio,
+                         float layer_norm_eps,
                          bool pre_or_postLayerNorm,
                          const std::vector<std::array<int, 3>>& gemm_algos,
                          bool attn_dropout_checkpoint,

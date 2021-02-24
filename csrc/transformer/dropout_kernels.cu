@@ -493,7 +493,7 @@ __global__ void dropout_kernel(const int N,
         m[3] = (uint8_t)(rand.w > ratio);
 
         float4 x_data = Xdata_cast[j];
-        float4 b_data = bias_cast[tid];
+        float4 b_data = bias_cast[j % (dim / unroll_factor)];
 
         x_data.x += b_data.x;
         x_data.y += b_data.y;
@@ -515,7 +515,7 @@ __global__ void dropout_kernel(const int N,
         float* rand_data = &(rand.x);
         int k = 0;
         for (int i = high_index; i < N; i++) {
-            float x_data = Xdata[i] + bias[threadIdx.x % dim];
+            float x_data = Xdata[i] + bias[i % dim];
             uint8_t m = (uint8_t)(rand_data[k++] > ratio);
             Xdata[i] = x_data * scale * m;
             mask[i] = m;
@@ -553,7 +553,7 @@ __global__ void dropout_kernel(const int N,
         __half2* bias_h = reinterpret_cast<__half2*>(&bias_f);
 
         data_f = Xdata_cast[j];
-        bias_f = bias_cast[tid];
+        bias_f = bias_cast[j % (dim / unroll_factor)];
 
         float2 data_h_0 = __half22float2(data_h[0]);
         float2 data_h_1 = __half22float2(data_h[1]);
@@ -595,7 +595,7 @@ __global__ void dropout_kernel(const int N,
         float* rand_data = &(rand.x);
         int k = 0;
         for (int i = high_index; i < N; i++) {
-            float x_data = (float)Xdata[i] + (float)bias[threadIdx.x % dim];
+            float x_data = (float)Xdata[i] + (float)bias[i % dim];
             uint8_t m = (uint8_t)(rand_data[k++] > ratio);
             Xdata[i] = __float2half(x_data * scale * m);
             mask[i] = m;
@@ -678,7 +678,7 @@ __global__ void dropout_kernel(const int N,
         m[3] = (uint8_t)(rand.w > ratio);
 
         float4 out_data;
-        float4 b_data = bias_cast[tid];
+        float4 b_data = bias_cast[j % (dim / unroll_factor)];
         float4 res_data = residual_cast[j];
         float4 inp_data = input_cast[j];
 
@@ -707,7 +707,7 @@ __global__ void dropout_kernel(const int N,
         float* rand_data = &(rand.x);
         int k = 0;
         for (int i = high_index; i < N; i++) {
-            float x_data = input[i] + bias[threadIdx.x % dim];
+            float x_data = input[i] + bias[i % dim];
             uint8_t m = (uint8_t)(rand_data[k++] > ratio);
             x_data = x_data * scale * m;
             x_data += residual[i];
@@ -758,7 +758,7 @@ __global__ void dropout_kernel(const int N,
         float2 input_f;
         __half2* input_h = reinterpret_cast<__half2*>(&input_f);
 
-        bias_f = bias_cast[tid];
+        bias_f = bias_cast[j % (dim / unroll_factor)];
         residual_f = residual_cast[j];
         input_f = input_cast[j];
 
@@ -813,7 +813,7 @@ __global__ void dropout_kernel(const int N,
         float* rand_data = &(rand.x);
         int k = 0;
         for (int i = high_index; i < N; i++) {
-            float x_data = (float)input[i] + (float)bias[threadIdx.x % dim];
+            float x_data = (float)input[i] + (float)bias[i % dim];
             uint8_t m = (uint8_t)(rand_data[k++] > ratio);
             x_data = x_data * scale * m;
             x_data += (float)residual[i];

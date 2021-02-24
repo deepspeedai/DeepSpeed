@@ -101,6 +101,7 @@ class DeepSpeedTransformerConfig(TransformerConfig):
                  hidden_dropout_ratio=-1,
                  num_hidden_layers=-1,
                  initializer_range=-1,
+                 layer_norm_eps=1e-12,
                  local_rank=-1,
                  seed=-1,
                  fp16=False,
@@ -130,6 +131,7 @@ class DeepSpeedTransformerConfig(TransformerConfig):
         self.gelu_checkpoint = gelu_checkpoint  # True: if higher batch size is required
         self.adjust_init_range = adjust_init_range
         self.test_gemm = False
+        self.layer_norm_eps = layer_norm_eps
         self.training = training
         self.is_grad_enabled = True
         self.attn_dropout_checkpoint = attn_dropout_checkpoint
@@ -553,6 +555,7 @@ class DeepSpeedTransformerLayer(nn.Module):
                           self.config.intermediate_size,
                           self.config.attn_dropout_ratio,
                           self.config.hidden_dropout_ratio,
+                          self.config.layer_norm_eps,
                           self.config.seed,
                           self.config.pre_layer_norm,
                           self.config.test_gemm,
