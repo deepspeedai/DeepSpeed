@@ -1471,6 +1471,11 @@ class DeepSpeedEngine(Module):
                 used if not provided. Tag name must be the same across all ranks.
             client_state: Optional. State dictionary used for saving required training states in the client code.
             save_latest: Optional. Save a file 'latest' pointing to the latest saved checkpoint.
+
+        Important: all processes must call this method and not just the process with rank 0. It is
+        because each process needs to save its master weights and scheduler+optimizer states. This
+        method will hang waiting to synchronize with other processes if it's called just for the
+        process with rank 0.
         """
 
         # This is to make sure the checkpoint names are created without collision
