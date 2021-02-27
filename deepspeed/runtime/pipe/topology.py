@@ -251,7 +251,7 @@ class PipeModelDataParallelTopology(ProcessTopology):
 
 class PipelineParallelGrid:
     """Implements a grid object that stores the data parallel ranks
-    corresponding to each o the model parallel stages
+    corresponding to each of the model parallel stages
 
     The grid object organizes the processes in a distributed pytorch job
     into a 2D grid, of stage_id and data_parallel_id.
