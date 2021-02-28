@@ -43,7 +43,7 @@ __global__ void column_sum_reduce(const T* __restrict__ inp,
 
     if (threadIdx.x == 0) {
         int pos = blockIdx.x * TILE_DIM + threadIdx.y;
-        if (pos < (rows * width)) out[pos] = sum;
+        if (pos < width) out[pos] = sum;
     }
 }
 
