@@ -27,7 +27,7 @@ We need to apply two changes to the launch script for the DeepSpeed Megatron-LM 
        --checkpoint-activations
 ```
 
-Most of the flags in the changes above should be familiar if you have stepped through the Megatron-LM [tutorial](/tutorials/megatron/). 
+Most of the flags in the changes above should be familiar if you have stepped through the Megatron-LM [tutorial](/tutorials/megatron/).
 
 Second, we need to apply the following changes to ensure that only one GPU is used for training.
 ```bash
