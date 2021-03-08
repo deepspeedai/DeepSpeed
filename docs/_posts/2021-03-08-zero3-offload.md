@@ -95,6 +95,6 @@ If you are already a DeepSpeed user, you can find our detailed tutorial on ZeRO-
 
 * DeepSpeed: [Getting Started Page](/getting-started/)
 
-* ZeRO-3 Offload [Documentation](https://deepspeed.readthedocs.io/en/latest/zero3.html), [Tutorial](tutorials/zero/#training-trillion-scale-models-with-zero-3-offload)
+* ZeRO-3 Offload [Documentation](https://deepspeed.readthedocs.io/en/latest/zero3.html), [Tutorial](/tutorials/zero/#training-trillion-scale-models-with-zero-3-offload)
 
 The DeepSpeed Team is very excited to share ZeRO-3 Offload with the DL community.
