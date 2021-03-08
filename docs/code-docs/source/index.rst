@@ -27,6 +27,16 @@ Checkpointing API
    activation-checkpointing
 
 
+ZeRO API
+--------
+.. toctree::
+   :maxdepth: 2
+
+   zero3
+   cpu-adam
+
+
+
 Transformer Kernel API
 ----------------------
 .. toctree::

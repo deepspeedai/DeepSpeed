@@ -1,3 +1,6 @@
+"""
+Copyright 2020 The Microsoft DeepSpeed Team
+"""
 import torch
 import warnings
 from .builder import OpBuilder

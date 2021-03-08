@@ -232,14 +232,22 @@ Example of ***scheduler***
 Enabling and configuring ZeRO memory optimizations
 ```json
   "zero_optimization": {
-    "stage": [0|1|2],
+    "stage": [0|1|2|3],
     "allgather_partitions": [true|false],
     "allgather_bucket_size": 5e8,
     "overlap_comm": false,
     "reduce_scatter": [true|false],
     "reduce_bucket_size": 5e8,
     "contiguous_gradients" : [true|false],
-    "cpu_offload": [true|false]
+    "cpu_offload": [true|false],
+    "cpu_offload_params" : [true|false],
+    "cpu_offload_use_pin_memory" : [true|false],
+    "stage3_max_live_parameters" : 1e9,
+    "stage3_max_reuse_distance" : 1e9,
+    "stage3_prefetch_bucket_size" : 5e8,
+    "stage3_param_persistence_threshold" : 1e6,
+    "sub_group_size" : 1e12,
+    "elastic_checkpoint" : [true|false]
     }
 ```
 
@@ -253,7 +261,7 @@ Enabling and configuring ZeRO memory optimizations
 
 | Description                                                                                                                                                           | Default |
 | --------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------- |
-| Chooses different stages of ZeRO Optimizer. Stage 0, 1, and 2 refer to disabled, optimizer state partitioning, and optimizer+gradient state partitiong, respectively. | `0`     |
+| Chooses different stages of ZeRO Optimizer. Stage 0, 1, 2, and 3 refer to disabled, optimizer state partitioning, and optimizer+gradient state partitioning, and optimizer+gradient+parameter partitioning, respectively. | `0`     |
 
 ***allgather_partitions***: [boolean]
 
@@ -296,6 +304,42 @@ Enabling and configuring ZeRO memory optimizations
 | Description                                                                                                              | Default |
 | ------------------------------------------------------------------------------------------------------------------------ | ------- |
 | Enable offloading of optimizer memory and computation to CPU. This frees up GPU memory for larger models or batch sizes. | `False` |
+
+***cpu_offload_params***: [boolean]
+
+| Description                                                                                                                       | Default |
+| --------------------------------------------------------------------------------------------------------------------------------- | ------- |
+| Enable offloading of model parameters to CPU. This frees up GPU memory for larger models or batch sizes. Valid only with stage 3. | `False` |
+
+***cpu_offload_use_pin_memory***: [boolean]
+
+| Description                                                                               | Default |
+| ----------------------------------------------------------------------------------------- | ------- |
+| Use pinned CPU memory when offloading. Can improve performance. Valid only with stage 3.  | `False` |
+
+***stage3_max_live_parameters***: [integer]
+
+| Description                                                                                                                           | Default |
+| ------------------------------------------------------------------------------------------------------------------------------------- | ------- |
+| The maximum number of parameters resident per GPU before releasing. Smaller values use less memory, but perform more communication. | `1e9`   |
+
+***stage3_max_reuse_distance***: [integer]
+
+| Description                                                                                                      | Default |
+| ---------------------------------------------------------------------------------------------------------------- | ------- |
+| Do not release a parameter if it will be reused within this threshold of parameters. Smaller values use less memory, but perform more communication. | `1e9`   |
+
+***stage3_prefetch_bucket_size***: [integer]
+
+| Description                                                                                                                     | Default |
+| ------------------------------------------------------------------------------------------------------------------------------- | ------- |
+| The size of the fixed buffer for prefetching parameters. Smaller values use less memory, but can increase stalls due to communication. | `5e8`   |
+
+
+***stage3_param_persistence_threshold***: [integer]
+| Description                                                                                                                                                          | Default |
+| -------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------- |
+| Do not partition parameters smaller than this threshold. Smaller values use less memory, but can greatly increase communication (especially latency-bound messages). | `1e6`   |
 
 
 ### Logging

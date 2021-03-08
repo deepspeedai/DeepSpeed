@@ -10,41 +10,6 @@ from ..op_builder import CPUAdamBuilder
 
 
 class DeepSpeedCPUAdam(torch.optim.Optimizer):
-    """Fast vectorized implementation of two variations of Adam optimizer on CPU:
-
-        - Adam: A Method for Stochastic Optimization: (https://arxiv.org/abs/1412.6980);
-        - AdamW: FIXING WEIGHT DECAY REGULARIZATION IN ADAM (https://arxiv.org/abs/1711.05101v1)
-
-       DeepSpeed CPU Adam(W) provides between 5x to 7x speedu over torch.optim.adam(W).
-       In order to apply this optimizer, the model requires to have its master parameter (in FP32)
-       reside on the CPU memory.
-
-       To train on a hetrogeneous system, such as coordinating CPU and GPU, DeepSpeed offers
-       the ZeRO-Offload technology which efficiently offloads the optimizer states into CPU memory,
-       with minimal impact on training througput. DeepSpeedCPUAdam plays an important role to minimize
-       the overhead of the optimizer's latency on CPU. Please refer to ZeRO-Offload tutorial
-       (https://www.deepspeed.ai/tutorials/zero-offload/) for more information on how to enable this technology.
-
-       For calling step function, there are two options available: (1) update optimizer's states and (2) update
-       optimizer's states and copy the parameters back to GPU at the same time. We have seen that the second
-       option can bring 30% higher throughput than the doing the copy separately using option one.
-
-
-    Arguments:
-        model_params (iterable): iterable of parameters to optimize or dicts defining
-            parameter groups.
-        lr (float, optional): learning rate. (default: 1e-3)
-        betas (Tuple[float, float], optional): coefficients used for computing
-            running averages of gradient and its square. (default: (0.9, 0.999))
-        eps (float, optional): term added to the denominator to improve
-            numerical stability. (default: 1e-8)
-        weight_decay (float, optional): weight decay (L2 penalty) (default: 0)
-        amsgrad (boolean, optional): whether to use the AMSGrad variant of this
-            algorithm from the paper `On the Convergence of Adam and Beyond`_
-            (default: False) NOT SUPPORTED in DeepSpeed CPUAdam!
-        adamw_mode: select between Adam and AdamW implementations (default: AdamW)
-    """
-
     optimizer_id = 0
 
     def __init__(self,
@@ -57,6 +22,47 @@ class DeepSpeedCPUAdam(torch.optim.Optimizer):
                  weight_decay=0,
                  amsgrad=False,
                  adamw_mode=True):
+        """Fast vectorized implementation of two variations of Adam optimizer on CPU:
+
+        * Adam: A Method for Stochastic Optimization: (https://arxiv.org/abs/1412.6980);
+        * AdamW: Fixing Weight Decay Regularization in Adam (https://arxiv.org/abs/1711.05101)
+
+        DeepSpeed CPU Adam(W) provides between 5x to 7x speedup over torch.optim.adam(W).
+        In order to apply this optimizer, the model requires to have its master parameter (in FP32)
+        reside on the CPU memory.
+
+        To train on a hetrogeneous system, such as coordinating CPU and GPU, DeepSpeed offers
+        the ZeRO-Offload technology which efficiently offloads the optimizer states into CPU memory,
+        with minimal impact on training througput. DeepSpeedCPUAdam plays an important role to minimize
+        the overhead of the optimizer's latency on CPU. Please refer to ZeRO-Offload tutorial
+        (https://www.deepspeed.ai/tutorials/zero-offload/) for more information on how to enable this technology.
+
+        For calling step function, there are two options available: (1) update optimizer's states and (2) update
+        optimizer's states and copy the parameters back to GPU at the same time. We have seen that the second
+        option can bring 30% higher throughput than the doing the copy separately using option one.
+
+
+        .. note::
+                We recommend using our `config
+                <https://www.deepspeed.ai/docs/config-json/#optimizer-parameters>`_
+                to allow :meth:`deepspeed.initialize` to build this optimizer
+                for you.
+
+
+        Arguments:
+            model_params (iterable): iterable of parameters to optimize or dicts defining
+                parameter groups.
+            lr (float, optional): learning rate. (default: 1e-3)
+            betas (Tuple[float, float], optional): coefficients used for computing
+                running averages of gradient and its square. (default: (0.9, 0.999))
+            eps (float, optional): term added to the denominator to improve
+                numerical stability. (default: 1e-8)
+            weight_decay (float, optional): weight decay (L2 penalty) (default: 0)
+            amsgrad (boolean, optional): whether to use the AMSGrad variant of this
+                algorithm from the paper `On the Convergence of Adam and Beyond`_
+                (default: False) NOT SUPPORTED in DeepSpeed CPUAdam!
+            adamw_mode: select between Adam and AdamW implementations (default: AdamW)
+        """
 
         default_args = dict(lr=lr,
                             betas=betas,
@@ -86,6 +92,24 @@ class DeepSpeedCPUAdam(torch.optim.Optimizer):
 
     @torch.no_grad()
     def step(self, closure=None, fp16_param_groups=None):
+        """Update the model parameters.
+
+        .. note::
+            This method will be called internally by ZeRO-Offload. DeepSpeed
+            users should still use ``engine.step()`` as shown in the
+            `Getting Started
+            <https://www.deepspeed.ai/getting-started/#training>`_ guide.
+
+        Args:
+            closure (callable, optional): closure to compute the loss.
+                Defaults to ``None``.
+            fp16_param_groups: FP16 GPU parameters to update. Performing the
+                copy here reduces communication time. Defaults to ``None``.
+
+        Returns:
+            loss: if ``closure`` is provided. Otherwise ``None``.
+        """
+
         loss = None
         if closure is not None:
             with torch.enable_grad():
@@ -100,7 +124,7 @@ class DeepSpeedCPUAdam(torch.optim.Optimizer):
                 state = self.state[p]
                 # State initialization
                 if len(state) == 0:
-                    print(f'group {group_id} param {param_id} = {p.numel()}')
+                    #print(f'group {group_id} param {param_id} = {p.numel()}')
                     state['step'] = 0
                     # gradient momentums
                     state['exp_avg'] = torch.zeros_like(p.data,

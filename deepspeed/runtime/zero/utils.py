@@ -39,7 +39,8 @@ except ImportError:
 
 
 def is_zero_supported_optimizer(optimizer):
-    print(
-        f'Checking ZeRO support for optimizer={optimizer.__class__.__name__} type={type(optimizer)}'
-    )
+    if dist.get_rank() == 0:
+        print(
+            f'Checking ZeRO support for optimizer={optimizer.__class__.__name__} type={type(optimizer)}'
+        )
     return type(optimizer) in ZERO_SUPPORTED_OPTIMIZERS

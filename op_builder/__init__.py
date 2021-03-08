@@ -1,3 +1,6 @@
+"""
+Copyright 2020 The Microsoft DeepSpeed Team
+"""
 from .cpu_adam import CPUAdamBuilder
 from .fused_adam import FusedAdamBuilder
 from .fused_lamb import FusedLambBuilder

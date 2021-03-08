@@ -14,6 +14,8 @@ PipeTopo = PipeDataParallelTopology
 
 from deepspeed.ops.op_builder import FusedLambBuilder, CPUAdamBuilder
 
+from deepspeed.runtime.zero.stage3 import FP16_DeepSpeedZeroOptimizer_Stage3
+
 import argparse
 import pytest
 import json
@@ -42,7 +44,13 @@ def compare_model_states(saved_model, loaded_model, compare_optimizer=True):
     if not compare_optimizer:
         return
 
-    if isinstance(saved_model.optimizer, FP16_DeepSpeedZeroOptimizer):
+    if FP16_DeepSpeedZeroOptimizer_Stage3 is not None and isinstance(
+            saved_model.optimizer,
+            FP16_DeepSpeedZeroOptimizer_Stage3):
+        for p0, p1 in zip(saved_model.optimizer.fp32_groups_flat, loaded_model.optimizer.fp32_groups_flat):
+            assert torch.allclose(p0, p1, atol=1e-07), f"Fp32 model states {p0} is not equal to {p1}"
+
+    elif isinstance(saved_model.optimizer, FP16_DeepSpeedZeroOptimizer):
         for p0, p1 in zip(saved_model.optimizer.single_partition_of_fp32_groups, loaded_model.optimizer.single_partition_of_fp32_groups):
             assert id(p0) != id(p1), f'Comparing fp32 model state tensor against itself: {id(p0)} <====> {id(p1)}'
             assert torch.allclose(p0, p1, atol=1e-07), f"Fp32 model states {p0} is not equal to {p1}"
@@ -283,18 +291,24 @@ def test_checkpoint_fused_optimizer(tmpdir):
                                      load_optimizer_states=False)
 
 
-@pytest.mark.parametrize('zero_stage, use_cpu_offload',
-                         [
-                             (1,
-                              False),
-                             (2,
-                              False),
-                             (2,
-                              True),
-                         ])
-def test_checkpoint_zero_optimizer(tmpdir, zero_stage, use_cpu_offload):
+@pytest.mark.parametrize('zero_stage, use_cpu_offload, adam_optimizer',
+                         [(1,
+                           False,
+                           'Adam'),
+                          (2,
+                           False,
+                           'Adam'),
+                          (2,
+                           True,
+                           'deepspeed_adam'),
+                          (3,
+                           False,
+                           'Adam')])
+def test_checkpoint_zero_optimizer(tmpdir, zero_stage, use_cpu_offload, adam_optimizer):
     if use_cpu_offload and not deepspeed.ops.__compatible_ops__[CPUAdamBuilder.NAME]:
         pytest.skip("cpu-adam is not compatible")
+    if zero_stage == 3:
+        pytest.skip('Skip checkpointing tests for ZeRO3')
 
     config_dict = {
         "train_batch_size": 2,
@@ -320,34 +334,52 @@ def test_checkpoint_zero_optimizer(tmpdir, zero_stage, use_cpu_offload):
     args = args_from_dict(tmpdir, config_dict)
     hidden_dim = 10
 
-    models = [SimpleModel(hidden_dim, empty_grad=False) for _ in range(2)]
-
     @distributed_test(world_size=[2])
-    def _test_checkpoint_zero_optimizer(args, models, hidden_dim, load_optimizer_states):
+    def _test_checkpoint_zero_optimizer(args,
+                                        zero_stage,
+                                        hidden_dim,
+                                        load_optimizer_states):
+        if zero_stage == 3:
+            global FP16_DeepSpeedZeroOptimizer_Stage3
+            from deepspeed.runtime.zero.stage3 import FP16_DeepSpeedZeroOptimizer_Stage3
+            with deepspeed.ScatteredParameters(zero_modules=True):
+                models = [SimpleModel(hidden_dim, empty_grad=False) for _ in range(2)]
+        else:
+            models = [SimpleModel(hidden_dim, empty_grad=False) for _ in range(2)]
+
         checkpoint_correctness_verification(args,
-                                            models=models,
-                                            hidden_dim=hidden_dim,
-                                            tmpdir=tmpdir,
+                                            models,
+                                            hidden_dim,
+                                            tmpdir,
                                             load_optimizer_states=load_optimizer_states)
 
     _test_checkpoint_zero_optimizer(args=args,
-                                    models=models,
+                                    zero_stage=zero_stage,
                                     hidden_dim=hidden_dim,
                                     load_optimizer_states=True)
 
 
-@pytest.mark.parametrize('zero_stage, use_cpu_offload',
-                         [
-                             (1,
-                              False),
-                             (2,
-                              False),
-                             (2,
-                              True),
-                         ])
-def test_checkpoint_zero_no_optimizer(tmpdir, zero_stage, use_cpu_offload):
+@pytest.mark.parametrize('zero_stage, use_cpu_offload, adam_optimizer',
+                         [(1,
+                           False,
+                           "Adam"),
+                          (2,
+                           False,
+                           "Adam"),
+                          (2,
+                           True,
+                           'deepspeed_adam'),
+                          (3,
+                           False,
+                           'Adam')])
+def test_checkpoint_zero_no_optimizer(tmpdir,
+                                      zero_stage,
+                                      use_cpu_offload,
+                                      adam_optimizer):
     if use_cpu_offload and not deepspeed.ops.__compatible_ops__[CPUAdamBuilder.NAME]:
         pytest.skip("cpu-adam is not compatible")
+    if zero_stage == 3:
+        pytest.skip('Skip checkpointing tests for ZeRO3')
 
     config_dict = {
         "train_batch_size": 2,
@@ -373,39 +405,52 @@ def test_checkpoint_zero_no_optimizer(tmpdir, zero_stage, use_cpu_offload):
     args = args_from_dict(tmpdir, config_dict)
     hidden_dim = 10
 
-    models = [SimpleModel(hidden_dim, empty_grad=False) for _ in range(2)]
-
-    @distributed_test(world_size=[2])
+    @distributed_test(world_size=[1])
     def _test_checkpoint_zero_no_optimizer(args,
-                                           models,
+                                           zero_stage,
                                            hidden_dim,
                                            load_optimizer_states):
+        if zero_stage == 3:
+            global FP16_DeepSpeedZeroOptimizer_Stage3
+            from deepspeed.runtime.zero.stage3 import FP16_DeepSpeedZeroOptimizer_Stage3
+            with deepspeed.ScatteredParameters(zero_modules=True):
+                models = [SimpleModel(hidden_dim, empty_grad=False) for _ in range(2)]
+        else:
+            models = [SimpleModel(hidden_dim, empty_grad=False) for _ in range(2)]
+
         checkpoint_correctness_verification(args,
-                                            models=models,
-                                            hidden_dim=hidden_dim,
-                                            tmpdir=tmpdir,
+                                            models,
+                                            hidden_dim,
+                                            tmpdir,
                                             load_optimizer_states=load_optimizer_states)
 
     _test_checkpoint_zero_no_optimizer(args=args,
-                                       models=models,
+                                       zero_stage=zero_stage,
                                        hidden_dim=hidden_dim,
                                        load_optimizer_states=False)
 
 
-@pytest.mark.parametrize('zero_stage, use_cpu_offload',
-                         [
-                             (0,
-                              False),
-                             (1,
-                              False),
-                             (2,
-                              False),
-                             (2,
-                              True),
-                         ])
-def test_checkpoint_lr_scheduler(tmpdir, zero_stage, use_cpu_offload):
+@pytest.mark.parametrize('zero_stage, use_cpu_offload, adam_optimizer',
+                         [(0,
+                           False,
+                           'Adam'),
+                          (1,
+                           False,
+                           'Adam'),
+                          (2,
+                           False,
+                           'Adam'),
+                          (2,
+                           True,
+                           'deepspeed_adam'),
+                          (3,
+                           False,
+                           'Adam')])
+def test_checkpoint_lr_scheduler(tmpdir, zero_stage, use_cpu_offload, adam_optimizer):
     if use_cpu_offload and not deepspeed.ops.__compatible_ops__[CPUAdamBuilder.NAME]:
         pytest.skip("cpu-adam is not compatible")
+    if zero_stage == 3:
+        pytest.skip('Skip checkpointing tests for ZeRO3')
 
     config_dict = {
         "train_batch_size": 2,
@@ -439,43 +484,56 @@ def test_checkpoint_lr_scheduler(tmpdir, zero_stage, use_cpu_offload):
     args = args_from_dict(tmpdir, config_dict)
     hidden_dim = 10
 
-    models = [SimpleModel(hidden_dim, empty_grad=False) for _ in range(2)]
-
     @distributed_test(world_size=[2])
     def _test_checkpoint_lr_scheduler(args,
-                                      models,
+                                      zero_stage,
                                       hidden_dim,
                                       load_optimizer_states,
                                       load_lr_scheduler_states):
+        if zero_stage == 3:
+            global FP16_DeepSpeedZeroOptimizer_Stage3
+            from deepspeed.runtime.zero.stage3 import FP16_DeepSpeedZeroOptimizer_Stage3
+            with deepspeed.ScatteredParameters(zero_modules=True):
+                models = [SimpleModel(hidden_dim, empty_grad=False) for _ in range(2)]
+        else:
+            models = [SimpleModel(hidden_dim, empty_grad=False) for _ in range(2)]
+
         checkpoint_correctness_verification(
             args,
-            models=models,
-            hidden_dim=hidden_dim,
-            tmpdir=tmpdir,
+            models,
+            hidden_dim,
+            tmpdir,
             load_optimizer_states=load_optimizer_states,
             load_lr_scheduler_states=load_lr_scheduler_states)
 
     _test_checkpoint_lr_scheduler(args=args,
-                                  models=models,
+                                  zero_stage=zero_stage,
                                   hidden_dim=hidden_dim,
                                   load_optimizer_states=False,
                                   load_lr_scheduler_states=True)
 
 
-@pytest.mark.parametrize('zero_stage, use_cpu_offload',
-                         [
-                             (0,
-                              False),
-                             (1,
-                              False),
-                             (2,
-                              False),
-                             (2,
-                              True),
-                         ])
-def test_checkpoint_no_lr_scheduler(tmpdir, zero_stage, use_cpu_offload):
+@pytest.mark.parametrize('zero_stage, use_cpu_offload, adam_optimizer',
+                         [(0,
+                           False,
+                           'Adam'),
+                          (1,
+                           False,
+                           'Adam'),
+                          (2,
+                           False,
+                           'Adam'),
+                          (2,
+                           True,
+                           'deepspeed_adam'),
+                          (3,
+                           True,
+                           'Adam')])
+def test_checkpoint_no_lr_scheduler(tmpdir, zero_stage, use_cpu_offload, adam_optimizer):
     if use_cpu_offload and not deepspeed.ops.__compatible_ops__[CPUAdamBuilder.NAME]:
         pytest.skip("cpu-adam is not compatible")
+    if zero_stage == 3:
+        pytest.skip('Skip checkpointing tests for ZeRO3')
 
     config_dict = {
         "train_batch_size": 2,
@@ -505,24 +563,28 @@ def test_checkpoint_no_lr_scheduler(tmpdir, zero_stage, use_cpu_offload):
     args = args_from_dict(tmpdir, config_dict)
     hidden_dim = 10
 
-    models = [SimpleModel(hidden_dim, empty_grad=False) for _ in range(2)]
-
     @distributed_test(world_size=[2])
     def _test_checkpoint_no_lr_scheduler(args,
-                                         models,
+                                         zero_stage,
                                          hidden_dim,
                                          load_optimizer_states,
                                          load_lr_scheduler_states):
+        if zero_stage == 3:
+            with deepspeed.ScatteredParameters(zero_modules=True):
+                models = [SimpleModel(hidden_dim, empty_grad=False) for _ in range(2)]
+        else:
+            models = [SimpleModel(hidden_dim, empty_grad=False) for _ in range(2)]
+
         checkpoint_correctness_verification(
             args,
-            models=models,
-            hidden_dim=hidden_dim,
-            tmpdir=tmpdir,
+            models,
+            hidden_dim,
+            tmpdir,
             load_optimizer_states=load_optimizer_states,
             load_lr_scheduler_states=load_lr_scheduler_states)
 
     _test_checkpoint_no_lr_scheduler(args=args,
-                                     models=models,
+                                     zero_stage=zero_stage,
                                      hidden_dim=hidden_dim,
                                      load_optimizer_states=False,
                                      load_lr_scheduler_states=False)

@@ -1,3 +1,6 @@
+"""
+Copyright 2020 The Microsoft DeepSpeed Team
+"""
 import os
 import time
 import torch
@@ -119,6 +122,37 @@ class OpBuilder(ABC):
         '''
         return True
 
+    def extra_ldflags(self):
+        return []
+
+    def libraries_installed(self, libraries):
+        valid = False
+        check_cmd = 'dpkg -l'
+        for lib in libraries:
+            result = subprocess.Popen(f'dpkg -l {lib}',
+                                      stdout=subprocess.PIPE,
+                                      stderr=subprocess.PIPE,
+                                      shell=True)
+            valid = valid or result.wait() == 0
+        return valid
+
+    def simd_width(self):
+        if not self.command_exists('lscpu'):
+            self.warning(
+                f"{self.name} is attempted to query 'lscpu' to detect the existence "
+                "of AVX instructions. However, 'lscpu' does not appear to exist on "
+                "your system, will fall back to non-vectorized execution.")
+            return ''
+
+        result = subprocess.check_output('lscpu', shell=True)
+        result = result.decode('utf-8').strip().lower()
+        if 'genuineintel' in result:
+            if 'avx512' in result:
+                return '-D__AVX512__'
+            elif 'avx2' in result:
+                return '-D__AVX256__'
+        return ''
+
     def python_requirements(self):
         '''
         Override if op wants to define special dependencies, otherwise will
@@ -165,7 +199,8 @@ class OpBuilder(ABC):
         return CppExtension(name=self.absolute_name(),
                             sources=self.sources(),
                             include_dirs=self.include_paths(),
-                            extra_compile_args={'cxx': self.cxx_args()})
+                            extra_compile_args={'cxx': self.cxx_args()},
+                            extra_link_args=self.extra_ldflags())
 
     def load(self, verbose=True):
         from ...git_version_info import installed_ops, torch_info
@@ -213,6 +248,7 @@ class OpBuilder(ABC):
             ],
             extra_cflags=self.cxx_args(),
             extra_cuda_cflags=self.nvcc_args(),
+            extra_ldflags=self.extra_ldflags(),
             verbose=verbose)
         build_duration = time.time() - start_build
         if verbose:

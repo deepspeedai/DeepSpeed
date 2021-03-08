@@ -170,7 +170,7 @@ else
     export PDSH_RCMD_TYPE=ssh
     tmp_wheel_path="/tmp/deepspeed_wheels"
 
-    pdsh -w $hosts "if [ -d $tmp_wheel_path ]; then rm $tmp_wheel_path/*.whl; else mkdir -pv $tmp_wheel_path; fi"
+    pdsh -w $hosts "if [ -d $tmp_wheel_path ]; then rm $tmp_wheel_path/*; else mkdir -pv $tmp_wheel_path; fi"
     pdcp -w $hosts requirements/requirements.txt ${tmp_wheel_path}/
 
     echo "Installing deepspeed"

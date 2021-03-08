@@ -48,4 +48,4 @@ jobs:
       - name: Unit tests
         run: |
           if [[ -d ./torch-extensions ]]; then rm -rf ./torch-extensions; fi
-          TORCH_EXTENSIONS_DIR=./torch-extensions pytest --durations=0 --forked --verbose -x tests/unit/
+          TORCH_EXTENSIONS_DIR=./torch-extensions pytest --durations=0 --forked --verbose tests/unit/

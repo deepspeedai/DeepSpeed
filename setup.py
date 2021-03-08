@@ -13,6 +13,7 @@ import shutil
 import subprocess
 import warnings
 from setuptools import setup, find_packages
+import time
 
 try:
     import torch
@@ -124,10 +125,8 @@ version_str = open('version.txt', 'r').read().strip()
 
 # Build specifiers like .devX can be added at install time. Otherwise, add the git hash.
 # example: DS_BUILD_STR=".dev20201022" python setup.py sdist bdist_wheel
-#version_str += os.environ.get('DS_BUILD_STRING', f'+{git_hash}')
 
 # Building wheel for distribution, update version file
-
 if 'DS_BUILD_STRING' in os.environ:
     # Build string env specified, probably building for distribution
     with open('build.txt', 'w') as fd:
@@ -166,6 +165,8 @@ thisdir = os.path.abspath(os.path.dirname(__file__))
 with open(os.path.join(thisdir, 'README.md'), encoding='utf-8') as fin:
     readme_text = fin.read()
 
+start_time = time.time()
+
 setup(name='deepspeed',
       version=version_str,
       description='DeepSpeed library',
@@ -195,3 +196,6 @@ setup(name='deepspeed',
       license='MIT',
       ext_modules=ext_modules,
       cmdclass=cmdclass)
+
+end_time = time.time()
+print(f'deepspeed build time = {end_time - start_time} secs')
