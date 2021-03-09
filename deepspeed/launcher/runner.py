@@ -304,7 +304,7 @@ def main(args=None):
     # encode world info as base64 to make it easier to pass via command line
     world_info_base64 = encode_world_info(active_resources)
 
-    multi_node_exec = True  # len(active_resources) > 1
+    multi_node_exec = len(active_resources) > 1
 
     if multi_node_exec and not shutil.which('pdsh'):
         raise RuntimeError("pdsh is not installed, unable to proceed")
