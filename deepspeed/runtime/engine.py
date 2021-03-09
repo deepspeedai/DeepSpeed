@@ -255,7 +255,7 @@ class DeepSpeedEngine(Module):
 
     def get_summary_writer(self,
                            name="DeepSpeedJobName",
-                           base=os.path.join(os.environ["HOME"],
+                           base=os.path.join(os.path.expanduser("~"),
                                              "tensorboard")):
         if self.tensorboard_output_path():
             base_dir = self.tensorboard_output_path()
