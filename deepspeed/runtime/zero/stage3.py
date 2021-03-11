@@ -580,7 +580,7 @@ class FP16_DeepSpeedZeroOptimizer_Stage3(object):
                  gradient_accumulation_steps=1,
                  elastic_checkpoint=False):
 
-        see_memory_usage("Stage 3 intialize begining", force=True)
+        see_memory_usage("Stage 3 intialize beginning", force=True)
 
         if dist.get_rank() == 0:
             logger.info(f"Reduce bucket size {reduce_bucket_size}")
@@ -628,7 +628,7 @@ class FP16_DeepSpeedZeroOptimizer_Stage3(object):
         self.device = torch.cuda.current_device() if not self.cpu_offload else 'cpu'
         ############################################################################
 
-        see_memory_usage("Before Partitioned Parameter Coordinator", force=True)
+        see_memory_usage("Before Partitioned Parameter Coordinator", force=False)
 
         fetch_stream = torch.cuda.Stream() if self.overlap_comm else None
         self.param_coordinator = PartitionedParameterCoordinator(
@@ -636,7 +636,7 @@ class FP16_DeepSpeedZeroOptimizer_Stage3(object):
             max_reuse_distance_in_numel=int(max_reuse_distance),
             max_available_parameters_in_numel=int(max_live_parameters))
 
-        see_memory_usage("After Partitioned Parameter Coordinator", force=True)
+        see_memory_usage("After Partitioned Parameter Coordinator", force=False)
 
         #self.param_coordinator = PartitionedParameterCoordinator(comm_stream=torch.cuda.Stream())
         #-------------Stage 3 Setup-------------------#
@@ -711,20 +711,20 @@ class FP16_DeepSpeedZeroOptimizer_Stage3(object):
 
         self.sub_group_to_group_id = {}
 
-        see_memory_usage("Before creating fp16 partitions", force=True)
+        see_memory_usage("Before creating fp16 partitions", force=False)
         #self._create_fp16_partitions()
         self._create_fp16_partitions_with_defragmentation()
         num_fp16_subgroups = len(self.fp16_partitioned_groups_flat)
         see_memory_usage(f"After creating fp16 partitions: {num_fp16_subgroups}",
-                         force=True)
+                         force=False)
 
-        see_memory_usage("Before creating fp32 partitions", force=True)
+        see_memory_usage("Before creating fp32 partitions", force=False)
         self._create_fp32_partitions()
-        see_memory_usage("After creating fp32 partitions", force=True)
+        see_memory_usage("After creating fp32 partitions", force=False)
 
-        see_memory_usage("Before initializing optimizer states", force=True)
+        see_memory_usage("Before initializing optimizer states", force=False)
         self.initialize_optimizer_states()
-        see_memory_usage("After initializing optimizer states", force=True)
+        see_memory_usage("After initializing optimizer states", force=False)
 
         if dist.get_rank() == 0:
             logger.info(f"optimizer state initialized")
@@ -767,11 +767,11 @@ class FP16_DeepSpeedZeroOptimizer_Stage3(object):
         #Largest partitioned param
         largest_partitioned_param_numel = self._get_largest_partitioned_numel()
 
-        see_memory_usage(f"Before Set Grad positions", force=True)
+        see_memory_usage(f"Before Set Grad positions", force=False)
 
         self.grad_position = {}
         self.set_grad_positions()
-        see_memory_usage(f"Before CPU Offload initialization", force=True)
+        see_memory_usage(f"Before CPU Offload initialization", force=False)
 
         self.grads_in_partition = None
 
@@ -785,7 +785,7 @@ class FP16_DeepSpeedZeroOptimizer_Stage3(object):
             self.temp_grad_gpu_buffer = torch.zeros(
                 largest_partitioned_param_numel,
                 device=torch.cuda.current_device()).half()
-        see_memory_usage(f"After CPU Offload initialization", force=True)
+        see_memory_usage(f"After CPU Offload initialization", force=False)
 
         # stores if a partition has been reduced in this step
         self.is_partition_reduced = {}
@@ -1614,7 +1614,7 @@ class FP16_DeepSpeedZeroOptimizer_Stage3(object):
 
                 see_memory_usage(
                     f"group {i} before creating {total_size} reduced gradients into partition",
-                    force=True)
+                    force=False)
                 if self.cpu_offload_use_pin_memory:
                     self.grads_in_partition.append(
                         torch.zeros(int(total_size),
@@ -1627,7 +1627,7 @@ class FP16_DeepSpeedZeroOptimizer_Stage3(object):
                                     device=self.device))
                 see_memory_usage(
                     f"group {i} after creating {total_size} reduced gradients into partition",
-                    force=True)
+                    force=False)
 
         for param in self.previous_reduced_grads:
 
@@ -2044,13 +2044,22 @@ class FP16_DeepSpeedZeroOptimizer_Stage3(object):
         self.local_overflow = False
 
     def log_timers(self, timer_names):
+        if self.timers is None:
+            return
+
         self.timers.log(names=list(timer_names))
 
     def start_timers(self, timer_names):
+        if self.timers is None:
+            return
+
         for name in timer_names:
             self.timers(name).start()
 
     def stop_timers(self, timer_names):
+        if self.timers is None:
+            return
+
         for name in timer_names:
             self.timers(name).stop()
 
@@ -2210,7 +2219,7 @@ class FP16_DeepSpeedZeroOptimizer_Stage3(object):
 
         see_memory_usage('After zero_optimizer step', force=False)
         print_rank_0(f"------------------Finishing Step-----------------------",
-                     force=True)
+                     force=False)
         return
 
     def _pre_step(self):
@@ -2327,7 +2336,7 @@ class FP16_DeepSpeedZeroOptimizer_Stage3(object):
 
         self.log_timers(timer_names)
 
-        see_memory_usage('After zero_optimizer step', force=True)
+        see_memory_usage('After zero_optimizer step', force=False)
         print_rank_0(f"------------------Finishing Step-----------------------")
 
     def step(self, closure=None):
@@ -2342,7 +2351,6 @@ class FP16_DeepSpeedZeroOptimizer_Stage3(object):
 
         norm_groups = self._get_norm_groups()
 
-        timers = self.timers
         timer_names = set()
 
         timer_names.add('optimizer_step')

@@ -1326,6 +1326,26 @@ class FP16_DeepSpeedZeroOptimizer(object):
         self.norm_for_param_grads = {}
         self.local_overflow = False
 
+    def log_timers(self, timer_names):
+        if self.timers is None:
+            return
+
+        self.timers.log(names=list(timer_names))
+
+    def start_timers(self, timer_names):
+        if self.timers is None:
+            return
+
+        for name in timer_names:
+            self.timers(name).start()
+
+    def stop_timers(self, timer_names):
+        if self.timers is None:
+            return
+
+        for name in timer_names:
+            self.timers(name).stop()
+
     def step(self, closure=None):
         """
         Not supporting closure.
@@ -1340,7 +1360,10 @@ class FP16_DeepSpeedZeroOptimizer(object):
         # First compute norm for all group so we know if there is overflow
         self.check_overflow()
 
-        timers = self.timers
+        OPTIMIZER_ALLGATHER = 'optimizer_allgather'
+        OPTIMIZER_GRADIENTS = 'optimizer_gradients'
+        OPTIMIZER_STEP = 'optimizer_step'
+        timer_names = [OPTIMIZER_ALLGATHER, OPTIMIZER_GRADIENTS, OPTIMIZER_STEP]
 
         prev_scale = self.loss_scale
         self._update_scale(self.overflow)
@@ -1359,15 +1382,11 @@ class FP16_DeepSpeedZeroOptimizer(object):
                 "reducing to {}".format(dist.get_rank(),
                                         prev_scale,
                                         self.loss_scale))
-            timers('optimizer_gradients').start()
-            timers('optimizer_gradients').stop()
-            timers('optimizer_step').start()
-            timers('optimizer_step').stop()
-            timers('optimizer_allgather').start()
-            timers('optimizer_allgather').stop()
+            self.start_timers(timer_names)
+            self.stop_timers(timer_names)
             return
 
-        timers('optimizer_gradients').start()
+        self.start_timers([OPTIMIZER_GRADIENTS])
         norm_groups = []
         single_partition_grad_groups = []
         skip = False
@@ -1409,10 +1428,9 @@ class FP16_DeepSpeedZeroOptimizer(object):
             single_partition_grad_groups.append(single_grad_partition)
 
         self.unscale_and_clip_grads(single_partition_grad_groups, norm_groups)
-        timers('optimizer_gradients').stop()
+        self.stop_timers([OPTIMIZER_GRADIENTS])
 
-        #torch.set_num_threads(12)
-        timers('optimizer_step').start()
+        self.start_timers([OPTIMIZER_STEP])
         if self.deepspeed_adam_offload:
             from deepspeed.ops.adam import DeepSpeedCPUAdam
             if type(self.optimizer) == DeepSpeedCPUAdam:
@@ -1436,12 +1454,12 @@ class FP16_DeepSpeedZeroOptimizer(object):
             for fp16_partitions, fp32_partition in zip(self.parallel_partitioned_fp16_groups, self.single_partition_of_fp32_groups):
                 fp16_partitions[partition_id].data.copy_(fp32_partition.data)
 
-        timers('optimizer_step').stop()
+        self.stop_timers([OPTIMIZER_STEP])
 
         if self.cpu_offload:
             self.reset_cpu_buffers()
 
-        timers('optimizer_allgather').start()
+        self.start_timers([OPTIMIZER_ALLGATHER])
         #gather the updated weights from everyone
         for group_id, partitioned_params in enumerate(self.parallel_partitioned_fp16_groups):
 
@@ -1474,7 +1492,7 @@ class FP16_DeepSpeedZeroOptimizer(object):
                 dist.all_gather(shard_list,
                                 shard_list[partition_id],
                                 group=self.dp_process_group)
-        timers('optimizer_allgather').stop()
+        self.stop_timers([OPTIMIZER_ALLGATHER])
 
         # TODO: we probably don't need this? just to be safe
         for i in range(len(norm_groups)):
@@ -1483,11 +1501,9 @@ class FP16_DeepSpeedZeroOptimizer(object):
             for p, q in zip(self.fp16_groups[i], updated_params):
                 p.data = q.data
 
-        timers.log(
-            names=['optimizer_gradients',
-                   'optimizer_step',
-                   'optimizer_allgather'])
+        self.log_timers(timer_names)
         see_memory_usage('After zero_optimizer step')
+
         return
 
     def unscale_and_clip_grads(self, grad_groups_flat, norm_groups):

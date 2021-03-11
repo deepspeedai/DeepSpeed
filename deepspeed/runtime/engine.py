@@ -722,6 +722,7 @@ class DeepSpeedEngine(Module):
         zero_stage = self.zero_optimization_stage()
         log_dist('Creating fp16 ZeRO stage {} optimizer'.format(zero_stage), ranks=[0])
         assert not self.allreduce_always_fp32(), "ZeRO does not support 'fp32_allreduce': true"
+        timers = self.timers if self.wall_clock_breakdown() else None
 
         if zero_stage == ZERO_OPTIMIZATION_OPTIMIZER_STATES:
             assert self.zero_reduce_scatter(), 'Stage 1 only supports reduce scatter mode'
@@ -740,7 +741,7 @@ class DeepSpeedEngine(Module):
         elif zero_stage == ZERO_OPTIMIZATION_GRADIENTS:
             optimizer = FP16_DeepSpeedZeroOptimizer(
                 optimizer,
-                timers=self.timers,
+                timers=timers,
                 static_loss_scale=self.loss_scale(),
                 dynamic_loss_scale=self.dynamic_loss_scale(),
                 dynamic_loss_args=self.dynamic_loss_scale_args(),
@@ -762,7 +763,7 @@ class DeepSpeedEngine(Module):
             optimizer = FP16_DeepSpeedZeroOptimizer_Stage3(
                 self.module,
                 optimizer,
-                timers=self.timers,
+                timers=timers,
                 static_loss_scale=self.loss_scale(),
                 dynamic_loss_scale=self.dynamic_loss_scale(),
                 dynamic_loss_args=self.dynamic_loss_scale_args(),
