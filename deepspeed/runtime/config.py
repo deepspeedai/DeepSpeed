@@ -40,6 +40,10 @@ DEEPSPEED_OPTIMIZERS = [
 # extra optimizer parameters for adam/adamw
 TORCH_ADAM_PARAM = "torch_adam"
 
+# default to adamw logic for adam/adamw optimizers unless user explictly opts out
+ADAM_W_MODE = "adam_w_mode"
+ADAM_W_MODE_DEFAULT = True
+
 
 class DeepSpeedConfigError(Exception):
     pass
