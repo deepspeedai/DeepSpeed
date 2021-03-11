@@ -88,6 +88,8 @@ The DeepSpeed flops profiler can be used with the DeepSpeed runtime or as a stan
       - [Example: Bert](#example-bert)
     - [In Model Training Workflow](#in-model-training-workflow)
       - [Example Training Workflow](#example-training-workflow)
+
+
 ### Usage With the DeepSpeed Runtime
 
 When using DeepSpeed for model training, the flops profiler can be configured in the `deepspeed_config` file. No explict API calls are needed to use the profiler. Refer to [flops profiler](https://www.deepspeed.ai/docs/config-json/#flops-profiler) for details.

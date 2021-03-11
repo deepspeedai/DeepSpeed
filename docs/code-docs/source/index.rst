@@ -33,7 +33,6 @@ ZeRO API
    :maxdepth: 2
 
    zero3
-   cpu-adam
 
 
 
@@ -51,6 +50,26 @@ Pipeline Parallelism
 
    pipeline
 
+Optimizers
+--------------------
+.. toctree::
+   :maxdepth: 2
+
+   optimizers
+
+Learning Rate Schedulers
+--------------------
+.. toctree::
+   :maxdepth: 2
+
+   schedulers
+
+Flops Profiler
+--------------------
+.. toctree::
+   :maxdepth: 2
+
+   flops-profiler
 
 Indices and tables
 ------------------

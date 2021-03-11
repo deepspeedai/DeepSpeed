@@ -32,10 +32,10 @@ title: "DeepSpeed Configuration JSON"
 
 ***optimizer***: [dictionary]
 
-| Fields | Value                                                                                                                                                                                                   | Example                      |
-| ------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------- |
-| type   | The optimizer name. DeepSpeed natively supports **Adam**, **AdamW**, **OneBitAdam**, and **Lamb** optimizers and will import other optimizers from [torch](https://pytorch.org/docs/stable/optim.html). | `"Adam"`                     |
-| params | Dictionary of parameters to instantiate optimizer. The parameter names must match the optimizer constructor signature (e.g., for [Adam](https://pytorch.org/docs/stable/optim.html#torch.optim.Adam)).  | `{"lr": 0.001, "eps": 1e-8}` |
+| Fields | Value                                                                                                                                                                                                                                                                                        | Example                      |
+| ------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------- |
+| type   | The optimizer name. DeepSpeed natively supports **Adam**, **AdamW**, **OneBitAdam**, and **Lamb** optimizers (See [here](https://deepspeed.readthedocs.io/en/latest/optimizers.html) for details) and will import other optimizers from [torch](https://pytorch.org/docs/stable/optim.html). | `"Adam"`                     |
+| params | Dictionary of parameters to instantiate optimizer. The parameter names must match the optimizer constructor signature (e.g., for [Adam](https://pytorch.org/docs/stable/optim.html#torch.optim.Adam)).                                                                                       | `{"lr": 0.001, "eps": 1e-8}` |
 
   Example of ***optimizer*** with Adam
 
@@ -83,10 +83,10 @@ The Adam optimizer also supports the following two params keys/values in additio
 
 ***scheduler***: [dictionary]
 
-| Fields | Value                                                                                                                        | Example                                        |
-| ------ | ---------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------- |
-| type   | The scheduler name. See [here](https://deepspeed.readthedocs.io/en/latest/deepspeed.pt.html) for list of support schedulers. | `"WarmupLR"`                                   |
-| params | Dictionary of parameters to instantiate scheduler. The parameter names should match scheduler constructor signature.         | `{"warmup_min_lr": 0, "warmup_max_lr": 0.001}` |
+| Fields | Value                                                                                                                      | Example                                        |
+| ------ | -------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------- |
+| type   | The scheduler name. See [here](https://deepspeed.readthedocs.io/en/latest/schedulers.html) for list of support schedulers. | `"WarmupLR"`                                   |
+| params | Dictionary of parameters to instantiate scheduler. The parameter names should match scheduler constructor signature.       | `{"warmup_min_lr": 0, "warmup_max_lr": 0.001}` |
 
 Example of ***scheduler***
 
@@ -163,8 +163,8 @@ Example of ***scheduler***
 
 ***fp16:initial\_scale\_power***: [integer]
 
-| Description                                                                                                                                                                                                   | Default |
-| ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------- |
+| Description                                                                                                                                                                                       | Default |
+| ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------- |
 | ***initial\_scale\_power*** is a **fp16** parameter representing the power of the initial dynamic loss scale value. The actual loss scale is computed as 2<sup>***initial\_scale\_power***</sup>. | `32`    |
 
 ***fp16:loss\_scale\_window***: [integer]
