@@ -21,13 +21,13 @@ Getting Started
 
 If you are new to DeepSpeed, check out our `Getting Started <https://www.deepspeed.ai/getting-started/>`_ page.
 
-Once you are training with DeepSpeed, enabling ZeRO-3 offload is as simple as enabling it
+Once you are training with DeepSpeed, enabling ZeRO-3 Offload is as simple as enabling it
 in your DeepSpeed configuration! Below are a few examples of ZeRO-3 configurations. Please see
 our `config guide <https://www.deepspeed.ai/docs/config-json/#zero-optimizations-for-fp16-training>`_
 for a complete list of options for configuration and performance tuning.
 
 .. note::
-        ZeRO-Offload works best with our heavily optimized
+        ZeRO-3 Offload works best with our heavily optimized
         :class:`deepspeed.ops.adam.DeepSpeedCPUAdam` optimizer. We recommend using
         our `optimizer config <https://www.deepspeed.ai/docs/config-json/#optimizer-parameters>`_
         to instruct :meth:`deepspeed.initialize` to build the optimizer for you.
@@ -149,8 +149,8 @@ DeepSpeed provides mechanisms for collecting (or *gathering*) a partitioned para
 
 Some models partitioned with :class:`deepspeed.zero.Init` may need to access
 a module’s weights outside of the class constructor or its ``forward()``
-method. We refer to these weights as **external parameters**, since they
-parameters are accessed outside of the module that created it. To do so, use
+method. We refer to these weights as **external parameters**, since these
+parameters are accessed outside of the module that created them. To do so, use
 :class:`deepspeed.zero.GatheredParameters` or :meth:`deepspeed.zero.register_external_parameter`.
 
 .. autoclass:: deepspeed.zero.GatheredParameters

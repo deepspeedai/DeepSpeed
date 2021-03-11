@@ -227,7 +227,7 @@ class ParallelTransformerLayer(MegatronModule):
 #### Allocating Massive Megatron-LM Models
 
 We make two further changes to model initalization in order to support models
-that exceed *local* system memory, but not not *total* system memory.
+that exceed *local* system memory, but not *total* system memory.
 
 1. Allocate the model in a memory-scalable fashion. The model parameters will
 be allocated and immediately partitioned across the data parallel group. If
