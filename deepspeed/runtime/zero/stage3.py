@@ -961,10 +961,9 @@ class FP16_DeepSpeedZeroOptimizer_Stage3(object):
 
                     #create flat buffer in CPU and move to GPU
                     self.fp16_partitioned_groups_flat.append(
-                        flatten_dense_tensors_aligned(
-                            self.fp16_partitioned_groups[i],
-                            dist.get_world_size(group=self.dp_process_group)).cuda(
-                                torch.cuda.current_device()))
+                        flatten_dense_tensors_aligned(self.fp16_partitioned_groups[i],
+                                                      1).cuda(
+                                                          torch.cuda.current_device()))
                     see_memory_usage(
                         f"After flattening and moving param group {i} to GPU",
                         force=False)
@@ -976,9 +975,11 @@ class FP16_DeepSpeedZeroOptimizer_Stage3(object):
                                   flat_offset,
                                   total_elements)
                     self.fp16_partitioned_groups_flat.append(fp16_partitioned_group_flat)
-                    self._move_to_flat_buffer(self.fp16_partitioned_groups[i],
-                                              self.fp16_partitioned_groups_flat[i])
                     flat_offset += total_elements
+
+                # move param to flat buffer for both param offload on/off
+                self._move_to_flat_buffer(self.fp16_partitioned_groups[i],
+                                          self.fp16_partitioned_groups_flat[i])
 
                 see_memory_usage(f"After Flattening param group {i}", force=False)
 
@@ -1035,6 +1036,14 @@ class FP16_DeepSpeedZeroOptimizer_Stage3(object):
     def setup_zero_stage3_hooks(self):
         self.hierarchy = 0
         self._register_hooks_recursively(self.module)
+
+        #reset step if in inference mode
+        def _end_of_forward_hook(module, *args):
+
+            if not torch._C.is_grad_enabled():
+                self.param_coordinator.reset_step()
+
+        self.module.register_forward_hook(_end_of_forward_hook)
 
     def persistent_parameters(self):
         persistent_params = []

@@ -807,8 +807,12 @@ class Init(InsertPostInitMethodToModuleSubClasses):
         if start < param.ds_numel:
             elements = min(param.ds_numel - start, partition_size)
 
-            dest_tensor = partition_buffer.view(-1).narrow(0, 0, elements)
+            dest_tensor_full_buffer = partition_buffer.view(-1).narrow(
+                0,
+                0,
+                partition_size)
 
+            dest_tensor = dest_tensor_full_buffer.narrow(0, 0, elements)
             src_tensor = param.grad.view(-1).narrow(0, start, elements)
 
             # just copy the grad partition to the buffer
@@ -841,7 +845,7 @@ class Init(InsertPostInitMethodToModuleSubClasses):
             #                                             elements))
 
         #print("after partition gradients")
-        param.grad.data = dest_tensor.data
+        param.grad.data = dest_tensor_full_buffer.data
         see_memory_usage("After partitioning gradients", force=False)
 
 

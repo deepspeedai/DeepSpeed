@@ -347,9 +347,6 @@ def test_zero_static_scale(tmpdir, zero_stage, use_cpu_offload):
     if use_cpu_offload and not deepspeed.ops.__compatible_ops__[CPUAdamBuilder.NAME]:
         pytest.skip("cpu-adam is not compatible")
 
-    if zero_stage == 3:
-        pytest.skip("skip for now")
-
     config_dict = {
         "train_batch_size": 4,
         "steps_per_print": 1,
@@ -371,8 +368,9 @@ def test_zero_static_scale(tmpdir, zero_stage, use_cpu_offload):
     args = args_from_dict(tmpdir, config_dict)
 
     @distributed_test(world_size=2)
-    def _test_zero_static_scale(args, zero_stage):
-        hidden_dim = 10
+    def _test_zero_static_scale(args, zero_stage, hidden_dim):
+        #making hidden size not divisible by DP for covering this scenario
+        hidden_dim = hidden_dim
         model = SimpleModel(hidden_dim)
 
         model, optim, _, _ = deepspeed.initialize(args=args,
@@ -393,7 +391,10 @@ def test_zero_static_scale(tmpdir, zero_stage, use_cpu_offload):
             model.backward(loss)
             model.step()
 
-    _test_zero_static_scale(args=args, zero_stage=zero_stage)
+    #test when hidden_dim is not aligned with world size
+    _test_zero_static_scale(args=args, zero_stage=zero_stage, hidden_dim=9)
+    #test when hidden_dim is aligned with world size
+    _test_zero_static_scale(args=args, zero_stage=zero_stage, hidden_dim=10)
 
 
 def test_zero_static_scale_deprecated_format(tmpdir):
