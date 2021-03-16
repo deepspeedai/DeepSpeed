@@ -2269,7 +2269,7 @@ class FP16_DeepSpeedZeroOptimizer_Stage3(object):
 
         assert single_grad_partition.numel() == self.fp32_partitioned_groups_flat[sub_group_id].numel(), \
             "averaged gradients have different number of elements that partition size {} {} {} {}".format(
-                single_grad_partition.numel(), self.partition_size[sub_group_id], sub_group_id, partition_id)
+                single_grad_partition.numel(), self.fp32_partitioned_groups_flat[sub_group_id].numel(), sub_group_id, partition_id)
 
         self.fp32_partitioned_groups_flat[sub_group_id].grad = single_grad_partition
 
@@ -2638,14 +2638,12 @@ class FP16_DeepSpeedZeroOptimizer_Stage3(object):
     def _set_fp32_optimizer_param_groups(self):
         for sub_group_id, _ in enumerate(self.fp16_groups):
             param_group_id = self.sub_group_to_group_id[sub_group_id]
-            self.optimizer.param_groups[param_group_id]['params'] = [
-                self.fp32_partitioned_groups_flat[sub_group_id]
-            ]
+            self.optimizer.param_groups[param_group_id]['params'].append(
+                self.fp32_partitioned_groups_flat[sub_group_id])
 
     def _clear_fp32_optimizer_param_groups(self):
-        for sub_group_id, _ in enumerate(self.fp16_groups):
-            param_group_id = self.sub_group_to_group_id[sub_group_id]
-            self.optimizer.param_groups[param_group_id]['params'] = []
+        for param_group in self.optimizer.param_groups:
+            param_group['params'] = []
 
     def _rigid_state_dict(self):
         state_dict = {}
