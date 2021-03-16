@@ -495,9 +495,10 @@ class DeepSpeedEngine(Module):
         # After the distributed backend is initialized we are guaranteed the LOCAL_RANK
         # environment variable is set. We must align args.local_rank to this value for
         # backwards compatability with scripts relying on [args|self].local_rank containing
-        # the correct local rank info.
-        args.local_rank = int(os.environ['LOCAL_RANK'])
-        self.local_rank = args.local_rank
+        # the correct local rank info. _do_args_sanity_check will ensure this is the case.
+        self.local_rank = int(os.environ['LOCAL_RANK'])
+        if hasattr(args, 'local_rank'):
+            args.local_rank = self.local_rank
 
         config_file = args.deepspeed_config if hasattr(args,
                                                        'deepspeed_config') else None
@@ -513,15 +514,14 @@ class DeepSpeedEngine(Module):
                 assert args.deepspeed_config is None, "Not sure how to proceed, we were given both a deepscale_config and deepspeed_config"
             args.deepspeed_config = args.deepscale_config
 
-        local_rank_err = "DeepSpeed requires a command line parameter of --local_rank [int] and/or setting the LOCAL_RANK environment variable."
-        if hasattr(args, 'local_rank'):
-            assert type(args.local_rank) == int, local_rank_err
-            if "LOCAL_RANK" in os.environ and args.local_rank >= 0:
-                env_local_rank = int(os.environ.get("LOCAL_RANK", -1))
+        assert "LOCAL_RANK" in os.environ, "DeepSpeed requires the LOCAL_RANK environment variable, it is set by the deepspeed launcher, " \
+            "deepspeed.init_distributed, or the torch.distributed launcher. If using a different launcher please ensure LOCAL_RANK is set prior to initializing deepspeed."
+        if hasattr(args, 'local_rank') and args.local_rank != None:
+            assert isinstance(args.local_rank, int), f"args.local_rank of {args.local_rank} is an unknown type {type(args.local_rank)}"
+            if args.local_rank >= 0:
+                env_local_rank = int(os.environ.get("LOCAL_RANK"))
                 assert env_local_rank == args.local_rank, \
                     f"Mismatch in local rank setting, args.local_rank={args.local_rank} but env['LOCAL_RANK']={env_local_rank}."
-        else:
-            assert "LOCAL_RANK" in os.environ, local_rank_err
 
         if self.config_params is None:
             assert hasattr(args, 'deepspeed_config') and args.deepspeed_config is not None, \

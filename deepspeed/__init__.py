@@ -49,8 +49,8 @@ setattr(deepspeed.pt, 'loss_scaler', deepspeed.runtime.fp16.loss_scaler)
 sys.modules['deepspeed.pt.loss_scaler'] = deepspeed.runtime.fp16.loss_scaler
 
 
-def initialize(args,
-               model,
+def initialize(args=None,
+               model=None,
                optimizer=None,
                model_parameters=None,
                training_data=None,
@@ -62,8 +62,7 @@ def initialize(args,
     """Initialize the DeepSpeed Engine.
 
     Arguments:
-        args: a dictionary containing local_rank and deepspeed_config
-            file location
+        args: an object containing local_rank and deepspeed_config fields. This is optional if `config_params` is passed.
 
         model: Required: nn.module class before apply any wrappers
 
@@ -88,6 +87,9 @@ def initialize(args,
             mini-batch of Tensor(s).  Used when using batched loading from a
             map-style dataset.
 
+        config_params: Optional: Instead of requiring args.deepspeed_config you can pass your deepspeed config
+            as a dictionary instead.
+
     Returns:
         A tuple of ``engine``, ``optimizer``, ``training_dataloader``, ``lr_scheduler``
 
@@ -107,6 +109,8 @@ def initialize(args,
         __git_hash__,
         __git_branch__),
              ranks=[0])
+
+    assert model is not None, "deepspeed.initialize requires a model"
 
     if not isinstance(model, PipelineModule):
         engine = DeepSpeedEngine(args=args,
