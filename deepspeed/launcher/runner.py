@@ -359,6 +359,12 @@ def main(args=None):
     result = subprocess.Popen(cmd, env=env)
     result.wait()
 
+    # In case of failure must propagate the error-condition back to the caller (usually shell). The
+    # actual error and traceback should have been printed in the subprocess, so in order to avoid
+    # unnecessary noise we just quietly exit here with the same code as the subprocess
+    if result.returncode > 0:
+        sys.exit(result.returncode)
+
 
 if __name__ == "__main__":
     main()
