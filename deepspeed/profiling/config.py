@@ -3,12 +3,15 @@ Copyright (c) Microsoft Corporation
 Licensed under the MIT license.
 """
 
-from deepspeed.runtime.config_utils import get_scalar_param
+from deepspeed.runtime.config_utils import get_scalar_param, DeepSpeedConfigObject
 from deepspeed.profiling.constants import *
 
 
-class DeepSpeedFlopsProfilerConfig(object):
+class DeepSpeedFlopsProfilerConfig(DeepSpeedConfigObject):
     def __init__(self, param_dict):
+        """
+        docstring
+        """
         super(DeepSpeedFlopsProfilerConfig, self).__init__()
 
         self.enabled = None
@@ -24,6 +27,9 @@ class DeepSpeedFlopsProfilerConfig(object):
         self._initialize(flops_profiler_dict)
 
     def _initialize(self, flops_profiler_dict):
+        """
+        docstring
+        """
         self.enabled = get_scalar_param(flops_profiler_dict,
                                         FLOPS_PROFILER_ENABLED,
                                         FLOPS_PROFILER_ENABLED_DEFAULT)

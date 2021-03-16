@@ -3,7 +3,7 @@ Copyright (c) Microsoft Corporation
 Licensed under the MIT license.
 """
 
-from deepspeed.runtime.config_utils import get_scalar_param
+from deepspeed.runtime.config_utils import get_scalar_param, DeepSpeedConfigObject
 
 #########################################
 #  DeepSpeed Activation Checkpointing
@@ -56,7 +56,7 @@ ACT_CHKPT_DEFAULT = {
 }
 
 
-class DeepSpeedActivationCheckpointingConfig(object):
+class DeepSpeedActivationCheckpointingConfig(DeepSpeedConfigObject):
     def __init__(self, param_dict):
         super(DeepSpeedActivationCheckpointingConfig, self).__init__()
 
@@ -73,13 +73,6 @@ class DeepSpeedActivationCheckpointingConfig(object):
             act_chkpt_config_dict = ACT_CHKPT_DEFAULT
 
         self._initialize(act_chkpt_config_dict)
-
-    """
-    For json serialization
-    """
-
-    def repr(self):
-        return self.__dict__
 
     def _initialize(self, act_chkpt_config_dict):
         self.partition_activations = get_scalar_param(
