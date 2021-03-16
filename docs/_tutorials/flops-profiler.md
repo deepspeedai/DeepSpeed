@@ -37,11 +37,11 @@ Top 3 modules in params at depth 2 are {'Conv2d': '50.69 k', 'Linear': '11.01 k'
 Top 3 modules in latency at depth 2 are {'Conv2d': '11.37 ms', 'Linear': '5.27 ms', 'AvgPool2d': '5.02 ms'}
 
 ------------------------------ Detailed Profile ------------------------------
-Each module profile is listed after its name in the follwing order:
+Each module profile is listed after its name in the following order:
 number of parameters, percentage of total parameters, number of multiply-accumulate operations (MACs), percentage of total MACs, latency, percentage of total latency, number of floating point operations per second (FLOPS, computed as 2 * MACs / latency).
 Note:
 1. A module can have torch.nn.functional (e.g. to compute logits) along with submodules, thus making the difference between the parent's MACs(or latency) and the sum of its submodules'.
-2. Number of floating point operations is a theoretical estimation, thus FLOPS computed using that could be larger than the maximum system throught.
+2. Number of floating point operations is a theoretical estimation, thus FLOPS computed using that could be larger than the maximum system throughput.
 
 LeNet5(
   61.71 k, 100.00% Params, 439.56 MMACs, 100.00% MACs, 25.7 ms, 100.00% latency, 34.2 GFLOPS,
@@ -92,7 +92,7 @@ The DeepSpeed flops profiler can be used with the DeepSpeed runtime or as a stan
 
 ### Usage With the DeepSpeed Runtime
 
-When using DeepSpeed for model training, the flops profiler can be configured in the `deepspeed_config` file. No explict API calls are needed to use the profiler. Refer to [flops profiler](https://www.deepspeed.ai/docs/config-json/#flops-profiler) for details.
+When using DeepSpeed for model training, the flops profiler can be configured in the `deepspeed_config` file. No explicit API calls are needed to use the profiler. Refer to [flops profiler](https://www.deepspeed.ai/docs/config-json/#flops-profiler) for details.
 
 
 #### Example: Megatron-LM
@@ -131,11 +131,11 @@ Top 3 modules in params at depth 8 are {'ColumnParallelLinear': '7.35 M', 'RowPa
 Top 3 modules in latency at depth 8 are {'ColumnParallelLinear': '659.23 us', 'RowParallelLinear': '587.94 us', 'FusedScaleMaskSoftmax': '370.98 us'}
 
 ------------------------------ Detailed Profile ------------------------------
-Each module profile is listed after its name in the follwing order:
+Each module profile is listed after its name in the following order:
 number of parameters, percentage of total parameters, number of multiply-accumulate operations (MACs), percentage of total MACs, latency, percentage of total latency, number of floating point operations per second (FLOPS, computed as 2 * MACs / latency).
 Note:
 1. A module can have torch.nn.functional (e.g. to compute logits) along with submodules, thus making the difference between the parent's MACs(or latency) and the sum of its submodules'.
-2. Number of floating point operations is a theoretical estimation, thus FLOPS computed using that could be larger than the maximum system throught.
+2. Number of floating point operations is a theoretical estimation, thus FLOPS computed using that could be larger than the maximum system throughput.
 
 DistributedDataParallel(
   38.89 M, 100.00% Params, 314.61 GMACs, 100.00% MACs, 33.81 ms, 100.00% latency, 18.61 TFLOPS,
@@ -235,11 +235,11 @@ Top 3 modules in params at depth 2 are {'Linear': '58.63 M', 'Conv2d': '2.47 M',
 Top 3 modules in latency at depth 2 are {'Conv2d': '13.96 ms', 'Linear': '6.23 ms', 'ReLU': '730.75 us'}
 
 ------------------------------ Detailed Profile ------------------------------
-Each module profile is listed after its name in the follwing order:
+Each module profile is listed after its name in the following order:
 number of parameters, percentage of total parameters, number of multiply-accumulate operations (MACs), percentage of total MACs, latency, percentage of total latency, number of floating point operations per second (FLOPS, computed as 2 * MACs / latency).
 Note:
 1. A module can have torch.nn.functional (e.g. to compute logits) along with submodules, thus making the difference between the parent's MACs(or latency) and the sum of its submodules'.
-2. Number of floating point operations is a theoretical estimation, thus FLOPS computed using that could be larger than the maximum system throught.
+2. Number of floating point operations is a theoretical estimation, thus FLOPS computed using that could be larger than the maximum system throughput.
 
 AlexNet(
   61.1 M, 100.00% Params, 183.18 GMACs, 100.00% MACs, 22.13 ms, 100.00% latency, 16.56 TFLOPS,
@@ -335,11 +335,11 @@ Top 3 modules in params at depth 7 are {'Linear': '28.35 M', 'LayerNorm': '18.43
 Top 3 modules in latency at depth 7 are {'Linear': '153.7 ms', 'LayerNorm': '4.74 ms', 'Dropout': '597.95 us'}
 
 ------------------------------ Detailed Profile ------------------------------
-Each module profile is listed after its name in the follwing order:
+Each module profile is listed after its name in the following order:
 number of parameters, percentage of total parameters, number of multiply-accumulate operations (MACs), percentage of total MACs, latency, percentage of total latency, number of floating point operations per second (FLOPS, computed as 2 * MACs / latency).
 Note:
 1. A module can have torch.nn.functional (e.g. to compute logits) along with submodules, thus making the difference between the parent's MACs(or latency) and the sum of its submodules'.
-2. Number of floating point operations is a theoretical estimation, thus FLOPS computed using that could be larger than the maximum system throught.
+2. Number of floating point operations is a theoretical estimation, thus FLOPS computed using that could be larger than the maximum system throughput.
 
 BertForSequenceClassification(
   109.48 M, 100.00% Params, 43.5 GMACs, 100.00% MACs, 393.7 ms, 100.00% latency, 220.97 GFLOPS,

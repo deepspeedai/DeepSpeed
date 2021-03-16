@@ -37,7 +37,7 @@ and communication- efficient training. DeepSpeed supports a hybrid
 combination of data, model, and pipeline parallelism and has scaled to over
 [one trillion parameters using 3D parallelism]({{ site.press_release_v3 }}).
 Pipeline parallelism can also improve communication efficiency and has
-accelerated training by up to 7x on low-banwdith clusters.
+accelerated training by up to 7x on low-bandwidth clusters.
 
 
 ## Model Parallelism
@@ -256,9 +256,9 @@ This can be enabled by setting the following in the `deepspeed_config` file.
 
 ```
 
-###  Timing Activiation Checkpoint Functions
+###  Timing Activation Checkpoint Functions
 
-When activiation checkpoingint is enabled, profiling the forward and backward time of each checkpoint function can be enabled in the `deepspeed_config` file.
+When activation checkpointing is enabled, profiling the forward and backward time of each checkpoint function can be enabled in the `deepspeed_config` file.
 
 ```json
 {

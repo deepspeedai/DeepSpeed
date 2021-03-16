@@ -230,7 +230,7 @@ pipeline. Each worker should load micro-batches of size
 a total of `engine.gradient_accumulation_steps()` times per `train_batch()`.
 
 **Watch out!**
-The pipeline engine *pulls* data from an iteratior instead of iterating over
+The pipeline engine *pulls* data from an iterator instead of iterating over
 it. It's critical that the data stream does not empty in the middle of a
 training batch. Each invocation of `train_batch()` will pull
 a total of `engine.gradient_accumulation_steps()` micro-batches of data from
