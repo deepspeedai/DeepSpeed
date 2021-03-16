@@ -1,29 +1,31 @@
-from mpi4py import MPI
 import time
 import torch
 import torch.distributed as dist
 import numpy as np
+import argparse
 import deepspeed
-from deepspeed.runtime.fp16.onebit_adam import OnebitAdam
+import os
 
-comm = MPI.COMM_WORLD
-size = comm.Get_size()
-rank = comm.Get_rank()
+from deepspeed.runtime.comm.nccl import NcclBackend
 
-#TODO: Detect the hostname we are running on automatically
-torch.distributed.init_process_group(backend='nccl',
-                                     init_method='tcp://worker-1:2245',
-                                     world_size=size,
-                                     rank=rank)
+parser = argparse.ArgumentParser()
+parser.add_argument('--local_rank', type=int, default=-1)
+args = parser.parse_args()
 
-dummy_model = [torch.nn.Parameter(torch.ones(10))]
+deepspeed.init_distributed(dist_backend='nccl')
+args.local_rank = int(os.environ['LOCAL_RANK'])
 
-# Set cuda_aware to False to use host buffers for communication
-dummy_optim = OnebitAdam(dummy_model, cuda_aware=False)
+torch.cuda.set_device(args.local_rank)
+device = torch.device("cuda", args.local_rank)
 
-device = torch.device('cuda', rank % torch.cuda.device_count())
+size = dist.get_world_size()
+rank = dist.get_rank()
+
+backend = NcclBackend()
+local_rank = args.local_rank
 
 
+# A simulated compression function using torch.distributed
 def torch_sim(a):
     a_sign = a.sign().add_(1).bool().float().add_(-0.5).mul_(2.0)
     scale = a.norm() / np.sqrt(a.numel())
@@ -45,28 +47,26 @@ def torch_sim(a):
     return a_server_compressed, worker_error, server_error
 
 
-tensor_size = 100 * 2**20
+tensor_size = 300 * 2**20
 server_size = int(tensor_size / size)
 if tensor_size % (8 * size) != 0:
     right_tensor_size = tensor_size + (8 * size - (tensor_size % (8 * size)))
 else:
     right_tensor_size = tensor_size
 right_server_size = right_tensor_size // size
+
 # Adding bias to the initialization of the gradient we are communicating
 # In order to get rid of the case where some elements in the gradient are too small
 a = (torch.rand(tensor_size, device=device) - 0.5) + 0.01 * rank
+
 worker_error = torch.zeros(right_tensor_size, device=device)
 server_error = torch.zeros(right_server_size, device=device)
+
 a_torch, worker_error_torch, server_error_torch = torch_sim(a)
 torch.cuda.empty_cache()
-local_rank = rank % torch.cuda.device_count()
-a_after = dummy_optim.Compressed_Allreduce(a,
-                                           worker_error,
-                                           server_error,
-                                           rank,
-                                           size,
-                                           comm,
-                                           local_rank)
+
+a_after = backend.compressed_allreduce(a, worker_error, server_error, local_rank)
+
 threshold = 1e-6
 magnitude_threshold = 1e-6
 diff_mask = (a_after - a_torch) > threshold
@@ -74,13 +74,17 @@ diff_server_mask = torch.chunk(diff_mask, size)[rank]
 mpi_server = torch.chunk(a_after, size)[rank] + server_error
 torch_server = torch.chunk(a_torch, size)[rank] + server_error_torch
 
+test_correctness = True
+
 # If the number in the compensated_server_m is too small (e.g 1e-8), then calling sign() might be problematic
 # The test would skip those numbers that are too small in compensated_server_m
-if torch.sum(diff_server_mask) == 0:
-    print('Successfully passed the test for 1bit Adam at Rank {}'.format(rank))
-else:
-    check_mag_mask = mpi_server[diff_mask] > magnitude_threshold
-    if torch.sum(check_mag_mask) == 0:
-        print('Successfully passed the test for 1bit Adam at Rank {}'.format(rank))
+if test_correctness:
+    if torch.sum(diff_server_mask) == 0:
+        print('Successfully passed the test for NCCL Backend at Rank {}'.format(rank))
     else:
-        print('Fails at {} of positions'.format(torch.sum(check_mag_mask)))
+        check_mag_mask = mpi_server[diff_server_mask] > magnitude_threshold
+        if torch.sum(check_mag_mask) == 0:
+            print(
+                'Successfully passed the test for NCCL Backend at Rank {}'.format(rank))
+        else:
+            print('Fails at {} of positions'.format(torch.sum(check_mag_mask)))

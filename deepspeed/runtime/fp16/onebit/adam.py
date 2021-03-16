@@ -6,19 +6,15 @@ import torch
 import importlib
 import numpy as np
 import time
-import cupy
-from torch.utils.dlpack import to_dlpack
-from torch.utils.dlpack import from_dlpack
-from deepspeed.utils.logging import logger
+import torch.distributed as dist
 
-from mpi4py import MPI
-from deepspeed.runtime.custom_collectives import gather_cuda, gather_host, allgather_cuda, allgather_host
+from deepspeed.utils.logging import logger
 
 
 class OnebitAdam(torch.optim.Optimizer):
     """Implements the 1-bit Adam algorithm. Currently GPU-only.
-    For usage example please see, TODO DeepSpeed Tutorial
-    It has been proposed in APMSqueeze (https://arxiv.org/abs/2008.11343)
+    For usage example please see https://www.deepspeed.ai/tutorials/onebit-adam/
+    For technical details please read https://arxiv.org/abs/2102.02888
 
     Arguments:
         params (iterable): iterable of parameters to optimize or dicts defining
@@ -31,8 +27,6 @@ class OnebitAdam(torch.optim.Optimizer):
         eps (float, optional): term added to the denominator to improve
             numerical stability. (default: 1e-8)
         weight_decay (float, optional): weight decay (L2 penalty) (default: 0)
-        max_coeff(float, optional): maximum value of the lamb coefficient (default: 10.0)
-        min_coeff(float, optional): minimum value of the lamb coefficient (default: 0.01)
         amsgrad (boolean, optional): whether to use the AMSGrad variant of this
             algorithm from the paper `On the Convergence of Adam and Beyond`_
             (default: False) NOT SUPPORTED in 1-bit Adam!
@@ -42,6 +36,7 @@ class OnebitAdam(torch.optim.Optimizer):
             second moment estimate as in the original paper. (default: False)
         cuda_aware (boolean, required): Set True if the underlying MPI implementation
             supports CUDA-Aware communication. (default: False)
+        comm_backend_name (string, optional): Set to 'mpi' if needed. (default: 'nccl')
     .. _Adam\: A Method for Stochastic Optimization:
         https://arxiv.org/abs/1412.6980
     .. _On the Convergence of Adam and Beyond:
@@ -60,10 +55,12 @@ class OnebitAdam(torch.optim.Optimizer):
                  weight_decay=0.,
                  max_grad_norm=0.,
                  amsgrad=False,
-                 cuda_aware=False):
+                 cuda_aware=False,
+                 comm_backend_name='nccl'):
 
         if amsgrad:
             raise RuntimeError('1-bit Adam does not support the AMSGrad variant.')
+
         defaults = dict(lr=lr,
                         bias_correction=bias_correction,
                         betas=betas,
@@ -72,160 +69,40 @@ class OnebitAdam(torch.optim.Optimizer):
                         max_grad_norm=max_grad_norm)
 
         super(OnebitAdam, self).__init__(params, defaults)
-        from mpi4py import MPI
         self.eps_mode = 0 if eps_inside_sqrt else 1
+        assert (dist.is_initialized())
 
-        self.comm = MPI.COMM_WORLD
-        self.rank = self.comm.Get_rank()
-        self.size = self.comm.Get_size()
         self.comm_time = 0.0
         self.step_time = 0.0
         self.ave_step = 1
         self.bk_time = 0.0
-        self.divider = int(self.size * 8 / np.gcd(self.size, 8))
+
         self.deepspeed = deepspeed
         self.adam_freeze_key = False
         self.initialize = False
         self.freeze_step = freeze_step
         self.cuda_aware = cuda_aware
 
-    def torch2cupy(self, tensor):
-        return cupy.fromDlpack(to_dlpack(tensor))
+        self.comm_backend_name = comm_backend_name
 
-    def cupy2torch(self, cupy_tensor):
-        return from_dlpack(cupy_tensor.toDlpack())
+        # Empty initializer. Set handle based on the comm backend as follows.
+        self.comm_backend_handle = None
 
-    def compress_by_chunk(self, cupy_bool_tensor, num_chunks):
-        packed_sign = cupy.packbits(cupy_bool_tensor)
-        sign_list_packed = cupy.split(packed_sign, num_chunks)
-        cupy.cuda.get_current_stream().synchronize()
-        return sign_list_packed
+        if self.comm_backend_name == 'nccl':
+            TORCH_MAJOR = int(torch.__version__.split('.')[0])
+            TORCH_MINOR = int(torch.__version__.split('.')[1])
+            assert TORCH_MAJOR >= 1 and TORCH_MINOR >= 8, "Please use torch 1.8 or greater to enable NCCL backend in 1-bit Adam. Alternatively, please specify 'mpi' as the 'comm_backend_name' in config file to proceed with the MPI backend"
+            assert dist.is_initialized() == True, "Please initialize the torch distributed backend."
+            from deepspeed.runtime.comm.nccl import NcclBackend
+            self.comm_backend_handle = NcclBackend()
 
-    def Compressed_Allreduce(self,
-                             buffer_m: torch.tensor,
-                             worker_error,
-                             server_error,
-                             rank,
-                             world_size,
-                             comm,
-                             local_rank):
+        elif self.comm_backend_name == 'mpi':
+            from deepspeed.runtime.comm.mpi import MpiBackend
+            self.comm_backend_handle = MpiBackend(cuda_aware)
 
-        all_start_time = time.time()
-        original_size = buffer_m.numel()
-        cupy.cuda.Device(local_rank).use()
+        self.size = self.comm_backend_handle.size
 
-        if torch.numel(buffer_m) != torch.numel(worker_error):
-            empty_tensor = torch.zeros(torch.numel(worker_error) - torch.numel(buffer_m),
-                                       device=buffer_m.device)
-            buffer_m = torch.cat([buffer_m, empty_tensor])
-
-        buffer_m.add_(worker_error)
-        worker_scale = torch.norm(buffer_m) / np.sqrt(torch.numel(buffer_m))
-        sign_buffer_m = buffer_m.sign().add_(1).bool()
-        sign_buffer_m = sign_buffer_m.float()
-        sign_buffer_m.add_(-0.5).mul_(2.0)
-        worker_error.set_((buffer_m - worker_scale * sign_buffer_m))
-        sign_buffer_m = None
-
-        compensated_buffer_m = buffer_m
-        compensated_buffer_m.sign_()
-        compensated_buffer_m = compensated_buffer_m.add_(1).bool()
-        cupy_worker_scale = self.torch2cupy(worker_scale)
-        cupy_compensated_buffer_m = self.torch2cupy(compensated_buffer_m)
-        compensated_buffer_m = None
-
-        cupy_sign_list_packed = self.compress_by_chunk(cupy_compensated_buffer_m,
-                                                       world_size)
-        cupy_compensated_buffer_m = None
-
-        cupy_recvbuf_sign = cupy.zeros([world_size,
-                                        cupy_sign_list_packed[rank].size],
-                                       dtype=cupy_sign_list_packed[0].dtype)
-        cupy_recvbuf_scale = cupy.zeros([world_size, 1], dtype=cupy_worker_scale.dtype)
-
-        # Communication Phase 1
-        gather_start = time.time()
-        if self.cuda_aware:
-            gather_cuda(rank,
-                        world_size,
-                        comm,
-                        cupy_sign_list_packed,
-                        cupy_recvbuf_sign,
-                        cupy_worker_scale,
-                        cupy_recvbuf_scale)
-        else:
-            cupy_sign_list_packed, cupy_recvbuf_sign, cupy_worker_scale, cupy_recvbuf_scale = gather_host(rank,
-               world_size,
-               comm,
-               cupy_sign_list_packed,
-               cupy_recvbuf_sign,
-               cupy_worker_scale,
-               cupy_recvbuf_scale)
-        gather_end = time.time()
-
-        cupy_unpacked_sign = (cupy.unpackbits(cupy_recvbuf_sign.flatten())).reshape(
-            world_size,
-            -1)
-        cupy_recvbuf_sign = None
-        unpacked_sign = self.cupy2torch(cupy_unpacked_sign).float()
-        cupy_unpacked_sign = None
-        unpacked_sign = unpacked_sign.add_(-0.5).mul_(2.0)
-        worker_scale = self.cupy2torch(cupy_recvbuf_scale).mul_(1 / world_size)
-        compensated_server_m = unpacked_sign.mul_(worker_scale).sum(0)
-        unpacked_sign = None
-
-        compensated_server_m.add_(server_error)
-        server_scale = torch.norm(compensated_server_m) / np.sqrt(
-            compensated_server_m.numel())
-        sign_server_m = compensated_server_m.sign().add_(1).bool()
-        sign_server_m = sign_server_m.float()
-        sign_server_m.add_(-0.5).mul_(2.0)
-        server_error.set_(compensated_server_m - server_scale * sign_server_m)
-        sign_server_m = None
-
-        compensated_server_m.sign_()
-        compensated_server_m = compensated_server_m.add_(1).bool()
-        cupy_server_scale = self.torch2cupy(server_scale)
-        cupy_compensated_server_m = self.torch2cupy(compensated_server_m)
-        compensated_server_m = None
-
-        cupy_server_sign_packed = self.compress_by_chunk(cupy_compensated_server_m, 1)
-
-        cupy_recvbuf_sign_server = cupy.zeros(
-            [world_size,
-             cupy_server_sign_packed[0].size],
-            dtype=cupy_sign_list_packed[0].dtype)
-        cupy_recvbuf_scale_server = cupy.zeros([world_size,
-                                                1],
-                                               dtype=cupy_worker_scale.dtype)
-
-        # Communication Phase 2
-        if self.cuda_aware:
-            allgather_cuda(comm,
-                           cupy_server_sign_packed[0],
-                           cupy_recvbuf_sign_server,
-                           cupy_server_scale,
-                           cupy_recvbuf_scale_server)
-        else:
-            cupy_server_sign_packed[0], cupy_recvbuf_sign_server, cupy_server_scale, cupy_recvbuf_scale_server = allgather_host(comm,
-                  cupy_server_sign_packed[0],
-                  cupy_recvbuf_sign_server,
-                  cupy_server_scale,
-                  cupy_recvbuf_scale_server)
-
-        cupy_server_unpacked_sign = (cupy.unpackbits(
-            cupy_recvbuf_sign_server.flatten())).reshape(world_size,
-                                                         -1)
-        cupy_recvbuf_sign_server = None
-
-        server_unpacked_sign = self.cupy2torch(cupy_server_unpacked_sign)
-        cupy_server_unpacked_sign = None
-
-        server_unpacked_sign = server_unpacked_sign.float().add_(-0.5).mul_(2.0)
-        server_scale = self.cupy2torch(cupy_recvbuf_scale_server)
-        buffer_m = server_unpacked_sign.mul_(server_scale).flatten()[0:original_size]
-
-        return buffer_m
+        self.divider = int(self.size * 8 / np.gcd(self.size, 8))
 
     def step(self, closure=None, grads=None):
         """Performs a single optimization step.
@@ -275,9 +152,7 @@ class OnebitAdam(torch.optim.Optimizer):
                 if grad is None:
                     grad = p.grad.data
                 if grad.is_sparse:
-                    raise RuntimeError(
-                        'FusedAdam does not support sparse gradients, please consider SparseAdam instead'
-                    )
+                    raise RuntimeError('1-bit Adam does not support sparse gradients')
 
                 state = self.state[p]
 
@@ -337,13 +212,24 @@ class OnebitAdam(torch.optim.Optimizer):
 
                         if self.size > 1:
                             exp_avg.set_(
-                                self.Compressed_Allreduce(exp_avg,
-                                                          state['worker_error'],
-                                                          state['server_error'],
-                                                          self.rank,
-                                                          self.size,
-                                                          self.comm,
-                                                          self.deepspeed.local_rank))
+                                self.comm_backend_handle.compressed_allreduce(
+                                    exp_avg,
+                                    state['worker_error'],
+                                    state['server_error'],
+                                    self.deepspeed.local_rank))
+                        # Because 1-bit compression cannot represent exact zero, it is required to
+                        # provide a momentum mask for those params that have constant exact zeros in their
+                        # momentums, otherwise the compression error would keep accumulating.
+                        # For example, for BERT pre-training seq 128, bert.embeddings.position_embeddings.weight
+                        # always have exact zeros in its momentum for row 129 to 512, because it only
+                        # learns up to seq length 128 while the model supports up to 512 seq length.
+                        # (See example in DeepSpeedExamples/bing_bert/deepspeed_train.py.)
+                        if 'exp_avg_mask' in group:
+                            if exp_avg.device != group['exp_avg_mask'].device:
+                                group['exp_avg_mask'] = group['exp_avg_mask'].to(
+                                    device=exp_avg.device)
+                            exp_avg.mul_(group['exp_avg_mask'])
+
                     if self.initialize:
                         update = exp_avg / (exp_avg_sq.sqrt() + group['eps'])
 
@@ -372,3 +258,52 @@ class OnebitAdam(torch.optim.Optimizer):
                 self.deepspeed.enable_backward_allreduce = False
 
         return loss
+
+    def load_state_dict(self, state_dict):
+        """
+        Overrides load_state_dict() to add special handling when loading checkpoints
+        """
+        # Because at different stage exp_avg_mask may change (e.g.,
+        # BERT pre-training seqlen 128 and 512 ), we don't use the exp_avg_mask
+        # in checkpoints but always use the one user provided in training script.
+        # (See example in DeepSpeedExamples/bing_bert/deepspeed_train.py.)
+        # Thus here we keep the exp_avg_mask unchanged when loading checkpoint
+        for i, group in enumerate(self.param_groups):
+            if 'exp_avg_mask' in group:
+                state_dict['param_groups'][i]['exp_avg_mask'] = group['exp_avg_mask']
+            elif 'exp_avg_mask' not in group and 'exp_avg_mask' in state_dict[
+                    'param_groups'][i]:
+                state_dict['param_groups'][i].pop('exp_avg_mask')
+        super().load_state_dict(state_dict)
+        if self.state[self.param_groups[0]['params'][0]]['step'] < self.freeze_step:
+            if torch.distributed.get_rank() == 0:
+                print("Checkpoint loaded and 1-bit Adam warmup stage starts/continues.")
+            if self.adam_freeze_key is True:
+                self.adam_freeze_key = False
+                self.deepspeed.enable_backward_allreduce = True
+        else:
+            if torch.distributed.get_rank() == 0:
+                print(
+                    "Checkpoint loaded and 1-bit Adam compression stage starts/continues."
+                )
+            if self.adam_freeze_key is False:
+                self.adam_freeze_key = True
+                self.deepspeed.enable_backward_allreduce = False
+        # We reset the compression errors when loading checkpoints for 3 reasons:
+        # 1) The worker and server error at each GPU are distinct, so in current implementation
+        # only rank 0's errors are saved in the checkpoint. Thus we have to reset the errors.
+        # If we want to save them correctly we need O(num_gpu*model_size) memory in order to
+        # gather all the error, which is a very large memory requirement. It's possible to save
+        # them in a distributed way, but it will make the checkpoint saving/loading much more complicated.
+        # 2) Even if we are able to save the compression errors correctly, you need to have the
+        # exact same number of GPUs in order to load them correctly.
+        # 3) We verified on BERT pre-training that occasionally resetting the compression error
+        # at checkpoint loading does not affect the convergence.
+        # However, please avoid frequent checkpoint loading which could break the error
+        # compensation mechanism thus affect the convergence.
+        for group in self.param_groups:
+            for p in group['params']:
+                if 'worker_error' in self.state[p]:
+                    self.state[p].pop('worker_error')
+                if 'server_error' in self.state[p]:
+                    self.state[p].pop('server_error')

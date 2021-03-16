@@ -17,4 +17,4 @@ FusedLamb (GPU)
 
 OneBitAdam (GPU)
 ----------------------------
-.. autoclass:: deepspeed.runtime.fp16.OneBitAdam
+.. autoclass:: deepspeed.runtime.fp16.onebit.adam.OneBitAdam

@@ -4,23 +4,22 @@ import torch
 import torch.distributed as dist
 import numpy as np
 import deepspeed
-from deepspeed.runtime.fp16.onebit_adam import OnebitAdam
+
+from deepspeed.runtime.comm.mpi import MpiBackend
 
 comm = MPI.COMM_WORLD
 size = comm.Get_size()
 rank = comm.Get_rank()
 
-torch.distributed.init_process_group(backend='nccl',
-                                     init_method='tcp://worker-0:2245',
-                                     world_size=size,
-                                     rank=rank)
+deepspeed.init_distributed(dist_backend='nccl')
 
-dummy_model = [torch.nn.Parameter(torch.ones(10))]
-dummy_optim = OnebitAdam(dummy_model, cuda_aware=False)
+# Change cuda_aware to True to test out CUDA-Aware MPI communication
+backend = MpiBackend(cuda_aware=False)
 
 device = torch.device('cuda', rank % torch.cuda.device_count())
 
 
+# A simulated compression function using torch.distributed
 def torch_sim(a):
     a_sign = a.sign().add_(1).bool().float().add_(-0.5).mul_(2.0)
     scale = a.norm() / np.sqrt(a.numel())
@@ -42,46 +41,44 @@ def torch_sim(a):
     return a_server_compressed, worker_error, server_error
 
 
-# Input Tensor size
 tensor_size = 100 * 2**20
-
 server_size = int(tensor_size / size)
 if tensor_size % (8 * size) != 0:
     right_tensor_size = tensor_size + (8 * size - (tensor_size % (8 * size)))
 else:
     right_tensor_size = tensor_size
-
 right_server_size = right_tensor_size // size
 
-# The -0.5 is required for avoiding sign flips/errors
-a = torch.rand(tensor_size, device=device) - 0.5
+# Adding bias to the initialization of the gradient we are communicating
+# In order to get rid of the case where some elements in the gradient are too small
+a = (torch.rand(tensor_size, device=device) - 0.5) + 0.01 * rank
 
 worker_error = torch.zeros(right_tensor_size, device=device)
 server_error = torch.zeros(right_server_size, device=device)
+
 a_torch, worker_error_torch, server_error_torch = torch_sim(a)
 torch.cuda.empty_cache()
 local_rank = rank % torch.cuda.device_count()
 
-# Test the 1-bit Adam optimizer
-a_after = dummy_optim.Compressed_Allreduce(a,
-                                           worker_error,
-                                           server_error,
-                                           rank,
-                                           size,
-                                           comm,
-                                           local_rank)
+a_after = backend.compressed_allreduce(a, worker_error, server_error, local_rank)
 
-# If the error is below the threshold, it is acceptable for training
 threshold = 1e-6
+magnitude_threshold = 1e-6
+diff_mask = (a_after - a_torch) > threshold
+diff_server_mask = torch.chunk(diff_mask, size)[rank]
+mpi_server = torch.chunk(a_after, size)[rank] + server_error
+torch_server = torch.chunk(a_torch, size)[rank] + server_error_torch
 
-diff_pos = ((a_after - a_torch) > threshold)
+test_correctness = True
 
-if rank == 0:
-    before_diff = torch.chunk(a_after - a_torch,
-                              size)[rank] + server_error - server_error_torch
-    if torch.norm(before_diff) / torch.norm(torch.chunk(a_after,
-                                                        size)[rank]) < threshold:
-        print('Successfully passed the test')
+# If the number in the compensated_server_m is too small (e.g 1e-8), then calling sign() might be problematic
+# The test would skip those numbers that are too small in compensated_server_m
+if test_correctness:
+    if torch.sum(diff_server_mask) == 0:
+        print('Successfully passed the test for MPI Backend at Rank {}'.format(rank))
     else:
-        print('The difference for the tensor before allgather is {}'.format(
-            torch.norm(before_diff)))
+        check_mag_mask = mpi_server[diff_server_mask] > magnitude_threshold
+        if torch.sum(check_mag_mask) == 0:
+            print('Successfully passed the test for MPI Backend at Rank {}'.format(rank))
+        else:
+            print('Fails at {} of positions'.format(torch.sum(check_mag_mask)))

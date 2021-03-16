@@ -60,7 +60,7 @@ The Adam optimizer also supports the following two params keys/values in additio
 | torch\_adam   | Use torch's implementation of adam instead of our fused adam implementation | false   |
 | adam\_w\_mode | Apply L2 regularization (also known as AdamW)                               | true    |
 
-  Another example of ***optimizer*** with 1-bit Adam specific parameters is as follows.
+  Another example of ***optimizer*** with 1-bit Adam
 
 ```json
 "optimizer": {
@@ -74,10 +74,19 @@ The Adam optimizer also supports the following two params keys/values in additio
       "eps": 1e-8,
       "weight_decay": 3e-7,
       "freeze_step": 400,
-      "cuda_aware": true
+      "cuda_aware": false,
+      "comm_backend_name": "nccl"
     }
   }
 ```
+
+The 1-bit Adam optimizer supports the following three params keys/values in addition to the standard Adam (learn more in our [tutorial](/tutorials/onebit-adam/)):
+
+| "params" key  | Description                                                                 | Default |
+| ------------- | --------------------------------------------------------------------------- | ------- |
+| freeze\_step   | Number of warm up steps before 1-bit compression gets applied to the communication | 100000   |
+| cuda\_aware | To indicate that the underlying MPI library supports CUDA-Aware communication         | false    |
+| comm\_backend\_name | To indicate which backend implementation to use                               | "nccl"   |
 
 ### Scheduler Parameters
 
