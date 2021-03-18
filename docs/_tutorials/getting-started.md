@@ -186,8 +186,8 @@ slots available.
 The following command launches a PyTorch training job across all available nodes and GPUs
 specified in `myhostfile`:
 ```bash
-deepspeed <client_entry.py> <client args> \
-  --deepspeed --deepspeed_config ds_config.json --hostfile=myhostfile
+deepspeed --hostfile=myhostfile <client_entry.py> <client args> \
+  --deepspeed --deepspeed_config ds_config.json
 ```
 
 Alternatively, DeepSpeed allows you to restrict distributed training of your model to a
@@ -264,3 +264,10 @@ not detected or passed in then DeepSpeed will query the number of GPUs on the
 local machine to discover the number of slots available. The `--include` and
 `--exclude` arguments work as normal, but the user should specify 'localhost'
 as the hostname.
+
+Also note that `CUDA_VISIBLE_DEVICES` can't be used with DeepSpeed to control 
+which devices should be used. For example, to use only gpu1 of the current 
+node, do:
+```bash
+deepspeed --include localhost:1 ...
+```
