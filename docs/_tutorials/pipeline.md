@@ -276,9 +276,9 @@ For example, a machine with 16 GPUs must have as much local CPU memory as 16 tim
 
 DeepSpeed provides a `LayerSpec` class that delays the construction of
 modules until the model layers have been partitioned across workers.
-Then each worker will allocate only the layers it's assigned to. So, continuing the
-example from the previous paragraph, a machine with 16 GPUs will need to allocate a
-total of 1x model size on its CPU, compared to 16x in the LayerSpec example.
+Then each worker will allocate only the layers it's assigned to. So, comparing to the
+example from the previous paragraph, using `LayerSpec` a machine with 16 GPUs will need to 
+allocate a total of 1x model size on its CPU memory and not 16x.
 
 Here is an example of the abbreviated AlexNet model, but expressed only
 with `LayerSpec`s. Note that the syntax is almost unchanged: `nn.ReLU(inplace=True)`
