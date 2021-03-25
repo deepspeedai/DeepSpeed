@@ -8,6 +8,7 @@ Helper functions and classes from multiple sources.
 
 import os
 import psutil
+import gc
 from math import ceil
 from math import floor
 from bisect import bisect_left, bisect_right
@@ -551,6 +552,9 @@ def see_memory_usage(message, force=False):
     if torch.distributed.is_initialized() and not torch.distributed.get_rank() == 0:
         return
 
+    # python doesn't do real-time garbage collection so do it explicitly to get the correct RAM reports
+    gc.collect()
+
     # Print message except when distributed but not rank 0
     logger.info(message)
     logger.info(
@@ -563,6 +567,10 @@ def see_memory_usage(message, force=False):
     used_GB = round(((vm_stats.total - vm_stats.available) / (1024**3)), 2)
     logger.info(
         f'CPU Virtual Memory:  used = {used_GB} GB, percent = {vm_stats.percent}%')
+
+    # get the peak memory to report correct data, so reset the counter for the next call
+    if hasattr(torch.cuda, "reset_peak_memory_stats"):  # pytorch 1.4+
+        torch.cuda.reset_peak_memory_stats()
 
 
 def call_to_str(base, *args, **kwargs):
