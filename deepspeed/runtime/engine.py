@@ -3,10 +3,13 @@ Copyright 2019 The Microsoft DeepSpeed Team
 '''
 
 import os
+import stat
 import torch
 import warnings
 import hashlib
 import torch.distributed as dist
+from collections import OrderedDict
+from shutil import copyfile
 
 from torch.nn.modules import Module
 from torch.distributed.distributed_c10d import _get_global_rank
@@ -1684,8 +1687,30 @@ class DeepSpeedEngine(Module):
         torch.save(state, save_path)
         self._curr_save_path = None
 
+    def _get_param_shapes(self):
+        param_shapes = OrderedDict()
+        for name, param in self.module.named_parameters():
+            param_shapes[name] = param.ds_shape if hasattr(param,
+                                                           "ds_shape") else param.shape
+            # print(f"saving param {name} {param_shapes[name]}")
+        return param_shapes
+
+    def _copy_recovery_script(self, save_path):
+        base_dir = os.path.dirname(os.path.dirname(__file__))
+        script = "zero_to_fp32.py"
+        src = os.path.join(base_dir, "utils", script)
+        dst = os.path.join(save_path, script)
+        logger.info(f"creating recovery script {dst}")
+        copyfile(src, dst)
+        # make executable
+        os.chmod(dst, os.stat(dst).st_mode | stat.S_IEXEC)
+
     def _save_zero_checkpoint(self, save_path, tag):
         zero_checkpoint_name = self._get_zero_ckpt_name(save_path, tag)
-        zero_sd = {'optimizer_state_dict': self.optimizer.state_dict()}
+        zero_sd = dict(
+            optimizer_state_dict=self.optimizer.state_dict(),
+            param_shapes=self._get_param_shapes(),
+        )
         torch.save(zero_sd, zero_checkpoint_name)
+        self._copy_recovery_script(save_path)
         logger.info('zero checkpoint saved {}'.format(zero_checkpoint_name))
