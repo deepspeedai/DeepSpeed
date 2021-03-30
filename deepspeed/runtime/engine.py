@@ -955,7 +955,7 @@ class DeepSpeedEngine(Module):
 
         Arguments:
             loss: Torch tensor on which to execute backward propagation
-            allreduce_gradients: If this is False, then gradient averaging will be skipped. Default is True.
+            allreduce_gradients: is deprecated, ignored, and will soon be removed'
         """
 
         if not allreduce_gradients:
