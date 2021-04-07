@@ -190,6 +190,9 @@ class InsertPostInitMethodToModuleSubClasses(object):
         torch.empty = empty_cuda_tensor
 
         if self.mem_efficient_linear:
+            print_rank_0(
+                f"Your linear layers are being patched with more memory efficient version. This will persit unless manually reset.",
+                force=True)
             self.linear_bk = torch.nn.functional.linear
             torch.nn.functional.linear = LinearFunctionForZeroStage3.apply
 
@@ -210,8 +213,9 @@ class InsertPostInitMethodToModuleSubClasses(object):
         torch.Tensor.__new__ = torch.Tensor.__old_new__
         torch.empty = _orig_torch_empty
 
-        if self.mem_efficient_linear:
-            torch.nn.functional.linear = self.linear_bk
+        #un doing it here will undo it during training
+        #if self.mem_efficient_linear:
+        #    torch.nn.functional.linear = self.linear_bk
 
         # Now that we cleaned up the metaclass injection, raise the exception.
         if exc_type is not None:
@@ -356,6 +360,13 @@ class Init(InsertPostInitMethodToModuleSubClasses):
                     continue
                 self._convert_to_deepspeed_param(param)
                 param.partition()
+
+        if mem_efficient_linear:
+            print_rank_0(
+                f"Your linear layers are being patched with more memory efficient version. This will persit unless manually turned reset.",
+                force=True)
+            self.linear_bk = torch.nn.functional.linear
+            torch.nn.functional.linear = LinearFunctionForZeroStage3.apply
 
     def _post_init_method(self, module):
         #see_memory_usage(f"Before converting parmas in {module.__class__.__name__}", force=False)
