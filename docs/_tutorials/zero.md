@@ -122,7 +122,7 @@ configurations is available [here](/docs/config-json/#zero-optimizations-for-fp1
     "stage3_max_live_parameters": 6000000,
     "stage3_max_reuse_distance": 100000000,
     "stage3_prefetch_bucket_size": 200000,
-    "stage3_param_persitance_threshold": 100000,
+    "stage3_param_persistence_threshold": 100000,
     "reduce_bucket_size": 3000000,
     "sub_group_size": 1e6
   }
