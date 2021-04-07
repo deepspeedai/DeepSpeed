@@ -580,7 +580,7 @@ class FP16_DeepSpeedZeroOptimizer_Stage3(object):
                  gradient_accumulation_steps=1,
                  elastic_checkpoint=False):
 
-        see_memory_usage("Stage 3 intialize beginning", force=True)
+        see_memory_usage("Stage 3 initialize beginning", force=True)
 
         if dist.get_rank() == 0:
             logger.info(f"Reduce bucket size {reduce_bucket_size}")

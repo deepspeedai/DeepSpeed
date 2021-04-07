@@ -1662,27 +1662,19 @@ class DeepSpeedEngine(Module):
         # then instead just returns None.
         self._curr_ckpt_path = os.path.join(save_dir, tag)
 
-        state = {
-            'module':
-            self.module_state_dict(),
-            'optimizer':
-            self.optimizer.state_dict()
+        state = dict(
+            module=self.module_state_dict(),
+            optimizer=self.optimizer.state_dict()
             if self.optimizer and not self.zero_optimization() else None,
-            'lr_scheduler':
-            self.lr_scheduler.state_dict() if self.lr_scheduler is not None else None,
-            'csr_tensor_module_names':
-            self.csr_tensor_module_names,
-            'skipped_steps':
-            self.skipped_steps,
-            'global_steps':
-            self.global_steps,
-            'global_samples':
-            self.global_samples,
-            'dp_world_size':
-            self.dp_world_size,
-            'mp_world_size':
-            self.mp_world_size
-        }
+            lr_scheduler=self.lr_scheduler.state_dict()
+            if self.lr_scheduler is not None else None,
+            csr_tensor_module_names=self.csr_tensor_module_names,
+            skipped_steps=self.skipped_steps,
+            global_steps=self.global_steps,
+            global_samples=self.global_samples,
+            dp_world_size=self.dp_world_size,
+            mp_world_size=self.mp_world_size,
+        )
         state.update(client_state)
 
         log_dist(message=f'Saving model checkpoint: {save_path}', ranks=[0])

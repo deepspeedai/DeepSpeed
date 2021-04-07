@@ -36,12 +36,6 @@ class DeepSpeedZeroConfig(DeepSpeedConfigObject):
         self.max_reuse_distance = None
         self.gather_fp16_weights_on_model_save = None
 
-        #Stage3 Specific Parameters
-        self.prefetch_bucket_size = None
-        self.param_persistence_threshold = None
-        self.max_live_parameters = None
-        self.max_reuse_distance = None
-
         if ZERO_OPTIMIZATION in param_dict.keys():
             zero_config_dict = param_dict[ZERO_OPTIMIZATION]
             if type(zero_config_dict) is bool:

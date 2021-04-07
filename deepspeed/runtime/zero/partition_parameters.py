@@ -399,10 +399,10 @@ class Init(InsertPostInitMethodToModuleSubClasses):
         # Stores the shape of the original tensor
         param.ds_shape = param.shape
 
-        # Stores the number of elements in the original parmaeter without padding
+        # Stores the number of elements in the original parameter without padding
         param.ds_numel = param.numel()
 
-        # Stores the paritioned copy of the tensor
+        # Stores the partitioned copy of the tensor
         param.ds_tensor = None
 
         # Keeps track of how many active sub-modules need this param at any given point in time
