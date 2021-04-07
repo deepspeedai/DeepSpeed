@@ -1715,6 +1715,8 @@ class DeepSpeedEngine(Module):
 
         Get a full non-partitioned state_dict with fp16 weights on cpu.
 
+        Important: this function must be called on all ranks and not just rank 0.
+
         This is similar to nn.Module.state_dict (modelled after _save_to_state_dict), but:
 
         1. consolidates the weights from different partitions on gpu0

@@ -31,3 +31,11 @@ Optimizer Step
 Gradient Accumulation
 ---------------------
 .. autofunction:: deepspeed.DeepSpeedEngine.is_gradient_accumulation_boundary
+
+
+Model Saving
+------------
+.. autofunction:: deepspeed.DeepSpeedEngine.save_fp16_model
+
+
+Additionally when a DeepSpeed checkpoint is created, a script ``zero_to_fp32.py`` is added there which can be used to reconstruct fp32 master weights into a single pytorch ``state_dict`` file.

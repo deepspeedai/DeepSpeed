@@ -73,6 +73,18 @@ DS_BUILD_OPS=1 pip install deepspeed --global-option="build_ext" --global-option
 
 This should complete the full build 2-3 times faster. You can adjust `-j` to specify how many cpu-cores are to be used during the build. In the example it is set to 8 cores.
 
+You can also build a binary wheel and install it on multiple machines that have the same type of GPUs and the same software environment (CUDA toolkit, pytorch, python, etc.)
+
+```bash
+DS_BUILD_OPS=1 python setup.py build_ext -j8 bdist_wheel
+```
+
+This will create a pypi binary wheel under `dist`, e.g., ``dist/deepspeed-0.3.13+8cd046f-cp38-cp38-linux_x86_64.whl`` and then you can install it directly on multiple machines, in our example:
+
+```bash
+pip install dist/deepspeed-0.3.13+8cd046f-cp38-cp38-linux_x86_64.whl
+```
+
 
 ## Install DeepSpeed from source
 

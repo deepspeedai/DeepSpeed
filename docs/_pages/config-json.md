@@ -256,7 +256,8 @@ Enabling and configuring ZeRO memory optimizations
     "stage3_prefetch_bucket_size" : 5e8,
     "stage3_param_persistence_threshold" : 1e6,
     "sub_group_size" : 1e12,
-    "elastic_checkpoint" : [true|false]
+    "elastic_checkpoint" : [true|false],
+    "stage3_gather_fp16_weights_on_model_save": [true|false]
     }
 ```
 
@@ -350,6 +351,11 @@ Enabling and configuring ZeRO memory optimizations
 | -------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------- |
 | Do not partition parameters smaller than this threshold. Smaller values use less memory, but can greatly increase communication (especially latency-bound messages). | `1e6`   |
 
+
+***stage3_gather_fp16_weights_on_model_save***: [boolean]
+| Description                                                                                                                                                          | Default |
+| -------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------- |
+| Consolidate the weights before saving the model by `save_fp16_model()`. Since the weights are partitioned across GPUs, they aren't part of `state_dict`, so this function automatically gather the weights when this option is enabled and then saves the fp16 model weights. | `False` |
 
 ### Logging
 
