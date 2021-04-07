@@ -672,6 +672,13 @@ int ds_adam_step_plus_copy(int optimizer_id,
     return 0;
 }
 
+int destroy_adam_optimizer(int optimizer_id)
+{
+    s_optimizers.erase(optimizer_id);
+
+    return 0;
+}
+
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m)
 {
     m.def("adam_update", &ds_adam_step, "DeepSpeed CPU Adam update (C++)");
@@ -679,4 +686,5 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m)
           &ds_adam_step_plus_copy,
           "DeepSpeed CPU Adam update and param copy (C++)");
     m.def("create_adam", &create_adam_optimizer, "DeepSpeed CPU Adam (C++)");
+    m.def("destroy_adam", &destroy_adam_optimizer, "DeepSpeed CPU Adam destroy (C++)");
 }
