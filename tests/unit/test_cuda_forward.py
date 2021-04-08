@@ -199,7 +199,11 @@ def run_forward(ds_config, seq_len, atol=1e-2, verbose=False, test_bsz=None):
 # FP16 test cases can only run on the devices support FP16.
 @pytest.mark.parametrize('batch_size, hidden_size, seq_len, heads, num_layers, is_preln, use_fp16',
                          [
-                             (8,256,53,4,3,True,False),
+                             (8,160,128,2,3,True,True),
+                             (8,160,128,2,3,False,True),
+                             (8,1600,128,2,3,True,True),
+                             (8,1600,128,25,3,True,True),
+                             (8,1600,128,25,3,False,True),
                              (8,256,52,4,3,True,True),
                              (3,1024,51,16,3,True,False),
                              (3,1024,54,16,3,True,True),
@@ -259,10 +263,10 @@ def test_forward(batch_size,
 
 @pytest.mark.parametrize('batch_size, small_bsz, hidden_size, seq_len, heads, num_layers, is_preln, use_fp16',
                          [
-                             (8,3,1024,512,16,3,True,False),
-                             (8,7,1024,512,16,3,True,True),
-                             (8,3,1024,512,16,3,False,False),
-                             (8,7,1024,512,16,3,False,True),
+                             #(8,3,1024,512,16,3,True,False),
+                             #(8,7,1024,512,16,3,True,True),
+                             #(8,3,1024,512,16,3,False,False),
+                             #(8,7,1024,512,16,3,False,True),
                          ]) # yapf: disable
 def test_forward_with_small_bsz(batch_size,
                                 small_bsz,
@@ -294,10 +298,10 @@ def test_forward_with_small_bsz(batch_size,
 
 @pytest.mark.parametrize('batch_size, hidden_size, seq_len, heads, num_layers, is_preln, use_fp16',
                          [
-                             (64,1024,128,16,3,True,False),
-                             (64,1024,128,16,3,True,True),
-                             (64,1024,128,16,3,False,False),
-                             (64,1024,128,16,3,False,True),
+                             #(64,1024,128,16,3,True,False),
+                             #(64,1024,128,16,3,True,True),
+                             #(64,1024,128,16,3,False,False),
+                             #(64,1024,128,16,3,False,True),
                          ]) # yapf: disable
 def test_forward_stochastic(batch_size,
                             hidden_size,

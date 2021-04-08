@@ -17,9 +17,9 @@ import deepspeed
 import sys
 
 #if not deepspeed.ops.__installed_ops__['transformer']:
-pytest.skip(
-    "transformer kernels are temporarily disabled because of unexplained failures",
-    allow_module_level=True)
+#pytest.skip(
+#    "transformer kernels are temporarily disabled because of unexplained failures",
+#    allow_module_level=True)
 
 
 def check_equal(first, second, atol=1e-2, verbose=False):
@@ -258,6 +258,9 @@ def run_backward(ds_config, seq_len, atol=1e-2, verbose=False):
 # 3-128-54-2-24-False-True-0.2
 @pytest.mark.parametrize('batch_size, hidden_size, seq_len, heads, num_layers, is_preln, use_fp16, atol',
                          [
+                             (8,1600,128,25,3,True,True, 0.05),
+                             (8,160,128,2,3,True,True, 0.1),
+                             (8,1600,128,2,3,True,True, 0.05),
                              (3,1024,119,16,24,True,False, 0.05),
                              (3,1024,115,16,24,True,True, 0.05),
                              (1024,128,10,2,2,False,False, 0.1),
@@ -291,7 +294,7 @@ def test_backward(batch_size,
     ds_config.initializer_range = 0.02
     ds_config.fp16 = use_fp16
 
-    run_backward(ds_config, seq_len, atol=atol)
+    run_backward(ds_config, seq_len, atol=atol, verbose=False)
 
 
 #@pytest.mark.parametrize('batch_size, hidden_size, seq_len, heads, num_layers, is_preln, use_fp16, atol',
