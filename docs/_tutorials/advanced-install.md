@@ -103,6 +103,23 @@ script in the repo. This will build a python wheel locally and copy it to all
 the nodes listed in your hostfile (either given via --hostfile, or defaults to
 /job/hostfile).
 
+When the code using DeepSpeed is used for the first time it'll automatically build only the CUDA
+extensions, required for the run, and by default it'll place them under
+`~/.cache/torch_extensions/`. The next time the same program is executed these now precompiled
+extensions will be loaded form that directory.
+
+If you use multiple virtual environments this could be a problem, since by default there is only one
+extensions directory, but different virtual environments may use different setups (e.g. different
+python or cuda versions) and then the loading of a CUDA extension built by another environment will
+fail. Therefore, if you need to you can override the default location with the help of the
+ `TORCH_EXTENSIONS_DIR` environment variable. So in each virtual environment you can point it to a
+ unique directory and DeepSpeed will use it to save and load CUDA extensions.
+
+ You can also change it just for a specific run with:
+
+```bash
+ TORCH_EXTENSIONS_DIR=./torch-extensions deepspeed ...
+```
 
 ## Building for the correct architectures
 
