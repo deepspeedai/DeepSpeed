@@ -9,7 +9,7 @@ import copy
 
 from .constants import *
 from .fp16.loss_scaler import INITIAL_LOSS_SCALE, SCALE_WINDOW, DELAYED_SHIFT, MIN_LOSS_SCALE
-from .config_utils import get_scalar_param, dict_raise_error_on_duplicate_keys
+from .config_utils import get_scalar_param, dict_raise_error_on_duplicate_keys, ScientificNotationEncoder
 from .zero.config import DeepSpeedZeroConfig
 from .zero.constants import *
 from .activation_checkpointing.config import DeepSpeedActivationCheckpointingConfig
@@ -744,6 +744,7 @@ class DeepSpeedConfig(object):
             json.dumps(self._param_dict,
                        sort_keys=True,
                        indent=4,
+                       cls=ScientificNotationEncoder,
                        separators=(',',
                                    ':'))))
 
