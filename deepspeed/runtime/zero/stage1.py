@@ -1,7 +1,6 @@
 import math
 import torch
 import torch.distributed as dist
-from torch._utils import _flatten_dense_tensors, _unflatten_dense_tensors
 from collections import defaultdict
 
 from deepspeed.runtime.zero.utils import _initialize_parameter_parallel_groups
@@ -9,6 +8,7 @@ from deepspeed.runtime.fp16.loss_scaler import LossScaler, DynamicLossScaler
 from deepspeed.runtime.utils import get_grad_norm, CheckOverflow
 from deepspeed.runtime.zero.config import ZERO_OPTIMIZATION_OPTIMIZER_STATES
 from deepspeed.utils import logger, log_dist
+from deepspeed.ops.op_builder import UtilsBuilder
 
 
 def get_alignment_padding(flattened_lean_size, sub_partition_id, sub_partition_size):
@@ -27,54 +27,6 @@ def get_group_alignment_padding(tensor_list, sub_partition_size, sub_partition_c
         group_paddings.append(padding)
 
     return group_paddings
-
-
-def flatten_dense_tensors_sub_partition_aligned(tensor_list,
-                                                dp,
-                                                max_elements_per_comm,
-                                                pg):
-    assert max_elements_per_comm >= dp, f"max_elements_per_comm {max_elements_per_comm} < dp {dp}"
-
-    num_elements = sum(t.numel() for t in tensor_list)
-    log_dist("Total number of elements in model: {}, max elements per com: {}".format(
-        num_elements,
-        max_elements_per_comm),
-             ranks=[0])
-
-    # Compute aligned partition size based on parameter count
-    aligned_param_partition_size = math.ceil(num_elements / dp)
-
-    # Compute aligned partition size based on communication size
-    aligned_comm_partition_size = int(max_elements_per_comm // dp)
-
-    if aligned_param_partition_size <= aligned_comm_partition_size:
-        sub_partition_count = 1
-        sub_partition_size = aligned_param_partition_size
-    else:
-        sub_partition_count = math.ceil(aligned_param_partition_size /
-                                        aligned_comm_partition_size)
-        sub_partition_size = aligned_comm_partition_size
-
-    # Compute required padding  for alignment to dp and max_elements_per_comm
-    padding = (sub_partition_count * sub_partition_size * dp) - num_elements
-
-    log_dist(
-        f"sub_partition_count: {sub_partition_count}, sub_partition_size: {sub_partition_size}, padding: {padding}",
-        ranks=[0])
-    log_dist(
-        f"number of elements with padding: {num_elements} + {padding} = {num_elements + padding}",
-        ranks=[0])
-
-    if padding == 0:
-        aligned_tensor_list = tensor_list
-    else:
-        pad_tensor = torch.zeros(padding,
-                                 device=tensor_list[0].device,
-                                 dtype=tensor_list[0].dtype)
-        aligned_tensor_list = tensor_list + [pad_tensor]
-
-    flat_tensors = _flatten_dense_tensors(aligned_tensor_list)
-    return flat_tensors
 
 
 def _single_range_check(current_index, start_index, end_index, tensor_size):
@@ -126,6 +78,11 @@ class FP16_DeepSpeedZeroOptimizer_Stage1(object):
                  clip_grad=0.0,
                  max_elements_per_comm=5e8,
                  elastic_checkpoint=True):
+
+        # Load pre-built or JIT compile (un)flatten ops
+        util_ops = UtilsBuilder().load()
+        self.flatten = util_ops.flatten
+        self.unflatten = util_ops.unflatten
 
         if dp_process_group is not None and partition_size is not None:
             raise ValueError("Cannot specify both dp_process_group "
@@ -209,7 +166,7 @@ class FP16_DeepSpeedZeroOptimizer_Stage1(object):
 
             # flattens all tensors into single 1d tensor aligned with sub-partition size for later dividing
             # RS: create aligned sub-partitions
-            flat_aligned_params = flatten_dense_tensors_sub_partition_aligned(
+            flat_aligned_params = self.flatten_dense_tensors_sub_partition_aligned(
                 tensor_list=self.fp16_groups[i],
                 dp=dist.get_world_size(group=self.dp_process_group),
                 max_elements_per_comm=self.max_elems_per_comm[i],
@@ -218,8 +175,8 @@ class FP16_DeepSpeedZeroOptimizer_Stage1(object):
 
             # TODO: I don't think this does anything?
             # set model fp16 weight to slices of flattened buffer
-            updated_params = _unflatten_dense_tensors(self.fp16_groups_flat[i],
-                                                      self.fp16_groups[i])
+            updated_params = self.unflatten(self.fp16_groups_flat[i],
+                                            self.fp16_groups[i])
             for p, q in zip(self.fp16_groups[i], updated_params):
                 p.data = q.data
 
@@ -455,8 +412,8 @@ class FP16_DeepSpeedZeroOptimizer_Stage1(object):
 
         return params_in_rank_sub_partition, params_in_rank_sub_partitions_offsets, params_not_local
 
-    @staticmethod
-    def get_flat_sub_partitions(comm_tensor_list,
+    def get_flat_sub_partitions(self,
+                                comm_tensor_list,
                                 comm_param_offsets,
                                 sub_partition_size,
                                 dtype,
@@ -527,7 +484,7 @@ class FP16_DeepSpeedZeroOptimizer_Stage1(object):
             partition_params.append(my_params)  #flat_tensor_list)
             final_param_offsets.append(my_offsets)
             assert len(flat_tensor_list) == len(my_offsets), "{} {}".format(len(flat_tensor_list), len(my_offsets))
-            flat_sub_partitions.append(_flatten_dense_tensors(flat_tensor_list))
+            flat_sub_partitions.append(self.flatten(flat_tensor_list))
         if num_comm_intervals is not None and len(
                 flat_sub_partitions) < num_comm_intervals:
             # logger.info("padding w. sub partitions to ensure uniform communication")
@@ -568,6 +525,55 @@ class FP16_DeepSpeedZeroOptimizer_Stage1(object):
                     _p.grad = None
             else:
                 p.grad = None
+
+    def flatten_dense_tensors_sub_partition_aligned(self,
+                                                    tensor_list,
+                                                    dp,
+                                                    max_elements_per_comm,
+                                                    pg):
+        assert max_elements_per_comm >= dp, f"max_elements_per_comm {max_elements_per_comm} < dp {dp}"
+
+        num_elements = sum(t.numel() for t in tensor_list)
+        log_dist(
+            "Total number of elements in model: {}, max elements per com: {}".format(
+                num_elements,
+                max_elements_per_comm),
+            ranks=[0])
+
+        # Compute aligned partition size based on parameter count
+        aligned_param_partition_size = math.ceil(num_elements / dp)
+
+        # Compute aligned partition size based on communication size
+        aligned_comm_partition_size = int(max_elements_per_comm // dp)
+
+        if aligned_param_partition_size <= aligned_comm_partition_size:
+            sub_partition_count = 1
+            sub_partition_size = aligned_param_partition_size
+        else:
+            sub_partition_count = math.ceil(aligned_param_partition_size /
+                                            aligned_comm_partition_size)
+            sub_partition_size = aligned_comm_partition_size
+
+        # Compute required padding  for alignment to dp and max_elements_per_comm
+        padding = (sub_partition_count * sub_partition_size * dp) - num_elements
+
+        log_dist(
+            f"sub_partition_count: {sub_partition_count}, sub_partition_size: {sub_partition_size}, padding: {padding}",
+            ranks=[0])
+        log_dist(
+            f"number of elements with padding: {num_elements} + {padding} = {num_elements + padding}",
+            ranks=[0])
+
+        if padding == 0:
+            aligned_tensor_list = tensor_list
+        else:
+            pad_tensor = torch.zeros(padding,
+                                     device=tensor_list[0].device,
+                                     dtype=tensor_list[0].dtype)
+            aligned_tensor_list = tensor_list + [pad_tensor]
+
+        flat_tensors = self.flatten(aligned_tensor_list)
+        return flat_tensors
 
     def reduce_scatter_gradients(self,
                                  postscale_gradients,
@@ -699,8 +705,8 @@ class FP16_DeepSpeedZeroOptimizer_Stage1(object):
 
         # TODO: we probably don't need this? just to be safe
         for i in range(len(norm_groups)):
-            updated_params = _unflatten_dense_tensors(self.fp16_groups_flat[i],
-                                                      self.fp16_groups[i])
+            updated_params = self.unflatten(self.fp16_groups_flat[i],
+                                            self.fp16_groups[i])
             for p, q in zip(self.fp16_groups[i], updated_params):
                 p.data = q.data
 
@@ -903,7 +909,7 @@ class FP16_DeepSpeedZeroOptimizer_Stage1(object):
                 sub_partition_idx = (comm_idx * num_partitions) + rank
                 all_sub_partition_weights[sub_partition_idx] = sub_partition_weights
 
-        flat_merged_weights = flatten_dense_tensors_sub_partition_aligned(
+        flat_merged_weights = self.flatten_dense_tensors_sub_partition_aligned(
             tensor_list=all_sub_partition_weights,
             dp=dist.get_world_size(group=self.dp_process_group),
             max_elements_per_comm=max_elems_per_comm,
@@ -951,7 +957,7 @@ class FP16_DeepSpeedZeroOptimizer_Stage1(object):
             return all_partition_states[0]
 
         alignment = dist.get_world_size(group=self.dp_process_group)
-        flat_merged_partitions = flatten_dense_tensors_sub_partition_aligned(
+        flat_merged_partitions = self.flatten_dense_tensors_sub_partition_aligned(
             tensor_list=all_partition_states,
             dp=dist.get_world_size(group=self.dp_process_group),
             max_elements_per_comm=max_elems_per_comm,
