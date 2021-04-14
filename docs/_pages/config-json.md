@@ -82,13 +82,15 @@ The Adam optimizer also supports the following two params keys/values in additio
 
 The 1-bit Adam optimizer supports the following three params keys/values in addition to the standard Adam (learn more in our [tutorial](/tutorials/onebit-adam/)):
 
-| "params" key  | Description                                                                 | Default |
-| ------------- | --------------------------------------------------------------------------- | ------- |
-| freeze\_step   | Number of warm up steps before 1-bit compression gets applied to the communication | 100000   |
-| cuda\_aware | To indicate that the underlying MPI library supports CUDA-Aware communication         | false    |
-| comm\_backend\_name | To indicate which backend implementation to use                               | "nccl"   |
+| "params" key        | Description                                                                        | Default |
+| ------------------- | ---------------------------------------------------------------------------------- | ------- |
+| freeze\_step        | Number of warm up steps before 1-bit compression gets applied to the communication | 100000  |
+| cuda\_aware         | To indicate that the underlying MPI library supports CUDA-Aware communication      | false   |
+| comm\_backend\_name | To indicate which backend implementation to use                                    | "nccl"  |
 
 ### Scheduler Parameters
+
+DeepSpeed calls the `step()` method of the scheduler at every training step when `model_engine.step()` is executed.
 
 ***scheduler***: [dictionary]
 
@@ -269,8 +271,8 @@ Enabling and configuring ZeRO memory optimizations
 
 ***stage***: [integer]
 
-| Description                                                                                                                                                           | Default |
-| --------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------- |
+| Description                                                                                                                                                                                                               | Default |
+| ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------- |
 | Chooses different stages of ZeRO Optimizer. Stage 0, 1, 2, and 3 refer to disabled, optimizer state partitioning, and optimizer+gradient state partitioning, and optimizer+gradient+parameter partitioning, respectively. | `0`     |
 
 ***allgather_partitions***: [boolean]
@@ -323,26 +325,26 @@ Enabling and configuring ZeRO memory optimizations
 
 ***cpu_offload_use_pin_memory***: [boolean]
 
-| Description                                                                               | Default |
-| ----------------------------------------------------------------------------------------- | ------- |
-| Use pinned CPU memory when offloading. Can improve performance. Valid only with stage 3.  | `False` |
+| Description                                                                              | Default |
+| ---------------------------------------------------------------------------------------- | ------- |
+| Use pinned CPU memory when offloading. Can improve performance. Valid only with stage 3. | `False` |
 
 ***stage3_max_live_parameters***: [integer]
 
-| Description                                                                                                                           | Default |
-| ------------------------------------------------------------------------------------------------------------------------------------- | ------- |
+| Description                                                                                                                         | Default |
+| ----------------------------------------------------------------------------------------------------------------------------------- | ------- |
 | The maximum number of parameters resident per GPU before releasing. Smaller values use less memory, but perform more communication. | `1e9`   |
 
 ***stage3_max_reuse_distance***: [integer]
 
-| Description                                                                                                      | Default |
-| ---------------------------------------------------------------------------------------------------------------- | ------- |
+| Description                                                                                                                                          | Default |
+| ---------------------------------------------------------------------------------------------------------------------------------------------------- | ------- |
 | Do not release a parameter if it will be reused within this threshold of parameters. Smaller values use less memory, but perform more communication. | `1e9`   |
 
 ***stage3_prefetch_bucket_size***: [integer]
 
-| Description                                                                                                                     | Default |
-| ------------------------------------------------------------------------------------------------------------------------------- | ------- |
+| Description                                                                                                                            | Default |
+| -------------------------------------------------------------------------------------------------------------------------------------- | ------- |
 | The size of the fixed buffer for prefetching parameters. Smaller values use less memory, but can increase stalls due to communication. | `5e8`   |
 
 

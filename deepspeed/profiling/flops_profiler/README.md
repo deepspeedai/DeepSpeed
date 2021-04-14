@@ -9,7 +9,7 @@
 
 ## Overview
 
-The DeepSpeed flops profiler profiles the forward pass of a PyTorch model and prints the model graph with the measured profile attached to each module.
+This profiles the forward pass of a PyTorch model and prints the model graph with the measured profile attached to each module.
 It shows the parameters, latency, and number of floating point operations of the modules within the model to identify potential bottlenecks.
 It also outputs the names of the top `k` modules in terms of aggregated time, flops, and number of parameters at depth `l` with `k` and `l` specified by the user.
 The DeepSpeed flops profiler can be used with the DeepSpeed runtime or as a standalone package.
