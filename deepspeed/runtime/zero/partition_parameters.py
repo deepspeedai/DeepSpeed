@@ -808,16 +808,11 @@ class Init(InsertPostInitMethodToModuleSubClasses):
         start = partition_size * rank
         end = start + partition_size
 
-        dest_tensor = partition_buffer.view(-1).narrow(0, 0, partition_size)
+        dest_tensor_full_buffer = partition_buffer.view(-1).narrow(0, 0, partition_size)
 
         #print("before partition gradients")
         if start < param.ds_numel:
             elements = min(param.ds_numel - start, partition_size)
-
-            dest_tensor_full_buffer = partition_buffer.view(-1).narrow(
-                0,
-                0,
-                partition_size)
 
             dest_tensor = dest_tensor_full_buffer.narrow(0, 0, elements)
             src_tensor = param.grad.view(-1).narrow(0, start, elements)
