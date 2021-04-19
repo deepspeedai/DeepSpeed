@@ -112,6 +112,9 @@ class PipelineModule(nn.Module):
                     x = layer(x)
                 return x
 
+        .. note::
+            Pipeline parallelism is not compatible with ZeRO-2 and ZeRO-3.
+
         Args:
             layers (Iterable): A sequence of layers defining pipeline structure. Can be a ``torch.nn.Sequential`` module.
             num_stages (int, optional): The degree of pipeline parallelism. If not specified, ``topology`` must be provided.
