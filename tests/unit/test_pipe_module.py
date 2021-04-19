@@ -96,6 +96,6 @@ def test_pipe_module_sequential(sequential_model, simple_args):
         base_output = base_output.to('cpu')
         pipe_output = pipe_output.to('cpu')
 
-        assert torch.allclose(base_output, pipe_output)
+        assert torch.allclose(base_output, pipe_output, atol=1e-4)
 
     _helper()

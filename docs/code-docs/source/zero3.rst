@@ -16,12 +16,13 @@ For more information on our algorithms, please see our papers on `ZeRO
 <https://arxiv.org/abs/1910.02054>`_ and `ZeRO-Offload
 <https://arxiv.org/abs/2101.06840>`_.
 
+
 Getting Started
 ---------------
 
 If you are new to DeepSpeed, check out our `Getting Started <https://www.deepspeed.ai/getting-started/>`_ page.
 
-Once you are training with DeepSpeed, enabling ZeRO-3 Offload is as simple as enabling it
+Once you are training with DeepSpeed, enabling ZeRO-3 offload is as simple as enabling it
 in your DeepSpeed configuration! Below are a few examples of ZeRO-3 configurations. Please see
 our `config guide <https://www.deepspeed.ai/docs/config-json/#zero-optimizations-for-fp16-training>`_
 for a complete list of options for configuration and performance tuning.
@@ -46,6 +47,7 @@ Example ZeRO-3 Offload Configurations
             "zero_optimization": {
                 "stage": 3,
                 "overlap_comm": true
+
             },
             "fp16": {
                 "enabled": true
@@ -69,13 +71,14 @@ Example ZeRO-3 Offload Configurations
 #. Additionally offload the optimizer states and computations to the CPU.
 
     .. code-block:: python
-        :emphasize-lines:  4
 
         {
             "zero_optimization": {
                 "stage": 3,
-                "cpu_offload": true,
                 "overlap_comm": true
+                "offload_optimizer": {
+                    "device": "cpu"
+                }
             },
             ...
         }
@@ -84,14 +87,38 @@ Example ZeRO-3 Offload Configurations
 #. Save even more memory by offloading parameters to the CPU memory.
 
     .. code-block:: python
-        :emphasize-lines:  5
 
         {
             "zero_optimization": {
                 "stage": 3,
-                "cpu_offload": true,
-                "cpu_offload_params": true,
                 "overlap_comm": true
+                "offload_optimizer": {
+                    "device": "cpu"
+                }
+                "offload_param": {
+                    "device": "cpu"
+                }
+            },
+            ...
+        }
+
+
+#. Save even MORE memory by offloading to NVMe (if available):
+
+    .. code-block:: python
+
+        {
+            "zero_optimization": {
+                "stage": 3,
+                "overlap_comm": true
+                "offload_optimizer": {
+                    "device": "nvme",
+                    "nvme_path": "/nvme_data"
+                }
+                "offload_param": {
+                    "device": "nvme",
+                    "nvme_path": "/nvme_data"
+                }
             },
             ...
         }
@@ -126,8 +153,6 @@ you can simply allocate your model in our context:
         model = MyLargeModel()
 
 
-
-.. autoclass:: deepspeed.zero.Init
     :members:
 
 
@@ -179,6 +204,35 @@ because it is used in the training loop outside of its owning module's
 forward pass. DeepSpeed will coordinate external parameters if they are
 registered prior to the first forward pass.
 
+Consider the following pattern common in language models such as GPT:
+
+.. code-block:: python
+
+    class LanguageModel(torch.nn.Module):
+        ...
+        def forward(self, inputs):
+            embeds = self.embeddings(inputs)
+            ...
+            logits = compute_logits(output, self.embeddings.weight)
+            ...
+
+
+The tensor ``embeddings.weight`` is used in both ``embeddings.forward()`` and
+``compute_logits()``. We call ``embeddings.weight`` an *external* parameter
+because it is used in the training loop outside of its owning module's
+forward pass. DeepSpeed will coordinate external parameters if they are
+registered prior to the first forward pass.
+
+.. note::
+    Most models should not need to manually register parameters.
+
 .. autofunction:: deepspeed.zero.register_external_parameter
 
 .. autofunction:: deepspeed.zero.unregister_external_parameter
+
+
+Memory-Centric Tiling
+---------------------
+
+.. autoclass:: deepspeed.zero.TiledLinear
+    :members:

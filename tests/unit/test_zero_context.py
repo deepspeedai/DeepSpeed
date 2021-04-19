@@ -1,4 +1,7 @@
 import os
+import sys
+from types import SimpleNamespace
+
 import torch
 import pytest
 
@@ -62,55 +65,59 @@ def test_gather_update():
         assert torch.equal(l.weight, torch.zeros_like(l.weight))
 
 
-@pytest.mark.skip('WIP')
-def test_external_param():
+config_dict = {
+    "train_batch_size": 1,
+    "steps_per_print": 1,
+    "optimizer": {
+        "type": "Adam",
+        "params": {
+            "lr": 0.00015
+        }
+    },
+    "fp16": {
+        "enabled": True,
+        "loss_scale": 138.
+    },
+    "zero_optimization": {
+        "stage": 3,
+        "stage3_param_persistence_threshold": 1,
+    }
+}
+
+
+def test_ext_param_getattr():
     setup_serial_env()
 
-    print()
-
     class ExtLinear(torch.nn.Module):
-        def __init__(self, dim=10, copycat=None):
+        def __init__(self, dim=16):
             super().__init__()
             self.dim = dim
-            self.linear = torch.nn.Linear(dim, dim)
-            if copycat is not None:
-                with deepspeed.zero.GatheredParameters(self.linear.weight,
-                                                  modifier_rank=0), \
-                     torch.no_grad():
-                    self.linear.weight.copy_(copycat.linear.weight)
-
-            if hasattr(self.linear.weight, 'ds_id'):
-                print('registering')
-                super().ds_register_external_parameter('samyam', self.linear.weight)
+            self.linear1 = torch.nn.Linear(dim, dim)
+            self.linear2 = torch.nn.Linear(dim, dim)
 
         def forward(self, input):
-            yamsam = self.linear(input)
-            if hasattr(self.linear.weight, 'ds_status'):
-                assert self.linear.weight.ds_status == ZeroParamStatus.AVAILABLE
-            jeff = torch.nn.functional.linear(yamsam, self.linear.weight)
-            return jeff
+            A = self.linear1(input)
+            B = self.linear2(A)
 
-    l1_base = ExtLinear().half().cuda()
-    l2_base = ExtLinear().half().cuda()
+            # external use of self.linear1.weight
+            C = torch.nn.functional.linear(B, self.linear1.weight)
+            return C.sum()
 
-    input = torch.rand(10).half().cuda()
+    net = ExtLinear()
 
-    l1_base_out = l1_base(input.clone().detach())
-    l2_base_out = l2_base(input.clone().detach())
+    args = SimpleNamespace(local_rank=0)
+    engine, optim, _, _ = deepspeed.initialize(args=args,
+                                               model=net,
+                                               model_parameters=net.parameters(),
+                                               config_params=config_dict)
 
-    with deepspeed.zero.Init():
-        l1_test = ExtLinear(copycat=l1_base).cuda()
-        #l2_test = ExtLinear(copycat=l2_base).cuda()
-        assert l1_test.linear.weight.ds_status == ZeroParamStatus.NOT_AVAILABLE
+    with deepspeed.zero.GatheredParameters(net.linear1.weight):
+        assert net.linear1.weight.numel() == net.dim**2
 
-    # XXX l1 and l2 share their external parameter (l2.linear.weight)
-
-    assert l1_test.linear.weight.ds_status == ZeroParamStatus.NOT_AVAILABLE
-    l1_test_out = l1_test(input.clone().detach())
-    #assert torch.allclose(l1_base_out, l1_test_out)
-
-    #l2_test_out = l2_test(input.clone().detach())
-    #assert torch.allclose(l2_base_out, l2_test_out)
+    input = torch.rand(net.dim).to(engine.device).half()
+    loss = engine(input)
+    engine.backward(loss)
+    engine.step()
 
 
 def test_scatter_halftype():
@@ -122,3 +129,117 @@ def test_scatter_halftype():
 
         y = torch.LongTensor([3, 3])
         assert y.dtype == torch.long
+
+
+class DanglingBias(torch.nn.Linear):
+    def forward(self, *inputs):
+        out = super().forward(*inputs)
+        # return the bias to trigger a dangling external param
+        return out, self.bias
+
+
+class DataClass:
+    """Just wraps data in an object. """
+    def __init__(self, out=None, bias=None):
+        self.out = out
+        self.bias = bias
+
+
+class DanglingBiasClass(DanglingBias):
+    def forward(self, *inputs):
+        out, bias = super().forward(*inputs)
+        return DataClass(out=out, bias=bias)
+
+
+class DanglingAttention(torch.nn.Linear):
+    def __init__(self, dim=16, return_obj=False):
+        super().__init__(dim, dim)
+        self.dim = dim
+        self.return_obj = return_obj
+        if return_obj:
+            self.d_linear = DanglingBiasClass(dim, dim)
+        else:
+            self.d_linear = DanglingBias(dim, dim)
+
+    def forward(self, input):
+        out = super().forward(input)
+        if self.return_obj:
+            out_obj = self.d_linear(out)
+            assert out_obj.bias.ds_status == ZeroParamStatus.AVAILABLE
+            # forward the external param
+            return out_obj.out, out_obj.bias
+        else:
+            out, bias = self.d_linear(out)
+            assert bias.ds_status == ZeroParamStatus.AVAILABLE
+            return out, bias
+
+
+class ModelContainer(torch.nn.Module):
+    def __init__(self, dim=16, return_obj=False):
+        super().__init__()
+        self.dim = dim
+        self.linear1 = torch.nn.Linear(dim, dim)
+        self.dangler = DanglingAttention(dim, return_obj=return_obj)
+
+    def forward(self, input):
+        act1 = self.linear1(input)
+        # bias is actually dangler.d_linear1.bias
+        act2, bias = self.dangler(act1)
+        assert bias.ds_status == ZeroParamStatus.AVAILABLE
+        return (act2 + bias).sum()
+
+
+class DanglingExt(torch.nn.Module):
+    def __init__(self, dim=16):
+        super().__init__()
+        self.dim = dim
+        self.container = ModelContainer(dim)
+
+    def forward(self, input):
+        out = self.container(input)
+
+        # Make sure it's at the right level of the stack
+        assert len(self._external_params) == 0
+        assert len(self.container._external_params) == 1
+        assert len(self.container.dangler._external_params) == 0
+        return out
+
+
+def test_ext_param_return():
+    setup_serial_env()
+
+    net = DanglingExt()
+
+    args = SimpleNamespace(local_rank=0)
+    engine, optim, _, _ = deepspeed.initialize(args=args,
+                                               model=net,
+                                               model_parameters=net.parameters(),
+                                               config_params=config_dict)
+
+    for _ in range(5):
+        input = torch.rand(net.dim).to(engine.device).half()
+        loss = engine(input)
+        engine.backward(loss)
+        engine.step()
+
+
+@pytest.mark.skip('WIP')
+def test_ext_param_returnobj():
+    setup_serial_env()
+    print()
+
+    net = ModelContainer(return_obj=True)
+
+    args = SimpleNamespace(local_rank=0)
+    engine, optim, _, _ = deepspeed.initialize(args=args,
+                                               model=net,
+                                               model_parameters=net.parameters(),
+                                               config_params=config_dict)
+
+    for _ in range(5):
+        input = torch.rand(net.dim).to(engine.device).half()
+        loss = engine(input)
+        assert len(net._external_params) == 1
+        assert len(net.dangler._external_params) == 0
+        engine.backward(loss)
+        engine.step()

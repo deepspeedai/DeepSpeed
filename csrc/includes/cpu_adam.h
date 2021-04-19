@@ -20,7 +20,7 @@
         }                                                                                      \
     }
 
-#define TILE (1024 * 1024 * 1024)
+#define TILE (128 * 1024 * 1024)
 
 #if defined(__AVX512__)
 #define SIMD_STORE(a, d) _mm512_storeu_ps(a, d)

@@ -5,7 +5,10 @@ Licensed under the MIT license.
 
 from deepspeed.runtime.config_utils import get_scalar_param, DeepSpeedConfigObject
 from deepspeed.utils import logger
-from deepspeed.runtime.zero.constants import *
+from .constants import *
+from .offload_constants import *
+from .offload_config import get_offload_param_config, get_default_offload_param_config, \
+    get_offload_optimizer_config, get_default_offload_optimizer_config
 
 
 class DeepSpeedZeroConfig(DeepSpeedConfigObject):
@@ -24,9 +27,8 @@ class DeepSpeedZeroConfig(DeepSpeedConfigObject):
         self.elastic_checkpoint = None
 
         #Offload Specific Parameters
-        self.cpu_offload = None
-        self.cpu_offload_params = None
-        self.cpu_offload_use_pin_memory = None
+        self.offload_param = None
+        self.offload_optimizer = None
         self.sub_group_size = None
 
         #Stage3 Specific Parameters
@@ -60,7 +62,24 @@ class DeepSpeedZeroConfig(DeepSpeedConfigObject):
             .format(ZERO_FORMAT))
         return zero_config_dict
 
+    def _sanity_check(self, zero_config_dict):
+        deprecated_dict = {
+            ZERO_OPTIMIZATION_CPU_OFFLOAD:
+            ZERO_OPTIMIZATION_OFFLOAD_OPTIMIZER,
+            ZERO_OPTIMIZATION_CPU_OFFLOAD_PARAMS:
+            ZERO_OPTIMIZATION_OFFLOAD_PARAM,
+            ZERO_OPTIMIZATION_CPU_OFFLOAD_USE_PIN_MEMORY:
+            f'{ZERO_OPTIMIZATION_OFFLOAD_PARAM} or {ZERO_OPTIMIZATION_OFFLOAD_OPTIMIZER}'
+        }
+
+        for old_key, new_key in deprecated_dict.items():
+            if old_key in zero_config_dict:
+                logger.warning(
+                    f'DeepSpeedConfig: {old_key} is deprecated. Please use {new_key}.')
+
     def _initialize(self, zero_config_dict):
+        self._sanity_check(zero_config_dict)
+
         self.stage = get_scalar_param(zero_config_dict,
                                       ZERO_OPTIMIZATION_STAGE,
                                       ZERO_OPTIMIZATION_STAGE_DEFAULT)
@@ -103,24 +122,30 @@ class DeepSpeedZeroConfig(DeepSpeedConfigObject):
             ZERO_OPTIMIZATION_LOAD_FROM_FP32_WEIGHTS,
             ZERO_OPTIMIZATION_LOAD_FROM_FP32_WEIGHTS_DEFAULT)
 
-        self.cpu_offload = get_scalar_param(zero_config_dict,
-                                            ZERO_OPTIMIZATION_CPU_OFFLOAD,
-                                            ZERO_OPTIMIZATION_CPU_OFFLOAD_DEFAULT)
-
         self.elastic_checkpoint = get_scalar_param(
             zero_config_dict,
             ZERO_OPTIMIZATION_ELASTIC_CHECKPOINT,
             ZERO_OPTIMIZATION_ELASTIC_CHECKPOINT_DEFAULT)
 
-        self.cpu_offload_params = get_scalar_param(
-            zero_config_dict,
-            ZERO_OPTIMIZATION_CPU_OFFLOAD_PARAMS,
-            ZERO_OPTIMIZATION_CPU_OFFLOAD_PARAMS_DEFAULT)
+        if ZERO_OPTIMIZATION_CPU_OFFLOAD in zero_config_dict:
+            cpu_offload_optimizer = get_scalar_param(
+                zero_config_dict,
+                ZERO_OPTIMIZATION_CPU_OFFLOAD,
+                ZERO_OPTIMIZATION_CPU_OFFLOAD_DEFAULT)
+            if cpu_offload_optimizer:
+                self.offload_optimizer = get_default_offload_optimizer_config()
+        else:
+            self.offload_optimizer = get_offload_optimizer_config(zero_config_dict)
 
-        self.cpu_offload_use_pin_memory = get_scalar_param(
-            zero_config_dict,
-            ZERO_OPTIMIZATION_CPU_OFFLOAD_USE_PIN_MEMORY,
-            ZERO_OPTIMIZATION_CPU_OFFLOAD_USE_PIN_MEMORY_DEFAULT)
+        if ZERO_OPTIMIZATION_CPU_OFFLOAD_PARAMS in zero_config_dict:
+            cpu_offload_params = get_scalar_param(
+                zero_config_dict,
+                ZERO_OPTIMIZATION_CPU_OFFLOAD_PARAMS,
+                ZERO_OPTIMIZATION_CPU_OFFLOAD_PARAMS_DEFAULT)
+            if cpu_offload_params:
+                self.offload_param = get_default_offload_param_config()
+        else:
+            self.offload_param = get_offload_param_config(zero_config_dict)
 
         self.sub_group_size = get_scalar_param(zero_config_dict,
                                                ZERO_OPTIMIZATION_SUB_GROUP_SIZE,

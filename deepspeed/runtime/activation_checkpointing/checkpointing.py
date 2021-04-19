@@ -24,7 +24,7 @@ from torch.cuda import _lazy_call, device as device_ctx_manager
 
 from deepspeed.runtime.config import DeepSpeedConfig
 from deepspeed.utils import logger
-from deepspeed.runtime.utils import move_to_device
+from deepspeed.runtime.utils import move_to_device, see_memory_usage
 from deepspeed.utils.timer import SynchronizedWallClockTimer as Timers
 
 # DeepSpeed Checkpointing Enabled or Disabled
@@ -54,34 +54,6 @@ PA_TO_CPU = False
 CONTIGUOUS_CHECKPOINTING = False
 SYNCHRONIZE = False
 PROFILE_TIME = False
-
-
-def see_memory_usage(message, force=False):
-    # return
-    if not force:
-        return
-    # dist.barrier()
-    if dist.get_rank() == 0:
-        logger.info(message)
-        logger.info(
-            "Memory Allocated %s GigaBytes",
-            torch.cuda.memory_allocated() / (1024 * 1024 * 1024),
-        )
-        logger.info(
-            "Max Memory Allocated %s GigaBytes",
-            torch.cuda.max_memory_allocated() / (1024 * 1024 * 1024),
-        )
-        logger.info(
-            "Cache Allocated %s GigaBytes",
-            torch.cuda.memory_cached() / (1024 * 1024 * 1024),
-        )
-        logger.info(
-            "Max cache Allocated %s GigaBytes",
-            torch.cuda.max_memory_cached() / (1024 * 1024 * 1024),
-        )
-        logger.info("")
-        #input("Press Any Key To Continue ..")
-
 
 # Default name for the model parallel rng tracker.
 _MODEL_PARALLEL_RNG_TRACKER_NAME = 'model-parallel-rng'
@@ -685,8 +657,7 @@ class CheckpointFunction(torch.autograd.Function):
 
         torch.autograd.backward(output_tensors, grad_tensors)
 
-        see_memory_usage("After backward checkpointing code before backward",
-                         force=False)
+        see_memory_usage("After backward checkpointing code after backward", force=False)
 
         if PROFILE_TIME:
             timers('backward').stop()

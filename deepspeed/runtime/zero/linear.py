@@ -21,6 +21,11 @@ from torch.nn.modules.module import Module
 tensor_map = {}
 
 
+def print_rank_0(message, debug=False, force=False):
+    if torch.distributed.get_rank() == 0 and (debug or force):
+        print(message)
+
+
 class LinearFunctionForZeroStage3(torch.autograd.Function):
 
     # Note that both forward and backward are @staticmethods
@@ -46,6 +51,7 @@ class LinearFunctionForZeroStage3(torch.autograd.Function):
             if bias is not None:
                 output += bias
             ret = output
+
         return ret
 
     # This function has only a single output, so it gets only one gradient

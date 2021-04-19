@@ -6,7 +6,7 @@ Licensed under the MIT license.
 Collection of DeepSpeed configuration utilities
 """
 import json
-from collections import Counter, Mapping, Sequence
+import collections
 
 
 # adapted from https://stackoverflow.com/a/50701137/9201239
@@ -31,13 +31,13 @@ class ScientificNotationEncoder(json.JSONEncoder):
                 return f"{o:e}"
             else:
                 return f"{o}"
-        elif isinstance(o, Mapping):
+        elif isinstance(o, collections.Mapping):
             x = [
                 f'\n{prefix}"{k}": {self.iterencode(v, level=level)}' for k,
                 v in o.items()
             ]
             return "{" + ', '.join(x) + f"\n{prefix_close}" + "}"
-        elif isinstance(o, Sequence) and not isinstance(o, str):
+        elif isinstance(o, collections.Sequence) and not isinstance(o, str):
             return f"[{ f', '.join(map(self.iterencode, o)) }]"
         return "\n, ".join(super().iterencode(o, _one_shot))
 
@@ -70,7 +70,7 @@ def dict_raise_error_on_duplicate_keys(ordered_pairs):
     """Reject duplicate keys."""
     d = dict((k, v) for k, v in ordered_pairs)
     if len(d) != len(ordered_pairs):
-        counter = Counter([pair[0] for pair in ordered_pairs])
+        counter = collections.Counter([pair[0] for pair in ordered_pairs])
         keys = [key for key, value in counter.items() if value > 1]
         raise ValueError("Duplicate keys in DeepSpeed config: {}".format(keys))
     return d

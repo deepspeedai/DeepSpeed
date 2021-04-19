@@ -43,6 +43,10 @@ lnav:
         url: /docs/config-json/#gradient-clipping
       - title: "ZeRO optimizations"
         url: /docs/config-json/#zero-optimizations-for-fp16-training
+      - title: "Parameter Offloading"
+        url: /docs/config-json/#parameter-offloading
+      - title: "Optimizer Offloading"
+        url: /docs/config-json/#optimizer-offloading
       - title: "Logging"
         url: /docs/config-json/#logging
       - title: "Flops Profiler"

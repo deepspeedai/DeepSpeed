@@ -17,4 +17,8 @@ FusedLamb (GPU)
 
 OneBitAdam (GPU)
 ----------------------------
+<<<<<<< HEAD
 .. autoclass:: deepspeed.runtime.fp16.onebit.adam.OneBitAdam
+=======
+.. autoclass:: deepspeed.runtime.fp16.OneBitAdam
+>>>>>>> [squash] Staging zero infinity v1 (#168)
