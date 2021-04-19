@@ -1,5 +1,5 @@
-ZeRO-3 Offload
-##############
+ZeRO
+####
 
 The Zero Redundancy Optimizer (ZeRO) removes the memory redundancies across
 data-parallel processes by partitioning the three model states (optimizer
@@ -8,13 +8,31 @@ replicating them. By doing this, it boosts memory efficiency compared to
 classic data-parallelism while retaining its computational granularity and
 communication efficiency.
 
-ZeRO-Offload further increases memory efficiency by offloading the
-optimizer's states and computations to the CPU. The model parameters can also
-be offloaded for even more memory savings!
+#. **ZeRO Stage 1**: The optimizer states (e.g., for `Adam optimizer <https://arxiv.org/abs/1412.6980>`_, 32-bit weights, and the first, and second moment estimates) are partitioned across the processes, so that each process updates only its partition.
 
-For more information on our algorithms, please see our papers on `ZeRO
-<https://arxiv.org/abs/1910.02054>`_ and `ZeRO-Offload
-<https://arxiv.org/abs/2101.06840>`_.
+#. **ZeRO Stage 2**: The reduced 32-bit gradients for updating the model weights are also partitioned such that each process retains only the gradients corresponding to its portion of the optimizer states.
+
+#. **ZeRO Stage 3**: The 16-bit model parameters are partitioned across the processes. ZeRO-3 will automatically collect and partition them during the forward and backward passes.
+
+In addition, ZeRO-3 includes the *infinity offload engine* to form
+ZeRO-Infinity ([paper](https://arxiv.org/abs/2104.07857)), which can offload
+all model states to both CPU and NVMe memory for huge memory savings.
+
+
+For a deep dive of our algorithms, please see our `papers <https://www.deepspeed.ai/#publications>`_ on `ZeRO
+<https://arxiv.org/abs/1910.02054>`_, `ZeRO-Offload
+<https://arxiv.org/abs/2101.06840>`_,
+and `ZeRO-Infinity <https://arxiv.org/abs/2104.07857>`_.
+
+.. note::
+    DeepSpeed first included offloading capabilities with **ZeRO-Offload**, a
+    system for offloading optimizer and gradient states to CPU memory within
+    ZeRO-2. **ZeRO-Infinity** is the next generation of offloading
+    capabilities, accessible to ZeRO-3. ZeRO-Infinity has all of the savings
+    of ZeRO-Offload, plus is able to offload more the model weights and has
+    more effective bandwidth utilization and overlapping of computation and
+    communication.
+
 
 
 Getting Started
@@ -28,14 +46,15 @@ our `config guide <https://www.deepspeed.ai/docs/config-json/#zero-optimizations
 for a complete list of options for configuration and performance tuning.
 
 .. note::
-        ZeRO-3 Offload works best with our heavily optimized
+        ZeRO-Infinity and ZeRO-Offload work best with our heavily optimized
         :class:`deepspeed.ops.adam.DeepSpeedCPUAdam` optimizer. We recommend using
         our `optimizer config <https://www.deepspeed.ai/docs/config-json/#optimizer-parameters>`_
         to instruct :meth:`deepspeed.initialize` to build the optimizer for you.
 
 
-Example ZeRO-3 Offload Configurations
-=====================================
+
+Example ZeRO-3 Configurations
+=============================
 
 #. Use ZeRO to partition the optimizer states (stage 1), gradients (stage 2),
    and parameters (stage 3).
@@ -46,8 +65,6 @@ Example ZeRO-3 Offload Configurations
         {
             "zero_optimization": {
                 "stage": 3,
-                "overlap_comm": true
-
             },
             "fp16": {
                 "enabled": true
@@ -68,14 +85,13 @@ Example ZeRO-3 Offload Configurations
         }
 
 
-#. Additionally offload the optimizer states and computations to the CPU.
+#. Additionally offload the optimizer states and computations to the CPU with ZeRO-Infinity.
 
     .. code-block:: python
 
         {
             "zero_optimization": {
                 "stage": 3,
-                "overlap_comm": true
                 "offload_optimizer": {
                     "device": "cpu"
                 }
@@ -91,7 +107,6 @@ Example ZeRO-3 Offload Configurations
         {
             "zero_optimization": {
                 "stage": 3,
-                "overlap_comm": true
                 "offload_optimizer": {
                     "device": "cpu"
                 }
@@ -103,14 +118,13 @@ Example ZeRO-3 Offload Configurations
         }
 
 
-#. Save even MORE memory by offloading to NVMe (if available):
+#. Save even MORE memory by offloading to NVMe (if available on your system):
 
     .. code-block:: python
 
         {
             "zero_optimization": {
                 "stage": 3,
-                "overlap_comm": true
                 "offload_optimizer": {
                     "device": "nvme",
                     "nvme_path": "/nvme_data"
@@ -134,6 +148,9 @@ granularity of (sub)module ``forward()`` methods. The backward pass is
 handled similarly. This strategy has two underlying assumptions:
 
 #. The forward and backward passes of submodules must individually fit in device memory.
+   If this not the case, :class:`deepspeed.zero.TiledLinear` implements
+   **memory-centric tiling** and works with ZeRO-3 to break linear layers
+   into a sequence of smaller submodules that can fit in memory.
 
 #. A module's parameters are only accessed within its own ``__init__`` and ``forward()`` methods.
    Otherwise, DeepSpeed must be instructed to collect and re-partition the parameter.
@@ -153,6 +170,7 @@ you can simply allocate your model in our context:
         model = MyLargeModel()
 
 
+.. autoclass:: deepspeed.zero.Init
     :members:
 
 
@@ -185,46 +203,56 @@ parameters are accessed outside of the module that created them. To do so, use
 Registering External Parameters
 ===============================
 
-Consider the following pattern common in language models such as GPT:
+ZeRO-3 will automatically collect and partition the model parameters as they
+are needed during the forward and backward passes. However, in some cases a
+parameter may be used outside of its module's forward pass. We call these
+*external* parameters. ZeRO-3 can coordinate these parameters if they are
+registered either automatically or manually.
 
-.. code-block:: python
-
-    class LanguageModel(torch.nn.Module):
-        ...
-        def forward(self, inputs):
-            embeds = self.embeddings(inputs)
-            ...
-            logits = compute_logits(output, self.embeddings.weight)
-            ...
-
-
-The tensor ``embeddings.weight`` is used in both ``embeddings.forward()`` and
-``compute_logits()``. We call ``embeddings.weight`` an *external* parameter
-because it is used in the training loop outside of its owning module's
-forward pass. DeepSpeed will coordinate external parameters if they are
-registered prior to the first forward pass.
-
-Consider the following pattern common in language models such as GPT:
-
-.. code-block:: python
-
-    class LanguageModel(torch.nn.Module):
-        ...
-        def forward(self, inputs):
-            embeds = self.embeddings(inputs)
-            ...
-            logits = compute_logits(output, self.embeddings.weight)
-            ...
-
-
-The tensor ``embeddings.weight`` is used in both ``embeddings.forward()`` and
-``compute_logits()``. We call ``embeddings.weight`` an *external* parameter
-because it is used in the training loop outside of its owning module's
-forward pass. DeepSpeed will coordinate external parameters if they are
-registered prior to the first forward pass.
 
 .. note::
-    Most models should not need to manually register parameters.
+    DeepSpeed version ``0.3.15`` includes automatic external parameter
+    discovery and registration to support the most common cases. Parameters
+    can still be manually registered if they cannot be automatically
+    detected.
+
+
+DeepSpeed can automatically detect the following external parameter scenarios:
+
+
+#. Parameter access: consider the following pattern common in language models such as GPT:
+
+   The tensor ``embeddings.weight`` is used in both ``embeddings.forward()`` and
+   ``compute_logits()``. We call ``embeddings.weight`` an *external* parameter
+   because it is used in the training loop outside of its owning module's
+   forward pass.
+
+
+   .. code-block:: python
+
+       class LanguageModel(torch.nn.Module):
+           ...
+           def forward(self, inputs):
+               embeds = self.embeddings(inputs)
+               ...
+               logits = compute_logits(output, self.embeddings.weight)
+               ...
+
+
+#. Returning a parameter:
+
+   ``CustomLinear`` returns both an output and its own ``bias`` parameter. DeepSpeed
+   will detect the external ``bias`` parameter and register it with submodules that
+   use ``CustomLinear``.
+
+   .. code-block:: python
+
+       class CustomLinear(torch.nn.Linear):
+           def forward(self, *input):
+               output = super().forward(*input)
+               return output, self.bias
+
+
 
 .. autofunction:: deepspeed.zero.register_external_parameter
 
@@ -233,6 +261,17 @@ registered prior to the first forward pass.
 
 Memory-Centric Tiling
 ---------------------
+
+To reduce the working memory requirements of DL training for large models,
+ZeRO-Infinity includes technique called *memory-centric tiling* that exploits
+the data fetch and release pattern of ZeRO-3 to reduce the working memory
+requirements by breaking down a large operator into smaller tiles that can be
+executed sequentially. When combined with ZeRO-3, the parameter and gradients
+of each tile can be fetched and released one at a time, reducing the working
+memory proportional to the number of tiles. Therefore, ZeRO-Infinity can
+support operators of arbitrary sizes, without refactoring for model
+parallelism to fit them in limited GPU memory.
+
 
 .. autoclass:: deepspeed.zero.TiledLinear
     :members:

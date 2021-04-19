@@ -216,9 +216,10 @@ class TiledLinear(torch.nn.Module):
                     self.bias.copy_(other.bias)
 
         .. note::
-            If ZeRO-3 is enabled, this is a collective operation and the updated parameters of
-            data-parallel rank 0 will be visibly on all ranks. See
-            :class:`deepspeed.zero.GatheredParameters` for more information.
+            If ZeRO-3 is enabled, this is a collective operation and the
+            updated parameters of data-parallel rank 0 will be visible on all
+            ranks. See :class:`deepspeed.zero.GatheredParameters` for more
+            information.
 
 
         Args:
