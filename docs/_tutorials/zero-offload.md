@@ -1,6 +1,8 @@
 ---
 title: "ZeRO-Offload"
 ---
+ZeRO-3 Offload consists of a subset of features in our newly released ZeRO-Infinity. Read our [ZeRO-Infinity blog](https://www.microsoft.com/en-us/research/blog/zero-infinity-and-deepspeed-unlocking-unprecedented-model-scale-for-deep-learning-training/) to learn more!
+
 We recommend that you read the tutorials on [Getting Started](/getting-started/)  and [ZeRO](/tutorials/zero/) before stepping through this tutorial.
 
 ZeRO-Offload is a ZeRO optimization that offloads the optimizer memory and computation from the GPU to the host CPU. ZeRO-Offload enables large models with up to 13 billion parameters to be efficiently trained on a single GPU. In this tutorial we will use ZeRO-Offload to train a 10-billion parameter GPT-2 model in DeepSpeed. Furthermore, *using ZeRO-Offload in a DeepSpeed model is quick and easy because all you need is to change a few configurations in the DeepSpeed configuration json*. No code changes are needed.
