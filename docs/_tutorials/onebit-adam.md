@@ -191,7 +191,7 @@ Table 1. Fine-tuning configuration
 
 ### 2.3 Performance Results for BingBertSQuAD Fine-tuning
 
-***Accuracy:***
+<i>**Accuracy:**</i>
 The results are summarized in the table below. The total batch size is set to 96 and training is conducted
 on 32 GPUs for 2 epochs. A set of parameters (seeds and learning rates) were tried and the best ones were selected.
 We fixed the learning rate to 3e-5. The table below shows the F1 and the EM scores we achieved that are on-par or better than the [HuggingFace results](https://github.com/huggingface/transformers/tree/master/examples/question-answering).

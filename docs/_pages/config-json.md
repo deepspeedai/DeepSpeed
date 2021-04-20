@@ -4,40 +4,40 @@ title: "DeepSpeed Configuration JSON"
 
 ### Batch Size Related Parameters
 
-**Note:** configuring ***train\_batch\_size*** is required.
+**Note:** configuring <i>**train_batch_size**</i> is required.
 {: .notice--warning}
 
-***train\_batch\_size***: [integer]
+<i>**train_batch_size**</i>: [integer]
 
 | Value                                                                                                                                                                                                                                                                                                                                                                             | Example |
 | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------- |
-| The effective training batch size. This is the amount of data samples that leads to one step of model update. ***train\_batch\_size*** is aggregated by the batch size that a single GPU processes in one forward/backward pass (a.k.a., ***train\_step\_batch\_size***),  the gradient accumulation steps (a.k.a., ***gradient\_accumulation\_steps***), and the number of GPUs. | `32`    |
+| The effective training batch size. This is the amount of data samples that leads to one step of model update. <i>**train_batch_size**</i> is aggregated by the batch size that a single GPU processes in one forward/backward pass (a.k.a., <i>**train_step_batch_size**</i>),  the gradient accumulation steps (a.k.a., <i>**gradient_accumulation_steps**</i>), and the number of GPUs. | `32`    |
 
 
-***train\_micro\_batch\_size\_per\_gpu***: [integer]
+<i>**train_micro_batch_size_per_gpu**</i>: [integer]
 
 | Description                                                                                                                                                                                                                                                                                                                    | Default                        |
 | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------ |
-| Batch size to be processed by one GPU in one step (without gradient accumulation). When specified, ***gradient\_accumulation\_steps*** is automatically calculated using ***train\_batch\_size*** and number of GPUs. Should not be concurrently specified with ***gradient\_accumulation\_steps*** in the configuration JSON. | ***train\_batch\_size*** value |
+| Batch size to be processed by one GPU in one step (without gradient accumulation). When specified, <i>**gradient_accumulation_steps**</i> is automatically calculated using <i>**train_batch_size**</i> and number of GPUs. Should not be concurrently specified with <i>**gradient_accumulation_steps**</i> in the configuration JSON. | <i>**train_batch_size**</i> value |
 
-***gradient\_accumulation\_steps***: [integer]
+<i>**gradient_accumulation_steps**</i>: [integer]
 
 | Description                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        | Default |
 | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------- |
-| Number of training steps to accumulate gradients before averaging and applying them. This feature is sometimes useful to improve scalability since it results in less frequent communication of gradients between steps. Another impact of this feature is the ability to train with larger batch sizes per GPU. When specified, ***train\_step\_batch\_size*** is automatically calculated using ***train\_batch\_size*** and number of GPUs. Should not be concurrently specified with ***train\_step\_batch\_size*** in the configuration JSON. | `1`     |
+| Number of training steps to accumulate gradients before averaging and applying them. This feature is sometimes useful to improve scalability since it results in less frequent communication of gradients between steps. Another impact of this feature is the ability to train with larger batch sizes per GPU. When specified, <i>**train_step_batch_size**</i> is automatically calculated using <i>**train_batch_size**</i> and number of GPUs. Should not be concurrently specified with <i>**train_step_batch_size**</i> in the configuration JSON. | `1`     |
 
 
 
 ### Optimizer Parameters
 
-***optimizer***: [dictionary]
+<i>**optimizer**</i>: [dictionary]
 
 | Fields | Value                                                                                                                                                                                                                                                                                        | Example                      |
 | ------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------- |
 | type   | The optimizer name. DeepSpeed natively supports **Adam**, **AdamW**, **OneBitAdam**, and **Lamb** optimizers (See [here](https://deepspeed.readthedocs.io/en/latest/optimizers.html) for details) and will import other optimizers from [torch](https://pytorch.org/docs/stable/optim.html). | `"Adam"`                     |
 | params | Dictionary of parameters to instantiate optimizer. The parameter names must match the optimizer constructor signature (e.g., for [Adam](https://pytorch.org/docs/stable/optim.html#torch.optim.Adam)).                                                                                       | `{"lr": 0.001, "eps": 1e-8}` |
 
-  Example of ***optimizer*** with Adam
+  Example of <i>**optimizer**</i> with Adam
 
 ```json
 "optimizer": {
@@ -60,7 +60,7 @@ The Adam optimizer also supports the following two params keys/values in additio
 | torch\_adam   | Use torch's implementation of adam instead of our fused adam implementation | false   |
 | adam\_w\_mode | Apply L2 regularization (also known as AdamW)                               | true    |
 
-  Another example of ***optimizer*** with 1-bit Adam
+Another example of <i>**optimizer**</i> with 1-bit Adam specific parameters is as follows.
 
 ```json
 "optimizer": {
@@ -90,6 +90,7 @@ The 1-bit Adam optimizer supports the following three params keys/values in addi
 
 ### Scheduler Parameters
 
+
 DeepSpeed calls the `step()` method of the scheduler at every training step when `model_engine.step()` is executed.
 
 ***scheduler***: [dictionary]
@@ -99,7 +100,7 @@ DeepSpeed calls the `step()` method of the scheduler at every training step when
 | type   | The scheduler name. See [here](https://deepspeed.readthedocs.io/en/latest/schedulers.html) for list of support schedulers. | `"WarmupLR"`                                   |
 | params | Dictionary of parameters to instantiate scheduler. The parameter names should match scheduler constructor signature.       | `{"warmup_min_lr": 0, "warmup_max_lr": 0.001}` |
 
-Example of ***scheduler***
+Example of <i>**scheduler**</i>
 
 ```json
  "scheduler": {
@@ -114,25 +115,25 @@ Example of ***scheduler***
 
 ### Communication options
 
-***fp32\_allreduce***: [boolean]
+<i>**fp32_allreduce**</i>: [boolean]
 
 | Description                                                    | Default |
 | -------------------------------------------------------------- | ------- |
 | During gradient averaging perform allreduce with 32 bit values | `false` |
 
-***prescale\_gradients***: [boolean]
+<i>**prescale_gradients**</i>: [boolean]
 
 | Description                            | Default |
 | -------------------------------------- | ------- |
 | Scale gradients before doing allreduce | `false` |
 
-***gradient_predivide_factor***: [float]
+<i>**gradient_predivide_factor**</i>: [float]
 
 | Description                                                                                                                                       | Default |
 | ------------------------------------------------------------------------------------------------------------------------------------------------- | ------- |
 | Before gradient averaging predivide gradients by a specified factor, can sometimes help with fp16 stability when scaling to large numbers of GPUs | `1.0`   |
 
-***sparse\_gradients***: [boolean]
+<i>**sparse_gradients**</i>: [boolean]
 
 | Description                                                                                                              | Default |
 | ------------------------------------------------------------------------------------------------------------------------ | ------- |
@@ -143,7 +144,7 @@ Example of ***scheduler***
 **Note:** this mode cannot be combined with the `amp` mode described below.
 {: .notice--warning}
 
-***fp16***: [dictionary]
+<i>**fp16**</i>: [dictionary]
 
 | Description                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                | Default |
 | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------- |
@@ -160,48 +161,48 @@ Example of ***scheduler***
 }
 ```
 
-***fp16:enabled***: [boolean]
+<i>**fp16:enabled**</i>: [boolean]
 
 | Description                                                                            | Default |
 | -------------------------------------------------------------------------------------- | ------- |
-| ***enabled*** is a **fp16** parameter indicating whether or not FP16 training enabled. | `false` |
+| <i>**enabled**</i> is a **fp16** parameter indicating whether or not FP16 training enabled. | `false` |
 
-***fp16:loss\_scale***: [float]
+<i>**fp16:loss_scale**</i>: [float]
 
 | Description                                                                                                                                                                                                                  | Default |
 | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------- |
-| ***loss\_scale*** is a ***fp16*** parameter representing the loss scaling value for FP16 training. The default value of 0.0 results in dynamic loss scaling, otherwise the value will be used for static fixed loss scaling. | `0.0`   |
+| <i>**loss_scale**</i> is a <i>**fp16**</i> parameter representing the loss scaling value for FP16 training. The default value of 0.0 results in dynamic loss scaling, otherwise the value will be used for static fixed loss scaling. | `0.0`   |
 
-***fp16:initial\_scale\_power***: [integer]
+<i>**fp16:initial_scale_power**</i>: [integer]
 
-| Description                                                                                                                                                                                       | Default |
-| ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------- |
-| ***initial\_scale\_power*** is a **fp16** parameter representing the power of the initial dynamic loss scale value. The actual loss scale is computed as 2<sup>***initial\_scale\_power***</sup>. | `32`    |
+| Description                                                                                                                                                                                                   | Default |
+| ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------- |
+| <i>**initial_scale_power**</i> is a **fp16** parameter representing the power of the initial dynamic loss scale value. The actual loss scale is computed as 2<sup><i>**initial_scale_power**</i></sup>. | `32`    |
 
-***fp16:loss\_scale\_window***: [integer]
+<i>**fp16:loss_scale_window**</i>: [integer]
 
 | Description                                                                                                                       | Default |
 | --------------------------------------------------------------------------------------------------------------------------------- | ------- |
-| ***loss\_scale\_window*** is a **fp16** parameter representing the window over which to raise/lower the dynamic loss scale value. | `1000`  |
+| <i>**loss_scale_window**</i> is a **fp16** parameter representing the window over which to raise/lower the dynamic loss scale value. | `1000`  |
 
-***fp16:hysteresis***: [integer]
+<i>**fp16:hysteresis**</i>: [integer]
 
 | Description                                                                                    | Default |
 | ---------------------------------------------------------------------------------------------- | ------- |
-| ***hysteresis*** is a **fp16** parameter representing the delay shift in dynamic loss scaling. | `2`     |
+| <i>**hysteresis**</i> is a **fp16** parameter representing the delay shift in dynamic loss scaling. | `2`     |
 
-***fp16:min\_loss\_scale***: [integer]
+<i>**fp16:min_loss_scale**</i>: [integer]
 
 | Description                                                                                        | Default |
 | -------------------------------------------------------------------------------------------------- | ------- |
-| ***min\_loss\_scale*** is  a **fp16** parameter representing the minimum dynamic loss scale value. | `1000`  |
+| <i>**min_loss_scale**</i> is  a **fp16** parameter representing the minimum dynamic loss scale value. | `1000`  |
 
 ### Automatic mixed precision (AMP) training options
 
 **Note:** this mode cannot be combined with the `fp16` mode described above. In addition this mode is not currently compatible with ZeRO.
 {: .notice--warning}
 
-***amp***: [dictionary]
+<i>**amp**</i>: [dictionary]
 
 | Description                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     | Default |
 | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------- |
@@ -216,11 +217,11 @@ Example of ***scheduler***
 }
 ```
 
-***amp:enabled***: [boolean]
+<i>**amp:enabled**</i>: [boolean]
 
 | Description                                                                              | Default |
 | ---------------------------------------------------------------------------------------- | ------- |
-| ***enabled*** is an **amp** parameter indicating whether or not AMP training is enabled. | `false` |
+| <i>**enabled**</i> is an **amp** parameter indicating whether or not AMP training is enabled. | `false` |
 
 ***amp params***: [various]
 
@@ -230,7 +231,7 @@ Example of ***scheduler***
 
 ### Gradient Clipping
 
-***gradient\_clipping***: [float]
+<i>**gradient_clipping**</i>: [float]
 
 | Description                         | Default |
 | ----------------------------------- | ------- |
@@ -266,19 +267,19 @@ Enabling and configuring ZeRO memory optimizations
     }
 ```
 
-***zero\_optimization***: [dictionary]
+<i>**zero_optimization**</i>: [dictionary]
 
 | Description                                                                                               | Default |
 | --------------------------------------------------------------------------------------------------------- | ------- |
 | Enable ZeRO memory optimization wrapper for FP16 Training. Currently compatible only with Adam optimizer. | `false` |
 
-***stage***: [integer]
+<i>**stage**</i>: [integer]
 
 | Description                                                                                                                                                                                                               | Default |
 | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------- |
 | Chooses different stages of ZeRO Optimizer. Stage 0, 1, 2, and 3 refer to disabled, optimizer state partitioning, and optimizer+gradient state partitioning, and optimizer+gradient+parameter partitioning, respectively. | `0`     |
 
-***allgather_partitions***: [boolean]
+<i>**allgather_partitions**</i>: [boolean]
 
 | Description                                                                                                                                      | Default |
 | ------------------------------------------------------------------------------------------------------------------------------------------------ | ------- |
@@ -290,13 +291,13 @@ Enabling and configuring ZeRO memory optimizations
 | ------------------------------------------------------------------------------------------------------------ | ------- |
 | Number of elements allgathered at a time. Limits the memory required for the allgather for large model sizes | `5e8`   |
 
-***overlap_comm***: [boolean]
+<i>**overlap_comm**</i>: [boolean]
 
 | Description                                                                  | Default |
 | ---------------------------------------------------------------------------- | ------- |
 | Attempts to overlap the reduction of the gradients with backward computation | `false` |
 
-***reduce_scatter***: [boolean]
+<i>**reduce_scatter**</i>: [boolean]
 
 | Description                                                             | Default |
 | ----------------------------------------------------------------------- | ------- |
@@ -308,7 +309,7 @@ Enabling and configuring ZeRO memory optimizations
 | ------------------------------------------------------------------------------------------------------------------- | ------- |
 | Number of elements reduced/allreduced at a time. Limits the memory required for the allgather for large model sizes | `5e8`   |
 
-***contiguous_gradients***: [boolean]
+<i>**contiguous_gradients**</i>: [boolean]
 
 | Description                                                                                                                                                     | Default |
 | --------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------- |
@@ -455,19 +456,19 @@ Enabling and configuring ZeRO optimization of offloading optimizer computation t
 
 ### Logging
 
-***steps\_per\_print***: [integer]
+<i>**steps_per_print**</i>: [integer]
 
 | Description                    | Default |
 | ------------------------------ | ------- |
 | Print train loss every N steps | `10`    |
 
-***wall\_clock\_breakdown***: [boolean]
+<i>**wall_clock_breakdown**</i>: [boolean]
 
 | Description                                                             | Default |
 | ----------------------------------------------------------------------- | ------- |
 | Enable timing of the latency of forward/backward/update training phases | `false` |
 
-***dump_state***: [boolean]
+<i>**dump_state**</i>: [boolean]
 
 | Description                                                          | Default |
 | -------------------------------------------------------------------- | ------- |
@@ -485,31 +486,31 @@ Enabling and configuring ZeRO optimization of offloading optimizer computation t
     }
 }
 ```
-***enabled***: [boolean]
+<i>**enabled**</i>: [boolean]
 
 | Description                 | Default |
 | --------------------------- | ------- |
 | Enables the flops profiler. | `false` |
 
-***profile\_step***: [integer]
+<i>**profile_step**</i>: [integer]
 
 | Description                                                                                                     | Default |
 | --------------------------------------------------------------------------------------------------------------- | ------- |
 | The global training step at which to profile. Note that warm up steps are needed for accurate time measurement. | `1`     |
 
-***module\_depth***: [integer]
+<i>**module_depth**</i>: [integer]
 
 | Description                                                                                                                                                            | Default |
 | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------- |
 | The depth of the model at which to print the aggregated module information. When set to `-1`, it prints information on the innermost modules (with the maximum depth). | `-1`    |
 
-***top\_modules***: [integer]
+<i>**top_modules**</i>: [integer]
 
 | Description                                                                  | Default |
 | ---------------------------------------------------------------------------- | ------- |
 | Limits the aggregated profile output to the number of top modules specified. | `3`     |
 
-***detailed***: [boolean]
+<i>**detailed**</i>: [boolean]
 
 | Description                                  | Default |
 | -------------------------------------------- | ------- |
@@ -526,39 +527,39 @@ Enabling and configuring ZeRO optimization of offloading optimizer computation t
     "profile": false
     }
 ```
-***partition\_activations***: [boolean]
+<i>**partition_activations**</i>: [boolean]
 
 | Description                                                   | Default |
 | ------------------------------------------------------------- | ------- |
 | Enables partition activation when used with model parallelism | `false` |
 
-***cpu\_checkpointing***: [boolean]
+<i>**cpu_checkpointing**</i>: [boolean]
 
 | Description                                                                 | Default |
 | --------------------------------------------------------------------------- | ------- |
 | Offloads partitioned activations to CPU if partition_activations is enabled | `false` |
 
 
-***contiguous\_memory\_optimization***: [boolean]
+<i>**contiguous_memory_optimization**</i>: [boolean]
 
 | Description                                                          | Default |
 | -------------------------------------------------------------------- | ------- |
 | Copies partitioned activations so that they are contiguous in memory | `false` |
 
-***number_checkpoints***: [integer]
+<i>**number_checkpoints**</i>: [integer]
 
 | Description                                                                                              | Default |
 | -------------------------------------------------------------------------------------------------------- | ------- |
 | Total number of activation checkpoints used to allocate memory buffer for contiguous_memoty_optimization | `None`  |
 
-***synchronize\_checkpoint\_boundary***: [boolean]
+<i>**synchronize_checkpoint_boundary**</i>: [boolean]
 
 | Description                                                   | Default |
 | ------------------------------------------------------------- | ------- |
 | Inserts torch.cuda.synchronize() at each checkpoint boundary. | `false` |
 
 
-***profile***: [boolean]
+<i>**profile**</i>: [boolean]
 
 | Description                                                     | Default |
 | --------------------------------------------------------------- | ------- |
@@ -566,7 +567,7 @@ Enabling and configuring ZeRO optimization of offloading optimizer computation t
 
 ### Sparse Attention
 
-***sparse\_attention***: [dictionary]
+<i>**sparse_attention**</i>: [dictionary]
 
 | Fields                           | Value                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          | Example           |
 | -------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------- |
@@ -584,7 +585,7 @@ Enabling and configuring ZeRO optimization of offloading optimizer computation t
 | global\_block\_end\_indices      | A list of integers determining end indices of global window blocks. By default this is not used. But if it is set, it must have the same size of global\_block\_indices parameter, and combining this two parameters, for each index i, blocks from global\_block\_indices[i] to global\_block\_end\_indices[i], exclusive, are considered as global attention; used in `"variable"` and `"bslongformer"` modes.                                                                                               | None              |
 | num\_sliding\_window\_blocks     | An integer determining the number of blocks in sliding local attention window; used in `"bigbird"` and `"bslongformer"` modes.                                                                                                                                                                                                                                                                                                                                                                                 | 3                 |
 
-  Example of ***sparse\_attention***
+  Example of <i>**sparse_attention**</i>
 
 ```json
   "sparse_attention": {
