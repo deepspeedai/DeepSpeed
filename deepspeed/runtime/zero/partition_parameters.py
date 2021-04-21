@@ -23,6 +23,7 @@ from ..swap_tensor.partitioned_param_swapper import AsyncPartitionedParameterSwa
 from ..config import DeepSpeedConfig
 
 param_count = 0
+partitioned_param_data_shape = [1]
 
 
 def print_rank_0(message, debug=False, force=False):
@@ -634,7 +635,8 @@ class Init(InsertPostInitMethodToModuleSubClasses):
                     f'Before partitioning param {param.ds_id} {param.shape}',
                     force=False)
                 #param.data does not store anything meaningful in partitioned state
-                param.data = torch.ones(1).half().to(param.device)
+                param.data = torch.ones(partitioned_param_data_shape).half().to(
+                    param.device)
                 see_memory_usage(f'After partitioning param {param.ds_id} {param.shape}',
                                  force=False)
 
@@ -715,7 +717,7 @@ class Init(InsertPostInitMethodToModuleSubClasses):
 
             see_memory_usage(f'Before partitioning param {param.ds_id} {param.shape}',
                              force=False)
-            param.data = torch.ones(1).half().to(param.device)
+            param.data = torch.ones(partitioned_param_data_shape).half().to(param.device)
             see_memory_usage(f'After partitioning param {param.ds_id} {param.shape}',
                              force=False)
 

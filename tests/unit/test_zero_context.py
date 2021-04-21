@@ -6,7 +6,7 @@ import torch
 import pytest
 
 import deepspeed
-from deepspeed.runtime.zero.partition_parameters import ZeroParamStatus
+from deepspeed.runtime.zero.partition_parameters import ZeroParamStatus, partitioned_param_data_shape
 
 from common import distributed_test
 
@@ -32,7 +32,7 @@ def test_scatter_gather():
     with deepspeed.zero.Init():
         l = torch.nn.Linear(6, 3)
     assert l.weight.ds_status == ZeroParamStatus.NOT_AVAILABLE
-    assert l.weight.numel() == 1
+    assert l.weight.shape == torch.Size(partitioned_param_data_shape)
 
     # Ensure there is no impact outside the context
     l2 = torch.nn.Linear(6, 3)
