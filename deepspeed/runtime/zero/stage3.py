@@ -1418,13 +1418,13 @@ class FP16_DeepSpeedZeroOptimizer_Stage3(object):
                 if torch.is_tensor(output):
                     output = [output]
                 else:
-                    print(f'got UNKNOWN type {type(output)}')
+                    #print(f'got UNKNOWN type {type(output)}')
                     outputs = []
                     for name, val in vars(output).items():
                         if not name.startswith('__') and torch.is_tensor(val):
                             outputs.append(val)
                     output = outputs
-                    print(f'convert output to {output}')
+                    #print(f'convert output to {output}')
 
             for item in filter(lambda item: is_zero_param(item), output):
                 if not any(id(item) in m._external_params for m in FWD_MODULE_STACK):
