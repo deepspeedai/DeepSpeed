@@ -12,8 +12,12 @@ from deepspeed.runtime.compression.cupy import CupyBackend
 
 
 class NcclBackend(object):
-    def __init__(self):
-        self.world_group = dist.new_group(ranks=range(dist.get_world_size()))
+    def __init__(self, mpu=None):
+        if mpu is None:
+            self.world_group = dist.new_group(ranks=range(dist.get_world_size()))
+        else:
+            self.mpu = mpu
+            self.world_group = self.mpu.get_data_parallel_group()
         self.rank = dist.get_rank(group=self.world_group)
         self.size = dist.get_world_size(group=self.world_group)
         self.compression_backend = CupyBackend()
@@ -92,9 +96,11 @@ class NcclBackend(object):
         # communication phase 1
         # gather_start = time.time()
         # Alltoall for sign
-        dist.all_to_all_single(recvbuf_sign, torch.stack(sign_list_packed))
+        dist.all_to_all_single(recvbuf_sign,
+                               torch.stack(sign_list_packed),
+                               group=self.world_group)
         # Allgather for scale
-        dist.all_gather(recvbuf_scale, worker_scale)
+        dist.all_gather(recvbuf_scale, worker_scale, group=self.world_group)
 
         # gather_end = time.time()
 
@@ -151,8 +157,10 @@ class NcclBackend(object):
         ]
 
         # Communication Phase 2
-        dist.all_gather(recvbuf_sign_server, server_sign_packed[0])
-        dist.all_gather(recvbuf_scale_server, server_scale)
+        dist.all_gather(recvbuf_sign_server,
+                        server_sign_packed[0],
+                        group=self.world_group)
+        dist.all_gather(recvbuf_scale_server, server_scale, group=self.world_group)
 
         cupy_server_sign_packed = None
 

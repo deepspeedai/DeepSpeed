@@ -33,15 +33,22 @@ collections:
       - advanced-install.md
       - getting-started.md
       - azure.md
-      - cifar-10.md
-      - bert-pretraining.md
       - bert-finetuning.md
-      - transformer_kernel.md
+      - bert-pretraining.md
+      - cifar-10.md
+      - flops-profiler.md
+      - gan.md
+      - lrrt.md
       - megatron.md
       - one-cycle.md
-      - lrrt.md
+      - onebit-adam.md
+      - onebit-lamb.md
+      - pipeline.md
+      - progressive_layer_dropping.md
+      - sparse-attention.md
+      - transformer_kernel.md
+      - zero-offload.md
       - zero.md
-      - flops-profiler.md
 
 defaults:
   - scope:

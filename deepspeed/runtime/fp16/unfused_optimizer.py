@@ -22,6 +22,7 @@ class FP16_UnfusedOptimizer(object):
     """
     def __init__(self,
                  init_optimizer,
+                 deepspeed=None,
                  static_loss_scale=1.0,
                  dynamic_loss_scale=False,
                  dynamic_loss_args=None,
@@ -96,7 +97,9 @@ class FP16_UnfusedOptimizer(object):
         self.mpu = mpu
 
         self.overflow = False
-        self.overflow_checker = CheckOverflow(self.fp16_groups, mpu=self.mpu)
+        self.overflow_checker = CheckOverflow(self.fp16_groups,
+                                              mpu=self.mpu,
+                                              deepspeed=deepspeed)
 
         self.initialize_optimizer_states()
 

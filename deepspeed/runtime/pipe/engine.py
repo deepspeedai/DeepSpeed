@@ -56,6 +56,10 @@ class PipelineEngine(DeepSpeedEngine):
 
         # We schedule the all-reduces, so disable it in super().backward()
         self.enable_backward_allreduce = False
+
+        # used to disable the pipeline all-reduce when used with 1-bit Adam/1-bit LAMB
+        self.pipeline_enable_backward_allreduce = True
+
         assert not self.elasticity_enabled(), "Elasticity is not currently supported" \
             " with pipeline parallelism."
 
@@ -222,7 +226,7 @@ class PipelineEngine(DeepSpeedEngine):
 
     def _exec_reduce_grads(self):
         self._force_grad_boundary = True
-        if self.is_data_parallel:
+        if self.is_data_parallel and self.pipeline_enable_backward_allreduce:
             self.buffered_allreduce_fallback(
                 elements_per_buffer=MEMORY_OPT_ALLREDUCE_SIZE)
         self._force_grad_boundary = False

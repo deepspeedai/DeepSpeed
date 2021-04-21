@@ -32,11 +32,13 @@ ADAM_OPTIMIZER = 'adam'
 ADAMW_OPTIMIZER = 'adamw'
 LAMB_OPTIMIZER = 'lamb'
 ONEBIT_ADAM_OPTIMIZER = 'onebitadam'
+ONEBIT_LAMB_OPTIMIZER = 'onebitlamb'
 DEEPSPEED_OPTIMIZERS = [
     ADAM_OPTIMIZER,
     ADAMW_OPTIMIZER,
     LAMB_OPTIMIZER,
     ONEBIT_ADAM_OPTIMIZER,
+    ONEBIT_LAMB_OPTIMIZER,
 ]
 
 # extra optimizer parameters for adam/adamw
