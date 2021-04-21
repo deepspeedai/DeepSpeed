@@ -759,7 +759,6 @@ class DeepSpeedEngine(Module):
         timers = self.timers if self.wall_clock_breakdown() else None
 
         if zero_stage == ZERO_OPTIMIZATION_OPTIMIZER_STATES:
-            assert self.zero_reduce_scatter(), 'Stage 1 only supports reduce scatter mode'
             optimizer = FP16_DeepSpeedZeroOptimizer_Stage1(
                 optimizer,
                 static_loss_scale=self.loss_scale(),
@@ -970,8 +969,8 @@ class DeepSpeedEngine(Module):
 
         #Communicate only at gradient accumulation boundaries
         elif self.is_gradient_accumulation_boundary():
-            if self.zero_optimization_stage() == ZERO_OPTIMIZATION_OPTIMIZER_STATES:
-                assert self.zero_reduce_scatter()
+            if self.zero_optimization_stage(
+            ) == ZERO_OPTIMIZATION_OPTIMIZER_STATES and self.zero_reduce_scatter():
                 self.optimizer.reduce_scatter_gradients(
                     postscale_gradients=self.postscale_gradients(),
                     gradient_predivide_factor=self.gradient_predivide_factor(),
