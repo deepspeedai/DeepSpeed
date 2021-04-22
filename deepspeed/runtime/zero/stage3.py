@@ -1931,9 +1931,8 @@ class FP16_DeepSpeedZeroOptimizer_Stage3(object):
 
             dist.all_reduce(tensor_to_allreduce, group=self.dp_process_group)
 
-            if self.gradient_predivide_factor() != dp_world_size:
-                tensor_to_allreduce.mul_(self.gradient_predivide_factor() /
-                                         dp_world_size)
+            if self.gradient_predivide_factor != dp_world_size:
+                tensor_to_allreduce.mul_(self.gradient_predivide_factor / dp_world_size)
         else:
             tensor_to_allreduce.div_(dp_world_size)
             dist.all_reduce(tensor_to_allreduce, group=self.dp_process_group)
