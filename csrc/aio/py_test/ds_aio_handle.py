@@ -8,8 +8,8 @@ Functionality of swapping optimizer tensors to/from (NVMe) storage devices.
 import torch
 import os
 import time
-from deepspeed.ops.aio import aio_handle
 from multiprocessing import Pool, Barrier
+from deepspeed.ops.aio import AsyncIOBuilder
 from test_ds_aio_utils import report_results, task_log, task_barrier
 
 
@@ -29,11 +29,11 @@ def pre_handle(args, tid, read_op):
     )
 
     io_parallel = args.io_parallel if args.io_parallel else 1
-    handle = aio_handle(args.block_size,
-                        args.queue_depth,
-                        args.single_submit,
-                        args.overlap_events,
-                        io_parallel)
+    handle = AsyncIOBuilder().load().aio_handle(args.block_size,
+                                                args.queue_depth,
+                                                args.single_submit,
+                                                args.overlap_events,
+                                                io_parallel)
     task_log(tid, f'created deepspeed aio handle')
 
     ctxt = {}

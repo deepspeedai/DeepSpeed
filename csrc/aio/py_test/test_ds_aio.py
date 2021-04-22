@@ -12,11 +12,8 @@ import time
 import sys
 from multiprocessing import Pool
 import multiprocessing as mp
-from deepspeed.ops.aio import aio_read, aio_write, aio_handle
 from ds_aio_basic import aio_basic_multiprocessing
 from ds_aio_handle import aio_handle_multiprocessing
-
-GB_DIVISOR = 1024**3
 
 
 def parse_arguments():
