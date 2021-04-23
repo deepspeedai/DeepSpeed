@@ -496,6 +496,49 @@ Enabling and configuring ZeRO optimization of offloading optimizer computation t
 | ------------------------------------------------------------------------------------------------------------------------------------- | ------- |
 | Enable fast optimizer initialization when offloading to NVMe. | `false`  |
 
+
+### Asynchronous I/O
+Configuring the asynchronous I/O module for offloading parameter and optimizer states to persistent (NVMe) storage. This module uses Linux native asynchronous I/O (libaio).
+```json
+  "aio": {
+    "block_size": 1048576,
+    "queue_depth": 8,
+    "thread_count": 1,
+    "single_submit": false,
+    "overlap_events": true
+  }
+```
+***block_size***: [integer]
+
+| Description                                                                                                                           | Default |
+| ------------------------------------------------------------------------------------------------------------------------------------- | ------- |
+| I/O block size in bytes. | 1048576   |
+
+***queue_depth***: [integer]
+
+| Description                                                                                                                           | Default |
+| ------------------------------------------------------------------------------------------------------------------------------------- | ------- |
+| I/O queue depth. | 8  |
+
+***thread_count***: [integer]
+
+| Description                                                                                                                           | Default |
+| ------------------------------------------------------------------------------------------------------------------------------------- | ------- |
+| Intra-request parallelism for each read/write submitted by a user thread. | 1  |
+
+***single_submit***: [boolean]
+
+| Description                                                                                                                           | Default |
+| ------------------------------------------------------------------------------------------------------------------------------------- | ------- |
+| Submit requests to storage device as multiple individual requests as opposed to one block of requests. | `false`  |
+
+***overlap_events***: [boolean]
+
+| Description                                                                                                                           | Default |
+| ------------------------------------------------------------------------------------------------------------------------------------- | ------- |
+| Submit requests to storage device in an overlapped fashion without waiting for completion of earlier requests. | `true`  |
+
+
 ### Logging
 
 <i>**steps_per_print**</i>: [integer]

@@ -47,6 +47,8 @@ lnav:
         url: /docs/config-json/#parameter-offloading
       - title: "Optimizer Offloading"
         url: /docs/config-json/#optimizer-offloading
+      - title: "Asynchronous I/O"
+        url: /docs/config-json/#asynchronous-io
       - title: "Logging"
         url: /docs/config-json/#logging
       - title: "Flops Profiler"
