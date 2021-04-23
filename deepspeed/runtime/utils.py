@@ -22,6 +22,10 @@ from deepspeed.utils import logger
 from numpy import prod
 
 
+def noop_decorator(func):
+    return func
+
+
 def ensure_directory_exists(filename):
     """Create the directory path to ``filename`` if it does not already exist.
 
