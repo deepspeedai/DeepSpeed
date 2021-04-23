@@ -10,7 +10,7 @@ if [[ ! -f ${INPUT_FILE} ]]; then
     exit 1
 fi
 
-LOG_DIR=$2
+LOG_DIR=$2/aio_perf_sweep
 RUN_SCRIPT=./test_ds_aio.py
 READ_OPT="--read_file ${INPUT_FILE}"
 

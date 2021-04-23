@@ -9,34 +9,12 @@ import os
 import argparse
 import re
 
-RAW_RATE = 'raw_rate'
-E2E_RATE = 'e2e_rate'
-SUBMIT_LATENCY = 'submit_latency'
-COMPLETE_LATENCY = 'complete_latency'
 READ_SPEED = 'read_speed'
 WRITE_SPEED = 'write_speed'
 
-TASK_READ_SPEED = 'task_read_speed'
+PERF_METRICS = [READ_SPEED, WRITE_SPEED]
 
-PERF_METRICS = [
-    RAW_RATE,
-    E2E_RATE,
-    SUBMIT_LATENCY,
-    COMPLETE_LATENCY,
-    READ_SPEED,
-    WRITE_SPEED
-]
-METRIC_SEARCH = {
-    RAW_RATE: 'ds_raw_time',
-    E2E_RATE: 'ds_time',
-    SUBMIT_LATENCY: 'aggr: submit',
-    COMPLETE_LATENCY: 'aggr: complete',
-    READ_SPEED: 'E2E Read Speed',
-    WRITE_SPEED: 'E2E Write Speed'
-}
-
-NUM_BYTES = (400 * 1024 * 1024)
-NUM_GIGA_BYTES = (1024 * 1024 * 1024)
+METRIC_SEARCH = {READ_SPEED: 'E2E Read Speed', WRITE_SPEED: 'E2E Write Speed'}
 
 
 def parse_arguments():
@@ -47,13 +25,10 @@ def parse_arguments():
                         required=True,
                         help='Folder of statistics logs')
 
-    parser.add_argument(
-        '--metric',
-        type=str,
-        required=True,
-        help=
-        'Performance metric to report: [raw_rate|e2e_rate|submit_latency|complete_latency]'
-    )
+    parser.add_argument('--metric',
+                        type=str,
+                        required=True,
+                        help='Performance metric to report: [read_speed|write_speed]')
 
     args = parser.parse_args()
     print(f'args = {args}')
@@ -101,18 +76,24 @@ def get_thread_count(file):
     return 1
 
 
+"""
+Extract performance metric from log file.
+Sample file lines are:
+Task Read Latency = 0.031647682189941406 sec
+Task Read Speed = 12.342926020792527 GB/sec
+E2E Read Latency = 0.031697988510131836 sec
+E2E Read Speed = 12.323337169333062 GB/sec
+
+For the above sample, -metric = "read_speed" corresponds to "E2E Read Speed", and 12.32 will be returned
+"""
+
+
 def get_metric(file, metric):
     thread_count = get_thread_count(file)
-    num_giga_bytes = NUM_BYTES / NUM_GIGA_BYTES
     with open(file) as f:
         for line in f.readlines():
             if line.startswith(METRIC_SEARCH[metric]):
-                if metric == RAW_RATE:
-                    fields = line.split()
-                    raw_time_sec = float(fields[2]) / 1e06
-                    raw_rate = (thread_count * num_giga_bytes * 1.0) / raw_time_sec
-                    return raw_rate
-                elif metric in [READ_SPEED, WRITE_SPEED]:
+                if metric in [READ_SPEED, WRITE_SPEED]:
                     fields = line.split()
                     return float(fields[-2])
                 else:

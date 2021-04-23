@@ -16,7 +16,7 @@ fi
 
 SIZE="$1M"
 WRITE_DIR=$2
-LOG_DIR=$3
+LOG_DIR=$3/aio_perf_sweep
 
 OUTPUT_FILE=${WRITE_DIR}/ds_aio_write_${SIZE}B.pt
 WRITE_OPT="--write_file ${OUTPUT_FILE} --write_size ${SIZE}"
@@ -43,7 +43,7 @@ for sub in single block; do
             for p in 1; do
                 for d in 1 2 4 8 16 32; do
                     for bs in 128K 256K 512K 1M; do
-                        SCHED_OPTS="${sub_opt} ${ov_opt} --handle --threads 1"
+                        SCHED_OPTS="${sub_opt} ${ov_opt} --handle --threads ${t}"
                         OPTS="--io_parallel ${p} --queue_depth ${d} --block_size ${bs}"
                         LOG="${LOG_DIR}/write_${SIZE}B_${sub}_${ov}_t${t}_p${p}_d${d}_bs${bs}.txt"
                         cmd="python ${RUN_SCRIPT} ${WRITE_OPT} ${OPTS} ${SCHED_OPTS} &> ${LOG}"
