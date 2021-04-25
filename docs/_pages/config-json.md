@@ -299,7 +299,8 @@ Enabling and configuring ZeRO memory optimizations
     "stage3_param_persistence_threshold" : 1e6,
     "sub_group_size" : 1e12,
     "elastic_checkpoint" : [true|false],
-    "stage3_gather_fp16_weights_on_model_save": [true|false]
+    "stage3_gather_fp16_weights_on_model_save": [true|false],
+    "find_unused_parameters": [true|false]
     }
 ```
 
@@ -395,6 +396,7 @@ Enabling and configuring ZeRO memory optimizations
 | Description                                                                                                                                                          | Default |
 | -------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------- |
 | Consolidate the weights before saving the model by `save_fp16_model()`. Since the weights are partitioned across GPUs, they aren't part of `state_dict`, so this function automatically gather the weights when this option is enabled and then saves the fp16 model weights. | `False` |
+
 
 ***cpu_offload***: [boolean]
 
@@ -538,6 +540,10 @@ Configuring the asynchronous I/O module for offloading parameter and optimizer s
 | ------------------------------------------------------------------------------------------------------------------------------------- | ------- |
 | Submit requests to storage device in an overlapped fashion without waiting for completion of earlier requests. | `true`  |
 
+***find_unused_parameters***: [boolean]
+| Description                                                                                                                                                          | Default |
+| -------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------- |
+| As unused parameters in modules may not be expected sometimes, it will cause an explicit error msg when it occurred and enable this option to avoid the error, `torch.nn.parallel.DistributedDataParallel` has the same `find_unused_parameters` option with similar usage. Now it just used in stage2. | `False` |
 
 ### Logging
 

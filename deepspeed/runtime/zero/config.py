@@ -38,6 +38,8 @@ class DeepSpeedZeroConfig(DeepSpeedConfigObject):
         self.max_reuse_distance = None
         self.gather_fp16_weights_on_model_save = None
 
+        self.find_unused_parameters = None
+
         if ZERO_OPTIMIZATION in param_dict.keys():
             zero_config_dict = param_dict[ZERO_OPTIMIZATION]
             if type(zero_config_dict) is bool:
@@ -175,3 +177,8 @@ class DeepSpeedZeroConfig(DeepSpeedConfigObject):
             zero_config_dict,
             ZERO_OPTIMIZATION_GATHER_FP16_WEIGHTS_ON_MODEL_SAVE,
             ZERO_OPTIMIZATION_GATHER_FP16_WEIGHTS_ON_MODEL_SAVE_DEFAULT)
+
+        self.find_unused_parameters = get_scalar_param(
+            zero_config_dict,
+            ZERO_OPTIMIZATION_FIND_UNUSED_PARAMETERS,
+            ZERO_OPTIMIZATION_FIND_UNUSED_PARAMETERS_DEFAULT)

@@ -391,6 +391,9 @@ class DeepSpeedEngine(Module):
     def zero_gather_fp16_weights_on_model_save(self):
         return self._config.zero_config.gather_fp16_weights_on_model_save
 
+    def zero_find_unused_parameters(self):
+        return self._config.zero_config.find_unused_parameters
+
     def fp16_enabled(self):
         return self._config.fp16_enabled
 
@@ -789,7 +792,8 @@ class DeepSpeedEngine(Module):
                 mpu=self.mpu,
                 postscale_gradients=self.postscale_gradients(),
                 gradient_predivide_factor=self.gradient_predivide_factor(),
-                gradient_accumulation_steps=self.gradient_accumulation_steps())
+                gradient_accumulation_steps=self.gradient_accumulation_steps(),
+                find_unused_parameters=self.zero_find_unused_parameters())
         elif zero_stage == ZERO_OPTIMIZATION_WEIGHTS:
             print("Initializing ZeRO Stage 3") if dist.get_rank() == 0 else None
             from deepspeed.runtime.zero.stage3 import FP16_DeepSpeedZeroOptimizer_Stage3

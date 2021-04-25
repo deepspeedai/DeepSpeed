@@ -95,7 +95,8 @@ class FP16_DeepSpeedZeroOptimizer(object):
                  allreduce_always_fp32=False,
                  postscale_gradients=True,
                  gradient_predivide_factor=1.0,
-                 gradient_accumulation_steps=1):
+                 gradient_accumulation_steps=1,
+                 find_unused_parameters=False):
 
         if dist.get_rank() == 0:
             logger.info(f"Reduce bucket size {reduce_bucket_size}")
@@ -149,6 +150,7 @@ class FP16_DeepSpeedZeroOptimizer(object):
         self.postscale_gradients = postscale_gradients
         self.gradient_accumulation_steps = gradient_accumulation_steps
         self.micro_step_id = 0
+        self.find_unused_parameters = find_unused_parameters
 
         if self.reduce_scatter:
             assert not self.allreduce_always_fp32, "allreduce_always_fp32 is not yet supported with ZeRO-2 with reduce scatter enabled"
@@ -886,6 +888,19 @@ class FP16_DeepSpeedZeroOptimizer(object):
                 if param_id in self.norm_for_param_grads:
                     param_norm = self.norm_for_param_grads[param_id]
                     total_norm += param_norm.item()**2
+                else:
+                    # As unused parameters in modules may not be expected sometimes,
+                    # add an explicit error msg when it occurred and an option to
+                    # avoid the error
+                    # Error msg adapted from torch.nn.parallel.DistributedDataParallel
+                    assert self.find_unused_parameters, """
+                        This error indicates that your module has parameters that
+                        were not used in producing loss.
+                        You can avoid this error by
+                        (1) enable find_unused_parameters option in zero_optimization config;
+                        (2) making sure all trainable parameters and `forward` function
+                            outputs participate in calculating loss.
+                    """
 
         # Sum across all model parallel GPUs.
         total_norm_cuda = torch.cuda.FloatTensor([float(total_norm)])
