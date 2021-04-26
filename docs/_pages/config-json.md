@@ -271,7 +271,7 @@ Example of <i>**scheduler**</i>
 
 | Description                         | Default |
 | ----------------------------------- | ------- |
-| Enable gradient clipping with value | `0`     |
+| Enable gradient clipping with value | `1.0`   |
 
 
 
