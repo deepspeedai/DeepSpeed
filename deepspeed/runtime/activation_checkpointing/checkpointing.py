@@ -725,11 +725,11 @@ def reset():
         size_offsets = []
 
 
-def _configure_using_config_file(deepspeed_config, mpu=None):
+def _configure_using_config_file(config, mpu=None):
     global num_layers, PARTITION_ACTIVATIONS, CONTIGUOUS_CHECKPOINTING, \
         PA_TO_CPU, SYNCHRONIZE, PROFILE_TIME
 
-    config = DeepSpeedConfig(deepspeed_config, mpu=mpu).activation_checkpointing_config
+    config = DeepSpeedConfig(config, mpu=mpu).activation_checkpointing_config
     if dist.get_rank() == 0:
         logger.info(config.repr())
     PARTITION_ACTIVATIONS = config.partition_activations

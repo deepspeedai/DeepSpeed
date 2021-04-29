@@ -65,7 +65,7 @@ def test_gather_update():
         assert torch.equal(l.weight, torch.zeros_like(l.weight))
 
 
-config_dict = {
+config = {
     "train_batch_size": 1,
     "steps_per_print": 1,
     "optimizer": {
@@ -109,7 +109,7 @@ def test_ext_param_getattr():
     engine, optim, _, _ = deepspeed.initialize(args=args,
                                                model=net,
                                                model_parameters=net.parameters(),
-                                               config_params=config_dict)
+                                               config=config)
 
     with deepspeed.zero.GatheredParameters(net.linear1.weight):
         assert net.linear1.weight.numel() == net.dim**2
@@ -214,7 +214,7 @@ def test_ext_param_return():
     engine, optim, _, _ = deepspeed.initialize(args=args,
                                                model=net,
                                                model_parameters=net.parameters(),
-                                               config_params=config_dict)
+                                               config=config)
 
     for _ in range(5):
         input = torch.rand(net.dim).to(engine.device).half()
@@ -234,7 +234,7 @@ def test_ext_param_returnobj():
     engine, optim, _, _ = deepspeed.initialize(args=args,
                                                model=net,
                                                model_parameters=net.parameters(),
-                                               config_params=config_dict)
+                                               config=config)
 
     for _ in range(5):
         input = torch.rand(net.dim).to(engine.device).half()

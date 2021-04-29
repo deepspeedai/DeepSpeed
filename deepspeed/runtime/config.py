@@ -2,6 +2,8 @@
 Copyright (c) Microsoft Corporation
 Licensed under the MIT license.
 """
+import os
+from typing import Union
 
 import torch
 import json
@@ -521,17 +523,19 @@ class DeepSpeedConfigWriter:
 
 
 class DeepSpeedConfig(object):
-    def __init__(self, json_file, mpu=None, param_dict=None):
+    def __init__(self, config: Union[str, dict], mpu=None):
         super(DeepSpeedConfig, self).__init__()
-
-        if param_dict is None:
+        if isinstance(config, dict):
+            self._param_dict = config
+        elif os.path.exists(config):
             self._param_dict = json.load(
-                open(json_file,
+                open(config,
                      'r'),
                 object_pairs_hook=dict_raise_error_on_duplicate_keys)
         else:
-            self._param_dict = param_dict
-
+            raise ValueError(
+                f"Expected a string path to an existing deepspeed config, or a dictionary. Received: {ds_config}"
+            )
         try:
             self.global_rank = torch.distributed.get_rank()
             if mpu is None:

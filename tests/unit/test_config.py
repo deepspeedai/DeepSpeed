@@ -229,7 +229,7 @@ def test_init_no_optimizer(tmpdir):
 
 
 def test_none_args(tmpdir):
-    config_dict = {
+    config = {
         "train_batch_size": 1,
         "optimizer": {
             "type": "Adam",
@@ -245,7 +245,7 @@ def test_none_args(tmpdir):
     @distributed_test(world_size=1)
     def _helper():
         model = SimpleModel(hidden_dim=10)
-        model, _, _, _ = deepspeed.initialize(args=None, model=model, config_params=config_dict)
+        model, _, _, _ = deepspeed.initialize(args=None, model=model, config=config)
         data_loader = random_dataloader(model=model,
                                         total_samples=5,
                                         hidden_dim=10,
@@ -257,7 +257,7 @@ def test_none_args(tmpdir):
 
 
 def test_no_args(tmpdir):
-    config_dict = {
+    config = {
         "train_batch_size": 1,
         "optimizer": {
             "type": "Adam",
@@ -273,7 +273,7 @@ def test_no_args(tmpdir):
     @distributed_test(world_size=1)
     def _helper():
         model = SimpleModel(hidden_dim=10)
-        model, _, _, _ = deepspeed.initialize(model=model, config_params=config_dict)
+        model, _, _, _ = deepspeed.initialize(model=model, config=config)
         data_loader = random_dataloader(model=model,
                                         total_samples=5,
                                         hidden_dim=10,
@@ -285,7 +285,7 @@ def test_no_args(tmpdir):
 
 
 def test_no_model(tmpdir):
-    config_dict = {
+    config = {
         "train_batch_size": 1,
         "optimizer": {
             "type": "Adam",
@@ -302,7 +302,7 @@ def test_no_model(tmpdir):
     def _helper():
         model = SimpleModel(hidden_dim=10)
         with pytest.raises(AssertionError):
-            model, _, _, _ = deepspeed.initialize(model=None, config_params=config_dict)
+            model, _, _, _ = deepspeed.initialize(model=None, config=config)
 
         with pytest.raises(AssertionError):
-            model, _, _, _ = deepspeed.initialize(model, config_params=config_dict)
+            model, _, _, _ = deepspeed.initialize(model, config=config)
