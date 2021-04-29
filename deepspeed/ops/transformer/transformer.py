@@ -518,12 +518,15 @@ class DeepSpeedTransformerLayer(nn.Module):
             self.init_transformer_weights(self.config.adjust_init_range)
         else:
             # For testing only.
-            self.attn_qkvw = nn.Parameter(
-                torch.Tensor(self.config.hidden_size * 3,
-                             self.config.hidden_size))
-            for i in range(3):
-                self.attn_qkvw[i * self.config.hidden_size:(i + 1) * self.config.hidden_size] = \
-                    torch.empty_like(initial_weights[i]).copy_(initial_weights[i])
+            q = initial_weights[0].data
+            k = initial_weights[1].data
+            v = initial_weights[2].data
+
+            self.attn_qkvw = nn.Parameter(torch.cat((q, k, v)))
+            #self.attn_qkvw[i * self.config.hidden_size:(i + 1) * self.config.hidden_size] = \
+            #    initial_weights[i].clone()
+            #torch.empty_like(initial_weights[i]).data.copy_(initial_weights[i].data)
+
             self.attn_qkvb = nn.Parameter(torch.Tensor(self.config.hidden_size * 3))
             self.attn_qkvb.data.zero_()
             self.attn_ow = initial_weights[3]
