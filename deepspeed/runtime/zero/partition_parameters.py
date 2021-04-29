@@ -154,7 +154,7 @@ class ZeroParamStatus(Enum):
 _orig_torch_empty = torch.empty
 
 
-def empty_cuda_tensor(*size, **kwargs):
+def empty_cuda_tensor_half(*size, **kwargs):
     if not 'device' in kwargs.keys():
         kwargs['device'] = torch.device('cuda:{}'.format(os.environ["LOCAL_RANK"]))
     tensor = _orig_torch_empty(*size, **kwargs)
@@ -164,13 +164,26 @@ def empty_cuda_tensor(*size, **kwargs):
         return tensor
 
 
-def new_cuda_tensor(cls, *args):
+def new_cuda_tensor_half(cls, *args):
     device = torch.device('cuda:{}'.format(os.environ["LOCAL_RANK"]))
     tensor = torch.ones((1, 1), device=device).new_empty(*args).half()
     if tensor.is_floating_point():
         return tensor.half()
     else:
         return tensor
+
+
+def empty_cuda_tensor(*size, **kwargs):
+    if not 'device' in kwargs.keys():
+        kwargs['device'] = torch.device('cuda:{}'.format(os.environ["LOCAL_RANK"]))
+    tensor = _orig_torch_empty(*size, **kwargs)
+    return tensor
+
+
+def new_cuda_tensor(cls, *args):
+    device = torch.device('cuda:{}'.format(os.environ["LOCAL_RANK"]))
+    tensor = torch.ones((1, 1), device=device).new_empty(*args)
+    return tensor
 
 
 reuse_buffers = False
@@ -181,9 +194,11 @@ empty_buffers = {}
 # Inserts _post_init_method at the end of init method
 # for all sub classes of torch.nn.Module
 class InsertPostInitMethodToModuleSubClasses(object):
-    def __init__(self, enabled=True, mem_efficient_linear=True):
+    def __init__(self, enabled=True, mem_efficient_linear=True, config=None, dtype=None):
         self.mem_efficient_linear = mem_efficient_linear
         self.enabled = enabled
+        self._set_dtype(config, dtype)
+        assert self.dtype in [torch.half, torch.float], f"Invalid data type {self.dtype}, allowed values are [torch.half, torch.float]"
 
     def __enter__(self):
         if not self.enabled:
@@ -219,8 +234,12 @@ class InsertPostInitMethodToModuleSubClasses(object):
 
         # Replace .__init__() for future subclasses of torch.nn.Module
         torch.nn.modules.module.Module.__init_subclass__ = classmethod(_init_subclass)
-        torch.Tensor.__new__ = new_cuda_tensor
-        torch.empty = empty_cuda_tensor
+        if self.dtype == torch.half:
+            torch.Tensor.__new__ = new_cuda_tensor_half
+            torch.empty = empty_cuda_tensor_half
+        else:
+            torch.Tensor.__new__ = new_cuda_tensor
+            torch.empty = empty_cuda_tensor
 
         if self.mem_efficient_linear:
             print_rank_0(
@@ -260,6 +279,15 @@ class InsertPostInitMethodToModuleSubClasses(object):
     def _post_init_method(self, module):
         pass
 
+    def _set_dtype(self, ds_config, dtype):
+        if ds_config is not None and dtype is None:
+            _ds_config = DeepSpeedConfig(ds_config)
+            self.dtype = torch.half if _ds_config.fp16_enabled else torch.float
+        elif dtype is None:
+            self.dtype = torch.half
+        else:
+            self.dtype = dtype
+
 
 # Replaces all parameters in module with Scattered Parameters
 class Init(InsertPostInitMethodToModuleSubClasses):
@@ -272,7 +300,8 @@ class Init(InsertPostInitMethodToModuleSubClasses):
                  remote_device=None,
                  pin_memory=False,
                  config=None,
-                 enabled=True):
+                 enabled=True,
+                 dtype=torch.half):
         """A context to enable massive model construction for training with
         ZeRO-3. Models are automatically partitioned (or, sharded) across the
         system and converted to half precision.
@@ -296,6 +325,8 @@ class Init(InsertPostInitMethodToModuleSubClasses):
                 for swapping fp16 params to NVMe.
             enabled (bool, optional): If ``False``, this context has no
                 effect. Defaults to ``True``.
+            dtype (``torch.dtype``, optional): Can be used to change the data type of the parameters.
+                Supported options are ``torch.half`` and ``torch.float``. Defaults to ``torch.half``
 
         This context accelerates model initialization and enables models that
         are too large to allocate in their entirety in CPU memory. It has the
@@ -367,7 +398,10 @@ class Init(InsertPostInitMethodToModuleSubClasses):
                 model = deepspeed.zero.Init(module=model)
         """
 
-        super().__init__(enabled=enabled, mem_efficient_linear=mem_efficient_linear)
+        super().__init__(enabled=enabled,
+                         mem_efficient_linear=mem_efficient_linear,
+                         config=config,
+                         dtype=dtype)
         if not torch.distributed.is_initialized():
             init_distributed()
             assert torch.distributed.is_initialized(), "Parameters cannot be scattered without initializing torch.distributed"
@@ -632,8 +666,7 @@ class Init(InsertPostInitMethodToModuleSubClasses):
                     f'Before partitioning param {param.ds_id} {param.shape}',
                     force=False)
                 #param.data does not store anything meaningful in partitioned state
-                param.data = torch.ones(partitioned_param_data_shape).half().to(
-                    param.device)
+                param.data = torch.ones(1, dtype=self.dtype).to(param.device)
                 see_memory_usage(f'After partitioning param {param.ds_id} {param.shape}',
                                  force=False)
 
@@ -714,7 +747,7 @@ class Init(InsertPostInitMethodToModuleSubClasses):
 
             see_memory_usage(f'Before partitioning param {param.ds_id} {param.shape}',
                              force=False)
-            param.data = torch.ones(partitioned_param_data_shape).half().to(param.device)
+            param.data = torch.ones(1, dtype=self.dtype).to(param.device)
             see_memory_usage(f'After partitioning param {param.ds_id} {param.shape}',
                              force=False)
 
