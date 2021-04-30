@@ -301,7 +301,7 @@ class Init(InsertPostInitMethodToModuleSubClasses):
                  pin_memory=False,
                  config=None,
                  enabled=True,
-                 dtype=torch.half):
+                 dtype=None):
         """A context to enable massive model construction for training with
         ZeRO-3. Models are automatically partitioned (or, sharded) across the
         system and converted to half precision.
@@ -325,8 +325,8 @@ class Init(InsertPostInitMethodToModuleSubClasses):
                 for swapping fp16 params to NVMe.
             enabled (bool, optional): If ``False``, this context has no
                 effect. Defaults to ``True``.
-            dtype (``torch.dtype``, optional): Can be used to change the data type of the parameters.
-                Supported options are ``torch.half`` and ``torch.float``. Defaults to ``torch.half``
+            dtype (``dtype``, optional): Can be used to change the data type of the parameters.
+                Supported options are ``torch.half`` and ``torch.float``. Defaults to ``None``
 
         This context accelerates model initialization and enables models that
         are too large to allocate in their entirety in CPU memory. It has the
