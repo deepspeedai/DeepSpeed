@@ -2405,7 +2405,7 @@ class FP16_DeepSpeedZeroOptimizer_Stage3(object):
         """ Perform all reduce within model parallel group, if any.
         """
         if self.model_parallel_group is None:
-            torch.distributed.all_reduce(tensor=tensor, op=op)
+            pass
         else:
             torch.distributed.all_reduce(tensor=tensor,
                                          op=op,
