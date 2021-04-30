@@ -99,3 +99,6 @@ class DeepSpeedDataLoader(object):
         self.data = (x for x in self.dataloader)
 
         return self.dataloader
+
+
+# DataLoader([(torch.randn(3, 3), torch.tensor(i % 2)) for i in range(10)], batch_size=2))

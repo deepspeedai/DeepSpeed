@@ -845,6 +845,14 @@ class DeepSpeedEngine(Module):
 
         return pld
 
+    def is_map_style_dataset(obj):
+        return hasattr(obj, "__getitem__") and hasattr(obj, "__len__")
+
+    def is_iterable_style_dataset(obj):
+        return isinstance(obj,
+                          torch.utils.data.IterableDataset
+                          )  # hasattr(obj, "__iter__") should work as well
+
     def deepspeed_io(self,
                      dataset,
                      batch_size=None,
@@ -853,7 +861,7 @@ class DeepSpeedEngine(Module):
                      data_sampler=None,
                      collate_fn=None,
                      num_local_io_workers=None):
-        if not isinstance(dataset, torch.utils.data.Dataset):
+        if not (is_map_style_dataset(dataset) or is_iterable_style_dataset(dataset)):
             raise ValueError("Training data must be a torch Dataset")
 
         if data_sampler is None and (route == ROUTE_PREDICT or route == ROUTE_EVAL):
