@@ -4,6 +4,22 @@ if [[ $# -ne 2 ]]; then
     exit 1
 fi
 
+
+function validate_enviroment()
+{
+    validate_cmd="python ./validate_async_io.py"
+    eval ${validate_cmd}
+    res=$?
+    if [[ $res != 0 ]]; then
+        echo "Failing because environment is not properly configured"
+        echo "Possible fix: sudo apt-get install libaio-dev"
+        exit 1
+    fi
+}
+
+
+validate_enviroment
+
 INPUT_FILE=$1
 if [[ ! -f ${INPUT_FILE} ]]; then
     echo "Input file not found: ${INPUT_FILE}"
