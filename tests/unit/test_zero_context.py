@@ -243,3 +243,41 @@ def test_ext_param_returnobj():
         assert len(net.dangler._external_params) == 0
         engine.backward(loss)
         engine.step()
+
+
+class ModelContainerVariableOutputType(ModelContainer):
+    def __init__(self, dim=16, output_type=dict):
+        super().__init__()
+        self.output_type = output_type
+        self.dim = dim
+        self.linear1 = torch.nn.Linear(dim, dim)
+
+    def forward(self, input):
+        act1 = self.linear1(input)
+        if self.output_type is dict:
+            return {'loss': act1.sum()}
+        if self.output_type is torch.tensor:
+            return act1.sum()
+
+
+@pytest.mark.parametrize('output_type', [torch.tensor, dict, None])
+def test_stage_3_output_type(output_type):
+    setup_serial_env()
+    print()
+
+    net = ModelContainerVariableOutputType(output_type=output_type)
+
+    args = SimpleNamespace(local_rank=0)
+    engine, optim, _, _ = deepspeed.initialize(args=args,
+                                               model=net,
+                                               model_parameters=net.parameters(),
+                                               config=config)
+
+    for _ in range(1):
+        input = torch.rand(net.dim).to(engine.device).half()
+        loss = engine(input)
+        if loss is not None:
+            if isinstance(loss, dict):
+                loss = loss['loss']
+            engine.backward(loss)
+            engine.step()

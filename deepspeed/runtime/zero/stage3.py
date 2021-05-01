@@ -1415,14 +1415,16 @@ class FP16_DeepSpeedZeroOptimizer_Stage3(object):
         def _post_forward_module_hook(module, input, output):
             global FWD_MODULE_STACK
             FWD_MODULE_STACK.pop()
-
-            if not isinstance(output, (list, tuple)):
+            if output is None:
+                output = []
+            elif not isinstance(output, (list, tuple)):
                 if torch.is_tensor(output):
                     output = [output]
                 else:
                     #print(f'got UNKNOWN type {type(output)}')
                     outputs = []
-                    for name, val in vars(output).items():
+                    output = output if isinstance(output, dict) else vars(output)
+                    for name, val in output.items():
                         if not name.startswith('__') and torch.is_tensor(val):
                             outputs.append(val)
                     output = outputs
