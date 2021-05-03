@@ -842,7 +842,8 @@ class DeepSpeedEngine(Module):
                      data_sampler=None,
                      collate_fn=None,
                      num_local_io_workers=None):
-        if not (is_map_style_dataset(dataset) or is_iterable_style_dataset(dataset)):
+        if not (self.is_map_style_dataset(dataset)
+                or self.is_iterable_style_dataset(dataset)):
             raise ValueError("Training data must be a torch Dataset")
 
         if data_sampler is None and (route == ROUTE_PREDICT or route == ROUTE_EVAL):
