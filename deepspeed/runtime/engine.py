@@ -826,9 +826,11 @@ class DeepSpeedEngine(Module):
 
         return pld
 
+    @staticmethod
     def is_map_style_dataset(obj):
         return hasattr(obj, "__getitem__") and hasattr(obj, "__len__")
 
+    @staticmethod
     def is_iterable_style_dataset(obj):
         return isinstance(obj,
                           torch.utils.data.IterableDataset
