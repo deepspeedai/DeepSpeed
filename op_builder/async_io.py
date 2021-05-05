@@ -52,5 +52,6 @@ class AsyncIOBuilder(OpBuilder):
         aio_compatible = self.libraries_installed(aio_libraries)
         if not aio_compatible:
             self.warning(
-                f"{self.NAME} requires the libraries: {aio_libraries} but are missing.")
+                f"{self.NAME} requires the libraries: {aio_libraries} but are missing. Can be fixed by: `apt install libaio-dev`."
+            )
         return super().is_compatible() and aio_compatible

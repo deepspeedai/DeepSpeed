@@ -229,7 +229,7 @@ class SwapBufferManager(object):
 
 def get_sized_buffer(buffer, num_elems):
     assert num_elems <= buffer.numel(), \
-        f'num_elems {num_elems}> buffer {buffer.numel()}'
+        f'num_elems {num_elems} > buffer {buffer.numel()}'
     return buffer.narrow(0, 0, num_elems) if num_elems < buffer.numel() else buffer
 
 

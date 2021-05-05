@@ -182,7 +182,7 @@ int deepspeed_aio_handle_t::wait()
             validate_aio_operation(completed_op->_read_op,
                                    completed_op->_filename.c_str(),
                                    completed_op->data_ptr(),
-                                   completed_op->_num_bytes);
+                                   _num_threads * completed_op->_num_bytes);
         }
         --_num_pending_ops;
         ++num_completed_ops;
