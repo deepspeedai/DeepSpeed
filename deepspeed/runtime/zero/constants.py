@@ -30,7 +30,7 @@ ZeRO optimization should be enabled as:
     "sub_group_size" : 1000000000000,
     "offload_param": {...},
     "offload_optimizer": {...},
-    "find_unused_parameters": [true|false]
+    "ignore_unused_parameters": [true|false]
     }
 }
 '''
@@ -117,10 +117,8 @@ ZERO_OPTIMIZATION_GATHER_FP16_WEIGHTS_ON_MODEL_SAVE_DEFAULT = False
 # Now just used in stage2 complete_grad_norm_calculation_for_cpu_offload
 # Enable this option to avoid:
 # https://github.com/microsoft/DeepSpeed/issues/707
-# torch.nn.parallel.DistributedDataParallel has the same option with
-# similar usage
-ZERO_OPTIMIZATION_FIND_UNUSED_PARAMETERS = 'find_unused_parameters'
-ZERO_OPTIMIZATION_FIND_UNUSED_PARAMETERS_DEFAULT = False
+ZERO_OPTIMIZATION_IGNORE_UNUSED_PARAMETERS = 'ignore_unused_parameters'
+ZERO_OPTIMIZATION_IGNORE_UNUSED_PARAMETERS_DEFAULT = True
 
 ZERO_OPTIMIZATION_DEFAULT = {
     ZERO_OPTIMIZATION_STAGE:
@@ -155,6 +153,6 @@ ZERO_OPTIMIZATION_DEFAULT = {
     ZERO_OPTIMIZATION_PARAM_PERSISTENCE_THRESHOLD_DEFAULT,
     ZERO_OPTIMIZATION_GATHER_FP16_WEIGHTS_ON_MODEL_SAVE:
     ZERO_OPTIMIZATION_GATHER_FP16_WEIGHTS_ON_MODEL_SAVE_DEFAULT,
-    ZERO_OPTIMIZATION_FIND_UNUSED_PARAMETERS:
-    ZERO_OPTIMIZATION_FIND_UNUSED_PARAMETERS_DEFAULT
+    ZERO_OPTIMIZATION_IGNORE_UNUSED_PARAMETERS:
+    ZERO_OPTIMIZATION_IGNORE_UNUSED_PARAMETERS_DEFAULT
 }

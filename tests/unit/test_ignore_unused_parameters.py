@@ -10,8 +10,8 @@ from deepspeed.ops.op_builder import CPUAdamBuilder
 import deepspeed
 
 
-@pytest.mark.parametrize('find_unused_parameters', [False, True])
-def test_stage2_find_unused_parameters(tmpdir, find_unused_parameters):
+@pytest.mark.parametrize('ignore_unused_parameters', [False, True])
+def test_stage2_ignore_unused_parameters(tmpdir, ignore_unused_parameters):
     use_cpu_offload = True
 
     if use_cpu_offload and not deepspeed.ops.__compatible_ops__[CPUAdamBuilder.NAME]:
@@ -24,7 +24,7 @@ def test_stage2_find_unused_parameters(tmpdir, find_unused_parameters):
         "zero_optimization": {
             "stage": 2,
             "cpu_offload": use_cpu_offload,
-            "find_unused_parameters": find_unused_parameters
+            "ignore_unused_parameters": ignore_unused_parameters
         },
         "optimizer": {
             "type": "Adam",
@@ -44,7 +44,7 @@ def test_stage2_find_unused_parameters(tmpdir, find_unused_parameters):
     model = UnusedParametersModel(hidden_dim=hidden_dim)
 
     @distributed_test(world_size=[1])
-    def _test_stage2_find_unused_parameters(args, model, hidden_dim):
+    def _test_stage2_ignore_unused_parameters(args, model, hidden_dim):
         model, _, _, _ = deepspeed.initialize(args=args,
                                                   model=model,
                                                   model_parameters=model.parameters())
@@ -60,11 +60,11 @@ def test_stage2_find_unused_parameters(tmpdir, find_unused_parameters):
                 model.backward(loss)
                 model.step()
 
-        if not find_unused_parameters:
+        if ignore_unused_parameters:
+            _loop()
+        else:
             with pytest.raises(AssertionError) as e:
                 _loop()
-            assert e.value.args and 'find_unused_parameters' in e.value.args[0]
-        else:
-            _loop()
+            assert e.value.args and 'ignore_unused_parameters' in e.value.args[0]
 
-    _test_stage2_find_unused_parameters(args=args, model=model, hidden_dim=hidden_dim)
+    _test_stage2_ignore_unused_parameters(args=args, model=model, hidden_dim=hidden_dim)
