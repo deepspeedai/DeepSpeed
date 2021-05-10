@@ -1,0 +1,29 @@
+{
+    "block_size": [
+        "128K",
+        "256K",
+        "1M"
+    ],
+    "queue_depth": [
+        4,
+        16,
+        32
+    ],
+    "io_parallel": [
+        1,
+        2,
+        4,
+        8
+    ],
+    "single_submit": [
+        true,
+        false
+    ],
+    "overlap_events": [
+        true,
+        false
+    ],
+    "threads": [
+        1
+    ]
+}
