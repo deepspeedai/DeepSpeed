@@ -9,21 +9,21 @@ title: "DeepSpeed Configuration JSON"
 
 <i>**train_batch_size**</i>: [integer]
 
-| Value                                                                                                                                                                                                                                                                                                                                                                             | Example |
-| --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------- |
+| Value                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        | Example |
+| ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------- |
 | The effective training batch size. This is the amount of data samples that leads to one step of model update. <i>**train_batch_size**</i> is aggregated by the batch size that a single GPU processes in one forward/backward pass (a.k.a., <i>**train_micro_batch_size_per_gpu**</i>),  the gradient accumulation steps (a.k.a., <i>**gradient_accumulation_steps**</i>), and the number of GPUs. Can be omitted if both <i>**train_micro_batch_size_per_gpu**</i> and <i>**gradient_accumulation_steps**</i> are provided. | `32`    |
 
 
 <i>**train_micro_batch_size_per_gpu**</i>: [integer]
 
-| Description                                                                                                                                                                                                                                                                                                                    | Default                        |
-| ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------ |
+| Description                                                                                                                                                                                    | Default                           |
+| ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------- |
 | Batch size to be processed by one GPU in one step (without gradient accumulation). Can be omitted if both <i>**train_batch_size**</i> and <i>**gradient_accumulation_steps**</i> are provided. | <i>**train_batch_size**</i> value |
 
 <i>**gradient_accumulation_steps**</i>: [integer]
 
-| Description                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        | Default |
-| -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------- |
+| Description                                                                                                                                                                                                                                                                                                                                                                                                                     | Default |
+| ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------- |
 | Number of training steps to accumulate gradients before averaging and applying them. This feature is sometimes useful to improve scalability since it results in less frequent communication of gradients between steps. Another impact of this feature is the ability to train with larger batch sizes per GPU. Can be omitted if both <i>**train_batch_size**</i> and <i>**train_micro_batch_size_per_gpu**</i> are provided. | `1`     |
 
 
@@ -32,10 +32,10 @@ title: "DeepSpeed Configuration JSON"
 
 <i>**optimizer**</i>: [dictionary]
 
-| Fields | Value                                                                                                                                                                                                                                                                                        | Example                      |
-| ------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------- |
+| Fields | Value                                                                                                                                                                                                                                                                                                        | Example                      |
+| ------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ---------------------------- |
 | type   | The optimizer name. DeepSpeed natively supports **Adam**, **AdamW**, **OneBitAdam**, **Lamb**, and **OneBitLamb** optimizers (See [here](https://deepspeed.readthedocs.io/en/latest/optimizers.html) for details) and will import other optimizers from [torch](https://pytorch.org/docs/stable/optim.html). | `"Adam"`                     |
-| params | Dictionary of parameters to instantiate optimizer. The parameter names must match the optimizer constructor signature (e.g., for [Adam](https://pytorch.org/docs/stable/optim.html#torch.optim.Adam)).                                                                                       | `{"lr": 0.001, "eps": 1e-8}` |
+| params | Dictionary of parameters to instantiate optimizer. The parameter names must match the optimizer constructor signature (e.g., for [Adam](https://pytorch.org/docs/stable/optim.html#torch.optim.Adam)).                                                                                                       | `{"lr": 0.001, "eps": 1e-8}` |
 
   Example of <i>**optimizer**</i> with Adam
 
@@ -112,17 +112,17 @@ Another example of ***optimizer*** with 1-bit LAMB
 
 The 1-bit LAMB optimizer supports the following params keys/values in addition to the standard LAMB (learn more in our [tutorial](/tutorials/onebit-lamb/)):
 
-| "params" key  | Description                                                                 | Default |
-| ------------- | --------------------------------------------------------------------------- | ------- |
-| max\_coeff   | Scaling coefficient upper bound for original LAMB algorithm and 1-bit LAMB's warmup stage   | 10.0   |
-| min\_coeff   | Scaling coefficient lower bound for original LAMB algorithm and 1-bit LAMB's warmup stage   | 0.01   |
-| freeze\_step   | Number of warm up steps before 1-bit compression gets applied to the communication   | 100000   |
-| cuda\_aware | To indicate that the underlying MPI library supports CUDA-Aware communication           | false    |
-| comm\_backend\_name | To indicate which backend implementation to use                                 | "nccl"   |
-| coeff\_beta | Coefficient used for computing running averages of lamb coefficient                     | 0.9      |
-| factor\_max | Maximum value of scaling factor to the frozen lamb coefficient during compression stage | 4.0      |
-| factor\_min | Minimum value of scaling factor to the frozen lamb coefficient during compression stage | 0.5      |
-| factor\_threshold | Threshold of how much the scaling factor can fluctuate between steps              | 0.1      |
+| "params" key        | Description                                                                               | Default |
+| ------------------- | ----------------------------------------------------------------------------------------- | ------- |
+| max\_coeff          | Scaling coefficient upper bound for original LAMB algorithm and 1-bit LAMB's warmup stage | 10.0    |
+| min\_coeff          | Scaling coefficient lower bound for original LAMB algorithm and 1-bit LAMB's warmup stage | 0.01    |
+| freeze\_step        | Number of warm up steps before 1-bit compression gets applied to the communication        | 100000  |
+| cuda\_aware         | To indicate that the underlying MPI library supports CUDA-Aware communication             | false   |
+| comm\_backend\_name | To indicate which backend implementation to use                                           | "nccl"  |
+| coeff\_beta         | Coefficient used for computing running averages of lamb coefficient                       | 0.9     |
+| factor\_max         | Maximum value of scaling factor to the frozen lamb coefficient during compression stage   | 4.0     |
+| factor\_min         | Minimum value of scaling factor to the frozen lamb coefficient during compression stage   | 0.5     |
+| factor\_threshold   | Threshold of how much the scaling factor can fluctuate between steps                      | 0.1     |
 
 ### Scheduler Parameters
 
@@ -199,38 +199,38 @@ Example of <i>**scheduler**</i>
 
 <i>**fp16:enabled**</i>: [boolean]
 
-| Description                                                                            | Default |
-| -------------------------------------------------------------------------------------- | ------- |
+| Description                                                                                 | Default |
+| ------------------------------------------------------------------------------------------- | ------- |
 | <i>**enabled**</i> is a **fp16** parameter indicating whether or not FP16 training enabled. | `false` |
 
 <i>**fp16:loss_scale**</i>: [float]
 
-| Description                                                                                                                                                                                                                  | Default |
-| ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------- |
+| Description                                                                                                                                                                                                                           | Default |
+| ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------- |
 | <i>**loss_scale**</i> is a <i>**fp16**</i> parameter representing the loss scaling value for FP16 training. The default value of 0.0 results in dynamic loss scaling, otherwise the value will be used for static fixed loss scaling. | `0.0`   |
 
 <i>**fp16:initial_scale_power**</i>: [integer]
 
-| Description                                                                                                                                                                                                   | Default |
-| ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------- |
+| Description                                                                                                                                                                                             | Default |
+| ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------- |
 | <i>**initial_scale_power**</i> is a **fp16** parameter representing the power of the initial dynamic loss scale value. The actual loss scale is computed as 2<sup><i>**initial_scale_power**</i></sup>. | `32`    |
 
 <i>**fp16:loss_scale_window**</i>: [integer]
 
-| Description                                                                                                                       | Default |
-| --------------------------------------------------------------------------------------------------------------------------------- | ------- |
+| Description                                                                                                                          | Default |
+| ------------------------------------------------------------------------------------------------------------------------------------ | ------- |
 | <i>**loss_scale_window**</i> is a **fp16** parameter representing the window over which to raise/lower the dynamic loss scale value. | `1000`  |
 
 <i>**fp16:hysteresis**</i>: [integer]
 
-| Description                                                                                    | Default |
-| ---------------------------------------------------------------------------------------------- | ------- |
+| Description                                                                                         | Default |
+| --------------------------------------------------------------------------------------------------- | ------- |
 | <i>**hysteresis**</i> is a **fp16** parameter representing the delay shift in dynamic loss scaling. | `2`     |
 
 <i>**fp16:min_loss_scale**</i>: [integer]
 
-| Description                                                                                        | Default |
-| -------------------------------------------------------------------------------------------------- | ------- |
+| Description                                                                                           | Default |
+| ----------------------------------------------------------------------------------------------------- | ------- |
 | <i>**min_loss_scale**</i> is  a **fp16** parameter representing the minimum dynamic loss scale value. | `1000`  |
 
 ### Automatic mixed precision (AMP) training options
@@ -255,8 +255,8 @@ Example of <i>**scheduler**</i>
 
 <i>**amp:enabled**</i>: [boolean]
 
-| Description                                                                              | Default |
-| ---------------------------------------------------------------------------------------- | ------- |
+| Description                                                                                   | Default |
+| --------------------------------------------------------------------------------------------- | ------- |
 | <i>**enabled**</i> is an **amp** parameter indicating whether or not AMP training is enabled. | `false` |
 
 ***amp params***: [various]
@@ -355,14 +355,14 @@ Enabling and configuring ZeRO memory optimizations
 
 ***offload_param***: [dictionary]
 
-| Description                                                                                                                       | Default |
-| --------------------------------------------------------------------------------------------------------------------------------- | ------- |
+| Description                                                                                                                                                                                   | Default |
+| --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------- |
 | Enable offloading of model parameters to CPU or NVMe. This frees up GPU memory for larger models or batch sizes. Valid only with stage 3. See [here](#parameter-offloading) for more details. | `False` |
 
 ***offload_optimizer***: [dictionary]
 
-| Description                                                                               | Default |
-| ----------------------------------------------------------------------------------------- | ------- |
+| Description                                                                                                                                                                                                                    | Default |
+| ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------- |
 | Enable offloading of optimizer state to CPU or NVMe, and optimizer computation to CPU. This frees up GPU memory for larger models or batch sizes. Valid only with stage 3. See [here](#optimizer-offloading) for more details. | `False` |
 
 ***stage3_max_live_parameters***: [integer]
@@ -393,8 +393,8 @@ Enabling and configuring ZeRO memory optimizations
 
 ***stage3_gather_fp16_weights_on_model_save***: [boolean]
 
-| Description                                                                                                                                                          | Default |
-| -------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------- |
+| Description                                                                                                                                                                                                                                                                   | Default |
+| ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------- |
 | Consolidate the weights before saving the model by `save_fp16_model()`. Since the weights are partitioned across GPUs, they aren't part of `state_dict`, so this function automatically gather the weights when this option is enabled and then saves the fp16 model weights. | `False` |
 
 
@@ -403,9 +403,9 @@ Enabling and configuring ZeRO memory optimizations
 **Deprecated:** **cpu_offload** is disabled and will be removed in future, please use `offload_optimizer` instead.
 {: .notice--warning}
 
-| Description                                                                                                              | Default |
-| ------------------------------------------------------------------------------------------------------------------------ | ------- |
-| Enable offloading of optimizer memory and computation to CPU. This frees up GPU memory for larger models or batch sizes. Valid only with stage 2.| `False` |
+| Description                                                                                                                                       | Default |
+| ------------------------------------------------------------------------------------------------------------------------------------------------- | ------- |
+| Enable offloading of optimizer memory and computation to CPU. This frees up GPU memory for larger models or batch sizes. Valid only with stage 2. | `False` |
 
 
 ### Parameter offloading
@@ -414,7 +414,7 @@ Enabling and configuring ZeRO optimization of parameter offloading to CPU/NVMe. 
   "offload_param": {
     "device": "[none|cpu|nvme]",
     "nvme_path": "/local_nvme",
-    "pin_memory": [true|false],  
+    "pin_memory": [true|false],
     "buffer_count": 5,
     "buffer_size": 1e8,
     "max_in_cpu": 1e9
@@ -422,40 +422,40 @@ Enabling and configuring ZeRO optimization of parameter offloading to CPU/NVMe. 
 ```
 ***device***: [string]
 
-| Description                                                                                                                           | Default |
-| ------------------------------------------------------------------------------------------------------------------------------------- | ------- |
+| Description                                                                        | Default |
+| ---------------------------------------------------------------------------------- | ------- |
 | Device memory to offload model parameters. Supported options are `cpu` and `nvme`. | `cpu`   |
 
 ***nvme_path***: [string]
 
-| Description                                                                                                                           | Default |
-| ------------------------------------------------------------------------------------------------------------------------------------- | ------- |
-| Filesystem path for NVMe device for parameter offloading. | `/local_nvme`   |
+| Description                                               | Default       |
+| --------------------------------------------------------- | ------------- |
+| Filesystem path for NVMe device for parameter offloading. | `/local_nvme` |
 
 ***pin_memory***: [boolean]
 
-| Description                                                                                                                           | Default |
-| ------------------------------------------------------------------------------------------------------------------------------------- | ------- |
-| Offload to page-locked CPU memory. This could boost throughput at the cost of extra memory overhead. | `false`  |
+| Description                                                                                          | Default |
+| ---------------------------------------------------------------------------------------------------- | ------- |
+| Offload to page-locked CPU memory. This could boost throughput at the cost of extra memory overhead. | `false` |
 
 ***buffer_count***: [integer]
 
-| Description                                                                                                                           | Default |
-| ------------------------------------------------------------------------------------------------------------------------------------- | ------- |
-| Number of buffers in buffer pool for parameter offloading to NVMe. | 5  |
+| Description                                                        | Default |
+| ------------------------------------------------------------------ | ------- |
+| Number of buffers in buffer pool for parameter offloading to NVMe. | 5       |
 
 
 ***buffer_size***: [integer]
 
-| Description                                                                                                                           | Default |
-| ------------------------------------------------------------------------------------------------------------------------------------- | ------- |
-| Size of buffers in buffer pool for parameter offloading to NVMe. | 1e8  |
+| Description                                                      | Default |
+| ---------------------------------------------------------------- | ------- |
+| Size of buffers in buffer pool for parameter offloading to NVMe. | 1e8     |
 
 ***max_in_cpu***: [integer]
 
-| Description                                                                                                                           | Default |
-| ------------------------------------------------------------------------------------------------------------------------------------- | ------- |
-| Number of parameter elements to maintain in CPU memory when offloading to NVMe is enabled. | 1e9  |
+| Description                                                                                | Default |
+| ------------------------------------------------------------------------------------------ | ------- |
+| Number of parameter elements to maintain in CPU memory when offloading to NVMe is enabled. | 1e9     |
 
 ### Optimizer offloading
 Enabling and configuring ZeRO optimization of offloading optimizer computation to CPU and state to CPU/NVMe. CPU offloading is available with ZeRO stage 2 or 3. NVMe offloading is available only with ZeRO stage 3.
@@ -470,33 +470,33 @@ Enabling and configuring ZeRO optimization of offloading optimizer computation t
 ```
 ***device***: [string]
 
-| Description                                                                                                                           | Default |
-| ------------------------------------------------------------------------------------------------------------------------------------- | ------- |
+| Description                                                                                                                                            | Default |
+| ------------------------------------------------------------------------------------------------------------------------------------------------------ | ------- |
 | Device memory to offload optimizer state. Supported options are `cpu` and `nvme`. Optimizer computation is offload to CPU regardless of device option. | `cpu`   |
 
 ***nvme_path***: [string]
 
-| Description                                                                                                                           | Default |
-| ------------------------------------------------------------------------------------------------------------------------------------- | ------- |
-| Filesystem path for NVMe device for optimizer state offloading. | `/local_nvme`   |
+| Description                                                     | Default       |
+| --------------------------------------------------------------- | ------------- |
+| Filesystem path for NVMe device for optimizer state offloading. | `/local_nvme` |
 
 ***pin_memory***: [boolean]
 
-| Description                                                                                                                           | Default |
-| ------------------------------------------------------------------------------------------------------------------------------------- | ------- |
-| Offload to page-locked CPU memory. This could boost throughput at the cost of extra memory overhead. | `false`  |
+| Description                                                                                          | Default |
+| ---------------------------------------------------------------------------------------------------- | ------- |
+| Offload to page-locked CPU memory. This could boost throughput at the cost of extra memory overhead. | `false` |
 
 ***buffer_count***: [integer]
 
-| Description                                                                                                                           | Default |
-| ------------------------------------------------------------------------------------------------------------------------------------- | ------- |
-| Number of buffers in buffer pool for optimizer state offloading to NVMe. This should be at least the number of states maintained per parameter by the optimizer. For example, Adam optimizer has 4 states (parameter, gradient, momentum, and variance). | 4  |
+| Description                                                                                                                                                                                                                                              | Default |
+| -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------- |
+| Number of buffers in buffer pool for optimizer state offloading to NVMe. This should be at least the number of states maintained per parameter by the optimizer. For example, Adam optimizer has 4 states (parameter, gradient, momentum, and variance). | 4       |
 
 ***fast_init***: [boolean]
 
-| Description                                                                                                                           | Default |
-| ------------------------------------------------------------------------------------------------------------------------------------- | ------- |
-| Enable fast optimizer initialization when offloading to NVMe. | `false`  |
+| Description                                                   | Default |
+| ------------------------------------------------------------- | ------- |
+| Enable fast optimizer initialization when offloading to NVMe. | `false` |
 
 
 ### Asynchronous I/O
@@ -512,37 +512,37 @@ Configuring the asynchronous I/O module for offloading parameter and optimizer s
 ```
 ***block_size***: [integer]
 
-| Description                                                                                                                           | Default |
-| ------------------------------------------------------------------------------------------------------------------------------------- | ------- |
-| I/O block size in bytes. | 1048576   |
+| Description              | Default |
+| ------------------------ | ------- |
+| I/O block size in bytes. | 1048576 |
 
 ***queue_depth***: [integer]
 
-| Description                                                                                                                           | Default |
-| ------------------------------------------------------------------------------------------------------------------------------------- | ------- |
-| I/O queue depth. | 8  |
+| Description      | Default |
+| ---------------- | ------- |
+| I/O queue depth. | 8       |
 
 ***thread_count***: [integer]
 
-| Description                                                                                                                           | Default |
-| ------------------------------------------------------------------------------------------------------------------------------------- | ------- |
-| Intra-request parallelism for each read/write submitted by a user thread. | 1  |
+| Description                                                               | Default |
+| ------------------------------------------------------------------------- | ------- |
+| Intra-request parallelism for each read/write submitted by a user thread. | 1       |
 
 ***single_submit***: [boolean]
 
-| Description                                                                                                                           | Default |
-| ------------------------------------------------------------------------------------------------------------------------------------- | ------- |
-| Submit requests to storage device as multiple individual requests as opposed to one block of requests. | `false`  |
+| Description                                                                                            | Default |
+| ------------------------------------------------------------------------------------------------------ | ------- |
+| Submit requests to storage device as multiple individual requests as opposed to one block of requests. | `false` |
 
 ***overlap_events***: [boolean]
 
-| Description                                                                                                                           | Default |
-| ------------------------------------------------------------------------------------------------------------------------------------- | ------- |
+| Description                                                                                                    | Default |
+| -------------------------------------------------------------------------------------------------------------- | ------- |
 | Submit requests to storage device in an overlapped fashion without waiting for completion of earlier requests. | `true`  |
 
 ***find_unused_parameters***: [boolean]
-| Description                                                                                                                                                          | Default |
-| -------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------- |
+| Description                                                                                                                                                                                                                                                                                             | Default |
+| ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------- |
 | As unused parameters in modules may not be expected sometimes, it will cause an explicit error msg when it occurred and enable this option to avoid the error, `torch.nn.parallel.DistributedDataParallel` has the same `find_unused_parameters` option with similar usage. Now it just used in stage2. | `False` |
 
 ### Logging
@@ -569,19 +569,20 @@ Configuring the asynchronous I/O module for offloading parameter and optimizer s
 ```json
 {
   "flops_profiler": {
-    "enabled": true,
+    "enabled": false,
     "profile_step": 1,
     "module_depth": -1,
-    "top_modules": 3,
+    "top_modules": 1,
     "detailed": true,
+    "output_file": null,
     }
 }
 ```
 <i>**enabled**</i>: [boolean]
 
-| Description                 | Default |
-| --------------------------- | ------- |
-| Enables the flops profiler. | `false` |
+| Description                                                              | Default |
+| ------------------------------------------------------------------------ | ------- |
+| Enables the flops profiler. This would also enables wall_clock_breakdown | `false` |
 
 <i>**profile_step**</i>: [integer]
 
@@ -591,21 +592,28 @@ Configuring the asynchronous I/O module for offloading parameter and optimizer s
 
 <i>**module_depth**</i>: [integer]
 
-| Description                                                                                                                                                            | Default |
-| ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------- |
-| The depth of the model at which to print the aggregated module information. When set to `-1`, it prints information on the innermost modules (with the maximum depth). | `-1`    |
+| Description                                                                                                                                                                           | Default |
+| ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------- |
+| The depth of the model at which to print the aggregated module information. When set to `-1`, it prints information from the top module to the innermost modules (the maximum depth). | `-1`    |
 
 <i>**top_modules**</i>: [integer]
 
 | Description                                                                  | Default |
 | ---------------------------------------------------------------------------- | ------- |
-| Limits the aggregated profile output to the number of top modules specified. | `3`     |
+| Limits the aggregated profile output to the number of top modules specified. | `1`     |
 
 <i>**detailed**</i>: [boolean]
 
 | Description                                  | Default |
 | -------------------------------------------- | ------- |
 | Whether to print the detailed model profile. | `true`  |
+
+<i>**output_file**</i>: [string]
+
+| Description                                                       | Default |
+| ----------------------------------------------------------------- | ------- |
+| Path to the output file. If None, the profiler prints to stdout.. | `null`  |
+
 
 ### Activation Checkpointing
 ```json

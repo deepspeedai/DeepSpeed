@@ -646,8 +646,9 @@ class DeepSpeedConfig(object):
         self.scheduler_name = get_scheduler_name(param_dict)
         self.scheduler_params = get_scheduler_params(param_dict)
 
-        self.wall_clock_breakdown = get_wall_clock_breakdown(param_dict)
         self.flops_profiler_config = DeepSpeedFlopsProfilerConfig(param_dict)
+        self.wall_clock_breakdown = get_wall_clock_breakdown(
+            param_dict) | self.flops_profiler_config.enabled
         self.memory_breakdown = get_memory_breakdown(param_dict)
         self.tensorboard_enabled = get_tensorboard_enabled(param_dict)
         self.tensorboard_output_path = get_tensorboard_output_path(param_dict)

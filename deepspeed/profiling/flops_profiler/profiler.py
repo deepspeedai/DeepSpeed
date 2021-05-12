@@ -44,8 +44,11 @@ class FlopsProfiler(object):
     Args:
         object (torch.nn.Module): The PyTorch model to profile.
     """
-    def __init__(self, model):
+    def __init__(self, model, ds_engine=None):
         self.model = model
+        self.ds_engine = ds_engine
+        self.started = False
+        self.func_patched = False
 
     def start_profile(self, ignore_list=None):
         """Starts profiling.
@@ -93,21 +96,19 @@ class FlopsProfiler(object):
             module.__end_time_hook_handle__ = module.register_forward_hook(end_time_hook)
 
         self.model.apply(partial(register_module_hooks, ignore_list=ignore_list))
+        self.started = True
+        self.func_patched = True
 
-    def end_profile(self):
-        """Ends profiling.
+    def stop_profile(self):
+        """Stop profiling.
 
-        Added attributes and handles are removed recursively on all the modules and the torch.nn.functionals are restored.
+        All torch.nn.functionals are restored to their originals.
         """
+        if self.started and self.func_patched:
+            _reload_functionals()
+            self.func_patched = False
+
         def remove_profile_attrs(module):
-            if hasattr(module, "__flops__"):
-                del module.__flops__
-            if hasattr(module, "__params__"):
-                del module.__params__
-            if hasattr(module, "__start_time__"):
-                del module.__start_time__
-            if hasattr(module, "__duration__"):
-                del module.__duration__
             if hasattr(module, "__pre_hook_handle__"):
                 module.__pre_hook_handle__.remove()
                 del module.__pre_hook_handle__
@@ -125,7 +126,6 @@ class FlopsProfiler(object):
                 del module.__end_time_hook_handle__
 
         self.model.apply(remove_profile_attrs)
-        _reload_functionals()
 
     def reset_profile(self):
         """Resets the profiling.
@@ -140,6 +140,28 @@ class FlopsProfiler(object):
             module.__duration__ = 0
 
         self.model.apply(add_or_reset_attrs)
+
+    def end_profile(self):
+        """Ends profiling.
+
+        The added attributes and handles are removed recursively on all the modules.
+        """
+        if not self.started:
+            return
+        self.stop_profile()
+        self.started = False
+
+        def remove_profile_attrs(module):
+            if hasattr(module, "__flops__"):
+                del module.__flops__
+            if hasattr(module, "__params__"):
+                del module.__params__
+            if hasattr(module, "__start_time__"):
+                del module.__start_time__
+            if hasattr(module, "__duration__"):
+                del module.__duration__
+
+        self.model.apply(remove_profile_attrs)
 
     def get_total_flops(self, as_string=False):
         """Returns the total flops of the model.
@@ -162,7 +184,7 @@ class FlopsProfiler(object):
         Returns:
             The latency of the model forward pass.
         """
-        total_duration = self.model.__duration__
+        total_duration = get_module_duration(self.model)
         return duration_to_string(total_duration) if as_string else total_duration
 
     def get_total_params(self, as_string=False):
@@ -180,16 +202,32 @@ class FlopsProfiler(object):
     def print_model_profile(self,
                             profile_step=1,
                             module_depth=-1,
-                            top_modules=3,
-                            detailed=True):
+                            top_modules=1,
+                            detailed=True,
+                            output_file=None):
         """Prints the model graph with the measured profile attached to each module.
 
         Args:
             profile_step (int, optional): The global training step at which to profile. Note that warm up steps are needed for accurate time measurement.
-            module_depth (int, optional): The depth of the model at which to print the aggregated module information. When set to -1, it prints information on the innermost modules (with the maximum depth).
+            module_depth (int, optional): The depth of the model to which to print the aggregated module information. When set to -1, it prints information from the top to the innermost modules (the maximum depth).
             top_modules (int, optional): Limits the aggregated profile output to the number of top modules specified.
             detailed (bool, optional): Whether to print the detailed model profile.
+            output_file (str, optional): Path to the output file. If None, the profiler prints to stdout.
         """
+        if not self.started:
+            return
+        import sys
+        import os.path
+        from os import path
+        original_stdout = None
+        f = None
+        if output_file and output_file != "":
+            dir_path = os.path.dirname(output_file)
+            if not os.path.exists(dir_path):
+                os.makedirs(dir_path)
+            original_stdout = sys.stdout
+            f = open(output_file, "w")
+            sys.stdout = f
 
         total_flops = self.get_total_flops()
         total_duration = self.get_total_duration()
@@ -201,18 +239,69 @@ class FlopsProfiler(object):
         print(
             "\n-------------------------- DeepSpeed Flops Profiler --------------------------"
         )
-        print("Summary of forward pass:")
-        print('{:<30}  {:<8}'.format('Profile step: ', profile_step))
-        print('{:<30}  {:<8}'.format('Number of parameters: ',
-                                     params_to_string(total_params)))
-        print('{:<30}  {:<8}'.format('Number of multiply-accumulate operations (MACs): ',
-                                     num_to_string(total_flops)))
-        print('{:<30}  {:<8}'.format(
-            'Number of floating point operations ( = 2 * MACs): ',
-            num_to_string(2 * total_flops)))
-        print('{:<30}  {:<8}'.format('Latency: ', duration_to_string(total_duration)))
-        print('{:<30}  {:<8}'.format('Floating point operations per second(FLOPS): ',
-                                     flops_to_string(2 * total_flops / total_duration)))
+        print(f'Profile Summary at step {profile_step}:')
+        print(
+            "Notations:\ndata parallel size (dp_size), model paralel size(mp_size),\nnumber of parameters (params), number of multiply-accumulate operations(MACs),\number of floating point operations (flops), floating point operations per second (FLOPS),\nfwd latency (forward propagation latency), bwd latency (backward propagation latency),\nstep (weights update latency), iter latency (sum of fwd, bwd and step latency)\n"
+        )
+        if self.ds_engine:
+            print('{:<60}  {:<8}'.format('world size: ', self.ds_engine.world_size))
+            print('{:<60}  {:<8}'.format('data parallel size: ',
+                                         self.ds_engine.dp_world_size))
+            print('{:<60}  {:<8}'.format('model paralel size: ',
+                                         self.ds_engine.mp_world_size))
+            print('{:<60}  {:<8}'.format(
+                'batch size per GPU: ',
+                self.ds_engine.train_micro_batch_size_per_gpu()))
+
+        print('{:<60}  {:<8}'.format('params per gpu: ', params_to_string(total_params)))
+        print('{:<60}  {:<8}'.format(
+            'params of model = params per GPU * mp_size: ',
+            params_to_string(total_params *
+                             (self.ds_engine.mp_world_size) if self.ds_engine else 1)))
+
+        print('{:<60}  {:<8}'.format('fwd MACs per GPU: ', num_to_string(total_flops)))
+        print('{:<60}  {:<8}'.format('fwd flops per GPU = 2 * fwd MACs per GPU: ',
+                                     num_to_string(2 * total_flops)))
+
+        print('{:<60}  {:<8}'.format(
+            'fwd flops of model = fwd flops per GPU * mp_size: ',
+            num_to_string(2 * total_flops *
+                          (self.ds_engine.mp_world_size) if self.ds_engine else 1)))
+
+        fwd_latency = self.get_total_duration()
+        if self.ds_engine and self.ds_engine.wall_clock_breakdown():
+            fwd_latency = self.ds_engine.timers('forward').elapsed(False)
+        print('{:<60}  {:<8}'.format('fwd latency: ', duration_to_string(fwd_latency)))
+        print('{:<60}  {:<8}'.format(
+            'fwd FLOPS per GPU = fwd flops per GPU / fwd latency: ',
+            flops_to_string(2 * total_flops / fwd_latency)))
+
+        if self.ds_engine and self.ds_engine.wall_clock_breakdown():
+            bwd_latency = self.ds_engine.timers('backward').elapsed(False)
+            step_latency = self.ds_engine.timers('step').elapsed(False)
+            print('{:<60}  {:<8}'.format('bwd latency: ',
+                                         duration_to_string(bwd_latency)))
+            print('{:<60}  {:<8}'.format(
+                'bwd FLOPS per GPU = 2 * fwd flops per GPU / bwd latency: ',
+                flops_to_string(2 * 2 * total_flops / bwd_latency)))
+            print('{:<60}  {:<8}'.format(
+                'fwd+bwd FLOPS per GPU = 3 * fwd flops per GPU / (fwd+bwd latency): ',
+                flops_to_string(3 * 2 * total_flops / (fwd_latency + bwd_latency))))
+
+            print('{:<60}  {:<8}'.format('step latency: ',
+                                         duration_to_string(step_latency)))
+
+            iter_latency = fwd_latency + bwd_latency + step_latency
+            print('{:<60}  {:<8}'.format('iter latency: ',
+                                         duration_to_string(iter_latency)))
+            print('{:<60}  {:<8}'.format(
+                'FLOPS per GPU = 3 * fwd flops per GPU / iter latency: ',
+                flops_to_string(3 * 2 * total_flops / iter_latency)))
+
+            samples_per_iter = self.ds_engine.train_micro_batch_size_per_gpu(
+            ) * self.ds_engine.world_size
+            print('{:<60}  {:<8.2f}'.format('samples/second: ',
+                                            samples_per_iter / iter_latency))
 
         def flops_repr(module):
             params = module.__params__
@@ -223,10 +312,7 @@ class FlopsProfiler(object):
                 macs_to_string(flops),
                 "{:.2%} MACs".format(0.0 if total_flops == 0 else flops / total_flops),
             ]
-            duration = module.__duration__
-            if duration == 0:  # e.g. ModuleList
-                for m in module.children():
-                    duration += m.__duration__
+            duration = get_module_duration(module)
 
             items.append(duration_to_string(duration))
             items.append(
@@ -252,20 +338,20 @@ class FlopsProfiler(object):
         self.model.apply(add_extra_repr)
 
         print(
-            "\n----------------------------- Aggregated Profile -----------------------------"
+            "\n----------------------------- Aggregated Profile per GPU -----------------------------"
         )
         self.print_model_aggregated_profile(module_depth=module_depth,
                                             top_modules=top_modules)
 
         if detailed:
             print(
-                "\n------------------------------ Detailed Profile ------------------------------"
+                "\n------------------------------ Detailed Profile per GPU ------------------------------"
             )
             print(
-                "Each module profile is listed after its name in the following order: \nnumber of parameters, percentage of total parameters, number of multiply-accumulate operations (MACs), percentage of total MACs, latency, percentage of total latency, number of floating point operations per second (FLOPS, computed as 2 * MACs / latency)."
+                "Each module profile is listed after its name in the following order: \nparams, percentage of total params, MACs, percentage of total MACs, fwd latency, percentage of total fwd latency, fwd FLOPS"
             )
             print(
-                "Note: \n1. A module can have torch.nn.functional (e.g. to compute logits) along with submodules, thus making the difference between the parent's MACs(or latency) and the sum of its submodules'.\n2. Number of floating point operations is a theoretical estimation, thus FLOPS computed using that could be larger than the maximum system throughput.\n"
+                "\nNote: 1. A module can have torch.nn.module or torch.nn.functional to compute logits (e.g. CrossEntropyLoss). They are not counted as submodules, thus not to be printed out. However they make up the difference between a parent's MACs(or latency) and the sum of its submodules'.\n2. Number of floating point operations is a theoretical estimation, thus FLOPS computed using that could be larger than the maximum system throughput.\n3. The fwd latency listed in the top module's profile is directly captured at the module forward function in PyTorch, thus it's less than the fwd latency shown above which is captured in DeepSpeed.\n"
             )
             print(self.model)
 
@@ -275,12 +361,16 @@ class FlopsProfiler(object):
             "------------------------------------------------------------------------------"
         )
 
-    def print_model_aggregated_profile(self, module_depth=-1, top_modules=3):
+        if output_file:
+            sys.stdout = original_stdout
+            f.close()
+
+    def print_model_aggregated_profile(self, module_depth=-1, top_modules=1):
         """Prints the names of the top top_modules modules in terms of aggregated time, flops, and parameters at depth module_depth.
 
         Args:
             module_depth (int, optional): the depth of the modules to show. Defaults to -1 (the innermost modules).
-            top_modules (int, optional): the number of top modules to show. Defaults to 3.
+            top_modules (int, optional): the number of top modules to show. Defaults to 1.
         """
         info = {}
         if not hasattr(self.model, "__flops__"):
@@ -298,9 +388,9 @@ class FlopsProfiler(object):
                     0,
                     0,
                 ]  # flops, params, time
-            info[curr_depth][module.__class__.__name__][0] += module.__flops__
+            info[curr_depth][module.__class__.__name__][0] += get_module_flops(module)
             info[curr_depth][module.__class__.__name__][1] += module.__params__
-            info[curr_depth][module.__class__.__name__][2] += (module.__duration__)
+            info[curr_depth][module.__class__.__name__][2] += get_module_duration(module)
             has_children = len(module._modules.items()) != 0
             if has_children:
                 for child in module.children():
@@ -312,32 +402,39 @@ class FlopsProfiler(object):
         if module_depth == -1:
             depth = len(info) - 1
 
-        num_items = min(top_modules, len(info[depth]))
+        print(
+            f'Top {top_modules} modules in terms of params, MACs or fwd latency at different model depths:'
+        )
 
-        sort_flops = {
-            k: macs_to_string(v[0])
-            for k,
-            v in sorted(info[depth].items(),
-                        key=lambda item: item[1][0],
-                        reverse=True)[:num_items]
-        }
-        sort_params = {
-            k: params_to_string(v[1])
-            for k,
-            v in sorted(info[depth].items(),
-                        key=lambda item: item[1][1],
-                        reverse=True)[:num_items]
-        }
-        sort_time = {
-            k: duration_to_string(v[2])
-            for k,
-            v in sorted(info[depth].items(),
-                        key=lambda item: item[1][2],
-                        reverse=True)[:num_items]
-        }
-        print(f"Top {num_items} modules in MACs at depth {depth} are {sort_flops}")
-        print(f"Top {num_items} modules in params at depth {depth} are {sort_params}")
-        print(f"Top {num_items} modules in latency at depth {depth} are {sort_time}")
+        for d in range(depth):
+            num_items = min(top_modules, len(info[d]))
+
+            sort_flops = {
+                k: macs_to_string(v[0])
+                for k,
+                v in sorted(info[d].items(),
+                            key=lambda item: item[1][0],
+                            reverse=True)[:num_items]
+            }
+            sort_params = {
+                k: params_to_string(v[1])
+                for k,
+                v in sorted(info[d].items(),
+                            key=lambda item: item[1][1],
+                            reverse=True)[:num_items]
+            }
+            sort_time = {
+                k: duration_to_string(v[2])
+                for k,
+                v in sorted(info[d].items(),
+                            key=lambda item: item[1][2],
+                            reverse=True)[:num_items]
+            }
+
+            print(f"depth {d}:")
+            print(f"    params      - {sort_params}")
+            print(f"    MACs        - {sort_flops}")
+            print(f"    fwd latency - {sort_time}")
 
 
 def _prod(dims):
@@ -501,13 +598,15 @@ def _dropout_flops_compute(input, p=0.5, training=True, inplace=False):
 def wrapFunc(func, funcFlopCompute):
     oldFunc = func
     name = func.__name__
-    old_functions[func.__name__] = oldFunc
+    old_functions[name] = oldFunc
 
     def newFunc(*args, **kwds):
         flops = funcFlopCompute(*args, **kwds)
         if module_flop_count:
             module_flop_count[-1].append((name, flops))
         return oldFunc(*args, **kwds)
+
+    newFunc.__name__ = func.__name__
 
     return newFunc
 
@@ -563,35 +662,35 @@ def _patch_functionals():
 
 def _reload_functionals():
     # torch.nn.functional does not support importlib.reload()
-    F.linear = old_functions["linear"]
-    F.conv1d = old_functions["conv1d"]
-    F.conv2d = old_functions["conv2d"]
-    F.conv3d = old_functions["conv3d"]
-    F.conv_transpose1d = old_functions["conv_transpose1d"]
-    F.conv_transpose2d = old_functions["conv_transpose2d"]
-    F.conv_transpose3d = old_functions["conv_transpose3d"]
-    F.relu = old_functions["relu"]
-    F.prelu = old_functions["prelu"]
-    F.elu = old_functions["elu"]
-    F.leaky_relu = old_functions["leaky_relu"]
-    F.relu6 = old_functions["relu6"]
-    F.batch_norm = old_functions["batch_norm"]
-    F.avg_pool1d = old_functions["avg_pool1d"]
-    F.avg_pool2d = old_functions["avg_pool2d"]
-    F.avg_pool3d = old_functions["avg_pool3d"]
-    F.max_pool1d = old_functions["max_pool1d"]
-    F.max_pool2d = old_functions["max_pool2d"]
-    F.max_pool3d = old_functions["max_pool3d"]
-    F.adaptive_avg_pool1d = old_functions["adaptive_avg_pool1d"]
-    F.adaptive_avg_pool2d = old_functions["adaptive_avg_pool2d"]
-    F.adaptive_avg_pool3d = old_functions["adaptive_avg_pool3d"]
-    F.adaptive_max_pool1d = old_functions["adaptive_max_pool1d"]
-    F.adaptive_max_pool2d = old_functions["adaptive_max_pool2d"]
-    F.adaptive_max_pool3d = old_functions["adaptive_max_pool3d"]
-    F.upsample = old_functions["upsample"]
-    F.interpolate = old_functions["interpolate"]
-    F.softmax = old_functions["softmax"]
-    F.embedding = old_functions["embedding"]
+    F.linear = old_functions[F.linear.__name__]
+    F.conv1d = old_functions[F.conv1d.__name__]
+    F.conv2d = old_functions[F.conv2d.__name__]
+    F.conv3d = old_functions[F.conv3d.__name__]
+    F.conv_transpose1d = old_functions[F.conv_transpose1d.__name__]
+    F.conv_transpose2d = old_functions[F.conv_transpose2d.__name__]
+    F.conv_transpose3d = old_functions[F.conv_transpose3d.__name__]
+    F.relu = old_functions[F.relu.__name__]
+    F.prelu = old_functions[F.prelu.__name__]
+    F.elu = old_functions[F.elu.__name__]
+    F.leaky_relu = old_functions[F.leaky_relu.__name__]
+    F.relu6 = old_functions[F.relu6.__name__]
+    F.batch_norm = old_functions[F.batch_norm.__name__]
+    F.avg_pool1d = old_functions[F.avg_pool1d.__name__]
+    F.avg_pool2d = old_functions[F.avg_pool2d.__name__]
+    F.avg_pool3d = old_functions[F.avg_pool3d.__name__]
+    F.max_pool1d = old_functions[F.max_pool1d.__name__]
+    F.max_pool2d = old_functions[F.max_pool2d.__name__]
+    F.max_pool3d = old_functions[F.max_pool3d.__name__]
+    F.adaptive_avg_pool1d = old_functions[F.adaptive_avg_pool1d.__name__]
+    F.adaptive_avg_pool2d = old_functions[F.adaptive_avg_pool2d.__name__]
+    F.adaptive_avg_pool3d = old_functions[F.adaptive_avg_pool3d.__name__]
+    F.adaptive_max_pool1d = old_functions[F.adaptive_max_pool1d.__name__]
+    F.adaptive_max_pool2d = old_functions[F.adaptive_max_pool2d.__name__]
+    F.adaptive_max_pool3d = old_functions[F.adaptive_max_pool3d.__name__]
+    F.upsample = old_functions[F.upsample.__name__]
+    F.interpolate = old_functions[F.interpolate.__name__]
+    F.softmax = old_functions[F.softmax.__name__]
+    F.embedding = old_functions[F.embedding.__name__]
 
 
 def _rnn_flops(flops, rnn_module, w_ih, w_hh, input_size):
@@ -778,6 +877,14 @@ def get_module_flops(module):
     return sum
 
 
+def get_module_duration(module):
+    duration = module.__duration__
+    if duration == 0:  # e.g. ModuleList
+        for m in module.children():
+            duration += m.__duration__
+    return duration
+
+
 def get_model_profile(
     model,
     input_res,
@@ -785,9 +892,10 @@ def get_model_profile(
     print_profile=True,
     detailed=True,
     module_depth=-1,
-    top_modules=3,
+    top_modules=1,
     warm_up=1,
     as_string=True,
+    output_file=None,
     ignore_modules=None,
 ):
     """Returns the total MACs and parameters of a model.
@@ -810,6 +918,7 @@ def get_model_profile(
         top_modules (int, optional): the number of top modules to print in the aggregated profile. Defaults to 3.
         warm_up (int, optional): the number of warm-up steps before measuring the latency of each module. Defaults to 1.
         as_string (bool, optional): whether to print the output as string. Defaults to True.
+        output_file (str, optional): path to the output file. If None, the profiler prints to stdout.
         ignore_modules ([type], optional): the list of modules to ignore during profiling. Defaults to None.
 
     Returns:
@@ -859,7 +968,8 @@ def get_model_profile(
         prof.print_model_profile(profile_step=warm_up,
                                  module_depth=module_depth,
                                  top_modules=top_modules,
-                                 detailed=detailed)
+                                 detailed=detailed,
+                                 output_file=output_file)
 
     prof.end_profile()
     if as_string:

@@ -43,3 +43,7 @@ class DeepSpeedFlopsProfilerConfig(DeepSpeedConfigObject):
         self.detailed = get_scalar_param(flops_profiler_dict,
                                          FLOPS_PROFILER_DETAILED,
                                          FLOPS_PROFILER_DETAILED_DEFAULT)
+
+        self.output_file = get_scalar_param(flops_profiler_dict,
+                                            FLOPS_PROFILER_OUTPUT_FILE,
+                                            FLOPS_PROFILER_OUTPUT_FILE_DEFAULT)

@@ -405,7 +405,7 @@ class CheckpointFunction(torch.autograd.Function):
                     f"----contiguous Memory Checkpointing {CONTIGUOUS_CHECKPOINTING} with {num_layers} total layers"
                 )
                 logger.info(f"----Synchronization {SYNCHRONIZE}")
-                logger.info(f"----Profiling {PROFILE_TIME}")
+                logger.info(f"----Profiling time in checkpointing {PROFILE_TIME}")
 
             cuda_device = torch.cuda.current_device()
             transport_stream = torch.cuda.Stream(device=cuda_device)
