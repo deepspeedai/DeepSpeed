@@ -4,27 +4,27 @@ title: "DeepSpeed Configuration JSON"
 
 ### Batch Size Related Parameters
 
-**Note:** configuring <i>**train_batch_size**</i> is required.
+**Note:** <i>**train_batch_size**</i> must be equal to  <i>**train_micro_batch_size_per_gpu**</i> * <i>**gradient_accumulation**</i> * number of GPUs. For simplicty, you can choose to only specify two of the three parameters, the last one will be inferred automatically by DeepSpeed.
 {: .notice--warning}
 
 <i>**train_batch_size**</i>: [integer]
 
 | Value                                                                                                                                                                                                                                                                                                                                                                             | Example |
 | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------- |
-| The effective training batch size. This is the amount of data samples that leads to one step of model update. <i>**train_batch_size**</i> is aggregated by the batch size that a single GPU processes in one forward/backward pass (a.k.a., <i>**train_step_batch_size**</i>),  the gradient accumulation steps (a.k.a., <i>**gradient_accumulation_steps**</i>), and the number of GPUs. | `32`    |
+| The effective training batch size. This is the amount of data samples that leads to one step of model update. <i>**train_batch_size**</i> is aggregated by the batch size that a single GPU processes in one forward/backward pass (a.k.a., <i>**train_micro_batch_size_per_gpu**</i>),  the gradient accumulation steps (a.k.a., <i>**gradient_accumulation_steps**</i>), and the number of GPUs. Can be omitted if both <i>**train_micro_batch_size_per_gpu**</i> and <i>**gradient_accumulation_steps**</i> are provided. | `32`    |
 
 
 <i>**train_micro_batch_size_per_gpu**</i>: [integer]
 
 | Description                                                                                                                                                                                                                                                                                                                    | Default                        |
 | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------ |
-| Batch size to be processed by one GPU in one step (without gradient accumulation). When specified, <i>**gradient_accumulation_steps**</i> is automatically calculated using <i>**train_batch_size**</i> and number of GPUs. Should not be concurrently specified with <i>**gradient_accumulation_steps**</i> in the configuration JSON. | <i>**train_batch_size**</i> value |
+| Batch size to be processed by one GPU in one step (without gradient accumulation). Can be omitted if both <i>**train_batch_size**</i> and <i>**gradient_accumulation_steps**</i> are provided. | <i>**train_batch_size**</i> value |
 
 <i>**gradient_accumulation_steps**</i>: [integer]
 
 | Description                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        | Default |
 | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------- |
-| Number of training steps to accumulate gradients before averaging and applying them. This feature is sometimes useful to improve scalability since it results in less frequent communication of gradients between steps. Another impact of this feature is the ability to train with larger batch sizes per GPU. When specified, <i>**train_step_batch_size**</i> is automatically calculated using <i>**train_batch_size**</i> and number of GPUs. Should not be concurrently specified with <i>**train_step_batch_size**</i> in the configuration JSON. | `1`     |
+| Number of training steps to accumulate gradients before averaging and applying them. This feature is sometimes useful to improve scalability since it results in less frequent communication of gradients between steps. Another impact of this feature is the ability to train with larger batch sizes per GPU. Can be omitted if both <i>**train_batch_size**</i> and <i>**train_micro_batch_size_per_gpu**</i> are provided. | `1`     |
 
 
 
