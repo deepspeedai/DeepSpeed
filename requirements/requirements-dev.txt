@@ -1,5 +1,6 @@
 pytest
 pytest-forked
+pytest-randomly
 pre-commit
 clang-format
 sphinx

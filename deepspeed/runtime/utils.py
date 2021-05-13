@@ -37,6 +37,11 @@ def ensure_directory_exists(filename):
 
 
 def set_random_seed(seed):
+    """Set the random seed for common PRNGs used during training: random, numpy, and torch.
+
+    Args:
+        seed (int): the seed to use
+    """
     import numpy
     import random
     random.seed(seed)

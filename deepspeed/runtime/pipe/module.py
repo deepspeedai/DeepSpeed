@@ -533,7 +533,7 @@ class PipelineModule(nn.Module):
         idx = local_layer_idx + self._local_start
         layer_ckpt_path = os.path.join(ckpt_dir, f'layer_{idx:02d}')
         rank_repr = self._grid._topo.get_rank_repr(rank=self.global_rank)
-        if rank_repr is not '':
+        if rank_repr != '':
             layer_ckpt_path += f'-{rank_repr}'
         layer_ckpt_path += '-model_states.pt'
         return layer_ckpt_path
