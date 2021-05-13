@@ -1123,7 +1123,7 @@ class GatheredParameters:
             self.enabled = False
             return
 
-        self.params = params
+        self.params = [p for p in params if hasattr(p, "ds_id")]
         self.src_rank = None
         if modifier_rank is not None:
             if self.params[0].ds_process_group == torch.distributed.group.WORLD:
