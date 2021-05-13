@@ -576,10 +576,26 @@ class DeepSpeedEngine(Module):
             if self.zero_optimization_partition_weights() and any(
                 [hasattr(param,
                          'ds_id') for param in self.module.parameters()]):
-                assert all([param.dtype == torch.half for param in self.module.parameters()]), "fp16 is enabled but one or several model parameters have dtype that is not fp16"
+                if not all(
+                    [param.dtype == torch.half for param in self.module.parameters()]):
+                    names = [
+                        n for n,
+                        p in self.module.named_parameters() if p.dtype != torch.half
+                    ]
+                    raise ValueError(
+                        "fp16 is enabled but the following parameters have dtype that is not fp16: {', '.join(names)}"
+                    )
             self.module.half()
         else:
-            assert all([param.dtype == torch.float for param in self.module.parameters()]), "fp16 is not enabled but one or several model parameters have dtype of fp16"
+            if not all(
+                [param.dtype == torch.float for param in self.module.parameters()]):
+                names = [
+                    n for n,
+                    p in self.module.named_parameters() if p.dtype != torch.float
+                ]
+                raise ValueError(
+                    "fp32 is enabled but the following parameters have dtype that is not fp32: {', '.join(names)}"
+                )
 
         if not self.dont_change_device:
             self.module.to(self.device)
