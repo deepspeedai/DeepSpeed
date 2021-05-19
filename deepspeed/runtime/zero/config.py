@@ -182,3 +182,7 @@ class DeepSpeedZeroConfig(DeepSpeedConfigObject):
             zero_config_dict,
             ZERO_OPTIMIZATION_IGNORE_UNUSED_PARAMETERS,
             ZERO_OPTIMIZATION_IGNORE_UNUSED_PARAMETERS_DEFAULT)
+
+        self.legacy_stage1 = get_scalar_param(zero_config_dict,
+                                              ZERO_OPTIMIZATION_LEGACY_STAGE1,
+                                              ZERO_OPTIMIZATION_LEGACY_STAGE1_DEFAULT)

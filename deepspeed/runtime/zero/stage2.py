@@ -8,6 +8,7 @@ import torch.distributed as dist
 import math
 from torch._six import inf
 from torch.autograd import Variable
+from packaging import version as pkg_version
 
 import collections
 
@@ -17,6 +18,7 @@ from deepspeed.runtime.zero.config import ZERO_OPTIMIZATION_GRADIENTS
 from deepspeed.ops.adam import DeepSpeedCPUAdam
 from deepspeed.ops.op_builder import UtilsBuilder
 from deepspeed.utils import logger
+from deepspeed.git_version_info import version
 
 #Toggle this to true to enable correctness test
 #with gradient partitioning and without
@@ -96,7 +98,8 @@ class FP16_DeepSpeedZeroOptimizer(object):
                  postscale_gradients=True,
                  gradient_predivide_factor=1.0,
                  gradient_accumulation_steps=1,
-                 ignore_unused_parameters=True):
+                 ignore_unused_parameters=True,
+                 partition_grads=True):
 
         if dist.get_rank() == 0:
             logger.info(f"Reduce bucket size {reduce_bucket_size}")
@@ -120,6 +123,9 @@ class FP16_DeepSpeedZeroOptimizer(object):
         self.flatten = util_ops.flatten
         self.unflatten = util_ops.unflatten
 
+        # ZeRO stage 1 (False) or 2 (True)
+        self.partition_gradients = partition_grads
+
         self.timers = timers
 
         self.reduce_scatter = reduce_scatter
@@ -136,6 +142,8 @@ class FP16_DeepSpeedZeroOptimizer(object):
 
         self.partition_count = dist.get_world_size(group=self.dp_process_group)
 
+        self.is_gradient_accumulation_boundary = True
+
         if mpu is None:
             self.model_parallel_group = None
             self.model_parallel_rank = 0
@@ -151,6 +159,8 @@ class FP16_DeepSpeedZeroOptimizer(object):
         self.gradient_accumulation_steps = gradient_accumulation_steps
         self.micro_step_id = 0
         self.ignore_unused_parameters = ignore_unused_parameters
+
+        self.extra_large_param_to_reduce = None
 
         if self.reduce_scatter:
             assert not self.allreduce_always_fp32, "allreduce_always_fp32 is not yet supported with ZeRO-2 with reduce scatter enabled"
@@ -373,7 +383,8 @@ class FP16_DeepSpeedZeroOptimizer(object):
         self.reset_partition_gradient_structures()
 
         #creates backward hooks for gradient partitioning
-        self.create_reduce_and_remove_grad_hooks()
+        if self.partition_gradients or self.overlap_comm:
+            self.create_reduce_and_remove_grad_hooks()
 
         # we may have a way of fusing dynamic scale. Do not support for now
         if self.dtype == torch.float or not dynamic_loss_scale:
@@ -454,6 +465,31 @@ class FP16_DeepSpeedZeroOptimizer(object):
                 group.grad = None
 
         return
+
+    #########################################################################
+    #################### ZeRO Stage 1 - reduce gradients ####################
+    #########################################################################
+
+    def reduce_gradients(self, pipeline_parallel=False):
+        world_size = dist.get_world_size(self.dp_process_group)
+        my_rank = dist.get_rank(self.dp_process_group)
+
+        # with PP we must create ipg buffer, since backward is handled outside zero
+        if pipeline_parallel and self.contiguous_gradients:
+            self.ipg_buffer = []
+            buf_0 = torch.empty(int(self.reduce_bucket_size),
+                                dtype=self.dtype,
+                                device=torch.cuda.current_device())
+            self.ipg_buffer.append(buf_0)
+            self.ipg_index = 0
+
+        if not self.overlap_comm:
+            for i, group in enumerate(self.fp16_groups):
+                for param in group:
+                    self.reduce_ready_partitions_and_remove_grads(param, i)
+
+        # reduce any pending grads in either hook/non-hook case
+        self.overlapping_partition_gradients_reduce_epilogue()
 
     #########################################################################
     #########################ZeRO Partition Gradients########################
@@ -680,8 +716,11 @@ class FP16_DeepSpeedZeroOptimizer(object):
             Gradient computed twice for this partition. \
             Multiple gradient reduction is currently not supported"
 
-        #keeping the gradients contiguous to prevent memory fragmentation, and avoid flattening
-        if self.contiguous_gradients:
+        if param.numel() > self.reduce_bucket_size:
+            self.extra_large_param_to_reduce = param
+
+        elif self.contiguous_gradients:
+            #keeping the gradients contiguous to prevent memory fragmentation, and avoid flattening
             new_grad_tensor = self.ipg_buffer[self.ipg_index].narrow(
                 0,
                 self.elements_in_ipg_bucket,
@@ -1019,7 +1058,14 @@ class FP16_DeepSpeedZeroOptimizer(object):
             stream = torch.cuda.current_stream()
 
         if self.contiguous_gradients:
-            self.average_tensor(self.ipg_buffer[self.ipg_index])
+            if self.extra_large_param_to_reduce is not None:
+                assert len(self.params_in_ipg_bucket) == 1, "more than 1 param in ipg bucket, this shouldn't happen"
+                _, _, param_id = self.params_in_ipg_bucket[0]
+                assert self.get_param_id(self.extra_large_param_to_reduce) == param_id, "param in ipg bucket does not match extra-large param"
+                self.average_tensor(self.extra_large_param_to_reduce.grad.view(-1))
+                self.extra_large_param_to_reduce = None
+            else:
+                self.average_tensor(self.ipg_buffer[self.ipg_index])
         else:
             self.buffered_reduce_fallback(
                 None,
@@ -1054,7 +1100,8 @@ class FP16_DeepSpeedZeroOptimizer(object):
         #####################################################################
 
     def reduce_ready_partitions_and_remove_grads(self, param, i):
-        self.reduce_independent_p_g_buckets_and_remove_grads(param, i)
+        if self.partition_gradients or self.is_gradient_accumulation_boundary:
+            self.reduce_independent_p_g_buckets_and_remove_grads(param, i)
 
     def zero_reduced_gradients(self, partition_id, i):
         def are_all_related_partitions_reduced(params_id):
@@ -1677,17 +1724,16 @@ class FP16_DeepSpeedZeroOptimizer(object):
         if self.cpu_offload:
             torch.cuda.current_stream().wait_stream(self.migration_stream)
 
-        #TODO: we need to revist this and remove the magic 4.5x multiplier here
         if self.contiguous_gradients:
             self.ipg_buffer = []
-            buf_0 = torch.empty(int(self.reduce_bucket_size * 4.5),
+            buf_0 = torch.empty(int(self.reduce_bucket_size),
                                 dtype=self.dtype,
                                 device=torch.cuda.current_device())
             self.ipg_buffer.append(buf_0)
 
             # Use double buffers to avoid data access conflict when overlap_comm is enabled.
             if self.overlap_comm:
-                buf_1 = torch.empty(int(self.reduce_bucket_size * 4.5),
+                buf_1 = torch.empty(int(self.reduce_bucket_size),
                                     dtype=self.dtype,
                                     device=torch.cuda.current_device())
                 self.ipg_buffer.append(buf_1)
@@ -1784,6 +1830,8 @@ class FP16_DeepSpeedZeroOptimizer(object):
 
         state_dict['zero_stage'] = ZERO_OPTIMIZATION_GRADIENTS
         state_dict['partition_count'] = self.partition_count
+
+        state_dict['ds_version'] = version
 
         # Remove paddings for DP alignment to enable loading for other alignment values
         fp32_groups_without_padding = self._get_groups_without_padding(
@@ -1903,6 +1951,18 @@ class FP16_DeepSpeedZeroOptimizer(object):
         self.loss_scaler = state_dict_list[0]['loss_scaler']
         self.dynamic_loss_scale = state_dict_list[0]['dynamic_loss_scale']
         self.overflow = state_dict_list[0]['overflow']
+
+        # zero stage 1 mode
+        if not self.partition_gradients:
+            required_version = pkg_version.parse("0.3.17")
+            ckpt_version = state_dict_list[0].get("ds_version", False)
+            error_str = f"ZeRO stage 1 changed in {required_version} and is not backwards compatible " \
+                "with older stage 1 checkpoints. If you'd like to load an old ZeRO-1 checkpoint " \
+                "please set 'legacy_stage1': true in your zero config json. This old version of " \
+                "stage 1 will be removed in v0.4.0."
+
+            assert ckpt_version, f"Empty ds_version! {error_str}"
+            assert required_version <= pkg_version.parse(ckpt_version), f"Old version: {ckpt_version} {error_str}"
 
         if load_optimizer_states:
             self._restore_base_optimizer_state(state_dict_list)

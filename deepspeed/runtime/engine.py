@@ -44,6 +44,7 @@ from .utils import ensure_directory_exists
 from ..ops.op_builder import UtilsBuilder
 from ..ops.adam import DeepSpeedCPUAdam
 from ..ops.adam import FusedAdam
+from ..git_version_info import version
 
 from deepspeed.profiling.flops_profiler.profiler import FlopsProfiler
 
@@ -147,6 +148,8 @@ class DeepSpeedEngine(Module):
 
         # Configure distributed model
         self._configure_distributed_model(model)
+
+        self.pipeline_parallelism = isinstance(self.module, PipelineModule)
 
         see_memory_usage(f"DeepSpeed Engine: After configure distributed model")
 
@@ -389,6 +392,12 @@ class DeepSpeedEngine(Module):
 
     def zero_ignore_unused_parameters(self):
         return self._config.zero_config.ignore_unused_parameters
+
+    def zero_grad_hooks(self):
+        return self._config.zero_config.grad_hooks
+
+    def zero_legacy_stage1(self):
+        return self._config.zero_config.legacy_stage1
 
     def fp16_enabled(self):
         return self._config.fp16_enabled
@@ -780,7 +789,8 @@ class DeepSpeedEngine(Module):
         assert not self.allreduce_always_fp32(), "ZeRO does not support 'fp32_allreduce': true"
         timers = self.timers if self.wall_clock_breakdown() else None
 
-        if zero_stage == ZERO_OPTIMIZATION_OPTIMIZER_STATES:
+        if self.zero_legacy_stage1(
+        ) and zero_stage == ZERO_OPTIMIZATION_OPTIMIZER_STATES:
             optimizer = FP16_DeepSpeedZeroOptimizer_Stage1(
                 optimizer,
                 static_loss_scale=self.loss_scale(),
@@ -792,8 +802,19 @@ class DeepSpeedEngine(Module):
                 max_elements_per_comm=self.zero_reduce_bucket_size(),
                 dp_process_group=self.data_parallel_group,
                 elastic_checkpoint=self.zero_elastic_checkpoint(),
-                mpu=self.mpu)
-        elif zero_stage == ZERO_OPTIMIZATION_GRADIENTS:
+                mpu=self.mpu,
+                postscale_gradients=self.postscale_gradients(),
+                gradient_predivide_factor=self.gradient_predivide_factor(),
+                gradient_predivide=self.gradient_predivide)
+        elif zero_stage <= ZERO_OPTIMIZATION_GRADIENTS:
+            overlap_comm = self.zero_overlap_comm()
+            if isinstance(self.module, PipelineModule):
+                if overlap_comm:
+                    logger.warning(
+                        "Pipeline parallelism does not support overlapped communication, will be disabled."
+                    )
+                    overlap_comm = False
+
             optimizer = FP16_DeepSpeedZeroOptimizer(
                 optimizer,
                 timers=timers,
@@ -806,13 +827,14 @@ class DeepSpeedEngine(Module):
                 allgather_bucket_size=self.zero_allgather_bucket_size(),
                 dp_process_group=self.data_parallel_group,
                 reduce_scatter=self.zero_reduce_scatter(),
-                overlap_comm=self.zero_overlap_comm(),
+                overlap_comm=overlap_comm,
                 cpu_offload=self.zero_cpu_offload(),
                 mpu=self.mpu,
                 postscale_gradients=self.postscale_gradients(),
                 gradient_predivide_factor=self.gradient_predivide_factor(),
                 gradient_accumulation_steps=self.gradient_accumulation_steps(),
-                ignore_unused_parameters=self.zero_ignore_unused_parameters())
+                ignore_unused_parameters=self.zero_ignore_unused_parameters(),
+                partition_grads=zero_stage == ZERO_OPTIMIZATION_GRADIENTS)
         elif zero_stage == ZERO_OPTIMIZATION_WEIGHTS:
             print("Initializing ZeRO Stage 3") if dist.get_rank() == 0 else None
             from deepspeed.runtime.zero.stage3 import FP16_DeepSpeedZeroOptimizer_Stage3
@@ -999,18 +1021,15 @@ class DeepSpeedEngine(Module):
         return loss
 
     def allreduce_gradients(self, bucket_size=MEMORY_OPT_ALLREDUCE_SIZE):
-        #Zero stage 2 communicates during non gradient accumulation boundaries as well
+        # ZeRO stage 2 communicates during non gradient accumulation boundaries as well
         if self.zero_optimization_partition_gradients():
             self.optimizer.overlapping_partition_gradients_reduce_epilogue()
 
-        #Communicate only at gradient accumulation boundaries
+        # Communicate only at gradient accumulation boundaries
         elif self.is_gradient_accumulation_boundary():
-            if self.zero_optimization_stage(
-            ) == ZERO_OPTIMIZATION_OPTIMIZER_STATES and self.zero_reduce_scatter():
-                self.optimizer.reduce_scatter_gradients(
-                    postscale_gradients=self.postscale_gradients(),
-                    gradient_predivide_factor=self.gradient_predivide_factor(),
-                    gradient_average=self.gradient_average)
+            if self.zero_optimization_stage() == ZERO_OPTIMIZATION_OPTIMIZER_STATES:
+                self.optimizer.reduce_gradients(
+                    pipeline_parallel=self.pipeline_parallelism)
             else:
                 self.buffered_allreduce_fallback(elements_per_buffer=bucket_size)
 
@@ -1731,19 +1750,19 @@ class DeepSpeedEngine(Module):
         # then instead just returns None.
         self._curr_ckpt_path = os.path.join(save_dir, tag)
 
-        state = dict(
-            module=self.module_state_dict(),
-            optimizer=self.optimizer.state_dict()
-            if self.optimizer and not self.zero_optimization() else None,
-            lr_scheduler=self.lr_scheduler.state_dict()
-            if self.lr_scheduler is not None else None,
-            csr_tensor_module_names=self.csr_tensor_module_names,
-            skipped_steps=self.skipped_steps,
-            global_steps=self.global_steps,
-            global_samples=self.global_samples,
-            dp_world_size=self.dp_world_size,
-            mp_world_size=self.mp_world_size,
-        )
+        state = dict(module=self.module_state_dict(),
+                     optimizer=self.optimizer.state_dict()
+                     if self.optimizer and not self.zero_optimization() else None,
+                     lr_scheduler=self.lr_scheduler.state_dict()
+                     if self.lr_scheduler is not None else None,
+                     csr_tensor_module_names=self.csr_tensor_module_names,
+                     skipped_steps=self.skipped_steps,
+                     global_steps=self.global_steps,
+                     global_samples=self.global_samples,
+                     dp_world_size=self.dp_world_size,
+                     mp_world_size=self.mp_world_size,
+                     ds_config=self.config,
+                     ds_version=version)
         state.update(client_state)
 
         log_dist(message=f'Saving model checkpoint: {save_path}', ranks=[0])
@@ -1771,10 +1790,10 @@ class DeepSpeedEngine(Module):
 
     def _save_zero_checkpoint(self, save_path, tag):
         zero_checkpoint_name = self._get_zero_ckpt_name(save_path, tag)
-        zero_sd = dict(
-            optimizer_state_dict=self.optimizer.state_dict(),
-            param_shapes=self._get_param_shapes(),
-        )
+        zero_sd = dict(optimizer_state_dict=self.optimizer.state_dict(),
+                       param_shapes=self._get_param_shapes(),
+                       ds_config=self.config,
+                       ds_version=version)
         torch.save(zero_sd, zero_checkpoint_name)
         self._copy_recovery_script(save_path)
         logger.info('zero checkpoint saved {}'.format(zero_checkpoint_name))

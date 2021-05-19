@@ -352,6 +352,11 @@ Enabling and configuring ZeRO memory optimizations
 | --------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------- |
 | Copies the gradients to a contiguous buffer as they are produced. Avoids memory fragmentation during backward pass. Only useful when running very large models. | `False` |
 
+<i>**grad_hooks**</i>: [boolean]
+
+| Description                                                                                                                                | Default |
+| ------------------------------------------------------------------------------------------------------------------------------------------ | ------- |
+| For use with ZeRO stage 1, enable backward hooks to reduce gradients during the backward pass or wait until the end of the backward pass.  | `True`  |  
 
 ***offload_param***: [dictionary]
 

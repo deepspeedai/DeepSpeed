@@ -77,7 +77,10 @@ class FP16_DeepSpeedZeroOptimizer_Stage1(object):
                  allgather_size=500000000,
                  clip_grad=0.0,
                  max_elements_per_comm=5e8,
-                 elastic_checkpoint=True):
+                 elastic_checkpoint=True,
+                 postscale_gradients=True,
+                 gradient_predivide_factor=1.0,
+                 gradient_average=True):
 
         # Load pre-built or JIT compile (un)flatten ops
         util_ops = UtilsBuilder().load()
@@ -97,6 +100,10 @@ class FP16_DeepSpeedZeroOptimizer_Stage1(object):
 
         self.verbose = verbose
         self.dp_process_group = dp_process_group
+
+        self.postscale_gradients = postscale_gradients
+        self.gradient_predivide_factor = gradient_predivide_factor
+        self.gradient_average = gradient_average
 
         # TODO: automatically turn off if #params > some_limit
         self.all_gather_partitions = all_gather_partitions
@@ -575,10 +582,11 @@ class FP16_DeepSpeedZeroOptimizer_Stage1(object):
         flat_tensors = self.flatten(aligned_tensor_list)
         return flat_tensors
 
-    def reduce_scatter_gradients(self,
-                                 postscale_gradients,
-                                 gradient_predivide_factor,
-                                 gradient_average):
+    def reduce_gradients(self, pipeline_parallel=False):
+        postscale_gradients = self.postscale_gradients
+        gradient_predivide_factor = self.gradient_predivide_factor
+        gradient_average = self.gradient_average
+
         world_size = dist.get_world_size(group=self.dp_process_group)
         local_rank = dist.get_rank(group=self.dp_process_group)
 

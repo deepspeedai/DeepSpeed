@@ -226,9 +226,8 @@ class PipelineEngine(DeepSpeedEngine):
 
     def _exec_reduce_grads(self):
         self._force_grad_boundary = True
-        if self.is_data_parallel and self.pipeline_enable_backward_allreduce:
-            self.buffered_allreduce_fallback(
-                elements_per_buffer=MEMORY_OPT_ALLREDUCE_SIZE)
+        if self.pipeline_enable_backward_allreduce:
+            self.allreduce_gradients(bucket_size=MEMORY_OPT_ALLREDUCE_SIZE)
         self._force_grad_boundary = False
 
     def _reserve_pipe_buffers(self, num_buffers):
