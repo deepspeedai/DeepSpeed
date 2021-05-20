@@ -1024,9 +1024,9 @@ class FP16_DeepSpeedZeroOptimizer_Stage3(object):
                 print_rank_0(
                     f"Swapping in {param.ds_id} with partition size {param.ds_tensor.ds_numel} permanently to CPU"
                 )
-                param.nvme_swapper.swap_in([param],
-                                           swap_in_buffers=[dest],
-                                           async_op=False)
+                param.nvme_swapper.swap_into_buffer(param, dest)
+                src.data = dest.data
+                src.status = PartitionedParamStatus.AVAILABLE
             else:
                 assert src.status == PartitionedParamStatus.AVAILABLE, "Partitioned Parm must be avialable here"
                 if not avoid_copy:

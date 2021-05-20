@@ -274,6 +274,17 @@ class AsyncPartitionedParameterSwapper(object):
             assert force_buffer_release, "Should not release preallocated buffers without completing the swap out. Set force_buffer_release to True to do it anyways"
         self._swap_out(params, async_op=async_op)
 
+    # book keeping function for inflight swap in
+    def _update_inflight_swap_in(self, params, swap_in_buffers, inflight_numel):
+        self.inflight_params.extend(params)
+        self.inflight_swap_in_buffers.extend(swap_in_buffers)
+        self.inflight_numel += inflight_numel
+
+        for param in params:
+            param.ds_tensor.status = PartitionedParamStatus.INFLIGHT
+
+        self.pending_reads += len(params)
+
     #assigns an in memory buffer and swaps in from nvme
     def swap_in(self, params, async_op=True, swap_in_buffers=None):
 
@@ -294,20 +305,42 @@ class AsyncPartitionedParameterSwapper(object):
 
             assert len(swap_in_paths) <= len(self.available_buffer_ids), f"Not enough buffers {len(self.available_buffer_ids)} for swapping {len(swap_in_paths)}"
             compute_buffers, swap_in_buffers = self._allocate_and_return_buffers_for_swap_in(params)
+            inflight_numel = sum([t.numel() for t in compute_buffers])
+        else:
+            inflight_numel = sum([t.numel() for t in swap_in_buffers])
 
         swap_in_tensors(self.aio_read_handle, swap_in_buffers, swap_in_paths)
 
-        self.inflight_params.extend(params)
-        self.inflight_swap_in_buffers.extend(swap_in_buffers)
-        self.inflight_numel += sum([t.numel() for t in compute_buffers])
-
-        for param in params:
-            param.ds_tensor.status = PartitionedParamStatus.INFLIGHT
-
-        self.pending_reads += len(params)
+        self._update_inflight_swap_in(params, swap_in_buffers, inflight_numel)
 
         if not async_op:
             self.synchronize_reads()
+
+    # Enables swapping into buffer that is out the control of swapper. This is always synchronous
+    def swap_into_buffer(self, param, dest_buffer):
+        assert param.ds_tensor.status == PartitionedParamStatus.NOT_AVAILABLE, f"param {param.ds_id} is already available or inflight"
+
+        require_swap_buffer = not (dest_buffer.is_pinned()
+                                   and self._is_io_aligned(dest_buffer.numel()))
+
+        if require_swap_buffer:
+            assert len(self.available_buffer_ids) > 0, f"No buffer available to swap param {param.ds_id}."
+            compute_buffers, swap_in_buffers = self._allocate_and_return_buffers_for_swap_in([param])
+            inflight_numel = compute_buffers[0].numel()
+        else:
+            swap_in_buffers = [dest_buffer]
+            inflight_numel = dest_buffer.numel()
+
+        swap_in_paths = self._get_swap_paths([param])
+
+        swap_in_tensors(self.aio_read_handle, swap_in_buffers, swap_in_paths)
+        self._update_inflight_swap_in([param], swap_in_buffers, inflight_numel)
+        self.synchronize_reads()
+
+        if require_swap_buffer:
+            dest_buffer.data.copy_(param.ds_tensor.data)
+            # Release swap buffer memory assignment. Note, this will mark the parameter not available.
+            self.remove_partition_and_release_buffers([param])
 
     #assign a buffer to a param and return the buffer
     def get_buffer(self, param, numel):
@@ -350,6 +383,9 @@ class AsyncPartitionedParameterSwapper(object):
     def _io_aligned_numel(self, numel):
         remainder = numel % self.numel_alignment
         return numel if remainder == 0 else (numel + self.numel_alignment - remainder)
+
+    def _is_io_aligned(self, numel):
+        return (numel % self.numel_alignment) == 0
 
     def reserve_partitioned_swap_space(self, partition_num_elems):
         aligned_numel = sum(
