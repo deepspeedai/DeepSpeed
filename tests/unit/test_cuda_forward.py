@@ -258,7 +258,7 @@ def test_forward(batch_size,
     ds_config.initializer_range = 0.02
     ds_config.fp16 = use_fp16
 
-    run_forward(ds_config, seq_len, atol=2e-2)
+    run_forward(ds_config, seq_len, atol=3e-2)
 
 
 @pytest.mark.parametrize('batch_size, small_bsz, hidden_size, seq_len, heads, num_layers, is_preln, use_fp16',
@@ -294,7 +294,7 @@ def test_forward_with_small_bsz(batch_size,
     ds_config.initializer_range = 0.02
     ds_config.fp16 = use_fp16
 
-    run_forward(ds_config, seq_len, atol=2e-2, test_bsz=small_bsz)
+    run_forward(ds_config, seq_len, atol=3e-2, test_bsz=small_bsz)
 
 @pytest.mark.parametrize('batch_size, hidden_size, seq_len, heads, num_layers, is_preln, use_fp16',
                          [

@@ -22,7 +22,8 @@ class FusedAdamBuilder(CUDAOpBuilder):
         return ['csrc/includes']
 
     def cxx_args(self):
-        return ['-O3'] + self.version_dependent_macros()
+        args = super().cxx_args()
+        return args + self.version_dependent_macros()
 
     def nvcc_args(self):
         return ['-lineinfo',

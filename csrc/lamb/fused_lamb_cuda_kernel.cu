@@ -30,8 +30,10 @@ struct SharedMemory {
     // Ensure that we won't compile any un-specialized types
     __device__ inline operator T*()
     {
+#ifndef _WIN32
         extern __device__ void error(void);
         error();
+#endif
         return NULL;
     }
 };
@@ -281,13 +283,13 @@ __global__ void lamb_cuda_kernel_part3(
 
     float lamb_coeff = 1.0;
 
-    if (reg_w != 0 and reg_u != 0) {
+    if (reg_w != 0 && reg_u != 0) {
         lamb_coeff = reg_w / reg_u;
         if (lamb_coeff > max_coeff) { lamb_coeff = max_coeff; }
         if (lamb_coeff < min_coeff) { lamb_coeff = min_coeff; }
     }
 
-    if (blockId == 0 and threadIdInBlock == 0) {
+    if (blockId == 0 && threadIdInBlock == 0) {
         lamb_coeff_val[0] = lamb_coeff;
         // printf("Cuda Lamb Coeff is %.6f \n",lamb_coeff);
     }

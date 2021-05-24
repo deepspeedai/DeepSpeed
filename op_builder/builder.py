@@ -2,6 +2,7 @@
 Copyright 2020 The Microsoft DeepSpeed Team
 """
 import os
+import sys
 import time
 import torch
 import importlib
@@ -334,7 +335,20 @@ class CUDAOpBuilder(OpBuilder):
         return CUDAExtension(name=self.absolute_name(),
                              sources=self.sources(),
                              include_dirs=self.include_paths(),
+                             libraries=self.libraries_args(),
                              extra_compile_args={
                                  'cxx': self.cxx_args(),
                                  'nvcc': self.nvcc_args()
                              })
+
+    def cxx_args(self):
+        if sys.platform == "win32":
+            return ['-O2']
+        else:
+            return ['-O3', '-std=c++14', '-g', '-Wno-reorder']
+
+    def libraries_args(self):
+        if sys.platform == "win32":
+            return ['cublas', 'curand']
+        else:
+            return []

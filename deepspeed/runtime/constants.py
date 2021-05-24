@@ -288,6 +288,48 @@ TENSORBOARD_JOB_NAME = "job_name"
 TENSORBOARD_JOB_NAME_DEFAULT = "DeepSpeedJobName"
 
 #########################################
+# Eigenvalue
+#########################################
+# Eigenvalue computation. By default, this feature is not enabled.
+# Users can configure in ds_config.json as below example:
+EIGENVALUE_FORMAT = '''
+Tensorboard can be specified as:
+"eigenvalue": {
+  "enabled": true,
+  "verbose": true,
+  "max_iter": 100,
+  "tol": 1e-2,
+  "stability": 1e-6
+}
+'''
+EIGENVALUE = "eigenvalue"
+
+# Tensorboard enable signal
+EIGENVALUE_ENABLED = "enabled"
+EIGENVALUE_ENABLED_DEFAULT = False
+
+EIGENVALUE_VERBOSE = "verbose"
+EIGENVALUE_VERBOSE_DEFAULT = False
+
+EIGENVALUE_MAX_ITER = "max_iter"
+EIGENVALUE_MAX_ITER_DEFAULT = 100
+
+EIGENVALUE_TOL = "tol"
+EIGENVALUE_TOL_DEFAULT = 1e-2
+
+EIGENVALUE_STABILITY = "stability"
+EIGENVALUE_STABILITY_DEFAULT = 1e-6
+
+EIGENVALUE_GAS_BOUNDARY_RESOLUTION = "gas_boundary_resolution"
+EIGENVALUE_GAS_BOUNDARY_RESOLUTION_DEFAULT = 1
+
+EIGENVALUE_LAYER_NAME = "layer_name"
+EIGENVALUE_LAYER_NAME_DEFAULT = "bert.encoder.layer"
+
+EIGENVALUE_LAYER_NUM = "layer_num"
+EIGENVALUE_LAYER_NUM_DEFAULT = 0
+
+#########################################
 # Progressive Layer Drop (PLD)
 #########################################
 PROGRESSIVE_LAYER_DROP = "progressive_layer_drop"
@@ -324,3 +366,41 @@ CHECKPOINT_TAG_VALIDATION_MODES = [
     ValidationMode.IGNORE,
     ValidationMode.FAIL
 ]
+
+#########################################
+# Quantization
+#########################################
+QUANTIZE_TRAINING = "quantize_training"
+QUANTIZE_BITS = "quantize_bits"
+START_BITS = "start_bits"
+TARGET_BITS = "target_bits"
+QUANTIZER_KERNEL = "quantizer_kernel"
+QUANTIZE_SCHEDULE = "quantize_schedule"
+QUANTIZE_PERIOD = "quantize_period"
+SCHEDULE_OFFSET = "schedule_offset"
+QUANTIZE_GROUPS = "quantize_groups"
+FP16_MIXED_QUANTIZE = "fp16_mixed_quantize"
+QUANTIZE_CHANGE_RATIO = "quantize_change_ratio"
+FP16_MIXED_QUANTIZE_ENABLED = "enabled"
+QUANTIZE_VERBOSE = "quantize_verbose"
+QUANTIZE_ALGO = "quantize_algo"
+QUANTIZE_TYPE = "q_type"
+QUANTIZE_SYMMETRIC = "symmetric"
+QUANTIZE_ASYMMETRIC = "asymmetric"
+STOCHASTIC_ROUNDING = "stochastic"
+NEAREST_ROUNDING = "nearest"
+QUANTIZE_ROUNDING = "rounding"
+QUANTIZE_TRAINING_ENABLED = "enabled"
+QUANTIZE_TRAINING_ENABLED_DEFAULT = False
+QUANTIZE_TRAINING_DEFAULT = False
+QUANTIZE_START_BITS_DEFAULT = 16
+QUANTIZE_TARGET_BITS_DEFAULT = 8
+QUANTIZER_KERNEL_DEFAULT = False
+QUANTIZE_PERIOD_DEFAULT = 1000
+QUANTIZE_OFFSET_DEFAULT = 1000
+QUANTIZE_GROUPS_DEFAULT = 1
+QUANTIZE_TYPE_DEFAULT = 0  #symmetric
+QUANTIZE_ROUNDING_DEFAULT = 0  #nearest
+FP16_MIXED_QUANTIZE_ENABLED_DEFAULT = False
+QUANTIZE_CHANGE_RATIO_DEFAULT = 0.001
+QUANTIZE_VERBOSE_DEFAULT = False

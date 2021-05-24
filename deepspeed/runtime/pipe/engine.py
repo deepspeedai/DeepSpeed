@@ -17,6 +17,7 @@ import torch.distributed as dist
 from deepspeed.utils.logging import logger
 from deepspeed.utils.timer import SynchronizedWallClockTimer, ThroughputTimer
 
+from deepspeed.inference.engine import InferenceEngine
 from ..engine import DeepSpeedEngine, MEMORY_OPT_ALLREDUCE_SIZE
 from ..utils import PartitionedTensor, ensure_directory_exists
 from ..dataloader import RepeatingLoader
@@ -279,6 +280,7 @@ class PipelineEngine(DeepSpeedEngine):
 
         self.module.train()
         self.total_loss = None
+        self._compute_loss = True
 
         # Do the work
         self.timers('train_batch').start()
@@ -287,6 +289,7 @@ class PipelineEngine(DeepSpeedEngine):
                                        stage_id=self.stage_id)
         self._exec_schedule(sched)
         self.agg_train_loss = self._aggregate_total_loss()
+
         self.timers('train_batch').stop()
 
         if self.global_steps % self.steps_per_print() == 0:
@@ -322,7 +325,7 @@ class PipelineEngine(DeepSpeedEngine):
         # TODO: should return precisely what loss returned and allow others to be queried?
         return self.agg_train_loss
 
-    def eval_batch(self, data_iter):
+    def eval_batch(self, data_iter, compute_loss=True, reduce_output='avg'):
         """Evaluate the pipeline on a batch of data from ``data_iter``. The
         engine will evaluate ``self.train_batch_size()`` total samples
         collectively across all workers.
@@ -351,7 +354,10 @@ class PipelineEngine(DeepSpeedEngine):
         """
 
         self.module.eval()
-        self.total_loss = None
+
+        eval_output = None
+
+        self._compute_loss = compute_loss
 
         # Use the provided data iterator
         train_iterator = self.data_iterator
@@ -364,11 +370,16 @@ class PipelineEngine(DeepSpeedEngine):
         with torch.no_grad():
             self._exec_schedule(sched)
 
-        self.agg_eval_loss = self._aggregate_total_loss()
+        if self.is_last_stage():
+            eval_output = self._reduce_outputs(self.fwd_outputs, reduce=reduce_output)
+
+        if compute_loss:
+            eval_output = self._bcast_pipe_scalar(eval_output)
+
         if self.tensorboard_enabled():
             if self.global_rank == 0:
                 self.summary_events = [(f'Train/Samples/eval_loss',
-                                        self.agg_eval_loss.mean().item(),
+                                        eval_output.mean().item(),
                                         self.global_samples)]
                 for event in self.summary_events:  # write_summary_events
                     self.summary_writer.add_scalar(event[0], event[1], event[2])
@@ -380,7 +391,7 @@ class PipelineEngine(DeepSpeedEngine):
         # Reset any buffers that may have been populated during the forward passes.
         #ds_checkpointing.reset()
 
-        return self.agg_eval_loss
+        return eval_output
 
     def is_first_stage(self):
         """True if this process is in the first stage in the pipeline."""
@@ -390,10 +401,59 @@ class PipelineEngine(DeepSpeedEngine):
         """True if this process is in the last stage in the pipeline."""
         return self.stage_id == self.num_stages - 1
 
+    def _reduce_outputs(self, outputs, reduce='avg', reduce_dp=True):
+        if reduce is None:
+            return outputs
+
+        if reduce.lower() == 'avg':
+            # first sum over all microbatches
+            if torch.is_tensor(outputs[0]):
+                reduced = sum(outputs)
+            else:
+                assert isinstance(outputs, (list, tuple))
+                reduced = [torch.zeros_like(o) for o in outputs[0]]
+                for idx, out in outputs:
+                    reduced[idx] += out
+
+            # Average over the microbatches
+            reduced = self._scale_loss_by_gas(reduced)
+
+            # Average over DP groups
+            if reduce_dp and self.is_data_parallel:
+                if torch.is_tensor(reduced):
+                    dist.all_reduce(reduced, group=self.mpu.get_data_parallel_group())
+                    reduced /= self.dp_world_size
+                else:
+                    for idx in range(len(reduced)):
+                        dist.all_reduce(reduced[idx],
+                                        group=self.mpu.get_data_parallel_group())
+                        reduced[idx] /= self.dp_world_size
+
+            return reduced
+        else:
+            raise NotImplementedError(f'reduction type {reduce} not supported.')
+
+    def _bcast_pipe_scalar(self, data, src_rank=None, dtype=torch.float32):
+        # Default to last stage (e.g., for broadcasting loss)
+        if src_rank is None:
+            src_rank = self.grid.stage_to_global(self.num_stages - 1)
+        assert src_rank in self.grid.pp_group
+
+        if self.global_rank == src_rank:
+            result = data.clone().detach()
+        else:
+            result = torch.Tensor([0.]).type(dtype).to(self.device)
+
+        dist.broadcast(tensor=result,
+                       src=src_rank,
+                       group=self.mpu.get_pipe_parallel_group())
+
+        return result
+
     def _aggregate_total_loss(self):
         # Scale loss, average among DP ranks, and bcast loss to the rest of my DP group
         if self.is_last_stage():
-            loss = self._scale_loss(self.total_loss)
+            loss = self._scale_loss_by_gas(self.total_loss)
             self.dp_group_loss = loss.clone().detach()
 
             ## Average loss across all data-parallel groups
@@ -466,20 +526,12 @@ class PipelineEngine(DeepSpeedEngine):
             print(*msg)
 
     def _next_batch(self):
-        if self.is_model_parallel:
-            mp_rank = self.grid.get_slice_parallel_rank()
-        else:
-            mp_rank = 0
-
+        # If using 3D parallelism, only some first-stage ranks may do IO
         batch = None
-
-        # Only MP rank 0 loads the data.
-        if mp_rank == 0:
-            if self.data_iterator is None:
-                raise ValueError(f"RANK={self.global_rank} no data iterator provided.")
+        if self.data_iterator is not None:
             batch = next(self.data_iterator)
 
-        # All MP ranks participate in batch_fn, where they might broadcast the data.
+        # Any post-processing, like broadcasting across a slice-parallel group.
         if self.batch_fn:
             batch = self.batch_fn(batch)
 
@@ -529,7 +581,7 @@ class PipelineEngine(DeepSpeedEngine):
 
         # Optionally compute loss on the last device
         if self.is_last_stage():
-            if self.loss_model is not None:
+            if self._compute_loss and self.loss_model is not None:
                 labels = self.pipe_buffers['labels'][buffer_id]
                 self.loss = self.loss_model(outputs, labels)
             else:
@@ -537,10 +589,14 @@ class PipelineEngine(DeepSpeedEngine):
                 self.loss = outputs
 
             if isinstance(self.loss, torch.Tensor):
+                self.fwd_outputs.append(self.loss.detach())
+
                 if self.total_loss is None:
                     self.total_loss = torch.zeros_like(self.loss)
                 self.total_loss += self.loss.detach()
             else:
+                self.fwd_outputs.append([l.detach() for l in self.loss])
+
                 if self.total_loss is None:
                     self.total_loss = [torch.zeros_like(l) for l in self.loss]
                 for idx, l in enumerate(self.loss):
@@ -1151,7 +1207,10 @@ class PipelineEngine(DeepSpeedEngine):
     }
 
     def _exec_schedule(self, pipe_schedule):
+        # Reserve and reset buffers.
         self._reserve_pipe_buffers(pipe_schedule.num_pipe_buffers())
+        self.fwd_outputs = []
+
         # For each step in the schedule
         for step_cmds in pipe_schedule:
             # For each instruction in the step

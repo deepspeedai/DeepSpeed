@@ -1,0 +1,49 @@
+{
+  "train_batch_size": 24,
+  "train_micro_batch_size_per_gpu": 3,
+  "steps_per_print": 1,
+  "optimizer": {
+    "type": "Adam",
+    "params": {
+      "lr": 3e-5,
+      "weight_decay": 0.0,
+      "bias_correction": false
+    }
+  },
+  "gradient_clipping": 1.0,
+  "fp16": {
+    "enabled": true
+  },
+  "tensorboard": {
+    "enabled": true,
+    "output_path": "/tmp/eigenvalue_quantize_output",
+    "job_name": "eigenvalue_quantize"
+  },
+  "eigenvalue": {
+      "enabled": true,
+      "verbose": true,
+      "max_iter": 50,
+      "tol": 1e-2,
+      "stability": 0,
+      "gas_boundary_resolution": 1,
+      "model_name": "bert-large"
+  },
+  "quantize_training": {
+    "quantize_bits": {
+      "start_bits": 12,
+      "target_bits": 4
+    },
+    "quantize_type": "symmetric",
+    "quantize_schedule": {
+      "quantize_period": 400,
+      "schedule_offset": 400
+    },
+    "quantize_groups": 16,
+    "fp16_mixed_quantize": {
+      "enabled": true,
+      "quantize_change_ratio": 0.001
+    },
+    "quantize_verbose": true,
+    "quantize_eigenvalue": true
+  }
+}

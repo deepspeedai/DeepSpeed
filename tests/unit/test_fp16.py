@@ -232,7 +232,7 @@ def test_adamw_fp16_empty_grad(tmpdir):
     args = args_from_dict(tmpdir, config_dict)
     hidden_dim = 10
 
-    model = SimpleModel(hidden_dim, empty_grad=True)
+    model = SimpleModel(hidden_dim)
 
     @distributed_test(world_size=[1])
     def _test_adamw_fp16_empty_grad(args, model, hidden_dim):

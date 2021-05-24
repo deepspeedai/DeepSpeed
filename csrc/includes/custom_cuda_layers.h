@@ -24,6 +24,32 @@
 
 #define MAX_REGISTERS 256
 
+#define MAX_REG 256
+
+template <typename T>
+void launch_qunatize_kernel(T* vals,
+                            int total_count,
+                            int group_num,
+                            int num_bits,
+                            cudaStream_t stream);
+template <typename T>
+void launch_sr_qunatize_kernel(T* vals,
+                               int total_count,
+                               int group_num,
+                               int num_bits,
+                               cudaStream_t stream);
+template <typename T>
+void launch_qunatize_kernel_asym(T* vals,
+                                 int total_count,
+                                 int group_num,
+                                 int num_bits,
+                                 cudaStream_t stream);
+template <typename T>
+void launch_sr_qunatize_kernel_asym(T* vals,
+                                    int total_count,
+                                    int group_num,
+                                    int num_bits,
+                                    cudaStream_t stream);
 // Fused bias add with gelu activation
 template <typename T>
 void launch_bias_gelu(const T* input,

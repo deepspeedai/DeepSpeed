@@ -2,6 +2,7 @@
 Copyright 2020 The Microsoft DeepSpeed Team
 """
 import os
+import sys
 import torch
 import subprocess
 from .builder import CUDAOpBuilder
@@ -13,6 +14,10 @@ class CPUAdamBuilder(CUDAOpBuilder):
 
     def __init__(self):
         super().__init__(name=self.NAME)
+
+    def is_compatible(self):
+        # Disable on Windows.
+        return sys.platform != "win32"
 
     def absolute_name(self):
         return f'deepspeed.ops.adam.{self.NAME}_op'

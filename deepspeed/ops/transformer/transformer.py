@@ -174,11 +174,6 @@ class DeepSpeedTransformerFunction(Function):
                 norm_b,
                 config):
 
-        bsz = input.shape[0]
-
-        if bsz > config.batch_size:
-            raise ValueError('Input batch size exceeds the limit.')
-
         cuda_module = stochastic_transformer_cuda_module if config.stochastic_mode else transformer_cuda_module
         forward_func = cuda_module.forward_fp16 if config.fp16 else cuda_module.forward_fp32
 
@@ -335,9 +330,6 @@ class DeepSpeedTransformerFunction(Function):
         if grad_output_shape[1] % 16 != 0:
             grad_output = torch.cat((grad_output, torch.zeros((bsz, (16 - (grad_output_shape[1] % 16)), \
                                         grad_output_shape[2]), device=grad_output.device, dtype=grad_output.dtype)), 1)
-
-        if bsz > ctx.config.batch_size:
-            raise ValueError('grad_output batch size exceeds the limit.')
 
         assert ctx.config.training
 
@@ -526,7 +518,6 @@ class DeepSpeedTransformerLayer(nn.Module):
             #self.attn_qkvw[i * self.config.hidden_size:(i + 1) * self.config.hidden_size] = \
             #    initial_weights[i].clone()
             #torch.empty_like(initial_weights[i]).data.copy_(initial_weights[i].data)
-
             self.attn_qkvb = nn.Parameter(torch.Tensor(self.config.hidden_size * 3))
             self.attn_qkvb.data.zero_()
             self.attn_ow = initial_weights[3]
@@ -591,11 +582,12 @@ class DeepSpeedTransformerLayer(nn.Module):
                 hidden_states,
                 attention_mask=None,
                 head_mask=None,
+                layer_head_mask=None,
                 encoder_hidden_states=None,
                 encoder_attention_mask=None,
+                past_key_value=None,
                 output_attentions=False,
                 grads=None):
-        self.config.training = self.training
         self.config.is_grad_enabled = torch.is_grad_enabled()
         return DeepSpeedTransformerFunction.apply(hidden_states,
                                                   attention_mask,

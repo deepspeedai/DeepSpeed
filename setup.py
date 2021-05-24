@@ -3,12 +3,18 @@ Copyright 2020 The Microsoft DeepSpeed Team
 
 DeepSpeed library
 
-Create a new wheel via the following command: python setup.py bdist_wheel
+To build wheel on Windows:
+    1. Install pytorch, such as pytorch 1.8 + cuda 11.1
+    2. Install visual cpp build tool
+
+Create a new wheel via the following command:
+    python setup.py bdist_wheel
 
 The wheel will be located at: dist/*.whl
 """
 
 import os
+import sys
 import shutil
 import subprocess
 import warnings
@@ -69,14 +75,19 @@ if not torch.cuda.is_available():
 
 ext_modules = []
 
-# Default to pre-install kernels to false so we rely on JIT
-BUILD_OP_DEFAULT = int(os.environ.get('DS_BUILD_OPS', 0))
+# Default to pre-install kernels to false so we rely on JIT on Linux, opposite on Windows.
+BUILD_OP_PLATFORM = 1 if sys.platform == "win32" else 0
+BUILD_OP_DEFAULT = int(os.environ.get('DS_BUILD_OPS', BUILD_OP_PLATFORM))
 print(f"DS_BUILD_OPS={BUILD_OP_DEFAULT}")
 
 
 def command_exists(cmd):
-    result = subprocess.Popen(f'type {cmd}', stdout=subprocess.PIPE, shell=True)
-    return result.wait() == 0
+    if sys.platform == "win32":
+        result = subprocess.Popen(f'{cmd}', stdout=subprocess.PIPE, shell=True)
+        return result.wait() == 1
+    else:
+        result = subprocess.Popen(f'type {cmd}', stdout=subprocess.PIPE, shell=True)
+        return result.wait() == 0
 
 
 def op_enabled(op_name):
@@ -167,6 +178,18 @@ with open(os.path.join(thisdir, 'README.md'), encoding='utf-8') as fin:
 
 start_time = time.time()
 
+
+def list_files(dirs):
+    if sys.platform == "win32":
+        # Linux symbolic links doesn't work on Windows, generate the right paths on Windows.
+        for dst_dir, src_dir in dirs:
+            for root, dirs, files in os.walk(src_dir, topdown=False):
+                for name in files:
+                    yield (os.path.join(dst_dir, root), [os.path.join(root, name)])
+    else:
+        return []
+
+
 setup(name='deepspeed',
       version=version_str,
       description='DeepSpeed library',
@@ -192,6 +215,12 @@ setup(name='deepspeed',
           'Programming Language :: Python :: 3.6',
           'Programming Language :: Python :: 3.7',
           'Programming Language :: Python :: 3.8'
+      ],
+      data_files=[
+          f for f in list_files([('deepspeed/ops',
+                                  'op_builder'),
+                                 ('deepspeed/ops',
+                                  'csrc')])
       ],
       license='MIT',
       ext_modules=ext_modules,

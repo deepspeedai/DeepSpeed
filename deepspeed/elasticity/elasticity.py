@@ -6,6 +6,8 @@ import re
 import json
 import numpy as np
 
+from packaging import version as pkg_version
+
 from .config import ElasticityConfig, ElasticityConfigError, ElasticityError, \
     ElasticityIncompatibleWorldSize
 from .constants import ELASTICITY, ENABLED, ENABLED_DEFAULT, LATEST_ELASTICITY_VERSION, \
@@ -171,29 +173,13 @@ def _get_compatible_gpus_v01(micro_batches,
     return final_batch_size, valid_gpus
 
 
-def _parse_version(version_str):
-    '''Parse a version string and extract the major and minor versions (and possibly patch version).'''
-    matched = re.search('^(\d+)\.(\d+)\.(\d+)', version_str)
-    if matched:
-        return int(matched.group(1)), int(matched.group(2)), int(matched.group(3))
-    else:
-        matched = re.search('^(\d+)\.(\d+)', version_str)
-        assert matched != None, "Unable to parse version number, expecting" \
-            f"major.minor[.patch] format but received {version_str}"
-        return int(matched.group(1)), int(matched.group(2)), 0
-
-
 def _compatible_ds_version_check(target_deepspeed_version: str):
-    min_major, min_minor, min_patch = _parse_version(MINIMUM_DEEPSPEED_VERSION)
-    trg_major, trg_minor, trg_patch = _parse_version(target_deepspeed_version)
+    min_version = pkg_version.parse(MINIMUM_DEEPSPEED_VERSION)
+    target_version = pkg_version.parse(target_deepspeed_version)
 
     err_str = f"Target deepspeed version of {target_deepspeed_version} is not compatible " \
         f"with minimum version {MINIMUM_DEEPSPEED_VERSION} supporting elasticity."
-    if trg_major < min_major:
-        raise ElasticityError(err_str)
-    if trg_minor < min_minor:
-        raise ElasticityError(err_str)
-    if trg_patch < min_patch:
+    if target_version < min_version:
         raise ElasticityError(err_str)
     return True
 

@@ -4,9 +4,6 @@ name: Torch16
 
 # Controls when the action will run.
 on:
-  #pull_request:
-  #  paths-ignore:
-  #  - 'docs/**'
   # Allows you to run this workflow manually from the Actions tab
   workflow_dispatch:
 
@@ -37,6 +34,11 @@ jobs:
         run: |
           pip install .[dev]
           ds_report
+
+      - name: Formatting checks
+        run: |
+           pre-commit run --all-files
+
       # Runs a set of commands using the runners shell
       - name: Unit tests
         run: |

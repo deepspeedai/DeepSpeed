@@ -1,4 +1,5 @@
 import os
+import glob
 import enum
 
 import re as regex
@@ -14,6 +15,7 @@ from deepspeed.utils import logger
 from .. import utils as ds_utils
 from ..activation_checkpointing import checkpointing
 from .topology import PipeDataParallelTopology, PipelineParallelGrid
+from deepspeed.runtime.state_dict_factory import SDLoaderFactory
 
 
 class PipelineError(Exception):
@@ -443,10 +445,10 @@ class PipelineModule(nn.Module):
             # TODO: fiber to generate process groups.
             tied_stages = set(self.stage_owner(idx) for idx in tied_layers)
             for dp in range(self._grid.data_parallel_size):
-                for mp in range(self._grid.model_parallel_size):
+                for mp in range(self._grid.get_slice_parallel_world_size()):
                     tied_ranks = []
                     for s in sorted(tied_stages):
-                        if self._grid.model_parallel_size > 1:
+                        if self._grid.get_slice_parallel_world_size() > 1:
                             tied_ranks.append(
                                 self._grid.stage_to_global(stage_id=s,
                                                            data=dp,
@@ -538,6 +540,15 @@ class PipelineModule(nn.Module):
         layer_ckpt_path += '-model_states.pt'
         return layer_ckpt_path
 
+    def ckpt_layer_path_list(self, ckpt_dir, local_layer_idx):
+        """Get all ckpt file list for a specific pipeline module layer. """
+        idx = local_layer_idx + self._local_start
+        layer_ckpt_path = os.path.join(ckpt_dir, f'layer_{idx:02d}')
+        layer_ckpt_path += "*model_states.pt"
+        ckpt_files = glob.glob(layer_ckpt_path)
+        ckpt_files.sort()
+        return ckpt_files
+
     def save_state_dict(self, save_dir):
         if self._grid.data_parallel_id != 0:
             return
@@ -551,22 +562,24 @@ class PipelineModule(nn.Module):
             torch.save(layer.state_dict(), model_ckpt_path)
 
     def load_state_dir(self, load_dir, strict=True):
-        rank = dist.get_rank()
-
-        layer_offset = self._local_start
         for idx, layer in enumerate(self.forward_funcs):
             # Functions, etc. will not have state_dicts
             if not hasattr(layer, 'load_state_dict'):
                 continue
 
-            model_ckpt_path = self.ckpt_layer_path(load_dir, idx)
-            layer.load_state_dict(torch.load(model_ckpt_path,
-                                             map_location=lambda storage,
-                                             loc: storage),
-                                  strict=strict)
+            # get all checkpoint files for the layer.
+            model_ckpt_list = self.ckpt_layer_path_list(load_dir, idx)
+            mp_rank = self._grid.get_slice_parallel_rank()
+            mp_world_size = self._grid.get_slice_parallel_world_size()
+
+            sd_loader = SDLoaderFactory.get_sd_loader(model_ckpt_list, version=2.0)
+            load_path, checkpoint, _ = sd_loader.load(mp_world_size, mp_rank, module_key=None, is_pipe_parallel=True)
+
+            layer.load_state_dict(checkpoint)
+
             if self._grid.data_parallel_id == 0:
                 logger.info(
-                    f'RANK={self.global_rank} Loaded layer={idx+layer_offset} file={model_ckpt_path}'
+                    f'RANK={self.global_rank} Loaded layer={idx+self._local_start} file={load_path}'
                 )
 
         self._synchronize_tied_weights()
