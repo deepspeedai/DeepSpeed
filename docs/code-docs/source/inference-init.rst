@@ -1,6 +1,6 @@
 Inference Setup
 -----------------------
-The entrypoint for inference with DeepSpeed is ``deepspeed.init_inference()``. 
+The entrypoint for inference with DeepSpeed is ``deepspeed.init_inference()``.
 
 Example usage:
 
@@ -9,4 +9,3 @@ Example usage:
     engine = deepspeed.init_inference(model=net)
 
 .. autofunction:: deepspeed.init_inference
-

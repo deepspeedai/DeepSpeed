@@ -1,8 +1,8 @@
 Inference API
 ============
 
-:func:`deepspeed.init_inference` returns an *inference engine* 
-of type :class:`InferenceEngine`. 
+:func:`deepspeed.init_inference` returns an *inference engine*
+of type :class:`InferenceEngine`.
 
 .. code-block:: python
 
