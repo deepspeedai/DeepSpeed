@@ -8,6 +8,7 @@ Model Setup
    :maxdepth: 2
 
    initialize
+   inference-init
 
 Training API
 ------------
@@ -17,6 +18,13 @@ Training API
 
    training
 
+Inference API
+------------
+
+.. toctree::
+   :maxdepth: 2
+
+   inference-engine
 
 Checkpointing API
 -----------------
