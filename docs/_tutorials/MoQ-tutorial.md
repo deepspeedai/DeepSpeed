@@ -1,4 +1,3 @@
-
 ---
 title: "DeepSpeed Mixture-of-Quantization (MoQ)"
 ---

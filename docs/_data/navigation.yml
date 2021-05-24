@@ -74,10 +74,14 @@ lnav:
         url: /tutorials/flops-profiler/
       - title: "GAN"
         url: /tutorials/gan/
+      - title: "Inference"
+        url: /tutorials/inference-tutorial/
       - title: "Learning Rate Range Test"
         url: /tutorials/lrrt/
       - title: "Megatron-LM GPT2"
         url: /tutorials/megatron/
+      - title: "Mixture-of-Quantization"
+        url: /tutorials/MoQ-tutorial/
       - title: "One-Cycle Schedule"
         url: /tutorials/one-cycle/
       - title: "One-Bit Adam"
