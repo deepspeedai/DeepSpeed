@@ -201,7 +201,10 @@ class DeepSpeedSelfAttentionFunction(Function):
                                             dim=-2)
             if unfused_mode:
                 mixed_query = _transpose_for_scores(mixed_query, False, True)
-                key_layer1 = _transpose_for_scores(key_layer, True, True) / norm_factor
+                key_layer1 = _transpose_for_scores(
+                    key_layer,
+                    True,
+                    True) / (norm_factor if config.scale_attention else 1.0)
                 value_layer1 = _transpose_for_scores(value_layer, False, True)
 
             if layer_past is None:
@@ -219,10 +222,10 @@ class DeepSpeedSelfAttentionFunction(Function):
             else:
                 attn_key_value = score_context_func(
                     mixed_query,
-                    past_key.type_as(key_layer),
+                    (key_layer1 if unfused_mode else past_key.type_as(key_layer)),
                     (key_layer1 if unfused_mode else key_layer),
                     (input_mask if config.triangular_masking else input_mask.float()),
-                    past_value.type_as(value_layer),
+                    (value_layer1 if unfused_mode else past_value.type_as(value_layer)),
                     (value_layer1 if unfused_mode else value_layer),
                     num_attention_heads_per_partition,
                     (1 / norm_factor if config.scale_attention else 1.0),
