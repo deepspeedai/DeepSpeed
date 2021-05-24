@@ -41,16 +41,18 @@ class DSPolicy(ABC):
 
 
 class HFBertLayerPolicy(DSPolicy):
-    try:
-        import transformers
-        _orig_layer_class = transformers.models.bert.modeling_bert.BertLayer
-    except:
-        _orig_layer_class = None
+    _orig_layer_class = None
 
     def __init__(self, client_module, inference=False, preln=False):
         super().__init__(inference)
         self.client_module = client_module
         self.preln = preln
+        if HFBertLayerPolicy._orig_layer_class is None:
+            try:
+                import transformers
+                HFBertLayerPolicy._orig_layer_class = transformers.models.bert.modeling_bert.BertLayer
+            except:
+                HFBertLayerPolicy._orig_layer_class = None
 
     def get_hidden_heads(self):
         return self.client_module.attention.self.query.weight.data.shape[1], \
@@ -98,15 +100,16 @@ class HFBertLayerPolicy(DSPolicy):
 
 
 class HFGPTNEOLayerPolicy(DSPolicy):
-    try:
-        import transformers
-        _orig_layer_class = transformers.models.gpt_neo.modeling_gpt_neo.GPTNeoBlock
-    except:
-        _orig_layer_class = None
+    _orig_layer_class = None
 
     def __init__(self, client_module, inference=True):
         super().__init__(inference, scale_attention=False)
         self.client_module = client_module
+        try:
+            import transformers
+            HFGPTNEOLayerPolicy._orig_layer_class = transformers.models.gpt_neo.modeling_gpt_neo.GPTNeoBlock
+        except:
+            HFGPTNEOLayerPolicy._orig_layer_class = None
 
     def get_hidden_heads(self):
         return self.client_module.attn.attention.q_proj.weight.data.shape[1], \
@@ -141,11 +144,7 @@ class HFGPTNEOLayerPolicy(DSPolicy):
 
 
 class MegatronLayerPolicy(DSPolicy):
-    try:
-        import megatron
-        _orig_layer_class = megatron.model.ParallelTransformerLayer
-    except:
-        _orig_layer_class = None
+    _orig_layer_class = None
 
     def __init__(self, client_module, version=0, inference=True):
         super().__init__(inference)
@@ -153,6 +152,13 @@ class MegatronLayerPolicy(DSPolicy):
         # we use megatron version to differentiate between the old and new
         # megatron-lm source code
         self.version = version
+        if MegatronLayerPolicy._orig_layer_class is None:
+            try:
+                import megatron
+                from megatron.model.transformer import ParallelTransformerLayer
+                MegatronLayerPolicy._orig_layer_class = ParallelTransformerLayer
+            except ImportError:
+                MegatronLayerPolicy._orig_layer_class = None
 
     def get_hidden_heads(self):
         return self.client_module.attention.query_key_value.weight.data.shape[1], \
@@ -187,16 +193,17 @@ class MegatronLayerPolicy(DSPolicy):
 
 
 class HFGPT2LayerPolicy(DSPolicy):
-    try:
-        import transformers
-        _orig_layer_class = transformers.models.gpt2.modeling_gpt2.GPT2Block
-    except:
-        _orig_layer_class = None
+    _orig_layer_class = None
 
     def __init__(self, client_module, inference=True):
         # HuggingFace GPT2 uses convolutional layer instead of linear layer
         super().__init__(inference, linear_layer=False)
         self.client_module = client_module
+        try:
+            import transformers
+            HFGPT2LayerPolicy._orig_layer_class = transformers.models.gpt2.modeling_gpt2.GPT2Block
+        except ImportError:
+            HFGPT2LayerPolicy._orig_layer_class = None
 
     def get_hidden_heads(self):
         return self.client_module.attn.embed_dim, \

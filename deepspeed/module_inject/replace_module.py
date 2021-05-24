@@ -387,6 +387,9 @@ def replace_module(model, orig_class, replace_fn, _replace_policy):
         policy.update({orig_class: (replace_fn, _replace_policy)})
     else:
         for plcy in replace_policies:
+            # instantiate a throw-away policy in order to populate the _orig_layer_class
+            _ = plcy(None)
+            assert plcy._orig_layer_class != None
             policy.update({plcy._orig_layer_class: (replace_fn, plcy)})
 
     replaced_module, _ = _replace_module(model, policy)
