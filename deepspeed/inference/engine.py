@@ -168,9 +168,6 @@ class InferenceEngine(Module):
                                     strict=load_module_strict)
 
     def _convert_to_dtype(self):
-        assert self.dtype is not torch.int8, \
-            "This mode is not currently supported, we will add the support for quantized inference mode in the next few days."
-
         if self.dtype is torch.int8 and self.quantization_scales is None:
             quantizer = WeightQuantization(mlp_extra_grouping=self.mlp_extra_grouping)
             model, self.quantization_scales = quantizer.model_quantize(self.module,
