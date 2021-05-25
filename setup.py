@@ -6,6 +6,7 @@ DeepSpeed library
 To build wheel on Windows:
     1. Install pytorch, such as pytorch 1.8 + cuda 11.1
     2. Install visual cpp build tool
+    3. Launch cmd console with Administrator privilege for creating required symlink folders
 
 Create a new wheel via the following command:
     python setup.py bdist_wheel
@@ -131,6 +132,21 @@ else:
     git_hash = "unknown"
     git_branch = "unknown"
 
+
+def create_dir_symlink(src, dest):
+    if not os.path.islink(dest):
+        if os.path.exists(dest):
+            os.remove(dest)
+        assert not os.path.exists(dest)
+        os.symlink(src, dest)
+
+
+if sys.platform == "win32":
+    # This creates a symbolic links on Windows.
+    # It needs Administrator privilege to create symlinks on Windows.
+    create_dir_symlink('..\\..\\csrc', '.\\deepspeed\\ops\\csrc')
+    create_dir_symlink('..\\..\\op_builder', '.\\deepspeed\\ops\\op_builder')
+
 # Parse the DeepSpeed version string from version.txt
 version_str = open('version.txt', 'r').read().strip()
 
@@ -178,18 +194,6 @@ with open(os.path.join(thisdir, 'README.md'), encoding='utf-8') as fin:
 
 start_time = time.time()
 
-
-def list_files(dirs):
-    if sys.platform == "win32":
-        # Linux symbolic links doesn't work on Windows, generate the right paths on Windows.
-        for dst_dir, src_dir in dirs:
-            for root, dirs, files in os.walk(src_dir, topdown=False):
-                for name in files:
-                    yield (os.path.join(dst_dir, root), [os.path.join(root, name)])
-    else:
-        return []
-
-
 setup(name='deepspeed',
       version=version_str,
       description='DeepSpeed library',
@@ -215,12 +219,6 @@ setup(name='deepspeed',
           'Programming Language :: Python :: 3.6',
           'Programming Language :: Python :: 3.7',
           'Programming Language :: Python :: 3.8'
-      ],
-      data_files=[
-          f for f in list_files([('deepspeed/ops',
-                                  'op_builder'),
-                                 ('deepspeed/ops',
-                                  'csrc')])
       ],
       license='MIT',
       ext_modules=ext_modules,
