@@ -885,7 +885,7 @@ class DeepSpeedConfig(object):
         #either none of the three parameters are provided or just gradient_accumulation_step is provided
         else:
             assert False, \
-                'Either train_batch_size or micro_batch_per_gpu needs to be provided'
+                'Either train_batch_size or train_micro_batch_size_per_gpu needs to be provided'
 
     def _configure_train_batch_size(self):
         self._set_batch_related_parameters()
