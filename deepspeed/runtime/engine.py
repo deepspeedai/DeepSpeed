@@ -638,7 +638,7 @@ class DeepSpeedEngine(Module):
                         p in self.module.named_parameters() if p.dtype != torch.half
                     ]
                     raise ValueError(
-                        "fp16 is enabled but the following parameters have dtype that is not fp16: {', '.join(names)}"
+                        f"fp16 is enabled but the following parameters have dtype that is not fp16: {', '.join(names)}"
                     )
             self.module.half()
         else:
@@ -649,7 +649,7 @@ class DeepSpeedEngine(Module):
                     p in self.module.named_parameters() if p.dtype != torch.float
                 ]
                 raise ValueError(
-                    "fp32 is enabled but the following parameters have dtype that is not fp32: {', '.join(names)}"
+                    f"fp32 is enabled but the following parameters have dtype that is not fp32: {', '.join(names)}"
                 )
 
         if not self.dont_change_device:
