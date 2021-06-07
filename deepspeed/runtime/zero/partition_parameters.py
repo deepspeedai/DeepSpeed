@@ -186,6 +186,20 @@ def new_cuda_tensor(cls, *args):
     return tensor
 
 
+# https://stackoverflow.com/a/63851681/9201239
+def get_all_subclasses(cls):
+    subclass_list = []
+
+    def recurse(cl):
+        for subclass in cl.__subclasses__():
+            subclass_list.append(subclass)
+            recurse(subclass)
+
+    recurse(cls)
+
+    return set(subclass_list)
+
+
 reuse_buffers = False
 temp_contiguous_tensor = None
 empty_buffers = {}
@@ -224,8 +238,9 @@ class InsertPostInitMethodToModuleSubClasses(object):
         def _init_subclass(cls, **kwargs):
             cls.__init__ = partition_after(cls.__init__)
 
-        # Replace .__init__() for all existing subclasses of torch.nn.Module
-        for subclass in torch.nn.modules.module.Module.__subclasses__():
+        # Replace .__init__() for all existing subclasses of torch.nn.Module recursively
+        for subclass in get_all_subclasses(torch.nn.modules.module.Module):
+            # print(f"subclass={subclass.__module__}.{subclass.__qualname__}")
             _enable_class(subclass)
 
         # holding on to the current __init__subclass__ for exit
@@ -256,7 +271,7 @@ class InsertPostInitMethodToModuleSubClasses(object):
             cls.__init__ = cls._old_init
 
         # Replace .__init__() for all existing subclasses of torch.nn.Module
-        for subclass in torch.nn.modules.module.Module.__subclasses__():
+        for subclass in get_all_subclasses(torch.nn.modules.module.Module):
             _disable_class(subclass)
 
         # Replace .__init__() for future subclasses of torch.nn.Module
