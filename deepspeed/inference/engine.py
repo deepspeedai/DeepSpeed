@@ -78,8 +78,12 @@ class InferenceEngine(Module):
     def _get_model_config_generate(self):
         if hasattr(self.module, 'config'):
             self.config = self.module.config
+        else:
+            self.config = None
         if hasattr(self.module, 'generate'):
             self.generate = self.module.generate
+        else:
+            self.generate = None
 
     def _create_model_parallel_group(self):
         # Call the init process
@@ -134,6 +138,7 @@ class InferenceEngine(Module):
                                   policy=injection_policy,
                                   mp_size=self.mp_world_size,
                                   mp_group=self.mp_group,
+                                  config=self.config,
                                   fp16=(self.dtype == torch.half),
                                   training=False,
                                   quantize=(self.dtype == torch.int8),

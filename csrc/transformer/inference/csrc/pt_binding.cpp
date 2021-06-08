@@ -13,7 +13,9 @@ template <typename T>
 at::Tensor ds_softmax(at::Tensor& attn_scores,
                       at::Tensor& attn_mask,
                       bool triangular,
-                      bool recompute)
+                      bool recompute,
+                      bool local_attention,
+                      int window_size)
 {
     auto attn_scores_c = attn_scores.contiguous();
     int bsz = attn_scores_c.size(0);
@@ -25,6 +27,8 @@ at::Tensor ds_softmax(at::Tensor& attn_scores,
                            (T*)attn_mask.data_ptr(),
                            triangular,
                            recompute,
+                           local_attention,
+                           window_size,
                            bsz,
                            heads,
                            seq_len,
@@ -47,7 +51,9 @@ void attention_unfused(at::Tensor& prev_key_cont,
                        int& heads,
                        float& norm_factor,
                        bool triangular,
-                       bool recompute)
+                       bool recompute,
+                       bool local_attention,
+                       int window_size)
 {
     auto options = at::TensorOptions()
                        .dtype(query_cont.options().dtype())
@@ -75,7 +81,8 @@ void attention_unfused(at::Tensor& prev_key_cont,
                                 seq_len * soft_len,
                                 bsz * heads,
                                 CUBLAS_GEMM_DEFAULT_TENSOR_OP);
-    attn_score = ds_softmax<T>(attn_score, attn_mask, triangular, recompute);
+    attn_score =
+        ds_softmax<T>(attn_score, attn_mask, triangular, recompute, local_attention, window_size);
     alpha = 1.0;
     cublas_strided_batched_gemm(Context::Instance().GetCublasHandle(),
                                 k,
@@ -105,7 +112,9 @@ std::vector<at::Tensor> ds_softmax_context(at::Tensor& query,
                                            int heads,
                                            float norm_factor,
                                            bool merging,
-                                           bool triangular)
+                                           bool triangular,
+                                           bool local_attention,
+                                           int window_size)
 {
     auto query_cont = query.contiguous();
     auto prev_key_cont = prev_key.contiguous();
@@ -138,7 +147,9 @@ std::vector<at::Tensor> ds_softmax_context(at::Tensor& query,
                          heads,
                          norm_factor,
                          (triangular && (new_size == 0)),
-                         (new_size == 0));
+                         (new_size == 0),
+                         local_attention,
+                         window_size);
 
     return {output, prev_key, prev_value};
 }

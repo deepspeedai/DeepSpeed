@@ -90,7 +90,7 @@ def replace_transformer_layer(orig_layer_impl,
                               model,
                               policy=None,
                               micro_batch_size=-1,
-                              bert_config=None,
+                              config=None,
                               seed=-1,
                               hidden_size=-1,
                               num_attention_heads=-1,
@@ -110,7 +110,7 @@ def replace_transformer_layer(orig_layer_impl,
         model (torch.nn.Module): user's nn.module representing their model
         policy: shows the policy for mapping from the orig_layer_impl to transformer parameters
         micro_batch_size (int): micro batch size per gpu used during training/eval
-        bert_config (dict): model config containing hidden size, attention heads, etc.
+        config (dict): model config containing hidden size, attention heads, etc.
         seed (int): random seed value
         max_seq_length (int): max sequence length for training
         hidden_size (int): hidden dimension
@@ -155,7 +155,6 @@ def replace_transformer_layer(orig_layer_impl,
             _4hh_w = _4hh_w.half()
 
         if quantize or fp16:
-            qkvb = qkvb.half()
             dense_b = dense_b.half()
             _h4h_b = _h4h_b.half()
             _4hh_b = _4hh_b.half()
@@ -175,7 +174,12 @@ def replace_transformer_layer(orig_layer_impl,
                 mp_size=mp_size,
                 q_int8=quantize,
                 encoder_decoder=(True if policy_cls is HFBertLayerPolicy else False),
-                triangular_masking=(policy_cls is not HFBertLayerPolicy))
+                triangular_masking=(policy_cls is not HFBertLayerPolicy),
+                local_attention=((config.attention_layers[layer_id] == "local")
+                                 if hasattr(config,
+                                            'attention_layers') else False),
+                window_size=(config.window_size if hasattr(config,
+                                                           'window_size') else 1))
 
             if quantize and quantize_settings is not None:
                 (quantization_scales,
@@ -208,8 +212,8 @@ def replace_transformer_layer(orig_layer_impl,
             new_module.config.scale_attention = scale_attention
 
             # we want the weights in [input, output] shape
-            # linear layer is created is created with [input, output] shape
-            # we transpose it here to reduce inference cost!
+            # linear layer is created with [input, output] shape
+            # transpose it here to reduce inference cost!
             def transpose(data):
                 data.view(-1).copy_(data.transpose(-1, -2).contiguous().view(-1))
                 data = data.reshape(data.shape[-1], data.shape[-2])
@@ -228,6 +232,7 @@ def replace_transformer_layer(orig_layer_impl,
                                                             qkvw)
 
             if qkvb is not None:
+                qkvb = qkvb.half()
                 attn_block.attn_qkvb.data = mp_replace.qkv_copy(
                     attn_block.attn_qkvb.data,
                     qkvb)
@@ -250,12 +255,12 @@ def replace_transformer_layer(orig_layer_impl,
         else:
             transformer_config = deepspeed.DeepSpeedTransformerConfig(
                 batch_size=micro_batch_size,
-                hidden_size=bert_config.hidden_size,
-                heads=bert_config.num_attention_heads,
-                attn_dropout_ratio=bert_config.attention_probs_dropout_prob,
-                hidden_dropout_ratio=bert_config.hidden_dropout_prob,
-                num_hidden_layers=bert_config.num_hidden_layers,
-                initializer_range=bert_config.initializer_range,
+                hidden_size=config.hidden_size,
+                heads=config.num_attention_heads,
+                attn_dropout_ratio=config.attention_probs_dropout_prob,
+                hidden_dropout_ratio=config.hidden_dropout_prob,
+                num_hidden_layers=config.num_hidden_layers,
+                initializer_range=config.initializer_range,
                 seed=seed,
                 fp16=fp16,
                 pre_layer_norm=(False if policy_cls is HFBertLayerPolicy else preln),
@@ -302,20 +307,20 @@ def replace_transformer_layer(orig_layer_impl,
                           _replace_policy=policy)
 
 
-def revert_transformer_layer(orig_layer_impl, model, bert_config, preln=False):
+def revert_transformer_layer(orig_layer_impl, model, config, preln=False):
     """ Revert DeepSpeed's transformer layer back to original bert-style transformer layer
     Arguments:
         orig_layer_impl (torch.nn.Module): the original transformer layer implementation that was replaced,
             e.g., transformers.modeling_bert.BertLayer.
         model (torch.nn.Module): user's nn.module representing their model
-        bert_config (dict): model config containing hidden size, attention heads, etc.
+        config (dict): model config containing hidden size, attention heads, etc.
 
     Returns:
         Updated nn.module with original bert-style transformer layers
     """
     def replace_fn(child, _replace_policy, layer_id):
         #from turing.nvidia_modelingpreln import BertLayer
-        orig_module = orig_layer_impl(bert_config)
+        orig_module = orig_layer_impl(config)
 
         # copy relevant state from child -> original module
         qkvw = child.attn_qkvw.data
@@ -389,8 +394,11 @@ def replace_module(model, orig_class, replace_fn, _replace_policy):
         for plcy in replace_policies:
             # instantiate a throw-away policy in order to populate the _orig_layer_class
             _ = plcy(None)
-            assert plcy._orig_layer_class != None
-            policy.update({plcy._orig_layer_class: (replace_fn, plcy)})
+            if plcy._orig_layer_class is not None:
+                policy.update({plcy._orig_layer_class: (replace_fn, plcy)})
+    assert len(policy.items()) > 0,\
+        "No default policy found! Please specifiy your policy injection_policy (like {BertLayer:HFBEertLayerPolicy})." +\
+        "You can find some samples here: https://github.com/microsoft/DeepSpeed/blob/master/deepspeed/module_inject/replace_policy.py"
 
     replaced_module, _ = _replace_module(model, policy)
     return replaced_module
