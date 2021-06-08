@@ -356,7 +356,7 @@ Enabling and configuring ZeRO memory optimizations
 
 | Description                                                                                                                                | Default |
 | ------------------------------------------------------------------------------------------------------------------------------------------ | ------- |
-| For use with ZeRO stage 1, enable backward hooks to reduce gradients during the backward pass or wait until the end of the backward pass.  | `True`  |  
+| For use with ZeRO stage 1, enable backward hooks to reduce gradients during the backward pass or wait until the end of the backward pass.  | `True`  |
 
 ***offload_param***: [dictionary]
 
@@ -368,7 +368,7 @@ Enabling and configuring ZeRO memory optimizations
 
 | Description                                                                                                                                                                                                                    | Default |
 | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------- |
-| Enable offloading of optimizer state to CPU or NVMe, and optimizer computation to CPU. This frees up GPU memory for larger models or batch sizes. Valid only with stage 3. See [here](#optimizer-offloading) for more details. | `False` |
+| Enable offloading of optimizer state to CPU or NVMe, and optimizer computation to CPU. This frees up GPU memory for larger models or batch sizes. Valid only with stage 2 and 3. See [here](#optimizer-offloading) for more details. | `False` |
 
 ***stage3_max_live_parameters***: [integer]
 
@@ -405,7 +405,7 @@ Enabling and configuring ZeRO memory optimizations
 
 ***cpu_offload***: [boolean]
 
-**Deprecated:** **cpu_offload** is disabled and will be removed in future, please use `offload_optimizer` instead.
+**Deprecated:** **cpu_offload** is deprecated and will be removed in future, please use `offload_optimizer` instead.
 {: .notice--warning}
 
 | Description                                                                                                                                       | Default |
