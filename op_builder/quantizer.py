@@ -21,15 +21,3 @@ class QuantizerBuilder(CUDAOpBuilder):
 
     def include_paths(self):
         return ['csrc/includes']
-
-    def nvcc_args(self):
-        args = [
-            '-O3',
-            '--use_fast_math',
-            '-std=c++14',
-            '-U__CUDA_NO_HALF_OPERATORS__',
-            '-U__CUDA_NO_HALF_CONVERSIONS__',
-            '-U__CUDA_NO_HALF2_OPERATORS__'
-        ]
-
-        return args + self.compute_capability_args()

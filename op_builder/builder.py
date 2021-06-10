@@ -364,6 +364,18 @@ class CUDAOpBuilder(OpBuilder):
         else:
             return ['-O3', '-std=c++14', '-g', '-Wno-reorder']
 
+    def nvcc_args(self):
+        args = [
+            '-O3',
+            '--use_fast_math',
+            '-std=c++17' if sys.platform == "win32" else '-std=c++14',
+            '-U__CUDA_NO_HALF_OPERATORS__',
+            '-U__CUDA_NO_HALF_CONVERSIONS__',
+            '-U__CUDA_NO_HALF2_OPERATORS__'
+        ]
+
+        return args + self.compute_capability_args()
+
     def libraries_args(self):
         if sys.platform == "win32":
             return ['cublas', 'curand']
