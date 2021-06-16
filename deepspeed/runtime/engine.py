@@ -562,6 +562,14 @@ class DeepSpeedEngine(Module):
         # environment variable is set. We must align args.local_rank to this value for
         # backwards compatability with scripts relying on [args|self].local_rank containing
         # the correct local rank info. _do_args_sanity_check will ensure this is the case.
+
+        if "OMPI_COMM_WORLD_LOCAL_RANK" in os.environ:
+            ompi_local_rank = os.environ.get("OMPI_COMM_WORLD_LOCAL_RANK")
+            local_rank = os.environ.get('LOCAL_RANK', ompi_local_rank)
+            assert ompi_local_rank == local_rank, f"LOCAL_RANK ({local_rank}) != OMPI_COMM_WORLD_LOCAL_RANK ({mpi_local_rank}), " \
+                "not sure how to proceed as we're seeing conficting local rank info."
+            os.environ['LOCAL_RANK'] = local_rank
+
         self.local_rank = int(os.environ['LOCAL_RANK'])
         if hasattr(args, 'local_rank'):
             args.local_rank = self.local_rank
@@ -581,8 +589,10 @@ class DeepSpeedEngine(Module):
                 assert args.deepspeed_config is None, "Not sure how to proceed, we were given both a deepscale_config and deepspeed_config"
             args.deepspeed_config = args.deepscale_config
 
-        assert "LOCAL_RANK" in os.environ, "DeepSpeed requires the LOCAL_RANK environment variable, it is set by the deepspeed launcher, " \
-            "deepspeed.init_distributed, or the torch.distributed launcher. If using a different launcher please ensure LOCAL_RANK is set prior to initializing deepspeed."
+        assert "LOCAL_RANK" in os.environ or "OMPI_COMM_WORLD_LOCAL_RANK" in os.environ, "DeepSpeed requires the LOCAL_RANK environment " \
+            "variable, it is set by the deepspeed launcher, deepspeed.init_distributed, or the torch.distributed launcher. If using a " \
+            "different launcher please ensure LOCAL_RANK is set prior to initializing deepspeed."
+
         if hasattr(args, 'local_rank') and args.local_rank != None:
             assert isinstance(args.local_rank, int), f"args.local_rank of {args.local_rank} is an unknown type {type(args.local_rank)}"
             if args.local_rank >= 0:
