@@ -3,7 +3,6 @@ Copyright 2020 The Microsoft DeepSpeed Team
 """
 import os
 import sys
-import torch
 import subprocess
 from .builder import CUDAOpBuilder
 
@@ -26,6 +25,7 @@ class CPUAdamBuilder(CUDAOpBuilder):
         return ['csrc/adam/cpu_adam.cpp', 'csrc/adam/custom_cuda_kernel.cu']
 
     def include_paths(self):
+        import torch
         CUDA_INCLUDE = os.path.join(torch.utils.cpp_extension.CUDA_HOME, "include")
         return ['csrc/includes', CUDA_INCLUDE]
 
@@ -47,6 +47,7 @@ class CPUAdamBuilder(CUDAOpBuilder):
         return '-D__SCALAR__'
 
     def cxx_args(self):
+        import torch
         CUDA_LIB64 = os.path.join(torch.utils.cpp_extension.CUDA_HOME, "lib64")
         SIMD_WIDTH = self.simd_width()
 

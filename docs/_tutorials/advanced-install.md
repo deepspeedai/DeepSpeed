@@ -11,10 +11,6 @@ just-in-time (JIT) using [torch's JIT C++ extension loader that relies on
 ninja](https://pytorch.org/docs/stable/cpp_extension.html) to build and
 dynamically link them at runtime.
 
-**Note:** [PyTorch](https://pytorch.org/) must be installed _before_ installing
-DeepSpeed.
-{: .notice--info}
-
 ```bash
 pip install deepspeed
 ```
@@ -29,6 +25,9 @@ ds_report
 ```
 
 ## Pre-install DeepSpeed Ops
+
+**Note:** [PyTorch](https://pytorch.org/) must be installed _before_ pre-compiling any DeepSpeed c++/cuda ops. However, this is not required if using the default mode of JIT compilition of ops.
+{: .notice--info}
 
 Sometimes we have found it useful to pre-install either some or all DeepSpeed
 C++/CUDA ops instead of using the JIT compiled path. In order to support

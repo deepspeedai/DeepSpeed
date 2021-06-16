@@ -1,4 +1,3 @@
-import torch
 from .builder import CUDAOpBuilder
 
 
