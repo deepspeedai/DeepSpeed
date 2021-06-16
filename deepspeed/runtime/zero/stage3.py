@@ -852,7 +852,10 @@ class FP16_DeepSpeedZeroOptimizer_Stage3(object):
                 count = count + 1
 
         #Largest partitioned param
-        largest_partitioned_param_numel = max(self.fp16_partitioned_groups_flat_numel)
+        largest_partitioned_param_numel = max([
+            max([tensor.numel() for tensor in fp16_partitioned_group])
+            for fp16_partitioned_group in self.fp16_partitioned_groups
+        ])
         print_rank_0(
             f'Largest partitioned param numel = {largest_partitioned_param_numel}',
             force=True)
