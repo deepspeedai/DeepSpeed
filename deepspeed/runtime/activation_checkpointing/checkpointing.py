@@ -416,7 +416,7 @@ class CheckpointFunction(torch.autograd.Function):
 
             inputs = []
             for i, item in enumerate(args[:-1]):
-                if not torch.is_tensor(item):
+                if not torch.is_tensor(item) or mp_size > item.numel():
                     inputs.append(item)
                     continue
 
