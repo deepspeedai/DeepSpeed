@@ -20,13 +20,27 @@ import deepspeed
 debug = 0
 
 
+def get_model_state_file(checkpoint_dir):
+
+    if not os.path.isdir(checkpoint_dir):
+        raise FileNotFoundError(f"Directory '{checkpoint_dir}' doesn't exist")
+
+    # there should be only one file
+    file = os.path.join(checkpoint_dir, "zero_pp_rank_0_mp_rank_00_model_states.pt")
+
+    if not os.path.exists(file):
+        raise FileNotFoundError(f"can't find '{file}' in directory '{checkpoint_dir}'")
+
+    return file
+
+
 def get_optim_files(checkpoint_dir):
 
     if not os.path.isdir(checkpoint_dir):
         raise FileNotFoundError(f"Directory '{checkpoint_dir}' doesn't exist")
 
     # XXX: need to test that this simple glob rule works for multi-node setup too
-    optim_files = sorted(glob.glob(f"{checkpoint_dir}/*_optim_states.pt"))
+    optim_files = sorted(glob.glob(os.path.join(checkpoint_dir, "*_optim_states.pt")))
 
     if len(optim_files) == 0:
         raise FileNotFoundError(
@@ -35,13 +49,34 @@ def get_optim_files(checkpoint_dir):
     return optim_files
 
 
+def parse_model_state(file):
+
+    # load to cpu
+    device = torch.device('cpu')
+    state_dict = torch.load(file, map_location=device)
+
+    if "buffer_names" not in state_dict:
+        raise ValueError(f"{file} is not a model state checkpoint")
+    buffer_names = state_dict["buffer_names"]
+    if debug:
+        print(buffer_names)
+
+    # recover just the buffers while restoring them to fp32 if they were saved in fp16
+    buffers = {
+        k: v.float()
+        for k,
+        v in state_dict["module"].items() if k in buffer_names
+    }
+    return buffers
+
+
 def parse_optim_states(files):
     state_dicts = []
     for f in files:
         state_dicts.append(torch.load(f))
 
     if not "zero_stage" in state_dicts[0]['optimizer_state_dict']:
-        raise ValueError(f"non zero checkpoint")
+        raise ValueError(f"{files[0]} is not a zero checkpoint")
     zero_stage = state_dicts[0]['optimizer_state_dict']["zero_stage"]
     world_size = state_dicts[0]['optimizer_state_dict']["partition_count"]
     param_shapes = state_dicts[0]["param_shapes"]
@@ -86,7 +121,9 @@ def convert_zero_chkpt_to_fp32_consolid_state_dict(checkpoint_dir, output_file):
     """
     print(f"Processing zero checkpoint '{checkpoint_dir}'")
 
+    model_file = get_model_state_file(checkpoint_dir)
     optim_files = get_optim_files(checkpoint_dir)
+    buffers = parse_model_state(model_file)
     zero_stage, world_size, param_shapes, fp32_flat_groups = parse_optim_states(optim_files)
     print(
         f"Detected checkpoint of type zero stage {zero_stage}, world_size: {world_size}")
@@ -108,9 +145,16 @@ def convert_zero_chkpt_to_fp32_consolid_state_dict(checkpoint_dir, output_file):
         # XXX: memory usage doubles here (zero2)
         full_single_fp32_vector = torch.cat(fp32_flat_groups, 0)
 
+    state_dict = OrderedDict()
+
+    # buffers
+    state_dict.update(buffers)
+    if debug:
+        print(f"added {len(buffers)} buffers")
+
+    # params
     # XXX: for huge models that can't fit into the host's RAM we will have to recode this to support
     # out-of-core computing solution
-    state_dict = OrderedDict()
     offset = 0
     total_numel = 0
     for name, shape in param_shapes.items():
