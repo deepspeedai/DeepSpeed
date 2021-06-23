@@ -32,11 +32,18 @@ from deepspeed.runtime.swap_tensor.pipelined_optimizer_swapper import PipelinedO
 pg_correctness_test = False
 
 FWD_MODULE_STACK = list()
+from deepspeed.utils.debug import debug_module2name_id, debug_param2name_id_numel, debug_param2name_id_shape_device, debug_module2name_class, printflock, log_rank_file
 
 
-def print_rank_0(message, debug=False, force=False):
-    if torch.distributed.get_rank() == 0 and (debug or force):
-        logger.info(message)
+def print_rank_0(message, debug=False, force=True):
+    rank = torch.distributed.get_rank()
+    if rank == 0 and (debug or force):
+        print(message)
+    # other variations
+    # - print for all ranks w/o interleaving
+    # printflock(f"[{rank}] {message}")
+    # - print to log file per rank
+    # log_rank_file(rank, message)
 
 
 def input(msg):
@@ -211,7 +218,7 @@ class PrefetchCoordinator(object):
         # tracing failed. The sub_module passed at the step_id must match with the sub_module during tracing
         if sub_module.id != self.sub_module_trace[self.step_id]:
             print_rank_0(
-                f"Tracing failed. Prefetching is disabled at sub-module: {sub_module.id}"
+                f"Tracing failed. Prefetching is disabled at sub-module: {debug_module2name_id(sub_module)}"
             )
             return []
 
@@ -390,11 +397,13 @@ class PartitionedParameterCoordinator(object):
     def fetch_sub_module(self, sub_module):
         partitioned_params = []
         params_in_flight = False
-        #print_rank_0(f"{'--' * self.hierarchy}Fetching params in module {sub_module.__class__.__name__}")
+        # print_rank_0(f"{'--' * self.hierarchy}Fetching params in module {sub_module.__class__.__name__}")
         params_to_fetch = [
             param for _,
             param in sub_module.named_parameters(recurse=False)
         ]
+        # print([n for n,p in sub_module.named_parameters(recurse=False)])
+
         if hasattr(sub_module, 'ds_external_parameters'):
             print_rank_0(
                 f"{'--' * self.hierarchy}--Fetching external parameters {sub_module.ds_external_parameters()}"
@@ -407,7 +416,7 @@ class PartitionedParameterCoordinator(object):
         for param in params_to_fetch:
             param.ds_active_sub_modules += 1
             print_rank_0(
-                f"{'--' * self.hierarchy}--Fetching parameters {param.ds_id} with active sub modules {param.ds_active_sub_modules}"
+                f"{'--' * self.hierarchy}--Fetching parameters {param.ds_id} {param.ds_shape} with active sub modules {param.ds_active_sub_modules}"
             )
 
             if param.ds_status == ZeroParamStatus.AVAILABLE:
@@ -441,14 +450,14 @@ class PartitionedParameterCoordinator(object):
         for _, param in sub_module.named_parameters(recurse=False):
             param.ds_status = ZeroParamStatus.AVAILABLE
             print_rank_0(
-                f"Param id {param.ds_id}, Shape {param.shape}, device {param.device} norm {param.norm()}",
+                f"Param {debug_param2name_id_shape_device(param)} norm={param.norm()}",
                 force=False)
         #print_rank_0(f"After fetching (id, shape, device): {[(param.ds_id, param.shape, param.device) for param in sub_module.named_parameters(recurse=False)]}")
 
     def release_sub_module(self, sub_module):
         self.hierarchy -= 1
         print_rank_0(
-            f"{'--' * self.hierarchy}Releasing params in module {sub_module.__class__.__name__}"
+            f"{'--' * self.hierarchy}Releasing params in module {debug_module2name_class(sub_module)}"
         )
         params_to_release = [
             param for _,
@@ -468,31 +477,31 @@ class PartitionedParameterCoordinator(object):
             if not param.ds_active_sub_modules and not self._keep_for_later(
                     sub_module) and not param.ds_persist:
                 print_rank_0(
-                    f"{'--' * self.hierarchy}--Releasing parameters {param.ds_id} with numel {param.numel()} active sub modules {param.ds_active_sub_modules} and keep for later {self._keep_for_later(sub_module)}",
+                    f"{'--' * self.hierarchy}--Releasing parameter {debug_param2name_id_numel(param)} active sub modules {param.ds_active_sub_modules} and keep for later {self._keep_for_later(sub_module)}",
                     force=False)
 
                 # Keeping track of number of elements that are consumed by available parameters
                 self._decrement_available_parameter_numel(param.ds_numel)
                 see_memory_usage(
-                    f"Before releasing param {param.ds_id} with numel {param.numel()}",
+                    f"Before releasing param {debug_param2name_id_numel(param)}",
                     force=False)
                 param.partition(hierarchy=self.hierarchy)
                 see_memory_usage(
-                    f"After releasing param {param.ds_id} has numel {param.numel()} ",
+                    f"After releasing param {debug_param2name_id_numel(param)}",
                     force=False)
 
                 param.ds_status = ZeroParamStatus.NOT_AVAILABLE
             else:
 
                 print_rank_0(
-                    f"{'--' * self.hierarchy}--Did not release parameters {param.ds_id} with numel {param.numel()} with active sub modules {param.ds_active_sub_modules}, keep for later {self._keep_for_later(sub_module)} and persistence {param.ds_persist}",
+                    f"{'--' * self.hierarchy}--Did not release param {debug_param2name_id_numel(param)} with active sub modules {param.ds_active_sub_modules}, keep for later={self._keep_for_later(sub_module)} and persistence={param.ds_persist}",
                     force=False)
 
     def release_and_reset_parameter(self, param):
         param.ds_active_sub_modules = 0
         if param.ds_status == ZeroParamStatus.AVAILABLE:
             print_rank_0(
-                f"Releasing unpartitioned {param.ds_id} active sub-modules {param.ds_active_sub_modules} size {param.ds_numel} and persisitence {param.ds_persist}"
+                f"Releasing unpartitioned param {debug_param2name_id_numel(param)} active sub-modules {param.ds_active_sub_modules} and persisitence {param.ds_persist}"
             )
             self._decrement_available_parameter_numel(param.ds_numel)
             param.partition()

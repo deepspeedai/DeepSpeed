@@ -38,6 +38,7 @@ from deepspeed.runtime.csr_tensor import CSRTensor
 import deepspeed.runtime.lr_schedules as lr_schedules
 from deepspeed.utils import logger, log_dist, init_distributed
 from deepspeed.utils.timer import ThroughputTimer, SynchronizedWallClockTimer
+from deepspeed.utils.debug import debug_extract_module_and_param_names
 from deepspeed.runtime.progressive_layer_drop import ProgressiveLayerDrop
 from deepspeed.runtime.eigenvalue import Eigenvalue
 
@@ -121,6 +122,9 @@ class DeepSpeedEngine(Module):
         self.block_eigenvalue = None
         self.gas_boundary_ctr = 0
         self.dist_backend = "nccl"
+
+        # for debug purposes - can then debug print: debug_get_module_name(module)
+        debug_extract_module_and_param_names(model)
 
         # Set config using config_params for backwards compat
         if self.config is None and config_params is not None:
