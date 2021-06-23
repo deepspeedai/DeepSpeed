@@ -79,6 +79,14 @@ Flops Profiler
 
    flops-profiler
 
+
+Memory Usage
+------------------
+.. toctree::
+   :maxdepth: 2
+
+   memory
+
 Indices and tables
 ------------------
 
