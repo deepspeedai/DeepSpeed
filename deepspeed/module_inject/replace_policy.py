@@ -19,7 +19,7 @@ class DSPolicy(ABC):
 
     def get_hidden_heads(self):
         """
-        retun hidden_size and number of heads
+        return hidden_size and number of heads
         """
         raise NotImplementedError
 
