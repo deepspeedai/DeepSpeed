@@ -68,7 +68,7 @@ def printflock(*msgs):
     1. Enable the force debug in say partitioning and zero3 files
     2. Override the usual versions with ::
 
-        def print_rank_0(message, debug=False, force=True):
+        def print_rank_0(message, debug=False, force=False):
             rank = torch.distributed.get_rank()
             printflock(f"[{rank}] {message}")
     3. run the program and you get both logs non-interleaved
@@ -99,7 +99,7 @@ def log_rank_file(rank, *msgs):
     1. Enable the force debug in say partitioning and zero3 files
     2. Override the usual versions of print_rank_0 in those files with ::
 
-        def print_rank_0(message, debug=False, force=True):
+        def print_rank_0(message, debug=False, force=False):
             rank = torch.distributed.get_rank()
             log_rank_file(rank, message)
 
