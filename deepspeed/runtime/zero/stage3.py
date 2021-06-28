@@ -627,7 +627,7 @@ class FP16_DeepSpeedZeroOptimizer_Stage3(object):
                  elastic_checkpoint=False,
                  aio_config=None):
 
-        see_memory_usage("Stage 3 initialize beginning", force=True)
+        see_memory_usage("Stage 3 initialize beginning", force=False)
 
         if dist.get_rank() == 0:
             logger.info(f"Reduce bucket size {reduce_bucket_size}")
@@ -702,7 +702,7 @@ class FP16_DeepSpeedZeroOptimizer_Stage3(object):
             self.max_params_in_cpu = offload_param_config[OFFLOAD_PARAM_MAX_IN_CPU]
             print_rank_0(
                 f"FP16 params swapping is {self.params_in_nvme_and_cpu}, Max params in CPU is {self.max_params_in_cpu}",
-                force=True)
+                force=False)
 
         self.deepspeed_adam_offload = (self.offload_optimizer
                                        and type(init_optimizer) == DeepSpeedCPUAdam)
@@ -798,7 +798,7 @@ class FP16_DeepSpeedZeroOptimizer_Stage3(object):
         self.sub_group_size = sub_group_size
 
         self.sub_group_to_group_id = {}
-        see_memory_usage("Before creating fp16 partitions", force=True)
+        see_memory_usage("Before creating fp16 partitions", force=False)
         self._create_fp16_partitions_with_defragmentation()
         num_fp16_subgroups = len(self.fp16_partitioned_groups_flat)
         see_memory_usage(f"After creating fp16 partitions: {num_fp16_subgroups}",
@@ -867,7 +867,7 @@ class FP16_DeepSpeedZeroOptimizer_Stage3(object):
         ])
         print_rank_0(
             f'Largest partitioned param numel = {largest_partitioned_param_numel}',
-            force=True)
+            force=False)
 
         see_memory_usage(f"Before Set Grad positions", force=False)
 
@@ -922,7 +922,7 @@ class FP16_DeepSpeedZeroOptimizer_Stage3(object):
         self.debug_fp16_grads = [{} for _ in self.fp16_groups]
 
         if dist.get_rank(group=self.dp_process_group) == 0:
-            see_memory_usage(f"After initializing ZeRO optimizer", force=True)
+            see_memory_usage(f"After initializing ZeRO optimizer", force=False)
 
     def _configure_tensor_swapping(self, offload_optimizer_config, aio_config):
         nvme_swap_folder = os.path.join(
@@ -1096,7 +1096,7 @@ class FP16_DeepSpeedZeroOptimizer_Stage3(object):
         for j, param_group in enumerate(self.optimizer.param_groups):
 
             sub_groups = self._create_fp16_sub_groups(param_group['params'])
-            print_rank_0(f'fp16 group {j} has {len(sub_groups)} subgroups', force=True)
+            print_rank_0(f'fp16 group {j} has {len(sub_groups)} subgroups', force=False)
 
             flat_offset = 0
             for sub_group in sub_groups:
@@ -1331,19 +1331,19 @@ class FP16_DeepSpeedZeroOptimizer_Stage3(object):
         nvme_gigabytes = nvme_memory_usage / GIGA_BYTES
         print_rank_0(
             f'Swappable FP32 Partitions: count={num_swappable_partitions} size={nvme_gigabytes:5.2f} GB',
-            force=True)
+            force=False)
         if self.params_in_nvme_and_cpu:
             print_rank_0(
                 f'Swap from NVMe Partitions: count = {num_swap_from_nvme_partitions}, size = {swap_from_nvme_memory_usage/GIGA_BYTES:5.2f}GB',
-                force=True)
+                force=False)
             print_rank_0(
                 f'Swap from CPU Partitions: count = {num_swap_from_cpu_partitions}, size = {swap_from_cpu_memory_usage/GIGA_BYTES:5.2f}GB',
-                force=True)
+                force=False)
 
         cpu_memory_gigabytes = cpu_memory_usage / GIGA_BYTES
         print_rank_0(
             f'In-Memory FP32 Partitions: count={cpu_memory_sub_groups} size={cpu_memory_gigabytes:5.2f} GB',
-            force=True)
+            force=False)
 
         # Clear for on-the-fly population before the optimizer step
         for param_group in self.optimizer.param_groups:

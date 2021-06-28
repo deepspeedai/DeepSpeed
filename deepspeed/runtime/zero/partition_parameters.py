@@ -266,7 +266,7 @@ class InsertPostInitMethodToModuleSubClasses(object):
         if self.mem_efficient_linear:
             print_rank_0(
                 "nn.functional.linear has been overridden with a more memory efficient version. This will persist unless manually reset.",
-                force=True)
+                force=False)
             self.linear_bk = torch.nn.functional.linear
             torch.nn.functional.linear = LinearFunctionForZeroStage3.apply
 
