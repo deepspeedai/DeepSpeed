@@ -283,6 +283,7 @@ def test_stage_3_output_type(output_type):
             engine.step()
 
 
+# test that no sub-class or super-class is missed
 class ConvX(torch.nn.Conv1d):
     def __init__(self, *args):
         super().__init__(*args)
@@ -310,3 +311,52 @@ def test_subclass_param():
 
     assert model.param.ds_status == ZeroParamStatus.NOT_AVAILABLE
     assert model.conv1.param_in.ds_status == ZeroParamStatus.NOT_AVAILABLE
+
+
+# test that sub-classes get params that aren't prematurely partitioned and thus requiring gathering
+# fixed by https://github.com/microsoft/DeepSpeed/pull/1202
+class GrandPa(torch.nn.Module):
+    def __init__(self, *args):
+        super().__init__(*args)
+        self.param_grandpa = torch.nn.Parameter(torch.ones(5))
+        self.param_grandpa.data = (self.param_grandpa.data +
+                                   1).data  # test param is not yet partitioned
+
+
+class Pa(GrandPa):
+    def __init__(self, *args):
+        super().__init__(*args)
+        self.param_pa = torch.nn.Parameter(torch.ones(5))
+        self.param_pa.data = (self.param_pa.data +
+                              1).data  # test param is not yet partitioned
+        self.param_grandpa.data = (self.param_grandpa.data +
+                                   1).data  # test param is not yet partitioned
+
+
+class Son(Pa):
+    def __init__(self):
+        super().__init__()
+        self.param = torch.nn.Parameter(torch.ones(5))
+        self.param.data = (self.param.data + 1).data  # test param is not yet partitioned
+        self.param_pa.data = (self.param_pa.data +
+                              1).data  # test param is not yet partitioned
+        self.param_grandpa.data = (self.param_grandpa.data +
+                                   1).data  # test param is not yet partitioned
+
+
+def test_subclass_param_init():
+    setup_serial_env()
+    with deepspeed.zero.Init(config=config):
+        model = Son().cpu()
+
+    # test that all params have been partitioned
+    assert model.param_grandpa.ds_status == ZeroParamStatus.NOT_AVAILABLE
+    assert model.param_pa.ds_status == ZeroParamStatus.NOT_AVAILABLE
+    assert model.param.ds_status == ZeroParamStatus.NOT_AVAILABLE
+
+    # test that the weights manipulation during each __init__ worked in all w/o needing gathering
+    ones = torch.ones(5).half().cuda()
+    with deepspeed.zero.GatheredParameters(list(model.parameters(recurse=False))):
+        assert torch.equal(model.param, ones + 1)
+        assert torch.equal(model.param_pa, ones + 2)
+        assert torch.equal(model.param_grandpa, ones + 3)

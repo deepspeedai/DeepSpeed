@@ -228,10 +228,34 @@ class InsertPostInitMethodToModuleSubClasses(object):
         def partition_after(f):
             @functools.wraps(f)
             def wrapper(module, *args, **kwargs):
+
+                # important logic: We want to run post_init only after child's __init__ is
+                # completed, and do nothing after __init__ of any of its parents and grandparents in
+                # the inheritance ancestry. This way the partitioning will need to happen only once
+                # when the whole object is ready to be partitioned and not before. This is because
+                # often the child module will need to tweak the weights - for example running a
+                # custom weights init function. So if a parent created the weights param, the child
+                # won't need to gather it in order to tweak it
+
                 print_rank_0(f'Before initializing {module.__class__.__name__}',
                              force=False)
+
+                is_child_module = False
+                if not hasattr(module, "_ds_child_entered"):
+                    # child's __init__ was called, since parents all see the same object they can now skip post_init
+                    is_child_module = True
+                    setattr(module, "_ds_child_entered", True)
+
                 f(module, *args, **kwargs)
-                self._post_init_method(module)
+
+                if is_child_module:
+                    # child's __init__ is done, now we can run a single post_init on the child object
+                    delattr(module, "_ds_child_entered")
+
+                    print_rank_0(f'Running post_init for {module.__class__.__name__}',
+                                 force=False)
+                    self._post_init_method(module)
+
                 print_rank_0(
                     f'After initializing followed by post init for {module.__class__.__name__}',
                     force=False)
