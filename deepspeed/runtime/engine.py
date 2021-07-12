@@ -2044,7 +2044,8 @@ class DeepSpeedEngine(Module):
         def get_layer_state_dict(module, prefix=""):
             # gather one layer at a time to be memory-efficient
             with deepspeed.zero.GatheredParameters(list(
-                    module.parameters(recurse=False))):
+                    module.parameters(recurse=False)),
+                                                   modifier_rank=0):
                 if torch.distributed.get_rank() == 0:
                     for name, param in module.named_parameters(recurse=False):
                         if param is None:
