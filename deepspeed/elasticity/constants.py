@@ -16,7 +16,7 @@ Elasticity should be enabled as:
   "max_train_batch_size": 2000,
   "micro_batch_sizes": [2,4,6],
   "min_gpus": 1,
-  "max_gpus" : 10000
+  "max_gpus" : 10000,
   "min_time": 20,
   "prefer_larger_batch": true,
   "ignore_non_elastic_batch_info": false,
