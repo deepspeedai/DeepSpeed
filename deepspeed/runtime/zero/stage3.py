@@ -2182,7 +2182,7 @@ class FP16_DeepSpeedZeroOptimizer_Stage3(object):
 
         params_to_reduce = [param for i, param, param_id in self.params_in_ipg_bucket]
         #print(f"Params in ipg bucket {self.params_in_ipg_bucket}")
-        #print(f"Reducing {[(param.ds_id, param.grad) for param in params_to_reduce]}")
+        #print(f"Reducing {[(debug_param2name_id_shape(param), param.grad) for param in params_to_reduce]}")
         #exit(0)
         if self.contiguous_gradients:
             reduction_list = [self.ipg_buffer[self.ipg_index]]

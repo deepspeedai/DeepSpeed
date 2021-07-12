@@ -18,7 +18,7 @@ from .offload_constants import *
 
 from ..utils import see_memory_usage
 from deepspeed.utils import log_dist, init_distributed
-from deepspeed.utils.debug import debug_param2name_id_shape, debug_module2name, debug_param2name, debug_param2name_id_shape_status, printflock, log_rank_file
+from deepspeed.utils.debug import debug_param2name_id_shape, debug_param2name_id_shape_device, debug_module2name, debug_param2name, debug_param2name_id_shape_status, printflock, log_rank_file
 
 from ..swap_tensor.partitioned_param_swapper import AsyncPartitionedParameterSwapper, PartitionedParamStatus
 from ..config import DeepSpeedConfig
@@ -568,7 +568,7 @@ class Init(InsertPostInitMethodToModuleSubClasses):
         def partition(param_list=None, hierarchy=0, has_been_updated=False):
             cls = param
             print_rank_0(
-                f"{'--'*hierarchy}----Partitioning param with id {cls.ds_id} dev {cls.device} shape {cls.shape}"
+                f"{'--'*hierarchy}----Partitioning param {debug_param2name_id_shape_device(cls)}"
             )
             if param_list is None:
                 param_list = [cls]
@@ -589,7 +589,8 @@ class Init(InsertPostInitMethodToModuleSubClasses):
                                 accumulate=False):
             cls = param
             print_rank_0(
-                f"{'--'*hierarchy}----Partitioning param gradient with id {cls.ds_id}")
+                f"{'--'*hierarchy}----Partitioning param gradient with id {debug_param2name_id_shape_device(cls)}"
+            )
             if param_list is None:
                 param_list = [cls]
                 if isinstance(partition_buffers, torch.Tensor):
