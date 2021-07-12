@@ -270,8 +270,8 @@ You can use this method to save ZeRO-2 weights as well.
 If you'd like to get the fp32 weights, we supply a special script that can do offline consolidation. It requires no configuration files or GPUs. Here is an example of its usage:
 
 ``` bash
-$ cd /path/to/checkpoints_dir
-$ ./zero_to_fp32.py global_step1 pytorch_model.bin
+$ cd /path/to/checkpoint_dir
+$ ./zero_to_fp32.py . pytorch_model.bin
 Processing zero checkpoint at global_step1
 Detected checkpoint of type zero stage 3, world_size: 2
 Saving fp32 state dict to pytorch_model.bin (total_numel=60506624)
@@ -280,6 +280,22 @@ Saving fp32 state dict to pytorch_model.bin (total_numel=60506624)
 The `zero_to_fp32.py` gets created automatically when you save a checkpoint.
 
 Note: currently this script uses 2x memory (general RAM) of the size of the final checkpoint.
+
+Alternatively, if you have plenty of spare CPU memory and instead of getting the file you want your model to be updated to its fp32 weights, you can do the following at the end of the training:
+
+``` python
+    from deepspeed.utils.zero_to_fp32 import load_state_dict_from_zero_checkpoint
+    fp32_model = load_state_dict_from_zero_checkpoint(deepspeed.module, checkpoint_dir)
+```
+
+Beware, that the model will be good for saving, but no longer good for continuing the training and will require a `deepspeed.initialize()` anew.
+
+If you just want the `state_dict`, you can do:
+
+``` python
+    from deepspeed.utils.zero_to_fp32 import get_fp32_state_dict_from_zero_checkpoint
+    state_dict = get_fp32_state_dict_from_zero_checkpoint(checkpoint_dir)
+```
 
 
 Congratulations! You have completed the ZeRO tutorial.

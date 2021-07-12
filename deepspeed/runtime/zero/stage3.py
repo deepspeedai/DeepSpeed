@@ -960,7 +960,7 @@ class FP16_DeepSpeedZeroOptimizer_Stage3(object):
                 self.fp16_groups.append(sub_group)
                 self.sub_group_to_group_id[i] = j
 
-                #These are the list of the partitoned parameters
+                #These are the list of the partitioned parameters
                 self.fp16_partitioned_groups.append(
                     [param.ds_tensor for param in self.fp16_groups[i]])
 
@@ -1106,7 +1106,12 @@ class FP16_DeepSpeedZeroOptimizer_Stage3(object):
                 self.fp16_groups.append(sub_group)
                 self.sub_group_to_group_id[i] = j
 
-                #These are the list of the partitoned parameters
+                # comment out for zero_to_fp32 debug
+                # if torch.distributed.get_rank() == 0:
+                #     for param in self.fp16_groups[i]:
+                #         print(f"{debug_param2name_id_shape(param)} {param.ds_shape}")
+
+                #These are the list of the partitioned parameters
                 self.fp16_partitioned_groups.append(
                     [param.ds_tensor for param in self.fp16_groups[i]])
 
@@ -1406,14 +1411,16 @@ class FP16_DeepSpeedZeroOptimizer_Stage3(object):
     def persistent_parameters(self):
         persistent_params = []
         total_persistent_parameters = 0
+        params_count = 0
         for _, param in self.module.named_parameters(recurse=True):
             if param.ds_numel < self.persistence_threshold:
+                params_count += 1
                 param.ds_persist = True
                 persistent_params.append(param)
                 total_persistent_parameters += param.ds_numel
 
         print_rank_0(
-            f'ZeRO 3: Total persistent parameters: {total_persistent_parameters}',
+            f"ZeRO 3: Total persistent parameters: {total_persistent_parameters} in {params_count} params",
             force=False)
         return persistent_params
 
