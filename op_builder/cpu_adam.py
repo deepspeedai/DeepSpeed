@@ -29,6 +29,21 @@ class CPUAdamBuilder(CUDAOpBuilder):
         CUDA_INCLUDE = os.path.join(torch.utils.cpp_extension.CUDA_HOME, "include")
         return ['csrc/includes', CUDA_INCLUDE]
 
+    def cpu_arch(self):
+        if not self.command_exists('lscpu'):
+            self.warning(
+                "CPUAdam attempted to query 'lscpu' to detect the CPU architecture. "
+                "However, 'lscpu' does not appear to exist on "
+                "your system, will fall back to use -march=native.")
+            return ''
+
+        result = subprocess.check_output('lscpu', shell=True)
+        result = result.decode('utf-8').strip().lower()
+        if 'ppc64le' in result:
+            # gcc does not provide -march on PowerPC, use -mcpu instead
+            return '-mcpu=native'
+        return '-march=native'
+
     def simd_width(self):
         if not self.command_exists('lscpu'):
             self.warning(
@@ -49,6 +64,7 @@ class CPUAdamBuilder(CUDAOpBuilder):
     def cxx_args(self):
         import torch
         CUDA_LIB64 = os.path.join(torch.utils.cpp_extension.CUDA_HOME, "lib64")
+        CPU_ARCH = self.cpu_arch()
         SIMD_WIDTH = self.simd_width()
 
         return [
@@ -59,7 +75,7 @@ class CPUAdamBuilder(CUDAOpBuilder):
             '-lcublas',
             '-g',
             '-Wno-reorder',
-            '-march=native',
+            CPU_ARCH,
             '-fopenmp',
             SIMD_WIDTH
         ]
