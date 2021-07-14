@@ -15,9 +15,9 @@ class SimpleModel(torch.nn.Module):
         self.cross_entropy_loss = torch.nn.CrossEntropyLoss()
 
     def forward(self, x, y):
-        hidden_dim = x
-        hidden_dim = self.linear(hidden_dim)
-        return self.cross_entropy_loss(hidden_dim, y)
+        hidden = x
+        hidden = self.linear(hidden)
+        return self.cross_entropy_loss(hidden, y)
 
 
 def create_config_from_dict(tmpdir, config_dict):

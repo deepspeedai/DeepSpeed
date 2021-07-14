@@ -32,7 +32,7 @@ from deepspeed.runtime.swap_tensor.pipelined_optimizer_swapper import PipelinedO
 pg_correctness_test = False
 
 FWD_MODULE_STACK = list()
-from deepspeed.utils.debug import debug_module2name_id, debug_param2name_id_numel, debug_param2name_id_shape_device, debug_module2name_class, printflock, log_rank_file
+from deepspeed.utils.debug import debug_module2name_id, debug_param2name_id, debug_param2name_id_numel, debug_param2name_id_shape_device, debug_module2name_class, printflock, log_rank_file
 
 
 def print_rank_0(message, debug=False, force=False):
@@ -397,7 +397,9 @@ class PartitionedParameterCoordinator(object):
     def fetch_sub_module(self, sub_module):
         partitioned_params = []
         params_in_flight = False
-        # print_rank_0(f"{'--' * self.hierarchy}Fetching params in module {sub_module.__class__.__name__}")
+        print_rank_0(
+            f"{'--' * self.hierarchy}Fetching params in module {debug_module2name_class(sub_module)}"
+        )
         params_to_fetch = [
             param for _,
             param in sub_module.named_parameters(recurse=False)
@@ -416,17 +418,18 @@ class PartitionedParameterCoordinator(object):
         for param in params_to_fetch:
             param.ds_active_sub_modules += 1
             print_rank_0(
-                f"{'--' * self.hierarchy}--Fetching parameters {param.ds_id} {param.ds_shape} with active sub modules {param.ds_active_sub_modules}"
+                f"{'--' * self.hierarchy}--Fetching parameters {debug_param2name_id_shape(param)} with active sub modules {param.ds_active_sub_modules}"
             )
 
             if param.ds_status == ZeroParamStatus.AVAILABLE:
                 print_rank_0(
-                    f"{'--' * self.hierarchy}--Parameter {param.ds_id} is already available"
+                    f"{'--' * self.hierarchy}--Parameter {debug_param2name_id(param)} is already available"
                 )
 
             if param.ds_status == ZeroParamStatus.NOT_AVAILABLE:
                 print_rank_0(
-                    f"{'--' * self.hierarchy}--Parameter {param.ds_id} is being fetched")
+                    f"{'--' * self.hierarchy}--Parameter {debug_param2name_id(param)} is being fetched"
+                )
                 partitioned_params.append(param)
 
                 # keeping track of number of elements consumed by available parmaeters
@@ -436,7 +439,7 @@ class PartitionedParameterCoordinator(object):
             if param.ds_status == ZeroParamStatus.INFLIGHT:
                 params_in_flight = True
                 print_rank_0(
-                    f"{'--' * self.hierarchy}--Parameters {param.ds_id} is already in flight (prefetched)"
+                    f"{'--' * self.hierarchy}--Parameters {debug_param2name_id(param)} is already in flight (prefetched)"
                 )
         self.hierarchy += 1
 
@@ -545,7 +548,9 @@ class PreBackwardFunction(torch.autograd.Function):
     def forward(ctx, module, pre_backward_function, outputs):
         ctx.module = module
         ctx.pre_backward_function = pre_backward_function
-        module.applied_pre_backward = False
+        if not hasattr(module, "applied_pre_backward_ref_cnt"):
+            module.applied_pre_backward_ref_cnt = 0
+        module.applied_pre_backward_ref_cnt += 1
         #print(f"After Forward: {ctx.module.__class__.__name__}")
         outputs = outputs.detach()
         return outputs
@@ -1478,9 +1483,14 @@ class FP16_DeepSpeedZeroOptimizer_Stage3(object):
 
         def _pre_backward_module_hook(module, inputs, output):
             def _run_before_backward_function(sub_module):
-                if sub_module.applied_pre_backward is False:
+                # some models (e.g. Albert) may run multiple forwards on the same layer in a loop
+                # before doing backwards, so each backward will need a pre-fetch - using reference
+                # counting to support this scenario
+                #print(f"COUNTER before: {sub_module.applied_pre_backward_ref_cnt}")
+                if sub_module.applied_pre_backward_ref_cnt > 0:
                     self.pre_sub_module_backward_function(sub_module)
-                    sub_module.applied_pre_backward = True
+                    sub_module.applied_pre_backward_ref_cnt -= 1
+                #print(f"COUNTER after: {sub_module.applied_pre_backward_ref_cnt}")
 
             return _apply_to_tensors_only(module,
                                           PreBackwardFunction,
