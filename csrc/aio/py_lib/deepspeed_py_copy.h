@@ -6,8 +6,10 @@ Licensed under the MIT license.
 Functionality for swapping optimizer tensors to/from (NVMe) storage devices.
 */
 
+#if (__x86_64__ || __i386__)
 #include <cpuid.h>
 #include <x86intrin.h>
+#endif
 
 #include <deepspeed_aio_common.h>
 #include <stdlib.h>

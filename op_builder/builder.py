@@ -160,13 +160,34 @@ class OpBuilder(ABC):
             valid = valid or result.wait() == 0
         return valid
 
+    def strip_empty_entries(self, args):
+        '''
+        Drop any empty strings from the list of compile and link flags
+        '''
+        return [x for x in args if len(x) > 0]
+
+    def cpu_arch(self):
+        if not self.command_exists('lscpu'):
+            self.warning(
+                f"{self.name} attempted to query 'lscpu' to detect the CPU architecture. "
+                "However, 'lscpu' does not appear to exist on "
+                "your system, will fall back to use -march=native.")
+            return '-march=native'
+
+        result = subprocess.check_output('lscpu', shell=True)
+        result = result.decode('utf-8').strip().lower()
+        if 'ppc64le' in result:
+            # gcc does not provide -march on PowerPC, use -mcpu instead
+            return '-mcpu=native'
+        return '-march=native'
+
     def simd_width(self):
         if not self.command_exists('lscpu'):
             self.warning(
-                f"{self.name} is attempted to query 'lscpu' to detect the existence "
+                f"{self.name} attempted to query 'lscpu' to detect the existence "
                 "of AVX instructions. However, 'lscpu' does not appear to exist on "
                 "your system, will fall back to non-vectorized execution.")
-            return ''
+            return '-D__SCALAR__'
 
         result = subprocess.check_output('lscpu', shell=True)
         result = result.decode('utf-8').strip().lower()
@@ -175,7 +196,7 @@ class OpBuilder(ABC):
                 return '-D__AVX512__'
             elif 'avx2' in result:
                 return '-D__AVX256__'
-        return ''
+        return '-D__SCALAR__'
 
     def python_requirements(self):
         '''
@@ -220,11 +241,12 @@ class OpBuilder(ABC):
 
     def builder(self):
         from torch.utils.cpp_extension import CppExtension
-        return CppExtension(name=self.absolute_name(),
-                            sources=self.sources(),
-                            include_dirs=self.include_paths(),
-                            extra_compile_args={'cxx': self.cxx_args()},
-                            extra_link_args=self.extra_ldflags())
+        return CppExtension(
+            name=self.absolute_name(),
+            sources=self.strip_empty_entries(self.sources()),
+            include_dirs=self.strip_empty_entries(self.include_paths()),
+            extra_compile_args={'cxx': self.strip_empty_entries(self.cxx_args())},
+            extra_link_args=self.strip_empty_entries(self.extra_ldflags()))
 
     def load(self, verbose=True):
         from ...git_version_info import installed_ops, torch_info
@@ -264,15 +286,17 @@ class OpBuilder(ABC):
         os.makedirs(ext_path, exist_ok=True)
 
         start_build = time.time()
+        sources = [self.deepspeed_src_path(path) for path in self.sources()]
+        extra_include_paths = [
+            self.deepspeed_src_path(path) for path in self.include_paths()
+        ]
         op_module = load(
             name=self.name,
-            sources=[self.deepspeed_src_path(path) for path in self.sources()],
-            extra_include_paths=[
-                self.deepspeed_src_path(path) for path in self.include_paths()
-            ],
-            extra_cflags=self.cxx_args(),
-            extra_cuda_cflags=self.nvcc_args(),
-            extra_ldflags=self.extra_ldflags(),
+            sources=self.strip_empty_entries(sources),
+            extra_include_paths=self.strip_empty_entries(extra_include_paths),
+            extra_cflags=self.strip_empty_entries(self.cxx_args()),
+            extra_cuda_cflags=self.strip_empty_entries(self.nvcc_args()),
+            extra_ldflags=self.strip_empty_entries(self.extra_ldflags()),
             verbose=verbose)
         build_duration = time.time() - start_build
         if verbose:
@@ -356,12 +380,12 @@ class CUDAOpBuilder(OpBuilder):
         from torch.utils.cpp_extension import CUDAExtension
         assert_no_cuda_mismatch()
         return CUDAExtension(name=self.absolute_name(),
-                             sources=self.sources(),
-                             include_dirs=self.include_paths(),
-                             libraries=self.libraries_args(),
+                             sources=self.strip_empty_entries(self.sources()),
+                             include_dirs=self.strip_empty_entries(self.include_paths()),
+                             libraries=self.strip_empty_entries(self.libraries_args()),
                              extra_compile_args={
-                                 'cxx': self.cxx_args(),
-                                 'nvcc': self.nvcc_args()
+                                 'cxx': self.strip_empty_entries(self.cxx_args()),
+                                 'nvcc': self.strip_empty_entries(self.nvcc_args())
                              })
 
     def cxx_args(self):
