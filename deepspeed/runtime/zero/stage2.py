@@ -422,6 +422,10 @@ class FP16_DeepSpeedZeroOptimizer(object):
             param.data = self.round_robin_fp16_groups[group_index][new_index].data
 
     def _round_robin_reorder(self, tensor_list, num_partitions):
+
+        # disable round robin if need to debug something
+        #return tensor_list, list(range(len(tensor_list)))
+
         partition_tensors = {}
 
         for i, tensor in enumerate(tensor_list):

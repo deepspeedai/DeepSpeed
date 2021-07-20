@@ -1978,7 +1978,15 @@ class DeepSpeedEngine(Module):
         param_shapes = OrderedDict()
         cnt = 0
         numel = 0
-        for fp16_group in self.optimizer.fp16_groups:
+
+        # zero2 started using a round_robin_fp16_groups which is a shuffled version of fp16_groups -
+        # if we don't use it, we get parameters ordered incorrectly
+        if hasattr(self.optimizer, "round_robin_fp16_groups"):
+            fp16_groups = self.optimizer.round_robin_fp16_groups
+        else:
+            fp16_groups = self.optimizer.fp16_groups
+
+        for fp16_group in fp16_groups:
             for param in fp16_group:
                 cnt += 1
                 numel += param.ds_numel if hasattr(param, "ds_numel") else param.numel()
