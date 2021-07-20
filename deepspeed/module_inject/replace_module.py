@@ -232,7 +232,8 @@ def replace_transformer_layer(orig_layer_impl,
                                                             qkvw)
 
             if qkvb is not None:
-                qkvb = qkvb.half()
+                if fp16:
+                    qkvb = qkvb.half()
                 attn_block.attn_qkvb.data = mp_replace.qkv_copy(
                     attn_block.attn_qkvb.data,
                     qkvb)

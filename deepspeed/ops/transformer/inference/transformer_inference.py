@@ -137,10 +137,6 @@ class DeepSpeedSelfAttentionFunction(Function):
                 q_groups,
                 merge_count,
                 qkv_merging):
-
-        while len(input_mask.shape) < 4:
-            input_mask = input_mask.unsqueeze(0)
-
         def _transpose_for_scores(x, key=False, reshape=False):
             attention_head_size = x.shape[-1] // num_attention_heads_per_partition
             new_x_shape = x.size()[:-1] + (num_attention_heads_per_partition,
@@ -160,7 +156,7 @@ class DeepSpeedSelfAttentionFunction(Function):
                                       (hidden_size_per_partition,)
             return x.view(*new_x_layer_shape)
 
-        def compute_attention(qkv_out):
+        def compute_attention(qkv_out, input_mask):
             score_context_func = inference_cuda_module.softmax_context_fp32 if (not config.fp16 or not config.triangular_masking) else \
                                     inference_cuda_module.softmax_context_fp16
             if not config.triangular_masking:
@@ -211,12 +207,17 @@ class DeepSpeedSelfAttentionFunction(Function):
                     True) / (norm_factor if config.scale_attention else 1.0)
                 value_layer1 = _transpose_for_scores(value_layer, False, True)
 
+            no_masking = input_mask is None
+            if no_masking:
+                input_mask = torch.empty(1)
+
             if layer_past is None:
                 attn_key_value = score_context_func(
                     mixed_query,
                     (key_layer1 if unfused_mode else key_layer),
                     torch.empty(1),
-                    (input_mask if config.triangular_masking else input_mask.float()),
+                    (input_mask
+                     if config.triangular_masking or no_masking else input_mask.float()),
                     (value_layer1 if unfused_mode else value_layer),
                     torch.empty(1),
                     num_attention_heads_per_partition,
@@ -224,13 +225,15 @@ class DeepSpeedSelfAttentionFunction(Function):
                     (not unfused_mode),
                     config.triangular_masking,
                     config.local_attention,
-                    config.window_size)
+                    config.window_size,
+                    no_masking)
             else:
                 attn_key_value = score_context_func(
                     mixed_query,
                     (key_layer1 if unfused_mode else past_key.type_as(key_layer)),
                     (key_layer1 if unfused_mode else key_layer),
-                    (input_mask if config.triangular_masking else input_mask.float()),
+                    (input_mask
+                     if config.triangular_masking or no_masking else input_mask.float()),
                     (value_layer1 if unfused_mode else past_value.type_as(value_layer)),
                     (value_layer1 if unfused_mode else value_layer),
                     num_attention_heads_per_partition,
@@ -238,7 +241,8 @@ class DeepSpeedSelfAttentionFunction(Function):
                     (not unfused_mode),
                     config.triangular_masking,
                     config.local_attention,
-                    config.window_size)
+                    config.window_size,
+                    no_masking)
             #import pdb;pdb.set_trace()
             if unfused_mode:
                 context_layer, _, _ = attn_key_value
@@ -270,7 +274,7 @@ class DeepSpeedSelfAttentionFunction(Function):
                                    norm_b,
                                    config.epsilon,
                                    (attn_qkvb is not None))
-            context_layer, key_layer, value_layer = compute_attention(qkv_out)
+            context_layer, key_layer, value_layer = compute_attention(qkv_out, input_mask)
             output = vector_matmul_func(context_layer, attn_ow)
 
             return output, key_layer, value_layer, context_layer
