@@ -7,6 +7,7 @@ import time
 import importlib
 from pathlib import Path
 import subprocess
+import distutils.ccompiler
 from abc import ABC, abstractmethod
 
 YELLOW = '\033[93m'
@@ -159,6 +160,10 @@ class OpBuilder(ABC):
                                       shell=True)
             valid = valid or result.wait() == 0
         return valid
+
+    def has_function(self, funcname, libraries):
+        compiler = distutils.ccompiler.new_compiler()
+        return compiler.has_function(funcname, libraries=libraries)
 
     def strip_empty_entries(self, args):
         '''

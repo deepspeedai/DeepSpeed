@@ -50,10 +50,14 @@ class AsyncIOBuilder(OpBuilder):
         return ['-laio']
 
     def is_compatible(self):
-        aio_libraries = ['libaio-dev']
-        aio_compatible = self.libraries_installed(aio_libraries)
+        # Check for the existence of libaio by using distutils
+        # to compile and link a test program that calls io_submit,
+        # which is a function provided by libaio that is used in the async_io op.
+        # If needed, one can define -I and -L entries in CFLAGS and LDFLAGS
+        # respectively to specify the directories for libaio.h and libaio.so.
+        aio_compatible = self.has_function('io_submit', ('aio', ))
         if not aio_compatible:
             self.warning(
-                f"{self.NAME} requires the libraries: {aio_libraries} but are missing. Can be fixed by: `apt install libaio-dev`."
+                f"{self.NAME} requires libaio but it is missing. Can be fixed by: `apt install libaio-dev`."
             )
         return super().is_compatible() and aio_compatible
