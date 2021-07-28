@@ -106,6 +106,7 @@ class FP16_DeepSpeedZeroOptimizer(object):
             logger.info(f"Reduce bucket size {reduce_bucket_size}")
             logger.info(f"Allgather bucket size {allgather_bucket_size}")
             logger.info(f"CPU Offload: {cpu_offload}")
+            logger.info(f'Round robin gradient partitioning: {round_robin_gradients}')
         # The fused optimizer does all the work. We need this layer for two reason:
         # 1. maintain same user API from apex.fp16_utils
         # 2. keep common stuff here in case we need to add ne552w fused optimizer later

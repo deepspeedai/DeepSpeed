@@ -189,4 +189,4 @@ class DeepSpeedZeroConfig(DeepSpeedConfigObject):
         self.round_robin_gradients = get_scalar_param(
             zero_config_dict,
             ZERO_OPTIMIZATION_ROUND_ROBIN_GRADIENTS,
-            ZERO3_OPTIMIZATION_CONTIGUOUS_GRADIENTS_DEFAULT)
+            ZERO_OPTIMIZATION_ROUND_ROBIN_GRADIENTS_DEFAULT)
