@@ -482,6 +482,9 @@ class DeepSpeedEngine(Module):
     def zero_allgather_partitions(self):
         return self._config.zero_config.allgather_partitions
 
+    def zero_round_robin_gradients(self):
+        return self._config.zero_config.round_robin_gradients
+
     def dump_state(self):
         return self._config.dump_state
 
@@ -908,11 +911,13 @@ class DeepSpeedEngine(Module):
         elif zero_stage <= ZERO_OPTIMIZATION_GRADIENTS:
             overlap_comm = self.zero_overlap_comm()
             contiguous_gradients = self.zero_contiguous_gradients()
+            round_robin_gradients = self.zero_round_robin_gradients()
 
             # Overlap and contiguous grads are meaningless in stage 1 and are ignored
             if zero_stage == ZERO_OPTIMIZATION_OPTIMIZER_STATES:
                 overlap_comm = False
                 contiguous_gradients = False
+                round_robin_gradients = False
 
             if isinstance(self.module, PipelineModule):
                 if overlap_comm:
@@ -940,7 +945,8 @@ class DeepSpeedEngine(Module):
                 gradient_predivide_factor=self.gradient_predivide_factor(),
                 gradient_accumulation_steps=self.gradient_accumulation_steps(),
                 ignore_unused_parameters=self.zero_ignore_unused_parameters(),
-                partition_grads=zero_stage == ZERO_OPTIMIZATION_GRADIENTS)
+                partition_grads=zero_stage == ZERO_OPTIMIZATION_GRADIENTS,
+                round_robin_gradients=round_robin_gradients)
         elif zero_stage == ZERO_OPTIMIZATION_WEIGHTS:
             logger.info("Initializing ZeRO Stage 3") if dist.get_rank() == 0 else None
             from deepspeed.runtime.zero.stage3 import FP16_DeepSpeedZeroOptimizer_Stage3

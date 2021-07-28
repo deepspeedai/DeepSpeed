@@ -39,6 +39,7 @@ class DeepSpeedZeroConfig(DeepSpeedConfigObject):
         self.gather_fp16_weights_on_model_save = None
 
         self.ignore_unused_parameters = None
+        self.round_robin_gradients = None
 
         if ZERO_OPTIMIZATION in param_dict.keys():
             zero_config_dict = param_dict[ZERO_OPTIMIZATION]
@@ -184,3 +185,8 @@ class DeepSpeedZeroConfig(DeepSpeedConfigObject):
         self.legacy_stage1 = get_scalar_param(zero_config_dict,
                                               ZERO_OPTIMIZATION_LEGACY_STAGE1,
                                               ZERO_OPTIMIZATION_LEGACY_STAGE1_DEFAULT)
+
+        self.round_robin_gradients = get_scalar_param(
+            zero_config_dict,
+            ZERO_OPTIMIZATION_ROUND_ROBIN_GRADIENTS,
+            ZERO3_OPTIMIZATION_CONTIGUOUS_GRADIENTS_DEFAULT)

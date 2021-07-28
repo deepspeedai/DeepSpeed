@@ -30,7 +30,8 @@ ZeRO optimization should be enabled as:
     "sub_group_size" : 1000000000000,
     "offload_param": {...},
     "offload_optimizer": {...},
-    "ignore_unused_parameters": [true|false]
+    "ignore_unused_parameters": [true|false],
+    "round_robin_gradients": [true|false]
     }
 }
 '''
@@ -124,6 +125,10 @@ ZERO_OPTIMIZATION_IGNORE_UNUSED_PARAMETERS_DEFAULT = True
 ZERO_OPTIMIZATION_LEGACY_STAGE1 = "legacy_stage1"
 ZERO_OPTIMIZATION_LEGACY_STAGE1_DEFAULT = False
 
+# Stage 2 - partition gradients in a round robin fashsion to load-balance reduction and offload copying
+ZERO_OPTIMIZATION_ROUND_ROBIN_GRADIENTS = 'round_robin_gradients'
+ZERO_OPTIMIZATION_ROUND_ROBIN_GRADIENTS_DEFAULT = False
+
 #yapf: disable
 ZERO_OPTIMIZATION_DEFAULT = {
     ZERO_OPTIMIZATION_STAGE:
@@ -161,5 +166,7 @@ ZERO_OPTIMIZATION_DEFAULT = {
     ZERO_OPTIMIZATION_IGNORE_UNUSED_PARAMETERS:
     ZERO_OPTIMIZATION_IGNORE_UNUSED_PARAMETERS_DEFAULT,
     ZERO_OPTIMIZATION_LEGACY_STAGE1:
-    ZERO_OPTIMIZATION_LEGACY_STAGE1_DEFAULT
+    ZERO_OPTIMIZATION_LEGACY_STAGE1_DEFAULT,
+    ZERO_OPTIMIZATION_ROUND_ROBIN_GRADIENTS:
+    ZERO_OPTIMIZATION_ROUND_ROBIN_GRADIENTS_DEFAULT
 }

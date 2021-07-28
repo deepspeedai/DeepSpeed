@@ -99,7 +99,8 @@ class FP16_DeepSpeedZeroOptimizer(object):
                  gradient_predivide_factor=1.0,
                  gradient_accumulation_steps=1,
                  ignore_unused_parameters=True,
-                 partition_grads=True):
+                 partition_grads=True,
+                 round_robin_gradients=False):
 
         if dist.get_rank() == 0:
             logger.info(f"Reduce bucket size {reduce_bucket_size}")
@@ -159,6 +160,7 @@ class FP16_DeepSpeedZeroOptimizer(object):
         self.gradient_accumulation_steps = gradient_accumulation_steps
         self.micro_step_id = 0
         self.ignore_unused_parameters = ignore_unused_parameters
+        self.round_robin_gradients = round_robin_gradients
 
         self.extra_large_param_to_reduce = None
 
@@ -232,10 +234,15 @@ class FP16_DeepSpeedZeroOptimizer(object):
             # This ensures that gradients are reduced in a fashion such that ownership round robins among the ranks.
             # For example, rather than 3 gradients (g_n+2, g_n+1, g_n) that are reduced consecutively belonging
             # to the same rank, instead they will belong to 3 ranks (r_m+2, r_m+1, r_m).
-            round_robin_tensors, round_robin_indices = self._round_robin_reorder(
-                self.fp16_groups[i],
-                dist.get_world_size(group=self.dp_process_group)
-            )
+            if self.round_robin_gradients:
+                round_robin_tensors, round_robin_indices = self._round_robin_reorder(
+                    self.fp16_groups[i],
+                    dist.get_world_size(group=self.dp_process_group)
+                )
+            else:
+                round_robin_tensors = self.fp16_groups[i]
+                round_robin_indices = list(range(len(self.fp16_groups[i])))
+
             self.round_robin_fp16_groups.append(round_robin_tensors)
             self.round_robin_fp6_indices.append(round_robin_indices)
 
