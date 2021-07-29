@@ -7,7 +7,13 @@ import time
 import importlib
 from pathlib import Path
 import subprocess
+import shlex
+import shutil
+import tempfile
 import distutils.ccompiler
+import distutils.log
+import distutils.sysconfig
+from distutils.errors import CompileError, LinkError
 from abc import ABC, abstractmethod
 
 YELLOW = '\033[93m'
@@ -161,9 +167,84 @@ class OpBuilder(ABC):
             valid = valid or result.wait() == 0
         return valid
 
-    def has_function(self, funcname, libraries):
-        compiler = distutils.ccompiler.new_compiler()
-        return compiler.has_function(funcname, libraries=libraries)
+    def has_function(self, funcname, libraries, verbose=False):
+        '''
+        Test for existence of a function within a tuple of libraries.
+
+        This is used as a smoke test to check whether a certain library is avaiable.
+        As a test, this creates a simple C program that calls the specified function,
+        and then distutils is used to compile that program and link it with the specified libraries.
+        Returns True if both the compile and link are successful, False otherwise.
+        '''
+        tempdir = None  # we create a temporary directory to hold various files
+        filestderr = None  # handle to open file to which we redirect stderr
+        oldstderr = None  # file descriptor for stderr
+        try:
+            # Echo compile and link commands that are used.
+            if verbose:
+                distutils.log.set_verbosity(1)
+
+            # Create a compiler object.
+            compiler = distutils.ccompiler.new_compiler(verbose=verbose)
+
+            # Configure compiler and linker to build according to Python install.
+            distutils.sysconfig.customize_compiler(compiler)
+
+            # Create a temporary directory to hold test files.
+            tempdir = tempfile.mkdtemp()
+
+            # Define a simple C program that calls the function in question
+            prog = "void %s(void); int main(int argc, char** argv) { %s(); return 0; }" % (
+                funcname,
+                funcname)
+
+            # Write the test program to a file.
+            filename = os.path.join(tempdir, 'test.c')
+            with open(filename, 'w') as f:
+                f.write(prog)
+
+            # Redirect stderr file descriptor to a file to silence compile/link warnings.
+            if not verbose:
+                filestderr = open(os.path.join(tempdir, 'stderr.txt'), 'w')
+                oldstderr = os.dup(sys.stderr.fileno())
+                os.dup2(filestderr.fileno(), sys.stderr.fileno())
+
+            # Attempt to compile the C program into an object file.
+            cflags = shlex.split(os.environ.get('CFLAGS', ""))
+            objs = compiler.compile([filename],
+                                    extra_preargs=self.strip_empty_entries(cflags))
+
+            # Attempt to link the object file into an executable.
+            # Be sure to tack on any libraries that have been specified.
+            ldflags = shlex.split(os.environ.get('LDFLAGS', ""))
+            compiler.link_executable(objs,
+                                     os.path.join(tempdir,
+                                                  'a.out'),
+                                     extra_preargs=self.strip_empty_entries(ldflags),
+                                     libraries=libraries)
+
+            # Compile and link succeeded
+            return True
+
+        except CompileError:
+            return False
+
+        except LinkError:
+            return False
+
+        except:
+            return False
+
+        finally:
+            # Restore stderr file descriptor and close the stderr redirect file.
+            if oldstderr is not None:
+                os.dup2(oldstderr, sys.stderr.fileno())
+            if filestderr is not None:
+                filestderr.close()
+
+            # Delete the temporary directory holding the test program and stderr files.
+            if tempdir is not None:
+                shutil.rmtree(tempdir)
 
     def strip_empty_entries(self, args):
         '''
