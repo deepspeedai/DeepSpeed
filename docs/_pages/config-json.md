@@ -301,6 +301,7 @@ Enabling and configuring ZeRO memory optimizations
     "elastic_checkpoint" : [true|false],
     "stage3_gather_fp16_weights_on_model_save": [true|false],
     "ignore_unused_parameters": [true|false]
+    "round_robin_gradients": [true|false]
     }
 ```
 
@@ -357,6 +358,12 @@ Enabling and configuring ZeRO memory optimizations
 | Description                                                                                                                                | Default |
 | ------------------------------------------------------------------------------------------------------------------------------------------ | ------- |
 | For use with ZeRO stage 1, enable backward hooks to reduce gradients during the backward pass or wait until the end of the backward pass.  | `True`  |
+
+***round_robin_gradients***: [boolean]
+
+| Description                                                                                                                                | Default |
+| ------------------------------------------------------------------------------------------------------------------------------------------ | ------- |
+| Stage 2 optimization for CPU offloading that parallelizes gradient copying to CPU memory among ranks by fine-grained gradient partitioning. Performance benefit grows with gradient accumulation steps (more copying between optimizer steps) or GPU count (increased parallelism). | `False`  |
 
 ***offload_param***: [dictionary]
 
