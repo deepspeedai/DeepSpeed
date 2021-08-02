@@ -856,3 +856,38 @@ def test_zero3_lazyscatter(tmpdir):
             model.step()
 
     _go(args=args)
+
+
+@pytest.mark.parametrize('stage', [1, 2, 3])
+def test_zero_empty_grad(tmpdir, stage):
+    config_dict = {
+        "train_batch_size": 1,
+        "steps_per_print": 1,
+        "fp16": {
+            "enabled": True
+        },
+        "zero_optimization": {
+            "stage": stage
+        }
+    }
+    args = args_from_dict(tmpdir, config_dict)
+    hidden_dim = 10
+
+    model = SimpleModel(hidden_dim)
+
+    @distributed_test(world_size=[1])
+    def _go(args, model, hidden_dim):
+        optimizer = torch.optim.Adam(model.parameters())
+        model, _, _, _ = deepspeed.initialize(args=args,
+                                              model=model,
+                                              optimizer=optimizer)
+        data_loader = random_dataloader(model=model,
+                                        total_samples=50,
+                                        hidden_dim=hidden_dim,
+                                        device=model.device)
+        for n, batch in enumerate(data_loader):
+            loss = model(batch[0], batch[1])
+            model.backward(loss)
+            model.step()
+
+    _go(args=args, model=model, hidden_dim=hidden_dim)
