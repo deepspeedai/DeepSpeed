@@ -205,7 +205,7 @@ class OnebitAdam(torch.optim.Optimizer):
                     if 'non_freeze' in group.keys() and group['non_freeze'] is True:
                         dist.all_reduce(grad)
                         grad.mul_(1 / dist.get_world_size())
-                        exp_avg.mul_(beta1).add(1 - beta1, grad)
+                        exp_avg.mul_(beta1).add_(1 - beta1, grad)
                         exp_avg_sq.mul_(beta2).addcmul_(1 - beta2, grad, grad)
                         grad = None
                     else:
