@@ -432,7 +432,7 @@ class FP16_DeepSpeedZeroOptimizer(object):
     def _round_robin_reorder(self, tensor_list, num_partitions):
 
         # disable round robin if need to debug something
-        #return tensor_list, list(range(len(tensor_list)))
+        # return tensor_list, list(range(len(tensor_list)))
 
         partition_tensors = {}
 
@@ -518,7 +518,7 @@ class FP16_DeepSpeedZeroOptimizer(object):
 
         total_partitions = dist.get_world_size(group=self.dp_process_group)
 
-        for i, param_group in enumerate(self.fp16_groups):
+        for i, param_group in enumerate(self.round_robin_fp16_groups):
 
             self.param_to_partition_ids[i] = {}
             self.is_partition_reduced[i] = {}
