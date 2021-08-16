@@ -70,6 +70,8 @@ lnav:
         url: /tutorials/bert-pretraining/
       - title: "CIFAR-10"
         url: /tutorials/cifar-10/
+      - title: "Curriculum Learning"
+        url: /tutorials/curriculum-learning/
       - title: "Flops Profiler"
         url: /tutorials/flops-profiler/
       - title: "GAN"

@@ -36,6 +36,7 @@ collections:
       - bert-finetuning.md
       - bert-pretraining.md
       - cifar-10.md
+      - curriculum-learning.md
       - flops-profiler.md
       - gan.md
       - lrrt.md

@@ -41,6 +41,7 @@ from deepspeed.utils.timer import ThroughputTimer, SynchronizedWallClockTimer
 from deepspeed.utils.debug import debug_extract_module_and_param_names
 from deepspeed.runtime.progressive_layer_drop import ProgressiveLayerDrop
 from deepspeed.runtime.eigenvalue import Eigenvalue
+from deepspeed.runtime.data_pipeline.curriculum_scheduler import CurriculumScheduler
 
 from .pipe.module import PipelineModule
 from .utils import ensure_directory_exists
@@ -214,6 +215,9 @@ class DeepSpeedEngine(Module):
         if self.pld_enabled():
             self.progressive_layer_drop = self._configure_progressive_layer_drop()
 
+        if self.curriculum_enabled():
+            self.curriculum_scheduler = self._configure_curriculum_scheduler()
+
         if self.global_rank == 0:
             self._config.print('DeepSpeedEngine configuration')
             if self.dump_state():
@@ -281,6 +285,12 @@ class DeepSpeedEngine(Module):
 
     def eigenvalue_layer_num(self):
         return self._config.eigenvalue_layer_num
+
+    def curriculum_enabled(self):
+        return self._config.curriculum_enabled
+
+    def curriculum_params(self):
+        return self._config.curriculum_params
 
     def tensorboard_enabled(self):
         return self._config.tensorboard_enabled
@@ -998,6 +1008,10 @@ class DeepSpeedEngine(Module):
 
         return pld
 
+    def _configure_curriculum_scheduler(self):
+        scheduler = CurriculumScheduler(self.curriculum_params())
+        return scheduler
+
     @staticmethod
     def is_map_style_dataset(obj):
         return hasattr(obj, "__getitem__") and hasattr(obj, "__len__")
@@ -1100,6 +1114,14 @@ class DeepSpeedEngine(Module):
 
         if self.module.training and self.progressive_layer_drop:
             kwargs.update(self.progressive_layer_drop.get_state())
+
+        if self.module.training and self.curriculum_enabled():
+            self.curriculum_scheduler.update_difficulty(self.global_steps + 1)
+            if self.curriculum_params()["curriculum_type"] == "seqlen":
+                kwargs.update({
+                    "curriculum_seqlen":
+                    self.curriculum_scheduler.get_current_difficulty()
+                })
 
         if self.zero_optimization_partition_weights():
             # Enable automated discovery of external parameters by indicating that
