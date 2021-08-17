@@ -311,3 +311,6 @@ DeepSpeed offers sparse attention to support long sequences. Please refer to the
     "num_different_global_patterns": 4
 }
 ```
+
+## Mixture of Experts (MoE)
+To learn more about training Mixture of Experts (MoE) models with DeepSpeed, see our [tutorial](https://www.deepspeed.ai/tutorials/mixture-of-experts/) for more details.

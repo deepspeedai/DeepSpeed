@@ -41,6 +41,7 @@ collections:
       - gan.md
       - lrrt.md
       - megatron.md
+      - mixture-of-experts.md
       - one-cycle.md
       - onebit-adam.md
       - onebit-lamb.md
