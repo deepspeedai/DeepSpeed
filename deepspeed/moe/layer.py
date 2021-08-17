@@ -16,9 +16,6 @@ import typing
 
 
 class MoE(torch.nn.Module):
-    '''
-        DeepSpeed MOE API: This defines a simple API that can be used from client-side code.
-    '''
     def __init__(self,
                  hidden_size,
                  expert,
@@ -30,10 +27,9 @@ class MoE(torch.nn.Module):
                  min_capacity=4,
                  noisy_gate_policy: typing.Optional[str] = None):
         """Initialize an MoE layer.
-        TODO: add details about input/output dimension assumptions
 
         Arguments:
-            hidden_size (int): the hidden dimension of the model.
+            hidden_size (int): the hidden dimension of the model, importantly this is also the input and output dimension.
 
             expert (torch.nn.Module): the torch module that defines the expert (e.g., MLP, torch.linear).
 
@@ -81,15 +77,20 @@ class MoE(torch.nn.Module):
         self.dropout = torch.nn.Dropout(output_dropout_prob)
 
     def forward(self, hidden_states, used_token=None):
-        """
+        """ MoE forward
+
         Arguments:
             hidden_states (Tensor): input to the layer
             used_token (Tensor, optional): default: None, mask only used tokens
 
         Returns:
-            output (Tensor): output of the model
-            l_aux (Tensor): gate loss value
-            exp_counts (int): expert count
+            A tuple including output, gate loss, and expert count.
+
+            * output (Tensor): output of the model
+
+            * l_aux (Tensor): gate loss value
+
+            * exp_counts (int): expert count
         """
         output = self.deepspeed_moe(hidden_states, used_token)
         output = self.dropout(output)

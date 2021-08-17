@@ -69,10 +69,39 @@ def ensure_divisibility(numerator, denominator):
 
 
 def initialize(ep_size=1, mpu=None):
-    """ if mpu is provided, intialize groups using mpu.
-        otherwise, we have two cases:
-        1. If called from DeepSpeed.initialize(), initialize groups with mp_size=1 and ep_size=1
-        2. If called from an application, initialize groups with mp_size=1 and ep_size=ep_size provided by the application
+    """
+    Process groups initialization supporting expert (E), data (D), and model (M) parallelism. DeepSpeed considers
+    the following scenarios w.r.t. process group creation.
+
+    * S1: There is no expert parallelism or model parallelism, only data (D)::
+
+        model = my_model(args)
+        engine = deepspeed.initialize(model) # initialize groups without mpu
+
+    * S2: There is expert parallelism but no model parallelism (E+D)::
+
+        deepspeed.utils.groups.initialize(ep_size) # groups will be initialized here
+        model = my_model(args)
+        engine = deepspeed.initialize(model)
+
+    * S3: There is model parallelism but no expert parallelism (M)::
+
+        mpu.init() # client initializes it's model parallel unit
+        model = my_model(args)
+        engine = deepspeed.initialize(model, mpu=mpu) # init w. mpu but ep_size = dp_world_size
+
+    * S4: There is model, data, and expert parallelism (E+D+M)::
+
+        mpu.init() # client initializes it's model parallel unit
+        deepspeed.utils.groups.initialize(ep_size, mpu) # initialize expert groups wrt mpu
+        model = my_model(args)
+        engine = deepspeed.initialize(model, mpu=mpu) # passing mpu is optional in this case
+
+    Arguments:
+        ep_size (int, optional): default=1, expert parallel size
+        mpu (module, optional): default=None, model parallel unit (e.g., from Megatron)
+            that descibes model/data parallel ranks.
+
     """
     if mpu is not None:
         log_dist(message="initializing deepspeed groups using mpu", ranks=[0])
