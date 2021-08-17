@@ -81,6 +81,12 @@ def parse_optim_states(files, ds_checkpoint_dir):
     zero_stage = state_dicts[0]['optimizer_state_dict']["zero_stage"]
     world_size = state_dicts[0]['optimizer_state_dict']["partition_count"]
     param_shapes = state_dicts[0]["param_shapes"]
+    '''For ZeRO-2 each param group can have different partiiton_count as data parallelism for expert
+    parameters can be different from data parallelism for non-expert parameters. So we can just use the max of
+    the partition_count to get the dp world_size.
+    '''
+    if type(world_size) is list:
+        world_size = max(world_size)
 
     if world_size != total_files:
         raise ValueError(

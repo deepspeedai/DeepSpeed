@@ -23,7 +23,8 @@ void Adam_Optimizer::Step(float* _params,
                           float* _exp_avg,
                           float* _exp_avg_sq,
                           size_t _param_size,
-                          __half* dev_params)
+                          __half* dev_params,
+                          bool half_precision)
 {
     float betta1_minus1 = 1 - _betta1;
     float betta2_minus1 = 1 - _betta2;
@@ -67,7 +68,7 @@ void Adam_Optimizer::Step(float* _params,
 #pragma omp parallel for
         for (size_t i = t; i < offset; i += SIMD_WIDTH) {
             AVX_Data grad_4;
-            grad_4.data = SIMD_LOAD(grads + i);
+            grad_4.data = SIMD_LOAD2(grads + i, half_precision);
 
             AVX_Data momentum_4;
             momentum_4.data = SIMD_LOAD(_exp_avg + i);
@@ -75,7 +76,7 @@ void Adam_Optimizer::Step(float* _params,
             variance_4.data = SIMD_LOAD(_exp_avg_sq + i);
 
             AVX_Data param_4;
-            param_4.data = SIMD_LOAD(_params + i);
+            param_4.data = SIMD_LOAD2(_params + i, half_precision);
 
             if (_weight_decay > 0 && !_adamw_mode) {
                 grad_4.data = SIMD_FMA(param_4.data, weight_decay4.data, grad_4.data);
@@ -95,16 +96,22 @@ void Adam_Optimizer::Step(float* _params,
             }
             param_4.data = SIMD_FMA(grad_4.data, step_size_4.data, param_4.data);
 
-            SIMD_STORE(_params + i, param_4.data);
+            SIMD_STORE2(_params + i, param_4.data, half_precision);
 
-            if (dev_params) SIMD_STORE(_doubled_buffer[_buf_index] + (i - t), param_4.data);
+            if (dev_params)
+                SIMD_STORE2(_doubled_buffer[_buf_index] + (i - t), param_4.data, half_precision);
 
             SIMD_STORE(_exp_avg + i, momentum_4.data);
             SIMD_STORE(_exp_avg_sq + i, variance_4.data);
         }
         if (dev_params) {
-            launch_param_update(
-                _doubled_buffer[_buf_index], dev_params + t, copy_size, _streams[_buf_index]);
+            if (half_precision)
+                launch_param_update_half(
+                    _doubled_buffer[_buf_index], dev_params + t, copy_size, _streams[_buf_index]);
+            else
+                launch_param_update(
+                    _doubled_buffer[_buf_index], dev_params + t, copy_size, _streams[_buf_index]);
+
             _buf_index = !_buf_index;
         }
     }
@@ -112,15 +119,23 @@ void Adam_Optimizer::Step(float* _params,
 #endif
 
     if (_param_size > rounded_size) {
+        __half* grads_cast_h;
+        __half* params_cast_h;
+        if (half_precision) {
+            grads_cast_h = reinterpret_cast<__half*>(grads);
+            params_cast_h = reinterpret_cast<__half*>(_params);
+        }
+
         for (size_t t = rounded_size; t < _param_size; t += TILE) {
             size_t copy_size = TILE;
             if ((t + TILE) > _param_size) copy_size = _param_size - t;
             size_t offset = copy_size + t;
             if ((t / TILE) >= 2) { cudaStreamSynchronize(_streams[_buf_index]); }
+
 #pragma omp parallel for
             for (size_t k = t; k < offset; k++) {
-                float grad = grads[k];
-                float param = _params[k];
+                float grad = half_precision ? (float)grads_cast_h[k] : grads[k];
+                float param = half_precision ? (float)params_cast_h[k] : _params[k];
                 float momentum = _exp_avg[k];
                 float variance = _exp_avg_sq[k];
                 if (_weight_decay > 0 && !_adamw_mode) { grad = param * _weight_decay + grad; }
@@ -138,13 +153,17 @@ void Adam_Optimizer::Step(float* _params,
                 param = grad * step_size + param;
                 if (dev_params) _doubled_buffer[_buf_index][k - t] = param;
 
-                _params[k] = param;
+                if (half_precision)
+                    params_cast_h[k] = (__half)param;
+                else
+                    _params[k] = param;
                 _exp_avg[k] = momentum;
                 _exp_avg_sq[k] = variance;
             }
             if (dev_params) {
                 launch_param_update(
                     _doubled_buffer[_buf_index], dev_params + t, (copy_size), _streams[_buf_index]);
+
                 _buf_index = !_buf_index;
             }
         }
@@ -156,7 +175,8 @@ void Adam_Optimizer::Step_4(float* _params,
                             float* _exp_avg,
                             float* _exp_avg_sq,
                             size_t _param_size,
-                            __half* dev_params)
+                            __half* dev_params,
+                            bool half_precision)
 {
     size_t rounded_size = 0;
 
@@ -198,10 +218,10 @@ void Adam_Optimizer::Step_4(float* _params,
 #pragma omp parallel for
         for (size_t i = t; i < offset; i += (SIMD_WIDTH << 2)) {
             AVX_Data grad_4[4];
-            grad_4[0].data = SIMD_LOAD(grads + i);
-            grad_4[1].data = SIMD_LOAD(grads + i + SIMD_WIDTH);
-            grad_4[2].data = SIMD_LOAD(grads + i + (SIMD_WIDTH << 1));
-            grad_4[3].data = SIMD_LOAD(grads + i + SIMD_WIDTH * 3);
+            grad_4[0].data = SIMD_LOAD2(grads + i, half_precision);
+            grad_4[1].data = SIMD_LOAD2(grads + i + SIMD_WIDTH, half_precision);
+            grad_4[2].data = SIMD_LOAD2(grads + i + (SIMD_WIDTH << 1), half_precision);
+            grad_4[3].data = SIMD_LOAD2(grads + i + SIMD_WIDTH * 3, half_precision);
 
             AVX_Data momentum_4[4];
             momentum_4[0].data = SIMD_LOAD(_exp_avg + i);
@@ -216,10 +236,10 @@ void Adam_Optimizer::Step_4(float* _params,
             variance_4[3].data = SIMD_LOAD(_exp_avg_sq + i + SIMD_WIDTH * 3);
 
             AVX_Data param_4[4];
-            param_4[0].data = SIMD_LOAD(_params + i);
-            param_4[1].data = SIMD_LOAD(_params + i + SIMD_WIDTH);
-            param_4[2].data = SIMD_LOAD(_params + i + (SIMD_WIDTH << 1));
-            param_4[3].data = SIMD_LOAD(_params + i + SIMD_WIDTH * 3);
+            param_4[0].data = SIMD_LOAD2(_params + i, half_precision);
+            param_4[1].data = SIMD_LOAD2(_params + i + SIMD_WIDTH, half_precision);
+            param_4[2].data = SIMD_LOAD2(_params + i + (SIMD_WIDTH << 1), half_precision);
+            param_4[3].data = SIMD_LOAD2(_params + i + SIMD_WIDTH * 3, half_precision);
 
             if (_weight_decay > 0 && !_adamw_mode) {
                 grad_4[0].data = SIMD_FMA(param_4[0].data, weight_decay4.data, grad_4[0].data);
@@ -276,17 +296,22 @@ void Adam_Optimizer::Step_4(float* _params,
             param_4[2].data = SIMD_FMA(grad_4[2].data, step_size_4.data, param_4[2].data);
             param_4[3].data = SIMD_FMA(grad_4[3].data, step_size_4.data, param_4[3].data);
 
-            SIMD_STORE(_params + i, param_4[0].data);
-            SIMD_STORE(_params + i + SIMD_WIDTH, param_4[1].data);
-            SIMD_STORE(_params + i + (SIMD_WIDTH << 1), param_4[2].data);
-            SIMD_STORE(_params + i + SIMD_WIDTH * 3, param_4[3].data);
+            SIMD_STORE2(_params + i, param_4[0].data, half_precision);
+            SIMD_STORE2(_params + i + SIMD_WIDTH, param_4[1].data, half_precision);
+            SIMD_STORE2(_params + i + (SIMD_WIDTH << 1), param_4[2].data, half_precision);
+            SIMD_STORE2(_params + i + SIMD_WIDTH * 3, param_4[3].data, half_precision);
 
             if (dev_params) {
-                SIMD_STORE(_doubled_buffer[_buf_index] + (i - t), param_4[0].data);
-                SIMD_STORE(_doubled_buffer[_buf_index] + (i - t) + SIMD_WIDTH, param_4[1].data);
-                SIMD_STORE(_doubled_buffer[_buf_index] + (i - t) + (SIMD_WIDTH << 1),
-                           param_4[2].data);
-                SIMD_STORE(_doubled_buffer[_buf_index] + (i - t) + SIMD_WIDTH * 3, param_4[3].data);
+                SIMD_STORE2(_doubled_buffer[_buf_index] + (i - t), param_4[0].data, half_precision);
+                SIMD_STORE2(_doubled_buffer[_buf_index] + (i - t) + SIMD_WIDTH,
+                            param_4[1].data,
+                            half_precision);
+                SIMD_STORE2(_doubled_buffer[_buf_index] + (i - t) + (SIMD_WIDTH << 1),
+                            param_4[2].data,
+                            half_precision);
+                SIMD_STORE2(_doubled_buffer[_buf_index] + (i - t) + SIMD_WIDTH * 3,
+                            param_4[3].data,
+                            half_precision);
             }
 
             SIMD_STORE(_exp_avg + i, momentum_4[0].data);
@@ -301,8 +326,13 @@ void Adam_Optimizer::Step_4(float* _params,
         }
 
         if (dev_params) {
-            launch_param_update(
-                _doubled_buffer[_buf_index], dev_params + t, copy_size, _streams[_buf_index]);
+            if (half_precision)
+                launch_param_update_half(
+                    _doubled_buffer[_buf_index], dev_params + t, copy_size, _streams[_buf_index]);
+            else
+                launch_param_update(
+                    _doubled_buffer[_buf_index], dev_params + t, copy_size, _streams[_buf_index]);
+
             _buf_index = !_buf_index;
         }
     }
@@ -313,7 +343,8 @@ void Adam_Optimizer::Step_4(float* _params,
              (_exp_avg + rounded_size),
              (_exp_avg_sq + rounded_size),
              (_param_size - rounded_size),
-             (dev_params != nullptr ? (dev_params + rounded_size) : dev_params));
+             (dev_params != nullptr ? (dev_params + rounded_size) : dev_params),
+             half_precision);
 }
 
 int create_adam_optimizer(int optimizer_id,
@@ -361,7 +392,8 @@ void Adam_Optimizer::Step_8(float* _params,
                             float* _exp_avg,
                             float* _exp_avg_sq,
                             size_t _param_size,
-                            __half* dev_params)
+                            __half* dev_params,
+                            bool half_precision)
 {
     size_t rounded_size = 0;
 
@@ -403,14 +435,14 @@ void Adam_Optimizer::Step_8(float* _params,
 #pragma omp parallel for
         for (size_t i = t; i < offset; i += (SIMD_WIDTH << 3)) {
             AVX_Data grad_4[8];
-            grad_4[0].data = SIMD_LOAD(grads + i);
-            grad_4[1].data = SIMD_LOAD(grads + i + SIMD_WIDTH);
-            grad_4[2].data = SIMD_LOAD(grads + i + (SIMD_WIDTH << 1));
-            grad_4[3].data = SIMD_LOAD(grads + i + SIMD_WIDTH * 3);
-            grad_4[4].data = SIMD_LOAD(grads + i + (SIMD_WIDTH << 2));
-            grad_4[5].data = SIMD_LOAD(grads + i + SIMD_WIDTH * 5);
-            grad_4[6].data = SIMD_LOAD(grads + i + SIMD_WIDTH * 6);
-            grad_4[7].data = SIMD_LOAD(grads + i + SIMD_WIDTH * 7);
+            grad_4[0].data = SIMD_LOAD2(grads + i, half_precision);
+            grad_4[1].data = SIMD_LOAD2(grads + i + SIMD_WIDTH, half_precision);
+            grad_4[2].data = SIMD_LOAD2(grads + i + (SIMD_WIDTH << 1), half_precision);
+            grad_4[3].data = SIMD_LOAD2(grads + i + SIMD_WIDTH * 3, half_precision);
+            grad_4[4].data = SIMD_LOAD2(grads + i + (SIMD_WIDTH << 2), half_precision);
+            grad_4[5].data = SIMD_LOAD2(grads + i + SIMD_WIDTH * 5, half_precision);
+            grad_4[6].data = SIMD_LOAD2(grads + i + SIMD_WIDTH * 6, half_precision);
+            grad_4[7].data = SIMD_LOAD2(grads + i + SIMD_WIDTH * 7, half_precision);
 
             AVX_Data momentum_4[8];
             momentum_4[0].data = SIMD_LOAD(_exp_avg + i);
@@ -433,14 +465,14 @@ void Adam_Optimizer::Step_8(float* _params,
             variance_4[7].data = SIMD_LOAD(_exp_avg_sq + i + SIMD_WIDTH * 7);
 
             AVX_Data param_4[8];
-            param_4[0].data = SIMD_LOAD(_params + i);
-            param_4[1].data = SIMD_LOAD(_params + i + SIMD_WIDTH);
-            param_4[2].data = SIMD_LOAD(_params + i + (SIMD_WIDTH << 1));
-            param_4[3].data = SIMD_LOAD(_params + i + SIMD_WIDTH * 3);
-            param_4[4].data = SIMD_LOAD(_params + i + (SIMD_WIDTH << 2));
-            param_4[5].data = SIMD_LOAD(_params + i + SIMD_WIDTH * 5);
-            param_4[6].data = SIMD_LOAD(_params + i + SIMD_WIDTH * 6);
-            param_4[7].data = SIMD_LOAD(_params + i + SIMD_WIDTH * 7);
+            param_4[0].data = SIMD_LOAD2(_params + i, half_precision);
+            param_4[1].data = SIMD_LOAD2(_params + i + SIMD_WIDTH, half_precision);
+            param_4[2].data = SIMD_LOAD2(_params + i + (SIMD_WIDTH << 1), half_precision);
+            param_4[3].data = SIMD_LOAD2(_params + i + SIMD_WIDTH * 3, half_precision);
+            param_4[4].data = SIMD_LOAD2(_params + i + (SIMD_WIDTH << 2), half_precision);
+            param_4[5].data = SIMD_LOAD2(_params + i + SIMD_WIDTH * 5, half_precision);
+            param_4[6].data = SIMD_LOAD2(_params + i + SIMD_WIDTH * 6, half_precision);
+            param_4[7].data = SIMD_LOAD2(_params + i + SIMD_WIDTH * 7, half_precision);
 
             if (_weight_decay > 0 && !_adamw_mode) {
                 grad_4[0].data = SIMD_FMA(param_4[0].data, weight_decay4.data, grad_4[0].data);
@@ -541,26 +573,38 @@ void Adam_Optimizer::Step_8(float* _params,
             param_4[6].data = SIMD_FMA(grad_4[6].data, step_size_4.data, param_4[6].data);
             param_4[7].data = SIMD_FMA(grad_4[7].data, step_size_4.data, param_4[7].data);
 
-            SIMD_STORE(_params + i, param_4[0].data);
-            SIMD_STORE(_params + i + SIMD_WIDTH, param_4[1].data);
-            SIMD_STORE(_params + i + (SIMD_WIDTH << 1), param_4[2].data);
-            SIMD_STORE(_params + i + SIMD_WIDTH * 3, param_4[3].data);
-            SIMD_STORE(_params + i + (SIMD_WIDTH << 2), param_4[4].data);
-            SIMD_STORE(_params + i + SIMD_WIDTH * 5, param_4[5].data);
-            SIMD_STORE(_params + i + SIMD_WIDTH * 6, param_4[6].data);
-            SIMD_STORE(_params + i + SIMD_WIDTH * 7, param_4[7].data);
+            SIMD_STORE2(_params + i, param_4[0].data, half_precision);
+            SIMD_STORE2(_params + i + SIMD_WIDTH, param_4[1].data, half_precision);
+            SIMD_STORE2(_params + i + (SIMD_WIDTH << 1), param_4[2].data, half_precision);
+            SIMD_STORE2(_params + i + SIMD_WIDTH * 3, param_4[3].data, half_precision);
+            SIMD_STORE2(_params + i + (SIMD_WIDTH << 2), param_4[4].data, half_precision);
+            SIMD_STORE2(_params + i + SIMD_WIDTH * 5, param_4[5].data, half_precision);
+            SIMD_STORE2(_params + i + SIMD_WIDTH * 6, param_4[6].data, half_precision);
+            SIMD_STORE2(_params + i + SIMD_WIDTH * 7, param_4[7].data, half_precision);
 
             if (dev_params) {
-                SIMD_STORE(_doubled_buffer[_buf_index] + (i - t), param_4[0].data);
-                SIMD_STORE(_doubled_buffer[_buf_index] + (i - t) + SIMD_WIDTH, param_4[1].data);
-                SIMD_STORE(_doubled_buffer[_buf_index] + (i - t) + (SIMD_WIDTH << 1),
-                           param_4[2].data);
-                SIMD_STORE(_doubled_buffer[_buf_index] + (i - t) + SIMD_WIDTH * 3, param_4[3].data);
-                SIMD_STORE(_doubled_buffer[_buf_index] + (i - t) + (SIMD_WIDTH << 2),
-                           param_4[4].data);
-                SIMD_STORE(_doubled_buffer[_buf_index] + (i - t) + SIMD_WIDTH * 5, param_4[5].data);
-                SIMD_STORE(_doubled_buffer[_buf_index] + (i - t) + SIMD_WIDTH * 6, param_4[6].data);
-                SIMD_STORE(_doubled_buffer[_buf_index] + (i - t) + SIMD_WIDTH * 7, param_4[7].data);
+                SIMD_STORE2(_doubled_buffer[_buf_index] + (i - t), param_4[0].data, half_precision);
+                SIMD_STORE2(_doubled_buffer[_buf_index] + (i - t) + SIMD_WIDTH,
+                            param_4[1].data,
+                            half_precision);
+                SIMD_STORE2(_doubled_buffer[_buf_index] + (i - t) + (SIMD_WIDTH << 1),
+                            param_4[2].data,
+                            half_precision);
+                SIMD_STORE2(_doubled_buffer[_buf_index] + (i - t) + SIMD_WIDTH * 3,
+                            param_4[3].data,
+                            half_precision);
+                SIMD_STORE2(_doubled_buffer[_buf_index] + (i - t) + (SIMD_WIDTH << 2),
+                            param_4[4].data,
+                            half_precision);
+                SIMD_STORE2(_doubled_buffer[_buf_index] + (i - t) + SIMD_WIDTH * 5,
+                            param_4[5].data,
+                            half_precision);
+                SIMD_STORE2(_doubled_buffer[_buf_index] + (i - t) + SIMD_WIDTH * 6,
+                            param_4[6].data,
+                            half_precision);
+                SIMD_STORE2(_doubled_buffer[_buf_index] + (i - t) + SIMD_WIDTH * 7,
+                            param_4[7].data,
+                            half_precision);
             }
 
             SIMD_STORE(_exp_avg + i, momentum_4[0].data);
@@ -582,8 +626,12 @@ void Adam_Optimizer::Step_8(float* _params,
             SIMD_STORE(_exp_avg_sq + i + SIMD_WIDTH * 7, variance_4[7].data);
         }
         if (dev_params) {
-            launch_param_update(
-                _doubled_buffer[_buf_index], dev_params + t, copy_size, _streams[_buf_index]);
+            if (half_precision)
+                launch_param_update_half(
+                    _doubled_buffer[_buf_index], dev_params + t, copy_size, _streams[_buf_index]);
+            else
+                launch_param_update(
+                    _doubled_buffer[_buf_index], dev_params + t, copy_size, _streams[_buf_index]);
             _buf_index = !_buf_index;
         }
     }
@@ -594,7 +642,8 @@ void Adam_Optimizer::Step_8(float* _params,
                (_exp_avg + rounded_size),
                (_exp_avg_sq + rounded_size),
                (_param_size - rounded_size),
-               (dev_params != nullptr ? (dev_params + rounded_size) : dev_params));
+               (dev_params != nullptr ? (dev_params + rounded_size) : dev_params),
+               half_precision);
 }
 
 int ds_adam_step(int optimizer_id,
@@ -615,6 +664,8 @@ int ds_adam_step(int optimizer_id,
     auto exp_avg_c = exp_avg.contiguous();
     auto exp_avg_sq_c = exp_avg_sq.contiguous();
 
+    // assert(params.options().dtype() == grads.options().dtype());
+
     float* params_ptr = (float*)params_c.data_ptr();
     float* grads_ptr = (float*)grads_c.data_ptr();
     float* exp_avg_ptr = (float*)exp_avg_c.data_ptr();
@@ -624,7 +675,14 @@ int ds_adam_step(int optimizer_id,
         std::static_pointer_cast<Adam_Optimizer>(s_optimizers[optimizer_id]);
     opt->IncrementStep(step, beta1, beta2);
     opt->update_state(lr, epsilon, weight_decay, bias_correction);
-    opt->Step_8(params_ptr, grads_ptr, exp_avg_ptr, exp_avg_sq_ptr, params_c.size(0));
+
+    opt->Step_8(params_ptr,
+                grads_ptr,
+                exp_avg_ptr,
+                exp_avg_sq_ptr,
+                params_c.size(0),
+                nullptr,
+                (params.options().dtype() == at::kHalf));
 
     opt->SynchronizeStreams();
     return 0;
@@ -660,8 +718,13 @@ int ds_adam_step_plus_copy(int optimizer_id,
         std::static_pointer_cast<Adam_Optimizer>(s_optimizers[optimizer_id]);
     opt->IncrementStep(step, beta1, beta2);
     opt->update_state(lr, epsilon, weight_decay, bias_correction);
-    opt->Step_8(
-        params_ptr, grads_ptr, exp_avg_ptr, exp_avg_sq_ptr, params_c.size(0), gpu_params_ptr);
+    opt->Step_8(params_ptr,
+                grads_ptr,
+                exp_avg_ptr,
+                exp_avg_sq_ptr,
+                params_c.size(0),
+                gpu_params_ptr,
+                (params.options().dtype() == at::kHalf));
 
     opt->SynchronizeStreams();
     return 0;

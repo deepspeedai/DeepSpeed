@@ -22,7 +22,8 @@ class DeepSpeedCPUAdam(torch.optim.Optimizer):
                  eps=1e-8,
                  weight_decay=0,
                  amsgrad=False,
-                 adamw_mode=True):
+                 adamw_mode=True,
+                 fp32_optimizer_states=True):
         """Fast vectorized implementation of two variations of Adam optimizer on CPU:
 
         * Adam: A Method for Stochastic Optimization: (https://arxiv.org/abs/1412.6980);
@@ -63,6 +64,8 @@ class DeepSpeedCPUAdam(torch.optim.Optimizer):
                 algorithm from the paper `On the Convergence of Adam and Beyond`_
                 (default: False) NOT SUPPORTED in DeepSpeed CPUAdam!
             adamw_mode: select between Adam and AdamW implementations (default: AdamW)
+            full_precision_optimizer_states: creates momementum and variance in full precision regardless of
+                        the precision of the parameters (default: True)
         """
 
         default_args = dict(lr=lr,
@@ -76,6 +79,7 @@ class DeepSpeedCPUAdam(torch.optim.Optimizer):
         self.opt_id = DeepSpeedCPUAdam.optimizer_id
         DeepSpeedCPUAdam.optimizer_id = DeepSpeedCPUAdam.optimizer_id + 1
         self.adam_w_mode = adamw_mode
+        self.fp32_optimizer_states = fp32_optimizer_states
         self.ds_opt_adam = CPUAdamBuilder().load()
 
         self.ds_opt_adam.create_adam(self.opt_id,
@@ -133,14 +137,18 @@ class DeepSpeedCPUAdam(torch.optim.Optimizer):
                 if len(state) == 0:
                     #print(f'group {group_id} param {param_id} = {p.numel()}')
                     state['step'] = 0
+
+                    #use full precision by default unless self.fp32_optimizer_states is off
+                    state_dtype = torch.float if self.fp32_optimizer_states else p.dtype
+
                     # gradient momentums
                     state['exp_avg'] = torch.zeros_like(p.data,
-                                                        dtype=p.dtype,
+                                                        dtype=state_dtype,
                                                         device='cpu')
                     #memory_format=torch.preserve_format)
                     # gradient variances
                     state['exp_avg_sq'] = torch.zeros_like(p.data,
-                                                           dtype=p.dtype,
+                                                           dtype=state_dtype,
                                                            device='cpu')
                     #memory_format=torch.preserve_format)
 

@@ -34,6 +34,14 @@
 #define SIMD_SQRT(x) _mm512_sqrt_ps(x)
 #define SIMD_DIV(x, y) _mm512_div_ps(x, y)
 #define SIMD_WIDTH 16
+
+#define SIMD_LOAD2(x, h) \
+    ((h) ? _mm512_cvtph_ps(_mm256_loadu_si256((const __m256i*)x)) : _mm512_loadu_ps(x))
+#define SIMD_STORE2(x, d, h)                                                                      \
+    ((h) ? _mm256_store_ps(x, _mm256_castsi256_ps(_mm512_cvtps_ph(d, _MM_FROUND_TO_NEAREST_INT))) \
+         : _mm512_storeu_ps(x, d))
+
+#define INTV __m256i
 #else
 #if defined(__AVX256__)
 #define SIMD_STORE(a, d) _mm256_storeu_ps(a, d)
@@ -44,6 +52,15 @@
 #define SIMD_SQRT(x) _mm256_sqrt_ps(x)
 #define SIMD_DIV(x, y) _mm256_div_ps(x, y)
 #define SIMD_WIDTH 8
+#define SIMD_LOAD2(x, h) \
+    ((h) ? _mm256_cvtph_ps(_mm_loadu_si128((const __m128i*)x)) : _mm256_loadu_ps(x))
+
+#define SIMD_STORE2(x, d, h)                                                                \
+    ((h) ? _mm_store_ps(x, _mm_castsi128_ps(_mm256_cvtps_ph(d, _MM_FROUND_TO_NEAREST_INT))) \
+         : _mm256_storeu_ps(x, d))
+
+#define INTV __m128i
+
 #endif
 #endif
 
@@ -82,19 +99,25 @@ public:
               float* _exp_avg,
               float* _exp_avg_sq,
               size_t param_size,
-              __half* dev_param = nullptr);
+              __half* dev_param = nullptr,
+              bool half_precision = false);
+
     void Step_4(float* _params,
                 float* grads,
                 float* _exp_avg,
                 float* _exp_avg_sa,
                 size_t param_size,
-                __half* dev_param = nullptr);
+                __half* dev_param = nullptr,
+                bool half_precision = false);
+
     void Step_8(float* _params,
                 float* grads,
                 float* _exp_avg,
                 float* _exp_avg_sq,
                 size_t _param_size,
-                __half* dev_params = nullptr);
+                __half* dev_params = nullptr,
+                bool half_precision = false);
+
     inline void SynchronizeStreams()
     {
         for (int i = 0; i < 2; i++) cudaStreamSynchronize(_streams[i]);

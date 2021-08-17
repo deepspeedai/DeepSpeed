@@ -114,6 +114,15 @@ def get_fp16_enabled(param_dict):
         return False
 
 
+def get_fp16_master_weights_and_grads_enabled(param_dict):
+    if get_fp16_enabled(param_dict):
+        return get_scalar_param(param_dict[FP16],
+                                FP16_MASTER_WEIGHTS_AND_GRADS,
+                                FP16_MASTER_WEIGHTS_AND_GRADS_DEFAULT)
+    else:
+        return False
+
+
 def get_loss_scale(param_dict):
     if get_fp16_enabled(param_dict):
         return get_scalar_param(param_dict[FP16],
@@ -774,6 +783,8 @@ class DeepSpeedConfig(object):
 
         self.gradient_clipping = get_gradient_clipping(param_dict)
         self.fp16_enabled = get_fp16_enabled(param_dict)
+        self.fp16_master_weights_and_gradients = get_fp16_master_weights_and_grads_enabled(
+            param_dict)
         self.amp_enabled = get_amp_enabled(param_dict)
         self.amp_params = get_amp_params(param_dict)
         self.loss_scale = get_loss_scale(param_dict)
@@ -940,6 +951,9 @@ class DeepSpeedConfig(object):
 
         if self.zero_enabled:
             assert self.zero_optimization_stage <= MAX_STAGE_ZERO_OPTIMIZATION, "DeepSpeedConfig: Maximum supported ZeRO stage is {}".format(MAX_STAGE_ZERO_OPTIMIZATION)
+
+        if self.fp16_master_weights_and_gradients:
+            assert self.zero_enabled and self.zero_optimization_stage == ZERO_OPTIMIZATION_GRADIENTS, "Fp16_master_weights_and_grads is only supported with ZeRO Stage 2 for now."
 
     def _do_warning_check(self):
         fp16_enabled = self.fp16_enabled or self.zero_enabled

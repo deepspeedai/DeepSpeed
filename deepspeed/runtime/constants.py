@@ -148,6 +148,10 @@ FP16_HYSTERESIS_DEFAULT = 2
 FP16_MIN_LOSS_SCALE = "min_loss_scale"
 FP16_MIN_LOSS_SCALE_DEFAULT = 1
 
+# FP16 master and grads
+FP16_MASTER_WEIGHTS_AND_GRADS = "fp16_master_weights_and_grads"
+FP16_MASTER_WEIGHTS_AND_GRADS_DEFAULT = False
+
 #########################################
 # Apex AMP support
 #########################################

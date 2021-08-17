@@ -5,6 +5,7 @@ Copyright NVIDIA/apex
 This file is adapted from FP16_Optimizer in NVIDIA/apex
 '''
 
+from deepspeed.moe.utils import split_params_grads_into_shared_and_expert_params
 import torch
 from torch._utils import _flatten_dense_tensors, _unflatten_dense_tensors
 import math
@@ -126,6 +127,7 @@ class FP16_UnfusedOptimizer(object):
         grads_groups_flat = []
         grads_groups = []
         norm_groups = []
+        expert_norm_groups = []
         for i, group in enumerate(self.fp16_groups):
             grads = [
                 torch.zeros(p.size(),
@@ -134,9 +136,22 @@ class FP16_UnfusedOptimizer(object):
             ]
             grads_groups.append(grads)
             grads_groups_flat.append(_flatten_dense_tensors(grads))
-            norm_groups.append(get_weight_norm(grads_groups_flat[i], mpu=self.mpu))
+            grads_for_norm, expert_grads_for_norm = split_params_grads_into_shared_and_expert_params(group)
+            norm_group_value = 0.0
+            if len(grads_for_norm) > 0:
+                norm_group_value = get_weight_norm(
+                    _flatten_dense_tensors(grads_for_norm),
+                    mpu=self.mpu)
+            norm_groups.append(norm_group_value)
+            expert_norm_group_value = 0.0
+            if len(expert_grads_for_norm) > 0:
+                expert_norm_group_value = get_weight_norm(
+                    _flatten_dense_tensors(expert_grads_for_norm),
+                    mpu=self.mpu)
+            expert_norm_groups.append(expert_norm_group_value)
 
-        self.overflow = self.overflow_checker.check_using_norm(norm_groups)
+        self.overflow = self.overflow_checker.check_using_norm(norm_groups +
+                                                               expert_norm_groups)
         prev_scale = self.cur_scale
 
         self._update_scale(self.overflow)
@@ -186,7 +201,11 @@ class FP16_UnfusedOptimizer(object):
 
         norm_groups = []
         for i, group in enumerate(self.fp16_groups):
-            norm_groups.append(get_grad_norm(group, mpu=self.mpu))
+            grads_for_norm, _ = split_params_grads_into_shared_and_expert_params(group)
+            norm_group_value = 0.0
+            if len(grads_for_norm) > 0:
+                norm_group_value = get_weight_norm(grads_for_norm, mpu=self.mpu)
+            norm_groups.append(norm_group_value)
 
             # copying gradients to fp32 to wor  k with fp32 parameters
             for fp32_param, fp16_param in zip(self.fp32_groups[i], self.fp16_groups[i]):
@@ -317,6 +336,12 @@ class FP16_UnfusedOptimizer(object):
         state_dict['optimizer_state_dict'] = self.optimizer.state_dict()
         state_dict['fp32_groups'] = self.fp32_groups
         return state_dict
+
+    # Refresh fp32 master params from fp16 copies
+    def refresh_fp32_params(self):
+        for current_group, saved_group in zip(self.fp32_groups, self.fp16_groups):
+            for current, saved in zip(current_group, saved_group):
+                current.data.copy_(saved.data)
 
     def load_state_dict(self, state_dict, load_optimizer_states=True):
         """

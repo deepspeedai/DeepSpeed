@@ -1,4 +1,7 @@
+import math
+from deepspeed.utils import groups
 import torch
+import torch.distributed as dist
 import deepspeed
 import argparse
 import pytest
@@ -6,8 +9,9 @@ import json
 import os
 from deepspeed.ops.adam import FusedAdam
 from common import distributed_test
-from simple_model import SimpleModel, SimpleOptimizer, random_dataloader, args_from_dict, create_deepspeed_args
 from deepspeed.ops.op_builder import CPUAdamBuilder
+from simple_model import SimpleModel, SimpleOptimizer, random_dataloader, args_from_dict, create_deepspeed_args, SimpleMoEModel, sequence_dataloader
+from util import required_torch_version
 
 try:
     from apex import amp
@@ -193,6 +197,175 @@ def test_adamw_fp16_basic(tmpdir):
             model.step()
 
     _test_adamw_fp16_basic(args=args, model=model, hidden_dim=hidden_dim)
+
+
+def test_unfused_fp16_optimizer_gradnorm_for_moe(tmpdir, monkeypatch):
+    if not required_torch_version():
+        pytest.skip("DeepSpeed MoE tests need torch 1.8 or higher to run correctly")
+
+    config_dict = {
+        "train_batch_size": 2,
+        "steps_per_print": 1,
+        "fp16": {
+            "enabled": True
+        }
+    }
+    args = args_from_dict(tmpdir, config_dict)
+    hidden_dim = 10
+
+    def mock_unscale_and_clip_grads(norm_groups, apply_scale=True):
+        total_norm = 0.0
+        for norm in norm_groups:
+            total_norm += norm**2.0
+        total_norm = math.sqrt(total_norm)
+        torch_norm_tensor = torch.cuda.FloatTensor([total_norm])
+        all_gather_results = [
+            torch.zeros_like(torch_norm_tensor) for _ in range(dist.get_world_size())
+        ]
+        dist.all_gather(all_gather_results, torch_norm_tensor)
+        assert len(set([x.item() for x in all_gather_results])) == 1
+        return 1.0
+
+    @distributed_test(world_size=[2])
+    def _test_unfused_fp16_optimizer(args, hidden_dim):
+        # initialize MoE
+        groups.initialize_model_parallel(1)
+        groups.initialize_expert_parallel(2)
+        model = SimpleMoEModel(hidden_dim)
+        optimizer = torch.optim.AdamW(params=model.parameters())
+        engine, optimizer, _, _ = deepspeed.initialize(args=args,
+                                              model=model,
+                                              optimizer=optimizer,
+                                              dist_init_required=False)
+        monkeypatch.setattr(optimizer,
+                            'unscale_and_clip_grads',
+                            mock_unscale_and_clip_grads)
+        data_loader = sequence_dataloader(model=engine,
+                                          total_samples=50,
+                                          hidden_dim=hidden_dim,
+                                          device=engine.device)
+        for n, batch in enumerate(data_loader):
+            loss = engine(batch[0], batch[1])
+            engine.backward(loss)
+            engine.step()
+
+    _test_unfused_fp16_optimizer(args=args, hidden_dim=hidden_dim)
+
+
+def test_fused_fp16_optimizer_gradnorm_for_moe(tmpdir, monkeypatch):
+    if not required_torch_version():
+        pytest.skip("DeepSpeed MoE tests need torch 1.8 or higher to run correctly")
+
+    config_dict = {
+        "train_batch_size": 2,
+        "steps_per_print": 1,
+        "fp16": {
+            "enabled": True
+        }
+    }
+    args = args_from_dict(tmpdir, config_dict)
+    hidden_dim = 10
+
+    def mock_unscale_and_clip_grads(grads_groups_flat, norm_groups, apply_scale=True):
+        total_norm = 0.0
+        for norm in norm_groups:
+            total_norm += norm**2.0
+        total_norm = math.sqrt(total_norm)
+        torch_norm_tensor = torch.cuda.FloatTensor([total_norm])
+        all_gather_results = [
+            torch.zeros_like(torch_norm_tensor) for _ in range(dist.get_world_size())
+        ]
+        dist.all_gather(all_gather_results, torch_norm_tensor)
+        assert len(set([x.item() for x in all_gather_results])) == 1
+        return 1.0
+
+    @distributed_test(world_size=[2])
+    def _test_fused_fp16_optimizer(args, hidden_dim):
+        # initialize MoE
+        groups.initialize_model_parallel(1)
+        groups.initialize_expert_parallel(2)
+        model = SimpleMoEModel(hidden_dim)
+        # optimizer = torch.optim.AdamW(params=model.parameters())
+        optimizer = FusedAdam(params=model.parameters())
+        engine, optimizer, _, _ = deepspeed.initialize(args=args,
+                                              model=model,
+                                              optimizer=optimizer,
+                                              dist_init_required=False)
+        monkeypatch.setattr(optimizer,
+                            'unscale_and_clip_grads',
+                            mock_unscale_and_clip_grads)
+        data_loader = sequence_dataloader(model=engine,
+                                          total_samples=50,
+                                          hidden_dim=hidden_dim,
+                                          device=engine.device)
+        for n, batch in enumerate(data_loader):
+            loss = engine(batch[0], batch[1])
+            engine.backward(loss)
+            engine.step()
+
+    _test_fused_fp16_optimizer(args=args, hidden_dim=hidden_dim)
+
+
+@pytest.mark.parametrize("fused_lamb_legacy", [(False), (True)])
+def test_lamb_optimizer_gradnorm_for_moe(tmpdir, monkeypatch, fused_lamb_legacy: bool):
+    if not required_torch_version():
+        pytest.skip("DeepSpeed MoE tests need torch 1.8 or higher to run correctly")
+
+    config_dict = {
+        "train_batch_size": 2,
+        "steps_per_print": 1,
+        "fp16": {
+            "enabled": True
+        },
+        "optimizer": {
+            "type": "Lamb",
+            "params": {
+                "lr": 0.00015
+            }
+        }
+    }
+    args = args_from_dict(tmpdir, config_dict)
+    hidden_dim = 10
+
+    def mock_unscale_and_clip_grads(norm_groups, apply_scale=True):
+        total_norm = 0.0
+        for norm in norm_groups:
+            total_norm += norm**2.0
+        total_norm = math.sqrt(total_norm)
+        torch_norm_tensor = torch.cuda.FloatTensor([total_norm])
+        all_gather_results = [
+            torch.zeros_like(torch_norm_tensor) for _ in range(dist.get_world_size())
+        ]
+        dist.all_gather(all_gather_results, torch_norm_tensor)
+        assert len(set([x.item() for x in all_gather_results])) == 1
+        return 1.0
+
+    @distributed_test(world_size=[2])
+    def _test_lamb_legacy_optimizer_step(args, hidden_dim, fused_lamb_legacy):
+        # initialize MoE
+        groups.initialize_model_parallel(1)
+        groups.initialize_expert_parallel(2)
+        model = SimpleMoEModel(hidden_dim)
+        engine, optimizer, _, _ = deepspeed.initialize(args=args,
+                                               model=model,
+                                               model_parameters=model.parameters(),
+                                               dist_init_required=False)
+        monkeypatch.setattr(optimizer,
+                            'unscale_and_clip_grads',
+                            mock_unscale_and_clip_grads)
+        optimizer.fused_lamb_legacy = fused_lamb_legacy
+        data_loader = sequence_dataloader(model=engine,
+                                          total_samples=50,
+                                          hidden_dim=hidden_dim,
+                                          device=engine.device)
+        for n, batch in enumerate(data_loader):
+            loss = engine(batch[0], batch[1])
+            engine.backward(loss)
+            engine.step()
+
+    _test_lamb_legacy_optimizer_step(args=args,
+                                     hidden_dim=hidden_dim,
+                                     fused_lamb_legacy=fused_lamb_legacy)
 
 
 def test_dict_config_adamw_fp16_basic():

@@ -11,7 +11,8 @@ from torch._utils import _flatten_dense_tensors, _unflatten_dense_tensors
 
 from deepspeed.runtime.utils import get_grad_norm, CheckOverflow, get_weight_norm
 from deepspeed.runtime.fp16.loss_scaler import INITIAL_LOSS_SCALE, SCALE_WINDOW, MIN_LOSS_SCALE
-from deepspeed.utils import logger, log_dist
+from deepspeed.utils import groups, logger, log_dist
+import torch.distributed as dist
 
 
 class FP16_Optimizer(object):
@@ -35,7 +36,8 @@ class FP16_Optimizer(object):
 
         self.fused_adam_legacy = fused_adam_legacy
         self.timers = timers
-
+        self.deepspeed = deepspeed
+        self.using_pipeline = self.deepspeed.pipeline_parallelism
         if not torch.cuda.is_available:
             raise SystemError("Cannot use fp16 without CUDA.")
         self.optimizer = init_optimizer
@@ -248,7 +250,22 @@ class FP16_Optimizer(object):
             self.fp32_groups_flat[i].grad = grads_groups_flat[i]
 
         self.start_timers([COMPUTE_NORM])
+
         all_groups_norm = get_grad_norm(self.fp32_groups_flat, mpu=self.mpu)
+        #all_groups_norm_old = all_groups_norm
+        # Need to allreduce (avg) the norms across different ranks because moe params will not be synced during allreduce
+        if self.using_pipeline:
+            pg = self.deepspeed.mpu.get_data_parallel_group()
+        else:
+            pg = groups.get_data_parallel_group()
+        scaled_norm = all_groups_norm * 1.0 / float(dist.get_world_size(group=pg))
+        scaled_norm_tensor = torch.tensor(scaled_norm,
+                                          device=self.fp32_groups_flat[i].device,
+                                          dtype=torch.float)
+        dist.all_reduce(scaled_norm_tensor, group=pg)
+        all_groups_norm = scaled_norm_tensor.item()
+        #print(f"old = {all_groups_norm_old} and new = {all_groups_norm} at rank: {torch.distributed.get_rank()}")
+
         self.stop_timers([COMPUTE_NORM])
 
         self.start_timers([UNSCALE_AND_CLIP])
@@ -433,3 +450,7 @@ class FP16_Optimizer(object):
 
     def __repr__(self):
         return repr(self.optimizer)
+
+    @property
+    def loss_scale(self):
+        return self.cur_scale
