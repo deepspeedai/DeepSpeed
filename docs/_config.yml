@@ -87,3 +87,4 @@ timezone: America/Los_Angeles
 breadcrumbs: true
 
 press_release_v3: https://www.microsoft.com/en-us/research/blog/deepspeed-extreme-scale-model-training-for-everyone/
+press_release_v5: https://www.microsoft.com/en-us/research/blog/deepspeed-powers-8x-larger-moe-model-training-with-high-performance/
