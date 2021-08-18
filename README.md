@@ -153,7 +153,7 @@ overview](https://www.deepspeed.ai/features/) for descriptions and usage.
   * Stable and 2.6x faster GPT-2 pre-training with 8x/4x larger batch size/learning rate while maintaining token-wise convergence speed
   * Complementary to many other DeepSpeed features
 * [Performance Analysis and Debugging](https://www.deepspeed.ai/features/#performance-analysis-and-debugging)
-
+* [Mixture of Experts (MoE)](https://www.deepspeed.ai/tutorials/mixture-of-experts/)
 
 
 # Further Reading
