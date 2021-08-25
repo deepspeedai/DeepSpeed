@@ -261,7 +261,7 @@ class FP16_DeepSpeedZeroOptimizer(object):
             see_memory_usage(f"Before moving param group {i} to CPU")
             # move all the parameters to cpu to free up GPU space for creating flat buffer
             move_to_cpu(self.fp16_groups[i])
-            see_memory_usage(f"After moving param group {i} to CPU", force=True)
+            see_memory_usage(f"After moving param group {i} to CPU", force=False)
 
             # Reorder group parameters for load balancing of gradient partitioning during backward among ranks.
             # This ensures that gradients are reduced in a fashion such that ownership round robins among the ranks.
@@ -286,12 +286,12 @@ class FP16_DeepSpeedZeroOptimizer(object):
                     dist.get_world_size(group=self.real_dp_process_group[i])).cuda(
                         torch.cuda.current_device()))
             see_memory_usage(f"After flattening and moving param group {i} to GPU",
-                             force=True)
+                             force=False)
 
             if dist.get_rank(group=self.real_dp_process_group[i]) == 0:
                 see_memory_usage(
                     f"After Flattening and after emptying param group {i} cache",
-                    force=True)
+                    force=False)
 
             # set model fp16 weight to slices of flattened buffer
             self._update_model_fp16_weights(i)

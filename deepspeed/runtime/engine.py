@@ -13,8 +13,13 @@ from collections import defaultdict, OrderedDict
 from shutil import copyfile
 
 from torch.nn.modules import Module
+from torch.nn.parameter import Parameter
+from torch.optim import Optimizer
+from torch.optim.lr_scheduler import _LRScheduler
 from torch.distributed.distributed_c10d import _get_global_rank
 from tensorboardX import SummaryWriter
+
+from typing import Callable, Dict, Optional, Union, Iterable
 
 from deepspeed.runtime.utils import see_memory_usage
 from deepspeed.runtime.zero.stage2 import FP16_DeepSpeedZeroOptimizer
@@ -56,6 +61,10 @@ from ..git_version_info import version
 from deepspeed.profiling.flops_profiler.profiler import FlopsProfiler
 
 MEMORY_OPT_ALLREDUCE_SIZE = 500000000
+
+DeepSpeedOptimizerCallable = \
+    Callable[[Union[Iterable[Parameter], Dict[str, Iterable]]], Optimizer]
+DeepSpeedSchedulerCallable = Callable[[Optimizer], _LRScheduler]
 
 try:
     import apex
@@ -198,6 +207,7 @@ class DeepSpeedEngine(Module):
 
         # Configure optimizer and scheduler
         self.optimizer = None
+        self.basic_optimizer = None
         self.lr_scheduler = None
         if model_parameters or optimizer:
             self._configure_optimizer(optimizer, model_parameters)
@@ -536,9 +546,15 @@ class DeepSpeedEngine(Module):
                     f'DeepSpeed using configured LR scheduler = {self.scheduler_name()}')
             self.lr_scheduler = lr_scheduler
         else:
-            if self.global_rank == 0:
-                logger.info('DeepSpeed using client LR scheduler')
-            self.lr_scheduler = client_lr_scheduler
+            if isinstance(client_lr_scheduler, _LRScheduler):
+                if self.global_rank == 0:
+                    logger.info('DeepSpeed using client LR scheduler')
+                self.lr_scheduler = client_lr_scheduler
+            elif isinstance(client_lr_scheduler, Callable):
+                if self.global_rank == 0:
+                    logger.info('DeepSpeed using client callable to create LR scheduler')
+                self.lr_scheduler = client_lr_scheduler(self.basic_optimizer)
+
         log_dist(f'DeepSpeed LR Scheduler = {self.lr_scheduler}', ranks=[0])
 
     def _configure_checkpointing(self, dist_init_required):
@@ -644,6 +660,9 @@ class DeepSpeedEngine(Module):
 
     # Validate configuration based on command line arguments
     def _do_sanity_check(self):
+        assert isinstance(self.client_optimizer, (type(None), Optimizer, Callable)), \
+            f'Client Optimizer is of unexpected type {type(self.client_optimizer)}'
+
         if not self.client_optimizer:
             if self.optimizer_name() is not None:
                 assert self._is_supported_optimizer(self.optimizer_name()), \
@@ -653,6 +672,14 @@ class DeepSpeedEngine(Module):
         ) == ONEBIT_LAMB_OPTIMIZER:
             assert self.dynamic_loss_scale(), \
                 'DeepSpeed {} optimizer requires dynamic loss scaling'.format(self.optimizer_name())
+
+        assert isinstance(self.client_lr_scheduler, (type(None), _LRScheduler, Callable)), \
+            f'Client LR Scheduler is of unexpected type {type(self.client_lr_scheduler)}'
+
+        # Detect invalid combinations of client optimizer and client scheduler
+        if isinstance(self.client_lr_scheduler, _LRScheduler):
+            assert isinstance(self.client_optimizer, Optimizer), \
+                f'Client Optimizer (type = {type(self.client_optimizer)} is not instantiated but Client LR Scheduler is instantiated'
 
     def _broadcast_model(self):
         def is_replicated(p):
@@ -771,18 +798,23 @@ class DeepSpeedEngine(Module):
 
     # Configure optimizer
     def _configure_optimizer(self, client_optimizer, model_parameters):
-
         if client_optimizer is not None:
-            client_optimizer.param_groups[:] = [
-                pg for pg in client_optimizer.param_groups if len(pg["params"]) != 0
-            ]
-            if self.global_rank == 0:
-                logger.info(
-                    "Removing param_group that has no 'params' in the client Optimizer")
+            if isinstance(client_optimizer, Optimizer):
+                client_optimizer.param_groups[:] = [
+                    pg for pg in client_optimizer.param_groups if len(pg["params"]) != 0
+                ]
+                if self.global_rank == 0:
+                    logger.info(
+                        "Removing param_group that has no 'params' in the client Optimizer"
+                    )
 
-            basic_optimizer = client_optimizer
-            if self.global_rank == 0:
-                logger.info('Using client Optimizer as basic optimizer')
+                basic_optimizer = client_optimizer
+                if self.global_rank == 0:
+                    logger.info('Using client Optimizer as basic optimizer')
+            else:
+                basic_optimizer = client_optimizer(model_parameters)
+                if self.global_rank == 0:
+                    logger.info('Using client callable to create basic optimizer')
         else:
             basic_optimizer = self._configure_basic_optimizer(model_parameters)
             if self.global_rank == 0:
@@ -792,6 +824,7 @@ class DeepSpeedEngine(Module):
 
         self._check_for_duplicates(basic_optimizer)
 
+        self.basic_optimizer = basic_optimizer
         if self.global_rank == 0:
             logger.info('DeepSpeed Basic Optimizer = {}'.format(
                 basic_optimizer.__class__.__name__))
@@ -832,6 +865,8 @@ class DeepSpeedEngine(Module):
 
     def _configure_basic_optimizer(self, model_parameters):
         optimizer_parameters = self.optimizer_params()
+        if optimizer_parameters is None:
+            optimizer_parameters = {}
         # print(optimizer_parameters.keys())
         if 'max_grad_norm' in optimizer_parameters.keys():
             raise ValueError(
