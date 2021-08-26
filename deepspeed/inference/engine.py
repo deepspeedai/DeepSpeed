@@ -44,15 +44,6 @@ class InferenceEngine(Module):
         self.quantize_merge_count = 1
         self.quantization_scales = None
 
-        if self.mpu:
-            self.mp_world_size = dist.get_world_size(
-                group=self.mpu.get_model_parallel_group())
-            self.mp_group = self.mpu.get_model_parallel_group()
-        elif self.mp_world_size > 1 and not dist.is_initialized():
-            self._create_model_parallel_group()
-        else:
-            self.module.to(torch.cuda.current_device())
-
         self._check_quantize_setting(quantization_setting)
 
         if self.checkpoint:
@@ -62,12 +53,21 @@ class InferenceEngine(Module):
         if self.dtype:
             self._convert_to_dtype()
 
+        if self.mpu:
+            self.mp_world_size = dist.get_world_size(
+                group=self.mpu.get_model_parallel_group())
+            self.mp_group = self.mpu.get_model_parallel_group()
+        elif self.mp_world_size > 1 and not dist.is_initialized():
+            self._create_model_parallel_group()
+
         # apply injection policy
         if self.injection_dict:
             for client_module, injection_policy in self.injection_dict.items():
                 self._apply_injection_policy(client_module, injection_policy)
         elif replace_method == 'auto':
             self._apply_injection_policy()
+
+        self.module.to(torch.cuda.current_device())
 
         if self.mp_world_size > 1:
             self.model_orig_fwd = self.module.forward
@@ -95,11 +95,6 @@ class InferenceEngine(Module):
 
         ranks = [i for i in range(self.mp_world_size)]
         self.mp_group = dist.new_group(ranks)
-
-        self.module.to(torch.cuda.current_device())
-        for p in self.module.parameters():
-            if torch.is_tensor(p):
-                dist.broadcast(p, 0)
 
     def _check_quantize_setting(self, quantization_setting):
         self.quatize_bits = 8
