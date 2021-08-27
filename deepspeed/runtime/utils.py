@@ -59,24 +59,52 @@ def set_random_seed(seed):
     torch.manual_seed(seed)
 
 
-def move_to_device(item, device):
+def copy_to_device(item, device, criterion_func):
     """
-    Move tensor onto device. Works on individual tensors, and tensors contained/nested in lists, tuples, and dicts.
+    Return a copy of tensor on specified device.
+    Works on individual tensors, and tensors contained/nested in lists, tuples, and dicts.
     Parameters:
-        item: tensor to move or (possibly nested) container of tensors to move.
+        item: tensor to copy or (possibly nested) container of tensors to copy.
         device: target device
+        criterion_func: Function to restrict copy operation to items meet criterion
 
     Returns:
         None
     """
-    if torch.is_tensor(item):
+    if criterion_func(item):
         return item.to(device)
     elif isinstance(item, list):
-        return [move_to_device(v, device) for v in item]
+        return [copy_to_device(v, device, criterion_func) for v in item]
     elif isinstance(item, tuple):
-        return tuple([move_to_device(v, device) for v in item])
+        return tuple([copy_to_device(v, device, criterion_func) for v in item])
     elif isinstance(item, dict):
-        return {k: move_to_device(v, device) for k, v in item.items()}
+        return {k: copy_to_device(v, device, criterion_func) for k, v in item.items()}
+    else:
+        return item
+
+
+def move_to_device(item, device, criterion_func):
+    """
+    Move tensor on to specified device by changing the storage.
+    Works on individual tensors, and tensors contained/nested in lists, tuples, and dicts.
+    Parameters:
+        item: tensor to move or (possibly nested) container of tensors to move.
+        device: target device
+        criterion_func: Function to restrict move operation to items meet criterion
+
+    Returns:
+        None
+    """
+    if criterion_func(item):
+        device_copy = item.to(device)
+        item.data = device_copy.data
+        return item
+    elif isinstance(item, list):
+        return [move_to_device(v, device, criterion_func) for v in item]
+    elif isinstance(item, tuple):
+        return tuple([move_to_device(v, device, criterion_func) for v in item])
+    elif isinstance(item, dict):
+        return {k: move_to_device(v, device, criterion_func) for k, v in item.items()}
     else:
         return item
 
