@@ -275,8 +275,15 @@ class OpBuilder(ABC):
                 "your system, will fall back to non-vectorized execution.")
             return '-D__SCALAR__'
 
-        result = subprocess.check_output('lscpu', shell=True)
-        result = result.decode('utf-8').strip().lower()
+        try:
+            result = subprocess.check_output('lscpu', shell=True)
+            result = result.decode('utf-8').strip().lower()
+        except Exception as e:
+            print(
+                f"{WARNING} {self.name} SIMD_WIDTH cannot be recognized due to {str(e)}!"
+            )
+            return '-D__SCALAR__'
+
         if 'genuineintel' in result:
             if 'avx512' in result:
                 return '-D__AVX512__'
