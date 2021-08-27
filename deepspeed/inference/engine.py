@@ -183,18 +183,9 @@ class InferenceEngine(Module):
         for input in inputs:
             if torch.is_tensor(input):
                 input = input.to(torch.cuda.current_device())
-                if self.mp_world_size > 1:
-                    if not input.is_contiguous():
-                        input = input.contiguous()
-                    dist.broadcast(input, 0)
-
         for k in kwargs:
             if torch.is_tensor(kwargs[k]):
                 kwargs[k] = kwargs[k].to(torch.cuda.current_device())
-                if self.mp_world_size > 1:
-                    if not kwargs[k].is_contiguous():
-                        kwargs[k] = kwargs[k].contiguous()
-                    dist.broadcast(kwargs[k], 0)
 
     def forward(self, *inputs, **kwargs):
         """Execute forward propagation
@@ -208,18 +199,16 @@ class InferenceEngine(Module):
                 for input in inputs:
                     if torch.is_tensor(input):
                         input = input.to(torch.cuda.current_device())
-                        if self.mp_world_size > 1:
-                            if not input.is_contiguous():
-                                input = input.contiguous()
-                            dist.broadcast(input, 0)
-
+                        if not input.is_contiguous():
+                            input = input.contiguous()
                 for k in kwargs:
                     if torch.is_tensor(kwargs[k]):
                         kwargs[k] = kwargs[k].to(torch.cuda.current_device())
-                        if self.mp_world_size > 1:
-                            if not kwargs[k].is_contiguous():
-                                kwargs[k] = kwargs[k].contiguous()
-                            dist.broadcast(kwargs[k], 0)
+                        if not kwargs[k].is_contiguous():
+                            kwargs[k] = kwargs[k].contiguous()
+                        dist.broadcast(kwargs[k], 0)
 
-            return self.model_orig_fwd(*inputs, **kwargs)
-        return self.module(*inputs, **kwargs)
+            outputs = self.model_orig_fwd(*inputs, **kwargs)
+        else:
+            outputs = self.module(*inputs, **kwargs)
+        return outputs

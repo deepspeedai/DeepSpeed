@@ -596,42 +596,50 @@ class DeepSpeedTransformerInference(nn.Module):
                 encoder_attention_mask=None,
                 use_cache=False,
                 output_attentions=False):
+
         get_present = (get_present or get_key_value or use_cache)
         input_mask = input_mask if attention_mask is None else attention_mask
 
         input_type = input.dtype
-        if (self.config.fp16 or self.config.q_int8) and input.dtype == torch.float:
+
+        if (self.config.fp16 or self.config.q_int8) \
+            and input.dtype == torch.float:
             input = input.half()
 
-        attention_output = self.attention(input,
-                                          input_mask,
-                                          head_mask,
-                                          layer_past,
-                                          get_present,
-                                          encoder_hidden_states,
-                                          encoder_attention_mask,
-                                          output_attentions,
-                                          self.norm_w,
-                                          self.norm_b)
+        with torch.no_grad():
+            attention_output = self.attention(input,
+                                              input_mask,
+                                              head_mask,
+                                              layer_past,
+                                              get_present,
+                                              encoder_hidden_states,
+                                              encoder_attention_mask,
+                                              output_attentions,
+                                              self.norm_w,
+                                              self.norm_b)
 
-        if get_present:
-            attention_output, p_key, p_value, _ = attention_output
-            presents = (p_key, p_value)
-        elif output_attentions:
-            attention_output, _, _, context_output = attention_output
-        else:
-            attention_output, _, _, _ = attention_output
-        output = self.mlp(attention_output, input, self.attention.attn_ob)
+            if get_present:
+                attention_output, p_key, p_value, _ = attention_output
+                presents = (p_key, p_value)
+            elif output_attentions:
+                attention_output, _, _, context_output = attention_output
+            else:
+                attention_output, _, _, _ = attention_output
+            output = self.mlp(attention_output, input, self.attention.attn_ob)
+
+            if not self.config.pre_layer_norm:
+                ds_layernorm = inference_cuda_module.layer_norm_fp16 if self.config.fp16 or self.config.q_int8 else \
+                                        inference_cuda_module.layer_norm_fp32
+                output = ds_layernorm(output,
+                                      self.norm_w,
+                                      self.norm_b,
+                                      self.config.epsilon)
+
+            if input_type != output.dtype:
+                output = output.to(input_type)
+
         if get_present:
             output = (output, presents)
-
-        if not self.config.pre_layer_norm:
-            ds_layernorm = inference_cuda_module.layer_norm_fp16 if self.config.fp16 or self.config.q_int8 else \
-                                    inference_cuda_module.layer_norm_fp32
-            output = ds_layernorm(output, self.norm_w, self.norm_b, self.config.epsilon)
-
-        if torch.is_tensor(output) and input_type != output.dtype:
-            output = output.to(input_type)
 
         if self.config.encoder_decoder:
             return (output, )
