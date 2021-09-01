@@ -1143,6 +1143,9 @@ class DeepSpeedEngine(Module):
                           torch.utils.data.IterableDataset
                           )  # hasattr(obj, "__iter__") should work as well
 
+    def dataloader_drop_last(self):
+        return self._config.dataloader_drop_last
+
     def deepspeed_io(self,
                      dataset,
                      batch_size=None,
@@ -1185,7 +1188,8 @@ class DeepSpeedEngine(Module):
                                    num_local_io_workers=num_local_io_workers,
                                    data_sampler=data_sampler,
                                    data_parallel_world_size=data_parallel_world_size,
-                                   data_parallel_rank=data_parallel_rank)
+                                   data_parallel_rank=data_parallel_rank,
+                                   dataloader_drop_last=self.dataloader_drop_last())
 
     def train(self, mode=True):
         r"""
