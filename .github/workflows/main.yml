@@ -3,7 +3,8 @@ name: Build
 on:
   push:
     branches:
-      'staging**'
+      - 'master'
+      - 'staging**'
     paths-ignore:
     - 'docs/**'
   pull_request:
