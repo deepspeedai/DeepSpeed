@@ -14,7 +14,7 @@ on:
 jobs:
   # unit tests running on nvidia gpus
   unit-tests:
-    runs-on: [self-hosted, nvidia]
+    runs-on: [self-hosted, nvidia, torch12]
 
     steps:
       - uses: actions/checkout@v2
