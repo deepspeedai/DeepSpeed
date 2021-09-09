@@ -231,3 +231,91 @@ def test_zero_to_fp32(tmpdir, zero_stage):
                                   fp32_state_dict[name].float())
 
     _test_zero_to_fp32()
+
+
+@pytest.mark.parametrize('zero_stage, allgather_bucket_size', [(2, 1000), (2, 1001)])
+def test_incorrect_allgather_bucket_size(tmpdir, zero_stage, allgather_bucket_size):
+    config_dict = {
+        "train_micro_batch_size_per_gpu": 2,
+        "gradient_accumulation_steps": 2,
+        "steps_per_print": 1,
+        "zero_optimization": {
+            "stage": zero_stage,
+            "allgather_bucket_size": allgather_bucket_size
+        },
+        "optimizer": {
+            "type": "Adam",
+            "params": {
+                "lr": 1e-3
+            }
+        },
+        "fp16": {
+            "enabled": True,
+            "initial_scale_power": 8
+        }
+    }
+
+    args = args_from_dict(tmpdir, config_dict)
+    hidden_dim = 4
+
+    model = SimpleModel(hidden_dim=hidden_dim)
+
+    @distributed_test(world_size=[1])
+    def _test_incorrect_allgather_bucket_size(args, model, hidden_dim):
+        if allgather_bucket_size % 2 == 0:
+            model, _, _, _ = deepspeed.initialize(args=args,
+                                              model=model,
+                                              model_parameters=model.parameters())
+        else:
+            with pytest.raises(AssertionError) as assertinfo:
+                model, _, _, _ = deepspeed.initialize(args=args,
+                                                  model=model,
+                                                  model_parameters=model.parameters())
+            assert "allgather_bucket_size must be a multiple of nccl_start_alignment_factor" in str(
+                assertinfo)
+
+    _test_incorrect_allgather_bucket_size(args=args, model=model, hidden_dim=hidden_dim)
+
+
+@pytest.mark.parametrize('zero_stage, world_size', [(2, 2), (2, 3), (2, 4)])
+def test_partition_nccl_alignment(tmpdir, zero_stage, world_size):
+    config_dict = {
+        "train_micro_batch_size_per_gpu": 2,
+        "gradient_accumulation_steps": 2,
+        "steps_per_print": 1,
+        "zero_optimization": {
+            "stage": zero_stage
+        },
+        "optimizer": {
+            "type": "Adam",
+            "params": {
+                "lr": 1e-3
+            }
+        },
+        "fp16": {
+            "enabled": True,
+            "initial_scale_power": 8
+        }
+    }
+
+    args = args_from_dict(tmpdir, config_dict)
+    hidden_dim = 4
+
+    model = SimpleModel(hidden_dim=hidden_dim)
+
+    @distributed_test(world_size=world_size)
+    def _test_partition_nccl_alignment(args, model, hidden_dim):
+        model, _, _, _ = deepspeed.initialize(args=args,
+                                              model=model,
+                                              model_parameters=model.parameters())
+
+        # get nccl all-gather send buffers alignment factor
+        nccl_start_alignment_factor = model.optimizer.nccl_start_alignment_factor
+
+        for data_parallel_partitions in model.optimizer.parallel_partitioned_fp16_groups:
+            for partition_id, partitioned_data in enumerate(data_parallel_partitions):
+                # verify that data partition start locations are 4-byte aligned
+                assert (partitioned_data.data_ptr() %
+                        (2 * nccl_start_alignment_factor) == 0)
+
+    _test_partition_nccl_alignment(args=args, model=model, hidden_dim=hidden_dim)
