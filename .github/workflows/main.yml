@@ -13,7 +13,7 @@ on:
 
 jobs:
   # unit tests running on nvidia gpus
-  unit-tests:
+  build:
     runs-on: [self-hosted, nvidia, torch12]
 
     steps:
