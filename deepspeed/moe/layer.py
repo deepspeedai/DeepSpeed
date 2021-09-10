@@ -21,7 +21,6 @@ class MoE(torch.nn.Module):
                  expert,
                  num_experts=1,
                  k=1,
-                 output_dropout_prob=0.0,
                  capacity_factor=1.,
                  eval_capacity_factor=1.,
                  min_capacity=4,
@@ -36,8 +35,6 @@ class MoE(torch.nn.Module):
             num_experts (int, optional): default=1, the total number of experts per layer.
 
             k (int, optional): default=1, top-k gating value, only supports k=1 or k=2.
-
-            output_dropout_prob (float, optional): default=0.0, output dropout probability.
 
             capacity_factor (float, optional): default=1.0, the capacity of the expert at training time.
 
@@ -74,8 +71,6 @@ class MoE(torch.nn.Module):
                                       num_local_experts,
                                       group=groups.get_expert_parallel_group())
 
-        self.dropout = torch.nn.Dropout(output_dropout_prob)
-
     def forward(self, hidden_states, used_token=None):
         """ MoE forward
 
@@ -93,5 +88,4 @@ class MoE(torch.nn.Module):
             * exp_counts (int): expert count
         """
         output = self.deepspeed_moe(hidden_states, used_token)
-        output = self.dropout(output)
         return output, self.deepspeed_moe.l_aux, self.deepspeed_moe.exp_counts
