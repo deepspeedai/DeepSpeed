@@ -145,7 +145,7 @@ class SDLoaderBase(ABC):
             return 'model'
 
     def get_module(self, sd):
-        if sd is None:
+        if self.module_key is None:
             return sd
         elif self.module_key == AUTO_MODULE_KEY:
             return sd[self._choose_module_key(sd)]
