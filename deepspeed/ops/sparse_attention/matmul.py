@@ -173,7 +173,7 @@ class _sparse_matmul(torch.autograd.Function):
                     'TN': block * pack,
                     'TMN': block * block * pack * pack,
                     'BLOCK': block,
-                    'TK': 32,
+                    'TK': TK[0],
                     'TYPE': dtype,
                     'STRIDE_AM': '1' if trans_a else 'lda',
                     'STRIDE_AK': 'lda' if trans_a else '1',
