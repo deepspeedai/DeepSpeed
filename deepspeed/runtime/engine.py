@@ -169,7 +169,7 @@ class DeepSpeedEngine(Module):
             assert not self.elasticity_enabled(), "Elasticity is not currently supported" \
                 " with model parallelism."
 
-        self._set_distributed_vars()
+        self._set_distributed_vars(args)
 
         if self.tensorboard_enabled() and self.global_rank == 0:
             self.summary_writer = self.get_summary_writer()
@@ -592,10 +592,13 @@ class DeepSpeedEngine(Module):
         else:
             return None
 
-    def _set_distributed_vars(self):
-        if self.local_rank >= 0:
-            torch.cuda.set_device(self.local_rank)
-            self.device = torch.device("cuda", self.local_rank)
+    def _set_distributed_vars(self, args):
+        device_rank = args.device_rank if args is not None and hasattr(
+            args,
+            'device_rank') else self.local_rank
+        if device_rank >= 0:
+            torch.cuda.set_device(device_rank)
+            self.device = torch.device("cuda", device_rank)
             self.world_size = dist.get_world_size()
             self.global_rank = dist.get_rank()
         else:
