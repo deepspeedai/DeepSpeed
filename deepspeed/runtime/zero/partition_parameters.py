@@ -17,7 +17,7 @@ from .linear import LinearModuleForZeroStage3, LinearFunctionForZeroStage3
 from .offload_constants import *
 
 from ..utils import see_memory_usage
-from deepspeed.utils import log_dist, init_distributed
+from deepspeed.utils import log_dist, init_distributed, logger
 from deepspeed.utils.debug import debug_param2name_id_shape, debug_param2name_id_shape_device, debug_module2name, debug_param2name, debug_param2name_id_shape_status, printflock, log_rank_file
 
 from ..swap_tensor.partitioned_param_swapper import AsyncPartitionedParameterSwapper, PartitionedParamStatus
@@ -450,6 +450,12 @@ class Init(InsertPostInitMethodToModuleSubClasses):
 
                 model = deepspeed.zero.Init(module=model)
         """
+        if config is not None:
+            config_dict_or_path = config
+            logger.warning(
+                f'zero.Init: the `config` argument is deprecated. Please use `config_dict_or_path` instead.'
+            )
+
         _ds_config = DeepSpeedConfig(config_dict_or_path,
                                      mpu) if config_dict_or_path is not None else None
         super().__init__(enabled=enabled,
