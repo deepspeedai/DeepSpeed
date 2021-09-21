@@ -38,6 +38,7 @@ collections:
       - cifar-10.md
       - curriculum-learning.md
       - flops-profiler.md
+      - pytorch-profiler.md
       - gan.md
       - lrrt.md
       - megatron.md
