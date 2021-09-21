@@ -37,4 +37,31 @@ jobs:
       - name: Unit tests
         run: |
           if [[ -d ./torch-extensions ]]; then rm -rf ./torch-extensions; fi
-          TORCH_EXTENSIONS_DIR=./torch-extensions pytest --durations=0 --forked --verbose tests/unit/
+          cd tests
+          TORCH_EXTENSIONS_DIR=./torch-extensions pytest --durations=0 --forked --verbose unit/
+
+  nv-torch18-v100:
+    runs-on: [self-hosted, nvidia, torch18, v100]
+
+    steps:
+      - uses: actions/checkout@v2
+
+      - name: environment
+        run: |
+          nvidia-smi
+          which python
+          python --version
+          which nvcc
+          nvcc --version
+          python -c "import torch; print('torch:', torch.__version__, torch)"
+          python -c "import torch; print('CUDA available:', torch.cuda.is_available())"
+      - name: Install deepspeed
+        run: |
+          pip install .[dev,1bit]
+          ds_report
+      - name: Unit tests
+        run: |
+          unset TORCH_CUDA_ARCH_LIST # only jit compile for current arch
+          if [[ -d ./torch-extensions ]]; then rm -rf ./torch-extensions; fi
+          cd tests
+          TORCH_EXTENSIONS_DIR=./torch-extensions pytest --durations=0 --forked --verbose unit/

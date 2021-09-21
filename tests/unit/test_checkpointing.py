@@ -5,7 +5,7 @@ import torch.distributed as dist
 import deepspeed
 from deepspeed.runtime.zero.stage2 import FP16_DeepSpeedZeroOptimizer
 from deepspeed.runtime.zero.stage1 import FP16_DeepSpeedZeroOptimizer_Stage1
-
+from deepspeed.utils import groups
 from deepspeed.runtime.fp16.fused_optimizer import FP16_Optimizer
 from deepspeed.runtime.fp16.unfused_optimizer import FP16_UnfusedOptimizer
 
@@ -15,6 +15,7 @@ PipeTopo = PipeDataParallelTopology
 from deepspeed.ops.op_builder import FusedLambBuilder, CPUAdamBuilder
 
 from deepspeed.runtime.zero.stage3 import FP16_DeepSpeedZeroOptimizer_Stage3
+from util import required_torch_version
 
 import argparse
 import pytest
@@ -37,9 +38,19 @@ def compare_deepspeed_states(saved_model, loaded_model):
 def compare_model_states(saved_model, loaded_model, compare_optimizer=True):
     compare_deepspeed_states(saved_model, loaded_model)
 
-    for p0, p1 in zip(saved_model.module.parameters(), loaded_model.module.parameters()):
+    for p0, p1 in zip(saved_model.module.named_parameters(), loaded_model.module.named_parameters()):
+        np0, p0 = p0
+        np1, p1 = p1
+        if 'deepspeed_moe.gate.wg' in np0:
+            # these params are converted to float at runtime, cast to half for comparison
+            p1 = p1.half()
+            p0 = p0.half()
         assert id(p0) != id(p1), f'Comparing fp16 model state tensor against itself : {id(p0)} <====> {id(p1)}'
-        assert torch.allclose(p0, p1, atol=1e-07), f"FP16 model state {p0} is not equal to {p1}"
+        try:
+            assert torch.allclose(p0, p1, atol=1e-07), f"FP16 model state {p0} is not equal to {p1}, names:{np0}, {np1}"
+        except RuntimeError as err:
+            print(f"FP16 model state {p0} is not equal to {p1}, names:{np0}, {np1}")
+            raise err
 
     if not compare_optimizer:
         return
@@ -137,17 +148,25 @@ def checkpoint_correctness_verification(args,
                                         train_batch=False,
                                         base_optimizers=[None,
                                                          None],
-                                        empty_tag=False):
+                                        empty_tag=False,
+                                        seq_dataloader=False):
     dtype = torch.half if fp16 else torch.float32
     ds_model = create_deepspeed_model(args=args,
                                       model=models[0],
                                       base_optimizer=base_optimizers[0])
 
-    data_loader = random_dataloader(model=ds_model,
-                                    total_samples=50,
-                                    hidden_dim=hidden_dim,
-                                    device=ds_model.device,
-                                    dtype=dtype)
+    if seq_dataloader:
+        data_loader = sequence_dataloader(model=ds_model,
+                                          total_samples=50,
+                                          hidden_dim=hidden_dim,
+                                          device=ds_model.device,
+                                          dtype=dtype)
+    else:
+        data_loader = random_dataloader(model=ds_model,
+                                        total_samples=50,
+                                        hidden_dim=hidden_dim,
+                                        device=ds_model.device,
+                                        dtype=dtype)
 
     if train_batch:
         ds_model.set_dataloader(data_loader)
@@ -169,6 +188,8 @@ def checkpoint_correctness_verification(args,
     loaded_model = create_deepspeed_model(args=args,
                                           model=models[1],
                                           base_optimizer=base_optimizers[1])
+    assert list(trained_model.parameters())[0].dtype == list(
+        loaded_model.parameters())[0].dtype
 
     loaded_model.load_checkpoint(save_folder,
                                  tag=save_tag,
@@ -895,3 +916,37 @@ def test_checkpoint_unknown_tag_validation(tmpdir):
                                                  model_parameters=model.parameters())
 
     _helper(args=args, model=model, hidden_dim=hidden_dim)
+
+
+@pytest.mark.parametrize("ep_size", [4])
+def test_checkpoint_moe(tmpdir, ep_size):
+    if not required_torch_version():
+        pytest.skip("DeepSpeed MoE tests need torch 1.8 or higher to run correctly")
+
+    config_dict = {
+        "train_batch_size": 8,
+        "steps_per_print": 1,
+        "fp16": {
+            "enabled": True
+        }
+    }
+    hidden_dim = 16
+    args = args_from_dict(tmpdir, config_dict)
+
+    @distributed_test(world_size=[4])
+    def _helper(args):
+        groups.initialize(ep_size=ep_size)
+        models = [SimpleMoEModel(hidden_dim=hidden_dim) for _ in range(2)]
+        optimizers = [torch.optim.AdamW(params=model.parameters()) for model in models]
+        checkpoint_correctness_verification(args,
+                                            models=models,
+                                            hidden_dim=hidden_dim,
+                                            tmpdir=tmpdir,
+                                            load_optimizer_states=True,
+                                            load_lr_scheduler_states=False,
+                                            fp16=config_dict["fp16"]["enabled"],
+                                            empty_tag=True,
+                                            base_optimizers=optimizers,
+                                            seq_dataloader=True)
+
+    _helper(args)

@@ -1944,12 +1944,6 @@ class DeepSpeedEngine(Module):
                          load_lr_scheduler_states=True,
                          load_module_only=False):
 
-        # moe branch uses the following three lines
-        load_path = self._get_ckpt_name(load_dir, tag)
-        logger.info(f'rank: {self.global_rank} loading checkpoint: {load_path}')
-        model_checkpoint = torch.load(load_path, map_location=torch.device('cpu'))
-
-        # deepspeed master branch uses a new system now
         from deepspeed.runtime.state_dict_factory import SDLoaderFactory
         ckpt_list = self._get_all_ckpt_names(load_dir, tag)
         sd_loader = SDLoaderFactory.get_sd_loader(ckpt_list)
@@ -1969,11 +1963,9 @@ class DeepSpeedEngine(Module):
             self._curr_ckpt_path = os.path.join(load_dir, tag)
 
         if self.has_moe_layers:
-            self.load_moe_state_dict(load_dir,
-                                     tag,
-                                     state_dict=model_checkpoint['module'])
+            self.load_moe_state_dict(load_dir, tag, state_dict=checkpoint['module'])
 
-        self.load_module_state_dict(state_dict=model_checkpoint['module'],
+        self.load_module_state_dict(state_dict=checkpoint['module'],
                                     strict=load_module_strict)
 
         #TODO: Do the following before we merge to master.
@@ -1993,7 +1985,7 @@ class DeepSpeedEngine(Module):
                 optim_checkpoint = torch.load(optim_load_path,
                                               map_location=torch.device('cpu'))
             else:
-                optim_checkpoint = model_checkpoint
+                optim_checkpoint = checkpoint
 
             if load_optimizer_states and self.optimizer is not None and not self.zero_optimization(
             ):
@@ -2005,16 +1997,16 @@ class DeepSpeedEngine(Module):
                     self.optimizer.load_state_dict(optim_checkpoint['optimizer'])
 
             if load_lr_scheduler_states and self.lr_scheduler is not None:
-                self.lr_scheduler.load_state_dict(model_checkpoint['lr_scheduler'])
+                self.lr_scheduler.load_state_dict(checkpoint['lr_scheduler'])
 
-            self.csr_tensor_module_names = model_checkpoint['csr_tensor_module_names']
-            self.global_steps = model_checkpoint['global_steps']
-            self.global_samples = model_checkpoint.get(
+            self.csr_tensor_module_names = checkpoint['csr_tensor_module_names']
+            self.global_steps = checkpoint['global_steps']
+            self.global_samples = checkpoint.get(
                 'global_samples',
                 self.global_steps * self.train_batch_size())
-            self.skipped_steps = model_checkpoint['skipped_steps']
-            self.loaded_checkpoint_mp_world_size = model_checkpoint['mp_world_size']
-            self.loaded_checkpoint_dp_world_size = model_checkpoint['dp_world_size']
+            self.skipped_steps = checkpoint['skipped_steps']
+            self.loaded_checkpoint_mp_world_size = checkpoint['mp_world_size']
+            self.loaded_checkpoint_dp_world_size = checkpoint['dp_world_size']
             deepspeed_states = [
                 'module',
                 'csr_tensor_module_names',
@@ -2033,7 +2025,7 @@ class DeepSpeedEngine(Module):
         client_state = {
             key: value
             for key,
-            value in model_checkpoint.items() if not key in deepspeed_states
+            value in checkpoint.items() if not key in deepspeed_states
         }
 
         if not load_optimizer_states:

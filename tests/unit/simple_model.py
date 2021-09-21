@@ -33,14 +33,13 @@ class Curriculum_SimpleModel(SimpleModel):
 
 
 class SimpleMoEModel(torch.nn.Module):
-    def __init__(self, hidden_dim):
+    def __init__(self, hidden_dim, num_experts=4):
         super(SimpleMoEModel, self).__init__()
         self.linear = torch.nn.Linear(hidden_dim, hidden_dim)
         linear2 = torch.nn.Linear(hidden_dim, hidden_dim)
         self.linear2 = MoE(hidden_size=hidden_dim,
-                           output_dropout_prob=0.0,
                            expert=linear2,
-                           num_experts=4,
+                           num_experts=num_experts,
                            k=1)
         self.cross_entropy_loss = torch.nn.CrossEntropyLoss()
 
