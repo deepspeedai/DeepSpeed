@@ -166,13 +166,15 @@ def test_zero_to_fp32(tmpdir, zero_stage):
         class MyModel(torch.nn.Module):
             def __init__(self, hidden_dim, n_layers):
                 super().__init__()
+                # to reproduce https://github.com/microsoft/DeepSpeed/pull/1372 it is important that
+                # the number of total elements is uneven:
+                # (1) 4 layers of 3*(3+1)=12 elements each, 48 in total
                 self.ll = torch.nn.ModuleList(
                     torch.nn.Linear(hidden_dim,
                                     hidden_dim) for i in range(n_layers))
-                # to reproduce https://github.com/microsoft/DeepSpeed/pull/1372 it is important that
-                # the number of params is uneven - the following adds 4+1 params - the linear
-                # layers are 6 param each + 5 - so total 17 elements (for 1 gpu)
+                # (2) the following adds 4+1=5 elements
                 self.classifier = torch.nn.Linear(4, 1)
+                # total 48+5=53 (uneven as desired) elements
                 self.cross_entropy_loss = torch.nn.CrossEntropyLoss()
 
             def forward(self, x, y):
@@ -182,7 +184,7 @@ def test_zero_to_fp32(tmpdir, zero_stage):
                 return self.cross_entropy_loss(hidden, y)
 
         args = args_from_dict(tmpdir, config_dict)
-        hidden_dim = 2
+        hidden_dim = 3  # do not change
 
         world_size = dist.get_world_size()
         # we want at least 2x layers as there are gpus to trigger round_robin_fp16_groups reshuffle in zero2

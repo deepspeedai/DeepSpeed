@@ -117,14 +117,9 @@ def parse_optim_states(files, ds_checkpoint_dir):
 
 
 def zero3_partitioned_param_info(unpartitioned_numel, world_size):
-    #print("*** ", unpartitioned_numel, world_size, " ***",)
-    # handle an edge case where there is only 1 element (e.g. bias in a tiny test model)
-    if unpartitioned_numel == 1:
-        return 1, 0
-
     remainder = unpartitioned_numel % world_size
     padding_numel = (world_size - remainder) if remainder else 0
-    partitioned_numel = int(unpartitioned_numel / world_size)
+    partitioned_numel = math.ceil(unpartitioned_numel / world_size)
     return partitioned_numel, padding_numel
 
 
@@ -211,21 +206,16 @@ def _get_fp32_state_dict_from_zero_checkpoint(ds_checkpoint_dir):
                     f"{total_params} {name} full shape: {shape} partition0 numel={partitioned_numel} partitioned_padding_numel={partitioned_padding_numel}"
                 )
 
-            if unpartitioned_numel > 1:
-                # XXX: memory usage doubles here (zero3)
-                state_dict[name] = torch.cat(
-                    tuple(fp32_flat_groups[i].narrow(0,
-                                                     offset,
-                                                     partitioned_numel)
-                          for i in range(world_size)),
-                    0).view(shape)
-            else:
-                # handle an edge case where there is only 1 element (e.g. bias in a tiny test model)
-                state_dict[name] = fp32_flat_groups[0].narrow(
-                    0,
-                    offset,
-                    partitioned_numel).view(shape)
-            offset += partitioned_numel + partitioned_padding_numel
+            # XXX: memory usage doubles here (zero3)
+            state_dict[name] = torch.cat(
+                tuple(fp32_flat_groups[i].narrow(0,
+                                                 offset,
+                                                 partitioned_numel)
+                      for i in range(world_size)),
+                0).narrow(0,
+                          0,
+                          unpartitioned_numel).view(shape)
+            offset += partitioned_numel
 
     if zero_stage == 3:
         offset *= world_size
