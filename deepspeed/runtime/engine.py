@@ -2028,7 +2028,7 @@ class DeepSpeedEngine(Module):
             value in checkpoint.items() if not key in deepspeed_states
         }
 
-        if not load_optimizer_states:
+        if not load_optimizer_states and not load_module_only:
             client_state['optimizer'] = optim_checkpoint['optimizer']
 
         return load_path, client_state
