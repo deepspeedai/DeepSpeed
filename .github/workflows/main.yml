@@ -53,6 +53,7 @@ jobs:
           python --version
           which nvcc
           nvcc --version
+          pip install torch==1.8.2+cu111 torchvision==0.9.2+cu111 -f https://download.pytorch.org/whl/lts/1.8/torch_lts.html
           python -c "import torch; print('torch:', torch.__version__, torch)"
           python -c "import torch; print('CUDA available:', torch.cuda.is_available())"
       - name: Install deepspeed
@@ -65,3 +66,34 @@ jobs:
           if [[ -d ./torch-extensions ]]; then rm -rf ./torch-extensions; fi
           cd tests
           TORCH_EXTENSIONS_DIR=./torch-extensions pytest --durations=0 --forked --verbose unit/
+
+  nv-transformers-v100:
+    runs-on: [self-hosted, nvidia, torch18, v100]
+
+    steps:
+      - uses: actions/checkout@v2
+
+      - name: environment
+        run: |
+          nvidia-smi
+          which python
+          python --version
+          which nvcc
+          nvcc --version
+          pip install torch==1.8.2+cu111 torchvision==0.9.2+cu111 -f https://download.pytorch.org/whl/lts/1.8/torch_lts.html
+          python -c "import torch; print('torch:', torch.__version__, torch)"
+          python -c "import torch; print('CUDA available:', torch.cuda.is_available())"
+      - name: Install deepspeed
+        run: |
+          pip install .[dev]
+          ds_report
+      - name: HF transformers tests
+        run: |
+          if [[ -d ./torch-extensions ]]; then rm -rf ./torch-extensions; fi
+          git clone https://github.com/huggingface/transformers
+          git rev-parse --short HEAD
+          cd transformers
+          pip install .[testing]
+          # find reqs used in ds integration tests
+          find examples/pytorch  -regextype posix-egrep -regex '.*(language-modeling|question-answering|summarization|text-classification|translation).*/requirements.txt' -exec pip install -r {} \;
+          TORCH_EXTENSIONS_DIR=./torch-extensions RUN_SLOW=1 pytest --durations=0 --verbose tests/deepspeed
