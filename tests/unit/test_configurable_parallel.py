@@ -51,13 +51,11 @@ class TestConfigurableMP:
             },
         }
 
-        ds_args = args_from_dict(tmpdir, ds_config_dict)
-
         from megatron import mpu
-        model, _, _,_ = deepspeed.initialize(args=ds_args,
-                                            model=model,
-                                            mpu=mpu,
-                                            model_parameters=model.parameters())
+        model, _, _,_ = deepspeed.initialize(model=model,
+                                             mpu=mpu,
+                                             model_parameters=model.parameters(),
+                                             config=ds_config_dict)
         return model
 
     def test_gpt2_basic(self, tmpdir):
@@ -243,13 +241,11 @@ class TestConfigurablePP:
                 }
             },
         }
-
-        ds_args = args_from_dict(tmpdir, ds_config_dict)
         dist.barrier()
 
-        model, _, _,_ = deepspeed.initialize(args=ds_args,
-                                            model=model,
-                                            model_parameters=model.parameters())
+        model, _, _,_ = deepspeed.initialize(model=model,
+                                             model_parameters=model.parameters(),
+                                             config=ds_config_dict)
         return model.cuda()
 
     def get_topology(self, mp, pp, world_size):
