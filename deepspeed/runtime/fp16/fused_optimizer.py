@@ -9,7 +9,7 @@ import torch
 import math
 from torch._utils import _flatten_dense_tensors, _unflatten_dense_tensors
 
-from deepspeed.runtime.utils import get_grad_norm, CheckOverflow, get_weight_norm
+from deepspeed.runtime.utils import get_global_norm, get_grad_norm, CheckOverflow, get_weight_norm
 from deepspeed.runtime.fp16.loss_scaler import INITIAL_LOSS_SCALE, SCALE_WINDOW, MIN_LOSS_SCALE
 from deepspeed.utils import groups, logger, log_dist
 import torch.distributed as dist
@@ -46,6 +46,8 @@ class FP16_Optimizer(object):
         self.fp16_groups = []
         self.fp16_groups_flat = []
         self.fp32_groups_flat = []
+
+        self._global_grad_norm = 0.
 
         # loop to deal with groups
         for i, param_group in enumerate(self.optimizer.param_groups):
@@ -163,8 +165,11 @@ class FP16_Optimizer(object):
                     "scale: {}, reducing to {}".format(prev_scale,
                                                        self.cur_scale))
             return self.overflow
+
+        self._global_grad_norm = get_global_norm(norm_list=norm_groups)
+
         combined_scale = self.unscale_and_clip_grads(grads_groups_flat,
-                                                     norm_groups,
+                                                     self._global_grad_norm,
                                                      apply_scale=False)
         # norm is in fact norm*cur_scale
         self.optimizer.step(grads=[[g] for g in grads_groups_flat],
@@ -268,8 +273,10 @@ class FP16_Optimizer(object):
 
         self.stop_timers([COMPUTE_NORM])
 
+        self._global_grad_norm = get_global_norm(norm_list=[all_groups_norm])
+
         self.start_timers([UNSCALE_AND_CLIP])
-        self.unscale_and_clip_grads(grads_groups_flat, [all_groups_norm])
+        self.unscale_and_clip_grads(grads_groups_flat, self._global_grad_norm)
         self.stop_timers([UNSCALE_AND_CLIP])
 
         self.start_timers([BASIC_STEP])
@@ -294,12 +301,7 @@ class FP16_Optimizer(object):
 
         return self.overflow
 
-    def unscale_and_clip_grads(self, grad_groups_flat, norm_groups, apply_scale=True):
-        total_norm = 0.0
-        for norm in norm_groups:
-            total_norm += norm**2.0
-        total_norm = math.sqrt(total_norm)
-
+    def unscale_and_clip_grads(self, grad_groups_flat, total_norm, apply_scale=True):
         # compute combined scale factor for this group
         combined_scale = self.cur_scale
         if self.clip_grad > 0.:

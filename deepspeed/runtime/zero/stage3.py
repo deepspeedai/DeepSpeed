@@ -16,7 +16,7 @@ from torch.autograd import Variable
 
 from deepspeed.utils.logging import logger
 from deepspeed.runtime.fp16.loss_scaler import LossScaler, DynamicLossScaler
-from deepspeed.runtime.utils import see_memory_usage, is_model_parallel_parameter
+from deepspeed.runtime.utils import get_global_norm, see_memory_usage, is_model_parallel_parameter
 from deepspeed.runtime.zero.partition_parameters import *
 from deepspeed.runtime.zero.partition_parameters import _init_external_params
 from deepspeed.runtime.zero.constants import ZERO_OPTIMIZATION_WEIGHTS
@@ -655,6 +655,7 @@ class FP16_DeepSpeedZeroOptimizer_Stage3(object):
         self.flatten = util_ops.flatten
         self.unflatten = util_ops.unflatten
         self.dtype = self.optimizer.param_groups[0]['params'][0].dtype
+        self._global_grad_norm = 0.
 
         if not all(is_zero_param(p) for p in module.parameters()):
             group = None
@@ -2787,6 +2788,7 @@ class FP16_DeepSpeedZeroOptimizer_Stage3(object):
             return
 
         norm_groups = self._get_norm_groups()
+        self._global_grad_norm = get_global_norm(norm_list=norm_groups)
 
         timer_names = set()
 
@@ -2800,7 +2802,7 @@ class FP16_DeepSpeedZeroOptimizer_Stage3(object):
             self._prepare_sub_group(sub_group_id, timer_names)
 
             #scale the fp32 gradients
-            self.unscale_and_clip_grads(sub_group_id, norm_groups)
+            self.unscale_and_clip_grads(sub_group_id, self._global_grad_norm)
 
             #apply the optimizer step on the sub group and copy fp32 parameters to fp16
             self._optimizer_step(sub_group_id)
@@ -2849,14 +2851,8 @@ class FP16_DeepSpeedZeroOptimizer_Stage3(object):
                 norm_list = [param_norm, ds_norm] + unflat_norm
                 print(f'Post-Step Norms {i} {param_id} = {norm_list}')
 
-    def unscale_and_clip_grads(self, sub_group_id, norm_groups):
-
+    def unscale_and_clip_grads(self, sub_group_id, total_norm):
         grad_groups_flat = [self.fp32_partitioned_groups_flat[sub_group_id].grad]
-
-        total_norm = 0.0
-        for norm in norm_groups:
-            total_norm += norm**2.0
-        total_norm = math.sqrt(total_norm)
 
         # compute combined scale factor for this group
         combined_scale = self.loss_scale

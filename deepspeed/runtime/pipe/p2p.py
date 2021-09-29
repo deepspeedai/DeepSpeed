@@ -2,10 +2,26 @@
 Copyright 2019 The Microsoft DeepSpeed Team
 '''
 
+import pickle
+import typing
+
+import torch
 import torch.distributed as dist
+
+# To query whether we have send/recv support
+from packaging.version import Version
+from deepspeed.git_version_info import torch_info
 
 _groups = None
 _grid = None
+
+_async = []
+
+
+def can_send_recv() -> bool:
+    torch_version = Version(torch_info['version'])
+    sendrecv_min = Version('1.8')
+    return torch_version >= sendrecv_min
 
 
 #initializes adjacent process groups
@@ -16,7 +32,8 @@ def init_process_groups(grid):
 
     assert _grid.pipe_parallel_size > 1, "There is no pipeline parallelism"
 
-    _groups = [dist.new_group(ranks=group) for group in _grid.p2p_groups]
+    if not can_send_recv():
+        _groups = [dist.new_group(ranks=group) for group in _grid.p2p_groups]
 
 
 def _is_valid_send_recv(src_stage, dest_stage):
@@ -30,40 +47,117 @@ def _is_valid_send_recv(src_stage, dest_stage):
 
 def send(tensor, dest_stage, async_op=False):
     global _groups
-
-    async_op = False
+    assert async_op == False, "Doesnt support async_op true"
     src_stage = _grid.get_stage_id()
     _is_valid_send_recv(src_stage, dest_stage)
 
-    group = _get_send_recv_group(src_stage, dest_stage)
-    src_rank = _grid.stage_to_global(stage_id=src_stage)
+    dest_rank = _grid.stage_to_global(stage_id=dest_stage)
+    if async_op:
+        global _async
+        op = dist.isend(tensor, dest_rank)
+        _async.append(op)
+    else:
 
-    return dist.broadcast(tensor, src_rank, group=group, async_op=async_op)
+        if can_send_recv():
+            return dist.send(tensor, dest_rank)
+        else:
+            group = _get_send_recv_group(src_stage, dest_stage)
+            src_rank = _grid.stage_to_global(stage_id=src_stage)
+            return dist.broadcast(tensor, src_rank, group=group, async_op=async_op)
 
 
 def recv(tensor, src_stage, async_op=False):
-
     global _groups
-
-    async_op = False
+    assert async_op == False, "Doesnt support async_op true"
     dest_stage = _grid.get_stage_id()
     _is_valid_send_recv(src_stage, dest_stage)
 
-    group = _get_send_recv_group(src_stage, dest_stage)
     src_rank = _grid.stage_to_global(stage_id=src_stage)
 
-    return dist.broadcast(tensor, src_rank, group=group, async_op=async_op)
+    if async_op:
+        global _async
+        op = dist.irecv(tensor, src_rank)
+        _async.append(op)
+    else:
+        if can_send_recv():
+            return dist.recv(tensor, src_rank)
+        else:
+            group = _get_send_recv_group(src_stage, dest_stage)
+            return dist.broadcast(tensor, src_rank, group=group, async_op=async_op)
 
 
-def barrier(stage_id):
-    global _groups, _grid
-    group_id = _grid.stage_to_global(stage_id=stage_id)
-    if (dist.get_rank() >= 0):
-        print("Barrier Group ID", group_id)
-        print("Barrier Group", _grid.p2p_groups[group_id])
-    dist.barrier(group=_groups[group_id])
-    if (dist.get_rank() >= 0):
-        print("Exiting Barrier ", group_id)
+def wait():
+    global _async
+    for op in _async:
+        op.wait()
+    _async = []
+
+    torch.cuda.synchronize()
+
+
+def send_obj(msg: typing.Any, dest: int):
+    """Send an arbitrary python object to ``dest``.
+
+    Note: ``msg`` must be pickleable.
+
+    WARN: This incurs a CPU -> GPU transfer and should be used sparingly
+    for performance reasons.
+
+    Args:
+        msg (typing.Any): The object to send.
+        dest (int): Destination rank.
+    """
+    # serialize the message
+    msg = pickle.dumps(msg)
+    # construct a tensor to send
+    msg = torch.ByteTensor(torch.ByteStorage.from_buffer(msg)).cuda()
+
+    # Send meta and message
+    length_tensor = torch.tensor([len(msg)], dtype=torch.long).cuda()
+    dist.send(length_tensor, dst=dest)
+    dist.send(msg, dst=dest)
+
+
+def recv_obj(sender: int) -> typing.Any:
+    """Receive an arbitrary python object from ``sender``.
+
+    WARN: This incur a CPU <-> GPU transfers and should be used sparingly
+    for performance reasons.
+
+    Args:
+        sender (int): The rank sending the message.
+    """
+    # Get message meta
+    length = torch.tensor([0], dtype=torch.long).cuda()
+    dist.recv(length, src=sender)
+
+    # Receive and deserialize
+    msg = torch.empty(length.item(), dtype=torch.uint8).cuda()
+    dist.recv(msg, src=sender)
+
+    msg = pickle.loads(msg.cpu().numpy().tobytes())
+
+    def _to(x):
+        """Recursively move to the current device."""
+        if torch.is_tensor(x):
+            return x.cuda()
+        if isinstance(x, (tuple, list)):
+            ret = [_to(x_) for x_ in x]
+            if isinstance(x, tuple):
+                ret = tuple(ret)
+            return ret
+        # handle kwargs
+        if isinstance(x, dict):
+            ret = dict()
+            for key, val in x.items():
+                ret[_to(key)] = _to(val)
+            return ret
+
+        # Anything else is a no-op
+        return x
+
+    msg = _to(msg)
+    return msg
 
 
 def _get_send_recv_group(src_stage, dest_stage):

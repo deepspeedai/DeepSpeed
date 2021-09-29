@@ -53,6 +53,9 @@ def get_optim_files(checkpoint_dir):
 
 
 def parse_model_state(file):
+
+    # load to cpu
+    device = torch.device('cpu')
     state_dict = torch.load(file, map_location=device)
 
     if "buffer_names" not in state_dict:

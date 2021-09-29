@@ -213,11 +213,7 @@ def test_unfused_fp16_optimizer_gradnorm_for_moe(tmpdir, monkeypatch):
     args = args_from_dict(tmpdir, config_dict)
     hidden_dim = 10
 
-    def mock_unscale_and_clip_grads(norm_groups, apply_scale=True):
-        total_norm = 0.0
-        for norm in norm_groups:
-            total_norm += norm**2.0
-        total_norm = math.sqrt(total_norm)
+    def mock_unscale_and_clip_grads(total_norm, apply_scale=True):
         torch_norm_tensor = torch.cuda.FloatTensor([total_norm])
         all_gather_results = [
             torch.zeros_like(torch_norm_tensor) for _ in range(dist.get_world_size())
@@ -266,11 +262,7 @@ def test_fused_fp16_optimizer_gradnorm_for_moe(tmpdir, monkeypatch):
     args = args_from_dict(tmpdir, config_dict)
     hidden_dim = 10
 
-    def mock_unscale_and_clip_grads(grads_groups_flat, norm_groups, apply_scale=True):
-        total_norm = 0.0
-        for norm in norm_groups:
-            total_norm += norm**2.0
-        total_norm = math.sqrt(total_norm)
+    def mock_unscale_and_clip_grads(grads_groups_flat, total_norm, apply_scale=True):
         torch_norm_tensor = torch.cuda.FloatTensor([total_norm])
         all_gather_results = [
             torch.zeros_like(torch_norm_tensor) for _ in range(dist.get_world_size())
@@ -327,11 +319,7 @@ def test_lamb_optimizer_gradnorm_for_moe(tmpdir, monkeypatch, fused_lamb_legacy:
     args = args_from_dict(tmpdir, config_dict)
     hidden_dim = 10
 
-    def mock_unscale_and_clip_grads(norm_groups, apply_scale=True):
-        total_norm = 0.0
-        for norm in norm_groups:
-            total_norm += norm**2.0
-        total_norm = math.sqrt(total_norm)
+    def mock_unscale_and_clip_grads(total_norm, apply_scale=True):
         torch_norm_tensor = torch.cuda.FloatTensor([total_norm])
         all_gather_results = [
             torch.zeros_like(torch_norm_tensor) for _ in range(dist.get_world_size())

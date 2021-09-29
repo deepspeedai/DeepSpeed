@@ -24,7 +24,7 @@ from torch.cuda import _lazy_call, device as device_ctx_manager
 
 from deepspeed.runtime.config import DeepSpeedConfig
 from deepspeed.utils import logger
-from deepspeed.runtime.utils import copy_to_device, move_to_device, see_memory_usage
+from deepspeed.runtime.utils import copy_to_device, move_to_device, see_memory_usage, bwc_tensor_model_parallel_rank
 from deepspeed.utils.timer import SynchronizedWallClockTimer as Timers
 
 # DeepSpeed Checkpointing Enabled or Disabled
@@ -213,9 +213,12 @@ def model_parallel_cuda_manual_seed(seed):
                               model parallel regions.
     """
     global mpu
+
+    tp_rank = bwc_tensor_model_parallel_rank(mpu)
+
     # 2718 is just for fun and any POSITIVE value will work.
     offset = seed + 2718
-    model_parallel_seed = offset + mpu.get_model_parallel_rank()
+    model_parallel_seed = offset + tp_rank
     # Data parallel gets the original sedd.
     data_parallel_seed = seed
 
@@ -225,7 +228,7 @@ def model_parallel_cuda_manual_seed(seed):
             'model parallel rank {}, and data parallel rank {} with '
             'model parallel seed: {} and data parallel seed: {}'.format(
                 torch.distributed.get_rank(),
-                mpu.get_model_parallel_rank(),
+                tp_rank,
                 mpu.get_data_parallel_rank(),
                 model_parallel_seed,
                 data_parallel_seed),
@@ -515,9 +518,14 @@ class CheckpointFunction(torch.autograd.Function):
         global data_offsets, size_offsets
         if mp_rank is None:
             if mpu is not None:
-                mp_rank = mpu.get_model_parallel_rank()
-                mp_size = mpu.get_model_parallel_world_size()
-                mp_group = mpu.get_model_parallel_group()
+                if hasattr(mpu, 'get_tensor_model_parallel_rank'):
+                    mp_rank = mpu.get_tensor_model_parallel_rank()
+                    mp_size = mpu.get_tensor_model_parallel_world_size()
+                    mp_group = mpu.get_tensor_model_parallel_group()
+                else:
+                    mp_rank = mpu.get_model_parallel_rank()
+                    mp_size = mpu.get_model_parallel_world_size()
+                    mp_group = mpu.get_model_parallel_group()
             else:
                 mp_rank = 0
                 mp_size = 1

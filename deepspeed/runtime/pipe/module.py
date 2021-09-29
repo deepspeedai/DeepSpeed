@@ -253,7 +253,7 @@ class PipelineModule(nn.Module):
         # All pipeline parameters should be considered as model parallel in the context
         # of our FP16 optimizer
         for p in self.parameters():
-            p.model_parallel = True
+            p.ds_pipe_replicated = False
 
     def _count_layer_params(self):
         """Count the trainable parameters in individual layers.
@@ -472,7 +472,7 @@ class PipelineModule(nn.Module):
                             # Only count the tied module once in the eyes of the FP16 optimizer
                             if self.global_rank != tied_ranks[0]:
                                 for p in self.tied_modules[key].parameters():
-                                    p.model_parallel = False
+                                    p.ds_pipe_replicated = True
         '''
         if len(tied_comms) > 0:
             print(f'RANK={self.global_rank} tied_comms={tied_comms}')
@@ -588,15 +588,18 @@ class PipelineModule(nn.Module):
 
             layer.load_state_dict(checkpoint)
 
-            if self._grid.data_parallel_id == 0:
-                logger.info(
-                    f'RANK={self.global_rank} Loaded layer={idx+self._local_start} file={load_path}'
-                )
+            # if self._grid.data_parallel_id == 0:
+            #     logger.info(
+            #         f'RANK={self.global_rank} Loaded layer={idx+self._local_start} file={load_path}'
+            #     )
 
         self._synchronize_tied_weights()
 
     def _is_checkpointable(self, funcs):
-        if self.__class__.__name__ == 'GPT2ModelPipe':
+        # This is an unfortunate hack related to torch and deepspeed activation checkpoint implementations.
+        # Some layers like torch.nn.Embedding will not receive grads if checkpointed, which breaks things.
+        # I presume it's related to the discrete inputs that cannot require_grad? Need to revisit.
+        if self.__class__.__name__ in ('GPTModelPipe', 'GPT2ModelPipe'):
             return all('ParallelTransformerLayerPipe' in f.__class__.__name__
                        for f in funcs)
 

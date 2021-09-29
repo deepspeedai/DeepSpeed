@@ -283,7 +283,7 @@ def test_stage_3_output_type(output_type):
             engine.step()
 
 
-# test that no sub-class or super-class is missed
+# Test that no sub-class or super-class is missed
 class ConvX(torch.nn.Conv1d):
     def __init__(self, *args):
         super().__init__(*args)

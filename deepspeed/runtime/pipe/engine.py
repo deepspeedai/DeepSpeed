@@ -110,8 +110,9 @@ class PipelineEngine(DeepSpeedEngine):
         self.is_model_parallel = self.grid.model_parallel_size > 1
 
         # Partition input/output buffers
+        # XXX temporarily disable while I revert some partition hacks.
         self.is_pipe_partitioned = self.is_model_parallel
-        self.is_grad_partitioned = False
+        self.is_grad_partitioned = self.is_model_parallel
 
         model_parameters = filter(lambda p: p.requires_grad, self.module.parameters())
         num_params = sum([p.numel() for p in model_parameters])
@@ -393,6 +394,19 @@ class PipelineEngine(DeepSpeedEngine):
 
         return eval_output
 
+    def set_train_batch_size(self, train_batch_size):
+        """Adjust the global batch size by increasing or decreasing the number of
+        micro-batches (i.e., gradient accumulation steps). The size of each micro-batch
+        (i.e., ``train_micro_batch_size_per_gpu``) is not changed.
+        Args:
+            train_batch_size (int): The new global batch size for training.
+        Raises:
+            ValueError: if ``train_batch_size`` is not divisible by the
+                configured micro-batch size and data parallelism.
+        """
+        super().set_train_batch_size(train_batch_size)
+        self.micro_batches = self.gradient_accumulation_steps()
+
     def is_first_stage(self):
         """True if this process is in the first stage in the pipeline."""
         return self.stage_id == 0
@@ -553,12 +567,18 @@ class PipelineEngine(DeepSpeedEngine):
                 local_part=inputs[1],
                 group=self.grid.get_slice_parallel_group())
 
+            inputs = part_input.full()
+            inputs.requires_grad = True
+            part_input = None
+            self.pipe_buffers['inputs'][buffer_id] = inputs
+            '''
             inputs = tuple([part_input.full(), inputs[2]])
             inputs[0].requires_grad = True
             # skip mask
             #inputs[1].requires_grad = True
             part_input = None
             self.pipe_buffers['inputs'][buffer_id] = inputs
+            '''
 
         # Zero out the gradients each time we use the tensor because only the data in
         # tensor changes across batches
@@ -568,13 +588,14 @@ class PipelineEngine(DeepSpeedEngine):
 
         # Partition the outputs if we are not the last stage
         if self.is_pipe_partitioned and not self.is_last_stage():
-            part = PartitionedTensor(tensor=outputs[0],
+            assert torch.is_tensor(outputs)
+            part = PartitionedTensor(tensor=outputs,
                                      group=self.grid.get_slice_parallel_group())
             # Clear the large output data, but save the computation graph
-            outputs[0].data = torch.zeros(1)
-            self.pipe_buffers['output_tensors'][buffer_id] = outputs[0]
+            outputs.data = torch.zeros(1)
+            self.pipe_buffers['output_tensors'][buffer_id] = outputs
             # Inject the partitioned tensor into the output before sending
-            outputs = tuple([part.to_meta(), part.data(), outputs[1]])
+            outputs = tuple([part.to_meta(), part.data()])
             part = None
 
         self.pipe_buffers['outputs'][buffer_id] = outputs
@@ -632,15 +653,11 @@ class PipelineEngine(DeepSpeedEngine):
                     local_part=outputs[1],
                     group=self.grid.get_slice_parallel_group())
                 self.pipe_buffers['output_tensors'][buffer_id].data = part_output.full()
-                outputs = tuple(
-                    [self.pipe_buffers['output_tensors'][buffer_id],
-                     outputs[2]])
+                outputs = self.pipe_buffers['output_tensors'][buffer_id]
             else:
                 # Already restored from partition
-                self.pipe_buffers['output_tensors'][buffer_id].data = outputs[0]
-                outputs = tuple(
-                    [self.pipe_buffers['output_tensors'][buffer_id],
-                     outputs[1]])
+                self.pipe_buffers['output_tensors'][buffer_id].data = outputs
+                outputs = self.pipe_buffers['output_tensors'][buffer_id]
 
         grad_tensors = self.grad_layer
         if self.is_grad_partitioned:
@@ -649,7 +666,7 @@ class PipelineEngine(DeepSpeedEngine):
                 meta=self.grad_layer[0],
                 local_part=self.grad_layer[1],
                 group=self.grid.get_slice_parallel_group())
-            grad_tensors = tuple([part_grad.full(), self.grad_layer[2]])
+            grad_tensors = part_grad.full()
             part_grad = None
             #print(f'RANK={self.global_rank} BEFORE-BWD restored grad={self.grad_layer[0].size()} {self.grad_layer[1].size()}')
 
@@ -872,13 +889,10 @@ class PipelineEngine(DeepSpeedEngine):
 
         # Partition the gradient
         if self.is_grad_partitioned:
-            part = PartitionedTensor(tensor=inputs[0].grad,
+            assert torch.is_tensor(inputs)
+            part = PartitionedTensor(tensor=inputs.grad,
                                      group=self.grid.get_slice_parallel_group())
-            # Clear the large output data, but save the computation graph
-            # Inject the partitoned tensor into the output before sending
-
-            # XXX Hack
-            inputs = tuple([part.to_meta(), part.data(), inputs[1]])
+            inputs = tuple([part.to_meta(), part.data()])
 
         # XXX Terrible hack
         # Drop the attention mask from the input buffer here. It does not have
@@ -899,8 +913,6 @@ class PipelineEngine(DeepSpeedEngine):
                 # First two sends are partitioned gradient
                 p2p.send(inputs[0], self.prev_stage)
                 p2p.send(inputs[1], self.prev_stage)
-                # XXX hack hack hack
-                #p2p.send(inputs[2].grad, self.prev_stage)
             else:
                 for idx, buffer in enumerate(inputs):
                     # Skip tensors that will not produce a grad
@@ -974,7 +986,7 @@ class PipelineEngine(DeepSpeedEngine):
                 local_part=outputs[1],
                 group=self.grid.get_slice_parallel_group())
             outputs[0].data = part_output.full()
-            outputs = tuple([outputs[0], outputs[2]])
+            outputs = outputs[0]
             # save for backward
             self.pipe_buffers['outputs'][buffer_id] = outputs
 
@@ -984,7 +996,7 @@ class PipelineEngine(DeepSpeedEngine):
                 s = list(outputs.size())
                 self.grad_layer = self._allocate_buffer(s, num_buffers=1)[0]
             else:
-                sizes = [list(t.size()) for t in outputs if t.is_floating_point()]
+                sizes = [list(t.size()) for t in outputs]  # if t.is_floating_point()]
                 self.grad_layer = self._allocate_buffers(sizes, num_buffers=1)[0]
 
         if isinstance(self.grad_layer, torch.Tensor):
