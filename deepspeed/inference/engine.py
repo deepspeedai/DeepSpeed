@@ -17,6 +17,8 @@ from ..pipe import PipelineModule
 
 
 class InferenceEngine(Module):
+    inference_mp_group = None
+
     def __init__(self,
                  model,
                  mp_size=1,
@@ -57,7 +59,7 @@ class InferenceEngine(Module):
             self.mp_world_size = dist.get_world_size(
                 group=self.mpu.get_model_parallel_group())
             self.mp_group = self.mpu.get_model_parallel_group()
-        elif self.mp_world_size > 1 and not dist.is_initialized():
+        elif self.mp_world_size > 1:
             self._create_model_parallel_group()
 
         # apply injection policy
@@ -87,14 +89,17 @@ class InferenceEngine(Module):
 
     def _create_model_parallel_group(self):
         # Call the init process
+        if InferenceEngine.inference_mp_group is None:
+            init_distributed()
 
-        init_distributed()
+            local_rank = int(os.getenv('LOCAL_RANK', '0'))
+            torch.cuda.set_device(local_rank)
 
-        local_rank = int(os.getenv('LOCAL_RANK', '0'))
-        torch.cuda.set_device(local_rank)
-
-        ranks = [i for i in range(self.mp_world_size)]
-        self.mp_group = dist.new_group(ranks)
+            ranks = [i for i in range(self.mp_world_size)]
+            self.mp_group = dist.new_group(ranks)
+            InferenceEngine.inference_mp_group = self.mp_group
+        else:
+            self.mp_group = InferenceEngine.inference_mp_group
 
     def _check_quantize_setting(self, quantization_setting):
         self.quatize_bits = 8
