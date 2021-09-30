@@ -698,7 +698,7 @@ class Init(InsertPostInitMethodToModuleSubClasses):
             # self._param_status(param)
 
     def _partition_param(self, param, buffer=None, has_been_updated=False):
-        assert param.ds_status is not ZeroParamStatus.INFLIGHT, f" {param} Cannot parititon a param in flight"
+        assert param.ds_status is not ZeroParamStatus.INFLIGHT, f" {param} Cannot partition a param in flight"
 
         global reuse_buffers
         #print_rank_0(f"Param id {param.ds_id} status is {param.ds_status}")
