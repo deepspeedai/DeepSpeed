@@ -42,6 +42,9 @@ def distributed_test(world_size=2, backend='nccl'):
             os.environ['RANK'] = str(local_rank)
             os.environ['WORLD_SIZE'] = str(num_procs)
 
+            # turn off NCCL logging if set
+            os.environ.pop('NCCL_DEBUG', None)
+
             deepspeed.init_distributed(dist_backend=backend)
 
             if torch.cuda.is_available():

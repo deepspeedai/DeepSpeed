@@ -78,14 +78,18 @@ except ImportError:
 
 
 def split_half_float_double_csr(tensors):
-    dtypes = [
+    supported_types = [
         "torch.cuda.HalfTensor",
         "torch.cuda.FloatTensor",
         "torch.cuda.DoubleTensor",
         CSRTensor.type()
     ]
+
+    for t in tensors:
+        assert t.type() in supported_types, f"attempting to reduce an unsupported grad type: {t.type()}"
+
     buckets = []
-    for i, dtype in enumerate(dtypes):
+    for i, dtype in enumerate(supported_types):
         bucket = [t for t in tensors if t.type() == dtype]
         if bucket:
             buckets.append((dtype, bucket))
@@ -1761,7 +1765,7 @@ class DeepSpeedEngine(Module):
                         grads.append(grad_data)
 
         split_buckets = split_half_float_double_csr(grads)
-        for i, bucket_tuple in enumerate(split_buckets):
+        for _, bucket_tuple in enumerate(split_buckets):
             bucket_type, bucket = bucket_tuple
 
             if self.pipeline_parallelism:
@@ -1770,22 +1774,17 @@ class DeepSpeedEngine(Module):
                 dp_group = groups.get_data_parallel_group()
 
             if bucket_type == CSRTensor.type():
-                # TODO: do we have to do something here?
                 self.csr_allreduce_no_retain(bucket, dp_group=dp_group)
-                #groups.get_data_parallel_group() if self.pipeline_parallelism else self.mpu.get_data_parallel_group())
             else:
-                self.allreduce_no_retain(
-                    bucket,
-                    dp_group=dp_group,
-                    #groups.get_data_parallel_group(),
-                    numel_per_bucket=elements_per_buffer)
+                self.allreduce_no_retain(bucket,
+                                         dp_group=dp_group,
+                                         numel_per_bucket=elements_per_buffer)
 
         if self.has_moe_layers:
             expert_split_buckets = split_half_float_double_csr(expert_grads)
             for i, bucket_tuple in enumerate(expert_split_buckets):
                 bucket_type, bucket = bucket_tuple
                 if bucket_type == CSRTensor.type():
-                    # TODO: do we have to do something here?
                     self.csr_allreduce_no_retain(bucket,
                                                  groups.get_expert_data_parallel_group())
                 else:
