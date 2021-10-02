@@ -175,7 +175,7 @@ class PipelineModule(nn.Module):
                 topology = PipeDataParallelTopology(num_pp=num_stages, num_dp=dp)
                 self._topo = topology
 
-        # Contruct communicators for pipeline topology
+        # Construct communicators for pipeline topology
         self._grid = PipelineParallelGrid(process_group=self.world_group,
                                           topology=self._topo)
 

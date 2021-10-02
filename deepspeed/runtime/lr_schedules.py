@@ -361,7 +361,7 @@ class LRRangeTest(object):
         self.step_rate = lr_range_test_step_rate
         self.last_batch_iteration = last_batch_iteration
         self.staircase = lr_range_test_staircase
-        self.interval_fn = self._staircase_interval if lr_range_test_staircase else self._continous_interval
+        self.interval_fn = self._staircase_interval if lr_range_test_staircase else self._continuous_interval
 
         if last_batch_iteration == -1:
             self._update_optimizer(self.min_lr)
@@ -369,7 +369,7 @@ class LRRangeTest(object):
     def _staircase_interval(self):
         return math.floor(float(self.last_batch_iteration + 1) / self.step_size)
 
-    def _continous_interval(self):
+    def _continuous_interval(self):
         return float(self.last_batch_iteration + 1) / self.step_size
 
     def _get_increase(self):
@@ -514,7 +514,7 @@ class OneCycle(object):
                                       decay_mom_rate,
                                       last_batch_iteration)
 
-        # Initalize batch iteration tracker
+        # Initialize batch iteration tracker
         self.last_batch_iteration = last_batch_iteration
 
     # Configure cycle shape

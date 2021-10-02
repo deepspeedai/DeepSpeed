@@ -1,6 +1,6 @@
 ---
 layout: single
-title: "DeepSpeed Inference: Multi-GPU inference with customized inference kerenls and quantization support"
+title: "DeepSpeed Inference: Multi-GPU inference with customized inference kernels and quantization support"
 excerpt: ""
 categories: news
 new_post: false

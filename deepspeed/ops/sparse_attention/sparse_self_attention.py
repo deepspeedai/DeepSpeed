@@ -26,7 +26,7 @@ class SparseSelfAttention(nn.Module):
         max_seq_length=2048):
         """Initialize the sparse self attention layer.
         Arguments:
-            sparsity_config: optional: this parameter determins sparsity pattern configuration; it is based on SparsityConfig class.
+            sparsity_config: optional: this parameter determines sparsity pattern configuration; it is based on SparsityConfig class.
             key_padding_mask_mode: optional: a string determining if key padding mask needs to be added, `add`, or be multiplied, `mul`.
             attn_mask_mode: optional: a string determining if attention mask needs to be added, `add`, or be multiplied, `mul`.
             max_seq_length: optional: the maximum sequence length this sparse attention module will be applied to; it controls the size of the master_layout.
@@ -121,7 +121,7 @@ class SparseSelfAttention(nn.Module):
             attn_mask_mode: optional: a boolean determining if attn_mask needs to be added or multiplied
 
         Return:
-             attn_output: a dense tensor containing attnetion context
+             attn_output: a dense tensor containing attention context
         """
         assert query.dtype == torch.half, "sparse attention only supports training in fp16 currently, please file a github issue if you need fp32 support"
         bsz, num_heads, tgt_len, head_dim = query.size()

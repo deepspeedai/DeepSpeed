@@ -94,10 +94,10 @@ class SparseAttentionUtils:
         Arguments:
             model: required: a transformer model
             max_position: required: an integer determining new position embedding size
-            sparsity_config: optional: this parameter determins sparsity pattern configuration; it is based on SparsityConfig class
+            sparsity_config: optional: this parameter determines sparsity pattern configuration; it is based on SparsityConfig class
 
         Return:
-            model: updated model; in which self attention layer has been repleaced with DeepSpeed Sparse Self Attention layer.
+            model: updated model; in which self attention layer has been replaced with DeepSpeed Sparse Self Attention layer.
         """
 
         if hasattr(model, 'bert'):
@@ -131,10 +131,10 @@ class SparseAttentionUtils:
         Arguments:
             config: required: transformer model config
             layers: required: transformer model attention layers
-            sparsity_config: optional: this parameter determins sparsity pattern configuration; it is based on SparsityConfig class
+            sparsity_config: optional: this parameter determines sparsity pattern configuration; it is based on SparsityConfig class
 
         Return:
-            layers: updated attention layers; in which self attention layers have been repleaced with DeepSpeed Sparse Self Attention layer.
+            layers: updated attention layers; in which self attention layers have been replaced with DeepSpeed Sparse Self Attention layer.
         """
 
         for layer in layers:
@@ -161,7 +161,7 @@ class SparseAttentionUtils:
             It needs to be called in your model, such as BertModel, right before you calculate the embedding outputs.
             Note)
             1- instead of passing your embedding layer to this function, you can simply add this function to your model. It can be more simplified if given attention_mask and/or token_type_ids are none.
-            2- you need to call unpdad function before returning your model output to unpad the encoder sequence output.
+            2- you need to call unpad function before returning your model output to unpad the encoder sequence output.
 
             Arguments:
                 block_size: required: an integer determining the block size of sparsity config.

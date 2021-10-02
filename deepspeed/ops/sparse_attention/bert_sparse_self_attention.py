@@ -24,7 +24,7 @@ class BertSparseSelfAttention(nn.Module):
 
         Arguments:
             config: required: Bert model config
-            sparsity_config: optional: this parameter determins sparsity pattern configuration; it is based on FixedSparsityConfig class.
+            sparsity_config: optional: this parameter determines sparsity pattern configuration; it is based on FixedSparsityConfig class.
         """
 
         super(BertSparseSelfAttention, self).__init__()
@@ -53,11 +53,11 @@ class BertSparseSelfAttention(nn.Module):
         """Applies forward phase of bert sparse self attention
 
         Arguments:
-            hidden_states: required: hidde_states tensor of the bert model
+            hidden_states: required: hidden_states tensor of the bert model
             attn_mask: required: a mask tensor of size (SequenceLength X SequenceLength); currently only 2D is supported
 
         Return:
-             context_layer: a dense tensor containing attnetion context
+             context_layer: a dense tensor containing attention context
         """
         mixed_query_layer = self.query(hidden_states)
         mixed_key_layer = self.key(hidden_states)

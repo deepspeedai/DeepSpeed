@@ -9,7 +9,7 @@ from .transformer import TransformerBuilder
 from .stochastic_transformer import StochasticTransformerBuilder
 from .utils import UtilsBuilder
 from .async_io import AsyncIOBuilder
-from .builder import get_default_compute_capatabilities
+from .builder import get_default_compute_capabilities
 from .transformer_inference import InferenceBuilder
 from .quantizer import QuantizerBuilder
 

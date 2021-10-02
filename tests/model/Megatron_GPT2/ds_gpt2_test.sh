@@ -3,7 +3,7 @@
 helpFunction()
 {
     echo ""
-    echo "Usage: $0 -m model-parallelism -g gpu-per-node -n node# -b batch-size -s stpes -l layers -h hidden_size -q seq_length -e heads -c ckpt_num_layers -p [-d]"
+    echo "Usage: $0 -m model-parallelism -g gpu-per-node -n node# -b batch-size -s steps -l layers -h hidden_size -q seq_length -e heads -c ckpt_num_layers -p [-d]"
     echo -e "\t-m model parallelism"
     echo -e "\t-g gpus per node"
     echo -e "\t-n node count"

@@ -269,7 +269,7 @@ def get_fp32_state_dict_from_zero_checkpoint(checkpoint_dir, tag=None):
         model.load_state_dict(state_dict)
         # submit to model hub or save the model to share with others
 
-    In this example the ``model`` will no longer be useable in the deepspeed context of the same
+    In this example the ``model`` will no longer be usable in the deepspeed context of the same
     application. i.e. you will need to re-initialize the deepspeed engine, since
     ``model.load_state_dict(state_dict)`` will remove all the deepspeed magic from it.
 
@@ -332,7 +332,7 @@ def load_state_dict_from_zero_checkpoint(model, checkpoint_dir, tag=None):
         model = load_state_dict_from_zero_checkpoint(trainer.model, checkpoint_dir)
         # submit to model hub or save the model to share with others
 
-    Note, that once this was run, the ``model`` will no longer be useable in the deepspeed context
+    Note, that once this was run, the ``model`` will no longer be usable in the deepspeed context
     of the same application. i.e. you will need to re-initialize the deepspeed engine, since
     ``model.load_state_dict(state_dict)`` will remove all the deepspeed magic from it.
 

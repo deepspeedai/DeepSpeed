@@ -3,7 +3,7 @@
 
 namespace cg = cooperative_groups;
 
-__global__ void qunatize_kernel(__half* vals, int group_size, int num_bits)
+__global__ void quantize_kernel(__half* vals, int group_size, int num_bits)
 {
 #if __CUDA_ARCH__ >= 700
 
@@ -93,7 +93,7 @@ __global__ void qunatize_kernel(__half* vals, int group_size, int num_bits)
 #endif
 }
 
-__global__ void qunatize_kernel(float* vals, int group_size, int num_bits)
+__global__ void quantize_kernel(float* vals, int group_size, int num_bits)
 {
     cg::thread_block b = cg::this_thread_block();
     cg::thread_block_tile<32> g = cg::tiled_partition<32>(b);
@@ -176,7 +176,7 @@ __global__ void qunatize_kernel(float* vals, int group_size, int num_bits)
 }
 
 template <typename T>
-void launch_qunatize_kernel(T* vals,
+void launch_quantize_kernel(T* vals,
                             int total_count,
                             int group_num,
                             int num_bits,
@@ -185,22 +185,22 @@ void launch_qunatize_kernel(T* vals,
     dim3 grid_dim(group_num);
     dim3 block_dim(1024);
 
-    qunatize_kernel<<<grid_dim, block_dim, 0, stream>>>(
+    quantize_kernel<<<grid_dim, block_dim, 0, stream>>>(
         vals, (total_count / group_num) / 4, num_bits);
 }
 
-template void launch_qunatize_kernel(float* vals,
+template void launch_quantize_kernel(float* vals,
                                      int total_count,
                                      int group_num,
                                      int num_bits,
                                      cudaStream_t stream);
-template void launch_qunatize_kernel(__half* vals,
+template void launch_quantize_kernel(__half* vals,
                                      int total_count,
                                      int group_num,
                                      int num_bits,
                                      cudaStream_t stream);
 
-__global__ void sr_qunatize_kernel(__half* vals,
+__global__ void sr_quantize_kernel(__half* vals,
                                    int token_size,
                                    int token_num,
                                    int num_bits,
@@ -336,7 +336,7 @@ __global__ void sr_qunatize_kernel(__half* vals,
 #endif
 }
 
-__global__ void sr_qunatize_kernel(float* vals,
+__global__ void sr_quantize_kernel(float* vals,
                                    int token_size,
                                    int token_num,
                                    int num_bits,
@@ -456,7 +456,7 @@ __global__ void sr_qunatize_kernel(float* vals,
 }
 
 template <typename T>
-void launch_sr_qunatize_kernel(T* vals,
+void launch_sr_quantize_kernel(T* vals,
                                int total_count,
                                int group_num,
                                int num_bits,
@@ -468,21 +468,21 @@ void launch_sr_qunatize_kernel(T* vals,
     uint64_t inc = total_count / grid_dim.x / block_dim.x;
     std::pair<uint64_t, uint64_t> seed = Context::Instance().IncrementOffset(inc);
 
-    sr_qunatize_kernel<<<grid_dim, block_dim, 0, stream>>>(
+    sr_quantize_kernel<<<grid_dim, block_dim, 0, stream>>>(
         vals, (total_count / group_num) / 4, group_num, num_bits, seed);
 }
-template void launch_sr_qunatize_kernel(float* vals,
+template void launch_sr_quantize_kernel(float* vals,
                                         int total_count,
                                         int group_num,
                                         int num_bits,
                                         cudaStream_t stream);
-template void launch_sr_qunatize_kernel(__half* vals,
+template void launch_sr_quantize_kernel(__half* vals,
                                         int total_count,
                                         int group_num,
                                         int num_bits,
                                         cudaStream_t stream);
 
-__global__ void qunatize_kernel_asym(__half* vals, int group_size, int num_bits)
+__global__ void quantize_kernel_asym(__half* vals, int group_size, int num_bits)
 {
 #if __CUDA_ARCH__ >= 700
 
@@ -595,7 +595,7 @@ __global__ void qunatize_kernel_asym(__half* vals, int group_size, int num_bits)
 #endif
 }
 
-__global__ void qunatize_kernel_asym(float* vals, int group_size, int num_bits)
+__global__ void quantize_kernel_asym(float* vals, int group_size, int num_bits)
 {
     cg::thread_block b = cg::this_thread_block();
     cg::thread_block_tile<32> g = cg::tiled_partition<32>(b);
@@ -699,7 +699,7 @@ __global__ void qunatize_kernel_asym(float* vals, int group_size, int num_bits)
 }
 
 template <typename T>
-void launch_qunatize_kernel_asym(T* vals,
+void launch_quantize_kernel_asym(T* vals,
                                  int total_count,
                                  int group_num,
                                  int num_bits,
@@ -708,22 +708,22 @@ void launch_qunatize_kernel_asym(T* vals,
     dim3 grid_dim(group_num);
     dim3 block_dim(1024);
 
-    qunatize_kernel_asym<<<grid_dim, block_dim, 0, stream>>>(
+    quantize_kernel_asym<<<grid_dim, block_dim, 0, stream>>>(
         vals, (total_count / group_num) / 4, num_bits);
 }
 
-template void launch_qunatize_kernel_asym(float* vals,
+template void launch_quantize_kernel_asym(float* vals,
                                           int total_count,
                                           int group_num,
                                           int num_bits,
                                           cudaStream_t stream);
-template void launch_qunatize_kernel_asym(__half* vals,
+template void launch_quantize_kernel_asym(__half* vals,
                                           int total_count,
                                           int group_num,
                                           int num_bits,
                                           cudaStream_t stream);
 
-__global__ void sr_qunatize_kernel_asym(__half* vals,
+__global__ void sr_quantize_kernel_asym(__half* vals,
                                         int token_size,
                                         int token_num,
                                         int num_bits,
@@ -879,7 +879,7 @@ __global__ void sr_qunatize_kernel_asym(__half* vals,
 #endif
 }
 
-__global__ void sr_qunatize_kernel_asym(float* vals,
+__global__ void sr_quantize_kernel_asym(float* vals,
                                         int token_size,
                                         int token_num,
                                         int num_bits,
@@ -1010,7 +1010,7 @@ __global__ void sr_qunatize_kernel_asym(float* vals,
     }
 }
 template <typename T>
-void launch_sr_qunatize_kernel_asym(T* vals,
+void launch_sr_quantize_kernel_asym(T* vals,
                                     int total_count,
                                     int group_num,
                                     int num_bits,
@@ -1022,15 +1022,15 @@ void launch_sr_qunatize_kernel_asym(T* vals,
     uint64_t inc = total_count / grid_dim.x / block_dim.x;
     std::pair<uint64_t, uint64_t> seed = Context::Instance().IncrementOffset(inc);
 
-    sr_qunatize_kernel<<<grid_dim, block_dim, 0, stream>>>(
+    sr_quantize_kernel<<<grid_dim, block_dim, 0, stream>>>(
         vals, (total_count / group_num) / 4, group_num, num_bits, seed);
 }
-template void launch_sr_qunatize_kernel_asym(float* vals,
+template void launch_sr_quantize_kernel_asym(float* vals,
                                              int total_count,
                                              int group_num,
                                              int num_bits,
                                              cudaStream_t stream);
-template void launch_sr_qunatize_kernel_asym(__half* vals,
+template void launch_sr_quantize_kernel_asym(__half* vals,
                                              int total_count,
                                              int group_num,
                                              int num_bits,

@@ -205,7 +205,7 @@ def model_parallel_cuda_manual_seed(seed):
     Two set of RNG states are tracked:
         default state: This is for data parallelism and is the same among a
                        set of model parallel GPUs but different across
-                       different model paralle groups. This is used for
+                       different model parallel groups. This is used for
                        example for dropout in the non-model-parallel regions.
         model-parallel state: This state is different among a set of model
                               parallel GPUs, but the same across data parallel
@@ -219,7 +219,7 @@ def model_parallel_cuda_manual_seed(seed):
     # 2718 is just for fun and any POSITIVE value will work.
     offset = seed + 2718
     model_parallel_seed = offset + tp_rank
-    # Data parallel gets the original sedd.
+    # Data parallel gets the original seed.
     data_parallel_seed = seed
 
     if torch.distributed.get_rank() == 0:
@@ -534,7 +534,7 @@ class CheckpointFunction(torch.autograd.Function):
         global cuda_device, transport_stream, PARTITION_ACTIVATIONS, buffer_0, buffer_1, buffer_0_offset, buffer_1_offset
 
         if cuda_device is None:
-            see_memory_usage("First Forward Begining", force=False)
+            see_memory_usage("First Forward Beginning", force=False)
             if dist.get_rank() == 0:
                 logger.info(f"Activation Checkpointing Information")
                 logger.info(
@@ -886,7 +886,7 @@ def configure(
         PROFILE_TIME = profile
 
     if CONTIGUOUS_CHECKPOINTING:
-        assert PARTITION_ACTIVATIONS, "Contiguous Checkpointing is only availble with partitioned activations. Set partitioned activations to true in deepspeed config"
+        assert PARTITION_ACTIVATIONS, "Contiguous Checkpointing is only available with partitioned activations. Set partitioned activations to true in deepspeed config"
     if CONTIGUOUS_CHECKPOINTING:
         assert num_layers is not None, "Must specify the number of layers with contiguous memory checkpointing"
 

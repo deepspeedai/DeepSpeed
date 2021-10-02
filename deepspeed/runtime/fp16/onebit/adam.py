@@ -115,7 +115,7 @@ class OnebitAdam(torch.optim.Optimizer):
             grads (list of tensors, optional): weight gradient to use for the
                 optimizer update. If gradients have type torch.half, parameters
                 are expected to be in type torch.float. (default: None)
-            output params (list of tensors, optional): A reduced recision copy
+            output params (list of tensors, optional): A reduced precision copy
                 of the updated weights written out in addition to the regular
                 updated weights. Have to be of same type as gradients. (default: None)
             scale (float, optional): factor to divide gradient tensor values

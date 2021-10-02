@@ -10,7 +10,7 @@ class ContiguousMemoryAllocator(object):
     def __init__(self, size, dtype, device):
         self.buffer = torch.zeros(size, dtype=dtype, device=device)
 
-        #address to contiguous size avaialble
+        #address to contiguous size available
         self.contiguous_sizes = {}
 
         self.contiguous_sizes[0] = size
@@ -65,7 +65,7 @@ class ContiguousMemoryAllocator(object):
         print_rank_0(
             f"Free before allocation {free_before}. Allocating {size}. Free after allocation {self.total_free}. Max allocated {self.max_allocated}"
         )
-        assert self.total_free + size == free_before, "Allcation bookeeping error"
+        assert self.total_free + size == free_before, "Allocation bookkeeping error"
 
         return ret_tensor
 

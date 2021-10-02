@@ -63,7 +63,7 @@ class SDLoaderBase(ABC):
                 a. if no mp_size resizing occurs, for both training & inference, loading
                    the mp_rank related checkpoint directly.
                 b. if has mp_size resizing, only Megatron model inference is supported,
-                   checkpoint file(s) will be merged/splitted according to mp_rank, mp_world_size and
+                   checkpoint file(s) will be merged/split according to mp_rank, mp_world_size and
                    checkpoint file list.
 
             3. Non-PipeModule loading mp_rank_*.pt files, is_pipe_parallel=False
@@ -433,7 +433,7 @@ class MegatronSDLoader(SDLoaderBase):
 
         sd = torch.load(ckpt_file_name, map_location=lambda storage, loc: storage)
 
-        # partail_key is a sub-string of one key in the sd
+        # partial_key is a sub-string of one key in the sd
         def check_key_exist(partial_key, sd):
             keys = sd.keys()
             found = False

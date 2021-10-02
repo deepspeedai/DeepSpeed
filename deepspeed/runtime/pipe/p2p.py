@@ -177,7 +177,7 @@ def _get_send_recv_group(src_stage, dest_stage):
         stage_id = src_stage
     '''group_id corresponds to group of [group_id, group_id+1]
      unless group_id is the rank of the last stage
-     in which case group_id correspods to group[group_id-num_stages+1, group_id]
+     in which case group_id corresponds to group[group_id-num_stages+1, group_id]
      '''
     group_id = _grid.stage_to_global(stage_id=stage_id)
 

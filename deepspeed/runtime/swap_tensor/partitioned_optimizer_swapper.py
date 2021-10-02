@@ -124,7 +124,7 @@ class PartitionedOptimizerSwapper(OptimizerSwapper):
             return
 
         self._start_timer(SWAP_OUT_PARAM_TIMER)
-        pinned_tensors, pinned_paths, unpinned_tensors, unpinned_paths = self._seperate_pinned_tensors(swap_info)
+        pinned_tensors, pinned_paths, unpinned_tensors, unpinned_paths = self._separate_pinned_tensors(swap_info)
         swap_bytes = sum([
             self._io_aligned_numel(t.numel()) * t.element_size()
             for t in swap_info.tensors
@@ -203,7 +203,7 @@ class PartitionedOptimizerSwapper(OptimizerSwapper):
         if DEBUG_MODE and torch.distributed.get_rank() == 0:
             logger.info(f'optimizer_param_swap_in: {(swap_bytes/(1024**3)):5.2f} GB')
 
-    def _seperate_pinned_tensors(self, swap_info):
+    def _separate_pinned_tensors(self, swap_info):
         pinned_tensors = []
         pinned_paths = []
 

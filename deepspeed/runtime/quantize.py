@@ -154,7 +154,7 @@ class Quantizer(object):
                         f'Quantization settings: current bit-precision = {self.q_start_bits[index]}, step = {self.qsteps}, quantization period = {self.q_period[index]}, index = {index}'
                     )
         assert (self.q_start_bits[index] >= self.q_target_bits), \
-            'Quantization bit is lower thab target precision bits!'
+            'Quantization bit is lower than target precision bits!'
 
         # quantize the weights base on the selected bits and the value-range
         if not self.use_quantizer_kernel:

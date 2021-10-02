@@ -33,9 +33,9 @@ class DeepSpeedCPUAdam(torch.optim.Optimizer):
         In order to apply this optimizer, the model requires to have its master parameter (in FP32)
         reside on the CPU memory.
 
-        To train on a hetrogeneous system, such as coordinating CPU and GPU, DeepSpeed offers
+        To train on a heterogeneous system, such as coordinating CPU and GPU, DeepSpeed offers
         the ZeRO-Offload technology which efficiently offloads the optimizer states into CPU memory,
-        with minimal impact on training througput. DeepSpeedCPUAdam plays an important role to minimize
+        with minimal impact on training throughput. DeepSpeedCPUAdam plays an important role to minimize
         the overhead of the optimizer's latency on CPU. Please refer to ZeRO-Offload tutorial
         (https://www.deepspeed.ai/tutorials/zero-offload/) for more information on how to enable this technology.
 

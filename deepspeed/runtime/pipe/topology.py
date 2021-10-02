@@ -233,7 +233,7 @@ def _prime_factors(N):
 
 
 class PipeDataParallelTopology(ProcessTopology):
-    """ A topology specialiation for hybrid data and pipeline parallelism.
+    """ A topology specialization for hybrid data and pipeline parallelism.
 
         Uses data parallelism on the last dimension to encourage gradient
         reductions to use high-bandwidth intra-node links and lower-volume

@@ -139,14 +139,14 @@ The DeepSpeed Flops Profiler can be used with the DeepSpeed runtime without any 
 
 ## Flops Measurement
 
-Similar to exsiting flops calculation tools or methods, the DeepSpeed Flops Profiler measures the flops of the forward pass of a module and the flops of the backward pass is estimated as `2` times of that of the forward pass.
-Different from the PyTorch profiler which calculates the flops of PyTorch operators, the DeepSpeed Flops Profiler measures the flops witin modules in a model and provides more insights to the users about the model execution.
+Similar to existing flops calculation tools or methods, the DeepSpeed Flops Profiler measures the flops of the forward pass of a module and the flops of the backward pass is estimated as `2` times of that of the forward pass.
+Different from the PyTorch profiler which calculates the flops of PyTorch operators, the DeepSpeed Flops Profiler measures the flops within modules in a model and provides more insights to the users about the model execution.
 The flops estimation is partly inspired by [ptflops](https://github.com/sovrasov/flops-counter.pytorch) with the major difference being that the DeepSpeed Flops Profiler not only supports flops computation directly at module level, but can also capture ```torch.nn.functional``` invoked in a module to estimate the flops.
 Thus the DeepSpeed Flops Profiler allows for customized modules in the model, e.g., ```ParallelTransformerLayerworks, ParallelSelfAttention, RowParallelLinear, etc.``` in [Megatron-LM](https://github.com/NVIDIA/Megatron-LM). This is in contrast to ptflops which requires users to write customized flops calculation functions for each customized module.
 
 ## Multi-GPU, Multi-node, Data Parallelism, and Model Parallelism
 
-The DeepSpeed Flops Profiler outputs the per GPU profile as well as the world size, data parallel size, and model paralel size.                                           1
+The DeepSpeed Flops Profiler outputs the per GPU profile as well as the world size, data parallel size, and model parallel size.                                           1
 For models running on multi-GPU or multi-node, only change of the model parallelism (e.g. ```--model-parallel-size``` in [Megatron-LM](https://github.com/NVIDIA/Megatron-LM)) affects the number of flops and parameters profiled, i.e.,
 `model_parallel_size * flops = total_flops` and `model_parallel_size * parameters = total_parameters`. The data parallel size or world size (related to the number of GPUs or nodes) does not affect the per GPU profile.
 
@@ -376,7 +376,7 @@ with torch.cuda.device(0):
 #### In Model Training Workflow
 
 To profile model forward in a training workflow, use the `FlopsProfiler`class.
-The `FlopsProfiler`class provides the follwing methods:
+The `FlopsProfiler`class provides the following methods:
   * `start_profile()` - starts profiling
   * `get_total_flops(as_string=False)` - returns the total number of MACs in the model
   * `get_total_params(as_string=False)` - returns the total number of parameters in the model

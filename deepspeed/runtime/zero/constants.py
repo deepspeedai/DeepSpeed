@@ -106,7 +106,7 @@ ZERO_OPTIMIZATION_PREFETCH_BUCKET_SIZE = 'stage3_prefetch_bucket_size'
 ZERO_OPTIMIZATION_PREFETCH_BUCKET_SIZE_DEFAULT = 50000000
 
 #parameters smaller than the threshold are only communicated once after the
-#parameters are updated and are persisted thoughout the trainging
+#parameters are updated and are persisted throughout the training
 #avoid tons of latency bound communication
 ZERO_OPTIMIZATION_PARAM_PERSISTENCE_THRESHOLD = 'stage3_param_persistence_threshold'
 ZERO_OPTIMIZATION_PARAM_PERSISTENCE_THRESHOLD_DEFAULT = 100000
@@ -125,7 +125,7 @@ ZERO_OPTIMIZATION_IGNORE_UNUSED_PARAMETERS_DEFAULT = True
 ZERO_OPTIMIZATION_LEGACY_STAGE1 = "legacy_stage1"
 ZERO_OPTIMIZATION_LEGACY_STAGE1_DEFAULT = False
 
-# Stage 2 - partition gradients in a round robin fashsion to load-balance reduction and offload copying
+# Stage 2 - partition gradients in a round robin fashion to load-balance reduction and offload copying
 ZERO_OPTIMIZATION_ROUND_ROBIN_GRADIENTS = 'round_robin_gradients'
 ZERO_OPTIMIZATION_ROUND_ROBIN_GRADIENTS_DEFAULT = False
 

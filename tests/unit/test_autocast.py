@@ -30,7 +30,7 @@ def test_missing_amp_autocast(tmpdir, half_op):
 @pytest.mark.parametrize('half_op', [False, True])
 def test_disable_autocast_linear(tmpdir, half_op):
     if _skip_autocast_test():
-        pytest.skip("amp autocast is not availalbe")
+        pytest.skip("amp autocast is not available")
 
     hidden_dim = 4
     if half_op:
@@ -56,7 +56,7 @@ def test_disable_autocast_linear(tmpdir, half_op):
                            True)])
 def test_autocast_linear(tmpdir, half_input, half_weight):
     if _skip_autocast_test():
-        pytest.skip("amp autocast is not availalbe")
+        pytest.skip("amp autocast is not available")
 
     hidden_dim = 4
     input = torch.randn(hidden_dim).cuda()

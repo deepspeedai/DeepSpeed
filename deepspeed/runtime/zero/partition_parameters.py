@@ -379,7 +379,7 @@ class Init(InsertPostInitMethodToModuleSubClasses):
                 effect. Defaults to ``True``.
             dtype (``dtype``, optional): Can be used to change the data type of the parameters.
                 Supported options are ``torch.half`` and ``torch.float``. Defaults to ``None``
-            mpu (``object``, optional): A model parallelism unit object that implements get_{model,data}_parallel_{rank,group,wolrd_size}.
+            mpu (``object``, optional): A model parallelism unit object that implements get_{model,data}_parallel_{rank,group,world_size}.
 
         This context accelerates model initialization and enables models that
         are too large to allocate in their entirety in CPU memory. It has the
@@ -1059,7 +1059,7 @@ class Init(InsertPostInitMethodToModuleSubClasses):
             if not accumulate:
                 dest_tensor.copy_(src_tensor)
 
-            # if source and destinatoin are on same device,
+            # if source and destination are on same device,
             # add to the provided buffer
             elif src_tensor.device == dest_tensor.device:
                 dest_tensor.add_(src_tensor)

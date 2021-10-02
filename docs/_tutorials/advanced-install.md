@@ -26,7 +26,7 @@ ds_report
 
 ## Pre-install DeepSpeed Ops
 
-**Note:** [PyTorch](https://pytorch.org/) must be installed _before_ pre-compiling any DeepSpeed c++/cuda ops. However, this is not required if using the default mode of JIT compilition of ops.
+**Note:** [PyTorch](https://pytorch.org/) must be installed _before_ pre-compiling any DeepSpeed c++/cuda ops. However, this is not required if using the default mode of JIT compilation of ops.
 {: .notice--info}
 
 Sometimes we have found it useful to pre-install either some or all DeepSpeed

@@ -19,7 +19,7 @@ class ReplaceWithTensorSlicing:
         assert dim1 > dim2, \
             'Merging tensors is not allowed here! Please use deepspeed load_checkpoint\
             for merging your checkpoints before replacing the transformer layer with\
-            inference-kerenls'
+            inference-kernels'
 
     def qkv_copy(self, dst, src):
         if src is None:
@@ -114,9 +114,9 @@ def replace_transformer_layer(orig_layer_impl,
         seed (int): random seed value
         max_seq_length (int): max sequence length for training
         hidden_size (int): hidden dimension
-        num_attention_heads (int): numebr of attention heads
+        num_attention_heads (int): number of attention heads
         mp_size (int): model_parallelism degree
-        mp_group : model_parallel gropu initialized on the modeling side
+        mp_group : model_parallel group initialized on the modeling side
         preln (bool): does the original layer implementation do pre or post layer norm?
         fp16 (bool): fp16 or fp32
         local_rank (int): GPU rank (optional),
@@ -401,7 +401,7 @@ def replace_module(model, orig_class, replace_fn, _replace_policy):
             if plcy._orig_layer_class is not None:
                 policy.update({plcy._orig_layer_class: (replace_fn, plcy)})
     assert len(policy.items()) > 0,\
-        "No default policy found! Please specifiy your policy injection_policy (like {BertLayer:HFBEertLayerPolicy})." +\
+        "No default policy found! Please specify your policy injection_policy (like {BertLayer:HFBEertLayerPolicy})." +\
         "You can find some samples here: https://github.com/microsoft/DeepSpeed/blob/master/deepspeed/module_inject/replace_policy.py"
 
     replaced_module, _ = _replace_module(model, policy)

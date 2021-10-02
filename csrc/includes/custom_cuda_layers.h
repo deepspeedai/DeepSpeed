@@ -27,25 +27,25 @@
 #define MAX_REG 256
 
 template <typename T>
-void launch_qunatize_kernel(T* vals,
+void launch_quantize_kernel(T* vals,
                             int total_count,
                             int group_num,
                             int num_bits,
                             cudaStream_t stream);
 template <typename T>
-void launch_sr_qunatize_kernel(T* vals,
+void launch_sr_quantize_kernel(T* vals,
                                int total_count,
                                int group_num,
                                int num_bits,
                                cudaStream_t stream);
 template <typename T>
-void launch_qunatize_kernel_asym(T* vals,
+void launch_quantize_kernel_asym(T* vals,
                                  int total_count,
                                  int group_num,
                                  int num_bits,
                                  cudaStream_t stream);
 template <typename T>
-void launch_sr_qunatize_kernel_asym(T* vals,
+void launch_sr_quantize_kernel_asym(T* vals,
                                     int total_count,
                                     int group_num,
                                     int num_bits,

@@ -33,7 +33,7 @@ exp_selection_uniform_map: Dict[torch.device, Callable] = {}
 
 def multiplicative_jitter(x, device: torch.device, epsilon=1e-2):
     """
-    Modified from swtich transformer paper. mesh transformers
+    Modified from switch transformer paper. mesh transformers
     Multiply values by a random number between 1-epsilon and 1+epsilon.
     Makes models more resilient to rounding errors introduced by bfloat16.
     This seems particularly important for logits.
@@ -147,7 +147,7 @@ def top1gating(logits: torch.Tensor,
 
     mask1_rand = mask1 * uniform(mask1.shape)
 
-    assert logits.shape[0] >= min_capacity, "No. of tokens (batch-size) should be greater than min_capacity. Either set min_capacity to 0 or inrease your batch size."
+    assert logits.shape[0] >= min_capacity, "No. of tokens (batch-size) should be greater than min_capacity. Either set min_capacity to 0 or increase your batch size."
 
     _, top_idx = torch.topk(mask1_rand, k=capacity, dim=0)
 

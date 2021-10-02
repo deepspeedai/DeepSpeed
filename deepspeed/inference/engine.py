@@ -102,7 +102,7 @@ class InferenceEngine(Module):
             self.mp_group = InferenceEngine.inference_mp_group
 
     def _check_quantize_setting(self, quantization_setting):
-        self.quatize_bits = 8
+        self.quantize_bits = 8
         self.mlp_extra_grouping = False
         self.quantize_groups = 1
         if quantization_setting is None:
@@ -177,7 +177,7 @@ class InferenceEngine(Module):
             quantizer = WeightQuantization(mlp_extra_grouping=self.mlp_extra_grouping)
             model, self.quantization_scales = quantizer.model_quantize(self.module,
                                                                         self.injection_dict,
-                                                                        self.quatize_bits,
+                                                                        self.quantize_bits,
                                                                         self.quantize_groups)
         elif self.dtype == torch.half:
             self.module.half()

@@ -6,7 +6,7 @@ from simple_model import SimpleModel, SimpleOptimizer, random_dataloader, args_f
 from common import distributed_test
 
 
-def test_flops_profiler_in_ds_trainning(tmpdir):
+def test_flops_profiler_in_ds_training(tmpdir):
     config_dict = {
         "train_batch_size": 1,
         "steps_per_print": 1,
@@ -34,7 +34,7 @@ def test_flops_profiler_in_ds_trainning(tmpdir):
     model = SimpleModel(hidden_dim, empty_grad=False)
 
     @distributed_test(world_size=[1])
-    def _test_flops_profiler_in_ds_trainning(args, model, hidden_dim):
+    def _test_flops_profiler_in_ds_training(args, model, hidden_dim):
         model, _, _, _ = deepspeed.initialize(args=args,
                                             model=model,
                                             model_parameters=model.parameters())
@@ -52,7 +52,7 @@ def test_flops_profiler_in_ds_trainning(tmpdir):
         assert model.flops_profiler.flops == 100
         assert model.flops_profiler.params == 110
 
-    _test_flops_profiler_in_ds_trainning(args, model, hidden_dim)
+    _test_flops_profiler_in_ds_training(args, model, hidden_dim)
 
 
 class LeNet5(torch.nn.Module):

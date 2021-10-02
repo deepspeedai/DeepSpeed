@@ -11,7 +11,7 @@ at::Tensor ds_quantize(at::Tensor& vals, int groups, int bits)
     for (auto dim : t_size) size *= dim;
 
     if ((((size / groups) - 1) / 4096 + 1) <= MAX_REG) {
-        launch_qunatize_kernel(
+        launch_quantize_kernel(
             (T*)vals.data_ptr(), size, groups, bits, at::cuda::getCurrentCUDAStream());
     }
     return vals;
@@ -25,7 +25,7 @@ at::Tensor ds_sr_quantize(at::Tensor& vals, int groups, int bits)
     for (auto dim : t_size) size *= dim;
 
     if (((size / groups) / 4 / 1024) <= 256) {
-        launch_sr_qunatize_kernel(
+        launch_sr_quantize_kernel(
             (T*)vals.data_ptr(), size, groups, bits, at::cuda::getCurrentCUDAStream());
     }
     return vals;
@@ -39,7 +39,7 @@ at::Tensor ds_quantize_asym(at::Tensor& vals, int groups, int bits)
     for (auto dim : t_size) size *= dim;
 
     if ((((size / groups) - 1) / 4096 + 1) <= MAX_REG) {
-        launch_qunatize_kernel_asym(
+        launch_quantize_kernel_asym(
             (T*)vals.data_ptr(), size, groups, bits, at::cuda::getCurrentCUDAStream());
     }
     return vals;
@@ -53,7 +53,7 @@ at::Tensor ds_sr_quantize_asym(at::Tensor& vals, int groups, int bits)
     for (auto dim : t_size) size *= dim;
 
     if (((size / groups) / 4 / 1024) <= 256) {
-        launch_sr_qunatize_kernel_asym(
+        launch_sr_quantize_kernel_asym(
             (T*)vals.data_ptr(), size, groups, bits, at::cuda::getCurrentCUDAStream());
     }
     return vals;

@@ -179,6 +179,6 @@ private:
     bool _normalize_invertible;
     bool _gelu_checkpoint;
 
-    // High Performace flags
+    // High Performance flags
     bool _stochastic_mode;
 };

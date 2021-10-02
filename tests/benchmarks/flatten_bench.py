@@ -105,7 +105,7 @@ def timeme():
 
 
 def line_profileme():
-    print("--------------- line_profier -----------------")
+    print("--------------- line_profiler -----------------")
     print("py")
     profile(py)()
     gc.collect()

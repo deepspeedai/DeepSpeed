@@ -7,7 +7,7 @@ This tutorial describes how to use [PyTorch Profiler](https://pytorch.org/blog/i
 PyTorch Profiler is an open-source tool that enables accurate and efficient performance analysis and troubleshooting for large-scale deep learning models.  The profiling results can be outputted as a `.json` trace file and viewed in Google Chrome's trace viewer (chrome://tracing).
 Microsoft Visual Studio Code's Python extension integrates TensorBoard into the code editor, including the support for the PyTorch Profiler.
 
-For more detais, refer to [PYTORCH PROFILER](https://pytorch.org/tutorials/recipes/recipes/profiler_recipe.html#pytorch-profiler).
+For more details, refer to [PYTORCH PROFILER](https://pytorch.org/tutorials/recipes/recipes/profiler_recipe.html#pytorch-profiler).
 
 ## Profile the model training loop
 

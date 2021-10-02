@@ -5,7 +5,7 @@ if [[ $# -ne 2 ]]; then
 fi
 
 
-function validate_enviroment()
+function validate_environment()
 {
     validate_cmd="python ./validate_async_io.py"
     eval ${validate_cmd}
@@ -18,7 +18,7 @@ function validate_enviroment()
 }
 
 
-validate_enviroment
+validate_environment
 
 INPUT_FILE=$1
 if [[ ! -f ${INPUT_FILE} ]]; then

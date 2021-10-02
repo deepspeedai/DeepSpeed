@@ -61,16 +61,16 @@ def check_equal(first, second, atol=1e-2, verbose=False):
         for i in range(len(x.shape) - 1):
             countx *= x.shape[i + 1]
             avgx = np.sum(avgx)
-        tollerance = 1
+        tolerance = 1
         if avgx != float('inf') and avgx != -float('inf'):
             avgx = avgx / countx
-            tollerance = avgx * atol
+            tolerance = avgx * atol
         if verbose:
-            print("tollerance is ", tollerance)
+            print("tolerance is ", tolerance)
             print("x = {}".format(x.flatten()))
             print("y = {}".format(y.flatten()))
             print('-' * 80)
-        np.testing.assert_allclose(x, y, err_msg="Index: {}".format(i), atol=tollerance)
+        np.testing.assert_allclose(x, y, err_msg="Index: {}".format(i), atol=tolerance)
 
 
 def zero_grad(variables):

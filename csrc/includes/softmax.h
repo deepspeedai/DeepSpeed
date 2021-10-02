@@ -17,14 +17,14 @@ public:
         size_t heads;
         size_t seq_length;
         size_t prob_depth;
-        float temprature;
+        float temperature;
         bool mem_alloc;
         Config(size_t batch, size_t h, size_t seq, int prob_size = 0, bool mem_alloc = false)
             : batchSize(batch),
               heads(h),
               seq_length(seq),
               prob_depth(prob_size),
-              temprature(1.0),
+              temperature(1.0),
               mem_alloc(mem_alloc)
         {
         }

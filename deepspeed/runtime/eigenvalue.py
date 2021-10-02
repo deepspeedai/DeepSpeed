@@ -30,7 +30,7 @@ class Eigenvalue(object):
             ranks=[0])
 
     # Replace all nan/pos-inf/neg-inf to zero
-    # TODO: Pytorch new verion may add this function, replace this one by then.
+    # TODO: Pytorch new version may add this function, replace this one by then.
     def nan_to_num(self, x):
         device = x.device
         x = x.cpu().numpy()

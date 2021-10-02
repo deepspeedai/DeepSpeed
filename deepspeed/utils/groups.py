@@ -100,7 +100,7 @@ def initialize(ep_size=1, mpu=None):
     Arguments:
         ep_size (int, optional): default=1, expert parallel size
         mpu (module, optional): default=None, model parallel unit (e.g., from Megatron)
-            that descibes model/data parallel ranks.
+            that describes model/data parallel ranks.
 
     """
     if mpu is not None:
@@ -121,7 +121,7 @@ def initialize_model_parallel(model_parallel_size_):
 
     Let's say we have a total of 8 GPUs denoted by g0 ... g7 and we
     use 2 GPUs to parallelize the model. The present function will
-    create 4 model parallel groups and 2 data parallel grous as:
+    create 4 model parallel groups and 2 data parallel groups as:
         4 model parallel groups:
             [g0, g1], [g2, g3], [g4, g5], [g6, g7]
         2 data parallel groups:

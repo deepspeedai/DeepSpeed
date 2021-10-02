@@ -241,13 +241,13 @@ class FlopsProfiler(object):
         )
         print(f'Profile Summary at step {profile_step}:')
         print(
-            "Notations:\ndata parallel size (dp_size), model paralel size(mp_size),\nnumber of parameters (params), number of multiply-accumulate operations(MACs),\number of floating point operations (flops), floating point operations per second (FLOPS),\nfwd latency (forward propagation latency), bwd latency (backward propagation latency),\nstep (weights update latency), iter latency (sum of fwd, bwd and step latency)\n"
+            "Notations:\ndata parallel size (dp_size), model parallel size(mp_size),\nnumber of parameters (params), number of multiply-accumulate operations(MACs),\number of floating point operations (flops), floating point operations per second (FLOPS),\nfwd latency (forward propagation latency), bwd latency (backward propagation latency),\nstep (weights update latency), iter latency (sum of fwd, bwd and step latency)\n"
         )
         if self.ds_engine:
             print('{:<60}  {:<8}'.format('world size: ', self.ds_engine.world_size))
             print('{:<60}  {:<8}'.format('data parallel size: ',
                                          self.ds_engine.dp_world_size))
-            print('{:<60}  {:<8}'.format('model paralel size: ',
+            print('{:<60}  {:<8}'.format('model parallel size: ',
                                          self.ds_engine.mp_world_size))
             print('{:<60}  {:<8}'.format(
                 'batch size per GPU: ',

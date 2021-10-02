@@ -20,7 +20,7 @@ def check_equal(first, second, atol=1e-2, verbose=False):
         print("x = {}".format(x.flatten()))
         print("y = {}".format(y.flatten()))
         print('-' * 80)
-    np.testing.assert_allclose(x, y, err_msg="param-update dismatch!", atol=atol)
+    np.testing.assert_allclose(x, y, err_msg="param-update mismatch!", atol=atol)
 
 @pytest.mark.parametrize('model_size',
                          [

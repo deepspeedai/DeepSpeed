@@ -27,7 +27,7 @@ MoQ quantization schedule is defined by a number of parameters which allow users
 
 `quantize_groups`: Quantization groups, which shows the number of scales used to quantize a model, default is 1.
 
-`quantize_bits`, The numer of bits to control the data-precision transition from a start-bit to thhe final target-bits (e.g. starting from 16-bit down to 8-bit).
+`quantize_bits`, The numer of bits to control the data-precision transition from a start-bit to the final target-bits (e.g. starting from 16-bit down to 8-bit).
 
     `start_bits`: The start bits in quantization training. Default is set to 16.
     `target_bits`: The target bits in quantization training. Default is set to 16.
@@ -63,7 +63,7 @@ MoQ quantization schedule is defined by a number of parameters which allow users
 
 ## How to Use MoQ for GLUE Training Tasks
 
-Before fine-tunning the GLUE tasks using DeepSpeed MoQ, you need:
+Before fine-tuning the GLUE tasks using DeepSpeed MoQ, you need:
 
 1. Install DeepSpeed.
 2. Checkout Huggingface transformers branch, install it with all required packages.
@@ -206,6 +206,6 @@ As we see in the following table, MoQ consistently preserve accuracy across diff
 
 ### Tips
 
-When using the MoQ, one needs to consider the number of samples and training iterations before setting the correct quatization period or offset to make sure that the quantization reaches the desired level of precision before training finishes.
+When using the MoQ, one needs to consider the number of samples and training iterations before setting the correct quantization period or offset to make sure that the quantization reaches the desired level of precision before training finishes.
 
-Enabling eigenvalues for quantization dynamically adjust the quantization period on the different parts of the network. This has two positive impact: 1) the quantized network can potentially produce higher accuracy than quantizing each layer with same `quantize_period` ; 2) it automatically identifies a good quantization schedule for each layer based on its senitivity.
+Enabling eigenvalues for quantization dynamically adjust the quantization period on the different parts of the network. This has two positive impact: 1) the quantized network can potentially produce higher accuracy than quantizing each layer with same `quantize_period` ; 2) it automatically identifies a good quantization schedule for each layer based on its sensitivity.

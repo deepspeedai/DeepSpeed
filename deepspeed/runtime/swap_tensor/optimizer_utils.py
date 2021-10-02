@@ -461,12 +461,12 @@ class OptimizerSwapper(object):
         self._stop_timer(UNSWAPPED_READ_GRADIENTS)
         self._log_timers([UNSWAPPED_READ_GRADIENTS])
 
-        # It shoud be safe to discard unswapped gradient partitions
+        # It should be safe to discard unswapped gradient partitions
         swap_info.release_unswapped_gradients()
 
         if SWAPPER_DEBUG_MODE:
             logger.info(
-                f'optimizer_retreive_unswapped_radients: param={swap_info.param_id} tensor_count={tensor_count} elem_count={num_elem_count}'
+                f'optimizer_retrieve_unswapped_gradients: param={swap_info.param_id} tensor_count={tensor_count} elem_count={num_elem_count}'
             )
 
     def _get_state_tensors(self, parameter):

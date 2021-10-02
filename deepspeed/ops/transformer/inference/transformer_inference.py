@@ -525,7 +525,7 @@ class DeepSpeedTransformerInference(nn.Module):
 
             config: An object of DeepSpeedInferenceConfig
             mp_group: Model parallelism group initialized on the modeling side.
-            quantize_scales: This arguement groups all the layers' scales used for quantization
+            quantize_scales: This argument groups all the layers' scales used for quantization
             quantize_groups: Number of groups used for quantizing the model
             merge_count: Shows the number of model-parallel checkpoints merged before running inference.
                 We use this argument to control the quantization scale for the model parameters if a bigger

@@ -88,7 +88,7 @@ class DeepSpeedTransformerConfig(TransformerConfig):
                 a high accuracy level. On the other hand, for the downstream tasks, such as fine-tuning, we recommend
                 to turn it off in order to be able to reproduce the same result through the regular kernel execution.
 
-            huggingface: Enbale if using the HuggingFace interface style for sending out the forward results.
+            huggingface: Enable if using the HuggingFace interface style for sending out the forward results.
 
             training: Enable for training rather than inference.
     """
