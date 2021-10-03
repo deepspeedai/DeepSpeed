@@ -42,8 +42,6 @@ class DeepSpeedTransformerConfig(TransformerConfig):
         Arguments:
             batch_size: The maximum batch size used for running the kernel on each GPU
 
-            max_seq_length: The sequence-length of the model being trained with DeepSpeed
-
             hidden_size: The hidden size of the transformer layer
 
             intermediate_size: The intermediate size of the feed-forward part of transformer layer
