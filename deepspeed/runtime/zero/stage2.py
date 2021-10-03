@@ -770,10 +770,7 @@ class FP16_DeepSpeedZeroOptimizer(object):
 
     # create a flat tensor aligned at the alignment boundary
     def flatten_dense_tensors_aligned(self, tensor_list, alignment):
-        num_elements = 0
-        for tensor in tensor_list:
-            num_elements = num_elements + tensor.numel()
-
+        num_elements = sum(t.numel() for t in tensor_list)
         remaining = num_elements % alignment
 
         if remaining:
@@ -782,8 +779,6 @@ class FP16_DeepSpeedZeroOptimizer(object):
                                      device=tensor_list[0].device,
                                      dtype=tensor_list[0].dtype)
             padded_tensor_list = tensor_list + [pad_tensor]
-
-            num_elements = num_elements + elements_to_add
         else:
             padded_tensor_list = tensor_list
 

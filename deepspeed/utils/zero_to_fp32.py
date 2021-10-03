@@ -220,16 +220,27 @@ def _get_fp32_state_dict_from_zero_checkpoint(ds_checkpoint_dir):
                           unpartitioned_numel).view(shape)
             offset += partitioned_numel
 
-    if zero_stage == 3:
-        offset *= world_size
-
-    def align_to_4(x):
-        return 4 * math.ceil(x / 4)
-
     if zero_stage == 2:
-        # Z2 started to align to 4 to improve nccl performance
-        offset = align_to_4(offset)
-        avail_numel = align_to_4(avail_numel)
+        # Z2 started to align to 2*world_size to improve nccl performance. Therefore both offset and
+        # avail_numel can differ by anywhere between 0..2*world_size. Due to two unrelated complex
+        # paddings performed in the code it's almost impossible to predict the exact numbers w/o the
+        # live optimizer object, so we are checking that the numbers are within the right range
+        align_to = 2 * world_size
+
+        def zero2_align(x):
+            return align_to * math.ceil(x / align_to)
+
+        if debug:
+            print(f"original offset={offset}, avail_numel={avail_numel}")
+
+        offset = zero2_align(offset)
+        avail_numel = zero2_align(avail_numel)
+
+        if debug:
+            print(f"aligned  offset={offset}, avail_numel={avail_numel}")
+
+    elif zero_stage == 3:
+        offset *= world_size
 
     # Sanity check
     if offset != avail_numel:
