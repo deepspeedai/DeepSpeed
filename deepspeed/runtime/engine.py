@@ -2441,7 +2441,7 @@ class DeepSpeedEngine(Module):
 
         optimizer.fp16_groups seems to be the easiest to use as it's in all zeroX versions.
         """
-        param_shapes = OrderedDict()
+        param_group_shapes = []
         cnt = 0
         numel = 0
 
@@ -2453,6 +2453,7 @@ class DeepSpeedEngine(Module):
             fp16_groups = self.optimizer.fp16_groups
 
         for fp16_group in fp16_groups:
+            param_shapes = OrderedDict()
             for param in fp16_group:
                 cnt += 1
                 numel += param.ds_numel if hasattr(param, "ds_numel") else param.numel()
@@ -2464,9 +2465,10 @@ class DeepSpeedEngine(Module):
 
                 # uncomment to debug zero_to_fp32.py problems
                 # if self.global_rank == 0: print(f"saving param {name} {shape} (numel={shape.numel()})")
+            param_group_shapes.append(param_shapes)
         # if self.global_rank == 0: print(f"Total saved {numel} numels in {cnt} params")
 
-        return param_shapes
+        return param_group_shapes
 
     def _copy_recovery_script(self, save_path):
         base_dir = os.path.dirname(os.path.dirname(__file__))
