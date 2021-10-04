@@ -96,5 +96,5 @@ jobs:
           # scipy/sklearn required for tests, using the 'dev' extra forces torch re-install
           pip install .[testing]
           # find reqs used in ds integration tests
-          find examples/pytorch  -regextype posix-egrep -regex '.*(language-modeling|question-answering|summarization|text-classification|translation).*/requirements.txt' -exec pip install -r {} \;
+          find examples/pytorch  -regextype posix-egrep -regex '.*(language-modeling|question-answering|summarization|image-classification|text-classification|translation).*/requirements.txt' -exec pip install -r {} \;
           TORCH_EXTENSIONS_DIR=./torch-extensions RUN_SLOW=1 pytest --durations=0 --verbose tests/deepspeed
