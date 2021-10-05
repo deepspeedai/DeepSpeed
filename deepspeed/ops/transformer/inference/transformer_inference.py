@@ -37,6 +37,8 @@ class DeepSpeedInferenceConfig(TransformerConfig):
 
             num_hidden_layers: The number of transformer layers
 
+            layer_norm_eps: The epsilon value for the layer norm
+
             local_rank: Optional: The rank of GPU running the transformer kernel, it is not required
                 to use if the model already set the current device, otherwise need to set it
                 so that the transformer kernel can work on the right device
@@ -66,6 +68,7 @@ class DeepSpeedInferenceConfig(TransformerConfig):
                  intermediate_size=-1,
                  heads=-1,
                  num_hidden_layers=-1,
+                 layer_norm_eps=1e-12,
                  local_rank=-1,
                  mp_size=1,
                  fp16=False,
@@ -87,7 +90,7 @@ class DeepSpeedInferenceConfig(TransformerConfig):
         self.pre_layer_norm = pre_layer_norm
         self.local_rank = local_rank
         self.stochastic_mode = stochastic_mode
-        self.epsilon = 1.0e-5  # 1e-12
+        self.epsilon = layer_norm_eps
         self.mp_size = mp_size
         self.q_int8 = q_int8
         self.encoder_decoder = encoder_decoder
