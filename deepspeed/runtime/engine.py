@@ -2034,6 +2034,8 @@ class DeepSpeedEngine(Module):
         #           If the consistency check fails, crash with a message telling users
         #           to turn on load_module_only.
 
+        self.loaded_checkpoint_dp_world_size = checkpoint['dp_world_size']
+
         if load_module_only:
             deepspeed_states = ['module']
             if self.optimizer is not None and self.fp16_enabled():
@@ -2066,7 +2068,6 @@ class DeepSpeedEngine(Module):
                 self.global_steps * self.train_batch_size())
             self.skipped_steps = checkpoint['skipped_steps']
             self.loaded_checkpoint_mp_world_size = checkpoint['mp_world_size']
-            self.loaded_checkpoint_dp_world_size = checkpoint['dp_world_size']
             deepspeed_states = [
                 'module',
                 'csr_tensor_module_names',

@@ -35,8 +35,12 @@ def compare_deepspeed_states(saved_model, loaded_model):
     assert saved_model.global_steps == loaded_model.global_steps
 
 
-def compare_model_states(saved_model, loaded_model, compare_optimizer=True):
-    compare_deepspeed_states(saved_model, loaded_model)
+def compare_model_states(saved_model,
+                         loaded_model,
+                         compare_optimizer=True,
+                         load_module_only=False):
+    if not load_module_only:
+        compare_deepspeed_states(saved_model, loaded_model)
 
     for p0, p1 in zip(saved_model.module.named_parameters(), loaded_model.module.named_parameters()):
         np0, p0 = p0
@@ -149,7 +153,8 @@ def checkpoint_correctness_verification(args,
                                         base_optimizers=[None,
                                                          None],
                                         empty_tag=False,
-                                        seq_dataloader=False):
+                                        seq_dataloader=False,
+                                        load_module_only=False):
     dtype = torch.half if fp16 else torch.float32
     ds_model = create_deepspeed_model(args=args,
                                       model=models[0],
@@ -194,11 +199,13 @@ def checkpoint_correctness_verification(args,
     loaded_model.load_checkpoint(save_folder,
                                  tag=save_tag,
                                  load_optimizer_states=load_optimizer_states,
-                                 load_lr_scheduler_states=load_lr_scheduler_states)
+                                 load_lr_scheduler_states=load_lr_scheduler_states,
+                                 load_module_only=load_module_only)
 
     compare_model_states(trained_model,
                          loaded_model,
-                         compare_optimizer=load_optimizer_states)
+                         compare_optimizer=load_optimizer_states,
+                         load_module_only=load_module_only)
 
     if load_optimizer_states:
         compare_optimizer_states(trained_model, loaded_model, hidden_dim, fp16)
@@ -950,3 +957,38 @@ def test_checkpoint_moe(tmpdir, ep_size):
                                             seq_dataloader=True)
 
     _helper(args)
+
+
+@pytest.mark.parametrize('zero_stage', [0, 1, 2, 3])
+def test_checkpoint_load_module_only(tmpdir, zero_stage):
+    config_dict = {
+        "train_batch_size": 2,
+        "optimizer": {
+            "type": 'Adam'
+        },
+        "fp16": {
+            "enabled": True,
+            "initial_scale_power": 8
+        },
+        "zero_optimization": {
+            "stage": zero_stage,
+        }
+    }
+    args = args_from_dict(tmpdir, config_dict)
+    hidden_dim = 10
+
+    @distributed_test(world_size=[2])
+    def _go(args, zero_stage, hidden_dim):
+        if zero_stage == 3:
+            with deepspeed.zero.Init():
+                models = [SimpleModel(hidden_dim, empty_grad=False) for _ in range(2)]
+        else:
+            models = [SimpleModel(hidden_dim, empty_grad=False) for _ in range(2)]
+
+        checkpoint_correctness_verification(args,
+                                            models,
+                                            hidden_dim,
+                                            tmpdir,
+                                            load_module_only=True)
+
+    _go(args, zero_stage, hidden_dim)
