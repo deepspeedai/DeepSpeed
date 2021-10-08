@@ -265,6 +265,16 @@ class PipelineEngine(DeepSpeedEngine):
             self.pipe_buffers[key].extend([None] * num_added)
         self.num_pipe_buffers = num_buffers
 
+    def reset_activation_shape(self):
+        """Reset the buffers when the shape of activation and gradient change.
+        For example, for curriculum learning that changes the seqlen of each
+        sample, we need to call this whenever the seqlen is going to change.
+        """
+        self.first_output_send = True
+        self.pipe_recv_buf = None
+        self.grad_layer = None
+        self.meta_buffer = None
+
     def train_batch(self, data_iter=None):
         """Progress the pipeline to train the next batch of data. The engine will ingest
         ``self.train_batch_size()`` total samples collectively across all workers.
@@ -292,6 +302,17 @@ class PipelineEngine(DeepSpeedEngine):
         if not torch._C.is_grad_enabled():
             raise RuntimeError(
                 f'train_batch() requires gradients enabled. Use eval_batch() instead.')
+
+        # Curriculum learning could change activation shape
+        if self.curriculum_enabled():
+            new_difficulty = self.curriculum_scheduler.update_difficulty( \
+                self.global_steps + 1)
+            if self.global_steps == 0 or self.curriculum_scheduler.first_step:
+                self.reset_activation_shape()
+                self.curriculum_scheduler.first_step = False
+            elif new_difficulty != self.curriculum_scheduler.get_difficulty( \
+                self.global_steps):
+                self.reset_activation_shape()
 
         if data_iter:
             self.set_dataiterator(data_iter)

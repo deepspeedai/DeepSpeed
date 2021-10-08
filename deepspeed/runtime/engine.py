@@ -1293,13 +1293,16 @@ class DeepSpeedEngine(Module):
         if self.module.training and self.progressive_layer_drop:
             kwargs.update(self.progressive_layer_drop.get_state())
 
-        if self.module.training and self.curriculum_enabled():
-            self.curriculum_scheduler.update_difficulty(self.global_steps + 1)
-            if self.curriculum_params()["curriculum_type"] == "seqlen":
-                kwargs.update({
-                    "curriculum_seqlen":
-                    self.curriculum_scheduler.get_current_difficulty()
-                })
+        if self.__class__.__name__ != "PipelineEngine":
+            # TODO: The above if condition is a HACK since for PipelineEngine
+            # it's difficult to inject argument in forward pass.
+            if self.module.training and self.curriculum_enabled():
+                self.curriculum_scheduler.update_difficulty(self.global_steps + 1)
+                if self.curriculum_params()["curriculum_type"] == "seqlen":
+                    kwargs.update({
+                        "curriculum_seqlen":
+                        self.curriculum_scheduler.get_current_difficulty()
+                    })
 
         if self.zero_optimization_partition_weights():
             # Enable automated discovery of external parameters by indicating that
