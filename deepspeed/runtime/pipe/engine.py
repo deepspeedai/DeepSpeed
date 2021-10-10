@@ -394,6 +394,17 @@ class PipelineEngine(DeepSpeedEngine):
 
         self.module.eval()
 
+        # Curriculum learning could change activation shape
+        if self.curriculum_enabled():
+            new_difficulty = self.curriculum_scheduler.update_difficulty( \
+                self.global_steps + 1)
+            if self.global_steps == 0 or self.curriculum_scheduler.first_step:
+                self.reset_activation_shape()
+                self.curriculum_scheduler.first_step = False
+            elif new_difficulty != self.curriculum_scheduler.get_difficulty( \
+                self.global_steps):
+                self.reset_activation_shape()
+
         eval_output = None
 
         self._compute_loss = compute_loss
