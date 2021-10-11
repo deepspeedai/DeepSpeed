@@ -63,7 +63,8 @@ class SparseSelfAttention(nn.Module):
 
     # add to cache
     def get_ops(self, H, L):
-        from deepspeed.ops.sparse_attention import MatMul, Softmax
+        from deepspeed.ops.sparse_attention.matmul import MatMul
+        from deepspeed.ops.sparse_attention.softmax import Softmax
         if L not in SparseSelfAttention.ops:
             sparsity_layout = self.get_layout(L)
             sparse_dot_sdd_nt = MatMul(sparsity_layout,
