@@ -12,6 +12,7 @@ Copyright 2021 The Microsoft DeepSpeed Team
 # This source code is licensed under the BSD license found in the
 # LICENSE file in the root directory of this source tree.
 
+from deepspeed.utils.timer import ThroughputTimer, SynchronizedWallClockTimer
 from typing import Callable, Dict, TYPE_CHECKING, Any, Optional, Tuple, Union, cast
 
 import time
@@ -110,8 +111,8 @@ def top1gating(logits: torch.Tensor,
     gates = F.softmax(logits, dim=1)
 
     # gates has shape of SE
-    num_tokens = gates.shape[0]
-    num_experts = gates.shape[1]
+    num_tokens = int(gates.shape[0])
+    num_experts = int(gates.shape[1])
     # round-up
     capacity = math.ceil((num_tokens / num_experts) * capacity_factor)
     if capacity < min_capacity:
@@ -180,8 +181,8 @@ def top2gating(logits: torch.Tensor,
     gates = F.softmax(logits, dim=1)
 
     # gates has shape of SE
-    num_tokens = gates.shape[0]
-    num_experts = gates.shape[1]
+    num_tokens = int(gates.shape[0])
+    num_experts = int(gates.shape[1])
     # capacity = (2 * num_tokens // num_experts) * capacity_factor
     # round-up
     capacity = math.ceil((2 * num_tokens / num_experts) * capacity_factor)
@@ -281,6 +282,9 @@ class TopKGate(torch.nn.Module):
         self.eval_capacity_factor = eval_capacity_factor
         self.min_capacity = min_capacity
         self.noisy_gate_policy = noisy_gate_policy
+        self.timers = SynchronizedWallClockTimer()
+        self.wall_clock_breakdown = False
+        self.gate_time = 0.0
 
     def forward(
         self,
@@ -289,6 +293,10 @@ class TopKGate(torch.nn.Module):
     ) -> Tuple[Tensor,
                Tensor,
                Tensor]:  # type: ignore
+
+        if self.wall_clock_breakdown:
+            self.timers('TopKGate').start()
+
         if self.wg.weight.dtype != torch.float32:
             self.wg = self.wg.float()
         input_fp32 = input.float()
@@ -296,17 +304,25 @@ class TopKGate(torch.nn.Module):
         if self.noisy_gate_policy == 'Jitter' and self.training:
             input_fp32 = multiplicative_jitter(input_fp32, device=input.device)
         logits = self.wg(input_fp32)
+
         if self.k == 1:
-            return top1gating(
+            gate_output = top1gating(
                 logits,
                 self.capacity_factor if self.training else self.eval_capacity_factor,
                 self.min_capacity,
                 used_token,
                 self.noisy_gate_policy if self.training else None)
+
         else:
-            return top2gating(
+            gate_output = top2gating(
                 logits,
                 self.capacity_factor if self.training else self.eval_capacity_factor)
+
+        if self.wall_clock_breakdown:
+            self.timers('TopKGate').stop()
+            self.gate_time = self.timers('TopKGate').elapsed(reset=False) * 1000
+
+        return gate_output
 
 
 class MOELayer(Base):
@@ -337,41 +353,70 @@ class MOELayer(Base):
         self.group = group
         self.world_size = dist.get_world_size(group)
         self.num_local_experts = num_local_experts
+        self.time_falltoall = 0.0
+        self.time_salltoall = 0.0
+        self.time_moe = 0.0
+        self.timers = SynchronizedWallClockTimer()
+        self.wall_clock_breakdown = False
 
     def forward(self, *input: Tensor, **kwargs: Any) -> Tensor:
-        # assert len(input) == 1, "only single input Tensor supported"
-        # assert len(input[0].shape) == 3 or len(input[0].shape) == 2, "input Tensor must have dimensions: (s)equence, (t)oken, (m)odel"
-        # removed wrong assert
-        # assert input[0].shape[0] % len(self.experts) == 0, "num tokens must be order of number of local experts"
+
+        if self.wall_clock_breakdown:
+            self.timers('moe').start()
+
         # Implement Algorithm 2 from GShard paper.
         d_model = input[0].shape[-1]
+
         # Initial implementation -> Reshape into S tokens by dropping sequence dimension.
         # Reshape into G groups so that each group can distribute tokens equally
         # group_size = kwargs['group_size'] if 'group_size' in kwargs.keys() else 1
         reshaped_input = input[0].reshape(-1, d_model)
+
         self.l_aux, combine_weights, dispatch_mask, self.exp_counts  = self.gate(reshaped_input, input[1])
+
         dispatched_input = torch.einsum("sec,sm->ecm",
                                         dispatch_mask.type_as(input[0]),
                                         reshaped_input)
 
-        #print(f"alltoall called at rank:{dist.get_rank()} with dispatched_input shape:{dispatched_input.shape}")
-        a = time.perf_counter()
+        if self.wall_clock_breakdown:
+            self.timers('falltoall').start()
+
         dispatched_input = _AllToAll.apply(self.group, dispatched_input)
-        b = time.perf_counter()
-        #print(f"alltoall took {b-a} seconds at rank:{dist.get_rank()}")
+
+        if self.wall_clock_breakdown:
+            self.timers('falltoall').stop()
+            self.time_falltoall = self.timers('falltoall').elapsed(reset=False) * 1000
+
         # Re-shape after all-to-all: ecm -> gecm
         dispatched_input = dispatched_input.reshape(self.world_size,
                                                     self.num_local_experts,
                                                     -1,
                                                     d_model)
-        #print(f"reshaped input after alltoall called at rank:{dist.get_rank()} is dispatched_input shape:{dispatched_input.shape}")
+
         expert_output = self.experts(dispatched_input)
+
+        if self.wall_clock_breakdown:
+            self.timers('salltoall').start()
+
         expert_output = _AllToAll.apply(self.group, expert_output)
+
+        if self.wall_clock_breakdown:
+            self.timers('salltoall').stop()
+            self.time_salltoall = self.timers('salltoall').elapsed(reset=False) * 1000
+
         # Re-shape back: gecm -> ecm
         expert_output = expert_output.reshape(self.world_size * self.num_local_experts,
                                               -1,
                                               d_model)
+
         combined_output = torch.einsum("sec,ecm->sm",
                                        combine_weights.type_as(input[0]),
                                        expert_output)
-        return combined_output.reshape(input[0].shape)
+
+        a = combined_output.reshape(input[0].shape)
+
+        if self.wall_clock_breakdown:
+            self.timers('moe').stop()
+            self.time_moe = self.timers('moe').elapsed(reset=False) * 1000
+
+        return a

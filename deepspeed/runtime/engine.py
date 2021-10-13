@@ -56,6 +56,7 @@ from .utils import ensure_directory_exists
 from ..ops.op_builder import UtilsBuilder
 from ..ops.adam import DeepSpeedCPUAdam
 from ..ops.adam import FusedAdam
+from ..moe.sharded_moe import TopKGate, MOELayer
 from ..moe.layer import MoE
 from ..git_version_info import version
 
@@ -145,6 +146,8 @@ class DeepSpeedEngine(Module):
         self.dist_backend = "nccl"
         self.has_moe_layers = False
         self.num_experts = None
+        self.gate_modules = []
+        self.moe_layers = []
         self._step_applied = False
         self._global_grad_norm = None
 
@@ -777,6 +780,17 @@ class DeepSpeedEngine(Module):
                 self.num_experts = module.num_experts
                 break
 
+        if self.has_moe_layers:
+            for _, module in self.module.named_modules():
+                if isinstance(module, TopKGate):
+                    self.gate_modules.append(module)
+                    if self.wall_clock_breakdown:
+                        module.wall_clock_breakdown = True
+                if isinstance(module, MOELayer):
+                    self.moe_layers.append(module)
+                    if self.wall_clock_breakdown:
+                        module.wall_clock_breakdown = True
+
         if not self.pipeline_parallelism:
             # PipeEngine's mpu object is different from Megatron's mpu object
             # so we handle them separately
@@ -1280,7 +1294,6 @@ class DeepSpeedEngine(Module):
 
     def forward(self, *inputs, **kwargs):
         r"""Execute forward propagation
-
         Arguments:
             *inputs: Variable length input list
             **kwargs: variable length keyword arguments
@@ -1346,6 +1359,29 @@ class DeepSpeedEngine(Module):
             self.flops_profiler.end_profile()
 
         return loss
+
+    def print_forward_breakdown(self, fwd_time):
+        gate_time = 0.0
+        moe_time = 0.0
+        falltoall = 0.0
+        salltoall = 0.0
+
+        for gate in self.gate_modules:
+            #logger.info(f"Individual TopK gate time: {gate.gate_time:.2f} ms")
+            gate_time += gate.gate_time
+
+        for l in self.moe_layers:
+            #logger.info(f"MoE layer; total: {l.time_moe:.2f} ms, first alltoall: {l.time_falltoall:.2f}, second alltoall: {l.time_salltoall:.2f}")
+            moe_time += l.time_moe
+            falltoall += l.time_falltoall
+            salltoall += l.time_salltoall
+
+        #TODO: Allreduce/average them across ranks for more accurate timing.
+
+        #if torch.distributed.get_rank() == 0:
+        log_dist(
+            f"rank={torch.distributed.get_rank()} time (ms) | forward: {fwd_time:.2f} (forward_moe: {moe_time:.2f}, 1st alltoall: {falltoall:.2f}, 2nd alltoall: {salltoall:.2f}, top-k: {gate_time:.2f})",
+            ranks=[0])
 
     def allreduce_gradients(self, bucket_size=MEMORY_OPT_ALLREDUCE_SIZE):
         # Pass (PP) gas boundary flag to optimizer (required for zero)
@@ -1642,6 +1678,7 @@ class DeepSpeedEngine(Module):
                         self.summary_writer.flush()
 
             if self.wall_clock_breakdown():
+                fwd_time = self.timers('forward').elapsed(reset=False) * 1000
                 self.timers.log([
                     'forward',
                     'backward',
@@ -1650,6 +1687,8 @@ class DeepSpeedEngine(Module):
                     'step'
                 ],
                                 reset=False)
+                if self.has_moe_layers:
+                    self.print_forward_breakdown(fwd_time=fwd_time)
 
         self.micro_steps += 1
 
