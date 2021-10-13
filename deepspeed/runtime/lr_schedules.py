@@ -326,7 +326,7 @@ class LRRangeTest(object):
 
     Example:
         >>> optimizer = torch.optim.SGD(model.parameters(), lr=0.1, momentum=0.9)
-        >>> scheduler = torch.optim.LRRangeTest(optimizer)
+        >>> scheduler = LRRangeTest(optimizer)
         >>> data_loader = torch.utils.data.DataLoader(...)
         >>> for epoch in range(10):
         >>>     for batch in data_loader:
@@ -463,7 +463,7 @@ class OneCycle(object):
 
     Example:
         >>> optimizer = torch.optim.SGD(model.parameters(), lr=0.1, momentum=0.9)
-        >>> scheduler = torch.optim.OneCycle(optimizer)
+        >>> scheduler = OneCycle(optimizer, 0.0001, 0.0010)
         >>> data_loader = torch.utils.data.DataLoader(...)
         >>> for epoch in range(10):
         >>>     for batch in data_loader:
@@ -686,7 +686,7 @@ class WarmupLR(object):
             last_batch_iteration (int): The index of the last batch. Default: -1.
         Example:
             >>> optimizer = torch.optim.SGD(model.parameters(), lr=0.1, momentum=0.9)
-            >>> scheduler = torch.optim.WarmupLR(optimizer)
+            >>> scheduler = WarmupLR(optimizer)
             >>> data_loader = torch.utils.data.DataLoader(...)
             >>> for epoch in range(10):
             >>>     for batch in data_loader:
