@@ -2009,6 +2009,11 @@ class DeepSpeedEngine(Module):
             *``load_path``: Path of the loaded checkpoint. ``None`` if loading the checkpoint failed.
 
             *``client_state``: State dictionary used for loading required training states in the client code.
+
+        Important: under ZeRO3, one cannot load checkpoint with ``engine.load_checkpoint()`` right
+        after ``engine.save_checkpoint()``. It is because ``engine.module`` is partitioned, and
+        ``load_checkpoint()`` wants a pristine model. If insisting to do so, please reinitialize engine
+        before ``load_checkpoint()``.
         """
 
         if tag is None:
