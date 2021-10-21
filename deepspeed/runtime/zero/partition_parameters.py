@@ -494,11 +494,14 @@ class Init(InsertPostInitMethodToModuleSubClasses):
         # If we are provided an already-allocated module to prepare.
         if module is not None:
             assert isinstance(module, torch.nn.Module)
-            for param in module.parameters(recurse=True):
-                if is_zero_param(param):
-                    continue
-                self._convert_to_deepspeed_param(param)
-                param.partition()
+            self._convert_to_zero_parameters(module.parameters(recurse=True))
+
+    def _convert_to_zero_parameters(self, param_list):
+        for param in param_list:
+            if is_zero_param(param):
+                continue
+            self._convert_to_deepspeed_param(param)
+            param.partition()
 
     def _validate_remote_device(self, remote_device, ds_config):
         if ds_config is not None:
@@ -621,6 +624,9 @@ class Init(InsertPostInitMethodToModuleSubClasses):
         def partitioned_size():
             return self._partitioned_size(param)
 
+        def convert_to_zero_parameters(param_list):
+            self._convert_to_zero_parameters(param_list)
+
         # Collectives for gathering and partitioning parameters
         param.all_gather = all_gather
         param.partition = partition
@@ -633,6 +639,8 @@ class Init(InsertPostInitMethodToModuleSubClasses):
         param.aligned_size = aligned_size
         param.padding_size = padding_size
         param.partitioned_size = partitioned_size
+
+        param.convert_to_zero_parameters = convert_to_zero_parameters
 
     def _aligned_size(self, param):
         return param.ds_numel + self._padding_size(param)
