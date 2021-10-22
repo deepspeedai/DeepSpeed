@@ -476,17 +476,17 @@ class FP16_DeepSpeedZeroOptimizer(object):
         if dist.get_rank(group=self.dp_process_group) == 0:
             see_memory_usage(f"After initializing ZeRO optimizer", force=True)
 
+    def is_moe_group(self, group):
+        return 'moe' in group and group['moe']
+
     def _configure_moe_settings(self):
         assert self.contiguous_gradients, "Contiguous Gradients in ZeRO Stage 2 must be set to True for MoE. Other code paths are not tested with MoE"
         assert self.reduce_scatter, "Reduce Scatter in ZeRO Stage 2 must be set to True for MoE. Other code paths are not tested with MoE"
 
-        def is_moe_group(group):
-            return 'moe' in group and group['moe']
-
-        assert any([is_moe_group(group) for group in self.optimizer.param_groups]), "The model has moe layers, but None of the param groups are marked as MoE. Create a param group with 'moe' key set to True before creating optimizer"
+        assert any([self.is_moe_group(group) for group in self.optimizer.param_groups]), "The model has moe layers, but None of the param groups are marked as MoE. Create a param group with 'moe' key set to True before creating optimizer"
         self.is_moe_param_group = []
         for i, group in enumerate(self.optimizer.param_groups):
-            if is_moe_group(group):
+            if self.is_moe_group(group):
                 assert all([is_moe_param(param) for param in group['params']]), "All params in MoE group must be MoE params"
                 self.real_dp_process_group[i] = self.expert_dp_process_group
                 self.partition_count[i] = dist.get_world_size(
@@ -1991,11 +1991,15 @@ class FP16_DeepSpeedZeroOptimizer(object):
     # 3) Using extracted weights to update base optimizer weights directly.
     def _restore_from_fp32_weights(self, all_state_dict):
         merged_single_partition_of_fp32_groups = []
+
         for i in range(len(self.single_partition_of_fp32_groups)):
             partition_id = dist.get_rank(group=self.real_dp_process_group[i])
             merged_partitions = [
                 sd['single_partition_of_fp32_groups'][i] for sd in all_state_dict
             ]
+            if self.is_moe_group(self.optimizer.param_groups[i]):
+                ranks = self.get_ep_ranks()
+                merged_partitions = [merged_partitions[i] for i in ranks]
             flat_merged_partitions = self.flatten_dense_tensors_aligned(
                 merged_partitions,
                 self.nccl_start_alignment_factor *
@@ -2031,6 +2035,14 @@ class FP16_DeepSpeedZeroOptimizer(object):
             # Assume non-tensor states are not partitioned and equal across ranks, so return first one
             return all_partition_states[0]
 
+    def get_ep_ranks(self, rank=0):
+        from deepspeed.utils import groups
+        expert_parallel_size_ = groups.get_expert_parallel_world_size()
+        world_size = groups.get_data_parallel_world_size()
+        rank = groups.get_expert_parallel_rank()
+        ranks = range(rank, world_size, expert_parallel_size_)
+        return list(ranks)
+
     # Restore base optimizer state from checkpoint by
     # 1) Merging optimizer state from checkpoints of all partitions
     # 2) Extracting optimizer state for current partition from the merged state
@@ -2042,6 +2054,13 @@ class FP16_DeepSpeedZeroOptimizer(object):
             all_partition_group_states = [
                 sd['base_optimizer_state'][i] for sd in all_state_dict
             ]
+
+            if self.is_moe_group(self.optimizer.param_groups[i]):
+                ranks = self.get_ep_ranks()
+                all_partition_group_states = [
+                    all_partition_group_states[i] for i in ranks
+                ]
+
             for key in all_partition_group_states[0].keys():
                 all_partition_states = [
                     all_states[key] for all_states in all_partition_group_states
