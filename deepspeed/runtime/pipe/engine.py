@@ -1083,11 +1083,15 @@ class PipelineEngine(DeepSpeedEngine):
                 # two tensors: a 1/TPth chunk of the original data and also a
                 # small LongTensor storing the metadata used to reconstruct on
                 # the other side. When combined, the floating point filter also
-                # filtered out the metadata tensor. A quick (hacky) fix just
+                # filtered out the metadata tensor. This quick (hacky) fix just
                 # branches on is_grad_partitioned so we don't filter out the
                 # metadata tensor.
                 if self.is_grad_partitioned:
-                    sizes_and_dtypes = [(list(t.size()), t.dtype) for t in outputs]
+                    sizes_and_dtypes = [
+                        (list(t.size()),
+                         t.dtype) for t in outputs[:2]
+                    ] + [(list(t.size()),
+                          t.dtype) for t in outputs[2:] if t.is_floating_point()]
                 else:
                     sizes_and_dtypes = [(list(t.size()),
                                          t.dtype) for t in outputs
