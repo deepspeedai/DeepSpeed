@@ -1,6 +1,6 @@
 import torch
 import random
-from deepspeed.runtime.csr_tensor import CSRTensor
+from deepspeed.runtime.sparse_tensor import SparseTensor
 
 
 def test_csr_addition_self():
@@ -14,7 +14,7 @@ def test_csr_addition_self():
         else:
             x = torch.cat([x, torch.zeros(1, 5)])
     dense_x = x.clone()
-    cx = CSRTensor(x)
+    cx = SparseTensor(x)
 
     assert torch.all(dense_x == cx.to_dense())
 
@@ -33,7 +33,7 @@ def test_csr_addition_different():
         else:
             x = torch.cat([x, torch.zeros(1, 5)])
     dense_x = x.clone()
-    cx = CSRTensor(x)
+    cx = SparseTensor(x)
 
     y = torch.ones(1, 5)
     for i in range(row_count - 1):
@@ -42,7 +42,7 @@ def test_csr_addition_different():
         else:
             y = torch.cat([y, torch.zeros(1, 5)])
     dense_y = y.clone()
-    cy = CSRTensor(y)
+    cy = SparseTensor(y)
 
     dense_sum = dense_x + dense_y
     cx.add(cy)

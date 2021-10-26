@@ -30,7 +30,7 @@ def compare_deepspeed_states(saved_model, loaded_model):
     # These are compared in more depth in other places
     assert hasattr(loaded_model, 'module')
 
-    assert saved_model.csr_tensor_module_names == loaded_model.csr_tensor_module_names
+    assert saved_model.sparse_tensor_module_names == loaded_model.sparse_tensor_module_names
     assert saved_model.skipped_steps == loaded_model.skipped_steps
     assert saved_model.global_steps == loaded_model.global_steps
 

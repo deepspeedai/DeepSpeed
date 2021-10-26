@@ -1,30 +1,41 @@
 """
 Copyright 2020 The Microsoft DeepSpeed Team
 
-Implementation of a compressed sparse row (CSR) tensor. Similar in
+Implementation of a compressed sparse tensor. Similar in
 functionality to TensorFlow's IndexedSlices implementation.
 """
 
 import torch
 
 
-class CSRTensor(object):
-    """ Compressed Sparse Row (CSR) Tensor """
+class SparseTensor(object):
+    """ Compressed Sparse Tensor """
     def __init__(self, dense_tensor=None):
         self.orig_dense_tensor = dense_tensor
+        self.is_sparse = dense_tensor.is_sparse
         if dense_tensor is not None:
-            result = torch.sum(dense_tensor, dim=1)
-            self.indices = result.nonzero().flatten()
-            self.values = dense_tensor[self.indices]
+            if dense_tensor.is_sparse:
+                dense_tensor = dense_tensor.coalesce()
+                self.indices = dense_tensor.indices().flatten()
+                self.values = dense_tensor.values()
+            else:
+                result = torch.sum(dense_tensor, dim=1)
+                self.indices = result.nonzero().flatten()
+                self.values = dense_tensor[self.indices]
             self.dense_size = list(dense_tensor.size())
         else:
             self.indices = None
             self.values = None
             self.dense_size = None
 
+    def to_coo_tensor(self):
+        return torch.sparse_coo_tensor(self.indices.unsqueeze(0),
+                                       self.values,
+                                       self.dense_size)
+
     @staticmethod
     def type():
-        return "deepspeed.CSRTensor"
+        return "deepspeed.SparseTensor"
 
     def to_dense(self):
         it = self.indices.unsqueeze(1)
@@ -49,7 +60,7 @@ class CSRTensor(object):
 
     def __str__(self):
         sparse_size, dense_size = self.sparse_size()
-        return "DeepSpeed.CSRTensor(indices_size={}, values_size={}, " \
+        return "DeepSpeed.SparseTensor(indices_size={}, values_size={}, " \
                "dense_size={}, device={}, reduction_factor={})".format(
             self.indices.size(), self.values.size(), self.dense_size,
             self.indices.get_device(), dense_size / sparse_size
