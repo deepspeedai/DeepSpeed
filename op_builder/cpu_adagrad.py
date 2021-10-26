@@ -7,9 +7,9 @@ import subprocess
 from .builder import CUDAOpBuilder
 
 
-class CPUAdamBuilder(CUDAOpBuilder):
-    BUILD_VAR = "DS_BUILD_CPU_ADAM"
-    NAME = "cpu_adam"
+class CPUAdagradBuilder(CUDAOpBuilder):
+    BUILD_VAR = "DS_BUILD_CPU_ADAGRAD"
+    NAME = "cpu_adagrad"
 
     def __init__(self):
         super().__init__(name=self.NAME)
@@ -19,10 +19,10 @@ class CPUAdamBuilder(CUDAOpBuilder):
         return sys.platform != "win32"
 
     def absolute_name(self):
-        return f'deepspeed.ops.adam.{self.NAME}_op'
+        return f'deepspeed.ops.adagrad.{self.NAME}_op'
 
     def sources(self):
-        return ['csrc/adam/cpu_adam.cpp', 'csrc/common/custom_cuda_kernel.cu']
+        return ['csrc/adagrad/cpu_adagrad.cpp', 'csrc/common/custom_cuda_kernel.cu']
 
     def include_paths(self):
         import torch

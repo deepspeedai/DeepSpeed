@@ -1,5 +1,3 @@
-
-
 #include "custom_cuda_layers.h"
 
 __global__ void param_update_kernel(const float* input, __half* output, int size)

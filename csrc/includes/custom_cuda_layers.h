@@ -11,6 +11,15 @@
 #include "context.h"
 #include "cublas_wrappers.h"
 
+#define CUDA_CHECK(callstr)                                                                    \
+    {                                                                                          \
+        cudaError_t error_code = callstr;                                                      \
+        if (error_code != cudaSuccess) {                                                       \
+            std::cerr << "CUDA error " << error_code << " at " << __FILE__ << ":" << __LINE__; \
+            assert(0);                                                                         \
+        }                                                                                      \
+    }
+
 #define MAX_THREADS 1024
 #define THREADS 256
 

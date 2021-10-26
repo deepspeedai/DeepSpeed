@@ -2,6 +2,7 @@
 Copyright 2020 The Microsoft DeepSpeed Team
 """
 from .cpu_adam import CPUAdamBuilder
+from .cpu_adagrad import CPUAdagradBuilder
 from .fused_adam import FusedAdamBuilder
 from .fused_lamb import FusedLambBuilder
 from .sparse_attn import SparseAttnBuilder
@@ -17,6 +18,7 @@ from .quantizer import QuantizerBuilder
 # List of all available ops
 __op_builders__ = [
     CPUAdamBuilder(),
+    CPUAdagradBuilder(),
     FusedAdamBuilder(),
     FusedLambBuilder(),
     SparseAttnBuilder(),

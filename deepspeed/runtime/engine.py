@@ -30,7 +30,7 @@ from deepspeed.runtime.activation_checkpointing import checkpointing as activati
 from deepspeed.runtime.fp16.fused_optimizer import FP16_Optimizer
 from deepspeed.runtime.fp16.unfused_optimizer import FP16_UnfusedOptimizer
 from deepspeed.runtime.config import DeepSpeedConfig, DEEPSPEED_OPTIMIZERS, \
-    ADAM_OPTIMIZER, ADAMW_OPTIMIZER, LAMB_OPTIMIZER, ONEBIT_ADAM_OPTIMIZER, ONEBIT_LAMB_OPTIMIZER, \
+    ADAGRAD_OPTIMIZER, ADAM_OPTIMIZER, ADAMW_OPTIMIZER, LAMB_OPTIMIZER, ONEBIT_ADAM_OPTIMIZER, ONEBIT_LAMB_OPTIMIZER, \
     TORCH_ADAM_PARAM, ADAM_W_MODE, ADAM_W_MODE_DEFAULT
 
 from deepspeed.runtime.dataloader import DeepSpeedDataLoader
@@ -928,7 +928,7 @@ class DeepSpeedEngine(Module):
                 "'max_grad_norm' is not supported as an optimizer parameter, please switch to using the deepspeed parameter 'gradient_clipping' see: https://www.deepspeed.ai/docs/config-json/#gradient-clipping for more details"
             )
 
-        if self.optimizer_name() in [ADAM_OPTIMIZER, ADAMW_OPTIMIZER]:
+        if self.optimizer_name() in [ADAGRAD_OPTIMIZER, ADAM_OPTIMIZER, ADAMW_OPTIMIZER]:
             torch_adam = optimizer_parameters.pop(TORCH_ADAM_PARAM, False)
             adam_w_mode = optimizer_parameters.pop(ADAM_W_MODE, ADAM_W_MODE_DEFAULT)
 
@@ -945,10 +945,15 @@ class DeepSpeedEngine(Module):
                                                   **optimizer_parameters)
             else:
                 if self.zero_cpu_offload():
-                    from deepspeed.ops.adam import DeepSpeedCPUAdam
-                    optimizer = DeepSpeedCPUAdam(model_parameters,
-                                                 **optimizer_parameters,
-                                                 adamw_mode=effective_adam_w_mode)
+                    if self.optimizer_name() == ADAGRAD_OPTIMIZER:
+                        from deepspeed.ops.adagrad import DeepSpeedCPUAdagrad
+                        optimizer = DeepSpeedCPUAdagrad(model_parameters,
+                                                        **optimizer_parameters)
+                    else:
+                        from deepspeed.ops.adam import DeepSpeedCPUAdam
+                        optimizer = DeepSpeedCPUAdam(model_parameters,
+                                                     **optimizer_parameters,
+                                                     adamw_mode=effective_adam_w_mode)
                 else:
                     from deepspeed.ops.adam import FusedAdam
                     optimizer = FusedAdam(model_parameters,

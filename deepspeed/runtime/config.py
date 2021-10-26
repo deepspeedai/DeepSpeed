@@ -30,12 +30,14 @@ from .swap_tensor.aio_config import get_aio_config
 
 TENSOR_CORE_ALIGN_SIZE = 8
 
+ADAGRAD_OPTIMIZER = 'adagrad'
 ADAM_OPTIMIZER = 'adam'
 ADAMW_OPTIMIZER = 'adamw'
 LAMB_OPTIMIZER = 'lamb'
 ONEBIT_ADAM_OPTIMIZER = 'onebitadam'
 ONEBIT_LAMB_OPTIMIZER = 'onebitlamb'
 DEEPSPEED_OPTIMIZERS = [
+    ADAGRAD_OPTIMIZER,
     ADAM_OPTIMIZER,
     ADAMW_OPTIMIZER,
     LAMB_OPTIMIZER,
