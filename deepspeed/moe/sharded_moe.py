@@ -136,9 +136,10 @@ def top1gating(logits: torch.Tensor,
                capacity_factor: float,
                min_capacity: int,
                used_token: torch.Tensor = None,
-               noisy_gate_policy: Optional[str] = None) -> Tuple[Tensor,
-                                                                 Tensor,
-                                                                 Tensor]:
+               noisy_gate_policy: Optional[str] = None,
+               drop_tokens: bool = True) -> Tuple[Tensor,
+                                                  Tensor,
+                                                  Tensor]:
     """Implements Top1Gating on logits."""
     if noisy_gate_policy == 'RSample':
         logits_w_noise = logits + gumbel_rsample(logits.shape, device=logits.device)
@@ -166,6 +167,12 @@ def top1gating(logits: torch.Tensor,
 
     # gating decisions
     exp_counts = torch.sum(mask1, dim=0).detach().to('cpu')
+
+    # if we don't want to drop any tokens
+    if not drop_tokens:
+        new_capacity = torch.max(exp_counts).to(logits.device)
+        dist.all_reduce(new_capacity, op=dist.ReduceOp.MAX, group=dist.group.WORLD)
+        capacity = new_capacity
 
     # Compute l_aux
     me = torch.mean(gates, dim=0)
@@ -306,7 +313,8 @@ class TopKGate(torch.nn.Module):
                  capacity_factor: float = 1.0,
                  eval_capacity_factor: float = 1.0,
                  min_capacity: int = 4,
-                 noisy_gate_policy: Optional[str] = None) -> None:
+                 noisy_gate_policy: Optional[str] = None,
+                 drop_tokens: bool = True) -> None:
         super().__init__()
 
         # Only top-1 and top-2 are supported at the moment.
@@ -321,6 +329,7 @@ class TopKGate(torch.nn.Module):
         self.timers = SynchronizedWallClockTimer()
         self.wall_clock_breakdown = False
         self.gate_time = 0.0
+        self.drop_tokens = drop_tokens
 
     def forward(
         self,
@@ -347,7 +356,8 @@ class TopKGate(torch.nn.Module):
                 self.capacity_factor if self.training else self.eval_capacity_factor,
                 self.min_capacity,
                 used_token,
-                self.noisy_gate_policy if self.training else None)
+                self.noisy_gate_policy if self.training else None,
+                self.drop_tokens)
 
         else:
             gate_output = top2gating(

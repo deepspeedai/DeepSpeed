@@ -24,7 +24,8 @@ class MoE(torch.nn.Module):
                  capacity_factor=1.,
                  eval_capacity_factor=1.,
                  min_capacity=4,
-                 noisy_gate_policy: typing.Optional[str] = None):
+                 noisy_gate_policy: typing.Optional[str] = None,
+                 drop_tokens: bool = True):
         """Initialize an MoE layer.
 
         Arguments:
@@ -66,7 +67,8 @@ class MoE(torch.nn.Module):
                                                capacity_factor,
                                                eval_capacity_factor,
                                                min_capacity,
-                                               noisy_gate_policy),
+                                               noisy_gate_policy,
+                                               drop_tokens),
                                       experts,
                                       num_local_experts,
                                       group=groups.get_expert_parallel_group())
