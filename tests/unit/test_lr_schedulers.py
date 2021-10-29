@@ -357,14 +357,20 @@ def test_lr_range_test(tmpdir, min_lr, step_rate, step_size, staircase):
                         staircase=staircase)
 
 
-@pytest.mark.parametrize("min_lr, max_lr, decay_rate, step_size",
+@pytest.mark.parametrize("min_lr, max_lr, decay_rate, cycle_step_size, decay_step_size",
                          [
-                             (1e-5, 1e-2, 1e-3, 10),
-                             (1e-3, 1e-1, 0, 21),
-                             (1e-5, 1e-2, 1e-3, 10),
-                             (1e-3, 1e-1, 0, 21),
+                             (1e-5, 1e-2, 1e-3, 10, 10),
+                             (1e-3, 1e-1, 0, 21, 21),
+                             (1e-5, 1e-2, 1e-3, 10, 10),
+                             (1e-3, 1e-1, 1e-1, 21, 21),
+                             (1e-5, 1e-1, 0, 10, 0),
                          ])  # yapf: disable
-def test_onecycle_lr(tmpdir, min_lr, max_lr, decay_rate, step_size):
+def test_onecycle_lr(tmpdir,
+                     min_lr,
+                     max_lr,
+                     decay_rate,
+                     cycle_step_size,
+                     decay_step_size):
     config_dict = {
         "train_batch_size": 2,
         "steps_per_print": 1,
@@ -380,8 +386,8 @@ def test_onecycle_lr(tmpdir, min_lr, max_lr, decay_rate, step_size):
                 CYCLE_MIN_LR: min_lr,
                 CYCLE_MAX_LR: max_lr,
                 DECAY_LR_RATE: decay_rate,
-                CYCLE_FIRST_STEP_SIZE: step_size,
-                DECAY_STEP_SIZE: step_size
+                CYCLE_FIRST_STEP_SIZE: cycle_step_size,
+                DECAY_STEP_SIZE: decay_step_size
             }
         },
         "gradient_clipping": 1.0
@@ -437,7 +443,7 @@ def test_onecycle_lr(tmpdir, min_lr, max_lr, decay_rate, step_size):
                       hidden_dim=hidden_dim,
                       min_lr=[min_lr],
                       max_lr=[max_lr],
-                      step_size=step_size,
+                      step_size=cycle_step_size,
                       decay_rate=decay_rate)
 
 

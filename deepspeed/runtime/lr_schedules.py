@@ -536,6 +536,13 @@ class OneCycle(object):
         self.second_stair_count = cycle_first_stair_count if cycle_second_stair_count is None else cycle_second_stair_count
         self.decay_step_size = decay_step_size
 
+        if math.isclose(self.decay_step_size, 0):
+            self.skip_lr_decay = True
+            self.skip_mom_decay = True
+        else:
+            self.skip_lr_decay = False
+            self.skip_mom_decay = False
+
     # Configure lr schedule
     def _initialize_lr(self,
                        optimizer,
@@ -550,6 +557,9 @@ class OneCycle(object):
 
         self.max_lrs = [cycle_max_lr] * len(optimizer.param_groups)
         self.decay_lr_rate = decay_lr_rate
+
+        if math.isclose(self.decay_lr_rate, 0):
+            self.skip_lr_decay = True
 
     # Configure momentum schedule
     def _initialize_momentum(self,
@@ -573,6 +583,9 @@ class OneCycle(object):
         if last_batch_iteration == -1:
             for momentum, group in zip(self.min_moms, optimizer.param_groups):
                 group['betas'] = momentum
+
+        if math.isclose(self.decay_mom_rate, 0):
+            self.skip_mom_decay = True
 
     def _get_scale_factor(self):
         batch_iteration = (self.last_batch_iteration + 1)
@@ -607,9 +620,13 @@ class OneCycle(object):
         return lrs
 
     def _get_decay_mom(self, decay_batch_iteration):
+        if self.skip_mom_decay:
+            return self.max_moms
+
         decay_interval = decay_batch_iteration / self.decay_step_size
         mom_decay_factor = (1 + self.decay_mom_rate * decay_interval)
         momentums = [(beta0 * mom_decay_factor, beta1) for beta0, beta1 in self.max_moms]
+
         return momentums
 
     def _get_decay_lr(self, decay_batch_iteration):
@@ -617,6 +634,9 @@ class OneCycle(object):
         after the cycle completes and post cycle decaying of lr/mom is enabled.
         This function treats `self.last_batch_iteration` as the last batch index.
         """
+        if self.skip_lr_decay:
+            return self.min_lrs
+
         decay_interval = decay_batch_iteration / self.decay_step_size
         lr_decay_factor = (1 + self.decay_lr_rate * decay_interval)
         lrs = [cycle_min_lr / lr_decay_factor for cycle_min_lr in self.min_lrs]
