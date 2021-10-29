@@ -6,10 +6,10 @@ on:
       - 'master'
       - 'staging**'
     paths-ignore:
-    - 'docs/**'
+      - 'docs/**'
   pull_request:
     paths-ignore:
-    - 'docs/**'
+      - 'docs/**'
 
 jobs:
   # unit tests running on nvidia gpus

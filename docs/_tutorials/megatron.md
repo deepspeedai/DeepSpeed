@@ -20,8 +20,7 @@ reduction_** from using DeepSpeed.
 
 The original model code from
 [Megatron-LM](https://github.com/NVIDIA/Megatron-LM).  We've copied this repo
-under
-[DeepSpeedExamples/Megatron-LM/](https://github.com/microsoft/DeepSpeedExamples/tree/master/Megatron-LM)
+into DeepSpeed [Megatron-LM](https://github.com/microsoft/DeepSpeedExamples/tree/master/Megatron-LM-v1.1.5-ZeRO3) example
 and made it available as a submodule. To download, execute:
 ```bash
 git submodule update --init --recursive
