@@ -119,7 +119,7 @@ The following calculations show how much memory is required by model params, gra
 
 The optimizer states assume that ``Adam`` is used, where 4 bytes per parameter are used by momentum and another 4 by variance (8 in total).
 
-Gradients at ``fp32`` take 4 bytes, and parameters take 2 bytes at ``fp16` and 4 bytes at ``fp32``.
+Gradients at ``fp32`` take 4 bytes, and parameters take 2 bytes at ``fp16`` and 4 bytes at ``fp32``.
 
 **GPU RAM**
 
