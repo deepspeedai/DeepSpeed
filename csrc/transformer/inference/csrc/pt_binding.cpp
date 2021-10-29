@@ -11,7 +11,7 @@ std::array<int, 3> gemm_algos = std::array<int, 3>({99, 99, 99});
 
 template <typename T>
 at::Tensor ds_softmax(at::Tensor& attn_scores,
-                      T* attn_mask_ptr,
+                      at::Tensor& attn_mask,
                       bool triangular,
                       bool recompute,
                       bool local_attention,
@@ -22,9 +22,8 @@ at::Tensor ds_softmax(at::Tensor& attn_scores,
     int seq_len = attn_scores_c.size(2);
     int soft_len = attn_scores_c.size(3);
     int heads = attn_scores_c.size(1);
-
     launch_attn_softmax_v2((T*)attn_scores_c.data_ptr(),
-                           attn_mask_ptr,
+                           (attn_mask.sizes().size() > 1 ? (T*)attn_mask.data_ptr() : nullptr),
                            triangular,
                            recompute,
                            local_attention,
@@ -42,7 +41,7 @@ at::Tensor ds_softmax(at::Tensor& attn_scores,
 template <typename T>
 void attention_unfused(at::Tensor& prev_key_cont,
                        at::Tensor& query_cont,
-                       T* attn_mask_ptr,
+                       at::Tensor& attn_mask,
                        at::Tensor& prev_value_cont,
                        at::Tensor& output,
                        int& bsz,
@@ -81,8 +80,8 @@ void attention_unfused(at::Tensor& prev_key_cont,
                                 seq_len * soft_len,
                                 bsz * heads,
                                 CUBLAS_GEMM_DEFAULT_TENSOR_OP);
-    attn_score = ds_softmax<T>(
-        attn_score, attn_mask_ptr, triangular, recompute, local_attention, window_size);
+    attn_score =
+        ds_softmax<T>(attn_score, attn_mask, triangular, recompute, local_attention, window_size);
     alpha = 1.0;
     cublas_strided_batched_gemm(Context::Instance().GetCublasHandle(),
                                 k,
@@ -139,7 +138,7 @@ std::vector<at::Tensor> ds_softmax_context(at::Tensor& query,
         at::empty({prev_value.size(0), heads, seq_len, prev_value.size(2) / heads}, options);
     attention_unfused<T>(prev_key_cont,
                          query_cont,
-                         (no_masking ? nullptr : (T*)attn_mask.data_ptr()),
+                         attn_mask,  //(no_masking ? nullptr : (T*)attn_mask.data_ptr()),
                          prev_value_cont,
                          output,
                          bsz,

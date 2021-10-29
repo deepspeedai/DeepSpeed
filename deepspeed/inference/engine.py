@@ -26,6 +26,7 @@ class InferenceEngine(Module):
                  checkpoint=None,
                  dtype=None,
                  injection_dict=None,
+                 return_tuple=True,
                  replace_method='auto',
                  quantization_setting=None):
 
@@ -141,6 +142,7 @@ class InferenceEngine(Module):
                                   config=self.config,
                                   fp16=(self.dtype == torch.half),
                                   training=False,
+                                  return_tuple=return_tuple,
                                   quantize=(self.dtype == torch.int8),
                                   quantize_settings=(self.quantization_scales,
                                                      self.quantize_merge_count,

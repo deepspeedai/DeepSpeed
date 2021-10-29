@@ -102,8 +102,8 @@ def replace_transformer_layer(orig_layer_impl,
                               stochastic_mode=True,
                               training=True,
                               quantize=False,
-                              encoder_decoder=False,
-                              quantize_settings=None):
+                              quantize_settings=None,
+                              return_tuple=False):
     """ Replace bert-style transformer layers with DeepSpeed's transformer layer
     Arguments:
         orig_layer_impl (torch.nn.Module): the original transformer layer implementation to look for,
@@ -125,7 +125,8 @@ def replace_transformer_layer(orig_layer_impl,
         training (bool): specifying whether kernel-injection is done for training/inference (set to false for inference-mode injection)
         quantize_settings (tuple): this setting shows how we can quantize a model for running it through the inference kernels.
                 It includes (quantization_scales, merge_count, mlp_extra_grouping, quantize_groups).
-        encoder_decoder (bool): this flag needs to be set for huggingface Bert models.
+        return_tuple (bool): if set, transformer layer returns a tuple as the output.
+            Note: this flag needs to be set for huggingface models.
 
     Returns:
         Updated nn.module with replaced transformer layers
@@ -181,7 +182,7 @@ def replace_transformer_layer(orig_layer_impl,
                 pre_layer_norm=preln,
                 mp_size=mp_size,
                 q_int8=quantize,
-                encoder_decoder=(True if policy_cls is HFBertLayerPolicy else False),
+                return_tuple=(return_tuple or (policy_cls is HFBertLayerPolicy)),
                 triangular_masking=(policy_cls is not HFBertLayerPolicy),
                 local_attention=((config.attention_layers[layer_id] == "local")
                                  if hasattr(config,
@@ -276,7 +277,7 @@ def replace_transformer_layer(orig_layer_impl,
                 seed=seed,
                 fp16=fp16,
                 pre_layer_norm=(False if policy_cls is HFBertLayerPolicy else preln),
-                huggingface=encoder_decoder,
+                return_tuple=return_tuple,
                 local_rank=local_rank,
                 stochastic_mode=stochastic_mode,
                 normalize_invertible=True,
