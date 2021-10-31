@@ -50,11 +50,12 @@ def check_equal(first, second, atol=1e-2, verbose=False):
             print("checking ", x[1], ":")
         y = diction_y[x[0], x[1]]
         x = diction_x[x[0], x[1]]
+
+        if verbose:
+            print(((x == float('inf')).nonzero(as_tuple=True)[0]))
+            print(((y == float('inf')).nonzero(as_tuple=True)[0]))
         x = x.cpu().detach().numpy()
         y = y.cpu().detach().numpy()
-        if verbose:
-            print(x)
-            print(y)
 
         avgx = np.sum(abs(x), dtype=float)
         countx = x.shape[0]
@@ -67,9 +68,18 @@ def check_equal(first, second, atol=1e-2, verbose=False):
             tolerance = avgx * atol
         if verbose:
             print("tolerance is ", tolerance)
-            print("x = {}".format(x.flatten()))
-            print("y = {}".format(y.flatten()))
+            x = x.flatten()
+            y = y.flatten()
+            print("x = {}".format(x))
+            print("y = {}".format(y))
+            if any(x == float('inf')) or any(x == -float('inf')):
+                print("found infinity in x")
+            if any(y == float('inf')) or any(y == -float('inf')):
+                print("found infinity in y")
+            print(np.linalg.norm(x.astype('float64')))
+            print(np.linalg.norm(y.astype('float64')))
             print('-' * 80)
+        #toler = np.linalg.norm(x.astype('float64')) * 0.0005
         np.testing.assert_allclose(x, y, err_msg="Index: {}".format(i), atol=tolerance)
 
 
@@ -235,7 +245,7 @@ def run_backward(ds_config, seq_len, atol=1e-2, verbose=False):
                                 output_all_encoded_layers=False,
                                 checkpoint_activations=False)
 
-    loss = (Y - base_results[0]).pow(2).sum()
+    loss = (Y - base_results[0]).pow(2).sum() / 64
     loss.backward()
     base_grads = bert_encoder.get_grads()
 
@@ -245,7 +255,7 @@ def run_backward(ds_config, seq_len, atol=1e-2, verbose=False):
                             output_all_encoded_layers=False,
                             checkpoint_activations=False)
 
-    loss = (Y - ds_results[0]).pow(2).sum()
+    loss = (Y - ds_results[0]).pow(2).sum() / 64
     loss.backward()
     ds_grads = ds_encoder.get_grads()
 
@@ -258,6 +268,7 @@ def run_backward(ds_config, seq_len, atol=1e-2, verbose=False):
 # 3-128-54-2-24-False-True-0.2
 @pytest.mark.parametrize('batch_size, hidden_size, seq_len, heads, num_layers, is_preln, use_fp16, atol',
                          [
+                             (64,1600,128,2,4,False,True, 0.2),
                              (8,1600,128,25,3,True,True, 0.05),
                              (8,160,128,2,3,True,True, 0.1),
                              (8,1600,128,2,3,True,True, 0.05),

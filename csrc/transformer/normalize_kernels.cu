@@ -70,7 +70,7 @@ __global__ void fused_bias_residual_layer_norm(float* vals,
     sum = g.shfl(sum, 0);
     float mean = sum / row_stride;
     if (training)
-        if (g.thread_rank() == 0) means[row] = mean;
+        if (threadIdx.x == 0) means[row] = mean;
     float variance = 0.f;
     for (int i = 0; i < iterations; i++) {
         vals_arr[i] -= mean;
@@ -94,7 +94,7 @@ __global__ void fused_bias_residual_layer_norm(float* vals,
     variance /= row_stride;
     variance += epsilon;
     if (training)
-        if (g.thread_rank() == 0) vars[row] = variance;
+        if (threadIdx.x == 0) vars[row] = variance;
 
     iterations = row_stride / iteration_stride;
     for (int i = 0; i < iterations; i++) {
@@ -201,7 +201,7 @@ __global__ void fused_bias_residual_layer_norm(__half* vals,
     const __half2* gamma_cast = reinterpret_cast<const __half2*>(gamma);
     const __half2* beta_cast = reinterpret_cast<const __half2*>(beta);
 
-    if (training && g.thread_rank() == 0) {
+    if (training && threadIdx.x == 0) {
         vars[row] = __float2half(variance);
         means[row] = __float2half(mean);
     }
@@ -378,7 +378,7 @@ __global__ void fused_bias_residual_layer_norm(float* vals,
     variance /= row_stride;
     variance += epsilon;
     if (training)
-        if (g.thread_rank() == 0) vars[row] = variance;
+        if (threadIdx.x == 0) vars[row] = variance;
 
     iterations = row_stride / iteration_stride;
     for (int i = 0; i < iterations; i++) {
@@ -485,7 +485,7 @@ __global__ void fused_bias_residual_layer_norm(__half* vals,
     const __half2* gamma_cast = reinterpret_cast<const __half2*>(gamma);
     const __half2* beta_cast = reinterpret_cast<const __half2*>(beta);
 
-    if (training && g.thread_rank() == 0) vars[row] = __float2half(variance);
+    if (training && threadIdx.x == 0) vars[row] = __float2half(variance);
 
     iterations = row_stride / iteration_stride;
     for (int i = 0; i < iterations; i++) {

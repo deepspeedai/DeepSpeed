@@ -27,30 +27,20 @@ class TransformerConfig():
 
 class DeepSpeedInferenceConfig(TransformerConfig):
     """Initialize the DeepSpeed Transformer Config.
-
         Arguments:
             hidden_size: The hidden size of the transformer layer
-
             intermediate_size: The intermediate size of the feed-forward part of transformer layer
-
             heads: The number of heads in the self-attention of the transformer layer
-
             num_hidden_layers: The number of transformer layers
-
             layer_norm_eps: The epsilon value for the layer norm
-
             local_rank: Optional: The rank of GPU running the transformer kernel, it is not required
                 to use if the model already set the current device, otherwise need to set it
                 so that the transformer kernel can work on the right device
-
             mp_size (optional): This argument is mainly used to create the parameters on the kernel side
                 using model-parallel architecture. If the client model already takes care of this, there is no
                 need to pass this argument.
-
             fp16: Enable half-precision computation
-
             pre_layer_norm: Select between Pre-LN or Post-LN transformer architecture
-
             stochastic_mode:  Enable for high performance, please note that this flag has some level of
                 non-determinism and can produce different results on different runs.  However, we have seen
                 that by enabling it, the pretraining tasks such as BERT are not affected and can obtain
@@ -510,11 +500,9 @@ class DeepSpeedMLP(nn.Module):
 
 class DeepSpeedTransformerInference(nn.Module):
     """Initialize the DeepSpeed Transformer Layer.
-
         Arguments:
             layer_id: The layer index starting from 0, e.g. if model has 24 transformer layers,
                 layer_id will be 0,1,2...23 when each layer object is instantiated
-
             config: An object of DeepSpeedInferenceConfig
             mp_group: Model parallelism group initialized on the modeling side.
             quantize_scales: This argument groups all the layers' scales used for quantization
