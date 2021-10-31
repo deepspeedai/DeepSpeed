@@ -444,7 +444,7 @@ class PartitionedParameterCoordinator(object):
         self.hierarchy += 1
 
         # parameters are partitioned and need to be allgathered
-        self._all_gather(partitioned_params, async_op=True)
+        self._all_gather(partitioned_params, async_op=False)
 
         # parameters are inflight and communication needs to be completed
         if partitioned_params or params_in_flight:
