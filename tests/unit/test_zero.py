@@ -427,7 +427,8 @@ def test_partition_nccl_alignment(tmpdir, zero_stage, world_size):
         # get nccl all-gather send buffers alignment factor
         nccl_start_alignment_factor = model.optimizer.nccl_start_alignment_factor
 
-        for data_parallel_partitions in model.optimizer.parallel_partitioned_fp16_groups:
+        parallel_partitioned_bit16_groups = model.optimizer.parallel_partitioned_bit16_groups if zero_stage == 2 else model.optimizer.parallel_partitioned_fp16_groups
+        for data_parallel_partitions in parallel_partitioned_bit16_groups:
             for partition_id, partitioned_data in enumerate(data_parallel_partitions):
                 # verify that data partition start locations are 4-byte aligned
                 assert (partitioned_data.data_ptr() %

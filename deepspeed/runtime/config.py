@@ -116,6 +116,15 @@ def get_fp16_enabled(param_dict):
         return False
 
 
+def get_bfloat16_enabled(param_dict):
+    if BFLOAT16 in param_dict.keys():
+        return get_scalar_param(param_dict[BFLOAT16],
+                                BFLOAT16_ENABLED,
+                                BFLOAT16_ENABLED_DEFAULT)
+    else:
+        return False
+
+
 def get_fp16_master_weights_and_grads_enabled(param_dict):
     if get_fp16_enabled(param_dict):
         return get_scalar_param(param_dict[FP16],
@@ -130,6 +139,8 @@ def get_loss_scale(param_dict):
         return get_scalar_param(param_dict[FP16],
                                 FP16_LOSS_SCALE,
                                 FP16_LOSS_SCALE_DEFAULT)
+    elif get_bfloat16_enabled(param_dict):
+        return 1.0
     else:
         return FP16_LOSS_SCALE_DEFAULT
 
@@ -139,6 +150,8 @@ def get_initial_dynamic_scale(param_dict):
         initial_scale_power = get_scalar_param(param_dict[FP16],
                                                FP16_INITIAL_SCALE_POWER,
                                                FP16_INITIAL_SCALE_POWER_DEFAULT)
+    elif get_bfloat16_enabled(param_dict):
+        initial_scale_power = 0
     else:
         initial_scale_power = FP16_INITIAL_SCALE_POWER_DEFAULT
 
@@ -791,6 +804,9 @@ class DeepSpeedConfig(object):
 
         self.gradient_clipping = get_gradient_clipping(param_dict)
         self.fp16_enabled = get_fp16_enabled(param_dict)
+        self.bfloat16_enabled = get_bfloat16_enabled(param_dict)
+        assert not (self.fp16_enabled and self.bfloat16_enabled), 'bfloat16 and fp16 modes cannot be simultaneously enabled'
+        assert not (self.bfloat16_enabled and (self.zero_optimization_stage != 2)), 'bfloat16 mode is only enabled for Zero2 currently'
         self.fp16_master_weights_and_gradients = get_fp16_master_weights_and_grads_enabled(
             param_dict)
         self.amp_enabled = get_amp_enabled(param_dict)
@@ -966,7 +982,7 @@ class DeepSpeedConfig(object):
             assert self.zero_enabled and self.zero_optimization_stage == ZERO_OPTIMIZATION_GRADIENTS, "Fp16_master_weights_and_grads is only supported with ZeRO Stage 2 for now."
 
     def _do_warning_check(self):
-        fp16_enabled = self.fp16_enabled or self.zero_enabled
+        fp16_enabled = self.fp16_enabled
 
         vocabulary_size = self._param_dict.get(VOCABULARY_SIZE, VOCABULARY_SIZE_DEFAULT)
         if vocabulary_size and vocabulary_size % TENSOR_CORE_ALIGN_SIZE != 0:

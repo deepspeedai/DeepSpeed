@@ -108,6 +108,22 @@ SPARSE_GRADIENTS = "sparse_gradients"
 SPARSE_GRADIENTS_DEFAULT = False
 
 #########################################
+# BFLOAT16 support
+#########################################
+# BFLOAT16 feature. By default, this feature is not enabled.
+# Users can configure in ds_config.json as below example:
+BFLOAT16_FORMAT = '''
+BFLOAT16 parameters should be of the format:
+"bfloat16": {
+  "enabled": true
+}
+'''
+BFLOAT16 = "bfloat16"
+
+BFLOAT16_ENABLED = "enabled"
+BFLOAT16_ENABLED_DEFAULT = False
+
+#########################################
 # FP16 support
 #########################################
 # FP16 feature. By default, this feature is not enabled.

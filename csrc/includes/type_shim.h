@@ -26,6 +26,11 @@
             __VA_ARGS__;                                                         \
             break;                                                               \
         }                                                                        \
+        case at::ScalarType::BFloat16: {                                         \
+            using scalar_t_##LEVEL = at::BFloat16;                               \
+            __VA_ARGS__;                                                         \
+            break;                                                               \
+        }                                                                        \
         default: AT_ERROR(#NAME, " not implemented for '", toString(TYPE), "'"); \
     }
 
@@ -43,6 +48,11 @@
         }                                                                        \
         case at::ScalarType::Half: {                                             \
             using scalar_t_##LEVEL = at::Half;                                   \
+            __VA_ARGS__;                                                         \
+            break;                                                               \
+        }                                                                        \
+        case at::ScalarType::BFloat16: {                                         \
+            using scalar_t_##LEVEL = at::BFloat16;                               \
             __VA_ARGS__;                                                         \
             break;                                                               \
         }                                                                        \
