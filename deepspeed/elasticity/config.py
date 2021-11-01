@@ -10,21 +10,18 @@ class ElasticityError(Exception):
     """
     Base exception for all elasticity related errors
     """
-    pass
 
 
 class ElasticityConfigError(ElasticityError):
     """
     Elasticity configuration error
     """
-    pass
 
 
 class ElasticityIncompatibleWorldSize(ElasticityError):
     """
     Attempting to run a world size that is incompatible with a given elastic config
     """
-    pass
 
 
 class ElasticityConfig:
