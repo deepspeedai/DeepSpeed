@@ -380,9 +380,8 @@ class PipelineModule(nn.Module):
             binary_weights = [0] * len(self._layer_specs)
             for idx in self._find_layer_type(layertype):
                 binary_weights[idx] = 1
-            else:
-                self.parts = ds_utils.partition_balanced(weights=binary_weights,
-                                                         num_parts=num_stages)
+            self.parts = ds_utils.partition_balanced(weights=binary_weights,
+                                                     num_parts=num_stages)
         elif method == 'profile':
             raise NotImplementedError(f'Partitioning method {method} not implemented.')
         else:
