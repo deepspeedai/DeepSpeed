@@ -210,9 +210,16 @@ class OpBuilder(ABC):
                 oldstderr = os.dup(sys.stderr.fileno())
                 os.dup2(filestderr.fileno(), sys.stderr.fileno())
 
+            # Workaround for behavior in distutils.ccompiler.CCompiler.object_filenames()
+            # Otherwise, a local directory will be used instead of tempdir
+            drive, driveless_filename = os.path.splitdrive(filename)
+            root_dir = driveless_filename[0] if os.path.isabs(driveless_filename) else ''
+            output_dir = os.path.join(drive, root_dir)
+
             # Attempt to compile the C program into an object file.
             cflags = shlex.split(os.environ.get('CFLAGS', ""))
             objs = compiler.compile([filename],
+                                    output_dir=output_dir,
                                     extra_preargs=self.strip_empty_entries(cflags))
 
             # Attempt to link the object file into an executable.
