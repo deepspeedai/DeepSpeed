@@ -9,7 +9,6 @@ per rank for training.
 import os
 import sys
 import json
-import shutil
 import base64
 import argparse
 import subprocess
@@ -142,7 +141,7 @@ def fetch_hostfile(hostfile_path):
             if hostname in resource_pool:
                 logger.error("Hostfile contains duplicate hosts, unable to "
                              "proceed with training.")
-                raise ValueError("host {} is already defined".format(hostname))
+                raise ValueError(f"host {hostname} is already defined")
             resource_pool[hostname] = slot_count
 
     return resource_pool
@@ -192,27 +191,25 @@ def parse_resource_filter(host_info, include_str="", exclude_str=""):
 
             # sanity checks
             if hostname not in host_info:
-                raise ValueError("Hostname '{}' not found in hostfile".format(hostname))
-            for s in slots:
-                if s not in host_info[hostname]:
-                    raise ValueError("No slot '{}' specified on host '{}'".format(
-                        s,
-                        hostname))
+                raise ValueError(f"Hostname '{hostname}' not found in hostfile")
+            for slot in slots:
+                if slot not in host_info[hostname]:
+                    raise ValueError(f"No slot '{slot}' specified on host '{hostname}'")
 
             # If include string, build the list from here
             if include_str:
                 filtered_hosts[hostname] = slots
             elif exclude_str:
-                for s in slots:
-                    logger.info('removing {} from {}'.format(s, hostname))
-                    filtered_hosts[hostname].remove(s)
+                for slot in slots:
+                    logger.info(f'removing {slot} from {hostname}')
+                    filtered_hosts[hostname].remove(slot)
 
         # User just specified the whole node
         else:
             hostname = node_config
             # sanity check hostname
             if hostname not in host_info:
-                raise ValueError("Hostname '{}' not found in hostfile".format(hostname))
+                raise ValueError(f"Hostname '{hostname}' not found in hostfile")
 
             if include_str:
                 filtered_hosts[hostname] = host_info[hostname]
@@ -285,12 +282,10 @@ def main(args=None):
 
     if not args.master_addr:
         first_host = list(active_resources.keys())[0]
-        hostname_cmd = ["ssh {} hostname -I".format(first_host)]
+        hostname_cmd = [f"ssh {first_host} hostname -I"]
         result = subprocess.check_output(hostname_cmd, shell=True)
         args.master_addr = result.decode('utf-8').split()[0]
-        logger.info("Using IP address of {} for node {}".format(
-            args.master_addr,
-            first_host))
+        logger.info(f"Using IP address of {args.master_addr} for node {first_host}")
 
     if args.num_nodes > 0:
         updated_active_resources = collections.OrderedDict()
@@ -317,9 +312,9 @@ def main(args=None):
             "-u",
             "-m",
             "deepspeed.launcher.launch",
-            "--world_info={}".format(world_info_base64),
-            "--master_addr={}".format(args.master_addr),
-            "--master_port={}".format(args.master_port)
+            f"--world_info={world_info_base64}",
+            f"--master_addr={args.master_addr}",
+            f"--master_port={args.master_port}"
         ]
         cmd = deepspeed_launch + [args.user_script] + args.user_args
     else:
@@ -357,7 +352,7 @@ def main(args=None):
 
         cmd = runner.get_cmd(env, active_resources)
 
-    logger.info("cmd = {}".format(' '.join(cmd)))
+    logger.info(f"cmd = {' '.join(cmd)}")
     result = subprocess.Popen(cmd, env=env)
     result.wait()
 
