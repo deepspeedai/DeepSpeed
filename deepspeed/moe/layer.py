@@ -25,7 +25,9 @@ class MoE(torch.nn.Module):
                  eval_capacity_factor=1.,
                  min_capacity=4,
                  noisy_gate_policy: typing.Optional[str] = None,
-                 drop_tokens: bool = True):
+                 drop_tokens: bool = True,
+                 use_rts=True,
+                 use_tutel: bool = False):
         """Initialize an MoE layer.
 
         Arguments:
@@ -44,6 +46,12 @@ class MoE(torch.nn.Module):
             min_capacity (int, optional): default=4, the minimum capacity per expert regardless of the capacity_factor.
 
             noisy_gate_policy (str, optional): default=None, noisy gate policy, valid options are 'Jitter', 'RSample' or 'None'.
+
+            drop_tokens (bool, optional): default=True, whether to drop tokens - (setting to False is equivalent to infinite capacity).
+
+            use_rts (bool, optional): default=True, whether to use Random Token Selection.
+
+            use_tutel (bool, optional): default=False, whether to use Tutel optimizations (if installed).
         """
 
         super(MoE, self).__init__()
@@ -68,10 +76,12 @@ class MoE(torch.nn.Module):
                                                eval_capacity_factor,
                                                min_capacity,
                                                noisy_gate_policy,
-                                               drop_tokens),
+                                               drop_tokens,
+                                               use_rts),
                                       experts,
                                       num_local_experts,
-                                      group=groups.get_expert_parallel_group())
+                                      group=groups.get_expert_parallel_group(),
+                                      use_tutel=use_tutel)
 
     def forward(self, hidden_states, used_token=None):
         """ MoE forward
