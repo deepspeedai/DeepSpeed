@@ -480,15 +480,17 @@ def _conv_flops_compute(input,
     kernel_dims = list(weight.shape[-2:])
     input_dims = list(input.shape[2:])
 
-    paddings = padding if type(padding) is tuple else (padding, padding)
-    strides = stride if type(stride) is tuple else (stride, stride)
-    dilations = dilation if type(dilation) is tuple else (dilation, dilation)
+    length = len(input_dims)
 
-    output_dims = [0, 0]
-    output_dims[0] = (input_dims[0] + 2 * paddings[0] -
-                      (dilations[0] * (kernel_dims[0] - 1) + 1)) // strides[0] + 1
-    output_dims[1] = (input_dims[1] + 2 * paddings[1] -
-                      (dilations[1] * (kernel_dims[1] - 1) + 1)) // strides[1] + 1
+    paddings = padding if type(padding) is tuple else (padding, ) * length
+    strides = stride if type(stride) is tuple else (stride, ) * length
+    dilations = dilation if type(dilation) is tuple else (dilation, ) * length
+
+    output_dims = []
+    for idx, input_dim in enumerate(input_dims):
+        output_dim = (input_dim + 2 * paddings[idx] -
+                      (dilations[idx] * (kernel_dims[idx] - 1) + 1)) // strides[idx] + 1
+        output_dims.append(output_dim)
 
     filters_per_channel = out_channels // groups
     conv_per_position_flops = int(_prod(kernel_dims)) * in_channels * filters_per_channel
@@ -520,15 +522,22 @@ def _conv_trans_flops_compute(
     kernel_dims = list(weight.shape[-2:])
     input_dims = list(input.shape[2:])
 
+    length = len(input_dims)
+
+    paddings = padding if type(padding) is tuple else (padding, ) * length
+    strides = stride if type(stride) is tuple else (stride, ) * length
+    dilations = dilation if type(dilation) is tuple else (dilation, ) * length
+
+    output_dims = []
+    for idx, input_dim in enumerate(input_dims):
+
+        output_dim = (input_dim + 2 * paddings[idx] -
+                      (dilations[idx] * (kernel_dims[idx] - 1) + 1)) // strides[idx] + 1
+        output_dims.append(output_dim)
+
     paddings = padding if type(padding) is tuple else (padding, padding)
     strides = stride if type(stride) is tuple else (stride, stride)
     dilations = dilation if type(dilation) is tuple else (dilation, dilation)
-
-    output_dims = [0, 0]
-    output_dims[0] = (input_dims[0] + 2 * paddings[0] -
-                      (dilations[0] * (kernel_dims[0] - 1) + 1)) // strides[0] + 1
-    output_dims[1] = (input_dims[1] + 2 * paddings[1] -
-                      (dilations[1] * (kernel_dims[1] - 1) + 1)) // strides[1] + 1
 
     filters_per_channel = out_channels // groups
     conv_per_position_flops = int(_prod(kernel_dims)) * in_channels * filters_per_channel
