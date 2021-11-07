@@ -71,7 +71,7 @@ mpirun -np [#processes] -ppn [#GPUs on each node] -hostfile [hostfile] [MPI flag
 
 ### 1.3 1-bit Algorithm
 
-The detailed description of the 1-bit Algorithm can be seen from our [blog post](https://www.deepspeed.ai/news/2020/09/09/onebit-adam-blog-post.html) and our [paper](https://arxiv.org/abs/2102.02888).
+The detailed description of the 1-bit Algorithm can be seen from our [blog post](https://www.deepspeed.ai/news/2020/09/08/onebit-adam-blog-post.html) and our [paper](https://arxiv.org/abs/2102.02888).
 
 ### 1.4 Configuration of 1-bit Adam
 The 1-bit Adam feature can be used by setting the optimizer configuration options as follows. An example json config file is shown below.
@@ -209,7 +209,7 @@ We fixed the learning rate to 3e-5. The table below shows the F1 and the EM scor
 
 Figure 1: Scalability of 1-bit Adam for SQuAD Finetuning on V100 GPUs with batch size of 3/GPU. -->
 
-Performance results of SQuAD Fine-tuning can be seen from our [blog post](https://www.deepspeed.ai/news/2020/09/09/onebit-adam-blog-post.html) and our [paper](https://arxiv.org/abs/2102.02888).
+Performance results of SQuAD Fine-tuning can be seen from our [blog post](https://www.deepspeed.ai/news/2020/09/08/onebit-adam-blog-post.html) and our [paper](https://arxiv.org/abs/2102.02888).
 
 
 
@@ -289,4 +289,4 @@ The above file is for BERT-large. For BERT-base training (sequence length 128), 
 
 ### 3.3 Performance Results for BERT Pre-training
 
-Performance results of BERT Pre-training can be seen from our [blog post](https://www.deepspeed.ai/news/2020/09/09/onebit-adam-blog-post.html) and our [paper](https://arxiv.org/abs/2102.02888).
+Performance results of BERT Pre-training can be seen from our [blog post](https://www.deepspeed.ai/news/2020/09/08/onebit-adam-blog-post.html) and our [paper](https://arxiv.org/abs/2102.02888).
