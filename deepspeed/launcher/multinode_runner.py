@@ -12,6 +12,7 @@ from .constants import PDSH_MAX_FAN_OUT, MVAPICH_TMP_HOSTFILE
 class MultiNodeRunner(ABC):
     def __init__(self, args, world_info_base64):
         self.args = args
+        self.validate_args()
         self.user_arguments = self.parse_user_args()
         self.user_script = args.user_script
         self.world_info_base64 = world_info_base64
@@ -19,17 +20,25 @@ class MultiNodeRunner(ABC):
 
     @abstractmethod
     def backend_exists(self):
-        pass
+        """Return whether the corresponding backend exists"""
 
     @abstractmethod
     def get_cmd(self, environment, active_resources):
-        pass
+        """Return the command to execute on node"""
 
     def add_export(self, key, var):
         self.exports[key.strip()] = var.strip()
 
     def parse_user_args(self):
         return self.args.user_args
+
+    @property
+    def name(self):
+        """Return the name of the backend"""
+        return self.__class__.__name__
+
+    def validate_args(self):
+        """Validate self.args"""
 
 
 class PDSHRunner(MultiNodeRunner):
@@ -39,9 +48,13 @@ class PDSHRunner(MultiNodeRunner):
     def backend_exists(self):
         return shutil.which('pdsh')
 
+    @property
+    def name(self):
+        return "pdsh"
+
     def parse_user_args(self):
         return list(
-            map(lambda x: x if x.startswith("-") else "'{}'".format(x),
+            map(lambda x: x if x.startswith("-") else f"'{x}'",
                 self.args.user_args))
 
     def get_cmd(self, environment, active_resources):
@@ -56,19 +69,21 @@ class PDSHRunner(MultiNodeRunner):
 
         exports = ""
         for key, val in self.exports.items():
-            exports += "export {}={}; ".format(key, val)
+            exports += f"export {key}={val}; "
 
+        # https://linux.die.net/man/1/pdsh
+        # %n will be replaced by pdsh command
         deepspeed_launch = [
             exports,
-            "cd {};".format(os.path.abspath('.')),
+            f"cd {os.path.abspath('.')};",
             sys.executable,
             "-u",
             "-m",
             "deepspeed.launcher.launch",
-            '--world_info={}'.format(self.world_info_base64),
+            f'--world_info={self.world_info_base64}',
             "--node_rank=%n",
-            "--master_addr={}".format(self.args.master_addr),
-            "--master_port={}".format(self.args.master_port)
+            f"--master_addr={self.args.master_addr}",
+            f"--master_port={self.args.master_port}"
         ]
 
         return pdsh_cmd_args + deepspeed_launch + [self.user_script
@@ -85,10 +100,21 @@ class OpenMPIRunner(MultiNodeRunner):
         #TODO: if IB is available we should suggestion mvapich
         return shutil.which('ompi_info')
 
-    def get_cmd(self, environment, active_resources):
+    @property
+    def name(self):
+        return "openmpi"
+
+    def validate_args(self):
+        super().validate_args()
         #TODO: Allow for include/exclude at node-level but not gpu-level
-        assert self.args.include == "" and self.args.exclude == "", 'openmpi backend does not support worker include/exclusion'
-        assert self.args.num_nodes == -1 and self.args.num_gpus == -1, 'openmpi backend does not support limiting num nodes/gpus'
+        if self.args.include != "" or self.args.exclude != "":
+            raise ValueError(
+                f"{self.name} backend does not support worker include/exclusion")
+        if self.args.num_nodes != -1 or self.args.num_gpus != -1:
+            raise ValueError(
+                f"{self.name} backend does not support limiting num nodes/gpus")
+
+    def get_cmd(self, environment, active_resources):
         total_process_count = sum(self.resource_pool.values())
 
         mpirun_cmd = [
@@ -156,14 +182,26 @@ class MVAPICHRunner(MultiNodeRunner):
                 )
         return exists
 
-    def get_cmd(self, environment, active_resources):
+    @property
+    def name(self):
+        return "mvapich"
+
+    def validate_args(self):
+        super().validate_args()
         #TODO: Allow for include/exclude at node-level but not gpu-level
-        assert self.args.include == "" and self.args.exclude == "", 'mvapich backend does not support worker include/exclusion'
-        assert self.args.num_nodes == -1 and self.args.num_gpus == -1, 'mvapich backend does not support limiting num nodes/gpus'
+        if self.args.include != "" or self.args.exclude != "":
+            raise ValueError(
+                f"{self.name} backend does not support worker include/exclusion")
+        if self.args.num_nodes != -1 or self.args.num_gpus != -1:
+            raise ValueError(
+                f"{self.name} backend does not support limiting num nodes/gpus")
+
+    def get_cmd(self, environment, active_resources):
         devices_per_node = self.resource_pool.values()
         total_process_count = sum(devices_per_node)
         process_per_node = list(devices_per_node)[0]
-        assert all([n == process_per_node for n in devices_per_node]), "mvapich requires same number of devices per node"
+        if not all([n == process_per_node for n in devices_per_node]):
+            raise ValueError("mvapich requires same number of devices per node")
 
         with open(MVAPICH_TMP_HOSTFILE, 'w') as fd:
             for host in self.resource_pool.keys():
