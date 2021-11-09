@@ -5,11 +5,10 @@
 #include <x86intrin.h>
 #endif
 
+#define TILE (128 * 1024 * 1024)
 #if defined(__AVX512__) or defined(__AVX256__)
 
 #define ROUND_DOWN(size, step) ((size) & ~((step)-1))
-
-#define TILE (128 * 1024 * 1024)
 
 #if defined(__AVX512__)
 #define SIMD_STORE(a, d) _mm512_storeu_ps(a, d)

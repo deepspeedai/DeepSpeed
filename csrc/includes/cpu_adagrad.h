@@ -32,6 +32,7 @@ public:
         cudaFreeHost(_doubled_buffer[0]);
         cudaFreeHost(_doubled_buffer[1]);
     }
+#if defined(__AVX512__) or defined(__AVX256__)
     template <int span>
     void Step_AVX(size_t* rounded_size,
                   float* _params,
@@ -40,11 +41,10 @@ public:
                   size_t param_size,
                   __half* dev_param = nullptr,
                   bool half_precision = false);
-#if defined(__AVX512__) or defined(__AVX256__)
+#endif
     STEP(1)
     STEP(4)
     STEP(8)
-#endif
     inline void SynchronizeStreams()
     {
         for (int i = 0; i < 2; i++) cudaStreamSynchronize(_streams[i]);
