@@ -2128,8 +2128,11 @@ class DeepSpeedEngine(Module):
 
             if load_lr_scheduler_states and self.lr_scheduler is not None:
                 self.lr_scheduler.load_state_dict(checkpoint['lr_scheduler'])
-
-            self.sparse_tensor_module_names = checkpoint['sparse_tensor_module_names']
+            if 'sparse_tensor_module_names' in checkpoint:
+                self.sparse_tensor_module_names = checkpoint[
+                    'sparse_tensor_module_names']
+            elif 'csr_tensor_module_names' in checkpoint:
+                self.sparse_tensor_module_names = checkpoint['csr_tensor_module_names']
             self.global_steps = checkpoint['global_steps']
             self.global_samples = checkpoint.get(
                 'global_samples',
