@@ -91,8 +91,8 @@ jobs:
         run: |
           if [[ -d ./torch-extensions ]]; then rm -rf ./torch-extensions; fi
           git clone https://github.com/huggingface/transformers
-          git rev-parse --short HEAD
           cd transformers
+          git rev-parse --short HEAD
           # scipy/sklearn required for tests, using the 'dev' extra forces torch re-install
           pip install .[testing]
           # find reqs used in ds integration tests
