@@ -620,6 +620,6 @@ class DeepSpeedTransformerInference(nn.Module):
             output = (output, presents)
 
         if self.config.return_tuple:
-            return (output, )
+            return output if type(output) is tuple else (output, )
         else:
             return output

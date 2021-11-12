@@ -25,7 +25,8 @@ class InferenceEngine(Module):
                  injection_dict=None,
                  return_tuple=True,
                  replace_method='auto',
-                 quantization_setting=None):
+                 quantization_setting=None,
+                 replace_with_kernel_inject=False):
         """
         Args:
             model: torch.nn.Module
@@ -74,15 +75,17 @@ class InferenceEngine(Module):
             self.mp_group = self.mpu.get_model_parallel_group()
         elif self.mp_world_size > 1:
             self._create_model_parallel_group()
-
         # apply injection policy
         if self.injection_dict:
             for client_module, injection_policy in self.injection_dict.items():
                 self._apply_injection_policy(client_module,
                                              injection_policy,
-                                             return_tuple)
-        elif replace_method == "auto":
-            self._apply_injection_policy()
+                                             return_tuple,
+                                             replace_with_kernel_inject)
+        elif replace_method == 'auto':
+            self._apply_injection_policy(
+                return_tuple=return_tuple,
+                replace_with_kernel_inject=replace_with_kernel_inject)
 
         device = torch.cuda.current_device()
         logger.info(f"Place model to device: {device}")
@@ -152,7 +155,9 @@ class InferenceEngine(Module):
     def _apply_injection_policy(self,
                                 client_module=None,
                                 injection_policy=None,
-                                return_tuple=True):
+                                return_tuple=True,
+                                replace_with_kernel_inject=False):
+
         replace_transformer_layer(client_module,
                                   self.module,
                                   policy=injection_policy,
@@ -166,7 +171,8 @@ class InferenceEngine(Module):
                                   quantize_settings=(self.quantization_scales,
                                                      self.quantize_merge_count,
                                                      self.mlp_extra_grouping,
-                                                     self.quantize_groups))
+                                                     self.quantize_groups),
+                                  replace_with_kernel_inject=replace_with_kernel_inject)
 
     def _load_checkpoint(self, load_dir, load_module_strict=True):
         sd_loader = SDLoaderFactory.get_sd_loader_json(load_dir)
