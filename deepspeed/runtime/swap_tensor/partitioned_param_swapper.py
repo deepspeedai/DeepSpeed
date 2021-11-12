@@ -414,3 +414,6 @@ class AsyncPartitionedParameterSwapper(object):
             dst_fp16_params[i].ds_tensor.status = PartitionedParamStatus.AVAILABLE
 
         self.partitioned_swap_pool.swap_out(self.aio_write_handle)
+
+        for param in dst_fp16_params:
+            param.ds_tensor.status = PartitionedParamStatus.NOT_AVAILABLE
