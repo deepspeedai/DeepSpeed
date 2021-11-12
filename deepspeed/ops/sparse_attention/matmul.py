@@ -289,7 +289,7 @@ class _sparse_matmul(torch.autograd.Function):
         #_sparse_matmul._load_utils()
         #start_width = 64 // block
         #segmented = _sparse_matmul.sdd_segment(layout.type(torch.int32), start_width)
-        start_width = 128 // block
+        start_width = (128 if block > 16 else 32) // block
         layout = layout.type(torch.int32)
         segmented = libtriton.superblock(layout.data_ptr(),
                                          layout.shape[0],
