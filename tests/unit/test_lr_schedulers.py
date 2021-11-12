@@ -7,7 +7,7 @@ import os
 from common import distributed_test
 from simple_model import SimpleModel, SimpleOptimizer, random_dataloader, args_from_dict
 from deepspeed.runtime.lr_schedules import LR_RANGE_TEST, LR_RANGE_TEST_MIN_LR, LR_RANGE_TEST_STEP_RATE, LR_RANGE_TEST_STEP_SIZE, LR_RANGE_TEST_STAIRCASE
-from deepspeed.runtime.lr_schedules import WARMUP_LR, WARMUP_MIN_LR, WARMUP_MAX_LR, WARMUP_NUM_STEPS
+from deepspeed.runtime.lr_schedules import WARMUP_LR, WARMUP_MIN_LR, WARMUP_MAX_LR, WARMUP_NUM_STEPS, WARMUP_TYPE, WARMUP_LOG_RATE, WARMUP_LINEAR_RATE
 from deepspeed.runtime.lr_schedules import ONE_CYCLE, CYCLE_MIN_LR, CYCLE_MAX_LR, CYCLE_FIRST_STEP_SIZE, DECAY_LR_RATE, DECAY_STEP_SIZE
 from deepspeed.runtime.lr_schedules import CYCLE_MIN_MOM, CYCLE_MAX_MOM, DECAY_MOM_RATE
 from deepspeed.runtime.lr_schedules import WARMUP_DECAY_LR, TOTAL_NUM_STEPS
@@ -86,8 +86,26 @@ def test_get_lr_before_train(tmpdir, scheduler_type, params):
     _test_get_lr_before_train(args=args, model=model, hidden_dim=hidden_dim)
 
 
-@pytest.mark.parametrize("warmup_num_steps", [10, 15, 19, 33])
-def test_lr_warmup_schedule(tmpdir, warmup_num_steps):
+@pytest.mark.parametrize("warmup_num_steps, warmup_type",
+                         [
+                             (10,
+                              WARMUP_LOG_RATE),
+                             (15,
+                              WARMUP_LOG_RATE),
+                             (19,
+                              WARMUP_LOG_RATE),
+                             (33,
+                              WARMUP_LOG_RATE),
+                             (10,
+                              WARMUP_LINEAR_RATE),
+                             (15,
+                              WARMUP_LINEAR_RATE),
+                             (19,
+                              WARMUP_LINEAR_RATE),
+                             (33,
+                              WARMUP_LINEAR_RATE),
+                         ])
+def test_lr_warmup_schedule(tmpdir, warmup_num_steps, warmup_type):
     config_dict = {
         "train_batch_size": 2,
         "steps_per_print": 1,
@@ -102,7 +120,8 @@ def test_lr_warmup_schedule(tmpdir, warmup_num_steps):
             "params": {
                 WARMUP_MIN_LR: 0.1,
                 WARMUP_MAX_LR: 0.2,
-                WARMUP_NUM_STEPS: warmup_num_steps
+                WARMUP_NUM_STEPS: warmup_num_steps,
+                WARMUP_TYPE: warmup_type,
             }
         },
         "gradient_clipping": 1.0
@@ -151,8 +170,26 @@ def test_lr_warmup_schedule(tmpdir, warmup_num_steps):
                              num_steps=total_num_steps)
 
 
-@pytest.mark.parametrize("warmup_num_steps", [10, 15, 19, 33])
-def test_lr_warmup_decay_schedule(tmpdir, warmup_num_steps):
+@pytest.mark.parametrize("warmup_num_steps, warmup_type",
+                         [
+                             (10,
+                              WARMUP_LOG_RATE),
+                             (15,
+                              WARMUP_LOG_RATE),
+                             (19,
+                              WARMUP_LOG_RATE),
+                             (33,
+                              WARMUP_LOG_RATE),
+                             (10,
+                              WARMUP_LINEAR_RATE),
+                             (15,
+                              WARMUP_LINEAR_RATE),
+                             (19,
+                              WARMUP_LINEAR_RATE),
+                             (33,
+                              WARMUP_LINEAR_RATE),
+                         ])
+def test_lr_warmup_decay_schedule(tmpdir, warmup_num_steps, warmup_type):
     config_dict = {
         "train_batch_size": 2,
         "steps_per_print": 1,
@@ -168,7 +205,8 @@ def test_lr_warmup_decay_schedule(tmpdir, warmup_num_steps):
                 WARMUP_MIN_LR: 0.1,
                 WARMUP_MAX_LR: 0.2,
                 WARMUP_NUM_STEPS: warmup_num_steps,
-                TOTAL_NUM_STEPS: warmup_num_steps * 2
+                TOTAL_NUM_STEPS: warmup_num_steps * 2,
+                WARMUP_TYPE: warmup_type
             }
         },
         "gradient_clipping": 1.0
