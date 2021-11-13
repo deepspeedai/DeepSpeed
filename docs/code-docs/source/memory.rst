@@ -128,19 +128,19 @@ The big question is how big of a model you can fit on the hardware you have? Or 
 
 * ZeRO-2:
 
-   - ``"cpu_offload": true``: 2 * params
+   - ``"offload_optimizer": {"device": "cpu"}``: 2 * params
 
    Example: a 40GB GPU can fit ~11B param model (regardless of how many GPUs are used). Here the model is loaded in ``fp16`` so just the model weights take about 22GB and the remaining 18GB are used by other components. You can barely fit a very small batch size in this scenario.
 
-   - ``"cpu_offload": false``: 4 params + 16 params/ (total number of gpus)
+   - ``"offload_optimizer": {"device": "none"}``: 4 * params + 16 * params/ (total number of gpus)
 
 * ZeRO-3:
 
 ``largest_layer_memory = 4*largest_layer_params`` - GPU memory needed to gather the largest layer on a single GPU. 2 bytes fp16 params are gathered and 2 bytes fp16 grads are computed (total 4x). The optimizer states and fp32 parameters are updated in partitioned form and copied to fp16 params in partitioned form. This happens during the optimizer step. After that the fp16 params are sufficient.
 
-   - case 1: ``"cpu_offload": false, "cpu_offload_params": false`` - largest_layer_memory + 18 * params / total number of gpus across all nodes
-   - case 2: ``"cpu_offload": true, "cpu_offload_params": true``- largest_layer_memory. The main limit here is general RAM.
-   - case 3: ``"cpu_offload": true, "cpu_offload_params": false``- largest_layer_memory + 2 * params / total number of gpus across all nodes
+   - case 1: ``"offload_param": {"device": "none"}, "offload_optimizer": {"device": "none"}`` - largest_layer_memory + 18 * params / total number of gpus across all nodes
+   - case 2: ``"offload_param": {"device": "cpu"}, "offload_optimizer": {"device": "cpu"}``- largest_layer_memory. The main limit here is general RAM.
+   - case 3: ``"offload_param": {"device": "none"}, "offload_optimizer": {"device": "cpu"}``- largest_layer_memory + 2 * params / total number of gpus across all nodes
 
      Example:
 
@@ -194,11 +194,11 @@ In the following calculations we will use:
 
 * ZeRO-2:
 
-   - ``"cpu_offload": false``:
+   - ``"offload_optimizer": {"device": "none"}``:
 
       params * 4 * n_gpus * additional_buffer_factor - this is the memory needed only at the beginning to initialize the model on CPU memory
 
-   - ``"cpu_offload": true``:
+   - ``"offload_optimizer": {"device": "cpu"}``:
 
       params * max(4 * n_gpus, 16) * additional_buffer_factor
 
@@ -208,7 +208,7 @@ In the following calculations we will use:
 
    gpus_factor = n_gpus / total_gpus
 
-   - case 1: ``"cpu_offload": false``:
+   - case 1: ``"offload_param": {"device": "none"}, "offload_optimizer": {"device": "none"}``:
 
       Without ``zero.Init``:
 
@@ -222,7 +222,7 @@ In the following calculations we will use:
 
           assuming Pytorch is deallocating the memory once the tensors are moved to the GPU by ZeRO.Init
 
-   - case 2: ``"cpu_offload": true, cpu_offload_params true``:
+   - case 2: ``"offload_param": {"device": "cpu"}, "offload_optimizer": {"device": "cpu"}``:
 
       Without ``zero.Init``:
 
@@ -232,7 +232,7 @@ In the following calculations we will use:
 
           params * 18 * gpus_factor * additional_buffer_factor
 
-   - case 3: ``"cpu_offload": true, cpu_offload_params false``:
+   - case 3: ``"offload_param": {"device": "none"}, "offload_optimizer": {"device": "cpu"}``:
 
       Without ``zero.Init``:
 
