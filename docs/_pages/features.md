@@ -292,6 +292,36 @@ The DeepSpeed flops profiler measures the time, flops and parameters of a PyTorc
 ```
 The flops profiler can also be used as a standalone package. Please refer to the [Flops Profiler](/tutorials/flops-profiler) tutorial for more details.
 
+
+### Autotuning
+
+The DeepSpeed Autotuner  uses model information, system information, and heuristics to efficiently tune Zero stage, micro batch size, and other Zero configurations. Using the autotuning feature requires no code change from DeepSpeed users. While `"autotuning": {"enabled": true}` is the minimal required to enable auotuning, there are other parameters users can define to configure the autotuning process. Below shows major parameters and their default values in the autotuning configuration. Please refer to the [Autotuning](/tutorials/autotuning) tutorial for more details.
+
+```json
+{
+  "autotuning": {
+    "enabled": true,
+    "results_dir": null,
+    "exps_dir": null,
+    "overwrite": false,
+    "metric": "throughput",
+    "num_nodes": null,
+    "num_gpus": null,
+    "start_profile_step": 3,
+    "end_profile_step": 5,
+    "fast": true,
+    "num_tuning_micro_batch_sizes": 3,
+    "tuner_type": "model_based",
+    "tuner_early_stopping": 5,
+    "tuner_num_trials": 50,
+    "arg_mappings": null
+  }
+}
+
+```
+The flops profiler can also be used as a standalone package. Please refer to the [Flops Profiler](/tutorials/flops-profiler) tutorial for more details.
+
+
 ## Sparse Attention
 DeepSpeed offers sparse attention to support long sequences. Please refer to the [Sparse Attention](/tutorials/sparse-attention/) tutorial.
 

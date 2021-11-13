@@ -84,6 +84,12 @@ Flops Profiler
 
    flops-profiler
 
+Autotuning
+--------------------
+.. toctree::
+   :maxdepth: 2
+
+   autotuning
 
 Memory Usage
 ------------------

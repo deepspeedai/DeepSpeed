@@ -1,6 +1,7 @@
-'''
+"""
 Copyright 2019 The Microsoft DeepSpeed Team
-'''
+"""
+
 import os
 import re
 import stat
@@ -21,14 +22,20 @@ from tensorboardX import SummaryWriter
 
 from typing import Callable, Dict, Optional, Union, Iterable
 
-from deepspeed.runtime.utils import see_memory_usage
+from deepspeed.runtime.utils import see_memory_usage, get_ma_status
 from deepspeed.runtime.zero.stage2 import FP16_DeepSpeedZeroOptimizer
 from deepspeed.runtime.zero.stage1 import FP16_DeepSpeedZeroOptimizer_Stage1
 from deepspeed.runtime.zero.partition_parameters import ZeroParamStatus
-from deepspeed.runtime.zero.utils import is_zero_supported_optimizer, _initialize_parameter_parallel_groups
-from deepspeed.runtime.activation_checkpointing import checkpointing as activation_checkpointing
+from deepspeed.runtime.zero.utils import (
+    is_zero_supported_optimizer,
+    _initialize_parameter_parallel_groups,
+)
+from deepspeed.runtime.activation_checkpointing import (
+    checkpointing as activation_checkpointing,
+)
 from deepspeed.runtime.fp16.fused_optimizer import FP16_Optimizer
 from deepspeed.runtime.fp16.unfused_optimizer import FP16_UnfusedOptimizer
+
 from deepspeed.runtime.config import DeepSpeedConfig, DEEPSPEED_OPTIMIZERS, \
     ADAGRAD_OPTIMIZER, ADAM_OPTIMIZER, ADAMW_OPTIMIZER, LAMB_OPTIMIZER, ONEBIT_ADAM_OPTIMIZER, ONEBIT_LAMB_OPTIMIZER, \
     TORCH_ADAM_PARAM, ADAM_W_MODE, ADAM_W_MODE_DEFAULT
@@ -40,6 +47,7 @@ from deepspeed.runtime.constants import \
 from deepspeed.runtime.zero.constants import \
     ZERO_OPTIMIZATION_OPTIMIZER_STATES, ZERO_OPTIMIZATION_GRADIENTS, ZERO_OPTIMIZATION_WEIGHTS
 from deepspeed.runtime.sparse_tensor import SparseTensor
+
 import deepspeed.runtime.lr_schedules as lr_schedules
 import deepspeed.utils.groups as groups
 from deepspeed.runtime.utils import get_grad_norm
@@ -52,7 +60,7 @@ from deepspeed.runtime.eigenvalue import Eigenvalue
 from deepspeed.runtime.data_pipeline.curriculum_scheduler import CurriculumScheduler
 
 from .pipe.module import PipelineModule
-from .utils import ensure_directory_exists
+from .utils import ensure_directory_exists, get_ma_status
 from ..ops.op_builder import UtilsBuilder
 from ..ops.adam import DeepSpeedCPUAdam
 from ..ops.adam import FusedAdam
@@ -61,6 +69,7 @@ from ..moe.layer import MoE
 from ..git_version_info import version
 
 from deepspeed.profiling.flops_profiler.profiler import FlopsProfiler
+from deepspeed.utils.logging import print_json_dist
 
 MEMORY_OPT_ALLREDUCE_SIZE = 500000000
 
@@ -99,28 +108,81 @@ def split_half_float_double_sparse(tensors):
 
 
 def print_configuration(args, name):
-    logger.info('{}:'.format(name))
+    logger.info("{}:".format(name))
     for arg in sorted(vars(args)):
-        dots = '.' * (29 - len(arg))
-        logger.info('  {} {} {}'.format(arg, dots, getattr(args, arg)))
+        dots = "." * (29 - len(arg))
+        logger.info("  {} {} {}".format(arg, dots, getattr(args, arg)))
+
+
+FORWARD_MICRO_TIMER = 'forward_microstep'
+FORWARD_GLOBAL_TIMER = 'forward'
+BACKWARD_MICRO_TIMER = 'backward_microstep'
+BACKWARD_GLOBAL_TIMER = 'backward'
+BACKWARD_INNER_MICRO_TIMER = 'backward_inner_microstep'
+BACKWARD_INNER_GLOBAL_TIMER = 'backward_inner'
+BACKWARD_REDUCE_MICRO_TIMER = 'backward_allreduce_microstep'
+BACKWARD_REDUCE_GLOBAL_TIMER = 'backward_allreduce'
+STEP_MICRO_TIMER = 'step_microstep'
+STEP_GLOBAL_TIMER = 'step'
+
+
+class EngineTimers(object):
+    r"""Wallclock timers for DeepSpeedEngine"""
+    def __init__(self, enable_micro_timers, enable_global_timers):
+        self.forward_timers = []
+        self.backward_timers = []
+        self.backward_inner_timers = []
+        self.backward_reduce_timers = []
+        self.step_timers = []
+        self.global_timers = []
+        self.micro_timers = []
+
+        if enable_micro_timers:
+            self.forward_timers += [FORWARD_MICRO_TIMER]
+            self.backward_timers += [BACKWARD_MICRO_TIMER]
+            self.backward_inner_timers += [BACKWARD_INNER_MICRO_TIMER]
+            self.backward_reduce_timers += [BACKWARD_REDUCE_MICRO_TIMER]
+            self.step_timers += [STEP_MICRO_TIMER]
+            self.micro_timers += [
+                FORWARD_MICRO_TIMER,
+                BACKWARD_MICRO_TIMER,
+                BACKWARD_INNER_MICRO_TIMER,
+                BACKWARD_REDUCE_MICRO_TIMER,
+                STEP_MICRO_TIMER
+            ]
+
+        if enable_global_timers:
+            self.forward_timers += [FORWARD_GLOBAL_TIMER]
+            self.backward_timers += [BACKWARD_GLOBAL_TIMER]
+            self.backward_inner_timers += [BACKWARD_INNER_GLOBAL_TIMER]
+            self.backward_reduce_timers += [BACKWARD_REDUCE_GLOBAL_TIMER]
+            self.step_timers += [STEP_GLOBAL_TIMER]
+            self.global_timers += [
+                FORWARD_GLOBAL_TIMER,
+                BACKWARD_GLOBAL_TIMER,
+                BACKWARD_INNER_GLOBAL_TIMER,
+                BACKWARD_REDUCE_GLOBAL_TIMER,
+                STEP_GLOBAL_TIMER
+            ]
 
 
 class DeepSpeedEngine(Module):
-    r"""DeepSpeed engine for training.
-    """
-    def __init__(self,
-                 args,
-                 model,
-                 optimizer=None,
-                 model_parameters=None,
-                 training_data=None,
-                 lr_scheduler=None,
-                 mpu=None,
-                 dist_init_required=None,
-                 collate_fn=None,
-                 config=None,
-                 config_params=None,
-                 dont_change_device=False):
+    r"""DeepSpeed engine for training."""
+    def __init__(
+        self,
+        args,
+        model,
+        optimizer=None,
+        model_parameters=None,
+        training_data=None,
+        lr_scheduler=None,
+        mpu=None,
+        dist_init_required=None,
+        collate_fn=None,
+        config=None,
+        config_params=None,
+        dont_change_device=False,
+    ):
         super(DeepSpeedEngine, self).__init__()
         self.dont_change_device = dont_change_device
         self.client_optimizer = optimizer
@@ -166,42 +228,51 @@ class DeepSpeedEngine(Module):
             dist_init_required = not dist.is_initialized()
 
         if dist_init_required is False:
-            assert dist.is_initialized() is True, "Torch distributed not initialized. Please set dist_init_required to True or initialize before calling deepspeed.initialize()"
+            assert (
+                dist.is_initialized() is True
+            ), "Torch distributed not initialized. Please set dist_init_required to True or initialize before calling deepspeed.initialize()"
         else:
             # Initialize torch distributed if needed
             init_distributed(dist_backend=self.dist_backend)
 
-        see_memory_usage(f"DeepSpeed Engine: Before args sanity test")
         self._do_args_sanity_check(args)
         self._configure_with_arguments(args, mpu)
         self._do_sanity_check()
-
+        see_memory_usage(f"DeepSpeed Engine: After args sanity test",
+                         force=self.memory_breakdown())
         if mpu is not None:
-            assert not self.elasticity_enabled(), "Elasticity is not currently supported" \
-                " with model parallelism."
+            assert not self.elasticity_enabled(), (
+                "Elasticity is not currently supported" " with model parallelism."
+            )
 
         self._set_distributed_vars(args)
 
         if self.tensorboard_enabled() and self.global_rank == 0:
             self.summary_writer = self.get_summary_writer()
 
-        see_memory_usage(f"DeepSpeed Engine: Before configure distributed model")
+        see_memory_usage(
+            f"DeepSpeed Engine: Before configure distributed model",
+            force=self.memory_breakdown(),
+        )
 
         self.pipeline_parallelism = isinstance(model, PipelineModule)
 
         # Configure distributed model
         self._configure_distributed_model(model)
 
+        self._get_model_parameters()
+
         see_memory_usage(f"DeepSpeed Engine: After configure distributed model")
 
-        # Configure wall clock timer
+        # Configure wall clock timers
         self.timers = SynchronizedWallClockTimer()
         # Throughput timer
         self.tput_timer = ThroughputTimer(
             batch_size=self.train_micro_batch_size_per_gpu(),
             num_workers=self.dp_world_size,
             steps_per_output=self.steps_per_print(),
-            monitor_memory=False)
+            monitor_memory=False,
+        )
 
         if dist.get_rank() == 0:
             logger.info(
@@ -223,6 +294,8 @@ class DeepSpeedEngine(Module):
             self._configure_optimizer(optimizer, model_parameters)
             self._configure_lr_scheduler(lr_scheduler)
             self._report_progress(0)
+
+        self._get_model_parameters()
 
         # Bookkeeping for sparse support
         self.sparse_tensor_module_names = set()
@@ -249,18 +322,49 @@ class DeepSpeedEngine(Module):
         if self.curriculum_enabled():
             self.curriculum_scheduler = self._configure_curriculum_scheduler()
 
+        # Engine timers
+
+        self.engine_timers = EngineTimers(
+            enable_micro_timers=self.wall_clock_breakdown(),
+            enable_global_timers=self.wall_clock_breakdown()
+            or self.flops_profiler_enabled())
+
         if self.global_rank == 0:
-            self._config.print('DeepSpeedEngine configuration')
+            self._config.print("DeepSpeedEngine configuration")
             if self.dump_state():
-                print_configuration(self, 'DeepSpeedEngine')
+                print_configuration(self, "DeepSpeedEngine")
 
         # Load pre-installed or JIT compile (un)flatten ops
         util_ops = UtilsBuilder().load()
         self.flatten = util_ops.flatten
         self.unflatten = util_ops.unflatten
 
+    def _get_model_parameters(self):
+        if self.autotuning_profile_model_info():
+            self.autotuning_model_info = {}
+            num_params = 0
+            trainable_num_params = 0
+
+            for p in self.module.parameters():
+                # since user code might call deepspeed.zero.Init() before deepspeed.initialize(), need to check the attrbuite to check if the parameter is partitioned in zero 3 already or not
+                n = 0
+                if hasattr(p, "ds_tensor"):  # if the parameter is partitioned in zero 3
+                    n += p.ds_numel
+                else:  # if the parameter is not partitioned in zero 3 yet
+                    n += p.numel()
+                num_params += n
+                if p.requires_grad:
+                    trainable_num_params += n
+            if self.global_rank == 0:
+                self.autotuning_model_info[
+                    "num_params"] = num_params * self.mp_world_size
+                self.autotuning_model_info[
+                    "trainable_num_params"] = trainable_num_params * self.mp_world_size
+
+            print(f"model parameter = {num_params}")
+
     def get_batch_info(self):
-        """ Get all training batch related settings.
+        """Get all training batch related settings.
 
         Returns:
             train_batch_size (int): The effective training batch size. This is the amount of data
@@ -270,7 +374,45 @@ class DeepSpeedEngine(Module):
             gradient_accumulation_steps (int): Number of training steps to accumulate gradients
                 before averaging and applying them.
         """
-        return self.train_batch_size, self.train_micro_batch_size_per_gpu, self.gradient_accumulation_steps
+        return (
+            self.train_batch_size,
+            self.train_micro_batch_size_per_gpu,
+            self.gradient_accumulation_steps,
+        )
+
+    def set_train_batch_size(self, train_batch_size):
+        """Adjust the global batch size by increasing or decreasing the number of
+        micro-batches (i.e., gradient accumulation steps). The size of each micro-batch
+        (i.e., ``train_micro_batch_size_per_gpu``) is not changed.
+        Args:
+            train_batch_size (int): The new global batch size for training.
+        Raises:
+            ValueError: if ``train_batch_size`` is not divisible by the
+                configured micro-batch size and data parallelism.
+        """
+        if train_batch_size % (self.train_micro_batch_size_per_gpu() *
+                               self.dp_world_size) != 0:
+            #print(f'{train_batch_size=} {self.train_micro_batch_size_per_gpu()=} {self.dp_world_size=}')
+            raise ValueError(
+                f'Train batch size must be divisible by micro-batch data parallelism')
+        new_gas = train_batch_size // (self.train_micro_batch_size_per_gpu() *
+                                       self.dp_world_size)
+        # overwrite config
+        self._config.train_batch_size = train_batch_size
+        self._config.gradient_accumulation_steps = new_gas
+
+    def get_global_grad_norm(self) -> float:
+        """Return the 2-norm of all gradients. If there is model parallelism,
+        the norm will be global.
+
+        The computed norm will be cached and reused until the next step() pass.
+        .. note::
+            In the presence of model parallelism, this is a collective call
+            and acts as a barrier among ``mpu.get_model_parallel_group()``.
+        Returns:
+            float: norm
+        """
+        return self._global_grad_norm
 
     def set_train_batch_size(self, train_batch_size):
         """Adjust the global batch size by increasing or decreasing the number of
@@ -366,10 +508,12 @@ class DeepSpeedEngine(Module):
     def tensorboard_job_name(self):
         return self._config.tensorboard_job_name
 
-    def get_summary_writer(self,
-                           name="DeepSpeedJobName",
-                           base=os.path.join(os.path.expanduser("~"),
-                                             "tensorboard")):
+    def get_summary_writer(
+        self,
+        name="DeepSpeedJobName",
+        base=os.path.join(os.path.expanduser("~"),
+                          "tensorboard"),
+    ):
         if self.tensorboard_output_path():
             base_dir = self.tensorboard_output_path()
             job_name = self.tensorboard_job_name()
@@ -379,12 +523,12 @@ class DeepSpeedEngine(Module):
                 name = self.tensorboard_job_name()
 
             # Infrastructure-specific job-id
-            if 'DLWS_JOB_ID' in os.environ:
-                infra_job_id = os.environ['DLWS_JOB_ID']
-            elif 'DLTS_JOB_ID' in os.environ:
-                infra_job_id = os.environ['DLTS_JOB_ID']
+            if "DLWS_JOB_ID" in os.environ:
+                infra_job_id = os.environ["DLWS_JOB_ID"]
+            elif "DLTS_JOB_ID" in os.environ:
+                infra_job_id = os.environ["DLTS_JOB_ID"]
             else:
-                infra_job_id = 'unknown-job-id'
+                infra_job_id = "unknown-job-id"
 
             summary_writer_dir_name = os.path.join(infra_job_id, "logs")
             log_dir = os.path.join(base, summary_writer_dir_name, name)
@@ -397,10 +541,13 @@ class DeepSpeedEngine(Module):
         return self._config.wall_clock_breakdown
 
     def flops_profiler_enabled(self):
-        return self._config.flops_profiler_config.enabled
+        return self._config.flops_profiler_config.enabled or self.autotuning_enabled()
 
     def flops_profiler_profile_step(self):
-        return self._config.flops_profiler_config.profile_step
+        step = self._config.flops_profiler_config.profile_step
+        if self._config.autotuning_config.enabled:
+            step = self.autotuning_start_profile_step()
+        return step
 
     def flops_profiler_module_depth(self):
         return self._config.flops_profiler_config.module_depth
@@ -409,6 +556,8 @@ class DeepSpeedEngine(Module):
         return self._config.flops_profiler_config.top_modules
 
     def flops_profiler_detailed(self):
+        if self._config.autotuning_config.enabled:
+            return False
         return self._config.flops_profiler_config.detailed
 
     def flops_profiler_output_file(self):
@@ -416,6 +565,36 @@ class DeepSpeedEngine(Module):
 
     def memory_breakdown(self):
         return self._config.memory_breakdown
+
+    def autotuning_enabled(self):
+        return self._config.autotuning_config.enabled
+
+    def autotuning_start_profile_step(self):
+        return self._config.autotuning_config.start_profile_step
+
+    def autotuning_end_profile_step(self):
+        return self._config.autotuning_config.end_profile_step
+
+    def autotuning_metric_path(self):
+        path = self._config.autotuning_config.metric_path
+        if not path:
+            path = os.path.join(os.getcwd(), "autotuning_metric.json")
+        return path
+
+    def autotuning_model_info_path(self):
+        path = self._config.autotuning_config.model_info_path
+        if not path:
+            path = os.path.join(os.getcwd(), "autotuning_model_info.json")
+        return path
+
+    def autotuning_metric(self):
+        return self._config.autotuning_config.metric
+
+    def autotuning_profile_model_info(self):
+        return self.autotuning_enabled(
+        ) and self._config.autotuning_config.model_info and self._config.autotuning_config.model_info.get(
+            "profile",
+            False)
 
     def sparse_gradients_enabled(self):
         return self._config.sparse_gradients_enabled
@@ -427,7 +606,8 @@ class DeepSpeedEngine(Module):
         return self._config.train_micro_batch_size_per_gpu
 
     def optimizer_name(self):
-        return self.client_optimizer.__class__.__name__ if self.client_optimizer else self._config.optimizer_name
+        return (self.client_optimizer.__class__.__name__
+                if self.client_optimizer else self._config.optimizer_name)
 
     def optimizer_params(self):
         return self._config.optimizer_params
@@ -442,18 +622,20 @@ class DeepSpeedEngine(Module):
         return self._config.scheduler_params
 
     def quantize_training(self):
-        return self._config.quantize_training_enabled, \
-            self._config.quantize_target_bits, \
-            self._config.quantize_start_bits, \
-            self._config.quantize_period, \
-            self._config.quantize_offset, \
-            self._config.quantize_groups, \
-            self._config.fp16_mixed_quantize, \
-            self._config.quantize_change_rate, \
-            self._config.quantize_type, \
-            self._config.quantize_rounding, \
-            self._config.quantize_verbose, \
-            self._config.use_quantizer_kernel
+        return (
+            self._config.quantize_training_enabled,
+            self._config.quantize_target_bits,
+            self._config.quantize_start_bits,
+            self._config.quantize_period,
+            self._config.quantize_offset,
+            self._config.quantize_groups,
+            self._config.fp16_mixed_quantize,
+            self._config.quantize_change_rate,
+            self._config.quantize_type,
+            self._config.quantize_rounding,
+            self._config.quantize_verbose,
+            self._config.use_quantizer_kernel,
+        )
 
     def zero_optimization(self):
         return self._config.zero_enabled
@@ -593,7 +775,7 @@ class DeepSpeedEngine(Module):
         if lr_scheduler:
             if self.global_rank == 0:
                 logger.info(
-                    f'DeepSpeed using configured LR scheduler = {self.scheduler_name()}')
+                    f"DeepSpeed using configured LR scheduler = {self.scheduler_name()}")
             self.lr_scheduler = lr_scheduler
         else:
             if isinstance(client_lr_scheduler, Callable):
@@ -623,7 +805,7 @@ class DeepSpeedEngine(Module):
 
             # Only the first parameter parallel process needs to store the
             # optimizer state checkpoints for zero
-            self.save_zero_checkpoint = (param_rank == dp_rank)
+            self.save_zero_checkpoint = param_rank == dp_rank
 
     def _scheduler_from_config(self, optimizer):
         scheduler_name = self.scheduler_name()
@@ -631,8 +813,9 @@ class DeepSpeedEngine(Module):
             if hasattr(lr_schedules, scheduler_name):
                 scheduler = getattr(lr_schedules, scheduler_name)
             else:
-                assert hasattr(torch.optim.lr_scheduler, scheduler_name), \
-                    f"DeepSpeed does not recognize LR scheduler {scheduler_name}"
+                assert hasattr(
+                    torch.optim.lr_scheduler, scheduler_name
+                ), f"DeepSpeed does not recognize LR scheduler {scheduler_name}"
 
                 scheduler = getattr(torch.optim.lr_scheduler, scheduler_name)
 
@@ -675,18 +858,21 @@ class DeepSpeedEngine(Module):
             args.local_rank = self.local_rank
 
         if self.config is None:
-            self.config = args.deepspeed_config if hasattr(args,
-                                                           'deepspeed_config') else None
+            self.config = (args.deepspeed_config
+                           if hasattr(args,
+                                      "deepspeed_config") else None)
         self._config = DeepSpeedConfig(self.config, mpu)
 
     # Validate command line arguments
     def _do_args_sanity_check(self, args):
-        if hasattr(args, 'deepscale_config') and args.deepscale_config is not None:
+        if hasattr(args, "deepscale_config") and args.deepscale_config is not None:
             logger.warning(
                 "************ --deepscale_config is deprecated, please use --deepspeed_config ************"
             )
-            if hasattr(args, 'deepspeed_config'):
-                assert args.deepspeed_config is None, "Not sure how to proceed, we were given both a deepscale_config and deepspeed_config"
+            if hasattr(args, "deepspeed_config"):
+                assert (
+                    args.deepspeed_config is None
+                ), "Not sure how to proceed, we were given both a deepscale_config and deepspeed_config"
             args.deepspeed_config = args.deepscale_config
 
         assert "LOCAL_RANK" in os.environ or "OMPI_COMM_WORLD_LOCAL_RANK" in os.environ, "DeepSpeed requires the LOCAL_RANK environment " \
@@ -694,22 +880,31 @@ class DeepSpeedEngine(Module):
             "different launcher please ensure LOCAL_RANK is set prior to initializing deepspeed."
 
         if hasattr(args, 'local_rank') and args.local_rank != None:
-            assert isinstance(args.local_rank, int), f"args.local_rank of {args.local_rank} is an unknown type {type(args.local_rank)}"
+            assert isinstance(
+                args.local_rank, int), f"args.local_rank of {args.local_rank} is an unknown type {type(args.local_rank)}"
             if args.local_rank >= 0:
                 env_local_rank = int(os.environ.get("LOCAL_RANK"))
-                assert env_local_rank == args.local_rank, \
-                    f"Mismatch in local rank setting, args.local_rank={args.local_rank} but env['LOCAL_RANK']={env_local_rank}."
+                assert (
+                    env_local_rank == args.local_rank
+                ), f"Mismatch in local rank setting, args.local_rank={args.local_rank} but env['LOCAL_RANK']={env_local_rank}."
 
         if self.config is None:
-            assert hasattr(args, 'deepspeed_config') and args.deepspeed_config is not None, \
-                'DeepSpeed requires --deepspeed_config to specify configuration file'
+            assert (
+                hasattr(
+                    args, "deepspeed_config") and args.deepspeed_config is not None
+            ), "DeepSpeed requires --deepspeed_config to specify configuration file"
 
-            assert os.path.isfile(args.deepspeed_config), \
-                'DeepSpeed configuration file: {} is not an existing file'.format(args.deepspeed_config)
+            assert os.path.isfile(
+                args.deepspeed_config
+            ), "DeepSpeed configuration file: {} is not an existing file".format(
+                args.deepspeed_config
+            )
 
     def _is_supported_optimizer(self, optimizer_name):
-        return optimizer_name in DEEPSPEED_OPTIMIZERS or \
-            getattr(torch.optim, optimizer_name, None) is not None
+        return (optimizer_name in DEEPSPEED_OPTIMIZERS
+                or getattr(torch.optim,
+                           optimizer_name,
+                           None) is not None)
 
     # Validate configuration based on command line arguments
     def _do_sanity_check(self):
@@ -718,13 +913,19 @@ class DeepSpeedEngine(Module):
 
         if not self.client_optimizer:
             if self.optimizer_name() is not None:
-                assert self._is_supported_optimizer(self.optimizer_name()), \
-                    '{} is not a supported DeepSpeed Optimizer'.format(self.optimizer_name())
+                assert self._is_supported_optimizer(
+                    self.optimizer_name()
+                ), "{} is not a supported DeepSpeed Optimizer".format(
+                    self.optimizer_name()
+                )
 
-        if self.optimizer_name() == LAMB_OPTIMIZER or self.optimizer_name(
-        ) == ONEBIT_LAMB_OPTIMIZER:
-            assert self.dynamic_loss_scale(), \
-                'DeepSpeed {} optimizer requires dynamic loss scaling'.format(self.optimizer_name())
+        if (self.optimizer_name() == LAMB_OPTIMIZER
+                or self.optimizer_name() == ONEBIT_LAMB_OPTIMIZER):
+            assert (
+                self.dynamic_loss_scale()
+            ), "DeepSpeed {} optimizer requires dynamic loss scaling".format(
+                self.optimizer_name()
+            )
 
         # Detect invalid combinations of client optimizer and client scheduler
         if isinstance(self.client_lr_scheduler, _LRScheduler):
@@ -733,7 +934,7 @@ class DeepSpeedEngine(Module):
 
     def _broadcast_model(self):
         def is_replicated(p):
-            if hasattr(p, 'ds_status') and p.ds_status is not ZeroParamStatus.AVAILABLE:
+            if hasattr(p, "ds_status") and p.ds_status is not ZeroParamStatus.AVAILABLE:
                 return False
             return True
 
@@ -754,7 +955,7 @@ class DeepSpeedEngine(Module):
         if self.fp16_enabled():
             if self.zero_optimization_partition_weights() and any(
                 [hasattr(param,
-                         'ds_id') for param in self.module.parameters()]):
+                         "ds_id") for param in self.module.parameters()]):
                 if not all(
                     [param.dtype == torch.half for param in self.module.parameters()]):
                     names = [
@@ -805,8 +1006,10 @@ class DeepSpeedEngine(Module):
             if self.mpu is not None:
                 if groups.is_initialized():
                     # Scenario 4 - Case 1
-                    assert self.mpu.get_data_parallel_world_size() == groups.get_data_parallel_world_size(), "mpu object provided must match mpu object provided to groups.initialize()"
-                    assert self.mpu.get_model_parallel_world_size() == groups.get_model_parallel_world_size(), "mpu object provided must match mpu object provided to groups.initialize()"
+                    assert self.mpu.get_data_parallel_world_size() == groups.get_data_parallel_world_size(
+                    ), "mpu object provided must match mpu object provided to groups.initialize()"
+                    assert self.mpu.get_model_parallel_world_size() == groups.get_model_parallel_world_size(
+                    ), "mpu object provided must match mpu object provided to groups.initialize()"
                 else:
                     # Scenario 3
                     groups.initialize(mpu=self.mpu)
@@ -814,7 +1017,7 @@ class DeepSpeedEngine(Module):
                 if not groups.is_initialized():
                     # Scenario 1
                     groups.initialize()
-                #else:
+                # else:
                 # Scenario 2
                 # Scenario 4 - Case 2
                 # pass
@@ -844,7 +1047,7 @@ class DeepSpeedEngine(Module):
         if not self.amp_enabled():
             self._broadcast_model()
 
-    #check if parameters are duplicated in optimizer param_groups
+    # check if parameters are duplicated in optimizer param_groups
     def _check_for_duplicates(self, optimizer):
         for name, param in self.module.named_parameters():
             param_id = id(param)
@@ -882,21 +1085,24 @@ class DeepSpeedEngine(Module):
             basic_optimizer = self._configure_basic_optimizer(model_parameters)
             if self.global_rank == 0:
                 logger.info(
-                    'Using DeepSpeed Optimizer param name {} as basic optimizer'.format(
+                    "Using DeepSpeed Optimizer param name {} as basic optimizer".format(
                         self.optimizer_name()))
 
         self._check_for_duplicates(basic_optimizer)
 
         self.basic_optimizer = basic_optimizer
         if self.global_rank == 0:
-            logger.info('DeepSpeed Basic Optimizer = {}'.format(
+            logger.info("DeepSpeed Basic Optimizer = {}".format(
                 basic_optimizer.__class__.__name__))
 
         if self.zero_optimization():
-            assert not self.amp_enabled(), "Amp and ZeRO are not currently compatible, please use (legacy) fp16 mode which performs similar to amp opt_mode=O2"
+            assert (
+                not self.amp_enabled()
+            ), "Amp and ZeRO are not currently compatible, please use (legacy) fp16 mode which performs similar to amp opt_mode=O2"
             if not is_zero_supported_optimizer(basic_optimizer):
-                assert self.zero_allow_untested_optimizer(), \
-                    'You are using an untested ZeRO Optimizer. Please add <"zero_allow_untested_optimizer": true> in the configuration file to use it.'
+                assert (
+                    self.zero_allow_untested_optimizer()
+                ), 'You are using an untested ZeRO Optimizer. Please add <"zero_allow_untested_optimizer": true> in the configuration file to use it.'
 
                 if self.global_rank == 0:
                     logger.warning(
@@ -914,14 +1120,16 @@ class DeepSpeedEngine(Module):
                 # If apex/amp is available it will be imported above
                 raise RuntimeError(
                     "Unable to import apex/amp, please make sure it is installed")
-            self.module, self.optimizer = amp.initialize(self.module, basic_optimizer, **amp_params)
+            self.module, self.optimizer = amp.initialize(
+                self.module, basic_optimizer, **amp_params
+            )
             self._broadcast_model()
             # TODO: maybe need to broadcast experts differently?
         elif self.fp16_enabled():
             self.optimizer = self._configure_fp16_optimizer(basic_optimizer)
         else:
             self.optimizer = basic_optimizer
-        log_dist('DeepSpeed Final Optimizer = {}'.format(self.optimizer_name()),
+        log_dist("DeepSpeed Final Optimizer = {}".format(self.optimizer_name()),
                  ranks=[0])
 
         self.quantizer = self._configure_quantization()
@@ -931,7 +1139,7 @@ class DeepSpeedEngine(Module):
         if optimizer_parameters is None:
             optimizer_parameters = {}
         # print(optimizer_parameters.keys())
-        if 'max_grad_norm' in optimizer_parameters.keys():
+        if "max_grad_norm" in optimizer_parameters.keys():
             raise ValueError(
                 "'max_grad_norm' is not supported as an optimizer parameter, please switch to using the deepspeed parameter 'gradient_clipping' see: https://www.deepspeed.ai/docs/config-json/#gradient-clipping for more details"
             )
@@ -964,28 +1172,34 @@ class DeepSpeedEngine(Module):
                                                      adamw_mode=effective_adam_w_mode)
                 else:
                     from deepspeed.ops.adam import FusedAdam
-                    optimizer = FusedAdam(model_parameters,
-                                          **optimizer_parameters,
-                                          adam_w_mode=effective_adam_w_mode)
+
+                    optimizer = FusedAdam(
+                        model_parameters,
+                        **optimizer_parameters,
+                        adam_w_mode=effective_adam_w_mode,
+                    )
 
         elif self.optimizer_name() == LAMB_OPTIMIZER:
             from deepspeed.ops.lamb import FusedLamb
+
             optimizer = FusedLamb(model_parameters, **optimizer_parameters)
         elif self.optimizer_name() == ONEBIT_ADAM_OPTIMIZER:
             assert not self.zero_optimization(), "1bit-Adam is not compatible with ZeRO"
             from deepspeed.runtime.fp16.onebit.adam import OnebitAdam
+
             optimizer = OnebitAdam(model_parameters, self, **optimizer_parameters)
             if not self.fp16_enabled():
                 logger.warning(
-                    f'Currently the convergence of 1-bit Adam is only verified under FP16'
+                    f"Currently the convergence of 1-bit Adam is only verified under FP16"
                 )
         elif self.optimizer_name() == ONEBIT_LAMB_OPTIMIZER:
             assert not self.zero_optimization(), "1bit-Lamb is not compatible with ZeRO"
             from deepspeed.runtime.fp16.onebit.lamb import OnebitLamb
+
             optimizer = OnebitLamb(model_parameters, self, **optimizer_parameters)
             if not self.fp16_enabled():
                 logger.warning(
-                    f'Currently the convergence of 1-bit Lamb is only verified under FP16'
+                    f"Currently the convergence of 1-bit Lamb is only verified under FP16"
                 )
         else:
             torch_optimizer = getattr(torch.optim, self.optimizer_name())
@@ -993,21 +1207,24 @@ class DeepSpeedEngine(Module):
         return optimizer
 
     def _configure_quantization(self):
-        quantize_enabled, \
-            q_target_bits, \
-            q_start_bits, \
-            q_period, \
-            q_offset, \
-            q_groups, \
-            q_mixed_fp16, \
-            q_change_ratio, \
-            q_type, \
-            q_rounding, \
-            q_verbose, \
-            use_quantizer_kernel = self.quantize_training()
+        (
+            quantize_enabled,
+            q_target_bits,
+            q_start_bits,
+            q_period,
+            q_offset,
+            q_groups,
+            q_mixed_fp16,
+            q_change_ratio,
+            q_type,
+            q_rounding,
+            q_verbose,
+            use_quantizer_kernel,
+        ) = self.quantize_training()
         quantizer = None
         if quantize_enabled:
             from deepspeed.runtime.quantize import Quantizer
+
             quantizer = Quantizer(
                 q_target_bits,
                 q_start_bits,
@@ -1021,7 +1238,8 @@ class DeepSpeedEngine(Module):
                 q_verbose,
                 self.eigenvalue_enabled(),
                 use_quantizer_kernel,
-                self.eigenvalue_layer_num() if self.eigenvalue_enabled() else 0)
+                self.eigenvalue_layer_num() if self.eigenvalue_enabled() else 0,
+            )
         return quantizer
 
     def _configure_fp16_optimizer(self, optimizer):
@@ -1033,9 +1251,9 @@ class DeepSpeedEngine(Module):
         else:
             fused_opts = FusedAdam
         if isinstance(optimizer, fused_opts) \
-                      or self.optimizer_name() == ONEBIT_ADAM_OPTIMIZER:
+                or self.optimizer_name() == ONEBIT_ADAM_OPTIMIZER:
             if self.dynamic_loss_scale():
-                log_dist('Creating fp16 optimizer with dynamic loss scale', ranks=[0])
+                log_dist("Creating fp16 optimizer with dynamic loss scale", ranks=[0])
                 timers = self.timers if self.wall_clock_breakdown() else None
                 optimizer = FP16_Optimizer(
                     optimizer,
@@ -1046,20 +1264,24 @@ class DeepSpeedEngine(Module):
                     mpu=self.mpu,
                     clip_grad=clip_grad,
                     fused_adam_legacy=self.optimizer_legacy_fusion(),
-                    timers=timers)
+                    timers=timers,
+                )
             else:
-                log_dist('Creating fp16 optimizer with static loss scale: {}'.format(
-                    self.loss_scale()),
-                         ranks=[0])
+                log_dist(
+                    "Creating fp16 optimizer with static loss scale: {}".format(
+                        self.loss_scale()),
+                    ranks=[0],
+                )
                 optimizer = FP16_Optimizer(
                     optimizer,
                     deepspeed=self,
                     static_loss_scale=self.loss_scale(),
                     mpu=self.mpu,
                     clip_grad=clip_grad,
-                    fused_adam_legacy=self.optimizer_legacy_fusion())
+                    fused_adam_legacy=self.optimizer_legacy_fusion(),
+                )
         else:
-            log_dist('Creating fp16 unfused optimizer with dynamic loss scale',
+            log_dist("Creating fp16 unfused optimizer with dynamic loss scale",
                      ranks=[0])
             optimizer = FP16_UnfusedOptimizer(
                 optimizer,
@@ -1069,14 +1291,17 @@ class DeepSpeedEngine(Module):
                 dynamic_loss_args=dynamic_loss_args,
                 mpu=self.mpu,
                 clip_grad=clip_grad,
-                fused_lamb_legacy=self.optimizer_name() == LAMB_OPTIMIZER)
+                fused_lamb_legacy=self.optimizer_name() == LAMB_OPTIMIZER,
+            )
 
         return optimizer
 
     def _configure_zero_optimizer(self, optimizer):
         zero_stage = self.zero_optimization_stage()
-        log_dist('Creating fp16 ZeRO stage {} optimizer'.format(zero_stage), ranks=[0])
-        assert not self.allreduce_always_fp32(), "ZeRO does not support 'fp32_allreduce': true"
+        log_dist("Creating fp16 ZeRO stage {} optimizer".format(zero_stage), ranks=[0])
+        assert (
+            not self.allreduce_always_fp32()
+        ), "ZeRO does not support 'fp32_allreduce': true"
         timers = self.timers if self.wall_clock_breakdown() else None
 
         if self.zero_legacy_stage1(
@@ -1097,7 +1322,8 @@ class DeepSpeedEngine(Module):
                 mpu=self.mpu,
                 postscale_gradients=self.postscale_gradients(),
                 gradient_predivide_factor=self.gradient_predivide_factor(),
-                gradient_predivide=self.gradient_predivide)
+                gradient_predivide=self.gradient_predivide,
+            )
         elif zero_stage <= ZERO_OPTIMIZATION_GRADIENTS:
             overlap_comm = self.zero_overlap_comm()
             contiguous_gradients = self.zero_contiguous_gradients()
@@ -1149,6 +1375,7 @@ class DeepSpeedEngine(Module):
             assert not self.has_moe_layers, "MoE not supported with Stage 3"
             print("Initializing ZeRO Stage 3") if dist.get_rank() == 0 else None
             from deepspeed.runtime.zero.stage3 import FP16_DeepSpeedZeroOptimizer_Stage3
+
             optimizer = FP16_DeepSpeedZeroOptimizer_Stage3(
                 self.module,
                 optimizer,
@@ -1174,7 +1401,8 @@ class DeepSpeedEngine(Module):
                 postscale_gradients=self.postscale_gradients(),
                 gradient_predivide_factor=self.gradient_predivide_factor(),
                 gradient_accumulation_steps=self.gradient_accumulation_steps(),
-                aio_config=self.aio_config())
+                aio_config=self.aio_config(),
+            )
 
         else:
             raise NotImplementedError("ZeRO stage {} not implemented".format(zero_stage))
@@ -1189,7 +1417,8 @@ class DeepSpeedEngine(Module):
             stability=self.eigenvalue_stability(),
             gas_boundary_resolution=self.eigenvalue_gas_boundary_resolution(),
             layer_name=self.eigenvalue_layer_name(),
-            layer_num=self.eigenvalue_layer_num())
+            layer_num=self.eigenvalue_layer_num(),
+        )
 
         return eigenvalue
 
@@ -1273,15 +1502,13 @@ class DeepSpeedEngine(Module):
                                    dataloader_drop_last=self.dataloader_drop_last())
 
     def train(self, mode=True):
-        r"""
-        """
+        r""""""
 
         self.warn_unscaled_loss = True
         self.module.train(mode)
 
     def eval(self):
-        r"""
-        """
+        r""""""
 
         self.warn_unscaled_loss = True
         self.module.train(False)
@@ -1300,7 +1527,7 @@ class DeepSpeedEngine(Module):
             scaled_loss = prescaled_loss
             if self.warn_unscaled_loss:
                 logger.warning(
-                    f'DeepSpeed unable to scale loss because of type: {type(prescaled_loss)}'
+                    f"DeepSpeed unable to scale loss because of type: {type(prescaled_loss)}"
                 )
                 self.warn_unscaled_loss = False
 
@@ -1312,9 +1539,17 @@ class DeepSpeedEngine(Module):
             *inputs: Variable length input list
             **kwargs: variable length keyword arguments
         """
-        if self.flops_profiler_enabled(
-        ) and self.global_steps == self.flops_profiler_profile_step(
-        ) and self.global_rank == 0:
+
+        if self.autotuning_profile_model_info():
+            ma = get_ma_status()
+        else:
+            see_memory_usage("Engine before forward", force=self.memory_breakdown())
+
+        flops_profiler_active = (self.flops_profiler_enabled() and
+                                 self.global_steps == self.flops_profiler_profile_step()
+                                 and self.global_rank == 0)
+
+        if flops_profiler_active:
             self.flops_profiler.start_profile(ignore_list=None)
 
         if self.module.training and self.progressive_layer_drop:
@@ -1338,9 +1573,7 @@ class DeepSpeedEngine(Module):
                 module._parameters._in_forward = True
                 pass
 
-        if self.wall_clock_breakdown():
-            self.timers('forward_microstep').start()
-            self.timers('forward').start()
+        self._start_timers(self.engine_timers.forward_timers)
 
         if self.training_dataloader is None:
             self.tput_timer.start()
@@ -1356,22 +1589,20 @@ class DeepSpeedEngine(Module):
             for module in self.module.modules():
                 module._parameters._in_forward = False
 
-        if self.wall_clock_breakdown():
-            self.timers('forward').stop()
-            self.timers('forward_microstep').stop()
+        self._stop_timers(self.engine_timers.forward_timers)
 
-        if self.flops_profiler_enabled(
-        ) and self.global_steps == self.flops_profiler_profile_step(
-        ) and self.global_rank == 0:
+        if flops_profiler_active:
             self.flops_profiler.stop_profile()
-            self.flops_profiler.print_model_profile(
-                profile_step=self.global_steps,
-                module_depth=self.flops_profiler_module_depth(),
-                top_modules=self.flops_profiler_top_modules(),
-                detailed=self.flops_profiler_detailed(),
-                output_file=self.flops_profiler_output_file())
-            self.flops_profiler.end_profile()
 
+        if self.autotuning_profile_model_info():
+            activation_mem = get_ma_status() - ma
+            self.autotuning_model_info["activation_mem_per_gpu"] = activation_mem
+            print_json_dist(self.autotuning_model_info,
+                            [0],
+                            path=self.autotuning_model_info_path())
+            exit()
+        else:
+            see_memory_usage("Engine after forward", force=self.memory_breakdown())
         return loss
 
     def print_forward_breakdown(self, fwd_time):
@@ -1390,9 +1621,9 @@ class DeepSpeedEngine(Module):
             falltoall += l.time_falltoall
             salltoall += l.time_salltoall
 
-        #TODO: Allreduce/average them across ranks for more accurate timing.
+        # TODO: Allreduce/average them across ranks for more accurate timing.
 
-        #if torch.distributed.get_rank() == 0:
+        # if torch.distributed.get_rank() == 0:
         log_dist(
             f"rank={torch.distributed.get_rank()} time (ms) | forward: {fwd_time:.2f} (forward_moe: {moe_time:.2f}, 1st alltoall: {falltoall:.2f}, 2nd alltoall: {salltoall:.2f}, top-k: {gate_time:.2f})",
             ranks=[0])
@@ -1422,9 +1653,11 @@ class DeepSpeedEngine(Module):
             allreduce_gradients: is deprecated, ignored, and will soon be removed'
         """
 
+        see_memory_usage("Engine before backward", force=self.memory_breakdown())
+
         if not allreduce_gradients:
             logger.warning(
-                f'Argument `allreduce_gradients` is deprecated, ignored, and will soon be removed'
+                f"Argument `allreduce_gradients` is deprecated, ignored, and will soon be removed"
             )
 
         # scale loss w.r.t. gradient accumulation if needed
@@ -1435,29 +1668,26 @@ class DeepSpeedEngine(Module):
         if self.tensorboard_enabled():
             if self.is_gradient_accumulation_boundary():
                 if self.global_rank == 0:
-                    self.summary_events = [
-                        (f'Train/Samples/train_loss',
-                         loss.mean().item() * self.gradient_accumulation_steps(),
-                         self.global_samples)
-                    ]
+                    self.summary_events = [(
+                        f"Train/Samples/train_loss",
+                        loss.mean().item() * self.gradient_accumulation_steps(),
+                        self.global_samples,
+                    )]
                     for event in self.summary_events:  # write_summary_events
                         self.summary_writer.add_scalar(event[0], event[1], event[2])
                     self.summary_writer.flush()
 
-        if self.wall_clock_breakdown():
-            self.timers('backward_microstep').start()
-            self.timers('backward').start()
+        self._start_timers(self.engine_timers.backward_timers)
 
-        assert self.optimizer is not None, "must provide optimizer during " \
-                                           "init in order to use backward"
+        assert self.optimizer is not None, (
+            "must provide optimizer during " "init in order to use backward"
+        )
 
-        if self.wall_clock_breakdown():
-            self.timers('backward_inner_microstep').start()
-            self.timers('backward_inner').start()
+        self._start_timers(self.engine_timers.backward_inner_timers)
 
         if self.zero_optimization():
-            self.optimizer.is_gradient_accumulation_boundary = self.is_gradient_accumulation_boundary(
-            )
+            self.optimizer.is_gradient_accumulation_boundary = (
+                self.is_gradient_accumulation_boundary())
             self.optimizer.backward(loss)
         elif self.amp_enabled():
             # AMP requires delaying unscale when inside gradient accumulation boundaries
@@ -1478,26 +1708,22 @@ class DeepSpeedEngine(Module):
             else:
                 loss.backward()
 
-        if self.wall_clock_breakdown():
-            self.timers('backward_inner').stop()
-            self.timers('backward_inner_microstep').stop()
+        self._stop_timers(self.engine_timers.backward_inner_timers)
 
-        if self.wall_clock_breakdown():
-            self.timers('backward_allreduce_microstep').start()
-            self.timers('backward_allreduce').start()
+        self._start_timers(self.engine_timers.backward_reduce_timers)
 
         if self.enable_backward_allreduce:
             self.allreduce_gradients()
 
-        if self.wall_clock_breakdown():
-            self.timers('backward_allreduce').stop()
-            self.timers('backward_allreduce_microstep').stop()
-            self.timers('backward').stop()
-            self.timers('backward_microstep').stop()
+        self._stop_timers(self.engine_timers.backward_reduce_timers)
+
+        self._stop_timers(self.engine_timers.backward_timers)
 
         if release_loss:
             # loss.data = None
             pass
+
+        see_memory_usage("Engine after backward", force=self.memory_breakdown())
 
         return loss
 
@@ -1509,8 +1735,7 @@ class DeepSpeedEngine(Module):
         Returns:
             bool: if the current step is a gradient accumulation boundary.
         """
-        return (self.micro_steps + 1) % \
-            self.gradient_accumulation_steps() == 0
+        return (self.micro_steps + 1) % self.gradient_accumulation_steps() == 0
 
     def zero_grad(self):
         """
@@ -1552,11 +1777,12 @@ class DeepSpeedEngine(Module):
                 tensor_to_quantize,
                 (self.optimizer.overflow if self.fp16_enabled() else False),
                 self.eigenvalue_enabled(),
-                block_eigenvalue)
-        #zero grad in basic optimizer could be unreliable and may not exhibit
-        #the behaviour that we want
-        if not self.zero_optimization() and not self.fp16_enabled(
-        ) and not self.amp_enabled():
+                block_eigenvalue,
+            )
+        # zero grad in basic optimizer could be unreliable and may not exhibit
+        # the behaviour that we want
+        if (not self.zero_optimization() and not self.fp16_enabled()
+                and not self.amp_enabled()):
             self.zero_grad()
         else:
             self.optimizer.zero_grad()
@@ -1565,7 +1791,7 @@ class DeepSpeedEngine(Module):
 
         # Check overflow here since in DS fp16 optimizer, the overflow is updated in above step() function.
         overflow = False
-        if hasattr(self.optimizer, 'overflow'):
+        if hasattr(self.optimizer, "overflow"):
             overflow = self.optimizer.overflow
         self._step_applied = not overflow
 
@@ -1591,12 +1817,19 @@ class DeepSpeedEngine(Module):
         r"""Execute the weight update step after forward and backward propagation
         on effective_train_batch.
         """
-        if self.wall_clock_breakdown():
-            self.timers('step_microstep').start()
-            self.timers('step').start()
+        see_memory_usage("Engine before step", force=self.memory_breakdown())
 
-        assert self.optimizer is not None, "must provide optimizer during " \
-                                           "init in order to use step"
+        # Check early because self.global_steps is incremented at some point here.
+        # TODO: Delay self.global_steps increment until very end of this function.
+        flops_profiler_active = self.flops_profiler_enabled(
+        ) and self.global_steps == self.flops_profiler_profile_step(
+        ) and self.global_rank == 0
+
+        self._start_timers(self.engine_timers.step_timers)
+
+        assert self.optimizer is not None, (
+            "must provide optimizer during " "init in order to use step"
+        )
         report_progress = self.global_rank == 0 if self.global_rank else True
 
         self._step_applied = False  # assume False, will flip to True
@@ -1605,10 +1838,10 @@ class DeepSpeedEngine(Module):
         if self.is_gradient_accumulation_boundary():
             self.gas_boundary_ctr += 1
 
-            if self.eigenvalue_enabled() and (
-                    self.gas_boundary_ctr % self.eigenvalue_gas_boundary_resolution() ==
-                    0) and self.quantizer.any_precision_switch():
-                log_dist(f'computing eigenvalue...', ranks=[0])
+            if (self.eigenvalue_enabled() and
+                (self.gas_boundary_ctr % self.eigenvalue_gas_boundary_resolution() == 0)
+                    and self.quantizer.any_precision_switch()):
+                log_dist(f"computing eigenvalue...", ranks=[0])
                 self.block_eigenvalue = self.eigenvalue.compute_eigenvalue(
                     self.module,
                     self.device,
@@ -1617,98 +1850,152 @@ class DeepSpeedEngine(Module):
             if self.progressive_layer_drop:
                 self.progressive_layer_drop.update_state(self.global_steps)
 
-            if self.eigenvalue_enabled(
-            ) and not self.gas_boundary_ctr % self.eigenvalue_gas_boundary_resolution(
-            ) and self.quantizer.any_precision_switch():
+            if (self.eigenvalue_enabled() and not self.gas_boundary_ctr %
+                    self.eigenvalue_gas_boundary_resolution()
+                    and self.quantizer.any_precision_switch()):
                 self._take_model_step(lr_kwargs, self.block_eigenvalue)
             else:
                 self._take_model_step(lr_kwargs)
 
         self.tput_timer.stop(report_progress)
 
+        self._stop_timers(self.engine_timers.step_timers)
+
         # Log learning rate
         if self.tensorboard_enabled():
             if self.is_gradient_accumulation_boundary():
                 if self.global_rank == 0:
-                    self.summary_events = [(f'Train/Samples/lr',
+                    self.summary_events = [(f"Train/Samples/lr",
                                             self.get_lr()[0],
                                             self.global_samples)]
                     for event in self.summary_events:  # write_summary_events
                         self.summary_writer.add_scalar(event[0], event[1], event[2])
-                    if self.fp16_enabled() and hasattr(self.optimizer, 'cur_scale'):
-                        self.summary_events.append((f'Train/Samples/loss_scale',
-                                                    self.optimizer.cur_scale,
-                                                    self.global_samples))
+                    if self.fp16_enabled() and hasattr(self.optimizer, "cur_scale"):
+                        self.summary_events.append((
+                            f"Train/Samples/loss_scale",
+                            self.optimizer.cur_scale,
+                            self.global_samples,
+                        ))
 
-                    if self.eigenvalue_enabled(
-                    ) and not self.gas_boundary_ctr % self.eigenvalue_gas_boundary_resolution(
-                    ):
+                    if (self.eigenvalue_enabled() and not self.gas_boundary_ctr %
+                            self.eigenvalue_gas_boundary_resolution()):
                         ev_values = self.block_eigenvalue.values()
                         for i in range(len(ev_values)):
                             self.summary_writer.add_scalar(
-                                f'Train/Eigenvalues/ModelBlockParam_{i}',
+                                f"Train/Eigenvalues/ModelBlockParam_{i}",
                                 self.ev_values[i][0],
-                                self.global_samples)
+                                self.global_samples,
+                            )
                             self.summary_writer.flush()
 
                     for event in self.summary_events:  # write_summary_events
                         self.summary_writer.add_scalar(event[0], event[1], event[2])
                     self.summary_writer.flush()
 
+        # Check flops profiling
+        if flops_profiler_active:
+            if self.autotuning_enabled():
+                self.flops = self.flops_profiler.get_total_flops() * 3
+            else:
+                self.flops_profiler.print_model_profile(
+                    profile_step=self.global_steps,
+                    module_depth=self.flops_profiler_module_depth(),
+                    top_modules=self.flops_profiler_top_modules(),
+                    detailed=self.flops_profiler_detailed(),
+                    output_file=self.flops_profiler_output_file(),
+                )
+            self.flops_profiler.end_profile()
+
+        if self.autotuning_enabled() and self.global_steps == (
+                self.autotuning_end_profile_step() + 1):
+            self._autotuning_exit()
+
         if self.wall_clock_breakdown():
-            self.timers('step').stop()
-            self.timers('step_microstep').stop()
-            timer_names = [
-                'forward_microstep',
-                'backward_microstep',
-                'backward_inner_microstep',
-                'backward_allreduce_microstep',
-                'step_microstep'
-            ]
-            self.timers.log(names=timer_names,
-                            reset=False,
+            # Log micro timing and reset
+            self.timers.log(names=self.engine_timers.micro_timers,
                             memory_breakdown=self.memory_breakdown())
 
-            # Log timing
+        if self.wall_clock_breakdown() or self.flops_profiler_enabled():
+            # Log global timing and reset
             if self.is_gradient_accumulation_boundary():
                 if self.tensorboard_enabled():
-                    if self.global_rank == 0:
-                        self.summary_events = [
-                            (f'Train/Samples/elapsed_time_ms_forward',
-                             self.timers('forward').elapsed(reset=False) * 1000.0,
-                             self.global_samples),
-                            (f'Train/Samples/elapsed_time_ms_backward',
-                             self.timers('backward').elapsed(reset=False) * 1000.0,
-                             self.global_samples),
-                            (f'Train/Samples/elapsed_time_ms_backward_inner',
-                             self.timers('backward_inner').elapsed(reset=False) * 1000.0,
-                             self.global_samples),
-                            (f'Train/Samples/elapsed_time_ms_backward_allreduce',
-                             self.timers('backward_allreduce').elapsed(reset=False) *
-                             1000.0,
-                             self.global_samples),
-                            (f'Train/Samples/elapsed_time_ms_step',
-                             self.timers('step').elapsed(reset=False) * 1000.0,
-                             self.global_samples)
-                        ]
-                        for event in self.summary_events:  # write_summary_events
-                            self.summary_writer.add_scalar(event[0], event[1], event[2])
-                        self.summary_writer.flush()
+                    self._write_tensorboard()
 
-            if self.wall_clock_breakdown():
-                fwd_time = self.timers('forward').elapsed(reset=False) * 1000
-                self.timers.log([
-                    'forward',
-                    'backward',
-                    'backward_inner',
-                    'backward_allreduce',
-                    'step'
-                ],
-                                reset=False)
                 if self.has_moe_layers:
+                    fwd_time = self.timers(FORWARD_GLOBAL_TIMER).elapsed(
+                        reset=False) * 1000
                     self.print_forward_breakdown(fwd_time=fwd_time)
 
+                self.timers.log(self.engine_timers.global_timers)
+
         self.micro_steps += 1
+        see_memory_usage("Engine after step", force=self.memory_breakdown())
+
+    def _start_timers(self, timer_names):
+        for name in timer_names:
+            self.timers(name).start()
+
+    def _stop_timers(self, timer_names):
+        record = self.is_gradient_accumulation_boundary() and \
+            self.flops_profiler_enabled() and \
+                (self.global_steps >= self.flops_profiler_profile_step())
+        for name in timer_names:
+            self.timers(name).stop(record=record)
+
+    def _autotuning_exit(self):
+        if self.global_rank == 0:
+            msg = self.timers.get_mean([
+                FORWARD_GLOBAL_TIMER,
+                BACKWARD_GLOBAL_TIMER,
+                STEP_GLOBAL_TIMER,
+            ],
+                                       reset=False)
+            titer = msg[FORWARD_GLOBAL_TIMER] + msg[BACKWARD_GLOBAL_TIMER] + msg[
+                STEP_GLOBAL_TIMER]
+            msg["latency"] = titer
+            msg["FLOPS_per_gpu"] = self.flops * self.gradient_accumulation_steps(
+            ) / titer
+            msg["throughput"] = self.train_batch_size() * 1000 / \
+                msg["latency"]
+            print_json_dist(msg, [0], path=self.autotuning_metric_path())
+            import atexit
+            atexit.register(print, "Autotuning: done with runing current ds config.")
+        exit()
+
+    def _write_tensorboard(self):
+        if self.global_rank == 0:
+            self.summary_events = [
+                (
+                    f"Train/Samples/elapsed_time_ms_forward",
+                    self.timers(FORWARD_GLOBAL_TIMER).elapsed(reset=False) * 1000.0,
+                    self.global_samples,
+                ),
+                (
+                    f"Train/Samples/elapsed_time_ms_backward",
+                    self.timers(BACKWARD_GLOBAL_TIMER).elapsed(reset=False) * 1000.0,
+                    self.global_samples,
+                ),
+                (
+                    f"Train/Samples/elapsed_time_ms_backward_inner",
+                    self.timers(BACKWARD_INNER_GLOBAL_TIMER).elapsed(reset=False) *
+                    1000.0,
+                    self.global_samples,
+                ),
+                (
+                    f"Train/Samples/elapsed_time_ms_backward_allreduce",
+                    self.timers(BACKWARD_REDUCE_GLOBAL_TIMER).elapsed(reset=False) *
+                    1000.0,
+                    self.global_samples,
+                ),
+                (
+                    f"Train/Samples/elapsed_time_ms_step",
+                    self.timers(STEP_GLOBAL_TIMER).elapsed(reset=False) * 1000.0,
+                    self.global_samples,
+                ),
+            ]
+            for event in self.summary_events:  # write_summary_events
+                self.summary_writer.add_scalar(event[0], event[1], event[2])
+            self.summary_writer.flush()
 
     def _get_optimizer_param(self, param_name):
         result = []
@@ -1722,16 +2009,16 @@ class DeepSpeedEngine(Module):
         return result
 
     def get_lr(self):
-        return self._get_optimizer_param('lr')
+        return self._get_optimizer_param("lr")
 
     def get_type(self):
-        return self._get_optimizer_param('type')
+        return self._get_optimizer_param("type")
 
     def get_mom(self):
-        if self.optimizer_name() in ['SGD', 'RMSprop']:
-            return self._get_optimizer_param('momentum')
+        if self.optimizer_name() in ["SGD", "RMSprop"]:
+            return self._get_optimizer_param("momentum")
         else:
-            return self._get_optimizer_param('betas')
+            return self._get_optimizer_param("betas")
 
     def get_pld_theta(self):
         if self.progressive_layer_drop:
@@ -1742,7 +2029,7 @@ class DeepSpeedEngine(Module):
     def _report_progress(self, step):
         lr = self.get_lr()
         mom = self.get_mom()
-        log_dist(f'step={step}, skipped={self.skipped_steps}, lr={lr}, mom={mom}',
+        log_dist(f"step={step}, skipped={self.skipped_steps}, lr={lr}, mom={mom}",
                  ranks=[0])
 
     def allreduce_bucket(self, bucket, dp_group):
@@ -1755,7 +2042,7 @@ class DeepSpeedEngine(Module):
 
         if self.postscale_gradients():
             if self.gradient_predivide_factor() != 1.0:
-                tensor_to_allreduce.mul_(1. / self.gradient_predivide_factor())
+                tensor_to_allreduce.mul_(1.0 / self.gradient_predivide_factor())
 
             dist.all_reduce(tensor_to_allreduce, group=dp_group)
             if self.gradient_average:
@@ -1884,7 +2171,7 @@ class DeepSpeedEngine(Module):
         my_size = torch.LongTensor([value.size()[0]]).to(self.device)
         all_sizes = self.all_gather_scalar(my_size, dp_group)
         max_size = torch.cat(all_sizes).max()
-        fill_size = (max_size - my_size)
+        fill_size = max_size - my_size
 
         assert value.dim() in [1, 2]
         if value.dim() == 1:
@@ -1923,7 +2210,7 @@ class DeepSpeedEngine(Module):
         dist.all_gather(tensor_list, value, group=dp_group)
         return tensor_list
 
-    def module_state_dict(self, destination=None, prefix='', keep_vars=False):
+    def module_state_dict(self, destination=None, prefix="", keep_vars=False):
         sd = self.module.state_dict(destination, prefix, keep_vars)
         return sd
 
@@ -1951,11 +2238,12 @@ class DeepSpeedEngine(Module):
         self.module.load_state_dict(state_dict, strict=strict)
 
     def _get_rank_zero_ckpt_name(self, checkpoints_path, tag, mp_rank, dp_rank):
-        filename = 'zero_pp_rank_{}'.format(dp_rank)
+        filename = "zero_pp_rank_{}".format(dp_rank)
         zero_ckpt_name = os.path.join(
             checkpoints_path,
             str(tag),
-            filename + '_mp_rank_{:02d}'.format(mp_rank) + '_optim_states.pt')
+            filename + "_mp_rank_{:02d}".format(mp_rank) + "_optim_states.pt",
+        )
         return zero_ckpt_name
 
     def _get_zero_ckpt_name(self, checkpoints_path, tag):
@@ -1971,16 +2259,19 @@ class DeepSpeedEngine(Module):
             mp_rank_str = "{:02d}".format(mp_rank)
 
         if self.zero_optimization_partition_weights():
-            filename = 'zero_pp_rank_{}'.format(
+            filename = "zero_pp_rank_{}".format(
                 torch.distributed.get_rank(group=self.optimizer.dp_process_group))
             ckpt_name = os.path.join(
                 checkpoints_path,
                 str(tag),
-                filename + '_mp_rank_' + mp_rank_str + '_model_states.pt')
+                filename + "_mp_rank_" + mp_rank_str + "_model_states.pt",
+            )
         else:
-            ckpt_name = os.path.join(checkpoints_path,
-                                     str(tag),
-                                     'mp_rank_' + mp_rank_str + '_model_states.pt')
+            ckpt_name = os.path.join(
+                checkpoints_path,
+                str(tag),
+                "mp_rank_" + mp_rank_str + "_model_states.pt",
+            )
         return ckpt_name
 
     def _get_optimizer_ckpt_name(self, checkpoints_path, tag, expp_rank):
@@ -2005,6 +2296,7 @@ class DeepSpeedEngine(Module):
                                                 tag,
                                                 mp_placeholder="*")
         import glob
+
         ckpt_files = glob.glob(ckpt_file_pattern)
         ckpt_files.sort()
         return ckpt_files
@@ -2039,13 +2331,15 @@ class DeepSpeedEngine(Module):
         """
 
         if tag is None:
-            latest_path = os.path.join(load_dir, 'latest')
+            latest_path = os.path.join(load_dir, "latest")
             if os.path.isfile(latest_path):
-                with open(latest_path, 'r') as fd:
+                with open(latest_path, "r") as fd:
                     tag = fd.read().strip()
             else:
-                logger.warning(f"Unable to find latest file at {latest_path}, if trying to load latest " \
-                "checkpoint please ensure this file exists or pass an explicit checkpoint tag when loading a checkpoint.")
+                logger.warning(
+                    f"Unable to find latest file at {latest_path}, if trying to load latest "
+                    "checkpoint please ensure this file exists or pass an explicit checkpoint tag when loading a checkpoint."
+                )
                 return None, None
 
         load_path, client_states = self._load_checkpoint(load_dir,
@@ -2074,13 +2368,16 @@ class DeepSpeedEngine(Module):
                          load_module_only=False):
 
         from deepspeed.runtime.state_dict_factory import SDLoaderFactory
+
         ckpt_list = self._get_all_ckpt_names(load_dir, tag)
         sd_loader = SDLoaderFactory.get_sd_loader(ckpt_list)
 
         is_pipe_parallel = isinstance(self.module, PipelineModule)
 
         mp_rank = 0 if self.mpu is None else self.mpu.get_model_parallel_rank()
-        load_path, checkpoint, _ = sd_loader.load(self.mp_world_size, mp_rank, is_pipe_parallel=is_pipe_parallel)
+        load_path, checkpoint, _ = sd_loader.load(
+            self.mp_world_size, mp_rank, is_pipe_parallel=is_pipe_parallel
+        )
 
         if checkpoint is None:
             return None, None
@@ -2097,7 +2394,7 @@ class DeepSpeedEngine(Module):
         self.load_module_state_dict(state_dict=checkpoint['module'],
                                     strict=load_module_strict)
 
-        #TODO: Do the following before we merge to master.
+        # TODO: Do the following before we merge to master.
         #   if load_optimizer states and not load_module_only:
         #           Add consistency check between fp16 and fp32 parameters
         #           If the consistency check fails, crash with a message telling users
@@ -2129,11 +2426,13 @@ class DeepSpeedEngine(Module):
 
             if load_lr_scheduler_states and self.lr_scheduler is not None:
                 self.lr_scheduler.load_state_dict(checkpoint['lr_scheduler'])
+
             if 'sparse_tensor_module_names' in checkpoint:
                 self.sparse_tensor_module_names = checkpoint[
                     'sparse_tensor_module_names']
             elif 'csr_tensor_module_names' in checkpoint:
                 self.sparse_tensor_module_names = checkpoint['csr_tensor_module_names']
+
             self.global_steps = checkpoint['global_steps']
             self.global_samples = checkpoint.get(
                 'global_samples',
@@ -2174,9 +2473,10 @@ class DeepSpeedEngine(Module):
         self.optimizer.load_state_dict(
             state_dict_list=zero_sd_list,
             load_optimizer_states=load_optimizer_states,
-            load_from_fp32_weights=self.zero_load_from_fp32_weights())
+            load_from_fp32_weights=self.zero_load_from_fp32_weights(),
+        )
         print(
-            f'loading {len(zero_sd_list)} zero partition checkpoints for rank {self.global_rank}'
+            f"loading {len(zero_sd_list)} zero partition checkpoints for rank {self.global_rank}"
         )
         return True
 
@@ -2213,12 +2513,13 @@ class DeepSpeedEngine(Module):
             load_dir=load_dir,
             tag=tag,
             mp_rank=mp_rank,
-            dp_world_size=self.loaded_checkpoint_dp_world_size)
+            dp_world_size=self.loaded_checkpoint_dp_world_size,
+        )
         invalid_zero_ckpt_paths = []
         for i, ckpt_name in enumerate(zero_ckpt_names):
             if not os.path.exists(ckpt_name):
                 # transparently handle the old file pattern for optim_states
-                if 'optim_states.pt' in ckpt_name:
+                if "optim_states.pt" in ckpt_name:
                     ckpt_name_try = ckpt_name.replace("_optim_states.pt",
                                                       "optim_states.pt")
                     if os.path.exists(ckpt_name_try):
@@ -2234,9 +2535,9 @@ class DeepSpeedEngine(Module):
 
         zero_sd_list = []
         for ckpt_name in zero_ckpt_names:
-            zero_sd_list.append(torch.load(ckpt_name, map_location='cpu'))
+            zero_sd_list.append(torch.load(ckpt_name, map_location="cpu"))
 
-        zero_optimizer_sd = [sd['optimizer_state_dict'] for sd in zero_sd_list]
+        zero_optimizer_sd = [sd["optimizer_state_dict"] for sd in zero_sd_list]
         print(
             f"successfully loaded {len(zero_optimizer_sd)} ZeRO state_dicts for rank {self.global_rank}"
         )
@@ -2251,9 +2552,10 @@ class DeepSpeedEngine(Module):
             dist.all_reduce(max_bhash, op=torch.distributed.ReduceOp.MAX)
             dist.all_reduce(min_bhash, op=torch.distributed.ReduceOp.MIN)
             valid = all(min_bhash == bhash) and all(max_bhash == bhash)
-            msg = f"[rank={dist.get_rank()}] The checkpoint tag name '{tag}' is not consistent across " \
-                "all ranks. Including rank unique information in checkpoint tag could cause issues when " \
-                "restoring with different world sizes."
+            msg = (
+                f"[rank={dist.get_rank()}] The checkpoint tag name '{tag}' is not consistent across "
+                "all ranks. Including rank unique information in checkpoint tag could cause issues when "
+                "restoring with different world sizes.")
             if self.checkpoint_tag_validation_fail():
                 assert valid, msg
             elif not valid:
@@ -2353,7 +2655,8 @@ class DeepSpeedEngine(Module):
             else:
                 local_expert_id = m.group(1)
 
-            global_expert_id = expp_rank * num_local_experts + int(local_expert_id)
+            global_expert_id = expp_rank * \
+                num_local_experts + int(local_expert_id)
             expert_key = key.replace(f'{moe_str_prefix}{local_expert_id}',
                                      f'{moe_str_prefix}{global_expert_id}')
             experts_state_dict[str(global_expert_id)][expert_key] = moe_state_dict.pop(
@@ -2383,7 +2686,8 @@ class DeepSpeedEngine(Module):
             return
 
         num_local_experts = self.num_experts // self.ep_world_size
-        experts_state_dict, model_state_dict = self._get_moe_state_dict(self.module_state_dict(), num_local_experts, expp_rank)
+        experts_state_dict, model_state_dict = self._get_moe_state_dict(
+            self.module_state_dict(), num_local_experts, expp_rank)
 
         #  Each rank saves its local experts
         for global_expert_id, expert_state_dict in experts_state_dict.items():
@@ -2432,12 +2736,13 @@ class DeepSpeedEngine(Module):
         self._curr_save_path = None
 
     def _create_checkpoint_file(self, save_dir, tag, zero_checkpoint):
-        name_function = self._get_zero_ckpt_name if zero_checkpoint else self._get_ckpt_name
+        name_function = (self._get_zero_ckpt_name
+                         if zero_checkpoint else self._get_ckpt_name)
         try:
             checkpoint_name = name_function(save_dir, tag)
             ensure_directory_exists(checkpoint_name)
         except:
-            logger.error(f'Failed saving model checkpoint to {save_dir} with tag {tag}')
+            logger.error(f"Failed saving model checkpoint to {save_dir} with tag {tag}")
             return False
 
         return True
@@ -2619,7 +2924,8 @@ class DeepSpeedEngine(Module):
 
                     # now buffers - not sure if need to take care of potentially shared weights here
                     for name, buf in module.named_buffers(recurse=False):
-                        if buf is not None and name not in module._non_persistent_buffers_set:
+                        if (buf is not None
+                                and name not in module._non_persistent_buffers_set):
                             state_dict[prefix + name] = buf.detach().cpu()
             #see_memory_usage("after GatheredParameters", force=True)
 

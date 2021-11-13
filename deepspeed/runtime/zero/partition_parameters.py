@@ -743,7 +743,6 @@ class Init(InsertPostInitMethodToModuleSubClasses):
                 see_memory_usage(
                     f'Before partitioning param {param.ds_id} {param.shape}',
                     force=False)
-
                 # param.data does not store anything meaningful in partitioned state
                 param.data = torch.empty(1, dtype=self.dtype, device=param.device)
 

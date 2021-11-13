@@ -1,5 +1,6 @@
 import logging
 import sys
+import os
 
 import torch.distributed as dist
 
@@ -66,6 +67,32 @@ def log_dist(message, ranks=None, level=logging.INFO):
     if should_log:
         final_message = "[Rank {}] {}".format(my_rank, message)
         logger.log(level, final_message)
+
+
+def print_json_dist(message, ranks=None, path=None):
+    """Print message when one of following condition meets
+
+    + not dist.is_initialized()
+    + dist.get_rank() in ranks if ranks is not None or ranks = [-1]
+
+    Args:
+        message (str)
+        ranks (list)
+        path (str)
+
+    """
+    should_log = not dist.is_initialized()
+    ranks = ranks or []
+    my_rank = dist.get_rank() if dist.is_initialized() else -1
+    if ranks and not should_log:
+        should_log = ranks[0] == -1
+        should_log = should_log or (my_rank in set(ranks))
+    if should_log:
+        message['rank'] = my_rank
+        import json
+        with open(path, 'w') as outfile:
+            json.dump(message, outfile)
+            os.fsync(outfile)
 
 
 def get_current_level():

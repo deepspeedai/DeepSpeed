@@ -5,15 +5,17 @@ Licensed under the MIT license.
 #########################################
 # TENSOR OFFLOADING
 #########################################
+OFFLOAD_NONE_DEVICE = "none"
 OFFLOAD_CPU_DEVICE = "cpu"
 OFFLOAD_NVME_DEVICE = "nvme"
+VALID_OFFLOAD_DEVICES = [OFFLOAD_NONE_DEVICE, OFFLOAD_CPU_DEVICE, OFFLOAD_NVME_DEVICE]
 
 #########################################
 # PARAM TENSOR OFFLOADING
 #########################################
 OFFLOAD_PARAM_FORMAT = '''
 "offload_param": {
-  "device": [cpu|nvme],
+  "device": [none|cpu|nvme],
   "nvme_path": "/local_nvme",
   "buffer_count": 5,
   "buffer_size": 1e8,
@@ -23,7 +25,7 @@ OFFLOAD_PARAM_FORMAT = '''
 '''
 OFFLOAD_PARAM = "offload_param"
 OFFLOAD_PARAM_DEVICE = "device"
-OFFLOAD_PARAM_DEVICE_DEFAULT = OFFLOAD_CPU_DEVICE
+OFFLOAD_PARAM_DEVICE_DEFAULT = None
 OFFLOAD_PARAM_NVME_PATH = "nvme_path"
 OFFLOAD_PARAM_NVME_PATH_DEFAULT = None
 OFFLOAD_PARAM_BUFFER_COUNT = "buffer_count"
@@ -40,7 +42,7 @@ OFFLOAD_PARAM_PIN_MEMORY_DEFAULT = False
 #########################################
 OFFLOAD_OPTIMIZER_FORMAT = '''
 "offload_optimizer": {
-  "device": [cpu|nvme],
+  "device": [none|cpu|nvme],
   "nvme_path": "/local_nvme",
   "buffer_count": 4,
   "pin_memory": [true|false],
@@ -51,7 +53,7 @@ OFFLOAD_OPTIMIZER_FORMAT = '''
 '''
 OFFLOAD_OPTIMIZER = "offload_optimizer"
 OFFLOAD_OPTIMIZER_DEVICE = "device"
-OFFLOAD_OPTIMIZER_DEVICE_DEFAULT = OFFLOAD_CPU_DEVICE
+OFFLOAD_OPTIMIZER_DEVICE_DEFAULT = None
 OFFLOAD_OPTIMIZER_NVME_PATH = "nvme_path"
 OFFLOAD_OPTIMIZER_NVME_PATH_DEFAULT = None
 OFFLOAD_OPTIMIZER_BUFFER_COUNT = "buffer_count"

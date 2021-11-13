@@ -27,6 +27,8 @@ lnav:
   - title: "Configuration"
     url: /docs/config-json/
     children:
+      - title: "Autotuning"
+        url: /docs/config-json/#autotuning
       - title: "Batch size"
         url: /docs/config-json/#batch-size-related-parameters
       - title: "Optimizer"
@@ -64,6 +66,8 @@ lnav:
         url: /getting-started/
       - title: "Getting started on Azure"
         url: /tutorials/azure/
+      - title: "Autotuning"
+        url: /tutorials/autotuning/
       - title: "BingBertSQuAD Fine-tuning"
         url: /tutorials/bert-finetuning/
       - title: "BERT Pre-training"

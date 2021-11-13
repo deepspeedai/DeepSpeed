@@ -793,6 +793,12 @@ def memory_status(msg, print_rank=-1, reset_max=False):
     )
 
 
+def get_ma_status():
+    if torch.distributed.is_initialized() and not torch.distributed.get_rank() == 0:
+        return 0
+    return torch.cuda.memory_allocated()
+
+
 def see_memory_usage(message, force=False):
     if not force:
         return

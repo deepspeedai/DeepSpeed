@@ -5,6 +5,7 @@ Licensed under the MIT license.
 
 from deepspeed.runtime.config_utils import get_scalar_param
 from .offload_constants import *
+from .utils import logger
 
 OFFLOAD_PARAM_KEY_DEFAULT_DICT = {
     OFFLOAD_PARAM_DEVICE: OFFLOAD_PARAM_DEVICE_DEFAULT,
@@ -36,9 +37,14 @@ def _get_offload_config(param_dict, key_default_dict):
 
 def get_offload_param_config(param_dict):
     if OFFLOAD_PARAM in param_dict and param_dict[OFFLOAD_PARAM] is not None:
-        return _get_offload_config(param_dict=param_dict[OFFLOAD_PARAM],
-                                   key_default_dict=OFFLOAD_PARAM_KEY_DEFAULT_DICT)
-
+        offload_config = _get_offload_config(
+            param_dict=param_dict[OFFLOAD_PARAM],
+            key_default_dict=OFFLOAD_PARAM_KEY_DEFAULT_DICT)
+        device = offload_config.get("device", OFFLOAD_PARAM_DEVICE_DEFAULT)
+        assert device in VALID_OFFLOAD_DEVICES, f'Invalid parameter offloading device specified: {device}.'
+        if device == OFFLOAD_NONE_DEVICE:
+            return None
+        return offload_config
     return None
 
 
@@ -51,6 +57,12 @@ def get_offload_optimizer_config(param_dict):
         offload_config = _get_offload_config(
             param_dict=param_dict[OFFLOAD_OPTIMIZER],
             key_default_dict=OFFLOAD_OPTIMIZER_KEY_DEFAULT_DICT)
+
+        device = offload_config.get("device", OFFLOAD_OPTIMIZER_DEVICE_DEFAULT)
+        assert device in VALID_OFFLOAD_DEVICES, f'Invalid optimizer offloading device specified: {device}.'
+        if device == OFFLOAD_NONE_DEVICE:
+            return None
+
         offload_config[OFFLOAD_OPTIMIZER_PIPELINE] = offload_config[
             OFFLOAD_OPTIMIZER_PIPELINE_READ] or offload_config[
                 OFFLOAD_OPTIMIZER_PIPELINE_WRITE]

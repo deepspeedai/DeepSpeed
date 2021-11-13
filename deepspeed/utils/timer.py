@@ -1,15 +1,19 @@
-'''
+"""
 Copyright 2019 The Microsoft DeepSpeed Team
-'''
+"""
 
+from numpy.core.numeric import count_nonzero
+from deepspeed.elasticity.elasticity import compute_elastic_config
 import time
 import torch
+from numpy import mean
 from deepspeed.utils.logging import log_dist
 
 from deepspeed.utils import logger
 
 try:
     import psutil
+
     PSUTILS_INSTALLED = True
 except ImportError:
     PSUTILS_INSTALLED = False
@@ -25,28 +29,33 @@ class SynchronizedWallClockTimer:
             self.elapsed_ = 0.0
             self.started_ = False
             self.start_time = time.time()
+            self.records = []
 
         def start(self):
             """Start the timer."""
-            assert not self.started_, 'timer has already been started'
+            assert not self.started_, "timer has already been started"
             torch.cuda.synchronize()
             self.start_time = time.time()
             self.started_ = True
 
-        def stop(self, reset=True):
+        def stop(self, reset=False, record=False):
             """Stop the timer."""
-            assert self.started_, 'timer is not started'
+            assert self.started_, "timer is not started"
             torch.cuda.synchronize()
             if reset:
-                self.elapsed_ = (time.time() - self.start_time)
+                self.elapsed_ = time.time() - self.start_time
             else:
-                self.elapsed_ += (time.time() - self.start_time)
+                self.elapsed_ += time.time() - self.start_time
             self.started_ = False
+            if record:
+                self.records.append(self.elapsed_)
 
         def reset(self):
             """Reset timer."""
             self.elapsed_ = 0.0
             self.started_ = False
+            self.acc_ = 0.0
+            self.cnt_ = 0
 
         def elapsed(self, reset=True):
             """Calculate the elapsed time."""
@@ -63,6 +72,9 @@ class SynchronizedWallClockTimer:
             if started_:
                 self.start()
             return elapsed_
+
+        def mean(self):
+            return trim_mean(self.records, 0.1)
 
     def __init__(self):
         self.timers = {}
@@ -87,24 +99,36 @@ class SynchronizedWallClockTimer:
     def log(self, names, normalizer=1.0, reset=True, memory_breakdown=False, ranks=None):
         """Log a group of timers."""
         assert normalizer > 0.0
-        string = f'rank={torch.distributed.get_rank()} time (ms)'
+        string = f"rank={torch.distributed.get_rank()} time (ms)"
         for name in names:
             if name in self.timers:
-                elapsed_time = self.timers[name].elapsed(
-                    reset=reset) * 1000.0 / normalizer
-                string += ' | {}: {:.2f}'.format(name, elapsed_time)
+                elapsed_time = (self.timers[name].elapsed(reset=reset) * 1000.0 /
+                                normalizer)
+                string += " | {}: {:.2f}".format(name, elapsed_time)
 
         log_dist(string, ranks=ranks or [0])
 
+    def get_mean(self, names, normalizer=1.0, reset=True):
+        """Get the mean of a group of timers."""
+        assert normalizer > 0.0
+        means = {}
+        for name in names:
+            if name in self.timers:
+                elapsed_time = (self.timers[name].mean() * 1000.0 / normalizer)
+                means[name] = elapsed_time
+        return means
 
-class ThroughputTimer():
-    def __init__(self,
-                 batch_size,
-                 num_workers,
-                 start_step=2,
-                 steps_per_output=50,
-                 monitor_memory=False,
-                 logging_fn=None):
+
+class ThroughputTimer:
+    def __init__(
+        self,
+        batch_size,
+        num_workers,
+        start_step=2,
+        steps_per_output=50,
+        monitor_memory=False,
+        logging_fn=None,
+    ):
         self.start_time = 0
         self.end_time = 0
         self.started = False
@@ -157,7 +181,8 @@ class ThroughputTimer():
                     self.logging("{}/{}, SamplesPerSec={}".format(
                         self.epoch_count,
                         self.local_step_count,
-                        self.avg_samples_per_sec()))
+                        self.avg_samples_per_sec(),
+                    ))
                 if self.monitor_memory:
                     virt_mem = psutil.virtual_memory()
                     swap = psutil.swap_memory()
@@ -165,7 +190,8 @@ class ThroughputTimer():
                         self.epoch_count,
                         self.local_step_count,
                         virt_mem.percent,
-                        swap.percent))
+                        swap.percent,
+                    ))
 
     def avg_samples_per_sec(self):
         if self.total_step_count > 0:
@@ -175,3 +201,20 @@ class ThroughputTimer():
             # training samples per second
             return samples_per_step / avg_time_per_step
         return float("-inf")
+
+
+def trim_mean(data, trim_percent):
+    """Compute the trimmed mean of a list of numbers.
+
+    Args:
+        data (list): List of numbers.
+        trim_percent (float): Percentage of data to trim.
+
+    Returns:
+        float: Trimmed mean.
+    """
+    assert trim_percent >= 0.0 and trim_percent <= 1.0
+    n = len(data)
+    data.sort()
+    k = int(round(n * (trim_percent)))
+    return mean(data[k:n - k])

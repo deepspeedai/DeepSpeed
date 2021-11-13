@@ -39,6 +39,7 @@ collections:
       - curriculum-learning.md
       - flops-profiler.md
       - pytorch-profiler.md
+      - autotuning.md
       - gan.md
       - lrrt.md
       - megatron.md

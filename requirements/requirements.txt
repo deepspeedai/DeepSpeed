@@ -5,3 +5,4 @@ ninja
 numpy
 psutil
 packaging
+hjson

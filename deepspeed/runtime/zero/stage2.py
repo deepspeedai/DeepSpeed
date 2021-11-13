@@ -316,6 +316,11 @@ class FP16_DeepSpeedZeroOptimizer(object):
                 assert (partitioned_data.data_ptr() %
                         (2 * self.nccl_start_alignment_factor) == 0)
 
+            # verify that data partition start locations are 4-byte aligned
+            for partitioned_data in data_parallel_partitions:
+                assert (partitioned_data.data_ptr() %
+                        (2 * self.nccl_start_alignment_factor) == 0)
+
             # a partition of the fp32 master weights that will be updated by this process
             if not fp16_master_weights_and_gradients:
                 self.single_partition_of_fp32_groups.append(

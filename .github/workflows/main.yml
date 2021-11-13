@@ -31,7 +31,7 @@ jobs:
 
       - name: Install deepspeed
         run: |
-          pip install .[dev]
+          pip install .[dev,autotuning]
           ds_report
 
       - name: Unit tests
@@ -58,7 +58,7 @@ jobs:
           python -c "import torch; print('CUDA available:', torch.cuda.is_available())"
       - name: Install deepspeed
         run: |
-          pip install .[dev,1bit]
+          pip install .[dev,1bit,autotuning]
           ds_report
       - name: Unit tests
         run: |
@@ -85,7 +85,7 @@ jobs:
           python -c "import torch; print('CUDA available:', torch.cuda.is_available())"
       - name: Install deepspeed
         run: |
-          pip install .[dev]
+          pip install .[dev,autotuning]
           ds_report
       - name: HF transformers tests
         run: |

@@ -22,6 +22,8 @@ from .constants import PDSH_LAUNCHER, OPENMPI_LAUNCHER, MVAPICH_LAUNCHER
 from ..constants import TORCH_DISTRIBUTED_DEFAULT_PORT
 from ..utils import logger
 
+from ..autotuning import Autotuner
+
 DLTS_HOSTFILE = "/job/hostfile"
 EXPORT_ENVS = ["NCCL", "PYTHON", "MV2", 'UCX']
 DEEPSPEED_ENVIRONMENT_NAME = ".deepspeed_env"
@@ -107,6 +109,15 @@ def parse_args(args=None):
                         action="store_true",
                         help="Force multi-node launcher mode, helps in cases where user "
                         "wants to launch on single remote node.")
+
+    parser.add_argument(
+        "--autotuning",
+        default="",
+        choices=["tune",
+                 "run"],
+        type=str,
+        help="Run DeepSpeed autotuner to discover optimal configuration parameters "
+        "before running job.")
 
     parser.add_argument("user_script",
                         type=str,
@@ -253,6 +264,19 @@ def encode_world_info(world_info):
     return world_info_base64
 
 
+def run_autotuning(args, active_resources):
+    tuner = Autotuner(args, active_resources)
+    logger.info("[Start] Running autotuning")
+
+    tuner.tune()
+    tuner.print_tuning_results()
+
+    logger.info("[End] Running autotuning")
+
+    if args.autotuning == "run":
+        tuner.run_after_tuning()
+
+
 def main(args=None):
     args = parse_args(args)
 
@@ -286,6 +310,10 @@ def main(args=None):
         result = subprocess.check_output(hostname_cmd, shell=True)
         args.master_addr = result.decode('utf-8').split()[0]
         logger.info(f"Using IP address of {args.master_addr} for node {first_host}")
+
+    if args.autotuning != "":
+        run_autotuning(args, active_resources)
+        return
 
     if args.num_nodes > 0:
         updated_active_resources = collections.OrderedDict()
