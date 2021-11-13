@@ -233,6 +233,36 @@ Example of <i>**scheduler**</i>
 | ----------------------------------------------------------------------------------------------------- | ------- |
 | <i>**min_loss_scale**</i> is  a **fp16** parameter representing the minimum dynamic loss scale value. | `1000`  |
 
+### BFLOAT16 options
+
+**Note:** this mode cannot be combined with the `amp` mode described below.
+{: .notice--warning}
+
+**Note:** this mode cannot be combined with the `fp16` mode described above.
+{: .notice--warning}
+
+**Note:** this mode is only compatible with ZeRO stage 2.
+{: .notice--warning}
+
+<i>**bfloat16**</i>: [dictionary]
+
+| Description                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                | Default |
+| ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------- |
+| Configuration for using [bfloat16](https://en.wikipedia.org/wiki/Bfloat16_floating-point_format) floating-point format as an alternative to FP16. BFLOAT16 requires hardware support (e.g., NVIDIA A100). An example, including the available dictionary keys is illustrated below. Training with bfloat16 does not require loss scaling. | None    |
+
+```json
+"bfloat16": {
+   "enabled": true
+ }
+```
+
+<i>**bfloat16:enabled**</i>: [boolean]
+
+| Description                                                                                 | Default |
+| ------------------------------------------------------------------------------------------- | ------- |
+| <i>**enabled**</i> is a **bfloat16** parameter indicating whether or not BFLOAT16 training enabled. | `false` |
+
+
 ### Automatic mixed precision (AMP) training options
 
 **Note:** this mode cannot be combined with the `fp16` mode described above. In addition this mode is not currently compatible with ZeRO.
