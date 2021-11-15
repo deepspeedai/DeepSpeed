@@ -64,14 +64,19 @@ def get_default_compute_capabilities():
 # list compatible minor CUDA versions - so that for example pytorch built with cuda-11.0 can be used
 # to build deepspeed and system-wide installed cuda 11.2
 cuda_minor_mismatch_ok = {
-    10: ["10.0",
-         "10.1",
-         "10.2"],
-    11: ["11.0",
-         "11.1",
-         "11.2",
-         "11.3",
-         "11.4"],
+    10: [
+        "10.0",
+        "10.1",
+        "10.2",
+    ],
+    11: [
+        "11.0",
+        "11.1",
+        "11.2",
+        "11.3",
+        "11.4",
+        "11.5",
+    ],
 }
 
 
