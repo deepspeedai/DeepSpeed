@@ -1,19 +1,19 @@
 ---
 title: "Autotuning"
-excerpt: " Automatically discover the optimal DeepSpeed configuration that delivers good training speed"
+excerpt: "Automatically discover the optimal DeepSpeed configuration that delivers good training speed"
 ---
 
 Make sure you've read the DeepSpeed tutorials on [Getting Started](https://www.deepspeed.ai/getting-started/) and [Zero Redundancy Optimizer](https://www.deepspeed.ai/tutorials/zero/) before stepping through this tutorial.
 
-One pain point in model training is to figure out good performance-relevant configurations such as micro-batch size to fully utilize the hardware and achieve a high throughput number. This configuration exploring process is commonly done manually but is important since model training is repeated many times and benefits of using a good configuration. Not only is the hand-tuning process time-consuming, but the outcome is hardware-dependent. This means that a good configuration on one hardware might not be the best on another different hardware. The user thus has to hand tune the configuration again. With DeepSpeed, there are more configuration parameters that could potentially affect the training speed, thus making it more tedious to manually tune the configuration. The hand-tuning process is not needed with Deepspeed's Autotuning framework.
+One pain point in model training is to figure out good performance-relevant configurations such as micro-batch size to fully utilize the hardware and achieve a high throughput number. This configuration exploring process is commonly done manually but is important since model training is repeated many times and benefits from using a good configuration. Not only is the hand-tuning process time-consuming, but the outcome is hardware-dependent. This means that a good configuration on one hardware might not be the best on another different hardware. The user thus has to hand tune the configuration again. With DeepSpeed, there are more configuration parameters that could potentially affect the training speed, thus making it more tedious to manually tune the configuration.
 
-The DeepSpeed Autotuner aims to mitigate this pain point and automatically discover the optimal DeepSpeed configuration that delivers good training speed. It not only reduces the time and resources users spend on tuning, but also can discover configurations better than hand-tuned methods. In this tutorial, we showcase the usage and benefits of the autotuning feature in DeepSpeed. For more details, please see the [README.md](https://github.com/microsoft/DeepSpeed/tree/master/deepspeed/autotuning).
+The DeepSpeed Autotuner mitigates this pain point and automatically discovers the optimal DeepSpeed configuration that delivers good training speed. It not only reduces the time and resources users spend on tuning, but also can discover configurations better than hand-tuned methods. In this tutorial, we showcase the usage and benefits of the autotuning feature in DeepSpeed. For more details, please see the [README.md](https://github.com/microsoft/DeepSpeed/tree/master/deepspeed/autotuning).
 
 ## Tuning scope and strategy
 
 The DeepSpeed Autotuner uses model information, system information, and heuristics to efficiently tune system knobs that affect compute and memory efficiencies, such as ZeRO optimization stages, micro-batch sizes, and many other ZeRO optimization configurations.
 Currently, the DeepSpeed Autotuner tunes ZeRO stages, micro-batch size per GPU, and ZeRO configurations (offloading is not yet supported) on top of other configurations such as optimizer, scheduler, fp16 defined by the user in the DeepSpeed configuration file.
-Note that ZeRO stages, micro-batch sizes, and other ZeRO configurations to tune are also configurable and can be overwritten by the user through the DeepSpeed configuration file. See [Overwriting Tuning Scope](https://github.com/microsoft/DeepSpeed/tree/master/deepspeed/autotuning#overwriting-tuning-scope) for details.
+Note that ZeRO stages, micro-batch sizes, and other ZeRO configurations to tune are also configurable and can be overwritten by the user through the DeepSpeed configuration file. See [Configuring Tuning Scope](https://github.com/microsoft/DeepSpeed/tree/master/deepspeed/autotuning#configuring-tuning-scope) for details.
 
 
 ## Ease of use
@@ -23,7 +23,7 @@ Compared to the original training script (`deepspeed your_program.py <normal cl 
 
 ## Example
 
-We demonstrate the usage and benefit of autotuning using the training of a 0.77 billion parameter [GPT2-large model](https://huggingface.co/gpt2-large) from Hugging Face on 16 Nvidia V100 GPUs. For more examples, refer to [autotuning](https://github.com/microsoft/DeepSpeedExamples/tree/staging-autotuing-v1/autotuning) in the DeepSpeedExamples repo. Note that autotuning works with any DeepSpeed-accelerated model training, not limited to Hugging Face models.
+We demonstrate the usage and benefit of autotuning using the training of a 0.77 billion parameter [GPT2-large model](https://huggingface.co/gpt2-large) from Hugging Face on 16 Nvidia V100 GPUs. For more examples, refer to [autotuning](https://github.com/microsoft/DeepSpeedExamples/tree/master/autotuning) in the DeepSpeedExamples repo. Note that autotuning works with any DeepSpeed-accelerated model training, not limited to Hugging Face models.
 
 The model has:
 

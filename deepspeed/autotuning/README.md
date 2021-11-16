@@ -1,9 +1,9 @@
 # DeepSpeed Autotuning
 ## Overview
 
-One pain point in model training is to figure out good performance-relevant configurations such as micro-batch size to fully utilize the hardware and achieve a high throughput number. This configuration exploring process is commonly done manually but is important since model training is repeated many times and benefits of using a good configuration. Not only is the hand-tuning process time-consuming, but the outcome is hardware-dependent. This means that a good configuration on one hardware might not be the best on another different hardware. The user thus has to hand tune the configuration again. With DeepSpeed, there are more configuration parameters that could potentially affect the training speed, thus making it more tedious to manually tune the configuration. The hand-tuning process is not needed with Deepspeed's Autotuning framework.
+One pain point in model training is to figure out good performance-relevant configurations such as micro-batch size to fully utilize the hardware and achieve a high throughput number. This configuration exploring process is commonly done manually but is important since model training is repeated many times and benefits from using a good configuration. Not only is the hand-tuning process time-consuming, but the outcome is hardware-dependent. This means that a good configuration on one hardware might not be the best on another different hardware. The user thus has to hand tune the configuration again. With DeepSpeed, there are more configuration parameters that could potentially affect the training speed, thus making it more tedious to manually tune the configuration.
 
-The DeepSpeed Autotuner aims to mitigate this pain point and automatically discover the optimal DeepSpeed configuration that delivers good training speed.
+The DeepSpeed Autotuner mitigates this pain point and automatically discovers the optimal DeepSpeed configuration that delivers good training speed.
 The Autotuner uses model information, system information, and heuristics to efficiently tune system knobs that affect compute and memory efficiencies, such as ZeRO optimization stages, micro-batch sizes, and many other ZeRO optimization configurations.
 It not only reduces the time and resources users spend on tuning, but also can discover configurations better than hand-tuned methods.
 
@@ -86,7 +86,7 @@ Currently, the DeepSpeed Autotuner tunes ZeRO stages, micro-batch size per GPU, 
   3. The exploration of different ZeRO stages would stop if the optimal setup for the current ZeRO stage is no better than that of the previous ZeRO stage tuned (other heuristics are used as well for determining the termination).
   4. In the end, the global optimal setup is returned to the user. If the value of the `--autotuning` flag is set to `run`, the Autotuner launches the training with the found optimal setup.
 
-Note that ZeRO stages, micro-batch sizes, and other ZeRO configurations to tune are also configurable and can be overwritten by the user through the DeepSpeed configuration file. See [Overwriting Tuning Scope](#overwriting-tuning-scope) for details.
+Note that ZeRO stages, micro-batch sizes, and other ZeRO configurations to tune are also configurable and can be overwritten by the user through the DeepSpeed configuration file. See [Configuring Tuning Scope](#configuring-tuning-scope) for details.
 
 
 ## Configuring Tuning Scope
