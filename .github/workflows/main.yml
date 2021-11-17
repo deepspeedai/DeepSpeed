@@ -92,6 +92,8 @@ jobs:
           if [[ -d ./torch-extensions ]]; then rm -rf ./torch-extensions; fi
           git clone https://github.com/huggingface/transformers
           cd transformers
+          # use known good HF hash until fix is merged for PR-14408
+          git checkout 1cc453d33
           git rev-parse --short HEAD
           # scipy/sklearn required for tests, using the 'dev' extra forces torch re-install
           pip install .[testing]
