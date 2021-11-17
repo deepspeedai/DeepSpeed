@@ -9,7 +9,6 @@ import torch
 import time
 import datetime
 import math
-from tabulate import tabulate
 
 from ..runtime.config_utils import dict_raise_error_on_duplicate_keys
 from ..runtime.constants import *
@@ -21,6 +20,11 @@ from .scheduler import ResourceManager, run_experiment
 from .tuner import GridSearchTuner, RandomTuner, ModelBasedTuner
 from .utils import *
 
+try:
+    from tabulate import tabulate
+except ImportError:
+    tabulate = None
+
 
 class Autotuner:
     """The DeepSpeed Autotuner automatically discovers the optimal DeepSpeed configuration that delivers good training speed. The Autotuner uses model information, system information, and heuristics to efficiently tune system knobs that affect compute and memory efficiencies, such as ZeRO optimization stages, micro-batch sizes, and many other ZeRO optimization configurations. It not only reduces the time and resources user spend on tuning, but also can discover configurations better than hand-tuned methods.
@@ -29,6 +33,8 @@ class Autotuner:
     def __init__(self, args, active_resources):
         self.args = args
         self.selected_exp_dir = None
+
+        assert tabulate is not None, "Missing required package `tabulate`, please install with `pip install deepspeed[autotuning]`."
 
         logger.debug(f"autotunning args={args}")
 
