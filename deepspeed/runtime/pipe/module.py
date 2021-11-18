@@ -121,7 +121,7 @@ class PipelineModule(nn.Module):
         Args:
             layers (Iterable): A sequence of layers defining pipeline structure. Can be a ``torch.nn.Sequential`` module.
             num_stages (int, optional): The degree of pipeline parallelism. If not specified, ``topology`` must be provided.
-            topology (``deepseed.pipe.ProcessTopology``, optional): Defines the axes of parallelism axes for training. Must be provided if ``num_stages`` is ``None``.
+            topology (``deepseed.runtime.pipe.ProcessTopology``, optional): Defines the axes of parallelism axes for training. Must be provided if ``num_stages`` is ``None``.
             loss_fn (callable, optional): Loss is computed ``loss = loss_fn(outputs, label)``
             base_seed (int, optional): [description]. Defaults to 1234.
             partition_method (str, optional): [description]. Defaults to 'parameters'.
