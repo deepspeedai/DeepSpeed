@@ -21,7 +21,7 @@ from torch.distributed.distributed_c10d import _get_global_rank
 
 from typing import Callable, Dict, Optional, Union, Iterable
 
-from deepspeed.runtime.utils import see_memory_usage, get_ma_status
+from deepspeed.runtime.utils import see_memory_usage, get_ma_status, DummyOptim
 from deepspeed.runtime.zero.stage2 import FP16_DeepSpeedZeroOptimizer
 from deepspeed.runtime.zero.stage1 import FP16_DeepSpeedZeroOptimizer_Stage1
 from deepspeed.runtime.zero.partition_parameters import ZeroParamStatus
@@ -293,6 +293,9 @@ class DeepSpeedEngine(Module):
             self._configure_optimizer(optimizer, model_parameters)
             self._configure_lr_scheduler(lr_scheduler)
             self._report_progress(0)
+        elif self.zero_optimization():
+            # no optim selected but zero is enabled
+            self.optimizer = self._configure_zero_optimizer(optimizer=None)
 
         self._get_model_parameters()
 
@@ -1312,9 +1315,13 @@ class DeepSpeedEngine(Module):
         ), "ZeRO does not support 'fp32_allreduce': true"
         timers = self.timers if self.wall_clock_breakdown() else None
 
+        if optimizer is None:
+            optimizer = DummyOptim(list(self.module.parameters()))
+
         if self.zero_legacy_stage1(
         ) and zero_stage == ZERO_OPTIMIZATION_OPTIMIZER_STATES:
             assert not self.has_moe_layers, "MoE not supported with Stage 1"
+            assert not isinstance(optimizer, DummyOptim), "zero stage 1 requires an optimizer"
 
             optimizer = FP16_DeepSpeedZeroOptimizer_Stage1(
                 optimizer,
@@ -1336,6 +1343,7 @@ class DeepSpeedEngine(Module):
             overlap_comm = self.zero_overlap_comm()
             contiguous_gradients = self.zero_contiguous_gradients()
             round_robin_gradients = self.zero_round_robin_gradients()
+            assert not isinstance(optimizer, DummyOptim), "zero stage 2 requires an optimizer"
 
             # Overlap and contiguous grads are meaningless in stage 1 and are ignored
             if zero_stage == ZERO_OPTIMIZATION_OPTIMIZER_STATES:
@@ -1687,9 +1695,8 @@ class DeepSpeedEngine(Module):
 
         self._start_timers(self.engine_timers.backward_timers)
 
-        assert self.optimizer is not None, (
-            "must provide optimizer during " "init in order to use backward"
-        )
+        assert self.optimizer is not None and not isinstance(self.optimizer, DummyOptim), \
+            "must provide optimizer during init in order to use backward"
 
         self._start_timers(self.engine_timers.backward_inner_timers)
 
@@ -1835,9 +1842,9 @@ class DeepSpeedEngine(Module):
 
         self._start_timers(self.engine_timers.step_timers)
 
-        assert self.optimizer is not None, (
-            "must provide optimizer during " "init in order to use step"
-        )
+        assert self.optimizer is not None and not isinstance(self.optimizer, DummyOptim), \
+            "must provide optimizer during init in order to use step"
+
         report_progress = self.global_rank == 0 if self.global_rank else True
 
         self._step_applied = False  # assume False, will flip to True

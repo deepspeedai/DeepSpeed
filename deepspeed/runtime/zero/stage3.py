@@ -16,7 +16,7 @@ from torch.autograd import Variable
 
 from deepspeed.utils.logging import logger
 from deepspeed.runtime.fp16.loss_scaler import LossScaler, DynamicLossScaler
-from deepspeed.runtime.utils import get_global_norm, see_memory_usage, is_model_parallel_parameter
+from deepspeed.runtime.utils import get_global_norm, see_memory_usage, is_model_parallel_parameter, DummyOptim
 from deepspeed.runtime.zero.partition_parameters import *
 from deepspeed.runtime.zero.partition_parameters import _init_external_params
 from deepspeed.runtime.zero.constants import ZERO_OPTIMIZATION_WEIGHTS
@@ -792,15 +792,18 @@ class FP16_DeepSpeedZeroOptimizer_Stage3(object):
             self._configure_tensor_swapping(offload_optimizer_config, aio_config)
 
         see_memory_usage("Before creating fp32 partitions", force=False)
-        self._create_fp32_partitions()
+        if not isinstance(self.optimizer, DummyOptim):
+            self._create_fp32_partitions()
         see_memory_usage("After creating fp32 partitions", force=False)
         dist.barrier()
 
         # To support pipelined optimizer swapping
-        self._create_next_swappable_fp32_groups()
+        if not isinstance(init_optimizer, DummyOptim):
+            self._create_next_swappable_fp32_groups()
 
         see_memory_usage("Before initializing optimizer states", force=False)
-        self.initialize_optimizer_states()
+        if not isinstance(init_optimizer, DummyOptim):
+            self.initialize_optimizer_states()
         see_memory_usage("After initializing optimizer states", force=False)
         dist.barrier()
 
@@ -920,7 +923,8 @@ class FP16_DeepSpeedZeroOptimizer_Stage3(object):
 
         ###################### offload param setup ##################################
         if offload_param_config is not None:
-            assert self.offload_optimizer, "parameter offload is only available with optimizer state offload"
+            if not isinstance(self.optimizer, DummyOptim):
+                assert self.offload_optimizer, "parameter offload is only available with optimizer state offload"
             self.offload_param = True
             self.offload_param_pin_memory = offload_param_config[
                 OFFLOAD_PARAM_PIN_MEMORY]
