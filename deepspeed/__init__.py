@@ -46,18 +46,6 @@ __version_major__, __version_minor__, __version_patch__ = _parse_version(__versi
 __git_hash__ = git_hash
 __git_branch__ = git_branch
 
-# Provide backwards compatability with old deepspeed.pt module structure, should hopefully not be used
-pt = types.ModuleType('pt', 'dummy pt module for backwards compatability')
-deepspeed = sys.modules[__name__]
-setattr(deepspeed, 'pt', pt)
-setattr(deepspeed.pt, 'deepspeed_utils', deepspeed.runtime.utils)
-sys.modules['deepspeed.pt'] = deepspeed.pt
-sys.modules['deepspeed.pt.deepspeed_utils'] = deepspeed.runtime.utils
-setattr(deepspeed.pt, 'deepspeed_config', deepspeed.runtime.config)
-sys.modules['deepspeed.pt.deepspeed_config'] = deepspeed.runtime.config
-setattr(deepspeed.pt, 'loss_scaler', deepspeed.runtime.fp16.loss_scaler)
-sys.modules['deepspeed.pt.loss_scaler'] = deepspeed.runtime.fp16.loss_scaler
-
 
 def initialize(args=None,
                model: torch.nn.Module = None,
