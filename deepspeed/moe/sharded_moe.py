@@ -37,7 +37,7 @@ try:
     #   python3 -m pip install --user --upgrade git+https://github.com/microsoft/tutel@v0.1.x
     from tutel import moe as tutel_moe
     TUTEL_INSTALLED = True
-except ImportError:
+except:
     # Fail silently so we don't spam logs unnecessarily if user isn't using tutel
     TUTEL_INSTALLED = False
     pass
