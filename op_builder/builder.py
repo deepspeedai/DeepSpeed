@@ -302,6 +302,9 @@ class OpBuilder(ABC):
                 return '-D__AVX512__'
             elif 'avx2' in result:
                 return '-D__AVX256__'
+        elif 'authenticamd' in result:
+            if 'avx2' in result:
+                return '-D__AVX256__'
         return '-D__SCALAR__'
 
     def python_requirements(self):
