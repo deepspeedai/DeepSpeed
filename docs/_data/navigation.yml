@@ -59,6 +59,8 @@ lnav:
         url: /docs/config-json/#activation-checkpointing
       - title: "Sparse Attention"
         url: /docs/config-json/#sparse-attention
+      - title: "Logging to TensorBoard"
+        url: /docs/config-json/#tensorboard-options
   - title: "Tutorials"
     url: /tutorials/
     children:

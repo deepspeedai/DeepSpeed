@@ -939,3 +939,42 @@ Configuring the asynchronous I/O module for offloading parameter and optimizer s
 | Description                                                                                                                  | Default |
 | ---------------------------------------------------------------------------------------------------------------------------- | ------- |
 | List of which step to change difficulty level. One of the `schedule_config` when the `fixed_discrete` schedule_type is used. | N/A     |
+
+### Logging to Tensorboard
+
+**Note:** Deepspeed logs to TensorBoard through PyTorch. Logging to TensorBoard requires that the `tensorboard` package is installed (read more in the [PyTorch documentation](https://pytorch.org/docs/1.8.0/tensorboard.html)).
+{: .notice--warning}
+
+
+Deepspeed can log training details into a [Tensorboard](https://www.tensorflow.org/tensorboard)-compatible file. Below is an overview of what deepspeed will log.
+
+| Field | Description                                                                                                                                                                                                                                                                                               |Conditions |
+| ------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ----- |
+| `Train/Samples/train_loss`   | The training loss. | None |
+| `Train/Samples/lr`           | The learning rate during training. | None |
+| `Train/Samples/loss_scale`   | The loss scale when training using `fp16`. | `fp16` must be enabled. |
+| `Train/Eigenvalues/ModelBlockParam_{i}`   | Eigen values per param block. | `eigenvalue` must be enabled. |
+| `Train/Samples/elapsed_time_ms_forward`   | The global duration of the forward pass. | `flops_profiler.enabled` or `wall_clock_breakdown`. |
+| `Train/Samples/elapsed_time_ms_backward`   | The global duration of the forward pass. | `flops_profiler.enabled` or `wall_clock_breakdown`.  |
+| `Train/Samples/elapsed_time_ms_backward_inner`   | The backward time that does not include the the gradient reduction time. Only in cases where the gradient reduction is not overlapped, if it is overlapped then the inner time should be about the same as the entire backward time. | `flops_profiler.enabled` or `wall_clock_breakdown`.  |
+| `Train/Samples/elapsed_time_ms_backward_allreduce`   | The global duration of the allreduce operation. | `flops_profiler.enabled` or `wall_clock_breakdown`.  |
+| `Train/Samples/elapsed_time_ms_step`   | The optimizer step time | `flops_profiler.enabled` or `wall_clock_breakdown`.  |
+
+<i>**tensorboard**</i>: [dictionary]
+
+| Fields | Value                                                                                                                                                                                                                                                                                                        |Default |
+| ------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ----- |
+| enabled   | Whether logging to [Tensorboard](https://www.tensorflow.org/tensorboard) is enabled. | `false` |
+| job_name  | Name for the current job. This will become a new directory inside `output_path` | `"DeepSpeedJobName"` |
+| output_path | Path to where the Tensorboard logs will be written.                           | `~/tensorboard/` |
+
+
+Example of <i>** tensorboard**</i> configuration:
+
+```json
+"tensorboard": {
+    "enabled": true,
+    "output_path": "output/ds_logs/",
+    "job_name": "train_bert"
+}
+```
