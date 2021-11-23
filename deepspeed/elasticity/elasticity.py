@@ -62,17 +62,16 @@ HCN_LIST = [
 
 def get_candidate_batch_sizes(base_list, max_acceptable_batch_size):
     candidate_batch_size = []
-
-    #brute force is fine here. We are working with very small lists
     for base in base_list:
-        batch_size = base
-        for hcn in HCN_LIST:
-            new_batch_size = base * hcn
-            if new_batch_size > max_acceptable_batch_size:
-                break
-            batch_size = new_batch_size
-        candidate_batch_size.append(batch_size)
-    return list(set(candidate_batch_size))
+        if base >= max_acceptable_batch_size:
+            candidate_batch_size.append(base)
+        else:
+            value = max_acceptable_batch_size // base
+            index = np.argmax(np.asarray(HCN_LIST) > value)
+            candidate_batch_size.append(HCN_LIST[index - 1] * base)
+    candidate_batch_size = list(set(candidate_batch_size))
+    logger.info(f"Candidate batch size: {candidate_batch_size}")
+    return candidate_batch_size
 
 
 def get_valid_gpus(batch_size, micro_batches, min_valid_gpus, max_valid_gpus):
@@ -84,12 +83,17 @@ def get_valid_gpus(batch_size, micro_batches, min_valid_gpus, max_valid_gpus):
             if max_gpus >= min_valid_gpus and max_gpus <= max_valid_gpus:
                 valid_gpus.append(max_gpus)
 
+            # find all factors less than max_gpus / 2
             for i in range(1, max_gpus // 2 + 1):
+                if i > max_valid_gpus:
+                    break
+                if i < min_valid_gpus:
+                    continue
                 if max_gpus % i == 0:
-                    if i >= min_valid_gpus and i <= max_valid_gpus:
-                        valid_gpus.append(i)
+                    valid_gpus.append(i)
     valid_gpus = set(valid_gpus)
     valid_gpus = sorted(list(valid_gpus))
+    logger.info(f"Valid GPUs: {valid_gpus}")
     return valid_gpus
 
 
@@ -143,16 +147,12 @@ def _get_compatible_gpus_v01(micro_batches,
         final_batch_size
         valid_gpus
     '''
+    min_gpus = min_gpus or 1
+    max_gpus = max_gpus or max_acceptable_batch_size // min(micro_batches)
 
-    if min_gpus is None:
-        min_gpus = int(1)
-
-    if max_gpus is None:
-        max_gpus = int(max_acceptable_batch_size / min(micro_batches))
-
-    assert all(mb <= max_acceptable_batch_size for mb in micro_batches ), \
-            f"All micro batches must be less than \
-            or equal to max_acceptable_batch_size: {max_acceptable_batch_size}"
+    if not all(mb <= max_acceptable_batch_size for mb in micro_batches):
+        raise ValueError(f"All micro batches must be less than \
+            or equal to max_acceptable_batch_size: {max_acceptable_batch_size}")
 
     lcm = np.lcm.reduce(micro_batches)
 
