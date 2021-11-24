@@ -506,7 +506,7 @@ class CheckpointFunction(torch.autograd.Function):
 
         def save_args_for_backward(*all_args):
             tensor_args, non_tensor_args, tensor_flags = extract_tensors(all_objects=all_args)
-            ctx.save_for_backward(*tensor_args)
+            ctx.deepspeed_saved_tensors = tensor_args
             ctx.non_tensor_args = non_tensor_args
             ctx.tensor_flags = tensor_flags
 
@@ -656,16 +656,16 @@ class CheckpointFunction(torch.autograd.Function):
         if PARTITION_ACTIVATIONS:
             # with torch.cuda.stream(transport_stream):
             inputs = gather_partitioned_activations(
-                ctx.saved_tensors,
+                ctx.deepspeed_saved_tensors,
                 device=cuda_device if CPU_CHECKPOINT else None)
             detached_inputs = detach_variable(inputs)
         elif CPU_CHECKPOINT:
-            inputs = move_to_device(ctx.saved_tensors,
+            inputs = move_to_device(ctx.deepspeed_saved_tensors,
                                     cuda_device,
                                     is_activation_to_checkpoint)
             detached_inputs = detach_variable(inputs)
         else:
-            inputs = ctx.saved_tensors
+            inputs = ctx.deepspeed_saved_tensors
             detached_inputs = detach_variable(inputs)
 
         # Add non tensor input args

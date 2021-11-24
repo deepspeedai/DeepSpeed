@@ -120,3 +120,21 @@ def log_rank_file(rank, *msgs):
     for m in msgs:
         fh.write(f"{m}\n")
     fh.flush()
+
+
+def print_backward_tensors(tensor):
+    def _print_bwd_tensors(grad_fn):
+        print(f"Backward tensors in {grad_fn}")
+        for funcs in grad_fn.next_functions:
+            if funcs[0]:
+                try:
+                    tensor = getattr(funcs[0], 'variable')
+                    print(funcs[0])
+                    print(
+                        f"Tensor - id: {id(tensor)}, shape: {tensor.shape}, data: {tensor}, grad: {tensor.grad}"
+                    )
+                except AttributeError as e:
+                    _print_bwd_tensors(funcs[0])
+
+    if hasattr(tensor, 'grad_fn'):
+        _print_bwd_tensors(tensor.grad_fn)
