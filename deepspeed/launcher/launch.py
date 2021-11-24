@@ -134,7 +134,8 @@ def main():
             except Exception:
                 pass
         if last_return_code is not None:
-            raise subprocess.CalledProcessError(returncode=last_return_code, cmd=cmd)
+            logger.error(f"{cmd} exits with return code = {last_return_code}")
+            sys.exit(last_return_code)
         if signum in sig_names:
             logger.info(f"Main process received {sig_names[signum]}, exiting")
         sys.exit(1)
