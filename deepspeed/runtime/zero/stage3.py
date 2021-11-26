@@ -626,7 +626,7 @@ class FP16_DeepSpeedZeroOptimizer_Stage3(object):
                  sub_group_size=1000000000000,
                  mpu=None,
                  clip_grad=0.0,
-                 allreduce_always_fp32=False,
+                 communication_data_type=torch.float16,
                  postscale_gradients=True,
                  gradient_predivide_factor=1.0,
                  gradient_accumulation_steps=1,
@@ -737,14 +737,14 @@ class FP16_DeepSpeedZeroOptimizer_Stage3(object):
 
         self.overflow = False
         self.clip_grad = clip_grad
-        self.allreduce_always_fp32 = allreduce_always_fp32
+        self.communication_data_type = communication_data_type
         self.gradient_predivide_factor = gradient_predivide_factor
         self.postscale_gradients = postscale_gradients
         self.gradient_accumulation_steps = gradient_accumulation_steps
         self.micro_step_id = INITIAL_MICRO_STEP_ID
 
         if self.reduce_scatter:
-            assert not self.allreduce_always_fp32, "allreduce_always_fp32 is not yet supported with ZeRO-2 with reduce scatter enabled"
+            assert self.communication_data_type in (torch.float16, torch.bfloat16), f"ZeRO-3 supports only float16 or bfloat16 communication_data_type with reduce scatter enabled. Got: '{self.communication_data_type}'"
             assert self.gradient_predivide_factor == 1.0, "gradient_predivide_factor != 1.0 is not yet supported with ZeRO-2 with reduce scatter enabled"
             assert self.postscale_gradients, "pre-scale gradients is not yet supported with ZeRO-2 with reduce scatter enabled"
 
@@ -1987,8 +1987,8 @@ class FP16_DeepSpeedZeroOptimizer_Stage3(object):
 
         tensor_to_allreduce = tensor
 
-        if self.allreduce_always_fp32:
-            tensor_to_allreduce = tensor.float()
+        if self.communication_data_type != tensor.dtype:
+            tensor_to_allreduce = tensor.to(self.communication_data_type)
 
         if self.postscale_gradients:
             if self.gradient_predivide_factor != 1.0:
@@ -2002,7 +2002,7 @@ class FP16_DeepSpeedZeroOptimizer_Stage3(object):
             tensor_to_allreduce.div_(dp_world_size)
             dist.all_reduce(tensor_to_allreduce, group=self.dp_process_group)
 
-        if self.allreduce_always_fp32 and tensor is not tensor_to_allreduce:
+        if self.communication_data_type != tensor.dtype and tensor is not tensor_to_allreduce:
             tensor.copy_(tensor_to_allreduce)
 
         return tensor
@@ -2327,17 +2327,21 @@ class FP16_DeepSpeedZeroOptimizer_Stage3(object):
 
     ######################Reduction Related Methods##############################
 
-    def allreduce_bucket(self, bucket, allreduce_always_fp32=False, rank=None, log=None):
+    def allreduce_bucket(self,
+                         bucket,
+                         communication_data_type=torch.float16,
+                         rank=None,
+                         log=None):
         rank = None
         tensor = self.flatten(bucket)
 
         tensor_to_allreduce = tensor
 
         if pg_correctness_test:
-            allreduce_always_fp32 = True
+            communication_data_type = torch.float32
 
-        if allreduce_always_fp32:
-            tensor_to_allreduce = tensor.float()
+        if communication_data_type != tensor.dtype:
+            tensor_to_allreduce = tensor.to(communication_data_type)
 
         tensor_to_allreduce.div_(dist.get_world_size(group=self.dp_process_group))
 
@@ -2348,7 +2352,7 @@ class FP16_DeepSpeedZeroOptimizer_Stage3(object):
             global_rank = _get_global_rank(self.dp_process_group, rank)
             dist.reduce(tensor_to_allreduce, global_rank, group=self.dp_process_group)
 
-        if allreduce_always_fp32 and tensor is not tensor_to_allreduce:
+        if communication_data_type != tensor.dtype and tensor is not tensor_to_allreduce:
             if rank is None or rank == dist.get_rank(group=self.dp_process_group):
                 tensor.copy_(tensor_to_allreduce)
 

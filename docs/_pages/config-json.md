@@ -151,11 +151,11 @@ Example of <i>**scheduler**</i>
 
 ### Communication options
 
-<i>**fp32_allreduce**</i>: [boolean]
+<i>**communication_data_type**</i>: [boolean]
 
-| Description                                                    | Default |
-| -------------------------------------------------------------- | ------- |
-| During gradient averaging perform allreduce with 32 bit values | `false` |
+| Description                                                                                                                   | Default |
+| ----------------------------------------------------------------------------------------------------------------------------- | ------- |
+| During gradient averaging perform communication with selected data type. Buy default it will be determined by selected regime |  None   |
 
 <i>**prescale_gradients**</i>: [boolean]
 
