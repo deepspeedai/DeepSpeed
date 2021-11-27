@@ -1626,6 +1626,14 @@ class FP16_DeepSpeedZeroOptimizer(object):
         prev_scale = self.loss_scale
         self._update_scale(self.overflow)
         if self.overflow:
+
+            if dist.get_rank() == 0:
+                logger.info(
+                    "[deepscale] OVERFLOW! Rank {} Skipping step. Attempted loss scale: {}, "
+                    "reducing to {}".format(dist.get_rank(),
+                                            prev_scale,
+                                            self.loss_scale))
+
             see_memory_usage('After overflow before clearing gradients')
             self.zero_grad()
             if self.cpu_offload:
