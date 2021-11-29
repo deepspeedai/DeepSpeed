@@ -1014,11 +1014,11 @@ class DeepSpeedEngine(Module):
             for _, module in self.module.named_modules():
                 if isinstance(module, TopKGate):
                     self.gate_modules.append(module)
-                    if self.wall_clock_breakdown:
+                    if self.wall_clock_breakdown():
                         module.wall_clock_breakdown = True
                 if isinstance(module, MOELayer):
                     self.moe_layers.append(module)
-                    if self.wall_clock_breakdown:
+                    if self.wall_clock_breakdown():
                         module.wall_clock_breakdown = True
 
         if not self.pipeline_parallelism:
