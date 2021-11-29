@@ -72,4 +72,3 @@ Finally, here is a screenshot of htop showing host CPU and memory activity durin
 </a>
 
 Congratulations! You have completed the ZeRO-Offload tutorial.
-
