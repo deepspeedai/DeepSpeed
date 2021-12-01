@@ -475,9 +475,10 @@ class Init(InsertPostInitMethodToModuleSubClasses):
         self.rank = torch.distributed.get_rank(group=self.ds_process_group)
         self.world_size = torch.distributed.get_world_size(group=self.ds_process_group)
 
-        # Local device is the device where the parameters are consumed
+        # Local device is the device where the parameters are consumed, must be default device.
         # It is the device where parameters are fully instantiated using allgather
         self.local_device = torch.device('cuda:{}'.format(os.environ["LOCAL_RANK"]))
+        torch.cuda.set_device(self.local_device)
 
         if _ds_config is not None and _ds_config.zero_config.offload_param is not None:
             remote_device = _ds_config.zero_config.offload_param[OFFLOAD_PARAM_DEVICE]
