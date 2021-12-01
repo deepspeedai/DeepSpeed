@@ -373,7 +373,7 @@ optimizer](https://arxiv.org/abs/1910.02054v2). In February, we released a sub-s
 of optimizations from ZeRO in DeepSpeed that performs optimizer state partitioning.
 We refer to them as ZeRO-1. In May, 2020 we extended ZeRO-1 in DeepSpeed to include
 additional optimizations from ZeRO including gradient and activation partitioning,
-as well as contiguous memory optimizations. We refer to this release as ZeRO-2.  
+as well as contiguous memory optimizations. We refer to this release as ZeRO-2.
 
 ZeRO-2 significantly reduces the memory
 footprint for training large models which means large models can be trained with i) less

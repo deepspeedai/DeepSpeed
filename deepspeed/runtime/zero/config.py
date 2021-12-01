@@ -104,9 +104,8 @@ class DeepSpeedZeroConfig(DeepSpeedConfigObject):
         self.overlap_comm = get_scalar_param(
             zero_config_dict,
             ZERO_OPTIMIZATION_OVERLAP_COMM,
-            ZERO3_OPTIMIZATION_OVERLAP_COMM_DEFAULT
-            if self.stage == ZERO_OPTIMIZATION_WEIGHTS else
-            ZERO_OPTIMIZATION_OVERLAP_COMM_DEFAULT)
+            ZERO3_OPTIMIZATION_OVERLAP_COMM_DEFAULT if self.stage
+            == ZERO_OPTIMIZATION_WEIGHTS else ZERO_OPTIMIZATION_OVERLAP_COMM_DEFAULT)
 
         self.allgather_partitions = get_scalar_param(
             zero_config_dict,

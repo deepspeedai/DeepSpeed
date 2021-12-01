@@ -12,6 +12,6 @@
     "stage3_prefetch_bucket_size": 5e8,
     "stage3_param_persistence_threshold": 1e6,
     "stage3_gather_fp16_weights_on_model_save": false,
-    "sub_group_size": 1e12,
+    "sub_group_size": 1e12
   }
 }

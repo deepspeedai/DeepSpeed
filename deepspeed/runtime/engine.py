@@ -511,10 +511,10 @@ class DeepSpeedEngine(Module):
         return self._config.tensorboard_job_name
 
     def get_summary_writer(
-        self,
-        name="DeepSpeedJobName",
-        base=os.path.join(os.path.expanduser("~"),
-                          "tensorboard"),
+            self,
+            name="DeepSpeedJobName",
+            base=os.path.join(os.path.expanduser("~"),
+                              "tensorboard"),
     ):
         if self.tensorboard_output_path():
             base_dir = self.tensorboard_output_path()
@@ -1570,8 +1570,8 @@ class DeepSpeedEngine(Module):
         else:
             see_memory_usage("Engine before forward", force=self.memory_breakdown())
 
-        flops_profiler_active = (self.flops_profiler_enabled() and
-                                 self.global_steps == self.flops_profiler_profile_step()
+        flops_profiler_active = (self.flops_profiler_enabled() and self.global_steps
+                                 == self.flops_profiler_profile_step()
                                  and self.global_rank == 0)
 
         if flops_profiler_active:

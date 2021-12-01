@@ -7,6 +7,7 @@ import pytest
 import torch
 
 import deepspeed
+
 ckpt = deepspeed.checkpointing.checkpoint
 
 from common import distributed_test

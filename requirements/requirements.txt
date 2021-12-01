@@ -1,7 +1,7 @@
-torch
-tqdm
+hjson
 ninja
 numpy
-psutil
 packaging
-hjson
+psutil
+torch
+tqdm

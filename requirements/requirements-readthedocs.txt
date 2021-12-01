@@ -1,5 +1,5 @@
-tqdm
-psutil
 docutils<0.18
 hjson
+psutil
 torch
+tqdm

@@ -18,12 +18,12 @@ class SparseSelfAttention(nn.Module):
     For usage example please see, TODO DeepSpeed Sparse Transformer Tutorial.
     """
     def __init__(
-        self,
-        # SparsityConfig parameters needs to be set accordingly
-        sparsity_config=SparsityConfig(num_heads=4),
-        key_padding_mask_mode='add',
-        attn_mask_mode='mul',
-        max_seq_length=2048):
+            self,
+            # SparsityConfig parameters needs to be set accordingly
+            sparsity_config=SparsityConfig(num_heads=4),
+            key_padding_mask_mode='add',
+            attn_mask_mode='mul',
+            max_seq_length=2048):
         """Initialize the sparse self attention layer.
         Arguments:
             sparsity_config: optional: this parameter determines sparsity pattern configuration; it is based on SparsityConfig class.

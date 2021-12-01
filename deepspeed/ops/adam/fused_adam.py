@@ -8,6 +8,7 @@ This file is adapted from fused adam in NVIDIA/apex, commit a109f85
 import torch
 import importlib
 from .multi_tensor_apply import MultiTensorApply
+
 multi_tensor_applier = MultiTensorApply(2048 * 32)
 from ..op_builder import FusedAdamBuilder
 

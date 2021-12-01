@@ -488,8 +488,8 @@ class Init(InsertPostInitMethodToModuleSubClasses):
         # Remote device is the device where parameter partiitons are stored
         # It can be same as local_device or it could be CPU or NVMe.
         self.remote_device = self.local_device if remote_device is None else remote_device
-        self.pin_memory = pin_memory if (
-            self.remote_device == OFFLOAD_CPU_DEVICE) else False
+        self.pin_memory = pin_memory if (self.remote_device
+                                         == OFFLOAD_CPU_DEVICE) else False
 
         # Enable fp16 param swapping to NVMe
         if self.remote_device == OFFLOAD_NVME_DEVICE:
@@ -783,9 +783,8 @@ class Init(InsertPostInitMethodToModuleSubClasses):
                     partitioned_tensor = torch.empty(
                         partition_size,
                         dtype=param.dtype,
-                        device=OFFLOAD_CPU_DEVICE
-                        if self.remote_device == OFFLOAD_NVME_DEVICE else
-                        self.remote_device)
+                        device=OFFLOAD_CPU_DEVICE if self.remote_device
+                        == OFFLOAD_NVME_DEVICE else self.remote_device)
                     if self.pin_memory:
                         partitioned_tensor = partitioned_tensor.pin_memory()
 

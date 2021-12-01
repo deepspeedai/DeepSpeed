@@ -16,11 +16,11 @@ example, DeepSpeed can attain a staggering 64 teraflops of single GPU
 performance on a NVIDIA V100 GPU which is over 50% of the hardware peak.
 
 In this blog post, we will discuss four technological improvements that enable
-DeepSpeed to achieve this record-breaking BERT training time.  
+DeepSpeed to achieve this record-breaking BERT training time.
 
 1.  Highly optimized transformer kernels to improve compute efficiency
 2.  Overlapping I/O with computation through asynchronous prefetching queue
-3.  Sparse output processing to eliminate wasteful computation  
+3.  Sparse output processing to eliminate wasteful computation
 4.  Layer-norm reordering for training stability and faster convergence
 
 These optimizations not only benefit BERT; they are also applicable to many
@@ -143,7 +143,7 @@ transferring data to and from global memory and overhead from kernel launching.
 Existing compiler-based approaches perform fine-grained fusion (e.g., fusion of
 element-wise operations), leading to missed fusion opportunities. In contrast,
 we fully exploit both fine-grain and coarse-grained fusion, tailored for
-Transformer blocks.  
+Transformer blocks.
 
 **QKV and various fusions.**  We merge the three Query (Q), Key (K), and Value (V)
 weight matrices to dispatch a larger QKV GEMM to expose more parallelism and
@@ -160,7 +160,7 @@ order to rearrange the data in a way that we can put the data in consecutive
 parts of memory. Even though we produce an uncoalesced pattern when accessing
 shared memory, we reduce the cost of uncoalesced access to main memory to
 better exploit memory bandwidth, resulting in 3% to 5% performance improvement
-in the end-to-end training.  
+in the end-to-end training.
 
 ![QKV-Fusion](/assets/images/qkv_fusion.png){: .align-center}
 
@@ -280,7 +280,7 @@ a modification described by several recent works for neural machine
 translation. The Pre-LayerNorm results in several useful characteristics such
 as avoiding vanishing gradient, stable optimization, and performance gain.  It
 allows us to train at aggregated batch size of 64K with increased learning rate
-and faster convergence.  
+and faster convergence.
 
 
 To try out these optimizations and training recipe, please check out our [BERT

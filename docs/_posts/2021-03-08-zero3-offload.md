@@ -12,7 +12,7 @@ Today we are announcing the release of ZeRO-3 Offload, a highly efficient and ea
 * Extremely Easy to use:
     * Scale to over a trillion parameters without the need to combine multiple parallelism techniques in complicated ways.
     * For existing DeepSpeed users, turn on ZeRO-3 Offload with just a few flags in DeepSpeed Config file.
-* High-performance per-GPU throughput and super-linear scalability across GPUs for distributed training.  
+* High-performance per-GPU throughput and super-linear scalability across GPUs for distributed training.
     * With 1 Trillion parameters, ZeRO-3 Offload sustains 25 PetaFlops in compute performance on 512 NVIDIA V100 GPUs, achieving 49 TFlops/GPU.
     * Up to 2x improvement in throughput compared to ZeRO- 2 Offload on single GPU
 
@@ -64,7 +64,7 @@ i) With ground-breaking memory efficiency, ZeRO-3 and ZeRO-3 Offload are the onl
 ii) ZeRO-3 Offload requires virtually no model refactoring from model scientists, liberating data scientists to scale up complex models to hundreds of billions to trillions of parameters.
 
 <h2>Excellent training efficiency</h2>
-<i>High-performance per-GPU throughput on multiple nodes</i>: ZeRO-3 Offload offers excellent training efficiency for multi-billion and trillion parameter models on multiple nodes. It achieves a sustained throughput of up to 50 Tflops per GPU running on 32 DGX2 nodes comprising 512 NVIDIA V100 GPUs (see Figure 2). In comparison, the standard data parallel training with PyTorch can only achieve 30 TFlops per GPU for a 1.2B parameter model, the largest model that can be trained using data parallelism alone.  
+<i>High-performance per-GPU throughput on multiple nodes</i>: ZeRO-3 Offload offers excellent training efficiency for multi-billion and trillion parameter models on multiple nodes. It achieves a sustained throughput of up to 50 Tflops per GPU running on 32 DGX2 nodes comprising 512 NVIDIA V100 GPUs (see Figure 2). In comparison, the standard data parallel training with PyTorch can only achieve 30 TFlops per GPU for a 1.2B parameter model, the largest model that can be trained using data parallelism alone.
 
 <a href="/assets/images/zero3-offload-512-v100.png">
 <img src="/assets/images/zero3-offload-512-v100.png">
@@ -74,7 +74,7 @@ Figure 2. ZeRO-3 Offload: Multi-billion and trillion parameter model throughput 
 ZeRO-3 Offload obtains high efficiency despite the 50% communication overhead of ZeRO Stage 3 compared to standard data parallel training for a fixed batch size. This is made possible through a communication overlap centric design and implementation, which allows ZeRO-3 Offload to hide nearly all of the communication volume with computation, while taking advantage of a larger batch size for improved efficiency resulting from better GPU memory efficiency.
 
 
-<i>Efficient multi-billion parameter model training on a single GPU</i>: ZeRO-3 Offload further democratizes AI by enabling efficient training of multi-billion parameter models on a single GPU. For single GPU training, ZeRO-3 Offload provides benefits over ZeRO-2 Offload along two dimensions. First, ZeRO-3 Offload increases the size of models trainable on a single V100 from 13B to 40B. Second, for ZeRO-3 Offload provides speedups (e.g., 2.3X for 13B) compared to ZeRO-2 Offload for model sizes trainable by both solutions. These results are summarized in Figure 3.  
+<i>Efficient multi-billion parameter model training on a single GPU</i>: ZeRO-3 Offload further democratizes AI by enabling efficient training of multi-billion parameter models on a single GPU. For single GPU training, ZeRO-3 Offload provides benefits over ZeRO-2 Offload along two dimensions. First, ZeRO-3 Offload increases the size of models trainable on a single V100 from 13B to 40B. Second, for ZeRO-3 Offload provides speedups (e.g., 2.3X for 13B) compared to ZeRO-2 Offload for model sizes trainable by both solutions. These results are summarized in Figure 3.
 
 <a href="/assets/images/zero3-offload-1-v100.png">
 <img src="/assets/images/zero3-offload-1-v100.png">

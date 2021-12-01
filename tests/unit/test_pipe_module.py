@@ -9,6 +9,7 @@ import pytest
 import deepspeed
 
 from deepspeed.runtime.pipe.topology import PipeDataParallelTopology, PipeModelDataParallelTopology
+
 PipeTopo = PipeDataParallelTopology
 
 from deepspeed.pipe import PipelineModule, LayerSpec

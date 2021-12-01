@@ -354,8 +354,8 @@ def clip_grad_norm_(parameters, max_norm, norm_type=2, mpu=None):
         total_norm = 0
         for p in parameters:
             if mpu is not None:
-                if (mpu.get_model_parallel_rank() == 0
-                    ) or is_model_parallel_parameter(p):
+                if (mpu.get_model_parallel_rank()
+                        == 0) or is_model_parallel_parameter(p):
                     param_norm = p.grad.data.norm(norm_type)
                     total_norm += param_norm.item()**norm_type
             else:

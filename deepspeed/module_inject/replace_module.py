@@ -450,12 +450,12 @@ def replace_transformer_layer(orig_layer_impl,
         else:
             # copy relevant state from child -> new module
             if replace_with_kernel_inject:
-                new_module = replace_with_policy(
-                    child,
-                    _policy,
-                    inference=True,
-                    preln=(_policy is not HFBertLayerPolicy),
-                    layer_id=layer_id)
+                new_module = replace_with_policy(child,
+                                                 _policy,
+                                                 inference=True,
+                                                 preln=(_policy
+                                                        is not HFBertLayerPolicy),
+                                                 layer_id=layer_id)
             else:
                 new_module = replace_wo_policy(child, _policy)
 

@@ -1,27 +1,34 @@
-
 repos:
--   repo: https://github.com/pre-commit/pre-commit-hooks
-    rev: v1.2.3
+-   repo: meta
     hooks:
-    -   id: trailing-whitespace
-        exclude: "DeepSpeedExamples/"
+    -   id: check-hooks-apply
+    -   id: check-useless-excludes
+
+-   repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v4.0.1
+    hooks:
+    -   id: check-case-conflict
+    -   id: check-json
+    -   id: check-symlinks
     -   id: check-yaml
-        exclude: "DeepSpeedExamples/"
+    -   id: destroyed-symlinks
     -   id: end-of-file-fixer
-        exclude: "DeepSpeedExamples/"
-        exclude: "docs/CNAME"
+        exclude: docs/CNAME
+    -   id: fix-byte-order-marker
+    -   id: fix-encoding-pragma
+        args: [--remove]
     -   id: mixed-line-ending
-        exclude: "DeepSpeedExamples/"
         args: [--fix=lf]
+    -   id: requirements-txt-fixer
+    -   id: trailing-whitespace
 
 -   repo: https://github.com/pre-commit/mirrors-yapf
-    rev: v0.29.0
+    rev: v0.31.0
     hooks:
     -   id: yapf
-        exclude: "examples/"
 
 -   repo: https://gitlab.com/daverona/pre-commit-cpp
-    rev: 0.6.0
+    rev: 0.8.0
     hooks:
     -   id: clang-format  # formatter of C/C++ code based on a style guide: LLVM, Google, Chromium, Mozilla, and WebKit available
         args: []

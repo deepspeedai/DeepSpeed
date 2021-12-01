@@ -10,6 +10,7 @@ from deepspeed.runtime.fp16.fused_optimizer import FP16_Optimizer
 from deepspeed.runtime.fp16.unfused_optimizer import FP16_UnfusedOptimizer
 
 from deepspeed.runtime.pipe.topology import *
+
 PipeTopo = PipeDataParallelTopology
 
 from deepspeed.ops.op_builder import FusedLambBuilder, CPUAdamBuilder

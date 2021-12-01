@@ -1,11 +1,11 @@
+clang-format
+docutils<0.18
+importlib-metadata>=4
+megatron-lm==1.1.5
+pre-commit
 pytest
 pytest-forked
 pytest-randomly
-pre-commit
-clang-format
-sphinx
 recommonmark
+sphinx
 sphinx-rtd-theme
-megatron-lm==1.1.5
-importlib-metadata>=4
-docutils<0.18

@@ -9,9 +9,8 @@ def is_moe_param(param: torch.Tensor) -> bool:
 
 
 def split_params_into_shared_and_expert_params(
-    params: List[torch.nn.Parameter]
-) -> Tuple[torch.nn.Parameter,
-           torch.nn.Parameter]:
+        params: List[torch.nn.Parameter]) -> Tuple[torch.nn.Parameter,
+                                                   torch.nn.Parameter]:
     shared_params, expert_params = [], []
     for p in params:
         if is_moe_param(p):
@@ -22,9 +21,8 @@ def split_params_into_shared_and_expert_params(
 
 
 def split_params_grads_into_shared_and_expert_params(
-    group: List[torch.nn.Parameter]
-) -> Tuple[torch.nn.Parameter,
-           torch.nn.Parameter]:
+        group: List[torch.nn.Parameter]) -> Tuple[torch.nn.Parameter,
+                                                  torch.nn.Parameter]:
     """Split grad of parameters into grads of non-expert params
     and grads of expert params. This is useful while computing
     grad-norms for clipping and overflow detection
