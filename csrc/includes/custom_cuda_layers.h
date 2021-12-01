@@ -35,6 +35,8 @@
 
 #define MAX_REG 256
 
+#define WARP_SIZE_BITS 5
+
 template <typename T>
 void launch_quantize_kernel(T* vals,
                             int total_count,

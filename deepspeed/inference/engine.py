@@ -76,7 +76,7 @@ class InferenceEngine(Module):
         elif self.mp_world_size > 1:
             self._create_model_parallel_group()
         # apply injection policy
-        if self.injection_dict:
+        if self.injection_dict is not None:
             for client_module, injection_policy in self.injection_dict.items():
                 self._apply_injection_policy(client_module,
                                              injection_policy,
