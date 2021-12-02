@@ -1,1 +1,1 @@
-triton
+triton==1.0.0
