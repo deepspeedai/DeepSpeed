@@ -21,7 +21,7 @@ class SparseAttnBuilder(OpBuilder):
     def cxx_args(self):
         return ['-O2', '-fopenmp']
 
-    def is_compatible(self):
+    def is_compatible(self, verbose=True):
         # Check to see if llvm and cmake are installed since they are dependencies
         #required_commands = ['llvm-config|llvm-config-9', 'cmake']
         #command_status = list(map(self.command_exists, required_commands))
@@ -52,4 +52,4 @@ class SparseAttnBuilder(OpBuilder):
                 f'{self.NAME} requires a torch version >= 1.5 but detected {TORCH_MAJOR}.{TORCH_MINOR}'
             )
 
-        return super().is_compatible() and torch_compatible and cuda_compatible
+        return super().is_compatible(verbose) and torch_compatible and cuda_compatible

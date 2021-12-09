@@ -14,7 +14,7 @@ class CPUAdagradBuilder(CUDAOpBuilder):
     def __init__(self):
         super().__init__(name=self.NAME)
 
-    def is_compatible(self):
+    def is_compatible(self, verbose=True):
         # Disable on Windows.
         return sys.platform != "win32"
 

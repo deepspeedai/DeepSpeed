@@ -84,14 +84,14 @@ class AsyncIOBuilder(OpBuilder):
                 break
         return found
 
-    def is_compatible(self):
+    def is_compatible(self, verbose=True):
         # Check for the existence of libaio by using distutils
         # to compile and link a test program that calls io_submit,
         # which is a function provided by libaio that is used in the async_io op.
         # If needed, one can define -I and -L entries in CFLAGS and LDFLAGS
         # respectively to specify the directories for libaio.h and libaio.so.
         aio_compatible = self.has_function('io_submit', ('aio', ))
-        if not aio_compatible:
+        if verbose and not aio_compatible:
             self.warning(
                 f"{self.NAME} requires the dev libaio .so object and headers but these were not found."
             )
@@ -103,4 +103,4 @@ class AsyncIOBuilder(OpBuilder):
             self.warning(
                 "If libaio is already installed (perhaps from source), try setting the CFLAGS and LDFLAGS environment variables to where it can be found."
             )
-        return super().is_compatible() and aio_compatible
+        return super().is_compatible(verbose) and aio_compatible

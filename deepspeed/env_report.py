@@ -1,6 +1,7 @@
 import torch
 import deepspeed
 import subprocess
+import argparse
 from .ops.op_builder import ALL_OPS
 from .git_version_info import installed_ops, torch_info
 from .ops import __compatible_ops__ as compatible_ops
@@ -20,7 +21,7 @@ okay = f"{GREEN}[OKAY]{END}"
 warning = f"{YELLOW}[WARNING]{END}"
 
 
-def op_report():
+def op_report(verbose=True):
     max_dots = 23
     max_dots2 = 11
     h = ["op name", "installed", "compatible"]
@@ -43,7 +44,7 @@ def op_report():
     no = f"{YELLOW}[NO]{END}"
     for op_name, builder in ALL_OPS.items():
         dots = "." * (max_dots - len(op_name))
-        is_compatible = OKAY if builder.is_compatible() else no
+        is_compatible = OKAY if builder.is_compatible(verbose) else no
         is_installed = installed if installed_ops[op_name] else no
         dots2 = '.' * ((len(h[1]) + (max_dots2 - len(h[1]))) -
                        (len(is_installed) - color_len))
@@ -100,9 +101,31 @@ def debug_report():
         print(name, "." * (max_dots - len(name)), value)
 
 
-def main():
-    op_report()
+def parse_arguments():
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        '--hide_operator_status',
+        action='store_true',
+        help=
+        'Suppress display of installation and compatiblity statuses of DeepSpeed operators. '
+    )
+    parser.add_argument('--hide_errors_and_warnings',
+                        action='store_true',
+                        help='Suppress warning and error messages.')
+    args = parser.parse_args()
+    return args
+
+
+def main(hide_operator_status=False, hide_errors_and_warnings=False):
+    if not hide_operator_status:
+        op_report(verbose=not hide_errors_and_warnings)
     debug_report()
+
+
+def cli_main():
+    args = parse_arguments()
+    main(hide_operator_status=args.hide_operator_status,
+         hide_errors_and_warnings=args.hide_errors_and_warnings)
 
 
 if __name__ == "__main__":

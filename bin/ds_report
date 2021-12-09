@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 
-from deepspeed.env_report import main
+from deepspeed.env_report import cli_main
 
 if __name__ == '__main__':
-    main()
+    cli_main()

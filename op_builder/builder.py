@@ -153,7 +153,7 @@ class OpBuilder(ABC):
         '''
         return []
 
-    def is_compatible(self):
+    def is_compatible(self, verbose=True):
         '''
         Check if all non-python dependencies are satisfied to build this op
         '''
@@ -370,7 +370,7 @@ class OpBuilder(ABC):
             return self.jit_load(verbose)
 
     def jit_load(self, verbose=True):
-        if not self.is_compatible():
+        if not self.is_compatible(verbose):
             raise RuntimeError(
                 f"Unable to JIT load the {self.name} op due to it not being compatible due to hardware/software issue."
             )
@@ -482,8 +482,8 @@ class CUDAOpBuilder(OpBuilder):
             version_ge_1_5 = ['-DVERSION_GE_1_5']
         return version_ge_1_1 + version_ge_1_3 + version_ge_1_5
 
-    def is_compatible(self):
-        return super().is_compatible()
+    def is_compatible(self, verbose=True):
+        return super().is_compatible(verbose)
 
     def builder(self):
         from torch.utils.cpp_extension import CUDAExtension
