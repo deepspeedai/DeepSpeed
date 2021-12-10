@@ -81,7 +81,7 @@ We pre-trained both the dense and MoE version of the above models using
 combination of data parallel and expert parallel training to effectively scale
 the [MoE model training](https://www.microsoft.com/en-us/research/blog/deepspeed-powers-8x-larger-moe-model-training-with-high-performance/).
 
-We used the same training data as described in the MT-NLG blog. For a fair
+We used the same training data as described in the [MT-NLG blog](https://www.microsoft.com/en-us/research/blog/using-deepspeed-and-megatron-to-train-megatron-turing-nlg-530b-the-worlds-largest-and-most-powerful-generative-language-model/). For a fair
 comparison, we use 300B tokens to train both the dense model and the MoE model.
 
 ## MoE leads to better quality for NLG models
@@ -179,12 +179,12 @@ To this end we are releasing our [end-to-end pipeline for training MoE based
 NLG models](https://github.com/microsoft/Megatron-DeepSpeed/tree/moe-training),
 along with [specific example
 scripts](https://github.com/microsoft/Megatron-DeepSpeed/tree/moe-training/examples/MoE)
-to help get started with our pipeline.  We look forward to the application and
+and [tutorial](/tutorials/mixture-of-experts-nlg) to help get started with our pipeline.  We look forward to the application and
 the innovations that this may bring to the deep learning community.
 
 ## Acknowledgement
 
-This work was done in collaboration with Brandon Norick and Xia Song from the
+This work was done in collaboration with Brandon Norick, Zhun Liu, Xia Song from the
 Turing Team, and Young Jin Kim, Alex Muzio, Hany Hassan Awadalla from Z-Code
 Team. We also thank Luis Vargas, Umesh Madan, Gopi Kumar, Andrey Proskurin and
 Mikhail Parakhin for their continuous support and guidance.

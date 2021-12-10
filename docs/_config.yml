@@ -44,6 +44,7 @@ collections:
       - lrrt.md
       - megatron.md
       - mixture-of-experts.md
+      - mixture-of-experts-nlg.md
       - one-cycle.md
       - onebit-adam.md
       - onebit-lamb.md
