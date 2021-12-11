@@ -266,44 +266,39 @@ class OpBuilder(ABC):
         return [x for x in args if len(x) > 0]
 
     def cpu_arch(self):
-        if not self.command_exists('lscpu'):
-            self.warning(
-                f"{self.name} attempted to query 'lscpu' to detect the CPU architecture. "
-                "However, 'lscpu' does not appear to exist on "
-                "your system, will fall back to use -march=native.")
-            return '-march=native'
+        try:
+            from cpuinfo import get_cpu_info
+        except ImportError as e:
+            self.warning(f"{self.name} to failed import cpu_info:\n{e}\n"
+                         "will fall back to use -march=native")
+            return "-march=native"
+        cpu_info = get_cpu_info()
 
-        result = subprocess.check_output('lscpu', shell=True)
-        result = result.decode('utf-8').strip().lower()
-        if 'ppc64le' in result:
+        if cpu_info['arch'].startswith('PPC_'):
             # gcc does not provide -march on PowerPC, use -mcpu instead
             return '-mcpu=native'
         return '-march=native'
 
     def simd_width(self):
-        if not self.command_exists('lscpu'):
-            self.warning(
-                f"{self.name} attempted to query 'lscpu' to detect the existence "
-                "of AVX instructions. However, 'lscpu' does not appear to exist on "
-                "your system, will fall back to non-vectorized execution.")
+        try:
+            from cpuinfo import get_cpu_info
+        except ImportError as e:
+            self.warning(f"{self.name} to failed import cpu_info:\n{e}\n"
+                         "will fall back to non-vectorized execution.")
             return '-D__SCALAR__'
 
         try:
-            result = subprocess.check_output('lscpu', shell=True)
-            result = result.decode('utf-8').strip().lower()
+            cpu_info = get_cpu_info()
         except Exception as e:
             print(
                 f"{WARNING} {self.name} SIMD_WIDTH cannot be recognized due to {str(e)}!"
             )
             return '-D__SCALAR__'
 
-        if 'genuineintel' in result:
-            if 'avx512' in result:
+        if cpu_info['arch'] == 'X86_64':
+            if 'avx512' in cpu_info['flags']:
                 return '-D__AVX512__'
-            elif 'avx2' in result:
-                return '-D__AVX256__'
-        elif 'authenticamd' in result:
-            if 'avx2' in result:
+            elif 'avx2' in cpu_info['flags']:
                 return '-D__AVX256__'
         return '-D__SCALAR__'
 

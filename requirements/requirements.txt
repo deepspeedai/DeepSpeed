@@ -3,5 +3,6 @@ ninja
 numpy
 packaging
 psutil
+py-cpuinfo
 torch
 tqdm
