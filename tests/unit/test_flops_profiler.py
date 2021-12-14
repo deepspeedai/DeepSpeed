@@ -1,9 +1,23 @@
 import torch
+import pytest
 import deepspeed
 import deepspeed.runtime.utils as ds_utils
 from deepspeed.profiling.flops_profiler import FlopsProfiler, get_model_profile
 from simple_model import SimpleModel, SimpleOptimizer, random_dataloader, args_from_dict
 from common import distributed_test
+
+TORCH_MAJOR = int(torch.__version__.split('.')[0])
+TORCH_MINOR = int(torch.__version__.split('.')[1])
+pytestmark = pytest.mark.skipif(TORCH_MAJOR < 1
+                                or (TORCH_MAJOR == 1 and TORCH_MINOR < 3),
+                                reason='requires Pytorch version 1.3 or above')
+
+
+def within_range(val, target, tolerance):
+    return abs(val - target) / target < tolerance
+
+
+TOLERANCE = 0.05
 
 
 def test_flops_profiler_in_ds_training(tmpdir):
@@ -49,7 +63,7 @@ def test_flops_profiler_in_ds_training(tmpdir):
             model.backward(loss)
             model.step()
             if n == 3: break
-        assert model.flops_profiler.flops == 100
+        assert within_range(model.flops_profiler.flops, 200, tolerance=TOLERANCE)
         assert model.flops_profiler.params == 110
 
     _test_flops_profiler_in_ds_training(args, model, hidden_dim)
@@ -99,7 +113,7 @@ def test_flops_profiler_in_inference():
     mod = LeNet5(10)
     batch_size = 1024
     input = torch.randn(batch_size, 1, 32, 32)
-    macs, params = get_model_profile(
+    flops, macs, params = get_model_profile(
         mod,
         tuple(input.shape),
         print_profile=True,
@@ -107,9 +121,10 @@ def test_flops_profiler_in_inference():
         module_depth=-1,
         top_modules=3,
         warm_up=1,
-        as_string=True,
+        as_string=False,
         ignore_modules=None,
     )
-    print(macs, params)
-    assert macs == "439.56 MMACs"
-    assert params == "61.71 k"
+    print(flops, macs, params)
+    assert within_range(flops, 866076672, TOLERANCE)
+    assert within_range(macs, 426516480, TOLERANCE)
+    assert params == 61706

@@ -1,6 +1,6 @@
 # DeepSpeed Flops Profiler
 
-> Measures the parameters, latency, and floating point operations of your model.
+> Measures the parameters, latency, and floating-point operations of your model.
 
   - [Overview](#overview)
   - [Flops Measurement](#flops-measurement)
@@ -8,7 +8,7 @@
   - [Usage](#usage)
 ## Overview
 
-Effective use of hardware resources is critical to good performance, but performance inefficiency in existing implementations for large-scale model training and inference are often hard to spot and attributed to specific module components. DeepSpeed Flops Profiler helps users easily measure both the model training/inference speed (latency, throughput) and efficiency (floating point operations per second, i.e., FLOPS) of a model and its submodules, with an eye towards eliminating inefficiencies in existing implementations.
+Effective use of hardware resources is critical to good performance, but performance inefficiency in existing implementations for large-scale model training and inference are often hard to spot and attributed to specific module components. DeepSpeed Flops Profiler helps users easily measure both the model training/inference speed (latency, throughput) and efficiency (floating-point operations per second, i.e., FLOPS) of a model and its submodules, with an eye towards eliminating inefficiencies in existing implementations.
 
 Below is an example output for BERT-Large(NVIDIA) on an A100 GPU with batch size `80`:
 
@@ -18,7 +18,7 @@ Profile Summary at step 10:
 Notations:
 data parallel size (dp_size), model paralel size(mp_size),
 number of parameters (params), number of multiply-accumulate operations(MACs),
-umber of floating point operations (flops), floating point operations per second (FLOPS),
+number of floating-point operations (flops), floating-point operations per second (FLOPS),
 fwd latency (forward propagation latency), bwd latency (backward propagation latency),
 step (weights update latency), iter latency (sum of fwd, bwd and step latency)
 
@@ -29,7 +29,7 @@ batch size per GPU:                                           80
 params per gpu:                                               336.23 M
 params of model = params per GPU * mp_size:                   336.23 M
 fwd MACs per GPU:                                             3139.93 G
-fwd flops per GPU = 2 * fwd MACs per GPU:                     6279.86 G
+fwd flops per GPU:                                            6279.86 G
 fwd flops of model = fwd flops per GPU * mp_size:             6279.86 G
 fwd latency:                                                  76.67 ms
 bwd latency:                                                  108.02 ms
@@ -127,7 +127,7 @@ BertForPreTrainingPreLN(
 
 ```
 
-In the summary profile, the DeepSpeed Flops Profiler outputs the number of parameters, floating point operations (flops), FLOPS, latency, and throughput in samples/second of the model. This profile shows how much performance gap (compared to the peak hardware performance) the current model execution has and helps users tune the training or inference setup (e.g., hyperparameters, data parallelism, model parallelism, system configurations, etc.) for better performance.
+In the summary profile, the DeepSpeed Flops Profiler outputs the number of parameters, floating-point operations (flops), FLOPS, latency, and throughput in samples/second of the model. This profile shows how much performance gap (compared to the peak hardware performance) the current model execution has and helps users tune the training or inference setup (e.g., hyperparameters, data parallelism, model parallelism, system configurations, etc.) for better performance.
 
 The DeepSpeed Flops Profiler also measures significant modules at different model depths (aggregated profile) and module-specific profile in the model architecture (detailed profile). Using these profiles DeepSpeed users can understand how each layer or submodule contributes to the overall model complexity/performance. Then users can adjust or refactor the model design to achieve better performance. For example, using the profiler, DeepSpeed users can quantitatively tell if stacking smaller layers is lighter or more performant than having bigger ones. The aggregated and detailed profiles also allow users to quickly identify bottleneck modules. In the BERT-Large example above, using the DeepSpeed Flops Profiler, we find that BertLayer is the most significant layer and contains quite a few dropout, softmax, and layer norm along with linear modules. These modules are not heavy in flops and would trigger many GPU kernel invocations and create excessive read/write requests to memory. The pattern shown in the detailed profile suggests this is a perfect match for kernel fusion, and we developed fused transformer-kernels to reduce data movement (See DeepSpeedBert). After applying our optimizations, we see a 25% improvement in FLOPS per GPU and overall training samples/second in the DeepSpeed Flops Profiler output.
 
@@ -187,7 +187,7 @@ Profile Summary at step 10:
 Notations:
 data parallel size (dp_size), model paralel size(mp_size),
 number of parameters (params), number of multiply-accumulate operations(MACs),
-umber of floating point operations (flops), floating point operations per second (FLOPS),
+number of floating-point operations (flops), floating-point operations per second (FLOPS),
 fwd latency (forward propagation latency), bwd latency (backward propagation latency),
 step (weights update latency), iter latency (sum of fwd, bwd and step latency)
 
@@ -198,7 +198,7 @@ batch size per GPU:                                           1024
 params per gpu:                                               1.29 M
 params of model = params per GPU * mp_size:                   1.29 M
 fwd MACs per GPU:                                             41271.95 G
-fwd flops per GPU = 2 * fwd MACs per GPU:                     82543.9 G
+fwd flops per GPU:                                            82543.9 G
 fwd flops of model = fwd flops per GPU * mp_size:             82543.9 G
 fwd latency:                                                  1.89 s
 bwd latency:                                                  5.38 s
@@ -241,7 +241,7 @@ Each module profile is listed after its name in the following order:
 params, percentage of total params, MACs, percentage of total MACs, fwd latency, percentage of total fwd latency, fwd FLOPS
 
 Note: 1. A module can have torch.nn.module or torch.nn.functional to compute logits (e.g. CrossEntropyLoss). They are not counted as submodules, thus not to be printed out. However they make up the difference between a parent's MACs(or latency) and the sum of its submodules'.
-2. Number of floating point operations is a theoretical estimation, thus FLOPS computed using that could be larger than the maximum system throughput.
+2. Number of floating-point operations is a theoretical estimation, thus FLOPS computed using that could be larger than the maximum system throughput.
 3. The fwd latency listed in the top module's profile is directly captured at the module forward function in PyTorch, thus it's less than the fwd latency shown above which is captured in DeepSpeed.
 
 GPT2Model(
@@ -313,7 +313,7 @@ from deepspeed.profiling.flops_profiler import get_model_profile
 with torch.cuda.device(0):
     model = models.alexnet()
     batch_size = 256
-    macs, params = get_model_profile(model=model, # model
+    flops, macs, params = get_model_profile(model=model, # model
                                      input_res=(batch_size, 3, 224, 224), # input shape or input to the input_constructor
                                      input_constructor=None, # if specified, a constructor taking input_res is used as input to the model
                                      print_profile=True, # prints the model graph with the measured profile attached to each module
@@ -356,7 +356,7 @@ with torch.cuda.device(0):
     seq_len = 128
     enable_profile = True
     if enable_profile:
-      macs, params = get_model_profile(
+      flops, macs, params = get_model_profile(
           model,
           (batch_size, seq_len),
           input_constructor=partial(bert_input_constructor,
@@ -374,11 +374,12 @@ with torch.cuda.device(0):
 To profile model forward in a training workflow, use the `FlopsProfiler`class.
 The `FlopsProfiler`class provides the following methods:
   * `start_profile()` - starts profiling
-  * `get_total_flops(as_string=False)` - returns the total number of MACs in the model
+  * `get_total_flops(as_string=False)` - returns the total number of floating-point operations in the model
+  * `get_total_macs(as_string=False)` - returns the total number of MACs in the model
   * `get_total_params(as_string=False)` - returns the total number of parameters in the model
   * `print_model_profile(profile_step=1, module_depth=-1, top_modules=1, detailed=True, output_file=None)` - prints the model profile
   * `stop_profile()` - stops profiling. This stops the flops counting in the model.
-  * `end_profile()` - cleans up. This cleans up the profile attributes added to the model during the profiling. This should be invoked at the end of the profiling and AFTER `get_total_flops`, `get_total_params` or `print_model_profile`.
+  * `end_profile()` - cleans up. This cleans up the profile attributes added to the model during the profiling. This should be invoked at the end of the profiling and AFTER `get_total_flops`, `get_total_macs`, `get_total_params` or `print_model_profile`.
 
 ##### Example Training Workflow
 
@@ -404,8 +405,9 @@ for step, batch in enumerate(data_loader):
   # end profiling and print output
   if step == profile_step: # if using multi nodes, check global_rank == 0 as well
     prof.stop_profile()
-    flops = prof.get_total_flops(as_string=True)
-    params = prof.get_total_params(as_string=True)
+    flops = prof.get_total_flops()
+    macs = prof.get_total_macs()
+    params = prof.get_total_params()
     if print_profile:
         prof.print_model_profile(profile_step=profile_step)
     prof.end_profile()
