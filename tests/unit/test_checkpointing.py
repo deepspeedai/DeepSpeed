@@ -3,8 +3,7 @@ import torch
 import torch.distributed as dist
 
 import deepspeed
-from deepspeed.runtime.zero.stage2 import FP16_DeepSpeedZeroOptimizer
-from deepspeed.runtime.zero.stage1 import FP16_DeepSpeedZeroOptimizer_Stage1
+from deepspeed.runtime.zero.stage_1_and_2 import DeepSpeedZeroOptimizer
 from deepspeed.utils import groups
 from deepspeed.runtime.fp16.fused_optimizer import FP16_Optimizer
 from deepspeed.runtime.fp16.unfused_optimizer import FP16_UnfusedOptimizer
@@ -15,7 +14,7 @@ PipeTopo = PipeDataParallelTopology
 
 from deepspeed.ops.op_builder import FusedLambBuilder, CPUAdamBuilder
 
-from deepspeed.runtime.zero.stage3 import FP16_DeepSpeedZeroOptimizer_Stage3
+from deepspeed.runtime.zero.stage3 import DeepSpeedZeroOptimizer_Stage3
 from util import required_torch_version
 
 import argparse
@@ -60,22 +59,16 @@ def compare_model_states(saved_model,
     if not compare_optimizer:
         return
 
-    if FP16_DeepSpeedZeroOptimizer_Stage3 is not None and isinstance(
+    if DeepSpeedZeroOptimizer_Stage3 is not None and isinstance(
             saved_model.optimizer,
-            FP16_DeepSpeedZeroOptimizer_Stage3):
+            DeepSpeedZeroOptimizer_Stage3):
         for p0, p1 in zip(saved_model.optimizer.fp32_partitioned_groups_flat, loaded_model.optimizer.fp32_partitioned_groups_flat):
             assert torch.allclose(p0, p1, atol=1e-07), f"Fp32 model states {p0} is not equal to {p1}"
 
-    elif isinstance(saved_model.optimizer, FP16_DeepSpeedZeroOptimizer):
+    elif isinstance(saved_model.optimizer, DeepSpeedZeroOptimizer):
         for p0, p1 in zip(saved_model.optimizer.single_partition_of_fp32_groups, loaded_model.optimizer.single_partition_of_fp32_groups):
             assert id(p0) != id(p1), f'Comparing fp32 model state tensor against itself: {id(p0)} <====> {id(p1)}'
             assert torch.allclose(p0, p1, atol=1e-07), f"Fp32 model states {p0} is not equal to {p1}"
-
-    elif isinstance(saved_model.optimizer, FP16_DeepSpeedZeroOptimizer_Stage1):
-        for partition0, partition1 in zip(saved_model.optimizer.local_sub_partitions_of_fp32_groups, loaded_model.optimizer.local_sub_partitions_of_fp32_groups):
-            for p0, p1 in zip(partition0, partition1):
-                assert id(p0) != id(p1), f'Comparing fp32 model state tensor against itself: {id(p0)} <====> {id(p1)}'
-                assert torch.allclose(p0, p1, atol=1e-07), f"Fp32 model states {p0} is not equal to {p1}"
 
     elif isinstance(saved_model.optimizer, FP16_Optimizer):
         for p0, p1 in zip(saved_model.optimizer.fp32_groups_flat, loaded_model.optimizer.fp32_groups_flat):
@@ -444,8 +437,8 @@ def test_checkpoint_zero_no_optimizer(tmpdir,
                                            hidden_dim,
                                            load_optimizer_states):
         if zero_stage == 3:
-            global FP16_DeepSpeedZeroOptimizer_Stage3
-            from deepspeed.runtime.zero.stage3 import FP16_DeepSpeedZeroOptimizer_Stage3
+            global DeepSpeedZeroOptimizer_Stage3
+            from deepspeed.runtime.zero.stage3 import DeepSpeedZeroOptimizer_Stage3
             with deepspeed.zero.Init():
                 models = [SimpleModel(hidden_dim, empty_grad=False) for _ in range(2)]
         else:
@@ -525,8 +518,8 @@ def test_checkpoint_lr_scheduler(tmpdir, zero_stage, use_cpu_offload, adam_optim
                                       load_optimizer_states,
                                       load_lr_scheduler_states):
         if zero_stage == 3:
-            global FP16_DeepSpeedZeroOptimizer_Stage3
-            from deepspeed.runtime.zero.stage3 import FP16_DeepSpeedZeroOptimizer_Stage3
+            global DeepSpeedZeroOptimizer_Stage3
+            from deepspeed.runtime.zero.stage3 import DeepSpeedZeroOptimizer_Stage3
             with deepspeed.zero.Init():
                 models = [SimpleModel(hidden_dim, empty_grad=False) for _ in range(2)]
         else:

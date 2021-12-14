@@ -22,8 +22,7 @@ from torch.distributed.distributed_c10d import _get_global_rank
 from typing import Callable, Dict, Optional, Union, Iterable
 
 from deepspeed.runtime.utils import see_memory_usage, get_ma_status, DummyOptim
-from deepspeed.runtime.zero.stage2 import FP16_DeepSpeedZeroOptimizer
-from deepspeed.runtime.zero.stage1 import FP16_DeepSpeedZeroOptimizer_Stage1
+from deepspeed.runtime.zero.stage_1_and_2 import DeepSpeedZeroOptimizer
 from deepspeed.runtime.zero.partition_parameters import ZeroParamStatus
 from deepspeed.runtime.zero.utils import (
     is_zero_supported_optimizer,
@@ -1326,28 +1325,12 @@ class DeepSpeedEngine(Module):
         if optimizer is None:
             optimizer = DummyOptim(list(self.module.parameters()))
 
-        if self.zero_legacy_stage1(
-        ) and zero_stage == ZERO_OPTIMIZATION_OPTIMIZER_STATES:
-            assert not self.has_moe_layers, "MoE not supported with Stage 1"
-            assert not isinstance(optimizer, DummyOptim), "zero stage 1 requires an optimizer"
-
-            optimizer = FP16_DeepSpeedZeroOptimizer_Stage1(
-                optimizer,
-                static_loss_scale=self.loss_scale(),
-                dynamic_loss_scale=self.dynamic_loss_scale(),
-                dynamic_loss_args=self.dynamic_loss_scale_args(),
-                clip_grad=self.gradient_clipping(),
-                all_gather_partitions=self.zero_allgather_partitions(),
-                allgather_size=self.zero_allgather_bucket_size(),
-                max_elements_per_comm=self.zero_reduce_bucket_size(),
-                dp_process_group=self.data_parallel_group,
-                elastic_checkpoint=self.zero_elastic_checkpoint(),
-                mpu=self.mpu,
-                postscale_gradients=self.postscale_gradients(),
-                gradient_predivide_factor=self.gradient_predivide_factor(),
-                gradient_predivide=self.gradient_predivide,
+        if self.zero_legacy_stage1():
+            raise Exception(
+                "The deprecated version of ZeRO Stage 1 is not supported in deepspeed >= 0.5.9. Please downgrade to a version less than 0.5.9 if you need to use this deprecated version of ZeRO."
             )
-        elif zero_stage <= ZERO_OPTIMIZATION_GRADIENTS:
+
+        if zero_stage <= ZERO_OPTIMIZATION_GRADIENTS:
             overlap_comm = self.zero_overlap_comm()
             contiguous_gradients = self.zero_contiguous_gradients()
             round_robin_gradients = self.zero_round_robin_gradients()
@@ -1366,7 +1349,7 @@ class DeepSpeedEngine(Module):
                     )
                     overlap_comm = False
 
-            optimizer = FP16_DeepSpeedZeroOptimizer(
+            optimizer = DeepSpeedZeroOptimizer(
                 optimizer,
                 timers=timers,
                 static_loss_scale=self.loss_scale(),
@@ -1399,9 +1382,9 @@ class DeepSpeedEngine(Module):
         elif zero_stage == ZERO_OPTIMIZATION_WEIGHTS:
             assert not self.has_moe_layers, "MoE not supported with Stage 3"
             print("Initializing ZeRO Stage 3") if dist.get_rank() == 0 else None
-            from deepspeed.runtime.zero.stage3 import FP16_DeepSpeedZeroOptimizer_Stage3
+            from deepspeed.runtime.zero.stage3 import DeepSpeedZeroOptimizer_Stage3
 
-            optimizer = FP16_DeepSpeedZeroOptimizer_Stage3(
+            optimizer = DeepSpeedZeroOptimizer_Stage3(
                 self.module,
                 optimizer,
                 timers=timers,

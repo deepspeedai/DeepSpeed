@@ -70,7 +70,7 @@ def print_rank_msg(msg):
     print(f"rank {dist.get_rank()} - {msg}")
 
 
-class FP16_DeepSpeedZeroOptimizer(object):
+class DeepSpeedZeroOptimizer(object):
     """
     DeepSpeedZeroOptimizer designed to reduce the memory footprint
     required for training large deep learning models.
@@ -2135,8 +2135,7 @@ class FP16_DeepSpeedZeroOptimizer(object):
             ckpt_version = state_dict_list[0].get("ds_version", False)
             error_str = f"ZeRO stage 1 changed in {required_version} and is not backwards compatible " \
                 "with older stage 1 checkpoints. If you'd like to load an old ZeRO-1 checkpoint " \
-                "please set 'legacy_stage1': true in your zero config json. This old version of " \
-                "stage 1 will be removed in v0.4.0."
+                "please use an older version of DeepSpeed (<= 0.5.8) and set 'legacy_stage1': true in your zero config json."
 
             assert ckpt_version, f"Empty ds_version! {error_str}"
             assert required_version <= pkg_version.parse(ckpt_version), f"Old version: {ckpt_version} {error_str}"

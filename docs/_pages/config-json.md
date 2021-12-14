@@ -241,7 +241,7 @@ Example of <i>**scheduler**</i>
 **Note:** this mode cannot be combined with the `fp16` mode described above.
 {: .notice--warning}
 
-**Note:** this mode is only compatible with ZeRO stage 2.
+**Note:** this mode is only compatible with ZeRO stages 1 and 2.
 {: .notice--warning}
 
 <i>**bfloat16**</i>: [dictionary]
