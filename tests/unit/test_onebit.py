@@ -850,6 +850,7 @@ def test_onebitlamb_fp16_pipeline(topo, tmpdir):
     _helper(topo, tmpdir)
 
 
+@pytest.mark.sequential
 def test_compressed_allreduce_basic(tmpdir):
     @distributed_test(world_size=[1, 2])
     def _test_compressed_allreduce_basic():

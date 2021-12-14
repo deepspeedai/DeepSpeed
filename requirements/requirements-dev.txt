@@ -6,6 +6,7 @@ pre-commit
 pytest
 pytest-forked
 pytest-randomly
+pytest-xdist
 recommonmark
 sphinx
 sphinx-rtd-theme

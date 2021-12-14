@@ -197,6 +197,7 @@ def run_forward(ds_config, seq_len, atol=1e-2, verbose=False, test_bsz=None):
 
 
 # FP16 test cases can only run on the devices support FP16.
+@pytest.mark.sequential
 @pytest.mark.parametrize('batch_size, hidden_size, seq_len, heads, num_layers, is_preln, use_fp16',
                          [
                              (64,160,128,2,24,False,True),
