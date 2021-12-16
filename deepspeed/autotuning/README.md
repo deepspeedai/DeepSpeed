@@ -174,6 +174,11 @@ The entry bellow asks the Autotuner to use `4` as the micro-batch size per GPU i
 }
 ```
 
+#### Learning rate scaling when the effective batch size changes
+
+Given that DS Autotuner provides users the flexibility to explore the best performance configuration under a range of different batch sizes (e.g., by changing the `train_micro_batch_size_per_gpu`), it is possible that the total effective batch size `B'` per training iteration that maximizes the compute efficiency is different from the one `B` the user originally uses for training. If the user decides to choose the best-performing batch size `B'` identified by DS autotuner for training to achieve faster training speed, we suggest the user to scale the learning rate by `sqrt(B'/B)` while keeping the other hyperparameters unchanged. The rationale behind this scaling is that one should scale the learning rate such that the variance in the gradient expectation remains constant when the batch size changes. In the case of stochastic gradient descent, we recommend the user to scale the learning rate linearly by `B'/B` while keeping the other hyperparameters (momentum, weight decay, etc.) the same, which we empirically find to work better for SGD and momentum-based optimizer.
+
+
 ### Configuring ZeRO configurations
 
 The DeepSpeed Autotuner explores a set of carefully-chosen default values for ZeRO configuration parameters, defined in [`DEFAULT_TUNING_SPACE_ZERO_0,1,2,3`](constants.py). Users can overwrite any of the parameters (using a value or a list of values) in the DeepSpeed configuration file.
