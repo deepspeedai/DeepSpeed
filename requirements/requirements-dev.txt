@@ -10,3 +10,4 @@ pytest-xdist
 recommonmark
 sphinx
 sphinx-rtd-theme
+torchvision
