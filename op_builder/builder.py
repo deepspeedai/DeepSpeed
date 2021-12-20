@@ -4,6 +4,7 @@ Copyright 2020 The Microsoft DeepSpeed Team
 import os
 import sys
 import time
+import json
 import importlib
 from pathlib import Path
 import subprocess
@@ -269,31 +270,66 @@ class OpBuilder(ABC):
         try:
             from cpuinfo import get_cpu_info
         except ImportError as e:
-            self.warning(f"{self.name} to failed import cpu_info:\n{e}\n"
-                         "will fall back to use -march=native")
-            return "-march=native"
-        cpu_info = get_cpu_info()
+            cpu_info = _backup_cpuinfo()
+            if cpu_info is None:
+                return "-march=native"
+
+        try:
+            cpu_info = get_cpu_info()
+        except json.decoder.JSONDecodeError as e:
+            #FIXME: temp workaround, seeing strange JSON stack trace from
+            # cpuinfo on A100-80GB machines and possibly others.
+            cpu_info = _backup_cpuinfo()
+            if cpu_info is None:
+                return "-march=native"
 
         if cpu_info['arch'].startswith('PPC_'):
             # gcc does not provide -march on PowerPC, use -mcpu instead
             return '-mcpu=native'
         return '-march=native'
 
+    def _backup_cpuinfo(self):
+        # Construct cpu_info dict from lscpu that is similar to what py-cpuinfo provides
+        if not self.command_exists('lscpu'):
+            self.warning(
+                f"{self.name} attempted to query 'lscpu' after failing to use py-cpuinfo "
+                "to detect the CPU architecture. 'lscpu' does not appear to exist on "
+                "your system, will fall back to use -march=native and non-vectorized execution."
+            )
+            return None
+        result = subprocess.check_output('lscpu', shell=True)
+        result = result.decode('utf-8').strip().lower()
+
+        cpu_info = {}
+        cpu_info['arch'] = None
+        cpu_info['flags'] = ""
+        if 'genuineintel' in result or 'authenticamd' in result:
+            cpu_info['arch'] = 'X86_64'
+            if 'avx512' in result:
+                cpu_info['flags'] += 'avx512,'
+            if 'avx2' in result:
+                cpu_info['flags'] += 'avx2'
+        elif 'ppc64le' in result:
+            cpu_info['arch'] = "PPC_"
+
+        return cpu_info
+
     def simd_width(self):
         try:
             from cpuinfo import get_cpu_info
         except ImportError as e:
-            self.warning(f"{self.name} to failed import cpu_info:\n{e}\n"
-                         "will fall back to non-vectorized execution.")
-            return '-D__SCALAR__'
+            cpu_info = _backup_cpuinfo()
+            if cpu_info is None:
+                return '-D__SCALAR__'
 
         try:
             cpu_info = get_cpu_info()
-        except Exception as e:
-            print(
-                f"{WARNING} {self.name} SIMD_WIDTH cannot be recognized due to {str(e)}!"
-            )
-            return '-D__SCALAR__'
+        except json.decoder.JSONDecodeError as e:
+            cpu_info = _backup_cpuinfo()
+            #FIXME: temp workaround, seeing strange JSON stack trace from
+            # cpuinfo on A100-80GB machines and possibly others.
+            if cpu_info is None:
+                return '-D__SCALAR__'
 
         if cpu_info['arch'] == 'X86_64':
             if 'avx512' in cpu_info['flags']:
