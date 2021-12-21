@@ -270,16 +270,17 @@ class OpBuilder(ABC):
         try:
             from cpuinfo import get_cpu_info
         except ImportError as e:
-            cpu_info = _backup_cpuinfo()
+            cpu_info = self._backup_cpuinfo()
             if cpu_info is None:
                 return "-march=native"
 
         try:
             cpu_info = get_cpu_info()
-        except json.decoder.JSONDecodeError as e:
-            #FIXME: temp workaround, seeing strange JSON stack trace from
-            # cpuinfo on A100-80GB machines and possibly others.
-            cpu_info = _backup_cpuinfo()
+        except Exception as e:
+            self.warning(
+                f"{self.name} attempted to use `py-cpuinfo` but failed (exception type: {type(e)}, {e}), "
+                "falling back to `lscpu` to get this information.")
+            cpu_info = self._backup_cpuinfo()
             if cpu_info is None:
                 return "-march=native"
 
@@ -318,16 +319,17 @@ class OpBuilder(ABC):
         try:
             from cpuinfo import get_cpu_info
         except ImportError as e:
-            cpu_info = _backup_cpuinfo()
+            cpu_info = self._backup_cpuinfo()
             if cpu_info is None:
                 return '-D__SCALAR__'
 
         try:
             cpu_info = get_cpu_info()
-        except json.decoder.JSONDecodeError as e:
-            cpu_info = _backup_cpuinfo()
-            #FIXME: temp workaround, seeing strange JSON stack trace from
-            # cpuinfo on A100-80GB machines and possibly others.
+        except Exception as e:
+            self.warning(
+                f"{self.name} attempted to use `py-cpuinfo` but failed (exception type: {type(e)}, {e}), "
+                "falling back to `lscpu` to get this information.")
+            cpu_info = self._backup_cpuinfo()
             if cpu_info is None:
                 return '-D__SCALAR__'
 
