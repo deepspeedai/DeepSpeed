@@ -18,17 +18,14 @@ reduction_** from using DeepSpeed.
 
 ## Training GPT-2 with the Original Megatron-LM
 
-The original model code from
-[Megatron-LM](https://github.com/NVIDIA/Megatron-LM).  We've copied this repo
-into DeepSpeed [Megatron-LM](https://github.com/microsoft/DeepSpeedExamples/tree/master/Megatron-LM-v1.1.5-ZeRO3) example
-and made it available as a submodule. To download, execute:
+We've copied the original model code from [Megatron-LM](https://github.com/NVIDIA/Megatron-LM) into DeepSpeed [Megatron-LM](https://github.com/microsoft/DeepSpeedExamples/tree/master/Megatron-LM-v1.1.5-ZeRO3) and made it available as a submodule. To download, execute:
 ```bash
 git submodule update --init --recursive
 ```
 
 ### Training Data Setup
 * Follow Megatron's [instructions](https://github.com/NVIDIA/Megatron-LM#collecting-gpt2-webtext-data)
-  to download the webtext data and place a symbolic link under `DeepSpeedExamples/Megatron-LM/data`:
+  to download the `webtext` data and place a symbolic link under `DeepSpeedExamples/Megatron-LM/data`:
 
 ### Running Unmodified Megatron-LM GPT2 model
 
@@ -51,7 +48,7 @@ To use DeepSpeed we will modify three files :
 
 * `arguments.py` : Arguments configurations
 * `pretrain_gpt2.py` : Main entry point for training
-* `utils.py` : Checkpoints saving and loading utilities
+* `utils.py` : Checkpoint saving and loading utilities
 
 
 ### Argument Parsing
@@ -78,7 +75,7 @@ def get_args():
 
 
 ### Initialization and Training
-We modify `pretrain.py` to enable training with DeepSpeed.
+We will modify `pretrain.py` to enable training with DeepSpeed.
 
 #### Initialization
 We use `deepspeed.initialize` to create `model_engine`, `optimizer` and LR
@@ -236,9 +233,9 @@ as the learning rate.
 
 
 ##### Loss Scaling
-The GPT2 training script logs the loss scaling value during training. Inside,
+The GPT2 training script logs the loss scaling value during training. Inside
 the DeepSpeed optimizer, this value is stored as `cur_scale` instead of
-`loss_scale` in Megatron's optimizer. Therefore, we appropriately replace it in
+`loss_scale` as in Megatron's optimizer. Therefore, we appropriately replace it in
 the logging string.
 
 ```python
@@ -249,9 +246,9 @@ the logging string.
 ```
 
 
-### Checkpoints Saving & Loading
+### Checkpoint Saving & Loading
 
-DeepSpeed engine has flexible APIs for checkpoint saving and loading, to handle
+The DeepSpeed engine has flexible APIs for checkpoint saving and loading, to handle
 the states from both the client model and its own internal.
 
 ```python
@@ -259,12 +256,12 @@ def save_checkpoint(self, save_dir, tag, client_state={})
 def load_checkpoint(self, load_dir, tag)
 ```
 
-Applying DeepSpeed needs to update utils.py in which Megatron-LM GPT2 saves and
-loads its checkpoints.
+To use DeepSpeed, we need to update `utils.py` in which Megatron-LM GPT2 saves and
+loads checkpoints.
 
-A new function `save_ds_checkpoint()` is created as below for DeepSpeed, it
-collects the client model states and passes to DeepSpeed engine by calling
-`save_checkpoint()` of DeepSpeed.
+Create a new function `save_ds_checkpoint()` as shown below. The new function
+collects the client model states and passes them to the DeepSpeed engine by calling
+DeepSpeed's `save_checkpoint()`.
 
 ```python
  def save_ds_checkpoint(iteration, model, args):
@@ -284,7 +281,7 @@ collects the client model states and passes to DeepSpeed engine by calling
 
 ```
 
-In Megatron-LM GPT2 `save_checkpoint()` function, adds following lines to
+In Megatron-LM GPT2's `save_checkpoint()` function, add the following lines to
 invoke the above function for DeepSpeed.
 
 ```python
@@ -298,7 +295,7 @@ invoke the above function for DeepSpeed.
 
 ```
 
-In `load_checkpoint()` function, use DeepSpeed loading checkpoint API as below,
+In the `load_checkpoint()` function, use DeepSpeed checkpoint loading API as below,
 and return the states for the client model.
 
 ```python
@@ -321,7 +318,7 @@ and return the states for the client model.
 
 ### DeepSpeed Activation Checkpoints (Optional)
 
-DeepSpeed can reduce the activation memory during model parallel training by partitioning activation checkpoints across model parallel GPUs, or offloading them to CPU. These optimizations are optional, and can be skipped unless activation memory becomes a memory bottleneck. To enable partition activation, we use the `deepspeed.checkpointing` API to replace Megatron's activation checkpointing and random state tracker APIs. The replacement should happen before the first invocation of these APIs.
+DeepSpeed can reduce the activation memory during model parallel training by partitioning activation checkpoints across model parallel GPUs, or offloading them to CPU. These optimizations are optional, and can be skipped unless activation memory becomes a bottleneck. To enable partition activation, we use the `deepspeed.checkpointing` API to replace Megatron's activation checkpointing and random state tracker APIs. The replacement should happen before the first invocation of these APIs.
 
 a) Replace in `pretrain_gpt.py` :
 
@@ -347,17 +344,17 @@ b) Replace in `mpu/transformer.py`:
 
 ```python
 if deepspeed.checkpointing.is_configured():
-            global get_cuda_rng_tracker, checkpoint
-            get_cuda_rng_tracker = deepspeed.checkpoint.get_cuda_rng_tracker
-            checkpoint = deepspeed.checkpointing.checkpoint
+    global get_cuda_rng_tracker, checkpoint
+    get_cuda_rng_tracker = deepspeed.checkpoint.get_cuda_rng_tracker
+    checkpoint = deepspeed.checkpointing.checkpoint
 
 ```
 
-With these replacements, various DeepSpeed activation checkpointing optimizations such as activation partitioning, contiguous checkpointing, and CPU checkpointing, can be specified with either `deepspeed.checkpointing.configure` or in the `deepspeed_config` file.
+With these replacements, various DeepSpeed activation checkpointing optimizations such as activation partitioning, contiguous checkpointing, and CPU checkpointing, can be specified either with `deepspeed.checkpointing.configure` or in the `deepspeed_config` file.
 
 
 ### Train  scripts
-Assume webtext data was prepared in previous step, to start training
+We assume that the `webtext` data was prepared in the previous step. To start training
 Megatron-LM GPT2 model with DeepSpeed applied, execute the following command to
 start training.
 
@@ -369,17 +366,17 @@ start training.
 ## DeepSpeed Evaluation using GPT-2
 
 DeepSpeed enables training very large models effectively via the advanced [ZeRO
-optimizer](https://arxiv.org/abs/1910.02054v2). In February, we released a sub-set
-of optimizations from ZeRO in DeepSpeed that performs optimizer state partitioning.
-We refer to them as ZeRO-1. In May, 2020 we extended ZeRO-1 in DeepSpeed to include
+optimizer](https://arxiv.org/abs/1910.02054v2). In February 2020, we released a sub-set
+of optimizations from ZeRO in DeepSpeed that perform optimizer state partitioning.
+We refer to them as ZeRO-1. In May 2020, we extended ZeRO-1 in DeepSpeed to include
 additional optimizations from ZeRO including gradient and activation partitioning,
 as well as contiguous memory optimizations. We refer to this release as ZeRO-2.
 
 ZeRO-2 significantly reduces the memory
 footprint for training large models which means large models can be trained with i) less
 model parallelism and ii) larger batch sizes. A lower model parallelism degree improves
-training efficiency by increasing the granularity of the computation such as the matrix
-multiplication where performance is directly related to the size of the matrices.
+training efficiency by increasing the granularity of computations such as matrix
+multiplications where performance is directly related to the size of the matrices.
 Furthermore, less model parallelism also results in less communication between model
 parallel GPUs, which further boosts performance.  Larger batch size has a similar effect
 of increasing the computational granularity as well as reducing communication, also
@@ -393,15 +390,12 @@ we elevate the model scale and speed to an entirely new level compared to Megatr
 
 More concretely, DeepSpeed and ZeRO-2 excel in four aspects (as visualized in Figure 2), supporting an order-of-magnitude bigger models, up to 10x faster, with superlinear scalability, and improved usability to democratize large model training. These four aspects are detailed below.
 
+**Model size**: State-of-the-art large models such as OpenAI GPT-2, NVIDIA Megatron-LM, Google T5, and Microsoft Turing-NLG have sizes of 1.5B, 8.3B, 11B, and 17B parameters respectively. ZeRO-2 provides system support to efficiently run models of 170 billion parameters, an order-of-magnitude bigger than these largest models (Figure 2, top left).
 
-Figure 2: ZeRO-2 scales to 170 billion parameters, has up to 10x higher throughput, obtains super linear speedup, and improves usability by avoiding the need for code refactoring for models up to 13 billion parameters.
+**Speed**: Improved memory efficiency powers higher throughput and faster training. Figure 2 (bottom left) shows system throughput of ZeRO-2 and ZeRO-1 (both combining ZeRO-powered data parallelism with NVIDIA Megatron-LM model parallelism) as well as using the state-of-the-art model parallelism approach Megatron-LM alone (baseline in Figure 2, bottom left). ZeRO-2 runs 100-billion-parameter models on a 400 NVIDIA V100 GPU cluster with over 38 teraflops per GPU and aggregated performance over 15 petaflops. For models of the same size, ZeRO-2 is 10x faster in training speed when compared with using Megatron-LM alone and 5x faster when compared with ZeRO-1.
 
-Model size: State-of-the-art large models such as OpenAI GPT-2, NVIDIA Megatron-LM, Google T5, and Microsoft Turing-NLG have sizes of 1.5B, 8.3B, 11B, and 17B parameters respectively. ZeRO-2 provides system support to efficiently run models of 170 billion parameters, an order-of-magnitude bigger than these largest models (Figure 2, top left).
+**Scalability**: We observe superlinear speedup (Figure 2, top right), where the performance more than doubles when the number of GPUs are doubled. ZeRO-2 reduces the memory footprint of the model states as we increase the data parallelism degree, allowing us to fit larger batch sizes per GPU and resulting in better performance.
 
-Speed: Improved memory efficiency powers higher throughput and faster training. Figure 2 (bottom left) shows system throughput of ZeRO-2 and ZeRO-1 (both combining ZeRO-powered data parallelism with NVIDIA Megatron-LM model parallelism) as well as using the state-of-the-art model parallelism approach Megatron-LM alone (baseline in Figure 2, bottom left). ZeRO-2 runs 100-billion-parameter models on a 400 NVIDIA V100 GPU cluster with over 38 teraflops per GPU and aggregated performance over 15 petaflops. For models of the same size, ZeRO-2 is 10x faster in training speed when compared with using Megatron-LM alone and 5x faster when compared with ZeRO-1.
+**Democratizing large model training**: ZeRO-2 empowers model scientists to train models up to 13 billion parameters efficiently without any model parallelism that typically requires model refactoring (Figure 2, bottom right). 13 billion parameters is larger than most of the largest state-of-the-art models (such as Google T5, with 11 billion parameters). Model scientists can therefore experiment freely with large models without worrying about model parallelism. In comparison, the implementations of classic data-parallelism approaches (such as PyTorch Distributed Data Parallel) run out of memory with 1.4-billion-parameter models, while ZeRO-1 supports up to 6 billion parameters for comparison.
 
-Scalability: We observe superlinear speedup (Figure 2, top right), where the performance more than doubles when the number of GPUs are doubled. ZeRO-2 reduces the memory footprint of the model states as we increase the data parallelism degree, allowing us to fit larger batch sizes per GPU and resulting in better performance.
-
-Democratizing large model training: ZeRO-2 empowers model scientists to train models up to 13 billion parameters efficiently without any model parallelism that typically requires model refactoring (Figure 2, bottom right). 13 billion parameters is larger than most of the largest state-of-the-art models (such as Google T5, with 11 billion parameters). Model scientists can therefore experiment freely with large models without worrying about model parallelism. In comparison, the implementations of classic data-parallelism approaches (such as PyTorch Distributed Data Parallel) run out of memory with 1.4-billion-parameter models, while ZeRO-1 supports up to 6 billion parameters for comparison.
-
-Furthermore, in the absence of model parallelism, these models can be trained on low bandwidth clusters while still achieving significantly better throughput compared to using model parallelism. For example, the GPT-2 model can be trained nearly 4x faster with ZeRO powered data parallelism compared to using model parallelism on a four node cluster connected with 40 Gbps Infiniband interconnect, where each node have four NVIDIA 16GB V100 GPUs connected with PCI-E. Therefore, with this performance improvement, large model training is no longer limited to GPU clusters with ultra fast interconnect but also accessible on modest clusters with limited bandwidth.
+Furthermore, in the absence of model parallelism, these models can be trained on low bandwidth clusters while still achieving significantly better throughput compared to using model parallelism. For example, the GPT-2 model can be trained nearly 4x faster with ZeRO powered data parallelism compared to using model parallelism on a four node cluster connected with 40 Gbps Infiniband interconnect, where each node has four NVIDIA 16GB V100 GPUs connected with PCI-E. Therefore, with this performance improvement, large model training is no longer limited to GPU clusters with ultra fast interconnect, but also accessible on modest clusters with limited bandwidth.

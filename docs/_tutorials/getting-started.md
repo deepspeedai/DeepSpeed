@@ -83,7 +83,7 @@ pre-defined learning rate scheduler:
   engine automatically handles scaling the loss to avoid precision loss in the
   gradients.
 
-- **Learning Rate Scheduler**: when using a DeepSpeed's learning rate scheduler (specified in the `ds_config.json` file), DeepSpeed calls the `step()` method of the scheduler at every training step (when `model_engine.step()` is executed). When not using a DeepSpeed's learning rate scheduler:
+- **Learning Rate Scheduler**: when using a DeepSpeed's learning rate scheduler (specified in the `ds_config.json` file), DeepSpeed calls the `step()` method of the scheduler at every training step (when `model_engine.step()` is executed). When not using DeepSpeed's learning rate scheduler:
   - if the schedule is supposed to execute at every training step, then the user can pass the scheduler to `deepspeed.initialize` when initializing the DeepSpeed engine and let DeepSpeed manage it for update or save/restore.
   - if the schedule is supposed to execute at any other interval (e.g., training epochs), then the user should NOT pass the scheduler to DeepSpeed during initialization and must manage it explicitly.
 
@@ -125,15 +125,16 @@ for step, batch in enumerate(data_loader):
 
 DeepSpeed can automatically save and restore the model, optimizer, and the
 learning rate scheduler states while hiding away these details from the user.
-However, the user may want to save other data in addition to these that are
+However, the user may want to save additional data that are
 unique to a given model training. To support these items, `save_checkpoint`
 accepts a client state dictionary `client_sd` for saving. These items can be
 retrieved from `load_checkpoint` as a return argument. In the example above,
 the `step` value is stored as part of the `client_sd`.
 
-Important: all processes must call this method and not just the process with rank 0. It is because
+**Important**: all processes must call this method and not just the process with rank 0. It is because
 each process needs to save its master weights and scheduler+optimizer states. This method will hang
 waiting to synchronize with other processes if it's called just for the process with rank 0.
+{: .notice--info}
 
 ## DeepSpeed Configuration
 

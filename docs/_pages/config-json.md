@@ -435,9 +435,9 @@ Enabling and configuring ZeRO memory optimizations
 
 ***stage3_gather_fp16_weights_on_model_save***: [boolean]
 
-| Description                                                                                                                                                                                                                                                                   | Default |
-| ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------- |
-| Consolidate the weights before saving the model by `save_fp16_model()`. Since the weights are partitioned across GPUs, they aren't part of `state_dict`, so this function automatically gather the weights when this option is enabled and then saves the fp16 model weights. | `False` |
+| Description                                                                                                                                                                                                                                                                    | Default |
+|--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------| ------- |
+| Consolidate the weights before saving the model by `save_fp16_model()`. Since the weights are partitioned across GPUs, they aren't part of `state_dict`, so this function automatically gathers the weights when this option is enabled and then saves the fp16 model weights. | `False` |
 
 
 ***cpu_offload***: [boolean]
