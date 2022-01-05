@@ -553,3 +553,23 @@ class CUDAOpBuilder(OpBuilder):
             return ['cublas', 'curand']
         else:
             return []
+
+
+class TorchCPUOpBuilder(CUDAOpBuilder):
+    def cxx_args(self):
+        import torch
+        CUDA_LIB64 = os.path.join(torch.utils.cpp_extension.CUDA_HOME, "lib64")
+        CPU_ARCH = self.cpu_arch()
+        SIMD_WIDTH = self.simd_width()
+
+        args = super().cxx_args()
+        args += [
+            f'-L{CUDA_LIB64}',
+            '-lcudart',
+            '-lcublas',
+            '-g',
+            CPU_ARCH,
+            '-fopenmp',
+            SIMD_WIDTH,
+        ]
+        return args
