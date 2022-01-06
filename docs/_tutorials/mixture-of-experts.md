@@ -194,4 +194,6 @@ We have devised a new technique called “Random Token Selection” that greatly
 
 ## Advanced MoE usage
 
+We have added an example of applying MoE to NLG models. Please read more in this [newsletter](https://www.deepspeed.ai/news/2021/12/09/deepspeed-moe-nlg.html) and [tutorial](/tutorials/mixture-of-experts-nlg/).
+
 Watch this space! We plan to add more interesting and detailed examples of using DeepSpeed MoE in the coming weeks.

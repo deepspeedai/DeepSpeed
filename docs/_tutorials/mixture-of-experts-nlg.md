@@ -28,4 +28,15 @@ We provide example training scripts under [examples/MoE](https://github.com/micr
 
 In addition to the new hyperparameters above, for NLG+MoE models we found that it's helpful to lower the learning rate and increase the learning rate decay duration compared to the base dense model. Details of our tuning can be found in the example training scripts.
 
-Regarding training data, we are not able to release our internal data but any public data for Megatron-LM pre-training (e.g., [The Pile dataset](https://the-eye.eu/public/AI/pile_neox/)) can be directly used to train MoE models (with the caveat that it might not provide the exact same model quality as in our experiments). We are evaluating public dataset for MoE pre-training and will post our findings here.
+Regarding training data, we are not able to release our internal data but any public data for Megatron-LM pre-training can be directly used to train MoE models (with the caveat that it might not provide the exact same model quality as in our experiments). For example, we evaluated The Pile dataset ([pile.eleuther.ai](https://pile.eleuther.ai/), [github.com/EleutherAI/the-pile](https://github.com/EleutherAI/the-pile)) for both dense and MoE models. Table 1 below shows that this public data provides similar evaluation results as our internal data.
+
+| Model size | LAMBADA: completion prediction | PIQA: commonsense reasoning | BoolQ: reading comprehension | RACE-h: reading comprehension | TriviaQA: question answering | WebQs: question answering |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| **Dense NLG:** | | | | | | |
+| 350M, internal data | 0.5203 | 0.6931 | 0.5364 | 0.3177 | 0.0321 | 0.0157 |
+| 350M, public Pile | 0.5106 | 0.6589 | 0.5933 | 0.3196 | 0.0257 | 0.0064 |
+| **MoE NLG:** | | | | | | |
+| 350M+MoE-128, internal data | 0.6270 | 0.7459 | 0.6046 | 0.3560 | 0.1658 | 0.0517 |
+| 350M+MoE-128, public Pile | 0.6128 | 0.7323 | 0.6040 | 0.3349 | 0.1111 | 0.0335 |
+
+Table 1: Zero-shot evaluation results (last six columns) for different dense and MoE NLG models. All zero-shot evaluation results use the accuracy metric.
