@@ -3,6 +3,10 @@
 [![Documentation Status](https://readthedocs.org/projects/deepspeed/badge/?version=latest)](https://deepspeed.readthedocs.io/en/latest/?badge=latest)
 [![License MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://github.com/Microsoft/DeepSpeed/blob/master/LICENSE)
 
+<div align="center">
+<img src="docs/assets/images/DeepSpeed_dark.svg" width="400px">
+</div>
+
 <!--
 Remove until pypi issue is resolved: https://status.python.org/incidents/2jj696st6yn5
 [![Downloads](https://pepy.tech/badge/deepspeed/month)](https://pepy.tech/project/deepspeed)
