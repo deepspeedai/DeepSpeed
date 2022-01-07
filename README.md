@@ -4,7 +4,8 @@
 [![License MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://github.com/Microsoft/DeepSpeed/blob/master/LICENSE)
 
 <div align="center">
-<img src="docs/assets/images/DeepSpeed_dark.svg" width="400px">
+ <img src="docs/assets/images/DeepSpeed_light.svg#gh-light-mode-only" width="400px">
+ <img src="docs/assets/images/DeepSpeed_dark.svg#gh-dark-mode-only" width="400px">
 </div>
 
 <!--
