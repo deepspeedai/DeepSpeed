@@ -123,3 +123,14 @@ def test_cpu_adagrad_opt_sparse_embedding(model_size, vocabulary_size, dim):
         optimizer1.step()
 
     check_equal(param, param1, atol=1e-2, verbose=True)
+
+
+def test_cpu_adam_gpu_error():
+    model_size = 64
+    device = 'cuda:0'
+    param = torch.nn.Parameter(torch.randn(model_size, device=device))
+    optimizer = DeepSpeedCPUAdagrad([param])
+
+    param.grad = torch.randn(model_size, device=device)
+    with pytest.raises(AssertionError):
+        optimizer.step()
