@@ -77,3 +77,22 @@ void launch_dequantize(T* output,
                        unsigned groups,
                        unsigned merge_count,
                        cudaStream_t stream);
+
+template <typename T>
+void launch_gptj_residual_add(T* input,
+                              T* output,
+                              T* attn,
+                              T* bias,
+                              int batch,
+                              int head_size,
+                              cudaStream_t stream);
+template <typename T>
+void launch_apply_rotary_pos_emb(T* mixed_query,
+                                 T* key_layer,
+                                 unsigned head_size,
+                                 unsigned seq_len,
+                                 unsigned rotary_dim,
+                                 unsigned offset,
+                                 unsigned num_heads,
+                                 unsigned batch,
+                                 cudaStream_t stream);

@@ -19,6 +19,7 @@ class InferenceBuilder(CUDAOpBuilder):
             'csrc/transformer/inference/csrc/normalize.cu',
             'csrc/transformer/inference/csrc/softmax.cu',
             'csrc/transformer/inference/csrc/dequantize.cu',
+            'csrc/transformer/inference/csrc/apply_rotary_pos_emb.cu',
         ]
 
     def include_paths(self):

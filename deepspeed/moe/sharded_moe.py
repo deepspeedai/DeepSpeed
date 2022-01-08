@@ -226,19 +226,21 @@ def top1gating(logits: Tensor,
             exp_selection_uniform_map[logits.device] = uniform
 
         mask1_rand = mask1 * uniform(mask1.shape)
+    else:
+        mask1_rand = mask1
 
-        assert logits.shape[0] >= min_capacity, "No. of tokens (batch-size) should be greater than min_capacity. Either set min_capacity to 0 or increase your batch size."
+    assert logits.shape[0] >= min_capacity, "No. of tokens (batch-size) should be greater than min_capacity. Either set min_capacity to 0 or increase your batch size."
 
-        top_idx = _top_idx(mask1_rand, capacity)
+    top_idx = _top_idx(mask1_rand, capacity)
 
-        new_mask1 = mask1 * torch.zeros_like(mask1).scatter_(0, top_idx, 1)
-        mask1 = new_mask1
+    new_mask1 = mask1 * torch.zeros_like(mask1).scatter_(0, top_idx, 1)
+    mask1 = new_mask1
 
-        if use_tutel:
-            # Tutel doesn't support index values masked with zero
-            # so we need to replace masked indices with -1
-            indices_mask = mask1.sum(dim=1) * num_experts - 1
-            indices1_s = torch.min(indices1_s, indices_mask)
+    if use_tutel:
+        # Tutel doesn't support index values masked with zero
+        # so we need to replace masked indices with -1
+        indices_mask = mask1.sum(dim=1) * num_experts - 1
+        indices1_s = torch.min(indices1_s, indices_mask)
 
     # Compute locations in capacity buffer
     if use_tutel:

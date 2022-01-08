@@ -143,6 +143,50 @@ class HFGPTNEOLayerPolicy(DSPolicy):
                self.client_module.ln_1.bias.data
 
 
+class HFGPTJLayerPolicy(DSPolicy):
+    _orig_layer_class = None
+
+    def __init__(self, client_module, inference=True):
+        super().__init__(inference, scale_attention=True)
+        self.client_module = client_module
+        try:
+            import transformers
+            HFGPTJLayerPolicy._orig_layer_class = transformers.models.gptj.modeling_gptj.GPTJBlock
+        except:
+            HFGPTJLayerPolicy._orig_layer_class = None
+
+    def get_hidden_heads(self):
+        return self.client_module.attn.q_proj.weight.data.shape[1], \
+                self.client_module.attn.num_attention_heads
+
+    def attention(self):
+        qw = self.client_module.attn.q_proj.weight.data
+        kw = self.client_module.attn.k_proj.weight.data
+        vw = self.client_module.attn.v_proj.weight.data
+
+        qkvw = torch.cat((qw, kw, vw), dim=0)
+
+        return self.linear_layer, \
+                qkvw, \
+                None, \
+                self.client_module.attn.out_proj.weight.data, \
+                None, \
+                self.scale_attention
+
+    def mlp(self):
+        return self.linear_layer, \
+                self.client_module.mlp.fc_in.weight.data, \
+                self.client_module.mlp.fc_in.bias.data, \
+                self.client_module.mlp.fc_out.weight.data, \
+                self.client_module.mlp.fc_out.bias.data
+
+    def layerNorm(self):
+        return None, \
+               None, \
+               self.client_module.ln_1.weight.data, \
+               self.client_module.ln_1.bias.data
+
+
 class MegatronLayerPolicy(DSPolicy):
     _orig_layer_class = None
 
@@ -234,6 +278,7 @@ class HFGPT2LayerPolicy(DSPolicy):
 replace_policies = [
     HFBertLayerPolicy,
     HFGPTNEOLayerPolicy,
+    HFGPTJLayerPolicy,
     MegatronLayerPolicy,
     HFGPT2LayerPolicy,
 ]

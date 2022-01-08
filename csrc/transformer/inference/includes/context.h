@@ -40,7 +40,7 @@ inline int DS_GET_BLOCKS(const int N)
 
 class Context {
 public:
-    Context() : _workspace(nullptr), _seed(42), _curr_offset(0)
+    Context() : _workspace(nullptr), _seed(42), _curr_offset(0), _stream(0)
     {
         curandCreateGenerator(&_gen, CURAND_RNG_PSEUDO_DEFAULT);
         curandSetPseudoRandomGeneratorSeed(_gen, 123);
@@ -50,12 +50,16 @@ public:
             throw std::runtime_error(message);
         }
         cublasSetMathMode(_cublasHandle, CUBLAS_TENSOR_OP_MATH);
+        cudaEventCreate(&_comp1_event, (cudaEventDisableTiming | cudaEventBlockingSync));
+        cudaEventCreate(&_comp2_event, (cudaEventDisableTiming | cudaEventBlockingSync));
     }
 
     virtual ~Context()
     {
         cublasDestroy(_cublasHandle);
         cudaFree(_workspace);
+        cudaEventDestroy(_comp1_event);
+        cudaEventDestroy(_comp2_event);
     }
 
     static Context& Instance()
@@ -81,12 +85,18 @@ public:
 
     curandGenerator_t& GetRandGenerator() { return _gen; }
 
-    cudaStream_t GetCurrentStream()
+    cudaStream_t GetCurrentStream(bool other_stream = false)
     {
         // get current pytorch stream.
+        if (other_stream) {
+            if (!_stream) _stream = at::cuda::getStreamFromPool(true);
+            return _stream;
+        }
         cudaStream_t stream = at::cuda::getCurrentCUDAStream();
         return stream;
     }
+
+    cudaEvent_t GetCompEvent(int id) { return id == 1 ? _comp1_event : _comp2_event; }
 
     cublasHandle_t GetCublasHandle() { return _cublasHandle; }
 
@@ -108,5 +118,11 @@ private:
     uint64_t _seed;
     uint64_t _curr_offset;
     size_t _workSpaceSize;
+
+    cudaEvent_t _comp1_event;
+    cudaEvent_t _comp2_event;
+
+    cudaStream_t _stream;
+
     std::vector<std::array<int, 3>> _gemm_algos;
 };

@@ -2,7 +2,7 @@ import copy
 import torch
 import deepspeed
 import deepspeed.ops.transformer as transformer_inference
-from .replace_policy import HFBertLayerPolicy, MegatronLayerPolicy, HFGPT2LayerPolicy
+from .replace_policy import HFBertLayerPolicy, MegatronLayerPolicy, HFGPT2LayerPolicy, HFGPTJLayerPolicy
 from .replace_policy import replace_policies
 from ..constants import INFERENCE_GENERIC_MODE, INFERENCE_SPECIALIZED_MODE
 from ..runtime.weight_quantizer import WeightQuantization
@@ -200,11 +200,12 @@ def replace_transformer_layer(orig_layer_impl,
             _4hh_w = _4hh_w.half()
 
         if quantize or fp16:
-            dense_b = dense_b.half()
+            qkvb = qkvb if qkvb is None else qkvb.half()
+            dense_b = dense_b if dense_b is None else dense_b.half()
             _h4h_b = _h4h_b.half()
             _4hh_b = _4hh_b.half()
-            attn_nw = attn_nw.half()
-            attn_nb = attn_nb.half()
+            attn_nw = attn_nw if dense_b is None else attn_nw.half()
+            attn_nb = attn_nb if dense_b is None else attn_nb.half()
             input_nw = input_nw.half()
             input_nb = input_nb.half()
 
@@ -216,7 +217,9 @@ def replace_transformer_layer(orig_layer_impl,
                 heads=num_attention_heads,
                 layer_norm_eps=config.layer_norm_eps if hasattr(
                     config,
-                    'layer_norm_eps') else 1e-12,
+                    'layer_norm_eps') else
+                (config.layer_norm_epsilon if hasattr(config,
+                                                      'layer_norm_epsilon') else 1e-12),
                 fp16=fp16,
                 pre_layer_norm=preln,
                 mp_size=mp_size,
@@ -227,7 +230,10 @@ def replace_transformer_layer(orig_layer_impl,
                                  if hasattr(config,
                                             'attention_layers') else False),
                 window_size=(config.window_size if hasattr(config,
-                                                           'window_size') else 1))
+                                                           'window_size') else 1),
+                rotary_dim=(config.rotary_dim if hasattr(config,
+                                                         'rotary_dim') else -1),
+                mlp_after_attn=(policy_cls is not HFGPTJLayerPolicy))
 
             if quantize and quantize_settings is not None:
                 (quantization_scales,
@@ -278,18 +284,10 @@ def replace_transformer_layer(orig_layer_impl,
             attn_block = new_module.attention
             attn_block.attn_qkvw.data = mp_replace.qkv_copy(attn_block.attn_qkvw.data,
                                                             qkvw)
-
-            if qkvb is not None:
-                if fp16:
-                    qkvb = qkvb.half()
-                attn_block.attn_qkvb.data = mp_replace.qkv_copy(
-                    attn_block.attn_qkvb.data,
-                    qkvb)
-            else:
-                attn_block.attn_qkvb = qkvb
+            attn_block.attn_qkvb = mp_replace.qkv_copy(attn_block.attn_qkvb.data, qkvb)
 
             attn_block.attn_ow.data = mp_replace.copy(attn_block.attn_ow.data, dense_w)
-            attn_block.attn_ob.data = mp_replace.copy(attn_block.attn_ob.data, dense_b)
+            attn_block.attn_ob = mp_replace.copy(attn_block.attn_ob.data, dense_b)
 
             mpl_block = new_module.mlp
             mpl_block.inter_w.data = mp_replace.copy(mpl_block.inter_w.data, _h4h_w)
@@ -297,8 +295,10 @@ def replace_transformer_layer(orig_layer_impl,
             mpl_block.output_w.data = mp_replace.copy(mpl_block.output_w.data, _4hh_w)
             mpl_block.output_b.data = mp_replace.copy(mpl_block.output_b.data, _4hh_b)
 
-            new_module.mlp.attn_nw.data = attn_nw.to(torch.cuda.current_device())
-            new_module.mlp.attn_nb.data = attn_nb.to(torch.cuda.current_device())
+            new_module.mlp.attn_nw = attn_nw if dense_b is None else attn_nw.to(
+                torch.cuda.current_device())
+            new_module.mlp.attn_nb = attn_nb if dense_b is None else attn_nb.to(
+                torch.cuda.current_device())
             new_module.norm_w.data = input_nw.to(torch.cuda.current_device())
             new_module.norm_b.data = input_nb.to(torch.cuda.current_device())
         else:
