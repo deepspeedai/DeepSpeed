@@ -556,6 +556,9 @@ class CUDAOpBuilder(OpBuilder):
 
 
 class TorchCPUOpBuilder(CUDAOpBuilder):
+    def extra_ldflags(self):
+        return ['-lcurand']
+
     def cxx_args(self):
         import torch
         CUDA_LIB64 = os.path.join(torch.utils.cpp_extension.CUDA_HOME, "lib64")
