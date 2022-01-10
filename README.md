@@ -5,7 +5,7 @@
 
 <div align="center">
  <img src="docs/assets/images/DeepSpeed_light.svg#gh-light-mode-only" width="400px">
- <img src="docs/assets/images/DeepSpeed_dark_gh.svg#gh-dark-mode-only" width="400px">
+ <img src="docs/assets/images/DeepSpeed_dark_transparent.svg#gh-dark-mode-only" width="400px">
 </div>
 
 <!--
