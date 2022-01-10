@@ -57,21 +57,24 @@ __global__ void apply_rotary_pos_emb(__half* mixed_query,
                                      unsigned total_count)
 {
 #if __CUDA_ARCH__ >= 700
+    cg::thread_block b = cg::this_thread_block();
+    cg::thread_block_tile<WARP_SIZE> g = cg::tiled_partition<WARP_SIZE>(b);
 
-    unsigned head_id = blockIdx.x * blockDim.y + threadIdx.y;
+    int id = threadIdx.x;
+    int gid = id >> 5;
+    int lane = id & 0x1f;
+
+    unsigned head_id = blockIdx.x * MAX_WARP_NUM + gid;
+    unsigned offset = head_id * head_size;
+
+    unsigned seq_id = (head_id / num_heads) % seq_len + seq_offset;
+
     if (head_id < total_count) {
-        unsigned offset = head_id * head_size + threadIdx.x;
-        unsigned tid = threadIdx.x;
-        unsigned seq_id = (head_id / num_heads) % seq_len + seq_offset;
-
-        cg::thread_block b = cg::this_thread_block();
-        cg::thread_block_tile<WARP_SIZE> g = cg::tiled_partition<WARP_SIZE>(b);
-
-        while (tid < rotary_dim) {
+        while (lane < rotary_dim) {
             float inv_freq = (float)((lane / 2) * 2) / (float)rotary_dim;
             inv_freq = 1.0 / powf(10000.0, inv_freq) * (float)seq_id;
-            float q = (float)mixed_query[offset];
-            float k = (float)key_layer[offset];
+            float q = (float)mixed_query[offset + lane];
+            float k = (float)key_layer[offset + lane];
             float rotary_sign = (lane % 2 == 1 ? -1.0 : 1.0);
             float q_rot = (q * rotary_sign);
             float k_rot = (k * rotary_sign);
@@ -80,11 +83,10 @@ __global__ void apply_rotary_pos_emb(__half* mixed_query,
             q = q * cosf(inv_freq) + q_rot * sinf(inv_freq);
             k = k * cosf(inv_freq) + k_rot * sinf(inv_freq);
 
-            mixed_query[offset] = (__half)q;
-            key_layer[offset] = (__half)k;
+            mixed_query[offset + lane] = (__half)q;
+            key_layer[offset + lane] = (__half)k;
 
-            tid += blockDim.x;
-            offset += blockDim.x;
+            lane += WARP_SIZE;
         }
     }
 #endif
