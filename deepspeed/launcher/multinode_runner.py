@@ -3,6 +3,7 @@ import sys
 import shutil
 import subprocess
 import warnings
+from shlex import quote
 from abc import ABC, abstractmethod
 
 from ..utils import logger
@@ -69,7 +70,7 @@ class PDSHRunner(MultiNodeRunner):
 
         exports = ""
         for key, val in self.exports.items():
-            exports += f"export {key}={val}; "
+            exports += f"export {key}={quote(val)}; "
 
         # https://linux.die.net/man/1/pdsh
         # %n will be replaced by pdsh command
@@ -85,6 +86,12 @@ class PDSHRunner(MultiNodeRunner):
             f"--master_addr={self.args.master_addr}",
             f"--master_port={self.args.master_port}"
         ]
+        if self.args.no_python:
+            deepspeed_launch.append("--no_python")
+        if self.args.module:
+            deepspeed_launch.append("--module")
+        if self.args.no_local_rank:
+            deepspeed_launch.append("--no_local_rank")
 
         return pdsh_cmd_args + deepspeed_launch + [self.user_script
                                                    ] + self.user_arguments
@@ -133,9 +140,13 @@ class OpenMPIRunner(MultiNodeRunner):
 
         export_cmd = []
         for k, v in self.exports.items():
-            export_cmd += ['-x', f'{k}={v}']
+            export_cmd += ['-x', f'{k}={quote(v)}']
 
-        python_exec = [sys.executable, "-u"]
+        python_exec = []
+        if not self.args.no_python:
+            python_exec = [sys.executable, "-u"]
+            if self.args.module:
+                python_exec.append("-m")
 
         return mpirun_cmd + export_cmd + python_exec + [self.user_script
                                                         ] + self.user_arguments
@@ -219,9 +230,13 @@ class MVAPICHRunner(MultiNodeRunner):
 
         export_cmd = []
         for k, v in self.exports.items():
-            export_cmd += ['-env', f'{k}={v}']
+            export_cmd += ['-env', f'{k}={quote(v)}']
 
-        python_exec = [sys.executable, "-u"]
+        python_exec = []
+        if not self.args.no_python:
+            python_exec = [sys.executable, "-u"]
+            if self.args.module:
+                python_exec.append("-m")
 
         return mpirun_cmd + export_cmd + python_exec + [self.user_script
                                                         ] + self.user_arguments

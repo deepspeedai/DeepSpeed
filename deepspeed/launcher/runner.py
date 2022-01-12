@@ -25,7 +25,7 @@ from ..utils import logger
 from ..autotuning import Autotuner
 
 DLTS_HOSTFILE = "/job/hostfile"
-EXPORT_ENVS = ["NCCL", "PYTHON", "MV2", 'UCX']
+EXPORT_ENVS = ["NCCL", "PYTHON", "MV2", "UCX"]
 DEEPSPEED_ENVIRONMENT_NAME = ".deepspeed_env"
 DEEPSPEED_ENVIRONMENT_PATHS = [os.path.expanduser("~"), '.']
 PDSH_MAX_FAN_OUT = 1024
@@ -104,6 +104,22 @@ def parse_args(args=None):
                         type=str,
                         help="(optional) pass launcher specific arguments as a "
                         "single quoted argument.")
+
+    parser.add_argument("--module",
+                        action="store_true",
+                        help="Change each process to interpret the launch "
+                        "script as a Python module, executing with the same "
+                        "behavior as 'python -m'.")
+
+    parser.add_argument("--no_python",
+                        action="store_true",
+                        help="Skip prepending the training script with "
+                        "'python' - just execute it directly.")
+
+    parser.add_argument("--no_local_rank",
+                        action="store_true",
+                        help="Do not pass local_rank as an argument when calling "
+                        "the user's training script.")
 
     parser.add_argument("--force_multi",
                         action="store_true",
@@ -359,6 +375,12 @@ def main(args=None):
             f"--master_addr={args.master_addr}",
             f"--master_port={args.master_port}"
         ]
+        if args.no_python:
+            deepspeed_launch.append("--no_python")
+        if args.module:
+            deepspeed_launch.append("--module")
+        if args.no_local_rank:
+            deepspeed_launch.append("--no_local_rank")
         cmd = deepspeed_launch + [args.user_script] + args.user_args
     else:
         args.launcher = args.launcher.lower()
