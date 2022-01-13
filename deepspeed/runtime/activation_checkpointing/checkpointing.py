@@ -718,6 +718,11 @@ class CheckpointFunction(torch.autograd.Function):
 
         torch.autograd.backward(output_tensors, grad_tensors)
 
+        # Force clear our stashed tensors to prevent a memory leak in certain scenarios
+        ctx.deepspeed_saved_tensors = None
+        ctx.non_tensor_args = None
+        ctx.tensor_flags = None
+
         see_memory_usage("After backward checkpointing code after backward", force=False)
 
         if PROFILE_TIME:
