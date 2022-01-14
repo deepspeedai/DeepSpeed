@@ -445,3 +445,9 @@ The last incomplete batch can be dropped by setting:
 '''
 DATALOADER_DROP_LAST = "dataloader_drop_last"
 DATALOADER_DROP_LAST_DEFAULT = False
+
+#########################################
+# Optimizer checkpoint keys
+#########################################
+OPTIMIZER_STATE_DICT = "optimizer_state_dict"
+FP32_GROUPS = "fp32_groups"

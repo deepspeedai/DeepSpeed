@@ -26,6 +26,7 @@ from deepspeed.runtime.zero.offload_constants import *
 from deepspeed.runtime.swap_tensor.partitioned_param_swapper import PartitionedParamStatus
 from deepspeed.runtime.swap_tensor.partitioned_optimizer_swapper import PartitionedOptimizerSwapper
 from deepspeed.runtime.swap_tensor.pipelined_optimizer_swapper import PipelinedOptimizerSwapper
+from deepspeed.runtime.constants import OPTIMIZER_STATE_DICT
 
 # Toggle this to true to enable correctness test
 # with gradient partitioning and without
@@ -3050,7 +3051,7 @@ class DeepSpeedZeroOptimizer_Stage3(object):
         state_dict['partition_count'] = self.partition_count
 
         self._set_fp32_optimizer_param_groups()
-        state_dict['optimizer_state_dict'] = self.optimizer.state_dict()
+        state_dict[OPTIMIZER_STATE_DICT] = self.optimizer.state_dict()
         state_dict['fp32_flat_groups'] = self.fp32_partitioned_groups_flat
         self._clear_fp32_optimizer_param_groups()
 
@@ -3163,7 +3164,7 @@ class DeepSpeedZeroOptimizer_Stage3(object):
 
         if load_optimizer_states:
             self._set_fp32_optimizer_param_groups()
-            self.optimizer.load_state_dict(state_dict['optimizer_state_dict'])
+            self.optimizer.load_state_dict(state_dict[OPTIMIZER_STATE_DICT])
             self._clear_fp32_optimizer_param_groups()
 
         # restore fp32 partitions

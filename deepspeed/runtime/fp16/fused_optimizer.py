@@ -6,12 +6,12 @@ This file is adapted from FP16_Optimizer in NVIDIA/apex
 '''
 
 import torch
-import math
 from torch._utils import _flatten_dense_tensors, _unflatten_dense_tensors
 
 from deepspeed.runtime.utils import get_global_norm, get_grad_norm, CheckOverflow, get_weight_norm
 from deepspeed.runtime.fp16.loss_scaler import INITIAL_LOSS_SCALE, SCALE_WINDOW, MIN_LOSS_SCALE
 from deepspeed.utils import groups, logger, log_dist
+from deepspeed.runtime.constants import OPTIMIZER_STATE_DICT
 import torch.distributed as dist
 
 
@@ -396,7 +396,7 @@ class FP16_Optimizer(object):
             state_dict['last_overflow_iter'] = self.last_overflow_iter
             state_dict['scale_factor'] = self.scale_factor
             state_dict['scale_window'] = self.scale_window
-        state_dict['optimizer_state_dict'] = self.optimizer.state_dict()
+        state_dict[OPTIMIZER_STATE_DICT] = self.optimizer.state_dict()
         state_dict['fp32_groups_flat'] = self.fp32_groups_flat
         state_dict['clip_grad'] = self.clip_grad
         return state_dict
@@ -431,7 +431,7 @@ class FP16_Optimizer(object):
             self.scale_factor = state_dict['scale_factor']
             self.scale_window = state_dict['scale_window']
         if load_optimizer_states:
-            self.optimizer.load_state_dict(state_dict['optimizer_state_dict'])
+            self.optimizer.load_state_dict(state_dict[OPTIMIZER_STATE_DICT])
         self.clip_grad = state_dict['clip_grad']
         # At this point, the optimizer's references to the model's fp32 parameters are up to date.
         # The optimizer's hyperparameters and internal buffers are also up to date.

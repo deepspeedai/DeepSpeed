@@ -161,7 +161,7 @@ class HybridStateOptimizer(torch.optim.Optimizer):
                 state = self.state[p]
                 if len(state) == 0:
                     state['integer_step'] = 0
-                    state['tensor_step'] = torch.zeros(1)
+                    state['tensor_step'] = torch.zeros(1, device=p.device)
 
                 d_p = p.grad.data
                 p.data.add_(-group['lr'], d_p)

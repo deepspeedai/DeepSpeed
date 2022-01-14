@@ -33,7 +33,8 @@ ZERO_SUPPORTED_OPTIMIZERS = [
 # Add apex FusedAdam to supported list if apex is installed
 try:
     import apex
-    ZERO_SUPPORTED_OPTIMIZERS.append(apex.optimizers.FusedAdam)
+    if hasattr(apex, 'optimizers') and hasattr(apex.optimizers, 'FusedAdam'):
+        ZERO_SUPPORTED_OPTIMIZERS.append(apex.optimizers.FusedAdam)
 except ImportError:
     pass
 
@@ -44,3 +45,7 @@ def is_zero_supported_optimizer(optimizer):
             f'Checking ZeRO support for optimizer={optimizer.__class__.__name__} type={type(optimizer)}'
         )
     return type(optimizer) in ZERO_SUPPORTED_OPTIMIZERS
+
+
+class ZeRORuntimeException(Exception):
+    pass

@@ -17,6 +17,7 @@ from deepspeed.ops.op_builder import FusedLambBuilder, CPUAdamBuilder
 from deepspeed.runtime.zero.stage3 import DeepSpeedZeroOptimizer_Stage3
 from util import required_torch_version
 
+import itertools
 import argparse
 import pytest
 import json
@@ -1159,3 +1160,124 @@ def test_non_strict_load_sparse(tmpdir,
     else:
         model_destination = ModelNoEmbedding()
     _test(model_to_save, model_destination)
+
+
+@pytest.mark.parametrize(["elastic_save",
+                          "elastic_load",
+                          "load_optim"],
+                         itertools.product(*[[True,
+                                              False],
+                                             [True,
+                                              False],
+                                             [True,
+                                              False]]))
+def test_checkpoint_zero_elastic(tmpdir, elastic_save, elastic_load, load_optim):
+    ds_config = {
+        "train_batch_size": 2,
+        "optimizer": {
+            "type": 'Adam'
+        },
+        "fp16": {
+            "enabled": True,
+            "initial_scale_power": 8
+        },
+        "zero_optimization": {
+            "stage": 2,
+            "elastic_checkpoint": elastic_save
+        }
+    }
+    hidden_dim = 10
+
+    @distributed_test(world_size=[2])
+    def _go():
+        models = [SimpleModel(hidden_dim) for _ in range(2)]
+        model, _, _, _ = deepspeed.initialize(config=ds_config,
+                                              model=models[0],
+                                              model_parameters=models[0].parameters())
+        data_loader = random_dataloader(model=model,
+                                        total_samples=8,
+                                        hidden_dim=hidden_dim,
+                                        device=model.device)
+        for n, batch in enumerate(data_loader):
+            loss = model(batch[0], batch[1])
+            model.backward(loss)
+            model.step()
+        model.save_checkpoint(tmpdir)
+
+        ds_config["zero_optimization"]["elastic_checkpoint"] = elastic_load
+        model, _, _, _ = deepspeed.initialize(config=ds_config,
+                                              model=models[1],
+                                              model_parameters=models[1].parameters())
+        model.load_checkpoint(tmpdir, load_optimizer_states=load_optim)
+        data_loader = random_dataloader(model=model,
+                                        total_samples=8,
+                                        hidden_dim=hidden_dim,
+                                        device=model.device)
+        for n, batch in enumerate(data_loader):
+            loss = model(batch[0], batch[1])
+            model.backward(loss)
+            model.step()
+
+    _go()
+
+
+@pytest.mark.parametrize(["elastic_save",
+                          "elastic_load",
+                          "load_optim"],
+                         itertools.product(*[[True,
+                                              False],
+                                             [True,
+                                              False],
+                                             [True,
+                                              False]]))
+def test_checkpoint_zero_elastic_dp_change(tmpdir,
+                                           elastic_save,
+                                           elastic_load,
+                                           load_optim):
+    ds_config = {
+        "train_batch_size": 4,
+        "optimizer": {
+            "type": 'Adam'
+        },
+        "fp16": {
+            "enabled": True,
+            "initial_scale_power": 8
+        },
+        "zero_optimization": {
+            "stage": 2,
+            "elastic_checkpoint": elastic_save
+        }
+    }
+    hidden_dim = 10
+    models = [SimpleModel(hidden_dim) for _ in range(2)]
+
+    @distributed_test(world_size=[4])
+    def _go2(models):
+        model, _, _, _ = deepspeed.initialize(config=ds_config,
+                                              model=models[0],
+                                              model_parameters=models[0].parameters())
+        data_loader = random_dataloader(model=model,
+                                        total_samples=8,
+                                        hidden_dim=hidden_dim,
+                                        device=model.device)
+        for n, batch in enumerate(data_loader):
+            loss = model(batch[0], batch[1])
+            model.backward(loss)
+            model.step()
+        model.save_checkpoint(tmpdir)
+
+    _go2(models)
+
+    @distributed_test(world_size=[2])
+    def _go1(models):
+        ds_config["zero_optimization"]["elastic_checkpoint"] = elastic_load
+        model, _, _, _ = deepspeed.initialize(config=ds_config,
+                                              model=models[1],
+                                              model_parameters=models[1].parameters())
+        if load_optim:
+            with pytest.raises(deepspeed.runtime.zero.utils.ZeRORuntimeException):
+                model.load_checkpoint(tmpdir, load_optimizer_states=load_optim)
+        else:
+            model.load_checkpoint(tmpdir, load_optimizer_states=load_optim)
+
+    _go1(models)
