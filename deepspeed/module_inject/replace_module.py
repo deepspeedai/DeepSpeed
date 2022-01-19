@@ -40,7 +40,7 @@ class LinearLayer(nn.Module):
 
 class ReplaceWithTensorSlicing:
     def __init__(self, mp_group=None):
-        if (torch.distributed.is_initialized() and mp_group is not None):
+        if mp_group is not None:
             self.gpu_index = torch.distributed.get_rank(group=mp_group)
         else:
             self.gpu_index = 0
@@ -57,7 +57,7 @@ class ReplaceWithTensorSlicing:
         src_shape = src.shape
         dst_shape = dst.shape
 
-        src_split = torch.split(src, src.shape[-1] // 3, dim=-1)
+        src_split = torch.split(src.data, src.shape[-1] // 3, dim=-1)
 
         if (len(src_shape) == 2 and len(dst_shape) == 2):
             if src_shape[1] == dst_shape[1]:
@@ -71,7 +71,8 @@ class ReplaceWithTensorSlicing:
                 torch.cat([qkv_s[i] for qkv_s in qkv_split],
                           axis=1) for i in range(len(qkv_split[0]))
             ]
-            dst = weight_split[self.gpu_index].to(torch.cuda.current_device())
+            dst.data.copy(weight_split[self.gpu_index].to(
+                torch.cuda.current_device()).contiguous())
         else:
             if src_shape[0] == dst_shape[0]:
                 return src
@@ -82,9 +83,10 @@ class ReplaceWithTensorSlicing:
                 torch.cat([qkv_s[i] for qkv_s in qkv_split],
                           axis=0) for i in range(len(qkv_split[0]))
             ]
-            dst = bias_split[self.gpu_index].to(torch.cuda.current_device())
+            dst.data.copy(bias_split[self.gpu_index].to(
+                torch.cuda.current_device()).contiguous())
 
-        return dst.contiguous()
+        return dst
 
     def copy(self, dst, src):
         if src is None:
@@ -103,17 +105,19 @@ class ReplaceWithTensorSlicing:
                 weight_split = torch.split(src, dst_shape[0])
             else:
                 self.merge_assert(src_shape[1], dst_shape[1])
-                weight_split = torch.split(src, dst_shape[1], dim=1)
+                weight_split = torch.split(src.data, dst_shape[1], dim=1)
 
-            dst = weight_split[self.gpu_index].to(torch.cuda.current_device())
+            dst.data.copy_(weight_split[self.gpu_index].to(
+                torch.cuda.current_device()).contiguous())
         else:
             if src_shape[0] == dst_shape[0]:
                 return src
 
-            bias_split = torch.split(src, dst_shape[-1])
-            dst = bias_split[self.gpu_index].to(torch.cuda.current_device())
+            bias_split = torch.split(src.data, dst_shape[-1])
+            dst.data.copy_(bias_split[self.gpu_index].to(
+                torch.cuda.current_device()).contiguous())
 
-        return dst.contiguous()
+        return dst
 
 
 def replace_transformer_layer(orig_layer_impl,
@@ -126,6 +130,8 @@ def replace_transformer_layer(orig_layer_impl,
                               num_attention_heads=-1,
                               mp_size=1,
                               mp_group=None,
+                              ep_group=None,
+                              expert_mp_group=None,
                               preln=True,
                               fp16=True,
                               local_rank=-1,
@@ -133,9 +139,13 @@ def replace_transformer_layer(orig_layer_impl,
                               training=True,
                               quantize=False,
                               quantize_settings=None,
+                              triangular_masking=False,
                               return_tuple=True,
                               replace_with_kernel_inject=False,
-                              linear_layer_setting=None):
+                              linear_layer_setting=None,
+                              moe=False,
+                              moe_experts=1,
+                              moe_type='standard'):
     """ Replace bert-style transformer layers with DeepSpeed's transformer layer
     Arguments:
         orig_layer_impl (torch.nn.Module): the original transformer layer implementation to look for,
@@ -170,7 +180,12 @@ def replace_transformer_layer(orig_layer_impl,
     Returns:
         Updated nn.module with replaced transformer layers
     """
-    def replace_with_policy(child, policy_cls, inference=False, preln=True, layer_id=0):
+    def replace_with_policy(child,
+                            policy_cls,
+                            triangular_masking,
+                            inference=False,
+                            preln=True,
+                            layer_id=0):
         preln = False if policy_cls is HFBertLayerPolicy else preln
         if policy_cls is HFBertLayerPolicy:
             policy = policy_cls(child, inference=inference, preln=preln)
@@ -182,87 +197,143 @@ def replace_transformer_layer(orig_layer_impl,
             assert num_attention_heads % mp_size == 0,\
                 "To run the model parallel across the GPUs, the attention_heads require to be divisible by the world_size!" +\
                 "This is because the attention computation is partitioned evenly among the parallel GPUs."
+        from deepspeed.moe.utils import has_moe_layers
+        moe, num_experts = has_moe_layers(child)
 
         attn_linear_layer, qkvw, qkvb, dense_w, dense_b, scale_attention = policy.attention()
-        mlp_linear_layer, _h4h_w, _h4h_b, _4hh_w, _4hh_b = policy.mlp()
-        attn_nw, attn_nb, input_nw, input_nb = policy.layerNorm()
+        if not moe or moe_type == 'standard':
+            mlp_linear_layer, _h4h_w, _h4h_b, _4hh_w, _4hh_b = policy.mlp()
+        else:
+            mlp_linear_layer, _h4h_w, _h4h_b, _4hh_w, _4hh_b, \
+                _res_h4h_w, _res_h4h_b, _res_4hh_w, _res_4hh_b, _res_coef = policy.mlp(moe_type)
 
+        attn_nw, attn_nb, input_nw, input_nb = policy.layerNorm()
         if quantize:
             if policy_cls is not HFBertLayerPolicy:
                 qkvw = qkvw.to(torch.int8)
             dense_w = dense_w.to(torch.int8)
-            _h4h_w = _h4h_w.to(torch.int8)
-            _4hh_w = _4hh_w.to(torch.int8)
+            _h4h_w = [moe_w1.to(torch.int8)
+                      for moe_w1 in _h4h_w] if moe else _h4h_w.to(torch.int8)
+            _4hh_w = [moe_w1.to(torch.int8)
+                      for moe_w1 in _4hh_w] if moe else _4hh_w.to(torch.int8)
         elif fp16:
             qkvw = qkvw.half()
             dense_w = dense_w.half()
-            _h4h_w = _h4h_w.half()
-            _4hh_w = _4hh_w.half()
-
+            _h4h_w = [moe_w1.half() for moe_w1 in _h4h_w] if moe else _h4h_w.half()
+            _4hh_w = [moe_w1.half() for moe_w1 in _4hh_w] if moe else _4hh_w.half()
         if quantize or fp16:
             qkvb = qkvb if qkvb is None else qkvb.half()
             dense_b = dense_b if dense_b is None else dense_b.half()
-            _h4h_b = _h4h_b.half()
-            _4hh_b = _4hh_b.half()
-            attn_nw = attn_nw if dense_b is None else attn_nw.half()
-            attn_nb = attn_nb if dense_b is None else attn_nb.half()
+            _h4h_b = [moe_b1.half() for moe_b1 in _h4h_b] if moe else _h4h_b.half()
+            _4hh_b = [moe_b1.half() for moe_b1 in _4hh_b] if moe else _4hh_b.half()
+            attn_nw = attn_nw if attn_nw is None else attn_nw.half()
+            attn_nb = attn_nb if attn_nb is None else attn_nb.half()
             input_nw = input_nw.half()
             input_nb = input_nb.half()
 
+        if moe and moe_type == 'residual' and fp16:
+            _res_h4h_b = _res_h4h_b.half()
+            _res_4hh_b = _res_4hh_b.half()
+            _res_h4h_w = _res_h4h_w.half()
+            _res_4hh_w = _res_4hh_w.half()
+            _res_coef = _res_coef.half()
+
         mp_replace = ReplaceWithTensorSlicing(mp_group=mp_group)
+        #expert_mp_replace = ReplaceWithTensorSlicing(mp_group=expert_mp_group)
 
         if inference:
-            transformer_config = transformer_inference.DeepSpeedInferenceConfig(
-                hidden_size=hidden_size,
-                heads=num_attention_heads,
-                layer_norm_eps=config.layer_norm_eps if hasattr(
-                    config,
-                    'layer_norm_eps') else
-                (config.layer_norm_epsilon if hasattr(config,
-                                                      'layer_norm_epsilon') else 1e-12),
-                fp16=fp16,
-                pre_layer_norm=preln,
-                mp_size=mp_size,
-                q_int8=quantize,
-                return_tuple=(return_tuple or (policy_cls is HFBertLayerPolicy)),
-                triangular_masking=(policy_cls is not HFBertLayerPolicy),
-                local_attention=((config.attention_layers[layer_id] == "local")
-                                 if hasattr(config,
-                                            'attention_layers') else False),
-                window_size=(config.window_size if hasattr(config,
-                                                           'window_size') else 1),
-                rotary_dim=(config.rotary_dim if hasattr(config,
-                                                         'rotary_dim') else -1),
-                mlp_after_attn=(policy_cls is not HFGPTJLayerPolicy))
+            if moe:
+                ep_world_size = torch.distributed.get_world_size()
+                local_ep_size = 1 if num_experts < ep_world_size else num_experts // ep_world_size
+
+                transformer_config = transformer_inference.DeepSpeedMoEInferenceConfig(
+                    hidden_size=hidden_size,
+                    heads=num_attention_heads,
+                    layer_norm_eps=config.layer_norm_eps if hasattr(
+                        config,
+                        'layer_norm_eps') else 1e-12,
+                    fp16=fp16,
+                    pre_layer_norm=preln,
+                    mp_size=mp_size,
+                    q_int8=quantize,
+                    moe_experts=local_ep_size,
+                    global_experts=num_experts,
+                    mlp_type=moe_type)
+            else:
+                transformer_config = transformer_inference.DeepSpeedInferenceConfig(
+                    hidden_size=hidden_size,
+                    heads=num_attention_heads,
+                    layer_norm_eps=config.layer_norm_eps if hasattr(
+                        config,
+                        'layer_norm_eps') else (config.layer_norm_epsilon if hasattr(
+                            config,
+                            'layer_norm_epsilon') else 1e-12),
+                    fp16=fp16,
+                    pre_layer_norm=preln,
+                    mp_size=mp_size,
+                    q_int8=quantize,
+                    return_tuple=(return_tuple or (policy_cls is HFBertLayerPolicy)),
+                    triangular_masking=(policy_cls is not HFBertLayerPolicy),
+                    local_attention=((config.attention_layers[layer_id] == "local")
+                                     if hasattr(config,
+                                                'attention_layers') else False),
+                    window_size=(config.window_size if hasattr(config,
+                                                               'window_size') else 1),
+                    rotary_dim=(config.rotary_dim if hasattr(config,
+                                                             'rotary_dim') else -1),
+                    mlp_after_attn=(policy_cls is not HFGPTJLayerPolicy))
 
             if quantize and quantize_settings is not None:
                 (quantization_scales,
                  merge_count,
                  mlp_extra_grouping,
                  quantize_groups) = quantize_settings
-                new_module = transformer_inference.DeepSpeedTransformerInference(
-                    transformer_config,
-                    mp_group=mp_group,
-                    quantize_scales=quantization_scales[layer_id],
-                    quantize_groups=quantize_groups,
-                    merge_count=merge_count,
-                    mlp_extra_grouping=mlp_extra_grouping,
-                    qkv_merging=(policy_cls is HFBertLayerPolicy))
+                if moe:
+                    new_module = transformer_inference.DeepSpeedMoEInference(
+                        transformer_config,
+                        mp_group=mp_group,
+                        ep_group=ep_group[num_experts],
+                        expert_mp_group=expert_mp_group[num_experts],
+                        quantize_scales=quantization_scales[layer_id],
+                        quantize_groups=quantize_groups,
+                        merge_count=merge_count,
+                        mlp_extra_grouping=mlp_extra_grouping,
+                        qkv_merging=(policy_cls is HFBertLayerPolicy))
+
+                else:
+                    new_module = transformer_inference.DeepSpeedTransformerInference(
+                        transformer_config,
+                        mp_group=mp_group,
+                        quantize_scales=quantization_scales[layer_id],
+                        quantize_groups=quantize_groups,
+                        merge_count=merge_count,
+                        mlp_extra_grouping=mlp_extra_grouping,
+                        qkv_merging=(policy_cls is HFBertLayerPolicy))
 
                 if quantize and qkvw.dtype != torch.int8:
                     quantize_bits = 8
                     quantizer = WeightQuantization()
                     if policy_cls is HFBertLayerPolicy:
-                        data_quantized, _ = quantizer.quantize_data(qkvw, quantize_bits, quantize_groups * 3)
+                        data_quantized, _ = quantizer.quantize_data(qkvw.data, quantize_bits, quantize_groups * 3)
                     else:
-                        data_quantized, _ = quantizer.quantize_data(qkvw, quantize_bits, quantize_groups)
-                    qkvw.copy_(data_quantized)
-                    qkvw = qkvw.to(torch.int8)
+                        data_quantized, _ = quantizer.quantize_data(qkvw.data, quantize_bits, quantize_groups)
+                    qkvw.data.copy_(data_quantized)
+                    qkvw.data = qkvw.data.to(torch.int8)
             else:
-                new_module = transformer_inference.DeepSpeedTransformerInference(
-                    transformer_config,
-                    mp_group=mp_group,
-                )
+
+                if moe:
+                    new_module = transformer_inference.DeepSpeedMoEInference(
+                        transformer_config,
+                        mp_group=mp_group,
+                        ep_group=ep_group[num_experts],
+                        expert_mp_group=expert_mp_group[num_experts],
+                    )
+
+                else:
+                    new_module = transformer_inference.DeepSpeedTransformerInference(
+                        transformer_config,
+                        mp_group=mp_group,
+                    )
             new_module.config.scale_attention = scale_attention
 
             # we want the weights in [input, output] shape
@@ -274,31 +345,69 @@ def replace_transformer_layer(orig_layer_impl,
                 return data
 
             if attn_linear_layer:
-                qkvw = transpose(qkvw.data)
-                dense_w = transpose(dense_w)
+                qkvw.data = transpose(qkvw.data)
+                dense_w.data = transpose(dense_w.data)
 
             if mlp_linear_layer:
-                _h4h_w = transpose(_h4h_w)
-                _4hh_w = transpose(_4hh_w)
+                _h4h_w = [transpose(moe_w1.data)
+                          for moe_w1 in _h4h_w] if moe else transpose(_h4h_w.data)
+                _4hh_w = [transpose(moe_w1.data)
+                          for moe_w1 in _4hh_w] if moe else transpose(_4hh_w.data)
+
+            if moe and moe_type == 'residual':
+                _res_h4h_w.data = transpose(_res_h4h_w.data)
+                _res_4hh_w.data = transpose(_res_4hh_w.data)
+                _res_coef.data = transpose(_res_coef.data)
 
             attn_block = new_module.attention
-            attn_block.attn_qkvw.data = mp_replace.qkv_copy(attn_block.attn_qkvw.data,
-                                                            qkvw)
-            attn_block.attn_qkvb = mp_replace.qkv_copy(attn_block.attn_qkvb.data, qkvb)
+            attn_block.attn_qkvw = mp_replace.qkv_copy(attn_block.attn_qkvw, qkvw)
+            attn_block.attn_qkvb = mp_replace.qkv_copy(attn_block.attn_qkvb, qkvb)
 
-            attn_block.attn_ow.data = mp_replace.copy(attn_block.attn_ow.data, dense_w)
-            attn_block.attn_ob = mp_replace.copy(attn_block.attn_ob.data, dense_b)
+            attn_block.attn_ow = mp_replace.copy(attn_block.attn_ow, dense_w)
+            attn_block.attn_ob = mp_replace.copy(attn_block.attn_ob, dense_b)
 
             mpl_block = new_module.mlp
-            mpl_block.inter_w.data = mp_replace.copy(mpl_block.inter_w.data, _h4h_w)
-            mpl_block.inter_b.data = mp_replace.copy(mpl_block.inter_b.data, _h4h_b)
-            mpl_block.output_w.data = mp_replace.copy(mpl_block.output_w.data, _4hh_w)
-            mpl_block.output_b.data = mp_replace.copy(mpl_block.output_b.data, _4hh_b)
-
-            new_module.mlp.attn_nw = attn_nw if dense_b is None else attn_nw.to(
-                torch.cuda.current_device())
-            new_module.mlp.attn_nb = attn_nb if dense_b is None else attn_nb.to(
-                torch.cuda.current_device())
+            if moe:
+                gpu_index = torch.distributed.get_rank()
+                gpu_index = 0
+                for ep_index in range(local_ep_size):
+                    mpl_block[ep_index].inter_w.data = _h4h_w[
+                        gpu_index * local_ep_size + ep_index].to(
+                            torch.cuda.current_device())
+                    mpl_block[ep_index].inter_b.data = _h4h_b[
+                        gpu_index * local_ep_size + ep_index].to(
+                            torch.cuda.current_device())
+                    mpl_block[ep_index].output_w.data = _4hh_w[
+                        gpu_index * local_ep_size + ep_index].to(
+                            torch.cuda.current_device())
+                    mpl_block[ep_index].output_b.data = _4hh_b[
+                        gpu_index * local_ep_size + ep_index].to(
+                            torch.cuda.current_device())
+                new_module.attn_nw.data = attn_nw.to(torch.cuda.current_device())
+                new_module.attn_nb.data = attn_nb.to(torch.cuda.current_device())
+                if moe_type == 'residual':
+                    new_module.res_mlp.inter_w.data = _res_h4h_w.to(
+                        torch.cuda.current_device())
+                    new_module.res_mlp.inter_b.data = _res_h4h_b.to(
+                        torch.cuda.current_device())
+                    new_module.res_mlp.output_w.data = _res_4hh_w.to(
+                        torch.cuda.current_device())
+                    new_module.res_mlp.output_b.data = _res_4hh_b.to(
+                        torch.cuda.current_device())
+                    new_module.res_coef.data = _res_coef.to(torch.cuda.current_device())
+            else:
+                mpl_block.inter_w.data = mp_replace.copy(mpl_block.inter_w, _h4h_w)
+                mpl_block.inter_b.data = mp_replace.copy(mpl_block.inter_b, _h4h_b)
+                mpl_block.output_w.data = mp_replace.copy(mpl_block.output_w, _4hh_w)
+                mpl_block.output_b.data = mp_replace.copy(mpl_block.output_b, _4hh_b)
+                if attn_nw is None:
+                    new_module.mlp.attn_nw = attn_nw
+                else:
+                    new_module.mlp.attn_nw.data = attn_nw.to(torch.cuda.current_device())
+                if attn_nb is None:
+                    new_module.mlp.attn_nb = attn_nb
+                else:
+                    new_module.mlp.attn_nb.data = attn_nb.to(torch.cuda.current_device())
             new_module.norm_w.data = input_nw.to(torch.cuda.current_device())
             new_module.norm_b.data = input_nb.to(torch.cuda.current_device())
         else:
@@ -445,13 +554,17 @@ def replace_transformer_layer(orig_layer_impl,
     def replace_fn(child, _policy, layer_id=0):
         if training:
             # copy relevant state from child -> new module
-            new_module = replace_with_policy(child, _policy, preln=preln)
+            new_module = replace_with_policy(child,
+                                             _policy,
+                                             triangular_masking,
+                                             preln=preln)
 
         else:
             # copy relevant state from child -> new module
             if replace_with_kernel_inject:
                 new_module = replace_with_policy(child,
                                                  _policy,
+                                                 triangular_masking,
                                                  inference=True,
                                                  preln=(_policy
                                                         is not HFBertLayerPolicy),

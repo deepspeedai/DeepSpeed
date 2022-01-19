@@ -141,6 +141,7 @@ class FP16_Optimizer(object):
         """
         Not supporting closure.
         """
+
         # First compute norm for all group so we know if there is overflow
         grads_groups_flat = []
         norm_groups = []

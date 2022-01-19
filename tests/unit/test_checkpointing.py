@@ -7,6 +7,7 @@ from deepspeed.runtime.zero.stage_1_and_2 import DeepSpeedZeroOptimizer
 from deepspeed.utils import groups
 from deepspeed.runtime.fp16.fused_optimizer import FP16_Optimizer
 from deepspeed.runtime.fp16.unfused_optimizer import FP16_UnfusedOptimizer
+from deepspeed.moe.utils import split_params_into_different_moe_groups_for_optimizer
 
 from deepspeed.runtime.pipe.topology import *
 
@@ -991,29 +992,10 @@ def test_checkpoint_moe_and_zero(tmpdir, ep_size, load_optim_states):
     hidden_dim = 16
     args = args_from_dict(tmpdir, config_dict)
 
-    def create_moe_param_groups(model):
-        from deepspeed.moe.utils import is_moe_param
-
-        params_with_weight_decay = {'params': [], 'name': 'weight_decay_params'}
-        moe_params_with_weight_decay = {
-            'params': [],
-            'moe': True,
-            'name': 'weight_decay_moe_params'
-        }
-
-        for module_ in model.modules():
-            moe_params_with_weight_decay['params'].extend([
-                p for n,
-                p in list(module_._parameters.items())
-                if p is not None and is_moe_param(p)
-            ])
-            params_with_weight_decay['params'].extend([
-                p for n,
-                p in list(module_._parameters.items())
-                if p is not None and not is_moe_param(p)
-            ])
-
-        return params_with_weight_decay, moe_params_with_weight_decay
+    def create_param_groups(model):
+        # param group must have a random unique name (for now)
+        # TODO: clean-up this requirement, the unique name should not be required here
+        return {'params': model.parameters(), 'name': 'random-unique-name'}
 
     @distributed_test(world_size=[4])
     def _helper(args):
@@ -1022,7 +1004,10 @@ def test_checkpoint_moe_and_zero(tmpdir, ep_size, load_optim_states):
             SimpleMoEModel(hidden_dim=hidden_dim,
                            num_experts=ep_size) for _ in range(2)
         ]
-        params = [create_moe_param_groups(model) for model in models]
+        params = [
+            split_params_into_different_moe_groups_for_optimizer(
+                create_param_groups(model)) for model in models
+        ]
         optimizers = [torch.optim.AdamW(params=param) for param in params]
         checkpoint_correctness_verification(args,
                                             models=models,

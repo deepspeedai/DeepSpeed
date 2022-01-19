@@ -465,7 +465,6 @@ class CUDAOpBuilder(OpBuilder):
         - `cross_compile_archs` uses ; separator.
 
         """
-
         ccs = []
         if self.jit_mode:
             # Compile for underlying architectures since we know those at runtime
@@ -537,10 +536,12 @@ class CUDAOpBuilder(OpBuilder):
             return ['-O3', '-std=c++14', '-g', '-Wno-reorder']
 
     def nvcc_args(self):
+        cuda_major, _ = installed_cuda_version()
         args = [
             '-O3',
             '--use_fast_math',
-            '-std=c++17' if sys.platform == "win32" else '-std=c++14',
+            '-std=c++17'
+            if sys.platform == "win32" and cuda_major > 10 else '-std=c++14',
             '-U__CUDA_NO_HALF_OPERATORS__',
             '-U__CUDA_NO_HALF_CONVERSIONS__',
             '-U__CUDA_NO_HALF2_OPERATORS__'

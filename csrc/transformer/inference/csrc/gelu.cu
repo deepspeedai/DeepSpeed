@@ -1,5 +1,8 @@
 #include "custom_cuda_layers.h"
 
+#define MAX_CAP 4
+#define MAX_SEQ 2048
+
 inline __device__ float gelu(const float x)
 {
     const float sqrt_param = 0.79788456080286535587989211986876f;
@@ -168,7 +171,8 @@ __global__ void fused_bias_residual(float* input,
                                     const float* residual,
                                     const float* bias,
                                     int total_count,
-                                    int intermediate_size)
+                                    int intermediate_size,
+                                    bool add_bias)
 {
     float4* input_cast = reinterpret_cast<float4*>(input);
     const float4* residual_cast = reinterpret_cast<const float4*>(residual);
@@ -178,12 +182,18 @@ __global__ void fused_bias_residual(float* input,
     if (offset < total_count) {
         float4 data = input_cast[offset];
         float4 res_vec = residual_cast[offset];
-        float4 bias_data = bias_cast[offset % intermediate_size];
-
-        data.x += (res_vec.x + bias_data.x);
-        data.y += (res_vec.y + bias_data.y);
-        data.z += (res_vec.z + bias_data.z);
-        data.w += (res_vec.w + bias_data.w);
+        if (add_bias) {
+            float4 bias_data = bias_cast[offset % intermediate_size];
+            data.x += (res_vec.x + bias_data.x);
+            data.y += (res_vec.y + bias_data.y);
+            data.z += (res_vec.z + bias_data.z);
+            data.w += (res_vec.w + bias_data.w);
+        } else {
+            data.x += res_vec.x;
+            data.y += res_vec.y;
+            data.z += res_vec.z;
+            data.w += res_vec.w;
+        }
 
         input_cast[offset] = data;
     }
@@ -193,7 +203,8 @@ __global__ void fused_bias_residual(__half* input,
                                     const __half* residual,
                                     const __half* bias,
                                     int total_count,
-                                    int intermediate_size)
+                                    int intermediate_size,
+                                    bool add_bias)
 {
 #if __CUDA_ARCH__ >= 700
 
@@ -208,11 +219,8 @@ __global__ void fused_bias_residual(__half* input,
         float2 vals_vec = input_cast[offset];
         float2 res_vec = residual_cast[offset];
 
-        float2 bias_vec = bias_cast[offset % intermediate_size];
-
         __half2* vals_half = reinterpret_cast<__half2*>(&vals_vec);
         __half2* res_half = reinterpret_cast<__half2*>(&res_vec);
-        __half2* bias_half = reinterpret_cast<__half2*>(&bias_vec);
 
         float2 low_data = __half22float2(vals_half[0]);
         float2 high_data = __half22float2(vals_half[1]);
@@ -220,13 +228,21 @@ __global__ void fused_bias_residual(__half* input,
         float2 low_res = __half22float2(res_half[0]);
         float2 high_res = __half22float2(res_half[1]);
 
-        float2 low_bias = __half22float2(bias_half[0]);
-        float2 high_bias = __half22float2(bias_half[1]);
-
-        low_data.x += (low_res.x + low_bias.x);
-        low_data.y += (low_res.y + low_bias.y);
-        high_data.x += (high_res.x + high_bias.x);
-        high_data.y += (high_res.y + high_bias.y);
+        if (add_bias) {
+            float2 bias_vec = bias_cast[offset % intermediate_size];
+            __half2* bias_half = reinterpret_cast<__half2*>(&bias_vec);
+            float2 low_bias = __half22float2(bias_half[0]);
+            float2 high_bias = __half22float2(bias_half[1]);
+            low_data.x += (low_res.x + low_bias.x);
+            low_data.y += (low_res.y + low_bias.y);
+            high_data.x += (high_res.x + high_bias.x);
+            high_data.y += (high_res.y + high_bias.y);
+        } else {
+            low_data.x += low_res.x;
+            low_data.y += low_res.y;
+            high_data.x += high_res.x;
+            high_data.y += high_res.y;
+        }
 
         vals_half[0] = __float22half2_rn(low_data);
         vals_half[1] = __float22half2_rn(high_data);
@@ -242,6 +258,7 @@ void launch_bias_residual(T* input,
                           const T* bias,
                           int batch,
                           int intermediate_size,
+                          bool add_bias,
                           cudaStream_t stream)
 {
     int total_count = batch * intermediate_size / 4;
@@ -249,21 +266,13 @@ void launch_bias_residual(T* input,
     dim3 grid_dims((total_count - 1) / 1024 + 1);  // (batch_size);
 
     fused_bias_residual<<<grid_dims, block_dims, 0, stream>>>(
-        input, residual, bias, total_count, intermediate_size / 4);
+        input, residual, bias, total_count, intermediate_size / 4, add_bias);
 }
 
-template void launch_bias_residual<float>(float*,
-                                          const float*,
-                                          const float*,
-                                          int,
-                                          int,
-                                          cudaStream_t);
-template void launch_bias_residual<__half>(__half*,
-                                           const __half*,
-                                           const __half*,
-                                           int,
-                                           int,
-                                           cudaStream_t);
+template void
+launch_bias_residual<float>(float*, const float*, const float*, int, int, bool, cudaStream_t);
+template void
+launch_bias_residual<__half>(__half*, const __half*, const __half*, int, int, bool, cudaStream_t);
 
 __global__ void gptj_residual_add(float* input,
                                   float* output,
@@ -368,3 +377,95 @@ template void
 launch_gptj_residual_add<float>(float*, float*, float*, float*, int, int, cudaStream_t);
 template void
 launch_gptj_residual_add<__half>(__half*, __half*, __half*, __half*, int, int, cudaStream_t);
+
+__global__ void moe_res_matmul(float* residual,
+                               float* coef,
+                               float* mlp_out,
+                               int seq_len,
+                               int hidden_dim)
+{
+    unsigned tid = threadIdx.x;
+    float4* residual_cast = reinterpret_cast<float4*>(residual);
+    float4* coef_cast = reinterpret_cast<float4*>(coef);
+    float4* mlp_out_cast = reinterpret_cast<float4*>(mlp_out);
+
+    residual_cast += blockIdx.x * hidden_dim;
+    mlp_out_cast += blockIdx.x * hidden_dim;
+
+    float4* coef_cast2 = coef_cast + hidden_dim;
+
+    while (tid < hidden_dim) {
+        float4 res = residual_cast[tid];
+        float4 mlp = mlp_out_cast[tid];
+        float4 coef1 = coef_cast[tid];
+        float4 coef2 = coef_cast2[tid];
+        mlp.x = mlp.x * coef2.x + res.x * coef1.x;
+        mlp.y = mlp.y * coef2.y + res.y * coef1.y;
+        mlp.z = mlp.z * coef2.z + res.z * coef1.z;
+        mlp.w = mlp.w * coef2.w + res.w * coef1.w;
+        mlp_out_cast[tid] = mlp;
+        tid += blockDim.x;
+    }
+}
+
+__global__ void moe_res_matmul(__half* residual,
+                               __half* coef,
+                               __half* mlp_out,
+                               int seq_len,
+                               int hidden_dim)
+{
+    unsigned tid = threadIdx.x;
+
+    float2* residual_cast = reinterpret_cast<float2*>(residual);
+    float2* mlp_out_cast = reinterpret_cast<float2*>(mlp_out);
+    float2* coef_cast = reinterpret_cast<float2*>(coef);
+    float2* coef_cast2 = coef_cast + hidden_dim;
+
+    residual_cast += blockIdx.x * hidden_dim;
+    mlp_out_cast += blockIdx.x * hidden_dim;
+
+    while (tid < hidden_dim) {
+        float2 res = residual_cast[tid];
+        float2 coef1 = coef_cast[tid];
+        float2 coef2 = coef_cast[tid];
+        float2 data = mlp_out_cast[tid];
+        __half* data_h = reinterpret_cast<__half*>(&data);
+        __half* coef1_h = reinterpret_cast<__half*>(&coef1);
+        __half* coef2_h = reinterpret_cast<__half*>(&coef2);
+        __half* res_h = reinterpret_cast<__half*>(&res);
+        data_h[0] = res_h[0] * coef1_h[0] + data_h[0] * coef2_h[0];
+        data_h[1] = res_h[1] * coef1_h[1] + data_h[1] * coef2_h[1];
+        data_h[2] = res_h[2] * coef1_h[2] + data_h[2] * coef2_h[2];
+        data_h[3] = res_h[3] * coef1_h[3] + data_h[3] * coef2_h[3];
+
+        mlp_out_cast[tid] = data;
+        tid += blockDim.x;
+    }
+}
+
+template <typename T>
+void launch_moe_res_matmul(T* residual,
+                           T* coef,
+                           T* mlp_out,
+                           int seq_len,
+                           int hidden_dim,
+                           cudaStream_t stream)
+{
+    dim3 grid_dim(seq_len);
+    dim3 block_dim(1024);
+    moe_res_matmul<<<grid_dim, block_dim, 0, stream>>>(
+        residual, coef, mlp_out, seq_len, hidden_dim / 4);
+}
+
+template void launch_moe_res_matmul(float* residual,
+                                    float* coef,
+                                    float* mlp_out,
+                                    int seq_len,
+                                    int hidden_dim,
+                                    cudaStream_t stream);
+template void launch_moe_res_matmul(__half* residual,
+                                    __half* coef,
+                                    __half* mlp_out,
+                                    int seq_len,
+                                    int hidden_dim,
+                                    cudaStream_t stream);

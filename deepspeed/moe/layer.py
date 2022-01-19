@@ -61,14 +61,25 @@ class MoE(torch.nn.Module):
         assert noisy_gate_policy is None or noisy_gate_policy in ['None', 'Jitter', 'RSample'], \
             'Unsupported noisy_gate_policy: ' + noisy_gate_policy
 
-        num_local_experts = num_experts // groups.get_expert_parallel_world_size()
+        # Get the group name
+        max_ep_size = groups.get_max_expert_size()
+        if max_ep_size >= num_experts:
+            self.expert_group_name = f"ep_size_{num_experts}"
+        else:
+            self.expert_group_name = f"ep_size_{max_ep_size}"
+
+        num_local_experts = 1 if num_experts < groups.get_expert_parallel_world_size(
+            self.expert_group_name
+        ) else num_experts // groups.get_expert_parallel_world_size(
+            self.expert_group_name)
 
         log_dist(
-            f'num_experts: {num_experts} | num_local_experts: {num_local_experts} | expert_parallel_size: {groups.get_expert_parallel_world_size()}',
+            f'num_experts: {num_experts} | num_local_experts: {num_local_experts} | expert_parallel_size: {groups.get_expert_parallel_world_size(self.expert_group_name)}',
             [0])
 
         self.num_experts = num_experts
-        experts = Experts(expert, num_local_experts)
+        self.num_local_experts = num_local_experts
+        experts = Experts(expert, num_local_experts, self.expert_group_name)
         self.deepspeed_moe = MOELayer(TopKGate(hidden_size,
                                                num_experts,
                                                k,
@@ -80,7 +91,8 @@ class MoE(torch.nn.Module):
                                                use_rts),
                                       experts,
                                       num_local_experts,
-                                      group=groups.get_expert_parallel_group(),
+                                      group=groups.get_expert_parallel_group(
+                                          self.expert_group_name),
                                       use_tutel=use_tutel)
 
     def forward(self, hidden_states, used_token=None):

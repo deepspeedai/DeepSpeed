@@ -43,6 +43,7 @@ void launch_bias_residual(T* input,
                           const T* bias,
                           int size,
                           int intermediate_size,
+                          bool add_bias,
                           cudaStream_t stream);
 
 template <typename T>
@@ -96,3 +97,11 @@ void launch_apply_rotary_pos_emb(T* mixed_query,
                                  unsigned num_heads,
                                  unsigned batch,
                                  cudaStream_t stream);
+
+template <typename T>
+void launch_moe_res_matmul(T* residual,
+                           T* coef,
+                           T* mlp_out,
+                           int seq_len,
+                           int hidden_dim,
+                           cudaStream_t stream);

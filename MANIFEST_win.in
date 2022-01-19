@@ -1,0 +1,8 @@
+include *.txt README.md
+recursive-include requirements *.txt
+
+# this is for Windows only
+recursive-include deepspeed *.tr
+recursive-exclude deepspeed/ops/csrc *.cpp *.h *.cu *.cuh *.cc
+prune csrc
+prune op_builder

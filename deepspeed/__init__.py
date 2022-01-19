@@ -218,20 +218,29 @@ def add_config_arguments(parser):
 
 
 def init_inference(model,
+                   triangular_masking=True,
                    mp_size=1,
                    mpu=None,
+                   ep_group=None,
+                   expert_mp_group=None,
                    checkpoint=None,
-                   module_key='module',
                    dtype=None,
                    injection_policy=None,
                    replace_method='auto',
                    quantization_setting=None,
                    replace_with_kernel_inject=False,
-                   return_tuple=True):
+                   return_tuple=True,
+                   ep_size=1,
+                   moe=False,
+                   moe_experts=1,
+                   moe_type='standard'):
     """Initialize the DeepSpeed InferenceEngine.
 
     Arguments:
         model: Required: nn.module class before apply any wrappers
+
+        triangular_masking: Required: this shows the type of masking for attention scores in transformer layer
+            note that the masking is application specific.
 
         mp_size: Optional: Desired model parallel size, default is 1 meaning no
             model parallelism.
@@ -272,14 +281,21 @@ def init_inference(model,
         raise NotImplementedError("pipeline module support is not implemented yet")
     else:
         engine = InferenceEngine(model,
+                                 triangular_masking,
                                  mp_size,
+                                 ep_size,
                                  mpu,
+                                 ep_group,
+                                 expert_mp_group,
                                  checkpoint,
                                  dtype,
                                  injection_policy,
                                  return_tuple,
                                  replace_method,
                                  quantization_setting,
-                                 replace_with_kernel_inject)
+                                 replace_with_kernel_inject,
+                                 moe,
+                                 moe_experts,
+                                 moe_type)
 
     return engine

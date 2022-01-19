@@ -25,8 +25,8 @@ __op_builders__ = [
     TransformerBuilder(),
     StochasticTransformerBuilder(),
     AsyncIOBuilder(),
-    InferenceBuilder(),
     UtilsBuilder(),
-    QuantizerBuilder()
+    QuantizerBuilder(),
+    InferenceBuilder()
 ]
 ALL_OPS = {op.name: op for op in __op_builders__}

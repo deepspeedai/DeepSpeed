@@ -181,7 +181,6 @@ class DeepSpeedZeroOptimizer(object):
         self.contiguous_gradients = contiguous_gradients or cpu_offload
 
         self.has_moe_layers = has_moe_layers
-
         if self.has_moe_layers:
             self._configure_moe_settings()
         self._global_grad_norm = 0.
@@ -254,6 +253,7 @@ class DeepSpeedZeroOptimizer(object):
         self.round_robin_bit16_groups = []
         self.round_robin_bit16_indices = []
 
+        # Use different parallel to do all_to_all_reduce related things
         # padding on each partition for alignment purposes
         self.groups_padding = []
         # loop to deal with groups
@@ -507,9 +507,10 @@ class DeepSpeedZeroOptimizer(object):
         for i, group in enumerate(self.optimizer.param_groups):
             if self.is_moe_group(group):
                 assert all([is_moe_param(param) for param in group['params']]), "All params in MoE group must be MoE params"
-                self.real_dp_process_group[i] = self.expert_dp_process_group
+                self.real_dp_process_group[i] = self.expert_dp_process_group[
+                    group['name']]
                 self.partition_count[i] = dist.get_world_size(
-                    group=self.expert_dp_process_group)
+                    group=self.expert_dp_process_group[group['name']])
                 self.is_moe_param_group.append(True)
             else:
                 self.is_moe_param_group.append(False)
@@ -901,12 +902,15 @@ class DeepSpeedZeroOptimizer(object):
                 process_group = self.dp_process_group
                 #Averages gradients at parameter level if ipg has a moe param
                 #Otherwise averaging is done at the entire buffer level at the end of the loop
+                # MoE param have different groups
                 if self.ipg_bucket_has_moe_params:
-                    process_group = self.expert_dp_process_group if is_moe_param(
-                        param) else self.dp_process_group
+                    process_group = self.expert_dp_process_group[
+                        param.group_name] if is_moe_param(
+                            param) else self.dp_process_group
                     param.grad.data.div_(dist.get_world_size(group=process_group))
 
                 partition_ids = self.param_to_partition_ids[i][param_id]
+                assert all([p_id < dist.get_world_size(group=process_group) for p_id in partition_ids]), f"world size {dist.get_world_size(group=process_group)} and p_ids: {partition_ids}"
                 partition_size = self.partition_size[i]
                 # Get all partition ids + their offsets
                 partition_ids_w_offsets = []
@@ -1790,11 +1794,11 @@ class DeepSpeedZeroOptimizer(object):
         for i, norm in enumerate(norm_groups):
             if self.is_moe_param_group[i]:
                 scaled_norm = norm * 1.0 / float(
-                    dist.get_world_size(group=self.ep_process_group))
+                    dist.get_world_size(group=self.real_dp_process_group[i]))
                 scaled_norm_tensor = torch.tensor(scaled_norm,
                                                   device='cuda',
                                                   dtype=torch.float)
-                dist.all_reduce(scaled_norm_tensor, group=self.ep_process_group)
+                dist.all_reduce(scaled_norm_tensor, group=self.real_dp_process_group[i])
                 norm_groups[i] = scaled_norm_tensor.item()
 
     def unscale_and_clip_grads(self, grad_groups_flat, total_norm):
@@ -2025,7 +2029,8 @@ class DeepSpeedZeroOptimizer(object):
                 sd[SINGLE_PARTITION_OF_FP32_GROUPS][i] for sd in all_state_dict
             ]
             if self.is_moe_group(self.optimizer.param_groups[i]):
-                ranks = self.get_ep_ranks()
+                ranks = self.get_ep_ranks(
+                    group_name=self.optimizer.param_groups[i]['name'])
                 merged_partitions = [merged_partitions[i] for i in ranks]
             flat_merged_partitions = self.flatten_dense_tensors_aligned(
                 merged_partitions,
@@ -2075,11 +2080,11 @@ class DeepSpeedZeroOptimizer(object):
                 else:
                     self.optimizer.state[p][key] = saved
 
-    def get_ep_ranks(self, rank=0):
+    def get_ep_ranks(self, rank=0, group_name=None):
         from deepspeed.utils import groups
-        expert_parallel_size_ = groups.get_expert_parallel_world_size()
+        expert_parallel_size_ = groups.get_expert_parallel_world_size(group_name)
         world_size = groups.get_data_parallel_world_size()
-        rank = groups.get_expert_parallel_rank()
+        rank = groups.get_expert_parallel_rank(group_name)
         ranks = range(rank, world_size, expert_parallel_size_)
         return list(ranks)
 
@@ -2096,7 +2101,8 @@ class DeepSpeedZeroOptimizer(object):
             ]
 
             if self.is_moe_group(self.optimizer.param_groups[i]):
-                ranks = self.get_ep_ranks()
+                ranks = self.get_ep_ranks(
+                    group_name=self.optimizer.param_groups[i]['name'])
                 all_partition_group_states = [
                     all_partition_group_states[i] for i in ranks
                 ]
@@ -2151,7 +2157,7 @@ class DeepSpeedZeroOptimizer(object):
         self.overflow = current_rank_sd['overflow']
 
         ckpt_version = current_rank_sd.get("ds_version", False)
-        assert ckpt_version, f"Empty ds_version! {error_str}"
+        assert ckpt_version, f"Empty ds_version in checkpoint, not clear how to proceed"
         ckpt_version = pkg_version.parse(ckpt_version)
 
         # zero stage 1 mode

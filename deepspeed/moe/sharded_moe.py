@@ -364,7 +364,7 @@ class TopKGate(Module):
                  k: int = 1,
                  capacity_factor: float = 1.0,
                  eval_capacity_factor: float = 1.0,
-                 min_capacity: int = 4,
+                 min_capacity: int = 8,
                  noisy_gate_policy: Optional[str] = None,
                  drop_tokens: bool = True,
                  use_rts: bool = True) -> None:

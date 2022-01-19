@@ -9,11 +9,11 @@ from torch import nn
 from torch.autograd import Function
 import time
 from ... import op_builder
-#from ...inference.engine import inference_cuda_module, specialized_mode
+import torch.nn as nn
+import torch.distributed as dist
+
 # Cuda modules will be imported if needed
 inference_cuda_module = None
-specialized_mode = None
-import torch.nn as nn
 
 
 class TransformerConfig():
@@ -83,13 +83,13 @@ class DeepSpeedInferenceConfig(TransformerConfig):
         self.mp_size = mp_size
         self.q_int8 = q_int8
         self.scale_attention = scale_attention
-        self.specialized_mode = None
         self.triangular_masking = triangular_masking
         self.local_attention = local_attention
         self.window_size = window_size
         self.rotary_dim = rotary_dim
         self.return_tuple = return_tuple
         self.mlp_after_attn = mlp_after_attn
+        self.specialized_mode = False
 
     @classmethod
     def from_dict(cls, json_object):
@@ -131,6 +131,11 @@ class DeepSpeedSelfAttentionFunction(Function):
                 q_groups,
                 merge_count,
                 qkv_merging):
+
+        #while len(input_mask.shape) < 4:
+        #    input_mask = input_mask.unsqueeze(0)
+        input_mask = torch.empty(1, device='cuda')
+
         def _transpose_for_scores(x, key=False, reshape=False):
             attention_head_size = x.shape[-1] // num_attention_heads_per_partition
             new_x_shape = x.size()[:-1] + (num_attention_heads_per_partition,
@@ -270,7 +275,7 @@ class DeepSpeedSelfAttentionFunction(Function):
                                    config.epsilon,
                                    (attn_qkvb is not None))
             context_layer, key_layer, value_layer = compute_attention(qkv_out[0], input_mask)
-            output = vector_matmul_func(context_layer, attn_ow)
+            output = vector_matmul_func(context_layer, attn_ow, False)
 
             return output, key_layer, value_layer, context_layer, qkv_out[-1] # attn_out, present_key, present_value, context_output, inp_norm
 
@@ -282,7 +287,9 @@ class DeepSpeedSelfAttentionFunction(Function):
                     attn_qkvb,
                     q_scales[0],
                     (q_groups * (3 if qkv_merging else 1) * (2**merge_count)))
+
             else:
+                #import pdb;pdb.set_trace()
                 qkv_out = inference_cuda_module.qkv_gemm_int8(
                     input,
                     attn_qkvw,
@@ -306,8 +313,8 @@ class DeepSpeedSelfAttentionFunction(Function):
         else:
             output, key_layer, value_layer, context_layer, inp_norm = selfAttention_fp()
 
-        if mp_group is not None and torch.distributed.get_world_size(group=mp_group) > 1:
-            torch.distributed.all_reduce(output, group=mp_group)
+        if mp_group is not None and dist.get_world_size(group=mp_group) > 1:
+            dist.all_reduce(output, group=mp_group)
 
         return (output, key_layer, value_layer, context_layer, inp_norm)
 
@@ -318,6 +325,8 @@ class DeepSpeedSelfAttentionFunction(Function):
 
 
 class DeepSpeedSelfAttention(nn.Module):
+    num_layers = 0
+
     def __init__(self,
                  config,
                  mp_group=None,
@@ -327,7 +336,8 @@ class DeepSpeedSelfAttention(nn.Module):
                  qkv_merging=False):
         super(DeepSpeedSelfAttention, self).__init__()
         self.config = config
-
+        self.config.layer_id = DeepSpeedSelfAttention.num_layers
+        DeepSpeedSelfAttention.num_layers = DeepSpeedSelfAttention.num_layers + 1
         self.attn_qkvw = nn.Parameter(
             torch.Tensor(self.config.hidden_size,
                          (self.config.hidden_size // self.config.mp_size) * 3))
@@ -436,7 +446,13 @@ class DeepSpeedMLPFunction(Function):
                                                               (merge_count))
         else:
             if attn_nw is None:
-                output = fused_gemm_gelu(input, inter_w, inter_b, output_w)
+                output = fused_gemm_gelu(input,
+                                         inter_w,
+                                         inter_b,
+                                         output_w,
+                                         config.epsilon,
+                                         config.pre_layer_norm,
+                                         False)
             else:
                 (intermediate,
                  residual_add) = mlp_gemm_func(input,
@@ -448,10 +464,10 @@ class DeepSpeedMLPFunction(Function):
                                                attn_nb,
                                                config.epsilon,
                                                config.pre_layer_norm)
-                output = vector_matmul_func(intermediate, output_w)
+                output = vector_matmul_func(intermediate, output_w, False)
 
-        if mp_group is not None and torch.distributed.get_world_size(group=mp_group) > 1:
-            torch.distributed.all_reduce(output, group=mp_group)
+        if mp_group is not None and dist.get_world_size(group=mp_group) > 1:
+            dist.all_reduce(output, group=mp_group)
 
         if attn_nw is not None:
             output = bias_residual_func(output, residual_add, output_b)
@@ -557,19 +573,10 @@ class DeepSpeedTransformerInference(nn.Module):
         DeepSpeedTransformerInference.layer_id += 1
 
         global inference_cuda_module
-        global specialized_mode
         if inference_cuda_module is None:
-            specialized_mode = False
-            if hasattr(op_builder, 'InferenceSpecializedBuilder'):
-                builder = op_builder.InferenceSpecializedBuilder()
-                if builder.is_compatible():
-                    inference_cuda_module = builder.load()
-                    specialized_mode = True
-                else:
-                    inference_cuda_module = op_builder.InferenceBuilder().load()
-            else:
-                inference_cuda_module = op_builder.InferenceBuilder().load()
-        self.config.specialized_mode = specialized_mode
+            builder = op_builder.InferenceBuilder()
+            inference_cuda_module = builder.load()
+
         print("DeepSpeed Transformer Inference config is ", self.config.__dict__)
 
         self.attention = DeepSpeedSelfAttention(self.config,
@@ -649,7 +656,6 @@ class DeepSpeedTransformerInference(nn.Module):
                                                         self.mlp.output_b)
 
             output = output.to(input_type)
-
         if get_present:
             output = (output, presents)
 

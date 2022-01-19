@@ -52,6 +52,8 @@ public:
         cublasSetMathMode(_cublasHandle, CUBLAS_TENSOR_OP_MATH);
         cudaEventCreate(&_comp1_event, (cudaEventDisableTiming | cudaEventBlockingSync));
         cudaEventCreate(&_comp2_event, (cudaEventDisableTiming | cudaEventBlockingSync));
+        cudaEventCreate(&_comp_event, (cudaEventDisableTiming | cudaEventBlockingSync));
+        cudaEventCreate(&_comm_event, (cudaEventDisableTiming | cudaEventBlockingSync));
     }
 
     virtual ~Context()
@@ -60,6 +62,8 @@ public:
         cudaFree(_workspace);
         cudaEventDestroy(_comp1_event);
         cudaEventDestroy(_comp2_event);
+        cudaEventDestroy(_comp_event);
+        cudaEventDestroy(_comm_event);
     }
 
     static Context& Instance()
@@ -81,10 +85,35 @@ public:
         _workSpaceSize = size;
     }
 
+    cudaEvent_t GetCompEvent(int id) { return id == 1 ? _comp1_event : _comp2_event; }
+
+    size_t get_workspace_size() const { return _workSpaceSize; }
     void* GetWorkSpace() { return _workspace; }
+
+    inline unsigned new_token(unsigned layer_id)
+    {
+        if (layer_id == 0) _token_length++;
+        return _token_length;
+    }
+
+    inline void reset_tokens(unsigned initial_tokens = 0)
+    {
+        _num_tokens = initial_tokens;
+    }  //_token_length = 0; }
+
+    inline unsigned current_tokens() const { return _num_tokens; }
+
+    inline void advance_tokens() { _num_tokens++; }
 
     curandGenerator_t& GetRandGenerator() { return _gen; }
 
+    cudaStream_t GetCommStream(bool async_op = false)
+    {
+        if (!_comm_stream)
+            _comm_stream = async_op ? at::cuda::getStreamFromPool(true)
+                                    : at::cuda::getCurrentCUDAStream();
+        return _comm_stream;
+    }
     cudaStream_t GetCurrentStream(bool other_stream = false)
     {
         // get current pytorch stream.
@@ -95,8 +124,6 @@ public:
         cudaStream_t stream = at::cuda::getCurrentCUDAStream();
         return stream;
     }
-
-    cudaEvent_t GetCompEvent(int id) { return id == 1 ? _comp1_event : _comp2_event; }
 
     cublasHandle_t GetCublasHandle() { return _cublasHandle; }
 
@@ -111,9 +138,24 @@ public:
 
     const std::vector<std::array<int, 3>>& GetGemmAlgos() const { return _gemm_algos; }
 
+    inline void SynchComp()
+    {
+        cudaEventRecord(_comp_event, _comp_stream);
+        cudaStreamWaitEvent(_comm_stream, _comp_event, 0);
+    }
+    inline void SynchComm()
+    {
+        cudaEventRecord(_comm_event, _comm_stream);
+        cudaStreamWaitEvent(_comp_stream, _comm_event, 0);
+    }
+
 private:
     curandGenerator_t _gen;
     cublasHandle_t _cublasHandle;
+
+    cudaEvent_t _comp_event;
+    cudaEvent_t _comm_event;
+
     void* _workspace;
     uint64_t _seed;
     uint64_t _curr_offset;
@@ -124,5 +166,12 @@ private:
 
     cudaStream_t _stream;
 
+    unsigned _token_length;
+    unsigned _num_tokens;
     std::vector<std::array<int, 3>> _gemm_algos;
+
+    cudaStream_t _comp_stream;
+    cudaStream_t _comm_stream;
+
+    std::unordered_map<int, int> _world_sizes;
 };

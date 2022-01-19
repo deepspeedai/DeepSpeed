@@ -1,5 +1,4 @@
 
-
 #include <ATen/cuda/CUDAContext.h>
 #include <torch/extension.h>
 #include <vector>
@@ -9,19 +8,30 @@
 
 std::array<int, 3> gemm_algos = std::array<int, 3>({99, 99, 99});
 
+#define MAX_OUT_TOKES 10
+
 template <typename T>
 at::Tensor ds_softmax(at::Tensor& attn_scores,
                       at::Tensor& attn_mask,
                       bool triangular,
                       bool recompute,
                       bool local_attention,
-                      int window_size)
+                      int window_size,
+                      bool async_op)
 {
     auto attn_scores_c = attn_scores.contiguous();
     int bsz = attn_scores_c.size(0);
-    int seq_len = attn_scores_c.size(2);
-    int soft_len = attn_scores_c.size(3);
-    int heads = attn_scores_c.size(1);
+
+    int seq_len = attn_scores_c.size(1);
+    int len = attn_scores_c.sizes().size();
+    if (len > 3) seq_len = attn_scores_c.size(2);
+
+    int soft_len = attn_scores_c.size(2);
+    if (len > 3) soft_len = attn_scores_c.size(3);
+
+    int heads = 1;
+    if (len > 3) heads = attn_scores_c.size(1);
+
     launch_attn_softmax_v2((T*)attn_scores_c.data_ptr(),
                            (attn_mask.sizes().size() > 1 ? (T*)attn_mask.data_ptr() : nullptr),
                            triangular,
@@ -33,9 +43,55 @@ at::Tensor ds_softmax(at::Tensor& attn_scores,
                            seq_len,
                            soft_len,
                            1.0,
-                           at::cuda::getCurrentCUDAStream());
+                           Context::Instance().GetCurrentStream(async_op));
 
     return attn_scores_c;
+}
+
+template <typename T>
+void allocate_workspace(size_t hidden_dim,
+                        size_t max_seq_len,
+                        size_t batch_size,
+                        size_t head_size = 128)
+{
+    size_t _workSpaceSize = (hidden_dim * batch_size * max_seq_len);
+    Context::Instance().GenWorkSpace(_workSpaceSize * sizeof(T));
+}
+
+template <typename T>
+at::Tensor einsum_sec_sm_ecm(at::Tensor& Q, at::Tensor& W)
+{
+    auto options = at::TensorOptions()
+                       .dtype(Q.options().dtype())
+                       .layout(at::kStrided)
+                       .device(at::kCUDA)
+                       .requires_grad(false);
+    T* workspace = (T*)Context::Instance().GetWorkSpace();
+    float alpha = 1;
+    float gemm_beta = 0.0;
+
+    if (!workspace) {
+        allocate_workspace<T>(W.size(1), MAX_OUT_TOKES, Q.size(0));
+        workspace = (T*)Context::Instance().GetWorkSpace();
+    }
+
+    auto O = at::from_blob(workspace, {Q.size(1), Q.size(2), W.size(1)}, options);
+    unsigned m = W.size(1);
+    unsigned n = Q.size(1) * Q.size(2);
+    unsigned k = Q.size(0);
+    cublas_gemm_ex(Context::Instance().GetCublasHandle(),
+                   CUBLAS_OP_N,
+                   CUBLAS_OP_T,
+                   m,
+                   n,
+                   k,
+                   &alpha,
+                   &gemm_beta,
+                   (T*)W.data_ptr(),
+                   (T*)Q.data_ptr(),
+                   (T*)O.data_ptr(),
+                   CUBLAS_GEMM_DEFAULT_TENSOR_OP);
+    return O;
 }
 
 template <typename T>
@@ -61,7 +117,7 @@ void attention_unfused(at::Tensor& prev_key_cont,
                        .requires_grad(false);
     float alpha = norm_factor;
     float gemm_beta = 0.0;
-    auto attn_score = at::zeros({bsz, heads, seq_len, soft_len}, options);
+    auto attn_score = at::empty({bsz, heads, seq_len, soft_len}, options);
     int k = prev_value_cont.size(2) / heads;
     cublasSetStream(Context::Instance().GetCublasHandle(), Context::Instance().GetCurrentStream());
     cublas_strided_batched_gemm(Context::Instance().GetCublasHandle(),
@@ -80,8 +136,8 @@ void attention_unfused(at::Tensor& prev_key_cont,
                                 seq_len * soft_len,
                                 bsz * heads,
                                 CUBLAS_GEMM_DEFAULT_TENSOR_OP);
-    attn_score =
-        ds_softmax<T>(attn_score, attn_mask, triangular, recompute, local_attention, window_size);
+    attn_score = ds_softmax<T>(
+        attn_score, attn_mask, triangular, recompute, local_attention, window_size, false);
     alpha = 1.0;
     cublas_strided_batched_gemm(Context::Instance().GetCublasHandle(),
                                 k,
@@ -177,12 +233,12 @@ at::Tensor ds_bias_residual(at::Tensor& input, at::Tensor& residual, at::Tensor&
     auto residual_cont = residual.contiguous();
 
     int bsz = input_cont.size(0) * input_cont.size(1);
-
     launch_bias_residual((T*)input_cont.data_ptr(),
                          (T*)residual_cont.data_ptr(),
                          (T*)bias.data_ptr(),
                          bsz,
                          input_cont.size(2),
+                         (bias.size(0) > 1),
                          Context::Instance().GetCurrentStream());
     return input_cont;
 }
@@ -409,7 +465,7 @@ at::Tensor ds_linear_layer_int8(at::Tensor& input,
 }
 
 template <typename T>
-at::Tensor ds_vector_matmul(at::Tensor& input, at::Tensor& weight)
+at::Tensor ds_vector_matmul(at::Tensor& input, at::Tensor& weight, bool async_op)
 {
     auto input_cont = input.contiguous();
     auto options = at::TensorOptions()
@@ -422,7 +478,8 @@ at::Tensor ds_vector_matmul(at::Tensor& input, at::Tensor& weight)
     int bsz = input_cont.size(0) * input_cont.size(1);
     float alpha = (T)1.0;
     float gemm_beta = (T)0.0;
-    cublasSetStream(Context::Instance().GetCublasHandle(), Context::Instance().GetCurrentStream());
+    cublasSetStream(Context::Instance().GetCublasHandle(),
+                    Context::Instance().GetCurrentStream(async_op));
     cublas_gemm_ex(Context::Instance().GetCublasHandle(),
                    CUBLAS_OP_N,
                    CUBLAS_OP_N,
@@ -435,7 +492,6 @@ at::Tensor ds_vector_matmul(at::Tensor& input, at::Tensor& weight)
                    (T*)input_cont.data_ptr(),
                    (T*)output.data_ptr(),
                    CUBLAS_GEMM_DEFAULT_TENSOR_OP);
-
     return output;
 }
 
@@ -503,7 +559,6 @@ void mlp_unfused_cublas(at::Tensor& output,
                    (T*)inp_norm.data_ptr(),
                    (T*)output.data_ptr(),
                    CUBLAS_GEMM_DEFAULT_TENSOR_OP);
-
     launch_bias_gelu((T*)output.data_ptr(),
                      (T*)bias.data_ptr(),
                      weight.size(1),
@@ -601,10 +656,11 @@ template <typename T>
 at::Tensor fused_gemm_gelu(at::Tensor& input,
                            at::Tensor& weight,
                            at::Tensor& bias,
-                           at::Tensor& weight_out)
+                           at::Tensor& weight_out,
+                           const float epsilon,
+                           bool preLayerNorm,
+                           bool async_op)
 {
-    // cudaStreamWaitEvent(
-    //    Context::Instance().GetCurrentStream(true), Context::Instance().GetCompEvent(1), 0);
     auto input_cont = input.contiguous();
     auto options = at::TensorOptions()
                        .dtype(input_cont.options().dtype())
@@ -717,6 +773,59 @@ std::vector<at::Tensor> apply_rotary_pos_emb(at::Tensor& mixed_query,
     return {query_cont, key_cont};
 }
 
+template <typename T>
+at::Tensor fused_gemm_gelu_int8(at::Tensor& input,
+                                at::Tensor& weight,
+                                at::Tensor& bias,
+                                const float epsilon,
+                                at::Tensor& q_scale,
+                                int groups,
+                                bool preLayerNorm)
+{
+    auto input_cont = input.contiguous();
+    auto options = at::TensorOptions()
+                       .dtype(input_cont.options().dtype())
+                       .layout(at::kStrided)
+                       .device(at::kCUDA)
+                       .requires_grad(false);
+
+    auto output = at::empty({input_cont.size(0), input_cont.size(1), weight.size(1)}, options);
+
+    int bsz = input_cont.size(0) * input_cont.size(1);
+
+    quantized_gemm<T>(output, input_cont, weight, q_scale, groups, 0);
+    launch_bias_gelu((T*)output.data_ptr(),
+                     (T*)bias.data_ptr(),
+                     weight.size(1),
+                     bsz,
+                     Context::Instance().GetCurrentStream());
+
+    return output;
+}
+
+at::Tensor moe_res_matmul(at::Tensor& moe_res, at::Tensor& coef, at::Tensor& output)
+{
+    int M = moe_res.size(0) * moe_res.size(1);
+    int N = moe_res.size(2);
+    Context::Instance().SynchComm();
+    if (moe_res.scalar_type() == at::kFloat) {
+        launch_moe_res_matmul<float>((float*)moe_res.data_ptr(),
+                                     (float*)coef.data_ptr(),
+                                     (float*)output.data_ptr(),
+                                     M,
+                                     N,
+                                     at::cuda::getCurrentCUDAStream());
+    } else {
+        launch_moe_res_matmul<__half>((__half*)moe_res.data_ptr(),
+                                      (__half*)coef.data_ptr(),
+                                      (__half*)output.data_ptr(),
+                                      M,
+                                      N,
+                                      at::cuda::getCurrentCUDAStream());
+    }
+    return output;
+}
+
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m)
 {
     m.def("softmax_fp32", &ds_softmax<float>, "DeepSpeed SoftMax with fp32 (CUDA)");
@@ -756,4 +865,12 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m)
     m.def("fused_gemm_gelu_fp16", &fused_gemm_gelu<__half>, "DeepSpeed mlp with fp16 (CUDA)");
     m.def("gptj_residual_add", &gptj_residual_add, "DeepSpeed mlp with fp16 (CUDA)");
     m.def("apply_rotary_pos_emb", &apply_rotary_pos_emb, "DeepSpeed mlp with fp16 (CUDA)");
+    m.def("einsum_sec_sm_ecm_fp32",
+          &einsum_sec_sm_ecm<float>,
+          "DeepSpeed vector-MM with fp32 (CUDA)");
+
+    m.def("einsum_sec_sm_ecm_fp16",
+          &einsum_sec_sm_ecm<__half>,
+          "DeepSpeed vector-MM with fp16 (CUDA)");
+    m.def("moe_res_matmul", &moe_res_matmul, "DeepSpeed moe residual matmul (CUDA)");
 }
