@@ -6,7 +6,7 @@ toc_label: "Contents"
 
 <b> DeepSpeed+Megatron trained the world's most powerful language model: [MT-530B](https://www.microsoft.com/en-us/research/blog/using-deepspeed-and-megatron-to-train-megatron-turing-nlg-530b-the-worlds-largest-and-most-powerful-generative-language-model/) <b>
 
-<b> DeepSpeed is hiring, [come join us!](https://careers.microsoft.com/us/en/search-results?keywords=deepspeed%20open%20source) </b>
+<b> DeepSpeed is hiring, [come join us!](https://careers.microsoft.com/us/en/search-results?keywords=http:%2F%2Fdeepspeed.ai) </b>
 
 DeepSpeed is a deep learning optimization library that makes distributed training easy,
 efficient, and effective.
@@ -32,7 +32,9 @@ initiative to enable next-generation AI capabilities at scale, where you can fin
 information [here](https://innovation.microsoft.com/en-us/exploring-ai-at-scale).
 
 # What's New?
-* [2021/12/09] [DeepSpeed-MoE for NLG: Reducing the training cost of language models by 5 times](https://www.deepspeed.ai/news/2021/12/09/deepspeed-moe-nlg.html)
+* [2022/1/19] [DeepSpeed: Advancing MoE inference and training to power next-generation AI scale](https://www.microsoft.com/en-us/research/blog/deepspeed-advancing-moe-inference-and-training-to-power-next-generation-ai-scale/)
+    * [Mixture of Experts (MoE) for NLG tutorial](https://www.deepspeed.ai/tutorials/mixture-of-experts-nlg/).
+    * [Mixture of Experts (MoE) Inference tutorial](https://www.deepspeed.ai/tutorials/moe-inference-tutorial).
 * [2021/11/15] [Autotuning: Automatically discover the optimal DeepSpeed configuration that delivers good training speed](https://www.deepspeed.ai/news/2021/11/15/autotuning.html)
 * [2021/10/11] [Using DeepSpeed and Megatron to Train Megatron-Turing NLG 530B, the World’s Largest and Most Powerful Generative Language Model](https://www.microsoft.com/en-us/research/blog/using-deepspeed-and-megatron-to-train-megatron-turing-nlg-530b-the-worlds-largest-and-most-powerful-generative-language-model/)
   * Read more on how to [train large models with DeepSpeed](https://www.deepspeed.ai/tutorials/large-models-w-deepspeed/)
