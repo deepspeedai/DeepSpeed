@@ -8,7 +8,9 @@ DeepSpeed provides a seamless inference mode for compatible transformer based mo
 
 ## Initializing for Inference
 
-For inference with DeepSpeed, use `init_inference` API to load the model for inference. Here, you can specify the MP degree, and if the model has not been loaded with the appropriate checkpoint, you can also provide the checkpoint description using a `json` file. To inject the high-performance kernels, you can pass int the `replace_method` as `'auto'` for the compatible models, or define a new policy in [replace_policy class](https://github.com/microsoft/DeepSpeed/blob/master/deepspeed/module_inject/replace_policy.py) and pass in the `injection_policy` that specifies the different parameters of a Transformer layer, such as attention and feed-forward parts. The `injection_policy` shows the mapping between the parameters of the original layer implementation with the inference-customized Transformer layer.
+For inference with DeepSpeed, use `init_inference` API to load the model for inference. Here, you can specify the MP degree, and if the model has not been loaded with the appropriate checkpoint, you can also provide the checkpoint description using a `json` file or the checkpoint path.
+
+To inject the high-performance kernels, you need to set the `replace_with_kernel_inject` to True and pass int the `replace_method` as `'auto'` for the compatible models, or define a new policy in [replace_policy class](https://github.com/microsoft/DeepSpeed/blob/master/deepspeed/module_inject/replace_policy.py) and pass in the `injection_policy` that specifies the different parameters of a Transformer layer, such as attention and feed-forward parts. The `injection_policy` shows the mapping between the parameters of the original layer implementation with the inference-customized Transformer layer.
 
 ```python
 # create the model
@@ -25,9 +27,31 @@ ds_engine = deepspeed.init_inference(model,
                                  mp_size=2,
                                  dtype=torch.half,
                                  checkpoint=None if args.pre_load_checkpoint else args.checkpoint_json,
-                                 replace_method='auto')
+                                 replace_method='auto',
+                                 replace_with_kernel_inject=True)
 model = ds_engine.module
 output = model('Input String')
+```
+
+To run inference with only model-parallelism for the models that we don't support kernels, you can pass an injection policy that shows the two specific linear layers on a Transformer Encoder/Decoder layer: 1) the attention output GeMM and 2) layer output GeMM. We need these part of the layer to add the required all-reduce communication between GPUs to merge the partial results across model-parallel ranks. Below, we bring an example that shows how you can use deepspeed-inference with a T5 model:
+
+
+```python
+# create the model
+import transformers
+from transformers.models.t5.modeling_t5 import T5Block
+
+import deepspeed
+
+pipe = pipeline("text2text-generation", model="google/t5-v1_1-small", device=local_rank)
+# Initialize the DeepSpeed-Inference engine
+pipe.model = deepspeed.init_inference(
+    pipe.model,
+    mp_size=world_size,
+    dtype=torch.float,
+    injection_policy={T5Block: ('SelfAttention.o', 'EncDecAttention.o', 'DenseReluDense.wo')}
+)
+output = pipe('Input String')
 ```
 
 ## Loading Checkpoints

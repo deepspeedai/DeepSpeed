@@ -1,6 +1,7 @@
 from abc import ABC
 
 import torch
+from torch.nn.parameter import Parameter
 
 
 class DSPolicy(ABC):
@@ -66,8 +67,8 @@ class HFBertLayerPolicy(DSPolicy):
         vw = self.client_module.attention.self.value.weight
         vb = self.client_module.attention.self.value.bias
 
-        qkvw = torch.cat((qw, kw, vw), dim=0)
-        qkvb = torch.cat((qb, kb, vb), dim=0)
+        qkvw = Parameter(torch.cat((qw, kw, vw), dim=0))
+        qkvb = Parameter(torch.cat((qb, kb, vb), dim=0))
 
         return self.linear_layer, \
                qkvw, \
@@ -120,7 +121,7 @@ class HFGPTNEOLayerPolicy(DSPolicy):
         kw = self.client_module.attn.attention.k_proj.weight
         vw = self.client_module.attn.attention.v_proj.weight
 
-        qkvw = torch.cat((qw, kw, vw), dim=0)
+        qkvw = Parameter(torch.cat((qw, kw, vw), dim=0))
 
         return self.linear_layer, \
                 qkvw, \
@@ -164,7 +165,7 @@ class HFGPTJLayerPolicy(DSPolicy):
         kw = self.client_module.attn.k_proj.weight
         vw = self.client_module.attn.v_proj.weight
 
-        qkvw = torch.cat((qw, kw, vw), dim=0)
+        qkvw = Parameter(torch.cat((qw, kw, vw), dim=0))
 
         return self.linear_layer, \
                 qkvw, \

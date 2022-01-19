@@ -53,6 +53,8 @@ class InferenceEngine(Module):
             replace_method: the injection method, this can be passed as auto if no injection-policy is defined, in which case the injection is automatic based on the available policies
             quantization_setting:
                 one of None, Tuple(mlp_extra_grouping, quantize_groups), quantize_groups
+            replace_with_kernel_inject: this flag need to be set to true to inject inference kernels for models such as, Bert, GPT2, GPT-Neo and GPT-J. Otherwise,
+            the injection_dict provides the names of two linear layers as a tuple: (attention_output projection, transformer output projection)
         """
 
         super().__init__()
