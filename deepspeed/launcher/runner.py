@@ -174,6 +174,16 @@ def fetch_hostfile(hostfile_path):
     return resource_pool
 
 
+def _stable_remove_duplicates(data):
+    # Create a new list in the same order as original but with duplicates
+    # removed, should never be more than ~16 elements so simple is best
+    new_list = []
+    for x in data:
+        if x not in new_list:
+            new_list.append(x)
+    return new_list
+
+
 def parse_resource_filter(host_info, include_str="", exclude_str=""):
     '''Parse an inclusion or exclusion string and filter a hostfile dictionary.
 
@@ -247,7 +257,7 @@ def parse_resource_filter(host_info, include_str="", exclude_str=""):
     del_keys = []
     for hostname in filtered_hosts:
         # Remove duplicates
-        filtered_hosts[hostname] = list(set(filtered_hosts[hostname]))
+        filtered_hosts[hostname] = _stable_remove_duplicates(filtered_hosts[hostname])
         # Remove empty hosts
         if len(filtered_hosts[hostname]) == 0:
             del_keys.append(hostname)
@@ -332,7 +342,6 @@ def main(args=None):
     active_resources = parse_inclusion_exclusion(resource_pool,
                                                  args.include,
                                                  args.exclude)
-
     env = os.environ.copy()
 
     if not args.master_addr:
