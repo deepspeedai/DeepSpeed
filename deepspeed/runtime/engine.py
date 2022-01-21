@@ -2460,7 +2460,7 @@ class DeepSpeedEngine(Module):
                 tag,
                 load_optimizer_states=load_optimizer_states)
             if not success:
-                self.optimizer._restore_from_fp16_weights()
+                self.optimizer._restore_from_bit16_weights()
 
         return load_path, client_states
 
