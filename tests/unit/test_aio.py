@@ -4,8 +4,8 @@ import filecmp
 import torch
 import deepspeed
 import torch.distributed as dist
-from common import distributed_test
 from deepspeed.ops.aio import AsyncIOBuilder
+from .common import distributed_test
 
 MEGA_BYTE = 1024**2
 BLOCK_SIZE = MEGA_BYTE

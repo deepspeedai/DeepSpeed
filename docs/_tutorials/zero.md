@@ -252,19 +252,19 @@ If you need to take the pretrained weights out of Deepspeed here is what you can
 
 ```json
     "zero_optimization": {
-        "stage3_gather_fp16_weights_on_model_save": true
+        "stage3_gather_16bit_weights_on_model_save": true
     },
 ```
 And then save the model using:
 
 ```python
             if self.deepspeed:
-                self.deepspeed.save_fp16_model(output_dir, output_file)
+                self.deepspeed.save_16bit_model(output_dir, output_file)
 ```
 
 Because it requires consolidation of the weights on one GPU it can be slow and memory demanding, so only use this feature when needed.
 
-Note that if `stage3_gather_fp16_weights_on_model_save` is `False`, no weights will be saved (again, because `state_dict` doesn't have them).
+Note that if `stage3_gather_16bit_weights_on_model_save` is `False`, no weights will be saved (again, because `state_dict` doesn't have them).
 You can use this method to save ZeRO-2 weights as well.
 
 If you'd like to get the fp32 weights, we supply a special script that can do offline consolidation. It requires no configuration files or GPUs. Here is an example of its usage:

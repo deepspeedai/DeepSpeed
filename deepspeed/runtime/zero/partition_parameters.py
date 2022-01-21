@@ -3,29 +3,68 @@
 Licensed under the MIT license.
 """
 
+import math
 import os
 import time
 import types
+from typing import Callable, Iterable
 from enum import Enum
 import functools
 import itertools
+from typing import List
 
 import torch
-from torch.distributed.distributed_c10d import _get_global_rank, group
+from torch import Tensor
 import torch.distributed as dist
+from torch.distributed.distributed_c10d import _get_global_rank, group
+from torch.nn import Module
+from torch.nn import Parameter
 
 from .linear import LinearModuleForZeroStage3, LinearFunctionForZeroStage3
 from .offload_constants import *
 
-from ..utils import see_memory_usage
-from deepspeed.utils import log_dist, init_distributed, logger
+from ..utils import get_only_unique_item, see_memory_usage
+from deepspeed.runtime.zero.utils import assert_ints_same_as_other_ranks
+from deepspeed.utils import init_distributed, instrument_w_nvtx, logger
 from deepspeed.utils.debug import debug_param2name_id_shape, debug_param2name_id_shape_device, debug_module2name, debug_param2name, debug_param2name_id_shape_status, printflock, log_rank_file
+from deepspeed.utils.logging import logger
 
 from ..swap_tensor.partitioned_param_swapper import AsyncPartitionedParameterSwapper, PartitionedParamStatus
 from ..config import DeepSpeedConfig
 
 param_count = 0
-partitioned_param_data_shape = [1]
+partitioned_param_data_shape = [0]
+
+if hasattr(torch.distributed, "_all_gather_base"):
+
+    def torch_allgather_fn(input_tensor: Tensor, output_tensor: Tensor, group):
+        try:
+            return instrument_w_nvtx(torch.distributed._all_gather_base)(
+                output_tensor,
+                input_tensor,
+                group=group,
+                async_op=True,
+            )
+        except RuntimeError as e:
+            raise RuntimeError(
+                f"output_tensor: {output_tensor.device}, input_tensor: {input_tensor.device}"
+            ) from e
+else:
+    logger.warning(
+        "unable to find torch.distributed._all_gather_base. will fall back to "
+        "torch.distributed.all_gather which will result in suboptimal performance. "
+        "please consider upgrading your pytorch installation.")
+
+    def torch_allgather_fn(input_tensor: Tensor, output_tensor: Tensor, group):
+        output_tensors = list(
+            torch.chunk(output_tensor,
+                        torch.distributed.get_world_size(group)))
+        return instrument_w_nvtx(torch.distributed.all_gather)(
+            output_tensors,
+            input_tensor,
+            group=group,
+            async_op=True,
+        )
 
 
 def print_rank_0(message, debug=False, force=False):
@@ -37,6 +76,11 @@ def print_rank_0(message, debug=False, force=False):
     # printflock(f"[{rank}] {message}")
     # - print to log file per rank
     # log_rank_file(rank, message)
+
+
+def debug_rank0(msg: str) -> None:
+    if torch.distributed.get_rank() == 0:
+        logger.debug(msg)
 
 
 def is_zero_param(parameter):
@@ -160,38 +204,35 @@ class ZeroParamStatus(Enum):
 
 
 _orig_torch_empty = torch.empty
+_orig_torch_zeros = torch.zeros
+_orig_torch_ones = torch.ones
+_orig_torch_full = torch.full
 
 
-def empty_cuda_tensor_half(*size, **kwargs):
-    if not 'device' in kwargs.keys():
-        kwargs['device'] = torch.device('cuda:{}'.format(os.environ["LOCAL_RANK"]))
-    tensor = _orig_torch_empty(*size, **kwargs)
-    if tensor.is_floating_point():
-        return tensor.half()
-    else:
+def zero_wrapper_for_fp_tensor_constructor(fn: Callable,
+                                           target_fp_dtype: torch.dtype) -> Callable:
+    def wrapped_fn(*args, **kwargs) -> Tensor:
+        if kwargs.get("device", None) is None:
+            kwargs['device'] = torch.device('cuda:{}'.format(os.environ["LOCAL_RANK"]))
+        tensor: Tensor = fn(*args, **kwargs)
+        if tensor.is_floating_point():
+            tensor = tensor.to(target_fp_dtype)
+
         return tensor
 
+    return wrapped_fn
 
-def new_cuda_tensor_half(cls, *args):
-    device = torch.device('cuda:{}'.format(os.environ["LOCAL_RANK"]))
-    tensor = torch.ones((1, 1), device=device).new_empty(*args).half()
-    if tensor.is_floating_point():
-        return tensor.half()
-    else:
+
+def get_new_tensor_fn_for_dtype(dtype: torch.dtype) -> Callable:
+    def new_tensor(cls, *args) -> Tensor:
+        device = torch.device('cuda:{}'.format(os.environ["LOCAL_RANK"]))
+        tensor = _orig_torch_empty(0, device=device).new_empty(*args)
+        if tensor.is_floating_point():
+            tensor = tensor.to(dtype)
+
         return tensor
 
-
-def empty_cuda_tensor(*size, **kwargs):
-    if not 'device' in kwargs.keys():
-        kwargs['device'] = torch.device('cuda:{}'.format(os.environ["LOCAL_RANK"]))
-    tensor = _orig_torch_empty(*size, **kwargs)
-    return tensor
-
-
-def new_cuda_tensor(cls, *args):
-    device = torch.device('cuda:{}'.format(os.environ["LOCAL_RANK"]))
-    tensor = torch.ones((1, 1), device=device).new_empty(*args)
-    return tensor
+    return new_tensor
 
 
 # https://stackoverflow.com/a/63851681/9201239
@@ -206,6 +247,19 @@ def get_all_subclasses(cls):
     recurse(cls)
 
     return set(subclass_list)
+
+
+@instrument_w_nvtx
+def free_param(param: Parameter) -> None:
+    """Free underlying storage of a parameter."""
+    assert not param.ds_active_sub_modules, param.ds_summary()
+    if param.data.is_cuda:
+        # need to make sure that we don't free the parameter while it is still
+        # being used for computation
+        param.data.record_stream(torch.cuda.current_stream())
+    # param.data doesn't store anything meaningful in partitioned state
+    param.data = torch.empty(0, dtype=param.dtype, device=param.device)
+    param.ds_status = ZeroParamStatus.NOT_AVAILABLE
 
 
 reuse_buffers = False
@@ -224,11 +278,78 @@ class InsertPostInitMethodToModuleSubClasses(object):
         self.mem_efficient_linear = mem_efficient_linear
         self.enabled = enabled
         self._set_dtype(ds_config, dtype)
-        assert self.dtype in [torch.half, torch.float], f"Invalid data type {self.dtype}, allowed values are [torch.half, torch.float]"
+        assert self.dtype in [torch.half, torch.bfloat16, torch.float], f"Invalid data type {self.dtype}, allowed values are [torch.half, torch.bfloat16, torch.float]"
 
     def __enter__(self):
         if not self.enabled:
             return
+
+        def apply_with_gather(orig_module_apply_fn: Callable) -> Callable:
+            """many models make use of child modules like Linear or Embedding which
+            perform their own weight initialization in their __init__ methods,
+            but will then have more weight initialization in a parent module's __init__
+            method that modifies weights of child modules, which is typically done
+            using the Module.apply method.
+
+            since the Init context manager partitions child modules immediately after
+            they are initialized, without modifying apply we would entirely skip
+            any initialization done by parent modules.
+
+            to get around this issue, we wrap the function passed to Module.apply
+            so that the applied function is applied to child modules correctly.
+            """
+            def get_wrapped_fn_to_apply(fn_to_apply: Callable) -> Callable:
+                if hasattr(fn_to_apply, "wrapped"):
+                    return fn_to_apply
+
+                @functools.wraps(fn_to_apply)
+                def wrapped_fn_to_apply(module_to_apply_fn_to: Module) -> None:
+                    """gathers parameters before calling apply function. afterwards
+                    parameters are broadcasted to ensure consistency across all ranks
+                    then re-partitioned.
+
+                    takes the following steps:
+                    1. allgathers parameters for the current module being worked on
+                    2. calls the original function
+                    3. broadcasts root rank's parameters to the other ranks
+                    4. re-partitions the parameters
+                    """
+                    if not all(
+                            is_zero_param(p)
+                            for p in module_to_apply_fn_to.parameters(recurse=False)):
+                        raise RuntimeError(
+                            f"not all parameters for {module_to_apply_fn_to.__class__.__name__}, "
+                            f"were zero params, is it possible that the parameters were "
+                            f"overwritten after they were initialized? "
+                            f"params: {[p for p in module_to_apply_fn_to.parameters(recurse=False)]} "
+                        )
+
+                    params_to_apply_fn_to: Iterable[Parameter] = list(
+                        sorted(module_to_apply_fn_to.parameters(recurse=False),
+                               key=lambda p: p.ds_id))
+
+                    for param in params_to_apply_fn_to:
+                        param.all_gather()
+
+                    fn_to_apply(module_to_apply_fn_to)
+
+                    for param in params_to_apply_fn_to:
+                        torch.distributed.broadcast(param.data,
+                                                    0,
+                                                    group=param.ds_process_group)
+
+                    for param in params_to_apply_fn_to:
+                        param.partition(has_been_updated=True)
+
+                wrapped_fn_to_apply.wrapped = True
+
+                return wrapped_fn_to_apply
+
+            @functools.wraps(orig_module_apply_fn)
+            def wrapped_apply(module: Module, fn_to_apply: Callable) -> None:
+                orig_module_apply_fn(module, get_wrapped_fn_to_apply(fn_to_apply))
+
+            return wrapped_apply
 
         def partition_after(f):
             @functools.wraps(f)
@@ -279,18 +400,23 @@ class InsertPostInitMethodToModuleSubClasses(object):
             # print(f"subclass={subclass.__module__}.{subclass.__qualname__}")
             _enable_class(subclass)
 
-        # holding on to the current __init__subclass__ for exit
+        # holding onto some methods so we can put them back the way they were in __exit__
         torch.nn.modules.module.Module._old_init_subclass = torch.nn.modules.module.Module.__init_subclass__
+        torch.nn.modules.module.Module._old_apply = torch.nn.modules.module.Module.apply
         torch.Tensor.__old_new__ = torch.Tensor.__new__
 
         # Replace .__init__() for future subclasses of torch.nn.Module
         torch.nn.modules.module.Module.__init_subclass__ = classmethod(_init_subclass)
-        if self.dtype == torch.half:
-            torch.Tensor.__new__ = new_cuda_tensor_half
-            torch.empty = empty_cuda_tensor_half
-        else:
-            torch.Tensor.__new__ = new_cuda_tensor
-            torch.empty = empty_cuda_tensor
+        torch.nn.modules.module.Module.apply = apply_with_gather(
+            torch.nn.modules.module.Module._old_apply)
+
+        torch.Tensor.__new__ = get_new_tensor_fn_for_dtype(self.dtype)
+        torch.empty = zero_wrapper_for_fp_tensor_constructor(_orig_torch_empty,
+                                                             self.dtype)
+        torch.zeros = zero_wrapper_for_fp_tensor_constructor(_orig_torch_zeros,
+                                                             self.dtype)
+        torch.ones = zero_wrapper_for_fp_tensor_constructor(_orig_torch_ones, self.dtype)
+        torch.full = zero_wrapper_for_fp_tensor_constructor(_orig_torch_full, self.dtype)
 
         if self.mem_efficient_linear:
             print_rank_0(
@@ -310,17 +436,25 @@ class InsertPostInitMethodToModuleSubClasses(object):
         for subclass in get_all_subclasses(torch.nn.modules.module.Module):
             _disable_class(subclass)
 
-        # Replace .__init__() for future subclasses of torch.nn.Module
+        # putting methods back the way we found them
         torch.nn.modules.module.Module.__init_subclass__ = torch.nn.modules.module.Module._old_init_subclass
+        torch.nn.modules.module.Module.apply = torch.nn.modules.module.Module._old_apply
 
         torch.Tensor.__new__ = torch.Tensor.__old_new__
         torch.empty = _orig_torch_empty
+        torch.zeros = _orig_torch_zeros
+        torch.ones = _orig_torch_ones
+        torch.full = _orig_torch_full
 
         # un doing it here will undo it during training
         # if self.mem_efficient_linear:
         #    torch.nn.functional.linear = self.linear_bk
         #        if self.mem_efficient_linear:
         #            torch.nn.functional.linear = self.linear_bk
+
+        if torch.distributed.get_rank() == 0:
+            logger.info("finished initializing model with %.2fB parameters",
+                        param_count / 1e9)
 
         # Now that we cleaned up the metaclass injection, raise the exception.
         if exc_type is not None:
@@ -332,11 +466,82 @@ class InsertPostInitMethodToModuleSubClasses(object):
 
     def _set_dtype(self, ds_config, dtype):
         if ds_config is not None and dtype is None:
-            self.dtype = torch.half if ds_config.fp16_enabled else torch.float
-        elif dtype is None:
-            self.dtype = torch.half
+            if ds_config.bfloat16_enabled and ds_config.fp16_enabled:
+                raise RuntimeError("bfloat16 and fp16 cannot be enabled at once")
+
+            if ds_config.bfloat16_enabled:
+                self.dtype = torch.bfloat16
+            elif ds_config.fp16_enabled:
+                self.dtype = torch.half
+            else:
+                self.dtype = torch.float
         else:
-            self.dtype = dtype
+            self.dtype = dtype or torch.half
+
+
+class AllGatherHandle:
+    def __init__(self, handle, param: Parameter) -> None:
+        if param.ds_status != ZeroParamStatus.INFLIGHT:
+            raise RuntimeError(f"expected param {param.ds_summary()} to be available")
+
+        self.__handle = handle
+        self.__param = param
+
+    def wait(self) -> None:
+        instrument_w_nvtx(self.__handle.wait)()
+        self.__param.ds_status = ZeroParamStatus.AVAILABLE
+
+
+class AllGatherCoalescedHandle:
+    def __init__(
+        self,
+        allgather_handle,
+        params: List[Parameter],
+        partitions: List[Tensor],
+        world_size: int,
+    ) -> None:
+        self.__allgather_handle = allgather_handle
+        self.__params = params
+        self.__partitions = partitions
+        self.__world_size = world_size
+        self.__complete = False
+
+        for param in self.__params:
+            if param.ds_status != ZeroParamStatus.INFLIGHT:
+                raise RuntimeError(
+                    f"expected param {param.ds_summary()} to not be available")
+
+    @instrument_w_nvtx
+    def wait(self) -> None:
+        if self.__complete:
+            return
+
+        instrument_w_nvtx(self.__allgather_handle.wait)()
+
+        # split the single tensor out into individual tensors
+        param_offset = 0
+        for param in self.__params:
+            assert param.ds_status == ZeroParamStatus.INFLIGHT, f"expected param {param.ds_summary()} to be inflight"
+            partitions: List[Tensor] = []
+            for rank in range(self.__world_size):
+                param_start = rank * param.ds_tensor.ds_numel
+                if param_start < param.ds_numel:
+                    part_to_copy = self.__partitions[rank].narrow(
+                        0,
+                        param_offset,
+                        min(param.ds_numel - param_start,
+                            param.ds_tensor.ds_numel))
+                    partitions.append(part_to_copy)
+
+            param.data = instrument_w_nvtx(torch.cat)(partitions).view(param.ds_shape)
+            param.ds_status = ZeroParamStatus.AVAILABLE
+
+            for part_to_copy in partitions:
+                part_to_copy.record_stream(torch.cuda.current_stream())
+
+            param_offset += param.ds_tensor.ds_numel
+
+        self.__complete = True
 
 
 # Replaces all parameters in module with Scattered Parameters
@@ -549,6 +754,14 @@ class Init(InsertPostInitMethodToModuleSubClasses):
                 print_rank_0(
                     f"Partitioning param {debug_param2name_id_shape(param)} module={debug_module2name(module)}"
                 )
+
+                if param.is_cuda:
+                    torch.distributed.broadcast(param, 0, self.ds_process_group)
+                else:
+                    if torch.distributed.get_rank() == 0:
+                        logger.warn(f"param in {module.__class__.__name__} "
+                                    f"not on GPU so was not broadcasted from rank 0")
+
                 param.partition()
         see_memory_usage(
             f"Param count {param_count}. After converting and partitioning parmas in {module.__class__.__name__}",
@@ -572,11 +785,13 @@ class Init(InsertPostInitMethodToModuleSubClasses):
         param.ds_tensor = None
 
         # Keeps track of how many active sub-modules need this param at any given point in time
-        param.ds_active_sub_modules = 0
+        param.ds_active_sub_modules = set()
 
         # If this flag is true, then the parameters are replicated throughput training
         # And only partitioned before the step
         param.ds_persist = False
+
+        param.is_external_param = False
 
         # The group that the parameter is scattered across.
         param.ds_process_group = self.ds_process_group
@@ -594,6 +809,85 @@ class Init(InsertPostInitMethodToModuleSubClasses):
             if param_list is None:
                 param_list = [cls]
             return self._all_gather(param_list, async_op=async_op, hierarchy=hierarchy)
+
+        @instrument_w_nvtx
+        def all_gather_coalesced(params: Iterable[Parameter],
+                                 safe_mode: bool = False) -> AllGatherCoalescedHandle:
+
+            # fetches from nvme if the partition is not available and in nvme
+            self._ensure_availability_of_partitioned_params(params)
+
+            for param in params:
+                if param.ds_status != ZeroParamStatus.NOT_AVAILABLE:
+                    raise RuntimeError(param.ds_summary())
+                param.ds_status = ZeroParamStatus.INFLIGHT
+
+            # ensure that each rank has params in same order. the allgather
+            # is done by flattening the parameter list into a single tensor that
+            # can be allgathered in a single call - this means that if each rank
+            # gives a list of the same parameters in a different order we will
+            # silently get incorrect parameter values, and have very difficult
+            # to debug correctness issues.
+            params = sorted(params, key=lambda p: p.ds_id)
+
+            debug_rank0(f"-allgather_coalesced: {[p.ds_id for p in params]}")
+
+            if safe_mode:
+                # ensure that same list (with same ordering) of parameters are
+                # being allgathered across all ranks, otherwise could mix
+                # data between tensors.
+                assert_ints_same_as_other_ranks([p.ds_id for p in params])
+                # ensure that tensors from each rank agree on the same ds_numel
+                # otherwise could mix data between tensors.
+                assert_ints_same_as_other_ranks([p.ds_tensor.ds_numel for p in params])
+
+            if len(params) == 1:
+                # have an opportunity to avoid some intermediate memory allocations
+                param, = params
+                param_buffer = torch.empty(
+                    math.ceil(param.ds_numel / self.world_size) * self.world_size,
+                    dtype=param.dtype,
+                    device=torch.cuda.current_device(),
+                    requires_grad=False,
+                )
+                handle = torch_allgather_fn(
+                    param.ds_tensor.to(torch.cuda.current_device()),
+                    param_buffer,
+                    self.ds_process_group,
+                )
+                param.data = param_buffer.narrow(0,
+                                                 0,
+                                                 param.ds_numel).view(param.ds_shape).to(
+                                                     param.device)
+                return AllGatherHandle(handle, param)
+            else:
+                partition_sz = sum(p.ds_tensor.ds_numel for p in params)
+                flat_tensor = torch.empty(partition_sz * self.world_size,
+                                          dtype=get_only_unique_item(p.dtype
+                                                                     for p in params),
+                                          device=torch.cuda.current_device(),
+                                          requires_grad=False)
+                partitions: List[Parameter] = []
+                for i in range(self.world_size):
+                    partitions.append(
+                        flat_tensor.narrow(0,
+                                           partition_sz * i,
+                                           partition_sz))
+
+                instrument_w_nvtx(torch.cat)(
+                    [p.ds_tensor.to(torch.cuda.current_device()) for p in params],
+                    out=partitions[self.rank])
+
+                handle = torch_allgather_fn(partitions[self.rank],
+                                            flat_tensor,
+                                            self.ds_process_group)
+
+                return AllGatherCoalescedHandle(
+                    allgather_handle=handle,
+                    params=params,
+                    partitions=partitions,
+                    world_size=self.world_size,
+                )
 
         def partition(param_list=None, hierarchy=0, has_been_updated=False):
             cls = param
@@ -639,11 +933,37 @@ class Init(InsertPostInitMethodToModuleSubClasses):
         def partitioned_size():
             return self._partitioned_size(param)
 
+        def item_override():
+            param.all_gather()
+            return param._orig_item()
+
+        def ds_summary(slf: torch.Tensor) -> dict:
+            return {
+                "id": slf.ds_id,
+                "status": slf.ds_status.name,
+                "numel": slf.numel(),
+                "ds_numel": slf.ds_numel,
+                "shape": tuple(slf.shape),
+                "ds_shape": tuple(slf.ds_shape),
+                "requires_grad": slf.requires_grad,
+                "grad_shape": tuple(slf.grad.shape) if slf.grad is not None else None,
+                "persist": slf.ds_persist,
+                "active_sub_modules": slf.ds_active_sub_modules,
+            }
+
         def convert_to_zero_parameters(param_list):
             self._convert_to_zero_parameters(param_list)
 
+        def allgather_before(func: Callable) -> Callable:
+            def wrapped(*args, **kwargs):
+                param.all_gather()
+                return func(*args, **kwargs)
+
+            return wrapped
+
         # Collectives for gathering and partitioning parameters
         param.all_gather = all_gather
+        param.all_gather_coalesced = all_gather_coalesced
         param.partition = partition
 
         # Collective for averaging gradients
@@ -654,6 +974,9 @@ class Init(InsertPostInitMethodToModuleSubClasses):
         param.aligned_size = aligned_size
         param.padding_size = padding_size
         param.partitioned_size = partitioned_size
+        param.ds_summary = types.MethodType(ds_summary, param)
+
+        param.item = allgather_before(param.item)
 
         param.convert_to_zero_parameters = convert_to_zero_parameters
 
@@ -682,6 +1005,7 @@ class Init(InsertPostInitMethodToModuleSubClasses):
         elif len(swap_in_flight) > 0:
             swap_in_flight[0].nvme_swapper.synchronize_reads()
 
+    @instrument_w_nvtx
     def _all_gather(self, param_list, async_op=False, hierarchy=None):
 
         # fetches from nvme if the partition is not available and in nvme
@@ -701,8 +1025,10 @@ class Init(InsertPostInitMethodToModuleSubClasses):
                     all_gather_list.append(param)
 
         if not async_op:
-            # ret_value = self._allgather_params(all_gather_list, hierarchy=hierarchy)
-            ret_value = self._allgather_params_coalesced(all_gather_list, hierarchy)
+            if len(param_list) == 1:
+                ret_value = self._allgather_params(all_gather_list, hierarchy=hierarchy)
+            else:
+                ret_value = self._allgather_params_coalesced(all_gather_list, hierarchy)
 
             for param in all_gather_list:
                 param.ds_status = ZeroParamStatus.AVAILABLE
@@ -722,6 +1048,7 @@ class Init(InsertPostInitMethodToModuleSubClasses):
             #print_rank_0(f"After Partitioning Param {param.ds_id}")
             # self._param_status(param)
 
+    @instrument_w_nvtx
     def _partition_param(self, param, buffer=None, has_been_updated=False):
         assert param.ds_status is not ZeroParamStatus.INFLIGHT, f" {param} Cannot partition a param in flight"
 
@@ -750,8 +1077,7 @@ class Init(InsertPostInitMethodToModuleSubClasses):
                     f'Before partitioning param {param.ds_id} {param.shape}',
                     force=False)
                 # param.data does not store anything meaningful in partitioned state
-                param.data = torch.empty(1, dtype=self.dtype, device=param.device)
-
+                free_param(param)
                 see_memory_usage(f'After partitioning param {param.ds_id} {param.shape}',
                                  force=False)
 
@@ -772,7 +1098,7 @@ class Init(InsertPostInitMethodToModuleSubClasses):
                         numel=partition_size):
                     final_location = OFFLOAD_NVME_DEVICE
                     buffer = self.param_swapper.get_buffer(param, partition_size)
-                    partitioned_tensor = torch.empty(1,
+                    partitioned_tensor = torch.empty(0,
                                                      dtype=param.dtype,
                                                      device=buffer.device)
                     partitioned_tensor.data = buffer.data
@@ -831,7 +1157,7 @@ class Init(InsertPostInitMethodToModuleSubClasses):
 
             see_memory_usage(f'Before partitioning param {param.ds_id} {param.shape}',
                              force=False)
-            param.data = torch.ones(1, dtype=self.dtype).to(param.device)
+            free_param(param)
             see_memory_usage(f'After partitioning param {param.ds_id} {param.shape}',
                              force=False)
 

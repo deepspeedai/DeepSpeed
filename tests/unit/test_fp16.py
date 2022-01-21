@@ -8,10 +8,10 @@ import pytest
 import json
 import os
 from deepspeed.ops.adam import FusedAdam
-from common import distributed_test
+from .common import distributed_test
 from deepspeed.ops.op_builder import CPUAdamBuilder
-from simple_model import SimpleModel, SimpleOptimizer, random_dataloader, args_from_dict, create_deepspeed_args, SimpleMoEModel, sequence_dataloader
-from util import required_torch_version
+from .simple_model import SimpleModel, SimpleOptimizer, random_dataloader, args_from_dict, create_deepspeed_args, SimpleMoEModel, sequence_dataloader
+from .util import required_torch_version
 
 try:
     from apex import amp

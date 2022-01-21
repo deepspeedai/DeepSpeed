@@ -5,9 +5,9 @@ import pytest
 from pytest import approx
 import json
 import os
-from common import distributed_test
-from simple_model import args_from_dict
-from multi_output_model import MultiOutputModel, multi_output_dataloader
+from .common import distributed_test
+from .simple_model import args_from_dict
+from .multi_output_model import MultiOutputModel, multi_output_dataloader
 
 
 def create_config_dict(micro_batch_size, grad_accumulation_steps, world_size):

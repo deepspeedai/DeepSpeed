@@ -8,9 +8,8 @@ import random
 import time
 import copy
 from torch import nn
-from modelingpreln import BertEncoder as BertEncoderPreln
-from modeling import BertEncoder as BertEncoderPostln
-from modeling import BertLayerNorm, BertConfig
+from .modelingpreln import BertEncoder as BertEncoderPreln
+from .modeling import BertLayerNorm, BertConfig, BertEncoder as BertEncoderPostln
 from deepspeed import DeepSpeedTransformerLayer, DeepSpeedTransformerConfig
 import deepspeed
 

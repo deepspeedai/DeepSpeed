@@ -1,8 +1,12 @@
+import os
+from typing import List
+
 import torch
 import torch.distributed as dist
 from deepspeed.utils import logger
 from deepspeed.ops.adam import DeepSpeedCPUAdam
 from deepspeed.ops.adam import FusedAdam
+from deepspeed.utils.nvtx import instrument_w_nvtx
 
 
 def _initialize_parameter_parallel_groups(parameter_parallel_size=None):
@@ -45,6 +49,38 @@ def is_zero_supported_optimizer(optimizer):
             f'Checking ZeRO support for optimizer={optimizer.__class__.__name__} type={type(optimizer)}'
         )
     return type(optimizer) in ZERO_SUPPORTED_OPTIMIZERS
+
+
+def get_lst_from_rank0(lst: List[int]) -> None:
+    """
+    NOTE: creates both communication and synchronization overhead so should be used
+    sparingly
+    """
+    lst_tensor = torch.tensor(
+        lst if dist.get_rank() == 0 else [-1] * len(lst),
+        dtype=int,
+        # device=torch.cuda.current_device(),
+        device=torch.device('cuda:{}'.format(os.environ["LOCAL_RANK"])),
+        requires_grad=False,
+    )
+    dist.broadcast(lst_tensor, src=0, async_op=False)
+
+    return list(lst_tensor.cpu().numpy())
+
+
+@instrument_w_nvtx
+def assert_ints_same_as_other_ranks(ints: List[int]) -> None:
+    """
+    NOTE: creates both communication and synchronization overhead so should be
+    used sparingly
+
+    takes a list of ints from each rank and ensures that they are the same
+    across ranks, throwing an exception if they are not.
+    """
+    rank0_ints = get_lst_from_rank0(ints)
+    if ints != rank0_ints:
+        raise RuntimeError(f"disagreement between rank0 and rank{dist.get_rank()}: "
+                           f"rank0: {rank0_ints}, rank{dist.get_rank()}: {ints}")
 
 
 class ZeRORuntimeException(Exception):

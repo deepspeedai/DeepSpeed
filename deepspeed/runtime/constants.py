@@ -114,11 +114,12 @@ SPARSE_GRADIENTS_DEFAULT = False
 # Users can configure in ds_config.json as below example:
 BFLOAT16_FORMAT = '''
 BFLOAT16 parameters should be of the format:
-"bfloat16": {
+"bf16": {
   "enabled": true
 }
 '''
-BFLOAT16 = "bfloat16"
+BFLOAT16 = "bf16"
+BFLOAT16_OLD = "bfloat16"  # keeping for backwards compatibility
 
 BFLOAT16_ENABLED = "enabled"
 BFLOAT16_ENABLED_DEFAULT = False

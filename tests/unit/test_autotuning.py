@@ -1,7 +1,7 @@
 import os
 import pytest
 import torch
-from simple_model import create_config_from_dict
+from .simple_model import create_config_from_dict
 from deepspeed.launcher import runner as dsrun
 from deepspeed.autotuning.autotuner import Autotuner
 from deepspeed.autotuning.scheduler import ResourceManager

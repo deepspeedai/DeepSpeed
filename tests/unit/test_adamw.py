@@ -2,10 +2,10 @@ import deepspeed
 import torch
 import pytest
 
-from common import distributed_test
 from deepspeed.ops.adam import FusedAdam
 from deepspeed.ops.adam import DeepSpeedCPUAdam
-from simple_model import SimpleModel, args_from_dict
+from .common import distributed_test
+from .simple_model import SimpleModel, args_from_dict
 
 # yapf: disable
 #'optimizer, zero_offload, torch_adam, adam_w_mode, resulting_optimizer

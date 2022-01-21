@@ -16,7 +16,7 @@ PipeTopo = PipeDataParallelTopology
 from deepspeed.ops.op_builder import FusedLambBuilder, CPUAdamBuilder
 
 from deepspeed.runtime.zero.stage3 import DeepSpeedZeroOptimizer_Stage3
-from util import required_torch_version
+from .util import required_torch_version
 
 import itertools
 import argparse
@@ -24,8 +24,8 @@ import pytest
 import json
 import os
 import numbers
-from common import distributed_test
-from simple_model import *
+from .common import distributed_test
+from .simple_model import *
 
 
 def compare_deepspeed_states(saved_model, loaded_model):

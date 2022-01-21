@@ -8,7 +8,7 @@ import deepspeed.runtime.utils as ds_utils
 from deepspeed.utils.logging import log_dist
 import deepspeed.utils.groups as groups
 
-from common import distributed_test
+from .common import distributed_test
 
 
 def test_call_to_str():

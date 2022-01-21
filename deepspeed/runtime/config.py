@@ -134,12 +134,12 @@ def get_fp16_enabled(param_dict):
 
 
 def get_bfloat16_enabled(param_dict):
-    if BFLOAT16 in param_dict.keys():
-        return get_scalar_param(param_dict[BFLOAT16],
-                                BFLOAT16_ENABLED,
-                                BFLOAT16_ENABLED_DEFAULT)
-    else:
-        return False
+    for key in [BFLOAT16, BFLOAT16_OLD]:
+        if key in param_dict.keys():
+            return get_scalar_param(param_dict[key],
+                                    BFLOAT16_ENABLED,
+                                    BFLOAT16_ENABLED_DEFAULT)
+    return False
 
 
 def get_fp16_master_weights_and_grads_enabled(param_dict):
@@ -899,7 +899,7 @@ class DeepSpeedConfig(object):
         self.fp16_enabled = get_fp16_enabled(param_dict)
         self.bfloat16_enabled = get_bfloat16_enabled(param_dict)
         assert not (self.fp16_enabled and self.bfloat16_enabled), 'bfloat16 and fp16 modes cannot be simultaneously enabled'
-        assert not (self.bfloat16_enabled and (self.zero_optimization_stage != 2)), 'bfloat16 mode is only enabled for Zero2 currently'
+        assert not (self.bfloat16_enabled and (self.zero_optimization_stage not in {2, 3})), f'bfloat16 mode is only enabled for Zero 2 and 3 currently. got {self.zero_optimization_stage}'
         self.fp16_master_weights_and_gradients = get_fp16_master_weights_and_grads_enabled(
             param_dict)
         self.amp_enabled = get_amp_enabled(param_dict)
