@@ -241,7 +241,7 @@ class ResourceManager:
         for exp_id, (exp, err) in self.finished_experiments.items():
             if err:
                 logger.info(
-                    f"The experiment exp_id = {exp_id}, exp_name = {exp['name']}, did not run succesfully with error = {err}, thus a metrics.txt does not exist for it. Check the stderr.log in {exp['result_dir']}"
+                    f"The experiment exp_id = {exp_id}, exp_name = {exp['name']}, did not run successfully with error = {err}, thus a metrics.txt does not exist for it. Check the stderr.log in {exp['result_dir']}"
                 )
                 continue
 

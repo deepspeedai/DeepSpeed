@@ -16,7 +16,7 @@ Below is an example output for BERT-Large(NVIDIA) on an A100 GPU with batch size
 -------------------------- DeepSpeed Flops Profiler --------------------------
 Profile Summary at step 10:
 Notations:
-data parallel size (dp_size), model paralel size(mp_size),
+data parallel size (dp_size), model parallel size(mp_size),
 number of parameters (params), number of multiply-accumulate operations(MACs),
 number of floating-point operations (flops), floating-point operations per second (FLOPS),
 fwd latency (forward propagation latency), bwd latency (backward propagation latency),
@@ -24,7 +24,7 @@ step (weights update latency), iter latency (sum of fwd, bwd and step latency)
 
 world size:                                                   1
 data parallel size:                                           1
-model paralel size:                                           1
+model parallel size:                                          1
 batch size per GPU:                                           80
 params per gpu:                                               336.23 M
 params of model = params per GPU * mp_size:                   336.23 M
@@ -160,7 +160,7 @@ The DeepSpeed Flops Profiler can be used with the DeepSpeed runtime or as a stan
       - [Example Training Workflow](#example-training-workflow)
 ### Usage With the DeepSpeed Runtime
 
-When using DeepSpeed for model training, the profiler can be configured in the deepspeed configuration file. No explict API calls are needed to use the profiler. The profiler can be enabled by adding the following field to the `deepspeed_config` json file. Refer to [flops profiler](https://www.deepspeed.ai/docs/config-json/#flops-profiler) for details.
+When using DeepSpeed for model training, the profiler can be configured in the deepspeed configuration file. No explicit API calls are needed to use the profiler. The profiler can be enabled by adding the following field to the `deepspeed_config` json file. Refer to [flops profiler](https://www.deepspeed.ai/docs/config-json/#flops-profiler) for details.
 
 ```json
 {
@@ -185,7 +185,7 @@ An example output of 12-layer Megatron-LM model (`hidden_size = 8192, num_attent
 -------------------------- DeepSpeed Flops Profiler --------------------------
 Profile Summary at step 10:
 Notations:
-data parallel size (dp_size), model paralel size(mp_size),
+data parallel size (dp_size), model parallel size(mp_size),
 number of parameters (params), number of multiply-accumulate operations(MACs),
 number of floating-point operations (flops), floating-point operations per second (FLOPS),
 fwd latency (forward propagation latency), bwd latency (backward propagation latency),
@@ -193,7 +193,7 @@ step (weights update latency), iter latency (sum of fwd, bwd and step latency)
 
 world size:                                                   1
 data parallel size:                                           1
-model paralel size:                                           1
+model parallel size:                                          1
 batch size per GPU:                                           1024
 params per gpu:                                               1.29 M
 params of model = params per GPU * mp_size:                   1.29 M

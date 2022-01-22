@@ -132,7 +132,7 @@ class DeepSpeedZeroOptimizer(object):
         # - assume all model params in fp16
         # - assume all params requires grad
         # - flat by groups, not keeping state. TODO: remove state explicitly?
-        # - master gard and unflat master weight never exist. TODO: a way to save out unflat master?
+        # - master grad and unflat master weight never exist. TODO: a way to save out unflat master?
         if not torch.cuda.is_available:
             raise SystemError("Cannot use fp16 without CUDA.")
         self.optimizer = init_optimizer
@@ -391,7 +391,7 @@ class DeepSpeedZeroOptimizer(object):
         # simplified param id
         self.param_id = {}
 
-        #interesting code: unique ids being assigned to individual paramters
+        #interesting code: unique ids being assigned to individual parameters
         largest_param_numel = 0
         count = 0
         for i, params_group in enumerate(self.bit16_groups):

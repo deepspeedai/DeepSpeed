@@ -314,7 +314,7 @@ class LRRangeTest(object):
     the paper `A disciplined approach to neural network hyper-parameters: Part1`_.
 
     LRRT policy is used for finding maximum LR that trains a model without divergence, and can be used to
-    configure the LR boundaries for Cylic LR schedules.
+    configure the LR boundaries for Cyclic LR schedules.
 
     LRRT changes the learning rate after every batch.
     `step` should be called after a batch has been used for training.
@@ -325,7 +325,7 @@ class LRRangeTest(object):
             lower boundary in the range test for each parameter group.
         lr_range_test_step_size (int): Interval of training steps to increase learning rate. Default: 2000
         lr_range_test_step_rate (float): Scaling rate for range test. Default: 1.0
-        lr_range_test_staircase (bool): Scale in staircase fashion, rather than continous. Default: False.
+        lr_range_test_staircase (bool): Scale in staircase fashion, rather than continuous. Default: False.
         last_batch_iteration (int): The index of the last batch. This parameter is used when
             resuming a training job. Since `step()` should be invoked after each
             batch instead of after each epoch, this number represents the total

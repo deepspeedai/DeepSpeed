@@ -232,7 +232,7 @@ class PartitionedParameterCoordinator:
         # this is a much less elegant way of fixing this vs something like using
         # cudaMallocAsync/cudaFreeAsync. Choosing to not expose this to the user now
         # because ideally in the future its replaced by an async allocation
-        # mechanism which doesnt require any configuration by the user.
+        # mechanism which doesn't require any configuration by the user.
         self.__ongoing_fetch_events: Deque[Event] = collections.deque()
         # TODO. make this configurable via JSON
         self.__max_ongoing_fetch_events: int = 2
@@ -250,7 +250,7 @@ class PartitionedParameterCoordinator:
         """adds sub module to trace"""
         if self.trace_complete:
             raise RuntimeError(
-                "attemted to record trace when trace was already complete")
+                "attempted to record trace when trace was already complete")
 
         self.__submodule_order.append(sub_module)
         for param in sorted(set(iter_params(sub_module)), key=lambda p: p.ds_id):
@@ -597,7 +597,7 @@ class DeepSpeedZeroOptimizer_Stage3(object):
         # - assume all model params in fp16
         # - assume all params requires grad
         # - flat by groups, not keeping state. TODO: remove state explicitly?
-        # - master gard and unflat master weight never exist. TODO: a way to save out unflat master?
+        # - master grad and unflat master weight never exist. TODO: a way to save out unflat master?
         if not torch.cuda.is_available:
             raise SystemError("Cannot use fp16 without CUDA.")
         self.optimizer = init_optimizer
@@ -867,7 +867,7 @@ class DeepSpeedZeroOptimizer_Stage3(object):
         # stores if a grad in a partition has been computed or not
         self.is_grad_computed = {}
 
-        # will store the averaged gradients required by this paritition
+        # will store the averaged gradients required by this partition
         self.averaged_gradients = {}
 
         #creates backward hooks for gradient partitioning
@@ -1011,8 +1011,8 @@ class DeepSpeedZeroOptimizer_Stage3(object):
 
     def _move_to_flat_buffer(self, param_list, flat_buffer, avoid_copy=False):
         '''If flat buffer is None then the parameters in the param_list are
-        not copied to the flat buffer. This is because they excede the number of max_params_in_cpu
-        Some of these parameters may aready be in CPU in unflattened buffers
+        not copied to the flat buffer. This is because they exceed the number of max_params_in_cpu
+        Some of these parameters may already be in CPU in unflattened buffers
         or they maybe in GPU, or they maybe in NVME. If they are in NVME, then
         they will be marked as NOT_AVAILABLE, and will be moved to CPU when they are
         needed during training.'''

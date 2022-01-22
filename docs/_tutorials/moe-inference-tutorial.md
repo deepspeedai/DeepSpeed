@@ -24,7 +24,7 @@ In this part, we elaborate the usage of MoE inference support in the DeepSpeed l
 
 First step to use DeepSpeed-MoE inferenece is to initialize the expert-parallel groups. To do so, one can use the group utility from DeepSpeed to initialize the group (`deepspeed.utils.groups.initialize`). This function creates the groups based on minimum of the world\_size (total number of GPUs) and expert size. By using this group, we can partition the experts among the expert-parallel GPUs. If number of experts is lower than total number of GPUs, DeepSpeed-MoE leverages expert-slicing for partitioning the expert parameters between the expert-parallel GPUs.
 
-For inference with DeepSpeed-MoE, use `init_inference` API to load the MoE model for inference. Here, you can specify the Model-parallelism/tensor-slicing (MP) degree, number of experts, and if the model has not been loaded with the appropriate checkpoint, you can also provide the checkpoint description using a `json` file or simply pass the `'checkpoint'` path to load the moddel. To inject the high-performance inference kernels, you can pass int the `replace_method` as `'auto'` and set the `replace_with_kernel_inject` to True.
+For inference with DeepSpeed-MoE, use `init_inference` API to load the MoE model for inference. Here, you can specify the Model-parallelism/tensor-slicing (MP) degree, number of experts, and if the model has not been loaded with the appropriate checkpoint, you can also provide the checkpoint description using a `json` file or simply pass the `'checkpoint'` path to load the model. To inject the high-performance inference kernels, you can pass int the `replace_method` as `'auto'` and set the `replace_with_kernel_inject` to True.
 
 ```python
 

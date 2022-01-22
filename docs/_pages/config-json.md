@@ -653,9 +653,9 @@ Configuring the asynchronous I/O module for offloading parameter and optimizer s
 
 <i>**overwrite**</i>: [boolean]
 
-| Description                                                                               | Default |
-| ----------------------------------------------------------------------------------------- | ------- |
-| Whether to run autotuing experiments whose results alreay exsit. Setting it to true would overwrite the existing result. | `false` |
+| Description                                                                                                               | Default |
+|---------------------------------------------------------------------------------------------------------------------------| ------- |
+| Whether to run autotuing experiments whose results already exist. Setting it to true would overwrite the existing result. | `false` |
 
 
 <i>**metric**</i>: [string]

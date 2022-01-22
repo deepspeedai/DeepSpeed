@@ -80,7 +80,7 @@ self.experts = deepspeed.moe.layer.MoE(hidden_size=input_dim, expert=ExpertModul
 ```
 With the above two commands, the DeepSpeed runtime will be set to train an MoE model with a total of 8 experts on 4 GPUs in 4 experts/GPU mode. We call this the E + D mode as described earlier in the table.
 
-For more advanced use case of the groups API including the inter-operability with Megatron style mpu object, watch this space!
+For more advanced use case of the groups API including the interoperability with Megatron style mpu object, watch this space!
 
 
 ```python

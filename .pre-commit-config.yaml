@@ -32,3 +32,16 @@ repos:
     hooks:
     -   id: clang-format  # formatter of C/C++ code based on a style guide: LLVM, Google, Chromium, Mozilla, and WebKit available
         args: []
+
+-   repo: https://github.com/codespell-project/codespell
+    rev: v2.1.0
+    hooks:
+    -   id: codespell
+        args: [
+            # Do not check files that are automatically generated
+            '--skip=docs/Gemfile.lock,tests/unit/gpt2-merges.txt,tests/unit/gpt2-vocab.json',
+            '--ignore-regex=\\n',  # Do not count the 'n' in an escaped newline as part of a word
+            '--ignore-words-list=unsupport',  # Word used in error messages that need rewording
+            --check-filenames,
+            --check-hidden
+        ]

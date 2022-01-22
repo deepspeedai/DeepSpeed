@@ -736,7 +736,7 @@ def test_zero3_param_partitioning_base(
                 ds_engine.optimizer.zero_grad()
 
         # TODO. add testing for this - for now we just call it to make sure it
-        # doesnt throw
+        # doesn't throw
         ds_engine.optimizer.step()
         # taking an optimizer step invalidates all parameters, make sure everything
         # has been partitioned afterwards
@@ -978,7 +978,7 @@ def test_zero3_init_for_parent_weight_initialization(world_sz):
 
 
 @pytest.mark.skip(
-    reason="depends on upgraded pytorch and nccl that isnt always available")
+    reason="depends on upgraded pytorch and nccl that isn't always available")
 @pytest.mark.parametrize("param_persistence_threshold", [0, 10])
 @pytest.mark.parametrize("contiguous_gradients", [True, False])
 @pytest.mark.parametrize("offload_optimizer", [True, False])
@@ -1174,7 +1174,7 @@ def test_zero3_param_partitioning_base_bf16(
                 ds_engine.optimizer.zero_grad()
 
         # TODO. add testing for this - for now we just call it to make sure it
-        # doesnt throw
+        # doesn't throw
         ds_engine.optimizer.step()
         _assert_partition_status(ds_engine, {ZeroParamStatus.NOT_AVAILABLE})
 

@@ -861,7 +861,7 @@ class DeepSpeedEngine(Module):
     def _configure_with_arguments(self, args, mpu):
         # After the distributed backend is initialized we are guaranteed the LOCAL_RANK
         # environment variable is set. We must align args.local_rank to this value for
-        # backwards compatability with scripts relying on [args|self].local_rank containing
+        # backwards compatibility with scripts relying on [args|self].local_rank containing
         # the correct local rank info. _do_args_sanity_check will ensure this is the case.
 
         if "OMPI_COMM_WORLD_LOCAL_RANK" in os.environ:
@@ -2005,7 +2005,7 @@ class DeepSpeedEngine(Module):
                 msg["latency"]
             print_json_dist(msg, [0], path=self.autotuning_metric_path())
             import atexit
-            atexit.register(print, "Autotuning: done with runing current ds config.")
+            atexit.register(print, "Autotuning: done with running current ds config.")
         exit()
 
     def _write_tensorboard(self):
@@ -2290,7 +2290,7 @@ class DeepSpeedEngine(Module):
                 global_expert_id = expp_rank * num_local_experts + local_expert_id
                 expert_state_dict = torch.load(self._get_expert_ckpt_name(
                     checkpoint_path,
-                    -1, # -1 means ingore layer_id
+                    -1, # -1 means ignore layer_id
                     global_expert_id,
                     tag),
                     map_location=torch.device('cpu'))

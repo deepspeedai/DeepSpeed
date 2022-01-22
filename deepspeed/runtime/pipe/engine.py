@@ -156,7 +156,7 @@ class PipelineEngine(DeepSpeedEngine):
                         f'TOTAL_PARAMS={total_params} ({total_params/1e6:0.3f}M) '
                         f'UNIQUE_PARAMS={unique_params} ({unique_params/1e6:0.3f}M)')
 
-        #intialize peer-2-peer communication and allreduce groups
+        #initialize peer-2-peer communication and allreduce groups
         if self.is_pipe_parallel:
             p2p.init_process_groups(self.grid)
 

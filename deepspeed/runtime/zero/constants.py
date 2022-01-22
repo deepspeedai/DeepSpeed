@@ -125,7 +125,7 @@ ZERO_OPTIMIZATION_GATHER_16BIT_WEIGHTS_ON_MODEL_SAVE_DEFAULT = False
 ZERO_OPTIMIZATION_IGNORE_UNUSED_PARAMETERS = 'ignore_unused_parameters'
 ZERO_OPTIMIZATION_IGNORE_UNUSED_PARAMETERS_DEFAULT = True
 
-# Use deepspeed < v0.3.17 zero stage 1, kept for backwards compatability reasons
+# Use deepspeed < v0.3.17 zero stage 1, kept for backwards compatibility reasons
 ZERO_OPTIMIZATION_LEGACY_STAGE1 = "legacy_stage1"
 ZERO_OPTIMIZATION_LEGACY_STAGE1_DEFAULT = False
 

@@ -96,7 +96,7 @@ class ContiguousMemoryAllocator(object):
         print_rank_0(
             f"Free before release {free_before}. Released {tensor.numel()}. Total free after {self.total_free}."
         )
-        assert self.total_free - tensor_size == free_before, "Release bookeeping error"
+        assert self.total_free - tensor_size == free_before, "Release bookkeeping error"
 
     def release_tensor_with_id(self, tensor_id):
         free_before = self.total_free
@@ -109,7 +109,7 @@ class ContiguousMemoryAllocator(object):
         print_rank_0(
             f"Free before release {free_before}. Released {tensor.numel()}. Total free after {self.total_free}."
         )
-        assert self.total_free - tensor_size == free_before, "Release bookeeping error"
+        assert self.total_free - tensor_size == free_before, "Release bookkeeping error"
 
     #shows the current memory allocation at specified resolution
     def print_allocation(self, resolution=200):

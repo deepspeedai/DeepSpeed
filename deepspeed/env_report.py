@@ -107,7 +107,7 @@ def parse_arguments():
         '--hide_operator_status',
         action='store_true',
         help=
-        'Suppress display of installation and compatiblity statuses of DeepSpeed operators. '
+        'Suppress display of installation and compatibility statuses of DeepSpeed operators. '
     )
     parser.add_argument('--hide_errors_and_warnings',
                         action='store_true',

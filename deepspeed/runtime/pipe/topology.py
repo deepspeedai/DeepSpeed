@@ -191,7 +191,7 @@ class ProcessTopology:
             return True
 
         coords = filter(_filter_helper, self.mapping.keys())
-        return [self.mapping[coo] for coo in coords]
+        return [self.mapping[coord] for coord in coords]
 
     def get_axis_list(self, axis, idx):
         """Returns the list of global ranks whose coordinate in an axis is idx.

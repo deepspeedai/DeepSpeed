@@ -120,7 +120,7 @@ class ModelBasedTuner(BaseTuner):
             feature_val = []
             if err:
                 logger.info(
-                    f"Skipping exp_id = {exp_id}, exp_name = {exp['name']}, the experiment did not run succesfully with error = {err}, thus a metrics.txt does not exist for it. Please check the stderr.log in {exp['result_dir']}"
+                    f"Skipping exp_id = {exp_id}, exp_name = {exp['name']}, the experiment did not run successfully with error = {err}, thus a metrics.txt does not exist for it. Please check the stderr.log in {exp['result_dir']}"
                 )
                 ds_config = exp["ds_config"]
                 flattened_ds_config = flatten(ds_config)

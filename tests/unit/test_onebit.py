@@ -265,7 +265,7 @@ def test_onebitadam_checkpointing(tmpdir):
                                 load_optimizer_states=True,
                                 load_lr_scheduler_states=True)
         assert torch.allclose(optimizer_2.param_groups[0]['exp_avg_mask'], mask2, atol=1e-07), f"Momentum mask should not change after loading checkpoint"
-        # Test whether worker&server error is resetted
+        # Test whether worker&server error is reset
         for v in optimizer_2.state.values():
             assert 'worker_error' not in v, f"Incorrect worker error"
             assert 'server_error' not in v, f"Incorrect server error"
@@ -291,7 +291,7 @@ def test_onebitadam_checkpointing(tmpdir):
                                 load_optimizer_states=True,
                                 load_lr_scheduler_states=True)
         assert 'exp_avg_mask' not in optimizer_3.param_groups[0], f"Momentum mask should not change after loading checkpoint"
-        # Test whether worker&server error is resetted
+        # Test whether worker&server error is reset
         for v in optimizer_3.state.values():
             assert 'worker_error' not in v, f"Incorrect worker error"
             assert 'server_error' not in v, f"Incorrect server error"
@@ -682,7 +682,7 @@ def test_onebitlamb_checkpointing(tmpdir):
                                 load_optimizer_states=True,
                                 load_lr_scheduler_states=True)
         assert torch.allclose(optimizer_2.param_groups[0]['exp_avg_mask'], mask2, atol=1e-07), f"Momentum mask should not change after loading checkpoint"
-        # Test whether worker&server error is resetted
+        # Test whether worker&server error is reset
         assert len(optimizer_2.optimizer.worker_errors) == 0, f"Incorrect worker error"
         assert len(optimizer_2.optimizer.server_errors) == 0, f"Incorrect server error"
         # Test whether scaling_coeffs is loaded correctly
@@ -713,10 +713,10 @@ def test_onebitlamb_checkpointing(tmpdir):
                                 load_optimizer_states=True,
                                 load_lr_scheduler_states=True)
         assert 'exp_avg_mask' not in optimizer_3.param_groups[0], f"Momentum mask should not change after loading checkpoint"
-        # Test whether worker&server error is resetted
+        # Test whether worker&server error is reset
         assert len(optimizer_3.optimizer.worker_errors) == 0, f"Incorrect worker error"
         assert len(optimizer_3.optimizer.server_errors) == 0, f"Incorrect server error"
-        # Test whether scaling_coeffs, lamb_coeff_freeze, last_factor are resetted
+        # Test whether scaling_coeffs, lamb_coeff_freeze, last_factor are reset
         for v in optimizer_3.state.values():
             assert v['lamb_coeff_freeze'] == 0.0, f"Incorrect lamb_coeff_freeze"
             assert v['last_factor'] == 1.0, f"Incorrect last_factor"

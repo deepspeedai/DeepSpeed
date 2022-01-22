@@ -61,7 +61,7 @@ at::Tensor lamb(at::Tensor& p,
 
     // intermediate for weight L2 reduction
     // make sure that the threads per block is at least 512 during the kernel launch otherwise the
-    // behavious is unexpected
+    // behaviour is unexpected
     at::Tensor w_l2_i = at::empty(
         {512},
         p.options().dtype(p.type().scalarType() == at::ScalarType::Half ? at::ScalarType::Float
@@ -69,7 +69,7 @@ at::Tensor lamb(at::Tensor& p,
 
     // intermediate for update L2 reduction
     // make sure that the threads per block is at least 512 during the kernel launch otherwise the
-    // behavious is unexpected
+    // behaviour is unexpected
     at::Tensor u_l2_i = at::empty(
         {512},
         p.options().dtype(p.type().scalarType() == at::ScalarType::Half ? at::ScalarType::Float

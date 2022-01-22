@@ -28,7 +28,7 @@ There are three stages in ZeRO corresponding to three model states, as shown in 
 </a>
 Figure 1. Overview of ZeRO memory savings
 
-In addition to these three stages, ZeRO family of technology also consists of ZeRO-2 Offload. ZeRO-2 Offload is a heterogenous DL training technology that works in conjunction with ZeRO-2 to offload partitioned optimizer states and gradients to CPU memory. ZeRO-2 Offload offers the full memory advantage of ZeRO-2 even on a single GPU, while at the same time offering great scalability of ZeRO-2 on multi-GPU setup.  DeepSpeed library has been offering ZeRO-2 Offload since Sept 2020. For details, please see below:
+In addition to these three stages, ZeRO family of technology also consists of ZeRO-2 Offload. ZeRO-2 Offload is a heterogeneous DL training technology that works in conjunction with ZeRO-2 to offload partitioned optimizer states and gradients to CPU memory. ZeRO-2 Offload offers the full memory advantage of ZeRO-2 even on a single GPU, while at the same time offering great scalability of ZeRO-2 on multi-GPU setup.  DeepSpeed library has been offering ZeRO-2 Offload since Sept 2020. For details, please see below:
 
 * ZeRO: [Stage 1 blog](https://www.microsoft.com/en-us/research/blog/zero-2-deepspeed-shattering-barriers-of-deep-learning-speed-scale/), [Stage 2 blog](https://www.microsoft.com/en-us/research/blog/zero-2-deepspeed-shattering-barriers-of-deep-learning-speed-scale/), [Tutorial](/tutorials/zero)
 * ZeRO-Offload: [Blog](https://www.microsoft.com/en-us/research/blog/deepspeed-extreme-scale-model-training-for-everyone/#toc-heading-3), [Tutorials](/tutorials/zero-offload), [Paper link](https://arxiv.org/abs/2101.06840)

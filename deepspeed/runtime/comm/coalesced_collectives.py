@@ -47,7 +47,7 @@ def reduce_scatter_coalesced(
     """simultaneously reduce-scatter a list of tensors - this can be done more
     efficiently than individual reduce scatter calls
 
-    TODO. see if PyTorch team wants a c++ verson of this for ProcessGroupNCCL
+    TODO. see if PyTorch team wants a c++ version of this for ProcessGroupNCCL
     """
     this_rank = torch.distributed.get_rank(group)
     world_sz = torch.distributed.get_world_size(group)

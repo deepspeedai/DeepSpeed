@@ -13,7 +13,7 @@ def test_parser_mutual_exclusive():
 
 def test_parser_local():
     ''' Test cases with only one node. '''
-    # First try no incude/exclude
+    # First try no include/exclude
     hosts = {'worker-0': [0, 1, 2, 3]}
     ret = dsrun.parse_resource_filter(hosts)
     assert (ret == hosts)
@@ -49,7 +49,7 @@ def test_parser_local():
 
 
 def test_parser_multinode():
-    # First try no incude/exclude
+    # First try no include/exclude
     hosts = {'worker-0': [0, 1, 2, 3], 'worker-1': [0, 1, 2, 3]}
     ret = dsrun.parse_resource_filter(hosts)
     assert (ret == hosts)

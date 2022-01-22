@@ -167,7 +167,7 @@ For example, the following section in the DeepSpeed configuration file limits th
 }
 ```
 
-The entry bellow asks the Autotuner to use `4` as the micro-batch size per GPU in tuning (micro-batch size per GPU is fixed as 4). Note that it's different from using ` "train_micro_batch_size_per_gpu": [4]` which asks the Autotuner to tune micro-batch size per GPU starting from `4`.
+The entry below asks the Autotuner to use `4` as the micro-batch size per GPU in tuning (micro-batch size per GPU is fixed as 4). Note that it's different from using ` "train_micro_batch_size_per_gpu": [4]` which asks the Autotuner to tune micro-batch size per GPU starting from `4`.
 ```json
 {
     "train_micro_batch_size_per_gpu": [4],

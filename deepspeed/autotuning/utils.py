@@ -317,7 +317,7 @@ def canonical_name(config: dict, tuning_keys=None, prefix="", omit_val=False):
     Args:
         config (dict): the config dict used to generate the name
         tuning_keys (list, optional):  the tuning keys used to generate the name. Defaults to None.
-        prefix (str, optional): a string added to the begining of the name. Defaults to None.
+        prefix (str, optional): a string added to the beginning of the name. Defaults to None.
     """
     if TRAIN_MICRO_BATCH_SIZE_PER_GPU not in tuning_keys:
         tuning_keys.append(TRAIN_MICRO_BATCH_SIZE_PER_GPU)

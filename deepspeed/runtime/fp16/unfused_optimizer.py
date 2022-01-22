@@ -55,7 +55,7 @@ class FP16_UnfusedOptimizer(object):
             #copied to fp16 weights
             fp32_group = [p.clone().float().detach() for p in param_group['params']]
 
-            #incase the internal optimizer needs it
+            #in case the internal optimizer needs it
             for p in fp32_group:
                 p.requires_grad = True
 

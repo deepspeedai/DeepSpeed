@@ -341,7 +341,7 @@ class Autotuner:
         else:
             return exps
 
-        # replace the corresponding parameter values if the user specfies them in the DeepSpeed configuration file
+        # replace the corresponding parameter values if the user specifies them in the DeepSpeed configuration file
         replace_dict(tuning_space,
                      self.user_config,
                      [ZERO_OPTIMIZATION,
@@ -511,7 +511,7 @@ class Autotuner:
         max_train_batch_size_per_gpu = 0
         tuning_micro_batch_sizes_overwritten = False
 
-        # calcuate max micro batch size using gpu memory, model instatiation memory and activation memory
+        # calculate max micro batch size using gpu memory, model instantiation memory and activation memory
         # calculated_max_micro_batch_size = (memory_per_gpu - instantiation_memory) // activation_memory_micro_batch_size_1
         calculated_max_micro_batch_size = int(
             self.gpu_mem -
@@ -584,11 +584,11 @@ class Autotuner:
             logger.info(f"End tuning for space: {tuning_space_name}")
             return max_micro_batch_size, fast_best_mbs, fast_best_metric_val
 
-        # if the best metric or the micro batch size for that best metric in the current Zero stage after tuning micro batch size is less than the corrresponding value in the prevous Zero stage, return, do not tune other Zero configuration paramerts
+        # if the best metric or the micro batch size for that best metric in the current Zero stage after tuning micro batch size is less than the corresponding value in the previous Zero stage, return, do not tune other Zero configuration parameters
         if stage > 0:
             if fast_best_mbs <= prev_best_mbs or fast_best_metric_val < prev_best_metric_val:
                 logger.info(
-                    f"End tuning for space: {tuning_space_name}. No need to tune other Zero configuration paramerts."
+                    f"End tuning for space: {tuning_space_name}. No need to tune other Zero configuration parameters."
                 )
                 return max_micro_batch_size, fast_best_mbs, fast_best_metric_val
 
@@ -665,7 +665,7 @@ class Autotuner:
         """Does a model information profling experiment that collects the number of model parameters and activation memory.\
             The experiment produces a "profile_model_info" folder under self.results_dir.
         Returns:
-            [dict]: a model inforation dictionary, e.g., {"num_params": 335144976, "trainable_num_params": 335144976, "activation_mem_per_gpu": 324358144, "rank": 0}
+            [dict]: a model information dictionary, e.g., {"num_params": 335144976, "trainable_num_params": 335144976, "activation_mem_per_gpu": 324358144, "rank": 0}
         """
         logger.info("Starting model info profile run.")
         model_info = self.autotuning_config.model_info

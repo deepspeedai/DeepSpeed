@@ -27,20 +27,20 @@ MoQ quantization schedule is defined by a number of parameters which allow users
 
 `quantize_groups`: Quantization groups, which shows the number of scales used to quantize a model, default is 1.
 
-`quantize_bits`, The numer of bits to control the data-precision transition from a start-bit to the final target-bits (e.g. starting from 16-bit down to 8-bit).
+`quantize_bits`, The number of bits to control the data-precision transition from a start-bit to the final target-bits (e.g. starting from 16-bit down to 8-bit).
 
     `start_bits`: The start bits in quantization training. Default is set to 16.
     `target_bits`: The target bits in quantization training. Default is set to 16.
 
 `quantize_schedule`, This determines how to schedule the training steps at each precision level.
 
-    `quantize_period`: indicates the period by which we reduce down the precison (number of bits) for quantization. By default, we use a period of 100 training steps, that will be doubled every time the precision reduces by 1 bit.
+    `quantize_period`: indicates the period by which we reduce down the precision (number of bits) for quantization. By default, we use a period of 100 training steps, that will be doubled every time the precision reduces by 1 bit.
     `schedule_offset`: indicates when the quantization starts to happen (before this offset, we just use the normal training precision which can be either FP32/FP16). Default is set to 100 steps.
 
 `quantize_algo`, The algorithm used to quantize the model.
 
     `q_type`: we currently support symmetric and asymmetric quantization that result in signed and unsigned integer values, respectively. Default is set to symmetric
-    `rounding`: for the rounding of the quantized values, we can either round to the nearest value or use stocahstic rounding. Default is set to nearest.
+    `rounding`: for the rounding of the quantized values, we can either round to the nearest value or use stochastic rounding. Default is set to nearest.
 
 ### Eigenvalue Parameters
 
