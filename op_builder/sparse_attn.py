@@ -3,6 +3,7 @@ Copyright 2020 The Microsoft DeepSpeed Team
 """
 import warnings
 from .builder import OpBuilder
+from packaging import version as pkg_version
 
 
 class SparseAttnBuilder(OpBuilder):
@@ -51,5 +52,21 @@ class SparseAttnBuilder(OpBuilder):
             self.warning(
                 f'{self.NAME} requires a torch version >= 1.5 but detected {TORCH_MAJOR}.{TORCH_MINOR}'
             )
+
+        try:
+            import triton
+        except ImportError:
+            # auto-install of triton is broken on some systems, reverting to manual install for now
+            # see this issue: https://github.com/microsoft/DeepSpeed/issues/1710
+            self.warning(
+                f"please install triton==1.0.0 if you want to use sparse attention")
+            return False
+
+        installed_triton = pkg_version.parse(triton.__version__)
+        if installed_triton != pkg_version.parse("1.0.0"):
+            self.warning(
+                f"using untested triton version ({installed_triton}), only 1.0.0 is known to be compatible"
+            )
+            return False
 
         return super().is_compatible(verbose) and torch_compatible and cuda_compatible
