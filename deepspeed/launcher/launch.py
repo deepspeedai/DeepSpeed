@@ -21,6 +21,8 @@ from argparse import ArgumentParser, REMAINDER
 from ..constants import TORCH_DISTRIBUTED_DEFAULT_PORT
 from ..utils import logger
 
+PID_FILE_BASEPATH = "/tmp"
+
 
 def parse_args():
     parser = ArgumentParser(description="DeepSpeed distributed training launch"
@@ -66,6 +68,11 @@ def parse_args():
                         action="store_true",
                         help="Do not pass local_rank as an argument when calling "
                         "the user's training script.")
+
+    parser.add_argument("--save_pid",
+                        type=int,
+                        default=0,
+                        help="main launching process pid, for internal pid tracking")
 
     # positional
     parser.add_argument("training_script",
@@ -125,6 +132,17 @@ def main():
     current_env["CROSS_SIZE"] = str(args.nnodes)
     current_env["LOCAL_SIZE"] = str(num_local_procs)
 
+    if args.save_pid:
+        print(f"launcher pid: {os.getpid()}")
+
+    pid_file = None
+    if args.save_pid:
+        launcher_pid = os.getpid()
+        pid_file = os.path.join(PID_FILE_BASEPATH, f"{args.save_pid}.deepspeed")
+        assert not os.path.isfile(pid_file), "pid file exists but shouldn't"
+        with open(pid_file, 'w') as fd:
+            fd.write(f"{launcher_pid}")
+
     processes = []
     cmd = []
     for local_rank in range(0, num_local_procs):
@@ -167,6 +185,9 @@ def main():
             sys.exit(last_return_code)
         if signum in sig_names:
             logger.info(f"Main process received {sig_names[signum]}, exiting")
+        if args.save_pid:
+            if os.path.isfile(pid_file):
+                os.remove(pid_file)
         sys.exit(1)
 
     # pass SIGINT/SIGTERM to children if the parent is being terminated

@@ -58,7 +58,7 @@ jobs:
           python -c "import torch; print('CUDA available:', torch.cuda.is_available())"
       - name: Install deepspeed
         run: |
-          pip install .[dev,1bit,autotuning]
+          pip install .[dev,1bit,autotuning,sparse_attn]
           ds_report
       - name: Unit tests
         run: |

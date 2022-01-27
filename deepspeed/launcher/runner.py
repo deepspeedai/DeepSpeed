@@ -29,7 +29,6 @@ EXPORT_ENVS = ["NCCL", "PYTHON", "MV2", "UCX"]
 DEEPSPEED_ENVIRONMENT_NAME = ".deepspeed_env"
 DEEPSPEED_ENVIRONMENT_PATHS = [os.path.expanduser("~"), '.']
 PDSH_MAX_FAN_OUT = 1024
-PID_FILE_BASEPATH = "/tmp"
 
 
 def parse_args(args=None):
@@ -398,6 +397,8 @@ def main(args=None):
             deepspeed_launch.append("--module")
         if args.no_local_rank:
             deepspeed_launch.append("--no_local_rank")
+        if args.save_pid:
+            deepspeed_launch += ["--save_pid", f"{os.getpid()}"]
         cmd = deepspeed_launch + [args.user_script] + args.user_args
     else:
         args.launcher = args.launcher.lower()
@@ -437,20 +438,7 @@ def main(args=None):
     logger.info(f"cmd = {' '.join(cmd)}")
     result = subprocess.Popen(cmd, env=env)
 
-    pid_file = None
-    if args.save_pid:
-        main_pid = os.getpid()
-        launcher_pid = result.pid
-        pid_file = os.path.join(PID_FILE_BASEPATH, f"{main_pid}.deepspeed")
-        with open(pid_file, 'w') as fd:
-            fd.write(f"{launcher_pid}")
-
     result.wait()
-
-    if args.save_pid and pid_file is not None:
-        # clean-up saved pid file
-        if os.path.isfile(pid_file):
-            os.remove(pid_file)
 
     # In case of failure must propagate the error-condition back to the caller (usually shell). The
     # actual error and traceback should have been printed in the subprocess, so in order to avoid

@@ -92,7 +92,8 @@ class PDSHRunner(MultiNodeRunner):
             deepspeed_launch.append("--module")
         if self.args.no_local_rank:
             deepspeed_launch.append("--no_local_rank")
-
+        if self.args.save_pid:
+            deepspeed_launch += ["--save_pid", f"{os.getpid()}"]
         return pdsh_cmd_args + deepspeed_launch + [self.user_script
                                                    ] + self.user_arguments
 
