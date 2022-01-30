@@ -42,7 +42,7 @@ def init_distributed(dist_backend="nccl",
             mpi_discovery(distributed_port=distributed_port, verbose=verbose)
 
     if not torch.distributed.is_initialized():
-        if verbose:
+        if verbose and int(os.getenv('RANK', '0')) == 0:
             logger.info(
                 "Initializing torch distributed with backend: {}".format(dist_backend))
         assert isinstance(timeout, timedelta)
