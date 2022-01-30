@@ -277,7 +277,7 @@ class PartitionedParameterCoordinator:
             self.__param_order = tuple(self.__param_order)  # freeze
             self.trace_complete = True
             print_rank_0(f"completed trace: {[m.id for m in self.__submodule_order]}",
-                         force=True)
+                         force=False)
 
         self.__param_queue = collections.deque(self.__param_order)  # reset fetch queue
         self.__most_recent_step_id_param_fetched_for = collections.defaultdict(
