@@ -71,7 +71,7 @@ class ReplaceWithTensorSlicing:
                 torch.cat([qkv_s[i] for qkv_s in qkv_split],
                           axis=1) for i in range(len(qkv_split[0]))
             ]
-            dst.data.copy(weight_split[self.gpu_index].to(
+            dst.data.copy_(weight_split[self.gpu_index].to(
                 torch.cuda.current_device()).contiguous())
         else:
             if src_shape[0] == dst_shape[0]:
@@ -83,7 +83,7 @@ class ReplaceWithTensorSlicing:
                 torch.cat([qkv_s[i] for qkv_s in qkv_split],
                           axis=0) for i in range(len(qkv_split[0]))
             ]
-            dst.data.copy(bias_split[self.gpu_index].to(
+            dst.data.copy_(bias_split[self.gpu_index].to(
                 torch.cuda.current_device()).contiguous())
 
         return dst
