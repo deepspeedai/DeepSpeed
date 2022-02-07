@@ -18,6 +18,15 @@ from collections import OrderedDict
 # DeepSpeed data structures it has to be available in the current python environment.
 import deepspeed
 from deepspeed.utils import logger
+from deepspeed.checkpoint.constants import (DS_VERSION,
+                                            OPTIMIZER_STATE_DICT,
+                                            PARAM_SHAPES,
+                                            SINGLE_PARTITION_OF_FP32_GROUPS,
+                                            FP32_FLAT_GROUPS,
+                                            ZERO_STAGE,
+                                            PARTITION_COUNT,
+                                            PARAM_SHAPES,
+                                            BUFFER_NAMES)
 
 debug = 0
 
@@ -55,9 +64,9 @@ def get_optim_files(checkpoint_dir):
 def parse_model_state(file):
     state_dict = torch.load(file, map_location=device)
 
-    if "buffer_names" not in state_dict:
+    if BUFFER_NAMES not in state_dict:
         raise ValueError(f"{file} is not a model state checkpoint")
-    buffer_names = state_dict["buffer_names"]
+    buffer_names = state_dict[BUFFER_NAMES]
     if debug:
         print("Found buffers:", buffer_names)
 
@@ -67,7 +76,11 @@ def parse_model_state(file):
         for k,
         v in state_dict["module"].items() if k in buffer_names
     }
-    return buffers
+    param_shapes = state_dict[PARAM_SHAPES]
+
+    ds_version = state_dict.get(DS_VERSION, None)
+
+    return buffers, param_shapes, ds_version
 
 
 def parse_optim_states(files, ds_checkpoint_dir):
@@ -77,11 +90,11 @@ def parse_optim_states(files, ds_checkpoint_dir):
     for f in files:
         state_dicts.append(torch.load(f, map_location=device))
 
-    if not "zero_stage" in state_dicts[0]['optimizer_state_dict']:
+    if not ZERO_STAGE in state_dicts[0][OPTIMIZER_STATE_DICT]:
         raise ValueError(f"{files[0]} is not a zero checkpoint")
-    zero_stage = state_dicts[0]['optimizer_state_dict']["zero_stage"]
-    world_size = state_dicts[0]['optimizer_state_dict']["partition_count"]
-    param_shapes = state_dicts[0]["param_shapes"]
+    zero_stage = state_dicts[0][OPTIMIZER_STATE_DICT][ZERO_STAGE]
+    world_size = state_dicts[0][OPTIMIZER_STATE_DICT][PARTITION_COUNT]
+
     # For ZeRO-2 each param group can have different partition_count as data parallelism for expert
     # parameters can be different from data parallelism for non-expert parameters. So we can just
     # use the max of the partition_count to get the dp world_size.
@@ -97,15 +110,15 @@ def parse_optim_states(files, ds_checkpoint_dir):
 
     # the groups are named differently in each stage
     if zero_stage == 2:
-        fp32_groups_key = "single_partition_of_fp32_groups"
+        fp32_groups_key = SINGLE_PARTITION_OF_FP32_GROUPS
     elif zero_stage == 3:
-        fp32_groups_key = "fp32_flat_groups"
+        fp32_groups_key = FP32_FLAT_GROUPS
     else:
         raise ValueError(f"unknown zero stage {zero_stage}")
 
     if zero_stage == 2:
         fp32_flat_groups = [
-            state_dicts[i]['optimizer_state_dict'][fp32_groups_key]
+            state_dicts[i][OPTIMIZER_STATE_DICT][fp32_groups_key]
             for i in range(len(state_dicts))
         ]
     elif zero_stage == 3:
@@ -116,11 +129,11 @@ def parse_optim_states(files, ds_checkpoint_dir):
         # will require matching the sub-lists of param_shapes for each param group flattened tensor
 
         fp32_flat_groups = [
-            torch.cat(state_dicts[i]['optimizer_state_dict'][fp32_groups_key],
+            torch.cat(state_dicts[i][OPTIMIZER_STATE_DICT][fp32_groups_key],
                       0) for i in range(len(state_dicts))
         ]
 
-    return zero_stage, world_size, param_shapes, fp32_flat_groups
+    return zero_stage, world_size, fp32_flat_groups
 
 
 def _get_fp32_state_dict_from_zero_checkpoint(ds_checkpoint_dir):
@@ -134,12 +147,13 @@ def _get_fp32_state_dict_from_zero_checkpoint(ds_checkpoint_dir):
     print(f"Processing zero checkpoint '{ds_checkpoint_dir}'")
 
     optim_files = get_optim_files(ds_checkpoint_dir)
-    zero_stage, world_size, param_shapes, fp32_flat_groups = parse_optim_states(optim_files, ds_checkpoint_dir)
+    zero_stage, world_size, fp32_flat_groups = parse_optim_states(optim_files, ds_checkpoint_dir)
     print(
         f"Detected checkpoint of type zero stage {zero_stage}, world_size: {world_size}")
 
     model_file = get_model_state_file(ds_checkpoint_dir, zero_stage)
-    buffers = parse_model_state(model_file)
+    buffers, param_shapes, ds_version = parse_model_state(model_file)
+    print(f'Parsing checkpoint created by deepspeed=={ds_version}')
 
     if zero_stage == 2:
         return _get_fp32_state_dict_from_zero2_checkpoint(world_size,
@@ -165,7 +179,8 @@ def _get_fp32_state_dict_from_zero2_checkpoint(world_size,
     if debug:
         for i in range(world_size):
             for j in range(len(fp32_flat_groups[0])):
-                print(f"fp32_flat_groups[{i}][{j}].shape={fp32_flat_groups[i][j].shape}")
+                print(
+                    f"{FP32_FLAT_GROUPS}[{i}][{j}].shape={fp32_flat_groups[i][j].shape}")
 
     # XXX: memory usage doubles here (zero2)
     num_param_groups = len(fp32_flat_groups[0])
@@ -269,7 +284,7 @@ def _get_fp32_state_dict_from_zero3_checkpoint(world_size,
 
     if debug:
         for i in range(world_size):
-            print(f"fp32_flat_groups[{i}].shape={fp32_flat_groups[i].shape}")
+            print(f"{FP32_FLAT_GROUPS}[{i}].shape={fp32_flat_groups[i].shape}")
 
         wanted_params = len(param_shapes)
         wanted_numel = sum(shape.numel() for shape in param_shapes.values())

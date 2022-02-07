@@ -12,7 +12,7 @@ from torch._utils import _flatten_dense_tensors
 from deepspeed.runtime.utils import get_global_norm, CheckOverflow, get_weight_norm
 from deepspeed.runtime.fp16.loss_scaler import INITIAL_LOSS_SCALE, SCALE_WINDOW, MIN_LOSS_SCALE
 from deepspeed.utils import logger
-from deepspeed.runtime.constants import OPTIMIZER_STATE_DICT
+from deepspeed.checkpoint.constants import OPTIMIZER_STATE_DICT
 
 
 class FP16_UnfusedOptimizer(object):
