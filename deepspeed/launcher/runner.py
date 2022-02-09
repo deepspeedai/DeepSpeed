@@ -430,7 +430,7 @@ def main(args=None):
             if os.path.isfile(environ_file):
                 with open(environ_file, 'r') as fd:
                     for var in fd.readlines():
-                        key, val = var.split('=')
+                        key, val = var.split('=', maxsplit=1)
                         runner.add_export(key, val)
 
         cmd = runner.get_cmd(env, active_resources)
