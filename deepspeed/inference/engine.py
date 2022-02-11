@@ -12,8 +12,10 @@ from ..utils import logger, init_distributed
 
 from ..pipe import PipelineModule
 from ..moe.utils import has_moe_layers
+from ..moe.layer import MoE
 
 import torch.distributed as dist
+import deepspeed.utils.groups as groups
 
 
 class InferenceEngine(Module):
@@ -95,8 +97,10 @@ class InferenceEngine(Module):
             self._create_model_parallel_group()
 
         moe, _ = has_moe_layers(self.module)
-        if moe:
+
+        if moe and dist.get_world_size() > 1:
             self._create_ep_parallel_group(moe_experts)
+
         if self.injection_dict:
             for client_module, injection_policy in self.injection_dict.items():
                 self._apply_injection_policy(client_module,
@@ -241,18 +245,48 @@ class InferenceEngine(Module):
                                   moe_experts=moe_experts,
                                   moe_type=moe_type)
 
-    def _load_checkpoint(self, load_dir, load_module_strict=True):
-        sd_loader = SDLoaderFactory.get_sd_loader_json(load_dir)
-        is_pipe_parallel = isinstance(self.module, PipelineModule)
+    def _get_all_ckpt_names(self, checkpoints_path, tag):
+        ckpt_file_pattern = self._get_ckpt_name(checkpoints_path,
+                                                tag,
+                                                mp_placeholder="*")
+        import glob
 
+        ckpt_files = glob.glob(ckpt_file_pattern)
+        ckpt_files.sort()
+        return ckpt_files
+
+    def _get_ckpt_name(self, checkpoints_path, tag, mp_placeholder=None):
+        if mp_placeholder is not None:
+            mp_rank_str = mp_placeholder
+        else:
+            mp_rank = 0 if self.mpu is None else self.mpu.get_model_parallel_rank()
+            mp_rank_str = "{:02d}".format(mp_rank)
+
+        ckpt_name = os.path.join(
+            checkpoints_path,
+            "mp_rank_" + mp_rank_str + "_model_states.pt",
+        )
+        return ckpt_name
+
+    def _load_checkpoint(self, load_dir, load_module_strict=True, tag=None):
+        is_pipe_parallel = isinstance(self.module, PipelineModule)
         if is_pipe_parallel:
             raise RuntimeError(
                 'pipeline parallelism is currently not supported in inference.')
+        if os.path.isdir(load_dir):
+            if tag is None:
+                latest_path = os.path.join(load_dir, "latest")
+                if os.path.isfile(latest_path):
+                    with open(latest_path, "r") as fd:
+                        tag = fd.read().strip()
 
-        mp_rank = 0 if self.mp_group is None else dist.get_rank(group=self.mp_group)
-        print(
-            f'self.mp_world_size: {self.mp_world_size}, mp_rank: {mp_rank}, is_pipe_parallel: {is_pipe_parallel}, (self.dtype is torch.int8): {(self.dtype is torch.int8)}, quantize_groups:{self.quantize_groups}, mlp_extra_grouping: {self.mlp_extra_grouping}'
-        )
+            ckpt_list = self._get_all_ckpt_names(load_dir, tag)
+            sd_loader = SDLoaderFactory.get_sd_loader(ckpt_list)
+        else:
+            sd_loader = SDLoaderFactory.get_sd_loader_json(load_dir)
+
+        mp_rank = 0 if self.mpu is None else self.mpu.get_model_parallel_rank()
+
         load_path, checkpoint, quantize_config = sd_loader.load(self.mp_world_size,
                                                   mp_rank,
                                                   is_pipe_parallel=is_pipe_parallel,
@@ -262,9 +296,19 @@ class InferenceEngine(Module):
 
         self.quantization_scales, self.quantize_merge_count = quantize_config
 
-        if is_pipe_parallel:
-            # Pipeline parallelism uses this to load its own checkpoint files.
-            self._curr_ckpt_path = load_dir
+        moe, _ = has_moe_layers(self.module)
+        if moe:
+            from deepspeed.runtime.engine import DeepSpeedEngine
+            old_moe_load = False
+            if not isinstance(checkpoint['num_experts'], list):
+                old_moe_load = True
+            DeepSpeedEngine.load_moe_state_dict(
+                load_dir,
+                tag,
+                state_dict=checkpoint[self._choose_module_key(checkpoint)],
+                old_moe_load=old_moe_load,
+                model=self.module,
+                mpu=self.mpu)
 
         self.module.load_state_dict(
             state_dict=checkpoint[self._choose_module_key(checkpoint)],

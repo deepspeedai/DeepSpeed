@@ -292,8 +292,9 @@ def replace_transformer_layer(orig_layer_impl,
                     new_module = transformer_inference.DeepSpeedMoEInference(
                         transformer_config,
                         mp_group=mp_group,
-                        ep_group=ep_group[num_experts],
-                        expert_mp_group=expert_mp_group[num_experts],
+                        ep_group=None if ep_group is None else ep_group[num_experts],
+                        expert_mp_group=None
+                        if expert_mp_group is None else expert_mp_group[num_experts],
                         quantize_scales=quantization_scales[layer_id],
                         quantize_groups=quantize_groups,
                         merge_count=merge_count,
@@ -325,8 +326,9 @@ def replace_transformer_layer(orig_layer_impl,
                     new_module = transformer_inference.DeepSpeedMoEInference(
                         transformer_config,
                         mp_group=mp_group,
-                        ep_group=ep_group[num_experts],
-                        expert_mp_group=expert_mp_group[num_experts],
+                        ep_group=None if ep_group is None else ep_group[num_experts],
+                        expert_mp_group=None
+                        if expert_mp_group is None else expert_mp_group[num_experts],
                     )
 
                 else:
