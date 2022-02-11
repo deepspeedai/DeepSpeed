@@ -18,7 +18,8 @@ try:
     _amp_available = True
 except ImportError:
     _amp_available = False
-amp_available = pytest.mark.skip(_amp_available, reason="apex/amp is not installed")
+amp_available = pytest.mark.skipif(not _amp_available,
+                                   reason="apex/amp is not installed")
 
 
 def test_lamb_fp32_grad_clip(tmpdir):
