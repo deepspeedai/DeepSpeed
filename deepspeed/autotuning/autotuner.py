@@ -349,7 +349,7 @@ class Autotuner:
 
         logger.debug(f"tuning_space = {json.dumps(tuning_space)}")
 
-        all_configs = get_all_configs(tuning_space)
+        all_configs = get_all_configs(tuning_space, ignore_keys=["optimizer"])
 
         tuning_keys = get_tuning_keys(tuning_space)
 

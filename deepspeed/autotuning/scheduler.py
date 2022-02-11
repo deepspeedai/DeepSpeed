@@ -333,7 +333,6 @@ def run_experiment(exp: dict, reservations, user_script, user_args):
     include_str = include_str[:-1]
     master_port = exp["master_port"]
     exp["launcher_args"] = [
-        "--force_multi",
         "--include",
         f"{include_str}",
         "--master_port",

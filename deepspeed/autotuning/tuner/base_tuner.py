@@ -43,8 +43,8 @@ class BaseTuner:
                 self.rm.schedule_experiments(exp_paths)
                 self.rm.run()
                 exp, metric_val = self.rm.parse_results(self.metric)
-                if self.best_exp == None or (metric_val
-                                             and metric_val > self.best_metric_val):
+                if self.best_exp == None or self.best_metric_val == None or (
+                        metric_val and metric_val > self.best_metric_val):
                     # logger.info(f"tuner finds better = {exp}")
                     self.best_exp = exp
                     self.best_metric_val = metric_val
