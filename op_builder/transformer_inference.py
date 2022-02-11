@@ -10,7 +10,7 @@ class InferenceBuilder(CUDAOpBuilder):
         super().__init__(name=name)
 
     def absolute_name(self):
-        return f'deepspeed.ops.transformer_inference.{self.NAME}_op'
+        return f'deepspeed.ops.transformer.inference.{self.NAME}_op'
 
     def sources(self):
         return [
