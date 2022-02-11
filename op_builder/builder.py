@@ -432,6 +432,16 @@ class OpBuilder(ABC):
         extra_include_paths = [
             self.deepspeed_src_path(path) for path in self.include_paths()
         ]
+
+        # Torch will try and apply whatever CCs are in the arch list at compile time,
+        # we have already set the intended targets ourselves we know that will be
+        # needed at runtime. This prevents CC collisions such as multiple __half
+        # implementations. Stash arch list to reset after build.
+        torch_arch_list = None
+        if "TORCH_CUDA_ARCH_LIST" in os.environ:
+            torch_arch_list = os.environ.get("TORCH_CUDA_ARCH_LIST")
+            os.environ["TORCH_CUDA_ARCH_LIST"] = ""
+
         op_module = load(
             name=self.name,
             sources=self.strip_empty_entries(sources),
@@ -443,6 +453,11 @@ class OpBuilder(ABC):
         build_duration = time.time() - start_build
         if verbose:
             print(f"Time to load {self.name} op: {build_duration} seconds")
+
+        # Reset arch list so we are not silently removing it for other possible use cases
+        if torch_arch_list:
+            os.environ["TORCH_CUDA_ARCH_LIST"] = torch_arch_list
+
         return op_module
 
 
