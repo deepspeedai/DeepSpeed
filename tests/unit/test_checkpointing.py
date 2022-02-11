@@ -1266,3 +1266,82 @@ def test_checkpoint_zero_elastic_dp_change(tmpdir,
             model.load_checkpoint(tmpdir, load_optimizer_states=load_optim)
 
     _go1(models)
+
+
+@pytest.mark.parametrize('zero_stage', [0, 1, 2, 3])
+def test_immediate_save_load(tmpdir, zero_stage):
+    config_dict = {
+        "train_batch_size": 4,
+        "optimizer": {
+            "type": 'Adam'
+        },
+        "fp16": {
+            "enabled": True,
+            "initial_scale_power": 8
+        },
+        "zero_optimization": {
+            "stage": zero_stage,
+        }
+    }
+    hidden_dim = 10
+    model = SimpleModel(hidden_dim)
+    args = args_from_dict(tmpdir, config_dict)
+
+    @distributed_test(world_size=[1])
+    def _test_immediate_save_load(args, model, tmpdir):
+
+        ds_model = create_deepspeed_model(args=args, model=model, base_optimizer=None)
+        ds_model.save_checkpoint(tmpdir)
+        ds_model.load_checkpoint(tmpdir,
+                                 load_optimizer_states=False,
+                                 load_lr_scheduler_states=False,
+                                 load_module_only=False)
+
+    _test_immediate_save_load(args, model, tmpdir)
+
+
+@pytest.mark.parametrize('zero_stage', [0, 1, 2, 3])
+def test_load_immediate_save(tmpdir, zero_stage):
+    config_dict = {
+        "train_batch_size": 4,
+        "optimizer": {
+            "type": 'Adam'
+        },
+        "fp16": {
+            "enabled": True,
+            "initial_scale_power": 8
+        },
+        "zero_optimization": {
+            "stage": zero_stage,
+        }
+    }
+    hidden_dim = 10
+    model = SimpleModel(hidden_dim)
+    args = args_from_dict(tmpdir, config_dict)
+
+    @distributed_test(world_size=[1])
+    def _test_load_immediate_save(args, model, tmpdir):
+
+        # 1. pretrain a model and save it
+        dtype = torch.half
+        ds_model = create_deepspeed_model(args=args, model=model, base_optimizer=None)
+        data_loader = random_dataloader(model=ds_model,
+                                        total_samples=1,
+                                        hidden_dim=hidden_dim,
+                                        device=ds_model.device,
+                                        dtype=dtype)
+        for n, batch in enumerate(data_loader):
+            loss = ds_model(batch[0], batch[1])
+            ds_model.backward(loss)
+            ds_model.step()
+        ds_model.save_checkpoint(tmpdir)
+
+        # 2. load and immediately save a model with a fresh ds engine
+        ds_model = create_deepspeed_model(args=args, model=model, base_optimizer=None)
+        ds_model.load_checkpoint(tmpdir,
+                                 load_optimizer_states=False,
+                                 load_lr_scheduler_states=False,
+                                 load_module_only=False)
+        ds_model.save_checkpoint(tmpdir)
+
+    _test_load_immediate_save(args, model, tmpdir)

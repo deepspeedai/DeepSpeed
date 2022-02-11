@@ -2457,6 +2457,10 @@ class DeepSpeedEngine(Module):
                 )
                 return None, None
 
+        if self.zero_optimization_partition_weights():
+            # Prepare for checkpoint load by ensuring all parameters are partitioned
+            self.optimizer.checkpoint_event_prologue()
+
         load_path, client_states = self._load_checkpoint(load_dir,
                                                          tag,
                                                          load_module_strict=load_module_strict,
@@ -2471,6 +2475,9 @@ class DeepSpeedEngine(Module):
                 load_optimizer_states=load_optimizer_states)
             if not success:
                 self.optimizer._restore_from_bit16_weights()
+
+        if self.zero_optimization_partition_weights():
+            self.optimizer.checkpoint_event_epilogue()
 
         return load_path, client_states
 
@@ -2737,8 +2744,8 @@ class DeepSpeedEngine(Module):
         process with rank 0.
         """
         if self.zero_optimization_partition_weights():
-            # Prepare for state_dict() by ensuring all parameters are partitioned
-            self.optimizer.save_checkpoint_prologue()
+            # Prepare for checkpoint save by ensuring all parameters are partitioned
+            self.optimizer.checkpoint_event_prologue()
 
         # This is to make sure the checkpoint names are created without collision
         # There seems to be issue creating them in parallel
@@ -2770,7 +2777,7 @@ class DeepSpeedEngine(Module):
             self._save_zero_checkpoint(save_dir, tag)
 
         if self.zero_optimization_partition_weights():
-            self.optimizer.save_checkpoint_epilogue()
+            self.optimizer.checkpoint_event_epilogue()
 
         # Save latest checkpoint tag
         torch.distributed.barrier()

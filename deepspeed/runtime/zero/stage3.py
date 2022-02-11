@@ -401,9 +401,9 @@ class PartitionedParameterCoordinator:
 
     @instrument_w_nvtx
     @torch.no_grad()
-    def release_and_reset_all(self) -> None:
+    def release_and_reset_all(self, module: Module) -> None:
         """release all module parameters"""
-        for param in map(lambda p: p.param, self.__param_order):
+        for param in iter_params(module, recurse=True):
             if param in self.__inflight_param_registry:
                 raise RuntimeError(f"param {param.ds_summary()} still in flight")
 
@@ -412,10 +412,9 @@ class PartitionedParameterCoordinator:
             param.ds_active_sub_modules.clear()
             self.__release_param(param)
 
-        for param_in_trace in self.__param_order:
-            if param_in_trace.param.ds_status != ZeroParamStatus.NOT_AVAILABLE:
-                raise RuntimeError(
-                    f"{param_in_trace.param.ds_summary()} expected to be released")
+        for param in iter_params(module, recurse=True):
+            if param.ds_status != ZeroParamStatus.NOT_AVAILABLE:
+                raise RuntimeError(f"{param.ds_summary()} expected to be released")
 
     @instrument_w_nvtx
     def __all_gather_params(self, params: Set[Parameter]) -> None:
@@ -2825,7 +2824,7 @@ class DeepSpeedZeroOptimizer_Stage3(object):
         """Partitioning Parameters that were not partitioned usually if parameters
         of modules whose input parameters do not require grad computation do not
         trigger post call and will therefore will remain unpartitioned"""
-        self.param_coordinator.release_and_reset_all()
+        self.param_coordinator.release_and_reset_all(self.module)
         for param in iter_params(self.module, recurse=True):
             if param.ds_status != ZeroParamStatus.NOT_AVAILABLE:
                 raise RuntimeError(f"{param.ds_summary()} expected to be released")
@@ -3110,10 +3109,10 @@ class DeepSpeedZeroOptimizer_Stage3(object):
             self.persistent_parameters[0].partition(self.persistent_parameters)
             self.persistent_parameters[0].all_gather(self.persistent_parameters)
 
-    def save_checkpoint_prologue(self):
+    def checkpoint_event_prologue(self):
         self._partition_all_parameters()
 
-    def save_checkpoint_epilogue(self):
+    def checkpoint_event_epilogue(self):
         if len(self.persistent_parameters) > 0:
             self.persistent_parameters[0].all_gather(self.persistent_parameters)
 
