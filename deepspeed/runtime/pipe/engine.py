@@ -1179,8 +1179,11 @@ class PipelineEngine(DeepSpeedEngine):
         Returns:
             A tensor from torch.zeros() allocated on self.device.
         """
-        if "dtype" not in kwargs and self.fp16_enabled():
-            kwargs["dtype"] = torch.half
+        if "dtype" not in kwargs:
+            if self.fp16_enabled():
+                kwargs["dtype"] = torch.half
+            if self.bfloat16_enabled():
+                kwargs["dtype"] = torch.bfloat16
 
         return torch.zeros(shape, device=self.device, **kwargs)
 
