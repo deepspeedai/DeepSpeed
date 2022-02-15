@@ -21,6 +21,8 @@ from torch.distributed.distributed_c10d import _get_global_rank
 
 from typing import Callable, Dict, Optional, Union, Iterable
 
+import deepspeed
+
 from deepspeed.runtime.utils import see_memory_usage, get_ma_status, DummyOptim
 from deepspeed.runtime.zero.stage_1_and_2 import DeepSpeedZeroOptimizer
 from deepspeed.runtime.zero.partition_parameters import ZeroParamStatus
@@ -3061,8 +3063,6 @@ class DeepSpeedEngine(Module):
             a consolidated fp16 ``state_dict`` on cpu on rank 0, ``None`` on other ranks
 
         """
-        import deepspeed
-
         if not self.zero_optimization_partition_weights():
             raise ValueError("this function requires ZeRO-3 mode")
 
@@ -3105,9 +3105,14 @@ class DeepSpeedEngine(Module):
                 if child is not None:
                     get_layer_state_dict(child, prefix + name + ".")
 
+        # Prepare for checkpoint save by ensuring all parameters are partitioned
+        self.optimizer.checkpoint_event_prologue()
+
         see_memory_usage("before get_layer_state_dict", force=False)
         get_layer_state_dict(self.module, prefix="")
         see_memory_usage("after get_layer_state_dict", force=False)
+
+        self.optimizer.checkpoint_event_epilogue()
 
         return state_dict
 

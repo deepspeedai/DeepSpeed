@@ -1345,3 +1345,54 @@ def test_load_immediate_save(tmpdir, zero_stage):
         ds_model.save_checkpoint(tmpdir)
 
     _test_load_immediate_save(args, model, tmpdir)
+
+
+@pytest.mark.parametrize('zero_stage', [0, 1, 2, 3])
+def test_save_before_accum_grad_is_done(tmpdir, zero_stage):
+    config_dict = {
+        "train_batch_size": 4,
+        "optimizer": {
+            "type": 'Adam'
+        },
+        "fp16": {
+            "enabled": True,
+            "initial_scale_power": 8
+        },
+        "zero_optimization": {
+            "stage": zero_stage,
+            "stage3_gather_fp16_weights_on_model_save": True,
+        },
+        "gradient_accumulation_steps": 2,
+        "train_micro_batch_size_per_gpu": 1,
+        "train_batch_size": 2,
+    }
+    hidden_dim = 10
+    model = SimpleModel(hidden_dim)
+    args = args_from_dict(tmpdir, config_dict)
+
+    @distributed_test(world_size=[1])
+    def _test_save_before_accum_grad_is_done(args, model, tmpdir):
+
+        # This test reproduces a bug where one tries to retrieve a 16bit model before grad_accum
+        # cycle was completed.
+        # So we config grad_accum=2 and step only once and save_16bit_model
+        ds_model = create_deepspeed_model(args=args, model=model, base_optimizer=None)
+
+        data_loader = random_dataloader(model=ds_model,
+                                        total_samples=2,
+                                        hidden_dim=hidden_dim,
+                                        device=ds_model.device,
+                                        dtype=torch.half)
+
+        batch = next(iter(data_loader))
+        loss = ds_model(batch[0], batch[1])
+        ds_model.backward(loss)
+        ds_model.step()
+
+        # we stepped only once, and now save 16bit model before gradient_accumulation_steps=2 is complete
+        ds_model.save_16bit_model(tmpdir, "model.pt")
+
+        # let's test just as well that we can save the checkpoint too
+        ds_model.save_checkpoint(tmpdir)
+
+    _test_save_before_accum_grad_is_done(args, model, tmpdir)
