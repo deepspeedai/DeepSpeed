@@ -1721,10 +1721,9 @@ class DeepSpeedZeroOptimizer(object):
         if self.deepspeed_adam_offload:
             from deepspeed.ops.adam import DeepSpeedCPUAdam
             if type(self.optimizer) == DeepSpeedCPUAdam and self.dtype == torch.half:
-                bit16_param_groups = [
+                bit16_param_groups = [[
                     bit16_partitions[partition_id]
-                    for bit16_partitions in self.parallel_partitioned_bit16_groups
-                ]
+                ] for bit16_partitions in self.parallel_partitioned_bit16_groups]
                 self.optimizer.step(fp16_param_groups=bit16_param_groups)
             else:
                 self.optimizer.step()
