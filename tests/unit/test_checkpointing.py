@@ -938,8 +938,11 @@ def test_checkpoint_moe(tmpdir, ep_size):
 
     @distributed_test(world_size=[4])
     def _helper(args):
-        groups.initialize(ep_size=ep_size)
-        models = [SimpleMoEModel(hidden_dim=hidden_dim) for _ in range(2)]
+        models = [
+            SimpleMoEModel(hidden_dim=hidden_dim,
+                           num_experts=ep_size,
+                           ep_size=ep_size) for _ in range(2)
+        ]
         optimizers = [torch.optim.AdamW(params=model.parameters()) for model in models]
         checkpoint_correctness_verification(args,
                                             models=models,
@@ -995,14 +998,14 @@ def test_checkpoint_moe_and_zero(tmpdir, ep_size, load_optim_states):
     def create_param_groups(model):
         # param group must have a random unique name (for now)
         # TODO: clean-up this requirement, the unique name should not be required here
-        return {'params': model.parameters(), 'name': 'random-unique-name'}
+        return {'params': [p for p in model.parameters()], 'name': 'random-unique-name'}
 
     @distributed_test(world_size=[4])
     def _helper(args):
-        groups.initialize(ep_size=ep_size)
         models = [
             SimpleMoEModel(hidden_dim=hidden_dim,
-                           num_experts=ep_size) for _ in range(2)
+                           num_experts=ep_size,
+                           ep_size=ep_size) for _ in range(2)
         ]
         params = [
             split_params_into_different_moe_groups_for_optimizer(

@@ -192,7 +192,7 @@ class CheckOverflow(object):
             # Only need to check groups.get_largest_expert_parallel_group()
             dist.all_reduce(overflow_gpu,
                             op=dist.ReduceOp.MAX,
-                            group=groups.get_max_expert_parallel_group())
+                            group=groups._get_max_expert_parallel_group())
         if self.mpu is not None:
             torch.distributed.all_reduce(overflow_gpu,
                                          op=torch.distributed.ReduceOp.MAX,
@@ -243,7 +243,7 @@ class CheckOverflow(object):
             # overflows, we detect it here
             dist.all_reduce(overflow_gpu,
                             op=dist.ReduceOp.MAX,
-                            group=groups.get_max_expert_parallel_group())
+                            group=groups._get_max_expert_parallel_group())
         if self.zero_reduce_scatter:
             torch.distributed.all_reduce(overflow_gpu,
                                          op=torch.distributed.ReduceOp.MAX,
@@ -373,7 +373,7 @@ def clip_grad_norm_(parameters, max_norm, norm_type=2, mpu=None):
         total_norm = total_norm_cuda[0].item()**(1. / norm_type)
 
     # Need to average total_norm across different GPUs due to the presence of moe params
-    pg = groups.get_data_parallel_group()
+    pg = groups._get_data_parallel_group()
     scaled_norm = total_norm * 1.0 / float(dist.get_world_size(group=pg))
 
     scaled_norm_tensor = torch.cuda.FloatTensor([float(scaled_norm)])

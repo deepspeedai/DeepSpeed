@@ -447,14 +447,16 @@ class MOELayer(Base):
     def __init__(self,
                  gate: Module,
                  experts: Module,
+                 ep_group_name,
+                 ep_size,
                  num_local_experts: int,
-                 group: Optional[Any] = None,
                  use_tutel: bool = False) -> None:
         super().__init__()
         self.gate = gate
         self.experts = experts
-        self.group = group
-        self.world_size = dist.get_world_size(group)
+        self.ep_group = None
+        self.ep_size = ep_size
+        self.ep_group_name = ep_group_name
         self.num_local_experts = num_local_experts
         self.time_falltoall = 0.0
         self.time_salltoall = 0.0
@@ -469,6 +471,9 @@ class MOELayer(Base):
         elif use_tutel and not TUTEL_INSTALLED:
             logger.warning("Tutel optimization requested but not installed. "
                            "Proceeding without Tutel.")
+
+    def _set_ep_group(self, ep_group):
+        self.ep_group = ep_group
 
     def forward(self, *input: Tensor, **kwargs: Any) -> Tensor:
 
@@ -504,14 +509,14 @@ class MOELayer(Base):
         if self.wall_clock_breakdown:
             self.timers('falltoall').start()
 
-        dispatched_input = _AllToAll.apply(self.group, dispatched_input)
+        dispatched_input = _AllToAll.apply(self.ep_group, dispatched_input)
 
         if self.wall_clock_breakdown:
             self.timers('falltoall').stop()
             self.time_falltoall = self.timers('falltoall').elapsed(reset=False) * 1000
 
         # Re-shape after all-to-all: ecm -> gecm
-        dispatched_input = dispatched_input.reshape(self.world_size,
+        dispatched_input = dispatched_input.reshape(self.ep_size,
                                                     self.num_local_experts,
                                                     -1,
                                                     d_model)
@@ -521,14 +526,14 @@ class MOELayer(Base):
         if self.wall_clock_breakdown:
             self.timers('salltoall').start()
 
-        expert_output = _AllToAll.apply(self.group, expert_output)
+        expert_output = _AllToAll.apply(self.ep_group, expert_output)
 
         if self.wall_clock_breakdown:
             self.timers('salltoall').stop()
             self.time_salltoall = self.timers('salltoall').elapsed(reset=False) * 1000
 
         # Re-shape back: gecm -> ecm
-        expert_output = expert_output.reshape(self.world_size * self.num_local_experts,
+        expert_output = expert_output.reshape(self.ep_size * self.num_local_experts,
                                               -1,
                                               d_model)
 

@@ -197,8 +197,11 @@ def replace_transformer_layer(orig_layer_impl,
             assert num_attention_heads % mp_size == 0,\
                 "To run the model parallel across the GPUs, the attention_heads require to be divisible by the world_size!" +\
                 "This is because the attention computation is partitioned evenly among the parallel GPUs."
-        from deepspeed.moe.utils import has_moe_layers
-        moe, num_experts = has_moe_layers(child)
+        from deepspeed.moe.layer import MoE
+        moe = False
+        if isinstance(child.mlp, MoE):
+            num_experts = child.mlp.num_experts
+            moe = True
 
         attn_linear_layer, qkvw, qkvb, dense_w, dense_b, scale_attention = policy.attention()
         if not moe or moe_type == 'standard':

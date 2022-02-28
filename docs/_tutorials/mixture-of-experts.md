@@ -30,14 +30,17 @@ DeepSpeed MoE supports five different forms of parallelism, and it exploits both
 | E + D + Z        | Expert + Data + ZeRO-powered data   | Supports massive hidden sizes and even larger base models than E+Z          |
 | E + Z-Off + M    | Expert + ZeRO-Offload + Model       | Leverages both GPU and CPU memory for large MoE models on limited # of GPUs |
 
-To support different forms of parallelism, we create a notion of DeepSpeed process groups that resides in ```deepspeed.utils.groups.py```
+To support different forms of parallelism, we create various process groups inside DeepSpeed. The helper functions that DeepSpeed uses reside in ```deepspeed.utils.groups.py```
 
-For most cases, the model training code needs to initialize these groups by calling
+Note: The following function has been deprecated now and model training code does not need to call this anymore.
+
 ```python
 deepspeed.utils.groups.initialize(ep_size="desired expert-parallel world size")
 ```
 
-The GPUs (or ranks) participating in an expert-parallel group will distribute the total number of experts specified by the model training code argument num_experts.
+Instead, the MoE layer API now accepts ```ep_size``` as an argument in addition to ```num_experts```. This new API allows users to create MoE models, which can have a different number of experts and a different expert parallelism degree for each MoE layer.
+
+The GPUs (or ranks) participating in an expert-parallel group of size ```ep_size``` will distribute the total number of experts specified by the layer.
 
 ### MoE layer API
 
@@ -53,8 +56,16 @@ Updated with MoE Layers
 
 ```python
     self.fc3 = nn.Linear(84, 84)
-    self.fc3 = deepspeed.moe.layer.MoE(hidden_size=84, expert=self.fc3, num_experts=args.num_experts, ...)
+    self.fc3 = deepspeed.moe.layer.MoE(hidden_size=84, expert=self.fc3, num_experts=args.num_experts, ep_size=<desired expert-parallel world size> ...)
     self.fc4 = nn.Linear(84, 10)
+```
+
+### Pyramid-Residual MoE
+
+Recently, we proposed a novel [Pyramid-Residual MoE](https://arxiv.org/abs/2201.05596]) (PR-MoE) model architecture. To create such an MoE model, the users need to do two additional things: 1) To make a pyramid structure, pass num_experts as a list e.g. [4, 8] and 2) Use the ```use_residual``` flag to indicate that the MoE layer is now a Residual MoE layer.
+
+```python
+self.experts = deepspeed.moe.layer.MoE(hidden_size=input_dim, expert=ExpertModule(), num_experts=[..], ep_size=ep_size, use_residual=True)
 ```
 
 ### An Example Scenario
@@ -64,23 +75,16 @@ Given a total number of GPUs in our world size and a subset of GPUs in our exper
 ```python
 WORLD_SIZE = 4
 EP_WORLD_SIZE = 2
-EXPERTS = 8
+EXPERTS = [8]
 ```
 
-The user code needs to initialize the groups as follows.
+The model code needs to use the deepspeed.moe.layer.MoE API as follows.
 
 ```python
-groups.initialize (ep_size=EP_WORLD_SIZE)
+self.experts = deepspeed.moe.layer.MoE(hidden_size=input_dim, expert=ExpertModule(), num_experts=EXPERTS, ep_size=EP_WORLD_SIZE)
 ```
 
-After that, the model code needs to use the deepspeed.moe.layer.MoE API as follows.
-
-```python
-self.experts = deepspeed.moe.layer.MoE(hidden_size=input_dim, expert=ExpertModule(), num_experts=EXPERTS)
-```
 With the above two commands, the DeepSpeed runtime will be set to train an MoE model with a total of 8 experts on 4 GPUs in 4 experts/GPU mode. We call this the E + D mode as described earlier in the table.
-
-For more advanced use case of the groups API including the interoperability with Megatron style mpu object, watch this space!
 
 
 ```python
@@ -93,15 +97,13 @@ WORLD_SIZE = 4
 EP_WORLD_SIZE = 2
 EXPERTS = 8
 
-groups.initialize(ep_size=EP_WORLD_SIZE)
-
 fc3 = torch.nn.Linear(84, 84)
-fc3 = MoE(hidden_size=84, expert=self.fc3, num_experts=EXPERTS, k=1)
+fc3 = MoE(hidden_size=84, expert=self.fc3, num_experts=EXPERTS, ep_size=EP_WORLD_SIZE, k=1)
 fc4 = torch.nn.Linear(84, 10)
 
 ```
 
-For a runnable end-to-end example, please look at [cifar10 example](https://github.com/microsoft/DeepSpeedExamples/tree/master/cifar)
+For a runnable end-to-end example that covers both the standard MoE architecture as well as the PR-MoE model , please look at the [cifar10 example](https://github.com/microsoft/DeepSpeedExamples/tree/master/cifar). In addition, see the advanced usage section of this tutorial that links to a more comprehensive example for NLG models.
 
 ### Combining ZeRO-Offload and DeepSpeed MoE for very large models
 
@@ -113,7 +115,7 @@ The relevant function that creates these param groups is as follows.
 def create_moe_param_groups(model):
     from deepspeed.moe.utils import split_params_into_different_moe_groups_for_optimizer
 
-    parameters = {'params': model.parameters(), 'name': 'parameters'}
+    parameters = {'params': [p for p in model.parameters()], 'name': 'parameters'}
 
     return split_params_into_different_moe_groups_for_optimizer(parameters)
 ```
@@ -156,23 +158,6 @@ An additional optimization to save memory for extremely large model training on 
   }
   ```
 
-<!--
-
-
-hidden_size (int): the hidden dimension of the model.
-expert (torch.nn.Module): the torch module that defines the expert (e.g., MLP, torch.linear).
-num_experts (int, optional): default=1, the total number of experts per layer.
-k (int, optional): default=1, top-k gating value, only supports k=1 or k=2.
-output_dropout_prob (float, optional): default=0.5, output dropout probability.
-capacity_factor (float, optional): default=1.0, the capacity of the expert at training time.
-eval_capacity_factor (float, optional): default=1.0, the capacity of the expert at eval time.
-min_capacity (int, optional): default=4, min number of tokens per expert.
-noisy_gate_policy (str, optional): default=None, noisy gate policy, valid options are 'Jitter', 'RSample' or 'None'.
--->
-
-
-
-
 ## Random Token Selection
 
 We have devised a new technique called “Random Token Selection” that greatly improves convergence. Random token selection addresses the limitation of biased selection problem in MoE model training. Our upcoming paper describes this technique and its results in detail. This feature is already part of the DeepSpeed runtime and is enabled by default so users can take advantage without any config flags or command-line arguments.
@@ -180,5 +165,3 @@ We have devised a new technique called “Random Token Selection” that greatly
 ## Advanced MoE usage
 
 We have added an example of applying MoE to NLG models. Please read more in this [newsletter](https://www.deepspeed.ai/news/2021/12/09/deepspeed-moe-nlg.html) and [tutorial](/tutorials/mixture-of-experts-nlg/).
-
-Watch this space! We plan to add more interesting and detailed examples of using DeepSpeed MoE in the coming weeks.

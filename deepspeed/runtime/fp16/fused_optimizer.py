@@ -263,7 +263,7 @@ class FP16_Optimizer(object):
         if self.using_pipeline:
             pg = self.deepspeed.mpu.get_data_parallel_group()
         else:
-            pg = groups.get_data_parallel_group()
+            pg = groups._get_data_parallel_group()
         scaled_norm = all_groups_norm * 1.0 / float(dist.get_world_size(group=pg))
         scaled_norm_tensor = torch.tensor(scaled_norm,
                                           device=self.fp32_groups_flat[i].device,

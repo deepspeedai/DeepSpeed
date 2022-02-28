@@ -61,7 +61,7 @@ def test_sparse_adam(tmpdir):
 
         results = [
             engine.all_gather_scalar(i,
-                                     groups.get_data_parallel_group())
+                                     groups._get_data_parallel_group())
             for i in model.emb.parameters()
         ]
         for res in results:

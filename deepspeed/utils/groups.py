@@ -18,123 +18,51 @@ Copyright 2021 The Microsoft DeepSpeed Team
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """
-Support, expert, data, and model (only megatron-style) parallelism in DeepSpeed
-
-Following are the possible scenarios:
-
-Scenario 1 : There is no expert parallelism or model parallelism (D)
-model = my_model(args)
-engine = deepspeed.init(model) ---> initialize groups without mpu
-
-Scenario 2 : There is expert parallelism but no model parallelism (E+D)
-deepspeed.init_groups(args) --> groups will be initialized here
-model = my_model(args)
-engine = deepspeed.init(model) --> don't initialize groups
-
-Scenario 3 : There is model parallelism but no expert parallelism (M)
-mpu.init()
-model = my_model(args)
-engine = deepspeed.init(model, mpu = mpu)  --> initialize groups with mpu but expert_parallel_size = dp_world_size
-
-Scenario 4 : There is model, data, and expert parallelism (E+D+M)
-mpu.init()
-deepspeed.init_groups(mpu, args)  ---> initialize groups with mpu
-model = my_model(args)
-
-#Valid but assert inside deepspeed to make sure mpu passed here is same as the one used to init the groups
-engine = deepspeed.init(model, mpu = mpu)
-
-#Also Valid
-engine = deepspeed.init(model)
-
+ Support different forms of parallelism in DeepSped using multiple process groups.
+ Given that there are multiple scenarios and use-cases, this file is going to be updated
+ frequently. For now, the group creation needed for the training scenario is being implemented.
+ For inference and other new scenarios, the code will be either reused or added to this file.
 """
 
 import torch
+from torch.distributed.distributed_c10d import _get_global_rank
 from deepspeed.utils import logger, log_dist
+from deepspeed.utils.exceptions import DeprecatedException
 
-# Model parallel group that the current rank belongs to.
-_MODEL_PARALLEL_GROUP = None
 # Expert parallel group that the current rank belongs to.
-_EXPERT_PARALLEL_GROUP = None  # {"32_expert": parallel_group}
+_EXPERT_PARALLEL_GROUP = {}
 # Expert data parallel group that the current rank belongs to.
-_EXPERT_DATA_PARALLEL_GROUP = None
-# Data parallel group that the current rank belongs to.
-_DATA_PARALLEL_GROUP = None
-# Max EP SIZE
-_MAX_EP_SIZE = None
-_MAX_EP_SIZE_NAME = None
+_EXPERT_DATA_PARALLEL_GROUP = {}
+# torch.distributed world group needs to be cloned for some cases
+_WORLD_GROUP = None
+# global object to maintain mpu object if passed by a Megatron client
+mpu = None
 
 
-def ensure_divisibility(numerator, denominator):
+# Deprecated groups initialize function.
+def initialize(ep_size=1, mpu=None):
+    """ Deprecated function. Retained to inform the users."""
+    raise DeprecatedException(
+        "Please do not use the groups.initialize() API as it is deprecated. Instead, pass the desired ep_size to deepspeed.moe.layer.MoE(..,ep_size,..)"
+    )
+
+
+def _ensure_divisibility(numerator, denominator):
     """Ensure that numerator is divisible by the denominator."""
     assert numerator % denominator == 0, '{} is not divisible by {}'.format(
         numerator, denominator)
 
 
-def initialize(ep_size=1, mpu=None, num_ep_list=None):
-    """
-    Process groups initialization supporting expert (E), data (D), and model (M) parallelism. DeepSpeed considers
-    the following scenarios w.r.t. process group creation.
-
-    * S1: There is no expert parallelism or model parallelism, only data (D)::
-
-        model = my_model(args)
-        engine = deepspeed.initialize(model) # initialize groups without mpu
-
-    * S2: There is expert parallelism but no model parallelism (E+D)::
-
-        deepspeed.utils.groups.initialize(ep_size) # groups will be initialized here
-        model = my_model(args)
-        engine = deepspeed.initialize(model)
-
-    * S3: There is model parallelism but no expert parallelism (M)::
-
-        mpu.init() # client initializes it's model parallel unit
-        model = my_model(args)
-        engine = deepspeed.initialize(model, mpu=mpu) # init w. mpu but ep_size = dp_world_size
-
-    * S4: There is model, data, and expert parallelism (E+D+M)::
-
-        mpu.init() # client initializes it's model parallel unit
-        deepspeed.utils.groups.initialize(ep_size, mpu) # initialize expert groups wrt mpu
-        model = my_model(args)
-        engine = deepspeed.initialize(model, mpu=mpu) # passing mpu is optional in this case
-
-    Arguments:
-        ep_size (int, optional): default=1, maximum expert parallel size, which should be divisible/divided by the world size.
-        by each element in num_ep_list.
-        mpu (module, optional): default=None, model parallel unit (e.g., from Megatron)
-            that describes model/data parallel ranks.
-        num_ep_list (list, optional): default=None, list of number of expert parallel sizes in each MoE layer.
-
-    """
-
-    if num_ep_list is None:
-        num_ep_list = [ep_size]
-
-    assert max(num_ep_list) >= ep_size, f"ep_size={ep_size} is larger than the largest num_ep_list={max(num_ep_list)}, you should reduce expert parallel size"
-
-    num_ep_list = list(set(num_ep_list))  # remove duplicates
-    num_ep_list.sort()  # sort in ascending order
-    for num_ep in num_ep_list:
-        assert num_ep > 0, 'num_ep must be positive'
-        assert num_ep % ep_size == 0 or ep_size % num_ep == 0, 'num_ep must be divisible/divided by ep_size'
-
-    if mpu is not None:
-        log_dist(message="initializing deepspeed groups using mpu", ranks=[0])
-        initialize_model_and_expert_parallel(ep_size, mpu, num_ep_list)
-    else:
-        log_dist(message="initializing deepspeed groups", ranks=[0])
-        initialize_model_parallel(1)
-        initialize_expert_parallel(ep_size, num_ep_list)
-
-
-def initialize_model_parallel(model_parallel_size_):
+# Not currently used. Helper function to create a model (tensor) parallel group.
+def _create_model_parallel(model_parallel_size_):
     """
     Initialize model data parallel groups.
 
     Arguments:
         model_parallel_size: number of GPUs used to parallelize model.
+
+    Returns:
+        Tuple of data parallel group and model parallel group
 
     Let's say we have a total of 8 GPUs denoted by g0 ... g7 and we
     use 2 GPUs to parallelize the model. The present function will
@@ -148,21 +76,18 @@ def initialize_model_parallel(model_parallel_size_):
     with a total of 16 GPUs, rank 0 to 7 belong to the first box and
     ranks 8 to 15 belong to the second box.
     """
-    log_dist(
-        'initializing deepspeed model parallel group with size {}'.format(
-            model_parallel_size_),
-        [0])
+    log_dist(f'Creating model parallel group with size {model_parallel_size_}',
+             ranks=[0])
     # Get world size and rank. Ensure some consistencies.
     assert torch.distributed.is_initialized()
     world_size = torch.distributed.get_world_size()
     model_parallel_size = min(model_parallel_size_, world_size)
-    ensure_divisibility(world_size, model_parallel_size)
+    _ensure_divisibility(world_size, model_parallel_size)
     rank = torch.distributed.get_rank()
 
+    _DATA_PARALLEL_GROUP = None
+    _MODEL_PARALLEL_GROUP = None
     # Build the data parallel groups.
-    global _DATA_PARALLEL_GROUP
-    assert _DATA_PARALLEL_GROUP is None, \
-        'data parallel group is already initialized'
     for i in range(model_parallel_size):
         ranks = range(i, world_size, model_parallel_size)
         group = torch.distributed.new_group(ranks)
@@ -170,19 +95,20 @@ def initialize_model_parallel(model_parallel_size_):
             _DATA_PARALLEL_GROUP = group
 
     # Build the model parallel groups.
-    global _MODEL_PARALLEL_GROUP
-    assert _MODEL_PARALLEL_GROUP is None, \
-        'model parallel group is already initialized'
     for i in range(world_size // model_parallel_size):
         ranks = range(i * model_parallel_size, (i + 1) * model_parallel_size)
         group = torch.distributed.new_group(ranks)
         if i == (rank // model_parallel_size):
             _MODEL_PARALLEL_GROUP = group
 
+    return _DATA_PARALLEL_GROUP, _MODEL_PARALLEL_GROUP
 
-def initialize_expert_parallel(expert_parallel_size_, num_ep_list_=None):
+
+def _create_expert_and_data_parallel(ep_size):
     """
-        Initialize expert plus data parallel groups.
+        Create expert and data parallel groups.
+
+        Note: Caller of this function is responsible to check if the groups already exist.
 
         Example - E + D parallel
         world_size = 16
@@ -193,83 +119,49 @@ def initialize_expert_parallel(expert_parallel_size_, num_ep_list_=None):
     """
     assert torch.distributed.is_initialized()
 
-    global _MAX_EP_SIZE
-    global _MAX_EP_SIZE_NAME
-    _MAX_EP_SIZE = expert_parallel_size_
-    _MAX_EP_SIZE_NAME = f"ep_size_{expert_parallel_size_}"
+    log_dist(f'Creating expert and data parallel groups with size {ep_size}', ranks=[0])
+    world_size = torch.distributed.get_world_size()
+    rank = torch.distributed.get_rank()
 
-    if num_ep_list_ is None:
-        num_ep_list_ = [expert_parallel_size_]
+    expert_parallel_size_ = min(ep_size, world_size)
+    _ensure_divisibility(world_size, expert_parallel_size_)
 
-    log_dist(
-        'initializing deepspeed expert parallel group with max size {} for number expert list {}'
-        .format(expert_parallel_size_,
-                num_ep_list_),
-        [0])
-    world_size = get_data_parallel_world_size()
-    rank = get_data_parallel_rank()
-
-    expert_parallel_size_ = min(expert_parallel_size_, world_size)
-    ensure_divisibility(world_size, expert_parallel_size_)
+    group_name = f"ep_size_{expert_parallel_size_}"
 
     # Build the expert data parallel groups.
     global _EXPERT_DATA_PARALLEL_GROUP
-    assert _EXPERT_DATA_PARALLEL_GROUP is None, \
-        'expert data parallel group is already initialized'
 
-    _EXPERT_DATA_PARALLEL_GROUP = {}
-
-    for num_ep in num_ep_list_:
-        # Build the data parallel groups for each num_ep
-        # We will have two cases
-        # 1. num_ep >= expert_parallel_size_, we can assign the same group to to num_ep from expert_parallel_size_ to num_ep
-        # 2. num_ep < expert_parallel_size_, we will need to create the new group
-        if num_ep >= expert_parallel_size_:
-            if f"ep_size_{expert_parallel_size_}" not in _EXPERT_DATA_PARALLEL_GROUP:
-                for i in range(expert_parallel_size_):
-                    # generate all groups
-                    ranks = range(i, world_size, expert_parallel_size_)
-                    group = torch.distributed.new_group(ranks)
-                    if i == (rank % expert_parallel_size_):
-                        # get the correct group
-                        _EXPERT_DATA_PARALLEL_GROUP[
-                            f"ep_size_{expert_parallel_size_}"] = group
-        else:
-            for i in range(num_ep):
-                ranks = range(i, world_size, num_ep)
-                group = torch.distributed.new_group(ranks)
-                if i == (rank % num_ep):
-                    _EXPERT_DATA_PARALLEL_GROUP[f"ep_size_{num_ep}"] = group
+    # Only create group if it does not already exist
+    if group_name not in _EXPERT_DATA_PARALLEL_GROUP:
+        for i in range(expert_parallel_size_):
+            ranks = range(i, world_size, expert_parallel_size_)
+            group = torch.distributed.new_group(ranks)
+            log_dist(
+                f'Creating expert data parallel process group named {group_name} with ranks: {list(ranks)}',
+                [0])
+            if i == (rank % expert_parallel_size_):
+                _EXPERT_DATA_PARALLEL_GROUP[group_name] = group
 
     # Build the expert parallel groups.
     global _EXPERT_PARALLEL_GROUP
-    assert _EXPERT_PARALLEL_GROUP is None, \
-        'expert parallel group is already initialized'
 
-    _EXPERT_PARALLEL_GROUP = {}
-
-    for num_ep in num_ep_list_:
-        # Similar as above we will need to think about two cases
-        if num_ep >= expert_parallel_size_:
-            if f"ep_size_{expert_parallel_size_}" not in _EXPERT_PARALLEL_GROUP:
-                for i in range(world_size // expert_parallel_size_):
-                    ranks = range(i * expert_parallel_size_,
-                                  (i + 1) * expert_parallel_size_)
-                    group = torch.distributed.new_group(ranks)
-                    if i == (rank // expert_parallel_size_):
-                        _EXPERT_PARALLEL_GROUP[
-                            f"ep_size_{expert_parallel_size_}"] = group
-        else:
-            for i in range(world_size // num_ep):
-                ranks = range(i * num_ep, (i + 1) * num_ep)
-                group = torch.distributed.new_group(ranks)
-                if i == (rank // num_ep):
-                    _EXPERT_PARALLEL_GROUP[f"ep_size_{num_ep}"] = group
+    # Only create group if it does not already exist
+    if group_name not in _EXPERT_PARALLEL_GROUP:
+        for i in range(world_size // expert_parallel_size_):
+            ranks = range(i * expert_parallel_size_, (i + 1) * expert_parallel_size_)
+            group = torch.distributed.new_group(ranks)
+            log_dist(
+                f'creating expert parallel process group named {group_name} with ranks: {list(ranks)}',
+                [0])
+            if i == (rank // expert_parallel_size_):
+                _EXPERT_PARALLEL_GROUP[group_name] = group
 
 
-def initialize_model_and_expert_parallel(expert_parallel_size_, mpu, num_ep_list_=None):
+def _create_expert_data_and_model_parallel(expert_parallel_size_, mpu):
     """
-        Initialize Expert groups based on MPU groups.
+        Create expert and data parallel groups based on MPU (model parallel) group.
+
+        Note: Caller of this function is responsible to check if the groups already exist.
 
         Example - E + M + D parallel
         world_size = 16
@@ -284,24 +176,15 @@ def initialize_model_and_expert_parallel(expert_parallel_size_, mpu, num_ep_list
     assert mpu.model_parallel_is_initialized(), "model parallel group is not initialized"
     model_parallel_size_ = mpu.get_model_parallel_world_size()
 
-    global _MAX_EP_SIZE
-    global _MAX_EP_SIZE_NAME
-    _MAX_EP_SIZE = expert_parallel_size_
-    _MAX_EP_SIZE_NAME = f"ep_size_{expert_parallel_size_}"
-
-    if num_ep_list_ is None:
-        num_ep_list = [expert_parallel_size_]
-
     world_size = torch.distributed.get_world_size()
     rank = torch.distributed.get_rank()
     dp_world_size = mpu.get_data_parallel_world_size()
     dp_rank = mpu.get_data_parallel_rank()
 
     log_dist(
-        f"Initializing deepspeed groups with model parallel size {model_parallel_size_}, expert parallel size {expert_parallel_size_}, world size {world_size}, dp world size {dp_world_size}",
+        f"Creating deepspeed groups with model parallel size {model_parallel_size_}, expert parallel size {expert_parallel_size_}, world size {world_size}, dp world size {dp_world_size}",
         [0])
 
-    global _DATA_PARALLEL_GROUP, _MODEL_PARALLEL_GROUP
     global _EXPERT_PARALLEL_GROUP, _EXPERT_DATA_PARALLEL_GROUP
 
     # Get world size and rank. Ensure some consistencies.
@@ -309,207 +192,159 @@ def initialize_model_and_expert_parallel(expert_parallel_size_, mpu, num_ep_list
     _MODEL_PARALLEL_GROUP = mpu.get_model_parallel_group()
 
     expert_parallel_size_ = min(expert_parallel_size_, dp_world_size)
-    ensure_divisibility(world_size, expert_parallel_size_)
+    _ensure_divisibility(world_size, expert_parallel_size_)
 
-    # Build the expert data parallel groups.
-    assert _EXPERT_DATA_PARALLEL_GROUP is None, \
-        'expert data parallel group is already initialized'
-    # Build the expert parallel groups.
-    assert _EXPERT_PARALLEL_GROUP is None, \
-        'expert parallel group is already initialized'
+    group_name = f"ep_size_{expert_parallel_size_}"
 
-    _EXPERT_DATA_PARALLEL_GROUP = {}
-    _EXPERT_PARALLEL_GROUP = {}
-
-    for num_ep in num_ep_list_:
+    # Only create groups if they don't already exist
+    # Need to check conditions outside the group creation loop because of the way torch.dist group creation works
+    if group_name not in _EXPERT_DATA_PARALLEL_GROUP and group_name not in _EXPERT_PARALLEL_GROUP:
         for j in range(model_parallel_size_):
-            # For data parallel
-            # Similar as initialize_expert_parallel we will need to think about two cases
-            if num_ep >= expert_parallel_size_:
-                #TODO: refactor this part of code to check condition in outer for-loop
-                if True:  #f"ep_size_{expert_parallel_size_}" not in _EXPERT_DATA_PARALLEL_GROUP:
-                    for i in range(expert_parallel_size_):
-                        ranks = range(i * model_parallel_size_ + j,
-                                      world_size,
-                                      expert_parallel_size_ * model_parallel_size_)
-                        group = torch.distributed.new_group(ranks)
-                        if rank in list(ranks):
-                            _EXPERT_DATA_PARALLEL_GROUP[
-                                f"ep_size_{expert_parallel_size_}"] = group
-            else:
-                for i in range(num_ep):
-                    ranks = range(i * model_parallel_size_ + j,
-                                  world_size,
-                                  num_ep * model_parallel_size_)
-                    group = torch.distributed.new_group(ranks)
-                    if rank in list(ranks):
-                        _EXPERT_DATA_PARALLEL_GROUP[f"ep_size_{num_ep}"] = group
+            for i in range(expert_parallel_size_):
+                ranks = range(i * model_parallel_size_ + j,
+                              world_size,
+                              expert_parallel_size_ * model_parallel_size_)
+                group = torch.distributed.new_group(ranks)
+                if rank in list(ranks):
+                    _EXPERT_DATA_PARALLEL_GROUP[group_name] = group
 
-            # For expert parallel
-            if num_ep >= expert_parallel_size_:
-                #TODO: refactor this part of code to check condition in outer for-loop
-                if True:  #f"ep_size_{expert_parallel_size_}" not in _EXPERT_PARALLEL_GROUP:
-                    for i in range(dp_world_size // expert_parallel_size_):
-                        ranks = range(
-                            i * expert_parallel_size_ * model_parallel_size_ + j,
-                            (i + 1) * expert_parallel_size_ * model_parallel_size_,
-                            model_parallel_size_)
-                        group = torch.distributed.new_group(ranks)
-                        if rank in list(ranks):
-                            _EXPERT_PARALLEL_GROUP[
-                                f"ep_size_{expert_parallel_size_}"] = group
-            else:
-                for i in range(dp_world_size // num_ep):
+                for i in range(dp_world_size // expert_parallel_size_):
                     ranks = range(i * num_ep * model_parallel_size_ + j,
-                                  (i + 1) * num_ep * model_parallel_size_,
+                                  (i + 1) * expert_parallel_size_ * model_parallel_size_,
                                   model_parallel_size_)
                     group = torch.distributed.new_group(ranks)
                     if rank in list(ranks):
-                        _EXPERT_PARALLEL_GROUP[f"ep_size_{num_ep}"] = group
+                        _EXPERT_PARALLEL_GROUP[group_name] = group
 
 
-def is_initialized():
-    """Check if deepspeed groups have been initialized."""
-    if _MODEL_PARALLEL_GROUP is None or _DATA_PARALLEL_GROUP is None or _EXPERT_PARALLEL_GROUP is None or _EXPERT_DATA_PARALLEL_GROUP is None:
-        return False
-    return True
+def _get_max_expert_size():
+    """Get the maximum ep_size from all the created groups."""
+    assert _EXPERT_PARALLEL_GROUP is not None, "Warning! Process group not initialized"
+    keylist = []
+    for key in _EXPERT_PARALLEL_GROUP.keys():
+        # index 2 is ep_size in the group name: ep_size_<ep_size>
+        index = 2
+        keylist.append(int(key.split('_')[index]))
+    return max(keylist) if len(keylist) > 0 else None
 
 
-def model_parallel_is_initialized():
-    """Check if model and data parallel groups are initialized."""
-    if _MODEL_PARALLEL_GROUP is None or _DATA_PARALLEL_GROUP is None:
-        return False
-    return True
+def _get_max_expert_size_name():
+    """Get the name of the group with max. ep_size"""
+    return f'ep_size_{_get_max_expert_size()}'
 
 
-def expert_parallel_is_initialized():
-    """Check if expert and expert data parallel groups are initialized."""
-    if _EXPERT_PARALLEL_GROUP is None or _EXPERT_DATA_PARALLEL_GROUP is None:
-        return False
-    return True
-
-
-def get_model_parallel_group():
-    """Get the model parallel group the caller rank belongs to."""
-    assert _MODEL_PARALLEL_GROUP is not None, \
-        'model parallel group is not initialized'
-    return _MODEL_PARALLEL_GROUP
-
-
-def get_max_expert_parallel_group():
+def _get_max_expert_parallel_group():
     """Get the max expert parallel size."""
-    return get_expert_parallel_group(get_max_expert_size_name())
+    return _get_expert_parallel_group(_get_max_expert_size_name())
 
 
-def get_max_expert_size_name():
-    """Get the maximum experts group size name in all group."""
-    assert _MAX_EP_SIZE_NAME is not None, \
-        'max expert parallel size is not initialized'
-    return _MAX_EP_SIZE_NAME
-
-
-def get_max_expert_size():
-    """Get the maximum experts group size in all group."""
-    assert _MAX_EP_SIZE is not None, \
-        'max expert parallel size is not initialized'
-    return _MAX_EP_SIZE
-
-
-def get_expert_parallel_group(group_name):
+def _get_expert_parallel_group(group_name):
     """Get the expert parallel group the caller rank belongs to."""
-    assert _EXPERT_PARALLEL_GROUP is not None, \
+    assert group_name in _EXPERT_PARALLEL_GROUP, \
         'expert parallel group is not initialized'
     return _EXPERT_PARALLEL_GROUP[group_name]
 
 
-def get_expert_parallel_group_dict():
+def _get_expert_parallel_group_dict():
     """Get the expert parallel group dict."""
-    assert _EXPERT_PARALLEL_GROUP is not None, \
-        'expert parallel group is not initialized'
     return _EXPERT_PARALLEL_GROUP
 
 
-def get_expert_data_parallel_group(group_name):
+def _get_expert_data_parallel_group(group_name):
     """Get the expert data parallel group the caller rank belongs to."""
-    assert _EXPERT_DATA_PARALLEL_GROUP is not None, \
+    assert group_name in _EXPERT_DATA_PARALLEL_GROUP, \
         'expert data parallel group is not initialized'
     return _EXPERT_DATA_PARALLEL_GROUP[group_name]
 
 
-def get_expert_data_parallel_group_dict():
+def _get_expert_data_parallel_group_dict():
     """Get the expert data parallel group dict."""
-    assert _EXPERT_DATA_PARALLEL_GROUP is not None, \
-        'expert data parallel group is not initialized'
     return _EXPERT_DATA_PARALLEL_GROUP
 
 
-def get_data_parallel_group():
+def _clone_world_group():
+    """Create a clone of the world group
+        Note: We need to clone the torch.distributed world group because we
+        use _get_global_rank() utility function in DeepSpeed at many places.
+        As that function does not work on torch.distributed.group.WORLD, we
+        need to keep a clone of it.
+    """
+    assert torch.distributed.is_initialized(), "torch.distributed is not initialized"
+    global _WORLD_GROUP
+    if _WORLD_GROUP is None:
+        # If not cloned already, clone the world group
+        _WORLD_GROUP = torch.distributed.new_group(
+            ranks=range(torch.distributed.get_world_size()))
+    return _WORLD_GROUP
+
+
+def _get_data_parallel_group():
     """Get the data parallel group the caller rank belongs to."""
-    assert _DATA_PARALLEL_GROUP is not None, \
-        'data parallel group is not initialized'
-    return _DATA_PARALLEL_GROUP
+    assert torch.distributed.is_initialized(), \
+        'torch.distributed is not initialized'
+    global mpu
+    if mpu is not None:
+        return mpu.get_data_parallel_group()
+    # Return the clone of torch.distributed world group
+    return _clone_world_group()
 
 
-def get_model_parallel_world_size():
-    """Return world size for the model parallel group."""
-    return torch.distributed.get_world_size(group=get_model_parallel_group())
+def _get_broadcast_src_rank():
+    return _get_global_rank(_get_data_parallel_group(), 0)
 
 
-def get_expert_parallel_world_size(group_name):
+def _get_expert_broadcast_src_rank(group_name):
+    return _get_global_rank(_get_expert_data_parallel_group(group_name), 0)
+
+
+def _get_expert_parallel_world_size(group_name):
     """Return world size for the expert parallel group."""
-    return torch.distributed.get_world_size(group=get_expert_parallel_group(group_name))
+    return torch.distributed.get_world_size(group=_get_expert_parallel_group(group_name))
 
 
-def get_expert_data_parallel_world_size(group_name):
+def _get_expert_data_parallel_world_size(group_name):
     """Return world size for the expert data parallel group."""
     return torch.distributed.get_world_size(
-        group=get_expert_data_parallel_group(group_name))
+        group=_get_expert_data_parallel_group(group_name))
 
 
-def get_model_parallel_rank():
-    """Return my rank for the model parallel group."""
-    return torch.distributed.get_rank(group=get_model_parallel_group())
-
-
-def get_expert_parallel_rank(group_name):
+def _get_expert_parallel_rank(group_name):
     """Return my rank for the expert parallel group."""
-    return torch.distributed.get_rank(group=get_expert_parallel_group(group_name))
+    return torch.distributed.get_rank(group=_get_expert_parallel_group(group_name))
 
 
-def get_model_parallel_src_rank():
-    """Calculate the global rank corresponding to a local rank zero
-    in the model parallel group."""
-    global_rank = torch.distributed.get_rank()
-    local_world_size = get_model_parallel_world_size()
-    return (global_rank // local_world_size) * local_world_size
-
-
-def get_expert_parallel_src_rank(group_name):
+def _get_expert_parallel_src_rank(group_name):
     """Calculate the global rank corresponding to a local rank zero
     in the expert parallel group."""
     global_rank = torch.distributed.get_rank()
-    local_world_size = get_expert_parallel_world_size(group_name)
+    local_world_size = _get_expert_parallel_world_size(group_name)
     return (global_rank // local_world_size) * local_world_size
 
 
-def get_expert_data_parallel_rank(group_name):
+def _get_expert_data_parallel_rank(group_name):
     """Return my rank for the expert data parallel group."""
-    return torch.distributed.get_rank(group=get_expert_data_parallel_group(group_name))
+    return torch.distributed.get_rank(group=_get_expert_data_parallel_group(group_name))
 
 
-def get_data_parallel_world_size():
+def _get_data_parallel_world_size():
     """Return world size for the data parallel group."""
-    return torch.distributed.get_world_size(group=get_data_parallel_group())
+    global mpu
+    if mpu is not None:
+        return mpu.get_data_parallel_world_size()
+    return torch.distributed.get_world_size(group=_get_data_parallel_group())
 
 
-def get_data_parallel_rank():
+def _get_model_parallel_world_size():
+    """Return world size for the model parallel group."""
+    global mpu
+    if mpu is not None:
+        return mpu.get_model_parallel_world_size()
+    return 1
+
+
+def _get_data_parallel_rank():
     """Return my rank for the data parallel group."""
-    return torch.distributed.get_rank(group=get_data_parallel_group())
-
-
-def destroy_model_parallel():
-    """Set the groups to none."""
-    global _MODEL_PARALLEL_GROUP
-    _MODEL_PARALLEL_GROUP = None
-    global _DATA_PARALLEL_GROUP
-    _DATA_PARALLEL_GROUP = None
+    global mpu
+    if mpu is not None:
+        return mpu.get_data_parallel_rank()
+    return torch.distributed.get_rank(group=_get_data_parallel_group())

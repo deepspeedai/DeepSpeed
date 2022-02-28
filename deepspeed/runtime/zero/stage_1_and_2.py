@@ -2085,9 +2085,9 @@ class DeepSpeedZeroOptimizer(object):
 
     def get_ep_ranks(self, rank=0, group_name=None):
         from deepspeed.utils import groups
-        expert_parallel_size_ = groups.get_expert_parallel_world_size(group_name)
-        world_size = groups.get_data_parallel_world_size()
-        rank = groups.get_expert_parallel_rank(group_name)
+        expert_parallel_size_ = groups._get_expert_parallel_world_size(group_name)
+        world_size = groups._get_data_parallel_world_size()
+        rank = groups._get_expert_parallel_rank(group_name)
         ranks = range(rank, world_size, expert_parallel_size_)
         return list(ranks)
 

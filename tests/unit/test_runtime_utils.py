@@ -34,8 +34,7 @@ def test_clip_grad_norm_():
 
         parameters = [param1, param2]
 
-        groups.initialize_model_parallel(1)
-        groups.initialize_expert_parallel(2)
+        groups._create_expert_and_data_parallel(2)
 
         norm = ds_utils.clip_grad_norm_(parameters, max_norm=0.1)
         norm = torch.Tensor([norm]).to(dist.get_rank())
@@ -54,8 +53,7 @@ def test_clip_grad_norm_():
 def test_CheckOverflow(check_using_norm):
     @distributed_test(world_size=[2])
     def _test_CheckOverflow(check_using_norm: bool):
-        groups.initialize_model_parallel(1)
-        groups.initialize_expert_parallel(2)
+        groups._create_expert_and_data_parallel(2)
 
         param1 = torch.nn.Parameter(torch.Tensor([0]))
         param1.grad = torch.Tensor([1])

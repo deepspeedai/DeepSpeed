@@ -78,12 +78,18 @@ def split_params_into_different_moe_groups_for_optimizer(
     elif not isinstance(param_groups, list):
         raise ValueError(f"Unknown param group type of {type(param_groups)}")
 
+    # gather all data parallel group names
+    data_parallel_group_names = set()
+    for param_group in param_groups:
+        for param in param_group["params"]:
+            if is_moe_param(param):
+                data_parallel_group_names.add(param.group_name)
+    data_parallel_group_names = list(data_parallel_group_names)
     group_moe = {}
-
     # Create the param MoE groups, leave param assign to next step
     for param_group in param_groups:
         group_moe[param_group['name']] = {}
-        for key in groups.get_expert_data_parallel_group_dict().keys():
+        for key in data_parallel_group_names:
             group_moe[param_group['name']][key] = {}
             group_moe[param_group['name']][key]['name'] = key
             group_moe[param_group['name']][key]['moe'] = True
