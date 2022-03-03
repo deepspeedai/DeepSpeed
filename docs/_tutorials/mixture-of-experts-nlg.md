@@ -49,5 +49,21 @@ Regarding training data, we are not able to release our internal data but any pu
 | 350M+MoE-128, public Pile | 0.6128 | 0.7323 | 0.6040 | 0.3349 | 0.1111 | 0.0335 |
 | **PR-MoE NLG:** | | | | | | |
 | 350M+MoE-128, internal data | 0.6365 | 0.7399 | 0.5988 | 0.3569 | 0.1630 | 0.0473 |
+| **PR-MoE + MoS NLG:** | | | | | | |
+| 350M+MoE-128, internal data | 0.6346 | 0.7334 | 0.5807 | 0.3483 | 0.1369 | 0.0522 |
+
 
 Table 1: Zero-shot evaluation results (last six columns) for different dense and MoE NLG models. All zero-shot evaluation results use the accuracy metric.
+
+### 2.4. Training MoS with reduced model size
+MoS, standing for Mixture-of-Students, is a staged distillation-based technique for compressing large MoE models. MoS further reduces the model size by 12.5%, leading to up 3.7x model size reduction when combined with PR-MoE over the standard MoE. The reduced model size helps reduce the latecy and cost during inference. To train an MoS model, one needs to specify a few additional parameters. We will use PR-MoE as an example:
+
+`--mos`: This would enable Mixture-of-Students via knowledge distillation.
+
+`--load-teacher`: This specifies the path to the teacher model checkpoint. This is a mandatory argumentment for using MoS and the teacher model checkpoint can be obtained by either training a standard MoE or the PR-MoE.
+
+`num-layers-teacher`, `--hidden-size-teacher`, `--hidden-size-teacher`, `--num-experts-teacher`: In addition to the teacher model checkpoint path, we also need to specify the model architecture of the teacher model such as its number of layers, hidden dimension size, and the number of experts per MoE layer. In the case of PR-MoE, we need to also provide a list of experts for the teacher model, where we remove a few expert layers from the teacher model.
+
+In addition to the new parameters above, we observe that using the teacher PR-MoE during the entire training process may adversely impact the final student model accuracy. In our experiments, we use a staged distillation method by stopping distillation early in the training process (e.g., after 400K steps) and perform optimization only against the standard language modeling loss for the rest of the training.
+
+We provide example training scripts under [examples/MoE](https://github.com/microsoft/Megatron-DeepSpeed/tree/moe/examples/MoE). Details of our parameter settings can be found in the example training scripts. The performance results of MoS can be seen from our [blog post](https://www.microsoft.com/en-us/research/blog/deepspeed-powers-8x-larger-moe-model-training-with-high-performance/) and our [paper](https://arxiv.org/abs/2201.05596).
