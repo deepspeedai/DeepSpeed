@@ -85,7 +85,7 @@ __global__ void fused_bias_residual_layer_norm(__half* output,
                                                float epsilon,
                                                int row_stride)
 {
-#if __CUDA_ARCH__ >= 700
+#ifdef HALF_PRECISION_AVAILABLE
     int iteration_stride = blockDim.x;
     int iterations = row_stride / iteration_stride;
 
@@ -287,7 +287,7 @@ __global__ void fused_residual_layer_norm(__half* norm,
                                           int row_stride,
                                           bool preLN)
 {
-#if __CUDA_ARCH__ >= 700
+#ifdef HALF_PRECISION_AVAILABLE
     int iteration_stride = blockDim.x;
 
     cg::thread_block b = cg::this_thread_block();

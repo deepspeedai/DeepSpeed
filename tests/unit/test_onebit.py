@@ -12,6 +12,7 @@ import numpy as np
 import time
 
 from deepspeed.runtime.pipe.topology import PipeDataParallelTopology, PipeModelDataParallelTopology
+from deepspeed.ops.op_builder import OpBuilder
 
 PipeTopo = PipeDataParallelTopology
 from deepspeed.runtime.pipe.module import PipelineModule, LayerSpec
@@ -24,6 +25,12 @@ TORCH_MINOR = int(torch.__version__.split('.')[1])
 if TORCH_MAJOR < 1 or TORCH_MINOR < 8:
     pytest.skip("NCCL-based 1-bit compression requires torch 1.8 or higher",
                 allow_module_level=True)
+
+rocm_version = OpBuilder.installed_rocm_version()
+if rocm_version[0] > 4:
+    pytest.skip(
+        "NCCL-based 1-bit compression is not yet supported w. ROCm 5 until cupy supports ROCm 5",
+        allow_module_level=True)
 
 
 def test_onebitadam_fp16_basic(tmpdir):

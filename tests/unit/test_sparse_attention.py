@@ -252,7 +252,6 @@ def init_softmax_inputs(Z, H, M, N, scale, rho, block, dtype, dense_x=True, layo
 
 
 def _skip_on_cuda_compatability():
-    return
     if torch.cuda.get_device_capability()[0] < 7:
         pytest.skip("needs higher compute capability than 7")
     cuda_major = int(torch.version.cuda.split('.')[0]) * 10

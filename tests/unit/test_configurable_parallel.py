@@ -123,7 +123,7 @@ class TestConfigurableMP:
                                   load_lr_scheduler_states=False)
 
             test = model(inputs[0].cuda(), inputs[1].cuda(), inputs[2].cuda())
-            assert torch.allclose(baseline, test, atol=1e-07), f"Baseline output {baseline} is not equal to save-then-load output {test}"
+            assert torch.allclose(baseline, test, rtol=1.0, atol=1e-07), f"Baseline output {baseline} is not equal to save-then-load output {test}"
 
         inputs = self.get_inputs()
         _run(inputs)

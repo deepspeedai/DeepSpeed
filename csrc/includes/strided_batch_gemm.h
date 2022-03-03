@@ -72,7 +72,11 @@ public:
                                     stride_b,
                                     stride_c,
                                     bsz,
+#ifdef __HIP_PLATFORM_HCC__
+                                    rocblas_gemm_algo(_config.gemm_algos[0]));
+#else
                                     cublasGemmAlgo_t(_config.gemm_algos[0]));
+#endif
     }
 
     void ForwardPlusSave(T* output, const T* _buffer_a, const T* _buffer_b, cublasHandle_t handle)
@@ -96,7 +100,11 @@ public:
                                     stride_b,
                                     stride_c,
                                     _config.batch_size,
+#ifdef __HIP_PLATFORM_HCC__
+                                    rocblas_gemm_algo(_config.gemm_algos[0]));
+#else
                                     cublasGemmAlgo_t(_config.gemm_algos[0]));
+#endif
 
         k_buf = _buffer_a;
         q_buf = _buffer_b;
@@ -136,7 +144,11 @@ public:
                                     stride_b,
                                     stride_c,
                                     bsz,
+#ifdef __HIP_PLATFORM_HCC__
+                                    rocblas_gemm_algo(_config.gemm_algos[1]));
+#else
                                     cublasGemmAlgo_t(_config.gemm_algos[1]));
+#endif
 
         // A need to transpose.
         cublasOperation_t op_a = (_config.op_A == CUBLAS_OP_T ? CUBLAS_OP_N : CUBLAS_OP_T);
@@ -161,7 +173,11 @@ public:
                                     stride_b,
                                     stride_c,
                                     bsz,
+#ifdef __HIP_PLATFORM_HCC__
+                                    rocblas_gemm_algo(_config.gemm_algos[2]));
+#else
                                     cublasGemmAlgo_t(_config.gemm_algos[2]));
+#endif
     }
 
     inline int GetN() const { return _config.k; }

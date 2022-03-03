@@ -186,6 +186,8 @@ def checkpoint_correctness_verification(args,
 
     trained_model.save_checkpoint(save_folder, tag=save_tag)
 
+    dist.barrier()
+
     loaded_model = create_deepspeed_model(args=args,
                                           model=models[1],
                                           base_optimizer=base_optimizers[1])

@@ -415,27 +415,6 @@ class DeepSpeedEngine(Module):
         """
         return self._global_grad_norm
 
-    def set_train_batch_size(self, train_batch_size):
-        """Adjust the global batch size by increasing or decreasing the number of
-        micro-batches (i.e., gradient accumulation steps). The size of each micro-batch
-        (i.e., ``train_micro_batch_size_per_gpu``) is not changed.
-        Args:
-            train_batch_size (int): The new global batch size for training.
-        Raises:
-            ValueError: if ``train_batch_size`` is not divisible by the
-                configured micro-batch size and data parallelism.
-        """
-        if train_batch_size % (self.train_micro_batch_size_per_gpu() *
-                               self.dp_world_size) != 0:
-            #print(f'{train_batch_size=} {self.train_micro_batch_size_per_gpu()=} {self.dp_world_size=}')
-            raise ValueError(
-                f'Train batch size must be divisible by micro-batch data parallelism')
-        new_gas = train_batch_size // (self.train_micro_batch_size_per_gpu() *
-                                       self.dp_world_size)
-        # overwrite config
-        self._config.train_batch_size = train_batch_size
-        self._config.gradient_accumulation_steps = new_gas
-
     def get_global_grad_norm(self) -> float:
         """Return the 2-norm of all gradients. If there is model parallelism,
         the norm will be global.
@@ -2839,10 +2818,9 @@ class DeepSpeedEngine(Module):
             self.optimizer.state_dict()
             if self.optimizer and not self.zero_optimization() else None
         }
-        torch.save(optimizer_state,
-                   self._get_optimizer_ckpt_name(save_dir,
-                                                 tag,
-                                                 expp_rank))
+        with open(self._get_optimizer_ckpt_name(save_dir, tag, expp_rank), 'wb') as fd:
+            torch.save(optimizer_state, fd)
+            fd.flush()
 
         # get non-moe parameters
         model_state_dict = self._get_non_moe_state_dict(self.module_state_dict())
@@ -2872,7 +2850,9 @@ class DeepSpeedEngine(Module):
             }
             state.update(client_state)
             logger.info(f'Saving model checkpoint: {save_path}')
-            torch.save(state, save_path)
+            with open(save_path, 'wb') as fd:
+                torch.save(state, fd)
+                fd.flush()
         self._curr_save_path = None
 
     def _create_checkpoint_file(self, save_dir, tag, zero_checkpoint):
@@ -3006,7 +2986,9 @@ class DeepSpeedEngine(Module):
         zero_sd = dict(optimizer_state_dict=self.optimizer.state_dict(),
                        ds_config=self.config,
                        ds_version=version)
-        torch.save(zero_sd, zero_checkpoint_name)
+        with open(zero_checkpoint_name, 'wb') as fd:
+            torch.save(zero_sd, fd)
+            fd.flush()
         if self.global_rank == 0:
             self._copy_recovery_script(save_path)
         logger.info('zero checkpoint saved {}'.format(zero_checkpoint_name))

@@ -32,7 +32,11 @@ except ImportError:
     print('[WARNING] Unable to import torch, pre-compiling ops will be disabled. ' \
         'Please visit https://pytorch.org/ to see how to properly install torch on your system.')
 
-from op_builder import ALL_OPS, get_default_compute_capabilities
+from op_builder import ALL_OPS, get_default_compute_capabilities, OpBuilder
+
+# fetch rocm state
+is_rocm_pytorch = OpBuilder.is_rocm_pytorch()
+rocm_version = OpBuilder.installed_rocm_version()
 
 RED_START = '\033[31m'
 RED_END = '\033[0m'
@@ -51,8 +55,8 @@ def fetch_requirements(path):
 
 install_requires = fetch_requirements('requirements/requirements.txt')
 extras_require = {
-    '1bit_mpi' : fetch_requirements('requirements/requirements-1bit-mpi.txt'),
-    '1bit': [], # Will add proper cupy version below
+    '1bit': [], # add cupy based on cuda/rocm version
+    '1bit_mpi': fetch_requirements('requirements/requirements-1bit-mpi.txt'),
     'readthedocs': fetch_requirements('requirements/requirements-readthedocs.txt'),
     'dev': fetch_requirements('requirements/requirements-dev.txt'),
     'autotuning': fetch_requirements('requirements/requirements-autotuning.txt'),
@@ -62,9 +66,17 @@ extras_require = {
 
 # Add specific cupy version to both onebit extension variants
 if torch_available and torch.cuda.is_available():
-    cupy = f"cupy-cuda{torch.version.cuda.replace('.','')[:3]}"
-    extras_require['1bit_mpi'].append(cupy)
-    extras_require['1bit'].append(cupy)
+    cupy = None
+    if is_rocm_pytorch:
+        rocm_major, rocm_minor = rocm_version
+        # XXX cupy support for rocm 5 is not available yet
+        if rocm_major <= 4:
+            cupy = f"cupy-rocm-{rocm_major}-{rocm_minor}"
+    else:
+        cupy = f"cupy-cuda{torch.version.cuda.replace('.','')[:3]}"
+    if cupy:
+        extras_require['1bit'].append(cupy)
+        extras_require['1bit_mpi'].append(cupy)
 
 # Make an [all] extra that installs all needed dependencies
 all_extras = set()
@@ -207,9 +219,17 @@ else:
 torch_version = ".".join([TORCH_MAJOR, TORCH_MINOR])
 # Set cuda_version to 0.0 if cpu-only
 cuda_version = "0.0"
+# Set hip_version to 0.0 if cpu-only
+hip_version = "0.0"
 if torch_available and torch.version.cuda is not None:
     cuda_version = ".".join(torch.version.cuda.split('.')[:2])
-torch_info = {"version": torch_version, "cuda_version": cuda_version}
+if torch_available and hasattr(torch.version, 'hip') and torch.version.hip is not None:
+    hip_version = ".".join(torch.version.hip.split('.')[:2])
+torch_info = {
+    "version": torch_version,
+    "cuda_version": cuda_version,
+    "hip_version": hip_version
+}
 
 print(f"version={version_str}, git_hash={git_hash}, git_branch={git_branch}")
 with open('deepspeed/git_version_info_installed.py', 'w') as fd:

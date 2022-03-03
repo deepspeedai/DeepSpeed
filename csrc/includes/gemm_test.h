@@ -2,7 +2,9 @@
 #pragma once
 
 #include <cuda_fp16.h>
+#ifndef __HIP_PLATFORM_HCC__
 #include <cuda_profiler_api.h>
+#endif
 #include <array>
 #include <cstdio>
 #include <cstdlib>
@@ -58,7 +60,11 @@ public:
                            B,
                            A,
                            C,
+#ifdef __HIP_PLATFORM_HCC__
+                           static_cast<rocblas_gemm_algo>(algo));
+#else
                            static_cast<cublasGemmAlgo_t>(algo));
+#endif
         });
 
         int algo_bw1 = Run(loops, [=](int algo) {
@@ -73,7 +79,11 @@ public:
                            A,
                            C,
                            B,
+#ifdef __HIP_PLATFORM_HCC__
+                           static_cast<rocblas_gemm_algo>(algo));
+#else
                            static_cast<cublasGemmAlgo_t>(algo));
+#endif
         });
 
         int algo_bw2 = Run(loops, [=](int algo) {
@@ -88,7 +98,11 @@ public:
                            B,
                            C,
                            A,
+#ifdef __HIP_PLATFORM_HCC__
+                           static_cast<rocblas_gemm_algo>(algo));
+#else
                            static_cast<cublasGemmAlgo_t>(algo));
+#endif
         });
 
         return std::array<int, 3>({algo_fw, algo_bw1, algo_bw2});
@@ -100,8 +114,12 @@ public:
         float fast_latency = (std::numeric_limits<float>::max)();
         int fast_algo = 0;
 
+#ifdef __HIP_PLATFORM_HCC__
+        for (int algo = (int)rocblas_gemm_algo_standard; algo <= (int)rocblas_gemm_algo_standard;
+#else
         for (int algo = (int)CUBLAS_GEMM_DEFAULT_TENSOR_OP;
              algo <= (int)CUBLAS_GEMM_ALGO15_TENSOR_OP;
+#endif
              algo++) {
             int warm_up = 5;
             for (int i = 0; i < warm_up; ++i) f(algo);
@@ -186,7 +204,11 @@ public:
                                         stride_b,
                                         stride_c,
                                         bsz,
+#ifdef __HIP_PLATFORM_HCC__
+                                        static_cast<rocblas_gemm_algo>(algo));
+#else
                                         static_cast<cublasGemmAlgo_t>(algo));
+#endif
         });
 
         int algo_bw1 = Run(loops, [=](int algo) {
@@ -216,7 +238,11 @@ public:
                                         stride_b,
                                         stride_c,
                                         bsz,
+#ifdef __HIP_PLATFORM_HCC__
+                                        static_cast<rocblas_gemm_algo>(algo));
+#else
                                         static_cast<cublasGemmAlgo_t>(algo));
+#endif
         });
 
         int algo_bw2 = Run(loops, [=](int algo) {
@@ -243,7 +269,11 @@ public:
                                         stride_b,
                                         stride_c,
                                         bsz,
+#ifdef __HIP_PLATFORM_HCC__
+                                        static_cast<rocblas_gemm_algo>(algo));
+#else
                                         static_cast<cublasGemmAlgo_t>(algo));
+#endif
         });
 
         return std::array<int, 3>({algo_fw, algo_bw1, algo_bw2});
@@ -255,8 +285,12 @@ public:
         float fast_latency = (std::numeric_limits<float>::max)();
         int fast_algo = 0;
 
+#ifdef __HIP_PLATFORM_HCC__
+        for (int algo = (int)rocblas_gemm_algo_standard; algo <= (int)rocblas_gemm_algo_standard;
+#else
         for (int algo = (int)CUBLAS_GEMM_DEFAULT_TENSOR_OP;
              algo <= (int)CUBLAS_GEMM_ALGO15_TENSOR_OP;
+#endif
              algo++) {
             int warm_up = 5;
             for (int i = 0; i < warm_up; ++i) f(algo);

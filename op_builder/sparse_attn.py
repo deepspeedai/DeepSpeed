@@ -32,6 +32,10 @@ class SparseAttnBuilder(OpBuilder):
         #command_status = list(map(self.command_exists, required_commands))
         #deps_compatible = all(command_status)
 
+        if self.is_rocm_pytorch():
+            self.warning(f'{self.NAME} is not compatible with ROCM')
+            return False
+
         try:
             import torch
         except ImportError:

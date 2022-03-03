@@ -15,9 +15,6 @@ import deepspeed
 
 import sys
 
-#if not deepspeed.ops.__installed_ops__['transformer']:
-#    pytest.skip("transformer kernels are not installed", allow_module_level=True)
-
 
 def check_equal(first, second, atol=1e-2, verbose=False):
     if verbose:
@@ -266,10 +263,10 @@ def test_forward(batch_size,
 
 @pytest.mark.parametrize('batch_size, small_bsz, hidden_size, seq_len, heads, num_layers, is_preln, use_fp16',
                          [
-                             #(8,3,1024,512,16,3,True,False),
-                             #(8,7,1024,512,16,3,True,True),
-                             #(8,3,1024,512,16,3,False,False),
-                             #(8,7,1024,512,16,3,False,True),
+                             (8,3,1024,512,16,3,True,False),
+                             (8,7,1024,512,16,3,True,True),
+                             (8,3,1024,512,16,3,False,False),
+                             (8,7,1024,512,16,3,False,True),
                          ]) # yapf: disable
 def test_forward_with_small_bsz(batch_size,
                                 small_bsz,

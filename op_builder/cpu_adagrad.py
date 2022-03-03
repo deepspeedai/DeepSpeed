@@ -2,8 +2,6 @@
 Copyright 2020 The Microsoft DeepSpeed Team
 """
 import os
-import sys
-import subprocess
 from .builder import TorchCPUOpBuilder
 
 
@@ -22,5 +20,17 @@ class CPUAdagradBuilder(TorchCPUOpBuilder):
 
     def include_paths(self):
         import torch
-        CUDA_INCLUDE = os.path.join(torch.utils.cpp_extension.CUDA_HOME, "include")
-        return ['csrc/includes', CUDA_INCLUDE]
+        if not self.is_rocm_pytorch():
+            CUDA_INCLUDE = [os.path.join(torch.utils.cpp_extension.CUDA_HOME, "include")]
+        else:
+            CUDA_INCLUDE = [
+                os.path.join(torch.utils.cpp_extension.ROCM_HOME,
+                             "include"),
+                os.path.join(torch.utils.cpp_extension.ROCM_HOME,
+                             "include",
+                             "rocrand"),
+                os.path.join(torch.utils.cpp_extension.ROCM_HOME,
+                             "include",
+                             "hiprand"),
+            ]
+        return ['csrc/includes'] + CUDA_INCLUDE

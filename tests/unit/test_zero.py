@@ -846,7 +846,7 @@ def test_zero3_param_partitioning_many_params(world_sz: int,
                 for _ in range(n_layers))
 
             for layer_num, module in enumerate(self.modulelist):
-                if dist.get_rank() == 0:
+                with deepspeed.zero.GatheredParameters(module.weight, modifier_rank=0):
                     param: Parameter = module.weight
                     partition_sz = math.ceil(param.numel() / dist.get_world_size())
                     offset = 0
