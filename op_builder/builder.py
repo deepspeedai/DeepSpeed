@@ -126,6 +126,9 @@ class OpBuilder(ABC):
         '''
         pass
 
+    def hipify_extension(self):
+        pass
+
     @staticmethod
     def assert_torch_info(torch_info):
         install_torch_version = torch_info['version']
@@ -605,6 +608,21 @@ class CUDAOpBuilder(OpBuilder):
                 sources[i] = str(src.relative_to(curr_file))
             cuda_ext.sources = sources
         return cuda_ext
+
+    def hipify_extension(self):
+        if self.is_rocm_pytorch():
+            from torch.utils.hipify import hipify_python
+            hipify_python.hipify(
+                project_directory=os.getcwd(),
+                output_directory=os.getcwd(),
+                header_include_dirs=self.include_paths(),
+                includes=[os.path.join(os.getcwd(),
+                                       '*')],
+                extra_files=[os.path.abspath(s) for s in self.sources()],
+                show_detailed=True,
+                is_pytorch_extension=True,
+                hipify_extra_files_only=True,
+            )
 
     def cxx_args(self):
         if sys.platform == "win32":

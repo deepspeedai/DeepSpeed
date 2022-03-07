@@ -7,7 +7,6 @@
 #include <cuda_runtime.h>
 #include <mma.h>
 #include <stdio.h>
-#include "cublas_wrappers.h"
 
 int cublas_gemm_ex(cublasHandle_t handle,
                    cublasOperation_t transa,
