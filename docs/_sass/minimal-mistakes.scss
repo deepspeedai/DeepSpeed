@@ -38,28 +38,3 @@
 @import "minimal-mistakes/archive";
 @import "minimal-mistakes/sidebar";
 @import "minimal-mistakes/print";
-
-
-.wide2 {
-    .page {
-      float: left;
-      width: 115%;
-      @include breakpoint($large) {
-        padding-left: 15%;
-      }
-
-      @include breakpoint($x-large) {
-        padding-left: 15%;
-      }
-    }
-
-    .page__related {
-      @include breakpoint($large) {
-        padding-left: 15%;
-      }
-
-      @include breakpoint($x-large) {
-        padding-left: 15%;
-      }
-    }
-  }
