@@ -1,15 +1,5 @@
 FROM rocm/pytorch:rocm5.0.1_ubuntu18.04_py3.7_pytorch_1.10.0
 
-# XXX: patch rocm coop groups, remove once patch is upstreamed
-RUN mkdir /tmp/staging && cd /tmp/staging && \
-    git clone https://github.com/microsoft/DeepSpeed.git && \
-    cd DeepSpeed && \
-    cp -a csrc/includes/patch/hip/hcc_detail/hip_cooperative_groups.h /opt/rocm/include/hip/hcc_detail/hip_cooperative_groups.h && \
-    cp -a csrc/includes/patch/hip/hcc_detail/hip_cooperative_groups.h /opt/rocm/include/hip/hcc_detail/amd_hip_cooperative_groups.h && \
-    cp -a csrc/includes/patch/hip/hcc_detail/hip_cooperative_groups_helper.h /opt/rocm/include/hip/hcc_detail/hip_cooperative_groups_helper.h && \
-    cd /tmp && \
-    rm -rf /tmp/staging
-
 # install latest released version of deepspeed
 RUN pip install deepspeed && \
     ds_report

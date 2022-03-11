@@ -309,7 +309,7 @@ __global__ void gptj_residual_add(__half* input,
                                   int total_count,
                                   int intermediate_size)
 {
-#if __CUDA_ARCH__ >= 700
+#if __CUDA_ARCH__ >= 700 || defined(__HIP_PLATFORM_HCC__)
 
     float2* input_cast = reinterpret_cast<float2*>(input);
     float2* output_cast = reinterpret_cast<float2*>(output);

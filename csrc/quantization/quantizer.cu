@@ -5,7 +5,7 @@ namespace cg = cooperative_groups;
 
 __global__ void quantize_kernel(__half* vals, int group_size, int num_bits)
 {
-#if __CUDA_ARCH__ >= 700
+#if __CUDA_ARCH__ >= 700 || defined(__HIP_PLATFORM_HCC__)
 
     cg::thread_block b = cg::this_thread_block();
     cg::thread_block_tile<32> g = cg::tiled_partition<32>(b);
@@ -206,7 +206,7 @@ __global__ void sr_quantize_kernel(__half* vals,
                                    int num_bits,
                                    std::pair<uint64_t, uint64_t> seed)
 {
-#if __CUDA_ARCH__ >= 700
+#if __CUDA_ARCH__ >= 700 || defined(__HIP_PLATFORM_HCC__)
 
     cg::thread_block b = cg::this_thread_block();
     cg::thread_block_tile<32> g = cg::tiled_partition<32>(b);
@@ -484,7 +484,7 @@ template void launch_sr_quantize_kernel(__half* vals,
 
 __global__ void quantize_kernel_asym(__half* vals, int group_size, int num_bits)
 {
-#if __CUDA_ARCH__ >= 700
+#if __CUDA_ARCH__ >= 700 || defined(__HIP_PLATFORM_HCC__)
 
     cg::thread_block b = cg::this_thread_block();
     cg::thread_block_tile<32> g = cg::tiled_partition<32>(b);
@@ -729,7 +729,7 @@ __global__ void sr_quantize_kernel_asym(__half* vals,
                                         int num_bits,
                                         std::pair<uint64_t, uint64_t> seed)
 {
-#if __CUDA_ARCH__ >= 700
+#if __CUDA_ARCH__ >= 700 || defined(__HIP_PLATFORM_HCC__)
 
     cg::thread_block b = cg::this_thread_block();
     cg::thread_block_tile<32> g = cg::tiled_partition<32>(b);
