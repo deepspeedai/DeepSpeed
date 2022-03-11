@@ -1,5 +1,7 @@
 ---
 title: "1-bit Adam: Up to 5x less communication volume and up to 3.4x faster training"
+tags: training IO
+toc: false
 ---
 
 **Note:**

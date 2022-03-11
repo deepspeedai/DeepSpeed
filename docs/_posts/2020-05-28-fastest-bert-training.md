@@ -1,9 +1,7 @@
 ---
-layout: single
 title: "Microsoft DeepSpeed achieves the fastest BERT training time"
 excerpt: ""
-categories: news
-new_post: false
+tags: training
 date: 2020-05-28 00:00:00
 ---
 

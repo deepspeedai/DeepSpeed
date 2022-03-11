@@ -1,122 +1,124 @@
 main:
-  - title: "Getting Started"
+  - title: 'Getting Started'
     url: /getting-started/
-  - title: "News"
-    url: /news/
-  - title: "Tutorials"
+  - title: 'Blog'
+    url: /posts/
+  - title: 'Tutorials'
     url: /tutorials/
-  - title: "Documentation"
+  - title: 'Documentation'
     url: https://deepspeed.readthedocs.io/
-  - title: "GitHub"
+  - title: 'GitHub'
     url: https://github.com/microsoft/DeepSpeed
 
 lnav:
-  - title: "Feature Overview"
+  - title: 'Feature Overview'
     url: /features/
-  - title: "Getting Started"
+  - title: 'Getting Started'
     url: /getting-started/
     children:
-      - title: "Installation"
+      - title: 'Installation'
         url: /getting-started/#installation
-      - title: "Writing models"
+      - title: 'Writing models'
         url: /getting-started/#writing-deepspeed-models
-      - title: "Training"
+      - title: 'Training'
         url: /getting-started/#training
-      - title: "Launching"
+      - title: 'Launching'
         url: /getting-started/#launching-deepspeed-training
-  - title: "Configuration"
+  - title: 'Configuration'
     url: /docs/config-json/
     children:
-      - title: "Autotuning"
+      - title: 'Autotuning'
         url: /docs/config-json/#autotuning
-      - title: "Batch size"
+      - title: 'Batch size'
         url: /docs/config-json/#batch-size-related-parameters
-      - title: "Optimizer"
+      - title: 'Optimizer'
         url: /docs/config-json/#optimizer-parameters
-      - title: "Scheduler"
+      - title: 'Scheduler'
         url: /docs/config-json/#scheduler-parameters
-      - title: "Communication"
+      - title: 'Communication'
         url: /docs/config-json/#communication-options
-      - title: "FP16"
+      - title: 'FP16'
         url: /docs/config-json/#fp16-training-options
-      - title: "BFOAT16"
+      - title: 'BFLOAT16'
         url: /docs/config-json/#bfloat16-training-options
-      - title: "Gradient Clipping"
+      - title: 'Gradient Clipping'
         url: /docs/config-json/#gradient-clipping
-      - title: "ZeRO optimizations"
+      - title: 'ZeRO optimizations'
         url: /docs/config-json/#zero-optimizations-for-fp16-training
-      - title: "Parameter Offloading"
+      - title: 'Parameter Offloading'
         url: /docs/config-json/#parameter-offloading
-      - title: "Optimizer Offloading"
+      - title: 'Optimizer Offloading'
         url: /docs/config-json/#optimizer-offloading
-      - title: "Asynchronous I/O"
+      - title: 'Asynchronous I/O'
         url: /docs/config-json/#asynchronous-io
-      - title: "Logging"
+      - title: 'Logging'
         url: /docs/config-json/#logging
-      - title: "Flops Profiler"
+      - title: 'Flops Profiler'
         url: /docs/config-json/#flops-profiler
-      - title: "PyTorch Profiler"
+      - title: 'PyTorch Profiler'
         url: /docs/config-json/#pytorch-profiler
-      - title: "Activation checkpointing"
+      - title: 'Activation checkpointing'
         url: /docs/config-json/#activation-checkpointing
-      - title: "Sparse Attention"
+      - title: 'Sparse Attention'
         url: /docs/config-json/#sparse-attention
-      - title: "Logging to TensorBoard"
+      - title: 'Logging to TensorBoard'
         url: /docs/config-json/#tensorboard-options
-  - title: "Tutorials"
+  - title: 'Tutorials'
     url: /tutorials/
     children:
-      - title: "Getting started"
+      - title: 'Getting started'
         url: /getting-started/
-      - title: "Getting started on Azure"
+      - title: 'Getting started on Azure'
         url: /tutorials/azure/
-      - title: "Autotuning"
+      - title: 'Autotuning'
         url: /tutorials/autotuning/
-      - title: "BingBertSQuAD Fine-tuning"
+      - title: 'BingBertSQuAD Fine-tuning'
         url: /tutorials/bert-finetuning/
-      - title: "BERT Pre-training"
+      - title: 'BERT Pre-training'
         url: /tutorials/bert-pretraining/
-      - title: "CIFAR-10"
+      - title: 'CIFAR-10'
         url: /tutorials/cifar-10/
-      - title: "Curriculum Learning"
+      - title: 'Curriculum Learning'
         url: /tutorials/curriculum-learning/
-      - title: "Flops Profiler"
+      - title: 'Flops Profiler'
         url: /tutorials/flops-profiler/
-      - title: "PyTorch Profiler"
+      - title: 'PyTorch Profiler'
         url: /tutorials/pytorch-profiler/
-      - title: "GAN"
+      - title: 'GAN'
         url: /tutorials/gan/
-      - title: "Inference"
+      - title: 'Inference'
         url: /tutorials/inference-tutorial/
-      - title: "Learning Rate Range Test"
+      - title: 'Learning Rate Range Test'
         url: /tutorials/lrrt/
-      - title: "Megatron-LM GPT2"
+      - title: 'Megatron-LM GPT2'
         url: /tutorials/megatron/
-      - title: "Mixture-of-Experts (MoE)"
+      - title: 'Mixture-of-Experts (MoE)'
         url: /tutorials/mixture-of-experts/
-      - title: "Mixture-of-Experts for NLG"
+      - title: 'MoE for NLG'
         url: /tutorials/mixture-of-experts-nlg/
-      - title: "Mixture-of-Quantization"
+      - title: 'MoE Inference'
+        url: /tutorials/mixture-of-experts-inference/
+      - title: 'Mixture-of-Quantization'
         url: /tutorials/MoQ-tutorial/
-      - title: "One-Cycle Schedule"
+      - title: 'One-Cycle Schedule'
         url: /tutorials/one-cycle/
-      - title: "One-Bit Adam"
+      - title: 'One-Bit Adam'
         url: /tutorials/onebit-adam/
       - title: "Zero-One Adam"
         url: /tutorials/zero-one-adam/
       - title: "One-Bit LAMB"
         url: /tutorials/onebit-lamb/
-      - title: "Pipeline Parallelism"
+      - title: 'Pipeline Parallelism'
         url: /tutorials/pipeline/
-      - title: "Progressive Layer Dropping"
+      - title: 'Progressive Layer Dropping'
         url: /tutorials/progressive_layer_dropping/
-      - title: "Sparse Attention"
+      - title: 'Sparse Attention'
         url: /tutorials/sparse-attention/
-      - title: "Transformer Kernel"
+      - title: 'Transformer Kernel'
         url: /tutorials/transformer_kernel/
-      - title: "ZeRO-Offload"
+      - title: 'ZeRO-Offload'
         url: /tutorials/zero-offload/
-      - title: "ZeRO Redundancy Optimizer (ZeRO)"
+      - title: 'ZeRO'
         url: /tutorials/zero/
-  - title: "Contributing"
+  - title: 'Contributing'
     url: /contributing/

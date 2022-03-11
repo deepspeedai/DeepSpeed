@@ -5,6 +5,7 @@ description: >-
   training easy, efficient, and effective.
 
 locale : "en-US"
+logo: /assets/images/deepspeed-logo-uppercase-bold-white-1.15.svg
 
 repository: microsoft/DeepSpeed
 baseurl: "/" # the subpath of your site, e.g. /blog
@@ -13,6 +14,7 @@ url: "https://www.deepspeed.ai" # the base hostname & protocol for your site, e.
 # Build settings
 remote_theme: "mmistakes/minimal-mistakes@4.19.0"
 minimal_mistakes_skin : "air"
+search: true
 
 plugins:
   - jekyll-feed
@@ -45,6 +47,7 @@ collections:
       - megatron.md
       - mixture-of-experts.md
       - mixture-of-experts-nlg.md
+      - mixture-of-experts-inference.md
       - one-cycle.md
       - onebit-adam.md
       - zero-one-adam.md
@@ -79,8 +82,23 @@ defaults:
       path: ""
       type: posts
     values:
-      layout: single
+      layout: single-full
+      author_profile: false
+      read_time: false
+      comments: false
       share: true
+      related: false
+      toc: true
+      toc_label: "Contents"
+      toc_sticky: true
+      show_date: true
+  - scope:
+      path: ""
+      type: tutorials
+    values:
+      layout: single
+      toc_sticky: true
+
 
 analytics:
   provider: "google-gtag"

@@ -1,5 +1,6 @@
 ---
-title: "DeepSpeed  Transformer Kernel"
+title: "DeepSpeed Transformer Kernel"
+tags: training
 ---
 
 This tutorial shows how to enable the DeepSpeed transformer kernel and set its different configuration parameters.

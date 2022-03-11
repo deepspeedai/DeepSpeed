@@ -6,6 +6,7 @@
 
 @import "minimal-mistakes/skins/{{ site.minimal_mistakes_skin | default: 'default' }}"; // skin
 @import "minimal-mistakes"; // main partials
+@import "button-group"; // main partials
 
 //
 // DeepSpeed customizations
@@ -45,3 +46,24 @@
     @include yiq-contrasted($active-color);
   }
 }
+
+ul.tag-box li {
+  display: inline-block;
+  list-style: none;
+  list-style-image: none;
+  margin-bottom: 10px;
+  text-transform: capitalize;
+}
+ul.tag-box li a {
+  background: #e6e6e6;
+  padding: 2px 8px;
+  border-radius: 3px;
+  color:  #0092ca;
+  text-transform: capitalize;
+  font-weight: bold;
+}
+ul.tag-box li span.size {
+  font-weight: bold;
+}
+
+.site-logo img { max-height: 200%; width: auto; }

@@ -1,5 +1,6 @@
 ---
-title: "DeepSpeed  Sparse Attention"
+title: "DeepSpeed Sparse Attention"
+tags: training
 ---
 
 In this tutorial we describe how to use DeepSpeed Sparse Attention (SA) and its building-block kernels. The easiest way to use SA is through DeepSpeed launcher. We will describe this through an example in [How to use sparse attention with DeepSpeed launcher](#how-to-use-sparse-attention-with-deepspeed-launcher) section. But before that, we introduce modules provided by DeepSpeed SA in the [next](#sparse-attention-modules) section.

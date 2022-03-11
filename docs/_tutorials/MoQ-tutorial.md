@@ -1,5 +1,6 @@
 ---
 title: "DeepSpeed Mixture-of-Quantization (MoQ)"
+tags: training quantization
 ---
 
 DeepSpeed introduces new support for model compression using quantization, called Mixture-of-Quantization (MoQ).  MoQ is designed on top of QAT (Quantization-Aware Training), with the difference that it schedules various data precisions across the training process. It starts with quantizing the model with a high precision, such as FP16 or 16-bit quantization, and reduce the precision through a pre-defined schedule until reaching the target quantization bits (like 8-bit). Moreover, we use second-order information of the model parameters to dynamically adjust the quantization schedule for each of layer of the network separately. We have seen that by adding such schedule and using various data precision in the training process, we can quantize the model with better quality and preserve accuracy. For a better understanding of MoQ methodology, please refer to MoQ deep-dive, [here](https://www.deepspeed.ai/posts/2021-05-05-MoQ/).

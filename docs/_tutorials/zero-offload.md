@@ -1,5 +1,6 @@
 ---
 title: "ZeRO-Offload"
+tags: training IO large-model
 ---
 ZeRO-3 Offload consists of a subset of features in our newly released ZeRO-Infinity. Read our [ZeRO-Infinity blog](https://www.microsoft.com/en-us/research/blog/zero-infinity-and-deepspeed-unlocking-unprecedented-model-scale-for-deep-learning-training/) to learn more!
 

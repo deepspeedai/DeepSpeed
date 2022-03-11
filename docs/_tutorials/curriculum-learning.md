@@ -1,5 +1,6 @@
 ---
 title: "Curriculum Learning: A Regularization Method for Efficient and Stable Billion-Scale GPT Model Pre-Training"
+tags: training pre-training
 ---
 
 **Note:**

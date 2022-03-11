@@ -1,5 +1,6 @@
 ---
 title: "Mixture of Experts for NLG models"
+tags: MoE training
 ---
 
 In this tutorial, we introduce how to apply DeepSpeed Mixture of Experts (MoE) to NLG models, which reduces the training cost by 5 times and reduce the MoE model size by 3 times (details in our [Blog]({{ site.press_release_v6 }})). We use the GPT-3 like models in Megatron-LM framework as the example. Before reading this tutorial, we recommend to first read the tutorials about [Mixture of Experts](/tutorials/mixture-of-experts/) and [Megatron-LM GPT pre-training](/tutorials/megatron/).

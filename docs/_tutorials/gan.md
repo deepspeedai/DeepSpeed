@@ -1,6 +1,7 @@
 ---
 title: "DCGAN Tutorial"
 excerpt: "Train your first GAN model with DeepSpeed!"
+tags: getting-started training
 ---
 
 If you haven't already, we advise you to first read through the [Getting Started](/getting-started/) guide before stepping through this

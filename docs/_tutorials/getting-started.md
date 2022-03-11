@@ -2,7 +2,7 @@
 title: 'Getting Started'
 permalink: /getting-started/
 excerpt: 'First steps with DeepSpeed'
-date: 2020-05-15
+tags: getting-started
 ---
 
 ## Installation

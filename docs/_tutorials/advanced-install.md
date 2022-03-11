@@ -1,6 +1,7 @@
 ---
 title: "Installation Details"
 date: 2020-10-28
+tags: getting-started
 ---
 
 The quickest way to get started with DeepSpeed is via pip, this will install

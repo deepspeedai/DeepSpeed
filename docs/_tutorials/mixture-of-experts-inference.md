@@ -1,5 +1,6 @@
 ---
 title: "Getting Started with DeepSpeed-MoE for Inferencing Large-Scale MoE Models"
+tags: MoE inference
 ---
 
 DeepSpeed-MoE Inference introduces several important features on top of the inference optimization for dense models ([DeepSpeed-Inference blog post](https://www.microsoft.com/en-us/research/blog/deepspeed-accelerating-large-scale-model-inference-and-training-via-system-optimizations-and-compression/)). It embraces several different types of parallelism, i.e. data-parallelism and tensor-slicing for the non-expert parameters and expert-parallelism and expert-slicing for the expert parameters. To maximize the aggregate memory-bandwidth, we provide the communication scheduling with parallelism coordination to effectively group and route tokens with the same critical-data-path. Moreover, we propose new modeling optimizations, PR-MoE and MoS, to reduce MoE model size while maintaining accuracy. For more information on the DeepSpeed MoE inference optimization, please refer to our [blog post]({{ site.press_release_v6 }}).

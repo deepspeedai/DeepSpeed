@@ -1,10 +1,8 @@
 ---
-layout: single
 title: "DeepSpeed ZeRO-3 Offload"
 excerpt: ""
-categories: news
-new_post: true
 date: 2021-03-08 00:00:00
+tags: training ZeRO
 ---
 Today we are announcing the release of ZeRO-3 Offload, a highly efficient and easy to use implementation of ZeRO Stage 3 and ZeRO Offload combined, geared towards our continued goal of democratizing AI by making efficient large-scale DL training available to everyone.  The key benefits of ZeRO-3 Offload are:
 
@@ -19,7 +17,7 @@ Today we are announcing the release of ZeRO-3 Offload, a highly efficient and ea
 
 <h2> Overview of ZeRO family of technology </h2>
 
-The Zero Redundancy Optimizer (abbreviated ZeRO) is a family of memory optimization technologies for large-scale distributed deep learning. Unlike data parallelism (that is efficient but can only support a limited model size) or model parallelism (that can support larger model sizes but requires significant code refactoring while adding communication overhead that limits efficiency), ZeRO allows fitting larger models in memory without requiring code refactoring while remaining very efficient. ZeRO does so by eliminating the memory redundancy that is inherent in data parallelism while limiting the communication overhead to a minimum.
+The ZeRO Redundancy Optimizer (abbreviated ZeRO) is a family of memory optimization technologies for large-scale distributed deep learning. Unlike data parallelism (that is efficient but can only support a limited model size) or model parallelism (that can support larger model sizes but requires significant code refactoring while adding communication overhead that limits efficiency), ZeRO allows fitting larger models in memory without requiring code refactoring while remaining very efficient. ZeRO does so by eliminating the memory redundancy that is inherent in data parallelism while limiting the communication overhead to a minimum.
 ZeRO removes the memory redundancies across data-parallel processes by partitioning the three model states (optimizer states, gradients, and parameters) across data-parallel processes instead of replicating them. By doing this, it boosts memory efficiency compared to classic data-parallelism while retaining its computational granularity and communication efficiency.
 There are three stages in ZeRO corresponding to three model states, as shown in the Figure 1: the first stage (ZeRO-1) partitions only the optimizer states, the second stage (ZeRO-2) partitions both the optimizer states and the gradients and the final stage (ZeRO-3) partitions all three model states (for more details see the ZeRO [paper](https://arxiv.org/abs/1910.02054v3)).
 
@@ -30,8 +28,8 @@ Figure 1. Overview of ZeRO memory savings
 
 In addition to these three stages, ZeRO family of technology also consists of ZeRO-2 Offload. ZeRO-2 Offload is a heterogeneous DL training technology that works in conjunction with ZeRO-2 to offload partitioned optimizer states and gradients to CPU memory. ZeRO-2 Offload offers the full memory advantage of ZeRO-2 even on a single GPU, while at the same time offering great scalability of ZeRO-2 on multi-GPU setup.  DeepSpeed library has been offering ZeRO-2 Offload since Sept 2020. For details, please see below:
 
-* ZeRO: [Stage 1 blog](https://www.microsoft.com/en-us/research/blog/zero-2-deepspeed-shattering-barriers-of-deep-learning-speed-scale/), [Stage 2 blog](https://www.microsoft.com/en-us/research/blog/zero-2-deepspeed-shattering-barriers-of-deep-learning-speed-scale/), [Tutorial](/tutorials/zero)
-* ZeRO-Offload: [Blog](https://www.microsoft.com/en-us/research/blog/deepspeed-extreme-scale-model-training-for-everyone/#toc-heading-3), [Tutorials](/tutorials/zero-offload), [Paper link](https://arxiv.org/abs/2101.06840)
+* ZeRO: [Stage 1 blog](https://www.microsoft.com/en-us/research/blog/ZeRO-2-deepspeed-shattering-barriers-of-deep-learning-speed-scale/), [Stage 2 blog](https://www.microsoft.com/en-us/research/blog/ZeRO-2-deepspeed-shattering-barriers-of-deep-learning-speed-scale/), [Tutorial](/tutorials/ZeRO)
+* ZeRO-Offload: [Blog](https://www.microsoft.com/en-us/research/blog/deepspeed-extreme-scale-model-training-for-everyone/#toc-heading-3), [Tutorials](/tutorials/ZeRO-offload), [Paper link](https://arxiv.org/abs/2101.06840)
 
 <h2>ZeRO-3 Offload</h2>
 With today’s release of ZeRO-3 Offload, we are adding support for partitioning and offloading parameters in addition to optimizer states and gradients partitioning already supported by ZeRO-2 Offload in DeepSpeed. With parameter partitioning ZeRO-3 Offload implements the full set of features in the three stages of ZeRO, that allows for a linear growth in model size with the number of GPUs. In addition, ZeRO-3 Offload can also optionally offload all these model states to CPU to further reduce GPU memory consumption, leveraging both CPU and GPU to maximize memory and compute efficiency of the entire system.
@@ -95,6 +93,6 @@ If you are already a DeepSpeed user, you can find our detailed tutorial on ZeRO-
 
 * DeepSpeed: [Getting Started Page](/getting-started/)
 
-* ZeRO-3 Offload [Documentation](https://deepspeed.readthedocs.io/en/latest/zero3.html), [Tutorial](/tutorials/zero/#training-trillion-scale-models-with-zero-3-offload)
+* ZeRO-3 Offload [Documentation](https://deepspeed.readthedocs.io/en/latest/zero3.html), [Tutorial](/tutorials/ZeRO/#training-trillion-scale-models-with-ZeRO-3-offload)
 
 The DeepSpeed Team is very excited to share ZeRO-3 Offload with the DL community.

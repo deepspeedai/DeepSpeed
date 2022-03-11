@@ -1,5 +1,6 @@
 ---
 title: "Getting Started with DeepSpeed on Azure"
+tags: getting-started
 ---
 
 This tutorial will help you get started running DeepSpeed on [Azure virtual

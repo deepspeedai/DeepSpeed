@@ -1,6 +1,7 @@
 ---
 title: "BERT Pre-training"
 excerpt: ""
+tags: training pre-training
 ---
 
 In this tutorial we will apply DeepSpeed to pre-train the BERT

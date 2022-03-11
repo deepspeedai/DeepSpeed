@@ -1,5 +1,6 @@
 ---
 title: "1-Cycle Schedule"
+tags: training learning-rate
 ---
 
 This tutorial shows how to implement 1Cycle schedules for learning rate and

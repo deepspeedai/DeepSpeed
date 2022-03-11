@@ -1,10 +1,8 @@
 ---
-layout: single
 title: "DeepSpeed Sparse Attention"
 excerpt: ""
-categories: news
-new_post: true
 date: 2020-09-09 01:00:00
+tags: training inference
 ---
 
 Attention-based deep learning models such as the transformers are highly effective in capturing relationship between tokens in an input sequence, even across long distances. As a result, they are used with text, image, and sound-based inputs, where the sequence length can be in thousands of tokens. However, despite the effectiveness of attention modules to capture long term dependencies, in practice, their application to long sequence input is limited by compute and memory requirements of the attention computation that grow quadratically, `O(n^2)`, with the sequence length `n`.

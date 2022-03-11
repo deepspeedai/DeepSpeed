@@ -1,15 +1,9 @@
 ---
-layout: single
 title: "DeepSpeed-MoE for NLG: Reducing the training cost of language models by 5 times"
 excerpt: ""
-categories: news
-new_post: false
 date: 2021-12-09 22:00:00
+tags: training
 ---
-
-Published on December 9, 2021
-
-[By DeepSpeed Team](https://www.microsoft.com/en-us/research/project/deepspeed/people/)
 
 Autoregressive transformer-based natural language generation (referred to as
 NLG in the rest of the blog) models can offer convincing solutions to a broad
@@ -92,7 +86,7 @@ the validation loss of the MoE model, 350M+MoE-128, is on par with the
 validation loss of the 1.3B dense model with 4x larger base.  This is also true
 for 1.3B+MoE-128 in comparison with 6.7B dense model with 5x larger base.
 Furthermore, the model quality is on par not only for the validation loss but
-also for a wide variety of 6 zero-shot evaluation tasks as shown in Table 1,
+also for a wide variety of 6 ZeRO-shot evaluation tasks as shown in Table 1,
 demonstrating that these models in fact have very similar model quality.
 
 ![MoE NLG](/assets/images/moe-nlg.png){: .align-center}
@@ -109,7 +103,7 @@ Figure 1: Token-wise validation loss curves for dense and MoE NLG models with di
 | 350M+MoE-128 (13B) | 0.6270 | 0.7459 | 0.6046 | 0.3560 | 0.1658 | 0.0517 |
 | 1.3B+MoE-128 (52B) | 0.6984 | 0.7671 | 0.6492 | 0.3809 | 0.3129 | 0.0719 |
 
-Table 1: Zero-shot evaluation results (last six columns) for different dense and MoE NLG models. All zero-shot evaluation results use the accuracy metric.
+Table 1: ZeRO-shot evaluation results (last six columns) for different dense and MoE NLG models. All ZeRO-shot evaluation results use the accuracy metric.
 
 ## Same quality with 5x less training cost
 

@@ -1,0 +1,24 @@
+{% capture video_id %}{{ include.id }}{% endcapture %}
+{% capture video_provider %}{{ include.provider }}{% endcapture %}
+{% capture video_danmaku %}{{ include.danmaku | default: 0 }}{% endcapture %}
+
+{% capture video_src %}
+  {% case video_provider %}
+  {% when "vimeo" %}
+    https://player.vimeo.com/video/{{ video_id }}?dnt=true
+  {% when "youtube" %}
+    https://www.youtube-nocookie.com/embed/{{ video_id }}
+  {% when "google-drive" %}
+    https://drive.google.com/file/d/{{ video_id }}/preview
+  {% when "bilibili" %}
+    https://player.bilibili.com/player.html?bvid={{ video_id }}&page=1&as_wide=1&high_quality=1&danmaku={{ video_danmaku }}
+  {% endcase %}
+{% endcapture %}
+{% assign video_src = video_src | strip %}
+
+<!-- Courtesy of embedresponsively.com //-->
+{% unless video_src == "" %}
+  <div class="responsive-video-container">
+    <iframe src="{{ video_src }}" frameborder="0" webkitAllowFullScreen mozallowfullscreen allowfullscreen></iframe>
+  </div>
+{% endunless %}

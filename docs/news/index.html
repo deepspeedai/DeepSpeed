@@ -1,3 +1,0 @@
----
-layout: news-home
----

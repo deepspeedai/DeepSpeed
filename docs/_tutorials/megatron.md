@@ -1,5 +1,6 @@
 ---
 title: "Megatron-LM GPT2"
+tags: training
 ---
 
 If you haven't already, we advise you to first read through the [Getting

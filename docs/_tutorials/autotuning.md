@@ -1,6 +1,7 @@
 ---
 title: "Autotuning"
 excerpt: "Automatically discover the optimal DeepSpeed configuration that delivers good training speed"
+tags: training performance-tuning
 ---
 
 Make sure you've read the DeepSpeed tutorials on [Getting Started](https://www.deepspeed.ai/getting-started/) and [Zero Redundancy Optimizer](https://www.deepspeed.ai/tutorials/zero/) before stepping through this tutorial.

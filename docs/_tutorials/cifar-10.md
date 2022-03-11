@@ -1,6 +1,7 @@
 ---
 title: "CIFAR-10 Tutorial"
 excerpt: "Train your first model with DeepSpeed!"
+tags: getting-started
 ---
 
 If you haven't already, we advise you to first read through the
