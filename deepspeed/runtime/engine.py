@@ -34,7 +34,7 @@ from deepspeed.runtime.fp16.unfused_optimizer import FP16_UnfusedOptimizer
 
 from deepspeed.runtime.config import DeepSpeedConfig, DEEPSPEED_OPTIMIZERS, \
     ADAGRAD_OPTIMIZER, ADAM_OPTIMIZER, ADAMW_OPTIMIZER, LAMB_OPTIMIZER, ONEBIT_ADAM_OPTIMIZER, ONEBIT_LAMB_OPTIMIZER, \
-    TORCH_ADAM_PARAM, ADAM_W_MODE, ADAM_W_MODE_DEFAULT
+    TORCH_ADAM_PARAM, ADAM_W_MODE, ADAM_W_MODE_DEFAULT, ZERO_ONE_ADAM_OPTIMIZER
 
 from deepspeed.runtime.dataloader import DeepSpeedDataLoader
 from deepspeed.runtime.constants import \
@@ -1169,6 +1169,14 @@ class DeepSpeedEngine(Module):
                 logger.warning(
                     f"Currently the convergence of 1-bit Adam is only verified under FP16"
                 )
+        elif self.optimizer_name() == ZERO_ONE_ADAM_OPTIMIZER:
+            assert not self.zero_optimization(), "0/1 Adam is not compatible with ZeRO"
+            from deepspeed.runtime.fp16.onebit.zoadam import ZeroOneAdam
+
+            optimizer = ZeroOneAdam(model_parameters, self, **optimizer_parameters)
+            if not self.fp16_enabled():
+                logger.warning(
+                    f'Currently the convergence of 0/1 Adam is only verified under FP16')
         elif self.optimizer_name() == ONEBIT_LAMB_OPTIMIZER:
             assert not self.zero_optimization(), "1bit-Lamb is not compatible with ZeRO"
             from deepspeed.runtime.fp16.onebit.lamb import OnebitLamb
@@ -1228,7 +1236,7 @@ class DeepSpeedEngine(Module):
         else:
             fused_opts = FusedAdam
         if isinstance(optimizer, fused_opts) \
-                or self.optimizer_name() == ONEBIT_ADAM_OPTIMIZER:
+                or self.optimizer_name() in [ONEBIT_ADAM_OPTIMIZER, ZERO_ONE_ADAM_OPTIMIZER]:
             if self.dynamic_loss_scale():
                 log_dist("Creating fp16 optimizer with dynamic loss scale", ranks=[0])
                 timers = self.timers if self.wall_clock_breakdown() else None

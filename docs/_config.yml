@@ -47,6 +47,7 @@ collections:
       - mixture-of-experts-nlg.md
       - one-cycle.md
       - onebit-adam.md
+      - zero-one-adam.md
       - onebit-lamb.md
       - pipeline.md
       - progressive_layer_dropping.md

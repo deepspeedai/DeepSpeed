@@ -9,7 +9,8 @@ toc_label: "Contents"
 </div>
 
 ## Latest News
-* [2022/1/19] [DeepSpeed: Advancing MoE inference and training to power next-generation AI scale](https://www.microsoft.com/en-us/research/blog/deepspeed-advancing-moe-inference-and-training-to-power-next-generation-ai-scale/)
+* [2022/03/07] [Maximizing Communication Efficiency for Large-scale Training via 0/1 Adam](https://www.deepspeed.ai/tutorials/zero-one-adam/)
+* [2022/01/19] [DeepSpeed: Advancing MoE inference and training to power next-generation AI scale](https://www.microsoft.com/en-us/research/blog/deepspeed-advancing-moe-inference-and-training-to-power-next-generation-ai-scale/)
     * [Mixture of Experts (MoE) for NLG tutorial](https://www.deepspeed.ai/tutorials/mixture-of-experts-nlg/).
     * [Mixture of Experts (MoE) Inference tutorial](https://www.deepspeed.ai/tutorials/moe-inference-tutorial).
 * [2021/11/15] [Autotuning: Automatically discover the optimal DeepSpeed configuration that delivers good training speed](https://www.deepspeed.ai/news/2021/11/15/autotuning.html)
@@ -34,7 +35,7 @@ DeepSpeed delivers extreme-scale model training for everyone, from data scientis
 * Extreme scale: Using current generation of GPU clusters with hundreds of devices,  3D parallelism of DeepSpeed can efficiently train deep learning models with trillions of parameters.
 * Extremely memory efficient: With just a single GPU, ZeRO-Offload of DeepSpeed can train models with over 10B parameters, 10x bigger than the state of the art, democratizing multi-billion-parameter model training such that many deep learning scientists can explore bigger and better models.
 * Extremely long sequence length: Sparse attention of DeepSpeed powers an order-of-magnitude longer input sequence and obtains up to 6x faster execution comparing with dense transformers.
-* Extremely communication efficient: 3D parallelism improves communication efficiency allows users to train multi-billion-parameter models 2–7x faster on clusters with limited network bandwidth.  1-bit Adam/1-bit LAMB reduce communication volume by up to 5x while achieving similar convergence efficiency to Adam/LAMB, allowing for scaling to different types of GPU clusters and networks.
+* Extremely communication efficient: 3D parallelism improves communication efficiency allows users to train multi-billion-parameter models 2–7x faster on clusters with limited network bandwidth.  1-bit Adam, 0/1 Adam and 1-bit LAMB reduce communication volume by up to 26x while achieving similar convergence efficiency to Adam/LAMB, allowing for scaling to different types of GPU clusters and networks.
 
 Early adopters of DeepSpeed have already produced
 a language model (LM) with over 17B parameters called
@@ -139,7 +140,7 @@ combinations, which we call 3D parallelism.
 Pipeline parallelism of DeepSpeed reduce communication volume during distributed training, which allows users to train multi-billion-parameter models 2–7x faster on clusters with limited network bandwidth.
 ![Low-bandwidth GPT-2 Performance](/assets/images/pp-lowbw-gpt2.png)
 
-1-bit Adam and 1-bit LAMB reduce communication volume by up to 5x while achieving similar convergence efficiency to Adam, allowing for scaling to different types of GPU clusters and networks.  [1-bit Adam blog post](https://www.deepspeed.ai/news/2020/09/08/onebit-adam-blog-post.html), [1-bit Adam tutorial](https://www.deepspeed.ai/tutorials/onebit-adam/), [1-bit LAMB tutorial](https://www.deepspeed.ai/tutorials/onebit-lamb/).
+1-bit Adam, 0/1 Adam and 1-bit LAMB reduce communication volume by up to 26x while achieving similar convergence efficiency to Adam, allowing for scaling to different types of GPU clusters and networks.  [1-bit Adam blog post](https://www.deepspeed.ai/news/2020/09/08/onebit-adam-blog-post.html), [1-bit Adam tutorial](https://www.deepspeed.ai/tutorials/onebit-adam/), [0/1 Adam tutorial](https://www.deepspeed.ai/tutorials/zero-one-adam/), [1-bit LAMB tutorial](https://www.deepspeed.ai/tutorials/onebit-lamb/).
 
 ## Supporting long sequence length
 DeepSpeed offers sparse attention kernels—an instrumental technology to support long sequences of model inputs, whether for text, image, or sound. Compared with the classic dense Transformers, it powers **an order-of-magnitude longer input sequence** and obtains up to 6x faster execution with comparable accuracy. It also outperforms state-of-the-art sparse implementations with 1.5–3x faster execution. Furthermore, our sparse kernels support efficient execution of flexible sparse format and empower users to innovate on their custom sparse structures.  [Read more here](https://www.deepspeed.ai/news/2020/09/08/sparse-attention.html).
@@ -183,9 +184,9 @@ Below we provide a brief feature list, see our detailed [feature overview](https
   * Memory- and compute-efficient sparse kernels
   * Support 10x long sequences than dense
   * Flexible support to different sparse structures
-* [1-bit Adam](https://www.deepspeed.ai/news/2020/09/08/onebit-adam-blog-post.html) and [1-bit LAMB](https://www.deepspeed.ai/tutorials/onebit-lamb/)
+* [1-bit Adam](https://www.deepspeed.ai/news/2020/09/08/onebit-adam-blog-post.html), [0/1 Adam](https://www.deepspeed.ai/tutorials/zero-one-adam/) and [1-bit LAMB](https://www.deepspeed.ai/tutorials/onebit-lamb/)
   * Custom communication collective
-  * Up to 5x communication volume saving
+  * Up to 26x communication volume saving
 * [Additional Memory and Bandwidth Optimizations](https://www.deepspeed.ai/features/#additional-memory-and-bandwidth-optimizations)
   * Smart Gradient Accumulation
   * Communication/Computation Overlap
@@ -246,6 +247,7 @@ comments.
 6. Samyam Rajbhandari, Olatunji Ruwase, Jeff Rasley, Shaden Smith, Yuxiong He. (2021) ZeRO-Infinity: Breaking the GPU Memory Wall for Extreme Scale Deep Learning. [arXiv:2104.07857](https://arxiv.org/abs/2104.07857).
 7. Conglong Li, Ammar Ahmad Awan, Hanlin Tang, Samyam Rajbhandari, Yuxiong He. (2021) 1-bit LAMB: Communication Efficient Large-Scale Large-Batch Training with LAMB's Convergence Speed. [arXiv:2104.06069](https://arxiv.org/abs/2104.06069).
 8. Conglong Li, Minjia Zhang, Yuxiong He. (2021) Curriculum Learning: A Regularization Method for Efficient and Stable Billion-Scale GPT Model Pre-Training. [arXiv:2108.06084](https://arxiv.org/abs/2108.06084).
+9. Yucheng Lu, Conglong Li, Minjia Zhang, Christopher De Sa, Yuxiong He. (2022) Maximizing Communication Efficiency for Large-scale Training via 0/1 Adam. [arXiv:2202.06009](https://arxiv.org/abs/2202.06009).
 
 # Videos
 1. DeepSpeed KDD 2020 Tutorial

@@ -102,6 +102,8 @@ lnav:
         url: /tutorials/one-cycle/
       - title: "One-Bit Adam"
         url: /tutorials/onebit-adam/
+      - title: "Zero-One Adam"
+        url: /tutorials/zero-one-adam/
       - title: "One-Bit LAMB"
         url: /tutorials/onebit-lamb/
       - title: "Pipeline Parallelism"

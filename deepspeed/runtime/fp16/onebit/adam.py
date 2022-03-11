@@ -167,6 +167,8 @@ class OnebitAdam(torch.optim.Optimizer):
                     # Exponential moving average of squared gradient values
                     state['exp_avg_sq'] = torch.zeros_like(p.data)
 
+                if not self.initialize or (self.adam_freeze_key
+                                           and 'worker_error' not in state.keys()):
                     state['tensor_size'] = torch.numel(p.data)
                     state['corrected_tensor_size'] = state['tensor_size']
 
@@ -176,9 +178,6 @@ class OnebitAdam(torch.optim.Optimizer):
                                                             (self.size * self.divider)))
                     state['server_chunk_size'] = state[
                         'corrected_tensor_size'] // self.size
-
-                if not self.initialize or (self.adam_freeze_key
-                                           and 'worker_error' not in state.keys()):
                     torch.cuda.empty_cache()
                     state['worker_error'] = torch.zeros(state['corrected_tensor_size'],
                                                         device=p.device)
