@@ -2145,7 +2145,11 @@ class DeepSpeedEngine(Module):
                         numel_per_bucket=elements_per_buffer)
 
     def buffered_allreduce_fallback(self, grads=None, elements_per_buffer=500000000):
-        non_expert_grads, expert_grads = self._get_gradients_for_reduction()
+        if grads is None:
+            non_expert_grads, expert_grads = self._get_gradients_for_reduction()
+        else:
+            assert not self.has_moe_layers, "attempting to reduce grads in unsupported way w.r.t. MoE"
+            non_expert_grads = grads
 
         self._reduce_non_expert_gradients(non_expert_grads, elements_per_buffer)
 
