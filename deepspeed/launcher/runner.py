@@ -351,7 +351,22 @@ def main(args=None):
                                                  args.exclude)
     env = os.environ.copy()
 
+    # validate that passwordless-ssh is workly properly with this hostfile
+    if multi_node_exec:
+        first_host = list(active_resources.keys())[0]
+        try:
+            subprocess.check_call(
+                f'ssh -o PasswordAuthentication=no {first_host} hostname',
+                stderr=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                shell=True)
+        except subprocess.CalledProcessError:
+            raise RuntimeError(
+                f"Using hostfile at {args.hostfile} but host={first_host} was not reachable via ssh. If you are running with a single node please remove {args.hostfile} or setup passwordless ssh."
+            )
+
     if not args.master_addr:
+        assert multi_node_exec
         first_host = list(active_resources.keys())[0]
         hostname_cmd = [f"ssh {first_host} hostname -I"]
         result = subprocess.check_output(hostname_cmd, shell=True)
