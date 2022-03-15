@@ -1,0 +1,40 @@
+name: nv-torch12-p40
+
+on:
+  push:
+    branches:
+      - 'master'
+      - 'staging**'
+    paths-ignore:
+      - 'docs/**'
+  pull_request:
+    paths-ignore:
+      - 'docs/**'
+
+jobs:
+  unit-tests:
+    runs-on: [self-hosted, nvidia, torch12, p40]
+
+    steps:
+      - uses: actions/checkout@v2
+
+      - name: environment
+        run: |
+          nvidia-smi
+          which python
+          python --version
+          which nvcc
+          nvcc --version
+          python -c "import torch; print('torch:', torch.__version__, torch)"
+          python -c "import torch; print('CUDA available:', torch.cuda.is_available())"
+
+      - name: Install deepspeed
+        run: |
+          pip install .[dev,autotuning]
+          ds_report
+
+      - name: Unit tests
+        run: |
+          if [[ -d ./torch-extensions ]]; then rm -rf ./torch-extensions; fi
+          cd tests
+          TORCH_EXTENSIONS_DIR=./torch-extensions pytest --color=yes --durations=0 --forked --verbose -n 4 unit/

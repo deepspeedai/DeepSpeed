@@ -1,0 +1,48 @@
+name: amd
+
+on:
+  push:
+    branches:
+      - 'master'
+      - 'staging**'
+    paths-ignore:
+      - 'docs/**'
+  pull_request:
+    paths-ignore:
+      - 'docs/**'
+
+jobs:
+  unit-tests:
+    # The type of runner that the job will run on
+    runs-on: [self-hosted, amd]
+
+    # Steps represent a sequence of tasks that will be executed as part of the job
+    steps:
+      # Checks-out your repository under $GITHUB_WORKSPACE, so your job can access it
+      - uses: actions/checkout@v2
+
+      # Runs a single command using the runners shell
+      - name: environment
+        run: |
+          rocm-smi --showhw
+          which python
+          python --version
+          which hipcc
+          hipcc --version
+          python -c "import torch; print('torch:', torch.__version__, torch)"
+          python -c "import torch; print('CUDA available:', torch.cuda.is_available())"
+          sudo apt-get update
+          sudo apt-get install -y libaio-dev
+      # Runs a set of commands using the runners shell
+      - name: Install deepspeed
+        run: |
+          sudo /opt/conda/bin/pip install .[dev,1bit,autotuning]
+          #python -c "from deepspeed.env_report import cli_main; cli_main()"
+          ds_report
+      # Runs a set of commands using the runners shell
+      - name: Unit tests
+        run: |
+          if [[ -d ./torch-extensions ]]; then rm -rf ./torch-extensions; fi
+          cd tests
+          TORCH_EXTENSIONS_DIR=./torch-extensions pytest --color=yes --durations=0 --forked --verbose -x -n 4 -m 'not sequential' unit/
+          TORCH_EXTENSIONS_DIR=./torch-extensions pytest --color=yes --durations=0 --forked --verbose -x -m 'sequential' unit/
