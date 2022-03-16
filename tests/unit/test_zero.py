@@ -1179,3 +1179,46 @@ def test_zero3_param_partitioning_base_bf16(
         _assert_partition_status(ds_engine, {ZeroParamStatus.NOT_AVAILABLE})
 
     _test_zero3_param_partitioning()
+
+
+def test_zero_offload_stage1():
+    config_dict = {
+        "train_batch_size": 4,
+        "gradient_accumulation_steps": 2,
+        "steps_per_print": 1,
+        "optimizer": {
+            "type": "Adam",
+            "params": {
+                "lr": 1e-4
+            }
+        },
+        "fp16": {
+            "enabled": True
+        },
+        "zero_optimization": {
+            "stage": 1,
+            "offload_optimizer": {
+                "device": "cpu"
+            }
+        }
+    }
+
+    hidden_dim = 10
+    model = SimpleModel(hidden_dim)
+
+    @distributed_test(world_size=[2])
+    def _go(model, hidden_dim):
+        model, _, _, _ = deepspeed.initialize(model=model,
+                                              model_parameters=model.parameters(),
+                                              config=config_dict)
+        data_loader = random_dataloader(model=model,
+                                        total_samples=50,
+                                        hidden_dim=hidden_dim,
+                                        device=model.device)
+        torch.distributed.barrier()
+        for n, batch in enumerate(data_loader):
+            loss = model(batch[0], batch[1])
+            model.backward(loss)
+            model.step()
+
+    _go(model=model, hidden_dim=hidden_dim)
