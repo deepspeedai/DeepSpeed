@@ -8,7 +8,6 @@
 #include "ATen/cuda/CUDAContext.h"
 #include "ATen/cuda/detail/IndexUtils.cuh"
 //#include "ATen/Type.h"
-#include <THC/THCGeneral.h>
 #include "ATen/AccumulateType.h"
 
 #include <iostream>
