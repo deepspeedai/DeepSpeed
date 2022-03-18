@@ -266,7 +266,10 @@ class DeepSpeedZeroOptimizer(object):
 
             # push this group to list before modify
             # TODO: Explore simplification that avoids the extra book-keeping by pushing the reordered group
-            self.bit16_groups.append(param_group['params'])
+            trainable_parameters = [
+                param for param in param_group['params'] if param.requires_grad
+            ]
+            self.bit16_groups.append(trainable_parameters)
 
             # Record padding required to align group to world size
             if partition_id == dist.get_world_size(
