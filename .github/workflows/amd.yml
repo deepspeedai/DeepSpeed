@@ -11,6 +11,10 @@ on:
     paths-ignore:
       - 'docs/**'
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   unit-tests:
     # The type of runner that the job will run on
