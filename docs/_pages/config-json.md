@@ -182,7 +182,7 @@ Example of <i>**scheduler**</i>
 
 | Description                                                                                                                   | Default |
 | ----------------------------------------------------------------------------------------------------------------------------- | ------- |
-| During gradient averaging perform communication with selected data type. Buy default it will be determined by selected regime |  None   |
+| During gradient averaging perform communication with selected data type. By default it will be determined by selected regime  |  None   |
 
 <i>**prescale_gradients**</i>: [boolean]
 
