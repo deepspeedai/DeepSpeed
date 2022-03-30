@@ -51,7 +51,10 @@ class HFBertLayerPolicy(DSPolicy):
         if HFBertLayerPolicy._orig_layer_class is None:
             try:
                 import transformers
-                HFBertLayerPolicy._orig_layer_class = transformers.models.bert.modeling_bert.BertLayer
+                HFBertLayerPolicy._orig_layer_class = [
+                    transformers.models.bert.modeling_bert.BertLayer,
+                    transformers.models.roberta.modeling_roberta.RobertaLayer
+                ]
             except:
                 HFBertLayerPolicy._orig_layer_class = None
 
