@@ -125,12 +125,12 @@ overview](https://www.deepspeed.ai/features/) for descriptions and usage.
 * [ZeRO-Offload](https://www.deepspeed.ai/tutorials/zero-offload/)
   * Leverage both CPU/GPU memory for model training
   * Support 10B model training on a single GPU
-* [Ultra-fast dense transformer kernels](https://www.deepspeed.ai/news/2020/05/18/bert-record.html)
-* [Sparse attention](https://www.deepspeed.ai/news/2020/09/08/sparse-attention.html)
+* [Ultra-fast dense transformer kernels](https://www.deepspeed.ai/2020/05/18/bert-record.html)
+* [Sparse attention](https://www.deepspeed.ai/2020/09/08/sparse-attention-news.html)
   * Memory- and compute-efficient sparse kernels
   * Support 10x longer sequences than dense
   * Flexible support to different sparse structures
-* [1-bit Adam](https://www.deepspeed.ai/news/2020/09/08/onebit-adam-blog-post.html), [0/1 Adam](https://www.deepspeed.ai/tutorials/zero-one-adam/) and [1-bit LAMB](https://www.deepspeed.ai/tutorials/onebit-lamb/)
+* [1-bit Adam](https://www.deepspeed.ai/2020/09/08/onebit-adam-blog-post.html), [0/1 Adam](https://www.deepspeed.ai/tutorials/zero-one-adam/) and [1-bit LAMB](https://www.deepspeed.ai/tutorials/onebit-lamb/)
   * Custom communication collective
   * Up to 26x communication volume saving
 * [Additional Memory and Bandwidth Optimizations](https://www.deepspeed.ai/features/#additional-memory-and-bandwidth-optimizations)

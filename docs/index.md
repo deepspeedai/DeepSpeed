@@ -176,7 +176,7 @@ Below we provide a brief feature list, see our detailed [feature overview](https
   * Leverage both CPU/GPU memory for model training
   * Support 10B model training on a single GPU
 * [Ultra-fast dense transformer kernels](https://www.deepspeed.ai/2020/05/18/bert-record.html)
-* [Sparse attention](https://www.deepspeed.ai/2020/09/08/sparse-attention.html)
+* [Sparse attention](https://www.deepspeed.ai/2020/09/08/sparse-attention-news.html)
   * Memory- and compute-efficient sparse kernels
   * Support 10x long sequences than dense
   * Flexible support to different sparse structures
