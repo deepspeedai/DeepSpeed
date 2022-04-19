@@ -9,7 +9,13 @@ from torch._six import inf
 from packaging import version as pkg_version
 
 from deepspeed.runtime.fp16.loss_scaler import LossScaler, DynamicLossScaler
-from deepspeed.runtime.utils import bwc_tensor_model_parallel_rank, get_global_norm, see_memory_usage, is_model_parallel_parameter
+from deepspeed.runtime.utils import (bwc_tensor_model_parallel_rank,
+                                     get_global_norm,
+                                     see_memory_usage,
+                                     is_model_parallel_parameter,
+                                     align_dense_tensors,
+                                     all_gather_dp_groups)
+
 from deepspeed.runtime.zero.config import ZERO_OPTIMIZATION_GRADIENTS
 from deepspeed.runtime.zero.offload_constants import OFFLOAD_CPU_DEVICE, OFFLOAD_OPTIMIZER
 from deepspeed.ops.adam import DeepSpeedCPUAdam
@@ -17,11 +23,12 @@ from deepspeed.ops.op_builder import UtilsBuilder
 from deepspeed.utils import logger
 from deepspeed.moe.utils import is_moe_param
 from deepspeed.git_version_info import version
-
+from deepspeed.runtime.constants import PIPE_REPLICATED
 from deepspeed.checkpoint.constants import (DS_VERSION,
                                             PARTITION_COUNT,
                                             SINGLE_PARTITION_OF_FP32_GROUPS,
                                             BASE_OPTIMIZER_STATE,
+                                            CLIP_GRAD,
                                             ZERO_STAGE)
 
 # Toggle this to true to enable correctness test
@@ -794,19 +801,7 @@ class DeepSpeedZeroOptimizer(object):
 
     # create a flat tensor aligned at the alignment boundary
     def flatten_dense_tensors_aligned(self, tensor_list, alignment):
-        num_elements = sum(t.numel() for t in tensor_list)
-        remaining = num_elements % alignment
-
-        if remaining:
-            elements_to_add = alignment - remaining
-            pad_tensor = torch.zeros(elements_to_add,
-                                     device=tensor_list[0].device,
-                                     dtype=tensor_list[0].dtype)
-            padded_tensor_list = tensor_list + [pad_tensor]
-        else:
-            padded_tensor_list = tensor_list
-
-        return self.flatten(padded_tensor_list)
+        return self.flatten(align_dense_tensors(tensor_list, alignment))
 
     ############### Independent Partition Gradient ########################
     def reduce_independent_p_g_buckets_and_remove_grads(self, param, i):
@@ -1117,7 +1112,7 @@ class DeepSpeedZeroOptimizer(object):
         norm_type = 2.0
         for p in params:
             # Pipeline parallelism may replicate parameters. Avoid multi-counting.
-            if hasattr(p, 'ds_pipe_replicated') and p.ds_pipe_replicated:
+            if hasattr(p, PIPE_REPLICATED) and p.ds_pipe_replicated:
                 continue
 
             if is_model_parallel_parameter(p) or (self.model_parallel_rank == 0):
@@ -1530,7 +1525,7 @@ class DeepSpeedZeroOptimizer(object):
             #    logger.info(f"Total Norm beginning {total_norm}")
             for g, p in zip(gradients, params):
                 # Pipeline parallelism may replicate parameters. Avoid multi-counting.
-                if hasattr(p, 'ds_pipe_replicated') and p.ds_pipe_replicated:
+                if hasattr(p, PIPE_REPLICATED) and p.ds_pipe_replicated:
                     continue
                 if is_model_parallel_parameter(p) or (self.model_parallel_rank == 0):
                     param_norm = g.data.double().norm(2)
@@ -1717,8 +1712,13 @@ class DeepSpeedZeroOptimizer(object):
         if self.has_moe_layers:
             self._average_expert_grad_norms(norm_groups)
 
-        self._global_grad_norm = get_global_norm(norm_list=norm_groups)
-        self.unscale_and_clip_grads(single_partition_grad_groups, self._global_grad_norm)
+        scaled_global_grad_norm = get_global_norm(norm_list=norm_groups)
+        self.unscale_and_clip_grads(single_partition_grad_groups,
+                                    scaled_global_grad_norm)
+
+        # Stash unscaled gradient norm
+        self._global_grad_norm = scaled_global_grad_norm / self.loss_scale
+
         self.stop_timers([OPTIMIZER_GRADIENTS])
 
         self.start_timers([OPTIMIZER_STEP])
@@ -1751,41 +1751,12 @@ class DeepSpeedZeroOptimizer(object):
 
         self.start_timers([OPTIMIZER_ALLGATHER])
         # gather the updated weights from everyone
-        for group_id, partitioned_params in enumerate(self.parallel_partitioned_bit16_groups):
+        all_gather_dp_groups(
+            partitioned_param_groups=self.parallel_partitioned_bit16_groups,
+            dp_process_group=self.real_dp_process_group,
+            start_alignment_factor=self.nccl_start_alignment_factor,
+            allgather_bucket_size=self.allgather_bucket_size)
 
-            # Sequential AllGather Best of both worlds
-            dp_world_size = dist.get_world_size(
-                group=self.real_dp_process_group[group_id])
-            num_shards = max(
-                1,
-                partitioned_params[partition_id].numel() * dp_world_size //
-                self.allgather_bucket_size)
-
-            shard_size = partitioned_params[partition_id].numel() // num_shards
-
-            # Enforce nccl/rccl alignment of start location of each shard
-            shard_size = shard_size - (shard_size % self.nccl_start_alignment_factor)
-
-            num_elements = shard_size
-
-            assert shard_size * num_shards <= partitioned_params[partition_id].numel()
-
-            for shard_id in range(num_shards):
-
-                if shard_id == (num_shards - 1):
-                    num_elements = partitioned_params[partition_id].numel(
-                    ) - shard_id * shard_size
-
-                shard_list = []
-                for dp_id in range(dp_world_size):
-                    curr_shard = partitioned_params[dp_id].narrow(
-                        0,
-                        shard_id * shard_size,
-                        num_elements).detach()
-                    shard_list.append(curr_shard)
-                dist.all_gather(shard_list,
-                                shard_list[partition_id],
-                                group=self.real_dp_process_group[group_id])
         self.stop_timers([OPTIMIZER_ALLGATHER])
 
         # TODO: we probably don't need this? just to be safe
@@ -2005,6 +1976,7 @@ class DeepSpeedZeroOptimizer(object):
         state_dict['loss_scaler'] = self.loss_scaler
         state_dict['dynamic_loss_scale'] = self.dynamic_loss_scale
         state_dict['overflow'] = self.overflow
+        state_dict[CLIP_GRAD] = self.clip_grad
 
         if self.elastic_checkpoint:
             state_dict[BASE_OPTIMIZER_STATE] = self._get_base_optimizer_state()
@@ -2159,9 +2131,11 @@ class DeepSpeedZeroOptimizer(object):
         # I think it should actually be ok to reload the optimizer before the model.
         dp_rank = dist.get_rank(group=self.dp_process_group)
         current_rank_sd = state_dict_list[dp_rank]
-        self.loss_scaler = current_rank_sd['loss_scaler']
-        self.dynamic_loss_scale = current_rank_sd['dynamic_loss_scale']
-        self.overflow = current_rank_sd['overflow']
+        self.loss_scaler = current_rank_sd.get('loss_scaler', self.loss_scaler)
+        self.dynamic_loss_scale = current_rank_sd.get('dynamic_loss_scale',
+                                                      self.dynamic_loss_scale)
+        self.overflow = current_rank_sd.get('overflow', self.overflow)
+        self.clip_grad = current_rank_sd.get(CLIP_GRAD, self.clip_grad)
 
         ckpt_version = current_rank_sd.get(DS_VERSION, False)
         assert ckpt_version, f"Empty ds_version in checkpoint, not clear how to proceed"

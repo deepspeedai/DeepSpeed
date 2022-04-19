@@ -2614,7 +2614,10 @@ class DeepSpeedZeroOptimizer_Stage3(object):
             return
 
         norm_groups = self._get_norm_groups()
-        self._global_grad_norm = get_global_norm(norm_list=norm_groups)
+        scaled_global_grad_norm = get_global_norm(norm_list=norm_groups)
+
+        # Stash unscaled gradient norm
+        self._global_grad_norm = scaled_global_grad_norm / self.loss_scale
 
         timer_names = set()
 
@@ -2628,7 +2631,7 @@ class DeepSpeedZeroOptimizer_Stage3(object):
             self._prepare_sub_group(sub_group_id, timer_names)
 
             #scale the fp32 gradients
-            self.unscale_and_clip_grads(sub_group_id, self._global_grad_norm)
+            self.unscale_and_clip_grads(sub_group_id, scaled_global_grad_norm)
 
             #apply the optimizer step on the sub group and copy fp32 parameters to fp16
             self._optimizer_step(sub_group_id)

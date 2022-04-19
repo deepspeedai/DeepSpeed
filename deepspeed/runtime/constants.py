@@ -446,3 +446,8 @@ The last incomplete batch can be dropped by setting:
 '''
 DATALOADER_DROP_LAST = "dataloader_drop_last"
 DATALOADER_DROP_LAST_DEFAULT = False
+
+#########################################
+# PIPELINE PARALLELISM
+#########################################
+PIPE_REPLICATED = 'ds_pipe_replicated'

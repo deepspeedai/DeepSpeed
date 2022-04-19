@@ -4,6 +4,7 @@
 *.swp
 *.log
 deepspeed/git_version_info_installed.py
+__pycache__
 
 # Build + installation data
 build/

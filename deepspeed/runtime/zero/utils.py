@@ -27,6 +27,10 @@ def _initialize_parameter_parallel_groups(parameter_parallel_size=None):
     return my_group
 
 
+class ZeRORuntimeException(Exception):
+    pass
+
+
 ZERO_SUPPORTED_OPTIMIZERS = [
     torch.optim.Adam,
     torch.optim.AdamW,
@@ -81,7 +85,3 @@ def assert_ints_same_as_other_ranks(ints: List[int]) -> None:
     if ints != rank0_ints:
         raise RuntimeError(f"disagreement between rank0 and rank{dist.get_rank()}: "
                            f"rank0: {rank0_ints}, rank{dist.get_rank()}: {ints}")
-
-
-class ZeRORuntimeException(Exception):
-    pass

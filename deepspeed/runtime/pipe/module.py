@@ -419,6 +419,13 @@ class PipelineModule(nn.Module):
             weight = getattr(self.tied_modules[key], comm['weight_attr'])
             dist.all_reduce(weight.grad, group=comm['group'])
 
+    def get_tied_weights_and_groups(self):
+        weight_group_list = []
+        for key, comm in self.tied_comms.items():
+            weight = getattr(self.tied_modules[key], comm['weight_attr'])
+            weight_group_list.append((weight, comm['group']))
+        return weight_group_list
+
     def _synchronize_tied_weights(self):
         for key, comm in self.tied_comms.items():
             dist.broadcast(
