@@ -2329,7 +2329,7 @@ class DeepSpeedEngine(Module):
         self.module.load_state_dict(state_dict, strict=strict)
 
     def _get_zero_ckpt_prefix(self, dp_rank, bf16_mode):
-        return f'bf16_zero_pp_rank_{dp_rank}' if bf16_mode else f'zero_pp_rank_{dp_rank}'
+        return f'{"bf16_" if bf16_mode else ""}zero_pp_rank_{dp_rank}'
 
     def _get_rank_zero_ckpt_name(self,
                                  checkpoints_path,
@@ -2341,7 +2341,7 @@ class DeepSpeedEngine(Module):
         zero_ckpt_name = os.path.join(
             checkpoints_path,
             str(tag),
-            file_prefix + "_mp_rank_{:02d}".format(mp_rank) + "_optim_states.pt",
+            f"{file_prefix}_mp_rank_{mp_rank:02d}_optim_states.pt",
         )
         return zero_ckpt_name
 
@@ -2360,7 +2360,7 @@ class DeepSpeedEngine(Module):
             mp_rank_str = mp_placeholder
         else:
             mp_rank = 0 if self.mpu is None else self.mpu.get_model_parallel_rank()
-            mp_rank_str = "{:02d}".format(mp_rank)
+            mp_rank_str = f"{mp_rank:02d}"
 
         if self.zero_optimization_partition_weights():
             filename = "zero_pp_rank_{}".format(
@@ -2368,7 +2368,7 @@ class DeepSpeedEngine(Module):
             ckpt_name = os.path.join(
                 checkpoints_path,
                 str(tag),
-                filename + "_mp_rank_" + mp_rank_str + "_model_states.pt",
+                f"{filename}_mp_rank_{mp_rank_str}_model_states.pt",
             )
         else:
             ckpt_name = os.path.join(
