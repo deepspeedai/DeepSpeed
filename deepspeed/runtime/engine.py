@@ -1568,10 +1568,6 @@ class DeepSpeedEngine(Module):
         loss = self.module(*inputs, **kwargs)
 
         if self.zero_optimization_partition_weights():
-            # Reset the ZeRO-3 state if we are only doing forward-passes (ie evaluation).
-            if not torch._C.is_grad_enabled():
-                self.optimizer.param_coordinator.reset_step()
-
             # Disable automated discovery of external parameters
             for module in self.module.modules():
                 module._parameters._in_forward = False
