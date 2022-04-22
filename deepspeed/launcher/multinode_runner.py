@@ -70,7 +70,7 @@ class PDSHRunner(MultiNodeRunner):
 
         exports = ""
         for key, val in self.exports.items():
-            exports += f"export {key}={quote(val)}; "
+            exports += "export {}={}; ".format(key, val)
 
         # https://linux.die.net/man/1/pdsh
         # %n will be replaced by pdsh command
@@ -141,7 +141,7 @@ class OpenMPIRunner(MultiNodeRunner):
 
         export_cmd = []
         for k, v in self.exports.items():
-            export_cmd += ['-x', f'{k}={quote(v)}']
+            export_cmd += ['-x', "{}={}".format(k, v)]
 
         python_exec = []
         if not self.args.no_python:
@@ -231,7 +231,7 @@ class MVAPICHRunner(MultiNodeRunner):
 
         export_cmd = []
         for k, v in self.exports.items():
-            export_cmd += ['-env', f'{k}={quote(v)}']
+            export_cmd += ['-env', "{}={}".format(k, v)]
 
         python_exec = []
         if not self.args.no_python:
