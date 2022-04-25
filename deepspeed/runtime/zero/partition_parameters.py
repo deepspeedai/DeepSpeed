@@ -699,7 +699,7 @@ class Init(InsertPostInitMethodToModuleSubClasses):
 
         # Enable fp16 param swapping to NVMe
         if self.remote_device == OFFLOAD_NVME_DEVICE:
-            self.param_swapper = AsyncPartitionedParameterSwapper(_ds_config)
+            self.param_swapper = AsyncPartitionedParameterSwapper(_ds_config, self.dtype)
         else:
             self.param_swapper = None
 
@@ -877,7 +877,6 @@ class Init(InsertPostInitMethodToModuleSubClasses):
                 instrument_w_nvtx(torch.cat)(
                     [p.ds_tensor.to(torch.cuda.current_device()) for p in params],
                     out=partitions[self.rank])
-
                 handle = torch_allgather_fn(partitions[self.rank],
                                             flat_tensor,
                                             self.ds_process_group)

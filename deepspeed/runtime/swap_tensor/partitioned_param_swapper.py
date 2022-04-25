@@ -6,6 +6,7 @@ Functionality of swapping tensors to/from (NVMe) storage devices.
 """
 
 import os
+import shutil
 from enum import Enum
 import torch
 import torch.distributed as dist
@@ -34,10 +35,11 @@ class PartitionedParamStatus(Enum):
 
 
 class AsyncPartitionedParameterSwapper(object):
-    def __init__(self, ds_config):
+    def __init__(self, ds_config, model_dtype):
 
         aio_op = AsyncIOBuilder().load(verbose=False)
         self.aio_handle = aio_op.aio_handle
+        self.dtype = model_dtype
 
         #set swap buffers, create aio handles
         self._configure_aio(ds_config)
@@ -83,13 +85,15 @@ class AsyncPartitionedParameterSwapper(object):
 
     def _configure_aio(self, ds_config):
         self.swap_config = ds_config.zero_config.offload_param
+        torch_dtype_string = str(self.dtype).split(".")[1]
         self.swap_folder = os.path.join(self.swap_config[OFFLOAD_PARAM_NVME_PATH],
                                         'zero_stage_3',
-                                        'fp16params',
+                                        f'{torch_dtype_string}params',
                                         f'rank{dist.get_rank()}')
+        shutil.rmtree(self.swap_folder, ignore_errors=True)
         os.makedirs(self.swap_folder, exist_ok=True)
 
-        self.swap_element_size = torch.tensor([], dtype=torch.half).element_size()
+        self.swap_element_size = torch.tensor([], dtype=self.dtype).element_size()
 
         self.aio_config = ds_config.aio_config
 
@@ -107,7 +111,7 @@ class AsyncPartitionedParameterSwapper(object):
         self.reserved_buffer_ids = []
         self.buffers = torch.empty(int(self.aligned_elements_per_buffer *
                                        self.param_buffer_count),
-                                   dtype=torch.half,
+                                   dtype=self.dtype,
                                    pin_memory=True,
                                    requires_grad=False)
 
@@ -293,8 +297,9 @@ class AsyncPartitionedParameterSwapper(object):
 
         if swap_in_buffers is None:
             if len(self.available_buffer_ids) < len(swap_in_paths):
+                ids = [p.ds_id for p in params]
                 print_rank_0(
-                    f'Not enough swap in buffers {len(self.available_buffer_ids)} for params {len(swap_in_paths)}',
+                    f'Not enough swap in buffers {len(self.available_buffer_ids)} for {len(swap_in_paths)} params, ids = {ids}',
                     force=True)
                 print_rank_0(
                     f'Num inflight: params {len(self.inflight_params)}, buffers {len(self.inflight_swap_in_buffers)}, numel = {self.inflight_numel}',
@@ -392,7 +397,7 @@ class AsyncPartitionedParameterSwapper(object):
             [self._io_aligned_numel(numel) for numel in partition_num_elems])
         self.partitioned_swap_buffer = torch.zeros(aligned_numel,
                                                    device='cpu',
-                                                   dtype=torch.half).pin_memory()
+                                                   dtype=self.dtype).pin_memory()
         self.partitioned_swap_pool = SwapBufferPool([self.partitioned_swap_buffer])
 
     def swap_out_partitioned_params(self, dst_fp16_params, src_fp32_params):

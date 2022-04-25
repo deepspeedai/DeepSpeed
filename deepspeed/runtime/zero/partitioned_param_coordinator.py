@@ -33,6 +33,15 @@ def iter_params(module: Module, recurse=False) -> Iterable[Parameter]:
     return map(lambda pair: pair[1], get_all_parameters(module, recurse))
 
 
+class TraceMode(Enum):
+    # Record trace of the network during a single forward+backward (for training) or forward (for inference)
+    RECORD = 1
+    # Use recorded network trace to optimize current forward+backward or forward
+    COMPLETE = 2
+    # Recorded trace does not match current forward+backward or forward pass.
+    INVALID = 3
+
+
 class PartitionedParameterCoordinator:
     """Handles partitioning and gathering of parameters."""
     class __InflightParamRegistry(UserDict):
@@ -65,9 +74,8 @@ class PartitionedParameterCoordinator:
         self.__inflight_param_registry = __class__.__InflightParamRegistry()
         # keeps track of the number of submodules invoked so far.
         self.__step_id: int = 0
-        # whether or not we have completed a trace of the entire network. This should
-        # always be true after the first forward pass + backward pass.
-        self.trace_complete: bool = False
+        # network tracing mode
+        self.__trace_mode: TraceMode = TraceMode.RECORD
         # sequence of submodules/parameters in forward pass + backward pass
         self.__submodule_order: Iterable[Module] = []
         self.__param_order: Iterable[__class__.__ParamInTrace] = []
@@ -110,13 +118,46 @@ class PartitionedParameterCoordinator:
     Bookkeeping operations used to track where we are in the forward/backward pass
     """
 
-    def record_trace(self, sub_module: Module) -> None:
-        """adds sub module to trace"""
-        if self.trace_complete:
-            raise RuntimeError(
-                "attempted to record trace when trace was already complete")
+    def _clear_trace_structures(self) -> None:
+        self.__submodule_order = []
+        self.__param_order = []
+        self.__most_recent_step_id_param_fetched_for = collections.defaultdict(
+            lambda: int(-1e10))
+        self.__param_queue = None
 
+    def is_complete_trace(self) -> bool:
+        return self.__trace_mode == TraceMode.COMPLETE
+
+    def is_invalid_trace(self) -> bool:
+        return self.__trace_mode == TraceMode.INVALID
+
+    def is_record_trace(self) -> bool:
+        return self.__trace_mode == TraceMode.RECORD
+
+    def _invalidate_trace(self) -> None:
+        if self.is_invalid_trace():
+            raise RuntimeError("attempted to invalidate already invalid trace")
+        self.__trace_mode = TraceMode.INVALID
+        self._clear_trace_structures()
+
+    def trace_prologue(self, sub_module: Module) -> None:
+        if self.is_complete_trace():
+            # sub_module must match expectation else invalidate trace cache
+            if sub_module != self.__submodule_order[self.__step_id]:
+                self._invalidate_trace()
+
+    def record_module(self, sub_module: Module) -> None:
+        """adds sub module to trace"""
+        if not self.is_record_trace():
+            raise RuntimeError(
+                f"attempted to record trace when status = {self.__trace_mode}")
         self.__submodule_order.append(sub_module)
+
+    def record_parameters(self, sub_module: Module) -> None:
+        """adds sub module to trace"""
+        if not self.is_record_trace():
+            raise RuntimeError(
+                f"attempted to record trace when status = {self.__trace_mode}")
         for param in sorted(set(iter_params(sub_module)), key=lambda p: p.ds_id):
             self.__param_order.append(
                 __class__.__ParamInTrace(param=param,
@@ -129,19 +170,25 @@ class PartitionedParameterCoordinator:
                 f"still have inflight params "
                 f"{[p.ds_summary for p in self.__inflight_param_registry.keys()]}")
 
-        if not self.trace_complete:
-            # make sure that recorded parameter and submodule orders are
+        if not self.is_complete_trace():  # not self.trace_complete:
+            # Make sure that recorded parameter and submodule orders are
             # identical across ranks
             assert_ints_same_as_other_ranks([m.id for m in self.__submodule_order])
             assert_ints_same_as_other_ranks([p.param.ds_id for p in self.__param_order])
             assert_ints_same_as_other_ranks(
                 [p.step_id_last_used_at for p in self.__param_order])
 
-            self.__submodule_order = tuple(self.__submodule_order)  # freeze
-            self.__param_order = tuple(self.__param_order)  # freeze
-            self.trace_complete = True
-            print_rank_0(f"completed trace: {[m.id for m in self.__submodule_order]}",
-                         force=False)
+            if self.is_record_trace():
+                # Successfully recorded a trace
+                self.__submodule_order = tuple(self.__submodule_order)  # freeze
+                self.__param_order = tuple(self.__param_order)  # freeze
+                self.__trace_mode = TraceMode.COMPLETE  # self.trace_complete = True
+                print_rank_0(
+                    f"completed trace: {[m.id for m in self.__submodule_order]}",
+                    force=False)
+            else:
+                # Enable trace recording for next forward/backward pass
+                self.__trace_mode = TraceMode.RECORD
 
         self.__param_queue = collections.deque(self.__param_order)  # reset fetch queue
         self.__most_recent_step_id_param_fetched_for = collections.defaultdict(
@@ -199,9 +246,8 @@ class PartitionedParameterCoordinator:
         torch.cuda.current_stream().wait_stream(self.__allgather_stream)
 
         # kick off parameter prefetches for upcoming modules
-        # don't prefetch if we dont have a completed model trace, or if we aren't
-        # training (throws off the tracing and don't want to prefetch modules for bwd)
-        if self.trace_complete and current_submodule.training:
+        # don't prefetch if we dont have a completed model trace
+        if self.is_complete_trace():
             # go through the parameters we need for the current module and pop them
             # off the fetch queue so that they aren't prefetched later.
             # if params have already been popped off the fetch queue by earlier
@@ -228,24 +274,26 @@ class PartitionedParameterCoordinator:
                 )
 
             # kick off all gather for params in the next few submodules (prefetch)
-            max_params_to_prefetch = min(
-                self.__max_n_available_params - self.__n_available_params,
-                self.__prefetch_bucket_sz)
-            params_to_prefetch = set()
-            numel_prefetching = 0
-            while self.__param_queue and numel_prefetching < max_params_to_prefetch:
-                param_in_trace: __class__.__ParamInTrace = self.__param_queue.popleft()
-                self.__most_recent_step_id_param_fetched_for[
-                    param_in_trace.param] = param_in_trace.step_id_last_used_at
-                if param_in_trace.param not in params_to_prefetch:
-                    params_to_prefetch.add(param_in_trace.param)
-                    numel_prefetching += param_in_trace.param.ds_numel
-            for param in params_to_prefetch:
-                debug_rank0(f"-prefetch: {param.ds_summary()}")
-            self.__all_gather_params(params_to_prefetch)
+            if self.__prefetch_bucket_sz > 0:
+                max_params_to_prefetch = min(
+                    self.__max_n_available_params - self.__n_available_params,
+                    self.__prefetch_bucket_sz)
+                params_to_prefetch = set()
+                numel_prefetching = 0
+                while self.__param_queue and numel_prefetching < max_params_to_prefetch:
+                    param_in_trace: __class__.__ParamInTrace = self.__param_queue.popleft(
+                    )
+                    self.__most_recent_step_id_param_fetched_for[
+                        param_in_trace.param] = param_in_trace.step_id_last_used_at
+                    if param_in_trace.param not in params_to_prefetch:
+                        params_to_prefetch.add(param_in_trace.param)
+                        numel_prefetching += param_in_trace.param.ds_numel
+                for param in params_to_prefetch:
+                    debug_rank0(f"-prefetch: {param.ds_summary()}")
+                self.__all_gather_params(params_to_prefetch)
 
-            if self.__prefetch_nvme:
-                self.__prefetch_nvme_param_partitions()
+                if self.__prefetch_nvme:
+                    self.__prefetch_nvme_param_partitions()
 
         self.__step_id += 1
 
@@ -256,9 +304,8 @@ class PartitionedParameterCoordinator:
         be released."""
         params_to_release = (self.__params_to_release(submodule,
                                                       self.__step_id)
-                             if self.trace_complete else set(
+                             if self.is_complete_trace() else set(
                                  p.ds_id for p in iter_params(submodule)))
-
         for param in iter_params(submodule):
             param.ds_active_sub_modules.discard(submodule.id)
             if param.ds_id in params_to_release and not param.is_external_param:
@@ -311,7 +358,7 @@ class PartitionedParameterCoordinator:
     def __params_to_release(self,
                             submodule_to_release: Module,
                             step_id: int) -> Set[int]:
-        if not self.trace_complete:
+        if not self.is_complete_trace():
             raise RuntimeError("expected trace to be complete")
 
         params_to_release = set(p.ds_id for p in iter_params(submodule_to_release)
@@ -335,7 +382,7 @@ class PartitionedParameterCoordinator:
         """swap in parameter partitions from nvme for those parameters that will be used
         after the ones that are already being prefetched into full parameters
         """
-        if not self.trace_complete:
+        if not self.is_complete_trace():
             return
 
         numel_in_flight = sum(param.ds_numel for param in self.__inflight_param_registry)
