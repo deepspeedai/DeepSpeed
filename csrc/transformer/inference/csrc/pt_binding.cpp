@@ -233,13 +233,13 @@ at::Tensor ds_bias_residual(at::Tensor& input, at::Tensor& residual, at::Tensor&
     auto residual_cont = residual.contiguous();
 
     int bsz = input_cont.size(0) * input_cont.size(1);
-    launch_bias_residual((T*)input_cont.data_ptr(),
-                         (T*)residual_cont.data_ptr(),
-                         (T*)bias.data_ptr(),
-                         bsz,
-                         input_cont.size(2),
-                         (bias.size(0) > 1),
-                         Context::Instance().GetCurrentStream());
+    // launch_bias_residual((T*)input_cont.data_ptr(),
+    //                      (T*)residual_cont.data_ptr(),
+    //                      (T*)bias.data_ptr(),
+    //                      bsz,
+    //                      input_cont.size(2),
+    //                      (bias.size(0) > 1),
+    //                      Context::Instance().GetCurrentStream());
     return input_cont;
 }
 
@@ -517,7 +517,6 @@ at::Tensor ds_vector_matmul_int8(at::Tensor& input,
 
 template <typename T>
 void mlp_unfused_cublas(at::Tensor& output,
-                        at::Tensor& residual_add,
                         at::Tensor& input,
                         at::Tensor& residual,
                         at::Tensor& input_bias,
@@ -526,13 +525,14 @@ void mlp_unfused_cublas(at::Tensor& output,
                         at::Tensor& gamma,
                         at::Tensor& beta,
                         const float epsilon,
-                        bool preLayerNorm)
+                        bool preLayerNorm,
+                        bool mlp_after_attn)
 {
     int bsz = input.size(0) * input.size(1);
-    auto inp_norm = preLayerNorm ? at::empty_like(input) : residual_add;
+    auto inp_norm = at::empty_like(input);
 
     launch_residual_layer_norm((T*)inp_norm.data_ptr(),
-                               (T*)residual_add.data_ptr(),
+                               (T*)nullptr,
                                (T*)input.data_ptr(),
                                (T*)residual.data_ptr(),
                                (T*)input_bias.data_ptr(),
@@ -542,6 +542,7 @@ void mlp_unfused_cublas(at::Tensor& output,
                                bsz,
                                input.size(2),
                                preLayerNorm,
+                               mlp_after_attn,
                                Context::Instance().GetCurrentStream());
 
     float alpha = (T)1.0;
@@ -566,15 +567,16 @@ void mlp_unfused_cublas(at::Tensor& output,
                      Context::Instance().GetCurrentStream());
 }
 template <typename T>
-std::vector<at::Tensor> ds_mlp_gemm(at::Tensor& input,
-                                    at::Tensor& residual,
-                                    at::Tensor& input_bias,
-                                    at::Tensor& weight,
-                                    at::Tensor& bias,
-                                    at::Tensor& gamma,
-                                    at::Tensor& beta,
-                                    const float epsilon,
-                                    bool preLayerNorm)
+at::Tensor ds_mlp_gemm(at::Tensor& input,
+                       at::Tensor& residual,
+                       at::Tensor& input_bias,
+                       at::Tensor& weight,
+                       at::Tensor& bias,
+                       at::Tensor& gamma,
+                       at::Tensor& beta,
+                       const float epsilon,
+                       bool preLayerNorm,
+                       bool mlp_after_attn)
 {
     auto input_cont = input.contiguous();
     auto options = at::TensorOptions()
@@ -584,12 +586,10 @@ std::vector<at::Tensor> ds_mlp_gemm(at::Tensor& input,
                        .requires_grad(false);
 
     auto output = at::empty({input_cont.size(0), input_cont.size(1), weight.size(1)}, options);
-    auto residual_add = at::empty_like(input_cont);
     int bsz = input_cont.size(0) * input_cont.size(1);
 
     mlp_unfused_cublas<T>(output,
-                          residual_add,
-                          input,
+                          mlp_after_attn ? input : residual,
                           residual,
                           input_bias,
                           weight,
@@ -597,9 +597,10 @@ std::vector<at::Tensor> ds_mlp_gemm(at::Tensor& input,
                           gamma,
                           beta,
                           epsilon,
-                          preLayerNorm);
+                          preLayerNorm,
+                          mlp_after_attn);
 
-    return {output, residual_add};
+    return output;
 }
 
 template <typename T>
@@ -629,18 +630,18 @@ std::vector<at::Tensor> ds_mlp_gemm_int8(at::Tensor& input,
 
     auto residual_add = (preLayerNorm ? at::empty_like(input_cont) : inp_norm);
     // computing the blocking across K dimension
-    launch_residual_layer_norm((T*)inp_norm.data_ptr(),
-                               (T*)residual_add.data_ptr(),
-                               (T*)input_cont.data_ptr(),
-                               (T*)residual.data_ptr(),
-                               (T*)input_bias.data_ptr(),
-                               (T*)gamma.data_ptr(),
-                               (T*)beta.data_ptr(),
-                               epsilon,
-                               bsz,
-                               input_cont.size(2),
-                               preLayerNorm,
-                               Context::Instance().GetCurrentStream());
+    // launch_residual_layer_norm((T*)inp_norm.data_ptr(),
+    //                           (T*)residual_add.data_ptr(),
+    //                           (T*)input_cont.data_ptr(),
+    //                           (T*)residual.data_ptr(),
+    //                           (T*)input_bias.data_ptr(),
+    //                           (T*)gamma.data_ptr(),
+    //                           (T*)beta.data_ptr(),
+    //                           epsilon,
+    //                           bsz,
+    //                           input_cont.size(2),
+    //                           preLayerNorm,
+    //                           Context::Instance().GetCurrentStream());
 
     quantized_gemm<T>(output, inp_norm, weight, q_scale, groups, 0);
     launch_bias_gelu((T*)output.data_ptr(),
@@ -710,30 +711,58 @@ at::Tensor fused_gemm_gelu(at::Tensor& input,
     return output;
 }
 
-void gptj_residual_add(at::Tensor& output,
+void residual_add_bias(at::Tensor& output,
                        at::Tensor& input,
                        at::Tensor& attention_output,
-                       at::Tensor& output_b)
+                       at::Tensor& output_b,
+                       at::Tensor& attention_b,
+                       int mp_size,
+                       bool mlp_after_attn)
 {
     int bsz = input.size(0) * input.size(1);
     int hidden_size = input.size(2);
     // cudaStreamWaitEvent(
     //    Context::Instance().GetCurrentStream(), Context::Instance().GetCompEvent(2), 0);
     if (input.scalar_type() == at::kFloat)
-        launch_gptj_residual_add<float>((float*)input.data_ptr(),
-                                        (float*)output.data_ptr(),
-                                        (float*)attention_output.data_ptr(),
-                                        (float*)output_b.data_ptr(),
-                                        hidden_size,
-                                        bsz,
-                                        Context::Instance().GetCurrentStream());
+        if (mlp_after_attn)
+            launch_bias_residual((float*)input.data_ptr(),
+                                 (float*)output.data_ptr(),
+                                 (float*)attention_output.data_ptr(),
+                                 (float*)output_b.data_ptr(),
+                                 (float*)attention_b.data_ptr(),
+                                 bsz,
+                                 hidden_size,
+                                 mp_size,
+                                 Context::Instance().GetCurrentStream());
+        else
+            launch_gptj_residual_add<float>((float*)input.data_ptr(),
+                                            (float*)output.data_ptr(),
+                                            (float*)attention_output.data_ptr(),
+                                            (float*)output_b.data_ptr(),
+                                            (float*)attention_b.data_ptr(),
+                                            hidden_size,
+                                            bsz,
+                                            mp_size,
+                                            Context::Instance().GetCurrentStream());
+    else if (mlp_after_attn)
+        launch_bias_residual((__half*)input.data_ptr(),
+                             (__half*)output.data_ptr(),
+                             (__half*)attention_output.data_ptr(),
+                             (__half*)output_b.data_ptr(),
+                             (__half*)attention_b.data_ptr(),
+                             bsz,
+                             hidden_size,
+                             mp_size,
+                             Context::Instance().GetCurrentStream());
     else
         launch_gptj_residual_add<__half>((__half*)input.data_ptr(),
                                          (__half*)output.data_ptr(),
                                          (__half*)attention_output.data_ptr(),
                                          (__half*)output_b.data_ptr(),
+                                         (__half*)attention_b.data_ptr(),
                                          hidden_size,
                                          bsz,
+                                         mp_size,
                                          Context::Instance().GetCurrentStream());
 }
 
@@ -741,7 +770,9 @@ std::vector<at::Tensor> apply_rotary_pos_emb(at::Tensor& mixed_query,
                                              at::Tensor& key_layer,
                                              unsigned rotary_dim,
                                              unsigned offset,
-                                             unsigned num_heads)
+                                             unsigned num_heads,
+                                             bool rotate_half,
+                                             bool rotate_every_two)
 {
     auto query_cont = mixed_query.contiguous();
     auto key_cont = key_layer.contiguous();
@@ -759,6 +790,8 @@ std::vector<at::Tensor> apply_rotary_pos_emb(at::Tensor& mixed_query,
                                            offset,
                                            num_heads,
                                            bsz,
+                                           rotate_half,
+                                           rotate_every_two,
                                            Context::Instance().GetCurrentStream());
     else
         launch_apply_rotary_pos_emb<__half>((__half*)query_cont.data_ptr(),
@@ -769,6 +802,8 @@ std::vector<at::Tensor> apply_rotary_pos_emb(at::Tensor& mixed_query,
                                             offset,
                                             num_heads,
                                             bsz,
+                                            rotate_half,
+                                            rotate_every_two,
                                             Context::Instance().GetCurrentStream());
     return {query_cont, key_cont};
 }
@@ -863,7 +898,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m)
           "DeepSpeed linear_layer with int8 (CUDA)");
     m.def("fused_gemm_gelu_fp32", &fused_gemm_gelu<float>, "DeepSpeed mlp with fp32 (CUDA)");
     m.def("fused_gemm_gelu_fp16", &fused_gemm_gelu<__half>, "DeepSpeed mlp with fp16 (CUDA)");
-    m.def("gptj_residual_add", &gptj_residual_add, "DeepSpeed mlp with fp16 (CUDA)");
+    m.def("residual_add", &residual_add_bias, "DeepSpeed mlp with fp16 (CUDA)");
     m.def("apply_rotary_pos_emb", &apply_rotary_pos_emb, "DeepSpeed mlp with fp16 (CUDA)");
     m.def("einsum_sec_sm_ecm_fp32",
           &einsum_sec_sm_ecm<float>,

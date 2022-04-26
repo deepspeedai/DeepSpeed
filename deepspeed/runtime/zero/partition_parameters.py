@@ -23,6 +23,7 @@ from torch.nn import Parameter
 from .linear import LinearModuleForZeroStage3, LinearFunctionForZeroStage3
 from .offload_constants import *
 
+import deepspeed
 from ..utils import get_only_unique_item, see_memory_usage
 from deepspeed.runtime.zero.utils import assert_ints_same_as_other_ranks
 from deepspeed.utils import init_distributed, instrument_w_nvtx, logger
@@ -30,7 +31,6 @@ from deepspeed.utils.debug import debug_param2name_id_shape, debug_param2name_id
 from deepspeed.utils.logging import logger
 
 from ..swap_tensor.partitioned_param_swapper import AsyncPartitionedParameterSwapper, PartitionedParamStatus
-from ..config import DeepSpeedConfig
 
 param_count = 0
 partitioned_param_data_shape = [0]
@@ -663,8 +663,9 @@ class Init(InsertPostInitMethodToModuleSubClasses):
                 f'zero.Init: the `config` argument is deprecated. Please use `config_dict_or_path` instead.'
             )
 
-        _ds_config = DeepSpeedConfig(config_dict_or_path,
-                                     mpu) if config_dict_or_path is not None else None
+        _ds_config = deepspeed.runtime.config.DeepSpeedConfig(
+            config_dict_or_path,
+            mpu) if config_dict_or_path is not None else None
         super().__init__(enabled=enabled,
                          mem_efficient_linear=mem_efficient_linear,
                          ds_config=_ds_config,

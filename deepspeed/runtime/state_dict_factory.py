@@ -371,7 +371,7 @@ class MegatronSDLoader(SDLoaderBase):
                          quantize_bits=8,
                          groups=64,
                          mlp_extra_grouping=True):
-        self.sanity_check(self.ckpt_list[0])
+        #self.sanity_check(self.ckpt_list[0])
 
         sd, num_to_split, ckpt_offset = self.get_split_state_dict(mp_world_size, mp_rank)
         ds_sd = copy.deepcopy(sd)
@@ -405,7 +405,7 @@ class MegatronSDLoader(SDLoaderBase):
                     num_to_split,
                     ckpt_offset,
                     ckpt_ver)
-            elif "mlp.dense_h_to_4h.weight" in key or "word_embeddings.weight" in key or "mlp.dense_h_to_4h.bias" in key:
+            elif "mlp.dense_h_to_4h.weight" in key or "word_embeddings.weight" in key or "mlp.dense_h_to_4h.bias" in key or "final_linear.weight" in key:
                 assert value.shape[0] % num_to_split == 0
                 split_size = value.shape[0] // num_to_split
                 if quantize and "mlp.dense_h_to_4h.weight" in key:

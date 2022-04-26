@@ -220,6 +220,7 @@ def add_config_arguments(parser):
 def init_inference(model,
                    triangular_masking=True,
                    mp_size=1,
+                   training_mp_size=1,
                    mpu=None,
                    ep_group=None,
                    expert_mp_group=None,
@@ -233,7 +234,8 @@ def init_inference(model,
                    ep_size=1,
                    moe=False,
                    moe_experts=1,
-                   moe_type='standard'):
+                   moe_type='standard',
+                   args=None):
     """Initialize the DeepSpeed InferenceEngine.
 
     Arguments:
@@ -244,6 +246,9 @@ def init_inference(model,
 
         mp_size: Optional: Desired model parallel size, default is 1 meaning no
             model parallelism.
+
+        training_mp_size: Optional: if loading a checkpoint this is the mp size that it was trained with,
+            it may be different than what the mp size that you want to use during inference.
 
         mpu: Optional: A model parallelism unit object that implements
             get_{model,data}_parallel_{rank,group,world_size}()
@@ -277,25 +282,24 @@ def init_inference(model,
         __git_branch__),
              ranks=[0])
 
-    if isinstance(model, PipelineModule):
-        raise NotImplementedError("pipeline module support is not implemented yet")
-    else:
-        engine = InferenceEngine(model,
-                                 triangular_masking,
-                                 mp_size,
-                                 ep_size,
-                                 mpu,
-                                 ep_group,
-                                 expert_mp_group,
-                                 checkpoint,
-                                 dtype,
-                                 injection_policy,
-                                 return_tuple,
-                                 replace_method,
-                                 quantization_setting,
-                                 replace_with_kernel_inject,
-                                 moe,
-                                 moe_experts,
-                                 moe_type)
+    engine = InferenceEngine(model,
+                             triangular_masking,
+                             mp_size,
+                             training_mp_size,
+                             ep_size,
+                             mpu,
+                             ep_group,
+                             expert_mp_group,
+                             checkpoint,
+                             dtype,
+                             injection_policy,
+                             return_tuple,
+                             replace_method,
+                             quantization_setting,
+                             replace_with_kernel_inject,
+                             moe,
+                             moe_experts,
+                             moe_type,
+                             args)
 
     return engine

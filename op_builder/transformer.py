@@ -15,6 +15,12 @@ class TransformerBuilder(CUDAOpBuilder):
     def absolute_name(self):
         return f'deepspeed.ops.transformer.{self.NAME}_op'
 
+    def extra_ldflags(self):
+        if not self.is_rocm_pytorch():
+            return ['-lcurand']
+        else:
+            return []
+
     def sources(self):
         return [
             'csrc/transformer/ds_transformer_cuda.cpp',

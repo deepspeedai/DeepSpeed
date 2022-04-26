@@ -17,6 +17,8 @@ from ..moe.layer import MoE
 import torch.distributed as dist
 import deepspeed.utils.groups as groups
 
+DS_INFERENCE_ENABLED = False
+
 
 class InferenceEngine(Module):
     inference_mp_group = None
@@ -27,6 +29,7 @@ class InferenceEngine(Module):
                  model,
                  triangular_masking=True,
                  mp_size=1,
+                 training_mp_size=1,
                  ep_size=1,
                  mpu=None,
                  ep_group=None,
@@ -40,7 +43,8 @@ class InferenceEngine(Module):
                  replace_with_kernel_inject=False,
                  moe=False,
                  moe_experts=1,
-                 moe_type='standard'):
+                 moe_type='standard',
+                 config=None):
         """
         Args:
             model: torch.nn.Module
@@ -58,12 +62,14 @@ class InferenceEngine(Module):
             replace_with_kernel_inject: this flag need to be set to true to inject inference kernels for models such as, Bert, GPT2, GPT-Neo and GPT-J. Otherwise,
             the injection_dict provides the names of two linear layers as a tuple: (attention_output projection, transformer output projection)
         """
+        global DS_INFERENCE_ENABLED
+        DS_INFERENCE_ENABLED = True
 
         super().__init__()
 
         self.module = model
 
-        self._get_model_config_generate()
+        self._get_model_config_generate(config)
 
         self.mp_world_size = mp_size
         self.checkpoint = checkpoint
@@ -109,14 +115,16 @@ class InferenceEngine(Module):
                                              replace_with_kernel_inject,
                                              moe,
                                              moe_experts,
-                                             moe_type)
+                                             moe_type,
+                                             training_mp_size)
         elif replace_method == 'auto':
             self._apply_injection_policy(
                 return_tuple=return_tuple,
                 replace_with_kernel_inject=replace_with_kernel_inject,
                 moe=moe,
                 moe_experts=moe_experts,
-                moe_type=moe_type)
+                moe_type=moe_type,
+                training_mp_size=training_mp_size)
 
         device = torch.cuda.current_device()
         logger.info(f"Place model to device: {device}")
@@ -128,8 +136,8 @@ class InferenceEngine(Module):
         else:
             self.module.register_forward_pre_hook(self._pre_forward_hook)
 
-    def _get_model_config_generate(self):
-        self.config = getattr(self.module, 'config', None)
+    def _get_model_config_generate(self, config):
+        self.config = getattr(self.module, 'config', None) if config is None else config
         self.generate = getattr(self.module, 'generate', None)
 
     def _create_model_parallel_group(self):
@@ -221,7 +229,8 @@ class InferenceEngine(Module):
                                 replace_with_kernel_inject=False,
                                 moe=False,
                                 moe_experts=1,
-                                moe_type='standard'):
+                                moe_type='standard',
+                                training_mp_size=1):
 
         replace_transformer_layer(client_module,
                                   self.module,
@@ -243,7 +252,8 @@ class InferenceEngine(Module):
                                   replace_with_kernel_inject=replace_with_kernel_inject,
                                   moe=moe,
                                   moe_experts=moe_experts,
-                                  moe_type=moe_type)
+                                  moe_type=moe_type,
+                                  training_mp_size=training_mp_size)
 
     def _get_all_ckpt_names(self, checkpoints_path, tag):
         ckpt_file_pattern = self._get_ckpt_name(checkpoints_path,
