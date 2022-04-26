@@ -1222,3 +1222,67 @@ def test_zero_offload_stage1():
             model.step()
 
     _go(model=model, hidden_dim=hidden_dim)
+
+
+@pytest.mark.parametrize('return_type', [tuple, list, dict])
+def test_z3_dict_fwd(return_type):
+    config_dict = {
+        "train_batch_size": 4,
+        "steps_per_print": 1,
+        "optimizer": {
+            "type": "Adam",
+            "params": {
+                "lr": 1e-4
+            }
+        },
+        "fp16": {
+            "enabled": True
+        },
+        "zero_optimization": {
+            "stage": 3
+        }
+    }
+    hidden_dim = 10
+
+    class MyModel(torch.nn.Module):
+        def __init__(self, hidden_dim):
+            super(MyModel, self).__init__()
+            self.l1 = torch.nn.Linear(hidden_dim, hidden_dim)
+            self.cel = torch.nn.CrossEntropyLoss()
+
+        def forward(self, x, y):
+            x = self.l1(x)
+            loss = self.cel(x, y)
+            if return_type == dict:
+                val = {'a': x, 'loss': loss, 'b': 1, 'c': None}
+            elif return_type == list:
+                val = [x, loss]
+            elif return_type == tuple:
+                val = (x, loss)
+            else:
+                raise NotImplementedError
+            return val
+
+    @distributed_test(world_size=[1])
+    def _go(hidden_dim):
+        with deepspeed.zero.Init():
+            model = MyModel(hidden_dim)
+
+        model, _, _, _ = deepspeed.initialize(model=model,
+                                              model_parameters=model.parameters(),
+                                              config=config_dict)
+        data_loader = random_dataloader(model=model,
+                                        total_samples=50,
+                                        hidden_dim=hidden_dim,
+                                        device=model.device)
+        torch.distributed.barrier()
+        for n, batch in enumerate(data_loader):
+            loss = model(batch[0], batch[1])
+            if return_type == dict:
+                loss = loss['loss']
+            else:
+                loss = loss[1]
+            model.backward(loss)
+            model.step()
+
+    _go(hidden_dim)

@@ -73,9 +73,14 @@ def move_to_cpu(tensor_list):
         tensor.data = tensor.data.cpu()
 
 
+def is_builtin_type(obj):
+    # https://stackoverflow.com/a/17795199
+    return obj.__class__.__module__ == '__builtin__' or obj.__class__.__module__ == "builtins"
+
+
 #apply torch.autograd.Function that calls a backward_function to tensors in output
 def _apply_to_tensors_only(module, functional, backward_function, outputs):
-    if type(outputs) is tuple:
+    if isinstance(outputs, (tuple, list)):
         touched_outputs = []
         for output in outputs:
             touched_output = _apply_to_tensors_only(module,
@@ -83,10 +88,23 @@ def _apply_to_tensors_only(module, functional, backward_function, outputs):
                                                     backward_function,
                                                     output)
             touched_outputs.append(touched_output)
-        return tuple(touched_outputs)
+        return outputs.__class__(touched_outputs)
+    elif isinstance(outputs, dict):
+        # apply inplace to avoid recreating dict inherited objects
+        for key in outputs.keys():
+            outputs[key] = _apply_to_tensors_only(module,
+                                                  functional,
+                                                  backward_function,
+                                                  outputs[key])
+        return outputs
     elif type(outputs) is torch.Tensor:
         return functional.apply(module, backward_function, outputs)
     else:
+        if not is_builtin_type(outputs):
+            logger.warning(
+                f"A module has unknown inputs or outputs type ({type(outputs)}) and the tensors embedded in it cannot be detected. "
+                "The ZeRO-3 hooks designed to trigger before or after backward pass of the module relies on knowing the input and "
+                "output tensors and therefore may not get triggered properly.")
         return outputs
 
 
