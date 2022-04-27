@@ -1,6 +1,7 @@
 """ debug utils """
 
-import fcntl
+# For lazy import with printflock()
+fcntl = None
 
 # for debug purposes map module and param objects to their fully qualified names
 module_names = {}
@@ -78,6 +79,9 @@ def printflock(*msgs):
     then compare those.
 
     """
+    global fcntl
+    if fcntl == None:
+        import fcntl
 
     with open(__file__, "r") as fh:
         fcntl.flock(fh, fcntl.LOCK_EX)
