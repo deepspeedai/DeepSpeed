@@ -1,7 +1,9 @@
 #include <limits>
 #include "custom_cuda_layers.h"
 
+#ifndef __HIP_PLATFORM_HCC__
 #include <cuda_profiler_api.h>
+#endif
 #include <cstdio>
 #include <cstdlib>
 #include <ctime>

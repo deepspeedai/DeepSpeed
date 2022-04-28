@@ -49,11 +49,18 @@ public:
             std::cerr << message << std::endl;
             throw std::runtime_error(message);
         }
+#ifndef __HIP_PLATFORM_HCC__
         cublasSetMathMode(_cublasHandle, CUBLAS_TENSOR_OP_MATH);
         cudaEventCreate(&_comp1_event, (cudaEventDisableTiming | cudaEventBlockingSync));
         cudaEventCreate(&_comp2_event, (cudaEventDisableTiming | cudaEventBlockingSync));
         cudaEventCreate(&_comp_event, (cudaEventDisableTiming | cudaEventBlockingSync));
         cudaEventCreate(&_comm_event, (cudaEventDisableTiming | cudaEventBlockingSync));
+#else
+        cudaEventCreate(&_comp1_event);
+        cudaEventCreate(&_comp2_event);
+        cudaEventCreate(&_comp_event);
+        cudaEventCreate(&_comm_event);
+#endif
     }
 
     virtual ~Context()
