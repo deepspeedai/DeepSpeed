@@ -7,8 +7,7 @@ from packaging import version as pkg_version
 from deepspeed.git_version_info import version
 from deepspeed.runtime.utils import (get_global_norm_of_tensors,
                                      clip_tensors_by_global_norm,
-                                     get_grad_norm,
-                                     clip_gradients,
+                                     DummyOptim,
                                      align_dense_tensors,
                                      all_gather_dp_groups,
                                      bwc_tensor_model_parallel_rank,
@@ -85,6 +84,8 @@ class BF16_Optimizer:
         see_memory_usage('begin bf16_optimizer', force=True)
         self.timers = timers
         self.optimizer = init_optimizer
+        self.using_real_optimizer = not isinstance(self.optimizer, DummyOptim)
+
         self.clip_grad = clip_grad
         self.norm_type = norm_type
         self.mpu = mpu
@@ -93,10 +94,6 @@ class BF16_Optimizer:
         self.dp_rank = dist.get_rank(group=self.dp_process_group)
         self.real_dp_process_group = [
             dp_process_group for i in range(len(self.optimizer.param_groups))
-        ]
-        dp_world_size = dist.get_world_size(group=self.dp_process_group)
-        self.partition_count = [
-            dp_world_size for i in range(len(self.optimizer.param_groups))
         ]
 
         # Load pre-built or JIT compile (un)flatten ops
@@ -123,6 +120,17 @@ class BF16_Optimizer:
 
         self.step_count = 0
         self.groups_padding = []
+
+        if self.using_real_optimizer:
+            self._setup_for_real_optimizer()
+
+        see_memory_usage('end bf16_optimizer', force=True)
+
+    def _setup_for_real_optimizer(self):
+        dp_world_size = dist.get_world_size(group=self.dp_process_group)
+        self.partition_count = [
+            dp_world_size for i in range(len(self.optimizer.param_groups))
+        ]
 
         for i, param_group in enumerate(self.optimizer.param_groups):
             see_memory_usage(f'before initializing group {i}', force=True)
@@ -209,8 +217,6 @@ class BF16_Optimizer:
 
         # Need optimizer states initialized before linking lp to optimizer state
         self._link_all_hp_params()
-
-        see_memory_usage('end bf16_optimizer', force=True)
 
     def _link_all_hp_params(self):
         dp_world_size = dist.get_world_size(group=self.dp_process_group)
@@ -482,7 +488,8 @@ class BF16_Optimizer:
                 src_tensor = _get_padded_tensor(saved, current.numel())
                 current.data.copy_(src_tensor.data)
 
-        self._link_all_hp_params()
+        if load_optimizer_states:
+            self._link_all_hp_params()
 
     @property
     def param_groups(self):

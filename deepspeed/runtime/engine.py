@@ -297,6 +297,8 @@ class DeepSpeedEngine(Module):
         elif self.zero_optimization():
             # no optim selected but zero is enabled
             self.optimizer = self._configure_zero_optimizer(optimizer=None)
+        elif self.bfloat16_enabled():
+            self.optimizer = self._configure_bf16_optimizer(optimizer=None)
 
         self._get_model_parameters()
 
@@ -1279,6 +1281,9 @@ class DeepSpeedEngine(Module):
 
     def _configure_bf16_optimizer(self, optimizer):
         clip_grad = self.gradient_clipping()
+
+        if optimizer is None:
+            optimizer = DummyOptim(list(self.module.parameters()))
 
         if self.global_rank == 0:
             logger.info('Creating unfused BF16 optimizer')
