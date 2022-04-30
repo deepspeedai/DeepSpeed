@@ -18,7 +18,7 @@ Copyright 2021 The Microsoft DeepSpeed Team
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """
- Support different forms of parallelism in DeepSped using multiple process groups.
+ Support different forms of parallelism in DeepSpeed using multiple process groups.
  Given that there are multiple scenarios and use-cases, this file is going to be updated
  frequently. For now, the group creation needed for the training scenario is being implemented.
  For inference and other new scenarios, the code will be either reused or added to this file.
