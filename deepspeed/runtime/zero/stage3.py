@@ -271,7 +271,7 @@ class DeepSpeedZeroOptimizer_Stage3(object):
 
         if dist.get_rank() == 0:
             logger.info(f"Reduce bucket size {reduce_bucket_size}")
-            logger.info(f"Allgather bucket size {prefetch_bucket_size}")
+            logger.info(f"Prefetch bucket size {prefetch_bucket_size}")
         # The fused optimizer does all the work. We need this layer for two reason:
         # 1. maintain same user API from apex.fp16_utils
         # 2. keep common stuff here in case we need to add ne552w fused optimizer later
