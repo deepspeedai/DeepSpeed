@@ -357,7 +357,7 @@ class PipelineEngine(DeepSpeedEngine):
 
         if self.global_steps % self.steps_per_print() == 0:
             if self.global_rank == 0:
-                elapsed = self.timers('train_batch').elapsed(reset=True)
+                elapsed = self.timers('train_batch').elapsed(reset=True) / 1000.0
                 iter_time = elapsed / self.steps_per_print()
                 tput = self.train_batch_size() / iter_time
                 print(f'steps: {self.global_steps} '
