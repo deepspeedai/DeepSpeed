@@ -27,7 +27,14 @@ import deepspeed
 from ..utils import get_only_unique_item, see_memory_usage
 from deepspeed.runtime.zero.utils import assert_ints_same_as_other_ranks
 from deepspeed.utils import init_distributed, instrument_w_nvtx, logger
-from deepspeed.utils.debug import debug_param2name_id_shape, debug_param2name_id_shape_device, debug_module2name, debug_param2name, debug_param2name_id_shape_status, printflock, log_rank_file
+from deepspeed.utils.debug import (debug_param2name_id_shape,
+                                   debug_param2name_id_shape_device,
+                                   debug_module2name,
+                                   debug_param2name,
+                                   debug_param2name_id,
+                                   debug_param2name_id_shape_status,
+                                   printflock,
+                                   log_rank_file)
 from deepspeed.utils.logging import logger
 
 from ..swap_tensor.partitioned_param_swapper import AsyncPartitionedParameterSwapper, PartitionedParamStatus
@@ -937,9 +944,9 @@ class Init(InsertPostInitMethodToModuleSubClasses):
             param.all_gather()
             return param._orig_item()
 
-        def ds_summary(slf: torch.Tensor) -> dict:
+        def ds_summary(slf: torch.Tensor, use_debug_name: bool = False) -> dict:
             return {
-                "id": slf.ds_id,
+                "id": debug_param2name_id(slf) if use_debug_name else slf.ds_id,
                 "status": slf.ds_status.name,
                 "numel": slf.numel(),
                 "ds_numel": slf.ds_numel,
