@@ -1533,7 +1533,7 @@ class GatheredParameters:
         again upon exit.
 
         Args:
-            params (``torch.nn.Parameter``): A single parameter or a list of parameters to collect.
+            params (``torch.nn.Parameter``): A single parameter or a list or a tuple of parameters to collect.
                 It's assumed that all parameters are zero params.
             modifier_rank (int, optional): If specified, this rank's parameter will be
                 broadcasted on exit from the context. This argument is required if ``params`` are
@@ -1615,7 +1615,7 @@ class GatheredParameters:
         if not enabled:
             return
 
-        if not isinstance(params, list):
+        if not (isinstance(params, list) or isinstance(params, tuple)):
             params = [params]
 
         # enable if at least one is zero-param, otherwise a noop
