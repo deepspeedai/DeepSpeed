@@ -1286,3 +1286,64 @@ def test_z3_dict_fwd(return_type):
             model.step()
 
     _go(hidden_dim)
+
+
+@pytest.mark.parametrize('zero_stage', [1, 2, 3])
+def test_zero_adam_optimizer_step_count(tmpdir, zero_stage):
+
+    # force all params to be partitioned by forcing threshold=0
+    config_dict = {
+        "train_micro_batch_size_per_gpu": 2,
+        "gradient_accumulation_steps": 2,
+        "steps_per_print": 1,
+        "zero_optimization": {
+            "stage": zero_stage,
+            "stage3_param_persistence_threshold": 0,
+            "sub_group_size": 4,
+        },
+        "optimizer": {
+            "type": "Adam",
+            "params": {
+                "lr": 1e-3
+            }
+        },
+        "fp16": {
+            "enabled": True,
+            "initial_scale_power": 8
+        }
+    }
+
+    hidden_dim = 4
+
+    model = SimpleModel(hidden_dim=hidden_dim, nlayers=12)
+
+    @distributed_test(world_size=[1])
+    def _test_zero_adam_optimizer_step_count_loop(model, hidden_dim):
+        model, optimizer, _, _ = deepspeed.initialize(config=config_dict,
+                                                      model=model,
+                                                      model_parameters=model.parameters())
+        data_loader = random_dataloader(model=model,
+                                        total_samples=16,
+                                        hidden_dim=hidden_dim,
+                                        device=model.device)
+
+        for i, batch in enumerate(data_loader):
+            loss = model(batch[0], batch[1])
+            model.backward(loss)
+            model.step()
+
+            step_counts = []
+            if zero_stage == 3:
+                for sub_group_id, _ in enumerate(optimizer.fp16_groups):
+                    fp32_param = optimizer.fp32_partitioned_groups_flat[sub_group_id]
+                    state = optimizer.optimizer.state[fp32_param]
+                    step_counts.append(state['step'])
+                assert all(step == step_counts[0] for step in step_counts)
+            elif zero_stage == 1 or zero_stage == 2:
+                for param_group in optimizer.optimizer.param_groups:
+                    for param in param_group['params']:
+                        state = optimizer.optimizer.state[param]
+                        step_counts.append(state['step'])
+                assert all(step == step_counts[0] for step in step_counts)
+
+    _test_zero_adam_optimizer_step_count_loop(model=model, hidden_dim=hidden_dim)
