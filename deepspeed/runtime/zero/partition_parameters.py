@@ -1533,7 +1533,7 @@ class GatheredParameters:
         again upon exit.
 
         Args:
-            params (``torch.nn.Parameter``): A single parameter or a list or a tuple of parameters to collect.
+            params (``torch.nn.Parameter``): A single parameter, a list, or a tuple of parameters to collect.
                 It's assumed that all parameters are zero params.
             modifier_rank (int, optional): If specified, this rank's parameter will be
                 broadcasted on exit from the context. This argument is required if ``params`` are
@@ -1543,7 +1543,7 @@ class GatheredParameters:
                 registered as external parameters of ``fwd_module``. See :meth:`deepspeed.zero.register_external_parameter`.
             enabled (bool, optional): If ``False``, this context is a no-op. Defaults to ``True``.
 
-        Important: Make sure to use ``modifier_rank`` that is not ``None`` (e.g. ``modifier_rank=0``)
+        Important: Make sure to use ``modifier_rank`` that is not ``None`` (e.g., ``modifier_rank=0``)
         if you need the GPU memory allocated by gather to be released upon exit from the context manager.
 
         Examples
@@ -1607,8 +1607,8 @@ class GatheredParameters:
 
                 load(model, prefix="")
 
-        If this approach is not used, then the full model will first get copied to each GPU. For models
-        bigger than the memory of a single gpu this method is required.
+        If this approach is not used, then the full model will first be copied to each GPU. For models
+        bigger than the memory of a single GPU, this method is required.
         """
 
         self.enabled = enabled
