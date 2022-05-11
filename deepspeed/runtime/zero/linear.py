@@ -110,6 +110,13 @@ class LinearFunctionForZeroStage3(torch.autograd.Function):
         return grad_input, grad_weight, grad_bias
 
 
+def zero3_linear_wrap(input, weight, bias=None):
+    if bias is None:
+        return LinearFunctionForZeroStage3.apply(input, weight)
+    else:
+        return LinearFunctionForZeroStage3.apply(input, weight, bias)
+
+
 class LinearModuleForZeroStage3(Module):
     r"""Applies a linear transformation to the incoming data: :math:`y = xA^T + b`.
     The weights are pre-transposed and stored as A^T instead of transposing during each

@@ -2,6 +2,7 @@ import torch
 import torch.distributed as dist
 from deepspeed.runtime.constants import PIPE_REPLICATED
 from deepspeed.ops.op_builder import UtilsBuilder
+from deepspeed.runtime import ZeROOptimizer
 from packaging import version as pkg_version
 
 from deepspeed.git_version_info import version
@@ -71,7 +72,7 @@ def get_full_hp_param(self, optim_state_key=None):
     return reduce_buffer.reshape_as(self)
 
 
-class BF16_Optimizer:
+class BF16_Optimizer(ZeROOptimizer):
     def __init__(self,
                  init_optimizer,
                  mpu=None,

@@ -418,6 +418,21 @@ class DeepSpeedEngine(Module):
         """
         return self._global_grad_norm
 
+    def __getattr__(self, name):
+        """
+        Pass through attributes defined in the model if they are not overridden by ds-engine.
+        """
+        _module = {}
+        if "module" in self.__dict__:
+            _module = self.__dict__['module']
+        if name in dir(self):
+            return getattr(self, name)
+        elif name in dir(_module):
+            return getattr(_module, name)
+        else:
+            raise AttributeError(
+                f"'{type(self).__name__}' object has no attribute '{name}'")
+
     def checkpoint_tag_validation_enabled(self):
         return self._config.checkpoint_tag_validation_enabled
 
@@ -895,9 +910,24 @@ class DeepSpeedEngine(Module):
                            optimizer_name,
                            None) is not None)
 
+    def _supported_optims(self):
+        FairseqOptimizer = None
+        try:
+            from fairseq.optim.fairseq_optimizer import FairseqOptimizer
+        except ImportError:
+            pass
+
+        expected_optim_types = [Optimizer]
+        if FairseqOptimizer:
+            # fairseq optims are not torch.optim objects
+            expected_optim_types.append(FairseqOptimizer)
+        return expected_optim_types
+
     # Validate configuration based on command line arguments
     def _do_sanity_check(self):
-        assert isinstance(self.client_optimizer, (type(None), Optimizer, Callable)), \
+        expected_optim_types = self._supported_optims()
+        expected_optim_types += [type(None), Callable]
+        assert isinstance(self.client_optimizer, tuple(expected_optim_types)), \
             f'Client Optimizer is of unexpected type {type(self.client_optimizer)}'
 
         if not self.client_optimizer:
@@ -950,8 +980,16 @@ class DeepSpeedEngine(Module):
                 f"{[(n, p.dtype) for n, p in model.named_parameters() if p.dtype != dtype]}"
             )
 
+    def _set_client_model(self, model):
+        # register client model in _modules so that nn.module methods work correctly
+        modules = self.__dict__.get('_modules')
+        modules['module'] = model
+        # register module attribute in engine but avoid getattr
+        self.__dict__['module'] = model
+
     def _configure_distributed_model(self, model):
-        self.module = model
+        self._set_client_model(model)
+
         if self.fp16_enabled():
             if self.zero_optimization_partition_weights() and any(
                 [hasattr(param,
@@ -1036,7 +1074,7 @@ class DeepSpeedEngine(Module):
     # Configure optimizer
     def _configure_optimizer(self, client_optimizer, model_parameters):
         if client_optimizer is not None:
-            if isinstance(client_optimizer, Optimizer):
+            if isinstance(client_optimizer, tuple(self._supported_optims())):
                 client_optimizer.param_groups[:] = [
                     pg for pg in client_optimizer.param_groups if len(pg["params"]) != 0
                 ]
@@ -1091,9 +1129,10 @@ class DeepSpeedEngine(Module):
                 # If apex/amp is available it will be imported above
                 raise RuntimeError(
                     "Unable to import apex/amp, please make sure it is installed")
-            self.module, self.optimizer = amp.initialize(
+            model, self.optimizer = amp.initialize(
                 self.module, basic_optimizer, **amp_params
             )
+            self._set_client_model(model)
             self._broadcast_model()
             # TODO: maybe need to broadcast experts differently?
         elif self.fp16_enabled():
@@ -2326,8 +2365,11 @@ class DeepSpeedEngine(Module):
                         state_dict.update(expert_state_dict)
                     moe_layer_id += 1
 
-    def load_module_state_dict(self, state_dict, strict=True):
-        self.module.load_state_dict(state_dict, strict=strict)
+    def load_module_state_dict(self, state_dict, strict=True, custom_load_fn=None):
+        if custom_load_fn:
+            custom_load_fn(src=state_dict, dst=self.module)
+        else:
+            self.module.load_state_dict(state_dict, strict=strict)
 
     def _get_zero_ckpt_prefix(self, dp_rank, bf16_mode):
         return f'{"bf16_" if bf16_mode else ""}zero_pp_rank_{dp_rank}'
@@ -2422,7 +2464,8 @@ class DeepSpeedEngine(Module):
                         load_module_strict=True,
                         load_optimizer_states=True,
                         load_lr_scheduler_states=True,
-                        load_module_only=False):
+                        load_module_only=False,
+                        custom_load_fn=None):
         """Load training checkpoint
 
         Arguments:
@@ -2432,6 +2475,7 @@ class DeepSpeedEngine(Module):
             load_optimizer_states: Optional. Boolean to load the training optimizer states from Checkpoint. Ex. ADAM's momentum and variance
             load_lr_scheduler_states: Optional. Boolean to add the learning rate scheduler states from Checkpoint.
             load_module_only: Optional. Boolean to load only the model weights from the checkpoint. Ex. warmstarting.
+            custom_load_fn: Optional. Custom model load function.
         Returns:
             A tuple of ``load_path`` and ``client_state``.
 
@@ -2466,7 +2510,8 @@ class DeepSpeedEngine(Module):
                                                          load_module_strict=load_module_strict,
                                                          load_optimizer_states=load_optimizer_states,
                                                          load_lr_scheduler_states=load_lr_scheduler_states,
-                                                         load_module_only=load_module_only)
+                                                         load_module_only=load_module_only,
+                                                         custom_load_fn=custom_load_fn)
 
         load_zero_checkpoint = self.zero_optimization() or self.bfloat16_enabled()
         if load_zero_checkpoint and load_path is not None:
@@ -2488,7 +2533,8 @@ class DeepSpeedEngine(Module):
                          load_module_strict=True,
                          load_optimizer_states=True,
                          load_lr_scheduler_states=True,
-                         load_module_only=False):
+                         load_module_only=False,
+                         custom_load_fn=None):
 
         from deepspeed.runtime.state_dict_factory import SDLoaderFactory
 
@@ -2523,7 +2569,8 @@ class DeepSpeedEngine(Module):
                                                 num_experts=self.num_experts)
 
         self.load_module_state_dict(state_dict=checkpoint['module'],
-                                    strict=load_module_strict)
+                                    strict=load_module_strict,
+                                    custom_load_fn=custom_load_fn)
 
         self.loaded_checkpoint_dp_world_size = checkpoint['dp_world_size']
 

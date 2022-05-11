@@ -20,7 +20,7 @@ from torch.distributed.distributed_c10d import _get_global_rank, group
 from torch.nn import Module
 from torch.nn import Parameter
 
-from .linear import LinearModuleForZeroStage3, LinearFunctionForZeroStage3
+from .linear import LinearModuleForZeroStage3, zero3_linear_wrap
 from .offload_constants import *
 
 import deepspeed
@@ -430,7 +430,7 @@ class InsertPostInitMethodToModuleSubClasses(object):
                 "nn.functional.linear has been overridden with a more memory efficient version. This will persist unless manually reset.",
                 force=False)
             self.linear_bk = torch.nn.functional.linear
-            torch.nn.functional.linear = LinearFunctionForZeroStage3.apply
+            torch.nn.functional.linear = zero3_linear_wrap
 
     def __exit__(self, exc_type, exc_value, traceback):
         if not self.enabled:

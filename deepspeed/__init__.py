@@ -28,6 +28,7 @@ from .utils import log_dist
 from .utils.distributed import init_distributed
 
 from .runtime import zero
+from .runtime import DeepSpeedOptimizer, ZeROOptimizer
 
 from .pipe import PipelineModule
 
