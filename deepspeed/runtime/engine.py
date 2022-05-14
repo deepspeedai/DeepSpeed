@@ -343,6 +343,10 @@ class DeepSpeedEngine(Module):
         self.flatten = util_ops.flatten
         self.unflatten = util_ops.unflatten
 
+    def destroy(self):
+        if self.optimizer is not None and hasattr(self.optimizer, 'destroy'):
+            self.optimizer.destroy()
+
     def _get_model_parameters(self):
         if self.autotuning_profile_model_info():
             self.autotuning_model_info = {}
