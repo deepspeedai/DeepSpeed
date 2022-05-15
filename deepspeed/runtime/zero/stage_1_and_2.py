@@ -982,7 +982,6 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
             param_start_offset = 0
 
             num_elements = tensor.numel()
-            tensor_offset = 0
 
             # we need to offset to get to the right element
             if i == 0 and first_offset > 0:

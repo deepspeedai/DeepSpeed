@@ -808,7 +808,7 @@ class Init(InsertPostInitMethodToModuleSubClasses):
         # else this is set to None
         param.nvme_swapper = self.param_swapper
 
-        # DeepSped Param ID
+        # DeepSpeed Param ID
         param.ds_id = Init.param_id
         Init.param_id += 1
 
