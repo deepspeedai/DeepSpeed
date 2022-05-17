@@ -44,7 +44,8 @@ class InferenceEngine(Module):
                  moe=False,
                  moe_experts=1,
                  moe_type='standard',
-                 config=None):
+                 config=None,
+                 enable_cuda_graph=False):
         """
         Args:
             model: torch.nn.Module
@@ -85,7 +86,8 @@ class InferenceEngine(Module):
         self.ep_size = ep_size
         self.ep_group = ep_group
         self.expert_mp_group = expert_mp_group
-
+        self.enable_cuda_graph = enable_cuda_graph
+        self.cuda_grah_created = False
         self._init_quantization_setting(quantization_setting)
 
         if self.checkpoint:
@@ -352,6 +354,35 @@ class InferenceEngine(Module):
             if torch.is_tensor(kwargs[k]):
                 kwargs[k] = kwargs[k].to(torch.cuda.current_device())
 
+    def _create_cuda_graph(self, *inputs, **kwargs):
+        # warmup to create the workspace and cublas handle
+        cuda_stream = torch.cuda.Stream()
+        cuda_stream.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(cuda_stream):
+            for i in range(3):
+                ret = self.module(*inputs, **kwargs)
+        torch.cuda.current_stream().wait_stream(cuda_stream)
+
+        # create cuda_graph and assign static_inputs and static_outputs
+        self._cuda_graphs = torch.cuda.CUDAGraph()
+        self.static_inputs = inputs
+        self.static_kwargs = kwargs
+
+        with torch.cuda.graph(self._cuda_graphs):
+            self.static_output = self.module(*self.static_inputs, **self.static_kwargs)
+
+        self.cuda_grah_created = True
+
+    def _graph_replay(self, *inputs, **kwargs):
+        for i in range(len(inputs)):
+            if torch.is_tensor(inputs[i]):
+                self.static_inputs[i].copy_(inputs[i])
+        for k in kwargs:
+            if torch.is_tensor(kwargs[k]):
+                self.static_kwargs[k].copy_(kwargs[k])
+        self._cuda_graphs.replay()
+        return self.static_output
+
     def forward(self, *inputs, **kwargs):
         """Execute forward propagation
 
@@ -376,5 +407,13 @@ class InferenceEngine(Module):
 
             outputs = self.model_orig_fwd(*inputs, **kwargs)
         else:
-            outputs = self.module(*inputs, **kwargs)
+            if self.enable_cuda_graph:
+                if self.cuda_grah_created:
+                    outputs = self._graph_replay(*inputs, **kwargs)
+                else:
+                    self._create_cuda_graph(*inputs, **kwargs)
+                    outputs = self._graph_replay(*inputs, **kwargs)
+            else:
+                outputs = self.module(*inputs, **kwargs)
+            #outputs = self.module(*inputs, **kwargs)
         return outputs

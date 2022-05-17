@@ -236,7 +236,8 @@ def init_inference(model,
                    moe=False,
                    moe_experts=1,
                    moe_type='standard',
-                   args=None):
+                   args=None,
+                   enable_cuda_graph=False):
     """Initialize the DeepSpeed InferenceEngine.
 
     Arguments:
@@ -301,6 +302,7 @@ def init_inference(model,
                              moe,
                              moe_experts,
                              moe_type,
-                             args)
+                             args,
+                             enable_cuda_graph)
 
     return engine
