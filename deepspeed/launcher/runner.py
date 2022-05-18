@@ -121,6 +121,10 @@ def parse_args(args=None):
                         help="Do not pass local_rank as an argument when calling "
                         "the user's training script.")
 
+    parser.add_argument("--no_ssh_check",
+                        action="store_true",
+                        help="Do not perform ssh check in multi-node launcher model")
+
     parser.add_argument("--force_multi",
                         action="store_true",
                         help="Force multi-node launcher mode, helps in cases where user "
@@ -352,7 +356,7 @@ def main(args=None):
     env = os.environ.copy()
 
     # validate that passwordless-ssh is workly properly with this hostfile
-    if multi_node_exec:
+    if multi_node_exec and not args.no_ssh_check:
         first_host = list(active_resources.keys())[0]
         try:
             subprocess.check_call(
