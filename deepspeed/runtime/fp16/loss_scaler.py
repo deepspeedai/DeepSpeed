@@ -16,8 +16,6 @@
 #    https://github.com/NVIDIA/Megatron-LM/blob/master/fp16/loss_scaler.py
 #Commit: 93ab4bea59dc5cbf97c079d313741866af4deac9
 
-import torch
-
 INITIAL_LOSS_SCALE = 'init_scale'
 SCALE_WINDOW = 'scale_window'
 DELAYED_SHIFT = 'delayed_shift'
@@ -107,7 +105,8 @@ class DynamicLossScaler(LossScalerBase):
                  scale_window=1000,
                  min_scale=1,
                  delayed_shift=1,
-                 consecutive_hysteresis=False):
+                 consecutive_hysteresis=False,
+                 raise_error_at_min_scale=True):
         super(DynamicLossScaler, self).__init__(init_scale)
         self.cur_iter = 0
         self.last_overflow_iter = -1
@@ -117,6 +116,7 @@ class DynamicLossScaler(LossScalerBase):
         self.delayed_shift = delayed_shift
         self.cur_hysteresis = delayed_shift
         self.consecutive_hysteresis = consecutive_hysteresis
+        self.raise_error_at_min_scale = raise_error_at_min_scale
 
     # `params` is a list / generator of torch.Variable
     def has_overflow_serial(self, params):
@@ -152,6 +152,10 @@ class DynamicLossScaler(LossScalerBase):
         if overflow:
             # self.cur_scale /= self.scale_factor
             if self.delayed_shift == 1 or self.cur_hysteresis == 1:
+                if (self.cur_scale == self.min_scale) and self.raise_error_at_min_scale:
+                    raise Exception(
+                        "Current loss scale already at minimum - cannot decrease scale anymore. Exiting run."
+                    )
                 self.cur_scale = max(self.cur_scale / self.scale_factor, self.min_scale)
             else:
                 self.cur_hysteresis -= 1
