@@ -20,7 +20,8 @@ class CPUAdamBuilder(TorchCPUOpBuilder):
 
     def libraries_args(self):
         args = super().libraries_args()
-        args += ['curand']
+        if not self.is_rocm_pytorch():
+            args += ['curand']
         return args
 
     def include_paths(self):
