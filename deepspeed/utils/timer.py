@@ -44,7 +44,7 @@ class SynchronizedWallClockTimer:
 
         def start(self):
             """Start the timer."""
-            assert not self.started_, f"{self.name} timer has already been started"
+            assert not self.started_, f"{self.name_} timer has already been started"
             self.start_event = torch.cuda.Event(enable_timing=True)
             self.start_event.record()
             self.started_ = True
