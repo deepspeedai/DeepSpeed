@@ -429,7 +429,8 @@ class BigBirdSparsityConfig(SparsityConfig):
                  different_layout_per_head=False,
                  num_random_blocks=1,
                  num_sliding_window_blocks=3,
-                 num_global_blocks=1):
+                 num_global_blocks=1,
+                 attention='bidirectional'):
         """Initialize the BigBird Sparsity Pattern Config.
 
         For usage example please see, TODO DeepSpeed Sparse Transformer Tutorial
@@ -441,6 +442,7 @@ class BigBirdSparsityConfig(SparsityConfig):
              num_random_blocks: optional: an integer determining the number of random blocks in each block row.
              num_sliding_window_blocks: optional: an integer determining the number of blocks in sliding local attention window.
              num_global_blocks: optional: an integer determining how many consecutive blocks, starting from index 0, are considered as global attention. Global block tokens will be attended by all other block tokens and will attend to all other block tokens as well.
+             attention: optional: a string determining attention type. Attention can be `unidirectional`, such as autoregressive models, in which tokens attend only to tokens appear before them in the context. Considering that, the upper triangular of attention matrix is empty as above figure. Or it can be `bidirectional`, such as BERT, in which tokens can attend to any other tokens before or after them. Then, the upper triangular part of the attention matrix is mirror of the lower triangular in the above figure.
         """
 
         super().__init__(num_heads, block, different_layout_per_head)
@@ -448,6 +450,11 @@ class BigBirdSparsityConfig(SparsityConfig):
         self.num_random_blocks = num_random_blocks
         self.num_sliding_window_blocks = num_sliding_window_blocks
         self.num_global_blocks = num_global_blocks
+
+        if (attention != 'unidirectional' and attention != 'bidirectional'):
+            raise NotImplementedError(
+                'only \"uni/bi-directional\" attentions are supported for now!')
+        self.attention = attention
 
     def set_random_layout(self, h, layout):
         """Sets random attention layout used by the given head in the sparse attention.
@@ -468,7 +475,11 @@ class BigBirdSparsityConfig(SparsityConfig):
             )
 
         for row in range(0, num_blocks):
-            rnd_cols = random.sample(range(0, num_blocks), self.num_random_blocks)
+            sample_range = range(
+                0,
+                num_blocks) if self.attention == 'bidirectional' else range(0,
+                                                                            row + 1)
+            rnd_cols = random.sample(sample_range, self.num_random_blocks)
             layout[h, row, rnd_cols] = 1
         return layout
 
@@ -519,6 +530,10 @@ class BigBirdSparsityConfig(SparsityConfig):
         #global columns
         layout[h, :, 0:self.num_global_blocks] = 1
 
+        if self.attention == 'unidirectional':
+            # zero out anything attending to the future
+            layout = torch.tril(layout)
+
         return layout
 
     def make_layout(self, seq_len):
@@ -555,7 +570,8 @@ class BSLongformerSparsityConfig(SparsityConfig):
                  different_layout_per_head=False,
                  num_sliding_window_blocks=3,
                  global_block_indices=[0],
-                 global_block_end_indices=None):
+                 global_block_end_indices=None,
+                 attention='bidirectional'):
         """Initialize the edited `Longformer` Sparsity Pattern Config.
 
         For usage example please see, TODO DeepSpeed Sparse Transformer Tutorial
@@ -568,12 +584,14 @@ class BSLongformerSparsityConfig(SparsityConfig):
              num_sliding_window_blocks: optional: an integer determining the number of blocks in sliding local attention window.
              global_block_indices: optional: a list of integers determining which blocks are considered as global attention. Given indices, determine the blocks that all other token blocks attend to and they attend to all other token blocks. Default value is only index 0. Notice that if global_block_end_indices parameter is set, this parameter is used as starting index of each global window.
              global_block_end_indices: optional: a list of integers determining end indices of global window blocks. By default this is not used. But if it is set, it must have the same size of global_block_indices parameter, and combining this two parameters, for each index i, blocks from global_block_indices[i] to global_block_end_indices[i] (exclusive) are considered as global attention.
+             attention: optional: a string determining attention type. Attention can be `unidirectional`, such as autoregressive models, in which tokens attend only to tokens appear before them in the context. Considering that, the upper triangular of attention matrix is empty as above figure. Or it can be `bidirectional`, such as BERT, in which tokens can attend to any other tokens before or after them. Then, the upper triangular part of the attention matrix is mirror of the lower triangular in the above figure.
         """
 
         super().__init__(num_heads, block, different_layout_per_head)
 
         self.num_sliding_window_blocks = num_sliding_window_blocks
         self.global_block_indices = global_block_indices
+        self.attention = attention
 
         if (global_block_end_indices is not None):
             if (len(global_block_indices) != len(global_block_end_indices)):
@@ -642,6 +660,8 @@ class BSLongformerSparsityConfig(SparsityConfig):
 
                     #global columns
                     layout[h, :, start_idx:end_idx] = 1
+        if self.attention == 'unidirectional':
+            layout = torch.tril(layout)
         return layout
 
     def make_layout(self, seq_len):
