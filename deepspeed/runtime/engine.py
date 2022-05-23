@@ -2169,7 +2169,8 @@ class DeepSpeedEngine(Module):
 
             grad_data = param.grad.data
             if param_name in self.sparse_tensor_module_names or grad_data.is_sparse:
-                grad_data = SparseTensor(grad_data)
+                # Call param.grad without data to avoid problem with setting of updated grads
+                grad_data = SparseTensor(param.grad)
 
             if is_moe_param(param):
                 expert_grads[param.group_name].append(grad_data)
