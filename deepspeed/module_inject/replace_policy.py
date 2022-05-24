@@ -2,6 +2,7 @@ from abc import ABC
 
 import torch
 from torch.nn.parameter import Parameter
+from packaging import version as pkg_version
 
 
 class DSPolicy(ABC):
@@ -210,12 +211,15 @@ class MegatronLayerPolicy(DSPolicy):
         # we use megatron version to differentiate between the old and new
         # megatron-lm source code
         if MegatronLayerPolicy._orig_layer_class is None:
-            try:
-                import megatron
-                from megatron.model.transformer import ParallelTransformerLayer
-                MegatronLayerPolicy._orig_layer_class = ParallelTransformerLayer
-            except ImportError:
+            if pkg_version.parse(torch.__version__) <= pkg_version.parse("1.2"):
                 MegatronLayerPolicy._orig_layer_class = None
+            else:
+                try:
+                    import megatron
+                    from megatron.model.transformer import ParallelTransformerLayer
+                    MegatronLayerPolicy._orig_layer_class = ParallelTransformerLayer
+                except ImportError:
+                    MegatronLayerPolicy._orig_layer_class = None
 
     def get_hidden_heads(self):
         return self.client_module.attention.query_key_value.weight.shape[1], \
@@ -325,12 +329,15 @@ class GPTNEOXLayerPolicy(DSPolicy):
         super().__init__(inference, megatron_v2=megatron_v2)
         self.client_module = client_module
         if GPTNEOXLayerPolicy._orig_layer_class is None:
-            try:
-                import megatron
-                from megatron.model.transformer import ParallelTransformerLayerPipe
-                GPTNEOXLayerPolicy._orig_layer_class = ParallelTransformerLayerPipe
-            except ImportError:
+            if pkg_version.parse(torch.__version__) <= pkg_version.parse("1.2"):
                 GPTNEOXLayerPolicy._orig_layer_class = None
+            else:
+                try:
+                    import megatron
+                    from megatron.model.transformer import ParallelTransformerLayerPipe
+                    GPTNEOXLayerPolicy._orig_layer_class = ParallelTransformerLayerPipe
+                except ImportError:
+                    GPTNEOXLayerPolicy._orig_layer_class = None
 
     def get_hidden_heads(self):
         if GPTNEOXLayerPolicy.version == 0:

@@ -135,7 +135,8 @@ class DeepSpeedSelfAttentionFunction(Function):
                 q_scales,
                 q_groups,
                 merge_count,
-                qkv_merging):
+                qkv_merging,
+                score_context_func):
         def _transpose_for_scores(x, key=False, reshape=False):
             attention_head_size = x.shape[-1] // num_attention_heads_per_partition
             new_x_shape = x.size()[:-1] + (num_attention_heads_per_partition,
@@ -156,9 +157,11 @@ class DeepSpeedSelfAttentionFunction(Function):
             return x.view(*new_x_layer_shape).contiguous()
 
         def compute_attention(qkv_out, input_mask):
-            score_context_func = inference_cuda_module.softmax_context_fp32 if (not config.fp16) else \
-                                    inference_cuda_module.softmax_context_fp16
+            no_masking = input_mask is None
 
+            head_size = (qkv_out.shape[-1] // 3 // num_attention_heads_per_partition)
+            if no_masking:
+                input_mask = torch.empty(1)
             if merge_count > 0 and config.q_int8:
                 split_dim = (qkv_out.dim() - 1)
                 qkv_split = torch.split(qkv_out,
@@ -175,86 +178,89 @@ class DeepSpeedSelfAttentionFunction(Function):
                      torch.cat([s[i] for s in qkv_split],
                                axis=-1) for i in range(len(qkv_split[0]))
                  ]
-            else:
-                (mixed_query,
-                 key_layer,
-                 value_layer) = torch.split(qkv_out,
-                                            (qkv_out.shape[-1] // 3),
-                                            dim=(qkv_out.dim() - 1))
-            no_masking = input_mask is None
-            if no_masking:
-                input_mask = torch.empty(1)
-            head_size = (mixed_query.shape[-1] // num_attention_heads_per_partition)
 
-            unfused_mode = not config.specialized_mode or \
-                                mixed_query.shape[1] >= 32 or head_size > 128
-
-            if config.rotary_dim > 0:
-                mixed_query, key_layer = inference_cuda_module.apply_rotary_pos_emb(
-                    mixed_query,
-                    key_layer,
-                    config.rotary_dim,
-                    0 if layer_past is None else layer_past[0].shape[-2],
-                    num_attention_heads_per_partition,
-                    config.rotate_half,
-                    config.rotate_every_two)
-            if layer_past is not None:
-                past_key, past_value = layer_past
-                if unfused_mode:
+                if config.rotary_dim > 0:
+                    mixed_query, key_layer = inference_cuda_module.apply_rotary_pos_emb(
+                        mixed_query,
+                        key_layer,
+                        config.rotary_dim,
+                        0 if layer_past is None else layer_past[0].shape[-2],
+                        num_attention_heads_per_partition,
+                        config.rotate_half,
+                        config.rotate_every_two)
+                if layer_past is not None:
+                    past_key, past_value = layer_past
                     key_layer = torch.cat((past_key.type_as(key_layer),
                                            key_layer),
                                           dim=-2)
                     value_layer = torch.cat((past_value.type_as(value_layer),
                                              value_layer),
                                             dim=-2)
-            presents = (key_layer, value_layer)
-            if unfused_mode:
+                presents = (key_layer, value_layer)
                 mixed_query = _transpose_for_scores(mixed_query, False, True)
                 key_layer = _transpose_for_scores(
                     key_layer,
                     True,
                     True) / (norm_factor if config.scale_attention else 1.0)
                 value_layer = _transpose_for_scores(value_layer, False, True)
-            #print(f'[{torch.distributed.get_rank()}] {config.layer_id}: {mixed_query.norm()}')
-            if layer_past is None:
+                if layer_past is None:
+                    attn_key_value = score_context_func(
+                        mixed_query,
+                        key_layer,
+                        torch.empty(1),
+                        input_mask,
+                        value_layer,
+                        torch.empty(1),
+                        num_attention_heads_per_partition,
+                        (1 / norm_factor if config.scale_attention else 1.0),
+                        (not unfused_mode),
+                        config.triangular_masking,
+                        config.local_attention,
+                        config.window_size,
+                        no_masking)
+                else:
+                    attn_key_value = score_context_func(
+                        mixed_query,
+                        (key_layer if unfused_mode else past_key.type_as(key_layer)),
+                        key_layer,
+                        input_mask,
+                        (value_layer
+                         if unfused_mode else past_value.type_as(value_layer)),
+                        value_layer,
+                        num_attention_heads_per_partition,
+                        (1 / norm_factor if config.scale_attention else 1.0),
+                        (not unfused_mode),
+                        config.triangular_masking,
+                        config.local_attention,
+                        config.window_size,
+                        no_masking)
+                if unfused_mode:
+                    context_layer, _, _ = attn_key_value
+                else:
+                    context_layer, key_layer, value_layer = attn_key_value
+
+                # Transpose Context
+                context_layer = _transpose_for_context(context_layer)
+
+                return context_layer, presents[0], presents[1] # atten_output, key_layer, value_layer
+            else:
                 attn_key_value = score_context_func(
-                    mixed_query,
-                    key_layer,
-                    torch.empty(1),
+                    qkv_out,
                     input_mask,
-                    value_layer,
-                    torch.empty(1),
+                    config.rotary_dim,
+                    config.rotate_half,
+                    config.rotate_every_two,
                     num_attention_heads_per_partition,
                     (1 / norm_factor if config.scale_attention else 1.0),
-                    (not unfused_mode),
                     config.triangular_masking,
                     config.local_attention,
                     config.window_size,
-                    no_masking)
-            else:
-                attn_key_value = score_context_func(
-                    mixed_query,
-                    (key_layer if unfused_mode else past_key.type_as(key_layer)),
-                    key_layer,
-                    input_mask,
-                    (value_layer if unfused_mode else past_value.type_as(value_layer)),
-                    value_layer,
-                    num_attention_heads_per_partition,
-                    (1 / norm_factor if config.scale_attention else 1.0),
-                    (not unfused_mode),
-                    config.triangular_masking,
-                    config.local_attention,
-                    config.window_size,
-                    no_masking)
-            if unfused_mode:
-                context_layer, _, _ = attn_key_value
-            else:
+                    no_masking,
+                    config.layer_id,
+                    DeepSpeedTransformerInference.layer_id)
+
                 context_layer, key_layer, value_layer = attn_key_value
-
-            # Transpose Context
-            context_layer = _transpose_for_context(context_layer)
-
-            return context_layer, presents[0], presents[1] # atten_output, key_layer, value_layer
+                return context_layer, key_layer, value_layer
 
         def selfAttention_fp():
             vector_matmul_func = inference_cuda_module.vector_matmul_fp16 if config.fp16 else \
@@ -267,19 +273,20 @@ class DeepSpeedSelfAttentionFunction(Function):
             else:
                 qkv_func = inference_cuda_module.qkv_gemm_fp16 if config.fp16 else \
                                     inference_cuda_module.qkv_gemm_fp32
+
                 qkv_out = qkv_func(input,
                                    attn_qkvw,
                                    (attn_qkvb if attn_qkvb is not None else norm_b),
                                    norm_w,
                                    norm_b,
                                    config.epsilon,
-                                   (attn_qkvb is not None))
+                                   (attn_qkvb is not None),
+                                   DeepSpeedTransformerInference.layer_id)
 
             context_layer, key_layer, value_layer = compute_attention(qkv_out[0] if isinstance(qkv_out, list) else qkv_out, input_mask)
             output = vector_matmul_func(context_layer, attn_ow, False)
-            #print(f'[{torch.distributed.get_rank()}] {config.layer_id}: oooooo -> {output.norm()}')
 
-            return output, key_layer, value_layer, context_layer, qkv_out[-1] # attn_out, present_key, present_value, context_output, inp_norm
+            return output, key_layer, value_layer, context_layer, qkv_out[-1]
 
         def selfAttention_int8():
             if not config.pre_layer_norm:
@@ -366,6 +373,9 @@ class DeepSpeedSelfAttention(nn.Module):
             math.sqrt(self.config.hidden_size // self.config.heads))
         self.qkv_merging = qkv_merging
 
+        self.score_context_func = inference_cuda_module.softmax_context_fp32 if (not config.fp16) else \
+                                    inference_cuda_module.softmax_context_fp16
+
     def forward(self,
                 input,
                 input_mask,
@@ -400,7 +410,8 @@ class DeepSpeedSelfAttention(nn.Module):
             self.q_scales,
             self.q_groups,
             self.merge_count,
-            self.qkv_merging)
+            self.qkv_merging,
+            self.score_context_func)
 
         return output
 
@@ -472,9 +483,10 @@ class DeepSpeedMLPFunction(Function):
                                            residual,
                                            input,
                                            output_b,
-                                           bias,
+                                           bias if bias is not None else output_b,
                                            config.mp_size,
-                                           config.mlp_after_attn)
+                                           config.mlp_after_attn,
+                                           bias is not None)
         if mp_group is not None and dist.get_world_size(group=mp_group) > 1:
             dist.all_reduce(output, group=mp_group)
         return output

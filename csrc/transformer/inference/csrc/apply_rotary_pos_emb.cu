@@ -5,6 +5,7 @@
 #endif
 
 namespace cg = cooperative_groups;
+namespace cg = cooperative_groups;
 
 __global__ void apply_rotary_pos_emb(float* mixed_query,
                                      float* key_layer,
@@ -153,7 +154,9 @@ __global__ void apply_rotary_pos_emb1(__half* mixed_query,
     int lane = id & 0x1f;
 
     unsigned head_id = blockIdx.x * MAX_WARP_NUM + gid;
+    unsigned seq_index = head_id % seq_len;
     unsigned offset = head_id * head_size;
+    unsigned k_offset = (seq_index + (head_id / seq_len) * MAX_OUT_TOKES) * head_size;
 
     constexpr unsigned mask[32] = {
         0x1 | 0x1000,     0x2 | 0x2000,     0x4 | 0x4000,     0x8 | 0x8000,     0x10 | 0x10000,
@@ -171,7 +174,7 @@ __global__ void apply_rotary_pos_emb1(__half* mixed_query,
             float inv_freq = (float)((lane % half_dim) * 2) / (float)rotary_dim;
             inv_freq = 1.0 / powf(10000.0, inv_freq) * (float)seq_id;
             float q = (float)mixed_query[offset + lane];
-            float k = (float)key_layer[offset + lane];
+            float k = (float)key_layer[k_offset + lane];
             float rotary_sign = (lane > (half_dim - 1) ? -1.0 : 1.0);
             float q_rot = (q * rotary_sign);
             float k_rot = (k * rotary_sign);
@@ -183,7 +186,7 @@ __global__ void apply_rotary_pos_emb1(__half* mixed_query,
             k = k * cosf(inv_freq) + k_rot_tmp * sinf(inv_freq);
 
             mixed_query[offset + lane] = (__half)q;
-            key_layer[offset + lane] = (__half)k;
+            key_layer[k_offset + lane] = (__half)k;
 
             lane += WARP_SIZE;
         }
@@ -237,6 +240,7 @@ template void launch_apply_rotary_pos_emb<__half>(__half*,
                                                   bool,
                                                   bool,
                                                   cudaStream_t);
+
 /*
 __global__ void apply_rotary_pos_emb(float* mixed_query,
 float* key_layer,

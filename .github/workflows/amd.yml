@@ -37,12 +37,23 @@ jobs:
           python -c "import torch; print('CUDA available:', torch.cuda.is_available())"
           sudo apt-get update
           sudo apt-get install -y libaio-dev
+
+      - name: Install transformers
+        run: |
+          git clone https://github.com/huggingface/transformers
+          cd transformers
+          # if needed switch to the last known good SHA until transformers@master is fixed
+          # git checkout 1cc453d33
+          git rev-parse --short HEAD
+          pip install .
+
       # Runs a set of commands using the runners shell
       - name: Install deepspeed
         run: |
           sudo /opt/conda/bin/pip install .[dev,1bit,autotuning]
           #python -c "from deepspeed.env_report import cli_main; cli_main()"
           ds_report
+
       # Runs a set of commands using the runners shell
       - name: Unit tests
         run: |

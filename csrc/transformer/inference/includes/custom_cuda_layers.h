@@ -17,8 +17,11 @@
 #include <cassert>
 #include <iostream>
 
+#define MAX_OUT_TOKES 1024
 #define MAX_WARP_NUM 32
 #define WARP_SIZE 32
+
+#define MAX_THREADS 1024
 #define SMs 80
 
 #define MAX_REGISTERS 256
@@ -122,3 +125,31 @@ void launch_moe_res_matmul(T* residual,
                            int seq_len,
                            int hidden_dim,
                            cudaStream_t stream);
+
+// 4D transform [0, 1, 2, 3] -> [0, 2, 1, 3]
+template <typename T>
+void launch_transform4d_0213(T* out,
+                             const T* in,
+                             int batch_size,
+                             int heads,
+                             int seq_length,
+                             int hidden_dim,
+                             cudaStream_t stream,
+                             int trans_count);
+template <typename T>
+void launch_bias_add_transform_0213(T* outputs,
+                                    T* vals,
+                                    T* vals1,
+                                    const T* vals2,
+                                    const T* bias,
+                                    int batch_size,
+                                    int seq_length,
+                                    unsigned seq_offset,
+                                    int seq_length1,
+                                    int hidden_dim,
+                                    int heads,
+                                    int rotary_dim,
+                                    bool rotate_half,
+                                    bool rotate_every_two,
+                                    cudaStream_t stream,
+                                    int trans_count);
