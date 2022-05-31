@@ -40,5 +40,6 @@ jobs:
         run: |
           if [[ -d ./torch-extensions ]]; then rm -rf ./torch-extensions; fi
           pip install pytorch-lightning
+          pip install "protobuf<4.21.0"
           cd tests
           TORCH_EXTENSIONS_DIR=./torch-extensions pytest --color=yes --durations=0 --verbose lightning/
