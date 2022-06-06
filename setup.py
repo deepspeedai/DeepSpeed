@@ -221,17 +221,28 @@ else:
     version_str += f'+{git_hash}'
 
 torch_version = ".".join([TORCH_MAJOR, TORCH_MINOR])
+bf16_support = False
 # Set cuda_version to 0.0 if cpu-only
 cuda_version = "0.0"
+nccl_version = "0.0"
 # Set hip_version to 0.0 if cpu-only
 hip_version = "0.0"
 if torch_available and torch.version.cuda is not None:
     cuda_version = ".".join(torch.version.cuda.split('.')[:2])
+    if isinstance(torch.cuda.nccl.version(), int):
+        # This will break if minor version > 9
+        nccl_version = ".".join(str(torch.cuda.nccl.version())[:2])
+    else:
+        nccl_version = ".".join(map(str, torch.cuda.nccl.version()[:2]))
+    if hasattr(torch.cuda, 'is_bf16_supported'):
+        bf16_support = torch.cuda.is_bf16_supported()
 if torch_available and hasattr(torch.version, 'hip') and torch.version.hip is not None:
     hip_version = ".".join(torch.version.hip.split('.')[:2])
 torch_info = {
     "version": torch_version,
+    "bf16_support": bf16_support,
     "cuda_version": cuda_version,
+    "nccl_version": nccl_version,
     "hip_version": hip_version
 }
 

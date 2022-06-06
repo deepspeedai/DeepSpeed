@@ -1,4 +1,4 @@
-name: nv-transformers-v100
+name: nv-torch-latest-v100
 
 on:
   push:
@@ -17,7 +17,7 @@ concurrency:
 
 jobs:
   unit-tests:
-    runs-on: [self-hosted, nvidia, cu111, v100]
+    runs-on: [self-hosted, nvidia, cu113, v100]
 
     steps:
       - uses: actions/checkout@v2
@@ -31,24 +31,30 @@ jobs:
           nvcc --version
           pip install --upgrade pip
           pip uninstall --yes torch torchvision
-          pip install torch==1.8.2+cu111 torchvision==0.9.2+cu111 -f https://download.pytorch.org/whl/lts/1.8/torch_lts.html
+          pip install torch torchvision --extra-index-url https://download.pytorch.org/whl/cu113
           python -c "import torch; print('torch:', torch.__version__, torch)"
           python -c "import torch; print('CUDA available:', torch.cuda.is_available())"
-      - name: Install deepspeed
+
+      - name: Install transformers
         run: |
-          pip uninstall --yes deepspeed
-          pip install .[dev,autotuning]
-          ds_report
-      - name: HF transformers tests
-        run: |
-          if [[ -d ./torch-extensions ]]; then rm -rf ./torch-extensions; fi
           git clone https://github.com/huggingface/transformers
           cd transformers
           # if needed switch to the last known good SHA until transformers@master is fixed
           # git checkout 1cc453d33
           git rev-parse --short HEAD
-          # scipy/sklearn required for tests, using the 'dev' extra forces torch re-install
-          pip install .[testing]
-          # find reqs used in ds integration tests
-          find examples/pytorch  -regextype posix-egrep -regex '.*(language-modeling|question-answering|summarization|image-classification|text-classification|translation).*/requirements.txt' -exec pip install -r {} \;
-          TORCH_EXTENSIONS_DIR=./torch-extensions RUN_SLOW=1 pytest --color=yes --durations=0 --verbose tests/deepspeed
+          pip uninstall --yes transformers
+          pip install .
+
+      - name: Install deepspeed
+        run: |
+          pip uninstall --yes deepspeed
+          pip install .[dev,1bit,autotuning,sparse_attn]
+          ds_report
+
+      - name: Unit tests
+        run: |
+          unset TORCH_CUDA_ARCH_LIST # only jit compile for current arch
+          if [[ -d ./torch-extensions ]]; then rm -rf ./torch-extensions; fi
+          cd tests
+          TORCH_EXTENSIONS_DIR=./torch-extensions pytest --color=yes --durations=0 --forked --verbose -n 4 -m 'not sequential' unit/
+          TORCH_EXTENSIONS_DIR=./torch-extensions pytest --color=yes --durations=0 --forked --verbose -m 'sequential' unit/

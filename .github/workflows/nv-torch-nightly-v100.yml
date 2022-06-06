@@ -1,15 +1,8 @@
-name: nv-torch18-v100
+name: nv-torch-nightly-v100
 
 on:
-  push:
-    branches:
-      - 'master'
-      - 'staging**'
-    paths-ignore:
-      - 'docs/**'
-  pull_request:
-    paths-ignore:
-      - 'docs/**'
+  schedule:
+    - cron: "0 0 * * *"
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -17,7 +10,7 @@ concurrency:
 
 jobs:
   unit-tests:
-    runs-on: [self-hosted, nvidia, cu111, v100]
+    runs-on: [self-hosted, nvidia, cu113, v100]
 
     steps:
       - uses: actions/checkout@v2
@@ -31,7 +24,7 @@ jobs:
           nvcc --version
           pip install --upgrade pip
           pip uninstall --yes torch torchvision
-          pip install torch==1.8.2+cu111 torchvision==0.9.2+cu111 -f https://download.pytorch.org/whl/lts/1.8/torch_lts.html
+          pip install --pre torch torchvision --extra-index-url https://download.pytorch.org/whl/nightly/cu113
           python -c "import torch; print('torch:', torch.__version__, torch)"
           python -c "import torch; print('CUDA available:', torch.cuda.is_available())"
 
