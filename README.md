@@ -1,7 +1,8 @@
-[![Build Status](https://github.com/microsoft/deepspeed/workflows/Build/badge.svg)](https://github.com/microsoft/DeepSpeed/actions)
+[![License MIT](https://badgen.net/badge/license/MIT/blue)](https://github.com/Microsoft/DeepSpeed/blob/master/LICENSE)
 [![PyPI version](https://badge.fury.io/py/deepspeed.svg)](https://pypi.org/project/deepspeed/)
-[![Documentation Status](https://readthedocs.org/projects/deepspeed/badge/?version=latest)](https://deepspeed.readthedocs.io/en/latest/?badge=latest)
-[![License MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://github.com/Microsoft/DeepSpeed/blob/master/LICENSE)
+[![Downloads](https://pepy.tech/badge/deepspeed)](https://pepy.tech/project/deepspeed)
+[![Build](https://badgen.net/badge/build/check-status/blue)](#build-pipeline-status)
+
 
 <div align="center">
  <img src="docs/assets/images/DeepSpeed_light.svg#gh-light-mode-only" width="400px">
@@ -49,6 +50,17 @@ initiative to enable next-generation AI capabilities at scale, where you can fin
 information [here](https://innovation.microsoft.com/en-us/exploring-ai-at-scale).
 
 **_For further documentation, tutorials, and technical deep-dives please see [deepspeed.ai](https://www.deepspeed.ai/)!_**
+
+# Build Pipeline Status
+
+| Description | Status |
+| ----------- | ------ |
+| NVIDIA | [![nv-torch12-p40](https://github.com/microsoft/DeepSpeed/actions/workflows/nv-torch12-p40.yml/badge.svg)](https://github.com/microsoft/DeepSpeed/actions/workflows/nv-torch12-p40.yml) [![nv-torch18-v100](https://github.com/microsoft/DeepSpeed/actions/workflows/nv-torch18-v100.yml/badge.svg)](https://github.com/microsoft/DeepSpeed/actions/workflows/nv-torch18-v100.yml) [![nv-torch-latest-v100](https://github.com/microsoft/DeepSpeed/actions/workflows/nv-torch-latest-v100.yml/badge.svg)](https://github.com/microsoft/DeepSpeed/actions/workflows/nv-torch-latest-v100.yml) |
+| AMD | [![amd](https://github.com/microsoft/DeepSpeed/actions/workflows/amd.yml/badge.svg)](https://github.com/microsoft/DeepSpeed/actions/workflows/amd.yml) |
+| PyTorch Nightly | [![nv-torch-nightly-v100](https://github.com/microsoft/DeepSpeed/actions/workflows/nv-torch-nightly-v100.yml/badge.svg)](https://github.com/microsoft/DeepSpeed/actions/workflows/nv-torch-nightly-v100.yml) |
+| Integrations | [![nv-transformers-v100](https://github.com/microsoft/DeepSpeed/actions/workflows/nv-transformers-v100.yml/badge.svg)](https://github.com/microsoft/DeepSpeed/actions/workflows/nv-transformers-v100.yml) [![nv-lightning-v100](https://github.com/microsoft/DeepSpeed/actions/workflows/nv-lightning-v100.yml/badge.svg)](https://github.com/microsoft/DeepSpeed/actions/workflows/nv-lightning-v100.yml) |
+| Misc | [![Formatting](https://github.com/microsoft/DeepSpeed/actions/workflows/formatting.yml/badge.svg)](https://github.com/microsoft/DeepSpeed/actions/workflows/formatting.yml) [![pages-build-deployment](https://github.com/microsoft/DeepSpeed/actions/workflows/pages/pages-build-deployment/badge.svg)](https://github.com/microsoft/DeepSpeed/actions/workflows/pages/pages-build-deployment) [![Documentation Status](https://readthedocs.org/projects/deepspeed/badge/?version=latest)](https://deepspeed.readthedocs.io/en/latest/?badge=latest)|
+
 
 # Table of Contents
 | Section                                 | Description                                 |
