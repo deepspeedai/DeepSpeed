@@ -35,7 +35,7 @@ import torch
 from torch import nn
 from torch.nn import CrossEntropyLoss
 from torch.utils import checkpoint
-import torch.distributed as dist
+import deepspeed.comm as dist
 
 from torch.nn import Module
 from torch.nn.parameter import Parameter

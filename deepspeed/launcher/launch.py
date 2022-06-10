@@ -1,6 +1,6 @@
 # Copyright 2020 The Microsoft DeepSpeed Team
 """
-DeepSpeed launcher, this is similar to torch.distributed.launch but supports
+DeepSpeed launcher, this is similar to torch's distributed.launch but supports
 additional features such as arbitrary gpu exclusion.
 
 deepspeed.launcher.launch is intended to be run on a single worker node and

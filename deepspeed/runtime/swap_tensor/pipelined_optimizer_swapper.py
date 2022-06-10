@@ -10,6 +10,7 @@ import torch
 
 from deepspeed.utils.logging import logger
 from deepspeed.ops.aio import AsyncIOBuilder
+import deepspeed.comm as dist
 
 from deepspeed.runtime.zero.offload_constants import *
 from deepspeed.runtime.swap_tensor.constants import *
@@ -113,7 +114,7 @@ class PipelinedOptimizerSwapper(OptimizerSwapper):
             'print_exclude_list'
         ]
 
-        if torch.distributed.get_rank() == 0:
+        if dist.get_rank() == 0:
             print_object(obj=self,
                          name='PipelinedOptimizerSwapper',
                          exclude_list=self.print_exclude_list)

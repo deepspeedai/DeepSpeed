@@ -3,7 +3,7 @@ Copyright 2020 The Microsoft DeepSpeed Team
 '''
 
 import torch
-import torch.distributed as dist
+import deepspeed.comm as dist
 import time
 import cupy
 import numpy as np

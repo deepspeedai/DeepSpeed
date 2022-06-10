@@ -1,7 +1,7 @@
 import pytest
 
 import torch
-import torch.distributed as dist
+import deepspeed.comm as dist
 
 from deepspeed.runtime.pipe.topology import PipelineParallelGrid as Grid
 from deepspeed.runtime.pipe.topology import ProcessTopology as Topo

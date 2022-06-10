@@ -2,7 +2,7 @@ import os
 from typing import List
 
 import torch
-import torch.distributed as dist
+import deepspeed.comm as dist
 from deepspeed.utils import logger
 from deepspeed.ops.adam import DeepSpeedCPUAdam
 from deepspeed.ops.adam import FusedAdam
@@ -21,7 +21,7 @@ def _initialize_parameter_parallel_groups(parameter_parallel_size=None):
     my_group = None
     for i in range(data_parallel_size // parameter_parallel_size):
         ranks = range(i * parameter_parallel_size, (i + 1) * parameter_parallel_size)
-        group = torch.distributed.new_group(ranks)
+        group = dist.new_group(ranks)
         if rank in ranks:
             my_group = group
     return my_group

@@ -2,7 +2,7 @@ import os
 import time
 
 import torch
-import torch.distributed as dist
+import deepspeed.comm as dist
 from torch.multiprocessing import Process
 
 import deepspeed
@@ -66,7 +66,7 @@ def set_cuda_visibile():
 def distributed_test(world_size=2, backend='nccl'):
     """A decorator for executing a function (e.g., a unit test) in a distributed manner.
     This decorator manages the spawning and joining of processes, initialization of
-    torch.distributed, and catching of errors.
+    deepspeed.comm, and catching of errors.
 
     Usage example:
         @distributed_test(worker_size=[2,3])
@@ -82,7 +82,7 @@ def distributed_test(world_size=2, backend='nccl'):
     def dist_wrap(run_func):
         """Second-level decorator for dist_test. This actually wraps the function. """
         def dist_init(local_rank, num_procs, *func_args, **func_kwargs):
-            """Initialize torch.distributed and execute the user function. """
+            """Initialize deepspeed.comm and execute the user function. """
             os.environ['MASTER_ADDR'] = '127.0.0.1'
             os.environ['MASTER_PORT'] = get_master_port()
             os.environ['LOCAL_RANK'] = str(local_rank)
@@ -96,6 +96,8 @@ def distributed_test(world_size=2, backend='nccl'):
             set_cuda_visibile()
 
             deepspeed.init_distributed(dist_backend=backend)
+            #dist.init_process_group(backend=backend)
+            dist.barrier()
 
             if torch.cuda.is_available():
                 torch.cuda.set_device(local_rank)
@@ -103,10 +105,9 @@ def distributed_test(world_size=2, backend='nccl'):
             run_func(*func_args, **func_kwargs)
 
             # make sure all ranks finish at the same time
-            torch.distributed.barrier()
-
+            dist.barrier()
             # tear down after test completes
-            torch.distributed.destroy_process_group()
+            dist.destroy_process_group()
 
         def dist_launcher(num_procs, *func_args, **func_kwargs):
             """Launch processes and gracefully handle failures. """

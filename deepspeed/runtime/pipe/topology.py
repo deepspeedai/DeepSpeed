@@ -2,7 +2,7 @@
 
 from deepspeed.utils import logger
 
-import torch.distributed as dist
+import deepspeed.comm as dist
 import sys
 
 from collections import namedtuple

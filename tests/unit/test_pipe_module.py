@@ -2,7 +2,7 @@ import copy
 
 import torch
 import torch.nn as nn
-import torch.distributed as dist
+import deepspeed.comm as dist
 
 import pytest
 

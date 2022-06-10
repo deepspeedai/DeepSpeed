@@ -33,6 +33,15 @@ repos:
     -   id: clang-format  # formatter of C/C++ code based on a style guide: LLVM, Google, Chromium, Mozilla, and WebKit available
         args: []
 
+-   repo: local
+    hooks:
+    -   id: check-torchdist
+        name: check-torchdist
+        entry: ./scripts/check-torchdist.py
+        language: script
+        exclude: ^(deepspeed/comm/|docs/|scripts/check-torchdist.py|deepspeed/moe/sharded_moe.py|deepspeed/runtime/comm/coalesced_collectives.py)
+        # Specific deepspeed/ files are excluded for now until we wrap ProcessGroup in deepspeed.comm
+
 -   repo: https://github.com/codespell-project/codespell
     rev: v2.1.0
     hooks:

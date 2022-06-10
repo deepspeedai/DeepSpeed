@@ -3,7 +3,7 @@ import os
 import filecmp
 import torch
 import deepspeed
-import torch.distributed as dist
+import deepspeed.comm as dist
 from deepspeed.ops.aio import AsyncIOBuilder
 from .common import distributed_test
 

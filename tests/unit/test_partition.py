@@ -1,7 +1,7 @@
 import pytest
 
 import torch
-import torch.distributed as dist
+import deepspeed.comm as dist
 
 from deepspeed.runtime.utils import partition_uniform
 from deepspeed.runtime.utils import partition_balanced

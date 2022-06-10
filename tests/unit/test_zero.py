@@ -1,7 +1,7 @@
 import math
 from typing import Dict, List, Set
 import pytest
-import torch.distributed as dist
+import deepspeed.comm as dist
 import torch
 from torch import Tensor
 from torch.nn import Linear, Module
@@ -1215,7 +1215,7 @@ def test_zero_offload_stage1():
                                         total_samples=50,
                                         hidden_dim=hidden_dim,
                                         device=model.device)
-        torch.distributed.barrier()
+        dist.barrier()
         for n, batch in enumerate(data_loader):
             loss = model(batch[0], batch[1])
             model.backward(loss)
@@ -1275,7 +1275,7 @@ def test_z3_dict_fwd(return_type):
                                         total_samples=50,
                                         hidden_dim=hidden_dim,
                                         device=model.device)
-        torch.distributed.barrier()
+        dist.barrier()
         for n, batch in enumerate(data_loader):
             loss = model(batch[0], batch[1])
             if return_type == dict:

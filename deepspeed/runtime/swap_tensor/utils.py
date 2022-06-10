@@ -9,6 +9,8 @@ import os
 import torch
 from deepspeed.utils.logging import logger
 
+import deepspeed.comm as dist
+
 from deepspeed.runtime.swap_tensor.constants import AIO_BLOCK_SIZE, AIO_QUEUE_DEPTH, \
     AIO_THREAD_COUNT, AIO_SINGLE_SUBMIT, AIO_OVERLAP_EVENTS
 
@@ -190,7 +192,7 @@ class SwapBufferManager(object):
         self.gigabytes = (self.all_buffers[0].element_size() * num_elems * count) / (1024
                                                                                      **3)
 
-        if torch.distributed.get_rank() == 0:
+        if dist.get_rank() == 0:
             exclude_list = ['all_buffers']
             print_object(obj=self, name='SwapBufferManager', exclude_list=exclude_list)
 

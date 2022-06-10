@@ -1,6 +1,6 @@
 import time
 import torch
-import torch.distributed as dist
+import deepspeed.comm as dist
 import numpy as np
 import argparse
 import deepspeed
@@ -62,7 +62,7 @@ print("Shape of the compressed buffer:", a_compressed.shape) if rank == 0 else N
 for i in range(iters):
     timers('compressed_allreduce').start()
     backend.compressed_allreduce(a, worker_error, server_error, local_rank)
-    #torch.distributed.all_reduce(a_compressed)
+    #deepspeed.comm.all_reduce(a_compressed)
     timers('compressed_allreduce').stop()
     time_list.append(timers('compressed_allreduce').elapsed())
 

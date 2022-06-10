@@ -6,7 +6,7 @@ import torch
 import importlib
 import numpy as np
 import time
-import torch.distributed as dist
+import deepspeed.comm as dist
 
 from deepspeed.utils.logging import logger
 
@@ -198,7 +198,7 @@ class ZeroOneAdam(torch.optim.Optimizer):
                     state['momentum_accumulator'] = torch.zeros_like(p.data)
                     torch.cuda.empty_cache()
                     # self.freeze_key = True
-                    if not self.initialize and torch.distributed.get_rank() == 0:
+                    if not self.initialize and dist.get_rank() == 0:
                         print("Cupy Buffers Initialized Successfully.")
 
                 exp_avg, exp_avg_sq = state['exp_avg'], state['exp_avg_sq']
@@ -313,9 +313,7 @@ class ZeroOneAdam(torch.optim.Optimizer):
 
         if not self.initialize:
             self.initialize = True
-            print(
-                f"Finished the initialization step at rank {torch.distributed.get_rank()}"
-            )
+            print(f"Finished the initialization step at rank {dist.get_rank()}")
             return loss
 
         if self.state[self.param_groups[0]['params'][0]]['step'] > self.var_freeze_step:

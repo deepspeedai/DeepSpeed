@@ -1,5 +1,5 @@
 import torch
-import torch.distributed as dist
+import deepspeed.comm as dist
 from deepspeed.runtime.constants import PIPE_REPLICATED
 from deepspeed.ops.op_builder import UtilsBuilder
 from deepspeed.runtime import ZeROOptimizer
@@ -68,7 +68,7 @@ def get_full_hp_param(self, optim_state_key=None):
             hp_fragment = self._hp_mapping.get_optim_state_fragment(optim_state_key)
 
         reduce_fragment.data.copy_(hp_fragment.data)
-    torch.distributed.all_reduce(reduce_buffer, group=self._dp_group)
+    dist.all_reduce(reduce_buffer, group=self._dp_group)
     return reduce_buffer.reshape_as(self)
 
 

@@ -1,8 +1,10 @@
 import torch
 
+import deepspeed.comm as dist
+
 
 def print_rank_0(message):
-    if torch.distributed.get_rank() == 0:
+    if dist.get_rank() == 0:
         print(message)
 
 

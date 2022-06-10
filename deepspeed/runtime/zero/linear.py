@@ -18,12 +18,13 @@ from torch.nn.parameter import Parameter
 from torch.nn import init
 from torch.nn.modules.module import Module
 from deepspeed.runtime.utils import noop_decorator
+import deepspeed.comm as dist
 
 tensor_map = {}
 
 
 def print_rank_0(message, debug=False, force=False):
-    if torch.distributed.get_rank() == 0 and (debug or force):
+    if dist.get_rank() == 0 and (debug or force):
         print(message)
 
 

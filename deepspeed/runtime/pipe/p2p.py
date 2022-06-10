@@ -6,7 +6,7 @@ import pickle
 import typing
 
 import torch
-import torch.distributed as dist
+import deepspeed.comm as dist
 
 # To query whether we have send/recv support
 from packaging.version import Version
@@ -25,7 +25,7 @@ def can_send_recv() -> bool:
 
 
 #initializes adjacent process groups
-#run this only after torch.distributed.init_process_group() has been called
+#run this only after deepspeed.init_distributed() has been called
 def init_process_groups(grid):
     global _groups, _grid
     _grid = grid

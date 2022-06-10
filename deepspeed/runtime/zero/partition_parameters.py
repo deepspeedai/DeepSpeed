@@ -15,8 +15,7 @@ from typing import List
 
 import torch
 from torch import Tensor
-import torch.distributed as dist
-from torch.distributed.distributed_c10d import _get_global_rank, group
+import deepspeed.comm as dist
 from torch.nn import Module
 from torch.nn import Parameter
 
@@ -26,7 +25,8 @@ from .offload_constants import *
 import deepspeed
 from ..utils import get_only_unique_item, see_memory_usage
 from deepspeed.runtime.zero.utils import assert_ints_same_as_other_ranks
-from deepspeed.utils import init_distributed, instrument_w_nvtx, logger
+from deepspeed.utils import instrument_w_nvtx, logger
+from deepspeed.comm.comm import init_distributed
 from deepspeed.utils.debug import (debug_param2name_id_shape,
                                    debug_param2name_id_shape_device,
                                    debug_module2name,
@@ -42,40 +42,16 @@ from ..swap_tensor.partitioned_param_swapper import AsyncPartitionedParameterSwa
 param_count = 0
 partitioned_param_data_shape = [0]
 
-if hasattr(torch.distributed, "_all_gather_base"):
 
-    def torch_allgather_fn(input_tensor: Tensor, output_tensor: Tensor, group):
-        try:
-            return instrument_w_nvtx(torch.distributed._all_gather_base)(
-                output_tensor,
-                input_tensor,
-                group=group,
-                async_op=True,
-            )
-        except RuntimeError as e:
-            raise RuntimeError(
-                f"output_tensor: {output_tensor.device}, input_tensor: {input_tensor.device}"
-            ) from e
-else:
-    logger.warning(
-        "unable to find torch.distributed._all_gather_base. will fall back to "
-        "torch.distributed.all_gather which will result in suboptimal performance. "
-        "please consider upgrading your pytorch installation.")
-
-    def torch_allgather_fn(input_tensor: Tensor, output_tensor: Tensor, group):
-        output_tensors = list(
-            torch.chunk(output_tensor,
-                        torch.distributed.get_world_size(group)))
-        return instrument_w_nvtx(torch.distributed.all_gather)(
-            output_tensors,
-            input_tensor,
-            group=group,
-            async_op=True,
-        )
+def _dist_allgather_fn(input_tensor: Tensor, output_tensor: Tensor, group):
+    return instrument_w_nvtx(dist.allgather_fn)(output_tensor,
+                                                input_tensor,
+                                                group=group,
+                                                async_op=True)
 
 
 def print_rank_0(message, debug=False, force=False):
-    rank = torch.distributed.get_rank()
+    rank = dist.get_rank()
     if rank == 0 and (debug or force):
         print(message)
     # other variations
@@ -86,7 +62,7 @@ def print_rank_0(message, debug=False, force=False):
 
 
 def debug_rank0(msg: str) -> None:
-    if torch.distributed.get_rank() == 0:
+    if dist.get_rank() == 0:
         logger.debug(msg)
 
 
@@ -341,9 +317,7 @@ class InsertPostInitMethodToModuleSubClasses(object):
                     fn_to_apply(module_to_apply_fn_to)
 
                     for param in params_to_apply_fn_to:
-                        torch.distributed.broadcast(param.data,
-                                                    0,
-                                                    group=param.ds_process_group)
+                        dist.broadcast(param.data, 0, group=param.ds_process_group)
 
                     for param in params_to_apply_fn_to:
                         param.partition(has_been_updated=True)
@@ -459,7 +433,7 @@ class InsertPostInitMethodToModuleSubClasses(object):
         #        if self.mem_efficient_linear:
         #            torch.nn.functional.linear = self.linear_bk
 
-        if torch.distributed.get_rank() == 0:
+        if dist.get_rank() == 0:
             logger.info("finished initializing model with %.2fB parameters",
                         param_count / 1e9)
 
@@ -573,7 +547,7 @@ class Init(InsertPostInitMethodToModuleSubClasses):
         Args:
             module (``torch.nn.Module``, optional): If provided, partition the model as
                 if it was constructed in the context.
-            data_parallel_group (``torch.distributed`` process group, optional):
+            data_parallel_group (``deepspeed.comm`` process group, optional):
                 The group of processes to partition among. Defaults to all processes.
             mem_efficient_linear (bool, optional): Replace
                 torch.nn.functional.linear with an implementation that allows
@@ -622,7 +596,7 @@ class Init(InsertPostInitMethodToModuleSubClasses):
         this feature must be used.
 
         .. note::
-            Initializes ``torch.distributed`` if it has not already been done so.
+            Initializes ``deepspeed.comm`` if it has not already been done so.
             See :meth:`deepseed.init_distributed` for more information.
 
         .. note::
@@ -677,16 +651,16 @@ class Init(InsertPostInitMethodToModuleSubClasses):
                          mem_efficient_linear=mem_efficient_linear,
                          ds_config=_ds_config,
                          dtype=dtype)
-        if not torch.distributed.is_initialized():
+        if not dist.is_initialized():
             init_distributed()
-            assert torch.distributed.is_initialized(), "Parameters cannot be scattered without initializing torch.distributed"
+            assert dist.is_initialized(), "Parameters cannot be scattered without initializing deepspeed.comm"
         if data_parallel_group is None:
-            self.ds_process_group = torch.distributed.group.WORLD
+            self.ds_process_group = dist.get_world_group()
         else:
             self.ds_process_group = data_parallel_group
 
-        self.rank = torch.distributed.get_rank(group=self.ds_process_group)
-        self.world_size = torch.distributed.get_world_size(group=self.ds_process_group)
+        self.rank = dist.get_rank(group=self.ds_process_group)
+        self.world_size = dist.get_world_size(group=self.ds_process_group)
 
         # Local device is the device where the parameters are consumed, must be default device.
         # It is the device where parameters are fully instantiated using allgather
@@ -717,10 +691,9 @@ class Init(InsertPostInitMethodToModuleSubClasses):
             self._convert_to_zero_parameters(module.parameters(recurse=True))
 
         self.use_all_gather_base = False
-        try:
-            from torch.distributed.distributed_c10d import _all_gather_base as all_gather
+        if dist.has_allgather_base():
             self.use_all_gather_base = True
-        except:
+        else:
             logger.info(
                 f"_all_gather_base API is not available in torch {torch.__version__}")
 
@@ -764,9 +737,9 @@ class Init(InsertPostInitMethodToModuleSubClasses):
                 )
 
                 if param.is_cuda:
-                    torch.distributed.broadcast(param, 0, self.ds_process_group)
+                    dist.broadcast(param, 0, self.ds_process_group)
                 else:
-                    if torch.distributed.get_rank() == 0:
+                    if dist.get_rank() == 0:
                         logger.warn(f"param `{name}` in {module.__class__.__name__} "
                                     f"not on GPU so was not broadcasted from rank 0")
 
@@ -858,7 +831,7 @@ class Init(InsertPostInitMethodToModuleSubClasses):
                     device=torch.cuda.current_device(),
                     requires_grad=False,
                 )
-                handle = torch_allgather_fn(
+                handle = _dist_allgather_fn(
                     param.ds_tensor.to(torch.cuda.current_device()),
                     param_buffer,
                     self.ds_process_group,
@@ -885,7 +858,7 @@ class Init(InsertPostInitMethodToModuleSubClasses):
                 instrument_w_nvtx(torch.cat)(
                     [p.ds_tensor.to(torch.cuda.current_device()) for p in params],
                     out=partitions[self.rank])
-                handle = torch_allgather_fn(partitions[self.rank],
+                handle = _dist_allgather_fn(partitions[self.rank],
                                             flat_tensor,
                                             self.ds_process_group)
 
@@ -1074,7 +1047,7 @@ class Init(InsertPostInitMethodToModuleSubClasses):
             #     if numel in empty_buffers:
             #         empty_buffers[numel].append(buffer)
 
-            # if torch.distributed.get_rank():
+            # if deepspeed.comm.get_rank():
             #    print(f"Releasing {param.data.numel()}")
             if param.ds_tensor is not None and not has_been_updated:
 
@@ -1225,10 +1198,10 @@ class Init(InsertPostInitMethodToModuleSubClasses):
         #            return None
         if self.use_all_gather_base:
             # try the _all_gather_base on PyTorch master branch
-            handle = dist._all_gather_base(flat_tensor,
-                                           param.ds_tensor.cuda(),
-                                           group=self.ds_process_group,
-                                           async_op=async_op)
+            handle = dist.all_gather_base(flat_tensor,
+                                          param.ds_tensor.cuda(),
+                                          group=self.ds_process_group,
+                                          async_op=async_op)
         else:
             partitions = []
             for i in range(self.world_size):
@@ -1281,10 +1254,10 @@ class Init(InsertPostInitMethodToModuleSubClasses):
 
             if self.use_all_gather_base:
                 # try the _all_gather_base from Pytorch master
-                h = dist._all_gather_base(allgather_params[param_idx],
-                                          input_tensor,
-                                          group=self.ds_process_group,
-                                          async_op=True)
+                h = dist.all_gather_base(allgather_params[param_idx],
+                                         input_tensor,
+                                         group=self.ds_process_group,
+                                         async_op=True)
             else:
                 output_list = []
                 for i in range(self.world_size):
@@ -1346,10 +1319,10 @@ class Init(InsertPostInitMethodToModuleSubClasses):
 
                     offset += param_numel
 
-        torch.distributed.all_gather(partitions,
-                                     partitions[self.rank],
-                                     group=self.ds_process_group,
-                                     async_op=False)
+        dist.all_gather(partitions,
+                        partitions[self.rank],
+                        group=self.ds_process_group,
+                        async_op=False)
         param_offset = 0
 
         for param in param_list:
@@ -1443,11 +1416,11 @@ class Init(InsertPostInitMethodToModuleSubClasses):
             #print("after reduce scatter gradients")
             input_list.append(input)
 
-        rank = torch.distributed.get_rank(group=self.ds_process_group)
-        handle = torch.distributed.reduce_scatter(input_list[rank],
-                                                  input_list,
-                                                  group=self.ds_process_group,
-                                                  async_op=True)
+        rank = dist.get_rank(group=self.ds_process_group)
+        handle = dist.reduce_scatter(input_list[rank],
+                                     input_list,
+                                     group=self.ds_process_group,
+                                     async_op=True)
 
         return handle, input_list[rank]
 
@@ -1479,7 +1452,7 @@ class Init(InsertPostInitMethodToModuleSubClasses):
             assert partition_buffer.numel(
             ) >= partition_size, f"The partition buffer size {partition_buffer.numel()} should match the size of param.ds_tensor {partition_size}"
 
-        rank = torch.distributed.get_rank(group=self.ds_process_group)
+        rank = dist.get_rank(group=self.ds_process_group)
         start = partition_size * rank
         end = start + partition_size
 
@@ -1559,12 +1532,12 @@ class GatheredParameters:
 
                 with deepspeed.zero.GatheredParameters(linear.weight,
                                                        modifier_rank=0):
-                    if torch.distributed.get_rank() == 0:
+                    if deepspeed.comm.get_rank() == 0:
                         linear.weight.zero_()
 
                 with deepspeed.zero.GatheredParameters(linear.weight,
                                                        modifier_rank=0):
-                    if torch.distributed.get_rank() == 0:
+                    if deepspeed.comm.get_rank() == 0:
                         linear.weight.zero_()
 
         #. Collect a partitioned weight to pass to another module during
@@ -1598,7 +1571,7 @@ class GatheredParameters:
                     # manager gathers (unpartitions) the params of the current layer, then loads from
                     # the state dict and then re-partitions them again
                     with deepspeed.zero.GatheredParameters(list(module.parameters(recurse=False)), modifier_rank=0):
-                        if torch.distributed.get_rank() == 0:
+                        if deepspeed.comm.get_rank() == 0:
                             module._load_from_state_dict(state_dict, prefix)
 
                     for name, child in module._modules.items():
@@ -1626,12 +1599,12 @@ class GatheredParameters:
         self.params = [p for p in params if hasattr(p, "ds_id")]
         self.src_rank = None
         if modifier_rank is not None:
-            if self.params[0].ds_process_group == torch.distributed.group.WORLD:
+            if self.params[0].ds_process_group == dist.get_world_group():
                 self.src_rank = modifier_rank
             else:
                 # A group was specified; convert DP rank to global rank
-                self.src_rank = _get_global_rank(self.params[0].ds_process_group,
-                                                 modifier_rank)
+                self.src_rank = dist.get_global_rank(self.params[0].ds_process_group,
+                                                     modifier_rank)
         self.fwd_module = fwd_module
         if self.fwd_module is not None:
             # is a no-op if already registered
@@ -1650,10 +1623,10 @@ class GatheredParameters:
             return
 
         handles = [
-            torch.distributed.broadcast(p,
-                                        self.src_rank,
-                                        group=p.ds_process_group,
-                                        async_op=True) for p in self.params
+            dist.broadcast(p,
+                           self.src_rank,
+                           group=p.ds_process_group,
+                           async_op=True) for p in self.params
         ]
         for h in handles:
             h.wait()

@@ -8,6 +8,7 @@ import time
 import torch
 from numpy import mean
 from deepspeed.utils.logging import log_dist
+import deepspeed.comm as dist
 
 from deepspeed.utils import logger
 
@@ -112,7 +113,7 @@ class SynchronizedWallClockTimer:
     def log(self, names, normalizer=1.0, reset=True, memory_breakdown=False, ranks=None):
         """Log a group of timers."""
         assert normalizer > 0.0
-        string = f"rank={torch.distributed.get_rank()} time (ms)"
+        string = f"rank={dist.get_rank()} time (ms)"
         for name in names:
             if name in self.timers:
                 elapsed_time = (self.timers[name].elapsed(reset=reset) / normalizer)

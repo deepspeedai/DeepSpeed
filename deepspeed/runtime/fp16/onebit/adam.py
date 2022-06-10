@@ -6,7 +6,7 @@ import torch
 import importlib
 import numpy as np
 import time
-import torch.distributed as dist
+import deepspeed.comm as dist
 
 from deepspeed.utils.logging import logger
 
@@ -185,7 +185,7 @@ class OnebitAdam(torch.optim.Optimizer):
                                                         device=p.device)
                     torch.cuda.empty_cache()
                     self.adam_freeze_key = True
-                    if not self.initialize and torch.distributed.get_rank() == 0:
+                    if not self.initialize and dist.get_rank() == 0:
                         print("Cupy Buffers Initialized Successfully.")
 
                 exp_avg, exp_avg_sq = state['exp_avg'], state['exp_avg_sq']
@@ -249,9 +249,7 @@ class OnebitAdam(torch.optim.Optimizer):
         if not self.initialize:
             self.adam_freeze_key = False
             self.initialize = True
-            print(
-                f"Finished the initialization step at rank {torch.distributed.get_rank()}"
-            )
+            print(f"Finished the initialization step at rank {dist.get_rank()}")
             return loss
 
         if self.adam_freeze_key is False:
@@ -282,7 +280,7 @@ class OnebitAdam(torch.optim.Optimizer):
                 state_dict['param_groups'][i].pop('exp_avg_mask')
         super().load_state_dict(state_dict)
         if self.state[self.param_groups[0]['params'][0]]['step'] < self.freeze_step:
-            if torch.distributed.get_rank() == 0:
+            if dist.get_rank() == 0:
                 print("Checkpoint loaded and OnebitAdam warmup stage starts/continues.")
             if self.adam_freeze_key is True:
                 self.adam_freeze_key = False
@@ -291,7 +289,7 @@ class OnebitAdam(torch.optim.Optimizer):
                 else:
                     self.deepspeed.enable_backward_allreduce = True
         else:
-            if torch.distributed.get_rank() == 0:
+            if dist.get_rank() == 0:
                 print(
                     "Checkpoint loaded and OnebitAdam compression stage starts/continues."
                 )

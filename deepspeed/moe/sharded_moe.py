@@ -20,7 +20,7 @@ import time
 from time import perf_counter
 import torch
 from torch import Tensor
-import torch.distributed as dist
+import deepspeed.comm as dist
 from torch.nn import Module, ModuleList
 import torch.nn.functional as F
 
@@ -80,12 +80,20 @@ def gumbel_rsample(shape: Tuple, device: torch.device) -> Tensor:
     return gumbel(shape)
 
 
+import deepspeed.comm as dist
+
+# einsum dimensions: (g)roup, (s)equence, (e)xpert, (m)odel, (c)apacity
+# See https://arxiv.org/pdf/2006.16668.pdf for details.
+
+
 # Based on https://github.com/pytorch/pytorch/pull/40762
 class _AllToAll(torch.autograd.Function):
     @staticmethod
-    def forward(ctx: Any,
-                group: dist.ProcessGroup,
-                input: Tensor) -> Tensor:  # type: ignore
+    def forward(
+            ctx: Any,
+            # TODO: replace with DS process group
+            group: torch.distributed.ProcessGroup,
+            input: Tensor) -> Tensor:  # type: ignore
         ctx.group = group
         input = input.contiguous()
         output = torch.empty_like(input)
@@ -206,7 +214,7 @@ def top1gating(logits: Tensor,
     # if we don't want to drop any tokens
     if not drop_tokens:
         new_capacity = torch.max(exp_counts).to(logits.device)
-        dist.all_reduce(new_capacity, op=dist.ReduceOp.MAX, group=dist.group.WORLD)
+        dist.all_reduce(new_capacity, op=dist.ReduceOp.MAX, group=dist.get_world_group())
         capacity = new_capacity
 
     # Compute l_aux

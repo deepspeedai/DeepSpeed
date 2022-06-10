@@ -4,7 +4,7 @@ Copyright 2020 The Microsoft DeepSpeed Team
 
 import torch.nn.init as init
 import torch
-import torch.distributed as dist
+import deepspeed.comm as dist
 
 from deepspeed.utils import logger, log_dist
 

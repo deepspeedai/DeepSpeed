@@ -1,6 +1,6 @@
 import torch
 
-import torch.distributed as dist
+import deepspeed.comm as dist
 
 import deepspeed
 from deepspeed.runtime.zero.stage_1_and_2 import DeepSpeedZeroOptimizer
@@ -885,11 +885,9 @@ def test_checkpoint_unique_tag(tmpdir, valid_mode):
                                              model_parameters=model.parameters())
         if valid_mode == "FAIL":
             with pytest.raises(AssertionError):
-                model.save_checkpoint(save_dir=tmpdir,
-                                      tag=f"tag-{torch.distributed.get_rank()}")
+                model.save_checkpoint(save_dir=tmpdir, tag=f"tag-{dist.get_rank()}")
         else:
-            model.save_checkpoint(save_dir=tmpdir,
-                                  tag=f"tag-{torch.distributed.get_rank()}")
+            model.save_checkpoint(save_dir=tmpdir, tag=f"tag-{dist.get_rank()}")
 
     _helper(args=args, model=model, hidden_dim=hidden_dim)
 

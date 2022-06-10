@@ -16,7 +16,7 @@ b886b7bb972afe72bac0f5de4f42a4a7bae8ebef
 import copy
 import torch
 import contextlib
-import torch.distributed as dist
+import deepspeed.comm as dist
 
 import mmap
 from torch import _C
@@ -222,12 +222,12 @@ def model_parallel_cuda_manual_seed(seed):
     # Data parallel gets the original seed.
     data_parallel_seed = seed
 
-    if torch.distributed.get_rank() == 0:
+    if dist.get_rank() == 0:
         logger.info(
             '> initializing model parallel cuda seeds on global rank {}, '
             'model parallel rank {}, and data parallel rank {} with '
             'model parallel seed: {} and data parallel seed: {}'.format(
-                torch.distributed.get_rank(),
+                dist.get_rank(),
                 tp_rank,
                 mpu.get_data_parallel_rank(),
                 model_parallel_seed,

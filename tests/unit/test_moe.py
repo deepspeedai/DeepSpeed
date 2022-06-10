@@ -1,7 +1,7 @@
 import math
 from deepspeed.utils import groups
 import torch
-import torch.distributed as dist
+import deepspeed.comm as dist
 import deepspeed
 import argparse
 import pytest

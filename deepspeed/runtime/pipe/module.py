@@ -9,7 +9,7 @@ from functools import partial
 
 import torch
 import torch.nn as nn
-import torch.distributed as dist
+import deepspeed.comm as dist
 
 from deepspeed.utils import logger
 from .. import utils as ds_utils

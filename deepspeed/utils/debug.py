@@ -70,7 +70,7 @@ def printflock(*msgs):
     2. Override the usual versions with ::
 
         def print_rank_0(message, debug=False, force=False):
-            rank = torch.distributed.get_rank()
+            rank = deepspeed.comm.get_rank()
             printflock(f"[{rank}] {message}")
     3. run the program and you get both logs non-interleaved
 
@@ -104,7 +104,7 @@ def log_rank_file(rank, *msgs):
     2. Override the usual versions of print_rank_0 in those files with ::
 
         def print_rank_0(message, debug=False, force=False):
-            rank = torch.distributed.get_rank()
+            rank = deepspeed.comm.get_rank()
             log_rank_file(rank, message)
 
     3. run the program

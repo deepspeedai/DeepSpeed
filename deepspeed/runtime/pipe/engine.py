@@ -12,7 +12,7 @@ from numpy import prod
 import torch
 import torch.nn as nn
 import torch.optim as optim
-import torch.distributed as dist
+import deepspeed.comm as dist
 
 from deepspeed.utils.logging import logger
 from deepspeed.utils.timer import SynchronizedWallClockTimer, ThroughputTimer

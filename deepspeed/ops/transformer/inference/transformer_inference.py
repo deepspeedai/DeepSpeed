@@ -10,7 +10,7 @@ from torch.autograd import Function
 import time
 from ... import op_builder
 import torch.nn as nn
-import torch.distributed as dist
+import deepspeed.comm as dist
 # Cuda modules will be imported if needed
 inference_cuda_module = None
 
@@ -671,7 +671,7 @@ class DeepSpeedTransformerInference(nn.Module):
                                       self.config.epsilon)
 
             output = output.to(input_type)
-        #print(f'[{torch.distributed.get_rank()}] {self.config.layer_id}: {output.norm()}')
+        #print(f'[{deepspeed.comm.get_rank()}] {self.config.layer_id}: {output.norm()}')
         #exit()
         if get_present:
             output = (output, presents)

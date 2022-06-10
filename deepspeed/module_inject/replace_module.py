@@ -19,7 +19,7 @@ class LinearAllreduce(nn.Module):
     def forward(self, input):
         output = torch.matmul(input, self.weight)
         if self.mp_group is not None:
-            torch.distributed.all_reduce(output, group=self.mp_group)
+            dist.all_reduce(output, group=self.mp_group)
         if self.bias is not None:
             output += self.bias
         return output
@@ -41,7 +41,7 @@ class LinearLayer(nn.Module):
 class ReplaceWithTensorSlicing:
     def __init__(self, mp_group=None):
         if mp_group is not None:
-            self.gpu_index = torch.distributed.get_rank(group=mp_group)
+            self.gpu_index = dist.get_rank(group=mp_group)
         else:
             self.gpu_index = 0
 
@@ -247,7 +247,7 @@ def replace_transformer_layer(orig_layer_impl,
 
         if inference:
             if moe:
-                ep_world_size = torch.distributed.get_world_size()
+                ep_world_size = dist.get_world_size()
                 local_ep_size = 1 if num_experts < ep_world_size else num_experts // ep_world_size
 
                 transformer_config = transformer_inference.DeepSpeedMoEInferenceConfig(
@@ -416,7 +416,7 @@ def replace_transformer_layer(orig_layer_impl,
 
             mpl_block = new_module.mlp
             if moe:
-                gpu_index = torch.distributed.get_rank()
+                gpu_index = dist.get_rank()
                 gpu_index = 0
                 for ep_index in range(local_ep_size):
                     mpl_block[ep_index].inter_w.data = _h4h_w[

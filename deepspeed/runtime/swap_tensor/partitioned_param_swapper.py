@@ -9,7 +9,7 @@ import os
 import shutil
 from enum import Enum
 import torch
-import torch.distributed as dist
+import deepspeed.comm as dist
 
 from deepspeed.utils.logging import logger
 from deepspeed.ops.aio import AsyncIOBuilder
@@ -19,7 +19,7 @@ from ..zero.offload_constants import *
 
 
 def print_rank_0(message, debug=False, force=False):
-    if torch.distributed.get_rank() == 0 and (debug or force):
+    if dist.get_rank() == 0 and (debug or force):
         print(message)
 
 

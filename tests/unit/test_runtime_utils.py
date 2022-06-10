@@ -1,7 +1,7 @@
 from deepspeed.moe.utils import is_moe_param, split_params_grads_into_shared_and_expert_params, split_params_into_shared_and_expert_params
 import torch
 from torch._utils import _flatten_dense_tensors
-import torch.distributed as dist
+import deepspeed.comm as dist
 import pytest
 
 import deepspeed.runtime.utils as ds_utils
@@ -42,7 +42,7 @@ def test_clip_grad_norm_():
         world_size = dist.get_world_size()
         gathered_norm = [torch.zeros(1).cuda() for i in range(world_size)]
 
-        torch.distributed.all_gather(gathered_norm, norm)
+        dist.all_gather(gathered_norm, norm)
 
         assert gathered_norm[0] == gathered_norm[1], "norm at rank 0 does not match the norm at rank 1"
 

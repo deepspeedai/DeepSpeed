@@ -59,8 +59,8 @@ def _match_outputs(ref, tgt):
         assert torch.equal(ref, tgt)
 
 
-# This is distributed because checkpoint() assumes that torch.distributed is initialized.
-# torch.distributed is used with activation partitioning, but not for these simple cases.
+# This is distributed because checkpoint() assumes that deepspeed.comm is initialized.
+# deepspeed.comm is used with activation partitioning, but not for these simple cases.
 @distributed_test(world_size=1)
 def _test_activation_checkpoint(module, *inputs):
     # Move to device
@@ -82,8 +82,8 @@ def _test_activation_checkpoint(module, *inputs):
             _match_outputs(b, t)
 
 
-# This is distributed because checkpoint() assumes that torch.distributed is initialized.
-# torch.distributed is used with activation partitioning, but not for these simple cases.
+# This is distributed because checkpoint() assumes that deepspeed.comm is initialized.
+# deepspeed.comm is used with activation partitioning, but not for these simple cases.
 @distributed_test(world_size=1)
 def _test_activation_checkpoint_ordering(module, expected_ordering, *inputs):
     # Move to device

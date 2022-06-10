@@ -6,6 +6,7 @@ import pytest
 
 import deepspeed
 from deepspeed.runtime.zero.partition_parameters import ZeroParamStatus, partitioned_param_data_shape
+import deepspeed.comm as dist
 
 from .common import distributed_test, get_master_port
 
@@ -21,9 +22,9 @@ def setup_serial_env():
 
 def test_scattered_init_dist():
     setup_serial_env()
-    assert not torch.distributed.is_initialized()
+    assert not dist.is_initialized()
     with deepspeed.zero.Init():
-        assert torch.distributed.is_initialized()
+        assert dist.is_initialized()
 
 
 @distributed_test(world_size=2)
@@ -52,7 +53,7 @@ def test_gather_update():
     # Gather and make a change
     with deepspeed.zero.GatheredParameters(l.weight, modifier_rank=1):
         assert l.weight.ds_status == ZeroParamStatus.AVAILABLE
-        if torch.distributed.get_rank() == 1:
+        if dist.get_rank() == 1:
             with torch.no_grad():
                 l.weight.zero_()
 

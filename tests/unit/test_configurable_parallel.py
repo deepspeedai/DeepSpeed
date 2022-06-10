@@ -6,7 +6,7 @@ import time
 import random
 import numpy as np
 import torch.multiprocessing as mp
-import torch.distributed as dist
+import deepspeed.comm as dist
 from .common import distributed_test
 from .simple_model import args_from_dict, create_deepspeed_args
 from .megatron_model import get_gpt2_model, get_megatron_version
