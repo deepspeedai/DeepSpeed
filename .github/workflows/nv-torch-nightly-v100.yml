@@ -38,6 +38,10 @@ jobs:
           pip uninstall --yes transformers
           pip install .
 
+      - name: Python environment
+        run: |
+          pip list
+
       - name: Install deepspeed
         run: |
           pip uninstall --yes deepspeed
