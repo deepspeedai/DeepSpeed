@@ -351,8 +351,11 @@ def replace_transformer_layer(orig_layer_impl,
             # linear layer is created with [input, output] shape
             # transpose it here to reduce inference cost!
             def transpose(data):
+                # temp move to cpu to avoid requiring extra GPU memory during the reshape
+                data = data.to('cpu')
                 data.reshape(-1).copy_(data.transpose(-1, -2).contiguous().reshape(-1))
                 data = data.reshape(data.shape[-1], data.shape[-2])
+                data.to(torch.cuda.current_device())
                 return data
 
             if attn_linear_layer:
@@ -460,7 +463,7 @@ def replace_transformer_layer(orig_layer_impl,
             new_module.norm_b.data = input_nb.to(torch.cuda.current_device())
         else:
             transformer_config = deepspeed.DeepSpeedTransformerConfig(
-                batch_size=micro_batch_size,
+                batch_size=micro_batch_size if micro_batch_size > 0 else 1,
                 hidden_size=config.hidden_size,
                 heads=config.num_attention_heads,
                 attn_dropout_ratio=config.attention_probs_dropout_prob,

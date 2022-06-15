@@ -58,6 +58,7 @@ void launch_bias_residual(T* input,
                           int batch,
                           int hidden_dim,
                           int mp_size,
+                          bool preln,
                           cudaStream_t stream);
 
 template <typename T>

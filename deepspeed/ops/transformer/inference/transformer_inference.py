@@ -471,7 +471,7 @@ class DeepSpeedMLPFunction(Function):
                                          config.pre_layer_norm,
                                          False)
             else:
-                intermediate = mlp_gemm_func(input,
+                intermediate, residual_add = mlp_gemm_func(input,
                                              residual,
                                              bias,
                                              inter_w,
@@ -482,14 +482,16 @@ class DeepSpeedMLPFunction(Function):
                                              config.pre_layer_norm,
                                              config.mlp_after_attn)
                 output = vector_matmul_func(intermediate, output_w, False)
-        inference_cuda_module.residual_add(output,
-                                           residual,
-                                           input,
-                                           output_b,
-                                           bias if bias is not None else output_b,
-                                           config.mp_size,
-                                           config.mlp_after_attn,
-                                           bias is not None)
+        inference_cuda_module.residual_add(
+            output,
+            residual if config.pre_layer_norm else residual_add,
+            input,
+            output_b,
+            bias if bias is not None else output_b,
+            config.mp_size,
+            config.mlp_after_attn,
+            bias is not None,
+            config.pre_layer_norm)
         if mp_group is not None and dist.get_world_size(group=mp_group) > 1:
             dist.all_reduce(output, group=mp_group)
         return output

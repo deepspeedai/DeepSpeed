@@ -3,20 +3,21 @@ Copyright 2021 The Microsoft DeepSpeed Team
 '''
 import torch
 import os
-from torch.nn.modules import Module
+
 import deepspeed.comm as dist
+import deepspeed.utils.groups as groups
+
+from torch.nn.modules import Module
+from packaging import version as pkg_version
+
 from ..runtime.state_dict_factory import SDLoaderFactory
 from ..runtime.weight_quantizer import WeightQuantization
 from ..module_inject.replace_module import replace_transformer_layer
 from ..utils import logger
 from ..comm.comm import init_distributed
-
 from ..pipe import PipelineModule
 from ..moe.utils import has_moe_layers
 from ..moe.layer import MoE
-
-import deepspeed.comm as dist
-import deepspeed.utils.groups as groups
 
 DS_INFERENCE_ENABLED = False
 
@@ -88,8 +89,12 @@ class InferenceEngine(Module):
         self.ep_group = ep_group
         self.expert_mp_group = expert_mp_group
         self.enable_cuda_graph = enable_cuda_graph
-        self.cuda_grah_created = False
+        self.cuda_graph_created = False
         self._init_quantization_setting(quantization_setting)
+
+        if enable_cuda_graph:
+            assert pkg_version.parse(torch.__version__) >= pkg_version.parse("1.10"), \
+                "If you want to use cuda graph, please upgrade torch to at least v1.10"
 
         if self.checkpoint:
             self._load_checkpoint(self.checkpoint)
@@ -372,7 +377,7 @@ class InferenceEngine(Module):
         with torch.cuda.graph(self._cuda_graphs):
             self.static_output = self.module(*self.static_inputs, **self.static_kwargs)
 
-        self.cuda_grah_created = True
+        self.cuda_graph_created = True
 
     def _graph_replay(self, *inputs, **kwargs):
         for i in range(len(inputs)):
@@ -409,7 +414,7 @@ class InferenceEngine(Module):
             outputs = self.model_orig_fwd(*inputs, **kwargs)
         else:
             if self.enable_cuda_graph:
-                if self.cuda_grah_created:
+                if self.cuda_graph_created:
                     outputs = self._graph_replay(*inputs, **kwargs)
                 else:
                     self._create_cuda_graph(*inputs, **kwargs)

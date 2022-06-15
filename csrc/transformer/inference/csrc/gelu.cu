@@ -174,7 +174,8 @@ __global__ void fused_bias_residual(float* input,
                                     float* attnbias,
                                     int total_count,
                                     int intermediate_size,
-                                    int mp_size)
+                                    int mp_size,
+                                    bool preln)
 {
     float4* input_cast = reinterpret_cast<float4*>(input);
     float4* output_cast = reinterpret_cast<float4*>(output);
@@ -189,12 +190,17 @@ __global__ void fused_bias_residual(float* input,
         float4 res_vec = attn_cast[offset];
         float4 bias_data = bias_cast[offset % intermediate_size];
         float4 attn_bias = attnbias_cast[offset % intermediate_size];
-
-        data.x = (data.x + res_vec.x) * mp_size + (out.x + bias_data.x + attn_bias.x);
-        data.y = (data.y + res_vec.y) * mp_size + (out.y + bias_data.y + attn_bias.y);
-        data.z = (data.z + res_vec.z) * mp_size + (out.z + bias_data.z + attn_bias.z);
-        data.w = (data.w + res_vec.w) * mp_size + (out.w + bias_data.w + attn_bias.w);
-
+        if (preln) {
+            data.x = (data.x + res_vec.x) * mp_size + (out.x + bias_data.x + attn_bias.x);
+            data.y = (data.y + res_vec.y) * mp_size + (out.y + bias_data.y + attn_bias.y);
+            data.z = (data.z + res_vec.z) * mp_size + (out.z + bias_data.z + attn_bias.z);
+            data.w = (data.w + res_vec.w) * mp_size + (out.w + bias_data.w + attn_bias.w);
+        } else {
+            data.x = data.x + out.x + bias_data.x;
+            data.y = data.y + out.y + bias_data.y;
+            data.z = data.z + out.z + bias_data.z;
+            data.w = data.w + out.w + bias_data.w;
+        }
         output_cast[offset] = data;
     }
 }
@@ -206,7 +212,8 @@ __global__ void fused_bias_residual(__half* input,
                                     __half* attn_bias,
                                     int total_count,
                                     int intermediate_size,
-                                    int mp_size)
+                                    int mp_size,
+                                    bool preln)
 {
 #ifdef HALF_PRECISION_AVAILABLE
 
@@ -248,15 +255,21 @@ __global__ void fused_bias_residual(__half* input,
         float2 attn_low_bias = __half22float2(attnbias_half[0]);
         float2 attn_high_bias = __half22float2(attnbias_half[1]);
 
-        low_data.x =
-            (low_data.x + low_res.x) * mp_size + (low_out.x + (low_bias.x + attn_low_bias.x));
-        low_data.y =
-            (low_data.y + low_res.y) * mp_size + (low_out.y + (low_bias.y + attn_low_bias.y));
-        high_data.x =
-            (high_data.x + high_res.x) * mp_size + (high_out.x + (high_bias.x + attn_high_bias.x));
-        high_data.y =
-            (high_data.y + high_res.y) * mp_size + (high_out.y + (high_bias.y + attn_high_bias.y));
-
+        if (preln) {
+            low_data.x =
+                (low_data.x + low_res.x) * mp_size + (low_out.x + (low_bias.x + attn_low_bias.x));
+            low_data.y =
+                (low_data.y + low_res.y) * mp_size + (low_out.y + (low_bias.y + attn_low_bias.y));
+            high_data.x = (high_data.x + high_res.x) * mp_size +
+                          (high_out.x + (high_bias.x + attn_high_bias.x));
+            high_data.y = (high_data.y + high_res.y) * mp_size +
+                          (high_out.y + (high_bias.y + attn_high_bias.y));
+        } else {
+            low_data.x = (low_data.x + low_out.x + low_bias.x);
+            low_data.y = (low_data.y + low_out.y + low_bias.y);
+            high_data.x = (high_data.x + high_out.x + high_bias.x);
+            high_data.y = (high_data.y + high_out.y + high_bias.y);
+        }
         vals_half[0] = __float22half2_rn(low_data);
         vals_half[1] = __float22half2_rn(high_data);
 
@@ -274,6 +287,7 @@ void launch_bias_residual(T* input,
                           int batch,
                           int hidden_dim,
                           int mp_size,
+                          bool preln,
                           cudaStream_t stream)
 {
     int total_count = batch * hidden_dim / 4;
@@ -281,20 +295,13 @@ void launch_bias_residual(T* input,
     dim3 grid_dims((total_count - 1) / 1024 + 1);  // (batch_size);
 
     fused_bias_residual<<<grid_dims, block_dims, 0, stream>>>(
-        input, output, attn, bias, attn_bias, total_count, hidden_dim / 4, 1.0 / mp_size);
+        input, output, attn, bias, attn_bias, total_count, hidden_dim / 4, 1.0 / mp_size, preln);
 }
 
-template void
-launch_bias_residual<float>(float*, float*, float*, float*, float*, int, int, int, cudaStream_t);
-template void launch_bias_residual<__half>(__half*,
-                                           __half*,
-                                           __half*,
-                                           __half*,
-                                           __half*,
-                                           int,
-                                           int,
-                                           int,
-                                           cudaStream_t);
+template void launch_bias_residual<
+    float>(float*, float*, float*, float*, float*, int, int, int, bool, cudaStream_t);
+template void launch_bias_residual<
+    __half>(__half*, __half*, __half*, __half*, __half*, int, int, int, bool, cudaStream_t);
 
 __global__ void gptj_residual_add(float* input,
                                   float* output,

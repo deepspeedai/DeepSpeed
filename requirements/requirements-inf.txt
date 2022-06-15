@@ -1,0 +1,2 @@
+lm-eval>=0.2.0
+transformers

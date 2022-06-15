@@ -787,17 +787,17 @@ at::Tensor ds_vector_matmul_int8(at::Tensor& input,
 }
 
 template <typename T>
-void mlp_unfused_cublas(at::Tensor& output,
-                        at::Tensor& input,
-                        at::Tensor& residual,
-                        at::Tensor& input_bias,
-                        at::Tensor& weight,
-                        at::Tensor& bias,
-                        at::Tensor& gamma,
-                        at::Tensor& beta,
-                        const float epsilon,
-                        bool preLayerNorm,
-                        bool mlp_after_attn)
+at::Tensor mlp_unfused_cublas(at::Tensor& output,
+                              at::Tensor& input,
+                              at::Tensor& residual,
+                              at::Tensor& input_bias,
+                              at::Tensor& weight,
+                              at::Tensor& bias,
+                              at::Tensor& gamma,
+                              at::Tensor& beta,
+                              const float epsilon,
+                              bool preLayerNorm,
+                              bool mlp_after_attn)
 {
     int bsz = input.size(0) * input.size(1);
     auto inp_norm = at::empty_like(input);
@@ -840,18 +840,19 @@ void mlp_unfused_cublas(at::Tensor& output,
                      weight.size(1),
                      bsz,
                      Context::Instance().GetCurrentStream());
+    return inp_norm;
 }
 template <typename T>
-at::Tensor ds_mlp_gemm(at::Tensor& input,
-                       at::Tensor& residual,
-                       at::Tensor& input_bias,
-                       at::Tensor& weight,
-                       at::Tensor& bias,
-                       at::Tensor& gamma,
-                       at::Tensor& beta,
-                       const float epsilon,
-                       bool preLayerNorm,
-                       bool mlp_after_attn)
+std::vector<at::Tensor> ds_mlp_gemm(at::Tensor& input,
+                                    at::Tensor& residual,
+                                    at::Tensor& input_bias,
+                                    at::Tensor& weight,
+                                    at::Tensor& bias,
+                                    at::Tensor& gamma,
+                                    at::Tensor& beta,
+                                    const float epsilon,
+                                    bool preLayerNorm,
+                                    bool mlp_after_attn)
 {
     auto input_cont = input.contiguous();
     auto options = at::TensorOptions()
@@ -863,19 +864,19 @@ at::Tensor ds_mlp_gemm(at::Tensor& input,
     auto output = at::empty({input_cont.size(0), input_cont.size(1), weight.size(1)}, options);
     int bsz = input_cont.size(0) * input_cont.size(1);
 
-    mlp_unfused_cublas<T>(output,
-                          mlp_after_attn ? input : residual,
-                          residual,
-                          input_bias,
-                          weight,
-                          bias,
-                          gamma,
-                          beta,
-                          epsilon,
-                          preLayerNorm,
-                          mlp_after_attn);
+    auto res_add = mlp_unfused_cublas<T>(output,
+                                         mlp_after_attn ? input : residual,
+                                         residual,
+                                         input_bias,
+                                         weight,
+                                         bias,
+                                         gamma,
+                                         beta,
+                                         epsilon,
+                                         preLayerNorm,
+                                         mlp_after_attn);
 
-    return output;
+    return {output, res_add};
 }
 
 template <typename T>
@@ -1001,7 +1002,8 @@ void residual_add_bias(at::Tensor& output,
                        at::Tensor& attention_b,
                        int mp_size,
                        bool mlp_after_attn,
-                       bool add_bias)
+                       bool add_bias,
+                       bool preln)
 {
     int bsz = input.size(0) * input.size(1);
     int hidden_size = input.size(2);
@@ -1017,6 +1019,7 @@ void residual_add_bias(at::Tensor& output,
                                  bsz,
                                  hidden_size,
                                  mp_size,
+                                 preln,
                                  Context::Instance().GetCurrentStream());
         else
             launch_gptj_residual_add<float>((float*)input.data_ptr(),
@@ -1037,6 +1040,7 @@ void residual_add_bias(at::Tensor& output,
                              bsz,
                              hidden_size,
                              mp_size,
+                             preln,
                              Context::Instance().GetCurrentStream());
     else
         launch_gptj_residual_add<__half>((__half*)input.data_ptr(),
