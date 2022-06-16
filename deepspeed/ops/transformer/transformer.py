@@ -218,7 +218,7 @@ class DeepSpeedTransformerFunction(Function):
                                          output_b,
                                          norm_w,
                                          norm_b,
-                                         config.training,
+                                         config.training and config.is_grad_enabled,
                                          config.pre_layer_norm,
                                          config.attn_dropout_checkpoint,
                                          config.normalize_invertible,
