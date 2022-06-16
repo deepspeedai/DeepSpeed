@@ -1,4 +1,0 @@
-[submodule "DeepSpeedExamples"]
-	path = DeepSpeedExamples
-	url = https://github.com/microsoft/DeepSpeedExamples
-	branch = master
