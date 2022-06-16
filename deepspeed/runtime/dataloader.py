@@ -68,9 +68,14 @@ class DeepSpeedDataLoader(object):
         self.device_count = device_count
         self.batch_size = batch_size
         self.pin_memory = pin_memory
-        self.len = len(self.data_sampler)
         self.data = None
         self.dataloader_drop_last = dataloader_drop_last
+
+        if self.dataloader_drop_last:
+            self.len = len(self.data_sampler) // self.batch_size
+        else:
+            from math import ceil
+            self.len = ceil(len(self.data_sampler) / self.batch_size)
 
     def __iter__(self):
         self._create_dataloader()
