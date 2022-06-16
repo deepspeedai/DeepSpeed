@@ -365,16 +365,12 @@ class PipelineEngine(DeepSpeedEngine):
                       f'iter time (s): {iter_time:0.3f} '
                       f'samples/sec: {tput:0.3f}')
 
-        # Tensorboard
-        if self.tensorboard_enabled():
-            if self.global_rank == 0:
-                self.summary_events = [(f'Train/Samples/train_loss',
-                                        self.agg_train_loss.mean().item(),
-                                        self.global_samples)]
-                for event in self.summary_events:  # write_summary_events
-                    self.summary_writer.add_scalar(event[0], event[1], event[2])
-                if self.global_steps % self.steps_per_print() == 0:
-                    self.summary_writer.flush()
+        # Monitoring
+        if self.global_rank == 0 and self.monitor.enabled:
+            self.summary_events = [(f'Train/Samples/train_loss',
+                                    self.agg_train_loss.mean().item(),
+                                    self.global_samples)]
+            self.monitor.write_events(self.summary_events)
 
         if self.wall_clock_breakdown(
         ) and self.global_steps % self.steps_per_print() == 0:
@@ -458,14 +454,11 @@ class PipelineEngine(DeepSpeedEngine):
         if compute_loss:
             eval_output = self._bcast_pipe_scalar(eval_output)
 
-        if self.tensorboard_enabled():
-            if self.global_rank == 0:
-                self.summary_events = [(f'Train/Samples/eval_loss',
-                                        eval_output.mean().item(),
-                                        self.global_samples)]
-                for event in self.summary_events:  # write_summary_events
-                    self.summary_writer.add_scalar(event[0], event[1], event[2])
-                self.summary_writer.flush()
+        if self.global_rank == 0 and self.monitor.enabled:
+            self.summary_events = [(f'Train/Samples/eval_loss',
+                                    eval_output.mean().item(),
+                                    self.global_samples)]
+            self.monitor.write_events(self.summary_events)
 
         # Restore the training iterator
         self.set_dataiterator(train_iterator)
@@ -1171,17 +1164,15 @@ class PipelineEngine(DeepSpeedEngine):
 
         self.mem_status('AFTER STEP')
 
-        if self.tensorboard_enabled():
-            if self.global_rank == 0:
-                self.summary_events = [(f'Train/Samples/lr',
-                                        self.get_lr()[0],
-                                        self.global_samples)]
-                if self.fp16_enabled() and hasattr(self.optimizer, 'cur_scale'):
-                    self.summary_events.append((f'Train/Samples/loss_scale',
-                                                self.optimizer.cur_scale,
-                                                self.global_samples))
-                for event in self.summary_events:  # write_summary_events
-                    self.summary_writer.add_scalar(event[0], event[1], event[2])
+        if self.global_rank == 0 and self.monitor.enabled:
+            self.summary_events = [(f'Train/Samples/lr',
+                                    self.get_lr()[0],
+                                    self.global_samples)]
+            if self.fp16_enabled() and hasattr(self.optimizer, 'cur_scale'):
+                self.summary_events.append((f'Train/Samples/loss_scale',
+                                            self.optimizer.cur_scale,
+                                            self.global_samples))
+            self.monitor.write_events(self.summary_events)
 
         if self.wall_clock_breakdown():
             self.timers('step_microstep').stop()

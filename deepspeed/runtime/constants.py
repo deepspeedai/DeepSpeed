@@ -283,33 +283,6 @@ MEMORY_BREAKDOWN = 'memory_breakdown'
 MEMORY_BREAKDOWN_DEFAULT = False
 
 #########################################
-# Tensorboard
-#########################################
-# Tensorboard. By default, this feature is not enabled.
-# Users can configure in ds_config.json as below example:
-TENSORBOARD_FORMAT = '''
-Tensorboard can be specified as:
-"tensorboard": {
-  "enabled": true,
-  "output_path": "/home/myname/foo",
-  "job_name": "model_lr2e-5_epoch3_seed2_seq64"
-}
-'''
-TENSORBOARD = "tensorboard"
-
-# Tensorboard enable signal
-TENSORBOARD_ENABLED = "enabled"
-TENSORBOARD_ENABLED_DEFAULT = False
-
-# Tensorboard output path
-TENSORBOARD_OUTPUT_PATH = "output_path"
-TENSORBOARD_OUTPUT_PATH_DEFAULT = ""
-
-# Tensorboard job name
-TENSORBOARD_JOB_NAME = "job_name"
-TENSORBOARD_JOB_NAME_DEFAULT = "DeepSpeedJobName"
-
-#########################################
 # Eigenvalue
 #########################################
 # Eigenvalue computation. By default, this feature is not enabled.

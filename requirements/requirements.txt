@@ -4,5 +4,6 @@ numpy
 packaging
 psutil
 py-cpuinfo
+pydantic
 torch
 tqdm

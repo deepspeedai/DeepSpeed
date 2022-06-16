@@ -322,6 +322,33 @@ The DeepSpeed Autotuner  uses model information, system information, and heurist
 ```
 The flops profiler can also be used as a standalone package. Please refer to the [Flops Profiler](/tutorials/flops-profiler) tutorial for more details.
 
+### Monitor
+
+The DeepSpeed Monitor logs live training metrics to one or more monitoring backends, including PyTorch's [TensorBoard](https://pytorch.org/docs/1.8.0/tensorboard.html), [WandB](https://docs.wandb.ai/quickstart), or simply to CSV files. The Monitor can be configured with one or more backends in the `deepspeed_config` file as follows:
+
+```json
+{
+  "tensorboard": {
+    "enabled": true,
+    "output_path": "output/ds_logs/",
+    "job_name": "train_bert"
+  }
+  "wandb": {
+    "enabled": true,
+    "team": "my_team",
+    "group": "my_group",
+    "project": "my_project"
+  }
+  "csv_monitor": {
+    "enabled": true,
+    "output_path": "output/ds_logs/",
+    "job_name": "train_bert"
+  }
+}
+
+```
+
+The Monitor can also be added to log custom metrics and client codes. Please refer to the [Monitor](/tutorials/monitor) tutorial for more details.
 
 ## Sparse Attention
 DeepSpeed offers sparse attention to support long sequences. Please refer to the [Sparse Attention](/tutorials/sparse-attention/) tutorial.

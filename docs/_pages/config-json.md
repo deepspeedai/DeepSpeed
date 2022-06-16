@@ -964,13 +964,15 @@ Configuring the asynchronous I/O module for offloading parameter and optimizer s
 | ---------------------------------------------------------------------------------------------------------------------------- | ------- |
 | List of which step to change difficulty level. One of the `schedule_config` when the `fixed_discrete` schedule_type is used. | N/A     |
 
-### Logging to Tensorboard
+### Monitoring Module (TensorBoard, WandB, CSV)
 
 **Note:** Deepspeed logs to TensorBoard through PyTorch. Logging to TensorBoard requires that the `tensorboard` package is installed (read more in the [PyTorch documentation](https://pytorch.org/docs/1.8.0/tensorboard.html)).
 {: .notice--warning}
+**Note:** Logging to WandB requires that the `wandb` package is installed (read more in the [WandB documentation](https://docs.wandb.ai/quickstart)).
+{: .notice--warning}
 
 
-Deepspeed can log training details into a [Tensorboard](https://www.tensorflow.org/tensorboard)-compatible file. Below is an overview of what deepspeed will log.
+Deepspeed's Monitor module can log training details into a [Tensorboard](https://www.tensorflow.org/tensorboard)-compatible file, to [WandB](https://wandb.ai/site), or to simple CSV files. Below is an overview of what DeepSpeed will log automatically.
 
 | Field | Description                                                                                                                                                                                                                                                                                               |Conditions |
 | ------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ----- |
@@ -989,14 +991,54 @@ Deepspeed can log training details into a [Tensorboard](https://www.tensorflow.o
 | Fields | Value                                                                                                                                                                                                                                                                                                        |Default |
 | ------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ----- |
 | enabled   | Whether logging to [Tensorboard](https://www.tensorflow.org/tensorboard) is enabled. | `false` |
-| job_name  | Name for the current job. This will become a new directory inside `output_path` | `"DeepSpeedJobName"` |
-| output_path | Path to where the Tensorboard logs will be written.                           | `~/tensorboard/` |
+| output_path | Path to where the Tensorboard logs will be written. If None, the output path is set under the training script's launching path.     | `null` |
+| job_name  | Name for the current job. This will become a new directory inside `output_path`. | `"DeepSpeedJobName"` |
 
 
-Example of <i>** tensorboard**</i> configuration:
+Example of <i>**tensorboard**</i> configuration:
 
 ```json
 "tensorboard": {
+    "enabled": true,
+    "output_path": "output/ds_logs/",
+    "job_name": "train_bert"
+}
+```
+
+<i>**wandb**</i>: [dictionary]
+
+| Fields | Value                                                                                                                                                                                                                                                                                                        |Default |
+| ------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ----- |
+| enabled   | Whether logging to [WandB](https://wandb.ai/site) is enabled. | `false` |
+| group  | Name for the WandB group. This can be used to group together runs. | `None` |
+| team | Name for the WandB team.       | `None` |
+| project | Name for the WandB project.       | `deepspeed` |
+
+
+Example of <i>**wandb**</i> configuration:
+
+```json
+"wandb": {
+    "enabled": true,
+    "group": "my_group",
+    "team": "my_team",
+    "project": "my_project"
+}
+```
+
+<i>**csv_monitor**</i>: [dictionary]
+
+| Fields | Value                                                                                                                                                                                                                                                                                                        |Default |
+| ------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ----- |
+| enabled   | Whether logging to local CSV files is enabled. | `false` |
+| output_path | Path to where the csv files will be written. If None, the output path is set under the training script's launching path.      | `null` |
+| job_name  | Name for the current job. This will become a new directory inside `output_path` | `"DeepSpeedJobName"` |
+
+
+Example of <i>**csv_monitor**</i> configuration:
+
+```json
+"csv_monitor": {
     "enabled": true,
     "output_path": "output/ds_logs/",
     "job_name": "train_bert"
