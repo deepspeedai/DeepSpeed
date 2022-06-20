@@ -2,7 +2,7 @@ import os
 from typing import List
 
 import torch
-import deepspeed.comm as dist
+from deepspeed import comm as dist
 from deepspeed.utils import logger
 from deepspeed.ops.adam import DeepSpeedCPUAdam
 from deepspeed.ops.adam import FusedAdam

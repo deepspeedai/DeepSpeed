@@ -4,8 +4,8 @@ Copyright 2021 The Microsoft DeepSpeed Team
 import torch
 import os
 
-import deepspeed.comm as dist
-import deepspeed.utils.groups as groups
+from deepspeed import comm as dist
+from deepspeed.utils import groups
 
 from torch.nn.modules import Module
 from packaging import version as pkg_version

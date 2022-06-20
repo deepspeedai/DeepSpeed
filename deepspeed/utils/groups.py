@@ -25,7 +25,7 @@ Copyright 2021 The Microsoft DeepSpeed Team
 """
 
 import torch
-import deepspeed.comm as dist
+from deepspeed import comm as dist
 
 from deepspeed.utils import logger, log_dist
 from deepspeed.utils.exceptions import DeprecatedException

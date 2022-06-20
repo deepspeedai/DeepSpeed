@@ -2,7 +2,7 @@ import logging
 import sys
 import os
 
-import deepspeed.comm as dist
+from deepspeed import comm as dist
 
 log_levels = {
     "debug": logging.DEBUG,

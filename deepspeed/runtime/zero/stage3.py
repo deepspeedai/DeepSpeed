@@ -14,7 +14,7 @@ from typing import Deque, Dict, Iterable, Set, Tuple
 import torch
 from torch.cuda import Event, Stream
 from torch.nn import Module, Parameter
-import deepspeed.comm as dist
+from deepspeed import comm as dist
 import math
 from torch._six import inf
 from torch.nn import Module

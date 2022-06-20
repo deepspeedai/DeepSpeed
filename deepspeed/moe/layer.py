@@ -4,11 +4,11 @@ Copyright 2020 The Microsoft DeepSpeed Team
 
 import torch.nn.init as init
 import torch
-import deepspeed.comm as dist
+from deepspeed import comm as dist
 
 from deepspeed.utils import logger, log_dist
 
-import deepspeed.utils.groups as groups
+from deepspeed.utils import groups
 from .sharded_moe import MOELayer, TopKGate
 from .experts import Experts
 import copy

@@ -6,7 +6,7 @@ from typing import List
 
 import torch
 from torch import Tensor
-import deepspeed.comm as dist
+from deepspeed import comm as dist
 # NOTE: Use torch.distributed's ProcessGroup class until we have our own.
 from torch.distributed import ProcessGroup
 import torch.nn.functional

@@ -12,7 +12,7 @@ import torch
 from torch.cuda import Event, Stream
 from torch.nn import Module, Parameter
 
-import deepspeed.comm as dist
+from deepspeed import comm as dist
 from deepspeed.utils.logging import logger
 from deepspeed.runtime.zero.partition_parameters import *
 from deepspeed.runtime.zero.offload_constants import *

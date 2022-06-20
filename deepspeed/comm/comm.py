@@ -14,7 +14,7 @@
     deepspeed.comm API
         -- must be kept fully compatible (same signatures) as torch.dist API to ensure backward/cross-framework compatibility.
         -- e.g. if a client code used
-            import deepspeed.comm as dist
+            from deepspeed import comm as dist
 
             instead of
             import torch.distributed as dist
@@ -49,7 +49,7 @@ class ReduceOp(Enum):
 from deepspeed.comm.backend import Backend
 from deepspeed.comm.torch import TorchBackend
 
-import deepspeed.utils as utils
+from deepspeed import utils
 from datetime import timedelta
 
 # Current deepspeed.comm backend (cdb) global object for simple access by client code

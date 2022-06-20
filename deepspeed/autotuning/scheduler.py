@@ -25,7 +25,7 @@ thread-0: loop over experiment queue dispatching experiments if they become avai
 thread-N: start each experiment in its own thread
 """
 
-import deepspeed.comm as dist
+from deepspeed import comm as dist
 
 from datetime import datetime
 

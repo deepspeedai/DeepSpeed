@@ -45,8 +45,8 @@ from deepspeed.runtime.zero.constants import \
 from deepspeed.checkpoint.constants import OPTIMIZER_STATE_DICT
 from deepspeed.runtime.sparse_tensor import SparseTensor
 
-import deepspeed.runtime.lr_schedules as lr_schedules
-import deepspeed.utils.groups as groups
+from deepspeed.runtime import lr_schedules
+from deepspeed.utils import groups
 from deepspeed.runtime.utils import get_grad_norm
 from deepspeed.utils import logger, log_dist, instrument_w_nvtx
 from deepspeed.comm.comm import init_distributed
@@ -219,7 +219,7 @@ class DeepSpeedEngine(Module):
         self.use_ds_comm = False  # False --> Use torch.dist, True --> Use ds.comm backend.
 
         global dist
-        import deepspeed.comm as dist
+        from deepspeed import comm as dist
         self._is_gradient_accumulation_boundary = None
 
         # for debug purposes - can then debug print: debug_get_module_name(module)

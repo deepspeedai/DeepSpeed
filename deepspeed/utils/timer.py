@@ -8,7 +8,7 @@ import time
 import torch
 from numpy import mean
 from deepspeed.utils.logging import log_dist
-import deepspeed.comm as dist
+from deepspeed import comm as dist
 
 from deepspeed.utils import logger
 

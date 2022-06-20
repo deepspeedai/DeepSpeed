@@ -3,7 +3,7 @@ Copyright 2019 The Microsoft DeepSpeed Team
 '''
 
 import torch
-import deepspeed.comm as dist
+from deepspeed import comm as dist
 from torch._six import inf
 from packaging import version as pkg_version
 

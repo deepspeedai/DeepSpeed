@@ -1,6 +1,6 @@
 from typing import List, Tuple, Dict
 import torch
-import deepspeed.utils.groups as groups
+from deepspeed.utils import groups
 from .layer import MoE
 
 

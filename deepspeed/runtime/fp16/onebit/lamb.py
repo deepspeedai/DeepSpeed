@@ -4,7 +4,7 @@ Copyright 2021 The Microsoft DeepSpeed Team
 import types
 import torch
 import numpy as np
-import deepspeed.comm as dist
+from deepspeed import comm as dist
 from torch._utils import _flatten_dense_tensors, _unflatten_dense_tensors
 
 

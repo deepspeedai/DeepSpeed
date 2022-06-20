@@ -1,6 +1,6 @@
 import torch
 
-import deepspeed.comm as dist
+from deepspeed import comm as dist
 
 
 def print_rank_0(message):

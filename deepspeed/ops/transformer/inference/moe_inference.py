@@ -16,7 +16,7 @@ specialized_mode = None
 import torch.nn as nn
 from .transformer_inference import DeepSpeedSelfAttention, DeepSpeedInferenceConfig
 from ....moe.sharded_moe import TopKGate
-import deepspeed.comm as dist
+from deepspeed import comm as dist
 
 import torch.nn.functional as F
 

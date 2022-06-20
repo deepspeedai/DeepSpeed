@@ -9,7 +9,7 @@ import os
 import shutil
 from enum import Enum
 import torch
-import deepspeed.comm as dist
+from deepspeed import comm as dist
 
 from deepspeed.utils.logging import logger
 from deepspeed.ops.aio import AsyncIOBuilder

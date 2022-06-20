@@ -10,7 +10,7 @@ import torch
 
 from deepspeed.utils.logging import logger
 from deepspeed.ops.aio import AsyncIOBuilder
-import deepspeed.comm as dist
+from deepspeed import comm as dist
 
 from deepspeed.runtime.swap_tensor.constants import *
 from deepspeed.runtime.swap_tensor.utils import swap_in_tensors, swap_out_tensors, print_object, \

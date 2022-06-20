@@ -18,7 +18,7 @@ from torch.nn.parameter import Parameter
 from torch.nn import init
 from torch.nn.modules.module import Module
 from deepspeed.runtime.utils import noop_decorator
-import deepspeed.comm as dist
+from deepspeed import comm as dist
 
 tensor_map = {}
 

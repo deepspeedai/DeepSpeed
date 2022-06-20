@@ -15,7 +15,7 @@ from typing import List
 
 import torch
 from torch import Tensor
-import deepspeed.comm as dist
+from deepspeed import comm as dist
 from torch.nn import Module
 from torch.nn import Parameter
 

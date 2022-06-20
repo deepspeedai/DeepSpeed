@@ -17,7 +17,7 @@ from bisect import bisect_left, bisect_right
 
 import torch
 from torch._six import inf
-import deepspeed.comm as dist
+from deepspeed import comm as dist
 
 from deepspeed.utils import groups, logger
 from deepspeed.runtime.constants import PIPE_REPLICATED

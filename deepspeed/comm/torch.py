@@ -4,7 +4,7 @@ Copyright 2021 The Microsoft DeepSpeed Team
 import os
 import torch
 
-import deepspeed.utils as utils
+from deepspeed import utils
 from ..constants import TORCH_DISTRIBUTED_DEFAULT_PORT, default_pg_timeout
 from datetime import timedelta
 

@@ -1,6 +1,6 @@
 import torch
 from .utils import *
-import deepspeed.utils as utils
+from deepspeed import utils
 
 supported_torch_version = False
 

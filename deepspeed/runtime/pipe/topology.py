@@ -2,7 +2,7 @@
 
 from deepspeed.utils import logger
 
-import deepspeed.comm as dist
+from deepspeed import comm as dist
 import sys
 
 from collections import namedtuple

@@ -9,7 +9,7 @@ import os
 import torch
 from deepspeed.utils.logging import logger
 
-import deepspeed.comm as dist
+from deepspeed import comm as dist
 
 from deepspeed.runtime.swap_tensor.constants import AIO_BLOCK_SIZE, AIO_QUEUE_DEPTH, \
     AIO_THREAD_COUNT, AIO_SINGLE_SUBMIT, AIO_OVERLAP_EVENTS
