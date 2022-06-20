@@ -910,8 +910,8 @@ class Init(InsertPostInitMethodToModuleSubClasses):
         def padding_size():
             return self._padding_size(param)
 
-        def partitioned_size():
-            return self._partitioned_size(param)
+        def partition_numel():
+            return self._partition_numel(param)
 
         def item_override():
             param.all_gather()
@@ -953,7 +953,7 @@ class Init(InsertPostInitMethodToModuleSubClasses):
         # Partitioning size utilities
         param.aligned_size = aligned_size
         param.padding_size = padding_size
-        param.partitioned_size = partitioned_size
+        param.partition_numel = partition_numel
         param.ds_summary = types.MethodType(ds_summary, param)
 
         param.item = allgather_before(param.item)
@@ -967,7 +967,7 @@ class Init(InsertPostInitMethodToModuleSubClasses):
         remainder = param.ds_numel % self.world_size
         return (self.world_size - remainder) if remainder else 0
 
-    def _partitioned_size(self, param):
+    def _partition_numel(self, param):
         return param.ds_tensor.ds_numel
 
     def _ensure_availability_of_partitioned_params(self, params):
