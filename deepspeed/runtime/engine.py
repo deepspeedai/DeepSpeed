@@ -25,9 +25,12 @@ from deepspeed.runtime.utils import see_memory_usage, get_ma_status, DummyOptim
 from deepspeed.runtime.zero.stage_1_and_2 import DeepSpeedZeroOptimizer
 from deepspeed.runtime.zero.partition_parameters import ZeroParamStatus
 from deepspeed.runtime.zero.utils import is_zero_supported_optimizer, ZeRORuntimeException
+from deepspeed.runtime.zero.parameter_offload import DeepSpeedZeRoOffload
+
 from deepspeed.runtime.activation_checkpointing import (
     checkpointing as activation_checkpointing,
 )
+
 from deepspeed.runtime.fp16.fused_optimizer import FP16_Optimizer
 from deepspeed.runtime.fp16.unfused_optimizer import FP16_UnfusedOptimizer
 from deepspeed.runtime.bf16_optimizer import BF16_Optimizer
@@ -328,7 +331,8 @@ class DeepSpeedEngine(Module):
 
         self.save_non_zero_checkpoint = False
         self.save_zero_checkpoint = False
-        self._configure_checkpointing(dist_init_required)
+        if not isinstance(self.optimizer, DeepSpeedZeRoOffload):
+            self._configure_checkpointing(dist_init_required)
 
         if self.eigenvalue_enabled():
             self.eigenvalue = self._configure_eigenvalue()
@@ -1337,7 +1341,6 @@ class DeepSpeedEngine(Module):
                         "Pipeline parallelism does not support overlapped communication, will be disabled."
                     )
                     overlap_comm = False
-
             optimizer = DeepSpeedZeroOptimizer(
                 optimizer,
                 timers=timers,
@@ -1374,33 +1377,47 @@ class DeepSpeedEngine(Module):
             logger.info("Initializing ZeRO Stage 3") if dist.get_rank() == 0 else None
             from deepspeed.runtime.zero.stage3 import DeepSpeedZeroOptimizer_Stage3
 
-            optimizer = DeepSpeedZeroOptimizer_Stage3(
-                self.module,
-                optimizer,
-                timers=timers,
-                ds_config=self.config,
-                static_loss_scale=self.loss_scale(),
-                dynamic_loss_scale=self.dynamic_loss_scale(),
-                dynamic_loss_args=self.dynamic_loss_scale_args(),
-                clip_grad=self.gradient_clipping(),
-                contiguous_gradients=self.zero_contiguous_gradients(),
-                reduce_bucket_size=self.zero_reduce_bucket_size(),
-                prefetch_bucket_size=self.zero_prefetch_bucket_size(),
-                max_reuse_distance=self.zero_max_reuse_distance(),
-                max_live_parameters=self.zero_max_live_parameters(),
-                param_persistence_threshold=self.zero_param_persistence_threshold(),
-                dp_process_group=self.data_parallel_group,
-                reduce_scatter=self.zero_reduce_scatter(),
-                overlap_comm=self.zero_overlap_comm(),
-                offload_optimizer_config=self.zero_offload_optimizer(),
-                offload_param_config=self.zero_offload_param(),
-                sub_group_size=self.zero_sub_group_size(),
-                mpu=self.mpu,
-                postscale_gradients=self.postscale_gradients(),
-                gradient_predivide_factor=self.gradient_predivide_factor(),
-                gradient_accumulation_steps=self.gradient_accumulation_steps(),
-                aio_config=self.aio_config(),
-                communication_data_type=self.communication_data_type)
+            if isinstance(optimizer, DummyOptim):
+                optimizer = DeepSpeedZeRoOffload(
+                    self.module,
+                    timers=timers,
+                    ds_config=self.config,
+                    overlap_comm=self.zero_overlap_comm(),
+                    prefetch_bucket_size=self.zero_prefetch_bucket_size(),
+                    max_reuse_distance=self.zero_max_reuse_distance(),
+                    max_live_parameters=self.zero_max_live_parameters(),
+                    param_persistence_threshold=self.zero_param_persistence_threshold(),
+                    offload_param_config=self.zero_offload_param(),
+                    mpu=self.mpu)
+            else:
+
+                optimizer = DeepSpeedZeroOptimizer_Stage3(
+                    self.module,
+                    optimizer,
+                    timers=timers,
+                    ds_config=self.config,
+                    static_loss_scale=self.loss_scale(),
+                    dynamic_loss_scale=self.dynamic_loss_scale(),
+                    dynamic_loss_args=self.dynamic_loss_scale_args(),
+                    clip_grad=self.gradient_clipping(),
+                    contiguous_gradients=self.zero_contiguous_gradients(),
+                    reduce_bucket_size=self.zero_reduce_bucket_size(),
+                    prefetch_bucket_size=self.zero_prefetch_bucket_size(),
+                    max_reuse_distance=self.zero_max_reuse_distance(),
+                    max_live_parameters=self.zero_max_live_parameters(),
+                    param_persistence_threshold=self.zero_param_persistence_threshold(),
+                    dp_process_group=self.data_parallel_group,
+                    reduce_scatter=self.zero_reduce_scatter(),
+                    overlap_comm=self.zero_overlap_comm(),
+                    offload_optimizer_config=self.zero_offload_optimizer(),
+                    offload_param_config=self.zero_offload_param(),
+                    sub_group_size=self.zero_sub_group_size(),
+                    mpu=self.mpu,
+                    postscale_gradients=self.postscale_gradients(),
+                    gradient_predivide_factor=self.gradient_predivide_factor(),
+                    gradient_accumulation_steps=self.gradient_accumulation_steps(),
+                    aio_config=self.aio_config(),
+                    communication_data_type=self.communication_data_type)
 
         else:
             raise NotImplementedError("ZeRO stage {} not implemented".format(zero_stage))
