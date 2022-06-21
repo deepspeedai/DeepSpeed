@@ -1,4 +1,5 @@
 import os
+import sys
 import time
 import torch
 import pytest
@@ -9,17 +10,18 @@ from collections import defaultdict
 from .common import distributed_test
 from packaging import version as pkg_version
 from deepspeed.ops.op_builder import OpBuilder
+from transformers import pipeline, AutoModelForCausalLM, AutoTokenizer
+from huggingface_hub import HfApi
 
-try:
+
+@pytest.fixture(scope="module", autouse=True)
+def lm_eval_imports():
+    global lm_eval
     import lm_eval
     import lm_eval.models
     import lm_eval.tasks
-    from lm_eval.evaluator import evaluate
-    from transformers import pipeline, AutoModelForCausalLM, AutoTokenizer
-    from huggingface_hub import HfApi
-except ImportError:
-    pytest.skip("please install w. [inf] extra to run this test",
-                allow_module_level=True)
+    import lm_eval.evaluator
+
 
 rocm_version = OpBuilder.installed_rocm_version()
 if rocm_version != (0, 0):
@@ -295,7 +297,7 @@ def test_lm_correctness(model_family, model_name, task):
 
         torch.cuda.synchronize()
         start = time.time()
-        bs_output = evaluate(lm=lm, task_dict=task_dict)
+        bs_output = lm_eval.evaluator.evaluate(lm=lm, task_dict=task_dict)
         torch.cuda.synchronize()
         bs_time = time.time() - start
 
@@ -311,7 +313,7 @@ def test_lm_correctness(model_family, model_name, task):
         setattr(lm, model_family, ds_model)
         torch.cuda.synchronize()
         start = time.time()
-        ds_output = evaluate(lm=lm, task_dict=task_dict)
+        ds_output = lm_eval.evaluator.evaluate(lm=lm, task_dict=task_dict)
         torch.cuda.synchronize()
         ds_time = time.time() - start
 
