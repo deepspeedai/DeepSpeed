@@ -486,35 +486,42 @@ class EltwiseMultiplicationTestNetwork(Module):
 
         self.loss = L1Loss(reduction="none")
 
-    def forward(self, x: Tensor, y: Tensor, prefetching: bool) -> Dict[str, Tensor]:
+    def forward(self,
+                x: Tensor,
+                y: Tensor,
+                use_module_trace: bool,
+                param_prefetching: bool) -> Dict[str,
+                                                 Tensor]:
         _assert_partition_status(
             self,
             {
                 ZeroParamStatus.NOT_AVAILABLE,
                 ZeroParamStatus.INFLIGHT,
                 ZeroParamStatus.AVAILABLE
-            } if prefetching else {ZeroParamStatus.NOT_AVAILABLE})
+            } if use_module_trace else {ZeroParamStatus.NOT_AVAILABLE})
 
-        layerwise_expected_states = {
-            ZeroParamStatus.INFLIGHT if prefetching else ZeroParamStatus.NOT_AVAILABLE,
+        pre_layer_expected_states = {
+            ZeroParamStatus.INFLIGHT
+            if param_prefetching else ZeroParamStatus.NOT_AVAILABLE,
             ZeroParamStatus.AVAILABLE,
         }
 
-        _assert_partition_status(self.__layer1, layerwise_expected_states)
+        post_layer_expected_states = {
+            ZeroParamStatus.AVAILABLE
+            if param_prefetching else ZeroParamStatus.NOT_AVAILABLE,
+        }
+
+        _assert_partition_status(self.__layer1, pre_layer_expected_states)
         hidden1 = self.__layer1(x)
-        _assert_partition_status(self.__layer1, {ZeroParamStatus.NOT_AVAILABLE})
+        _assert_partition_status(self.__layer1, post_layer_expected_states)
 
-        _assert_partition_status(self.__layer2, layerwise_expected_states)
+        _assert_partition_status(self.__layer2, pre_layer_expected_states)
         hidden2 = self.__layer2(hidden1)
-        _assert_partition_status(self.__layer2, {ZeroParamStatus.NOT_AVAILABLE})
+        _assert_partition_status(self.__layer2, post_layer_expected_states)
 
-        _assert_partition_status(self.__layer3, layerwise_expected_states)
+        _assert_partition_status(self.__layer3, pre_layer_expected_states)
         y_hat = self.__layer3(hidden2)
-        _assert_partition_status(self.__layer3,
-                                 {
-                                     ZeroParamStatus.AVAILABLE
-                                     if prefetching else ZeroParamStatus.NOT_AVAILABLE
-                                 })
+        _assert_partition_status(self.__layer3, post_layer_expected_states)
 
         loss = self.loss(y_hat, y)
 
@@ -524,7 +531,7 @@ class EltwiseMultiplicationTestNetwork(Module):
                 ZeroParamStatus.NOT_AVAILABLE,
                 ZeroParamStatus.INFLIGHT,
                 ZeroParamStatus.AVAILABLE
-            } if prefetching else {ZeroParamStatus.NOT_AVAILABLE})
+            } if use_module_trace else {ZeroParamStatus.NOT_AVAILABLE})
 
         return {
             "hidden1": hidden1,
@@ -539,14 +546,14 @@ class EltwiseMultiplicationTestNetwork(Module):
 @pytest.mark.parametrize("contiguous_gradients", [True, False])
 @pytest.mark.parametrize("offload_optimizer", [True, False])
 @pytest.mark.parametrize("zero_grad", [True, False])
-@pytest.mark.parametrize("iteration", list(range(1)))
+@pytest.mark.parametrize("prefetching", [True, False])
 def test_zero3_param_partitioning_base(
     param_persistence_threshold: int,
     fp16_enabled: bool,
     contiguous_gradients: bool,
     offload_optimizer: bool,
     zero_grad: bool,
-    iteration: int,
+    prefetching: bool,
 ) -> None:
     @distributed_test(world_size=[2])
     def _test_zero3_param_partitioning():
@@ -557,7 +564,7 @@ def test_zero3_param_partitioning_base(
         n = 5
         weights = [Parameter(torch.zeros((m, n), dtype=torch.float32)) for _ in range(3)]
         model = EltwiseMultiplicationTestNetwork(*weights)
-
+        prefetch_bucket_size = sum([p.numel() for p in model.parameters(recurse=True)])
         cfg = {
             "train_micro_batch_size_per_gpu": 1,
             "zero_optimization": {
@@ -565,6 +572,7 @@ def test_zero3_param_partitioning_base(
                 "stage3_max_reuse_distance": 0,
                 "stage3_param_persistence_threshold": param_persistence_threshold,
                 "contiguous_gradients": contiguous_gradients,
+                "stage3_prefetch_bucket_size": prefetch_bucket_size if prefetching else 0
             },
             "optimizer": {
                 "type": "Adam",
@@ -672,7 +680,8 @@ def test_zero3_param_partitioning_base(
                               n),
                              dtype=torch.float16 if fp16_enabled else torch.float32,
                              device=ds_engine.device),
-                prefetching=train_iter > 0,
+                use_module_trace=train_iter > 0,
+                param_prefetching=prefetching and train_iter > 0,
             )
             assert torch.allclose(activations["hidden1"], expected_hidden1)
             assert torch.allclose(activations["hidden2"], expected_hidden2)

@@ -305,7 +305,7 @@ class AsyncPartitionedParameterSwapper(object):
                     f'Num inflight: params {len(self.inflight_params)}, buffers {len(self.inflight_swap_in_buffers)}, numel = {self.inflight_numel}',
                     force=True)
                 print_rank_0(
-                    f'Num available: param {len(self.available_params)}, numel = {self.available_numel}',
+                    f'Num available params: count = {len(self.available_params)}, ids = {self.available_params}, numel = {self.available_numel}',
                     force=True)
 
             assert len(swap_in_paths) <= len(self.available_buffer_ids), f"Not enough buffers {len(self.available_buffer_ids)} for swapping {len(swap_in_paths)}"
