@@ -4,6 +4,7 @@ import time
 import numpy as np
 import pytest
 import copy
+from cpuinfo import get_cpu_info
 
 import deepspeed
 from deepspeed.ops.adam import FusedAdam
@@ -11,6 +12,8 @@ from deepspeed.ops.op_builder import CPUAdamBuilder
 
 if not deepspeed.ops.__compatible_ops__[CPUAdamBuilder.NAME]:
     pytest.skip("cpu-adam is not compatible")
+
+pytest.cpu_vendor = get_cpu_info()["vendor_id_raw"].lower()
 
 
 def check_equal(first, second, atol=1e-2, verbose=False):
@@ -35,6 +38,9 @@ def check_equal(first, second, atol=1e-2, verbose=False):
                              (1048576),
                          ]) # yapf: disable
 def test_cpu_adam_opt(dtype, model_size):
+    if ("amd" in pytest.cpu_vendor) and (dtype == torch.half):
+        pytest.skip("cpu-adam with half precision not supported on AMD CPUs")
+
     from deepspeed.ops.adam import DeepSpeedCPUAdam
     device = 'cpu'
     rng_state = torch.get_rng_state()
