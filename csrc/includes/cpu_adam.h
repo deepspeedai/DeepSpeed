@@ -135,6 +135,7 @@ void Adam_Optimizer::Step_AVX(size_t* rounded_size,
                               bool half_precision)
 {
     size_t new_rounded_size = 0;
+    int rshft = half_precision ? 1 : 0;
 
     AVX_Data betta1_4;
     betta1_4.data = SIMD_SET(_betta1);
@@ -171,7 +172,7 @@ void Adam_Optimizer::Step_AVX(size_t* rounded_size,
 #pragma omp parallel for
         for (size_t i = t; i < offset; i += SIMD_WIDTH * span) {
             AVX_Data grad_4[span];
-            simd_load<span>(grad_4, grads + i, half_precision);
+            simd_load<span>(grad_4, grads + (i >> rshft), half_precision);
 
             AVX_Data momentum_4[span];
             simd_load<span>(momentum_4, _exp_avg + i, false);
@@ -180,7 +181,7 @@ void Adam_Optimizer::Step_AVX(size_t* rounded_size,
             simd_load<span>(variance_4, _exp_avg_sq + i, false);
 
             AVX_Data param_4[span];
-            simd_load<span>(param_4, _params + i, half_precision);
+            simd_load<span>(param_4, _params + (i >> rshft), half_precision);
 
             if (_weight_decay > 0 && !_adamw_mode) {
                 simd_fma<span>(grad_4, param_4, weight_decay4, grad_4);
@@ -201,7 +202,7 @@ void Adam_Optimizer::Step_AVX(size_t* rounded_size,
 
             simd_fma<span>(param_4, grad_4, step_size_4, param_4);
 
-            simd_store<span>(_params + i, param_4, half_precision);
+            simd_store<span>(_params + (i >> rshft), param_4, half_precision);
             if (dev_params) {
                 simd_store<span>(_doubled_buffer[_buf_index] + (i - t), param_4, half_precision);
             }
