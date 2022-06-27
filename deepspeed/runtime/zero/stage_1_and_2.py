@@ -1762,7 +1762,8 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
                 for group in self.single_partition_of_fp32_groups:
                     group.grad = None  # in step
 
-            for bit16_partitions, fp32_partition in zip(self.parallel_partitioned_bit16_groups, self.single_partition_of_fp32_groups):
+            for group_id, (bit16_partitions, fp32_partition) in enumerate(zip(self.parallel_partitioned_bit16_groups, self.single_partition_of_fp32_groups)):
+                partition_id = dist.get_rank(group=self.real_dp_process_group[group_id])
                 bit16_partitions[partition_id].data.copy_(fp32_partition.data)
 
         self.stop_timers([OPTIMIZER_STEP])
