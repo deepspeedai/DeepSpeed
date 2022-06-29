@@ -7,6 +7,7 @@ from .replace_policy import replace_policies
 from ..constants import INFERENCE_GENERIC_MODE, INFERENCE_SPECIALIZED_MODE
 from ..runtime.weight_quantizer import WeightQuantization
 from torch import nn
+from deepspeed import comm as dist
 
 
 class LinearAllreduce(nn.Module):
