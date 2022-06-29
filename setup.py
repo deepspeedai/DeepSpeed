@@ -300,6 +300,7 @@ setup(name='deepspeed',
           'bin/ds',
           'bin/ds_ssh',
           'bin/ds_report',
+          'bin/ds_bench',
           'bin/dsr',
           'bin/ds_elastic'
       ],
