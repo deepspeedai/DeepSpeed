@@ -1089,6 +1089,8 @@ class DeepSpeedEngine(Module):
                     logger.warning(
                         "**** You are using ZeRO with an untested optimizer, proceed with caution *****"
                     )
+            # This optimizer in engine is ZeRO optimizer of stage1_2 or stage3 based on the 'stage' config,
+            # while ZeRO optimizer itself wraps the original optimizer.
             self.optimizer = self._configure_zero_optimizer(basic_optimizer)
         elif self.amp_enabled():
             assert not (self.fp16_enabled() or self.bfloat16_enabled()), "Cannot enable both amp with (legacy) fp16 or bfloat16 mode"
