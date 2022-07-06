@@ -235,7 +235,7 @@ if torch_available and torch.version.cuda is not None:
         nccl_version = ".".join(str(torch.cuda.nccl.version())[:2])
     else:
         nccl_version = ".".join(map(str, torch.cuda.nccl.version()[:2]))
-    if hasattr(torch.cuda, 'is_bf16_supported'):
+    if hasattr(torch.cuda, 'is_bf16_supported') and torch.cuda.is_available():
         bf16_support = torch.cuda.is_bf16_supported()
 if torch_available and hasattr(torch.version, 'hip') and torch.version.hip is not None:
     hip_version = ".".join(torch.version.hip.split('.')[:2])
