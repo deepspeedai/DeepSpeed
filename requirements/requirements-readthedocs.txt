@@ -1,5 +1,8 @@
 docutils<0.18
 hjson
+packaging
 psutil
+py-cpuinfo
+pydantic
 torch
 tqdm
