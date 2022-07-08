@@ -4,6 +4,7 @@ import argparse
 import torch
 import deepspeed
 from torch.utils.data.distributed import DistributedSampler
+import deepspeed.comm as dist
 
 
 class SimpleModel(torch.nn.Module):
