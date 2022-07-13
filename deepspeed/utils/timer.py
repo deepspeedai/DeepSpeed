@@ -88,6 +88,7 @@ class SynchronizedWallClockTimer:
             return elapsed_
 
         def mean(self):
+            self.elapsed(reset=False)
             return trim_mean(self.elapsed_records, 0.1)
 
     def __init__(self):
