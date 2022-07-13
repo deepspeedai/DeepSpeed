@@ -59,8 +59,9 @@ def split_params_grads_into_shared_and_expert_params(
     return shared_grads, expert_grads
 
 
-def split_params_into_different_moe_groups_for_optimizer(
-        param_groups: Tuple[Dict]) -> Tuple[Dict]:
+def split_params_into_different_moe_groups_for_optimizer(param_groups: Tuple[Dict],
+                                                         max_group_size=178956971
+                                                         ) -> Tuple[Dict]:
     """Split parameters into different MoE groups for optimizer
 
     Args:
@@ -112,8 +113,32 @@ def split_params_into_different_moe_groups_for_optimizer(
         param_group['params'] = new_params
 
     # Flatten the moe groups
-    for k, v in group_moe.items():
-        for k1, v1 in v.items():
-            param_groups.append(v1)
+    if max_group_size is not None:
+        for k, v in group_moe.items():
+            for k1, v1 in v.items():
+                cur_group = []
+                all_groups = []
+                size_of_cur_group = 0
+                for param in v1['params']:
+                    if size_of_cur_group + param.numel() <= max_group_size:
+                        cur_group.append(param)
+                        size_of_cur_group += param.numel()
+                    else:
+                        all_groups.append(cur_group)
+                        cur_group = [param]
+                        size_of_cur_group = param.numel()
+                if cur_group:
+                    all_groups.append(cur_group)
+                for group in all_groups:
+                    new_dict = {}
+                    for key, val in v1.items():
+                        if key != 'params':
+                            new_dict[key] = val
+                    new_dict['params'] = group
+                    param_groups.append(new_dict)
+    else:
+        for k, v in group_moe.items():
+            for k1, v1 in v.items():
+                param_groups.append(v1)
 
     return tuple(param_groups)
