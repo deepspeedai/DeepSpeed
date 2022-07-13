@@ -106,6 +106,7 @@ A variant ***optimizer*** for 1-bit Adam is 0/1 Adam, which further optimizes 1-
   }
 ```
 0/1 Adam supports  the following params key/values in addition to standard Adam (learn more in our [tutorial](/tutorial/zero-one-adam/).)
+
 | "params" key        | Description                                                                        | Default |
 | ------------------- | ---------------------------------------------------------------------------------- | ------- |
 | var\_freeze\_step   | The latest step to update the variance                                             | 100000  |
