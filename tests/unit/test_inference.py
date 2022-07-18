@@ -52,6 +52,7 @@ _gpt_models = [
     "distilgpt2",
     "Norod78/hebrew-bad_wiki-gpt_neo-tiny",
     "EleutherAI/gpt-j-6B",
+    "bigscience/bloom-350m",
 ]
 _all_models = HfApi().list_models()
 

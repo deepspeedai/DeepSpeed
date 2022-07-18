@@ -88,6 +88,7 @@ __global__ void fused_bias_residual_layer_norm(__half* output,
                                                int row_stride)
 {
 #ifdef HALF_PRECISION_AVAILABLE
+
     int iteration_stride = blockDim.x;
     int iterations = row_stride / iteration_stride;
 

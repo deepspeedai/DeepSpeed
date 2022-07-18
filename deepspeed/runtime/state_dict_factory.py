@@ -22,6 +22,8 @@ class SDLoaderFactory:
             sd_type = data['type']
             ckpt_list = data['checkpoints']
             version = data['version']
+            if 'BLOOM' in sd_type or 'Bloom' in sd_type:
+                return ckpt_list
             return SDLoaderFactory.get_sd_loader(ckpt_list, sd_type, version)
 
     @staticmethod

@@ -24,7 +24,7 @@ from .runtime.activation_checkpointing import checkpointing
 from .ops.transformer import DeepSpeedTransformerLayer, DeepSpeedTransformerConfig
 from .module_inject import replace_transformer_layer, revert_transformer_layer
 
-from .utils import log_dist
+from .utils import log_dist, OnDevice
 from .comm.comm import init_distributed
 
 from .runtime import zero
