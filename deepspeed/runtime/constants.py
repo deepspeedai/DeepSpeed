@@ -371,44 +371,6 @@ CHECKPOINT_TAG_VALIDATION_MODES = [
 ]
 
 #########################################
-# Quantization
-#########################################
-QUANTIZE_TRAINING = "quantize_training"
-QUANTIZE_BITS = "quantize_bits"
-START_BITS = "start_bits"
-TARGET_BITS = "target_bits"
-QUANTIZER_KERNEL = "quantizer_kernel"
-QUANTIZE_SCHEDULE = "quantize_schedule"
-QUANTIZE_PERIOD = "quantize_period"
-SCHEDULE_OFFSET = "schedule_offset"
-QUANTIZE_GROUPS = "quantize_groups"
-FP16_MIXED_QUANTIZE = "fp16_mixed_quantize"
-QUANTIZE_CHANGE_RATIO = "quantize_change_ratio"
-FP16_MIXED_QUANTIZE_ENABLED = "enabled"
-QUANTIZE_VERBOSE = "quantize_verbose"
-QUANTIZE_ALGO = "quantize_algo"
-QUANTIZE_TYPE = "q_type"
-QUANTIZE_SYMMETRIC = "symmetric"
-QUANTIZE_ASYMMETRIC = "asymmetric"
-STOCHASTIC_ROUNDING = "stochastic"
-NEAREST_ROUNDING = "nearest"
-QUANTIZE_ROUNDING = "rounding"
-QUANTIZE_TRAINING_ENABLED = "enabled"
-QUANTIZE_TRAINING_ENABLED_DEFAULT = False
-QUANTIZE_TRAINING_DEFAULT = False
-QUANTIZE_START_BITS_DEFAULT = 16
-QUANTIZE_TARGET_BITS_DEFAULT = 8
-QUANTIZER_KERNEL_DEFAULT = False
-QUANTIZE_PERIOD_DEFAULT = 1000
-QUANTIZE_OFFSET_DEFAULT = 1000
-QUANTIZE_GROUPS_DEFAULT = 1
-QUANTIZE_TYPE_DEFAULT = 0  #symmetric
-QUANTIZE_ROUNDING_DEFAULT = 0  #nearest
-FP16_MIXED_QUANTIZE_ENABLED_DEFAULT = False
-QUANTIZE_CHANGE_RATIO_DEFAULT = 0.001
-QUANTIZE_VERBOSE_DEFAULT = False
-
-#########################################
 # Drop the last incomplete Batch
 # #########################################
 # dataloader_drop_last. By default, this feature is not enabled.

@@ -48,6 +48,7 @@ collections:
       - mixture-of-experts.md
       - mixture-of-experts-nlg.md
       - mixture-of-experts-inference.md
+      - model-compression.md
       - monitor.md
       - one-cycle.md
       - onebit-adam.md

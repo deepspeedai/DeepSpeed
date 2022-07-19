@@ -1045,3 +1045,349 @@ Example of <i>**csv_monitor**</i> configuration:
     "job_name": "train_bert"
 }
 ```
+### Compression
+**Note:** <i>**Compression**</i> has seven different components, including layer reduction, weight quantization, activation quantization, sparse pruning, row pruning, head pruning, and channel pruning. We explain them one by one with simple json examples. Read more about how to use the DeepSpeed Compression library in our [tutorial](/tutorials/model-compression/).
+
+#### Layer Reduction
+**Note:** Layer reduction works much better when using knowledage distillation (learn more in our [tutorial](/tutorials/model-compression/)):
+
+```json
+"compression_training": {
+    "layer_reduction": {
+      "enabled": true,
+      "keep_number_layer": 5,
+      "module_name_prefix": "bert.encoder.layer",
+      "teacher_layer": [
+        2,
+        4,
+        6,
+        8,
+        10
+      ],
+      "other_module_name": [
+        "bert.pooler",
+        "bert.embeddings",
+        "classifier"
+      ]
+    }
+  }
+```
+
+<i>**layer_reduction**</i>: [dictionary]
+
+| Fields | Value | Default |
+| ----- | ----- | ----- |
+| <i>**enabled**</i>: [boolean] | Enable layer reduction or not. | `false` |
+| <i>**keep_number_layer**</i>: [list] | The number of layer in the model to be kept. | N/A |
+| <i>**module_name_prefix**</i>: [str] | The (uniform) name prefix of the model's modules of which the associated weight parameters are to be reinitialized. | N/A |
+| <i>**teacher_layer**</i>: [list] | The layer of the weight parameters are to be reinitialized. The length of the list equals to 'keep_number_layer'. | N/A |
+| <i>**other_module_name**</i>: [list] | The name of modules of which the associated weight parameters are to be reinitialized. It is an complemenatory or alternative of module_name_prefix. For instance,  "other_module_name": ["bert.encoder.layer.2","bert.encoder.layer.4"] equals to "module_name_prefix":"bert.encoder.layer" and  "teacher_layer": [2,4]. | N/A |
+
+#### Weight Quantization
+```json
+  "compression_training": {
+  "weight_quantization": {
+    "shared_parameters":{
+      "enabled": true,
+      "quantizer_kernel": false,
+      "schedule_offset": 0,
+      "quantize_groups": 1,
+      "quantize_verbose": false,
+      "quantization_type": "symmetric",
+      "rounding": "nearest",
+      "quantize_weight_in_forward": false,
+      "fp16_mixed_quantize":{
+        "enabled": false,
+        "quantize_change_ratio": 0.001
+      }
+    },
+    "different_groups":{
+      "wq1": {
+        "params": {
+            "start_bits": 8,
+            "target_bits": 8,
+            "quantization_period": 50
+        },
+        "modules": [
+          "attention.self",
+          "intermediate"
+        ]
+      },
+      "wq2": {
+        "params": {
+            "start_bits": 4,
+            "target_bits": 4,
+            "quantization_period": 50
+        },
+        "modules": [
+          "attention.output"
+        ]
+      }
+    }
+  }
+  }
+```
+
+<i>**shared_parameters**</i>: [dictionary]
+
+Shared parameters for all weight quantization groups.
+
+| Fields | Value | Default |
+| ----- | ----- | ----- |
+| <i>**enabled**</i>: [boolean] | Enable weight quantization or not. | `false` |
+| <i>**quantizer_kernel**</i>: [boolean] | Use DeepSpeed quantization kernel for >=4 bit quantization. This can only be enabled when using DeepSpeed FP16 optimizer. | `false` |
+| <i>**schedule_offset**</i>: [integer] | Enable weight quantization after scheduled steps (can be treated as warmup steps). | `0` |
+| <i>**quantize_groups**</i>: [integer] | Split the weight matrix into different number of groups, and each of them has its own scaling factor. | `1` |
+| <i>**quantize_verbose**</i>: [boolean] | Print the quantization related logs. | `false` |
+| <i>**quantization_type**</i>: [string] | Choose the quantization algorithm, symmetric or asymmetric. | `"symmetric"` |
+| <i>**rounding**</i>: [string] | Rounding algorithm associated with quantization, nearest or stochastic. | `"nearest"` |
+| <i>**quantize_weight_in_forward**</i>: [boolean] | Quantize weight in optimizer or forward step, must set to be true for FP32 optimizer training. | `false` |
+| <i>**fp16_mixed_quantize**</i>: [dictionary] | Using the value mixed by FP16 value and the quantized value. | N/A |
+| <i>&emsp;&emsp;**enabled**</i>: [boolean] | Whether fp16 mixed quantization is enabled. | `false` |
+| <i>&emsp;&emsp;**quantize_change_ratio**</i>: [float] | Initial quantize value ratio, will gradually increase to 1. | `0.001` |
+
+<i>**different_groups**</i>: [dictionary]
+
+Different quantization sets, this is used for different quantization parameters. In this example, we give two different sets. In practice, you can choose the number of sets based on your requirements.
+
+| Fields | Value | Default |
+| ----- | ----- | ----- |
+| <i>**params**</i>: [dictionary] | | |
+| <i>&emsp;&emsp;**start_bits**</i>: [integer] | Quantization starting bits, will gradaully reduce to target bits. | `8` |
+| <i>&emsp;&emsp;**target_bits**</i>: [integer] | Quantization target bits, need to be <= start_bits. | `8` |
+| <i>&emsp;&emsp;**quantization_period**</i>: [integer] | For every n steps, the quantization bits will be reduce by 1. | `1` |
+| <i>**modules**</i>: [list] | Scope of weight parameters associated to the params setting. | `"All Linear and CONV2D layers"` |
+
+#### Activation Quantization
+```json
+"compression_training": {
+  "activation_quantization": {
+    "shared_parameters":{
+      "enabled": true,
+      "quantization_type": "asymmetric",
+      "range_calibration": "dynamic",
+      "schedule_offset": 50
+    },
+    "different_groups":{
+      "aq1": {
+        "params": {
+            "bits": 8
+        },
+        "modules": [
+          "attention.output"
+        ]
+      }
+    }
+  }
+```
+
+<i>**shared_parameters**</i>: [dictionary]
+
+Shared parameters for all activation quantization groups.
+
+| Fields | Value | Default |
+| ----- | ----- | ----- |
+| <i>**enabled**</i>: [boolean] | Enable activation quantization or not. | `false` |
+| <i>**quantization_type**</i>: [string] | Choose the quantization algorithm, symmetric or asymmetric. | `"symmetric"` |
+| <i>**range_calibration**</i>: [string] | Using dynamic (per token or per image) or static (fixed min/max using momentum) for inference. | `"static"` |
+| <i>**schedule_offset**</i>: [integer] | Enable activation quantization after scheduled steps (can be treated as warmup steps). | `0` |
+
+<i>**different_groups**</i>: [dictionary]
+
+Different quantization sets, this is used for different quantization parameters. In this example, we give one set. In practice, you can choose the number of sets based on your requirements.
+
+| Fields | Value | Default |
+| ----- | ----- | ----- |
+| <i>**params**</i>: [dictionary] | | |
+| <i>&emsp;&emsp;**bits**</i>: [integer] | Number of bits used for activation target bits, need to be >= 4. | `8` |
+| <i>**modules**</i>: [list] | Scope of weight parameters associated to the params setting. | `"All Linear and CONV2D layers"` |
+
+#### Sparse Pruning
+```json
+"compression_training": {
+  "sparse_pruning":{
+    "shared_parameters":{
+      "enabled": true,
+      "schedule_offset": 30,
+      "method": "l1"
+    },
+    "different_groups":{
+      "sp1": {
+        "params": {
+            "dense_ratio": 0.5
+        },
+        "modules": [
+          "attention.self"
+        ]
+      }
+    }
+  }
+}
+```
+
+<i>**shared_parameters**</i>: [dictionary]
+
+Shared parameters for all sparse pruning groups.
+
+| Fields | Value | Default |
+| ----- | ----- | ----- |
+| <i>**enabled**</i>: [boolean] | Enable sparse pruning or not. | `false` |
+| <i>**schedule_offset**</i>: [integer] | Enable sparse pruning after scheduled steps (can be treated as warmup steps). | `0` |
+| <i>**method**</i>: [string] | Choose different pruning methods, l1 (static, magnitude based) or topk (dynamic, learnable). | `"l1"` |
+
+<i>**different_groups**</i>: [dictionary]
+
+Different pruning sets, this is used for different pruning parameters. In this example, we give one set. In practice, you can choose the number of sets based on your requirements.
+
+| Fields | Value | Default |
+| ----- | ----- | ----- |
+| <i>**params**</i>: [dictionary] | | |
+| <i>&emsp;&emsp;**dense_ratio**</i>: [float] | The percentage of weights to keep after pruning. | `0.5` |
+| <i>**modules**</i>: [list] | Scope of weight parameters associated to the params setting. | `"All Linear and CONV2D layers"` |
+
+#### Row Pruning
+**Note:** <i>**Row Pruning**</i> is a feature designed for two back-to-back linear layers (e.g., Feed Forward Network in Transformers). As such, we suggested use row pruning for the first linear layer (i.e., the `intermediate.dense` layer for BERT). Reducing the row dimension of this matrix can help reducing the column of the follow-up matrix (i.e., `layer.\\w+.output.dense` layer for BERT). It should also work for other linear layers as well.
+```json
+"compression_training": {
+  "row_pruning":{
+    "shared_parameters":{
+      "enabled": true,
+      "schedule_offset": 20,
+      "method": "topk"
+    },
+    "different_groups":{
+      "rp1": {
+        "params": {
+            "dense_ratio": 0.5
+        },
+        "modules": [
+          "intermediate.dense"
+        ],
+        "related_modules":[
+          ["layer.\\w+.output.dense"]
+        ]
+      }
+    }
+  }
+}
+```
+
+<i>**shared_parameters**</i>: [dictionary]
+
+Shared parameters for all row pruning groups.
+
+| Fields | Value | Default |
+| ----- | ----- | ----- |
+| <i>**enabled**</i>: [boolean] | Enable row pruning or not. | `false` |
+| <i>**schedule_offset**</i>: [integer] | Enable row pruning after scheduled steps (can be treated as warmup steps). | `0` |
+| <i>**method**</i>: [string] | Choose different pruning methods, l1 (static, magnitude based) or topk (dynamic, learnable). | `"l1"` |
+
+<i>**different_groups**</i>: [dictionary]
+
+Different pruning sets, this is used for different pruning parameters. In this example, we give one set. In practice, you can choose the number of sets based on your requirements.
+
+| Fields | Value | Default |
+| ----- | ----- | ----- |
+| <i>**params**</i>: [dictionary] | | |
+| <i>&emsp;&emsp;**dense_ratio**</i>: [float] | The percentage of weights to keep after pruning. | `0.5` |
+| <i>**modules**</i>: [list] | Scope of weight parameters associated to the params setting. | `"All Linear and CONV2D layers"` |
+| <i>**related_modules**</i>: [list[list]] | Related module to the row pruned module, which can be performed column pruning. | `None` |
+
+#### Head Pruning
+**Note:** <i>**Head Pruning**</i> is a feature designed for two attention layers (e.g., Multi Head Attention in Transformers). For now, it can only be applied to output matrix of the Transformer (i.e., `attention.output.dense` in BERT). Pruning the output matrix can lead to the pruning of Query/Key/Value matrix as well.
+```json
+"compression_training": {
+  "head_pruning":{
+    "shared_parameters":{
+      "enabled": true,
+      "schedule_offset": 10,
+      "method": "topk",
+      "num_heads": 12
+    },
+    "different_groups":{
+      "rp1": {
+        "params": {
+            "dense_ratio": 0.5
+        },
+        "modules": [
+          "attention.output.dense"
+        ],
+        "related_modules":[
+          ["self.query", "self.key", "self.value"]
+        ]
+      }
+    }
+  }
+}
+
+```
+
+<i>**shared_parameters**</i>: [dictionary]
+
+Shared parameters for all head pruning groups.
+
+| Fields | Value | Default |
+| ----- | ----- | ----- |
+| <i>**enabled**</i>: [boolean] | Enable head pruning or not. | `false` |
+| <i>**schedule_offset**</i>: [integer] | Enable head pruning after scheduled steps (can be treated as warmup steps). | `0` |
+| <i>**method**</i>: [string] | Choose different pruning methods. For now, we only support topk (dynamic, learnable). | `"topk"` |
+| <i>**num_heads**</i>: [int] | Number of heads (must be provided by user). | N/A |
+
+<i>**different_groups**</i>: [dictionary]
+
+Different pruning sets, this is used for different pruning parameters. In this example, we give one set. In practice, you can choose the number of sets based on your requirements.
+
+| Fields | Value | Default |
+| ----- | ----- | ----- |
+| <i>**params**</i>: [dictionary] | | |
+| <i>&emsp;&emsp;**dense_ratio**</i>: [float] | The percentage of weights to keep after pruning. | `0.5` |
+| <i>**modules**</i>: [list] | Scope of weight parameters associated to the params setting. | `"All Linear and CONV2D layers"` |
+| <i>**related_modules**</i>: [list[list]] | Related module (Usually Q/K/V) to the head pruned module (i.e., the output matrix). For now, this feature only works for BERT. | `None` |
+
+#### Channel Pruning
+**Note:** <i>**Channel Pruning**</i> is a feature designed for two back-to-back CONV2d layers (e.g., residual connection in ResNet). As such, we suggested use channel pruning for the first CONV2d layer. Reducing the number of output channels of this layer can help reducing the number of input channels the follow-up layer. It should also work for other CONV2d layers as well.
+```json
+"compression_training": {
+"channel_pruning":{
+      "shared_parameters":{
+        "enabled": true,
+        "schedule_offset": 0,
+        "method": "topk"
+      },
+      "different_groups":{
+        "cp1": {
+          "params": {
+              "dense_ratio": 0.5
+          },
+          "modules": [
+            "layer....conv1"
+          ],
+          "related_modules": [
+            ["layer....conv2", "layer....bn1"]
+          ]
+        }
+      }
+    }
+}
+```
+
+<i>**shared_parameters**</i>: [dictionary]
+
+Shared parameters for all channel pruning groups.
+
+| Fields | Value | Default |
+| ----- | ----- | ----- |
+| <i>**enabled**</i>: [boolean] | Enable channel pruning or not. | `false` |
+| <i>**schedule_offset**</i>: [integer] | Enable channel pruning after scheduled steps (can be treated as warmup steps). | `0` |
+| <i>**method**</i>: [string] | Choose different pruning methods, l1 (static, magnitude based) or topk (dynamic, learnable). | `"l1"` |
+
+<i>**different_groups**</i>: [dictionary]
+
+Different pruning sets, this is used for different pruning parameters. In this example, we give one set. In practice, you can choose the number of sets based on your requirements.
+
+| Fields | Value | Default |
+| ----- | ----- | ----- |
+| <i>**params**</i>: [dictionary] | | |
+| <i>&emsp;&emsp;**dense_ratio**</i>: [float] | The percentage of weights to keep after pruning. | `0.5` |
+| <i>**modules**</i>: [list] | Scope of weight parameters associated to the params setting. | `"All CONV2D layers"` |
+| <i>**related_modules**</i>: [list[list]] | Related module to the channel pruned module. | `None` |
