@@ -1,5 +1,6 @@
 import copy
 import torch
+import tqdm
 import deepspeed
 import deepspeed.ops.transformer as transformer_inference
 from .replace_policy import HFBertLayerPolicy, HFGPT2LayerPolicy, HFGPTJLayerPolicy, BLOOMLayerPolicy
@@ -765,9 +766,11 @@ def replace_transformer_layer(orig_layer_impl,
                                      _replace_policy=policy)
 
     if checkpoint is not None:
+        pbar = tqdm.tqdm(total=len(checkpoint),
+                         desc=f"Loading {len(checkpoint)} checkpoint shards")
         for i in range(len(checkpoint)):
             if not deepspeed.comm.is_initialized() or deepspeed.comm.get_rank() == 0:
-                print(f"loading checkpoint ({i})")
+                pbar.update(1)
             sd = torch.load(checkpoint[i], map_location='cpu')
             load_model_with_checkpoint(replaced_module, sd, mp_replace)
     return replaced_module
