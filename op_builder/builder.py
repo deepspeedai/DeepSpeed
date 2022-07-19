@@ -189,8 +189,15 @@ class OpBuilder(ABC):
         ROCM_MINOR = '0'
         if OpBuilder.is_rocm_pytorch():
             from torch.utils.cpp_extension import ROCM_HOME
-            with open('/opt/rocm/.info/version-dev', 'r') as file:
-                ROCM_VERSION_DEV_RAW = file.read()
+            rocm_ver_file = Path(ROCM_HOME).joinpath(".info/version-dev")
+            if rocm_ver_file.isfile():
+                with open(rocm_ver_file, 'r') as file:
+                    ROCM_VERSION_DEV_RAW = file.read()
+            elif "rocm" in roch.__version__:
+                ROCM_VERSION_DEV_RAW = torch.__version__.split("rocm")[1]
+            else:
+                assert False, "Could not detect ROCm version"
+            assert ROCM_VERSION_DEV_RAW is not "", "Could not detect ROCm version"
             ROCM_MAJOR = ROCM_VERSION_DEV_RAW.split('.')[0]
             ROCM_MINOR = ROCM_VERSION_DEV_RAW.split('.')[1]
         OpBuilder._rocm_version = (int(ROCM_MAJOR), int(ROCM_MINOR))
