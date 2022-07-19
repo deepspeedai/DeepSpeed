@@ -372,9 +372,9 @@ class GPTNEOXLayerPolicy(DSPolicy):
                 GPTNEOXLayerPolicy._orig_layer_class = None
             else:
                 try:
-                    import megatron
-                    from megatron.model.transformer import ParallelTransformerLayerPipe
-                    GPTNEOXLayerPolicy._orig_layer_class = ParallelTransformerLayerPipe
+                    import transformers
+                    from transformers import GPTNeoXLayer
+                    GPTNEOXLayerPolicy._orig_layer_class = GPTNeoXLayer
                 except ImportError:
                     GPTNEOXLayerPolicy._orig_layer_class = None
 
