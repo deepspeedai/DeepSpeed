@@ -126,6 +126,6 @@ class MoE(torch.nn.Module):
             if type(output_mlp) is tuple:
                 output_mlp = output_mlp[0]  # Ignore the bias term for now
             coef = self.coefficient(hidden_states)
-            coef = torch.nn.functional.softmax(coef, dim=1)
+            coef = torch.nn.functional.softmax(coef, dim=-1)
             output = output * coef[..., 0:1] + output_mlp * coef[..., 1:]
         return output, self.deepspeed_moe.l_aux, self.deepspeed_moe.exp_counts
