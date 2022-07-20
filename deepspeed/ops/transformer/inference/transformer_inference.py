@@ -11,6 +11,8 @@ import time
 from ... import op_builder
 import torch.nn as nn
 from deepspeed import comm as dist
+from deepspeed.utils.logging import log_dist
+
 # Cuda modules will be imported if needed
 inference_cuda_module = None
 minus_inf = -10000.0
@@ -768,7 +770,8 @@ class DeepSpeedTransformerInference(nn.Module):
             builder = op_builder.InferenceBuilder()
             inference_cuda_module = builder.load()
 
-        print("DeepSpeed Transformer Inference config is ", self.config.__dict__)
+        if DeepSpeedTransformerInference.layer_id == 1:
+            log_dist(f"DeepSpeed-Inference config: {self.config.__dict__}", [0])
 
         self.attention = DeepSpeedSelfAttention(self.config,
                                                 mp_group,

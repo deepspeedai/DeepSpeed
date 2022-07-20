@@ -163,7 +163,6 @@ class TorchBackend(Backend):
         return torch.distributed.get_backend(group=group)
 
     def new_group(self, ranks):
-        utils.logger.info(f"new group called with {ranks}")
         return torch.distributed.new_group(ranks)
 
     def get_global_rank(self, group, group_rank):
