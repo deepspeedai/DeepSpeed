@@ -16,7 +16,7 @@ PipeTopo = PipeDataParallelTopology
 from deepspeed.ops.op_builder import FusedLambBuilder, CPUAdamBuilder
 
 from deepspeed.runtime.zero.stage3 import DeepSpeedZeroOptimizer_Stage3
-from .util import required_torch_version
+from .util import required_minimum_torch_version, required_torch_version
 
 import itertools
 import argparse
@@ -88,18 +88,25 @@ def compare_model_states(saved_model,
         assert False, f'Unexpected Optimizer Type: {saved_model.optimizer}'
 
 
+def _compare_state_dicts(state0, state1, expected_mismatch_keys=[]):
+    for (k0, s0), (k1, s1) in zip(state0.items(), state1.items()):
+        assert k0 == k1, f'failure due to key mismatch {k0} != {k1}'
+        if k0 in expected_mismatch_keys:
+            continue
+        if isinstance(s0, torch.Tensor) and isinstance(s1, torch.Tensor):
+            assert id(s0) != id(s1), f'Comparing optimizer state tensor against itself: {id(s0)} <====> {id(s1)}'
+            assert torch.equal(s0.to('cpu'), s1.to('cpu'))
+        else:
+            assert s0 == s1, f'failures with keys = {k0}, {k1}, values = {type(s0[0])} and {type(s1[0])}'
+
+
 def compare_optimizer_states(saved_model, loaded_model, hidden_dim, fp16=True):
     saved_optimizer = saved_model.optimizer.optimizer if fp16 else saved_model.optimizer
     loaded_optimizer = loaded_model.optimizer.optimizer if fp16 else loaded_model.optimizer
 
     for state0, state1 in zip(saved_optimizer.state.values(),
                               loaded_optimizer.state.values()):
-        for s0, s1 in zip(state0.values(), state1.values()):
-            if isinstance(s0, torch.Tensor) and isinstance(s1, torch.Tensor):
-                assert id(s0) != id(s1), f'Comparing optimizer state tensor against itself: {id(s0)} <====> {id(s1)}'
-                assert torch.equal(s0, s1)
-            else:
-                assert s0 == s1
+        _compare_state_dicts(state0, state1)
 
 
 def compare_lr_scheduler_states(saved_model, loaded_model):
@@ -1178,6 +1185,11 @@ def test_checkpoint_zero_elastic(tmpdir, elastic_save, elastic_load, load_optim)
 
     @distributed_test(world_size=[2])
     def _go():
+        # torch 1.2.* stores raw tensor id numbers in checkpoint state which leads to
+        # false positive mismatches in checkpoint state comparisons.
+        # Newer torch versions store tensor ids as 0, 1, 2, ...
+        expected_mismatch_keys = [] if required_minimum_torch_version(1,
+                                                                      4) else ['params']
         models = [SimpleModel(hidden_dim) for _ in range(2)]
         model, _, _, _ = deepspeed.initialize(config=ds_config,
                                               model=models[0],
@@ -1190,6 +1202,10 @@ def test_checkpoint_zero_elastic(tmpdir, elastic_save, elastic_load, load_optim)
             loss = model(batch[0], batch[1])
             model.backward(loss)
             model.step()
+        if load_optim:
+            torch.save(model.optimizer.optimizer.state_dict(),
+                       os.path.join(tmpdir,
+                                    'opt-state-dict'))
         model.save_checkpoint(tmpdir)
 
         ds_config["zero_optimization"]["elastic_checkpoint"] = elastic_load
@@ -1197,6 +1213,15 @@ def test_checkpoint_zero_elastic(tmpdir, elastic_save, elastic_load, load_optim)
                                               model=models[1],
                                               model_parameters=models[1].parameters())
         model.load_checkpoint(tmpdir, load_optimizer_states=load_optim)
+
+        if load_optim:
+            saved_sd = torch.load(os.path.join(tmpdir, 'opt-state-dict'))
+            curr_sd = model.optimizer.optimizer.state_dict()
+            for curr_param_group, saved_param_group in zip(curr_sd['param_groups'], saved_sd['param_groups']):
+                _compare_state_dicts(curr_param_group,
+                                     saved_param_group,
+                                     expected_mismatch_keys)
+
         data_loader = random_dataloader(model=model,
                                         total_samples=8,
                                         hidden_dim=hidden_dim,
@@ -1252,6 +1277,11 @@ def test_checkpoint_zero_elastic_dp_change(tmpdir,
             loss = model(batch[0], batch[1])
             model.backward(loss)
             model.step()
+
+        if load_optim:
+            torch.save(model.optimizer.optimizer.state_dict(),
+                       os.path.join(tmpdir,
+                                    'opt-state-dict'))
         model.save_checkpoint(tmpdir)
 
     _go2(models)
@@ -1260,8 +1290,8 @@ def test_checkpoint_zero_elastic_dp_change(tmpdir,
     def _go1(models):
         ds_config["zero_optimization"]["elastic_checkpoint"] = elastic_load
         model, _, _, _ = deepspeed.initialize(config=ds_config,
-                                              model=models[1],
-                                              model_parameters=models[1].parameters())
+                                                  model=models[1],
+                                                  model_parameters=models[1].parameters())
         if load_optim:
             with pytest.raises(deepspeed.runtime.zero.utils.ZeRORuntimeException):
                 model.load_checkpoint(tmpdir, load_optimizer_states=load_optim)

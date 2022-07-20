@@ -867,6 +867,9 @@ class DeepSpeedConfig(object):
         self.checkpoint_tag_validation_enabled = (validation_mode !=
                                                   ValidationMode.IGNORE)
         self.checkpoint_tag_validation_fail = validation_mode == ValidationMode.FAIL
+        self.load_universal_checkpoint = checkpoint_params.get(
+            LOAD_UNIVERSAL_CHECKPOINT,
+            LOAD_UNIVERSAL_CHECKPOINT_DEFAULT)
 
         self.aio_config = get_aio_config(param_dict)
 

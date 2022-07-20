@@ -1,4 +1,10 @@
+"""
+Copyright 2022 The Microsoft DeepSpeed Team
+"""
+
+from typing import OrderedDict
 import torch
+import os
 from deepspeed import comm as dist
 from deepspeed.runtime.constants import PIPE_REPLICATED
 from deepspeed.ops.op_builder import UtilsBuilder
@@ -6,6 +12,7 @@ from deepspeed.runtime import ZeROOptimizer
 from packaging import version as pkg_version
 
 from deepspeed.git_version_info import version
+from deepspeed.runtime.swap_tensor.partitioned_param_swapper import print_rank_0
 from deepspeed.runtime.utils import (get_global_norm_of_tensors,
                                      clip_tensors_by_global_norm,
                                      DummyOptim,
@@ -20,7 +27,9 @@ from deepspeed.checkpoint.constants import (DS_VERSION,
                                             BASE_OPTIMIZER_STATE,
                                             SINGLE_PARTITION_OF_FP32_GROUPS,
                                             CLIP_GRAD,
-                                            GROUPS_PADDING)
+                                            GROUP_PADDINGS,
+                                            PARAM_SLICE_MAPPINGS,
+                                            FP32_WEIGHT_KEY)
 
 import types
 
@@ -53,6 +62,12 @@ class tensor_fragment:
         else:
             raise ValueError(f'{key} not found in optimizer state fragment')
 
+    def get_hp_fragment_address(self):
+        return self.hp_fragment_address
+
+    def get_optim_state_keys(self):
+        return list(self.optim_fragment.keys())
+
 
 def get_full_hp_param(self, optim_state_key=None):
     reduce_buffer = torch.zeros_like(self, dtype=torch.float32).flatten()
@@ -72,9 +87,103 @@ def get_full_hp_param(self, optim_state_key=None):
     return reduce_buffer.reshape_as(self)
 
 
+def load_hp_checkpoint_state(self, folder, tp_rank, tp_world_size):
+    hp_mapping = self._hp_mapping
+    optim_state_keys = hp_mapping.get_optim_state_keys()
+    hp_keys = [FP32_WEIGHT_KEY] + optim_state_keys
+    checkpoint_files = {key: os.path.join(folder, f"{key}.pt") for key in hp_keys}
+
+    for file in checkpoint_files.values():
+        assert os.path.isfile(file), f'{file} is not a valid file'
+
+    for key in hp_keys:
+        ckpt_file = checkpoint_files[key]
+        ckpt_dict = torch.load(ckpt_file)
+        full_hp_param = ckpt_dict['param']
+
+        # need to deal with slices that were averaged.
+        # the opposite of averaging here becomes an exact copy of the first slice
+        # I thought of 2 ways:
+        # implementation a. find a way for a client to pass a dict with patterns
+        # if any(re.search(pattern, folder) for pattern in WEIGHTS_TO_AVERAGE_PATTERNS):
+        #     tp_rank = 0
+        #     tp_world_size = 1
+        # the other approach is to assume that the saved data is correct and if full_hp_param.shape ==
+        # self.shape that means we automatically copy?
+        # implementation b.
+        # this version requires no additional data passed from the client
+        # if the shapes already match it must be slices that were averaged - so we just hack around those
+        if full_hp_param.shape == self.shape:
+            tp_rank = 0
+            tp_world_size = 1
+
+        # special case for word_embeddings weights which get padded differently depending on TP degree.
+        # the converter to universal currently strips the original padding completely so the saved
+        # weight is padding-free and we just need to add new padding depending on the target TP
+        # degree
+        vocab_divisibility_padding_tensor = ckpt_dict.get(
+            'vocab_divisibility_padding_tensor',
+            None)
+        if vocab_divisibility_padding_tensor is not None:
+            # In the absence of data passed from the user wrt new padded vocab specific to tp degree
+            # we can again derive that data by reverse engineering the target shapes like so:
+            padded_target_vocab_size = self.shape[0] * tp_world_size
+            if padded_target_vocab_size > full_hp_param.shape[0]:
+                # Need to expand
+                padding_tensor = vocab_divisibility_padding_tensor.expand(
+                    padded_target_vocab_size - full_hp_param.shape[0])
+                # Implement the following concat in efficient way using pad
+                #full_hp_param = torch.cat((full_hp_param, padding_tensor), 0)
+                full_hp_param = torch.nn.functional.pad(full_hp_param,
+                                                        (0,
+                                                         0,
+                                                         0,
+                                                         padding_tensor.shape[0]),
+                                                        "constant",
+                                                        0)
+                full_hp_param[:-padding_tensor.shape[0], :] = padding_tensor
+            else:
+                # Need to shrink or keep the same
+                full_hp_param = full_hp_param[:padded_target_vocab_size, :]
+
+        full_param_numel = full_hp_param.numel()
+        tp_slice_numel = self.numel()
+        #        if key == FP32_WEIGHT_KEY and 'word_embeddings.weight' in folder:
+        #            print_rank_0(f'{full_hp_param[:10]=}', force=True)
+
+
+        assert full_param_numel == tp_world_size * tp_slice_numel, \
+            f'Loading {ckpt_file} full param numel {full_param_numel} != tensor slice numel {tp_slice_numel} * tp_world_size {tp_world_size}'
+        dst_tensor = hp_mapping.hp_fragment if key == FP32_WEIGHT_KEY else hp_mapping.get_optim_state_fragment(
+            key)
+
+        #        print(f"{full_hp_param.shape=} {full_param_numel=} {folder=}")
+        #        print(f"{dst_tensor.shape=} {dst_tensor.numel()=}{folder=}")
+
+        # since when we do many to 1 on tp we cat sometimes on dim=0 and other times on dim=1 we have to do exactly the same in reverse
+        chunk_dim = ckpt_dict.get('cat_dim', 0)
+
+        # this performs the opposite of cat when merging TP slices
+        tp_hp_slice = full_hp_param.chunk(tp_world_size, chunk_dim)[tp_rank]
+        tp_hp_slice = tp_hp_slice.flatten()
+
+        lp_frag_address = hp_mapping.lp_fragment_address
+        tp_hp_fragment = tp_hp_slice.narrow(0,
+                                            lp_frag_address.start,
+                                            lp_frag_address.numel)
+        assert dst_tensor.numel() == lp_frag_address.numel, \
+            f'Load checkpoint {key} dst_tensor numel {dst_tensor.numel()} != src numel {lp_frag_address.numel}'
+
+        #        print(f"{key} SHAPE: {tp_hp_slice.shape=}")
+        #        print(f"{key} SHAPE: {dst_tensor.shape=}")
+        #        print(f"{key} SHAPE: {tp_hp_fragment.shape=}")
+        dst_tensor.data.copy_(tp_hp_fragment.data)
+
+
 class BF16_Optimizer(ZeROOptimizer):
     def __init__(self,
                  init_optimizer,
+                 param_names,
                  mpu=None,
                  clip_grad=0.0,
                  norm_type=2,
@@ -85,6 +194,7 @@ class BF16_Optimizer(ZeROOptimizer):
         see_memory_usage('begin bf16_optimizer', force=True)
         self.timers = timers
         self.optimizer = init_optimizer
+        self.param_names = param_names
         self.using_real_optimizer = not isinstance(self.optimizer, DummyOptim)
 
         self.clip_grad = clip_grad
@@ -120,7 +230,7 @@ class BF16_Optimizer(ZeROOptimizer):
         self.fp32_groups_has_gradients = []
 
         self.step_count = 0
-        self.groups_padding = []
+        self.group_paddings = []
 
         if self.using_real_optimizer:
             self._setup_for_real_optimizer()
@@ -205,7 +315,7 @@ class BF16_Optimizer(ZeROOptimizer):
             else:
                 padding = 0
 
-            self.groups_padding.append(padding)
+            self.group_paddings.append(padding)
 
             # update optimizer param groups to reference fp32 params partition
             param_group['params'] = [self.fp32_groups_flat_partition[i]]
@@ -218,12 +328,25 @@ class BF16_Optimizer(ZeROOptimizer):
 
         # Need optimizer states initialized before linking lp to optimizer state
         self._link_all_hp_params()
+        self._param_slice_mappings = self._create_param_mapping()
+
+    def _create_param_mapping(self):
+        param_mapping = []
+        for i, _ in enumerate(self.optimizer.param_groups):
+            param_mapping_per_group = OrderedDict()
+            for lp in self.bf16_groups[i]:
+                if lp._hp_mapping is not None:
+                    lp_name = self.param_names[lp]
+                    param_mapping_per_group[
+                        lp_name] = lp._hp_mapping.get_hp_fragment_address()
+            param_mapping.append(param_mapping_per_group)
+
+        return param_mapping
 
     def _link_all_hp_params(self):
         dp_world_size = dist.get_world_size(group=self.dp_process_group)
         for i, param_group in enumerate(self.optimizer.param_groups):
             # Link bf16 and fp32 params in partition
-            # TODO: Make this configurable
             partition_id = dist.get_rank(group=self.real_dp_process_group[i])
             partition_size = self.bf16_groups_flat[i].numel() // dp_world_size
             self._link_hp_params(self.bf16_groups[i],
@@ -244,6 +367,9 @@ class BF16_Optimizer(ZeROOptimizer):
             lp_param._hp_mapping = None
             lp_param._dp_group = dp_group
             lp_param.get_full_hp_param = types.MethodType(get_full_hp_param, lp_param)
+            lp_param.load_hp_checkpoint_state = types.MethodType(
+                load_hp_checkpoint_state,
+                lp_param)
             # lp_param overlaps with partition if both are true
             # 1) current_offset < partition_end,
             # 2) current_offset + lp_param.numel() >= partition_start
@@ -363,11 +489,6 @@ class BF16_Optimizer(ZeROOptimizer):
 
         self.update_lp_params()
 
-        all_gather_dp_groups(partitioned_param_groups=self.bf16_partitioned_groups,
-                             dp_process_group=self.real_dp_process_group,
-                             start_alignment_factor=self.nccl_start_alignment_factor,
-                             allgather_bucket_size=self.allgather_bucket_size)
-
         self.clear_hp_grads()
         self.step_count += 1
 
@@ -434,6 +555,14 @@ class BF16_Optimizer(ZeROOptimizer):
         for i, (bf16_partitions, fp32_partition) in enumerate(zip(self.bf16_partitioned_groups, self.fp32_groups_flat_partition)):
             partition_id = dist.get_rank(group=self.real_dp_process_group[i])
             bf16_partitions[partition_id].data.copy_(fp32_partition.data)
+            # print_rank_0(f'update_lp_params {i=} {partition_id=}', force=True)
+            # if i == 0:
+            #     print_rank_0(f'{fp32_partition[:10]=}', force=True)
+
+        all_gather_dp_groups(partitioned_param_groups=self.bf16_partitioned_groups,
+                             dp_process_group=self.real_dp_process_group,
+                             start_alignment_factor=self.nccl_start_alignment_factor,
+                             allgather_bucket_size=self.allgather_bucket_size)
 
     def clear_hp_grads(self):
         for flat_gradients in self.fp32_groups_gradients_flat:
@@ -452,9 +581,10 @@ class BF16_Optimizer(ZeROOptimizer):
         state_dict[CLIP_GRAD] = self.clip_grad
         state_dict[BASE_OPTIMIZER_STATE] = self.optimizer.state_dict()
         state_dict[SINGLE_PARTITION_OF_FP32_GROUPS] = self.fp32_groups_flat_partition
-        state_dict[GROUPS_PADDING] = self.groups_padding
+        state_dict[GROUP_PADDINGS] = self.group_paddings
         state_dict[PARTITION_COUNT] = self.partition_count
         state_dict[DS_VERSION] = version
+        state_dict[PARAM_SLICE_MAPPINGS] = self._param_slice_mappings
 
         return state_dict
 
@@ -470,8 +600,23 @@ class BF16_Optimizer(ZeROOptimizer):
 
     def load_state_dict(self,
                         state_dict_list,
+                        checkpoint_folder,
                         load_optimizer_states=True,
                         load_from_fp32_weights=False):
+        if checkpoint_folder:
+            self._load_universal_checkpoint(checkpoint_folder,
+                                            load_optimizer_states,
+                                            load_from_fp32_weights)
+        else:
+            self._load_legacy_checkpoint(state_dict_list,
+                                         load_optimizer_states,
+                                         load_from_fp32_weights)
+
+    def _load_legacy_checkpoint(self,
+                                state_dict_list,
+                                load_optimizer_states=True,
+                                load_from_fp32_weights=False):
+
         dp_rank = dist.get_rank(group=self.dp_process_group)
         current_rank_sd = state_dict_list[dp_rank]
 
@@ -492,10 +637,31 @@ class BF16_Optimizer(ZeROOptimizer):
         if load_optimizer_states:
             self._link_all_hp_params()
 
+    def _load_universal_checkpoint(self,
+                                   checkpoint_folder,
+                                   load_optimizer_states,
+                                   load_from_fp32_weights):
+        self._load_hp_checkpoint_state(checkpoint_folder)
+
     @property
     def param_groups(self):
         """Forward the wrapped optimizer's parameters."""
         return self.optimizer.param_groups
+
+    def _load_hp_checkpoint_state(self, checkpoint_dir):
+        checkpoint_dir = os.path.join(checkpoint_dir, "zero")
+        tp_rank = bwc_tensor_model_parallel_rank(mpu=self.mpu)
+        tp_world_size = self.mpu.get_slice_parallel_world_size()
+
+        for i, _ in enumerate(self.optimizer.param_groups):
+            for lp in self.bf16_groups[i]:
+                if lp._hp_mapping is not None:
+                    #print(f"Loading {self.param_names[lp]} {tp_rank=} {tp_world_size=}")
+                    lp.load_hp_checkpoint_state(
+                        os.path.join(checkpoint_dir,
+                                     self.param_names[lp]),
+                        tp_rank,
+                        tp_world_size)
 
 
 def _get_padded_tensor(src_tensor, size):

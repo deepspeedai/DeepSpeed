@@ -360,7 +360,10 @@ class ValidationMode:
 #########################################
 # Checkpoint config params
 #########################################
-# "checkpoint": {tag_validation=["Ignore"|"Warn"|"Fail"]}
+# "checkpoint": {
+#   tag_validation=["Ignore"|"Warn"|"Fail"]
+#   load_universal=false
+# }
 CHECKPOINT = "checkpoint"
 CHECKPOINT_TAG_VALIDATION = "tag_validation"
 CHECKPOINT_TAG_VALIDATION_DEFAULT = ValidationMode.WARN
@@ -369,6 +372,9 @@ CHECKPOINT_TAG_VALIDATION_MODES = [
     ValidationMode.IGNORE,
     ValidationMode.FAIL
 ]
+
+LOAD_UNIVERSAL_CHECKPOINT = "load_universal"
+LOAD_UNIVERSAL_CHECKPOINT_DEFAULT = False
 
 #########################################
 # Drop the last incomplete Batch

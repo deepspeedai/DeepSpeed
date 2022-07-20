@@ -18,6 +18,7 @@ from torch.optim import Optimizer
 from torch.optim.lr_scheduler import _LRScheduler
 
 from typing import Callable, Dict, Optional, Union, Iterable
+from deepspeed.checkpoint.utils import get_zero_ckpt_name_for_rank
 
 import deepspeed
 
@@ -724,6 +725,9 @@ class DeepSpeedEngine(Module):
     def gradient_accumulation_steps(self):
         return self._config.gradient_accumulation_steps
 
+    def load_universal_checkpoint(self):
+        return self._config.load_universal_checkpoint
+
     @property
     def communication_data_type(self):
         res = self._config.communication_data_type
@@ -1329,6 +1333,7 @@ class DeepSpeedEngine(Module):
         timers = self.timers if self.wall_clock_breakdown() else None
         optimizer = BF16_Optimizer(
             optimizer,
+            self.param_names,
             mpu=self.mpu,
             clip_grad=clip_grad,
             allgather_bucket_size=self.zero_allgather_bucket_size(),
@@ -2499,16 +2504,23 @@ class DeepSpeedEngine(Module):
         """
 
         if tag is None:
-            latest_path = os.path.join(load_dir, "latest")
+            latest_tag = "latest_universal" if self.load_universal_checkpoint(
+            ) else "latest"
+            latest_path = os.path.join(load_dir, latest_tag)
             if os.path.isfile(latest_path):
                 with open(latest_path, "r") as fd:
                     tag = fd.read().strip()
             else:
-                logger.warning(
-                    f"Unable to find latest file at {latest_path}, if trying to load latest "
-                    "checkpoint please ensure this file exists or pass an explicit checkpoint tag when loading a checkpoint."
-                )
-                return None, None
+                if self.load_universal_checkpoint():
+                    raise ValueError(
+                        f'Invalid for universal checkpoint: {latest_path} does not exist'
+                    )
+                else:
+                    logger.warning(
+                        f"Unable to find latest file at {latest_path}, if trying to load latest "
+                        "checkpoint please ensure this file exists or pass an explicit checkpoint tag when loading a checkpoint."
+                    )
+                    return None, None
 
         if self.zero_optimization_partition_weights():
             # Prepare for checkpoint load by ensuring all parameters are partitioned
@@ -2576,10 +2588,10 @@ class DeepSpeedEngine(Module):
                                                 model=self.module,
                                                 mpu=self.mpu,
                                                 num_experts=self.num_experts)
-
-        self.load_module_state_dict(state_dict=checkpoint['module'],
-                                    strict=load_module_strict,
-                                    custom_load_fn=custom_load_fn)
+        if not self.load_universal_checkpoint():
+            self.load_module_state_dict(state_dict=checkpoint['module'],
+                                        strict=load_module_strict,
+                                        custom_load_fn=custom_load_fn)
 
         self.loaded_checkpoint_dp_world_size = checkpoint['dp_world_size']
 
@@ -2677,25 +2689,35 @@ class DeepSpeedEngine(Module):
         return load_path, client_state
 
     def _load_zero_checkpoint(self, load_dir, tag, load_optimizer_states=True):
-        zero_sd_list = self._get_all_zero_checkpoints(load_dir, tag)
-        if zero_sd_list is None:
-            return False
-
-        if load_optimizer_states and self.dp_world_size != self.loaded_checkpoint_dp_world_size:
-            raise ZeRORuntimeException("The checkpoint being loaded used a DP " \
-                f"world size of {self.loaded_checkpoint_dp_world_size} but the " \
-                f"current world size is {self.dp_world_size}. Automatic adjustment " \
-                "of ZeRO's optimizer state partitioning with a new world size is not " \
-                "currently supported.")
+        if self.load_universal_checkpoint():
+            zero_sd_list = None
+            checkpoint_folder = f'{os.path.join(load_dir, tag)}'
+        else:
+            if load_optimizer_states and self.dp_world_size != self.loaded_checkpoint_dp_world_size:
+                raise ZeRORuntimeException("The checkpoint being loaded used a DP " \
+                    f"world size of {self.loaded_checkpoint_dp_world_size} but the " \
+                    f"current world size is {self.dp_world_size}. Automatic adjustment " \
+                    "of ZeRO's optimizer state partitioning with a new world size is not " \
+                    "currently supported.")
+            checkpoint_folder = None
+            zero_sd_list = self._get_all_zero_checkpoints(load_dir, tag)
+            if zero_sd_list is None:
+                return False
 
         self.optimizer.load_state_dict(
             state_dict_list=zero_sd_list,
             load_optimizer_states=load_optimizer_states,
             load_from_fp32_weights=self.zero_load_from_fp32_weights(),
-        )
-        logger.info(
-            f"loading {len(zero_sd_list)} zero partition checkpoints for rank {self.global_rank}"
-        )
+            checkpoint_folder=checkpoint_folder)
+
+        if self.load_universal_checkpoint():
+            logger.info(
+                f'loaded universal zero checkpoints from {checkpoint_folder} for rank {self.global_rank}'
+            )
+        else:
+            logger.info(
+                f"loading {len(zero_sd_list)} zero partition checkpoints for rank {self.global_rank}"
+            )
         return True
 
     def _get_mp_rank_zero_checkpoint_names(self,
