@@ -35,9 +35,10 @@ class TorchBackend(Backend):
         self.init_process_group(backend, timeout, init_method)
 
     def init_process_group(self, backend, timeout, init_method):
-        return torch.distributed.init_process_group(backend,
-                                                    timeout=timeout,
-                                                    init_method=init_method)
+        if not torch.distributed.is_initialized():
+            torch.distributed.init_process_group(backend,
+                                                 timeout=timeout,
+                                                 init_method=init_method)
 
     def all_reduce(self,
                    tensor,
