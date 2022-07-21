@@ -5,214 +5,78 @@ toc_label: "Contents"
 title: "Latest News"
 
 ---
+<b> DeepSpeed trained the world's most powerful language models ([MT-530B](https://www.microsoft.com/en-us/research/blog/using-deepspeed-and-megatron-to-train-megatron-turing-nlg-530b-the-worlds-largest-and-most-powerful-generative-language-model/), [BLOOM](https://huggingface.co/blog/bloom-megatron-deepspeed)); [learn how](https://www.deepspeed.ai/tutorials/large-models-w-deepspeed/).</b>
 
-* [2022/07/20] [DeepSpeed Compression: A composable library for extreme compression and zero-cost quantization](https://www.microsoft.com/en-us/research/blog/deepspeed-compression-a-composable-library-for-extreme-compression-and-zero-cost-quantization/)
-    * [Tutorial](https://www.deepspeed.ai/tutorials/model-compression/) and [Code examples](https://github.com/microsoft/DeepSpeedExamples/tree/master/model_compression).
-    * 50x model size reduction via [XTC](https://arxiv.org/abs/2206.01859) and 5000x compression cost reduction via [ZeroQuant](https://arxiv.org/abs/2206.01861).
-* [2022/03/21] [Supporting efficient large model training on AMD Instinct GPUs with DeepSpeed](https://cloudblogs.microsoft.com/opensource/2022/03/21/supporting-efficient-large-model-training-on-amd-instinct-gpus-with-deepspeed/)
-* [2022/03/07] [Maximizing Communication Efficiency for Large-scale Training via 0/1 Adam](https://www.deepspeed.ai/tutorials/zero-one-adam/)
-* [2022/01/19] [DeepSpeed: Advancing MoE inference and training to power next-generation AI scale](https://www.microsoft.com/en-us/research/blog/deepspeed-advancing-moe-inference-and-training-to-power-next-generation-ai-scale/)
-    * [Mixture of Experts (MoE) for NLG tutorial](https://www.deepspeed.ai/tutorials/mixture-of-experts-nlg/).
-    * [Mixture of Experts (MoE) Inference tutorial](https://www.deepspeed.ai/tutorials/moe-inference-tutorial).
-* [2021/11/15] [Autotuning: Automatically discover the optimal DeepSpeed configuration that delivers good training speed](https://www.deepspeed.ai/2021/11/16/autotuning.html)
-* [2021/10/11] [Using DeepSpeed and Megatron to Train Megatron-Turing NLG 530B, the World’s Largest and Most Powerful Generative Language Model](https://www.microsoft.com/en-us/research/blog/using-deepspeed-and-megatron-to-train-megatron-turing-nlg-530b-the-worlds-largest-and-most-powerful-generative-language-model/)
-  * Read more on how to [train large models with DeepSpeed](https://www.deepspeed.ai/tutorials/large-models-w-deepspeed/)
+* [2022/07] [DeepSpeed Compression: A composable library for extreme compression](https://www.microsoft.com/en-us/research/blog/deepspeed-compression-a-composable-library-for-extreme-compression-and-zero-cost-quantization/)
+* [2022/03] [Supporting efficient large model training on AMD Instinct GPUs with DeepSpeed](https://cloudblogs.microsoft.com/opensource/2022/03/21/supporting-efficient-large-model-training-on-amd-instinct-gpus-with-deepspeed/)
+* [2022/03] [Maximizing Communication Efficiency for Large-scale Training via 0/1 Adam](https://www.deepspeed.ai/tutorials/zero-one-adam/)
+* [2022/01] [DeepSpeed: Advancing MoE inference and training to power next-generation AI scale](https://www.microsoft.com/en-us/research/blog/deepspeed-advancing-moe-inference-and-training-to-power-next-generation-ai-scale/)
+* [2021/11] [Autotuning: Automatically discover the optimal DeepSpeed configuration](https://www.deepspeed.ai/news/2021/11/15/autotuning.html)
 
+<!-- <b> DeepSpeed is hiring, [come join us!](https://careers.microsoft.com/us/en/search-results?keywords=http:%2F%2Fdeepspeed.ai) </b> -->
 
-<b> DeepSpeed+Megatron trained the world's most powerful language model: [MT-530B](https://www.microsoft.com/en-us/research/blog/using-deepspeed-and-megatron-to-train-megatron-turing-nlg-530b-the-worlds-largest-and-most-powerful-generative-language-model/) <b>
+# Extreme Speed and Scale for DL Training and Inference
 
-<b> DeepSpeed is hiring, [come join us!](https://careers.microsoft.com/us/en/search-results?keywords=http:%2F%2Fdeepspeed.ai) </b>
-
-DeepSpeed is a deep learning optimization library that makes distributed training easy,
-efficient, and effective.
-
-<p align="center"><i><b>10x Larger Models</b></i></p>
-<p align="center"><i><b>10x Faster Training</b></i></p>
-<p align="center"><i><b>Minimal Code Change</b></i></p>
-
-DeepSpeed delivers extreme-scale model training for everyone, from data scientists training on massive supercomputers to those training on low-end clusters or even on a single GPU:
-* Extreme scale: Using current generation of GPU clusters with hundreds of devices,  3D parallelism of DeepSpeed can efficiently train deep learning models with trillions of parameters.
-* Extremely memory efficient: With just a single GPU, ZeRO-Offload of DeepSpeed can train models with over 10B parameters, 10x bigger than the state of the art, democratizing multi-billion-parameter model training such that many deep learning scientists can explore bigger and better models.
-* Extremely long sequence length: Sparse attention of DeepSpeed powers an order-of-magnitude longer input sequence and obtains up to 6x faster execution comparing with dense transformers.
-* Extremely communication efficient: 3D parallelism improves communication efficiency allows users to train multi-billion-parameter models 2–7x faster on clusters with limited network bandwidth.  1-bit Adam, 0/1 Adam and 1-bit LAMB reduce communication volume by up to 26x while achieving similar convergence efficiency to Adam/LAMB, allowing for scaling to different types of GPU clusters and networks.
-
-Early adopters of DeepSpeed have already produced
-a language model (LM) with over 17B parameters called
-[Turing-NLG](https://www.microsoft.com/en-us/research/blog/turing-nlg-a-17-billion-parameter-language-model-by-microsoft),
-establishing a new SOTA in the LM category.
-
-DeepSpeed is an important part of Microsoft’s new
-[AI at Scale](https://www.microsoft.com/en-us/research/project/ai-at-scale/)
-initiative to enable next-generation AI capabilities at scale, where you can find more
-information [here](https://innovation.microsoft.com/en-us/exploring-ai-at-scale).
-
-# Why DeepSpeed?
-Training advanced deep learning models is challenging. Beyond model design,
-model scientists also need to set up the state-of-the-art training techniques
-such as distributed training, mixed precision, gradient accumulation, and
-checkpointing. Yet still, scientists may not achieve the desired system
-performance and convergence rate. Large model sizes are even more challenging:
-a large model easily runs out of memory with pure data parallelism and it is
-difficult to use model parallelism. DeepSpeed addresses these challenges to
-accelerate model development *and* training.
-
-## Distributed, Effective, and Efficient Training with Ease
-The DeepSpeed API is a lightweight wrapper on [PyTorch](https://pytorch.org/). This
-means that you can use everything you love in PyTorch and without learning a new
-platform. In addition, DeepSpeed manages all of the boilerplate state-of-the-art
-training techniques, such as distributed training, mixed precision, gradient
-accumulation, and checkpoints so that you can focus on your model development. Most
-importantly, you can leverage the distinctive efficiency and effectiveness benefit of
-DeepSpeed to boost speed and scale with just a few lines of code changes to your PyTorch
-models.
-
-## Speed
-DeepSpeed achieves high performance and fast convergence through a combination of
-efficiency optimizations on compute/communication/memory/IO and effectiveness
-optimizations on advanced hyperparameter tuning and optimizers. For example:
-
-* <span style="color:dodgerblue">DeepSpeed trains BERT-large to parity in 44
-  mins using 1024 V100 GPUs (64 DGX-2 boxes) and in 2.4 hours using 256 GPUs
-  (16 DGX-2 boxes).</span>
-
-  **BERT-large Training Times**
-
-  | Devices        | Source    |        Training Time  |
-  | -------------- | --------- | ---------------------:|
-  | 1024 V100 GPUs | DeepSpeed |             **44** min|
-  | 256 V100 GPUs  | DeepSpeed |             **2.4** hr|
-  | 64 V100 GPUs   | DeepSpeed |            **8.68** hr|
-  | 16 V100 GPUs   | DeepSpeed |           **33.22** hr|
-
-  *BERT codes and tutorials will be available soon.*
-
-* DeepSpeed trains GPT2 (1.5 billion parameters) 3.75x faster than state-of-art, NVIDIA
-  Megatron on Azure GPUs.
-
-  *Read more*: [GPT tutorial](/tutorials/megatron/)
+   DeepSpeed is an easy-to-use deep learning optimization software suite that enables unprecedented scale and speed for Deep Learning Training and Inference. With DeepSpeed you can:
+<p style="text-align: center;"><em>Train/Inference dense or sparse models with billions or trillions of parameters</em></p>
+<p style="text-align: center;"><em>Achieve excellent system throughput and efficiently scale to thousands of GPUs</em></p>
+<p style="text-align: center;"><em>Train/Inference on resource constrained GPU systems</em></p>
+<p style="text-align: center;"><em>Achieve unprecedented low latency and high thoughput for inference</em></p>
+<p style="text-align: center;"><em>Achieve extreme compression for an unparalleled inference latency and model size reduction with low costs</em></p>
 
 
+# DeepSpeed has three innovation pillars:
 
-## Memory efficiency
-DeepSpeed provides memory-efficient data parallelism and enables training models without
-model parallelism. For example, DeepSpeed can train models with up to 13 billion parameters on
-a single GPU. In comparison, existing frameworks (e.g.,
-PyTorch's Distributed Data Parallel) run out of memory with 1.4 billion parameter models.
-
-DeepSpeed reduces the training memory footprint through a novel solution called Zero
-Redundancy Optimizer (ZeRO). Unlike basic data parallelism where memory states are
-replicated across data-parallel processes, ZeRO partitions model states and gradients to save
-significant memory. Furthermore, it also reduces activation memory and fragmented memory.
-The current implementation (ZeRO-2) reduces memory by up to
-8x relative to the state-of-art. You can read more about ZeRO in our [paper](https://arxiv.org/abs/1910.02054), and
-in our blog posts related to
-[ZeRO-1](https://www.microsoft.com/en-us/research/blog/zero-deepspeed-new-system-optimizations-enable-training-models-with-over-100-billion-parameters/) and [ZeRO-2](https://www.microsoft.com/en-us/research/blog/zero-2-deepspeed-shattering-barriers-of-deep-learning-speed-scale/).
-
-With this impressive memory reduction, early adopters of DeepSpeed have already
-produced  a language model (LM) with over 17B parameters called
-<a href="https://www.microsoft.com/en-us/research/blog/turing-nlg-a-17-billion-parameter-language-model-by-microsoft">
-<span style="color:dodgerblue">Turing-NLG</span></a>,
-establishing a new SOTA in the LM category.
-
-For model scientists with limited GPU resources, ZeRO-Offload leverages both CPU and GPU memory for training large models. Using a machine with **a single GPU**, our users can run **models of up to 13 billion parameters** without running out of memory, 10x bigger than the existing approaches, while obtaining competitive throughput. This feature democratizes multi-billion-parameter model training and opens the window for many deep learning practitioners to explore bigger and better models.
-
-## Scalability
-DeepSpeed supports efficient data parallelism, model parallelism, pipeline parallelism and their
-combinations, which we call 3D parallelism.
-* <span style="color:dodgerblue">3D parallelism of DeepSpeed provides system support to run models with trillions of parameters, read more in our [press-release]({{ site.press_release_v3 }}) and [tutorial](/tutorials/pipeline).</span>
-* <span style="color:dodgerblue">DeepSpeed can run large models more efficiently, up to 10x
-  faster for models with
-  various sizes spanning 1.5B to hundred billion.</span> More specifically, the data parallelism powered by ZeRO
-  is complementary and can be combined with different types of model parallelism.  It allows
-  DeepSpeed to fit models using lower degree of model parallelism and higher batch size, offering
-  significant performance gains compared to using model parallelism alone.
-
-  *Read more*: [ZeRO paper](https://arxiv.org/abs/1910.02054),
-  and [GPT tutorial](/tutorials/megatron).
-
-![DeepSpeed Speedup](/assets/images/deepspeed-speedup.png)
-<p align="center">
-<em>The figure depicts system throughput improvements of DeepSpeed (combining ZeRO-powered data parallelism with model parallelism of NVIDIA Megatron-LM) over using Megatron-LM alone.</em>
-</p>
-
-## Communication efficiency
-Pipeline parallelism of DeepSpeed reduce communication volume during distributed training, which allows users to train multi-billion-parameter models 2–7x faster on clusters with limited network bandwidth.
-![Low-bandwidth GPT-2 Performance](/assets/images/pp-lowbw-gpt2.png)
-
-1-bit Adam, 0/1 Adam and 1-bit LAMB reduce communication volume by up to 26x while achieving similar convergence efficiency to Adam, allowing for scaling to different types of GPU clusters and networks.  [1-bit Adam blog post](https://www.deepspeed.ai/2020/09/08/onebit-adam-blog-post.html), [1-bit Adam tutorial](https://www.deepspeed.ai/tutorials/onebit-adam/), [0/1 Adam tutorial](https://www.deepspeed.ai/tutorials/zero-one-adam/), [1-bit LAMB tutorial](https://www.deepspeed.ai/tutorials/onebit-lamb/).
-
-## Supporting long sequence length
-DeepSpeed offers sparse attention kernels—an instrumental technology to support long sequences of model inputs, whether for text, image, or sound. Compared with the classic dense Transformers, it powers **an order-of-magnitude longer input sequence** and obtains up to 6x faster execution with comparable accuracy. It also outperforms state-of-the-art sparse implementations with 1.5–3x faster execution. Furthermore, our sparse kernels support efficient execution of flexible sparse format and empower users to innovate on their custom sparse structures.  [Read more here](https://www.deepspeed.ai/2020/09/08/sparse-attention.html).
+![Three innovation pillars](/assets/images/3pillars.png){: .align-center}
 
 
-## Fast convergence for effectiveness
-DeepSpeed supports advanced hyperparameter tuning and large batch size
-optimizers such as [LAMB](https://arxiv.org/abs/1904.00962). These improve the
-effectiveness of model training and reduce the number of samples required to
-convergence to desired accuracy.
+## DeepSpeed-Training
 
-*Read more*: [Tuning tutorial](/tutorials/one-cycle).
+DeepSpeed offers a confluence of system innovations, that has made large scale DL training effective, and efficient, greatly improved ease of use, and redefined the DL training landscape in terms of scale that is possible. These innovations such as ZeRO, 3D-Parallelism, DeepSpeed-MoE, ZeRO-Infinity, etc fall under the DeepSpeed-Training pillar. Learn more: [DeepSpeed-Training](/_pages/training)
 
+## DeepSpeed-Inference
 
-## Good Usability
-Only a few lines of code changes are needed to enable a PyTorch model to use DeepSpeed and ZeRO. Compared to current model parallelism libraries, DeepSpeed does not require a code redesign or model refactoring. It also does not put limitations on model dimensions (such as number of attention heads, hidden sizes, and others), batch size, or any other training parameters. For models of up to 13 billion parameters, you can use ZeRO-powered data parallelism conveniently without requiring model parallelism, while in contrast, standard data parallelism will run out of memory for models with more than 1.4 billion parameters. In addition, DeepSpeed conveniently supports flexible combination of ZeRO-powered data parallelism with custom model parallelisms, such as tensor slicing of NVIDIA's Megatron-LM.
+DeepSpeed brings together innovations in parallelism technology such as tensor, pipeline, expert and ZeRO-parallelism, and combines them with high performance custom inference kernels, communication optimizations and heterogeneous memory technologies to enable inference at an unprecedented scale, while achieving unparalleled latency, thoughput and cost reduction. This systematic composition of system technologies for inference falls under the DeepSpeed-Inference. Learn more: [DeepSpeed-Inference](/_pages/inference)
 
+## DeepSpeed-Compression
 
-## Features
+To further increase the inference efficiency, DeepSpeed offers easy-to-use and flexible-to-compose compression techniques for researchers and practitioners to compress their models while delivering faster speed, smaller model size, and significantly reduced compression cost. Moreover, SoTA innovations on compression like ZeroQuant and XTC are included under the DeepSpeed-Compression pillar. Learn more: [DeepSpeed-Compression](/_pages/compression)
 
-Below we provide a brief feature list, see our detailed [feature overview](https://www.deepspeed.ai/features/) for descriptions and usage.
+# DeepSpeed Software Suite
 
-* [Distributed Training with Mixed Precision](https://www.deepspeed.ai/features/#distributed-training-with-mixed-precision)
-  * 16-bit mixed precision
-  * Single-GPU/Multi-GPU/Multi-Node
-* [Model Parallelism](https://www.deepspeed.ai/features/#model-parallelism)
-  * Support for Custom Model Parallelism
-  * Integration with Megatron-LM
-* [Pipeline Parallelism](https://www.deepspeed.ai/tutorials/pipeline/)
-  * 3D Parallelism
-* [The Zero Redundancy Optimizer](https://www.deepspeed.ai/tutorials/zero/)
-  * Optimizer State and Gradient Partitioning
-  * Activation Partitioning
-  * Constant Buffer Optimization
-  * Contiguous Memory Optimization
-* [ZeRO-Offload](https://www.deepspeed.ai/tutorials/zero-offload/)
-  * Leverage both CPU/GPU memory for model training
-  * Support 10B model training on a single GPU
-* [Ultra-fast dense transformer kernels](https://www.deepspeed.ai/2020/05/18/bert-record.html)
-* [Sparse attention](https://www.deepspeed.ai/2020/09/08/sparse-attention-news.html)
-  * Memory- and compute-efficient sparse kernels
-  * Support 10x long sequences than dense
-  * Flexible support to different sparse structures
-* [1-bit Adam](https://www.deepspeed.ai/2020/09/08/onebit-adam-blog-post.html), [0/1 Adam](https://www.deepspeed.ai/tutorials/zero-one-adam/) and [1-bit LAMB](https://www.deepspeed.ai/tutorials/onebit-lamb/)
-  * Custom communication collective
-  * Up to 26x communication volume saving
-* [Additional Memory and Bandwidth Optimizations](https://www.deepspeed.ai/features/#additional-memory-and-bandwidth-optimizations)
-  * Smart Gradient Accumulation
-  * Communication/Computation Overlap
-* [Training Features](https://www.deepspeed.ai/features/#training-features)
-  * Simplified training API
-  * Gradient Clipping
-  * Automatic loss scaling with mixed precision
-* [Training Optimizers](https://www.deepspeed.ai/features/#training-optimizers)
-  * Fused Adam optimizer and arbitrary `torch.optim.Optimizer`
-  * Memory bandwidth optimized FP16 Optimizer
-  * Large Batch Training with LAMB Optimizer
-  * Memory efficient Training with ZeRO Optimizer
-  * CPU-Adam
-* [Training Agnostic Checkpointing](https://www.deepspeed.ai/features/#training-agnostic-checkpointing)
-* [Advanced Parameter Search](https://www.deepspeed.ai/features/#advanced-parameter-search)
-  * Learning Rate Range Test
-  * 1Cycle Learning Rate Schedule
-* [Simplified Data Loader](https://www.deepspeed.ai/features/#simplified-data-loader)
-* [Curriculum Learning](https://www.deepspeed.ai/tutorials/curriculum-learning/)
-  * A curriculum learning-based data pipeline that presents easier or simpler examples earlier during training
-  * Stable and 3.3x faster GPT-2 pre-training with 8x/4x larger batch size/learning rate while maintaining token-wise convergence speed
-  * Complementary to many other DeepSpeed features
-* [Progressive Layer Dropping](https://www.deepspeed.ai/2020/10/28/progressive-layer-dropping-news.html)
-  * Efficient and robust compressed training
-  * Up to 2.5x convergence speedup for pre-training
-* [Performance Analysis and Debugging](https://www.deepspeed.ai/features/#performance-analysis-and-debugging)
-* [Mixture of Experts (MoE)](https://www.deepspeed.ai/tutorials/mixture-of-experts/)
+## DeepSpeed Library
+
+   The [DeepSpeed](https://github.com/microsoft/deepspeed) library implements and packages the innovations and technologies in DeepSpeed Training, Inference and Compression Pillars into a single easy-to-use, open-sourced repository. It allows for easy composition of multitude of features within a single training, infernece or compression pipeline. The DeepSpeed Library is heavily adopted by the DL community, and has been used to enable some of the most powerful models (see [DeepSpeed Adoption](#deepspeed-adoption)).
+
+## Model Implementations for Inference (MII)
+
+   [Model Implementations for Inference (MII)](https://github.com/microsoft/deepspeed-mii) is an open-sourced repository for making low-latency and high-throughput inference accessible to all data scientists by alleviating the need to apply complex system optimization techniques themselves. Out-of-box, MII offers support for thousands of widely used DL models, optimized using DeepSpeed-Inference, that can be deployed with a few lines of code, while achieving significant latency reduction compared to their vanilla open-sourced versions.
+
+## DeepSpeed on Azure
+
+   DeepSpeed users are diverse and have access to different environments. We recommend to try DeepSpeed on Azure as it is the simplest and easiest method. The recommended method to try DeepSpeed on Azure is through AzureML [recipes](https://github.com/Azure/azureml-examples/tree/main/python-sdk/workflows/train/deepspeed). The job submission and data preparation scripts have been made available [here](https://github.com/microsoft/Megatron-DeepSpeed/tree/main/examples/azureml). For more details on how to use DeepSpeed on Azure, please follow the [Azure tutorial](https://www.deepspeed.ai/tutorials/azure/).
+
+# DeepSpeed Adoption
+
+DeepSpeed has been used to train many different large-scale models, below is a list of several examples that we are aware of (if you'd like to include your model please submit a PR):
+
+  * [Megatron-Turing NLG (530B)](https://www.microsoft.com/en-us/research/blog/using-deepspeed-and-megatron-to-train-megatron-turing-nlg-530b-the-worlds-largest-and-most-powerful-generative-language-model/)
+  * [Jurassic-1 (178B)](https://uploads-ssl.webflow.com/60fd4503684b466578c0d307/61138924626a6981ee09caf6_jurassic_tech_paper.pdf)
+  * [BLOOM (176B)](https://huggingface.co/blog/bloom-megatron-deepspeed)
+  * [YaLM (100B)](https://github.com/yandex/YaLM-100B)
+  * [GPT-NeoX (20B)](https://github.com/EleutherAI/gpt-neox)
+
+DeepSpeed has been integrated with several different popular open-source DL frameworks such as:
+
+|                                                                                                | Documentation                                |
+| ---------------------------------------------------------------------------------------------- | -------------------------------------------- |
+| <img src="assets/images/transformers-light.png" width="300px"> | [Transformers with DeepSpeed](https://huggingface.co/docs/transformers/main/main_classes/deepspeed) |
+| <img src="assets/images/accelerate-light.png" width="300px">| [Accelerate with DeepSpeed](https://huggingface.co/docs/accelerate/main/en/deepspeed) |
+| <img src="assets/images/lightning-light.svg" width="250px"> | [Lightning with DeepSpeed](https://pytorch-lightning.readthedocs.io/en/stable/api/pytorch_lightning.strategies.DeepSpeedStrategy.html) |
+| <img src="assets/images/mosaicml.svg" width="250px"> | [MosaicML with DeepSpeed](https://docs.mosaicml.com/en/v0.8.0/trainer/using_the_trainer.html?highlight=deepspeed#deepspeed-integration) |
+
+DeepSpeed is an integral part of [Microsoft’s AI at Scale initiative](https://www.microsoft.com/en-us/research/project/ai-at-scale/) to enable next-generation AI capabilities at scale.
+
 
 # Contributing
 DeepSpeed welcomes your contributions! Please see our

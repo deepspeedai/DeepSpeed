@@ -80,6 +80,8 @@ defaults:
       path: "_pages"
     values:
       permalink: /docs/:basename/
+      toc: true
+      toc_label: "Contents"
   - scope:
       path: ""
       type: posts

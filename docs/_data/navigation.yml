@@ -11,20 +11,15 @@ main:
     url: https://github.com/microsoft/DeepSpeed
 
 lnav:
-  - title: 'Feature Overview'
-    url: /features/
+  - title: 'Training'
+    url: /training/
+  - title: 'Inference'
+    url: /inference/
+  - title: 'Compression'
+    url: /compression/
   - title: 'Getting Started'
     url: /getting-started/
-    children:
-      - title: 'Installation'
-        url: /getting-started/#installation
-      - title: 'Writing models'
-        url: /getting-started/#writing-deepspeed-models
-      - title: 'Training'
-        url: /getting-started/#training
-      - title: 'Launching'
-        url: /getting-started/#launching-deepspeed-training
-  - title: 'Configuration'
+  - title: 'ds_config'
     url: /docs/config-json/
     children:
       - title: 'Autotuning'
@@ -33,34 +28,16 @@ lnav:
         url: /docs/config-json/#batch-size-related-parameters
       - title: 'Optimizer'
         url: /docs/config-json/#optimizer-parameters
-      - title: 'Scheduler'
-        url: /docs/config-json/#scheduler-parameters
-      - title: 'Communication'
-        url: /docs/config-json/#communication-options
       - title: 'FP16'
         url: /docs/config-json/#fp16-training-options
       - title: 'BFLOAT16'
         url: /docs/config-json/#bfloat16-training-options
-      - title: 'Gradient Clipping'
-        url: /docs/config-json/#gradient-clipping
       - title: 'ZeRO optimizations'
         url: /docs/config-json/#zero-optimizations-for-fp16-training
-      - title: 'Parameter Offloading'
-        url: /docs/config-json/#parameter-offloading
-      - title: 'Optimizer Offloading'
-        url: /docs/config-json/#optimizer-offloading
-      - title: 'Asynchronous I/O'
-        url: /docs/config-json/#asynchronous-io
       - title: 'Logging'
         url: /docs/config-json/#logging
       - title: 'Flops Profiler'
         url: /docs/config-json/#flops-profiler
-      - title: 'PyTorch Profiler'
-        url: /docs/config-json/#pytorch-profiler
-      - title: 'Activation checkpointing'
-        url: /docs/config-json/#activation-checkpointing
-      - title: 'Sparse Attention'
-        url: /docs/config-json/#sparse-attention
       - title: 'Monitoring'
         url: /docs/config-json/#monitoring-module-tensorboard-wandb-csv
       - title: 'Model Compression'

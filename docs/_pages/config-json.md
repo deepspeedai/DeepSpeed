@@ -1,5 +1,7 @@
 ---
 title: "DeepSpeed Configuration JSON"
+toc: true
+toc_label: "Contents"
 ---
 
 ### Batch Size Related Parameters
