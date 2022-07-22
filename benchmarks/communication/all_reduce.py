@@ -8,15 +8,15 @@ import os
 import math
 
 
-def timed_allreduce(input, args):
+def timed_all_reduce(input, args):
     if args.dist == 'torch':
         import torch.distributed as dist
     elif args.dist == 'deepspeed':
         import deepspeed.comm as dist
 
     sync_all()
-    # Warmup, establish connections, etc.
-    for i in range(args.warmup):
+    # Warmups, establish connections, etc.
+    for i in range(args.warmups):
         dist.all_reduce(input, async_op=args.async_op)
     sync_all()
 
@@ -31,23 +31,25 @@ def timed_allreduce(input, args):
     avg_duration = duration / args.trials
     size = input.element_size() * input.nelement()
     n = dist.get_world_size()
-    tput, busbw = get_bw('allreduce', size, avg_duration, args)
+    tput, busbw = get_bw('all_reduce', size, avg_duration, args)
     tput_str, busbw_str, duration_str = get_metric_strings(args, tput, busbw, avg_duration)
     desc = f'{input.nelement()}x{input.element_size()}'
 
+    if not args.raw:
+        size = convert_size(size)
+
     print_rank_0(
-        f"{convert_size(size):<20} {desc:25s} {duration_str:20s} {tput_str:20s} {busbw_str:20s}"
-    )
+        f"{size:<20} {desc:25s} {duration_str:20s} {tput_str:20s} {busbw_str:20s}")
 
 
-def run_allreduce(local_rank, args):
+def run_all_reduce(local_rank, args):
     if args.dist == 'torch':
         import torch.distributed as dist
     elif args.dist == 'deepspeed':
         import deepspeed.comm as dist
 
     # Prepare benchmark header
-    print_header(args, 'allreduce')
+    print_header(args, 'all_reduce')
 
     world_size = dist.get_world_size()
     global_rank = dist.get_rank()
@@ -75,11 +77,11 @@ def run_allreduce(local_rank, args):
                     sync_all()
                     break
             sync_all()
-            timed_allreduce(input, args)
+            timed_all_reduce(input, args)
     else:
         # Send the biggest message size our GPUs can fit. If you're facing OOM errors, reduce the mem_factor
         # Don't need output tensor, so we double mem_factor
-        elements_per_gpu = max_numel(comm_op='allreduce',
+        elements_per_gpu = max_numel(comm_op='all_reduce',
                                      dtype=getattr(torch,
                                                    args.dtype),
                                      mem_factor=args.mem_factor * 2,
@@ -99,11 +101,11 @@ def run_allreduce(local_rank, args):
                 sync_all()
                 return
         sync_all()
-        timed_allreduce(input, args)
+        timed_all_reduce(input, args)
 
 
 if __name__ == "__main__":
     args = benchmark_parser().parse_args()
     rank = args.local_rank
     init_processes(local_rank=rank, args=args)
-    run_allreduce(local_rank=rank, args=args)
+    run_all_reduce(local_rank=rank, args=args)

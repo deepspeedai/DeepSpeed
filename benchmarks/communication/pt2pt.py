@@ -15,8 +15,8 @@ def timed_pt2pt(input, args):
         import deepspeed.comm as dist
 
     sync_all()
-    # Warmup, establish connections, etc.
-    for i in range(args.warmup):
+    # Warmups, establish connections, etc.
+    for i in range(args.warmups):
         if dist.get_rank() == 0:
             if args.async_op:
                 dist.isend(input, 1)
@@ -54,9 +54,11 @@ def timed_pt2pt(input, args):
     tput_str, busbw_str, duration_str = get_metric_strings(args, tput, busbw, avg_duration)
     desc = f'{input.nelement()}x{input.element_size()}'
 
+    if not args.raw:
+        size = convert_size(size)
+
     print_rank_0(
-        f"{convert_size(size):<20} {desc:25s} {duration_str:20s} {tput_str:20s} {busbw_str:20s}"
-    )
+        f"{size:<20} {desc:25s} {duration_str:20s} {tput_str:20s} {busbw_str:20s}")
 
 
 def run_pt2pt(local_rank, args):

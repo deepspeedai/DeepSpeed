@@ -8,15 +8,15 @@ import os
 import math
 
 
-def timed_alltoall(input, output, args):
+def timed_all_to_all(input, output, args):
     if args.dist == 'torch':
         import torch.distributed as dist
     elif args.dist == 'deepspeed':
         import deepspeed.comm as dist
 
     sync_all()
-    # Warmup, establish connections, etc.
-    for i in range(args.warmup):
+    # Warmups, establish connections, etc.
+    for i in range(args.warmups):
         dist.all_to_all_single(output, input, async_op=args.async_op)
     sync_all()
 
@@ -31,16 +31,18 @@ def timed_alltoall(input, output, args):
     avg_duration = duration / args.trials
     size = input.element_size() * input.nelement()
     n = dist.get_world_size()
-    tput, busbw = get_bw('alltoall', size, avg_duration, args)
+    tput, busbw = get_bw('all_to_all', size, avg_duration, args)
     tput_str, busbw_str, duration_str = get_metric_strings(args, tput, busbw, avg_duration)
     desc = f'{input.nelement()}x{input.element_size()}'
 
+    if not args.raw:
+        size = convert_size(size)
+
     print_rank_0(
-        f"{convert_size(size):<20} {desc:25s} {duration_str:20s} {tput_str:20s} {busbw_str:20s}"
-    )
+        f"{size:<20} {desc:25s} {duration_str:20s} {tput_str:20s} {busbw_str:20s}")
 
 
-def run_alltoall(local_rank, args):
+def run_all_to_all(local_rank, args):
     if args.dist == 'torch':
         import torch.distributed as dist
     elif args.dist == 'deepspeed':
@@ -49,7 +51,7 @@ def run_alltoall(local_rank, args):
     world_size = dist.get_world_size()
     global_rank = dist.get_rank()
     # Prepare benchmark header
-    print_header(args, 'alltoall')
+    print_header(args, 'all_to_all')
 
     if args.scan:
         M_LIST = []
@@ -76,10 +78,10 @@ def run_alltoall(local_rank, args):
                     sync_all()
                     break
             sync_all()
-            timed_alltoall(input, output, args)
+            timed_all_to_all(input, output, args)
     else:
         # Send the biggest message size our GPUs can fit. If you're facing OOM errors, reduce the mem_factor
-        elements_per_gpu = max_numel(comm_op='alltoall',
+        elements_per_gpu = max_numel(comm_op='all_to_all',
                                      dtype=getattr(torch,
                                                    args.dtype),
                                      mem_factor=args.mem_factor,
@@ -113,7 +115,7 @@ def run_alltoall(local_rank, args):
                     print(f"Before AllToAll Input List at rank {global_rank}: {input}")
                 dist.barrier()
 
-        timed_alltoall(input, output, args)
+        timed_all_to_all(input, output, args)
 
         if args.debug:
             for i in range(world_size):
@@ -126,4 +128,4 @@ if __name__ == "__main__":
     args = benchmark_parser().parse_args()
     rank = args.local_rank
     init_processes(local_rank=rank, args=args)
-    run_alltoall(local_rank=rank, args=args)
+    run_all_to_all(local_rank=rank, args=args)
