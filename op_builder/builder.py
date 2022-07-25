@@ -190,7 +190,7 @@ class OpBuilder(ABC):
         if OpBuilder.is_rocm_pytorch():
             from torch.utils.cpp_extension import ROCM_HOME
             rocm_ver_file = Path(ROCM_HOME).joinpath(".info/version-dev")
-            if rocm_ver_file.isfile():
+            if rocm_ver_file.is_file():
                 with open(rocm_ver_file, 'r') as file:
                     ROCM_VERSION_DEV_RAW = file.read()
             elif "rocm" in roch.__version__:
