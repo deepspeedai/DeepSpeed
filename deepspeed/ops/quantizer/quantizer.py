@@ -1,12 +1,7 @@
 '''
 Copyright 2020 The Microsoft DeepSpeed Team
 '''
-import json
-import math
-import importlib
 import torch
-from torch import nn
-from torch.autograd import Function
 
 from ..op_builder import QuantizerBuilder
 

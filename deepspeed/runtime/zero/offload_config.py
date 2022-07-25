@@ -5,7 +5,6 @@ Licensed under the MIT license.
 
 from deepspeed.runtime.config_utils import get_scalar_param
 from .offload_constants import *
-from .utils import logger
 
 OFFLOAD_PARAM_KEY_DEFAULT_DICT = {
     OFFLOAD_PARAM_DEVICE: OFFLOAD_PARAM_DEVICE_DEFAULT,

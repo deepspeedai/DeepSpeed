@@ -13,7 +13,7 @@ from deepspeed.utils.logging import logger
 from deepspeed.runtime.zero.offload_constants import *
 from deepspeed.runtime.swap_tensor.constants import *
 from deepspeed.runtime.swap_tensor.utils import swap_in_tensors, swap_out_tensors, \
-    MIN_AIO_BYTES, AIO_ALIGNED_BYTES, get_sized_buffers, get_sized_buffer
+    MIN_AIO_BYTES, AIO_ALIGNED_BYTES, get_sized_buffers
 from deepspeed.runtime.swap_tensor.utils import SwapBufferManager, SwapBufferPool
 
 

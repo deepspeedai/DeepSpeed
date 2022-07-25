@@ -1,7 +1,6 @@
 """
 Copyright 2020 The Microsoft DeepSpeed Team
 """
-import warnings
 from .builder import OpBuilder
 
 try:

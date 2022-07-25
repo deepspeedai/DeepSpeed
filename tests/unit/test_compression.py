@@ -1,4 +1,3 @@
-from zlib import compressobj
 import torch
 import pytest
 import random

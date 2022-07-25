@@ -1,6 +1,4 @@
-import copy
 import torch
-import deepspeed
 
 
 def quantize_transformer_layer(orig_layer_impl, model, megatron=False, preln=False):

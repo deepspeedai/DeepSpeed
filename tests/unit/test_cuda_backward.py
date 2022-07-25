@@ -1,6 +1,6 @@
+import math
 import numpy as np
 import torch
-import torch.nn.functional as F
 import pytest
 import random
 import copy
@@ -121,7 +121,7 @@ class DSEncoder(nn.Module):
             num_layers = len(self.layer)
             chunk_length = math.ceil(math.sqrt(num_layers))
             while l < num_layers:
-                hidden_states = checkpoint.checkpoint(custom(l,
+                hidden_states = checkpoint.checkpoint(custom(l,  # noqa: F821
                                                              l + chunk_length),
                                                       hidden_states,
                                                       attention_mask * 1)

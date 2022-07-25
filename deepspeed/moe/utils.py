@@ -1,6 +1,5 @@
 from typing import List, Tuple, Dict
 import torch
-from deepspeed.utils import groups
 from .layer import MoE
 
 

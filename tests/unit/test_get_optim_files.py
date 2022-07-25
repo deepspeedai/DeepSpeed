@@ -1,6 +1,5 @@
 import os
 import pytest
-import deepspeed
 from deepspeed.utils.zero_to_fp32 import get_optim_files
 
 

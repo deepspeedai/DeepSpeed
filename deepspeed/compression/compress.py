@@ -1,4 +1,3 @@
-import torch
 import re
 from .helper import compression_preparation, fix_compression, recursive_getattr, is_module_compressible
 from .config import get_compression_config
@@ -6,8 +5,6 @@ from ..runtime.config_utils import dict_raise_error_on_duplicate_keys
 from .constants import *
 import os
 import json
-
-from deepspeed.utils import logger
 
 
 def check_deepspeed_config(config):

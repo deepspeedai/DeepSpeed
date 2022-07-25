@@ -1,6 +1,4 @@
 import torch
-import deepspeed
-import deepspeed.ops.transformer as transformer_inference
 from deepspeed import comm as dist
 from torch import nn
 from torch.nn import functional as F

@@ -116,15 +116,15 @@ def timeme():
 def line_profileme():
     print("--------------- line_profier -----------------")
     print("py")
-    profile(py)()
+    profile(py)()  # noqa: F821
     gc.collect()
     torch.cuda.empty_cache()
     print("cpp")
-    profile(cpp)()
+    profile(cpp)()  # noqa: F821
     gc.collect()
     torch.cuda.empty_cache()
     print("apex")
-    profile(apex)()
+    profile(apex)()  # noqa: F821
     gc.collect()
     torch.cuda.empty_cache()
 

@@ -1,19 +1,15 @@
-import copy
 import torch
 import tqdm
 import deepspeed
 import deepspeed.ops.transformer as transformer_inference
-from .replace_policy import HFBertLayerPolicy, HFGPT2LayerPolicy, HFGPTJLayerPolicy, BLOOMLayerPolicy
+from .replace_policy import HFBertLayerPolicy, HFGPT2LayerPolicy, BLOOMLayerPolicy
 from .replace_policy import replace_policies
-from ..constants import INFERENCE_GENERIC_MODE, INFERENCE_SPECIALIZED_MODE
 from ..runtime.weight_quantizer import WeightQuantization
-from torch import nn
 from deepspeed import comm as dist
 from torch import nn
-from torch.nn import functional as F
 
 from ..runtime.zero import GatheredParameters
-from .layers import LinearAllreduce, LinearLayer, Normalize, EmbeddingLayer
+from .layers import LinearAllreduce, LinearLayer
 from .load_checkpoint import load_model_with_checkpoint
 
 
@@ -452,10 +448,12 @@ def replace_transformer_layer(orig_layer_impl,
                 if qkvw.is_meta or qkvw.ds_tensor.numel() < attn_block.attn_qkvw.numel():
                     pass
                 else:
-                    with GatheredParameters([attn_qkvw,
-                                             attn_qkvb,
-                                             attn_ow,
-                                             attn_ob],
+                    with GatheredParameters([
+                            attn_block.attn_qkvw,
+                            attn_block.attn_qkvb,
+                            attn_block.attn_ow,
+                            attn_block.attn_ob
+                    ],
                                             modifier_rank=0):
                         attn_block.attn_qkvw = mp_replace.copy(
                             attn_block.attn_qkvw,
@@ -680,12 +678,13 @@ def replace_transformer_layer(orig_layer_impl,
 
         def _slice_embedding(child, name, conv_linear_layer):
             mp_replace = ReplaceWithTensorSlicing(mp_group=mp_group)
-            new_weight = torch.empty((weight_shape[0],
-                                      weight_shape[1] // mp_size),
+            new_weight = torch.empty((child.weight.shape[0],
+                                      child.weight.shape[1] // mp_size),
                                      device=child.weight.device,
                                      dtype=child.weight.dtype)
             data = mp_replace.copy(new_weight, child.weight.ds_tensor.data)
-            new_embedding = nn.Embedding(weight_shape[0], weight_shape[1] // mp_size)
+            new_embedding = nn.Embedding(child.weight.shape[0],
+                                         child.weight.shape[1] // mp_size)
             new_embedding.weight.data.copy_(data)
             return new_embedding
 

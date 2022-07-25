@@ -5,7 +5,6 @@ Licensed under the MIT license.
 Functionality of swapping optimizer tensors to/from (NVMe) storage devices.
 """
 
-import os
 import torch
 
 from deepspeed.utils.logging import logger
@@ -14,7 +13,7 @@ from deepspeed import comm as dist
 
 from deepspeed.runtime.swap_tensor.constants import *
 from deepspeed.runtime.swap_tensor.utils import swap_in_tensors, swap_out_tensors, print_object, \
-    MIN_AIO_BYTES, AIO_ALIGNED_BYTES, get_sized_buffers, get_sized_buffer
+    get_sized_buffers
 from deepspeed.runtime.swap_tensor.async_swapper import AsyncTensorSwapper
 from deepspeed.runtime.swap_tensor.optimizer_utils import OptimizerSwapper
 

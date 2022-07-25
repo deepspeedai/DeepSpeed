@@ -1,10 +1,8 @@
 import os
 import glob
-import enum
 
 import re as regex
 
-from collections import defaultdict
 from functools import partial
 
 import torch

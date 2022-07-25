@@ -4,7 +4,6 @@ import subprocess
 import argparse
 from .ops.op_builder import ALL_OPS
 from .git_version_info import installed_ops, torch_info
-from .ops import __compatible_ops__ as compatible_ops
 
 GREEN = '\033[92m'
 RED = '\033[91m'
@@ -54,7 +53,7 @@ def op_report(verbose=True):
 
 def ninja_installed():
     try:
-        import ninja
+        import ninja  # noqa: F401
     except ImportError:
         return False
     return True

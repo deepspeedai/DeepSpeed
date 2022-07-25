@@ -5,7 +5,6 @@ Licensed under the MIT license.
 
 import math
 import os
-import time
 import types
 from typing import Callable, Iterable
 from enum import Enum
@@ -19,22 +18,19 @@ from deepspeed import comm as dist
 from torch.nn import Module
 from torch.nn import Parameter
 
-from .linear import LinearModuleForZeroStage3, zero3_linear_wrap
+from .linear import zero3_linear_wrap
 from .offload_constants import *
 
 import deepspeed
 from ..utils import get_only_unique_item, see_memory_usage
 from deepspeed.runtime.zero.utils import assert_ints_same_as_other_ranks
-from deepspeed.utils import instrument_w_nvtx, logger
+from deepspeed.utils import instrument_w_nvtx
 from deepspeed.comm.comm import init_distributed
 from deepspeed.utils.debug import (debug_param2name_id_shape,
                                    debug_param2name_id_shape_device,
                                    debug_module2name,
-                                   debug_param2name,
                                    debug_param2name_id,
-                                   debug_param2name_id_shape_status,
-                                   printflock,
-                                   log_rank_file)
+                                   debug_param2name_id_shape_status)
 from deepspeed.utils.logging import logger
 
 from ..swap_tensor.partitioned_param_swapper import AsyncPartitionedParameterSwapper, PartitionedParamStatus

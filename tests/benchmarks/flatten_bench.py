@@ -11,7 +11,7 @@ import argparse
 import gc
 
 import torch
-from torch._utils import _flatten_dense_tensors, _unflatten_dense_tensors
+from torch._utils import _flatten_dense_tensors
 from deepspeed.ops.op_builder import UtilsBuilder
 
 from apex_C import flatten as flatten_apex
@@ -107,15 +107,15 @@ def timeme():
 def line_profileme():
     print("--------------- line_profiler -----------------")
     print("py")
-    profile(py)()
+    profile(py)()  # noqa: F821
     gc.collect()
     torch.cuda.empty_cache()
     print("cpp")
-    profile(cpp)()
+    profile(cpp)()  # noqa: F821
     gc.collect()
     torch.cuda.empty_cache()
     print("apex")
-    profile(apex)()
+    profile(apex)()  # noqa: F821
     gc.collect()
     torch.cuda.empty_cache()
 

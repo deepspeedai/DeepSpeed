@@ -8,11 +8,11 @@ import pytest
 
 import deepspeed
 
-from deepspeed.runtime.pipe.topology import PipeDataParallelTopology, PipeModelDataParallelTopology
+from deepspeed.runtime.pipe.topology import PipeDataParallelTopology
 
 PipeTopo = PipeDataParallelTopology
 
-from deepspeed.pipe import PipelineModule, LayerSpec
+from deepspeed.pipe import PipelineModule
 from deepspeed.utils import RepeatingLoader
 
 from .common import distributed_test

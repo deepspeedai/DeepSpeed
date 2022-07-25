@@ -7,7 +7,6 @@ import deepspeed.comm as dist
 class csvMonitor(Monitor):
     def __init__(self, monitor_config):
         super().__init__(monitor_config)
-        import csv
         self.filenames = []
         self.enabled = monitor_config.csv_monitor_config.enabled
         self.output_path = monitor_config.csv_monitor_config.output_path

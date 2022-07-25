@@ -1,4 +1,3 @@
-import os
 import copy
 
 import torch
@@ -11,8 +10,7 @@ import pytest
 import deepspeed
 import deepspeed.runtime.utils as ds_utils
 
-
-from deepspeed.runtime.pipe.topology import PipeDataParallelTopology, PipeModelDataParallelTopology
+from deepspeed.runtime.pipe.topology import PipeDataParallelTopology
 
 PipeTopo = PipeDataParallelTopology
 from deepspeed.runtime.pipe.module import PipelineModule, LayerSpec

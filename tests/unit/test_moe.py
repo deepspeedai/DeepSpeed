@@ -1,20 +1,12 @@
-import math
-from deepspeed.utils import groups
 import torch
-import deepspeed.comm as dist
 import deepspeed
-import argparse
 import pytest
-import json
-import os
-from deepspeed.ops.adam import FusedAdam
 from .common import distributed_test
-from deepspeed.ops.op_builder import CPUAdamBuilder
-from .simple_model import SimpleModel, SimplePRMoEModel, SimpleOptimizer, random_dataloader, args_from_dict, create_deepspeed_args, SimpleMoEModel, sequence_dataloader
+from .simple_model import SimplePRMoEModel, args_from_dict, SimpleMoEModel, sequence_dataloader
 from .util import required_torch_version
 
 try:
-    from apex import amp
+    from apex import amp  # noqa: F401
     _amp_available = True
 except ImportError:
     _amp_available = False

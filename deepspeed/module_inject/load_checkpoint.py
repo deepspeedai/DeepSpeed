@@ -1,10 +1,7 @@
-import deepspeed
-import torch
 from torch import nn
-from torch.nn import functional as F
 import deepspeed.ops.transformer as transformer_inference
 from ..runtime.zero import GatheredParameters
-from .layers import LinearAllreduce, LinearLayer, Normalize, EmbeddingLayer
+from .layers import LinearLayer, Normalize, EmbeddingLayer
 
 
 def load_model_with_checkpoint(r_module, sd, mp_replace):

@@ -1,12 +1,4 @@
-import torch
-import deepspeed.comm as dist
 import deepspeed
-import argparse
-import pytest
-import json
-import os
-import numpy as np
-import time
 from .common import distributed_test
 from .simple_model import Curriculum_SimpleModel, random_dataloader, args_from_dict
 

@@ -12,7 +12,6 @@ from deepspeed.runtime import ZeROOptimizer
 from packaging import version as pkg_version
 
 from deepspeed.git_version_info import version
-from deepspeed.runtime.swap_tensor.partitioned_param_swapper import print_rank_0
 from deepspeed.runtime.utils import (get_global_norm_of_tensors,
                                      clip_tensors_by_global_norm,
                                      DummyOptim,

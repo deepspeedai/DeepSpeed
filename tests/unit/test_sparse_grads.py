@@ -1,7 +1,5 @@
 import torch
-import deepspeed.comm as dist
 import deepspeed
-import pytest
 from .common import distributed_test
 
 import deepspeed.utils.groups as groups

@@ -70,9 +70,6 @@ html_context = {
     "conf_py_path": "/docs/code-docs/source/",
 }
 
-# Mock imports so we don't have to install torch to build the docs.
-from unittest.mock import MagicMock
-
 sys.path.insert(0, os.path.abspath('../../../'))
 
 # Prepend module names to class descriptions?

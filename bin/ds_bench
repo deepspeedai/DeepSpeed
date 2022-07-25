@@ -3,7 +3,6 @@
 from benchmarks.communication.run_all import main
 from benchmarks.communication.constants import *
 from benchmarks.communication.utils import *
-import argparse
 import os
 import sys
 

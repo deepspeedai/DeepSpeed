@@ -4,35 +4,22 @@ Licensed under the MIT license.
 """
 
 import gc
-from dataclasses import dataclass
-import functools
-import os
 import collections
-from collections import OrderedDict, UserDict
-import itertools
-from typing import Deque, Dict, Iterable, Set, Tuple
-import torch
+from typing import Deque, Dict, Tuple
 from torch.cuda import Event, Stream
-from torch.nn import Module, Parameter
-from deepspeed import comm as dist
-import math
 from torch._six import inf
-from torch.nn import Module
-from torch.nn.parameter import Parameter
 
 from deepspeed.runtime import ZeROOptimizer
 from deepspeed.utils import logger
 from deepspeed.runtime.fp16.loss_scaler import LossScaler, DynamicLossScaler
 from deepspeed.runtime.comm.coalesced_collectives import reduce_scatter_coalesced
-from deepspeed.runtime.utils import get_global_norm, see_memory_usage, is_model_parallel_parameter
+from deepspeed.runtime.utils import get_global_norm, is_model_parallel_parameter
 from deepspeed.runtime.zero.partition_parameters import *
-from deepspeed.runtime.zero.partition_parameters import _init_external_params
 from deepspeed.runtime.zero.parameter_offload import DeepSpeedZeRoOffload
 from deepspeed.runtime.zero.constants import ZERO_OPTIMIZATION_WEIGHTS
 from deepspeed.ops.adam import DeepSpeedCPUAdam
 from deepspeed.ops.op_builder import UtilsBuilder
 from deepspeed.runtime.zero.offload_constants import *
-from deepspeed.runtime.zero.partitioned_param_coordinator import PartitionedParameterCoordinator, iter_params
 from deepspeed.runtime.swap_tensor.partitioned_param_swapper import PartitionedParamStatus
 from deepspeed.runtime.swap_tensor.partitioned_optimizer_swapper import PartitionedOptimizerSwapper
 from deepspeed.runtime.swap_tensor.pipelined_optimizer_swapper import PipelinedOptimizerSwapper
@@ -41,8 +28,6 @@ from deepspeed.checkpoint.constants import OPTIMIZER_STATE_DICT, FP32_FLAT_GROUP
 # Toggle this to true to enable correctness test
 # with gradient partitioning and without
 pg_correctness_test = False
-
-from deepspeed.utils.debug import debug_module2name_id, debug_param2name_id, debug_param2name_id_numel, debug_param2name_id_shape_device, debug_module2name_class, printflock, log_rank_file
 
 
 def print_rank_0(message, debug=False, force=False):
@@ -2478,9 +2463,6 @@ def model_to_params(model):
         largest_layer_params = max(largest_layer_params, layer_params)
 
     return total_params, largest_layer_params
-
-
-import math
 
 
 def estimate_zero3_model_states_mem_needs_all_live(model,

@@ -1,7 +1,5 @@
-import pdb
 import torch
 import math
-from deepspeed.utils import log_dist
 from deepspeed.utils import logger
 from deepspeed.ops.quantizer import ds_quantizer
 

@@ -1,10 +1,5 @@
-import copy
-import json
-import os
-from random import sample
 import shutil
 import subprocess
-import hjson
 import torch
 import time
 import datetime
@@ -13,10 +8,9 @@ import math
 from ..runtime.config_utils import dict_raise_error_on_duplicate_keys
 from ..runtime.constants import *
 from ..runtime.zero.constants import *
-from ..utils import logger
 from .config import DeepSpeedAutotuningConfig
 from .constants import *
-from .scheduler import ResourceManager, run_experiment
+from .scheduler import ResourceManager
 from .tuner import GridSearchTuner, RandomTuner, ModelBasedTuner
 from .utils import *
 

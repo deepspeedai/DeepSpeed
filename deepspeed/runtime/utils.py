@@ -7,13 +7,13 @@ Helper functions and classes from multiple sources.
 '''
 
 from collections.abc import Iterable
-from deepspeed.moe.utils import is_moe_param, split_params_into_shared_and_expert_params
+from deepspeed.moe.utils import is_moe_param
 import os
 import psutil
 import gc
-from math import ceil, sqrt
+from math import sqrt
 from math import floor
-from bisect import bisect_left, bisect_right
+from bisect import bisect_left
 
 import torch
 from torch._six import inf

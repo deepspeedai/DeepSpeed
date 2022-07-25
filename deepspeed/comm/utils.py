@@ -1,5 +1,4 @@
 import os
-import enum
 import torch
 import inspect
 from deepspeed.utils import get_caller_func
@@ -145,7 +144,7 @@ def get_msg_size_from_args(func, *args, **kwargs):
         # Sum of tensor sizes for list colls such as torch's all_to_all
         # NOTE: msg_size for list colls will not be the actual size transmitted by a given MPI/NCCL call within the coll op. Instead, it's the total amount of data transmitted.
         if type(tensor_arg) is list:
-            return sum(x.element_size() * x.nelement() for x in func_args['tensor_list'])
+            return sum(x.element_size() * x.nelement() for x in tensor_arg)
         else:
             return tensor_arg.element_size() * tensor_arg.nelement()
 

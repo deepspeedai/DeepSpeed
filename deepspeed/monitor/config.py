@@ -3,9 +3,7 @@ Copyright (c) Microsoft Corporation
 Licensed under the MIT license.
 """
 
-from typing import Optional
-from deepspeed.runtime.config_utils import get_scalar_param
-from pydantic import BaseModel, validator, ValidationError, create_model
+from pydantic import BaseModel
 from .constants import *
 
 

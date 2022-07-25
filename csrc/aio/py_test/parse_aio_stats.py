@@ -7,7 +7,6 @@ Functionality of swapping optimizer tensors to/from (NVMe) storage devices.
 
 import os
 import argparse
-import re
 
 READ_SPEED = 'read_speed'
 WRITE_SPEED = 'write_speed'

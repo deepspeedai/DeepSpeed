@@ -1,12 +1,7 @@
-import torch
 from benchmarks.communication.utils import *
 from benchmarks.communication.constants import *
 
 import time
-import argparse
-import os
-
-import math
 
 
 # Run all_gather and print metrics

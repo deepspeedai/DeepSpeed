@@ -5,7 +5,6 @@ Modified from https://github.com/jlebar/pre-commit-hooks/blob/master/check_do_no
 """
 from __future__ import annotations
 
-import os
 import subprocess
 import sys
 
@@ -25,7 +24,7 @@ res = subprocess.run(
      "grep",
      "-Hn",
      "--no-index",
-     "torch\.distributed",
+     r"torch\.distributed",
      *sys.argv[1:]],
     capture_output=True,
 )

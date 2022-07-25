@@ -181,7 +181,7 @@ class FP16_Optimizer(DeepSpeedOptimizer):
                                                      apply_scale=False)
 
         # Stash unscaled gradient norm
-        self._global_grad_norm = scaled_global_grad_norm / self.cur_scale
+        self._global_grad_norm = scaled_grad_norm / self.cur_scale
 
         # norm is in fact norm*cur_scale
         self.optimizer.step(grads=[[g] for g in grads_groups_flat],

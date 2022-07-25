@@ -1,14 +1,10 @@
 # DeepSpeed note, code taken & adapted from commit 9aa94789f13ada713af36cfd8cca2fc9a7f6b79a
 # https://github.com/ptillet/torch-blocksparse/blob/master/torch_blocksparse/matmul.py
 
-import warnings
-import importlib
 import torch
-import math
 
 import triton
 import triton.language as tl
-import triton._C.libtriton as libtriton
 
 
 def next_power_of_2(n):

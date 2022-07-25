@@ -1,19 +1,13 @@
-import argparse
+import math
 import numpy as np
 import torch
-import torch.nn.functional as F
 import pytest
-import json
 import random
-import time
 import copy
 from torch import nn
 from .modelingpreln import BertEncoder as BertEncoderPreln
 from .modeling import BertLayerNorm, BertConfig, BertEncoder as BertEncoderPostln
 from deepspeed import DeepSpeedTransformerLayer, DeepSpeedTransformerConfig
-import deepspeed
-
-import sys
 
 
 def check_equal(first, second, atol=1e-2, verbose=False):
@@ -74,7 +68,7 @@ class DSEncoder(nn.Module):
             num_layers = len(self.layer)
             chunk_length = math.ceil(math.sqrt(num_layers))
             while l < num_layers:
-                hidden_states = checkpoint.checkpoint(custom(l,
+                hidden_states = checkpoint.checkpoint(custom(l,  # noqa: F821
                                                              l + chunk_length),
                                                       hidden_states,
                                                       attention_mask * 1)

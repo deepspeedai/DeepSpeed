@@ -12,7 +12,6 @@ from torch.distributed import ProcessGroup
 import torch.nn.functional
 
 from deepspeed.utils import instrument_w_nvtx
-from deepspeed.utils import logger
 
 
 def _torch_reduce_scatter_fn(input_tensor: Tensor,

@@ -10,9 +10,7 @@ https://github.com/pytorch/pytorch/blob/v1.1.0/torch/optim/lr_scheduler.py
 
 import argparse
 from torch.optim import Optimizer
-from typing import Union, List
 import math
-from deepspeed.runtime.constants import *
 from deepspeed.utils import logger
 
 LR_SCHEDULE = 'lr_schedule'

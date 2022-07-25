@@ -5,7 +5,6 @@ import torch
 import os
 
 from deepspeed import comm as dist
-from deepspeed.utils import groups
 from deepspeed.utils.logging import log_dist
 
 from torch.nn.modules import Module
@@ -18,7 +17,6 @@ from ..utils import logger
 from ..comm.comm import init_distributed
 from ..pipe import PipelineModule
 from ..moe.utils import has_moe_layers
-from ..moe.layer import MoE
 from ..runtime.zero import GatheredParameters
 from ..module_inject import LinearAllreduce, LinearLayer, Normalize, ReplaceWithTensorSlicing
 

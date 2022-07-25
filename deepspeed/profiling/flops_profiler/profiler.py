@@ -3,7 +3,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from functools import partial
-from typing import Callable, List, Optional, Tuple
+from typing import List, Optional
 from collections import OrderedDict
 import numpy as np
 
@@ -251,7 +251,6 @@ class FlopsProfiler(object):
             return
         import sys
         import os.path
-        from os import path
         original_stdout = None
         f = None
         if output_file and output_file != "":

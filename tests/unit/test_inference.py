@@ -1,12 +1,10 @@
 import os
-import sys
 import time
 import torch
 import pytest
 import itertools
 import deepspeed
 from deepspeed.git_version_info import torch_info
-from collections import defaultdict
 from .common import distributed_test
 from packaging import version as pkg_version
 from deepspeed.ops.op_builder import OpBuilder

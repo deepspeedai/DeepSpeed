@@ -2,7 +2,6 @@ import pytest
 
 from deepspeed.monitor.constants import *
 
-from deepspeed.monitor.monitor import MonitorMaster
 from deepspeed.monitor.tensorboard import TensorBoardMonitor
 from deepspeed.monitor.wandb import WandbMonitor
 from deepspeed.monitor.csv_monitor import csvMonitor
@@ -10,10 +9,9 @@ from deepspeed.monitor.csv_monitor import csvMonitor
 from .simple_model import *
 from .common import distributed_test
 from deepspeed.runtime.config import DeepSpeedConfig
-from deepspeed.monitor.config import DeepSpeedMonitorConfig
 
 try:
-    import tensorboard
+    import tensorboard  # noqa: F401
     _tb_available = True
 except ImportError:
     _tb_available = False
@@ -21,7 +19,7 @@ tb_available = pytest.mark.skipif(not _tb_available,
                                   reason="tensorboard is not installed")
 
 try:
-    import wandb
+    import wandb  # noqa: F401
     _wandb_available = True
 except ImportError:
     _wandb_available = False

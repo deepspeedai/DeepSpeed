@@ -2,8 +2,6 @@
 Copyright 2019 The Microsoft DeepSpeed Team
 """
 
-from numpy.core.numeric import count_nonzero
-from deepspeed.elasticity.elasticity import compute_elastic_config
 import time
 import torch
 from numpy import mean

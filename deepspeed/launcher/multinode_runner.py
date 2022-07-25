@@ -3,7 +3,7 @@ import sys
 import shutil
 import subprocess
 import warnings
-from shlex import quote, split
+from shlex import split
 from abc import ABC, abstractmethod
 
 from ..utils import logger

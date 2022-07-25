@@ -16,7 +16,7 @@ if not deepspeed.ops.__compatible_ops__[SparseAttnBuilder.NAME]:
 def test_sparse_attention_module_availability():
     return True
     try:
-        from deepspeed.ops import sparse_attention
+        from deepspeed.ops import sparse_attention  # noqa: F401
     except ImportError:
         print("Sparse Attention Module is not installed!")
         return False
@@ -26,7 +26,7 @@ def test_sparse_attention_module_availability():
 def test_matmul_module_availability():
     return True
     try:
-        from deepspeed.ops.sparse_attention.matmul import MatMul
+        from deepspeed.ops.sparse_attention.matmul import MatMul  # noqa: F401
     except ImportError:
         print("Sparse MatMul Module is not installed!")
         return False
@@ -36,7 +36,7 @@ def test_matmul_module_availability():
 def test_softmax_module_availability():
     return True
     try:
-        from deepspeed.ops.sparse_attention.softmax import Softmax
+        from deepspeed.ops.sparse_attention.softmax import Softmax  # noqa: F401
     except ImportError:
         print("Sparse Softmax Module is not installed!")
         return False
@@ -46,7 +46,7 @@ def test_softmax_module_availability():
 def test_sparsityconfig_module_availability():
     return True
     try:
-        from deepspeed.ops.sparse_attention import SparsityConfig
+        from deepspeed.ops.sparse_attention import SparsityConfig  # noqa: F401
     except ImportError:
         print("SparsityConfig Module is not installed!")
         return False
@@ -56,7 +56,7 @@ def test_sparsityconfig_module_availability():
 def test_densesparsityconfig_module_availability():
     return True
     try:
-        from deepspeed.ops.sparse_attention import DenseSparsityConfig
+        from deepspeed.ops.sparse_attention import DenseSparsityConfig  # noqa: F401
     except ImportError:
         print("DenseSparsityConfig Module is not installed!")
         return False
@@ -66,7 +66,7 @@ def test_densesparsityconfig_module_availability():
 def test_fixedsparsityconfig_module_availability():
     return True
     try:
-        from deepspeed.ops.sparse_attention import FixedSparsityConfig
+        from deepspeed.ops.sparse_attention import FixedSparsityConfig  # noqa: F401
     except ImportError:
         print("FixedSparsityConfig Module is not installed!")
         return False
@@ -76,7 +76,7 @@ def test_fixedsparsityconfig_module_availability():
 def test_variablesparsityconfig_module_availability():
     return True
     try:
-        from deepspeed.ops.sparse_attention import VariableSparsityConfig
+        from deepspeed.ops.sparse_attention import VariableSparsityConfig  # noqa: F401
     except ImportError:
         print("VariableSparsityConfig Module is not installed!")
         return False
@@ -86,7 +86,7 @@ def test_variablesparsityconfig_module_availability():
 def test_bigbirdsparsityconfig_module_availability():
     return True
     try:
-        from deepspeed.ops.sparse_attention import BigBirdSparsityConfig
+        from deepspeed.ops.sparse_attention import BigBirdSparsityConfig  # noqa: F401
     except ImportError:
         print("BigBirdSparsityConfig Module is not installed!")
         return False
@@ -96,7 +96,7 @@ def test_bigbirdsparsityconfig_module_availability():
 def test_bslongformersparsityconfig_module_availability():
     return True
     try:
-        from deepspeed.ops.sparse_attention import BSLongformerSparsityConfig
+        from deepspeed.ops.sparse_attention import BSLongformerSparsityConfig  # noqa: F401
     except ImportError:
         print("BSLongformerSparsityConfig Module is not installed!")
         return False
@@ -106,7 +106,7 @@ def test_bslongformersparsityconfig_module_availability():
 def test_sparseselfattention_module_availability():
     return True
     try:
-        from deepspeed.ops.sparse_attention import SparseSelfAttention
+        from deepspeed.ops.sparse_attention import SparseSelfAttention  # noqa: F401
     except ImportError:
         print("SparseSelfAttention Module is not installed!")
         return False
@@ -116,7 +116,7 @@ def test_sparseselfattention_module_availability():
 def test_bertsparseselfattention_module_availability():
     return True
     try:
-        from deepspeed.ops.sparse_attention import BertSparseSelfAttention
+        from deepspeed.ops.sparse_attention import BertSparseSelfAttention  # noqa: F401
     except ImportError:
         print("BertSparseSelfAttention Module is not installed!")
         return False
@@ -126,7 +126,7 @@ def test_bertsparseselfattention_module_availability():
 def test_sparseattentionutils_availability():
     return True
     try:
-        from deepspeed.ops.sparse_attention import SparseAttentionUtils
+        from deepspeed.ops.sparse_attention import SparseAttentionUtils  # noqa: F401
     except ImportError:
         print("SparseAttentionUtils Module is not installed!")
         return False
@@ -136,7 +136,7 @@ def test_sparseattentionutils_availability():
 def test_cpp_utils_availability():
     return True
     try:
-        from deepspeed.ops.sparse_attention import cpp_utils
+        from deepspeed.ops.sparse_attention import cpp_utils  # noqa: F401
     except ImportError:
         print("Sparse Attention cpp_utils Module is not installed!")
         return False

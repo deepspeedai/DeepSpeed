@@ -5,7 +5,6 @@ import unittest
 import subprocess
 import os
 import time
-import re
 
 
 class BaseTestCase(unittest.TestCase):

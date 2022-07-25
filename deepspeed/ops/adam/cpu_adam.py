@@ -2,11 +2,8 @@
 Copyright 2020 The Microsoft DeepSpeed Team
 '''
 
-import math
 import torch
-import time
 from cpuinfo import get_cpu_info
-from pathlib import Path
 from ..op_builder import CPUAdamBuilder
 from deepspeed.utils import logger
 from deepspeed.utils.logging import should_log_le

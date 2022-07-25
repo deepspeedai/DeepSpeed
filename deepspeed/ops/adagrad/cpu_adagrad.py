@@ -2,10 +2,7 @@
 Copyright 2020 The Microsoft DeepSpeed Team
 '''
 
-import math
 import torch
-import time
-from pathlib import Path
 from ..op_builder import CPUAdagradBuilder
 from deepspeed.utils.logging import should_log_le
 

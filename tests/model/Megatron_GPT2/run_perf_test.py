@@ -3,9 +3,6 @@
 # Note: please copy webtext data to "Megatron-LM" folder, before running this script.
 
 import unittest
-import subprocess
-import os
-import time
 import re
 from test_common import BaseTestCase
 
@@ -107,7 +104,7 @@ class GPT2PerfTestCase(BaseTestCase):
             lines = f.readlines()
             line_filter = "elapsed time per iteration"
             match_number = re.compile(
-                'elapsed time per iteration \(ms\): ([-+]?[0-9]+\.?[0-9]*(?:[Ee][-+]?[0-9]+)?)'
+                r'elapsed time per iteration \(ms\): ([-+]?[0-9]+\.?[0-9]*(?:[Ee][-+]?[0-9]+)?)'
             )
 
             for line in lines:

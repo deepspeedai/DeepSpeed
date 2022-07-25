@@ -10,7 +10,7 @@ from torch.nn.modules.loss import L1Loss
 from torch.nn.parameter import Parameter
 
 from .common import distributed_test
-from .simple_model import SimpleModel, random_dataloader, args_from_dict
+from .simple_model import SimpleModel, random_dataloader
 
 import deepspeed
 from deepspeed.runtime.engine import DeepSpeedEngine

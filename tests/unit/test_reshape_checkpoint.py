@@ -1,6 +1,3 @@
-import pytest
-import deepspeed
-
 from deepspeed.checkpoint import model_3d_desc
 
 

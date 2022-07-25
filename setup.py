@@ -16,9 +16,7 @@ The wheel will be located at: dist/*.whl
 
 import os
 import sys
-import shutil
 import subprocess
-import warnings
 from setuptools import setup, find_packages
 from setuptools.command import egg_info
 import time

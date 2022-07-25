@@ -215,7 +215,6 @@ class MegatronLayerPolicy(DSPolicy):
                 MegatronLayerPolicy._orig_layer_class = None
             else:
                 try:
-                    import megatron
                     from megatron.model.transformer import ParallelTransformerLayer
                     MegatronLayerPolicy._orig_layer_class = ParallelTransformerLayer
                 except ImportError:
@@ -372,7 +371,6 @@ class GPTNEOXLayerPolicy(DSPolicy):
                 GPTNEOXLayerPolicy._orig_layer_class = None
             else:
                 try:
-                    import transformers
                     from transformers import GPTNeoXLayer
                     GPTNEOXLayerPolicy._orig_layer_class = GPTNeoXLayer
                 except ImportError:

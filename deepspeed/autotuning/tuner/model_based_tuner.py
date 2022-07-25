@@ -1,8 +1,6 @@
 import hjson
-import numpy as np
-from deepspeed.utils import logger
 
-from ..constants import AUTOTUNING, AUTOTUNING_METRIC_PATH, AUTOTUNING_METRIC_DEFAULT
+from ..constants import AUTOTUNING, AUTOTUNING_METRIC_PATH
 from .base_tuner import BaseTuner
 from .cost_model import XGBoostCostModel
 from .utils import *

@@ -3,10 +3,8 @@ Copyright 2020 The Microsoft DeepSpeed Team
 """
 
 import torch.nn as nn
-from torch.nn.functional import *
 import torch
 from torch import distributed as dist
-from collections import namedtuple
 from deepspeed.ops.sparse_attention import SparsityConfig
 
 

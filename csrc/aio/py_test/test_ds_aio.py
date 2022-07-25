@@ -6,11 +6,7 @@ Functionality of swapping optimizer tensors to/from (NVMe) storage devices.
 """
 
 import os
-import torch
 import argparse
-import time
-import sys
-from multiprocessing import Pool
 import multiprocessing as mp
 from ds_aio_basic import aio_basic_multiprocessing
 from ds_aio_handle import aio_handle_multiprocessing

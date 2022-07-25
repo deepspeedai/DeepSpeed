@@ -11,7 +11,6 @@ from enum import Enum
 import torch
 from deepspeed import comm as dist
 
-from deepspeed.utils.logging import logger
 from deepspeed.ops.aio import AsyncIOBuilder
 from .constants import *
 from .utils import swap_in_tensors, swap_out_tensors, MIN_AIO_BYTES, AIO_ALIGNED_BYTES, print_object, SwapBufferPool

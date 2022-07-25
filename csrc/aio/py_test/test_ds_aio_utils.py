@@ -5,8 +5,6 @@ Licensed under the MIT license.
 Functionality of swapping optimizer tensors to/from (NVMe) storage devices.
 """
 
-import os
-
 BYTES_PER_GB = 1024**3
 LOG_TIDS = [0]
 

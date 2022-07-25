@@ -1,10 +1,6 @@
 import torch
 import deepspeed
-import argparse
-import pytest
 from pytest import approx
-import json
-import os
 from .common import distributed_test
 from .simple_model import args_from_dict
 from .multi_output_model import MultiOutputModel, multi_output_dataloader

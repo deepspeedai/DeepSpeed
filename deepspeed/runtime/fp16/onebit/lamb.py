@@ -46,9 +46,9 @@ class OnebitLamb(torch.optim.Optimizer):
             coefficient during compression stage (default: 0.5)
         factor_threshold (float, optional): threshold of how much the scaling factor can
             fluctuate between steps (default: 0.1)
-    .. _Large Batch Optimization for Deep Learning\: Training BERT in 76 minutes:
+    .. _Large Batch Optimization for Deep Learning\\: Training BERT in 76 minutes:
         https://arxiv.org/abs/1904.00962
-    .. _Adam\: A Method for Stochastic Optimization:
+    .. _Adam\\: A Method for Stochastic Optimization:
         https://arxiv.org/abs/1412.6980
     .. _On the Convergence of Adam and Beyond:
         https://openreview.net/forum?id=ryQu7f-RZ

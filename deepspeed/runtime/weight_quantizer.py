@@ -127,7 +127,7 @@ class WeightQuantization(object):
             layer_scales = []
 
             for key in range(len(keys)):
-                if self.mlp_extra_grouping and is_mlp(keys[key]):
+                if self.mlp_extra_grouping and self.is_mlp(keys[key]):
                     data_quantized, data_scale = self.quantize_data(keys[key], quantize_bits, groups * 2)
                 elif policy_cls is HFBertLayerPolicy and self.is_qkv(keys[key]):
                     data_quantized, data_scale = self.quantize_data(keys[key], quantize_bits, groups * 3)

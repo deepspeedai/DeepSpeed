@@ -28,7 +28,6 @@ import os
 import shutil
 import tarfile
 import tempfile
-import sys
 from io import open
 
 import torch
@@ -38,10 +37,8 @@ from torch.utils import checkpoint
 import deepspeed.comm as dist
 
 from torch.nn import Module
-from torch.nn.parameter import Parameter
 import torch.nn.functional as F
 import torch.nn.init as init
-import time
 
 #from numba import cuda
 
@@ -187,8 +184,8 @@ ACT2FN = {"gelu": gelu, "relu": torch.nn.functional.relu, "swish": swish}
 class GPUTimer:
     def __init__(self):
         super().__init__()
-        self.start = cuda.event()
-        self.stop = cuda.event()
+        self.start = cuda.event()  # noqa: F821
+        self.stop = cuda.event()  # noqa: F821
 
     def record(self):
         self.start.record()
@@ -216,9 +213,7 @@ class LinearActivation(Module):
         self.out_features = out_features
         self.fused_gelu = False
         self.fused_tanh = False
-        if isinstance(act,
-                      str) or (sys.version_info[0] == 2 and isinstance(act,
-                                                                       unicode)):
+        if isinstance(act, str):
             if bias and act == 'gelu':
                 self.fused_gelu = True
             elif bias and act == 'tanh':
@@ -307,10 +302,7 @@ class BertConfig(object):
             initializer_range: The sttdev of the truncated_normal_initializer for
                 initializing all weight matrices.
         """
-        if isinstance(vocab_size_or_config_json_file,
-                      str) or (sys.version_info[0] == 2
-                               and isinstance(vocab_size_or_config_json_file,
-                                              unicode)):
+        if isinstance(vocab_size_or_config_json_file, str):
             with open(vocab_size_or_config_json_file, "r", encoding='utf-8') as reader:
                 json_config = json.loads(reader.read())
             for key, value in json_config.items():
@@ -738,8 +730,8 @@ class BertEncoder(nn.Module):
 
     def get_modules(self, big_node, input):
         for mdl in big_node.named_children():
-            graph.append(mdl)
-            get_modules(self, mdl, input)
+            self.graph.append(mdl)
+            self.get_modules(self, mdl, input)
 
     def forward(self,
                 hidden_states,
@@ -959,22 +951,22 @@ class BertPreTrainedModel(nn.Module):
             archive_file = PRETRAINED_MODEL_ARCHIVE_MAP[pretrained_model_name_or_path]
         else:
             archive_file = pretrained_model_name_or_path
-        if resolved_archive_file == archive_file:
+        if resolved_archive_file == archive_file:  # noqa: F821
             logger.info("loading archive file {}".format(archive_file))
         else:
             logger.info("loading archive file {} from cache at {}".format(
                 archive_file,
-                resolved_archive_file))
+                resolved_archive_file))  # noqa: F821
         tempdir = None
-        if os.path.isdir(resolved_archive_file) or from_tf:
-            serialization_dir = resolved_archive_file
+        if os.path.isdir(resolved_archive_file) or from_tf:  # noqa: F821
+            serialization_dir = resolved_archive_file  # noqa: F821
         else:
             # Extract archive to temp dir
             tempdir = tempfile.mkdtemp()
             logger.info("extracting archive file {} to temp dir {}".format(
-                resolved_archive_file,
+                resolved_archive_file,  # noqa: F821
                 tempdir))
-            with tarfile.open(resolved_archive_file, 'r:gz') as archive:
+            with tarfile.open(resolved_archive_file, 'r:gz') as archive:  # noqa: F821
                 archive.extractall(tempdir)
             serialization_dir = tempdir
         # Load config

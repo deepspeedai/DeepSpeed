@@ -4,7 +4,6 @@ Copyright 2020 The Microsoft DeepSpeed Team
 import os
 import sys
 import time
-import json
 import importlib
 from pathlib import Path
 import subprocess
@@ -193,11 +192,11 @@ class OpBuilder(ABC):
             if rocm_ver_file.is_file():
                 with open(rocm_ver_file, 'r') as file:
                     ROCM_VERSION_DEV_RAW = file.read()
-            elif "rocm" in roch.__version__:
+            elif "rocm" in torch.__version__:
                 ROCM_VERSION_DEV_RAW = torch.__version__.split("rocm")[1]
             else:
                 assert False, "Could not detect ROCm version"
-            assert ROCM_VERSION_DEV_RAW is not "", "Could not detect ROCm version"
+            assert ROCM_VERSION_DEV_RAW != "", "Could not detect ROCm version"
             ROCM_MAJOR = ROCM_VERSION_DEV_RAW.split('.')[0]
             ROCM_MINOR = ROCM_VERSION_DEV_RAW.split('.')[1]
         OpBuilder._rocm_version = (int(ROCM_MAJOR), int(ROCM_MINOR))
@@ -475,7 +474,7 @@ class OpBuilder(ABC):
                 f"Unable to JIT load the {self.name} op due to it not being compatible due to hardware/software issue."
             )
         try:
-            import ninja
+            import ninja  # noqa: F401
         except ImportError:
             raise RuntimeError(
                 f"Unable to JIT load the {self.name} op due to ninja not being installed."

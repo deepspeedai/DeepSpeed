@@ -1,4 +1,3 @@
-import torch
 from benchmarks.communication.utils import *
 from benchmarks.communication.all_reduce import run_all_reduce
 from benchmarks.communication.all_gather import run_all_gather
@@ -6,10 +5,6 @@ from benchmarks.communication.all_to_all import run_all_to_all
 from benchmarks.communication.pt2pt import run_pt2pt
 from benchmarks.communication.broadcast import run_broadcast
 from benchmarks.communication.constants import *
-
-import time
-import argparse
-import os
 
 
 # For importing

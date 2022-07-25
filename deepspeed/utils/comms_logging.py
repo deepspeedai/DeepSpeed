@@ -1,12 +1,9 @@
-import logging
-import sys
-import os
 import math
 from deepspeed.utils import log_dist
 
 
 def get_caller_func(frame=3):
-    import inspect, sys
+    import sys
     return sys._getframe(frame).f_code.co_name
 
 
@@ -43,7 +40,7 @@ def calc_bw_log(comm_op, size, duration):
         tput = (size / duration)
         busbw = tput
     else:
-        print_rank_0("wrong comm_op specified")
+        print_rank_0("wrong comm_op specified")  # noqa: F821
         exit(0)
 
     # convert to Gbps
@@ -78,18 +75,18 @@ class CommsLogger:
     # - Global profiling (profile all comms)
     # - Op-type profiling (e.g. profile all all_reduce comms)
     # - Op profiling (e.g. profile a specific all_reduce op)
-    def start_profiling_comms():
+    def start_profiling_comms(self):
         self.prof_all = True
 
-    def stop_profiling_comms():
+    def stop_profiling_comms(self):
         self.prof_all = True
 
     # E.g. start_profiling_op('all_reduce')
-    def start_profiling_op(op_name_list):
-        self.prof_ops = list(set(comms_logger.prof_ops) | set(op_name_list))
+    def start_profiling_op(self, op_name_list):
+        self.prof_ops = list(set(self.prof_ops) | set(op_name_list))
 
-    def stop_profiling_op(op_name_list):
-        self.prof_ops = [op for op in comms_logger.prof_ops if op not in op_name_list]
+    def stop_profiling_op(self, op_name_list):
+        self.prof_ops = [op for op in self.prof_ops if op not in op_name_list]
 
     # Add log entry
     def append(self, raw_name, record_name, latency, msg_size):

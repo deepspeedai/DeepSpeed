@@ -28,7 +28,6 @@
 from enum import Enum
 import torch
 import os
-import time
 
 from ..constants import TORCH_DISTRIBUTED_DEFAULT_PORT, default_pg_timeout
 from .constants import *
@@ -48,7 +47,6 @@ class ReduceOp(Enum):
 
 from deepspeed.utils.comms_logging import CommsLogger
 from deepspeed.utils import timer, get_caller_func
-from deepspeed.comm.backend import Backend
 from deepspeed.comm.torch import TorchBackend
 
 from deepspeed import utils

@@ -4,7 +4,6 @@ Copyright 2020 The Microsoft DeepSpeed Team
 
 import torch
 from deepspeed import comm as dist
-import time
 import cupy
 import numpy as np
 

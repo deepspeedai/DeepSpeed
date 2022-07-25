@@ -1,7 +1,5 @@
 """unit tests for coalesced collectives"""
 
-import pytest
-
 import torch
 import deepspeed.comm as dist
 from deepspeed.runtime.comm.coalesced_collectives import reduce_scatter_coalesced

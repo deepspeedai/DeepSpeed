@@ -1,9 +1,7 @@
 # DeepSpeed note, code taken & adapted from commit 9aa94789f13ada713af36cfd8cca2fc9a7f6b79a
 # https://github.com/ptillet/torch-blocksparse/blob/master/torch_blocksparse/matmul.py
 import importlib
-import warnings
 import torch
-import math
 
 import triton
 import triton.language as tl
@@ -339,7 +337,7 @@ class _sparse_matmul(torch.autograd.Function):
         a_inner, b_inner = a.shape[a_dim], b.shape[b_dim]
         if a_inner != b_inner:
             raise ValueError(
-                f"Size of tensor A along the {_dim_to_name(a_dim)} dim ({a_inner}) must match size "
+                f"Size of tensor A along the {_dim_to_name(a_dim)} dim ({a_inner}) must match size "  # noqa: F821
                 f"of tensor B along the {_dim_to_name(b_dim)} dim ({b_inner})")
         if a_inner % 16 != 0:
             raise ValueError('Reduction size for SDD must be a multiple of 16')

@@ -2,7 +2,7 @@
 Copyright 2020 The Microsoft DeepSpeed Team
 """
 
-from torch import nn
+import torch
 from torch.nn import functional as F
 from deepspeed.ops.sparse_attention import BertSparseSelfAttention, SparsityConfig
 '''
@@ -102,13 +102,13 @@ class SparseAttentionUtils:
 
         if hasattr(model, 'bert'):
             model.config.max_position_embeddings = max_position
-            replace_self_attention_layer_with_sparse_self_attention_layer(
+            model.replace_self_attention_layer_with_sparse_self_attention_layer(
                 model.config,
                 model.bert.encoder.layer,
                 sparsity_config)
         elif hasattr(model, 'roberta'):
             model.config.max_position_embeddings = max_position + 2
-            replace_self_attention_layer_with_sparse_self_attention_layer(
+            model.replace_self_attention_layer_with_sparse_self_attention_layer(
                 model.config,
                 model.roberta.encoder.layer,
                 sparsity_config)
@@ -155,7 +155,7 @@ class SparseAttentionUtils:
                           position_ids,
                           inputs_embeds,
                           pad_token_id,
-                          model_mbeddings):
+                          model_embeddings):
         """This function pads input tokens and attention mask on sequence length dimension to be multiple of block size.
             This is a requirement for Sparse Transformer in which the self attention layer works on sequences of length multiple of block size.
             It needs to be called in your model, such as BertModel, right before you calculate the embedding outputs.

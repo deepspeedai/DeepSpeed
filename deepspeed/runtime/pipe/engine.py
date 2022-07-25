@@ -1,28 +1,18 @@
 # Copyright 2019 The Microsoft DeepSpeed Team
 
-import time
-import logging
-import copy
-import os
-
 from types import MethodType
 
-from numpy import prod
-
 import torch
-import torch.nn as nn
-import torch.optim as optim
 from deepspeed import comm as dist
 
 from deepspeed.utils import logger
-from deepspeed.utils.timer import SynchronizedWallClockTimer, ThroughputTimer
+from deepspeed.utils.timer import ThroughputTimer
 
-from deepspeed.inference.engine import InferenceEngine
 from ..engine import DeepSpeedEngine, MEMORY_OPT_ALLREDUCE_SIZE
-from ..utils import PartitionedTensor, ensure_directory_exists
+from ..utils import PartitionedTensor
 from ..dataloader import RepeatingLoader
 
-from .module import PipelineModule, PipelineError, TiedLayerSpec
+from .module import PipelineModule, PipelineError
 from . import p2p
 from . import schedule
 
@@ -587,6 +577,11 @@ class PipelineEngine(DeepSpeedEngine):
             self.data_iterator = iterator
 
     def set_batch_fn(self, fn):
+        """Execute a post-processing function on input data.
+
+        Args:
+            fn (function): The function to run.
+        """
         self.batch_fn = fn
 
     def is_gradient_accumulation_boundary(self):
@@ -1373,11 +1368,3 @@ class PipelineEngine(DeepSpeedEngine):
                 # Equivalent to: self._exec_forward_pass(buffer_id=0)
                 self._exec_instr = MethodType(self._INSTRUCTION_MAP[type(cmd)], self)
                 self._exec_instr(**cmd.kwargs)
-
-    def set_batch_fn(self, fn):
-        """Execute a post-processing function on input data.
-
-        Args:
-            fn (function): The function to run.
-        """
-        self.batch_fn = fn

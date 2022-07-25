@@ -4,7 +4,7 @@ import pytest
 from deepspeed.runtime.progressive_layer_drop import ProgressiveLayerDrop
 
 from .common import distributed_test
-from .simple_model import SimpleModel, PLD_SimpleModel, SimpleOptimizer, random_dataloader, args_from_dict
+from .simple_model import SimpleModel, PLD_SimpleModel, random_dataloader, args_from_dict
 
 
 @pytest.mark.parametrize('theta', [0, 0.1, 0.9, 1.0])

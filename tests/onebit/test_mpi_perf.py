@@ -1,8 +1,5 @@
 from mpi4py import MPI
-import time
 import torch
-import deepspeed.comm as dist
-import numpy as np
 import deepspeed
 
 from deepspeed.runtime.comm.mpi import MpiBackend

@@ -1,17 +1,11 @@
 import copy
-from re import I
 
 from numpy import BUFSIZE
-from deepspeed.env_report import SUCCESS
-from enum import Flag
 import json
-import os
 import subprocess
 import sys
 import threading
 import time
-from pathlib import Path
-from typing import List
 
 import hjson
 from tqdm import tqdm
@@ -26,8 +20,6 @@ thread-N: start each experiment in its own thread
 """
 
 from deepspeed import comm as dist
-
-from datetime import datetime
 
 TIMEOUT = 5
 

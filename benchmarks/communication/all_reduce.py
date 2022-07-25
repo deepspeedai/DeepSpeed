@@ -1,11 +1,7 @@
-import torch
 from benchmarks.communication.utils import *
 from benchmarks.communication.constants import *
 
 import time
-import argparse
-import os
-import math
 
 
 def timed_all_reduce(input, args):

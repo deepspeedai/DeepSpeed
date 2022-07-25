@@ -3,8 +3,6 @@ import collections.abc
 import os
 import json
 from deepspeed.runtime.constants import GRADIENT_ACCUMULATION_STEPS, TRAIN_MICRO_BATCH_SIZE_PER_GPU
-import hjson
-import sys
 import itertools
 import copy
 
@@ -35,23 +33,11 @@ def was_interruptted(filename):
     return False
 
 
-def was_interruptted(filename):
-    if not os.path.exists(filename):
-        return "stderr.log does not exist"
-    with open(filename) as f:
-        for line in f:
-            s = "KeyboardInterrupt"
-            idx = line.find(s)
-            if idx != -1:
-                return True
-    return False
-
-
 def find_replace_str(value, replace_dict):
     if not isinstance(value, str):
         return str(value)
 
-    matches = re.findall("\$[A-Za-z0-9_]+", value)
+    matches = re.findall(r"\$[A-Za-z0-9_]+", value)
     for var in matches:
         var_key = var.replace("$", "").lower()
         if var_key == "nvme_path":

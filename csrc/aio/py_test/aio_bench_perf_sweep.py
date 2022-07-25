@@ -277,7 +277,6 @@ def script_path():
 
 
 def async_io_setup():
-    import deepspeed
     from deepspeed.ops.aio import AsyncIOBuilder
     return AsyncIOBuilder().is_compatible()
 

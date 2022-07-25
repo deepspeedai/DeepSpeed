@@ -3,11 +3,8 @@ Copyright 2020 The Microsoft DeepSpeed Team
 '''
 import json
 import math
-import importlib
 import torch
-from torch import nn
 from torch.autograd import Function
-import time
 from ... import op_builder
 import torch.nn as nn
 from deepspeed import comm as dist
@@ -338,7 +335,7 @@ class DeepSpeedSelfAttentionFunction(Function):
                         torch.empty(1),
                         num_attention_heads_per_partition,
                         (1 / norm_factor if config.scale_attention else 1.0),
-                        (not unfused_mode),
+                        (not unfused_mode),  # noqa: F821
                         config.triangular_masking,
                         config.local_attention,
                         config.window_size,
@@ -346,21 +343,21 @@ class DeepSpeedSelfAttentionFunction(Function):
                 else:
                     attn_key_value = score_context_func(
                         mixed_query,
-                        (key_layer if unfused_mode else past_key.type_as(key_layer)),
+                        (key_layer if unfused_mode else past_key.type_as(key_layer)),  # noqa: F821
                         key_layer,
                         ((1 - input_mask).half() *
                          minus_inf) if input_mask.dtype == torch.int64 else input_mask,
                         (value_layer
-                         if unfused_mode else past_value.type_as(value_layer)),
+                         if unfused_mode else past_value.type_as(value_layer)),  # noqa: F821
                         value_layer,
                         num_attention_heads_per_partition,
                         (1 / norm_factor if config.scale_attention else 1.0),
-                        (not unfused_mode),
+                        (not unfused_mode),  # noqa: F821
                         config.triangular_masking,
                         config.local_attention,
                         config.window_size,
                         no_masking)
-                if unfused_mode:
+                if unfused_mode:  # noqa: F821
                     context_layer, _, _ = attn_key_value
                 else:
                     context_layer, key_layer, value_layer = attn_key_value

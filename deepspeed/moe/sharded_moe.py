@@ -12,16 +12,13 @@ Copyright 2021 The Microsoft DeepSpeed Team
 # This source code is licensed under the BSD license found in the
 # LICENSE file in the root directory of this source tree.
 
-from deepspeed.utils.timer import ThroughputTimer, SynchronizedWallClockTimer
-from deepspeed.utils import logger, log_dist
-from typing import Callable, Dict, TYPE_CHECKING, Any, Optional, Tuple, Union, cast
+from deepspeed.utils.timer import SynchronizedWallClockTimer
+from deepspeed.utils import logger
+from typing import Callable, Dict, TYPE_CHECKING, Any, Optional, Tuple
 
-import time
-from time import perf_counter
 import torch
 from torch import Tensor
-from deepspeed import comm as dist
-from torch.nn import Module, ModuleList
+from torch.nn import Module
 import torch.nn.functional as F
 
 if TYPE_CHECKING:

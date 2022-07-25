@@ -1,7 +1,6 @@
 import copy
 
 import torch
-import deepspeed
 from deepspeed.runtime.zero.tiling import TiledLinear, TiledLinearReturnBias
 
 import pytest

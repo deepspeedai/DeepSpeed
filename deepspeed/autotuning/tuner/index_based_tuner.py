@@ -1,7 +1,5 @@
 import random
 
-from deepspeed.utils import logger
-
 from .base_tuner import BaseTuner
 
 

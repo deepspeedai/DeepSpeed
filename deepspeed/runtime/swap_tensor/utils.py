@@ -5,14 +5,10 @@ Licensed under the MIT license.
 Functionality of swapping tensors to/from (NVMe) storage devices.
 """
 
-import os
 import torch
 from deepspeed.utils.logging import logger
 
 from deepspeed import comm as dist
-
-from deepspeed.runtime.swap_tensor.constants import AIO_BLOCK_SIZE, AIO_QUEUE_DEPTH, \
-    AIO_THREAD_COUNT, AIO_SINGLE_SUBMIT, AIO_OVERLAP_EVENTS
 
 MIN_AIO_BYTES = 1024**2
 AIO_ALIGNED_BYTES = 1024

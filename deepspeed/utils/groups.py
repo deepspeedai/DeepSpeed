@@ -24,10 +24,9 @@ Copyright 2021 The Microsoft DeepSpeed Team
  For inference and other new scenarios, the code will be either reused or added to this file.
 """
 
-import torch
 from deepspeed import comm as dist
 
-from deepspeed.utils import logger, log_dist
+from deepspeed.utils import log_dist
 from deepspeed.utils.exceptions import DeprecatedException
 
 # Expert parallel group that the current rank belongs to.
