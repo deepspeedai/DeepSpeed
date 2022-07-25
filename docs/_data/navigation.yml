@@ -40,6 +40,8 @@ lnav:
         url: /docs/config-json/#flops-profiler
       - title: 'Monitoring'
         url: /docs/config-json/#monitoring-module-tensorboard-wandb-csv
+      - title: 'Communication Logging'
+        url: /docs/config-json/#communication-logging
       - title: 'Model Compression'
         url: /docs/config-json/#compression
   - title: 'Tutorials'
@@ -83,6 +85,8 @@ lnav:
         url: /tutorials/MoQ-tutorial/
       - title: 'Monitoring'
         url: /tutorials/monitor
+      - title: 'Communication Logging'
+        url: /tutorials/comms-logging
       - title: 'One-Cycle Schedule'
         url: /tutorials/one-cycle/
       - title: 'One-Bit Adam'

@@ -12,13 +12,18 @@ from torch.distributed import ProcessGroup
 import torch.nn.functional
 
 from deepspeed.utils import instrument_w_nvtx
-from deepspeed.utils.logging import logger
+from deepspeed.utils import logger
 
 
-def _torch_reduce_scatter_fn(input_tensor: Tensor, output_tensor: Tensor, group):
+def _torch_reduce_scatter_fn(input_tensor: Tensor,
+                             output_tensor: Tensor,
+                             group=None,
+                             async_op=False,
+                             prof=False):
     return instrument_w_nvtx(dist.reduce_scatter_fn)(output_tensor,
                                                      input_tensor,
-                                                     group=group)
+                                                     group=group,
+                                                     async_op=async_op)
 
 
 @instrument_w_nvtx
@@ -82,7 +87,7 @@ def reduce_scatter_coalesced(
     # batched reduce-scatter call
     _torch_reduce_scatter_fn(tensor_partition_flat_buffer,
                              tensor_partition_buffer_for_each_rank[this_rank],
-                             group)
+                             group=group)
 
     # reverse procedure of the interleaving done previously, done on the
     # result of the batched reduce-scatter

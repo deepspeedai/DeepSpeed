@@ -14,7 +14,7 @@ import torch.nn as nn
 import torch.optim as optim
 from deepspeed import comm as dist
 
-from deepspeed.utils.logging import logger
+from deepspeed.utils import logger
 from deepspeed.utils.timer import SynchronizedWallClockTimer, ThroughputTimer
 
 from deepspeed.inference.engine import InferenceEngine

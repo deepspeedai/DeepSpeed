@@ -1047,6 +1047,50 @@ Example of <i>**csv_monitor**</i> configuration:
     "job_name": "train_bert"
 }
 ```
+
+### Communication Logging
+
+
+DeepSpeed provides a flexible communication logging tool which can automatically detect and record communication operations launched via `deepspeed.comm`. NOTE: All logging communication calls are synchronized in order to provide accurate timing information. This may hamper performance if your model heavily uses asynchronous communication operations.
+
+Once the logs are populated, they can be summarized with `deepspeed.comm.log_summary()`. For more detail and example usage, see the [tutorial](/tutorials/comms-logging/)
+
+
+
+
+<i>**comms_logger**</i>: [dictionary]
+
+| Fields | Value                                                                                                                                                                                                                                                                                                        |Default |
+| ------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ----- |
+| enabled   | Whether communication logging is enabled. | `false` |
+| verbose | Whether to immediately print every communication operation  | `false` |
+| prof_all  | Whether to profile all operations. | `true` |
+| debug  | Appends the caller function to each communication operation's `log_name`. | `false` |
+| prof_ops  | A list of communication operations to log (only the specified ops will be profiled). | `[]` |
+
+
+Example of recommended <i>**comms_logger**</i> configuration:
+
+```json
+"comms_logger": {
+  "enabled": true,
+  "verbose": false,
+  "prof_all": true,
+  "debug": false
+}
+```
+
+Example of <i>**comms_logger**</i> configuration for logging specific operations only:
+
+```json
+"comms_logger": {
+  "enabled": true,
+  "verbose": false,
+  "prof_all": false,
+  "debug": false,
+  "prof_ops": ["all_reduce", "all_gather"]
+}
+```
 ### Compression
 **Note:** <i>**Compression**</i> has seven different components, including layer reduction, weight quantization, activation quantization, sparse pruning, row pruning, head pruning, and channel pruning. We explain them one by one with simple json examples. Read more about how to use the DeepSpeed Compression library in our [tutorial](/tutorials/model-compression/).
 

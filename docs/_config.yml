@@ -50,6 +50,7 @@ collections:
       - mixture-of-experts-inference.md
       - model-compression.md
       - monitor.md
+      - comms-logging.md
       - one-cycle.md
       - onebit-adam.md
       - zero-one-adam.md

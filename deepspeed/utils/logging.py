@@ -2,8 +2,6 @@ import logging
 import sys
 import os
 
-from deepspeed import comm as dist
-
 log_levels = {
     "debug": logging.DEBUG,
     "info": logging.INFO,
@@ -47,6 +45,7 @@ logger = LoggerFactory.create_logger(name="DeepSpeed", level=logging.INFO)
 
 
 def log_dist(message, ranks=None, level=logging.INFO):
+    from deepspeed import comm as dist
     """Log message when one of following condition meets
 
     + not dist.is_initialized()
@@ -70,6 +69,7 @@ def log_dist(message, ranks=None, level=logging.INFO):
 
 
 def print_json_dist(message, ranks=None, path=None):
+    from deepspeed import comm as dist
     """Print message when one of following condition meets
 
     + not dist.is_initialized()

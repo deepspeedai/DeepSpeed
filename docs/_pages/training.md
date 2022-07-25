@@ -527,6 +527,24 @@ The DeepSpeed Monitor logs live training metrics to one or more monitoring backe
 
 The Monitor can also be added to log custom metrics and client codes. Please refer to the [Monitor](/tutorials/monitor) tutorial for more details.
 
+### Communication Logging
+
+DeepSpeed provides logging of all communication operations launched within `deepspeed.comm`. The communication logger can be configured in the `deepspeed_config` file as follows:
+
+```json
+{
+  "comms_logger": {
+    "enabled": true,
+    "verbose": false,
+    "prof_all": true,
+    "debug": false
+  }
+}
+
+```
+
+Client codes can then print a summary with a call to `deepspeed.comm.log_summary()`. For more details and example usage, see the [Communication Logging](/tutorials/comms-logging) tutorial.
+
 ## Sparse Attention
 DeepSpeed offers sparse attention to support long sequences. Please refer to the [Sparse Attention](/tutorials/sparse-attention/) tutorial.
 

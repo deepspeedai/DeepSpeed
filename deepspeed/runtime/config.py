@@ -24,6 +24,7 @@ from .config_utils import (
 from .zero.config import DeepSpeedZeroConfig
 from .zero.constants import *
 from .activation_checkpointing.config import DeepSpeedActivationCheckpointingConfig
+from ..comm.config import DeepSpeedCommsConfig
 from ..monitor.config import DeepSpeedMonitorConfig
 
 from deepspeed import comm as dist
@@ -806,6 +807,7 @@ class DeepSpeedConfig(object):
         self.activation_checkpointing_config = DeepSpeedActivationCheckpointingConfig(
             param_dict)
 
+        self.comms_config = DeepSpeedCommsConfig(param_dict)
         self.monitor_config = DeepSpeedMonitorConfig(param_dict)
 
         self.gradient_clipping = get_gradient_clipping(param_dict)

@@ -43,7 +43,7 @@ param_count = 0
 partitioned_param_data_shape = [0]
 
 
-def _dist_allgather_fn(input_tensor: Tensor, output_tensor: Tensor, group):
+def _dist_allgather_fn(input_tensor: Tensor, output_tensor: Tensor, group=None):
     return instrument_w_nvtx(dist.allgather_fn)(output_tensor,
                                                 input_tensor,
                                                 group=group,
@@ -834,8 +834,7 @@ class Init(InsertPostInitMethodToModuleSubClasses):
                 handle = _dist_allgather_fn(
                     param.ds_tensor.to(torch.cuda.current_device()),
                     param_buffer,
-                    self.ds_process_group,
-                )
+                    self.ds_process_group)
                 param.data = param_buffer.narrow(0,
                                                  0,
                                                  param.ds_numel).view(param.ds_shape).to(
