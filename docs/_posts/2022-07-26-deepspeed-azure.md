@@ -129,7 +129,7 @@ Some users have customized environments built on top of Azure VMs and VMSS based
 ## Acknowledgement
 
 This blog post was written by the DeepSpeed team in collaboration with the AzureML and the AzureHPC team. We would like to acknowledge several individuals who made this work possible:
-- AzureHPC team: Russell Hewett, Kushal Datta, Prabhat Ram, Jithin Jose, and Nidhi Chappell
+- AzureHPC team: Russell J. Hewett, Kushal Datta, Prabhat Ram, Jithin Jose, and Nidhi Chappell
 - AzureML team: Vijay Aski, Razvan Tanase, Miseon Park, Savita Mittal, Ravi Shankar Kolli, Prasanth Pulavarthi, and Daniel Moth
 - DeepSpeed team: Ammar Ahmad Awan, Jeff Rasley, Samyam Rajbhandari, Martin Cai, and Yuxiong He
 - CTO office: Gopi Kumar and Luis Vargas
