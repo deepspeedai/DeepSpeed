@@ -337,8 +337,8 @@ class _sparse_matmul(torch.autograd.Function):
         a_inner, b_inner = a.shape[a_dim], b.shape[b_dim]
         if a_inner != b_inner:
             raise ValueError(
-                f"Size of tensor A along the {_dim_to_name(a_dim)} dim ({a_inner}) must match size "  # noqa: F821
-                f"of tensor B along the {_dim_to_name(b_dim)} dim ({b_inner})")
+                f"Size of tensor A along the {a_dim} dim ({a_inner}) must match size "
+                f"of tensor B along the {b_dim} dim ({b_inner})")
         if a_inner % 16 != 0:
             raise ValueError('Reduction size for SDD must be a multiple of 16')
 
