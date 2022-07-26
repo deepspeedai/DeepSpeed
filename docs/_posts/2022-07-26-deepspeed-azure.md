@@ -13,7 +13,7 @@ Large-scale transformer-based deep learning models trained on large amounts of d
 
 *Figure 1: Landscape of large models and hardware capabilities*
 
-To train these models, users needed to set up and maintain a complex distributed training infrastructure that usually required several manual and error-prone steps. These lead to a subpar experience both in terms of usability and performance. We recently [announced](https://azure.microsoft.com/en-us/blog/azure-empowers-easytouse-highperformance-and-hyperscale-model-training-using-deepspeed/) (update link to Azure blog) how we are making great strides to simplify this and enable easy-to-use and high-performance training at 1K+ GPU scale on Azure.
+To train these models, users needed to set up and maintain a complex distributed training infrastructure that usually required several manual and error-prone steps. These lead to a subpar experience both in terms of usability and performance. We recently [announced](https://azure.microsoft.com/en-us/blog/azure-empowers-easytouse-highperformance-and-hyperscale-model-training-using-deepspeed/) how we are making great strides to simplify this and enable easy-to-use and high-performance training at 1K+ GPU scale on Azure.
 
 In this extended post, we share the details of how DeepSpeed users can train trillion-parameter models with a new easy-to-use, streamlined, scalable, and high-performance distributed training experience on Azure. We also share details of the experimental setup, model configurations, additional performance trends, and guide our users on how to run these experiments in their own environments.
 
