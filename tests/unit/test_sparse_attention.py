@@ -103,6 +103,16 @@ def test_bslongformersparsityconfig_module_availability():
     return True
 
 
+def test_localwindowsparsityconfig_module_availability():
+    return True
+    try:
+        from deepspeed.ops.sparse_attention import LocalSlidingWindowSparsityConfig
+    except ImportError:
+        print("LocalSlidingWindowSparsityConfig Module is not installed!")
+        return False
+    return True
+
+
 def test_sparseselfattention_module_availability():
     return True
     try:
