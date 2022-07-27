@@ -54,5 +54,7 @@ jobs:
           pip install .[testing]
           # force protobuf version due to issues
           pip install "protobuf<4.21.0"
+          # tmp fix: force newer datasets version
+          pip install "datasets>=2.0.0"
           pip list
           TORCH_EXTENSIONS_DIR=./torch-extensions pytest --color=yes --durations=0 --verbose tests/deepspeed
