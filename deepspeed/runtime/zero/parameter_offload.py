@@ -7,9 +7,9 @@ import torch
 from torch.cuda import Stream
 from collections import OrderedDict
 from deepspeed.runtime.utils import see_memory_usage
+from deepspeed.runtime.zero.offload_config import OffloadDeviceEnum
 from deepspeed.runtime.zero.partition_parameters import _init_external_params
 from deepspeed.runtime.zero.partition_parameters import *
-from deepspeed.runtime.zero.offload_constants import *
 from deepspeed.runtime.zero.partitioned_param_coordinator import PartitionedParameterCoordinator, iter_params
 
 FWD_MODULE_STACK = list()
@@ -186,9 +186,8 @@ class DeepSpeedZeRoOffload(object):
         self.offload_device = None
         self.offload_param_pin_memory = False
         if offload_param_config is not None:
-            self.offload_device = offload_param_config[OFFLOAD_PARAM_DEVICE]
-            self.offload_param_pin_memory = offload_param_config[
-                OFFLOAD_PARAM_PIN_MEMORY]
+            self.offload_device = offload_param_config.device
+            self.offload_param_pin_memory = offload_param_config.pin_memory
 
         self._convert_to_zero_parameters(ds_config, module, mpu)
 
@@ -233,7 +232,7 @@ class DeepSpeedZeRoOffload(object):
                 max_available_parameters_in_numel=self.
                 _max_available_parameters_in_numel,
                 allgather_stream=self.__allgather_stream,
-                prefetch_nvme=self.offload_device == OFFLOAD_NVME_DEVICE,
+                prefetch_nvme=self.offload_device == OffloadDeviceEnum.nvme,
             )
 
         return self.param_coordinators[training]

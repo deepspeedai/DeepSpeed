@@ -8,7 +8,6 @@ Functionality of swapping optimizer tensors to/from (NVMe) storage devices.
 from deepspeed.ops.aio import AsyncIOBuilder
 from deepspeed import comm as dist
 
-from deepspeed.runtime.zero.offload_constants import *
 from deepspeed.runtime.swap_tensor.constants import *
 from deepspeed.runtime.swap_tensor.utils import swap_in_tensors, swap_out_tensors, print_object
 from deepspeed.runtime.swap_tensor.async_swapper import AsyncTensorSwapper
@@ -91,8 +90,8 @@ class PipelinedOptimizerSwapper(OptimizerSwapper):
                                                    numel_alignment=self.numel_alignment,
                                                    timers=self.timers)
 
-        self.async_swap_in = swap_config[OFFLOAD_OPTIMIZER_PIPELINE_READ]
-        self.async_swap_out = swap_config[OFFLOAD_OPTIMIZER_PIPELINE_WRITE]
+        self.async_swap_in = swap_config.pipeline_read
+        self.async_swap_out = swap_config.pipeline_write
 
         self.swap_ops = {
             SYNC_SWAP_IN: None,
@@ -250,7 +249,7 @@ class PipelinedOptimizerSwapper(OptimizerSwapper):
             count=required_buffer_count,
             dtype=parameter.dtype)
         assert allocated_buffers is not None, \
-        f"PipelinedOptimizerSwapper ran out of swap buffers, try increasing {OFFLOAD_OPTIMIZER_BUFFER_COUNT}"
+        f"PipelinedOptimizerSwapper ran out of swap buffers, try increasing 'buffer_count'"
 
         state_buffers = allocated_buffers[:len(param_info.tensors)]
         param_info.set_swap_buffers(state_buffers)

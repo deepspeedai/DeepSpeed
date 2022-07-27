@@ -15,11 +15,11 @@ from deepspeed.runtime.fp16.loss_scaler import LossScaler, DynamicLossScaler
 from deepspeed.runtime.comm.coalesced_collectives import reduce_scatter_coalesced
 from deepspeed.runtime.utils import get_global_norm, is_model_parallel_parameter
 from deepspeed.runtime.zero.partition_parameters import *
+from deepspeed.runtime.zero.config import ZeroStageEnum
+from deepspeed.runtime.zero.offload_config import OffloadDeviceEnum
 from deepspeed.runtime.zero.parameter_offload import DeepSpeedZeRoOffload
-from deepspeed.runtime.zero.constants import ZERO_OPTIMIZATION_WEIGHTS
 from deepspeed.ops.adam import DeepSpeedCPUAdam
 from deepspeed.ops.op_builder import UtilsBuilder
-from deepspeed.runtime.zero.offload_constants import *
 from deepspeed.runtime.swap_tensor.partitioned_param_swapper import PartitionedParamStatus
 from deepspeed.runtime.swap_tensor.partitioned_optimizer_swapper import PartitionedOptimizerSwapper
 from deepspeed.runtime.swap_tensor.pipelined_optimizer_swapper import PipelinedOptimizerSwapper
@@ -171,7 +171,7 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
                                        and type(init_optimizer) == DeepSpeedCPUAdam)
 
         self.device = torch.cuda.current_device(
-        ) if not self.offload_optimizer else OFFLOAD_CPU_DEVICE
+        ) if not self.offload_optimizer else OffloadDeviceEnum.cpu
         ### streams used for overlapping computation with communication
         self.__reduce_and_partition_stream = Stream(
         ) if overlap_comm else torch.cuda.default_stream()
@@ -443,35 +443,28 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
         ###################### offload optimizer setup ##################################
         if offload_optimizer_config is not None:
             self.offload_optimizer = True
-            self.offload_optimizer_pin_memory = offload_optimizer_config[
-                OFFLOAD_OPTIMIZER_PIN_MEMORY]
-            self.swap_optimizer = offload_optimizer_config[
-                OFFLOAD_OPTIMIZER_DEVICE] == OFFLOAD_NVME_DEVICE
-            self.offload_optimizer_fast_init = offload_optimizer_config[
-                OFFLOAD_OPTIMIZER_FAST_INIT]
+            self.offload_optimizer_pin_memory = offload_optimizer_config.pin_memory
+            self.swap_optimizer = offload_optimizer_config.device == OffloadDeviceEnum.nvme
+            self.offload_optimizer_fast_init = offload_optimizer_config.fast_init
 
         ###################### offload param setup ##################################
         if offload_param_config is not None:
             self.offload_param = True
-            self.offload_param_pin_memory = offload_param_config[
-                OFFLOAD_PARAM_PIN_MEMORY]
-            self.params_in_nvme_and_cpu = offload_param_config[
-                OFFLOAD_PARAM_DEVICE] == OFFLOAD_NVME_DEVICE
-            self.max_params_in_cpu = offload_param_config[OFFLOAD_PARAM_MAX_IN_CPU]
+            self.offload_param_pin_memory = offload_param_config.pin_memory
+            self.params_in_nvme_and_cpu = offload_param_config.device == OffloadDeviceEnum.nvme
+            self.max_params_in_cpu = offload_param_config.max_in_cpu
             print_rank_0(
                 f"FP16 params swapping is {self.params_in_nvme_and_cpu}, Max params in CPU is {self.max_params_in_cpu}",
                 force=False)
 
     def _configure_tensor_swapping(self, offload_optimizer_config, aio_config):
-        nvme_swap_folder = os.path.join(
-            offload_optimizer_config[OFFLOAD_OPTIMIZER_NVME_PATH],
-            'zero_stage_3')
+        nvme_swap_folder = os.path.join(offload_optimizer_config.nvme_path,
+                                        'zero_stage_3')
         os.makedirs(nvme_swap_folder, exist_ok=True)
         if dist.get_rank() == 0:
             logger.info(f'Tensor Swapping: Adding optimizer tensors')
 
-        swapper_type = PipelinedOptimizerSwapper if offload_optimizer_config[
-            OFFLOAD_OPTIMIZER_PIPELINE] else PartitionedOptimizerSwapper
+        swapper_type = PipelinedOptimizerSwapper if offload_optimizer_config.pipeline else PartitionedOptimizerSwapper
 
         self.optimizer_swapper = swapper_type(
             swap_config=offload_optimizer_config,
@@ -2196,7 +2189,7 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
 
     def _rigid_state_dict(self):
         state_dict = {}
-        state_dict[ZERO_STAGE] = ZERO_OPTIMIZATION_WEIGHTS
+        state_dict[ZERO_STAGE] = ZeroStageEnum.weights
         state_dict['loss_scaler'] = self.loss_scaler
         state_dict['dynamic_loss_scale'] = self.dynamic_loss_scale
         state_dict['overflow'] = self.overflow
@@ -2522,11 +2515,11 @@ def estimate_zero3_model_states_mem_needs_all_cold(total_params,
     """
     def format_options(cpu_offload, cpu_offload_params, zero_init):
         enabled = []
-        padded_cpu_str = f'{OFFLOAD_CPU_DEVICE:4}'
+        padded_cpu_str = f'{OffloadDeviceEnum.cpu:4}'
         param_device = padded_cpu_str if cpu_offload_params else "none"
-        enabled.append(f"{OFFLOAD_PARAM}={param_device}")
+        enabled.append(f"offload_param={param_device}")
         optimizer_device = padded_cpu_str if cpu_offload else "none"
-        enabled.append(f"{OFFLOAD_OPTIMIZER}={optimizer_device}")
+        enabled.append(f"offload_optimizer={optimizer_device}")
         enabled.append(f"zero_init={1 if zero_init else 0}")
         return ", ".join(enabled)
 

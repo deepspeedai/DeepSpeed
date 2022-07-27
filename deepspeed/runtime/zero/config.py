@@ -3,195 +3,136 @@ Copyright (c) Microsoft Corporation
 Licensed under the MIT license.
 """
 
-from deepspeed.runtime.config_utils import get_scalar_param, DeepSpeedConfigObject
+from pydantic import Field, validator
+from typing import Optional
+from enum import Enum
+from deepspeed.runtime.config_utils import get_scalar_param, DeepSpeedConfigModel
 from deepspeed.utils import logger
-from .constants import *
-from .offload_constants import *
-from .offload_config import get_offload_param_config, get_default_offload_param_config, \
-    get_offload_optimizer_config, get_default_offload_optimizer_config
+from .offload_config import DeepSpeedZeroOffloadParamConfig, DeepSpeedZeroOffloadOptimizerConfig
+
+# ZeRO optimization. By default, this optimization is not enabled.
+# Users have to configure the desired optimization (0 means disabled) in params.json as below example:
+ZERO_FORMAT = """
+ZeRO optimization should be enabled as:
+"session_params": {
+  "zero_optimization": {
+    "stage": [0|1|2],
+    "stage3_max_live_parameters" : 1000000000,
+    "stage3_max_reuse_distance" : 1000000000,
+    "allgather_partitions": [true|false],
+    "allgather_bucket_size": 500000000,
+    "reduce_scatter": [true|false],
+    "contiguous_gradients" : [true|false]
+    "overlap_comm": [true|false],
+    "reduce_bucket_size": 500000000,
+    "load_from_fp32_weights": [true|false],
+    "cpu_offload": [true|false] (deprecated),
+    "cpu_offload_params" : [true|false] (deprecated),
+    "cpu_offload_use_pin_memory": [true|false] (deprecated),
+    "sub_group_size" : 1000000000000,
+    "offload_param": {...},
+    "offload_optimizer": {...},
+    "ignore_unused_parameters": [true|false],
+    "round_robin_gradients": [true|false]
+    }
+}
+"""
+
+ZERO_OPTIMIZATION = "zero_optimization"
 
 
-class DeepSpeedZeroConfig(DeepSpeedConfigObject):
-    def __init__(self, param_dict):
-        super(DeepSpeedZeroConfig, self).__init__()
+def read_zero_config_deprecated(param_dict):
+    zero_config_dict = {}
+    zero_config_dict["stage"] = 1 if param_dict[ZERO_OPTIMIZATION] else 0
+    if zero_config_dict["stage"] > 0:
+        zero_config_dict["allgather_bucket_size"] = get_scalar_param(
+            param_dict,
+            "allgather_size",
+            5e8)
+    logger.warning(
+        "DeepSpeedConfig: this format of ZeRO optimization setup is deprecated. Please use the following format: {}"
+        .format(ZERO_FORMAT))
+    return zero_config_dict
 
-        self.stage = None
-        self.contiguous_gradients = None
-        self.reduce_scatter = None
-        self.reduce_bucket_size = None
-        self.allgather_partitions = None
-        self.allgather_bucket_size = None
-        self.overlap_comm = None
-        self.load_from_fp32_weights = None
 
-        self.elastic_checkpoint = None
-
-        #Offload Specific Parameters
-        self.offload_param = None
-        self.offload_optimizer = None
-        self.sub_group_size = None
-
-        #Stage3 Specific Parameters
-        self.prefetch_bucket_size = None
-        self.param_persistence_threshold = None
-        self.max_live_parameters = None
-        self.max_reuse_distance = None
-        self.gather_16bit_weights_on_model_save = None
-
-        self.ignore_unused_parameters = None
-        self.round_robin_gradients = None
-
-        if ZERO_OPTIMIZATION in param_dict.keys():
-            zero_config_dict = param_dict[ZERO_OPTIMIZATION]
-            if type(zero_config_dict) is bool:
-                zero_config_dict = self.read_zero_config_deprecated(param_dict)
-        else:
-            zero_config_dict = ZERO_OPTIMIZATION_DEFAULT
-
-        self._initialize(zero_config_dict)
-
-    def read_zero_config_deprecated(self, param_dict):
+def get_zero_config(param_dict):
+    if ZERO_OPTIMIZATION in param_dict:
+        zero_config_dict = param_dict[ZERO_OPTIMIZATION]
+        if isinstance(zero_config_dict, bool):
+            zero_config_dict = read_zero_config_deprecated(param_dict)
+    else:
         zero_config_dict = {}
-        zero_config_dict[
-            ZERO_OPTIMIZATION_STAGE] = 1 if param_dict[ZERO_OPTIMIZATION] else 0
-        if zero_config_dict[ZERO_OPTIMIZATION_STAGE] > 0:
-            zero_config_dict[ZERO_OPTIMIZATION_ALLGATHER_BUCKET_SIZE] = get_scalar_param(
-                param_dict,
-                ZERO_OPTIMIZATION_ALLGATHER_BUCKET_SIZE_DEPRECATED,
-                ZERO_OPTIMIZATION_ALLGATHER_BUCKET_SIZE_DEFAULT)
+    return DeepSpeedZeroConfig(**zero_config_dict)
 
-        logger.warning(
-            'DeepSpeedConfig: this format of ZeRO optimization setup is deprecated. Please use the following format: {}'
-            .format(ZERO_FORMAT))
-        return zero_config_dict
 
-    def _sanity_check(self, zero_config_dict):
-        deprecated_dict = dict(
-            ZERO_OPTIMIZATION_CPU_OFFLOAD=ZERO_OPTIMIZATION_OFFLOAD_OPTIMIZER,
-            ZERO_OPTIMIZATION_CPU_OFFLOAD_PARAMS=ZERO_OPTIMIZATION_OFFLOAD_PARAM,
-            ZERO_OPTIMIZATION_CPU_OFFLOAD_USE_PIN_MEMORY=
-            f'{ZERO_OPTIMIZATION_OFFLOAD_PARAM} or {ZERO_OPTIMIZATION_OFFLOAD_OPTIMIZER}'
-        )
+class ZeroStageEnum(int, Enum):
+    disabled = 0
+    optimizer_states = 1
+    gradients = 2
+    weights = 3
+    max_stage = 3
 
-        for old_key, new_key in deprecated_dict.items():
-            if old_key in zero_config_dict:
-                logger.warning(
-                    f'DeepSpeedConfig: {old_key} is deprecated. Please use {new_key}.')
 
-    def _initialize(self, zero_config_dict):
-        self._sanity_check(zero_config_dict)
+class DeepSpeedZeroConfig(DeepSpeedConfigModel):
+    stage: ZeroStageEnum = ZeroStageEnum.disabled
+    contiguous_gradients: bool = True
+    reduce_scatter: bool = True
+    reduce_bucket_size: int = Field(5e8, ge=0)
+    allgather_partitions: bool = True
+    allgather_bucket_size: int = Field(5e8, ge=0)
+    overlap_comm: bool = None  # None for dynamic default value
+    load_from_fp32_weights: bool = True
 
-        self.stage = get_scalar_param(zero_config_dict,
-                                      ZERO_OPTIMIZATION_STAGE,
-                                      ZERO_OPTIMIZATION_STAGE_DEFAULT)
+    elastic_checkpoint: bool = False
 
-        self.contiguous_gradients = get_scalar_param(
-            zero_config_dict,
-            ZERO_OPTIMIZATION_CONTIGUOUS_GRADIENTS,
-            ZERO3_OPTIMIZATION_CONTIGUOUS_GRADIENTS_DEFAULT
-            if self.stage == ZERO_OPTIMIZATION_WEIGHTS else
-            ZERO_OPTIMIZATION_CONTIGUOUS_GRADIENTS_DEFAULT)
+    # Offload Specific Parameters
+    offload_param: Optional[DeepSpeedZeroOffloadParamConfig] = None
+    offload_optimizer: Optional[DeepSpeedZeroOffloadOptimizerConfig] = None
+    sub_group_size: int = Field(1e9, ge=0)
+    cpu_offload_param: bool = Field(
+        None,
+        deprecated=True,
+        new_param="offload_param",
+        new_param_fn=(lambda val: DeepSpeedZeroOffloadParamConfig() if val else None),
+    )
+    cpu_offload_use_pin_memory: bool = Field(
+        None,
+        deprecated=True,
+        new_param="offload_param or offload_optimizer",
+        set_new_param=False,
+    )
+    cpu_offload: bool = Field(
+        None,
+        deprecated=True,
+        new_param="offload_optimizer",
+        new_param_fn=(lambda val: DeepSpeedZeroOffloadOptimizerConfig()
+                      if val else None),
+    )
 
-        self.reduce_bucket_size = get_scalar_param(
-            zero_config_dict,
-            ZERO_OPTIMIZATION_REDUCE_BUCKET_SIZE,
-            ZERO_OPTIMIZATION_REDUCE_BUCKET_SIZE_DEFAULT)
+    # Stage3 Specific Parameters
+    prefetch_bucket_size: int = Field(5e7, ge=0, alias="stage3_prefetch_bucket_size")
+    param_persistence_threshold: int = Field(1e5,
+                                             ge=0,
+                                             alias="stage3_param_persistence_threshold")
+    max_live_parameters: int = Field(1e9, ge=0, alias="stage3_max_live_parameters")
+    max_reuse_distance: int = Field(1e9, ge=0, alias="stage3_max_reuse_distance")
+    gather_16bit_weights_on_model_save: bool = Field(
+        False,
+        alias="stage3_gather_16bit_weights_on_model_save")
+    stage3_gather_fp16_weights_on_model_save: bool = Field(
+        False,
+        deprecated=True,
+        new_param="gather_16bit_weights_on_model_save")
 
-        self.reduce_scatter = get_scalar_param(zero_config_dict,
-                                               ZERO_OPTIMIZATION_REDUCE_SCATTER,
-                                               ZERO_OPTIMIZATION_REDUCE_SCATTER_DEFAULT)
+    ignore_unused_parameters: bool = True
+    legacy_stage1: bool = False
+    round_robin_gradients: bool = False
 
-        self.overlap_comm = get_scalar_param(
-            zero_config_dict,
-            ZERO_OPTIMIZATION_OVERLAP_COMM,
-            ZERO3_OPTIMIZATION_OVERLAP_COMM_DEFAULT if self.stage
-            == ZERO_OPTIMIZATION_WEIGHTS else ZERO_OPTIMIZATION_OVERLAP_COMM_DEFAULT)
-
-        self.allgather_partitions = get_scalar_param(
-            zero_config_dict,
-            ZERO_OPTIMIZATION_ALLGATHER_PARTITIONS,
-            ZERO_OPTIMIZATION_ALLGATHER_PARTITIONS_DEFAULT)
-
-        self.allgather_bucket_size = get_scalar_param(
-            zero_config_dict,
-            ZERO_OPTIMIZATION_ALLGATHER_BUCKET_SIZE,
-            ZERO_OPTIMIZATION_ALLGATHER_BUCKET_SIZE_DEFAULT)
-
-        self.load_from_fp32_weights = get_scalar_param(
-            zero_config_dict,
-            ZERO_OPTIMIZATION_LOAD_FROM_FP32_WEIGHTS,
-            ZERO_OPTIMIZATION_LOAD_FROM_FP32_WEIGHTS_DEFAULT)
-
-        self.elastic_checkpoint = get_scalar_param(
-            zero_config_dict,
-            ZERO_OPTIMIZATION_ELASTIC_CHECKPOINT,
-            ZERO_OPTIMIZATION_ELASTIC_CHECKPOINT_DEFAULT)
-
-        if ZERO_OPTIMIZATION_CPU_OFFLOAD in zero_config_dict:
-            cpu_offload_optimizer = get_scalar_param(
-                zero_config_dict,
-                ZERO_OPTIMIZATION_CPU_OFFLOAD,
-                ZERO_OPTIMIZATION_CPU_OFFLOAD_DEFAULT)
-            if cpu_offload_optimizer:
-                self.offload_optimizer = get_default_offload_optimizer_config()
-        else:
-            self.offload_optimizer = get_offload_optimizer_config(zero_config_dict)
-
-        if ZERO_OPTIMIZATION_CPU_OFFLOAD_PARAMS in zero_config_dict:
-            cpu_offload_params = get_scalar_param(
-                zero_config_dict,
-                ZERO_OPTIMIZATION_CPU_OFFLOAD_PARAMS,
-                ZERO_OPTIMIZATION_CPU_OFFLOAD_PARAMS_DEFAULT)
-            if cpu_offload_params:
-                self.offload_param = get_default_offload_param_config()
-        else:
-            self.offload_param = get_offload_param_config(zero_config_dict)
-
-        self.sub_group_size = get_scalar_param(zero_config_dict,
-                                               ZERO_OPTIMIZATION_SUB_GROUP_SIZE,
-                                               ZERO_OPTIMIZATION_SUB_GROUP_SIZE_DEFAULT)
-
-        self.max_live_parameters = get_scalar_param(
-            zero_config_dict,
-            ZERO_OPTIMIZATION_MAX_LIVE_PARAMETERS,
-            ZERO_OPTIMIZATION_MAX_LIVE_PARAMETERS_DEFAULT)
-
-        self.max_reuse_distance = get_scalar_param(
-            zero_config_dict,
-            ZERO_OPTIMIZATION_MAX_REUSE_DISTANCE,
-            ZERO_OPTIMIZATION_MAX_REUSE_DISTANCE_DEFAULT)
-
-        self.prefetch_bucket_size = get_scalar_param(
-            zero_config_dict,
-            ZERO_OPTIMIZATION_PREFETCH_BUCKET_SIZE,
-            ZERO_OPTIMIZATION_PREFETCH_BUCKET_SIZE_DEFAULT)
-
-        self.param_persistence_threshold = get_scalar_param(
-            zero_config_dict,
-            ZERO_OPTIMIZATION_PARAM_PERSISTENCE_THRESHOLD,
-            ZERO_OPTIMIZATION_PARAM_PERSISTENCE_THRESHOLD_DEFAULT)
-
-        # config key has been renamed to use "16bit" instead of "fp16." falling back
-        # to old config name in order to preserve backwards compatibility
-        self.gather_16bit_weights_on_model_save = ZERO_OPTIMIZATION_GATHER_16BIT_WEIGHTS_ON_MODEL_SAVE_DEFAULT
-        for key in [
-                ZERO_OPTIMIZATION_GATHER_16BIT_WEIGHTS_ON_MODEL_SAVE,
-                ZERO_OPTIMIZATION_GATHER_FP16_WEIGHTS_ON_MODEL_SAVE
-        ]:
-            if key in zero_config_dict:
-                self.gather_16bit_weights_on_model_save = zero_config_dict[key]
-                break
-
-        self.ignore_unused_parameters = get_scalar_param(
-            zero_config_dict,
-            ZERO_OPTIMIZATION_IGNORE_UNUSED_PARAMETERS,
-            ZERO_OPTIMIZATION_IGNORE_UNUSED_PARAMETERS_DEFAULT)
-
-        self.legacy_stage1 = get_scalar_param(zero_config_dict,
-                                              ZERO_OPTIMIZATION_LEGACY_STAGE1,
-                                              ZERO_OPTIMIZATION_LEGACY_STAGE1_DEFAULT)
-
-        self.round_robin_gradients = get_scalar_param(
-            zero_config_dict,
-            ZERO_OPTIMIZATION_ROUND_ROBIN_GRADIENTS,
-            ZERO_OPTIMIZATION_ROUND_ROBIN_GRADIENTS_DEFAULT)
+    @validator("overlap_comm")
+    def overlap_comm_valid(cls, field_value, values):
+        if field_value is None:
+            assert (
+                "stage" in values
+            ), "DeepSpeedZeroConfig: 'stage' must be defined before 'overlap_comm'"
+            field_value = values["stage"] == ZeroStageEnum.weights
+        return field_value

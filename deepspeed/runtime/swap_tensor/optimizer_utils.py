@@ -10,7 +10,6 @@ import torch
 
 from deepspeed import comm as dist
 from deepspeed.utils.logging import logger
-from deepspeed.runtime.zero.offload_constants import *
 from deepspeed.runtime.swap_tensor.constants import *
 from deepspeed.runtime.swap_tensor.utils import swap_in_tensors, swap_out_tensors, \
     MIN_AIO_BYTES, AIO_ALIGNED_BYTES, get_sized_buffers
@@ -147,10 +146,9 @@ class OptimizerSwapper(object):
         # Swap buffer management
         self.largest_numel = self._io_aligned_numel(largest_numel)
         self.dtype = dtype
-        self.swap_buffer_manager = SwapBufferManager(
-            num_elems=self.largest_numel,
-            count=swap_config[OFFLOAD_OPTIMIZER_BUFFER_COUNT],
-            dtype=dtype)
+        self.swap_buffer_manager = SwapBufferManager(num_elems=self.largest_numel,
+                                                     count=swap_config.buffer_count,
+                                                     dtype=dtype)
 
         # Timers
         self.timers = timers
