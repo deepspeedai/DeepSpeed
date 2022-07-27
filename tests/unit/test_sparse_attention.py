@@ -106,7 +106,7 @@ def test_bslongformersparsityconfig_module_availability():
 def test_localwindowsparsityconfig_module_availability():
     return True
     try:
-        from deepspeed.ops.sparse_attention import LocalSlidingWindowSparsityConfig
+        from deepspeed.ops.sparse_attention import LocalSlidingWindowSparsityConfig  # noqa: F401
     except ImportError:
         print("LocalSlidingWindowSparsityConfig Module is not installed!")
         return False
