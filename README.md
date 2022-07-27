@@ -148,7 +148,7 @@ Windows support is partially supported with DeepSpeed. On Windows you can build 
 
 # Features
 
-Please checkout [DeepSpeed-Training](https://www.deepspeed.ai/docs/training), [DeepSpeed-Inference](https://www.deepspeed.ai/docs/inference) and [DeepSpeed-Compression](https://www.deepspeed.ai/docs/compression) pages for full set of features offered along each of these three pillars.
+Please checkout [DeepSpeed-Training](https://www.deepspeed.ai/training), [DeepSpeed-Inference](https://www.deepspeed.ai/inference) and [DeepSpeed-Compression](https://www.deepspeed.ai/compression) pages for full set of features offered along each of these three pillars.
 
 # Further Reading
 
