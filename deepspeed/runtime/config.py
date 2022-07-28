@@ -45,6 +45,8 @@ from ..elasticity.constants import (
 
 from ..profiling.config import DeepSpeedFlopsProfilerConfig
 from ..autotuning.config import DeepSpeedAutotuningConfig
+from ..nebula.config import DeepSpeedNebulaConfig
+
 from ..compression.config import get_compression_config, get_quantize_enabled
 from ..compression.constants import *
 from .swap_tensor.aio_config import get_aio_config
@@ -863,6 +865,8 @@ class DeepSpeedConfig(object):
         self.aio_config = get_aio_config(param_dict)
 
         self.dataloader_drop_last = get_dataloader_drop_last(param_dict)
+
+        self.nebula_config = DeepSpeedNebulaConfig(param_dict)
 
     def _batch_assertion(self):
 

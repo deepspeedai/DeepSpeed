@@ -9,6 +9,7 @@ from deepspeed.utils.logging import log_dist
 
 from torch.nn.modules import Module
 from packaging import version as pkg_version
+from deepspeed.runtime.checkpoint_engine.torch_checkpoint_engine import TorchCheckpointEngine
 
 from ..runtime.state_dict_factory import SDLoaderFactory
 from ..runtime.weight_quantizer import WeightQuantization
@@ -92,6 +93,7 @@ class InferenceEngine(Module):
         self.expert_mp_group = expert_mp_group
         self.enable_cuda_graph = enable_cuda_graph
         self.cuda_graph_created = False
+        self.checkpoint_engine = TorchCheckpointEngine()
         self._init_quantization_setting(quantization_setting)
 
         if enable_cuda_graph:
@@ -376,9 +378,10 @@ class InferenceEngine(Module):
                         tag = fd.read().strip()
 
             ckpt_list = self._get_all_ckpt_names(load_dir, tag)
-            sd_loader = SDLoaderFactory.get_sd_loader(ckpt_list)
+            sd_loader = SDLoaderFactory.get_sd_loader(ckpt_list, self.checkpoint_engine)
         else:
-            sd_loader = SDLoaderFactory.get_sd_loader_json(load_dir)
+            sd_loader = SDLoaderFactory.get_sd_loader_json(load_dir,
+                                                           self.checkpoint_engine)
 
         if type(sd_loader) is list:
             self.sd = torch.load(sd_loader[0], map_location='cpu')
@@ -416,10 +419,12 @@ class InferenceEngine(Module):
                     state_dict=checkpoint[self._choose_module_key(checkpoint)],
                     old_moe_load=old_moe_load,
                     model=self.module,
-                    mpu=self.mpu)
+                    mpu=self.mpu,
+                    checkpoint_engine=self.checkpoint_engine)
 
             self.module.load_state_dict(
                 state_dict=checkpoint[self._choose_module_key(checkpoint)],
+                checkpoint_engine=self.checkpoint_engine,
                 strict=load_module_strict)
 
     def _choose_module_key(self, sd):

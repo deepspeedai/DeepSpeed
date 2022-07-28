@@ -8,7 +8,10 @@ import copy
 import collections
 import json
 from abc import ABC, abstractmethod
+
 from deepspeed.utils import logger
+from deepspeed.runtime.checkpoint_engine.torch_checkpoint_engine import TorchCheckpointEngine
+
 from .weight_quantizer import WeightQuantization
 
 AUTO_MODULE_KEY = 'auto'
@@ -16,7 +19,7 @@ AUTO_MODULE_KEY = 'auto'
 
 class SDLoaderFactory:
     @staticmethod
-    def get_sd_loader_json(json_file):
+    def get_sd_loader_json(json_file, checkpoint_engine):
         with open(json_file) as f:
             data = json.load(f)
             sd_type = data['type']
@@ -24,22 +27,27 @@ class SDLoaderFactory:
             version = data['version']
             if 'BLOOM' in sd_type or 'Bloom' in sd_type:
                 return ckpt_list
-            return SDLoaderFactory.get_sd_loader(ckpt_list, sd_type, version)
+            return SDLoaderFactory.get_sd_loader(ckpt_list,
+                                                 checkpoint_engine,
+                                                 sd_type,
+                                                 version)
 
     @staticmethod
-    def get_sd_loader(ckpt_list, sd_type='Megatron', version=None):
+    def get_sd_loader(ckpt_list, checkpoint_engine, sd_type='Megatron', version=None):
         if sd_type == 'Megatron':
-            return MegatronSDLoader(ckpt_list, version)
+            return MegatronSDLoader(ckpt_list, version, checkpoint_engine)
         else:
             assert False, '{} checkpoint type is not supported'.format(sd_type)
 
 
 class SDLoaderBase(ABC):
-    def __init__(self, ckpt_list, version):
+    def __init__(self, ckpt_list, version, checkpoint_engine):
         self.module_key = None
         self.ckpt_list = ckpt_list
-        self.check_ckpt_list()
         self.version = version
+        self.checkpoint_engine = TorchCheckpointEngine(
+        ) if checkpoint_engine is None else checkpoint_engine
+        self.check_ckpt_list()
 
     def load(self,
              mp_world_size,
@@ -81,7 +89,8 @@ class SDLoaderBase(ABC):
         if num_ckpt == mp_world_size:
             assert os.path.exists(load_path)
             #logger.info(f'rank: {mp_rank} loading checkpoint: {load_path}')
-            sd = torch.load(load_path, map_location=lambda storage, loc: storage)
+            sd = self.checkpoint_engine.load(load_path, map_location=lambda storage, \
+                loc: storage)
 
             if quantize:
                 quantizer = WeightQuantization(mlp_extra_grouping=mlp_extra_grouping,
@@ -110,9 +119,9 @@ class SDLoaderBase(ABC):
 
         logger.info(f"mp_rank: {mp_rank}, ckpt_list: {ckpt_list}")
         sd_list = [
-            torch.load(ckpt,
-                       map_location=lambda storage,
-                       loc: storage) for ckpt in ckpt_list
+            self.checkpoint_engine.load(ckpt,
+                                        map_location=lambda storage,
+                                        loc: storage) for ckpt in ckpt_list
         ]
         return sd_list
 
@@ -128,9 +137,9 @@ class SDLoaderBase(ABC):
             f"mp_rank: {mp_rank}, ckpt_list: {self.ckpt_list[ckpt_index]}, offset: {ckpt_offset}"
         )
 
-        sd = torch.load(self.ckpt_list[ckpt_index],
-                        map_location=lambda storage,
-                        loc: storage)
+        sd = self.checkpoint_engine.load(self.ckpt_list[ckpt_index],
+                                         map_location=lambda storage,
+                                         loc: storage)
 
         return sd, num_to_split, ckpt_offset
 
@@ -163,7 +172,9 @@ class SDLoaderBase(ABC):
         #logger.info(f'checkpoint file list: {self.ckpt_list}')
         assert len(self.ckpt_list) > 0
 
-        sd = torch.load(self.ckpt_list[0], map_location=lambda storage, loc: storage)
+        sd = self.checkpoint_engine.load(self.ckpt_list[0],
+                                         map_location=lambda storage,
+                                         loc: storage)
 
         # check checkpoint count is same with saved mp_world_size
         if 'mp_world_size' in sd.keys():
@@ -195,8 +206,8 @@ class SDLoaderBase(ABC):
 
 
 class MegatronSDLoader(SDLoaderBase):
-    def __init__(self, ckpt_list, version):
-        super().__init__(ckpt_list, version)
+    def __init__(self, ckpt_list, version, checkpoint_engine):
+        super().__init__(ckpt_list, version, checkpoint_engine)
         """
         ## Q/K/V data need special processing
         key: transformer.layers.0.attention.query_key_value.weight, shape: torch.Size([3192, 4256])
@@ -433,7 +444,9 @@ class MegatronSDLoader(SDLoaderBase):
             "mlp.dense_h_to_4h.bias"
         ]
 
-        sd = torch.load(ckpt_file_name, map_location=lambda storage, loc: storage)
+        sd = self.checkpoint_engine.load(ckpt_file_name,
+                                         map_location=lambda storage,
+                                         loc: storage)
 
         # partial_key is a sub-string of one key in the sd
         def check_key_exist(partial_key, sd):
