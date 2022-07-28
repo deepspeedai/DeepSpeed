@@ -15,6 +15,7 @@ import json
 import base64
 import time
 import signal
+import psutil
 from collections import defaultdict
 from argparse import ArgumentParser, REMAINDER
 
@@ -86,6 +87,21 @@ def parse_args():
     # rest from the training program
     parser.add_argument('training_script_args', nargs=REMAINDER)
     return parser.parse_args()
+
+
+# Adapted from https://psutil.readthedocs.io/en/latest/#kill-process-tree
+def terminate_process_tree(pid):
+    process = psutil.Process(pid)
+    children = process.children(recursive=True)
+    children.append(process)
+    for child in children:
+        try:
+            child.terminate()
+        except psutil.NoSuchProcess:
+            pass
+    gone, alive = psutil.wait_procs(children, timeout=30)
+    for p in alive:
+        p.kill()
 
 
 def main():
@@ -189,7 +205,7 @@ def main():
         for process in processes:
             logger.info(f"Killing subprocess {process.pid}")
             try:
-                process.kill()
+                terminate_process_tree(process.pid)
             except Exception:
                 pass
         if last_return_code is not None:
