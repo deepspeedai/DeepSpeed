@@ -2,6 +2,7 @@ import pytest
 import deepspeed
 from .common import distributed_test
 from deepspeed.git_version_info import version as ds_version
+import os
 from .simple_model import SimpleModel, args_from_dict
 
 base_ds_config = {
@@ -78,7 +79,7 @@ def test_invalid_world_size():
 
 def test_future_elastic_version():
     ds_config = base_ds_config.copy()
-    ds_config['elasticity']['version'] = '0.2'
+    ds_config['elasticity']['version'] = '0.3'
     with pytest.raises(deepspeed.elasticity.config.ElasticityError):
         deepspeed.elasticity.compute_elastic_config(ds_config=ds_config,
                                                     target_deepspeed_version=ds_version)
@@ -105,6 +106,42 @@ def test_empty_config():
     with pytest.raises(deepspeed.elasticity.config.ElasticityError):
         deepspeed.elasticity.compute_elastic_config(ds_config=ds_config,
                                                     target_deepspeed_version=ds_version)
+
+
+def test_model_parallel_v1_invalid():
+    ds_config = base_ds_config.copy()
+    ds_config["elasticity"]["model_parallel_size"] = 4
+    ds_config["elasticity"]["num_gpus_per_node"] = 8
+    ds_config["elasticity"]["version"] = 0.1
+
+    with pytest.raises(deepspeed.elasticity.config.ElasticityError):
+        deepspeed.elasticity.compute_elastic_config(ds_config=ds_config,
+                                                    target_deepspeed_version=ds_version)
+
+
+def test_model_parallel_v2_invalid():
+    ds_config = base_ds_config.copy()
+    ds_config["elasticity"]["model_parallel_size"] = 16
+    ds_config["elasticity"]["num_gpus_per_node"] = 8
+    ds_config["elasticity"]["version"] = 0.2
+
+    with pytest.raises(deepspeed.elasticity.config.ElasticityError):
+        deepspeed.elasticity.compute_elastic_config(ds_config=ds_config,
+                                                    target_deepspeed_version=ds_version,
+                                                    world_size=16)
+
+
+def test_model_parallel_v2_valid():
+
+    ds_config = base_ds_config.copy()
+    ds_config["elasticity"]["model_parallel_size"] = 4
+    ds_config["elasticity"]["num_gpus_per_node"] = 8
+    ds_config["elasticity"]["version"] = 0.2
+
+    os.environ["WORLD_SIZE"] = str(16)
+    deepspeed.elasticity.compute_elastic_config(ds_config=ds_config,
+                                                target_deepspeed_version=ds_version)
+    os.environ.pop("WORLD_SIZE")
 
 
 @pytest.mark.parametrize('key, value',

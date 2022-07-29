@@ -1048,6 +1048,38 @@ Example of <i>**csv_monitor**</i> configuration:
 }
 ```
 
+### Elastic Training Config (V0.1 and V0.2)
+
+```json
+  "elasticity": {
+    "enabled": true,
+    "max_train_batch_size": "seqlen",
+    "micro_batch_sizes": 8,
+    "min_gpus": 1024,
+    "max_gpus": "fixed_linear",
+    "min_time": "seqlen",
+    "version": 8,
+    "ignore_non_elastic_batch_info": 1024,
+    "num_gpus_per_node": "fixed_linear",
+    "model_parallel_size": MODEL_PARALLEL_SIZE
+  }
+```
+
+| Field | Description                                                                                                                                                                                                                                                                                                   |Default|
+| ------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ----- |
+| `enabled`   | Enables computation of global batch size in elastic training. | false |
+| `max_train_batch_size` | Max acceptable batch size can be used in training. | 2000 |
+| `micro_batch_sizes` | Acceptable micro batch sizes, same as train_micro_batch_size_per_gpu | [2,4,6] |
+| `min_gpus` | Min number of GPUs to search over when computing highly composite batch size in v0.1 and v0.2. | 1 |
+| `max_gpus` | Max number of GPUs to search over when computing highly composite batch size in v0.1 and v0.2. | 10000 |
+| `min_time` |Minimum running time (minutes) before the scheduler will scale again (only used in v0.1). 0 implies it's unknown | 0 |
+| `prefer_large_batch` | When finding a suitable batch size, attempt to find one that is closest to the max train batch size given. | true |
+| `version` | Version of elastic logic to use. | 0.2 |
+| `ignore_non_elastic_batch_info` | Ignore all batch info provided outside the elastic config. To reduce confusion, we require all batch related info to be given in elastic config only. | false |
+| `num_gpus_per_node` | Number of GPUs per node. This information is used by v0.2 to support model-parallel training (only used by v0.2) | 1 |
+| `model_parallel_size` | Tensor or model parallel size (only used by v0.2) | 1 |
+
+
 ### Communication Logging
 
 

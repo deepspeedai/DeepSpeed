@@ -79,6 +79,7 @@ class ElasticityConfig:
 
         self.min_gpus = param_dict.get(MIN_GPUS, MIN_GPUS_DEFAULT)
         self.max_gpus = param_dict.get(MAX_GPUS, MAX_GPUS_DEFAULT)
+
         if self.min_gpus < 1 or self.max_gpus < 1:
             raise ElasticityConfigError(
                 "Elasticity min/max gpus must be > 0, "
@@ -87,6 +88,20 @@ class ElasticityConfig:
             raise ElasticityConfigError(
                 "Elasticity min_gpus cannot be greater than max_gpus, "
                 f"given min_gpus: {self.min_gpus}, max_gpus: {self.max_gpus}")
+
+        self.model_parallel_size = param_dict.get(MODEL_PARLLEL_SIZE,
+                                                  MODEL_PARLLEL_SIZE_DEFAULT)
+        if self.model_parallel_size < 1:
+            raise ElasticityConfigError(
+                "Model-Parallel size cannot be less than 1, "
+                f"given model-parallel size: {self.model_parallel_size}")
+
+        self.num_gpus_per_node = param_dict.get(NUM_GPUS_PER_NODE,
+                                                NUM_GPUS_PER_NODE_DEFAULT)
+        if self.num_gpus_per_node < 1:
+            raise ElasticityConfigError(
+                "Number of GPUs per node cannot be less than 1, "
+                f"given number of GPUs per node: {self.num_gpus_per_node}")
 
         self.min_time = param_dict.get(MIN_TIME, MIN_TIME_DEFAULT)
         if self.min_time < 0:

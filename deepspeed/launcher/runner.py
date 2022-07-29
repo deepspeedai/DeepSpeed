@@ -14,7 +14,8 @@ import argparse
 import subprocess
 import collections
 from copy import deepcopy
-
+import signal
+import time
 import torch.cuda
 
 from .multinode_runner import PDSHRunner, OpenMPIRunner, MVAPICHRunner
@@ -76,6 +77,18 @@ def parse_args(args=None):
                         default=-1,
                         help="Total number of worker nodes to run on, this will use "
                         "the top N hosts from the given hostfile.")
+
+    parser.add_argument("--min_elastic_nodes",
+                        type=int,
+                        default=-1,
+                        help="Minimum number of nodes to run elastic training on. "
+                        "Default is 1 when elastic training is enabled")
+
+    parser.add_argument("--max_elastic_nodes",
+                        type=int,
+                        default=-1,
+                        help="Maximum number of nodes to run elastic training on. "
+                        "Default is num_nodes when elastic training is enabled")
 
     parser.add_argument("--num_gpus",
                         type=int,
@@ -147,6 +160,10 @@ def parse_args(args=None):
         type=str,
         help="Run DeepSpeed autotuner to discover optimal configuration parameters "
         "before running job.")
+
+    parser.add_argument("--elastic_training",
+                        action="store_true",
+                        help="Enable elastic training support in DeepSpeed.")
 
     parser.add_argument("user_script",
                         type=str,
@@ -316,8 +333,26 @@ def run_autotuning(args, active_resources):
         tuner.run_after_tuning()
 
 
+def parse_num_nodes(str_num_nodes: str, elastic_training: bool):
+    node_list = str_num_nodes.split(":")
+
+    if len(node_list) == 1:
+        min_nodes, max_nodes = int(node_list[0]), -1
+    elif len(node_list) == 2 and elastic_training:
+        min_nodes, max_nodes = int(node_list[0]), int(node_list[1])
+    elif len(node_list) == 2 and not elastic_training:
+        raise RuntimeError("MIN:MAX format is only supported in elastic training")
+    else:
+        raise RuntimeError("num_nodes {} is not in MIN:MAX format".format(str_num_nodes))
+
+    return min_nodes, max_nodes
+
+
 def main(args=None):
     args = parse_args(args)
+
+    if args.elastic_training:
+        assert args.master_addr != "", "Master Addr is required when elastic training is enabled"
 
     resource_pool = fetch_hostfile(args.hostfile)
 
@@ -397,6 +432,9 @@ def main(args=None):
             updated_active_resources[hostname] = list(range(args.num_gpus))
         active_resources = updated_active_resources
 
+    if args.elastic_training:
+        assert not args.no_local_rank, "--no_local_rank argument is not supported in Elastic training"
+
     # encode world info as base64 to make it easier to pass via command line
     world_info_base64 = encode_world_info(active_resources)
 
@@ -420,6 +458,10 @@ def main(args=None):
             deepspeed_launch.append("--no_local_rank")
         if args.save_pid:
             deepspeed_launch += ["--save_pid", f"{os.getpid()}"]
+        if args.elastic_training:
+            deepspeed_launch.append("--enable_elastic_training")
+            deepspeed_launch.append(f"--max_elastic_nodes={args.max_elastic_nodes}")
+            deepspeed_launch.append(f"--min_elastic_nodes={args.min_elastic_nodes}")
         cmd = deepspeed_launch + [args.user_script] + args.user_args
     else:
         args.launcher = args.launcher.lower()
@@ -454,10 +496,25 @@ def main(args=None):
                         key, val = var.split('=', maxsplit=1)
                         runner.add_export(key, val)
 
-        cmd = runner.get_cmd(env, active_resources)
+        if args.launcher == PDSH_LAUNCHER:
+            cmd, kill_cmd = runner.get_cmd(env, active_resources)
+        else:
+            cmd = runner.get_cmd(env, active_resources)
 
     logger.info(f"cmd = {' '.join(cmd)}")
     result = subprocess.Popen(cmd, env=env)
+
+    def sigkill_handler(signum, frame):
+        result.send_signal(signal.SIGINT)
+        time.sleep(0.1)
+        result.send_signal(signal.SIGTERM)
+        result_kill = subprocess.Popen(kill_cmd, env=env)
+        result_kill.wait()
+        time.sleep(1)
+        sys.exit(1)
+
+    if args.launcher == PDSH_LAUNCHER:
+        signal.signal(signal.SIGINT, sigkill_handler)
 
     result.wait()
 

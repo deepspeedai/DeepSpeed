@@ -94,8 +94,16 @@ class PDSHRunner(MultiNodeRunner):
             deepspeed_launch.append("--no_local_rank")
         if self.args.save_pid:
             deepspeed_launch += ["--save_pid", f"{os.getpid()}"]
+        if self.args.elastic_training:
+            deepspeed_launch.append("--enable_elastic_training")
+            deepspeed_launch.append(f"--max_elastic_nodes={self.args.max_elastic_nodes}")
+            deepspeed_launch.append(f"--min_elastic_nodes={self.args.min_elastic_nodes}")
+
+        cmd_to_search = [i + "\\" for i in deepspeed_launch[2:6]]
+
+        kill_command = pdsh_cmd_args + ["pkill -f ", " ".join(cmd_to_search)[:-2]]
         return pdsh_cmd_args + deepspeed_launch + [self.user_script
-                                                   ] + self.user_arguments
+                                                   ] + self.user_arguments, kill_command
 
 
 class OpenMPIRunner(MultiNodeRunner):

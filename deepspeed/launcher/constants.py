@@ -7,3 +7,5 @@ OPENMPI_LAUNCHER = 'openmpi'
 
 MVAPICH_LAUNCHER = 'mvapich'
 MVAPICH_TMP_HOSTFILE = '/tmp/deepspeed_mvapich_hostfile'
+
+ELASTIC_TRAINING_ID_DEFAULT = "123456789"
