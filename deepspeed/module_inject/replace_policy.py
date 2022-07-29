@@ -4,6 +4,8 @@ import torch
 from torch.nn.parameter import Parameter
 from packaging import version as pkg_version
 
+supported_models = {None}
+
 
 class DSPolicy(ABC):
     def __init__(self,
@@ -329,6 +331,9 @@ class BLOOMLayerPolicy(DSPolicy):
         try:
             import transformers
             BLOOMLayerPolicy._orig_layer_class = transformers.models.bloom.modeling_bloom.BloomBlock
+            global supported_models
+            supported_models.update(
+                {transformers.models.bloom.modeling_bloom.BloomModel})
         except:
             BLOOMLayerPolicy._orig_layer_class = None
 
