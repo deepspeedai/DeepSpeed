@@ -110,6 +110,7 @@ class OpBuilder(ABC):
     def __init__(self, name):
         self.name = name
         self.jit_mode = False
+        self.error_log = None
 
     @abstractmethod
     def absolute_name(self):
@@ -439,6 +440,7 @@ class OpBuilder(ABC):
         return valid
 
     def warning(self, msg):
+        self.error_log = f"{msg}"
         print(f"{WARNING} {msg}")
 
     def deepspeed_src_path(self, code_path):
@@ -471,7 +473,7 @@ class OpBuilder(ABC):
     def jit_load(self, verbose=True):
         if not self.is_compatible(verbose):
             raise RuntimeError(
-                f"Unable to JIT load the {self.name} op due to it not being compatible due to hardware/software issue."
+                f"Unable to JIT load the {self.name} op due to it not being compatible due to hardware/software issue. {self.error_log}"
             )
         try:
             import ninja  # noqa: F401
