@@ -163,6 +163,11 @@ def get_fp16_master_weights_and_grads_enabled(param_dict):
         return False
 
 
+def get_fp16_auto_cast(param_dict):
+    if get_fp16_enabled(param_dict):
+        return get_scalar_param(param_dict[FP16], FP16_AUTO_CAST, FP16_AUTO_CAST_DEFAULT)
+
+
 def get_loss_scale(param_dict):
     if get_fp16_enabled(param_dict):
         return get_scalar_param(param_dict[FP16],
@@ -820,6 +825,7 @@ class DeepSpeedConfig(object):
 
         self.gradient_clipping = get_gradient_clipping(param_dict)
         self.fp16_enabled = get_fp16_enabled(param_dict)
+        self.fp16_auto_cast = get_fp16_auto_cast(param_dict)
         self.bfloat16_enabled = get_bfloat16_enabled(param_dict)
         assert not (self.fp16_enabled and self.bfloat16_enabled), 'bfloat16 and fp16 modes cannot be simultaneously enabled'
         self.fp16_master_weights_and_gradients = get_fp16_master_weights_and_grads_enabled(

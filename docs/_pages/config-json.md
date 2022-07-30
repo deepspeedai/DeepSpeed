@@ -219,6 +219,7 @@ Example of <i>**scheduler**</i>
 ```json
 "fp16": {
     "enabled": true,
+    "auto_cast": false,
     "loss_scale": 0,
     "initial_scale_power": 32,
     "loss_scale_window": 1000,
@@ -232,6 +233,12 @@ Example of <i>**scheduler**</i>
 | Description                                                                                 | Default |
 | ------------------------------------------------------------------------------------------- | ------- |
 | <i>**enabled**</i> is a **fp16** parameter indicating whether or not FP16 training enabled. | `false` |
+
+<i>**fp16:auto_cast**</i>: [boolean]
+
+| Description                                                  | Default |
+| -------------------------------------------------------------| ------- |
+| <i>**auto_cast**</i> automatically casts inputs to **fp16**  | `false` |
 
 <i>**fp16:loss_scale**</i>: [float]
 

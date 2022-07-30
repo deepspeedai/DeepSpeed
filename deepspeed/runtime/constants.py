@@ -133,6 +133,7 @@ FP16_FORMAT = '''
 FP16 parameters should be of the format:
 "fp16": {
   "enabled": true,
+  "auto_cast": false,
   "loss_scale": 0,
   "initial_scale_power": 32,
   "loss_scale_window": 1000,
@@ -148,6 +149,9 @@ FP16_ENABLED_DEFAULT = False
 # FP16 loss scale, zero means using dynamic scaling
 FP16_LOSS_SCALE = "loss_scale"
 FP16_LOSS_SCALE_DEFAULT = 0
+
+FP16_AUTO_CAST = "auto_cast"
+FP16_AUTO_CAST_DEFAULT = False
 
 # FP16 initial dynamic scale loss power
 FP16_INITIAL_SCALE_POWER = "initial_scale_power"
