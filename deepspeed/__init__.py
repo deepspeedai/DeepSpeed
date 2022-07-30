@@ -115,6 +115,9 @@ def initialize(args=None,
         __git_branch__),
              ranks=[0])
 
+    # Disable zero.Init context if it's currently enabled
+    zero.partition_parameters.shutdown_init_context()
+
     assert model is not None, "deepspeed.initialize requires a model"
 
     if not isinstance(model, PipelineModule):

@@ -35,6 +35,7 @@ from ..swap_tensor.partitioned_param_swapper import AsyncPartitionedParameterSwa
 
 param_count = 0
 partitioned_param_data_shape = [0]
+zero_init_enabled = False
 
 
 def _dist_allgather_fn(input_tensor: Tensor, output_tensor: Tensor, group=None):
@@ -258,8 +259,10 @@ class InsertPostInitMethodToModuleSubClasses(object):
         assert self.dtype in [torch.half, torch.bfloat16, torch.float], f"Invalid data type {self.dtype}, allowed values are [torch.half, torch.bfloat16, torch.float]"
 
     def __enter__(self):
+        global zero_init_enabled
         if not self.enabled:
             return
+        zero_init_enabled = True
 
         def apply_with_gather(orig_module_apply_fn: Callable) -> Callable:
             """many models make use of child modules like Linear or Embedding which
@@ -404,28 +407,7 @@ class InsertPostInitMethodToModuleSubClasses(object):
         if not self.enabled:
             return
 
-        def _disable_class(cls):
-            cls.__init__ = cls._old_init
-
-        # Replace .__init__() for all existing subclasses of torch.nn.Module
-        for subclass in get_all_subclasses(torch.nn.modules.module.Module):
-            _disable_class(subclass)
-
-        # putting methods back the way we found them
-        torch.nn.modules.module.Module.__init_subclass__ = torch.nn.modules.module.Module._old_init_subclass
-        torch.nn.modules.module.Module.apply = torch.nn.modules.module.Module._old_apply
-
-        torch.Tensor.__new__ = torch.Tensor.__old_new__
-        torch.empty = _orig_torch_empty
-        torch.zeros = _orig_torch_zeros
-        torch.ones = _orig_torch_ones
-        torch.full = _orig_torch_full
-
-        # un doing it here will undo it during training
-        # if self.mem_efficient_linear:
-        #    torch.nn.functional.linear = self.linear_bk
-        #        if self.mem_efficient_linear:
-        #            torch.nn.functional.linear = self.linear_bk
+        shutdown_init_context()
 
         if dist.get_rank() == 0:
             logger.info("finished initializing model with %.2fB parameters",
@@ -452,6 +434,38 @@ class InsertPostInitMethodToModuleSubClasses(object):
                 self.dtype = torch.float
         else:
             self.dtype = dtype or torch.half
+
+
+def shutdown_init_context():
+    global zero_init_enabled
+
+    if not zero_init_enabled:
+        return
+
+    def _disable_class(cls):
+        cls.__init__ = cls._old_init
+
+    # Replace .__init__() for all existing subclasses of torch.nn.Module
+    for subclass in get_all_subclasses(torch.nn.modules.module.Module):
+        _disable_class(subclass)
+
+    # putting methods back the way we found them
+    torch.nn.modules.module.Module.__init_subclass__ = torch.nn.modules.module.Module._old_init_subclass
+    torch.nn.modules.module.Module.apply = torch.nn.modules.module.Module._old_apply
+
+    torch.Tensor.__new__ = torch.Tensor.__old_new__
+    torch.empty = _orig_torch_empty
+    torch.zeros = _orig_torch_zeros
+    torch.ones = _orig_torch_ones
+    torch.full = _orig_torch_full
+
+    # un doing it here will undo it during training
+    # if self.mem_efficient_linear:
+    #    torch.nn.functional.linear = self.linear_bk
+    #        if self.mem_efficient_linear:
+    #            torch.nn.functional.linear = self.linear_bk
+
+    zero_init_enabled = False
 
 
 class AllGatherHandle:

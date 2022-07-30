@@ -360,3 +360,30 @@ def test_subclass_param_init():
         assert torch.equal(model.param, ones + 1)
         assert torch.equal(model.param_pa, ones + 2)
         assert torch.equal(model.param_grandpa, ones + 3)
+
+
+@distributed_test(world_size=2)
+def test_ds_init_w_zinit():
+    ds_config = {
+        "train_batch_size": 2,
+        "steps_per_print": 1,
+        "optimizer": {
+            "type": "Adam",
+            "params": {
+                "lr": 0.00015
+            }
+        }
+    }
+
+    class Model(torch.nn.Module):
+        def __init__(self):
+            super(Model, self).__init__()
+            self.linear = torch.nn.Linear(4, 4)
+
+        def magic(self):
+            return 42
+
+    with deepspeed.zero.Init():
+        model = Model()
+        engine, *_ = deepspeed.initialize(model=model, config=ds_config, model_parameters=model.parameters())
+    assert engine.magic() == 42
