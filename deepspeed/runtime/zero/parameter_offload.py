@@ -3,6 +3,7 @@
 Licensed under the MIT license.
 """
 
+import sys
 import torch
 from torch.cuda import Stream
 from collections import OrderedDict
@@ -173,10 +174,11 @@ class DeepSpeedZeRoOffload(object):
                  max_reuse_distance=1000000000,
                  max_live_parameters=1000000000,
                  param_persistence_threshold=100000,
+                 model_persistence_threshold=sys.maxsize,
                  offload_param_config=None,
                  mpu=None):
 
-        see_memory_usage("TensorOffload initialize beginning", force=True)
+        see_memory_usage("DeepSpeedZeRoOffload initialize [begin]", force=True)
 
         print_rank_0(f"initialized {__class__.__name__} with args: {locals()}",
                      force=False)
@@ -196,8 +198,11 @@ class DeepSpeedZeRoOffload(object):
 
         _inject_parameters(module, ZeROOrderedDict)
 
-        self.persistence_threshold = int(param_persistence_threshold)
-        self.persistent_parameters = self.mark_persistent_parameters()
+        self.param_numel_persistence_threshold = int(param_persistence_threshold)
+        self.model_persistence_threshold = int(model_persistence_threshold)
+        self.persistent_parameters = self.mark_persistent_parameters(
+            self.param_numel_persistence_threshold,
+            self.model_persistence_threshold)
 
         self.param_coordinators = {}
         self._prefetch_bucket_sz = int(prefetch_bucket_size)
@@ -212,6 +217,8 @@ class DeepSpeedZeRoOffload(object):
         print_rank_0(
             f'Created module hooks: forward = {len(self.forward_hooks)}, backward = {len(self.backward_hooks)}',
             force=False)
+
+        see_memory_usage("DeepSpeedZeRoOffload initialize [end]", force=True)
 
     @instrument_w_nvtx
     def partition_all_parameters(self):
@@ -291,12 +298,15 @@ class DeepSpeedZeRoOffload(object):
         global FWD_MODULE_STACK
         FWD_MODULE_STACK.append(self.module)
 
-    def mark_persistent_parameters(self):
+    def mark_persistent_parameters(self, param_threshold, model_threshold):
         persistent_params = []
         total_persistent_parameters = 0
         params_count = 0
         for _, param in self.module.named_parameters(recurse=True):
-            if param.ds_numel < self.persistence_threshold:
+            if param.ds_numel + total_persistent_parameters > model_threshold:
+                continue
+
+            if param.ds_numel < param_threshold:
                 params_count += 1
                 param.ds_persist = True
                 persistent_params.append(param)
@@ -304,7 +314,7 @@ class DeepSpeedZeRoOffload(object):
 
         print_rank_0(
             f"Parameter Offload: Total persistent parameters: {total_persistent_parameters} in {params_count} params",
-            force=False)
+            force=True)
 
         return persistent_params
 

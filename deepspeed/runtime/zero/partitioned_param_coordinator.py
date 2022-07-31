@@ -400,6 +400,16 @@ class PartitionedParameterCoordinator:
                 assert param.ds_status == ZeroParamStatus.INFLIGHT, param.ds_summary()
                 self.__inflight_param_registry[param] = handle
 
+            # Release swap buffers for persisted params on nvme since they will never be partitioned or evicted from GPU
+            swap_persisted_params = [
+                p for p in partitioned_params
+                if p.ds_persist and p.ds_tensor.final_location == OffloadDeviceEnum.nvme
+            ]
+            if swap_persisted_params:
+                swap_persisted_params[
+                    0].nvme_swapper.remove_partition_and_release_buffers(
+                        swap_persisted_params)
+
     @instrument_w_nvtx
     def __release_param(self, param: Parameter) -> None:
         if param.ds_status == ZeroParamStatus.AVAILABLE and not param.ds_active_sub_modules:

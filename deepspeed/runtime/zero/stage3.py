@@ -3,6 +3,7 @@
 Licensed under the MIT license.
 """
 
+import sys
 import gc
 import collections
 from typing import Deque, Dict, Tuple
@@ -88,6 +89,7 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
                  max_reuse_distance=1000000000,
                  max_live_parameters=1000000000,
                  param_persistence_threshold=100000,
+                 model_persistence_threshold=sys.maxsize,
                  dp_process_group=None,
                  reduce_scatter=True,
                  overlap_comm=False,
@@ -146,15 +148,18 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
         self.params_in_nvme_and_cpu = False
         self.max_params_in_cpu = 0
 
-        self.parameter_offload = DeepSpeedZeRoOffload(module,
-                                                      timers,
-                                                      ds_config,
-                                                      overlap_comm,
-                                                      prefetch_bucket_size,
-                                                      max_reuse_distance,
-                                                      max_live_parameters,
-                                                      param_persistence_threshold,
-                                                      offload_param_config)
+        self.parameter_offload = DeepSpeedZeRoOffload(
+            module=module,
+            timers=timers,
+            ds_config=ds_config,
+            overlap_comm=overlap_comm,
+            prefetch_bucket_size=prefetch_bucket_size,
+            max_reuse_distance=max_reuse_distance,
+            max_live_parameters=max_live_parameters,
+            param_persistence_threshold=param_persistence_threshold,
+            model_persistence_threshold=model_persistence_threshold,
+            offload_param_config=offload_optimizer_config)
+
         self.persistent_parameters = self.parameter_offload.persistent_parameters
         self._configure_offloading(offload_optimizer_config, offload_param_config)
 

@@ -4,6 +4,7 @@ Licensed under the MIT license.
 """
 
 from pydantic import Field, validator
+import sys
 from typing import Optional
 from enum import Enum
 from deepspeed.runtime.config_utils import get_scalar_param, DeepSpeedConfigModel
@@ -114,6 +115,9 @@ class DeepSpeedZeroConfig(DeepSpeedConfigModel):
     param_persistence_threshold: int = Field(1e5,
                                              ge=0,
                                              alias="stage3_param_persistence_threshold")
+    model_persistence_threshold: int = Field(sys.maxsize,
+                                             ge=0,
+                                             alias="stage3_model_persistence_threshold")
     max_live_parameters: int = Field(1e9, ge=0, alias="stage3_max_live_parameters")
     max_reuse_distance: int = Field(1e9, ge=0, alias="stage3_max_reuse_distance")
     gather_16bit_weights_on_model_save: bool = Field(

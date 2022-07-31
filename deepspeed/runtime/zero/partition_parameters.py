@@ -683,9 +683,13 @@ class Init(InsertPostInitMethodToModuleSubClasses):
 
         # Remote device is the device where parameter partitions are stored
         # It can be same as local_device or it could be CPU or NVMe.
-        self.remote_device = self.local_device if remote_device is None else remote_device
-        self.pin_memory = pin_memory if (self.remote_device
-                                         == OffloadDeviceEnum.cpu) else False
+        self.remote_device = self.local_device if remote_device in [
+            None,
+            OffloadDeviceEnum.none
+        ] else remote_device
+        self.pin_memory = pin_memory if (
+            self.remote_device in [OffloadDeviceEnum.cpu,
+                                   OffloadDeviceEnum.nvme]) else False
 
         # Enable fp16 param swapping to NVMe
         if self.remote_device == OffloadDeviceEnum.nvme:
