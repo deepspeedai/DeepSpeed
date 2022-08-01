@@ -7,7 +7,7 @@ from deepspeed.runtime.pipe.topology import PipelineParallelGrid as Grid
 from deepspeed.runtime.pipe.topology import ProcessTopology as Topo
 from deepspeed.runtime.pipe.topology import _prime_factors
 
-from .common import distributed_test
+from tests.unit.common import DistributedTest
 
 
 def test_topology_2d():
@@ -157,51 +157,51 @@ def test_topology_comm_list():
     assert topo.get_axis_comm_lists('jeff') == []
 
 
-@distributed_test(world_size=4)
-def test_grid_pipe_data():
-    topo = Topo(axes=['pipe', 'data'], dims=[2, 2])
-    grid = Grid(topology=topo)
+class TestDistributedTopology(DistributedTest):
+    world_size = 4
 
-    assert grid._is_grid_valid()
+    def test_grid_pipe_data(self):
+        topo = Topo(axes=['pipe', 'data'], dims=[2, 2])
+        grid = Grid(topology=topo)
 
-    rank = dist.get_rank()
+        assert grid._is_grid_valid()
 
-    assert grid.is_first_stage == (grid.get_stage_id() == 0)
-    assert grid.is_last_stage == (
-        grid.get_stage_id() == grid.get_pipe_parallel_world_size() - 1)
+        rank = dist.get_rank()
 
-    # Test collectives along the pipeline parallel process groups
-    rank_tensor = torch.LongTensor(data=[rank]).cuda()
-    dist.all_reduce(rank_tensor, group=grid.get_pipe_parallel_group())
-    pipe_group = grid.pp_group
-    assert torch.all(rank_tensor == sum(pipe_group))
+        assert grid.is_first_stage == (grid.get_stage_id() == 0)
+        assert grid.is_last_stage == (
+            grid.get_stage_id() == grid.get_pipe_parallel_world_size() - 1)
 
-    # Test collectives along the data parallel process groups
-    rank_tensor = torch.LongTensor(data=[rank]).cuda()
-    dist.all_reduce(rank_tensor, group=grid.get_data_parallel_group())
-    data_group = grid.dp_group
-    assert torch.all(rank_tensor == sum(data_group))
+        # Test collectives along the pipeline parallel process groups
+        rank_tensor = torch.LongTensor(data=[rank]).cuda()
+        dist.all_reduce(rank_tensor, group=grid.get_pipe_parallel_group())
+        pipe_group = grid.pp_group
+        assert torch.all(rank_tensor == sum(pipe_group))
 
+        # Test collectives along the data parallel process groups
+        rank_tensor = torch.LongTensor(data=[rank]).cuda()
+        dist.all_reduce(rank_tensor, group=grid.get_data_parallel_group())
+        data_group = grid.dp_group
+        assert torch.all(rank_tensor == sum(data_group))
 
-@distributed_test(world_size=4)
-def test_stage_to_global():
-    topo = Topo(axes=['pipe', 'data'], dims=[2, 2])
-    grid = Grid(topology=topo)
+    def test_stage_to_global(self):
+        topo = Topo(axes=['pipe', 'data'], dims=[2, 2])
+        grid = Grid(topology=topo)
 
-    assert grid._is_grid_valid()
+        assert grid._is_grid_valid()
 
-    assert grid.stage_to_global(stage_id=0, data=0) == 0
-    assert grid.stage_to_global(stage_id=0, data=1) == 1
-    assert grid.stage_to_global(stage_id=1, data=0) == 2
-    assert grid.stage_to_global(stage_id=1, data=1) == 3
+        assert grid.stage_to_global(stage_id=0, data=0) == 0
+        assert grid.stage_to_global(stage_id=0, data=1) == 1
+        assert grid.stage_to_global(stage_id=1, data=0) == 2
+        assert grid.stage_to_global(stage_id=1, data=1) == 3
 
-    me = topo.get_coord(rank=dist.get_rank())
-    if me.data == 0:
-        assert grid.stage_to_global(stage_id=0) == 0
-        assert grid.stage_to_global(stage_id=1) == 2
-    else:
-        assert grid.stage_to_global(stage_id=0) == 1
-        assert grid.stage_to_global(stage_id=1) == 3
+        me = topo.get_coord(rank=dist.get_rank())
+        if me.data == 0:
+            assert grid.stage_to_global(stage_id=0) == 0
+            assert grid.stage_to_global(stage_id=1) == 2
+        else:
+            assert grid.stage_to_global(stage_id=0) == 1
+            assert grid.stage_to_global(stage_id=1) == 3
 
 
 def test_primes():

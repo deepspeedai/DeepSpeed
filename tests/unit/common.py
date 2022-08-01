@@ -1,15 +1,17 @@
 import os
 import time
+import inspect
+from abc import ABC
+from pathlib import Path
 
 import torch
+import torch.multiprocessing as mp
+import deepspeed
 import deepspeed.comm as dist
 from torch.multiprocessing import Process
 
-import deepspeed
-
 import pytest
-
-from pathlib import Path
+from _pytest.outcomes import Skipped
 
 # Worker timeout *after* the first worker has completed.
 DEEPSPEED_UNIT_WORKER_TIMEOUT = 120
@@ -58,6 +60,108 @@ def set_cuda_visibile():
     dev_id_list = cuda_visible.split(",")
     dev_id_list = dev_id_list[xdist_worker_id:] + dev_id_list[:xdist_worker_id]
     os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(dev_id_list)
+
+
+class DistributedTest(ABC):
+    is_dist_test = True
+    world_size = 2
+    backend = "nccl"
+
+    def _run_test(self, request):
+        self.current_test = self._get_current_test_func(request)
+        self.test_kwargs = self._get_test_kwargs(request)
+        if isinstance(self.world_size, int):
+            self.world_size = [self.world_size]
+        for procs in self.world_size:
+            self._launch_procs(procs)
+            time.sleep(0.5)
+
+    def _get_current_test_func(self, request):
+        # DistributedTest subclasses may have multiple test methods
+        func_name = request.function.__name__
+        return getattr(self, func_name)
+
+    def _get_test_kwargs(self, request):
+        # Grab fixture / parametrize kwargs from pytest request object
+        test_kwargs = {}
+        params = inspect.getfullargspec(self.current_test).args
+        params.remove("self")
+        for p in params:
+            test_kwargs[p] = request.getfixturevalue(p)
+        return test_kwargs
+
+    def _launch_procs(self, num_procs):
+        mp.set_start_method('forkserver', force=True)
+        skip_msg = mp.Queue()  # Allows forked processes to share pytest.skip reason
+        processes = []
+        for local_rank in range(num_procs):
+            p = Process(target=self._dist_init, args=(local_rank, num_procs, skip_msg))
+            p.start()
+            processes.append(p)
+
+        # Now loop and wait for a test to complete. The spin-wait here isn't a big
+        # deal because the number of processes will be O(#GPUs) << O(#CPUs).
+        any_done = False
+        while not any_done:
+            for p in processes:
+                if not p.is_alive():
+                    any_done = True
+                    break
+
+        # Wait for all other processes to complete
+        for p in processes:
+            p.join(DEEPSPEED_UNIT_WORKER_TIMEOUT)
+
+        failed = [(rank, p) for rank, p in enumerate(processes) if p.exitcode != 0]
+        for rank, p in failed:
+            # If it still hasn't terminated, kill it because it hung.
+            if p.exitcode is None:
+                p.terminate()
+                pytest.fail(f'Worker {rank} hung.', pytrace=False)
+            if p.exitcode < 0:
+                pytest.fail(f'Worker {rank} killed by signal {-p.exitcode}',
+                            pytrace=False)
+            if p.exitcode > 0:
+                pytest.fail(f'Worker {rank} exited with code {p.exitcode}',
+                            pytrace=False)
+
+        if not skip_msg.empty():
+            # This assumed all skip messages are the same, it may be useful to
+            # add a check here to assert all exit messages are equal
+            pytest.skip(skip_msg.get())
+
+    def _dist_init(self, local_rank, num_procs, skip_msg):
+        """Initialize deepspeed.comm and execute the user function. """
+        os.environ['MASTER_ADDR'] = '127.0.0.1'
+        os.environ['MASTER_PORT'] = get_master_port()
+        os.environ['LOCAL_RANK'] = str(local_rank)
+        # NOTE: unit tests don't support multi-node so local_rank == global rank
+        os.environ['RANK'] = str(local_rank)
+        os.environ['WORLD_SIZE'] = str(num_procs)
+
+        # turn off NCCL logging if set
+        os.environ.pop('NCCL_DEBUG', None)
+
+        set_cuda_visibile()
+
+        deepspeed.init_distributed(dist_backend=self.backend)
+        dist.barrier()
+
+        if torch.cuda.is_available():
+            torch.cuda.set_device(local_rank)
+
+        try:
+            self.current_test(**self.test_kwargs)
+        except BaseException as e:
+            if isinstance(e, Skipped):
+                skip_msg.put(e.msg)
+            else:
+                raise e
+
+        # make sure all ranks finish at the same time
+        dist.barrier()
+        # tear down after test completes
+        dist.destroy_process_group()
 
 
 def distributed_test(world_size=2, backend='nccl'):

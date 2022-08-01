@@ -4,8 +4,8 @@ import pytest
 
 from deepspeed.ops.adam import FusedAdam
 from deepspeed.ops.adam import DeepSpeedCPUAdam
-from .common import distributed_test
-from .simple_model import SimpleModel, args_from_dict
+from tests.unit.common import DistributedTest
+from tests.unit.simple_model import SimpleModel
 
 # yapf: disable
 #'optimizer, zero_offload, torch_adam, adam_w_mode, resulting_optimizer
@@ -29,38 +29,37 @@ adam_configs = [["AdamW", False, False, False, (FusedAdam, True)],
 @pytest.mark.parametrize(
     'optimizer, zero_offload, torch_adam, adam_w_mode, resulting_optimizer',
     adam_configs)
-def test_adam_configs(tmpdir,
-                      optimizer,
-                      zero_offload,
-                      torch_adam,
-                      adam_w_mode,
-                      resulting_optimizer):
-    config_dict = {
-        "train_batch_size": 2,
-        "steps_per_print": 1,
-        "optimizer": {
-            "type": optimizer,
-            "params": {
-                "lr": 0.00015,
-                "torch_adam": torch_adam,
-                "adam_w_mode": adam_w_mode
-            }
-        },
-        "gradient_clipping": 1.0,
-        "fp16": {
-            "enabled": True
-        },
-        "zero_optimization": {
-            "stage": 2,
-            "cpu_offload": zero_offload
-        }
-    }
-    args = args_from_dict(tmpdir, config_dict)
+class TestAdamConfigs(DistributedTest):
+    world_size = 1
 
-    @distributed_test(world_size=[1])
-    def helper(args):
+    def test(self,
+             optimizer,
+             zero_offload,
+             torch_adam,
+             adam_w_mode,
+             resulting_optimizer):
+        config_dict = {
+            "train_batch_size": 2,
+            "steps_per_print": 1,
+            "optimizer": {
+                "type": optimizer,
+                "params": {
+                    "lr": 0.00015,
+                    "torch_adam": torch_adam,
+                    "adam_w_mode": adam_w_mode
+                }
+            },
+            "gradient_clipping": 1.0,
+            "fp16": {
+                "enabled": True
+            },
+            "zero_optimization": {
+                "stage": 2,
+                "cpu_offload": zero_offload
+            }
+        }
         model = SimpleModel(10)
-        model, _, _, _ = deepspeed.initialize(args=args,
+        model, _, _, _ = deepspeed.initialize(config=config_dict,
                                               model=model,
                                               model_parameters=model.parameters())
         # get base optimizer under zero
@@ -69,5 +68,3 @@ def test_adam_configs(tmpdir,
         assert isinstance(ds_optimizer, opt_class)
         if adam_w_mode in [True, False]:
             assert ds_optimizer.adam_w_mode == adam_w_mode
-
-    helper(args)

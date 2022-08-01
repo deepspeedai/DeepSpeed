@@ -43,3 +43,14 @@ def check_environment(pytestconfig):
         pytest.exit(
             f"expected cuda version {expected_cuda_version} did not match found cuda version {torch.version.cuda}",
             returncode=2)
+
+
+# Override of pytest "runtest" for DistributedTest class
+# This hook is run before the default pytest_runtest_call
+@pytest.hookimpl(tryfirst=True)
+def pytest_runtest_call(item):
+    # We want to use our own launching function for distributed tests
+    if getattr(item.cls, "is_dist_test", False):
+        dist_test_class = item.cls()
+        dist_test_class._run_test(item._request)
+        item.runtest = lambda: True  # Dummy function so test is not run twice

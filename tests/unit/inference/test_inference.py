@@ -5,13 +5,15 @@ import pytest
 import itertools
 import deepspeed
 from deepspeed.git_version_info import torch_info
-from .common import distributed_test
+from tests.unit.common import DistributedTest
 from packaging import version as pkg_version
 from deepspeed.ops.op_builder import OpBuilder
 from transformers import pipeline, AutoModelForCausalLM, AutoTokenizer
 from huggingface_hub import HfApi
 
 
+# Fixture avoids problems with missing imports when pytest collects tests when
+# running non-inference tests
 @pytest.fixture(scope="module", autouse=True)
 def lm_eval_imports():
     global lm_eval
@@ -159,29 +161,41 @@ def inf_kwargs(model_w_task):
         return {}
 
 
+def fill_mask_assert(x, y):
+    return set(res["token_str"] for res in x) == set(res["token_str"] for res in y)
+
+
+def question_answering_assert(x, y):
+    return x["answer"] == y["answer"]
+
+
+def text_classification_assert(x, y):
+    return set(res["label"] for res in x) == set(res["label"] for res in y)
+
+
+def token_classification_assert(x, y):
+    return set(ent["word"] for ent in x) == set(ent["word"] for ent in y)
+
+
+def text_generation_assert(x, y):
+    return set(res["generated_text"] for res in x) == set(res["generated_text"]
+                                                          for res in y)
+
+
 @pytest.fixture
 def assert_fn(model_w_task):
     model, task = model_w_task
-    if task == "fill-mask":
-        return lambda x, y: set(res["token_str"] for res in x) == set(
-            res["token_str"] for res in y
-        )
-    elif task == "question-answering":
-        return lambda x, y: x["answer"] == y["answer"]
-    elif task == "text-classification":
-        return lambda x, y: set(res["label"] for res in x) == set(
-            res["label"] for res in y
-        )
-    elif task == "token-classification":
-        return lambda x, y: set(ent["word"] for ent in x) == set(
-            ent["word"] for ent in y
-        )
-    elif task == "text-generation":
-        return lambda x, y: set(res["generated_text"] for res in x) == set(
-            res["generated_text"] for res in y
-        )
-    else:
+    assert_fn_dict = {
+        "fill-mask": fill_mask_assert,
+        "question-answering": question_answering_assert,
+        "text-classification": text_classification_assert,
+        "token-classification": token_classification_assert,
+        "text-generation": text_generation_assert,
+    }
+    assert_fn = assert_fn_dict.get(task, None)
+    if assert_fn is None:
         NotImplementedError(f'assert_fn for task "{task}" is not implemented')
+    return assert_fn
 
 
 """
@@ -190,22 +204,23 @@ Tests
 
 
 @pytest.mark.inference
-def test_model_task(
-    model_w_task,
-    dtype,
-    enable_cuda_graph,
-    query,
-    inf_kwargs,
-    assert_fn,
-    invalid_model_task_config,
-):
-    if invalid_model_task_config:
-        pytest.skip(invalid_model_task_config)
+class TestModelTask(DistributedTest):
+    world_size = 1
 
-    model, task = model_w_task
+    def test(
+        self,
+        model_w_task,
+        dtype,
+        enable_cuda_graph,
+        query,
+        inf_kwargs,
+        assert_fn,
+        invalid_model_task_config,
+    ):
+        if invalid_model_task_config:
+            pytest.skip(invalid_model_task_config)
 
-    @distributed_test(world_size=[1])
-    def _go():
+        model, task = model_w_task
         local_rank = int(os.getenv("LOCAL_RANK", "0"))
 
         if "gpt-j-6B" in model and dtype == torch.half:
@@ -225,8 +240,8 @@ def test_model_task(
                 pipe.model.half()
 
         # Warm-up queries for perf measurement
-        for i in range(10):
-            _ = pipe(query, **inf_kwargs)
+        #for i in range(10):
+        #    _ = pipe(query, **inf_kwargs)
         torch.cuda.synchronize()
         start = time.time()
         bs_output = pipe(query, **inf_kwargs)
@@ -242,8 +257,8 @@ def test_model_task(
             enable_cuda_graph=enable_cuda_graph,
         )
         # Warm-up queries for perf measurement
-        for i in range(10):
-            _ = pipe(query, **inf_kwargs)
+        #for i in range(10):
+        #    _ = pipe(query, **inf_kwargs)
         torch.cuda.synchronize()
         start = time.time()
         ds_output = pipe(query, **inf_kwargs)
@@ -257,8 +272,6 @@ def test_model_task(
         # inference request, we just want to check that performance isn't terrible
         #assert ds_time <= (bs_time * 1.1)
         assert assert_fn(bs_output, ds_output)
-
-    _go()
 
 
 @pytest.mark.nightly
@@ -274,9 +287,10 @@ def test_model_task(
     ),
 )
 @pytest.mark.parametrize("task", ["lambada"])
-def test_lm_correctness(model_family, model_name, task):
-    @distributed_test(world_size=[1])
-    def _go():
+class TestLMCorrectness(DistributedTest):
+    world_size = 1
+
+    def test(self, model_family, model_name, task):
         local_rank = os.getenv("LOCAL_RANK", "0")
         device = torch.device(f"cuda:{local_rank}")
         dtype = torch.float
@@ -320,5 +334,3 @@ def test_lm_correctness(model_family, model_name, task):
                        ds_output["results"][task]["ppl"])
         #assert ds_time <= bs_time
         assert ppl_diff < 0.01
-
-    _go()

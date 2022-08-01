@@ -2,8 +2,8 @@ import torch
 import pytest
 import deepspeed
 from deepspeed.profiling.flops_profiler import get_model_profile
-from .simple_model import SimpleModel, random_dataloader, args_from_dict
-from .common import distributed_test
+from tests.unit.simple_model import SimpleModel, random_dataloader
+from tests.unit.common import DistributedTest
 
 TORCH_MAJOR = int(torch.__version__.split('.')[0])
 TORCH_MINOR = int(torch.__version__.split('.')[1])
@@ -19,36 +19,36 @@ def within_range(val, target, tolerance):
 TOLERANCE = 0.05
 
 
-def test_flops_profiler_in_ds_training(tmpdir):
-    config_dict = {
-        "train_batch_size": 1,
-        "steps_per_print": 1,
-        "optimizer": {
-            "type": "Adam",
-            "params": {
-                "lr": 0.001,
-            }
-        },
-        "zero_optimization": {
-            "stage": 0
-        },
-        "fp16": {
-            "enabled": True,
-        },
-        "flops_profiler": {
-            "enabled": True,
-            "step": 1,
-            "module_depth": -1,
-            "top_modules": 3,
-        },
-    }
-    args = args_from_dict(tmpdir, config_dict)
-    hidden_dim = 10
-    model = SimpleModel(hidden_dim, empty_grad=False)
+class TestFlopsProfilerInDSTraining(DistributedTest):
+    world_size = 1
 
-    @distributed_test(world_size=[1])
-    def _test_flops_profiler_in_ds_training(args, model, hidden_dim):
-        model, _, _, _ = deepspeed.initialize(args=args,
+    def test(self):
+        config_dict = {
+            "train_batch_size": 1,
+            "steps_per_print": 1,
+            "optimizer": {
+                "type": "Adam",
+                "params": {
+                    "lr": 0.001,
+                }
+            },
+            "zero_optimization": {
+                "stage": 0
+            },
+            "fp16": {
+                "enabled": True,
+            },
+            "flops_profiler": {
+                "enabled": True,
+                "step": 1,
+                "module_depth": -1,
+                "top_modules": 3,
+            },
+        }
+        hidden_dim = 10
+        model = SimpleModel(hidden_dim, empty_grad=False)
+
+        model, _, _, _ = deepspeed.initialize(config=config_dict,
                                             model=model,
                                             model_parameters=model.parameters())
 
@@ -64,8 +64,6 @@ def test_flops_profiler_in_ds_training(tmpdir):
             if n == 3: break
         assert within_range(model.flops_profiler.flops, 200, tolerance=TOLERANCE)
         assert model.flops_profiler.params == 110
-
-    _test_flops_profiler_in_ds_training(args, model, hidden_dim)
 
 
 class LeNet5(torch.nn.Module):
