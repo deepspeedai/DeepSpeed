@@ -1,4 +1,3 @@
-import torch
 from .builder import CUDAOpBuilder, installed_cuda_version
 
 
@@ -14,6 +13,13 @@ class InferenceBuilder(CUDAOpBuilder):
         return f'deepspeed.ops.transformer.inference.{self.NAME}_op'
 
     def is_compatible(self, verbose=True):
+        try:
+            import torch
+        except ImportError:
+            self.warning(
+                "Please install torch if trying to pre-compile inference kernels")
+            return False
+
         cuda_okay = True
         if not self.is_rocm_pytorch() and torch.cuda.is_available():
             sys_cuda_major, _ = installed_cuda_version()
