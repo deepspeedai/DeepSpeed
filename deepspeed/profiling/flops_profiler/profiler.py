@@ -304,15 +304,15 @@ class FlopsProfiler(object):
 
         fwd_latency = self.get_total_duration()
         if self.ds_engine and self.ds_engine.wall_clock_breakdown():
-            fwd_latency = self.ds_engine.timers('forward').elapsed(False)
+            fwd_latency = self.ds_engine.timers('forward').elapsed(False) / 1000.0
         print('{:<60}  {:<8}'.format('fwd latency: ', duration_to_string(fwd_latency)))
         print('{:<60}  {:<8}'.format(
             'fwd FLOPS per GPU = fwd flops per GPU / fwd latency: ',
             flops_to_string(total_flops / fwd_latency)))
 
         if self.ds_engine and self.ds_engine.wall_clock_breakdown():
-            bwd_latency = self.ds_engine.timers('backward').elapsed(False)
-            step_latency = self.ds_engine.timers('step').elapsed(False)
+            bwd_latency = self.ds_engine.timers('backward').elapsed(False) / 1000.0
+            step_latency = self.ds_engine.timers('step').elapsed(False) / 1000.0
             print('{:<60}  {:<8}'.format('bwd latency: ',
                                          duration_to_string(bwd_latency)))
             print('{:<60}  {:<8}'.format(
