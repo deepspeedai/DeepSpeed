@@ -33,6 +33,9 @@ jobs:
           python --version
           which hipcc
           hipcc --version
+          pip install --upgrade pip
+          pip uninstall --yes torch torchvision
+          pip install torch torchvision --extra-index-url https://download.pytorch.org/whl/rocm5.1.1
           python -c "import torch; print('torch:', torch.__version__, torch)"
           python -c "import torch; print('CUDA available:', torch.cuda.is_available())"
           sudo apt-get update
@@ -63,5 +66,5 @@ jobs:
         run: |
           if [[ -d ./torch-extensions ]]; then rm -rf ./torch-extensions; fi
           cd tests
-          TORCH_EXTENSIONS_DIR=./torch-extensions pytest --color=yes --durations=0 --forked --verbose -x -n 4 unit/
-          TORCH_EXTENSIONS_DIR=./torch-extensions pytest --color=yes --durations=0 --forked --verbose -x -m 'sequential' unit/
+          TORCH_EXTENSIONS_DIR=./torch-extensions pytest --color=yes --durations=0 --verbose -n 4 unit/{comm,inference,monitor,ops,profiling,runtime}
+          #TORCH_EXTENSIONS_DIR=./torch-extensions pytest --color=yes --durations=0 --verbose -m 'sequential' unit/{comm,inference,monitor,ops,profiling,runtime}
