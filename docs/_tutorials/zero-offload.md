@@ -38,20 +38,22 @@ Second, we need to apply the following changes to ensure that only one GPU is us
 ```
 
 ### DeepSpeed Configuration Changes
-ZeRO-Offload leverages many ZeRO stage 2 mechanisms, and so the configuration changes to enable ZeRO-Offload are an extension of those required to enable ZeRO stage 2. The `zero_optimization` configuration to enable ZeRO-Offload is shown below:
+ZeRO-Offload leverages many ZeRO stage 1 and 2 mechanisms, and so the configuration changes to enable ZeRO-Offload are an extension of those required to enable ZeRO stage 1 or 2. The `zero_optimization` configuration to enable ZeRO-Offload is shown below:
 
 ```json
 {
     "zero_optimization": {
         "stage": 2,
-        "cpu_offload": true,
+        "offload_optimizer": {
+            "device": "cpu",
+        }
         "contiguous_gradients": true,
         "overlap_comm": true
     }
 }
 ```
 
-As seen above, in addition to setting the _stage_ field to **2** (to enable ZeRO stage 2), we also need to set _cpu_offload_ flag to **true** to enable ZeRO-Offload optimizations. In addition, we can  set other ZeRO stage 2 optimization flags, such as _overlap_comm_ to tune ZeRO-Offload performance.  With these changes we can now run the model. We share some screenshots of the training below.
+As seen above, in addition to setting the _stage_ field to **2** (to enable ZeRO stage 2, but stage 1 also works), we also need to set the _offload\_optimizer_ device to **cpu** to enable ZeRO-Offload optimizations. In addition, we can set other ZeRO stage 2 optimization flags, such as _overlap\_comm_ to tune ZeRO-Offload performance.  With these changes we can now run the model. We share some screenshots of the training below.
 
 Here is a screenshot of the training log:
 

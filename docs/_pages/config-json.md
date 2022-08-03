@@ -427,7 +427,7 @@ Enabling and configuring ZeRO memory optimizations
 
 | Description                                                                                                                                                                                                                                                                         | Default |
 | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------- |
-| Stage 2 optimization for CPU offloading that parallelizes gradient copying to CPU memory among ranks by fine-grained gradient partitioning. Performance benefit grows with gradient accumulation steps (more copying between optimizer steps) or GPU count (increased parallelism). | `False` |
+| Stage 1 and 2 optimization for CPU offloading that parallelizes gradient copying to CPU memory among ranks by fine-grained gradient partitioning. Performance benefit grows with gradient accumulation steps (more copying between optimizer steps) or GPU count (increased parallelism). | `False` |
 
 ***offload_param***: [dictionary]
 
@@ -439,7 +439,7 @@ Enabling and configuring ZeRO memory optimizations
 
 | Description                                                                                                                                                                                                                          | Default |
 | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------- |
-| Enable offloading of optimizer state to CPU or NVMe, and optimizer computation to CPU. This frees up GPU memory for larger models or batch sizes. Valid only with stage 2 and 3. See [here](#optimizer-offloading) for more details. | `False` |
+| Enable offloading of optimizer state to CPU or NVMe, and optimizer computation to CPU. This frees up GPU memory for larger models or batch sizes. Valid for ZeRO stage 1, 2, 3. See [here](#optimizer-offloading) for more details. | `False` |
 
 ***stage3_max_live_parameters***: [integer]
 
@@ -481,7 +481,7 @@ Enabling and configuring ZeRO memory optimizations
 
 | Description                                                                                                                                       | Default |
 | ------------------------------------------------------------------------------------------------------------------------------------------------- | ------- |
-| Enable offloading of optimizer memory and computation to CPU. This frees up GPU memory for larger models or batch sizes. Valid only with stage 2. | `False` |
+| Enable offloading of optimizer memory and computation to CPU. This frees up GPU memory for larger models or batch sizes. Valid with stage 1 and 2. | `False` |
 
 
 ### Parameter offloading
@@ -536,7 +536,7 @@ Note that if the value of "device" is not specified or not supported, an asserti
 | Number of parameter elements to maintain in CPU memory when offloading to NVMe is enabled. | 1e9     |
 
 ### Optimizer offloading
-Enabling and configuring ZeRO optimization of offloading optimizer computation to CPU and state to CPU/NVMe. CPU offloading is available with ZeRO stage 2 or 3. NVMe offloading is available only with ZeRO stage 3.
+Enabling and configuring ZeRO optimization of offloading optimizer computation to CPU and state to CPU/NVMe. CPU offloading is available with ZeRO stage 1, 2, 3. NVMe offloading is available only with ZeRO stage 3.
 Note that if the value of "device" is not specified or not supported, an assertion will be triggered.
 ```json
   "offload_optimizer": {
