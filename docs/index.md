@@ -65,6 +65,8 @@ DeepSpeed has been used to train many different large-scale models, below is a l
   * [BLOOM (176B)](https://huggingface.co/blog/bloom-megatron-deepspeed)
   * [YaLM (100B)](https://github.com/yandex/YaLM-100B)
   * [GPT-NeoX (20B)](https://github.com/EleutherAI/gpt-neox)
+  * [AlexaTM (20B)](https://www.amazon.science/blog/20b-parameter-alexa-model-sets-new-marks-in-few-shot-learning)
+  * [METRO-LM (5.4B)](https://arxiv.org/pdf/2204.06644.pdf)
 
 DeepSpeed has been integrated with several different popular open-source DL frameworks such as:
 
