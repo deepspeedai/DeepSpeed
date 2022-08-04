@@ -105,7 +105,7 @@ __device__ void reduce_block_in_shared_memory(T* s_a, T* s_b, T* g_a, T* g_b)
 
     cg::sync(cta);
 
-#if (__CUDA_ARCH__ >= 300)
+#if (__CUDA_ARCH__ >= 300) || (defined(__HIP_PLATFORM_HCC__) && HIP_VERSION >= 502)
     if (tid < 32) {
         cg::coalesced_group active = cg::coalesced_threads();
 
