@@ -692,7 +692,8 @@ def replace_transformer_layer(orig_layer_impl,
                     bias_data = None if child.bias is None else mp_replace.copy(
                         new_bias,
                         child.bias.data).to(torch.cuda.current_device())
-                return LinearLayer(data.to(torch.cuda.current_device()), bias_data)
+                return LinearLayer(weight=data.to(torch.cuda.current_device()),
+                                   bias=bias_data)
 
         def _slice_embedding(child, name, conv_linear_layer):
             mp_replace = ReplaceWithTensorSlicing(mp_group=mp_group)
@@ -804,8 +805,9 @@ def replace_transformer_layer(orig_layer_impl,
             assert world_size >= ckpt_mp_size,\
                 "Currently, merging checkpoints is not supported (when world_size is smaller than #checkpoints)!"
             checkpoint_stride = world_size // ckpt_mp_size
-            pbar = tqdm.tqdm(total=num_checkpoints,
-                             desc=f"Loading {num_checkpoints} checkpoint shards")
+            if not deepspeed.comm.is_initialized() or deepspeed.comm.get_rank() == 0:
+                pbar = tqdm.tqdm(total=num_checkpoints,
+                                 desc=f"Loading {num_checkpoints} checkpoint shards")
             for i in range(num_checkpoints):
                 if not deepspeed.comm.is_initialized() or deepspeed.comm.get_rank() == 0:
                     pbar.update(1)
