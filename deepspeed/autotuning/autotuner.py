@@ -4,6 +4,7 @@ import torch
 import time
 import datetime
 import math
+import hjson
 
 from ..runtime.config_utils import dict_raise_error_on_duplicate_keys
 from ..runtime.constants import *
