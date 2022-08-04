@@ -966,9 +966,13 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
             if not self.ipg_bucket_has_moe_params:
                 tensor.div_(dist.get_world_size(group=self.dp_process_group))
 
+            tensor_to_reduce = tensor
+            if self.communication_data_type != tensor.dtype:
+                tensor_to_reduce = tensor.to(self.communication_data_type)
+
             async_handles = []
             for i, (dst, bucket_offset, numel) in enumerate(rank_and_offsets):
-                grad_slice = tensor.narrow(0, int(bucket_offset), int(numel))
+                grad_slice = tensor_to_reduce.narrow(0, int(bucket_offset), int(numel))
                 # if dist.get_rank() == 0:
                 #     print(f"Rank {dist.get_rank()} rank offset id {i} real dp size {dist.get_world_size(group=real_dp_process_group[i])} and dst: {dst}")
                 # dist.barrier()
@@ -982,6 +986,9 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
 
             for handle in async_handles:
                 handle.wait()
+
+            if self.communication_data_type != tensor.dtype:
+                tensor.copy_(tensor_to_reduce)
 
     ##############################################################################
     ############################# CPU Offload Methods#############################
@@ -1337,11 +1344,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
                 param.grad = torch.zero_like(param)
 
     ######################Reduction Related Methods##############################
-    def allreduce_bucket(self,
-                         bucket,
-                         communication_data_type=torch.float16,
-                         rank=None,
-                         log=None):
+    def allreduce_bucket(self, bucket, rank=None, log=None):
         rank = None
         tensor = self.flatten(bucket)
 
@@ -1349,6 +1352,8 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
 
         if pg_correctness_test:
             communication_data_type = torch.float32
+        else:
+            communication_data_type = self.communication_data_type
 
         if communication_data_type != tensor.dtype:
             tensor_to_allreduce = tensor.to(communication_data_type)

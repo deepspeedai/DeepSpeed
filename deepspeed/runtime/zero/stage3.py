@@ -1384,11 +1384,7 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
 
     ######################Reduction Related Methods##############################
 
-    def allreduce_bucket(self,
-                         bucket,
-                         communication_data_type=torch.float16,
-                         rank=None,
-                         log=None):
+    def allreduce_bucket(self, bucket, rank=None, log=None):
         rank = None
         tensor = self.flatten(bucket)
 
@@ -1396,6 +1392,8 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
 
         if pg_correctness_test:
             communication_data_type = torch.float32
+        else:
+            communication_data_type = self.communication_data_type
 
         if communication_data_type != tensor.dtype:
             tensor_to_allreduce = tensor.to(communication_data_type)

@@ -6,6 +6,7 @@ from .common import distributed_test
 from deepspeed.ops.op_builder import CPUAdamBuilder
 from .simple_model import SimpleModel, SimpleOptimizer, random_dataloader, args_from_dict
 from .util import bf16_required_version_check
+from deepspeed import comm as dist
 
 
 @pytest.mark.parametrize('zero_stage, use_cpu_offload', [(2, False)])
@@ -318,3 +319,78 @@ def test_zero_empty_grad(tmpdir, stage):
             model.step()
 
     _go(args=args, model=model, hidden_dim=hidden_dim)
+
+
+@pytest.mark.parametrize('comp_type_str, comm_type_str',
+                         [("fp16",
+                           "fp16"),
+                          ("bfp16",
+                           "bfp16"),
+                          ("fp16",
+                           "bfp16"),
+                          ("bfp16",
+                           "fp16"),
+                          ("fp32",
+                           "fp16"),
+                          ("fp32",
+                           "bfp16")])
+def test_zero_dtype_cocktail(tmpdir, comp_type_str, comm_type_str):
+    torch_dtype_dict = {
+        "fp16": torch.float16,
+        "bfp16": torch.bfloat16,
+        "fp32": torch.float
+    }
+    comp_torch_dtype = torch_dtype_dict[comp_type_str]
+    comm_torch_dtype = torch_dtype_dict[comm_type_str]
+
+    if comp_torch_dtype == torch.bfloat16 or comm_torch_dtype == torch.bfloat16:
+        if not bf16_required_version_check():
+            pytest.skip(
+                " DeepSpeed BFloat16 tests need torch >= 1.10, NCCL >= 2.10.3, CUDA > =11.0 and HW support for BFloat16 to run correctly"
+            )
+
+    config_dict = {
+        "train_batch_size": 2,
+        "steps_per_print": 1,
+        "fp16": {
+            "enabled": torch_dtype_dict[comp_type_str] == torch.float16
+        },
+        "bf16": {
+            "enabled": torch_dtype_dict[comp_type_str] == torch.bfloat16
+        },
+        "zero_optimization": {
+            "stage": 2
+        },
+        "communication_data_type": comm_type_str
+    }
+
+    args = args_from_dict(tmpdir, config_dict)
+    hidden_dim = 10
+
+    model = SimpleModel(hidden_dim)
+
+    orig_torch_reduce = dist.reduce
+
+    def custom_reduce(tensor, dst, op=dist.ReduceOp.SUM, group=None, async_op=False):
+        assert tensor.dtype == comm_torch_dtype
+        return orig_torch_reduce(tensor, dst, op, group, async_op)
+
+    @distributed_test(world_size=[2])
+    def _go(args, model, hidden_dim, comp_dtype):
+        optimizer = torch.optim.Adam(model.parameters())
+        model, _, _, _ = deepspeed.initialize(args=args,
+                                              model=model,
+                                              optimizer=optimizer)
+        data_loader = random_dataloader(model=model,
+                                        total_samples=2,
+                                        hidden_dim=hidden_dim,
+                                        device=model.device,
+                                        dtype=comp_dtype)
+        dist.reduce = custom_reduce
+        for n, batch in enumerate(data_loader):
+            loss = model(batch[0], batch[1])
+            model.backward(loss)
+            model.step()
+        dist.reduce = orig_torch_reduce
+
+    _go(args=args, model=model, hidden_dim=hidden_dim, comp_dtype=comp_torch_dtype)
