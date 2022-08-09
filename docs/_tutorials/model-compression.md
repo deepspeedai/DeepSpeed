@@ -47,9 +47,7 @@ Epoch: 18 | Time: 12m 38s
 Clean the best model, and the accuracy of the clean model is acc/mm-acc:0.8340295466123281/0.8339096826688365
 ```
 
-<!-- TODO: uncomment the below task-agnostic tutorial after the code example is fixed and released. -->
-
-<!-- To apply layer reduction for task-agnostic compression, we provide an example on how to do so in the GPT pre-training stage.
+To apply layer reduction for task-agnostic compression, we provide an example on how to do so in the GPT pre-training stage.
 
 Step 1: Obtain the latest version of the [Megatron-DeepSpeed](https://github.com/microsoft/Megatron-DeepSpeed).
 
@@ -69,16 +67,14 @@ Step 3: Run the example bash script such as `ds_pretrain_gpt_125M_dense_cl_kd.sh
 
 Apart from the above configs, you may also need to modify the data path in the `data_options` so that the trainer knows the data location. To make things slightly easier, we provide several example scripts for running distillation for different model sizes, including 350M (`ds_pretrain_gpt_350M_dense_kd.sh`) and 1.3B models (`ds_pretrain_gpt_1.3B_dense_cl_kd.sh`). We also empirically found that a staged KD often led to a better pre-trained distilled model on downstream tasks. Therefore, we suggest an easy approach to early-stop KD by not setting `--kd` in the script provided (e.g., disabling KD in the remaining 40% of training).
 
-Step 4 (optional): After distilling the model, one can also choose to further quantize the distilled model by running the script `125M-Int8-test-64gpu-distilled-group48.sh`, which quantizes both the weights and activations of a distilled model with INT8 quantizer (the weight and activation quantization are introduced in the following sections). We provide the perplexity results and zero-shot evaluation results (average across 10 tasks) in the following table.
+Step 4: After distilling the model, one can also choose to further quantize the distilled model by running the script `125M-L10-Int8-test-64gpu-distilled-group48.sh`, which quantizes both the weights and activations of a distilled model with INT8 quantizer (the weight and activation quantization are introduced in the following sections). note that you need to set the `-reset-iteration` flag when performing the quantization. We provide the zero-shot perplexity result from WikiText-2 and LAMBADA in the following table.
 
-| ---: | ---: | ---: |
-| **GPT (125M)** | **PPL** | **Zero-shot evaluation** |
-| Uncompressed | 8.92 | 32.01 |
-| Pretraining distillation | 9.36 | 31.74 |
-| Quantization only | 9.39 | 31.96 |
-| Pretraining distillation + quantization | 9.86 | 31.32 | -->
-
-<!-- TODO: Is the PPL the validation PPL or wikitext PPL? And there is no description about which 10 tasks are used, maybe it's better to just show one common task result (e.g., WikiText-2). -->
+| ---: | ---: | ---: | ---: |
+| **GPT (125M)** | **#Layers** | **wikitex2 perplexity** | **LAMBADA** |
+| Uncompressed | 12 | 29.6 | 39.5 |
+| Quantization only | 12 | 29.8 | 39.7 |
+| Distillation only | 10 | 31.9 | 39.2 |
+| Distillation + quantization | 10 | 32.28 | 38.7 |
 
 ### 1.2 Weight Quantization
 **What is weight quantization**
