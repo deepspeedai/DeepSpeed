@@ -2292,9 +2292,6 @@ class DeepSpeedEngine(Module):
         return sparse_list
 
     def sparse_allreduce(self, sparse, dp_group):
-        # Pre-divide for fp16 stability
-        sparse.values.mul_(1.0 / dist.get_world_size(group=dp_group))
-
         original_data_type = sparse.values.dtype
         if self.communication_data_type != sparse.values.dtype:
             if self.communication_data_type in (torch.float16, torch.bfloat16):
@@ -2305,6 +2302,13 @@ class DeepSpeedEngine(Module):
         else:
             indices = sparse.indices
             values = sparse.values
+
+        if self.postscale_gradients():
+            if self.gradient_average:
+                values.mul_(self.gradient_predivide_factor() /
+                            dist.get_world_size(group=dp_group))
+        else:
+            values.mul_(1. / dist.get_world_size(group=dp_group))
 
         indices_device_list = self.sparse_all_gather(indices, dp_group)
         values_device_list = self.sparse_all_gather(values, dp_group)
