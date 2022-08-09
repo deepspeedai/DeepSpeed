@@ -794,7 +794,8 @@ class DeepSpeedConfig(object):
             self._param_dict[TRAIN_MICRO_BATCH_SIZE_PER_GPU] = micro_batch_size
             self._param_dict[GRADIENT_ACCUMULATION_STEPS] = gradient_accu_steps
 
-        self._initialize_params(self._param_dict)
+        # Pass a copy so that user json is unmodified, e.g. for logging
+        self._initialize_params(copy.copy(self._param_dict))
         self._configure_train_batch_size()
         self._do_sanity_check()
 
@@ -971,13 +972,7 @@ class DeepSpeedConfig(object):
 
         self._do_warning_check()
 
-    def print(self, name):
-        logger.info("{}:".format(name))
-        for arg in sorted(vars(self)):
-            if arg != "_param_dict":
-                dots = "." * (29 - len(arg))
-                logger.info("  {} {} {}".format(arg, dots, getattr(self, arg)))
-
+    def print_user_config(self):
         logger.info("  json = {}".format(
             json.dumps(
                 self._param_dict,
@@ -987,6 +982,15 @@ class DeepSpeedConfig(object):
                 separators=(",",
                             ":"),
             )))
+
+    def print(self, name):
+        logger.info("{}:".format(name))
+        for arg in sorted(vars(self)):
+            if arg != "_param_dict":
+                dots = "." * (29 - len(arg))
+                logger.info("  {} {} {}".format(arg, dots, getattr(self, arg)))
+
+        self.print_user_config()
 
     def _do_error_check(self):
         assert (
