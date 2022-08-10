@@ -69,8 +69,8 @@ Apart from the above configs, you may also need to modify the data path in the `
 
 Step 4: After distilling the model, one can also choose to further quantize the distilled model by running the script `125M-L10-Int8-test-64gpu-distilled-group48.sh`, which quantizes both the weights and activations of a distilled model with INT8 quantizer (the weight and activation quantization are introduced in the following sections). note that you need to set the `-reset-iteration` flag when performing the quantization. We provide the zero-shot perplexity result from WikiText-2 and LAMBADA in the following table.
 
-| ---: | ---: | ---: | ---: |
 | **GPT (125M)** | **#Layers** | **wikitex2 perplexity** | **LAMBADA** |
+| ---------- |---------- |---------- |---------- |
 | Uncompressed | 12 | 29.6 | 39.5 |
 | Quantization only | 12 | 29.8 | 39.7 |
 | Distillation only | 10 | 31.9 | 39.2 |
