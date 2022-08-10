@@ -483,8 +483,8 @@ def replace_transformer_layer(orig_layer_impl,
                         attn_block.attn_ow = mp_replace.copy(attn_block.attn_ow, dense_w)
                         attn_block.attn_ob = mp_replace.copy(attn_block.attn_ob, dense_b)
             else:
-                attn_block.attn_qkvw = mp_replace.copy(attn_block.attn_qkvw, qkvw)
-                attn_block.attn_qkvb = mp_replace.copy(attn_block.attn_qkvb, qkvb)
+                attn_block.attn_qkvw = mp_replace.qkv_copy(attn_block.attn_qkvw, qkvw)
+                attn_block.attn_qkvb = mp_replace.qkv_copy(attn_block.attn_qkvb, qkvb)
 
                 attn_block.attn_ow = mp_replace.copy(attn_block.attn_ow, dense_w)
                 attn_block.attn_ob = mp_replace.copy(attn_block.attn_ob, dense_b)
