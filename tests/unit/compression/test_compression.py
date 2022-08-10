@@ -2,10 +2,10 @@ import torch
 import pytest
 import random
 import numpy as np
-from .megatron_model import get_gpt2_model
+from tests.unit.megatron_model import get_gpt2_model
 from deepspeed.compression.compress import init_compression
-from .modeling import BertConfig
-from .modelingpreln import BertEncoder as BertEncoderPreln
+from tests.unit.modeling import BertConfig
+from tests.unit.modelingpreln import BertEncoder as BertEncoderPreln
 from deepspeed.compression.basic_layer import LinearLayer_Compress, ColumnParallelLinear_Compress, RowParallelLinear_Compress
 from deepspeed.compression.helper import convert_conv1d_to_linear
 

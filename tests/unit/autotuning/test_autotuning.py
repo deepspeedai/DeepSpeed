@@ -1,6 +1,6 @@
 import os
 import pytest
-from .simple_model import create_config_from_dict
+from tests.unit.simple_model import create_config_from_dict
 from deepspeed.launcher import runner as dsrun
 from deepspeed.autotuning.autotuner import Autotuner
 from deepspeed.autotuning.scheduler import ResourceManager

@@ -44,11 +44,22 @@ class TestGroupedDistTest(DistributedTest):
         assert dist.get_world_size() == 2
         assert number == 1138
 
-    @pytest.mark.parametrize("color", ["purple"])
-    def test_two(self, number, color):
+    def test_two(self, number, color="purple"):
         assert dist.get_world_size() == 2
         assert number == 1138
         assert color == "purple"
+
+
+# Demonstration of world_size override
+class TestWorldSizeOverrideDistTest(DistributedTest):
+    world_size = 2
+
+    def test_world_size_2(self):
+        assert dist.get_world_size() == 2
+
+    @pytest.mark.world_size(1)
+    def test_world_size_1(self):
+        assert dist.get_world_size() == 1
 
 
 class TestDistAllReduce(DistributedTest):

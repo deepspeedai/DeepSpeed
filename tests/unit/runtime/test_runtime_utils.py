@@ -6,7 +6,7 @@ import pytest
 import deepspeed.runtime.utils as ds_utils
 import deepspeed.utils.groups as groups
 
-from .common import distributed_test
+from tests.unit.common import DistributedTest
 
 
 def test_call_to_str():
@@ -20,9 +20,10 @@ def test_call_to_str():
     assert c2s('hello', 1138, val=3) == 'hello(1138, val=3)'
 
 
-def test_clip_grad_norm_():
-    @distributed_test(world_size=[2])
-    def _test_clip_grad_norm_() -> None:
+class TestClibGradNorm(DistributedTest):
+    world_size = 2
+
+    def test(self):
         param1 = torch.nn.Parameter(torch.Tensor([0]))
         param1.grad = torch.Tensor([1])
         param2 = torch.nn.Parameter(torch.Tensor([0]))
@@ -44,13 +45,12 @@ def test_clip_grad_norm_():
 
         assert gathered_norm[0] == gathered_norm[1], "norm at rank 0 does not match the norm at rank 1"
 
-    return _test_clip_grad_norm_()
-
 
 @pytest.mark.parametrize("check_using_norm", [(False), (True)])
-def test_CheckOverflow(check_using_norm):
-    @distributed_test(world_size=[2])
-    def _test_CheckOverflow(check_using_norm: bool):
+class TestCheckOverflow(DistributedTest):
+    world_size = 2
+
+    def test(self, check_using_norm):
         groups._create_expert_and_data_parallel(2)
 
         param1 = torch.nn.Parameter(torch.Tensor([0]))
@@ -72,5 +72,3 @@ def test_CheckOverflow(check_using_norm):
             overflow_checker = ds_utils.CheckOverflow([parameters])
             overflow = overflow_checker.check()
         assert overflow
-
-    return _test_CheckOverflow(check_using_norm)

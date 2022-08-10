@@ -3,8 +3,8 @@ import deepspeed
 import pytest
 from deepspeed.runtime.progressive_layer_drop import ProgressiveLayerDrop
 
-from .common import distributed_test
-from .simple_model import SimpleModel, PLD_SimpleModel, random_dataloader, args_from_dict
+from tests.unit.common import DistributedTest
+from tests.unit.simple_model import SimpleModel, PLD_SimpleModel, random_dataloader
 
 
 @pytest.mark.parametrize('theta', [0, 0.1, 0.9, 1.0])
@@ -20,35 +20,33 @@ def test_pld_schedule(tmpdir, theta):
 
 
 @pytest.mark.parametrize('theta', [0, 0.1, 0.9, 1.0])
-def test_pld_model(tmpdir, theta):
-    gamma = 0.001
-    config_dict = {
-        "train_batch_size": 1,
-        "steps_per_print": 1,
-        "optimizer": {
-            "type": 'Adam',
-            "params": {
-                "lr": 0.0001
+class TestPLDModel(DistributedTest):
+    world_size = 1
+
+    def test_pld_model(self, theta):
+        gamma = 0.001
+        config_dict = {
+            "train_batch_size": 1,
+            "steps_per_print": 1,
+            "optimizer": {
+                "type": 'Adam',
+                "params": {
+                    "lr": 0.0001
+                }
+            },
+            "fp16": {
+                "enabled": True
+            },
+            "progressive_layer_drop": {
+                "enabled": True,
+                "theta": theta,
+                "gamma": gamma
             }
-        },
-        "fp16": {
-            "enabled": True
-        },
-        "progressive_layer_drop": {
-            "enabled": True,
-            "theta": theta,
-            "gamma": gamma
         }
-    }
+        hidden_dim = 10
 
-    args = args_from_dict(tmpdir, config_dict)
-    hidden_dim = 10
-
-    model = PLD_SimpleModel(hidden_dim, empty_grad=False)
-
-    @distributed_test(world_size=[1])
-    def _test_pld_model(args, model, hidden_dim, theta, gamma):
-        model, _, _, _ = deepspeed.initialize(args=args,
+        model = PLD_SimpleModel(hidden_dim, empty_grad=False)
+        model, _, _, _ = deepspeed.initialize(config=config_dict,
                                               model=model,
                                               model_parameters=model.parameters())
 
@@ -66,43 +64,35 @@ def test_pld_model(tmpdir, theta):
             actual_theta = model.get_pld_theta()
             assert expected_theta == actual_theta
 
-    _test_pld_model(args=args,
-                    model=model,
-                    hidden_dim=hidden_dim,
-                    theta=theta,
-                    gamma=gamma)
 
+class TestNonPLDModel(DistributedTest):
+    world_size = 1
 
-def test_non_pld_model(tmpdir):
-    gamma = 0.001
-    theta = 0.5
-    config_dict = {
-        "train_batch_size": 1,
-        "steps_per_print": 1,
-        "optimizer": {
-            "type": 'Adam',
-            "params": {
-                "lr": 0.0001
+    def test_non_pld_model(self):
+        gamma = 0.001
+        theta = 0.5
+        config_dict = {
+            "train_batch_size": 1,
+            "steps_per_print": 1,
+            "optimizer": {
+                "type": 'Adam',
+                "params": {
+                    "lr": 0.0001
+                }
+            },
+            "fp16": {
+                "enabled": True
+            },
+            "progressive_layer_drop": {
+                "enabled": True,
+                "theta": theta,
+                "gamma": gamma
             }
-        },
-        "fp16": {
-            "enabled": True
-        },
-        "progressive_layer_drop": {
-            "enabled": True,
-            "theta": theta,
-            "gamma": gamma
         }
-    }
+        hidden_dim = 10
 
-    args = args_from_dict(tmpdir, config_dict)
-    hidden_dim = 10
-
-    model = SimpleModel(hidden_dim, empty_grad=False)
-
-    @distributed_test(world_size=[1])
-    def _test_non_pld_model(args, model, hidden_dim):
-        model, _, _, _ = deepspeed.initialize(args=args,
+        model = SimpleModel(hidden_dim, empty_grad=False)
+        model, _, _, _ = deepspeed.initialize(config=config_dict,
                                               model=model,
                                               model_parameters=model.parameters())
 
@@ -114,5 +104,3 @@ def test_non_pld_model(tmpdir):
         for i, batch in enumerate(data_loader):
             with pytest.raises(TypeError):
                 loss = model(batch[0], batch[1])
-
-    _test_non_pld_model(args=args, model=model, hidden_dim=hidden_dim)

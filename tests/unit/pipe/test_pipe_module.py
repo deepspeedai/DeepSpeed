@@ -7,16 +7,10 @@ import deepspeed.comm as dist
 import pytest
 
 import deepspeed
-
-from deepspeed.runtime.pipe.topology import PipeDataParallelTopology
-
-PipeTopo = PipeDataParallelTopology
-
 from deepspeed.pipe import PipelineModule
 from deepspeed.utils import RepeatingLoader
 
-from .common import distributed_test
-from .simple_model import args_from_dict
+from tests.unit.common import DistributedTest
 
 HIDDEN_DIM = 32
 LAYERS = 8
@@ -34,7 +28,7 @@ def sequential_model():
 
 
 @pytest.fixture
-def simple_args(tmpdir):
+def simple_config():
     config_dict = {
         "train_batch_size": 1,
         "train_micro_batch_size_per_gpu": 1,
@@ -53,15 +47,18 @@ def simple_args(tmpdir):
             "activation_checkpoint_interval": 1
         }
     }
-    args = args_from_dict(tmpdir, config_dict)
-    return args
+    return config_dict
 
 
-def test_pipe_module_sequential(sequential_model, simple_args):
-    batch_input = torch.randn(1, HIDDEN_DIM)
+@pytest.fixture
+def batch_input():
+    return torch.randn(1, HIDDEN_DIM)
 
-    @distributed_test(world_size=4)
-    def _helper():
+
+class TestPipeModuleSequential(DistributedTest):
+    world_size = 2
+
+    def test(self, sequential_model, simple_config, batch_input):
         base_model = copy.deepcopy(sequential_model)
         base_input = batch_input.clone().detach()
         base_output = base_model(base_input)
@@ -69,7 +66,7 @@ def test_pipe_module_sequential(sequential_model, simple_args):
         base_params = sum(p.numel() for p in base_model.parameters())
 
         pipe_model = copy.deepcopy(sequential_model)
-        pipe_model = PipelineModule(layers=pipe_model, num_stages=4)
+        pipe_model = PipelineModule(layers=pipe_model, num_stages=2)
 
         # Ensure all parameters are accounted for.
         my_params = sum(p.numel() for p in pipe_model.parameters())
@@ -79,7 +76,7 @@ def test_pipe_module_sequential(sequential_model, simple_args):
         assert total_pipe_params == base_params
 
         pipe_model, _, _, _ = deepspeed.initialize(
-            args=simple_args,
+            config=simple_config,
             model=pipe_model,
             model_parameters=[p for p in pipe_model.parameters()])
 
@@ -98,5 +95,3 @@ def test_pipe_module_sequential(sequential_model, simple_args):
         pipe_output = pipe_output.to('cpu')
 
         assert torch.allclose(base_output, pipe_output, atol=1e-4)
-
-    _helper()

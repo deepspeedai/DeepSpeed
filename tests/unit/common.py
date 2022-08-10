@@ -12,6 +12,7 @@ from torch.multiprocessing import Process
 
 import pytest
 from _pytest.outcomes import Skipped
+from _pytest.fixtures import FixtureLookupError
 
 # Worker timeout *after* the first worker has completed.
 DEEPSPEED_UNIT_WORKER_TIMEOUT = 120
@@ -67,12 +68,27 @@ class DistributedTest(ABC):
     world_size = 2
     backend = "nccl"
 
+    # Temporary directory that is shared among test methods in a class
+    @pytest.fixture(autouse=True, scope="class")
+    def class_tmpdir(self, tmpdir_factory):
+        fn = tmpdir_factory.mktemp(self.__class__.__name__)
+        return fn
+
     def _run_test(self, request):
         self.current_test = self._get_current_test_func(request)
         self.test_kwargs = self._get_test_kwargs(request)
-        if isinstance(self.world_size, int):
-            self.world_size = [self.world_size]
-        for procs in self.world_size:
+
+        # Catch world_size override pytest mark
+        for mark in getattr(request.function, "pytestmark", []):
+            if mark.name == "world_size":
+                world_size = mark.args[0]
+                break
+        else:
+            world_size = self.world_size
+
+        if isinstance(world_size, int):
+            world_size = [world_size]
+        for procs in world_size:
             self._launch_procs(procs)
             time.sleep(0.5)
 
@@ -87,7 +103,10 @@ class DistributedTest(ABC):
         params = inspect.getfullargspec(self.current_test).args
         params.remove("self")
         for p in params:
-            test_kwargs[p] = request.getfixturevalue(p)
+            try:
+                test_kwargs[p] = request.getfixturevalue(p)
+            except FixtureLookupError:
+                pass  # test methods can have kwargs that are not fixtures
         return test_kwargs
 
     def _launch_procs(self, num_procs):

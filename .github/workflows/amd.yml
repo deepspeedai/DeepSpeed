@@ -66,5 +66,5 @@ jobs:
         run: |
           if [[ -d ./torch-extensions ]]; then rm -rf ./torch-extensions; fi
           cd tests
-          TORCH_EXTENSIONS_DIR=./torch-extensions pytest --color=yes --durations=0 --verbose -n 4 unit/{comm,inference,monitor,ops,profiling,runtime}
-          #TORCH_EXTENSIONS_DIR=./torch-extensions pytest --color=yes --durations=0 --verbose -m 'sequential' unit/{comm,inference,monitor,ops,profiling,runtime}
+          TORCH_EXTENSIONS_DIR=./torch-extensions pytest --color=yes --durations=0 --verbose unit/{autotuning,checkpoint,comm,compression,elasticity,inference,launcher,monitor,ops,profiling,runtime,utils}
+          #TORCH_EXTENSIONS_DIR=./torch-extensions pytest --color=yes --durations=0 --verbose -m 'sequential' unit/{autotuning,checkpoint,comm,compression,elasticity,inference,launcher,monitor,ops,profiling,runtime,utils}

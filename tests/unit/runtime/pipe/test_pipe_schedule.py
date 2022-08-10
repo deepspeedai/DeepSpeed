@@ -1,5 +1,4 @@
 import pytest
-
 import deepspeed.runtime.pipe.schedule as schedule
 
 
@@ -23,28 +22,26 @@ def test_pipe_train_schedule_singlestage():
     sched = schedule.TrainSchedule(micro_batches=4, stages=1, stage_id=0)
     assert sched.num_micro_batches == 4
     full = list(iter(sched))
-    print()
     for idx, cmds in enumerate(full):
-        print(idx, cmds)
-        #assert len(cmds) == 2
-        #assert type(cmds[0]) == schedule.LoadMicroBatch
-        #assert type(cmds[1]) == schedule.ForwardPass
-        #assert cmds[0].buffer_id == cmds[1].buffer_id
-    #assert len(full) == sched.num_micro_batches
+        if (idx % 2) != 0:
+            assert (len(cmds) == 1) or (len(cmds) == 4)
+            assert type(cmds[0]) == schedule.BackwardPass
+        else:
+            assert len(cmds) == 2
+            assert type(cmds[0]) == schedule.LoadMicroBatch
+            assert type(cmds[1]) == schedule.ForwardPass
+            assert cmds[0].buffer_id == cmds[1].buffer_id
+    assert len(full) == sched.num_micro_batches * 2
 
 
 @pytest.mark.parametrize('micro_batches', [1, 3, 8, 10])
-def test_pipe_inference_schedule_firststage(micro_batches, stages=3, verbose=False):
+def test_pipe_inference_schedule_firststage(micro_batches, stages=3):
     sched = schedule.InferenceSchedule(micro_batches=micro_batches,
                                        stages=stages,
                                        stage_id=0)
     assert sched.num_micro_batches == micro_batches
     full = list(iter(sched))
-    if verbose:
-        print()
     for idx, cmds in enumerate(full):
-        if verbose:
-            print(idx, cmds)
         # Ensure we don't send an activation the first step
         if idx == 0:
             assert len(cmds) == 2
@@ -73,17 +70,13 @@ def test_pipe_inference_schedule_firststage(micro_batches, stages=3, verbose=Fal
 
 
 @pytest.mark.parametrize('micro_batches', [1, 3, 8, 10])
-def test_pipe_inference_schedule_midstage(micro_batches, stages=3, verbose=False):
+def test_pipe_inference_schedule_midstage(micro_batches, stages=3):
     sched = schedule.InferenceSchedule(micro_batches=micro_batches,
                                        stages=stages,
                                        stage_id=1)
 
     full = list(iter(sched))
-    if verbose:
-        print()
     for idx, cmds in enumerate(full):
-        if verbose:
-            print(idx, cmds)
         if idx < sched.stage:
             assert len(cmds) == 0
             continue
@@ -103,16 +96,12 @@ def test_pipe_inference_schedule_midstage(micro_batches, stages=3, verbose=False
 
 
 @pytest.mark.parametrize('micro_batches', [1, 3, 8, 10])
-def test_pipe_inference_schedule_laststage(micro_batches, stages=3, verbose=False):
+def test_pipe_inference_schedule_laststage(micro_batches, stages=3):
     sched = schedule.InferenceSchedule(micro_batches=micro_batches,
                                        stages=stages,
                                        stage_id=2)
     full = list(iter(sched))
-    if verbose:
-        print()
     for idx, cmds in enumerate(full):
-        if verbose:
-            print(idx, cmds)
         if idx < sched.stage or idx > sched.stage + sched.num_micro_batches:
             assert len(cmds) == 0
             continue
@@ -135,10 +124,8 @@ def test_pipe_schedule_firststage():
 
 def test_pipe_schedule_laststage():
     sched = schedule.TrainSchedule(stages=3, micro_batches=4, stage_id=2)
-    #assert len(sched) == 2 * (sched.micro_batches + sched.stages - 1)
-    print()
+    assert len(list(iter(sched))) == 2 * (sched.micro_batches + sched.stages - 1)
     for cmds in sched:
-        print(cmds)
         assert all(instr.__class__ != schedule.SendActivation for instr in cmds)
         assert all(instr.__class__ != schedule.RecvGrad for instr in cmds)
 
