@@ -187,7 +187,8 @@ class DeepSpeedZeRoOffload(object):
         self.dtype = list(module.parameters())[0].dtype
         self.offload_device = None
         self.offload_param_pin_memory = False
-        if offload_param_config is not None:
+
+        if offload_param_config is not None and offload_param_config.device != OffloadDeviceEnum.none:
             self.offload_device = offload_param_config.device
             self.offload_param_pin_memory = offload_param_config.pin_memory
 

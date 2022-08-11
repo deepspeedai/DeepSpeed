@@ -9,7 +9,7 @@ from typing import Optional
 from enum import Enum
 from deepspeed.runtime.config_utils import get_scalar_param, DeepSpeedConfigModel
 from deepspeed.utils import logger
-from .offload_config import DeepSpeedZeroOffloadParamConfig, DeepSpeedZeroOffloadOptimizerConfig
+from .offload_config import DeepSpeedZeroOffloadParamConfig, DeepSpeedZeroOffloadOptimizerConfig, OffloadDeviceEnum
 
 # ZeRO optimization. By default, this optimization is not enabled.
 # Users have to configure the desired optimization (0 means disabled) in params.json as below example:
@@ -94,7 +94,9 @@ class DeepSpeedZeroConfig(DeepSpeedConfigModel):
         None,
         deprecated=True,
         new_param="offload_param",
-        new_param_fn=(lambda val: DeepSpeedZeroOffloadParamConfig() if val else None),
+        new_param_fn=(
+            lambda val: DeepSpeedZeroOffloadParamConfig(device=OffloadDeviceEnum.cpu)
+            if val else None),
     )
     cpu_offload_use_pin_memory: bool = Field(
         None,
@@ -106,8 +108,9 @@ class DeepSpeedZeroConfig(DeepSpeedConfigModel):
         None,
         deprecated=True,
         new_param="offload_optimizer",
-        new_param_fn=(lambda val: DeepSpeedZeroOffloadOptimizerConfig()
-                      if val else None),
+        new_param_fn=(
+            lambda val: DeepSpeedZeroOffloadOptimizerConfig(device=OffloadDeviceEnum.cpu)
+            if val else None),
     )
 
     # Stage3 Specific Parameters

@@ -446,14 +446,14 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
 
     def _configure_offloading(self, offload_optimizer_config, offload_param_config):
         ###################### offload optimizer setup ##################################
-        if offload_optimizer_config is not None:
+        if offload_optimizer_config is not None and offload_optimizer_config.device != OffloadDeviceEnum.none:
             self.offload_optimizer = True
             self.offload_optimizer_pin_memory = offload_optimizer_config.pin_memory
             self.swap_optimizer = offload_optimizer_config.device == OffloadDeviceEnum.nvme
             self.offload_optimizer_fast_init = offload_optimizer_config.fast_init
 
         ###################### offload param setup ##################################
-        if offload_param_config is not None:
+        if offload_param_config is not None and offload_param_config.device != OffloadDeviceEnum.none:
             self.offload_param = True
             self.offload_param_pin_memory = offload_param_config.pin_memory
             self.params_in_nvme_and_cpu = offload_param_config.device == OffloadDeviceEnum.nvme
