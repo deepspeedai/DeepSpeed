@@ -50,6 +50,15 @@ void launch_bias_gelu(T* input,
                       int intermediate_size,
                       int batch_size,
                       cudaStream_t stream);
+
+// Fused bias add with relu activation
+template <typename T>
+void launch_bias_relu(T* input,
+                      const T* bias,
+                      int intermediate_size,
+                      int batch_size,
+                      cudaStream_t stream);
+
 template <typename T>
 void launch_bias_add(T* input, const T* bias, int hidden_size, int batch_size, cudaStream_t stream);
 

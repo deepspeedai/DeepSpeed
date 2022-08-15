@@ -19,6 +19,7 @@ from ..pipe import PipelineModule
 from ..moe.utils import has_moe_layers
 from ..runtime.zero import GatheredParameters
 from ..module_inject import LinearAllreduce, LinearLayer, Normalize, ReplaceWithTensorSlicing
+from ..module_inject.replace_policy import DSPolicy
 
 DS_INFERENCE_ENABLED = False
 from torch import nn
@@ -76,6 +77,9 @@ class InferenceEngine(Module):
         self.module = model
 
         self._get_model_config_generate(config)
+
+        if hasattr(self.module, "config"):
+            DSPolicy.hf_model_config = self.module.config
 
         self.mp_world_size = mp_size
         self.checkpoint = checkpoint

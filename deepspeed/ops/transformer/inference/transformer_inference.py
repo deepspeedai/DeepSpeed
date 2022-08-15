@@ -9,6 +9,7 @@ from ... import op_builder
 import torch.nn as nn
 from deepspeed import comm as dist
 from deepspeed.utils.logging import log_dist
+from deepspeed.utils.types import ActivationFuncType
 
 # Cuda modules will be imported if needed
 inference_cuda_module = None
@@ -71,6 +72,7 @@ class DeepSpeedInferenceConfig(TransformerConfig):
                  rotate_every_two=True,
                  return_tuple=True,
                  mlp_after_attn=True,
+                 mlp_act_func_type=ActivationFuncType.GELU,
                  training_mp_size=1,
                  bigscience_bloom=False):
         super(DeepSpeedInferenceConfig,
@@ -95,6 +97,7 @@ class DeepSpeedInferenceConfig(TransformerConfig):
         self.rotate_every_two = rotate_every_two
         self.return_tuple = return_tuple
         self.mlp_after_attn = mlp_after_attn
+        self.mlp_act_func_type = mlp_act_func_type
         self.specialized_mode = False
         self.training_mp_size = training_mp_size
         self.bigscience_bloom = bigscience_bloom
@@ -589,7 +592,8 @@ class DeepSpeedMLPFunction(Function):
                 mlp_gemm_func,
                 fused_gemm_gelu,
                 vector_matmul_func,
-                bias_residual_func):
+                bias_residual_func,
+                activation_func_type=ActivationFuncType.GELU):
 
         if config.q_int8:
             (intermediate,
@@ -629,7 +633,8 @@ class DeepSpeedMLPFunction(Function):
                                              attn_nb,
                                              config.epsilon,
                                              config.pre_layer_norm,
-                                             config.mlp_after_attn)
+                                             config.mlp_after_attn,
+                                             config.mlp_act_func_type)
                 output = vector_matmul_func(intermediate, output_w, False)
 
         inference_cuda_module.residual_add(
@@ -795,28 +800,35 @@ class DeepSpeedTransformerInference(nn.Module):
                         device=device))
         self.layer_past = None
 
-    def forward(self,
-                input,
-                input_mask=None,
-                attention_mask=None,
-                head_mask=None,
-                layer_past=None,
-                get_key_value=False,
-                get_present=False,
-                encoder_output=None,
-                enc_dec_attn_mask=None,
-                encoder_hidden_states=None,
-                encoder_attention_mask=None,
-                use_cache=False,
-                alibi=None,
-                output_attentions=False):
+    def forward(
+            self,
+            input,
+            input_mask=None,
+            attention_mask=None,
+            head_mask=None,
+            layer_past=None,
+            get_key_value=False,
+            get_present=False,
+            encoder_output=None,
+            enc_dec_attn_mask=None,
+            encoder_hidden_states=None,
+            encoder_attention_mask=None,
+            use_cache=False,
+            alibi=None,
+            output_attentions=False,
+            # TODO(arashb): 'layer_head_mask' and 'past_key_value' are only added to satisfy the OPT models API.
+            # This needs to be redesigned later!
+            layer_head_mask=None,
+            past_key_value=None):
         get_present = (get_present or get_key_value or use_cache)
         input_mask = input_mask if attention_mask is None else attention_mask
 
         # We set the prev key/value to None when there is a prompt
         if input.shape[1] > 1:
             self.layer_past = None
+
         layer_past = layer_past if layer_past is not None else self.layer_past
+        head_mask = layer_head_mask if layer_head_mask is not None else head_mask
 
         attn_mask = None
         if isinstance(input, tuple):

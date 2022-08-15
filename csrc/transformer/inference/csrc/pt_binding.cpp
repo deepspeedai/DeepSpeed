@@ -8,6 +8,11 @@
 
 std::array<int, 3> gemm_algos = std::array<int, 3>({99, 99, 99});
 
+// NOTE: This activation function type enum should be always in sync
+// with the python counterpart, otherwise the casting from python binding
+// will be incorrect.
+enum class ActivationFuncType { UNKNOWN = 0, GELU = 1, ReLU = 2 };
+
 template <typename T>
 at::Tensor ds_softmax(at::Tensor& attn_scores,
                       at::Tensor& attn_mask,
@@ -464,9 +469,9 @@ std::vector<at::Tensor> ds_softmax_context(at::Tensor& query_key_value,
                                1);
 
     if (layer_id == num_layers - 1) Context::Instance().advance_tokens();
-    auto prev_key = torch::from_blob(workspace + offset, {bsz, all_tokens, hidden_dim}, options);
+    auto prev_key = torch::from_blob(workspace + offset, {bsz, heads, all_tokens, k}, options);
     auto prev_value =
-        torch::from_blob(workspace + offset + value_offset, {bsz, all_tokens, hidden_dim}, options);
+        torch::from_blob(workspace + offset + value_offset, {bsz, heads, all_tokens, k}, options);
     return {output, prev_key, prev_value};
 }
 
@@ -479,6 +484,22 @@ at::Tensor ds_bias_gelu(at::Tensor& input, at::Tensor& bias)
     int intermediate_size = input_cont.size(2);
 
     launch_bias_gelu((T*)input_cont.data_ptr(),
+                     (T*)bias.data_ptr(),
+                     intermediate_size,
+                     bsz,
+                     Context::Instance().GetCurrentStream());
+    return input_cont;
+}
+
+template <typename T>
+at::Tensor ds_bias_relu(at::Tensor& input, at::Tensor& bias)
+{
+    auto input_cont = input.contiguous();
+
+    int bsz = input_cont.size(0) * input_cont.size(1);
+    int intermediate_size = input_cont.size(2);
+
+    launch_bias_relu((T*)input_cont.data_ptr(),
                      (T*)bias.data_ptr(),
                      intermediate_size,
                      bsz,
@@ -840,7 +861,8 @@ at::Tensor mlp_unfused_cublas(at::Tensor& output,
                               at::Tensor& beta,
                               const float epsilon,
                               bool preLayerNorm,
-                              bool mlp_after_attn)
+                              bool mlp_after_attn,
+                              ActivationFuncType act_func_type)
 {
     int bsz = input.size(0) * input.size(1);
     auto inp_norm = at::empty_like(input);
@@ -878,13 +900,24 @@ at::Tensor mlp_unfused_cublas(at::Tensor& output,
 #else
                    CUBLAS_GEMM_DEFAULT_TENSOR_OP);
 #endif
-    launch_bias_gelu((T*)output.data_ptr(),
-                     (T*)bias.data_ptr(),
-                     weight.size(1),
-                     bsz,
-                     Context::Instance().GetCurrentStream());
+
+    if (act_func_type == ActivationFuncType::GELU) {
+        launch_bias_gelu((T*)output.data_ptr(),
+                         (T*)bias.data_ptr(),
+                         weight.size(1),
+                         bsz,
+                         Context::Instance().GetCurrentStream());
+    } else if (act_func_type == ActivationFuncType::ReLU) {
+        launch_bias_relu((T*)output.data_ptr(),
+                         (T*)bias.data_ptr(),
+                         weight.size(1),
+                         bsz,
+                         Context::Instance().GetCurrentStream());
+    }
+
     return inp_norm;
 }
+
 template <typename T>
 std::vector<at::Tensor> ds_mlp_gemm(at::Tensor& input,
                                     at::Tensor& residual,
@@ -895,7 +928,8 @@ std::vector<at::Tensor> ds_mlp_gemm(at::Tensor& input,
                                     at::Tensor& beta,
                                     const float epsilon,
                                     bool preLayerNorm,
-                                    bool mlp_after_attn)
+                                    bool mlp_after_attn,
+                                    int activation_type)
 {
     auto input_cont = input.contiguous();
     auto options = at::TensorOptions()
@@ -907,6 +941,7 @@ std::vector<at::Tensor> ds_mlp_gemm(at::Tensor& input,
     auto output = at::empty({input_cont.size(0), input_cont.size(1), weight.size(1)}, options);
     int bsz = input_cont.size(0) * input_cont.size(1);
 
+    auto act_func_type = static_cast<ActivationFuncType>(activation_type);
     auto res_add = mlp_unfused_cublas<T>(output,
                                          mlp_after_attn ? input : residual,
                                          residual,
@@ -917,7 +952,8 @@ std::vector<at::Tensor> ds_mlp_gemm(at::Tensor& input,
                                          beta,
                                          epsilon,
                                          preLayerNorm,
-                                         mlp_after_attn);
+                                         mlp_after_attn,
+                                         act_func_type);
 
     return {output, res_add};
 }
@@ -1205,7 +1241,9 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m)
           &ds_softmax_context1<__half>,
           "DeepSpeed attention with fp32 (CUDA)");
     m.def("bias_gelu_fp32", &ds_bias_gelu<float>, "DeepSpeed Gelu with fp32 (CUDA)");
-    m.def("bias_gelu_fp16", &ds_bias_gelu<__half>, "DeepSpeed Gelu with fp32 (CUDA)");
+    m.def("bias_gelu_fp16", &ds_bias_gelu<__half>, "DeepSpeed Gelu with fp16 (CUDA)");
+    m.def("bias_relu_fp32", &ds_bias_relu<float>, "DeepSpeed ReLU with fp32 (CUDA)");
+    m.def("bias_relu_fp16", &ds_bias_relu<__half>, "DeepSpeed ReLU with fp16 (CUDA)");
     m.def("bias_residual_fp32",
           &ds_bias_residual<float>,
           "DeepSpeed residual-bias add with fp32 (CUDA)");

@@ -54,9 +54,13 @@ _gpt_models = [
     "EleutherAI/gpt-j-6B",
     "bigscience/bloom-350m",
 ]
+_opt_models = [
+    "facebook/opt-125m",        # 125m, 1.7B, ..., 175B variants have the same model architecture.
+    "facebook/opt-350m",        # 350m applies layer norm after attnention layer which is different than other variants.
+]
 _all_models = HfApi().list_models()
 
-test_models = set(_bert_models + _roberta_models + _gpt_models)
+test_models = set(_bert_models + _roberta_models + _gpt_models + _opt_models)
 test_tasks = [
     "fill-mask",
     "question-answering",
