@@ -1,5 +1,5 @@
 
-#include <ATen/cuda/CUDAContext.h>
+#include <c10/cuda/CUDAStream.h>
 #include <torch/extension.h>
 #include <vector>
 #include "context.h"

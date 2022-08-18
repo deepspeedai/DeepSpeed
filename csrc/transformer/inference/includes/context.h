@@ -1,13 +1,12 @@
 #pragma once
 
-#include <ATen/cuda/CUDAContext.h>
+#include <c10/cuda/CUDAStream.h>
 #include <cuda_runtime_api.h>
 #include <cassert>
 #include <iostream>
 #include <vector>
 #include "cublas_v2.h"
 #include "cuda.h"
-#include "curand.h"
 
 #define WARP_SIZE 32
 
@@ -42,8 +41,6 @@ class Context {
 public:
     Context() : _workspace(nullptr), _seed(42), _curr_offset(0), _stream(0)
     {
-        curandCreateGenerator(&_gen, CURAND_RNG_PSEUDO_DEFAULT);
-        curandSetPseudoRandomGeneratorSeed(_gen, 123);
         if (cublasCreate(&_cublasHandle) != CUBLAS_STATUS_SUCCESS) {
             auto message = std::string("Fail to create cublas handle.");
             std::cerr << message << std::endl;
@@ -51,16 +48,11 @@ public:
         }
 #ifndef __HIP_PLATFORM_HCC__
         cublasSetMathMode(_cublasHandle, CUBLAS_TENSOR_OP_MATH);
-        cudaEventCreate(&_comp1_event, (cudaEventDisableTiming | cudaEventBlockingSync));
-        cudaEventCreate(&_comp2_event, (cudaEventDisableTiming | cudaEventBlockingSync));
-        cudaEventCreate(&_comp_event, (cudaEventDisableTiming | cudaEventBlockingSync));
-        cudaEventCreate(&_comm_event, (cudaEventDisableTiming | cudaEventBlockingSync));
-#else
+#endif
         cudaEventCreate(&_comp1_event);
         cudaEventCreate(&_comp2_event);
         cudaEventCreate(&_comp_event);
         cudaEventCreate(&_comm_event);
-#endif
     }
 
     virtual ~Context()
@@ -113,8 +105,6 @@ public:
 
     inline void advance_tokens() { _num_tokens++; }
 
-    curandGenerator_t& GetRandGenerator() { return _gen; }
-
     cudaStream_t GetCommStream(bool async_op = false)
     {
         if (!_comm_stream)
@@ -158,7 +148,6 @@ public:
     }
 
 private:
-    curandGenerator_t _gen;
     cublasHandle_t _cublasHandle;
 
     cudaEvent_t _comp_event;
