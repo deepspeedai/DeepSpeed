@@ -444,12 +444,11 @@ class HFOPTLayerPolicy(DSPolicy):
         try:
             import transformers
             HFOPTLayerPolicy._orig_layer_class = transformers.models.opt.modeling_opt.OPTDecoderLayer
+            if isinstance(DSPolicy.hf_model_config,
+                          transformers.models.opt.configuration_opt.OPTConfig):
+                self.pre_attn_norm = self.hf_model_config.do_layer_norm_before
         except:
             HFOPTLayerPolicy._orig_layer_class = None
-
-        if isinstance(DSPolicy.hf_model_config,
-                      transformers.models.opt.configuration_opt.OPTConfig):
-            self.pre_attn_norm = self.hf_model_config.do_layer_norm_before
 
     def get_hidden_heads(self):
         return self.client_module.self_attn.embed_dim, \
