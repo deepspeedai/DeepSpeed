@@ -646,6 +646,14 @@ class DeepSpeedEngine(Module):
     def zero_offload_param(self):
         return self._config.zero_config.offload_param
 
+    def zero_use_cpu_optimizer(self):
+        if self._config.zero_config.offload_optimizer is not None:
+            return self._config.zero_config.offload_optimizer.device in [
+                OffloadDeviceEnum.cpu,
+                OffloadDeviceEnum.nvme
+            ]
+        return False
+
     def zero_cpu_offload(self):
         if self._config.zero_config.offload_optimizer is not None:
             return self._config.zero_config.offload_optimizer.device == OffloadDeviceEnum.cpu
@@ -1188,7 +1196,7 @@ class DeepSpeedEngine(Module):
                     optimizer = torch.optim.AdamW(model_parameters,
                                                   **optimizer_parameters)
             else:
-                if self.zero_cpu_offload():
+                if self.zero_use_cpu_optimizer():
                     if self.optimizer_name() == ADAGRAD_OPTIMIZER:
                         from deepspeed.ops.adagrad import DeepSpeedCPUAdagrad
                         optimizer = DeepSpeedCPUAdagrad(model_parameters,
