@@ -350,7 +350,7 @@ __global__ void gptj_residual_add(__half* input,
                                   int intermediate_size,
                                   float mp_scale)
 {
-#if __CUDA_ARCH__ >= 700 || defined(__HIP_PLATFORM_HCC__)
+#ifdef HALF_PRECISION_AVAILABLE
 
     float2* input_cast = reinterpret_cast<float2*>(input);
     float2* output_cast = reinterpret_cast<float2*>(output);
@@ -482,6 +482,7 @@ __global__ void moe_res_matmul(__half* residual,
                                int seq_len,
                                int hidden_dim)
 {
+#ifdef HALF_PRECISION_AVAILABLE
     unsigned tid = threadIdx.x;
 
     float2* residual_cast = reinterpret_cast<float2*>(residual);
@@ -509,6 +510,7 @@ __global__ void moe_res_matmul(__half* residual,
         mlp_out_cast[tid] = data;
         tid += blockDim.x;
     }
+#endif
 }
 
 template <typename T>

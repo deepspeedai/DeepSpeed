@@ -4,7 +4,7 @@
 #define HALF_PRECISION_AVAILABLE = 1
 #include <hip/hip_cooperative_groups.h>
 #else
-#if __CUDA_ARCH__ >= 700
+#if __CUDA_ARCH__ >= 530
 #define HALF_PRECISION_AVAILABLE = 1
 #endif
 #include <cooperative_groups.h>
