@@ -431,7 +431,7 @@ class TopKGate(Module):
 
         if self.wall_clock_breakdown:
             self.timers('TopKGate').stop()
-            self.gate_time = self.timers('TopKGate').elapsed(reset=False) * 1000
+            self.gate_time = self.timers('TopKGate').elapsed(reset=False)
 
         return gate_output
 
@@ -535,7 +535,7 @@ class MOELayer(Base):
 
         if self.wall_clock_breakdown:
             self.timers('falltoall').stop()
-            self.time_falltoall = self.timers('falltoall').elapsed(reset=False) * 1000
+            self.time_falltoall = self.timers('falltoall').elapsed(reset=False)
 
         # Re-shape after all-to-all: ecm -> gecm
         dispatched_input = dispatched_input.reshape(self.ep_size,
@@ -552,7 +552,7 @@ class MOELayer(Base):
 
         if self.wall_clock_breakdown:
             self.timers('salltoall').stop()
-            self.time_salltoall = self.timers('salltoall').elapsed(reset=False) * 1000
+            self.time_salltoall = self.timers('salltoall').elapsed(reset=False)
 
         # Re-shape back: gecm -> ecm
         expert_output = expert_output.reshape(self.ep_size * self.num_local_experts,
@@ -576,6 +576,6 @@ class MOELayer(Base):
 
         if self.wall_clock_breakdown:
             self.timers('moe').stop()
-            self.time_moe = self.timers('moe').elapsed(reset=False) * 1000
+            self.time_moe = self.timers('moe').elapsed(reset=False)
 
         return a
