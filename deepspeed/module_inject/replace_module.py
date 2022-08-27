@@ -656,7 +656,7 @@ def replace_transformer_layer(orig_layer_impl,
                 if z_inference:
                     with deepspeed.zero.GatheredParameters(child.bias, modifier_rank=0):
                         new_bias.data.copy_(child.bias.data)
-                elif child.bias:
+                elif child.bias is not None:
                     new_bias.data.copy_(child.bias.data)
                 return LinearAllreduce(data, child.bias if child.bias is None else \
                             torch.nn.parameter.Parameter(new_bias.to(torch.cuda.current_device())), mp_group)
