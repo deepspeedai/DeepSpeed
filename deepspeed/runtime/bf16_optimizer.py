@@ -2,7 +2,7 @@
 Copyright 2022 The Microsoft DeepSpeed Team
 """
 
-from typing import OrderedDict
+from collections import OrderedDict
 import torch
 import os
 from deepspeed import comm as dist
