@@ -1,5 +1,6 @@
 #include "custom_cuda_layers.h"
 
+namespace cg = cooperative_groups;
 #define MAX_CAP 4
 #define MAX_SEQ 2048
 
