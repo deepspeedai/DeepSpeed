@@ -487,13 +487,6 @@ class OpBuilder(ABC):
         self.jit_mode = True
         from torch.utils.cpp_extension import load
 
-        # Ensure directory exists to prevent race condition in some cases
-        ext_path = os.path.join(
-            os.environ.get('TORCH_EXTENSIONS_DIR',
-                           DEFAULT_TORCH_EXTENSION_PATH),
-            self.name)
-        os.makedirs(ext_path, exist_ok=True)
-
         start_build = time.time()
         sources = [self.deepspeed_src_path(path) for path in self.sources()]
         extra_include_paths = [
