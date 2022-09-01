@@ -1,3 +1,7 @@
+/*
+Copyright 2022 The Microsoft DeepSpeed Team
+*/
+
 #pragma once
 
 #include <c10/cuda/CUDAStream.h>

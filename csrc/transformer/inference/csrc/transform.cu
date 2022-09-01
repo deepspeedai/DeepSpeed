@@ -1,7 +1,11 @@
+/*
+Copyright 2022 The Microsoft DeepSpeed Team
+*/
+
 #ifndef __HIP_PLATFORM_HCC__
 #include <cuda_profiler_api.h>
 #endif
-#include "custom_cuda_layers.h"
+#include "inference_cuda_layers.h"
 namespace cg = cooperative_groups;
 
 // Bias add

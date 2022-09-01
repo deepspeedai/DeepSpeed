@@ -51,4 +51,4 @@ class InferenceBuilder(CUDAOpBuilder):
             return []
 
     def include_paths(self):
-        return ['csrc/transformer/inference/includes']
+        return ['csrc/transformer/inference/includes', 'csrc/includes']

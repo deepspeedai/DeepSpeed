@@ -1,10 +1,13 @@
+/*
+Copyright 2022 The Microsoft DeepSpeed Team
+*/
 
 #include <c10/cuda/CUDAStream.h>
 #include <torch/extension.h>
 #include <vector>
-#include "context.h"
-#include "cublas_wrappers.h"
-#include "custom_cuda_layers.h"
+#include "inference_context.h"
+#include "inference_cublas_wrappers.h"
+#include "inference_cuda_layers.h"
 
 std::array<int, 3> gemm_algos = std::array<int, 3>({99, 99, 99});
 

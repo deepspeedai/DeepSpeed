@@ -1,3 +1,7 @@
+/*
+Copyright 2022 The Microsoft DeepSpeed Team
+*/
+
 #pragma once
 
 #ifdef __HIP_PLATFORM_HCC__
