@@ -274,7 +274,7 @@ __global__ void attn_softmax_v2(float* vals,
         int batch_idx = iter_offset / (num_seq * heads);
         int alibi_offset = batch_idx * heads * mp_size + head_offset;
         int mask_offset = batch_idx * mask_stride + (iter_offset % mask_stride);
-
+        mask_offset = mask_offset * sequence_length;
         int seq_id = iter_offset % num_seq;
         int seq_id4 = seq_id >> 2;
 
@@ -305,7 +305,7 @@ __global__ void attn_softmax_v2(float* vals,
                                  (data_id + 3) > window_stride)
                                     ? vals[data_id + 3]
                                     : minus_infinity;
-                    if (attn_mask && recompute) {
+                    if (attn_mask) {
                         data[i].x += attn_mask[data_id + mask_offset];
                         data[i].y += attn_mask[data_id + mask_offset + 1];
                         data[i].z += attn_mask[data_id + mask_offset + 2];
@@ -322,7 +322,7 @@ __global__ void attn_softmax_v2(float* vals,
                                     ? (vals[data_id + 2])
                                     : minus_infinity;
                     data[i].w = minus_infinity;
-                    if (attn_mask && recompute) {
+                    if (attn_mask) {
                         data[i].x += attn_mask[data_id + mask_offset];
                         if ((data_id + 1) < sequence_length)
                             data[i].y += attn_mask[data_id + mask_offset + 1];
