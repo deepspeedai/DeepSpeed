@@ -21,8 +21,11 @@ FP32_WEIGHT_KEY = "fp32"
 #########################################
 # Module checkpoint keys
 #########################################
+PARAM = 'param'
 PARAM_SHAPES = 'param_shapes'
 BUFFER_NAMES = 'buffer_names'
+VOCAB_DIVISIBILITY_PADDING_TENSOR = 'vocab_divisibility_padding_tensor'
+CAT_DIM = "cat_dim"
 
 #########################################
 # Checkpoint naming constants

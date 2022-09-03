@@ -11,3 +11,5 @@ from .reshape_utils import (merge_state)
 from .reshape_3d_utils import (model_3d_desc, get_model_3d_descriptor)
 
 from .zero_checkpoint import ZeROCheckpoint
+
+from .universal_checkpoint import enable_universal_checkpoint
