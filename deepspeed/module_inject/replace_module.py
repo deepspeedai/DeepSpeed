@@ -857,7 +857,6 @@ def replace_transformer_layer(orig_layer_impl,
                              desc=f"Loading {len(checkpoint)} checkpoint shards")
 
             for i in range(len(checkpoint)):
-
                 sd = [
                     torch.load(os.path.join(base_dir1,
                                             checkpoint[i]),
@@ -870,6 +869,7 @@ def replace_transformer_layer(orig_layer_impl,
                     ckpt_type,
                     quantizer,
                 )
+                pbar.update(1)
         else:
             import gc
             num_checkpoints = len(ckpt_list) // ckpt_mp_size
