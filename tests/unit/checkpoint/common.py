@@ -8,7 +8,7 @@ from deepspeed.runtime.fp16.fused_optimizer import FP16_Optimizer
 from deepspeed.runtime.fp16.unfused_optimizer import FP16_UnfusedOptimizer
 from deepspeed.runtime.zero.stage3 import DeepSpeedZeroOptimizer_Stage3
 
-from tests.unit.simple_model import *
+from unit.simple_model import *
 
 
 def compare_deepspeed_states(saved_model, loaded_model):

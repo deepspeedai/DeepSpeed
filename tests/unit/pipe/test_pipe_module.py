@@ -10,7 +10,7 @@ import deepspeed
 from deepspeed.pipe import PipelineModule
 from deepspeed.utils import RepeatingLoader
 
-from tests.unit.common import DistributedTest
+from unit.common import DistributedTest
 
 HIDDEN_DIM = 32
 LAYERS = 8

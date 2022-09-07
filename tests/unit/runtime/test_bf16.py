@@ -2,10 +2,10 @@ import torch
 import deepspeed
 import pytest
 from deepspeed.ops.adam import FusedAdam
-from tests.unit.common import DistributedTest
+from unit.common import DistributedTest
 from deepspeed.ops.op_builder import CPUAdamBuilder
-from tests.unit.simple_model import SimpleModel, SimpleOptimizer, random_dataloader
-from tests.unit.util import bf16_required_version_check
+from unit.simple_model import SimpleModel, SimpleOptimizer, random_dataloader
+from unit.util import bf16_required_version_check
 from deepspeed import comm as dist
 
 

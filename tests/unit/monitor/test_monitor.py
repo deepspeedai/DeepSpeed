@@ -4,7 +4,7 @@ from deepspeed.monitor.tensorboard import TensorBoardMonitor
 from deepspeed.monitor.wandb import WandbMonitor
 from deepspeed.monitor.csv_monitor import csvMonitor
 
-from tests.unit.common import DistributedTest
+from unit.common import DistributedTest
 from deepspeed.runtime.config import DeepSpeedConfig
 
 

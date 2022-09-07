@@ -1,11 +1,11 @@
 import deepspeed
 from deepspeed.ops.op_builder import CPUAdamBuilder
 
-from tests.unit.common import DistributedTest
-from tests.unit.simple_model import *
-from tests.unit.util import required_minimum_torch_version
+from unit.common import DistributedTest
+from unit.simple_model import *
+from unit.util import required_minimum_torch_version
 
-from tests.unit.checkpoint.common import *
+from unit.checkpoint.common import *
 
 import itertools
 import pytest

@@ -5,7 +5,7 @@ import pytest
 import itertools
 import deepspeed
 from deepspeed.git_version_info import torch_info
-from tests.unit.common import DistributedTest
+from unit.common import DistributedTest
 from packaging import version as pkg_version
 from deepspeed.ops.op_builder import OpBuilder
 from transformers import pipeline, AutoModelForCausalLM, AutoTokenizer

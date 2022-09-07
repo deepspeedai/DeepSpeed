@@ -4,8 +4,8 @@ import pytest
 
 from deepspeed.ops.adam import FusedAdam
 from deepspeed.ops.adam import DeepSpeedCPUAdam
-from tests.unit.common import DistributedTest
-from tests.unit.simple_model import SimpleModel
+from unit.common import DistributedTest
+from unit.simple_model import SimpleModel
 
 # yapf: disable
 #'optimizer, zero_offload, torch_adam, adam_w_mode, resulting_optimizer

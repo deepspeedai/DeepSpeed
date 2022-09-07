@@ -2,8 +2,8 @@ import torch
 import pytest
 import deepspeed
 from deepspeed.profiling.flops_profiler import get_model_profile
-from tests.unit.simple_model import SimpleModel, random_dataloader
-from tests.unit.common import DistributedTest
+from unit.simple_model import SimpleModel, random_dataloader
+from unit.common import DistributedTest
 
 TORCH_MAJOR = int(torch.__version__.split('.')[0])
 TORCH_MINOR = int(torch.__version__.split('.')[1])

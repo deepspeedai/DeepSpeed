@@ -6,7 +6,7 @@ import pytest
 import deepspeed.runtime.utils as ds_utils
 import deepspeed.utils.groups as groups
 
-from tests.unit.common import DistributedTest
+from unit.common import DistributedTest
 
 
 def test_call_to_str():

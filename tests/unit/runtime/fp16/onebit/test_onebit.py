@@ -10,9 +10,9 @@ import numpy as np
 from deepspeed.runtime.pipe.topology import PipeDataParallelTopology
 from deepspeed.ops.op_builder import OpBuilder
 from deepspeed.runtime.pipe.module import PipelineModule
-from tests.unit.common import DistributedTest
-from tests.unit.simple_model import SimpleModel, random_dataloader
-from tests.unit.alexnet_model import AlexNetPipe, train_cifar
+from unit.common import DistributedTest
+from unit.simple_model import SimpleModel, random_dataloader
+from unit.alexnet_model import AlexNetPipe, train_cifar
 
 PipeTopo = PipeDataParallelTopology
 

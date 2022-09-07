@@ -1,6 +1,6 @@
 import torch
 import deepspeed
-from tests.unit.common import DistributedTest
+from unit.common import DistributedTest
 
 import deepspeed.utils.groups as groups
 

@@ -5,8 +5,8 @@ import pytest
 import deepspeed.comm as dist
 from deepspeed.runtime.pipe.topology import PipeDataParallelTopology
 from deepspeed.runtime.pipe.module import PipelineModule
-from tests.unit.alexnet_model import AlexNetPipe, train_cifar
-from tests.unit.common import DistributedTest
+from unit.alexnet_model import AlexNetPipe, train_cifar
+from unit.common import DistributedTest
 
 PipeTopo = PipeDataParallelTopology
 

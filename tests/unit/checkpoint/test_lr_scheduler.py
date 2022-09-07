@@ -1,10 +1,10 @@
 import deepspeed
 from deepspeed.ops.op_builder import CPUAdamBuilder
 
-from tests.unit.common import DistributedTest
-from tests.unit.simple_model import *
+from unit.common import DistributedTest
+from unit.simple_model import *
 
-from tests.unit.checkpoint.common import checkpoint_correctness_verification
+from unit.checkpoint.common import checkpoint_correctness_verification
 
 import pytest
 

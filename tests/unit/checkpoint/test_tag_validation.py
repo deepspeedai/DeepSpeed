@@ -1,7 +1,7 @@
 import deepspeed
 
-from tests.unit.common import DistributedTest
-from tests.unit.simple_model import *
+from unit.common import DistributedTest
+from unit.simple_model import *
 
 import pytest
 

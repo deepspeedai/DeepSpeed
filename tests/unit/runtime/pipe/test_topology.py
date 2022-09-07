@@ -7,7 +7,7 @@ from deepspeed.runtime.pipe.topology import PipelineParallelGrid as Grid
 from deepspeed.runtime.pipe.topology import ProcessTopology as Topo
 from deepspeed.runtime.pipe.topology import _prime_factors
 
-from tests.unit.common import DistributedTest
+from unit.common import DistributedTest
 
 
 def test_topology_2d():

@@ -2,8 +2,8 @@ from deepspeed.utils import RepeatingLoader
 import torch
 import pytest
 import deepspeed
-from tests.unit.common import DistributedTest
-from tests.unit.simple_model import SimpleModel, random_dataset
+from unit.common import DistributedTest
+from unit.simple_model import SimpleModel, random_dataset
 
 
 def test_repeating_loader():
