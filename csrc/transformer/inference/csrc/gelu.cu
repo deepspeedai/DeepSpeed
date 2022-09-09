@@ -92,6 +92,7 @@ void launch_bias_gelu(T* input,
 template void launch_bias_gelu<float>(float*, const float*, int, int, cudaStream_t);
 template void launch_bias_gelu<__half>(__half*, const __half*, int, int, cudaStream_t);
 
+// Not called directly from DeepSpeed, but used in ds_qkv_gemm_int8, ds_linear_layer, etc.
 __global__ void fused_bias_add(float* input, const float* bias, int total_count, int hidden_size)
 {
     float4* input_cast = reinterpret_cast<float4*>(input);
