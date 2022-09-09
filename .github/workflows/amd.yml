@@ -28,6 +28,7 @@ jobs:
       # Runs a single command using the runners shell
       - name: environment
         run: |
+          echo "JobID: $AISC_NODE_INSTANCE_ID"
           rocm-smi --showhw
           which python
           python --version

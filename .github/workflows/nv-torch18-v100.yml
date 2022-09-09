@@ -24,6 +24,7 @@ jobs:
 
       - name: environment
         run: |
+          echo "JobID: $AISC_NODE_INSTANCE_ID"
           nvidia-smi
           which python
           python --version

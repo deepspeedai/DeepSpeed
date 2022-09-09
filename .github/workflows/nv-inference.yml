@@ -24,6 +24,7 @@ jobs:
 
       - name: environment
         run: |
+          echo "JobID: $AISC_NODE_INSTANCE_ID"
           nvidia-smi
           which python
           python --version
@@ -40,7 +41,7 @@ jobs:
           git clone https://github.com/huggingface/transformers
           cd transformers
           # if needed switch to the last known good SHA until transformers@master is fixed
-          # git checkout 1cc453d33
+          git checkout v4.21.2
           git rev-parse --short HEAD
           pip uninstall --yes transformers
           pip install .
@@ -61,4 +62,5 @@ jobs:
           if [[ -d ./torch-extensions ]]; then rm -rf ./torch-extensions; fi
           cd tests
           EXPECTED_TORCH=$(pip index versions torch | grep -oP -m1 "^\s*LATEST.*\s\K\d+\.\d+")
+          TRANSFORMERS_CACHE=/blob/transformers_cache/ TORCH_EXTENSIONS_DIR=./torch-extensions pytest --color=yes --durations=0 --verbose -m 'seq_inference' unit/ --torch_ver=$EXPECTED_TORCH --cuda_ver="11.3"
           TRANSFORMERS_CACHE=/blob/transformers_cache/ TORCH_EXTENSIONS_DIR=./torch-extensions pytest --color=yes --durations=0 -n 4 --verbose -m 'inference' unit/ --torch_ver=$EXPECTED_TORCH --cuda_ver="11.3"

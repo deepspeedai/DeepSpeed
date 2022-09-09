@@ -52,7 +52,7 @@ _gpt_models = [
     "distilgpt2",
     "Norod78/hebrew-bad_wiki-gpt_neo-tiny",
     "EleutherAI/gpt-j-6B",
-    "bigscience/bloom-350m",
+    "bigscience/bloom-560m",
 ]
 _opt_models = [
     "facebook/opt-125m",        # 125m, 1.7B, ..., 175B variants have the same model architecture.
@@ -111,6 +111,7 @@ This fixture will validate the configuration
 @pytest.fixture()
 def invalid_model_task_config(model_w_task, dtype, enable_cuda_graph):
     model, task = model_w_task
+    msg = ""
     if pkg_version.parse(torch.__version__) <= pkg_version.parse("1.2"):
         msg = "DS inference injection doesn't work well on older torch versions"
     elif model not in pytest.all_models[task]:
@@ -120,10 +121,17 @@ def invalid_model_task_config(model_w_task, dtype, enable_cuda_graph):
     elif enable_cuda_graph and pkg_version.parse(
             torch.__version__) < pkg_version.parse("1.10"):
         msg = "CUDA Graph is only available in torch versions >= 1.10"
-    elif ("gpt-j-6B" in model) and (dtype == torch.float):
+    elif "gpt-j-6B" in model:
+        if dtype != torch.half:
+            msg = f"Not enough GPU memory to run {model} with dtype {dtype}"
+        elif enable_cuda_graph:
+            msg = f"Not enough GPU memory to run {model} with CUDA Graph enabled"
+    elif "gpt-neox-20b" in model:  # TODO: remove this when neox issues resolved
+        msg = "Skipping gpt-neox-20b for now"
+    elif ("gpt-neox-20b" in model) and (dtype != torch.half):
         msg = f"Not enough GPU memory to run {model} with dtype {dtype}"
-    else:
-        msg = ""
+    elif ("bloom" in model) and (dtype != torch.half):
+        msg = f"Bloom models only support half precision, cannot use dtype {dtype}"
     return msg
 
 
@@ -160,7 +168,7 @@ def query(model_w_task):
 def inf_kwargs(model_w_task):
     model, task = model_w_task
     if task == "text-generation":
-        return {"do_sample": False}
+        return {"do_sample": False, "max_length": 20}
     else:
         return {}
 
@@ -228,7 +236,9 @@ class TestModelTask(DistributedTest):
         local_rank = int(os.getenv("LOCAL_RANK", "0"))
 
         if "gpt-j-6B" in model and dtype == torch.half:
-            _model = AutoModelForCausalLM.from_pretrained(model)
+            _model = AutoModelForCausalLM.from_pretrained(model,
+                                                          revision="float16",
+                                                          torch_dtype=torch.float16)
             tokenizer = AutoTokenizer.from_pretrained(model)
             _model.half()
             pipe = pipeline(
@@ -269,12 +279,66 @@ class TestModelTask(DistributedTest):
         torch.cuda.synchronize()
         ds_time = time.time() - start
 
-        if task == "text-generation":
+        # facebook/opt* and some bigscient/bloom* models are not matching
+        # baseline exactly, adding an exception to them for now
+        if ("opt" in model) or ("bloom" in model):
             bs_output = pipe(query, **inf_kwargs)
 
         # These performance tests are only measuring the time for a single
         # inference request, we just want to check that performance isn't terrible
         #assert ds_time <= (bs_time * 1.1)
+        assert assert_fn(bs_output, ds_output)
+
+
+@pytest.mark.seq_inference
+@pytest.mark.parametrize("model_w_task",
+                         [("gpt2",
+                           "text-generation"),
+                          ("EleutherAI/gpt-neox-20b",
+                           "text-generation"),
+                          ("bigscience/bloom-3b",
+                           "text-generation")],
+                         ids=["gpt2",
+                              "gpt-neox",
+                              "bloom"])
+class TestMPSize(DistributedTest):
+    world_size = 4
+
+    def test(
+        self,
+        model_w_task,
+        dtype,
+        enable_cuda_graph,
+        query,
+        inf_kwargs,
+        assert_fn,
+        invalid_model_task_config,
+    ):
+        if invalid_model_task_config:
+            pytest.skip(invalid_model_task_config)
+
+        model, task = model_w_task
+        local_rank = int(os.getenv("LOCAL_RANK", "0"))
+
+        # We have to load these large models on CPU with pipeline because not
+        # enough GPU memory
+        pipe = pipeline(task, model=model, device=-1, framework="pt")
+        bs_output = pipe(query, **inf_kwargs)
+
+        pipe.model = deepspeed.init_inference(
+            pipe.model,
+            mp_size=self.world_size,
+            dtype=dtype,
+            replace_method="auto",
+            replace_with_kernel_inject=True,
+            enable_cuda_graph=enable_cuda_graph,
+        )
+        # Switch device to GPU so that input tensors are not on CPU
+        pipe.device = torch.device(f"cuda:{local_rank}")
+        ds_output = pipe(query, **inf_kwargs)
+
+        print(local_rank, "baseline", bs_output)
+        print(local_rank, "deepspeed", ds_output)
         assert assert_fn(bs_output, ds_output)
 
 
