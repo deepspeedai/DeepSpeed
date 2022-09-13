@@ -116,3 +116,7 @@ Below is a configuration snippet for offloading to a NVMe device mounted on "/lo
 
 ## Conclusion
 Recent advances in AI technology have primarily come from extreme scaling of model sizes. However, extreme model scaling has also made the hardware cost of training and inferencing prohibitive for all but the largest organizations, severely restricting access to AI innovations. To help democratize AI, we developed ZeRO-Inference, a technology that enables inference computations of massive models on as few as a single GPU. ZeRO-Inference reduces the GPU cost of SOTA model inference by hosting the model on CPU or NVMe memory and streaming the model layers into GPU memory for inference computation. ZeRO-Inference complements the democratization efforts of large organizations that publicly release pre-trained SOTA models by ensuring that inference computation of these models is affordable for most users (e.g., students, hobbyists, model scientists, etc.).
+
+
+## Acknowledgement
+The DeepSpeed team would like to acknowledge Stas Bekman for previewing this blog and providing valuable feedback.
