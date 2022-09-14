@@ -162,10 +162,7 @@ class InferenceEngine(Module):
             torch.cuda.set_rng_state(_rng_state.cpu())
 
         if self.mp_world_size > 1:
-            self.model_orig_fwd = self.module.forward
-            self.module.forward = self.forward
-        else:
-            self.module.register_forward_pre_hook(self._pre_forward_hook)
+            assert not self.enable_cuda_graph, "Cuda graph is not supported for model parallelism"
 
     def _get_model_config_generate(self, config):
         self.config = getattr(self.module, 'config', None) if config is None else config
@@ -475,14 +472,6 @@ class InferenceEngine(Module):
         elif self.dtype == torch.float:
             self.module.float()
 
-    def _pre_forward_hook(self, module, *inputs, **kwargs):
-        for input in inputs:
-            if torch.is_tensor(input):
-                input = input.to(torch.cuda.current_device())
-        for k in kwargs:
-            if torch.is_tensor(kwargs[k]):
-                kwargs[k] = kwargs[k].to(torch.cuda.current_device())
-
     def _create_cuda_graph(self, *inputs, **kwargs):
         # warmup to create the workspace and cublas handle
         cuda_stream = torch.cuda.Stream()
@@ -519,30 +508,13 @@ class InferenceEngine(Module):
             *inputs: Variable length input list
             **kwargs: variable length keyword arguments
         """
-
-        if self.mp_world_size > 1:
-            if self.mpu is None:
-                for input in inputs:
-                    if torch.is_tensor(input):
-                        input = input.to(torch.cuda.current_device())
-                        if not input.is_contiguous():
-                            input = input.contiguous()
-                        dist.broadcast(input, 0)
-                for k in kwargs:
-                    if torch.is_tensor(kwargs[k]):
-                        kwargs[k] = kwargs[k].to(torch.cuda.current_device())
-                        if not kwargs[k].is_contiguous():
-                            kwargs[k] = kwargs[k].contiguous()
-                        dist.broadcast(kwargs[k], 0)
-            outputs = self.model_orig_fwd(*inputs, **kwargs)
-        else:
-            if self.enable_cuda_graph:
-                if self.cuda_graph_created:
-                    outputs = self._graph_replay(*inputs, **kwargs)
-                else:
-                    self._create_cuda_graph(*inputs, **kwargs)
-                    outputs = self._graph_replay(*inputs, **kwargs)
+        if self.enable_cuda_graph:
+            if self.cuda_graph_created:
+                outputs = self._graph_replay(*inputs, **kwargs)
             else:
-                outputs = self.module(*inputs, **kwargs)
-            #outputs = self.module(*inputs, **kwargs)
+                self._create_cuda_graph(*inputs, **kwargs)
+                outputs = self._graph_replay(*inputs, **kwargs)
+        else:
+            outputs = self.module(*inputs, **kwargs)
+
         return outputs

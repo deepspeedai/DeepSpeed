@@ -40,8 +40,6 @@ jobs:
         run: |
           git clone https://github.com/huggingface/transformers
           cd transformers
-          # if needed switch to the last known good SHA until transformers@master is fixed
-          git checkout v4.21.2
           git rev-parse --short HEAD
           pip uninstall --yes transformers
           pip install .

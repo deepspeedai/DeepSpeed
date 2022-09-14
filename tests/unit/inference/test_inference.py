@@ -292,13 +292,13 @@ class TestModelTask(DistributedTest):
 
 @pytest.mark.seq_inference
 @pytest.mark.parametrize("model_w_task",
-                         [("gpt2",
+                         [("EleutherAI/gpt-neo-1.3B",
                            "text-generation"),
                           ("EleutherAI/gpt-neox-20b",
                            "text-generation"),
                           ("bigscience/bloom-3b",
                            "text-generation")],
-                         ids=["gpt2",
+                         ids=["gpt-neo",
                               "gpt-neox",
                               "bloom"])
 class TestMPSize(DistributedTest):
@@ -308,7 +308,6 @@ class TestMPSize(DistributedTest):
         self,
         model_w_task,
         dtype,
-        enable_cuda_graph,
         query,
         inf_kwargs,
         assert_fn,
@@ -325,14 +324,11 @@ class TestMPSize(DistributedTest):
         pipe = pipeline(task, model=model, device=-1, framework="pt")
         bs_output = pipe(query, **inf_kwargs)
 
-        pipe.model = deepspeed.init_inference(
-            pipe.model,
-            mp_size=self.world_size,
-            dtype=dtype,
-            replace_method="auto",
-            replace_with_kernel_inject=True,
-            enable_cuda_graph=enable_cuda_graph,
-        )
+        pipe.model = deepspeed.init_inference(pipe.model,
+                                              mp_size=self.world_size,
+                                              dtype=dtype,
+                                              replace_method="auto",
+                                              replace_with_kernel_inject=True)
         # Switch device to GPU so that input tensors are not on CPU
         pipe.device = torch.device(f"cuda:{local_rank}")
         ds_output = pipe(query, **inf_kwargs)
