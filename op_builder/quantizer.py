@@ -20,3 +20,6 @@ class QuantizerBuilder(CUDAOpBuilder):
 
     def include_paths(self):
         return ['csrc/includes']
+
+    def extra_ldflags(self):
+        return ['-lcurand']
