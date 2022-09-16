@@ -1,3 +1,4 @@
+import os
 import torch
 import time
 import deepspeed
@@ -7,9 +8,26 @@ from transformers import pipeline
 parser = argparse.ArgumentParser()
 parser.add_argument("--model", "-m", type=str, help="hf model name")
 parser.add_argument("--deepspeed", action="store_true", help="use deepspeed inference")
-parser.add_argument("--dtype", type=str, default="fp16", help="fp16 or fp32")
+parser.add_argument("--dtype",
+                    type=str,
+                    default="fp16",
+                    choices=["fp16",
+                             "fp32",
+                             "int8"],
+                    help="int8, fp16, or fp32")
+parser.add_argument("--graphs", action="store_true", help="CUDA Graphs on")
+parser.add_argument("--kernel-inject", action="store_true", help="inject kernels on")
 parser.add_argument("--max-tokens", type=int, default=50, help="max new tokens")
-parser.add_argument("--local_rank", type=int, default=0, help="local rank")
+parser.add_argument("--local_rank",
+                    type=int,
+                    default=int(os.getenv("LOCAL_RANK",
+                                          "0")),
+                    help="local rank")
+parser.add_argument("--world_size",
+                    type=int,
+                    default=int(os.getenv("WORLD_SIZE",
+                                          "1")),
+                    help="world size")
 parser.add_argument("--trials", type=int, default=30, help="number of trials")
 args = parser.parse_args()
 
@@ -44,9 +62,17 @@ def print_latency(latency_set, title, warmup=3):
 
 deepspeed.init_distributed("nccl")
 
-print(args.model, args.max_tokens, args.dtype)
+if args.local_rank == 0:
+    print("BENCHMARK SETTINGS:")
+    print(f"\tMODEL: {args.model}")
+    print(f"\tMAX_TOKENS: {args.max_tokens}")
+    print(f"\tDTYPE: {args.dtype}")
+    print(f"\tCUDA_GRAPHS: {args.graphs}")
+    print(f"\tKERNEL_INJECT: {args.kernel_inject}")
 
-if args.dtype.lower() == "fp16":
+if args.dtype == "int8":
+    dtype = torch.int8
+elif args.dtype == "fp16":
     dtype = torch.float16
 else:
     dtype = torch.float32
@@ -56,26 +82,33 @@ pipe = pipeline("text-generation",
                 framework="pt",
                 device=args.local_rank)
 
-if dtype == torch.half:
+if dtype == torch.float16:
     pipe.model.half()
 
 if args.deepspeed:
-    pipe.model = deepspeed.init_inference(pipe.model,
-                                          dtype=dtype,
-                                          replace_with_kernel_inject=True,
-                                          replace_method='auto')
+    pipe.model = deepspeed.init_inference(
+        pipe.model,
+        dtype=dtype,
+        mp_size=args.world_size,
+        replace_with_kernel_inject=args.kernel_inject,
+        replace_method="auto",
+        enable_cuda_graph=args.graphs,
+    )
 
 responses = []
 times = []
 for i in range(args.trials):
     torch.cuda.synchronize()
     start = time.time()
-    r = pipe("DeepSpeed is", max_new_tokens=args.max_tokens)
+    r = pipe("DeepSpeed is", do_sample=False, max_new_tokens=args.max_tokens)
     torch.cuda.synchronize()
     end = time.time()
     responses.append(r)
     times.append((end - start) / (args.max_tokens - 3))
 
-print_latency(times, "token latency")
-
-print(responses[0:3])
+if args.local_rank == 0:
+    print_latency(times, "token latency")
+    print(f"RESPONSE 0:")
+    print("-" * 30)
+    print(responses[0][0]["generated_text"])
+    print("-" * 30)
