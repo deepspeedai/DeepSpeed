@@ -471,7 +471,6 @@ __global__ void moe_res_matmul(__half* residual,
 {
 #ifdef HALF_PRECISION_AVAILABLE
     unsigned tid = threadIdx.x;
-
     float2* residual_cast = reinterpret_cast<float2*>(residual);
     float2* mlp_out_cast = reinterpret_cast<float2*>(mlp_out);
     float2* coef_cast = reinterpret_cast<float2*>(coef);
@@ -483,7 +482,7 @@ __global__ void moe_res_matmul(__half* residual,
     while (tid < hidden_dim) {
         float2 res = residual_cast[tid];
         float2 coef1 = coef_cast[tid];
-        float2 coef2 = coef_cast[tid];
+        float2 coef2 = coef_cast2[tid];
         float2 data = mlp_out_cast[tid];
         __half* data_h = reinterpret_cast<__half*>(&data);
         __half* coef1_h = reinterpret_cast<__half*>(&coef1);
