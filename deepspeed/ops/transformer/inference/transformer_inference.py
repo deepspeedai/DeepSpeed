@@ -601,6 +601,7 @@ class DeepSpeedMLPFunction(Function):
                 fused_gemm_gelu,
                 vector_matmul_func,
                 bias_residual_func,
+                residual_add_func,
                 activation_func_type=ActivationFuncType.GELU):
 
         if attn_nw is None:
@@ -630,16 +631,16 @@ class DeepSpeedMLPFunction(Function):
                                         False,
                                         output_w.scale,
                                         config.q_int8)
-        inference_cuda_module.residual_add(
-            output,
-            residual if config.pre_layer_norm else residual_add,
-            input,
-            output_b,
+        output = residual_add_func(
+            output,                 # hidden state
+            residual if config.pre_layer_norm else residual_add,        # residual
+            input,                  # attention output
             bias if bias is not None else output_b,
-            config.mp_size,
-            config.mlp_after_attn,
-            bias is not None,
-            config.pre_layer_norm)
+            output_b,
+            config.mp_size,         # model parallel size
+            config.mlp_after_attn,  # whether mlp is after attention (GPTJ model architecture runs the MLP layer in parallel with attention)
+            bias is not None,       # whether bias addition is fused
+            config.pre_layer_norm)  # whether the layer norm is applied before attention
         if mp_group is not None and dist.get_world_size(group=mp_group) > 1:
             dist.all_reduce(output, group=mp_group)
         return output
@@ -710,6 +711,9 @@ class DeepSpeedMLP(nn.Module):
         self.bias_residual_func = inference_cuda_module.bias_residual_fp16 if config.fp16 or config.q_int8 else \
                                     inference_cuda_module.bias_residual_fp32
 
+        self.residual_add_func = inference_cuda_module.residual_add_bias_fp16 if config.fp16 or config.q_int8 else \
+                                    inference_cuda_module.residual_add_bias_fp32
+
     def forward(self, input, residual, residual_norm, bias):
         return DeepSpeedMLPFunction.apply(input,
                                           residual,
@@ -729,7 +733,8 @@ class DeepSpeedMLP(nn.Module):
                                           self.mlp_gemm_func,
                                           self.fused_gemm_gelu,
                                           self.vector_matmul_func,
-                                          self.bias_residual_func)
+                                          self.bias_residual_func,
+                                          self.residual_add_func)
 
 
 class DeepSpeedTransformerInference(nn.Module):

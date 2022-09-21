@@ -1182,63 +1182,42 @@ at::Tensor fused_gemm_gelu(at::Tensor& input,
     return output;
 }
 
-void residual_add_bias(at::Tensor& output,
-                       at::Tensor& input,
-                       at::Tensor& attention_output,
-                       at::Tensor& output_b,
-                       at::Tensor& attention_b,
-                       int mp_size,
-                       bool mlp_after_attn,
-                       bool add_bias,
-                       bool preln)
+template <typename T>
+at::Tensor& residual_add_bias(at::Tensor& hidden_state,
+                              const at::Tensor& residual,
+                              const at::Tensor& attention_output,
+                              const at::Tensor& attention_bias,
+                              const at::Tensor& final_bias,
+                              const int mp_size,
+                              const bool mlp_after_attn,
+                              const bool add_bias,
+                              const bool preln)
 {
-    int bsz = input.size(0) * input.size(1);
-    int hidden_size = input.size(2);
-    // cudaStreamWaitEvent(
-    //    Context::Instance().GetCurrentStream(), Context::Instance().GetCompEvent(2), 0);
-    if (input.scalar_type() == at::kFloat)
-        if (mlp_after_attn)
-            launch_bias_residual((float*)input.data_ptr(),
-                                 (float*)output.data_ptr(),
-                                 (float*)attention_output.data_ptr(),
-                                 (float*)output_b.data_ptr(),
-                                 (float*)attention_b.data_ptr(),
-                                 bsz,
-                                 hidden_size,
-                                 mp_size,
-                                 preln,
-                                 Context::Instance().GetCurrentStream());
-        else
-            launch_gptj_residual_add<float>((float*)input.data_ptr(),
-                                            (float*)output.data_ptr(),
-                                            (float*)attention_output.data_ptr(),
-                                            (float*)output_b.data_ptr(),
-                                            (float*)(add_bias ? attention_b.data_ptr() : nullptr),
-                                            hidden_size,
-                                            bsz,
-                                            mp_size,
-                                            Context::Instance().GetCurrentStream());
-    else if (mlp_after_attn)
-        launch_bias_residual((__half*)input.data_ptr(),
-                             (__half*)output.data_ptr(),
-                             (__half*)attention_output.data_ptr(),
-                             (__half*)output_b.data_ptr(),
-                             (__half*)attention_b.data_ptr(),
+    int bsz = residual.size(0) * residual.size(1);
+    int hidden_size = residual.size(2);
+    if (mlp_after_attn)
+        launch_bias_residual(static_cast<T*>(residual.data_ptr()),
+                             static_cast<T*>(hidden_state.data_ptr()),
+                             static_cast<T*>(attention_output.data_ptr()),
+                             static_cast<T*>(final_bias.data_ptr()),
+                             static_cast<T*>(attention_bias.data_ptr()),
                              bsz,
                              hidden_size,
                              mp_size,
                              preln,
                              Context::Instance().GetCurrentStream());
     else
-        launch_gptj_residual_add<__half>((__half*)input.data_ptr(),
-                                         (__half*)output.data_ptr(),
-                                         (__half*)attention_output.data_ptr(),
-                                         (__half*)output_b.data_ptr(),
-                                         (__half*)(add_bias ? attention_b.data_ptr() : nullptr),
-                                         hidden_size,
-                                         bsz,
-                                         mp_size,
-                                         Context::Instance().GetCurrentStream());
+        launch_gptj_residual_add<T>(
+            static_cast<T*>(residual.data_ptr()),
+            static_cast<T*>(hidden_state.data_ptr()),
+            static_cast<T*>(attention_output.data_ptr()),
+            static_cast<T*>(final_bias.data_ptr()),
+            static_cast<T*>((add_bias ? attention_bias.data_ptr() : nullptr)),
+            hidden_size,
+            bsz,
+            mp_size,
+            Context::Instance().GetCurrentStream());
+    return hidden_state;
 }
 
 std::vector<at::Tensor> apply_rotary_pos_emb(at::Tensor& mixed_query,
@@ -1380,7 +1359,12 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m)
           "DeepSpeed linear_layer with int8 (CUDA)");
     m.def("fused_gemm_gelu_fp32", &fused_gemm_gelu<float>, "DeepSpeed mlp with fp32 (CUDA)");
     m.def("fused_gemm_gelu_fp16", &fused_gemm_gelu<__half>, "DeepSpeed mlp with fp16 (CUDA)");
-    m.def("residual_add", &residual_add_bias, "DeepSpeed mlp with fp16 (CUDA)");
+    m.def("residual_add_bias_fp32",
+          &residual_add_bias<float>,
+          "DeepSpeed residual add with fp32 (CUDA)");
+    m.def("residual_add_bias_fp16",
+          &residual_add_bias<__half>,
+          "DeepSpeed residual add with fp16 (CUDA)");
     m.def("apply_rotary_pos_emb", &apply_rotary_pos_emb, "DeepSpeed mlp with fp16 (CUDA)");
     m.def("einsum_sec_sm_ecm_fp32",
           &einsum_sec_sm_ecm<float>,

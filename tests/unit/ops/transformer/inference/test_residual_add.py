@@ -26,8 +26,8 @@ def inference_module():
 def run_residual_add_reference(hidden_state,
                                residual,
                                attention_output,
-                               final_bias,
                                attention_output_bias,
+                               final_bias,
                                mlp_after_attn,
                                add_bias,
                                mp_size=1):
@@ -86,21 +86,29 @@ def test_residual_add(inference_module,
     ref_out = run_residual_add_reference(ref_out,
                                          residual,
                                          attention_output,
-                                         final_bias,
                                          attention_output_bias,
+                                         final_bias,
                                          mlp_after_attn,
                                          add_bias,
                                          mp_size)
 
-    inference_module.residual_add(
-            ds_out,         # in-place update of ds_out. Needs reafactoring to be consistent with other kernels.
-            residual,
-            attention_output,
-            final_bias,
-            attention_output_bias,
-            mp_size,
-            mlp_after_attn,
-            add_bias,
-            preln)
+    res_add_args = [
+        ds_out,
+        residual,
+        attention_output,
+        attention_output_bias,
+        final_bias,
+        mp_size,
+        mlp_after_attn,
+        add_bias,
+        preln
+    ]
+
+    if dtype == torch.float16:
+        ds_out = inference_module.residual_add_bias_fp16(*res_add_args)
+    elif dtype == torch.float32:
+        ds_out = inference_module.residual_add_bias_fp32(*res_add_args)
+    else:
+        raise ValueError(f"Unsupported dtype: {dtype}")
 
     assert (allclose(ds_out, ref_out))
