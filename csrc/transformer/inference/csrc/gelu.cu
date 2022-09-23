@@ -188,7 +188,7 @@ __global__ void fused_bias_residual(float* input,
             data.z = data.z + out.z + bias_data.z;
             data.w = data.w + out.w + bias_data.w;
         }
-        output_cast[offset] = data;
+        input_cast[offset] = data;
     }
 }
 
@@ -260,7 +260,7 @@ __global__ void fused_bias_residual(__half* input,
         vals_half[0] = __float22half2_rn(low_data);
         vals_half[1] = __float22half2_rn(high_data);
 
-        output_cast[offset] = vals_vec;
+        input_cast[offset] = vals_vec;
     }
 #endif
 }
@@ -324,7 +324,7 @@ __global__ void gptj_residual_add(float* input,
         data.z = out.z + res_vec.z + (data.z + bias_data.z) * mp_scale;
         data.w = out.w + res_vec.w + (data.w + bias_data.w) * mp_scale;
 
-        output_cast[offset] = data;
+        input_cast[offset] = data;
     }
 }
 
@@ -390,7 +390,7 @@ __global__ void gptj_residual_add(__half* input,
         vals_half[0] = __float22half2_rn(low_data);
         vals_half[1] = __float22half2_rn(high_data);
 
-        output_cast[offset] = vals_vec;
+        input_cast[offset] = vals_vec;
     }
 #endif
 }

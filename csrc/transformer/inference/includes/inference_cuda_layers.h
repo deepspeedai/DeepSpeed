@@ -21,7 +21,6 @@ Copyright 2022 The Microsoft DeepSpeed Team
 #include <cassert>
 #include <iostream>
 
-#define MAX_OUT_TOKES 128
 #define MAX_WARP_NUM 32
 #define WARP_SIZE 32
 
@@ -142,7 +141,8 @@ void launch_apply_rotary_pos_emb(T* mixed_query,
                                  unsigned batch,
                                  bool rotate_half,
                                  bool rotate_every_two,
-                                 cudaStream_t stream);
+                                 cudaStream_t stream,
+                                 int max_out_tokens);
 
 template <typename T>
 void launch_moe_res_matmul(T* residual,
@@ -178,4 +178,5 @@ void launch_bias_add_transform_0213(T* outputs,
                                     bool rotate_half,
                                     bool rotate_every_two,
                                     cudaStream_t stream,
-                                    int trans_count);
+                                    int trans_count,
+                                    int max_out_tokens);

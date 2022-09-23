@@ -152,10 +152,6 @@ __global__ void dequantize_kernel(__half* output,
             q_h[1] = __float2half(local_scale * (float)q_int8[1]);
             q_h[2] = __float2half(local_scale * (float)q_int8[2]);
             q_h[3] = __float2half(local_scale * (float)q_int8[3]);
-            // q_h[4] = __float2half(local_scale * (float)q_int8[4]);
-            // q_h[5] = __float2half(local_scale * (float)q_int8[5]);
-            // q_h[6] = __float2half(local_scale * (float)q_int8[6]);
-            // q_h[7] = __float2half(local_scale * (float)q_int8[7]);
             output_cast[tid] = q_f;
             tid += blockDim.x;
         }
