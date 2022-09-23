@@ -215,7 +215,8 @@ def replace_transformer_layer(orig_layer_impl,
                               moe_type='standard',
                               checkpoint_dict=None,
                               save_mp_checkpoint_path=None,
-                              base_dir=""):
+                              base_dir="",
+                              enable_cuda_graph=False):
     """ Replace bert-style transformer layers with DeepSpeed's transformer layer
     Arguments:
         orig_layer_impl (torch.nn.Module): the original transformer layer implementation to look for,
@@ -259,7 +260,9 @@ def replace_transformer_layer(orig_layer_impl,
                             inference=False,
                             layer_id=0):
         policy = policy_cls(child, inference=inference)
-
+        if not policy.cuda_graph_supported:
+            # policy says cuda graph is not supported raise an error if set
+            assert not enable_cuda_graph, "cuda graph is not supported with this model, please disable"
         if inference:
             hidden_size, num_attention_heads = policy.get_hidden_heads()
             assert num_attention_heads % mp_size == 0,\
@@ -687,7 +690,7 @@ def replace_transformer_layer(orig_layer_impl,
                 weight_shape = child.weight.ds_shape
             else:
                 weight_shape = child.weight.shape
-            if name in all_reduce_linears:
+            if isinstance(all_reduce_linears, dict) and name in all_reduce_linears:
                 new_weight = torch.empty((
                     weight_shape[1] if conv_linear_layer else weight_shape[0],
                     (weight_shape[0] if conv_linear_layer else weight_shape[1]) //

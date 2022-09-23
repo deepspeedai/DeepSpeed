@@ -24,7 +24,7 @@ class DSPolicy(ABC):
         mlp_act_func_type=ActivationFuncType.GELU,
         # applies layer norm before attention if `pre_attn_norm` is set to True
         pre_attn_norm=True):
-
+        self.cuda_graph_supported = False
         self.inference = inference
         self.linear_layer = linear_layer
         self.scale_attention = scale_attention
@@ -69,6 +69,7 @@ class HFBertLayerPolicy(DSPolicy):
     def __init__(self, client_module, inference=False):
         super().__init__(inference, pre_attn_norm=False)
         self.client_module = client_module
+        self.cuda_graph_supported = True
 
         if HFBertLayerPolicy._orig_layer_class is None:
             try:

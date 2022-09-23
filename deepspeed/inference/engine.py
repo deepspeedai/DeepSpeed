@@ -2,6 +2,7 @@
 Copyright 2021 The Microsoft DeepSpeed Team
 '''
 import torch
+import time
 import os
 
 from deepspeed import comm as dist
@@ -100,6 +101,8 @@ class InferenceEngine(Module):
         self.cuda_graph_created = False
         self.checkpoint_engine = TorchCheckpointEngine()
         self._init_quantization_setting(quantization_setting)
+        self.model_profile_enabled = False
+        self._model_times = []
 
         # This is a hack to remove the prepare_mask function on HF side for BLOOM architecture
         self.remove_mask_prepare_for_bloom()
@@ -164,6 +167,12 @@ class InferenceEngine(Module):
         if self.mp_world_size > 1:
             assert not self.enable_cuda_graph, "Cuda graph is not supported for model parallelism"
 
+    def profile_model_time(self):
+        if not self.model_profile_enabled and not self.enable_cuda_graph:
+            self.module.register_forward_pre_hook(self._pre_forward_hook)
+            self.module.register_forward_hook(self._post_forward_hook)
+        self.model_profile_enabled = True
+
     def _get_model_config_generate(self, config):
         self.config = getattr(self.module, 'config', None) if config is None else config
         self.generate = getattr(self.module, 'generate', None)
@@ -172,6 +181,15 @@ class InferenceEngine(Module):
         if hasattr(self.module, 'transformer'):
             if hasattr(self.module.transformer, '_prepare_attn_mask'):
                 self.module.transformer._prepare_attn_mask = lambda attention_mask, *args, **kwargs: attention_mask
+
+    def _pre_forward_hook(self, module, *inputs, **kwargs):
+        torch.cuda.synchronize()
+        self._start = time.time()
+
+    def _post_forward_hook(self, module, input, output):
+        torch.cuda.synchronize()
+        self._end = time.time()
+        self._model_times.append(self._end - self._start)
 
     def _create_model_parallel_group(self):
         # Call the init process
@@ -364,7 +382,8 @@ class InferenceEngine(Module):
                                   training_mp_size=training_mp_size,
                                   checkpoint_dict=checkpoint,
                                   save_mp_checkpoint_path=save_mp_checkpoint_path,
-                                  base_dir=base_dir)
+                                  base_dir=base_dir,
+                                  enable_cuda_graph=self.enable_cuda_graph)
 
     def _get_all_ckpt_names(self, checkpoints_path, tag):
         ckpt_file_pattern = self._get_ckpt_name(checkpoints_path,
@@ -501,6 +520,18 @@ class InferenceEngine(Module):
         self._cuda_graphs.replay()
         return self.static_output
 
+    def model_times(self):
+        assert self.model_profile_enabled, "model profiling is not enabled"
+        model_times = self._model_times
+        if self.enable_cuda_graph and len(self._model_times) == 0:
+            raise ValueError(
+                "Model times are empty and cuda graph is enabled. If "
+                "this is a GPT-style model this combo is not supported. If this is a "
+                "BERT-style model this is a bug, please report it. "
+                f"Model type is: {type(self.module)}")
+        self._model_times = []
+        return model_times
+
     def forward(self, *inputs, **kwargs):
         """Execute forward propagation
 
@@ -508,6 +539,11 @@ class InferenceEngine(Module):
             *inputs: Variable length input list
             **kwargs: variable length keyword arguments
         """
+        start = None
+        if self.model_profile_enabled and self.enable_cuda_graph:
+            torch.cuda.synchronize()
+            start = time.time()
+
         if self.enable_cuda_graph:
             if self.cuda_graph_created:
                 outputs = self._graph_replay(*inputs, **kwargs)
@@ -516,5 +552,10 @@ class InferenceEngine(Module):
                 outputs = self._graph_replay(*inputs, **kwargs)
         else:
             outputs = self.module(*inputs, **kwargs)
+
+        if self.model_profile_enabled and self.enable_cuda_graph:
+            torch.cuda.synchronize()
+            duration = time.time() - start
+            self._model_times.append(duration)
 
         return outputs

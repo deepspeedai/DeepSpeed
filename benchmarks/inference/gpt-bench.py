@@ -34,6 +34,7 @@ args = parser.parse_args()
 
 def print_latency(latency_set, title, warmup=3):
     # trim warmup queries
+    latency_set = list(latency_set)
     latency_set = latency_set[warmup:]
     count = len(latency_set)
     if count > 0:
@@ -94,9 +95,11 @@ if args.deepspeed:
         replace_method="auto",
         enable_cuda_graph=args.graphs,
     )
+    pipe.model.profile_model_time()
 
 responses = []
 times = []
+mtimes = []
 for i in range(args.trials):
     torch.cuda.synchronize()
     start = time.time()
@@ -104,10 +107,15 @@ for i in range(args.trials):
     torch.cuda.synchronize()
     end = time.time()
     responses.append(r)
-    times.append((end - start) / (args.max_tokens - 3))
+    times.append(end - start)  # / (args.max_tokens - 3))
+    mtimes.append(sum(pipe.model.model_times()))
 
 if args.local_rank == 0:
-    print_latency(times, "token latency")
+    print_latency(times, "(e2e) latency")
+    print_latency(mtimes, "(model-only) latency")
+    print_latency(map(lambda t: t / (args.max_tokens - 3),
+                      times),
+                  "(e2e) per token latency")
     print(f"RESPONSE 0:")
     print("-" * 30)
     print(responses[0][0]["generated_text"])
