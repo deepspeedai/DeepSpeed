@@ -373,7 +373,7 @@ Enabling and configuring ZeRO memory optimizations
 
 | Description                                                                                               | Default |
 | --------------------------------------------------------------------------------------------------------- | ------- |
-| Enable ZeRO memory optimization wrapper for FP16 Training. Currently compatible only with Adam optimizer. | `false` |
+| Enable ZeRO memory optimizations, compatible with FP16/BF16/FP32 and the Adam optimizer. | `false` |
 
 <i>**stage**</i>: [integer]
 
