@@ -97,7 +97,7 @@ generate_samples_gpt.py \
        --num-attention-heads 16 \
        --max-position-embeddings 1024 \
        --tokenizer-type GPT2BPETokenizer \
-       --load $checpoint_path \
+       --load $checkpoint_path \
        --fp16 \
        --ds-inference \
 ```
