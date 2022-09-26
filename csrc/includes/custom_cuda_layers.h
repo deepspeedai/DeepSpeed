@@ -1,20 +1,16 @@
+/*
+Copyright 2022 The Microsoft DeepSpeed Team
+*/
+
 #pragma once
+
+#include "ds_kernel_utils.h"
 
 #include <cuda.h>
 #include <cuda_fp16.h>
+#include <curand_kernel.h>
 #include <stdio.h>
 #include <stdlib.h>
-
-#ifdef __HIP_PLATFORM_HCC__
-#define HALF_PRECISION_AVAILABLE = 1
-#include <hip/hip_cooperative_groups.h>
-#else
-#if __CUDA_ARCH__ >= 530
-#define HALF_PRECISION_AVAILABLE = 1
-#endif
-#include <cooperative_groups.h>
-#endif
-#include <curand_kernel.h>
 
 #include "context.h"
 #include "cublas_wrappers.h"

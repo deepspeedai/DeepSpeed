@@ -16,6 +16,8 @@ Copyright 2022 The Microsoft DeepSpeed Team
 #define GIGABYTE (1024 * 1024 * 1024)
 
 #define MAX_OUT_TOKENS 8192
+
+// TODO: refactor out
 #define WARP_SIZE 32
 
 #define CUDA_CHECK(callstr)                                                                    \

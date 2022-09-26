@@ -5,15 +5,7 @@ Copyright 2022 The Microsoft DeepSpeed Team
 #pragma once
 
 #include <cuda.h>
-
-#if __CUDA_ARCH__ >= 800
-#define ASYNC_COPY_AVAILABLE
-#endif
-
-// Discuss basic GPUs to support
-#if __CUDA_ARCH__ >= 530
-#define PTX_AVAILABLE
-#endif
+#include "ds_kernel_utils.h"
 
 /////////////////////////////// Memory Access Utils ///////////////////////////////
 namespace mem_access {
