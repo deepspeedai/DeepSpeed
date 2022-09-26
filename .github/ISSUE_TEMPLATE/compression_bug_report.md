@@ -1,8 +1,8 @@
 ---
-name: Bug report (training)
-about: Create a DeepSpeed training related issue to help us improve
+name: Bug report (compression)
+about: Create a DeepSpeed compression related issue to help us improve
 title: "[BUG]"
-labels: bug,training
+labels: bug,compression
 assignees: ''
 
 ---

@@ -1,6 +1,6 @@
 ---
 name: Bug report (inference)
-about: Create a report to help us improve
+about: Create a DeepSpeed inference related issue to help us improve
 title: "[BUG]"
 labels: bug,inference
 assignees: ''
