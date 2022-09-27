@@ -18,7 +18,7 @@ def allclose(x, y):
     return torch.allclose(x, y, rtol=rtol, atol=atol)
 
 
-@pytest.fixture
+@pytest.fixture(scope="module")
 def inference_module():
     return InferenceBuilder().load()
 
