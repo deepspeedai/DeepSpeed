@@ -1,4 +1,4 @@
-set -ex
+set -x
 
 model=$1
 branch1=$2

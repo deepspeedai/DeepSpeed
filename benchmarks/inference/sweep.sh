@@ -1,4 +1,4 @@
-set -ex
+set -x
 
 export TRANSFORMERS_CACHE=/tmp/hf-cache
 

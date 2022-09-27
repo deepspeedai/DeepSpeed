@@ -75,6 +75,14 @@ def get_generated_text(file_content, gen_text_n):
         return {f"generated-text-{key}": val for key, val in matches}
 
 
+def get_error(file_content):
+    matches = re.findall(r"TypeError:\s+(.+?)\n", file_content)
+    if matches is []:
+        return False
+    else:
+        return {f"error": val for val in matches}
+
+
 if __name__ == "__main__":
     # List to collect data from all benchmarks
     benchmarks_data = []
@@ -112,15 +120,17 @@ if __name__ == "__main__":
             perf_data = get_perf_data(file_content)
             if not perf_data:
                 print(
-                    f"WARNING: Could not detect benchmark performance data for file {file_path}, skipping"
+                    f"WARNING: Could not detect benchmark performance data for file {file_path}"
                 )
-                continue
 
             generated_text = get_generated_text(file_content, args.gen_text_n)
             if not generated_text:
-                print(
-                    f"WARNING: Could not detect generated text for file {file_path}, skipping"
-                )
+                print(f"WARNING: Could not detect generated text for file {file_path}")
+
+            error = get_error(file_content)
+            if error:
+                print(f"Error found in {file_path}, collecting error info...")
+                benchmarks_data.append({"branch": branch, **params, **error})
                 continue
 
             benchmarks_data.append({
