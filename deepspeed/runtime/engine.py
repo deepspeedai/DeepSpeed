@@ -1694,7 +1694,7 @@ class DeepSpeedEngine(Module):
             return inputs.__class__(new_inputs)
         elif isinstance(inputs, dict):
             new_inputs = {}
-            for k, v in inputs:
+            for k, v in inputs.items():
                 new_inputs[k] = self._cast_inputs_half(v)
             return new_inputs
         elif hasattr(inputs, 'half'):
