@@ -6,13 +6,30 @@ import argparse
 
 from deepspeed.runtime.zero.config import DeepSpeedZeroConfig
 
-from .common import distributed_test, get_test_path
-from .simple_model import SimpleModel, create_config_from_dict, random_dataloader
+from unit.common import DistributedTest, get_test_path
+from unit.simple_model import SimpleModel, create_config_from_dict, random_dataloader
 import deepspeed.comm as dist
 
 # A test on its own
 import deepspeed
 from deepspeed.runtime.config import DeepSpeedConfig, get_bfloat16_enabled
+
+
+@pytest.fixture
+def base_config():
+    config_dict = {
+        "train_batch_size": 1,
+        "optimizer": {
+            "type": "Adam",
+            "params": {
+                "lr": 0.00015
+            }
+        },
+        "fp16": {
+            "enabled": True
+        }
+    }
+    return config_dict
 
 
 def test_cuda():
@@ -59,9 +76,10 @@ def _batch_assert(status, ds_config, batch, micro_batch, gas, success):
                          (2,32,8,2,True),
                          (2,33,17,2,False),
                          (2,32,18,1,False)]) # yapf: disable
-def test_batch_config(num_ranks, batch, micro_batch, gas, success):
-    @distributed_test(world_size=2)
-    def _test_batch_config(num_ranks, batch, micro_batch, gas, success):
+class TestBatchConfig(DistributedTest):
+    world_size = 2
+
+    def test(self, num_ranks, batch, micro_batch, gas, success):
         assert dist.get_world_size() == num_ranks, \
         'The test assumes a world size of f{num_ranks}'
 
@@ -104,9 +122,6 @@ def test_batch_config(num_ranks, batch, micro_batch, gas, success):
                 status = _run_batch_config(ds_config, train_batch=batch, gas=gas)
                 _batch_assert(status, ds_config, batch, micro_batch, gas, success)
 
-    """Run batch config test """
-    _test_batch_config(num_ranks, batch, micro_batch, gas, success)
-
 
 def test_temp_config_json(tmpdir):
     config_dict = {
@@ -141,32 +156,20 @@ def test_get_bfloat16_enabled(bf16_key):
     assert get_bfloat16_enabled(cfg) == True
 
 
-def test_deprecated_deepscale_config(tmpdir):
-    config_dict = {
-        "train_batch_size": 1,
-        "optimizer": {
-            "type": "Adam",
-            "params": {
-                "lr": 0.00015
-            }
-        },
-        "fp16": {
-            "enabled": True
-        }
-    }
+class TestDeprecatedDeepScaleConfig(DistributedTest):
+    world_size = 1
 
-    config_path = create_config_from_dict(tmpdir, config_dict)
-    parser = argparse.ArgumentParser()
-    args = parser.parse_args(args='')
-    args.deepscale_config = config_path
-    args.local_rank = 0
+    def test(self, base_config, tmpdir):
 
-    hidden_dim = 10
+        config_path = create_config_from_dict(tmpdir, base_config)
+        parser = argparse.ArgumentParser()
+        args = parser.parse_args(args='')
+        args.deepscale_config = config_path
+        args.local_rank = 0
 
-    model = SimpleModel(hidden_dim)
+        hidden_dim = 10
 
-    @distributed_test(world_size=[1])
-    def _test_deprecated_deepscale_config(args, model, hidden_dim):
+        model = SimpleModel(hidden_dim)
         model, _, _,_ = deepspeed.initialize(args=args,
                                              model=model,
                                              model_parameters=model.parameters())
@@ -179,36 +182,15 @@ def test_deprecated_deepscale_config(tmpdir):
             model.backward(loss)
             model.step()
 
-    _test_deprecated_deepscale_config(args=args, model=model, hidden_dim=hidden_dim)
 
+class TestDistInit(DistributedTest):
+    world_size = 1
 
-def test_dist_init_true(tmpdir):
-    config_dict = {
-        "train_batch_size": 1,
-        "optimizer": {
-            "type": "Adam",
-            "params": {
-                "lr": 0.00015
-            }
-        },
-        "fp16": {
-            "enabled": True
-        }
-    }
+    def test(self, base_config):
+        hidden_dim = 10
 
-    config_path = create_config_from_dict(tmpdir, config_dict)
-    parser = argparse.ArgumentParser()
-    args = parser.parse_args(args='')
-    args.deepscale_config = config_path
-    args.local_rank = 0
-
-    hidden_dim = 10
-
-    model = SimpleModel(hidden_dim)
-
-    @distributed_test(world_size=[1])
-    def _test_dist_init_true(args, model, hidden_dim):
-        model, _, _,_ = deepspeed.initialize(args=args,
+        model = SimpleModel(hidden_dim)
+        model, _, _,_ = deepspeed.initialize(config=base_config,
                                              model=model,
                                              model_parameters=model.parameters(),
                                              dist_init_required=True)
@@ -221,26 +203,17 @@ def test_dist_init_true(tmpdir):
             model.backward(loss)
             model.step()
 
-    _test_dist_init_true(args=args, model=model, hidden_dim=hidden_dim)
 
+class TestInitNoOptimizer(DistributedTest):
+    world_size = 1
 
-def test_init_no_optimizer(tmpdir):
-
-    config_dict = {"train_batch_size": 1, "fp16": {"enabled": True}}
-    config_path = create_config_from_dict(tmpdir, config_dict)
-
-    @distributed_test(world_size=1)
-    def _helper():
-        parser = argparse.ArgumentParser()
-        args = parser.parse_args(args='')
-        args.deepscale_config = config_path
-        args.local_rank = 0
-
+    def test(self, base_config):
+        del base_config["optimizer"]
         hidden_dim = 10
 
         model = SimpleModel(hidden_dim=hidden_dim)
 
-        model, _, _, _ = deepspeed.initialize(args=args, model=model)
+        model, _, _, _ = deepspeed.initialize(config=base_config, model=model)
         data_loader = random_dataloader(model=model,
                                         total_samples=5,
                                         hidden_dim=hidden_dim,
@@ -252,27 +225,13 @@ def test_init_no_optimizer(tmpdir):
             with pytest.raises(AssertionError):
                 model.step()
 
-    _helper()
 
+class TestArgs(DistributedTest):
+    world_size = 1
 
-def test_none_args(tmpdir):
-    config = {
-        "train_batch_size": 1,
-        "optimizer": {
-            "type": "Adam",
-            "params": {
-                "lr": 0.00015
-            }
-        },
-        "fp16": {
-            "enabled": True
-        }
-    }
-
-    @distributed_test(world_size=1)
-    def _helper():
+    def test_none_args(self, base_config):
         model = SimpleModel(hidden_dim=10)
-        model, _, _, _ = deepspeed.initialize(args=None, model=model, config=config)
+        model, _, _, _ = deepspeed.initialize(args=None, model=model, config=base_config)
         data_loader = random_dataloader(model=model,
                                         total_samples=5,
                                         hidden_dim=10,
@@ -280,27 +239,9 @@ def test_none_args(tmpdir):
         for n, batch in enumerate(data_loader):
             loss = model(batch[0], batch[1])
 
-    _helper()
-
-
-def test_no_args(tmpdir):
-    config = {
-        "train_batch_size": 1,
-        "optimizer": {
-            "type": "Adam",
-            "params": {
-                "lr": 0.00015
-            }
-        },
-        "fp16": {
-            "enabled": True
-        }
-    }
-
-    @distributed_test(world_size=1)
-    def _helper():
+    def test_no_args(self, base_config):
         model = SimpleModel(hidden_dim=10)
-        model, _, _, _ = deepspeed.initialize(model=model, config=config)
+        model, _, _, _ = deepspeed.initialize(model=model, config=base_config)
         data_loader = random_dataloader(model=model,
                                         total_samples=5,
                                         hidden_dim=10,
@@ -308,28 +249,14 @@ def test_no_args(tmpdir):
         for n, batch in enumerate(data_loader):
             loss = model(batch[0], batch[1])
 
-    _helper()
 
+class TestNoModel(DistributedTest):
+    world_size = 1
 
-def test_no_model(tmpdir):
-    config = {
-        "train_batch_size": 1,
-        "optimizer": {
-            "type": "Adam",
-            "params": {
-                "lr": 0.00015
-            }
-        },
-        "fp16": {
-            "enabled": True
-        }
-    }
-
-    @distributed_test(world_size=1)
-    def _helper():
+    def test(self, base_config):
         model = SimpleModel(hidden_dim=10)
         with pytest.raises(AssertionError):
-            model, _, _, _ = deepspeed.initialize(model=None, config=config)
+            model, _, _, _ = deepspeed.initialize(model=None, config=base_config)
 
         with pytest.raises(AssertionError):
-            model, _, _, _ = deepspeed.initialize(model, config=config)
+            model, _, _, _ = deepspeed.initialize(model, config=base_config)

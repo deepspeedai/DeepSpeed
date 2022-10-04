@@ -8,46 +8,50 @@ from deepspeed.runtime.utils import partition_balanced
 from deepspeed.runtime.utils import prefix_sum_inc
 from deepspeed.runtime.utils import PartitionedTensor
 
-from .common import distributed_test
+from unit.common import DistributedTest
 
 
-@distributed_test(world_size=4)
-def test_partitioned_tensor():
-    world = dist.get_world_size()
-    rank = dist.get_rank()
+class TestPartitionedTensor(DistributedTest):
+    world_size = 4
 
-    group = dist.new_group(ranks=list(range(world)))
+    def test(self):
+        world = dist.get_world_size()
+        rank = dist.get_rank()
 
-    rows = world * 4
-    cols = 3
+        group = dist.new_group(ranks=list(range(world)))
 
-    full = torch.rand(rows, cols).cuda()
-    dist.broadcast(full, src=0, group=group)
-    part = PartitionedTensor(full, group=group)
+        rows = world * 4
+        cols = 3
 
-    assert len(part.local_size()) == 1
-    assert part.local_size()[0] * world == full.numel()
+        full = torch.rand(rows, cols).cuda()
+        dist.broadcast(full, src=0, group=group)
+        part = PartitionedTensor(full, group=group)
 
-    reconstructed = part.full()
-    assert torch.equal(full, reconstructed)
+        assert len(part.local_size()) == 1
+        assert part.local_size()[0] * world == full.numel()
+
+        reconstructed = part.full()
+        assert torch.equal(full, reconstructed)
 
 
-@distributed_test(world_size=4)
-def test_partitioned_tensor_meta():
-    world = dist.get_world_size()
-    rank = dist.get_rank()
+class TestPartitionedTensorMeta(DistributedTest):
+    world_size = 4
 
-    group = dist.new_group(ranks=list(range(world)))
+    def test(self):
+        world = dist.get_world_size()
+        rank = dist.get_rank()
 
-    rows = world * 7
-    cols = 3
+        group = dist.new_group(ranks=list(range(world)))
 
-    full = torch.rand(rows, cols).cuda()
-    dist.broadcast(full, src=0, group=group)
-    part = PartitionedTensor(full, group=group)
+        rows = world * 7
+        cols = 3
 
-    my_meta = PartitionedTensor.from_meta(part.to_meta(), part.local_data, group)
-    assert torch.equal(full, my_meta.full())
+        full = torch.rand(rows, cols).cuda()
+        dist.broadcast(full, src=0, group=group)
+        part = PartitionedTensor(full, group=group)
+
+        my_meta = PartitionedTensor.from_meta(part.to_meta(), part.local_data, group)
+        assert torch.equal(full, my_meta.full())
 
 
 def assert_valid_partition(weights, parts, P):

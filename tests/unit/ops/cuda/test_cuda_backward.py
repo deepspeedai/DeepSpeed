@@ -6,8 +6,8 @@ import random
 import copy
 from torch import nn
 from deepspeed import DeepSpeedTransformerLayer, DeepSpeedTransformerConfig
-from .modeling import BertConfig, BertLayerNorm, BertEncoder as BertEncoderPostln
-from .modelingpreln import BertEncoder as BertEncoderPreln
+from unit.modeling import BertConfig, BertLayerNorm, BertEncoder as BertEncoderPostln
+from unit.modelingpreln import BertEncoder as BertEncoderPreln
 
 #if not deepspeed.ops.__installed_ops__['transformer']:
 #pytest.skip(

@@ -5,8 +5,8 @@ import pytest
 import random
 import copy
 from torch import nn
-from .modelingpreln import BertEncoder as BertEncoderPreln
-from .modeling import BertLayerNorm, BertConfig, BertEncoder as BertEncoderPostln
+from unit.modelingpreln import BertEncoder as BertEncoderPreln
+from unit.modeling import BertLayerNorm, BertConfig, BertEncoder as BertEncoderPostln
 from deepspeed import DeepSpeedTransformerLayer, DeepSpeedTransformerConfig
 
 

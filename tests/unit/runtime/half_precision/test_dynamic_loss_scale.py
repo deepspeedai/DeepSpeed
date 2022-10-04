@@ -1,8 +1,8 @@
 import torch
 import deepspeed
 import numpy as np
-from .common import distributed_test
-from .simple_model import SimpleModel, args_from_dict
+from unit.common import DistributedTest
+from unit.simple_model import SimpleModel
 
 
 def run_model_step(model, gradient_list):
@@ -13,30 +13,29 @@ def run_model_step(model, gradient_list):
         model.step()
 
 
-def test_fused_no_overflow(tmpdir):
-    config_dict = {
-        "train_batch_size": 1,
-        "steps_per_print": 1,
-        "optimizer": {
-            "type": "Adam",
-            "params": {
-                "lr": 0.00015
-            }
-        },
-        "fp16": {
-            "enabled": True,
-            "loss_scale": 0,
-            "initial_scale_power": 8,
-            "loss_scale_window": 2
-        }
-    }
-    args = args_from_dict(tmpdir, config_dict)
+class TestFused(DistributedTest):
+    world_size = 1
 
-    @distributed_test(world_size=1)
-    def _test_fused_no_overflow(args):
+    def test_no_overflow(self):
+        config_dict = {
+            "train_batch_size": 1,
+            "steps_per_print": 1,
+            "optimizer": {
+                "type": "Adam",
+                "params": {
+                    "lr": 0.00015
+                }
+            },
+            "fp16": {
+                "enabled": True,
+                "loss_scale": 0,
+                "initial_scale_power": 8,
+                "loss_scale_window": 2
+            }
+        }
         hidden_dim = 1
         model = SimpleModel(hidden_dim)
-        model, optim, _, _ = deepspeed.initialize(args=args,
+        model, optim, _, _ = deepspeed.initialize(config=config_dict,
                                                   model=model,
                                                   model_parameters=model.parameters())
 
@@ -54,33 +53,26 @@ def test_fused_no_overflow(tmpdir):
             if optim.cur_iter % expected_scale_window == 0:
                 expected_loss_scale *= 2
 
-    _test_fused_no_overflow(args)
-
-
-def test_fused_all_overflow(tmpdir):
-    config_dict = {
-        "train_batch_size": 1,
-        "steps_per_print": 1,
-        "optimizer": {
-            "type": "Adam",
-            "params": {
-                "lr": 0.00015
+    def test_all_overflow(self):
+        config_dict = {
+            "train_batch_size": 1,
+            "steps_per_print": 1,
+            "optimizer": {
+                "type": "Adam",
+                "params": {
+                    "lr": 0.00015
+                }
+            },
+            "fp16": {
+                "enabled": True,
+                "loss_scale": 0,
+                "initial_scale_power": 4,
+                "loss_scale_window": 2
             }
-        },
-        "fp16": {
-            "enabled": True,
-            "loss_scale": 0,
-            "initial_scale_power": 4,
-            "loss_scale_window": 2
         }
-    }
-    args = args_from_dict(tmpdir, config_dict)
-
-    @distributed_test(world_size=1)
-    def _test_fused_all_overflow(args):
         hidden_dim = 1
         model = SimpleModel(hidden_dim)
-        model, optim, _, _ = deepspeed.initialize(args=args,
+        model, optim, _, _ = deepspeed.initialize(config=config_dict,
                                                   model=model,
                                                   model_parameters=model.parameters())
 
@@ -96,33 +88,26 @@ def test_fused_all_overflow(tmpdir):
             assert optim.cur_scale == expected_loss_scale
             assert optim.cur_iter == (i + 1)
 
-    _test_fused_all_overflow(args)
-
-
-def test_fused_some_overflow(tmpdir):
-    config_dict = {
-        "train_batch_size": 1,
-        "steps_per_print": 1,
-        "optimizer": {
-            "type": "Adam",
-            "params": {
-                "lr": 0.00015
+    def test_some_overflow(self):
+        config_dict = {
+            "train_batch_size": 1,
+            "steps_per_print": 1,
+            "optimizer": {
+                "type": "Adam",
+                "params": {
+                    "lr": 0.00015
+                }
+            },
+            "fp16": {
+                "enabled": True,
+                "loss_scale": 0,
+                "initial_scale_power": 8,
+                "loss_scale_window": 2
             }
-        },
-        "fp16": {
-            "enabled": True,
-            "loss_scale": 0,
-            "initial_scale_power": 8,
-            "loss_scale_window": 2
         }
-    }
-    args = args_from_dict(tmpdir, config_dict)
-
-    @distributed_test(world_size=1)
-    def _test_fused_some_overflow(args):
         hidden_dim = 1
         model = SimpleModel(hidden_dim)
-        model, optim, _, _ = deepspeed.initialize(args=args,
+        model, optim, _, _ = deepspeed.initialize(config=config_dict,
                                                   model=model,
                                                   model_parameters=model.parameters())
 
@@ -158,33 +143,30 @@ def test_fused_some_overflow(tmpdir):
         assert optim.cur_scale == expected_loss_scale
         assert optim.cur_iter == expected_iteration
 
-    _test_fused_some_overflow(args)
 
+class TestUnfused(DistributedTest):
+    world_size = 1
 
-def test_unfused_no_overflow(tmpdir):
-    config_dict = {
-        "train_batch_size": 1,
-        "steps_per_print": 1,
-        "optimizer": {
-            "type": "Lamb",
-            "params": {
-                "lr": 0.00015
+    def test_no_overflow(self):
+        config_dict = {
+            "train_batch_size": 1,
+            "steps_per_print": 1,
+            "optimizer": {
+                "type": "Lamb",
+                "params": {
+                    "lr": 0.00015
+                }
+            },
+            "fp16": {
+                "enabled": True,
+                "loss_scale": 0,
+                "initial_scale_power": 8,
+                "loss_scale_window": 2
             }
-        },
-        "fp16": {
-            "enabled": True,
-            "loss_scale": 0,
-            "initial_scale_power": 8,
-            "loss_scale_window": 2
         }
-    }
-    args = args_from_dict(tmpdir, config_dict)
-
-    @distributed_test(world_size=1)
-    def _test_unfused_no_overflow(args):
         hidden_dim = 1
         model = SimpleModel(hidden_dim)
-        model, optim, _, _ = deepspeed.initialize(args=args,
+        model, optim, _, _ = deepspeed.initialize(config=config_dict,
                                                   model=model,
                                                   model_parameters=model.parameters())
         expected_loss_scale = 2**8
@@ -201,34 +183,27 @@ def test_unfused_no_overflow(tmpdir):
             if optim.cur_iter % expected_scale_window == 0:
                 expected_loss_scale *= 2
 
-    _test_unfused_no_overflow(args)
-
-
-def test_unfused_all_overflow(tmpdir):
-    config_dict = {
-        "train_batch_size": 1,
-        "steps_per_print": 1,
-        "optimizer": {
-            "type": "Lamb",
-            "params": {
-                "lr": 0.00015
+    def test_all_overflow(self):
+        config_dict = {
+            "train_batch_size": 1,
+            "steps_per_print": 1,
+            "optimizer": {
+                "type": "Lamb",
+                "params": {
+                    "lr": 0.00015
+                }
+            },
+            "fp16": {
+                "enabled": True,
+                "loss_scale": 0,
+                "initial_scale_power": 4,
+                "loss_scale_window": 2,
+                "min_loss_scale": 0.25
             }
-        },
-        "fp16": {
-            "enabled": True,
-            "loss_scale": 0,
-            "initial_scale_power": 4,
-            "loss_scale_window": 2,
-            "min_loss_scale": 0.25
         }
-    }
-    args = args_from_dict(tmpdir, config_dict)
-
-    @distributed_test(world_size=1)
-    def _test_unfused_all_overflow(args):
         hidden_dim = 1
         model = SimpleModel(hidden_dim)
-        model, optim, _, _ = deepspeed.initialize(args=args,
+        model, optim, _, _ = deepspeed.initialize(config=config_dict,
                                                   model=model,
                                                   model_parameters=model.parameters())
 
@@ -246,33 +221,26 @@ def test_unfused_all_overflow(tmpdir):
             assert optim.cur_scale == expected_loss_scale
             assert optim.cur_iter == (i + 1)
 
-    _test_unfused_all_overflow(args)
-
-
-def test_unfused_some_overflow(tmpdir):
-    config_dict = {
-        "train_batch_size": 1,
-        "steps_per_print": 1,
-        "optimizer": {
-            "type": "Lamb",
-            "params": {
-                "lr": 0.00015
+    def test_some_overflow(self):
+        config_dict = {
+            "train_batch_size": 1,
+            "steps_per_print": 1,
+            "optimizer": {
+                "type": "Lamb",
+                "params": {
+                    "lr": 0.00015
+                }
+            },
+            "fp16": {
+                "enabled": True,
+                "loss_scale": 0,
+                "initial_scale_power": 8,
+                "loss_scale_window": 2
             }
-        },
-        "fp16": {
-            "enabled": True,
-            "loss_scale": 0,
-            "initial_scale_power": 8,
-            "loss_scale_window": 2
         }
-    }
-    args = args_from_dict(tmpdir, config_dict)
-
-    @distributed_test(world_size=1)
-    def _test_unfused_some_overflow(args):
         hidden_dim = 1
         model = SimpleModel(hidden_dim)
-        model, optim, _, _ = deepspeed.initialize(args=args,
+        model, optim, _, _ = deepspeed.initialize(config=config_dict,
                                                   model=model,
                                                   model_parameters=model.parameters())
 
@@ -307,5 +275,3 @@ def test_unfused_some_overflow(tmpdir):
         expected_loss_scale /= (2**len(overflow_gradients))
         assert optim.cur_scale == expected_loss_scale
         assert optim.cur_iter == expected_iteration
-
-    _test_unfused_some_overflow(args)

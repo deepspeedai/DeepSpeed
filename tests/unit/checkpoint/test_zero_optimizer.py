@@ -1,13 +1,12 @@
 import deepspeed
 from deepspeed.ops.op_builder import CPUAdamBuilder
 
-from unit.common import DistributedTest
+from unit.common import DistributedTest, DistributedFixture
 from unit.simple_model import *
 from unit.util import required_minimum_torch_version
 
 from unit.checkpoint.common import *
 
-import itertools
 import pytest
 
 
@@ -192,18 +191,52 @@ class TestZeROCheckpoint(DistributedTest):
                                             load_module_only=True)
 
 
+class ws4_model_checkpoint(DistributedFixture):
+    world_size = 4
+
+    def run(self, class_tmpdir, elastic_save, load_optim):
+        ds_config = {
+            "train_batch_size": 4,
+            "optimizer": {
+                "type": 'Adam'
+            },
+            "fp16": {
+                "enabled": True,
+                "initial_scale_power": 8
+            },
+            "zero_optimization": {
+                "stage": 2,
+                "elastic_checkpoint": elastic_save
+            }
+        }
+        hidden_dim = 10
+        model = SimpleModel(hidden_dim)
+
+        model, _, _, _ = deepspeed.initialize(config=ds_config,
+                                            model=model,
+                                            model_parameters=model.parameters())
+        data_loader = random_dataloader(model=model,
+                                        total_samples=8,
+                                        hidden_dim=hidden_dim,
+                                        device=model.device)
+        for n, batch in enumerate(data_loader):
+            loss = model(batch[0], batch[1])
+            model.backward(loss)
+            model.step()
+
+        if load_optim:
+            torch.save(model.optimizer.optimizer.state_dict(),
+                       os.path.join(class_tmpdir,
+                                    'opt-state-dict'))
+        model.save_checkpoint(class_tmpdir)
+
+
+@pytest.mark.parametrize("elastic_save", [True, False])
+@pytest.mark.parametrize("elastic_load", [True, False])
+@pytest.mark.parametrize("load_optim", [True, False])
 class TestZeROElasticCheckpoint(DistributedTest):
     world_size = 2
 
-    @pytest.mark.parametrize(["elastic_save",
-                              "elastic_load",
-                              "load_optim"],
-                             itertools.product(*[[True,
-                                                  False],
-                                                 [True,
-                                                  False],
-                                                 [True,
-                                                  False]]))
     def test_elastic_checkpoint_fixed_dp(self,
                                          tmpdir,
                                          elastic_save,
@@ -271,22 +304,12 @@ class TestZeROElasticCheckpoint(DistributedTest):
             model.backward(loss)
             model.step()
 
-    @pytest.mark.parametrize(["elastic_save",
-                              "elastic_load",
-                              "load_optim"],
-                             itertools.product(*[[True,
-                                                  False],
-                                                 [True,
-                                                  False],
-                                                 [True,
-                                                  False]]))
     def test_elastic_checkpoint_change_dp(self,
-                                          tmpdir,
+                                          ws4_model_checkpoint,
+                                          class_tmpdir,
                                           elastic_save,
                                           elastic_load,
                                           load_optim):
-        pytest.skip(
-            'skip until DistributedTest can support changing world size within a test')
         ds_config = {
             "train_batch_size": 4,
             "optimizer": {
@@ -298,43 +321,21 @@ class TestZeROElasticCheckpoint(DistributedTest):
             },
             "zero_optimization": {
                 "stage": 2,
-                "elastic_checkpoint": elastic_save
+                "elastic_checkpoint": elastic_load
             }
         }
         hidden_dim = 10
-        models = [SimpleModel(hidden_dim) for _ in range(2)]
-
-        # Save checkpoint with dp world size  = 4
-        #TODO - remove this line @distributed_test(world_size=[4])
-        model, _, _, _ = deepspeed.initialize(config=ds_config,
-                                            model=models[0],
-                                            model_parameters=models[0].parameters())
-        data_loader = random_dataloader(model=model,
-                                        total_samples=8,
-                                        hidden_dim=hidden_dim,
-                                        device=model.device)
-        for n, batch in enumerate(data_loader):
-            loss = model(batch[0], batch[1])
-            model.backward(loss)
-            model.step()
-
-        if load_optim:
-            torch.save(model.optimizer.optimizer.state_dict(),
-                       os.path.join(tmpdir,
-                                    'opt-state-dict'))
-        model.save_checkpoint(tmpdir)
+        model = SimpleModel(hidden_dim)
 
         # Load checkpoint with dp world size = 2
-        #TODO - remove this line @distributed_test(world_size=[2])
-        ds_config["zero_optimization"]["elastic_checkpoint"] = elastic_load
         model, _, _, _ = deepspeed.initialize(config=ds_config,
-                                                model=models[1],
-                                                model_parameters=models[1].parameters())
+                                                model=model,
+                                                model_parameters=model.parameters())
         if load_optim:
             with pytest.raises(deepspeed.runtime.zero.utils.ZeRORuntimeException):
-                model.load_checkpoint(tmpdir, load_optimizer_states=load_optim)
+                model.load_checkpoint(class_tmpdir, load_optimizer_states=load_optim)
         else:
-            model.load_checkpoint(tmpdir, load_optimizer_states=load_optim)
+            model.load_checkpoint(class_tmpdir, load_optimizer_states=load_optim)
 
 
 class TestZeROSaveLoadEdgeCase(DistributedTest):

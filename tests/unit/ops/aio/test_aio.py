@@ -5,7 +5,7 @@ import torch
 import deepspeed
 import deepspeed.comm as dist
 from deepspeed.ops.aio import AsyncIOBuilder
-from .common import distributed_test
+from unit.common import DistributedTest
 
 MEGA_BYTE = 1024**2
 BLOCK_SIZE = MEGA_BYTE
@@ -13,10 +13,8 @@ QUEUE_DEPTH = 2
 IO_SIZE = 16 * MEGA_BYTE
 IO_PARALLEL = 2
 
-
-def _skip_if_no_aio():
-    if not deepspeed.ops.__compatible_ops__[AsyncIOBuilder.NAME]:
-        pytest.skip('Skip tests since async-io is not compatible')
+if not deepspeed.ops.__compatible_ops__[AsyncIOBuilder.NAME]:
+    pytest.skip('Skip tests since async-io is not compatible', allow_module_level=True)
 
 
 def _do_ref_write(tmpdir, index=0):
@@ -48,20 +46,12 @@ def _validate_handle_state(handle, single_submit, overlap_events):
     assert handle.get_queue_depth() == QUEUE_DEPTH
 
 
-@pytest.mark.parametrize('single_submit, overlap_events',
-                         [(False,
-                           False),
-                          (False,
-                           True),
-                          (True,
-                           False),
-                          (True,
-                           True)])
-def test_parallel_read(tmpdir, single_submit, overlap_events):
-    _skip_if_no_aio()
+@pytest.mark.parametrize("single_submit", [True, False])
+@pytest.mark.parametrize("overlap_events", [True, False])
+class TestRead(DistributedTest):
+    world_size = 2
 
-    @distributed_test(world_size=[2])
-    def _test_parallel_read(single_submit, overlap_events):
+    def test_parallel_read(self, tmpdir, single_submit, overlap_events):
         ref_file, _ = _do_ref_write(tmpdir)
 
         aio_buffer = torch.empty(IO_SIZE, dtype=torch.uint8, device='cpu').pin_memory()
@@ -80,34 +70,8 @@ def test_parallel_read(tmpdir, single_submit, overlap_events):
             ref_buffer = list(f.read())
         assert ref_buffer == aio_buffer.tolist()
 
-    _test_parallel_read(single_submit, overlap_events)
-
-
-@pytest.mark.parametrize('single_submit, overlap_events, cuda_device',
-                         [(False,
-                           False,
-                           False),
-                          (False,
-                           True,
-                           False),
-                          (True,
-                           False,
-                           False),
-                          (True,
-                           True,
-                           False),
-                          (False,
-                           False,
-                           True),
-                          (True,
-                           True,
-                           True)])
-def test_async_read(tmpdir, single_submit, overlap_events, cuda_device):
-
-    _skip_if_no_aio()
-
-    @distributed_test(world_size=[2])
-    def _test_async_read(single_submit, overlap_events, cuda_device):
+    @pytest.mark.parametrize("cuda_device", [True, False])
+    def test_async_read(self, tmpdir, single_submit, overlap_events, cuda_device):
         ref_file, _ = _do_ref_write(tmpdir)
 
         if cuda_device:
@@ -135,26 +99,14 @@ def test_async_read(tmpdir, single_submit, overlap_events, cuda_device):
             ref_buffer = list(f.read())
         assert ref_buffer == aio_buffer.tolist()
 
-    _test_async_read(single_submit, overlap_events, cuda_device)
 
+@pytest.mark.parametrize("single_submit", [True, False])
+@pytest.mark.parametrize("overlap_events", [True, False])
+class TestWrite(DistributedTest):
+    world_size = 2
 
-@pytest.mark.parametrize('single_submit, overlap_events',
-                         [(False,
-                           False),
-                          (False,
-                           True),
-                          (True,
-                           False),
-                          (True,
-                           True)])
-def test_parallel_write(tmpdir, single_submit, overlap_events):
-
-    _skip_if_no_aio()
-
-    @distributed_test(world_size=[2])
-    def _test_parallel_write(single_submit, overlap_events):
+    def test_parallel_write(self, tmpdir, single_submit, overlap_events):
         ref_file, ref_buffer = _do_ref_write(tmpdir)
-
         aio_file, aio_buffer = _get_test_file_and_buffer(tmpdir, ref_buffer, False)
 
         h = AsyncIOBuilder().load().aio_handle(BLOCK_SIZE,
@@ -173,36 +125,9 @@ def test_parallel_write(tmpdir, single_submit, overlap_events):
         filecmp.clear_cache()
         assert filecmp.cmp(ref_file, aio_file, shallow=False)
 
-    _test_parallel_write(single_submit, overlap_events)
-
-
-@pytest.mark.parametrize('single_submit, overlap_events, cuda_device',
-                         [(False,
-                           False,
-                           False),
-                          (False,
-                           True,
-                           False),
-                          (True,
-                           False,
-                           False),
-                          (True,
-                           True,
-                           False),
-                          (False,
-                           False,
-                           True),
-                          (True,
-                           True,
-                           True)])
-def test_async_write(tmpdir, single_submit, overlap_events, cuda_device):
-
-    _skip_if_no_aio()
-
-    @distributed_test(world_size=[2])
-    def _test_async_write(single_submit, overlap_events, cuda_device):
+    @pytest.mark.parametrize("cuda_device", [True, False])
+    def test_async_write(self, tmpdir, single_submit, overlap_events, cuda_device):
         ref_file, ref_buffer = _do_ref_write(tmpdir)
-
         aio_file, aio_buffer = _get_test_file_and_buffer(tmpdir, ref_buffer, cuda_device)
 
         h = AsyncIOBuilder().load().aio_handle(BLOCK_SIZE,
@@ -224,24 +149,13 @@ def test_async_write(tmpdir, single_submit, overlap_events, cuda_device):
         filecmp.clear_cache()
         assert filecmp.cmp(ref_file, aio_file, shallow=False)
 
-    _test_async_write(single_submit, overlap_events, cuda_device)
 
+@pytest.mark.parametrize("cuda_device", [True, False])
+class TestAsyncQueue(DistributedTest):
+    world_size = 2
 
-@pytest.mark.parametrize('async_queue, cuda_device',
-                         [(2,
-                           False),
-                          (4,
-                           False),
-                          (2,
-                           True),
-                          (4,
-                           True)])
-def test_async_queue_read(tmpdir, async_queue, cuda_device):
-
-    _skip_if_no_aio()
-
-    @distributed_test(world_size=[2])
-    def _test_async_queue_read(async_queue, cuda_device):
+    @pytest.mark.parametrize("async_queue", [2, 4])
+    def test_read(self, tmpdir, async_queue, cuda_device):
         ref_files = []
         for i in range(async_queue):
             f, _ = _do_ref_write(tmpdir, i)
@@ -277,24 +191,8 @@ def test_async_queue_read(tmpdir, async_queue, cuda_device):
                 ref_buffer = list(f.read())
             assert ref_buffer == aio_buffers[i].tolist()
 
-    _test_async_queue_read(async_queue, cuda_device)
-
-
-@pytest.mark.parametrize('async_queue, cuda_device',
-                         [(2,
-                           False),
-                          (7,
-                           False),
-                          (2,
-                           True),
-                          (7,
-                           True)])
-def test_async_queue_write(tmpdir, async_queue, cuda_device):
-
-    _skip_if_no_aio()
-
-    @distributed_test(world_size=[2])
-    def _test_async_queue_write(async_queue, cuda_device):
+    @pytest.mark.parametrize("async_queue", [2, 7])
+    def test_write(self, tmpdir, async_queue, cuda_device):
         ref_files = []
         ref_buffers = []
         for i in range(async_queue):
@@ -331,5 +229,3 @@ def test_async_queue_write(tmpdir, async_queue, cuda_device):
 
             filecmp.clear_cache()
             assert filecmp.cmp(ref_files[i], aio_files[i], shallow=False)
-
-    _test_async_queue_write(async_queue, cuda_device)

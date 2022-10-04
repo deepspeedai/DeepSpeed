@@ -1,16 +1,12 @@
 # TODO: add tests with model parallelism for activation partitioning and other features.
 
-from copy import deepcopy
-
 import pytest
-
 import torch
-
 import deepspeed
+from copy import deepcopy
+from unit.common import DistributedTest
 
 ckpt = deepspeed.checkpointing.checkpoint
-
-from .common import distributed_test
 
 
 def _compute(module, *inputs, do_checkpoint=False):
@@ -59,9 +55,6 @@ def _match_outputs(ref, tgt):
         assert torch.equal(ref, tgt)
 
 
-# This is distributed because checkpoint() assumes that deepspeed.comm is initialized.
-# deepspeed.comm is used with activation partitioning, but not for these simple cases.
-@distributed_test(world_size=1)
 def _test_activation_checkpoint(module, *inputs):
     # Move to device
     module.cuda()
@@ -82,9 +75,6 @@ def _test_activation_checkpoint(module, *inputs):
             _match_outputs(b, t)
 
 
-# This is distributed because checkpoint() assumes that deepspeed.comm is initialized.
-# deepspeed.comm is used with activation partitioning, but not for these simple cases.
-@distributed_test(world_size=1)
 def _test_activation_checkpoint_ordering(module, expected_ordering, *inputs):
     # Move to device
     module.cuda()
@@ -137,6 +127,26 @@ class MaskedLinearSeqDup(MaskedLinearSeq):
         return dup, x, mask
 
 
+class DropMaskLinear(torch.nn.Linear):
+    def forward(self, x, mask):
+        return super().forward(x)
+
+
+class LinearNonTensorInput(torch.nn.Linear):
+    def forward(self, x, non_tensor_input):
+        return super().forward(x)
+
+
+class LinearNonTensorOutput(torch.nn.Linear):
+    def __init__(self, non_tensor_output):
+        super().__init__(HIDDEN_DIM, HIDDEN_DIM)
+        self.non_tensor_output = non_tensor_output
+
+    def forward(self, x):
+        out = super().forward(x)
+        return out, self.non_tensor_output
+
+
 HIDDEN_DIM = 20
 
 
@@ -159,69 +169,48 @@ def _bool_to_float(btensor, dtype=torch.float32):
 #
 
 
-def test_ckpt_inputs1_outputs1():
-    module = torch.nn.Linear(HIDDEN_DIM, HIDDEN_DIM)
-    inputs = torch.rand(HIDDEN_DIM)
-    inputs.requires_grad = True
-    _test_activation_checkpoint(module, inputs)
-
-
 # both bool and float are important, as bool is not differentiable
 @pytest.mark.parametrize('mask',
                          [
                              _mixed_mask(),
                              _bool_to_float(_mixed_mask()),
                          ])
-def test_ckpt_inputs2_outputs1(mask):
-    module = MaskedLinear(HIDDEN_DIM, HIDDEN_DIM)
-    inputs = torch.rand(HIDDEN_DIM)
-    inputs.requires_grad = True
-    _test_activation_checkpoint(module, inputs, mask)
+class TestActivationCheckpoint(DistributedTest):
+    world_size = 1
 
+    def test_ckpt_inputs1_outputs1(self, mask):
+        module = torch.nn.Linear(HIDDEN_DIM, HIDDEN_DIM)
+        inputs = torch.rand(HIDDEN_DIM)
+        inputs.requires_grad = True
+        _test_activation_checkpoint(module, inputs)
 
-@pytest.mark.parametrize('mask',
-                         [
-                             _mixed_mask(),
-                             _bool_to_float(_mixed_mask()),
-                         ])
-def test_ckpt_inputs2_outputs2(mask):
-    module = MaskedLinearSeq(HIDDEN_DIM, HIDDEN_DIM)
-    inputs = torch.rand(HIDDEN_DIM)
-    inputs.requires_grad = True
-    _test_activation_checkpoint(module, inputs, mask)
+    def test_ckpt_inputs2_outputs1(self, mask):
+        module = MaskedLinear(HIDDEN_DIM, HIDDEN_DIM)
+        inputs = torch.rand(HIDDEN_DIM)
+        inputs.requires_grad = True
+        _test_activation_checkpoint(module, inputs, mask)
 
+    def test_ckpt_inputs2_outputs2(self, mask):
+        module = MaskedLinearSeq(HIDDEN_DIM, HIDDEN_DIM)
+        inputs = torch.rand(HIDDEN_DIM)
+        inputs.requires_grad = True
+        _test_activation_checkpoint(module, inputs, mask)
 
-@pytest.mark.parametrize('mask',
-                         [
-                             _mixed_mask(),
-                             _bool_to_float(_mixed_mask()),
-                         ])
-def test_ckpt_inputs2_outputs3(mask):
-    module = MaskedLinearSeqDup(HIDDEN_DIM, HIDDEN_DIM)
-    inputs = torch.rand(HIDDEN_DIM)
-    inputs.requires_grad = True
-    _test_activation_checkpoint(module, inputs, mask)
+    def test_ckpt_inputs2_outputs3(self, mask):
+        module = MaskedLinearSeqDup(HIDDEN_DIM, HIDDEN_DIM)
+        inputs = torch.rand(HIDDEN_DIM)
+        inputs.requires_grad = True
+        _test_activation_checkpoint(module, inputs, mask)
 
-
-class DropMaskLinear(torch.nn.Linear):
-    def forward(self, x, mask):
-        return super().forward(x)
-
-
-def test_ckpt_arg_none():
-    module = DropMaskLinear(HIDDEN_DIM, HIDDEN_DIM)
-    inputs = (torch.rand(HIDDEN_DIM), None)
-    inputs[0].requires_grad = True
-    _test_activation_checkpoint(module, *inputs)
-
-
-class LinearNonTensorInput(torch.nn.Linear):
-    def forward(self, x, non_tensor_input):
-        return super().forward(x)
+    def test_ckpt_arg_none(self, mask):
+        module = DropMaskLinear(HIDDEN_DIM, HIDDEN_DIM)
+        inputs = (torch.rand(HIDDEN_DIM), None)
+        inputs[0].requires_grad = True
+        _test_activation_checkpoint(module, *inputs)
 
 
 @pytest.mark.parametrize(
-    'non_tensor_input',
+    'non_tensor',
     [None,
      2,
      True,
@@ -230,38 +219,20 @@ class LinearNonTensorInput(torch.nn.Linear):
      (None,
       True,
       torch.randn(HIDDEN_DIM))])
-def test_ckpt_non_tensor_input(non_tensor_input):
-    module = LinearNonTensorInput(HIDDEN_DIM, HIDDEN_DIM)
-    inputs = torch.rand(HIDDEN_DIM)
-    inputs.requires_grad = True
-    _test_activation_checkpoint(module, inputs, non_tensor_input)
+class TestCheckpointNonTensor(DistributedTest):
+    world_size = 1
 
+    def test_ckpt_non_tensor_input(self, non_tensor):
+        module = LinearNonTensorInput(HIDDEN_DIM, HIDDEN_DIM)
+        inputs = torch.rand(HIDDEN_DIM)
+        inputs.requires_grad = True
+        _test_activation_checkpoint(module, inputs, non_tensor)
 
-class LinearNonTensorOutput(torch.nn.Linear):
-    def __init__(self, non_tensor_output):
-        super().__init__(HIDDEN_DIM, HIDDEN_DIM)
-        self.non_tensor_output = non_tensor_output
-
-    def forward(self, x):
-        out = super().forward(x)
-        return out, self.non_tensor_output
-
-
-@pytest.mark.parametrize(
-    'non_tensor_output',
-    [None,
-     2,
-     True,
-     (None,
-      2.5),
-     (None,
-      True,
-      torch.randn(HIDDEN_DIM))])
-def test_ckpt_non_tensor_output(non_tensor_output):
-    module = LinearNonTensorOutput(non_tensor_output)
-    inputs = torch.rand(HIDDEN_DIM)
-    inputs.requires_grad = True
-    _test_activation_checkpoint(module, inputs)
+    def test_ckpt_non_tensor_output(self, non_tensor):
+        module = LinearNonTensorOutput(non_tensor)
+        inputs = torch.rand(HIDDEN_DIM)
+        inputs.requires_grad = True
+        _test_activation_checkpoint(module, inputs)
 
 
 @pytest.mark.parametrize('non_tensor_output',
@@ -276,15 +247,18 @@ def test_ckpt_non_tensor_output(non_tensor_output):
                               True,
                               torch.randn(HIDDEN_DIM))
                          ])
-def test_ckpt_non_tensor_output_ordering(non_tensor_output):
-    module = LinearNonTensorOutput(non_tensor_output)
-    inputs = torch.rand(HIDDEN_DIM)
-    inputs.requires_grad = True
+class TestCheckpointNonTensorOutputOrdering(DistributedTest):
+    world_size = 1
 
-    # First return is a tensor
-    ordering = [True]
-    if type(non_tensor_output) in [list, tuple]:
-        ordering += [torch.is_tensor(t) for t in non_tensor_output]
-    else:
-        ordering += [torch.is_tensor(non_tensor_output)]
-    _test_activation_checkpoint_ordering(module, ordering, inputs)
+    def test_ckpt_non_tensor_output_ordering(self, non_tensor_output):
+        module = LinearNonTensorOutput(non_tensor_output)
+        inputs = torch.rand(HIDDEN_DIM)
+        inputs.requires_grad = True
+
+        # First return is a tensor
+        ordering = [True]
+        if type(non_tensor_output) in [list, tuple]:
+            ordering += [torch.is_tensor(t) for t in non_tensor_output]
+        else:
+            ordering += [torch.is_tensor(non_tensor_output)]
+        _test_activation_checkpoint_ordering(module, ordering, inputs)

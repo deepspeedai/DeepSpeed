@@ -8,7 +8,7 @@ import deepspeed
 from deepspeed.runtime.zero.partition_parameters import ZeroParamStatus, partitioned_param_data_shape
 import deepspeed.comm as dist
 
-from .common import distributed_test, get_master_port
+from unit.common import DistributedTest, get_master_port
 
 
 def setup_serial_env():
@@ -27,42 +27,46 @@ def test_scattered_init_dist():
         assert dist.is_initialized()
 
 
-@distributed_test(world_size=2)
-def test_scatter_gather():
-    with deepspeed.zero.Init():
-        l = torch.nn.Linear(6, 3)
-    assert l.weight.ds_status == ZeroParamStatus.NOT_AVAILABLE
-    assert l.weight.shape == torch.Size(partitioned_param_data_shape)
+class TestScatterGather(DistributedTest):
+    world_size = 2
 
-    # Ensure there is no impact outside the context
-    l2 = torch.nn.Linear(6, 3)
-    assert not hasattr(l2.weight, 'ds_status')
-    assert l2.weight.numel() == l2.in_features * l2.out_features
+    def test(self):
+        with deepspeed.zero.Init():
+            l = torch.nn.Linear(6, 3)
+        assert l.weight.ds_status == ZeroParamStatus.NOT_AVAILABLE
+        assert l.weight.shape == torch.Size(partitioned_param_data_shape)
 
-    with deepspeed.zero.GatheredParameters(l.weight):
-        assert l.weight.ds_status == ZeroParamStatus.AVAILABLE
-        assert l.weight.numel() == l.in_features * l.out_features
+        # Ensure there is no impact outside the context
+        l2 = torch.nn.Linear(6, 3)
+        assert not hasattr(l2.weight, 'ds_status')
+        assert l2.weight.numel() == l2.in_features * l2.out_features
+
+        with deepspeed.zero.GatheredParameters(l.weight):
+            assert l.weight.ds_status == ZeroParamStatus.AVAILABLE
+            assert l.weight.numel() == l.in_features * l.out_features
 
 
-@distributed_test(world_size=2)
-def test_gather_update():
-    with deepspeed.zero.Init():
-        l = torch.nn.Linear(4, 2)
-    assert l.weight.ds_status == ZeroParamStatus.NOT_AVAILABLE
+class TestGatherUpdate(DistributedTest):
+    world_size = 2
 
-    # Gather and make a change
-    with deepspeed.zero.GatheredParameters(l.weight, modifier_rank=1):
-        assert l.weight.ds_status == ZeroParamStatus.AVAILABLE
-        if dist.get_rank() == 1:
-            with torch.no_grad():
-                l.weight.zero_()
+    def test(self):
+        with deepspeed.zero.Init():
+            l = torch.nn.Linear(4, 2)
+        assert l.weight.ds_status == ZeroParamStatus.NOT_AVAILABLE
 
-    # should now be scattered again
+        # Gather and make a change
+        with deepspeed.zero.GatheredParameters(l.weight, modifier_rank=1):
+            assert l.weight.ds_status == ZeroParamStatus.AVAILABLE
+            if dist.get_rank() == 1:
+                with torch.no_grad():
+                    l.weight.zero_()
 
-    # Now gather again and ensure the change is global
-    with deepspeed.zero.GatheredParameters(l.weight):
-        # all ranks compare
-        assert torch.equal(l.weight, torch.zeros_like(l.weight))
+        # should now be scattered again
+
+        # Now gather again and ensure the change is global
+        with deepspeed.zero.GatheredParameters(l.weight):
+            # all ranks compare
+            assert torch.equal(l.weight, torch.zeros_like(l.weight))
 
 
 config = {
@@ -362,28 +366,30 @@ def test_subclass_param_init():
         assert torch.equal(model.param_grandpa, ones + 3)
 
 
-@distributed_test(world_size=2)
-def test_ds_init_w_zinit():
-    ds_config = {
-        "train_batch_size": 2,
-        "steps_per_print": 1,
-        "optimizer": {
-            "type": "Adam",
-            "params": {
-                "lr": 0.00015
+class TestDSInitWZinit(DistributedTest):
+    world_size = 2
+
+    def test(self):
+        ds_config = {
+            "train_batch_size": 2,
+            "steps_per_print": 1,
+            "optimizer": {
+                "type": "Adam",
+                "params": {
+                    "lr": 0.00015
+                }
             }
         }
-    }
 
-    class Model(torch.nn.Module):
-        def __init__(self):
-            super(Model, self).__init__()
-            self.linear = torch.nn.Linear(4, 4)
+        class Model(torch.nn.Module):
+            def __init__(self):
+                super(Model, self).__init__()
+                self.linear = torch.nn.Linear(4, 4)
 
-        def magic(self):
-            return 42
+            def magic(self):
+                return 42
 
-    with deepspeed.zero.Init():
-        model = Model()
-        engine, *_ = deepspeed.initialize(model=model, config=ds_config, model_parameters=model.parameters())
-    assert engine.magic() == 42
+        with deepspeed.zero.Init():
+            model = Model()
+            engine, *_ = deepspeed.initialize(model=model, config=ds_config, model_parameters=model.parameters())
+        assert engine.magic() == 42

@@ -11,18 +11,6 @@ from deepspeed.ops.op_builder import OpBuilder
 from transformers import pipeline, AutoModelForCausalLM, AutoTokenizer
 from huggingface_hub import HfApi
 
-
-# Fixture avoids problems with missing imports when pytest collects tests when
-# running non-inference tests
-@pytest.fixture(scope="module", autouse=True)
-def lm_eval_imports():
-    global lm_eval
-    import lm_eval
-    import lm_eval.models
-    import lm_eval.tasks
-    import lm_eval.evaluator
-
-
 rocm_version = OpBuilder.installed_rocm_version()
 if rocm_version != (0, 0):
     pytest.skip("skip inference tests on rocm for now", allow_module_level=True)
@@ -357,6 +345,12 @@ class TestLMCorrectness(DistributedTest):
     world_size = 1
 
     def test(self, model_family, model_name, task):
+        # imports here to avoid import errors when pytest collects tests
+        import lm_eval
+        import lm_eval.models
+        import lm_eval.tasks
+        import lm_eval.evaluator
+
         local_rank = os.getenv("LOCAL_RANK", "0")
         device = torch.device(f"cuda:{local_rank}")
         dtype = torch.float

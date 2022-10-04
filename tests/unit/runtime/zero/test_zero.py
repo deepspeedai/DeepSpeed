@@ -9,8 +9,8 @@ from torch.nn.modules.container import ModuleList
 from torch.nn.modules.loss import L1Loss
 from torch.nn.parameter import Parameter
 
-from .common import distributed_test
-from .simple_model import SimpleModel, random_dataloader
+from unit.common import DistributedTest
+from unit.simple_model import SimpleModel, random_dataloader
 
 import deepspeed
 from deepspeed.runtime.engine import DeepSpeedEngine
@@ -44,32 +44,31 @@ def dump_state_dict(model):
 
 
 @pytest.mark.parametrize('zero_stage', [1, 2, 3])
-def test_zero_unbalanced_gradients(tmpdir, zero_stage):
-    config_dict = {
-        "train_micro_batch_size_per_gpu": 2,
-        "gradient_accumulation_steps": 2,
-        "steps_per_print": 1,
-        "zero_optimization": {
-            "stage": zero_stage
-        },
-        "optimizer": {
-            "type": "Adam",
-            "params": {
-                "lr": 1e-3
+class TestZeroUnbalancedGradients(DistributedTest):
+    world_size = 1
+
+    def test(self, zero_stage):
+        config_dict = {
+            "train_micro_batch_size_per_gpu": 2,
+            "gradient_accumulation_steps": 2,
+            "steps_per_print": 1,
+            "zero_optimization": {
+                "stage": zero_stage
+            },
+            "optimizer": {
+                "type": "Adam",
+                "params": {
+                    "lr": 1e-3
+                }
+            },
+            "fp16": {
+                "enabled": True,
+                "initial_scale_power": 8
             }
-        },
-        "fp16": {
-            "enabled": True,
-            "initial_scale_power": 8
         }
-    }
+        hidden_dim = 4
 
-    hidden_dim = 4
-
-    model = SimpleModel(hidden_dim=hidden_dim)
-
-    @distributed_test(world_size=[1])
-    def _test_zero_unbalanced_gradients(model, hidden_dim):
+        model = SimpleModel(hidden_dim=hidden_dim)
         model, _, _, _ = deepspeed.initialize(config=config_dict,
                                               model=model,
                                               model_parameters=model.parameters())
@@ -80,53 +79,48 @@ def test_zero_unbalanced_gradients(tmpdir, zero_stage):
 
         run_unbalanced_gradients(model, data_loader)
 
-    _test_zero_unbalanced_gradients(model=model, hidden_dim=hidden_dim)
-
 
 # testing the fix https://github.com/microsoft/DeepSpeed/pull/1227
-@pytest.mark.parametrize('zero_stage', [3])
-def test_zero3_repeat_forward_loop(tmpdir, zero_stage):
+class TestZero3RepeatForwardLoop(DistributedTest):
+    world_size = 1
 
-    # force all params to be partitioned by forcing threshold=0
-    config_dict = {
-        "train_micro_batch_size_per_gpu": 2,
-        "gradient_accumulation_steps": 2,
-        "steps_per_print": 1,
-        "zero_optimization": {
-            "stage": zero_stage,
-            "stage3_param_persistence_threshold": 0
-        },
-        "optimizer": {
-            "type": "Adam",
-            "params": {
-                "lr": 1e-3
+    def test(self, zero_stage=3):
+        # force all params to be partitioned by forcing threshold=0
+        config_dict = {
+            "train_micro_batch_size_per_gpu": 2,
+            "gradient_accumulation_steps": 2,
+            "steps_per_print": 1,
+            "zero_optimization": {
+                "stage": zero_stage,
+                "stage3_param_persistence_threshold": 0
+            },
+            "optimizer": {
+                "type": "Adam",
+                "params": {
+                    "lr": 1e-3
+                }
+            },
+            "fp16": {
+                "enabled": True,
+                "initial_scale_power": 8
             }
-        },
-        "fp16": {
-            "enabled": True,
-            "initial_scale_power": 8
         }
-    }
+        hidden_dim = 4
 
-    hidden_dim = 4
+        class AlbertLikeModel(torch.nn.Module):
+            def __init__(self, hidden_dim):
+                super().__init__()
+                self.linear = torch.nn.Linear(hidden_dim, hidden_dim)
+                self.cross_entropy_loss = torch.nn.CrossEntropyLoss()
 
-    class AlbertLikeModel(torch.nn.Module):
-        def __init__(self, hidden_dim):
-            super().__init__()
-            self.linear = torch.nn.Linear(hidden_dim, hidden_dim)
-            self.cross_entropy_loss = torch.nn.CrossEntropyLoss()
+            def forward(self, x, y):
+                # run the same layer multiple times in a loop - to test a stack of forwards, followed by a stack of backwards
+                hidden = x
+                for i in range(3):
+                    hidden = hidden + self.linear(hidden)
+                return self.cross_entropy_loss(hidden, y)
 
-        def forward(self, x, y):
-            # run the same layer multiple times in a loop - to test a stack of forwards, followed by a stack of backwards
-            hidden = x
-            for i in range(3):
-                hidden = hidden + self.linear(hidden)
-            return self.cross_entropy_loss(hidden, y)
-
-    model = AlbertLikeModel(hidden_dim=hidden_dim)
-
-    @distributed_test(world_size=[1])
-    def _test_zero3_repeat_forward_loop(model, hidden_dim):
+        model = AlbertLikeModel(hidden_dim=hidden_dim)
         model, _, _, _ = deepspeed.initialize(config=config_dict,
                                               model=model,
                                               model_parameters=model.parameters())
@@ -140,39 +134,36 @@ def test_zero3_repeat_forward_loop(tmpdir, zero_stage):
             model.backward(loss)
             model.step()
 
-    _test_zero3_repeat_forward_loop(model=model, hidden_dim=hidden_dim)
-
 
 # testing the fix https://github.com/microsoft/DeepSpeed/pull/1227
 # also reproduces the https://github.com/microsoft/DeepSpeed/pull/1372
 @pytest.mark.parametrize('zero_stage', [2, 3])
-def test_zero_to_fp32_1_param_group(tmpdir, zero_stage):
+class TestZeroToFP32(DistributedTest):
+    world_size = 2
 
-    # XXX: ideally refactor with the 2_param_group test as 75% is the same
-
-    # force all params to be partitioned by forcing threshold=0
-    config_dict = {
-        "train_micro_batch_size_per_gpu": 2,
-        "gradient_accumulation_steps": 2,
-        "steps_per_print": 1,
-        "zero_optimization": {
-            "stage": zero_stage,
-            "stage3_param_persistence_threshold": 0
-        },
-        "optimizer": {
-            "type": "Adam",
-            "params": {
-                "lr": 1e-3
+    def test_1_param_group(self, tmpdir, zero_stage):
+        # XXX: ideally refactor with the 2_param_group test as 75% is the same
+        # force all params to be partitioned by forcing threshold=0
+        config_dict = {
+            "train_micro_batch_size_per_gpu": 2,
+            "gradient_accumulation_steps": 2,
+            "steps_per_print": 1,
+            "zero_optimization": {
+                "stage": zero_stage,
+                "stage3_param_persistence_threshold": 0
+            },
+            "optimizer": {
+                "type": "Adam",
+                "params": {
+                    "lr": 1e-3
+                }
+            },
+            "fp16": {
+                "enabled": True,
+                "initial_scale_power": 8
             }
-        },
-        "fp16": {
-            "enabled": True,
-            "initial_scale_power": 8
         }
-    }
 
-    @distributed_test(world_size=[2])
-    def _test_zero_to_fp32():
         class MyModel(torch.nn.Module):
             def __init__(self, hidden_dim, n_layers):
                 super().__init__()
@@ -240,39 +231,31 @@ def test_zero_to_fp32_1_param_group(tmpdir, zero_stage):
                 assert torch.allclose(orig_state_dict[name].float(),
                                       fp32_state_dict[name].float())
 
-    _test_zero_to_fp32()
-
-
-@pytest.mark.parametrize('zero_stage', [2, 3])
-def test_zero_to_fp32_2_param_groups(tmpdir, zero_stage):
-
-    # TODO:
-    # - need to test with multiple param groups
-
-    # force all params to be partitioned by forcing threshold=0
-    config_dict = {
-        "train_micro_batch_size_per_gpu": 2,
-        "gradient_accumulation_steps": 2,
-        "steps_per_print": 1,
-        "zero_allow_untested_optimizer": 1,
-        "zero_optimization": {
-            "stage": zero_stage,
-            "stage3_param_persistence_threshold": 0
-        },
-        "optimizer": {
-            "type": "Adam",
-            "params": {
-                "lr": 1e-3
+    def test_2_param_groups(self, tmpdir, zero_stage):
+        # TODO:
+        # - need to test with multiple param groups
+        # force all params to be partitioned by forcing threshold=0
+        config_dict = {
+            "train_micro_batch_size_per_gpu": 2,
+            "gradient_accumulation_steps": 2,
+            "steps_per_print": 1,
+            "zero_allow_untested_optimizer": 1,
+            "zero_optimization": {
+                "stage": zero_stage,
+                "stage3_param_persistence_threshold": 0
+            },
+            "optimizer": {
+                "type": "Adam",
+                "params": {
+                    "lr": 1e-3
+                }
+            },
+            "fp16": {
+                "enabled": True,
+                "initial_scale_power": 8
             }
-        },
-        "fp16": {
-            "enabled": True,
-            "initial_scale_power": 8
         }
-    }
 
-    @distributed_test(world_size=[2])
-    def _test_zero_to_fp32():
         class MyModel(torch.nn.Module):
             def __init__(self, hidden_dim, n_layers):
                 super().__init__()
@@ -347,37 +330,34 @@ def test_zero_to_fp32_2_param_groups(tmpdir, zero_stage):
                 assert torch.allclose(orig_state_dict[name].float(),
                                       fp32_state_dict[name].float())
 
-    _test_zero_to_fp32()
 
+@pytest.mark.parametrize("allgather_bucket_size", [1000, 1001])
+class TestIncorectAllgatherBucketSize(DistributedTest):
+    world_size = 1
 
-@pytest.mark.parametrize('zero_stage, allgather_bucket_size', [(2, 1000), (2, 1001)])
-def test_incorrect_allgather_bucket_size(tmpdir, zero_stage, allgather_bucket_size):
-    config_dict = {
-        "train_micro_batch_size_per_gpu": 2,
-        "gradient_accumulation_steps": 2,
-        "steps_per_print": 1,
-        "zero_optimization": {
-            "stage": zero_stage,
-            "allgather_bucket_size": allgather_bucket_size
-        },
-        "optimizer": {
-            "type": "Adam",
-            "params": {
-                "lr": 1e-3
+    def test(self, allgather_bucket_size, zero_stage=2):
+        config_dict = {
+            "train_micro_batch_size_per_gpu": 2,
+            "gradient_accumulation_steps": 2,
+            "steps_per_print": 1,
+            "zero_optimization": {
+                "stage": zero_stage,
+                "allgather_bucket_size": allgather_bucket_size
+            },
+            "optimizer": {
+                "type": "Adam",
+                "params": {
+                    "lr": 1e-3
+                }
+            },
+            "fp16": {
+                "enabled": True,
+                "initial_scale_power": 8
             }
-        },
-        "fp16": {
-            "enabled": True,
-            "initial_scale_power": 8
         }
-    }
+        hidden_dim = 4
 
-    hidden_dim = 4
-
-    model = SimpleModel(hidden_dim=hidden_dim)
-
-    @distributed_test(world_size=[1])
-    def _test_incorrect_allgather_bucket_size(model, hidden_dim):
+        model = SimpleModel(hidden_dim=hidden_dim)
         if allgather_bucket_size % 2 == 0:
             model, _, _, _ = deepspeed.initialize(config=config_dict,
                                               model=model,
@@ -390,36 +370,32 @@ def test_incorrect_allgather_bucket_size(tmpdir, zero_stage, allgather_bucket_si
             assert "allgather_bucket_size must be a multiple of nccl_start_alignment_factor" in str(
                 assertinfo)
 
-    _test_incorrect_allgather_bucket_size(model=model, hidden_dim=hidden_dim)
 
+class TestPartitionNcclAlignment(DistributedTest):
+    world_size = 4
 
-@pytest.mark.parametrize('zero_stage, world_size', [(2, 2), (2, 3), (2, 4)])
-def test_partition_nccl_alignment(tmpdir, zero_stage, world_size):
-    config_dict = {
-        "train_micro_batch_size_per_gpu": 2,
-        "gradient_accumulation_steps": 2,
-        "steps_per_print": 1,
-        "zero_optimization": {
-            "stage": zero_stage
-        },
-        "optimizer": {
-            "type": "Adam",
-            "params": {
-                "lr": 1e-3
+    def test(self, zero_stage=2):
+        config_dict = {
+            "train_micro_batch_size_per_gpu": 2,
+            "gradient_accumulation_steps": 2,
+            "steps_per_print": 1,
+            "zero_optimization": {
+                "stage": zero_stage
+            },
+            "optimizer": {
+                "type": "Adam",
+                "params": {
+                    "lr": 1e-3
+                }
+            },
+            "fp16": {
+                "enabled": True,
+                "initial_scale_power": 8
             }
-        },
-        "fp16": {
-            "enabled": True,
-            "initial_scale_power": 8
         }
-    }
+        hidden_dim = 4
 
-    hidden_dim = 4
-
-    model = SimpleModel(hidden_dim=hidden_dim)
-
-    @distributed_test(world_size=world_size)
-    def _test_partition_nccl_alignment(model, hidden_dim):
+        model = SimpleModel(hidden_dim=hidden_dim)
         model, _, _, _ = deepspeed.initialize(config=config_dict,
                                               model=model,
                                               model_parameters=model.parameters())
@@ -433,8 +409,6 @@ def test_partition_nccl_alignment(tmpdir, zero_stage, world_size):
                 # verify that data partition start locations are 4-byte aligned
                 assert (partitioned_data.data_ptr() %
                         (2 * nccl_start_alignment_factor) == 0)
-
-    _test_partition_nccl_alignment(model=model, hidden_dim=hidden_dim)
 
 
 def _ds_initialize_for_param_partitioning_testing(model: Module,
@@ -547,16 +521,18 @@ class EltwiseMultiplicationTestNetwork(Module):
 @pytest.mark.parametrize("offload_optimizer", [True, False])
 @pytest.mark.parametrize("zero_grad", [True, False])
 @pytest.mark.parametrize("prefetching", [True, False])
-def test_zero3_param_partitioning_base(
-    param_persistence_threshold: int,
-    fp16_enabled: bool,
-    contiguous_gradients: bool,
-    offload_optimizer: bool,
-    zero_grad: bool,
-    prefetching: bool,
-) -> None:
-    @distributed_test(world_size=[2])
-    def _test_zero3_param_partitioning():
+class TestZero3ParamPartitioningBase(DistributedTest):
+    world_size = 2
+
+    def test(
+        self,
+        param_persistence_threshold: int,
+        fp16_enabled: bool,
+        contiguous_gradients: bool,
+        offload_optimizer: bool,
+        zero_grad: bool,
+        prefetching: bool,
+    ) -> None:
         if offload_optimizer and not contiguous_gradients:
             return
 
@@ -752,35 +728,30 @@ def test_zero3_param_partitioning_base(
         _assert_partition_status(ds_engine, {ZeroParamStatus.NOT_AVAILABLE})
         assert not math.isclose(ds_engine.optimizer._global_grad_norm, 0.0)
 
-    _test_zero3_param_partitioning()
 
-
-@pytest.mark.parametrize("world_sz", [1, 2, 4])
-@pytest.mark.parametrize("param_sz", [8100])
 @pytest.mark.parametrize("init_context_manager", [True, False])
-def test_zero3_param_partitioning_large_param(world_sz: int,
-                                              param_sz: int,
-                                              init_context_manager: bool) -> None:
-    class LargeParamModel(Module):
-        def __init__(self):
-            super().__init__()
-            self.param = Parameter(torch.zeros((param_sz, ), dtype=torch.float32))
+class TestZero3ParamPartitioningLargeParam(DistributedTest):
+    world_size = 4
 
-            # only do weight initialization on root rank to
-            # make sure we are broadcasting correctly from rank 0
-            if dist.get_rank() == 0:
-                partition_sz = math.ceil(self.param.numel() / dist.get_world_size())
-                offset = 0
-                for rank in range(dist.get_world_size()):
-                    with torch.no_grad():
-                        self.param[offset:offset + partition_sz].fill_(rank)
-                    offset += partition_sz
+    def test(self, init_context_manager: bool, param_sz: int = 8100) -> None:
+        class LargeParamModel(Module):
+            def __init__(self):
+                super().__init__()
+                self.param = Parameter(torch.zeros((param_sz, ), dtype=torch.float32))
 
-        def forward(self, x: Tensor) -> Tensor:
-            return x * self.param
+                # only do weight initialization on root rank to
+                # make sure we are broadcasting correctly from rank 0
+                if dist.get_rank() == 0:
+                    partition_sz = math.ceil(self.param.numel() / dist.get_world_size())
+                    offset = 0
+                    for rank in range(dist.get_world_size()):
+                        with torch.no_grad():
+                            self.param[offset:offset + partition_sz].fill_(rank)
+                        offset += partition_sz
 
-    @distributed_test(world_size=[world_sz])
-    def _distributed_test():
+            def forward(self, x: Tensor) -> Tensor:
+                return x * self.param
+
         ds_config = {
             "train_micro_batch_size_per_gpu": 1,
             "zero_optimization": {
@@ -811,7 +782,7 @@ def test_zero3_param_partitioning_large_param(world_sz: int,
                            dtype=torch.float16,
                            device=ds_engine.device))
 
-            partition_sz = math.ceil(param_sz / world_sz)
+            partition_sz = math.ceil(param_sz / self.world_size)
             for rank_idx, start_idx in enumerate(range(0, param_sz, partition_sz)):
                 activation_from_partition = activation[start_idx:start_idx +
                                                        partition_sz]
@@ -832,50 +803,46 @@ def test_zero3_param_partitioning_large_param(world_sz: int,
 
             assert torch.allclose(weight_gradient, expected_weight_gradient)
 
-    _distributed_test()
 
-
-@pytest.mark.parametrize("world_sz", [1, 2, 4])
 @pytest.mark.parametrize("param_sz", [100, 1_000, 10_000])
 @pytest.mark.parametrize("n_layers", [100, 1_000])
 @pytest.mark.parametrize("init_context_manager", [True, False])
-def test_zero3_param_partitioning_many_params(world_sz: int,
-                                              param_sz: int,
-                                              n_layers: int,
-                                              init_context_manager: bool) -> None:
-    class ManyParamModel(Module):
-        def __init__(self) -> None:
-            super().__init__()
+class TestZero3ParamPartitioningManyParams(DistributedTest):
+    world_size = 4
 
-            self.modulelist = ModuleList(
-                EltwiseMultiplicationModule(
-                    weight=Parameter(torch.empty((param_sz,
-                                                  ),
-                                                 dtype=torch.float32)))
-                for _ in range(n_layers))
+    def test(self, param_sz: int, n_layers: int, init_context_manager: bool) -> None:
+        class ManyParamModel(Module):
+            def __init__(self) -> None:
+                super().__init__()
 
-            for layer_num, module in enumerate(self.modulelist):
-                with deepspeed.zero.GatheredParameters(module.weight, modifier_rank=0):
-                    param: Parameter = module.weight
-                    partition_sz = math.ceil(param.numel() / dist.get_world_size())
-                    offset = 0
-                    for rank in range(dist.get_world_size()):
-                        with torch.no_grad():
-                            param[offset:offset + partition_sz].fill_(2 * layer_num *
-                                                                      rank)
-                        offset += partition_sz
+                self.modulelist = ModuleList(
+                    EltwiseMultiplicationModule(
+                        weight=Parameter(torch.empty((param_sz,
+                                                      ),
+                                                     dtype=torch.float32)))
+                    for _ in range(n_layers))
 
-        def forward(self, x: Tensor) -> Tensor:
-            activations = []
+                for layer_num, module in enumerate(self.modulelist):
+                    with deepspeed.zero.GatheredParameters(module.weight,
+                                                           modifier_rank=0):
+                        param: Parameter = module.weight
+                        partition_sz = math.ceil(param.numel() / dist.get_world_size())
+                        offset = 0
+                        for rank in range(dist.get_world_size()):
+                            with torch.no_grad():
+                                param[offset:offset + partition_sz].fill_(2 * layer_num *
+                                                                          rank)
+                            offset += partition_sz
 
-            for module in self.modulelist:
-                x = module(x)
-                activations.append(x)
+            def forward(self, x: Tensor) -> Tensor:
+                activations = []
 
-            return activations
+                for module in self.modulelist:
+                    x = module(x)
+                    activations.append(x)
 
-    @distributed_test(world_size=[world_sz])
-    def _distributed_test():
+                return activations
+
         ds_cfg = {
             "train_micro_batch_size_per_gpu": 1,
             "zero_optimization": {
@@ -911,7 +878,7 @@ def test_zero3_param_partitioning_many_params(world_sz: int,
                            device=ds_engine.device))
             assert len(activations) == n_layers
 
-            partition_sz = math.ceil(param_sz / world_sz)
+            partition_sz = math.ceil(param_sz / self.world_size)
             expected_activations = torch.empty(param_sz,
                                                dtype=torch.float16,
                                                device=ds_engine.device)
@@ -933,26 +900,24 @@ def test_zero3_param_partitioning_many_params(world_sz: int,
             for layer_num, activation in enumerate(weight_gradients):
                 pass
 
-    _distributed_test()
 
+class TestZero3InitForParentWeightInitialization(DistributedTest):
+    world_size = 4
 
-@pytest.mark.parametrize("world_sz", [1, 2, 4])
-def test_zero3_init_for_parent_weight_initialization(world_sz):
-    class ModelWhereParentInitializesChildWeights(Module):
-        def __init__(self) -> None:
-            super().__init__()
+    def test(self):
+        class ModelWhereParentInitializesChildWeights(Module):
+            def __init__(self) -> None:
+                super().__init__()
 
-            self.linear = Linear(12, 1)
+                self.linear = Linear(12, 1)
 
-            self.apply(self.__init_weights)
+                self.apply(self.__init_weights)
 
-        def __init_weights(self, module):
-            if isinstance(module, Linear):
-                with torch.no_grad():
-                    module.weight.fill_(1 + dist.get_rank())
+            def __init_weights(self, module):
+                if isinstance(module, Linear):
+                    with torch.no_grad():
+                        module.weight.fill_(1 + dist.get_rank())
 
-    @distributed_test(world_size=[world_sz])
-    def _distributed_test():
         ds_cfg = {
             "train_micro_batch_size_per_gpu": 1,
             "zero_optimization": {
@@ -978,30 +943,29 @@ def test_zero3_init_for_parent_weight_initialization(world_sz):
                                  enabled=True):
             model = ModelWhereParentInitializesChildWeights()
 
-        assert model.linear.weight.ds_tensor.numel() == math.ceil(12 / world_sz)
+        assert model.linear.weight.ds_tensor.numel() == math.ceil(12 / self.world_size)
         assert torch.allclose(model.linear.weight.ds_tensor,
                               torch.full_like(model.linear.weight.ds_tensor,
                                               1))
 
-    _distributed_test()
 
-
-@pytest.mark.skip(
-    reason="depends on upgraded pytorch and nccl that isn't always available")
+@pytest.mark.skip("not working")
 @pytest.mark.parametrize("param_persistence_threshold", [0, 10])
 @pytest.mark.parametrize("contiguous_gradients", [True, False])
 @pytest.mark.parametrize("offload_optimizer", [True, False])
-@pytest.mark.parametrize("zero_grad", [True])
-@pytest.mark.parametrize("iteration", list(range(1)))
-def test_zero3_param_partitioning_base_bf16(
-    param_persistence_threshold: int,
-    contiguous_gradients: bool,
-    offload_optimizer: bool,
-    zero_grad: bool,
-    iteration: int,
-) -> None:
-    @distributed_test(world_size=[2])
-    def _test_zero3_param_partitioning():
+@pytest.mark.parametrize("zero_grad", [True, False])
+@pytest.mark.parametrize("prefetching", [True, False])
+class TestZero3ParamPartitioningBaseBF16(DistributedTest):
+    world_size = 2
+
+    def test(
+        self,
+        param_persistence_threshold: int,
+        contiguous_gradients: bool,
+        offload_optimizer: bool,
+        zero_grad: bool,
+        prefetching: bool,
+    ) -> None:
         if offload_optimizer and not contiguous_gradients:
             return
 
@@ -1009,7 +973,7 @@ def test_zero3_param_partitioning_base_bf16(
         n = 5
         weights = [Parameter(torch.zeros((m, n), dtype=torch.float32)) for _ in range(3)]
         model = EltwiseMultiplicationTestNetwork(*weights)
-
+        prefetch_bucket_size = sum([p.numel() for p in model.parameters(recurse=True)])
         cfg = {
             "train_micro_batch_size_per_gpu": 1,
             "zero_optimization": {
@@ -1017,6 +981,7 @@ def test_zero3_param_partitioning_base_bf16(
                 "stage3_max_reuse_distance": 0,
                 "stage3_param_persistence_threshold": param_persistence_threshold,
                 "contiguous_gradients": contiguous_gradients,
+                "stage3_prefetch_bucket_size": prefetch_bucket_size if prefetching else 0
             },
             "optimizer": {
                 "type": "Adam",
@@ -1122,7 +1087,8 @@ def test_zero3_param_partitioning_base_bf16(
                               n),
                              dtype=torch.bfloat16,
                              device=ds_engine.device),
-                prefetching=train_iter > 0,
+                use_module_trace=train_iter > 0,
+                param_prefetching=prefetching and train_iter > 0,
             )
             assert torch.allclose(activations["hidden1"], expected_hidden1)
             assert torch.allclose(activations["hidden2"], expected_hidden2)
@@ -1187,36 +1153,34 @@ def test_zero3_param_partitioning_base_bf16(
         ds_engine.optimizer.step()
         _assert_partition_status(ds_engine, {ZeroParamStatus.NOT_AVAILABLE})
 
-    _test_zero3_param_partitioning()
 
+class TestZeroOffloadStage1(DistributedTest):
+    world_size = 2
 
-def test_zero_offload_stage1():
-    config_dict = {
-        "train_batch_size": 4,
-        "gradient_accumulation_steps": 2,
-        "steps_per_print": 1,
-        "optimizer": {
-            "type": "Adam",
-            "params": {
-                "lr": 1e-4
-            }
-        },
-        "fp16": {
-            "enabled": True
-        },
-        "zero_optimization": {
-            "stage": 1,
-            "offload_optimizer": {
-                "device": "cpu"
+    def test(self):
+        config_dict = {
+            "train_batch_size": 4,
+            "gradient_accumulation_steps": 2,
+            "steps_per_print": 1,
+            "optimizer": {
+                "type": "Adam",
+                "params": {
+                    "lr": 1e-4
+                }
+            },
+            "fp16": {
+                "enabled": True
+            },
+            "zero_optimization": {
+                "stage": 1,
+                "offload_optimizer": {
+                    "device": "cpu"
+                }
             }
         }
-    }
+        hidden_dim = 10
 
-    hidden_dim = 10
-    model = SimpleModel(hidden_dim)
-
-    @distributed_test(world_size=[2])
-    def _go(model, hidden_dim):
+        model = SimpleModel(hidden_dim)
         model, _, _, _ = deepspeed.initialize(model=model,
                                               model_parameters=model.parameters(),
                                               config=config_dict)
@@ -1230,50 +1194,49 @@ def test_zero_offload_stage1():
             model.backward(loss)
             model.step()
 
-    _go(model=model, hidden_dim=hidden_dim)
-
 
 @pytest.mark.parametrize('return_type', [tuple, list, dict])
-def test_z3_dict_fwd(return_type):
-    config_dict = {
-        "train_batch_size": 4,
-        "steps_per_print": 1,
-        "optimizer": {
-            "type": "Adam",
-            "params": {
-                "lr": 1e-4
+class TestZero3DictFwd(DistributedTest):
+    world_size = 1
+
+    def test(self, return_type):
+        config_dict = {
+            "train_batch_size": 4,
+            "steps_per_print": 1,
+            "optimizer": {
+                "type": "Adam",
+                "params": {
+                    "lr": 1e-4
+                }
+            },
+            "fp16": {
+                "enabled": True
+            },
+            "zero_optimization": {
+                "stage": 3
             }
-        },
-        "fp16": {
-            "enabled": True
-        },
-        "zero_optimization": {
-            "stage": 3
         }
-    }
-    hidden_dim = 10
+        hidden_dim = 10
 
-    class MyModel(torch.nn.Module):
-        def __init__(self, hidden_dim):
-            super(MyModel, self).__init__()
-            self.l1 = torch.nn.Linear(hidden_dim, hidden_dim)
-            self.cel = torch.nn.CrossEntropyLoss()
+        class MyModel(torch.nn.Module):
+            def __init__(self, hidden_dim):
+                super(MyModel, self).__init__()
+                self.l1 = torch.nn.Linear(hidden_dim, hidden_dim)
+                self.cel = torch.nn.CrossEntropyLoss()
 
-        def forward(self, x, y):
-            x = self.l1(x)
-            loss = self.cel(x, y)
-            if return_type == dict:
-                val = {'a': x, 'loss': loss, 'b': 1, 'c': None}
-            elif return_type == list:
-                val = [x, loss]
-            elif return_type == tuple:
-                val = (x, loss)
-            else:
-                raise NotImplementedError
-            return val
+            def forward(self, x, y):
+                x = self.l1(x)
+                loss = self.cel(x, y)
+                if return_type == dict:
+                    val = {'a': x, 'loss': loss, 'b': 1, 'c': None}
+                elif return_type == list:
+                    val = [x, loss]
+                elif return_type == tuple:
+                    val = (x, loss)
+                else:
+                    raise NotImplementedError
+                return val
 
-    @distributed_test(world_size=[1])
-    def _go(hidden_dim):
         with deepspeed.zero.Init():
             model = MyModel(hidden_dim)
 
@@ -1294,40 +1257,36 @@ def test_z3_dict_fwd(return_type):
             model.backward(loss)
             model.step()
 
-    _go(hidden_dim)
-
 
 @pytest.mark.parametrize('zero_stage', [1, 2, 3])
-def test_zero_adam_optimizer_step_count(tmpdir, zero_stage):
+class TestZeroAdamOptimizerStepCount(DistributedTest):
+    world_size = 1
 
-    # force all params to be partitioned by forcing threshold=0
-    config_dict = {
-        "train_micro_batch_size_per_gpu": 2,
-        "gradient_accumulation_steps": 2,
-        "steps_per_print": 1,
-        "zero_optimization": {
-            "stage": zero_stage,
-            "stage3_param_persistence_threshold": 0,
-            "sub_group_size": 4,
-        },
-        "optimizer": {
-            "type": "Adam",
-            "params": {
-                "lr": 1e-3
+    def test(self, zero_stage):
+        # force all params to be partitioned by forcing threshold=0
+        config_dict = {
+            "train_micro_batch_size_per_gpu": 2,
+            "gradient_accumulation_steps": 2,
+            "steps_per_print": 1,
+            "zero_optimization": {
+                "stage": zero_stage,
+                "stage3_param_persistence_threshold": 0,
+                "sub_group_size": 4,
+            },
+            "optimizer": {
+                "type": "Adam",
+                "params": {
+                    "lr": 1e-3
+                }
+            },
+            "fp16": {
+                "enabled": True,
+                "initial_scale_power": 8
             }
-        },
-        "fp16": {
-            "enabled": True,
-            "initial_scale_power": 8
         }
-    }
+        hidden_dim = 4
 
-    hidden_dim = 4
-
-    model = SimpleModel(hidden_dim=hidden_dim, nlayers=12)
-
-    @distributed_test(world_size=[1])
-    def _test_zero_adam_optimizer_step_count_loop(model, hidden_dim):
+        model = SimpleModel(hidden_dim=hidden_dim, nlayers=12)
         model, optimizer, _, _ = deepspeed.initialize(config=config_dict,
                                                       model=model,
                                                       model_parameters=model.parameters())
@@ -1354,5 +1313,3 @@ def test_zero_adam_optimizer_step_count(tmpdir, zero_stage):
                         state = optimizer.optimizer.state[param]
                         step_counts.append(state['step'])
                 assert all(step == step_counts[0] for step in step_counts)
-
-    _test_zero_adam_optimizer_step_count_loop(model=model, hidden_dim=hidden_dim)

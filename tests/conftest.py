@@ -52,5 +52,14 @@ def pytest_runtest_call(item):
     # We want to use our own launching function for distributed tests
     if getattr(item.cls, "is_dist_test", False):
         dist_test_class = item.cls()
-        dist_test_class._run_test(item._request)
+        dist_test_class(item._request)
         item.runtest = lambda: True  # Dummy function so test is not run twice
+
+
+@pytest.hookimpl(tryfirst=True)
+def pytest_fixture_setup(fixturedef, request):
+    if getattr(fixturedef.func, "is_dist_fixture", False):
+        #for val in dir(request):
+        #    print(val.upper(), getattr(request, val), "\n")
+        dist_fixture_class = fixturedef.func()
+        dist_fixture_class(request)
