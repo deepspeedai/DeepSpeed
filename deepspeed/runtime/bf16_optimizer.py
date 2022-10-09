@@ -4,6 +4,7 @@ Copyright 2022 The Microsoft DeepSpeed Team
 
 from collections import OrderedDict
 import torch
+import sys
 import os
 from deepspeed import comm as dist
 from deepspeed.runtime.constants import PIPE_REPLICATED
@@ -21,7 +22,7 @@ from deepspeed.runtime.utils import (get_global_norm_of_tensors,
                                      is_model_parallel_parameter,
                                      see_memory_usage)
 
-from deepspeed.utils import link_hp_params
+from deepspeed.utils import link_hp_params, fragment_address
 from deepspeed.checkpoint import enable_universal_checkpoint
 from deepspeed.checkpoint.constants import (DS_VERSION,
                                             PARTITION_COUNT,
@@ -30,6 +31,8 @@ from deepspeed.checkpoint.constants import (DS_VERSION,
                                             CLIP_GRAD,
                                             GROUP_PADDINGS,
                                             PARAM_SLICE_MAPPINGS)
+
+setattr(sys.modules[__name__], 'fragment_address', fragment_address)
 
 
 class BF16_Optimizer(ZeROOptimizer):
