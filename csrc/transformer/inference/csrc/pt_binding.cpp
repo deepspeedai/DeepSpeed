@@ -103,13 +103,22 @@ at::Tensor ds_softmax(at::Tensor& attn_scores,
 template <typename T>
 void allocate_workspace(size_t hidden_dim,
                         size_t batch_size,
+                        size_t prompt_length,
                         unsigned num_layers,
+                        unsigned num_heads,
                         unsigned mp_size = 1,
                         bool external_cache = false,
                         unsigned rank = 0)
 {
-    Context::Instance().GenWorkSpace(
-        num_layers, batch_size, hidden_dim, mp_size, external_cache, sizeof(T), rank);
+    Context::Instance().GenWorkSpace(num_layers,
+                                     num_heads,
+                                     batch_size,
+                                     prompt_length,
+                                     hidden_dim,
+                                     mp_size,
+                                     external_cache,
+                                     sizeof(T),
+                                     rank);
 }
 
 template <typename T>
@@ -352,15 +361,7 @@ void attention_unfused(T* prev_key_cont,
     float layer_scale = alibi.sizes().size() > 1 ? std::max(1, layer_id) : 1.0;
     float alpha = norm_factor * norm_factor / layer_scale;
     float gemm_beta = 0.0;
-    T* workspace;
-    if (seq_len == 1) {
-        workspace = (T*)output + bsz * seq_len * heads * k;
-    } else {
-        // If we are doing the prompt, switch to the tail workspace
-        T* scratch = (T*)Context::Instance().GetWorkSpace();
-        workspace = scratch + ((Context::Instance().get_workspace_size() / sizeof(T)) -
-                               bsz * heads * seq_len * soft_len);
-    }
+    T* workspace = (T*)Context::Instance().GetAttentionUnfusedWorkspace();
 
     cublasSetStream(Context::Instance().GetCublasHandle(), Context::Instance().GetCurrentStream());
     cublas_strided_batched_gemm(Context::Instance().GetCublasHandle(),
@@ -733,11 +734,6 @@ std::vector<at::Tensor> ds_qkv_gemm(at::Tensor& input,
     int bsz = input.size(0) * input.size(1);
     T* workspace = (T*)Context::Instance().GetWorkSpace();
     int out_size = q_int8 ? weight.size(0) : weight.size(1);
-    if (!workspace)
-        cublasSetStream(Context::Instance().GetCublasHandle(),
-                        Context::Instance().GetCurrentStream());
-    allocate_workspace<T>(input.size(2), input.size(0), num_layers, mp_size, external_cache, rank);
-    workspace = (T*)Context::Instance().GetWorkSpace();
 
     auto options = at::TensorOptions()
                        .dtype(input.options().dtype())
@@ -846,13 +842,6 @@ at::Tensor ds_linear_layer(at::Tensor& input,
 
     int bsz = input.size(0) * input.size(1);
     T* workspace = (T*)Context::Instance().GetWorkSpace();
-    // Reallocate memory if we received a new prompt
-    if (!workspace || input.size(1) != 1) {
-        cublasSetStream(Context::Instance().GetCublasHandle(),
-                        Context::Instance().GetCurrentStream());
-        allocate_workspace<T>(input.size(2), input.size(0), num_layers);
-        workspace = (T*)Context::Instance().GetWorkSpace();
-    }
     auto output = at::from_blob(workspace, {input.size(0), input.size(1), weight.size(1)}, options);
 
     float alpha = (T)1.0;
@@ -1425,4 +1414,10 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m)
           &einsum_sec_sm_ecm<__half>,
           "DeepSpeed vector-MM with fp16 (CUDA)");
     m.def("moe_res_matmul", &moe_res_matmul, "DeepSpeed moe residual matmul (CUDA)");
+    m.def("allocate_workspace_fp32",
+          &allocate_workspace<float>,
+          "DeepSpeed memory allocation for GPT inference with fp32 (CUDA)");
+    m.def("allocate_workspace_fp16",
+          &allocate_workspace<__half>,
+          "DeepSpeed memory allocation for GPT inference with fp16 (CUDA)");
 }

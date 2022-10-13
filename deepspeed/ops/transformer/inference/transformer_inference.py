@@ -799,6 +799,8 @@ class DeepSpeedTransformerInference(nn.Module):
                                                device=device),
                                    requires_grad=False)
         self.layer_past = None
+        self.allocate_workspace = inference_cuda_module.allocate_workspace_fp32 if (not config.fp16) else \
+                                inference_cuda_module.allocate_workspace_fp16
 
     def forward(
             self,
@@ -820,6 +822,17 @@ class DeepSpeedTransformerInference(nn.Module):
             # This needs to be redesigned later!
             layer_head_mask=None,
             past_key_value=None):
+        # Allocate memory only on first layer forward
+        if self.config.layer_id == 0:
+            self.allocate_workspace(self.config.hidden_size,
+                                    input.size()[0],
+                                    input.size()[1],
+                                    DeepSpeedTransformerInference.layer_id,
+                                    self.config.heads,
+                                    self.config.mp_size,
+                                    self.config.bigscience_bloom,
+                                    dist.get_rank() if dist.is_initialized() else 0)
+
         get_present = (get_present or get_key_value or use_cache)
         input_mask = input_mask if attention_mask is None else attention_mask
 
