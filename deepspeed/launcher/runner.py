@@ -18,8 +18,8 @@ import signal
 import time
 import torch.cuda
 
-from .multinode_runner import PDSHRunner, OpenMPIRunner, MVAPICHRunner
-from .constants import PDSH_LAUNCHER, OPENMPI_LAUNCHER, MVAPICH_LAUNCHER
+from .multinode_runner import PDSHRunner, OpenMPIRunner, MVAPICHRunner, SlurmRunner
+from .constants import PDSH_LAUNCHER, OPENMPI_LAUNCHER, MVAPICH_LAUNCHER, SLURM_LAUNCHER
 from ..constants import TORCH_DISTRIBUTED_DEFAULT_PORT
 from ..nebula.constants import NEBULA_EXPORT_ENVS
 from ..utils import logger
@@ -108,11 +108,12 @@ def parse_args(args=None):
                         help="(optional) IP address of node 0, will be "
                         "inferred via 'hostname -I' if not specified.")
 
-    parser.add_argument("--launcher",
-                        default=PDSH_LAUNCHER,
-                        type=str,
-                        help="(optional) choose launcher backend for multi-node "
-                        "training. Options currently include PDSH, OpenMPI, MVAPICH.")
+    parser.add_argument(
+        "--launcher",
+        default=PDSH_LAUNCHER,
+        type=str,
+        help="(optional) choose launcher backend for multi-node "
+        "training. Options currently include PDSH, OpenMPI, MVAPICH, SLURM.")
 
     parser.add_argument("--launcher_args",
                         default="",
@@ -471,6 +472,8 @@ def main(args=None):
             runner = OpenMPIRunner(args, world_info_base64, resource_pool)
         elif args.launcher == MVAPICH_LAUNCHER:
             runner = MVAPICHRunner(args, world_info_base64, resource_pool)
+        elif args.launcher == SLURM_LAUNCHER:
+            runner = SlurmRunner(args, world_info_base64, resource_pool)
         else:
             raise NotImplementedError(f"Unknown launcher {args.launcher}")
 
