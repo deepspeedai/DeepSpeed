@@ -14,7 +14,7 @@ from deepspeed.runtime.checkpoint_engine.torch_checkpoint_engine import TorchChe
 
 from ..runtime.state_dict_factory import SDLoaderFactory
 from ..runtime.weight_quantizer import WeightQuantization
-from ..module_inject.replace_module import replace_transformer_layer
+from ..module_inject.replace_module import replace_transformer_layer, generic_injection
 from ..comm.comm import init_distributed
 from ..pipe import PipelineModule
 from ..moe.utils import has_moe_layers
@@ -89,7 +89,7 @@ class InferenceEngine(Module):
         self.injection_dict = injection_dict
         self.mp_group = None
         self.mpu = mpu
-        self._validate_args(mpu)
+        self._validate_args(mpu, replace_with_kernel_inject)
         self.replace_method = replace_method
         self.quantize_merge_count = 1
         self.quantization_scales = None
@@ -125,7 +125,8 @@ class InferenceEngine(Module):
         elif self.mp_world_size > 1:
             self._create_model_parallel_group()
 
-        moe, _ = has_moe_layers(self.module)
+        if isinstance(self.module, torch.nn.Module):
+            moe, _ = has_moe_layers(self.module)
 
         if moe and dist.get_world_size() > 1:
             self._create_ep_parallel_group(moe_experts)
@@ -251,8 +252,9 @@ class InferenceEngine(Module):
             f"quantize_groups = {self.quantize_groups}",
             [0])
 
-    def _validate_args(self, mpu):
-        if not isinstance(self.module, Module):
+    def _validate_args(self, mpu, replace_with_kernel_inject):
+        # TODO: to support SD pipeline we need to avoid this check for now
+        if replace_with_kernel_inject and not isinstance(self.module, Module):
             raise ValueError(f"model must be a torch.nn.Module, got {type(self.module)}")
         if not isinstance(self.mp_world_size, int) or self.mp_world_size < 1:
             raise ValueError(f"mp_size must be an int >= 1, got {self.mp_world_size}")
@@ -357,33 +359,38 @@ class InferenceEngine(Module):
         checkpoint = SDLoaderFactory.get_sd_loader_json(
             checkpoint_dir,
             self.checkpoint_engine) if checkpoint_dir is not None else None
-        replace_transformer_layer(client_module,
-                                  self.module,
-                                  triangular_masking=self.triangular_masking,
-                                  policy=injection_policy,
-                                  mp_size=self.mp_world_size,
-                                  mp_group=self.mp_group,
-                                  ep_group=self.ep_group,
-                                  expert_mp_group=self.expert_mp_group,
-                                  config=self.config,
-                                  fp16=(self.dtype == torch.half)
-                                  or (self.dtype == torch.int8),
-                                  training=False,
-                                  return_tuple=return_tuple,
-                                  quantize=(self.dtype == torch.int8),
-                                  quantize_settings=(self.quantization_scales,
-                                                     self.quantize_merge_count,
-                                                     self.mlp_extra_grouping,
-                                                     self.quantize_groups),
-                                  replace_with_kernel_inject=replace_with_kernel_inject,
-                                  moe=moe,
-                                  moe_experts=moe_experts,
-                                  moe_type=moe_type,
-                                  training_mp_size=training_mp_size,
-                                  checkpoint_dict=checkpoint,
-                                  save_mp_checkpoint_path=save_mp_checkpoint_path,
-                                  base_dir=base_dir,
-                                  enable_cuda_graph=self.enable_cuda_graph)
+
+        generic_injection(self.module,
+                          fp16=(self.dtype == torch.half) or (self.dtype == torch.int8))
+
+        if isinstance(self.module, torch.nn.Module):
+            replace_transformer_layer(
+                client_module,
+                self.module,
+                triangular_masking=self.triangular_masking,
+                policy=injection_policy,
+                mp_size=self.mp_world_size,
+                mp_group=self.mp_group,
+                ep_group=self.ep_group,
+                expert_mp_group=self.expert_mp_group,
+                config=self.config,
+                fp16=(self.dtype == torch.half) or (self.dtype == torch.int8),
+                training=False,
+                return_tuple=return_tuple,
+                quantize=(self.dtype == torch.int8),
+                quantize_settings=(self.quantization_scales,
+                                   self.quantize_merge_count,
+                                   self.mlp_extra_grouping,
+                                   self.quantize_groups),
+                replace_with_kernel_inject=replace_with_kernel_inject,
+                moe=moe,
+                moe_experts=moe_experts,
+                moe_type=moe_type,
+                training_mp_size=training_mp_size,
+                checkpoint_dict=checkpoint,
+                save_mp_checkpoint_path=save_mp_checkpoint_path,
+                base_dir=base_dir,
+                enable_cuda_graph=self.enable_cuda_graph)
 
     def _get_all_ckpt_names(self, checkpoints_path, tag):
         ckpt_file_pattern = self._get_ckpt_name(checkpoints_path,
@@ -478,6 +485,9 @@ class InferenceEngine(Module):
             return 'model'
 
     def _convert_to_dtype(self):
+        if not isinstance(self.module, torch.nn.Module):
+            return
+
         if False:  #self.dtype is torch.int8 and self.quantization_scales is None:
             quantizer = WeightQuantization(mlp_extra_grouping=self.mlp_extra_grouping)
             model, self.quantization_scales = quantizer.model_quantize(self.module,

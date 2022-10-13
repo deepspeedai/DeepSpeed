@@ -1,3 +1,6 @@
+'''
+Copyright 2020 The Microsoft DeepSpeed Team
+'''
 from abc import ABC
 
 import torch
@@ -10,6 +13,61 @@ supported_models = {None}
 
 
 class DSPolicy(ABC):
+    _orig_layer_class = None
+
+    def __init__(self):
+        self.cuda_graph_supported = False
+
+    def attention(self):
+        """
+        Returns attention qkv and dense parameters
+        weight: (3*hidden, hidden) and (hidden, hidden)
+        bias: (3*hidden) and (hidden)
+        """
+        raise NotImplementedError
+
+
+class UNetPolicy(DSPolicy):
+    def __init__(self):
+        super().__init__()
+        try:
+            import diffusers
+            self._orig_layer_class = diffusers.models.unet_2d_condition.UNet2DConditionModel
+        except ImportError:
+            self._orig_layer_class = None
+
+    def match(self, module):
+        return isinstance(module, self._orig_layer_class)
+
+    def apply(self, module):
+        from .unet import DSUNet
+        return DSUNet(module)
+
+    def attention(self, client_module):
+        qw = client_module.to_q.weight
+        kw = client_module.to_k.weight
+        vw = client_module.to_v.weight
+
+        if qw.shape[1] == kw.shape[1]:
+            qkvw = Parameter(torch.cat((qw, kw, vw), dim=0), requires_grad=False)
+
+            return qkvw, \
+                   client_module.to_out[0].weight, \
+                   client_module.to_out[0].bias, \
+                   qw.shape[-1], \
+                   client_module.heads
+        else:
+            #return None
+            #kvw = Parameter(torch.cat((kw, vw), dim=0), requires_grad=False)
+            return qw, \
+                   kw, vw, \
+                   client_module.to_out[0].weight, \
+                   client_module.to_out[0].bias, \
+                   qw.shape[-1], \
+                   client_module.heads
+
+
+class TransformerPolicy(DSPolicy):
     # a static class variable containing the HuggingFace model configuration.
     # see e.g., transformers.models.opt.configuration_opt.OPTConfig
     hf_model_config = None
@@ -24,7 +82,7 @@ class DSPolicy(ABC):
         mlp_act_func_type=ActivationFuncType.GELU,
         # applies layer norm before attention if `pre_attn_norm` is set to True
         pre_attn_norm=True):
-        self.cuda_graph_supported = False
+        super().__init__()
         self.inference = inference
         self.linear_layer = linear_layer
         self.scale_attention = scale_attention
@@ -63,9 +121,7 @@ class DSPolicy(ABC):
         raise NotImplementedError
 
 
-class HFBertLayerPolicy(DSPolicy):
-    _orig_layer_class = None
-
+class HFBertLayerPolicy(TransformerPolicy):
     def __init__(self, client_module, inference=False):
         super().__init__(inference, pre_attn_norm=False)
         self.client_module = client_module
@@ -127,9 +183,57 @@ class HFBertLayerPolicy(DSPolicy):
                transformer_layernorm.bias
 
 
-class HFGPTNEOLayerPolicy(DSPolicy):
-    _orig_layer_class = None
+class HFCLIPLayerPolicy(TransformerPolicy):
+    def __init__(self, client_module, inference=False):
+        super().__init__(inference, pre_attn_norm=True, scale_attention=False)
+        self.client_module = client_module
+        self.cuda_graph_supported = True
 
+        if HFCLIPLayerPolicy._orig_layer_class is None:
+            try:
+                import transformers
+                HFCLIPLayerPolicy._orig_layer_class = transformers.models.clip.modeling_clip.CLIPEncoderLayer
+            except:
+                HFCLIPLayerPolicy._orig_layer_class = None
+
+    def get_hidden_heads(self):
+        return self.client_module.self_attn.q_proj.weight.shape[1], \
+                self.client_module.self_attn.num_heads
+
+    def attention(self):
+        qw = self.client_module.self_attn.q_proj.weight
+        qb = self.client_module.self_attn.q_proj.bias
+        kw = self.client_module.self_attn.k_proj.weight
+        kb = self.client_module.self_attn.k_proj.bias
+        vw = self.client_module.self_attn.v_proj.weight
+        vb = self.client_module.self_attn.v_proj.bias
+
+        qkvw = Parameter(torch.cat((qw, kw, vw), dim=0), requires_grad=False)
+        qkvb = Parameter(torch.cat((qb, kb, vb), dim=0), requires_grad=False)
+
+        return self.linear_layer, \
+               qkvw, \
+               qkvb, \
+               self.client_module.self_attn.out_proj.weight, \
+               self.client_module.self_attn.out_proj.bias, \
+               self.scale_attention, \
+               self.is_megatron_v2
+
+    def mlp(self):
+        return self.linear_layer, \
+            self.client_module.mlp.fc1.weight, \
+            self.client_module.mlp.fc1.bias, \
+            self.client_module.mlp.fc2.weight, \
+            self.client_module.mlp.fc2.bias
+
+    def layerNorm(self):
+        return self.client_module.layer_norm2.weight, \
+               self.client_module.layer_norm2.bias, \
+               self.client_module.layer_norm1.weight, \
+               self.client_module.layer_norm1.bias
+
+
+class HFGPTNEOLayerPolicy(TransformerPolicy):
     def __init__(self, client_module, inference=True):
         super().__init__(inference, scale_attention=False)
         self.client_module = client_module
@@ -172,7 +276,7 @@ class HFGPTNEOLayerPolicy(DSPolicy):
                self.client_module.ln_1.bias
 
 
-class HFGPTJLayerPolicy(DSPolicy):
+class HFGPTJLayerPolicy(TransformerPolicy):
     _orig_layer_class = None
 
     def __init__(self, client_module, inference=True):
@@ -217,7 +321,7 @@ class HFGPTJLayerPolicy(DSPolicy):
                self.client_module.ln_1.bias
 
 
-class MegatronLayerPolicy(DSPolicy):
+class MegatronLayerPolicy(TransformerPolicy):
     _orig_layer_class = None
     version = 0
     moe_type = 'standard'
@@ -297,7 +401,7 @@ class MegatronLayerPolicy(DSPolicy):
                self.client_module.input_layernorm.bias
 
 
-class HFGPT2LayerPolicy(DSPolicy):
+class HFGPT2LayerPolicy(TransformerPolicy):
     _orig_layer_class = None
 
     def __init__(self, client_module, inference=True):
@@ -337,7 +441,7 @@ class HFGPT2LayerPolicy(DSPolicy):
                self.client_module.ln_1.bias
 
 
-class BLOOMLayerPolicy(DSPolicy):
+class BLOOMLayerPolicy(TransformerPolicy):
     _orig_layer_class = None
 
     def __init__(self, client_module, inference=True):
@@ -379,7 +483,7 @@ class BLOOMLayerPolicy(DSPolicy):
                self.client_module.input_layernorm.bias
 
 
-class GPTNEOXLayerPolicy(DSPolicy):
+class GPTNEOXLayerPolicy(TransformerPolicy):
     _orig_layer_class = None
     version = 0
 
@@ -433,7 +537,7 @@ class GPTNEOXLayerPolicy(DSPolicy):
                self.client_module.input_layernorm.bias
 
 
-class HFOPTLayerPolicy(DSPolicy):
+class HFOPTLayerPolicy(TransformerPolicy):
     _orig_layer_class = None
 
     def __init__(self, client_module, inference=True):
@@ -490,6 +594,7 @@ class HFOPTLayerPolicy(DSPolicy):
             self.client_module.self_attn_layer_norm.bias
 
 
+# transformer-based policies
 replace_policies = [
     HFBertLayerPolicy,
     HFGPTNEOLayerPolicy,
@@ -499,4 +604,8 @@ replace_policies = [
     HFGPT2LayerPolicy,
     BLOOMLayerPolicy,
     HFOPTLayerPolicy,
+    HFCLIPLayerPolicy,
 ]
+
+# non-transformer-based policies
+generic_policies = [UNetPolicy]

@@ -12,7 +12,7 @@ Copyright 2022 The Microsoft DeepSpeed Team
 #include <cstdlib>
 #include <ctime>
 
-#define ATTN_THREADS 1024
+#define ATTN_THREADS 256
 #define MAX_REG_SIZE 8
 
 #define minus_infinity -10000.0
@@ -427,7 +427,8 @@ void launch_attn_softmax_v2(T* vals,
                             cudaStream_t stream)
 {
     int total_count = batch_size * heads * num_seq;
-    dim3 grid_dim((total_count - 1) / (WARP_SIZE / ((sequence_length - 1) / ATTN_THREADS + 1)) + 1);
+    int warp_num = ATTN_THREADS / WARP_SIZE;
+    dim3 grid_dim((total_count - 1) / (warp_num / ((sequence_length - 1) / ATTN_THREADS + 1)) + 1);
     dim3 block_dim(ATTN_THREADS);
 
     const int reduce_width = ((sequence_length - 1) / ATTN_THREADS + 1) * WARP_SIZE;

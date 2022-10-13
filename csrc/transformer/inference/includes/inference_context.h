@@ -101,9 +101,12 @@ public:
         size_t total_size;
         if (!_free_memory_size) { cudaMemGetInfo(&_free_memory_size, &total_size); }
 
-        size_t activation_size = 16 * hidden_dim * batch_size;
-        size_t temp_size = batch_size * num_heads * prompt_len * prompt_len * elem_size / mp_size;
-        size_t cache_size = num_layers * batch_size * (hidden_dim / mp_size) * 2;
+        int head_size = hidden_dim / num_heads;
+        int padded_head_size = head_size < 32 ? 32 : (head_size < 64 ? 64 : 128);
+        size_t activation_size = 32 * (head_size * padded_head_size) * batch_size;
+        size_t temp_size = batch_size * num_heads * MAX_OUT_TOKENS * 2;
+        size_t cache_size =
+            num_layers * batch_size * ((head_size * padded_head_size) / mp_size) * 2;
         size_t minimal_requirements =
             temp_size + (_free_memory_size > GIGABYTE ? 500 : 100) * MEGABYTE;
         if (_free_memory_size < minimal_requirements) {
@@ -115,12 +118,12 @@ public:
         }
 
         _max_seq_len = ((_free_memory_size - minimal_requirements) / elem_size) /
-                       (activation_size + cache_size);
+                       (activation_size + temp_size + cache_size);
         _max_seq_len = std::min((size_t)MAX_OUT_TOKENS, _max_seq_len);
-        size_t workSpaceSize =
-            ((external_cache ? activation_size : (activation_size + cache_size))) * _max_seq_len *
-                elem_size +
-            temp_size;
+        size_t workSpaceSize = ((external_cache ? (activation_size + temp_size)
+                                                : (activation_size + temp_size + cache_size))) *
+                               _max_seq_len * elem_size;
+        temp_size *= _max_seq_len * elem_size;
         if (rank == 0 && !_workspace)
             printf(
                 "Free memory : %lu (Bytes)  Total memory: %lu (Bytes)  Setting maximum total "

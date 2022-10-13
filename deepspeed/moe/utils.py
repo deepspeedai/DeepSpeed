@@ -6,6 +6,7 @@ from .layer import MoE
 def has_moe_layers(m):
     has_moe = False
     num_experts = 0
+
     for _, module in m.named_modules():
         if isinstance(module, MoE):
             has_moe = True

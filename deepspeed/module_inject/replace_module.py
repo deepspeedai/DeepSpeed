@@ -4,7 +4,7 @@ import tqdm
 import deepspeed
 import deepspeed.ops.transformer as transformer_inference
 from .replace_policy import HFBertLayerPolicy, HFGPT2LayerPolicy, BLOOMLayerPolicy
-from .replace_policy import replace_policies
+from .replace_policy import replace_policies, generic_policies
 #from ..runtime.weight_quantizer import WeightQuantization
 from deepspeed import comm as dist
 from torch import nn
@@ -187,6 +187,93 @@ class GroupQuantizer:
         return out
 
 
+def _module_match(module):
+    for policy in generic_policies:
+        policy = policy()
+        if policy.match(module):
+            return policy
+    return None
+
+
+def generic_injection(module, fp16=False):
+    def replace_attn(child, policy, layer_id):
+        policy_attn = policy.attention(child)
+        if policy_attn is None:
+            return child
+        if len(policy_attn) == 5:
+            qkvw, attn_ow, attn_ob, hidden_size, heads = policy_attn
+        else:
+            qw, kw, vw, attn_ow, attn_ob, hidden_size, heads = policy_attn
+
+        config = transformer_inference.DeepSpeedInferenceConfig(
+            hidden_size=hidden_size,
+            heads=heads,
+            fp16=fp16,
+            triangular_masking=False,
+        )
+        attn_module = transformer_inference.DeepSpeedAttention(config)
+
+        def transpose(data):
+            data.reshape(-1).copy_(data.transpose(-1, -2).contiguous().reshape(-1))
+            data = data.reshape(data.shape[-1], data.shape[-2])
+            data.to(torch.cuda.current_device())
+            return data
+
+        if len(policy_attn) == 5:
+            attn_module.attn_qkvw.data = transpose(qkvw.data)
+        else:
+            attn_module.attn_qkvw = None
+            attn_module.attn_qw.data = transpose(qw.data)
+            attn_module.attn_kw.data = transpose(kw.data)
+            attn_module.attn_vw.data = transpose(vw.data)
+
+        attn_module.attn_qkvb = None
+        attn_module.attn_ow.data = transpose(attn_ow.data)
+        attn_module.attn_ob.data.copy_(attn_ob.data.to(torch.cuda.current_device()))
+        return attn_module
+
+    if isinstance(module, torch.nn.Module):
+        pass
+    else:
+        try:
+            import diffusers
+            cross_attention = diffusers.models.attention.CrossAttention
+            new_policies = {cross_attention: replace_attn}
+        except ImportError:
+            new_policies = {}
+
+        #replace_transformer_layer(None,
+        #                          module.text_encoder,
+        #                          training=False,
+        #                          replace_with_kernel_inject=True,
+        #                          triangular_masking=True)
+        #from .encoder import DSClipEncoder
+        #cg_encoder = DSClipEncoder(module.text_encoder)
+        #setattr(module, 'text_encoder', cg_encoder)
+        for name in module.__dict__.keys():
+            sub_module = getattr(module, name)
+            policy = _module_match(sub_module)
+
+            if policy is not None:
+
+                def _replace_module(module, policy, layer_id=0):
+                    for name, child in module.named_children():
+                        if child.__class__ in new_policies:
+                            replaced_module = new_policies[child.__class__](child,
+                                                                            policy,
+                                                                            layer_id)
+                            setattr(module, name, replaced_module)
+                            layer_id += 1
+                        else:
+                            layer_id = _replace_module(child, policy, layer_id=layer_id)
+                    return layer_id
+
+                _replace_module(sub_module, policy)
+                new_module = policy.apply(sub_module)
+                print(f"**** found and replaced {name} w. {type(new_module)}")
+                setattr(module, name, new_module)
+
+
 def replace_transformer_layer(orig_layer_impl,
                               model,
                               policy=None,
@@ -251,6 +338,7 @@ def replace_transformer_layer(orig_layer_impl,
     Returns:
         Updated nn.module with replaced transformer layers
     """
+
     mp_replace = ReplaceWithTensorSlicing(mp_group=mp_group,
                                           mp_size=mp_size)  #, out_dim=0, in_dim=1)
 
