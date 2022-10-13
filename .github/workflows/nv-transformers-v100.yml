@@ -31,7 +31,7 @@ jobs:
           which nvcc
           nvcc --version
           pip install --upgrade pip
-          pip uninstall --yes torch torchvision
+          pip uninstall --yes torch torchvision triton
           pip install torch==1.8.2+cu111 torchvision==0.9.2+cu111 -f https://download.pytorch.org/whl/lts/1.8/torch_lts.html
           python -c "import torch; print('torch:', torch.__version__, torch)"
           python -c "import torch; print('CUDA available:', torch.cuda.is_available())"
