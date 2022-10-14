@@ -76,7 +76,7 @@ def get_generated_text(file_content, gen_text_n):
 
 
 def get_error(file_content):
-    matches = re.findall(r"TypeError:\s+(.+?)\n", file_content)
+    matches = re.findall(r"Error:\s+(.+?)\n", file_content)
     if matches is []:
         return False
     else:
