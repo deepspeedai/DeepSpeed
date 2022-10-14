@@ -2989,8 +2989,9 @@ class DeepSpeedEngine(Module):
                         num_local_experts + int(local_expert_id)
                     expert_key = key.replace(f'{moe_str_prefix}{local_expert_id}',
                                              f'{moe_str_prefix}{global_expert_id}')
-                    experts_state_dict[str(
-                        global_expert_id)][expert_key] = moe_state_dict.pop(key)
+                    # truncating extra tensor (shared) storage
+                    truncated = moe_state_dict.pop(key).clone().detach()
+                    experts_state_dict[str(global_expert_id)][expert_key] = truncated
 
                 # let save the moe parameters
                 for global_expert_id, expert_state_dict in experts_state_dict.items():

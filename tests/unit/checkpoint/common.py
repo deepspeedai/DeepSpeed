@@ -115,16 +115,19 @@ def compare_lr_scheduler_states(saved_model, loaded_model):
             assert state0 == state1
 
 
-def create_deepspeed_model(config_dict, model, base_optimizer):
-    if base_optimizer is None:
-        ds_model, _, _, _ = deepspeed.initialize(config=config_dict,
-                                                 model=model,
-                                                 model_parameters=model.parameters())
-    else:
-        ds_model, _, _, _ = deepspeed.initialize(config=config_dict,
-                                                model=model,
-                                                optimizer=base_optimizer)
+# following mixture-of-experts.md
+def create_moe_param_groups(model):
+    from deepspeed.moe.utils import split_params_into_different_moe_groups_for_optimizer
 
+    parameters = {'params': [p for p in model.parameters()], 'name': 'parameters'}
+    return split_params_into_different_moe_groups_for_optimizer(parameters)
+
+
+def create_deepspeed_model(config_dict, model, base_optimizer):
+    ds_model, _, _, _ = deepspeed.initialize(config=config_dict,
+                                             model=model,
+                                             model_parameters=create_moe_param_groups(model),
+                                             optimizer=base_optimizer)
     return ds_model
 
 
@@ -177,6 +180,19 @@ def checkpoint_correctness_verification(config_dict,
     trained_model.save_checkpoint(save_folder, tag=save_tag)
 
     dist.barrier()
+
+    for root, _, files in os.walk(save_folder):
+        for f in files:
+            if "_expert_" in f and "_model_states" in f:
+                expert = torch.load(os.path.join(root, f))
+                needed, storages = 0, {}
+                for name, tensor in expert.items():
+                    needed += tensor.size().numel()
+                    storage = tensor.storage()
+                    # some storage can be shared within an expert's checkpoint
+                    storages[storage.data_ptr()] = storage.size()
+                stored = sum(v for _, v in storages.items())
+                assert needed == stored, f"MoE expert checkpoint uses more storage than required: {f}"
 
     loaded_model = create_deepspeed_model(config_dict=config_dict,
                                           model=models[1],
