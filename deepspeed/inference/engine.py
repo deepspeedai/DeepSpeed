@@ -420,7 +420,7 @@ class InferenceEngine(Module):
         if is_pipe_parallel:
             raise RuntimeError(
                 'pipeline parallelism is currently not supported in inference.')
-        if os.path.isdir(load_dir):
+        if not isinstance(load_dir, dict) and os.path.isdir(load_dir):
             if tag is None:
                 latest_path = os.path.join(load_dir, "latest")
                 if os.path.isfile(latest_path):
