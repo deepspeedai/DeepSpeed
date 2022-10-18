@@ -4,7 +4,6 @@ Copyright 2022 The Microsoft DeepSpeed Team
 import os
 import torch
 import types
-
 from .constants import (FP32_WEIGHT_KEY,
                         PARAM,
                         VOCAB_DIVISIBILITY_PADDING_TENSOR,
@@ -54,18 +53,17 @@ def load_hp_checkpoint_state(self, folder, tp_rank, tp_world_size):
             padded_target_vocab_size = self.shape[0] * tp_world_size
             if padded_target_vocab_size > full_hp_param.shape[0]:
                 # Need to expand
-                padding_tensor = vocab_divisibility_padding_tensor.expand(
-                    padded_target_vocab_size - full_hp_param.shape[0])
+                padding_size = padded_target_vocab_size - full_hp_param.shape[0]
                 # Implement the following concat in efficient way using pad
                 #full_hp_param = torch.cat((full_hp_param, padding_tensor), 0)
                 full_hp_param = torch.nn.functional.pad(full_hp_param,
                                                         (0,
                                                          0,
                                                          0,
-                                                         padding_tensor.shape[0]),
+                                                         padding_size),
                                                         "constant",
                                                         0)
-                full_hp_param[:-padding_tensor.shape[0], :] = padding_tensor
+                full_hp_param[:-padding_size, :] = vocab_divisibility_padding_tensor
             else:
                 # Need to shrink or keep the same
                 full_hp_param = full_hp_param[:padded_target_vocab_size, :]

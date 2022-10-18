@@ -82,14 +82,13 @@ def get_hp_fragment_mapping(lp_param,
     hp_fragment_tensor = flat_hp_partition.narrow(0,
                                                   hp_frag_address.start,
                                                   hp_frag_address.numel)
-
     optim_fragment = {
         key: value.narrow(0,
                           hp_frag_address.start,
                           hp_frag_address.numel)
         for key,
         value in optimizer_state_dict.items()
-        if torch.is_tensor(value) and value.dim() > 0
+        if torch.is_tensor(value) and value.shape == flat_hp_partition.shape
     }
 
     lp_frag_address = fragment_address(start=fragment_start - lp_start,
@@ -103,3 +102,86 @@ def get_hp_fragment_mapping(lp_param,
                            hp_fragment=hp_fragment_tensor,
                            hp_fragment_address=hp_frag_address,
                            optim_fragment=optim_fragment)
+
+
+'''
+Logic for lp_param to hp_param mapping
+
+lp      lp0 lp1 lp2         lp3  lp4            <-------  indices/names
+lp      [  ][  ][          ][   ][         ]    <-------- tensors
+flat_lp [                                  ]     <-------- flat lp params
+flat_hp            [                 ]   <------------------ flat hp partition on current rank
+full_hp [                                        ] <------- full flat hp params
+
+
+lp2
+ full numel = 16
+ lp_frag
+   numel = 12
+   frag_start = 3
+   frag_end  = 15
+ hp_frag
+    numel = 12
+    frag_start = 0
+    frag_end = 11
+
+ hp_frag.copy_(lp_frag)
+
+
+lp3:
+  full numel = 4
+  lp_frag
+     numel = 4
+     start = 0
+     end = 3
+  hp_frag
+     numel = 4
+     start = 12
+     end = 15
+
+
+lp4:
+   full numel = 12
+   lp_frag
+     numel = 4
+     start = 0
+     end = 3
+  hp_frag
+     numel = 4
+     start = 16
+     end = 19
+
+
+
+Visual depiction of above
+lp              {         }
+flat_lp [                                ]
+flat_hp            (                 )
+
+
+flat_lp [       {  (      }          )   ]
+                lx  hx   ly          hy
+                    ly-hx
+
+
+lp                             {       }
+flat_lp [                                ]
+flat_hp            (                 )
+
+
+flat_lp [          (            {     ) }  ]
+                   hx           lx   hy ly
+                                   hy-lx
+
+lp                        {   }
+flat_lp [                                ]
+flat_hp            (                 )
+
+
+flat_lp [          (       {   }      )   ]
+                   hx      lx  ly    hy
+                             ly-lx
+
+lp -> (lx, hy)
+flat_hp -> (hx, hy)
+'''

@@ -1,6 +1,7 @@
 import os
 import torch
 from collections import OrderedDict
+from .constants import (ZERO_FILE_PREFIX, FP16_ZERO_FILE_PREFIX, BF16_ZERO_FILE_PREFIX)
 
 
 def basic_folder_validation(dir):
@@ -30,6 +31,16 @@ def get_files(dir):
         for file in files:
             file_list.append(os.path.join(root, file))
     return file_list
+
+
+def get_zero_files(dir):
+    file_list = get_files(dir)
+    for prefix in [ZERO_FILE_PREFIX, FP16_ZERO_FILE_PREFIX, BF16_ZERO_FILE_PREFIX]:
+        zero_files = get_files_with_prefix(file_list, prefix)
+        if len(zero_files) > 0:
+            return zero_files
+
+    return []
 
 
 def partition_data(data_list, num_partitions):

@@ -3,14 +3,9 @@ import torch
 from .constants import (BASE_OPTIMIZER_STATE,
                         GROUP_PADDINGS,
                         OPTIMIZER_STATE_DICT,
-                        PARTITION_COUNT,
-                        ZERO_FILE_PREFIX,
-                        BF16_ZERO_FILE_PREFIX)
+                        PARTITION_COUNT)
 
-from .reshape_utils import (basic_folder_validation,
-                            get_files,
-                            get_files_with_prefix,
-                            merge_state)
+from .reshape_utils import (basic_folder_validation, get_zero_files, merge_state)
 
 from .reshape_3d_utils import (model_3d_desc, get_model_3d_descriptor)
 
@@ -21,7 +16,7 @@ class ZeROCheckpoint(object):
     def __init__(self, dir):
         basic_folder_validation(dir)
         self.dir = dir
-        self.file_list = self._get_zero_files(dir)
+        self.file_list = get_zero_files(dir)
         self.num_files = len(self.file_list)
         assert self.num_files > 0, f'No ZeRO files found in {dir}'
 
@@ -30,6 +25,18 @@ class ZeROCheckpoint(object):
                                        tp_degree=self.src_3d.tp_degree,
                                        dp_degree=self.src_3d.dp_degree)
         self._3d_file_map = self.src_3d.reshape(self.target_3d)
+
+    def get_src_world_size(self):
+        return self.src_3d.world_size()
+
+    def get_src_tp_degree(self):
+        return self.src_3d.tp_degree
+
+    def get_src_pp_degree(self):
+        return self.src_3d.pp_degree
+
+    def get_src_dp_degree(self):
+        return self.src_3d.dp_degree
 
     def get_file_indices_for_rank(self, pp_index, tp_index, dp_index):
         assert dp_index < len(self._3d_file_map), f'DP index {dp_index} >= DP degree {len(self._3d_file_map)}'
@@ -137,10 +144,3 @@ class ZeROCheckpoint(object):
             num_groups = len(partition_counts)
             sd[OPTIMIZER_STATE_DICT][PARTITION_COUNT] = [self.target_3d.dp_degree
                                                          ] * num_groups
-
-    def _get_zero_files(self, dir):
-        file_list = get_files(dir)
-        zero_files = get_files_with_prefix(file_list, ZERO_FILE_PREFIX)
-        if len(zero_files) > 0:
-            return zero_files
-        return get_files_with_prefix(file_list, BF16_ZERO_FILE_PREFIX)

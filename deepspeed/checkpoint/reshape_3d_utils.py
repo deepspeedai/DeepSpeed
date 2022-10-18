@@ -1,6 +1,9 @@
-from .reshape_utils import (get_files, get_files_with_prefix, partition_data)
+from .reshape_utils import (get_files,
+                            get_files_with_prefix,
+                            partition_data,
+                            get_zero_files)
 
-from .constants import (ZERO_FILE_PREFIX, MODEL_FILE_PREFIX, LAYER_FILE_PREFIX)
+from .constants import (MODEL_FILE_PREFIX, LAYER_FILE_PREFIX)
 
 from .reshape_meg_2d import (reshape_meg_2d_parallel, meg_2d_parallel_map)
 
@@ -33,6 +36,9 @@ class model_3d_desc(object):
 
     def get_desc(self):
         return f'{PP_DIM},{TP_DIM},{DP_DIM} = ({self.pp_degree}, {self.tp_degree}, {self.dp_degree})'
+
+    def world_size(self):
+        return self.pp_degree * self.tp_degree * self.dp_degree
 
     def is_valid(self, pp_index, tp_index, dp_index):
         err_msg = []
@@ -70,10 +76,17 @@ class model_3d_desc(object):
 
 def get_model_3d_descriptor(dir):
     file_list = get_files(dir)
-    tp_degree = len(get_files_with_prefix(file_list, f'{LAYER_FILE_PREFIX}01'))
-    pp_degree = len(get_files_with_prefix(file_list, MODEL_FILE_PREFIX)) // tp_degree
-    num_zero_files = len(get_files_with_prefix(file_list, ZERO_FILE_PREFIX))
-    dp_degree = max(1, num_zero_files // (pp_degree * tp_degree))
+    zero_file_list = get_zero_files(dir)
+    num_pp0_files = len(get_files_with_prefix(file_list, f'{LAYER_FILE_PREFIX}01'))
+    if num_pp0_files > 0:
+        tp_degree = num_pp0_files
+        pp_degree = len(get_files_with_prefix(file_list, MODEL_FILE_PREFIX)) // tp_degree
+        dp_degree = max(1, len(zero_file_list) // (pp_degree * tp_degree))
+    else:
+        tp_degree = len(get_files_with_prefix(file_list, MODEL_FILE_PREFIX))
+        dp_degree = max(1, len(zero_file_list) // tp_degree)
+        pp_degree = 0
+
     return model_3d_desc(pp_degree, tp_degree, dp_degree)
 
 

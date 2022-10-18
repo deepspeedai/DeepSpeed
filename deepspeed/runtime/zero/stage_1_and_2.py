@@ -3,9 +3,11 @@ Copyright 2019 The Microsoft DeepSpeed Team
 '''
 
 import torch
+import os
 from deepspeed import comm as dist
 from torch._six import inf
 from packaging import version as pkg_version
+from collections import OrderedDict
 
 from deepspeed.runtime import ZeROOptimizer
 from deepspeed.runtime.fp16.loss_scaler import LossScaler, DynamicLossScaler
@@ -31,7 +33,10 @@ from deepspeed.checkpoint.constants import (DS_VERSION,
                                             SINGLE_PARTITION_OF_FP32_GROUPS,
                                             BASE_OPTIMIZER_STATE,
                                             CLIP_GRAD,
-                                            ZERO_STAGE)
+                                            ZERO_STAGE,
+                                            PARAM_SLICE_MAPPINGS)
+from deepspeed.utils import link_hp_params
+from deepspeed.checkpoint import enable_universal_checkpoint
 
 # Toggle this to true to enable correctness test
 # with gradient partitioning and without
@@ -103,6 +108,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
     """
     def __init__(self,
                  init_optimizer,
+                 param_names,
                  timers,
                  static_loss_scale=1.0,
                  dynamic_loss_scale=False,
@@ -140,7 +146,8 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
         # 2. keep common stuff here in case we need to add ne552w fused optimizer later
 
         self.elastic_checkpoint = elastic_checkpoint
-
+        self.param_names = param_names
+        self.mpu = mpu
         # differences from apex.fp16_utils:
         # - assume all model params in fp16
         # - assume all params requires grad
@@ -517,6 +524,42 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
 
         if dist.get_rank(group=self.dp_process_group) == 0:
             see_memory_usage(f"After initializing ZeRO optimizer", force=True)
+
+        self._link_all_hp_params()
+        self._enable_universal_checkpoint()
+        self._param_slice_mappings = self._create_param_mapping()
+
+    def _enable_universal_checkpoint(self):
+        for lp_param_group in self.bit16_groups:
+            enable_universal_checkpoint(param_list=lp_param_group)
+
+    def _create_param_mapping(self):
+        param_mapping = []
+        for i, _ in enumerate(self.optimizer.param_groups):
+            param_mapping_per_group = OrderedDict()
+            for lp in self.bit16_groups[i]:
+                if lp._hp_mapping is not None:
+                    lp_name = self.param_names[lp]
+                    param_mapping_per_group[
+                        lp_name] = lp._hp_mapping.get_hp_fragment_address()
+            param_mapping.append(param_mapping_per_group)
+
+        return param_mapping
+
+    def _link_all_hp_params(self):
+        dp_world_size = dist.get_world_size(group=self.dp_process_group)
+        for i, _ in enumerate(self.optimizer.param_groups):
+            # Link bit16 and fp32 params in partition
+            partition_id = dist.get_rank(group=self.real_dp_process_group[i])
+            partition_size = self.bit16_groups_flat[i].numel() // dp_world_size
+            flat_hp_partition = self.single_partition_of_fp32_groups[i]
+            link_hp_params(
+                lp_param_list=self.bit16_groups[i],
+                flat_hp_partition=flat_hp_partition,
+                partition_start=partition_id * partition_size,
+                partition_size=partition_size,
+                partition_optimizer_state=self.optimizer.state[flat_hp_partition],
+                dp_group=self.real_dp_process_group[i])
 
     def is_moe_group(self, group):
         return 'moe' in group and group['moe']
@@ -1826,6 +1869,21 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
 
         return
 
+    @torch.no_grad()
+    def update_lp_params(self):
+        for i, (bit16_partitions, fp32_partition) in enumerate(zip(self.parallel_partitioned_bit16_groups, self.single_partition_of_fp32_groups)):
+            partition_id = dist.get_rank(group=self.real_dp_process_group[i])
+            bit16_partitions[partition_id].data.copy_(fp32_partition.data)
+            # print_rank_0(f'update_lp_params {i=} {partition_id=}', force=True)
+            # if i == 0:
+            #     print_rank_0(f'{fp32_partition[:10]=}', force=True)
+
+        all_gather_dp_groups(
+            partitioned_param_groups=self.parallel_partitioned_bit16_groups,
+            dp_process_group=self.real_dp_process_group,
+            start_alignment_factor=self.nccl_start_alignment_factor,
+            allgather_bucket_size=self.allgather_bucket_size)
+
     def _average_expert_grad_norms(self, norm_groups):
         for i, norm in enumerate(norm_groups):
             if self.is_moe_param_group[i]:
@@ -2058,6 +2116,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
         state_dict[PARTITION_COUNT] = self.partition_count
 
         state_dict[DS_VERSION] = version
+        state_dict[PARAM_SLICE_MAPPINGS] = self._param_slice_mappings
 
         return state_dict
 
@@ -2169,6 +2228,45 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
                         load_optimizer_states=True,
                         load_from_fp32_weights=False,
                         checkpoint_folder=None):
+        if checkpoint_folder:
+            self._load_universal_checkpoint(checkpoint_folder,
+                                            load_optimizer_states,
+                                            load_from_fp32_weights)
+        else:
+            self._load_legacy_checkpoint(state_dict_list,
+                                         load_optimizer_states,
+                                         load_from_fp32_weights)
+
+    def _load_universal_checkpoint(self,
+                                   checkpoint_folder,
+                                   load_optimizer_states,
+                                   load_from_fp32_weights):
+        self._load_hp_checkpoint_state(checkpoint_folder)
+
+    @property
+    def param_groups(self):
+        """Forward the wrapped optimizer's parameters."""
+        return self.optimizer.param_groups
+
+    def _load_hp_checkpoint_state(self, checkpoint_dir):
+        checkpoint_dir = os.path.join(checkpoint_dir, "zero")
+        tp_rank = bwc_tensor_model_parallel_rank(mpu=self.mpu)
+        tp_world_size = self.mpu.get_slice_parallel_world_size()
+
+        for i, _ in enumerate(self.optimizer.param_groups):
+            for lp in self.bit16_groups[i]:
+                if lp._hp_mapping is not None:
+                    #print(f"Loading {self.param_names[lp]} {tp_rank=} {tp_world_size=}")
+                    lp.load_hp_checkpoint_state(
+                        os.path.join(checkpoint_dir,
+                                     self.param_names[lp]),
+                        tp_rank,
+                        tp_world_size)
+
+    def _load_legacy_checkpoint(self,
+                                state_dict_list,
+                                load_optimizer_states=True,
+                                load_from_fp32_weights=False):
         r"""Loading ZeRO checkpoint
 
         Arguments:
@@ -2268,6 +2366,9 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
         else:
             # option 1 from above
             self._restore_from_bit16_weights()
+
+        if load_optimizer_states:
+            self._link_all_hp_params()
 
 
 def _handle_overflow(cpu_sum, x, i):

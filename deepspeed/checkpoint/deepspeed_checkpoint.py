@@ -9,7 +9,7 @@ from .reshape_utils import (basic_folder_validation,
                             get_files,
                             get_files_with_prefix)
 
-from .constants import (ZERO_FILE_PREFIX, MODEL_FILE_PREFIX, LAYER_FILE_PREFIX)
+from .constants import (MODEL_FILE_PREFIX, LAYER_FILE_PREFIX)
 
 from .reshape_meg_2d import reshape_meg_2d_parallel, meg_2d_parallel_map
 from .zero_checkpoint import ZeROCheckpoint
@@ -39,37 +39,36 @@ class DeepSpeedCheckpoint(object):
         self.dir = dir
         self._validate_folder(dir)
 
+        self.zero_checkpoint = ZeROCheckpoint(dir)
+
         self.file_list = get_files(dir)
-        self.zero_files = get_files_with_prefix(self.file_list, ZERO_FILE_PREFIX)
         self.layer_files = get_files_with_prefix(self.file_list, LAYER_FILE_PREFIX)
         self.mp_rank_files = get_files_with_prefix(self.file_list, MODEL_FILE_PREFIX)
 
         self.layer_keys = self._get_layer_keys()
         self.layer_count = len(self.layer_keys)
-        self.original_tp_degree = len(
-            get_files_with_prefix(self.layer_files,
-                                  f'{LAYER_FILE_PREFIX}01'))
-        self.original_pp_degree = len(self.mp_rank_files) // self.original_tp_degree
-        self.original_dp_degree = max(
-            1,
-            len(self.zero_files) // (self.original_pp_degree * self.original_tp_degree))
 
-        self.tp_degree = self.original_tp_degree if tp_degree is None else tp_degree
-        self.pp_degree = self.original_pp_degree if pp_degree is None else pp_degree
-        self.dp_degree = self.original_dp_degree if dp_degree is None else dp_degree
+        self.tp_degree = self.zero_checkpoint.get_src_tp_degree(
+        ) if tp_degree is None else tp_degree
+        self.pp_degree = self.zero_checkpoint.get_src_pp_degree(
+        ) if pp_degree is None else pp_degree
+        self.dp_degree = self.zero_checkpoint.get_src_dp_degree(
+        ) if dp_degree is None else dp_degree
 
-        self.original_world_size = self.original_tp_degree * self.original_pp_degree * self.original_dp_degree
+        self.original_world_size = self.zero_checkpoint.get_src_tp_degree(
+        ) * self.zero_checkpoint.get_src_pp_degree(
+        ) * self.zero_checkpoint.get_src_dp_degree()
         self.world_size = self.tp_degree * self.pp_degree * self.dp_degree
 
-        self.old_2d_map = meg_2d_parallel_map(self.original_pp_degree,
-                                              self.original_tp_degree)
+        self.old_2d_map = meg_2d_parallel_map(self.zero_checkpoint.get_src_pp_degree(),
+                                              self.zero_checkpoint.get_src_tp_degree())
         self.old_2d_map.simple_init()
-        self.new_2d_map = reshape_meg_2d_parallel(old_pp_degree=self.original_pp_degree,
-                                                  old_tp_degree=self.original_tp_degree,
-                                                  new_pp_degree=self.pp_degree,
-                                                  new_tp_degree=self.tp_degree)
+        self.new_2d_map = reshape_meg_2d_parallel(
+            old_pp_degree=self.zero_checkpoint.get_src_pp_degree(),
+            old_tp_degree=self.zero_checkpoint.get_src_tp_degree(),
+            new_pp_degree=self.pp_degree,
+            new_tp_degree=self.tp_degree)
 
-        self.zero_checkpoint = ZeROCheckpoint(dir)
         if self.is_change_pp_degree() or self.is_change_tp_degree(
         ) or self.is_change_dp_degree():
             self.zero_checkpoint.reshape(
@@ -88,13 +87,13 @@ class DeepSpeedCheckpoint(object):
         self._build_global_state()
 
     def is_change_tp_degree(self):
-        return self.tp_degree != self.original_tp_degree
+        return self.tp_degree != self.zero_checkpoint.get_src_tp_degree()
 
     def is_change_pp_degree(self):
-        return self.pp_degree != self.original_pp_degree
+        return self.pp_degree != self.zero_checkpoint.get_src_pp_degree()
 
     def is_change_dp_degree(self):
-        return self.dp_degree != self.original_dp_degree
+        return self.dp_degree != self.zero_checkpoint.get_src_dp_degree()
 
     def show_2d_mapping(self):
         print(f'reshaped 2d map ---- begin')
@@ -171,8 +170,8 @@ class DeepSpeedCheckpoint(object):
     def get_args(self):
         return self._get_checkpoint_value(ARGS_KEY)
 
-    def get_checkpoint_info(self):
-        return self._get_checkpoint_value(CHECKPOINT_INFO_KEY)
+    def get_checkpoint_info(self, info_key=CHECKPOINT_INFO_KEY):
+        return self._get_checkpoint_value(info_key)
 
     def get_2d_parallel_state(self, tp_index: int, pp_index: int) -> dict:
         assert tp_index < self.tp_degree
@@ -272,8 +271,8 @@ class DeepSpeedCheckpoint(object):
 
     def _sanity_check(self):
         assert len(self.mp_rank_files) % self.tp_degree == 0
-        assert len(self.zero_files) % (self.pp_degree * self.tp_degree) == 0
         assert len(self.layer_keys) > 2
+        assert self.zero_checkpoint.num_files % (self.pp_degree * self.tp_degree) == 0
         # XXX: fix me - isn't always the case
         # only true with  --pp-partition-method 'type:transformer|embedding' \
         # assert (len(self.layer_keys) - 2) % self.pp_degree == 0
