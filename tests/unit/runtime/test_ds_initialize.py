@@ -86,6 +86,36 @@ class TestClientOptimizer(DistributedTest):
             assert isinstance(ds_optimizer, AdamW)
 
 
+@pytest.mark.parametrize('client_parameters', [True, False])
+class TestConfigOptimizer(DistributedTest):
+    world_size = 1
+
+    def test(self, client_parameters):
+        ds_config = {
+            "train_batch_size": 1,
+            "optimizer": {
+                "type": "Adam",
+                "params": {
+                    "lr": 0.001
+                }
+            }
+        }
+
+        hidden_dim = 10
+        model = SimpleModel(hidden_dim)
+
+        if client_parameters:
+            model_parameters = list(model.parameters())
+        else:
+            model_parameters = None
+
+        _, ds_optimizer, _, _ = deepspeed.initialize(config=ds_config,
+                                                    model=model,
+                                                    model_parameters=model_parameters)
+
+        assert isinstance(ds_optimizer, FusedAdam)
+
+
 @pytest.mark.parametrize("scheduler_type", [None, _LRScheduler, Callable])
 @pytest.mark.parametrize("optimizer_type", [None, Optimizer, Callable])
 class TestClientLrScheduler(DistributedTest):
