@@ -21,12 +21,13 @@ Let's try a 3B model with just 1 node with 8 gpus, using live model:
     from deepspeed.runtime.zero.stage_1_and_2 import estimate_zero2_model_states_mem_needs_all_live; \
     model = AutoModel.from_pretrained("t5-3b"); \
     estimate_zero2_model_states_mem_needs_all_live(model, num_gpus_per_node=8, num_nodes=1)'
+
     Estimated memory needed for params, optim states and gradients for a:
     HW: Setup with 1 node, 8 GPUs per node.
     SW: Model with 2851M total params.
       per CPU  |  per GPU |   Options
-      127.48GB |   5.31GB | cpu_offload=1
-      127.48GB |  15.93GB | cpu_offload=0
+      127.48GB |   5.31GB | offload_optimizer=cpu
+      127.48GB |  15.93GB | offload_optimizer=none
 
 Now, without the actual model, which requires us to know ``total_params`` and
 ``largest_layer_params``, but we got those from the run above, so future estimators are now much
@@ -36,12 +37,13 @@ faster as we don't need to load the model.
 
     python -c 'from deepspeed.runtime.zero.stage_1_and_2 import estimate_zero2_model_states_mem_needs_all_cold; \
     estimate_zero2_model_states_mem_needs_all_cold(total_params=2851e6, num_gpus_per_node=8, num_nodes=1)'
+
     Estimated memory needed for params, optim states and gradients for a:
     HW: Setup with 1 node, 8 GPUs per node.
     SW: Model with 2851M total params.
       per CPU  |  per GPU |   Options
-      127.45GB |   5.31GB | cpu_offload=1
-      127.45GB |  15.93GB | cpu_offload=0
+      127.45GB |   5.31GB | offload_optimizer=cpu
+      127.45GB |  15.93GB | offload_optimizer=none
 
 There is a slight difference due to rounding - the actual live model has a few more params
 
@@ -67,12 +69,12 @@ Let's try a 3B model with just 1 node with 8 gpus, using live model:
     HW: Setup with 1 node, 8 GPUs per node.
     SW: Model with 2851M total params, 32M largest layer params.
       per CPU  |  per GPU |   Options
-       71.71GB |   0.12GB | cpu_offload=1, cpu_offload_params=1, zero_init=1
-      127.48GB |   0.12GB | cpu_offload=1, cpu_offload_params=1, zero_init=0
-       63.74GB |   0.79GB | cpu_offload=1, cpu_offload_params=0, zero_init=1
-      127.48GB |   0.79GB | cpu_offload=1, cpu_offload_params=0, zero_init=0
-        1.47GB |   6.10GB | cpu_offload=0, cpu_offload_params=0, zero_init=1
-      127.48GB |   6.10GB | cpu_offload=0, cpu_offload_params=0, zero_init=0
+       71.71GB |   0.12GB | offload_param=cpu , offload_optimizer=cpu , zero_init=1
+      127.48GB |   0.12GB | offload_param=cpu , offload_optimizer=cpu , zero_init=0
+       63.74GB |   0.79GB | offload_param=none, offload_optimizer=cpu , zero_init=1
+      127.48GB |   0.79GB | offload_param=none, offload_optimizer=cpu , zero_init=0
+        1.47GB |   6.10GB | offload_param=none, offload_optimizer=none, zero_init=1
+      127.48GB |   6.10GB | offload_param=none, offload_optimizer=none, zero_init=0
 
 Now, without the actual model, which requires us to know ``total_params`` and
 ``largest_layer_params``, but we got those from the run above, so future estimators are now much
@@ -87,12 +89,12 @@ faster as we don't need to load the model.
     HW: Setup with 1 node, 8 GPUs per node.
     SW: Model with 2851M total params, 32M largest layer params.
       per CPU  |  per GPU |   Options
-       71.69GB |   0.12GB | cpu_offload=1, cpu_offload_params=1, zero_init=1
-      127.45GB |   0.12GB | cpu_offload=1, cpu_offload_params=1, zero_init=0
-       63.72GB |   0.78GB | cpu_offload=1, cpu_offload_params=0, zero_init=1
-      127.45GB |   0.78GB | cpu_offload=1, cpu_offload_params=0, zero_init=0
-        1.43GB |   6.09GB | cpu_offload=0, cpu_offload_params=0, zero_init=1
-      127.45GB |   6.09GB | cpu_offload=0, cpu_offload_params=0, zero_init=0
+       71.69GB |   0.12GB | offload_param=cpu , offload_optimizer=cpu , zero_init=1
+      127.45GB |   0.12GB | offload_param=cpu , offload_optimizer=cpu , zero_init=0
+       63.72GB |   0.78GB | offload_param=none, offload_optimizer=cpu , zero_init=1
+      127.45GB |   0.78GB | offload_param=none, offload_optimizer=cpu , zero_init=0
+        1.43GB |   6.09GB | offload_param=none, offload_optimizer=none, zero_init=1
+      127.45GB |   6.09GB | offload_param=none, offload_optimizer=none, zero_init=0
 
 There is a slight difference due to rounding - the actual live model has a few more params
 
