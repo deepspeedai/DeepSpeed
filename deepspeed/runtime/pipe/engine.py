@@ -182,6 +182,8 @@ class PipelineEngine(DeepSpeedEngine):
             self.module.activation_checkpoint_interval = self._config.pipeline[
                 'activation_checkpoint_interval']
 
+        self.module.checkpoint_parallel_write_pipeline = self._config.checkpoint_parallel_write_pipeline
+
         if self.is_last_stage():
             self.loss_model = self.module.loss_fn
 

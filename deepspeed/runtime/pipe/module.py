@@ -562,13 +562,28 @@ class PipelineModule(nn.Module):
         return ckpt_files
 
     def save_state_dict(self, save_dir, checkpoint_engine):
-        if self._grid.data_parallel_id != 0:
-            return
+        # Processes having the same model parallel rank on different data parallel instances
+        # have identical layer weights.  We can distribute the task of saving the layer weights
+        # among the data parallel ranks.  For example, if a pipeline stage has 9 layers and
+        # if there are 2 data parallel instances, rank 0 will save the first 5 layers and
+        # rank 1 will save the last 4.
+        dp_rank = self._grid.data_parallel_id
+        dp_size = self._grid.data_parallel_size
+        num_layers = len(self.forward_funcs)
+        if self.checkpoint_parallel_write_pipeline:
+            # spread layers evenly across data parallel ranks
+            offsets = ds_utils.partition_uniform(num_layers, dp_size)
+            start, end = offsets[dp_rank], offsets[dp_rank + 1]
+        else:
+            # data parallel rank 0 writes all layers
+            if dp_rank != 0:
+                return
+            start, end = 0, num_layers
+        layer_list = self.forward_funcs[start:end]
 
         os.makedirs(save_dir, exist_ok=True)
-        layer_offset = self._local_start
-        for idx, layer in enumerate(self.forward_funcs):
-            model_ckpt_path = self.ckpt_layer_path(save_dir, idx)
+        for idx, layer in enumerate(layer_list):
+            model_ckpt_path = self.ckpt_layer_path(save_dir, start + idx)
             if not hasattr(layer, 'state_dict'):
                 continue
             # We pass cloned tensors to torch.save() to avoid checkpoint bloat which occurs because torch.save()

@@ -669,6 +669,19 @@ def get_checkpoint_tag_validation_mode(checkpoint_params):
         )
 
 
+def get_checkpoint_parallel_write_pipeline(checkpoint_params):
+    par_write_params = checkpoint_params.get(CHECKPOINT_PARALLEL_WRITE, {})
+    par_write_pipeline = par_write_params.get(
+        CHECKPOINT_PARALLEL_WRITE_PIPELINE_STAGE,
+        CHECKPOINT_PARALLEL_WRITE_PIPELINE_STAGE_DEFAULT)
+    if par_write_pipeline in [True, False]:
+        return par_write_pipeline
+    else:
+        raise DeepSpeedConfigError(
+            "checkpoint::parallel_write::pipeline_stage "
+            f"value of '{par_write_pipeline}' is invalid, expecting: true or false")
+
+
 def get_dataloader_drop_last(param_dict):
     return get_scalar_param(param_dict,
                             DATALOADER_DROP_LAST,
@@ -887,6 +900,8 @@ class DeepSpeedConfig(object):
         self.load_universal_checkpoint = checkpoint_params.get(
             LOAD_UNIVERSAL_CHECKPOINT,
             LOAD_UNIVERSAL_CHECKPOINT_DEFAULT)
+        par_write_pipe = get_checkpoint_parallel_write_pipeline(checkpoint_params)
+        self.checkpoint_parallel_write_pipeline = par_write_pipe
 
         self.aio_config = get_aio_config(param_dict)
 
