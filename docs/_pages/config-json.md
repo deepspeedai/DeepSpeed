@@ -1476,3 +1476,40 @@ Different pruning sets, this is used for different pruning parameters. In this e
 | <i>&emsp;&emsp;**dense_ratio**</i>: [float] | The percentage of weights to keep after pruning. | `0.5` |
 | <i>**modules**</i>: [list] | Scope of weight parameters associated to the params setting. | `"All CONV2D layers"` |
 | <i>**related_modules**</i>: [list[list]] | Related module to the channel pruned module. | `None` |
+
+### Checkpoint options
+
+```json
+"checkpoint": {
+    "tag_validation"="Warn",
+    "load_universal"=false,
+    "use_node_local_storage"=false,
+    "parallel_write":{
+        "pipeline_stage": false
+    }
+}
+```
+
+<i>**tag_validation**</i>: ["Ignore"|"Warn"|"Fail"]
+
+| Description                                                                                                                            | Default |
+| -------------------------------------------------------------------------------------------------------------------------------------- | ------- |
+| Enables level of checking to ensure checkpoint tags are consistent across all ranks. Useful when restoring with different world sizes. |  "Warn" |
+
+<i>**load_universal**</i>: [boolean]
+
+| Description                            | Default |
+| -------------------------------------- | ------- |
+| Load the latest checkpoint for all.    | `false` |
+
+<i>**use_node_local_storage**</i>: [boolean]
+
+| Description                                                                                                                                                               | Default |
+| ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------- |
+| If `true` DeepSpeed will store model parameter states and checkpoint states based on local rank allowing checkpoints to be loaded without access to a shared filesystem.  | `false` |
+
+<i>**pipeline_stage**</i>: [boolean]
+
+| Description                                                   | Default |
+| ------------------------------------------------------------- | ------- |
+| Use pipeline stages to parallelize the writing of checkpoints.| `false` |

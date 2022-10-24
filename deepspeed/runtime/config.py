@@ -900,6 +900,11 @@ class DeepSpeedConfig(object):
         self.load_universal_checkpoint = checkpoint_params.get(
             LOAD_UNIVERSAL_CHECKPOINT,
             LOAD_UNIVERSAL_CHECKPOINT_DEFAULT)
+
+        self.use_node_local_storage = checkpoint_params.get(
+            USE_NODE_LOCAL_STORAGE_CHECKPOINT,
+            USE_NODE_LOCAL_STORAGE_CHECKPOINT_DEFAULT)
+
         par_write_pipe = get_checkpoint_parallel_write_pipeline(checkpoint_params)
         self.checkpoint_parallel_write_pipeline = par_write_pipe
 
