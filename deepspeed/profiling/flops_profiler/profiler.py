@@ -514,15 +514,15 @@ def _gelu_flops_compute(input):
     return torch.numel(input), 0
 
 
-def _pool_flops_compute(
-    input,
-    kernel_size,
-    stride=None,
-    padding=0,
-    ceil_mode=False,
-    count_include_pad=True,
-    divisor_override=None,
-):
+def _pool_flops_compute(input,
+                        kernel_size,
+                        stride=None,
+                        padding=0,
+                        dilation=None,
+                        ceil_mode=False,
+                        count_include_pad=True,
+                        divisor_override=None,
+                        return_indices=None):
     return torch.numel(input), 0
 
 
@@ -1195,15 +1195,19 @@ def get_model_profile(
             input = torch.ones(()).new_empty((*input_shape, ))
 
         args = [input]
-
     assert (len(args) > 0) or (len(kwargs) > 0), "args and/or kwargs must be specified if input_shape is None"
 
     for _ in range(warm_up):
-        _ = model(*args, **kwargs)
-
+        if kwargs:
+            _ = model(*args, **kwargs)
+        else:
+            _ = model(*args)
     prof.start_profile(ignore_list=ignore_modules)
 
-    _ = model(*args, **kwargs)
+    if kwargs:
+        _ = model(*args, **kwargs)
+    else:
+        _ = model(*args)
 
     flops = prof.get_total_flops()
     macs = prof.get_total_macs()
