@@ -534,7 +534,7 @@ class TestAmp(DistributedTest):
 
     def test_adam_basic(self):
         config_dict = {
-            "train_batch_size": 1,
+            "train_batch_size": 2,
             "steps_per_print": 1,
             "amp": {
                 "enabled": True
