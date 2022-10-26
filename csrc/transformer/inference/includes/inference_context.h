@@ -157,7 +157,7 @@ public:
     void* GetWorkSpace() { return _workspace; }
     void* GetAttentionUnfusedWorkspace()
     {
-        return _workspace + _attention_unfused_workspace_offset;
+        return (char*)_workspace + _attention_unfused_workspace_offset;
     }
 
     inline unsigned new_token(unsigned layer_id)

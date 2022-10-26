@@ -3,6 +3,8 @@ Copyright 2020 The Microsoft DeepSpeed Team
 """
 from .builder import CUDAOpBuilder
 
+import sys
+
 
 class FusedAdamBuilder(CUDAOpBuilder):
     BUILD_VAR = "DS_BUILD_FUSED_ADAM"
@@ -27,6 +29,9 @@ class FusedAdamBuilder(CUDAOpBuilder):
     def nvcc_args(self):
         nvcc_flags = ['-O3'] + self.version_dependent_macros()
         if not self.is_rocm_pytorch():
-            nvcc_flags.extend(['-lineinfo',
-                               '--use_fast_math'] + self.compute_capability_args())
+            nvcc_flags.extend([
+                '-allow-unsupported-compiler' if sys.platform == "win32" else '',
+                '-lineinfo',
+                '--use_fast_math'
+            ] + self.compute_capability_args())
         return nvcc_flags
