@@ -374,7 +374,9 @@ def run_experiment(exp: dict, reservations, user_script, user_args):
         fd.flush()
         os.fsync(fd)
 
-    logger.info(f"Launching exp_id = {exp['exp_id']}, exp_name = {exp['name']}")
+    logger.info(
+        f"Launching exp_id = {exp['exp_id']}, exp_name = {exp['name']}, with resource = {include_str}"
+    )
 
     with open(os.path.join(exp_dir, "stdout.log"), "wb") as out, open(
         os.path.join(exp_dir, "stderr.log"), "wb"
@@ -388,7 +390,9 @@ def run_experiment(exp: dict, reservations, user_script, user_args):
 
     clean_up(exp, reservations)
 
-    logger.info(f"Done running exp_id = {exp['exp_id']}, exp_name = {exp['name']}")
+    logger.info(
+        f"Done running exp_id = {exp['exp_id']}, exp_name = {exp['name']}, with resource = {include_str}"
+    )
 
 
 PDSH_MAX_FAN_OUT = 1024

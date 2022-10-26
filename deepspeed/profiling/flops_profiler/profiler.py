@@ -254,7 +254,7 @@ class FlopsProfiler(object):
         original_stdout = None
         f = None
         if output_file and output_file != "":
-            dir_path = os.path.dirname(output_file)
+            dir_path = os.path.dirname(os.path.abspath(output_file))
             if not os.path.exists(dir_path):
                 os.makedirs(dir_path)
             original_stdout = sys.stdout

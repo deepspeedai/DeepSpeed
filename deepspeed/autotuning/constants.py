@@ -22,9 +22,6 @@ DEFAULT_TEMPLATE_PATH_ZERO_3 = os.path.join(os.path.dirname(os.path.realpath(__f
                                             "config_templates",
                                             "template_zero3.json")
 
-DEFAULT_EXPRS_DIR = os.path.join(os.getcwd(), "autotuning_exps")
-DEFAULT_RESULTS_DIR = os.path.join(os.getcwd(), "autotuning_results")
-
 METRIC_PERCENT_DIFF_CONST = 0.05
 DS_CONFIG = "ds_config"
 BUFSIZE = 1  # line buffer size for writing files
@@ -54,10 +51,10 @@ AUTOTUNING_FAST = "fast"
 AUTOTUNING_FAST_DEFAULT = True
 
 AUTOTUNING_RESULTS_DIR = "results_dir"
-AUTOTUNING_RESULTS_DIR_DEFAULT = None
+AUTOTUNING_RESULTS_DIR_DEFAULT = "autotuning_results"
 
 AUTOTUNING_EXPS_DIR = "exps_dir"
-AUTOTUNING_EXPS_DIR_DEFAULT = None
+AUTOTUNING_EXPS_DIR_DEFAULT = "autotuning_exps"
 
 AUTOTUNING_OVERWRITE = "overwrite"
 AUTOTUNING_OVERWRITE_DEFAULT = True
