@@ -303,7 +303,8 @@ def replace_transformer_layer(orig_layer_impl,
                               checkpoint_dict=None,
                               save_mp_checkpoint_path=None,
                               base_dir="",
-                              enable_cuda_graph=False):
+                              enable_cuda_graph=False,
+                              max_out_tokens=1024):
     """ Replace bert-style transformer layers with DeepSpeed's transformer layer
     Arguments:
         orig_layer_impl (torch.nn.Module): the original transformer layer implementation to look for,
@@ -451,7 +452,8 @@ def replace_transformer_layer(orig_layer_impl,
                     mlp_after_attn=(rotary_dim is None or rotary_dim < 0),
                     mlp_act_func_type=policy.mlp_act_func_type,
                     training_mp_size=training_mp_size,
-                    bigscience_bloom=bigscience_bloom)
+                    bigscience_bloom=bigscience_bloom,
+                    max_out_tokens=max_out_tokens)
 
             if quantize and quantize_settings is not None:
                 (quantization_scales,

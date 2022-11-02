@@ -428,10 +428,11 @@ void launch_attn_softmax_v2(T* vals,
 {
     int total_count = batch_size * heads * num_seq;
     int warp_num = ATTN_THREADS / WARP_SIZE;
-    dim3 grid_dim((total_count - 1) / (warp_num / ((sequence_length - 1) / ATTN_THREADS + 1)) + 1);
+    int reduce_width = ((sequence_length - 1) / ATTN_THREADS + 1);
+    reduce_width = (int)pow(2.0, floor(log2((float)(reduce_width)))) * WARP_SIZE;
+    dim3 grid_dim((total_count - 1) / (ATTN_THREADS / reduce_width) + 1);
     dim3 block_dim(ATTN_THREADS);
 
-    const int reduce_width = ((sequence_length - 1) / ATTN_THREADS + 1) * WARP_SIZE;
     const int iterations = (sequence_length - 1) / (reduce_width << 2) + 1;
 
     if (sequence_length <= 32768)
