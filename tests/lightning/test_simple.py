@@ -1,6 +1,6 @@
 import torch
 from pytorch_lightning import LightningModule, Trainer
-from pytorch_lightning.plugins import DeepSpeedPlugin
+from pytorch_lightning.strategies import DeepSpeedStrategy
 from torch.utils.data import DataLoader, Dataset
 
 
@@ -51,5 +51,5 @@ def test_lightning_model():
     """Test that DeepSpeed works with a simple LightningModule and LightningDataModule."""
 
     model = BoringModel()
-    trainer = Trainer(strategy=DeepSpeedPlugin(), max_epochs=1, precision=16, gpus=1)
+    trainer = Trainer(strategy=DeepSpeedStrategy(), max_epochs=1, precision=16, gpus=1)
     trainer.fit(model)

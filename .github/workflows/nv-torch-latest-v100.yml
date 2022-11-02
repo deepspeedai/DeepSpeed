@@ -17,7 +17,7 @@ concurrency:
 
 jobs:
   unit-tests:
-    runs-on: [self-hosted, nvidia, cu113, v100]
+    runs-on: [self-hosted, nvidia, cu111, v100]
 
     steps:
       - uses: actions/checkout@v2
@@ -32,7 +32,8 @@ jobs:
           nvcc --version
           pip install --upgrade pip
           pip uninstall --yes torch torchvision triton
-          pip install torch torchvision --extra-index-url https://download.pytorch.org/whl/cu113
+          pip install torch==1.12.0 torchvision --extra-index-url https://download.pytorch.org/whl/cu113 # Need to resolve errors with torch==1.13.0
+          pip install cupy-cuda113
           python -c "import torch; print('torch:', torch.__version__, torch)"
           python -c "import torch; print('CUDA available:', torch.cuda.is_available())"
 
@@ -61,5 +62,5 @@ jobs:
           unset TORCH_CUDA_ARCH_LIST # only jit compile for current arch
           if [[ -d ./torch-extensions ]]; then rm -rf ./torch-extensions; fi
           cd tests
-          TORCH_EXTENSIONS_DIR=./torch-extensions pytest --color=yes --durations=0 --forked --verbose -n 4 unit/ --torch_ver="1.12" --cuda_ver="11.3"
-          TORCH_EXTENSIONS_DIR=./torch-extensions pytest --color=yes --durations=0 --forked --verbose -m 'sequential' unit/ --torch_ver="1.12" --cuda_ver="11.3"
+          TORCH_EXTENSIONS_DIR=./torch-extensions pytest --color=yes --durations=0 --verbose -n 4 unit/ --torch_ver="1.12" --cuda_ver="11"
+          TORCH_EXTENSIONS_DIR=./torch-extensions pytest --color=yes --durations=0 --verbose -m 'sequential' unit/ --torch_ver="1.12" --cuda_ver="11"
