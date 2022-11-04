@@ -652,8 +652,8 @@ Configuring the asynchronous I/O module for offloading parameter and optimizer s
 {
   "autotuning": {
     "enabled": false,
-    "results_dir": null,
-    "exps_dir": null,
+    "results_dir": "autotuning_results",
+    "exps_dir": "autotuning_exps",
     "overwrite": false,
     "metric": "throughput",
     "start_profile_step": 3,
@@ -678,15 +678,15 @@ Configuring the asynchronous I/O module for offloading parameter and optimizer s
 
 <i>**results_dir**</i>: [string]
 
-| Description                                                                                                                      | Default |
-| -------------------------------------------------------------------------------------------------------------------------------- | ------- |
-| Path to the autotuning experiment results directory. If None, "autotuning_results" under the training script launching path is used. | `null`  |
+| Description                                                                                                                           | Default |
+| ------------------------------------------------------------------------------------------------------------------------------------- | --------------------- |
+| Path to the autotuning experiment results directory.  The default appears in the working directory from which Deepspeed was launched. | "autotuning_results"  |
 
 <i>**exps_dir**</i>: [string]
 
-| Description                                                                                                                        | Default |
-| ---------------------------------------------------------------------------------------------------------------------------------- | ------- |
-| Path to the auotuning experiment descriptions directory. If None, "autotuning_exps" under the train script launching path is used. | `null`  |
+| Description                                                                                                                              | Default |
+| ---------------------------------------------------------------------------------------------------------------------------------------- | ------------------ |
+| Path to the auotuning experiment descriptions directory. The default appears in the working directory from which Deepspeed was launched. | "autotuning_exps"  |
 
 <i>**overwrite**</i>: [boolean]
 
