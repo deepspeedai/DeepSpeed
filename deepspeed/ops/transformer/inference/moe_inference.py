@@ -11,7 +11,8 @@ from ... import op_builder
 inference_cuda_module = None
 specialized_mode = None
 import torch.nn as nn
-from .transformer_inference import DeepSpeedSelfAttention, DeepSpeedInferenceConfig
+from .ds_attention import DeepSpeedSelfAttention
+from .config import DeepSpeedInferenceConfig
 from ....moe.sharded_moe import TopKGate
 from deepspeed import comm as dist
 
