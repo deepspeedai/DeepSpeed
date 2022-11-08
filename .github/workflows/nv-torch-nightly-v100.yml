@@ -10,7 +10,7 @@ concurrency:
 
 jobs:
   unit-tests:
-    runs-on: [self-hosted, nvidia, cu113, v100]
+    runs-on: [self-hosted, nvidia, cu116, v100]
 
     steps:
       - uses: actions/checkout@v2
@@ -25,7 +25,7 @@ jobs:
           nvcc --version
           pip install --upgrade pip
           pip uninstall --yes torch torchvision triton
-          pip install --pre torch torchvision --extra-index-url https://download.pytorch.org/whl/nightly/cu113
+          pip install --pre torch torchvision --extra-index-url https://download.pytorch.org/whl/nightly/cu116
           python -c "import torch; print('torch:', torch.__version__, torch)"
           python -c "import torch; print('CUDA available:', torch.cuda.is_available())"
 
@@ -39,15 +39,15 @@ jobs:
           pip uninstall --yes transformers
           pip install .
 
-      - name: Python environment
-        run: |
-          pip list
-
       - name: Install deepspeed
         run: |
           pip uninstall --yes deepspeed
           pip install .[dev,1bit,autotuning]
           ds_report
+
+      - name: Python environment
+        run: |
+          pip list
 
       - name: Unit tests
         run: |

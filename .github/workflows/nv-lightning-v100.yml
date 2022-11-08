@@ -36,15 +36,15 @@ jobs:
           python -c "import torch; print('torch:', torch.__version__, torch)"
           python -c "import torch; print('CUDA available:', torch.cuda.is_available())"
 
-      - name: Python environment
-        run: |
-          pip list
-
       - name: Install deepspeed
         run: |
           pip uninstall --yes deepspeed
           pip install .[dev,autotuning]
           ds_report
+
+      - name: Python environment
+        run: |
+          pip list
 
       - name: PyTorch Lightning Tests
         run: |

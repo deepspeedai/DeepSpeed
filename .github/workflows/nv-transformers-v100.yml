@@ -38,15 +38,15 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libaio-dev
 
-      - name: Python environment
-        run: |
-          pip list
-
       - name: Install deepspeed
         run: |
           pip uninstall --yes deepspeed
           pip install .[dev,autotuning]
           ds_report
+
+      - name: Python environment
+        run: |
+          pip list
 
       - name: HF transformers tests
         run: |

@@ -46,15 +46,15 @@ jobs:
           pip uninstall --yes transformers
           pip install .
 
-      - name: Python environment
-        run: |
-          pip list
-
       - name: Install deepspeed
         run: |
           pip uninstall --yes deepspeed
           pip install .[dev,1bit,autotuning]
           ds_report
+
+      - name: Python environment
+        run: |
+          pip list
 
       - name: Unit tests
         run: |
