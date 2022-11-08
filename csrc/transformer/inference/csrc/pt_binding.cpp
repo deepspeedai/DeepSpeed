@@ -849,20 +849,6 @@ at::Tensor ds_linear_layer(at::Tensor& input,
     int head_size = input_cont.size(2) / num_heads;
     int bsz = input.size(0) * input.size(1);
     T* workspace = (T*)Context::Instance().GetWorkSpace();
-    // Reallocate memory if we received a new prompt
-    if (!workspace) {
-        cublasSetStream(Context::Instance().GetCublasHandle(),
-                        Context::Instance().GetCurrentStream());
-        allocate_workspace<T>(input.size(2),
-                              input.size(0),
-                              input.size(1),
-                              num_layers,
-                              num_heads,
-                              1,
-                              external_cache,
-                              0);
-        workspace = (T*)Context::Instance().GetWorkSpace();
-    }
     auto output = at::from_blob(workspace, {input.size(0), input.size(1), weight.size(1)}, options);
 
     float alpha = (T)1.0;

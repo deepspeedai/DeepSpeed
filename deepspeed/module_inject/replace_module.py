@@ -210,6 +210,7 @@ def generic_injection(module, fp16=False):
             heads=heads,
             fp16=fp16,
             triangular_masking=False,
+            max_out_tokens=4096,
         )
         attn_module = transformer_inference.DeepSpeedAttention(config)
 

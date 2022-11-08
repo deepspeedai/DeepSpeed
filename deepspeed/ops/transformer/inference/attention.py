@@ -233,6 +233,9 @@ class DeepSpeedAttention(nn.Module):
                                     inference_cuda_module.linear_layer_fp32
         self.cuda_graph_created = False
         self.enable_cuda_graph = False
+        self.allocate_workspace = inference_cuda_module.allocate_workspace_fp32 if (not config.fp16) else \
+                                inference_cuda_module.allocate_workspace_fp16
+        self.iter = 0
 
     def _graph_replay(self, *inputs, **kwargs):
         for i in range(len(inputs)):
@@ -275,6 +278,18 @@ class DeepSpeedAttention(nn.Module):
         return outputs
 
     def _forward(self, input, context=None, input_mask=None):
+        # Allocate memory only on first layer forward
+        if self.config.layer_id == 0 and self.iter == 0:
+            self.iter += 1
+            self.allocate_workspace(self.config.hidden_size,
+                                    input.size()[0],
+                                    input.size()[1],
+                                    DeepSpeedAttention.layer_id,
+                                    self.config.heads,
+                                    self.config.mp_size,
+                                    self.config.bigscience_bloom,
+                                    0,
+                                    self.config.max_out_tokens)
         output = DeepSpeedAttentionFunction.apply(input,
                                                   context,
                                                   input_mask,
