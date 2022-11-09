@@ -64,7 +64,8 @@ class DeepSpeedInferenceConfig(TransformerConfig):
                  mlp_act_func_type=ActivationFuncType.GELU,
                  training_mp_size=1,
                  bigscience_bloom=False,
-                 max_out_tokens=1024):
+                 max_out_tokens=1024,
+                 scale_attn_by_inverse_layer_idx=False):
         super(DeepSpeedInferenceConfig,
               self).__init__(
                   hidden_size,
@@ -92,6 +93,7 @@ class DeepSpeedInferenceConfig(TransformerConfig):
         self.training_mp_size = training_mp_size
         self.bigscience_bloom = bigscience_bloom
         self.max_out_tokens = max_out_tokens
+        self.scale_attn_by_inverse_layer_idx = scale_attn_by_inverse_layer_idx
 
     @classmethod
     def from_dict(cls, json_object):

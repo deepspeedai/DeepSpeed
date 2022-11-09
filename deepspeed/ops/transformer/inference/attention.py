@@ -227,6 +227,10 @@ class DeepSpeedAttention(nn.Module):
         self.norm_factor = math.sqrt(
             math.sqrt(self.config.hidden_size // self.config.heads))
 
+        if self.config.scale_attn_by_inverse_layer_idx is True:
+            self.norm_factor *= math.sqrt(self.config.layer_id + 1)
+            # https://github.com/huggingface/transformers/blob/v4.24.0/src/transformers/models/gpt2/modeling_gpt2.py#L191
+
         self.score_context_func = inference_cuda_module.softmax_context_fp32 if (not config.fp16) else \
                                     inference_cuda_module.softmax_context_fp16
         self.linear_func = inference_cuda_module.linear_layer_fp16 if config.fp16 else \

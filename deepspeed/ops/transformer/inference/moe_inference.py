@@ -68,7 +68,8 @@ class DeepSpeedMoEInferenceConfig(DeepSpeedInferenceConfig):
                  noisy_gate_policy=None,
                  drop_tokens=True,
                  use_rts=False,
-                 mlp_type='standard'):
+                 mlp_type='standard',
+                 scale_attn_by_inverse_layer_idx=False):
         super(DeepSpeedMoEInferenceConfig,
               self).__init__(
                   hidden_size,
@@ -97,6 +98,7 @@ class DeepSpeedMoEInferenceConfig(DeepSpeedInferenceConfig):
         self.use_rts = use_rts
         self.global_experts = global_experts
         self.mlp_type = mlp_type
+        self.scale_attn_by_inverse_layer_idx = scale_attn_by_inverse_layer_idx
 
     @classmethod
     def from_dict(cls, json_object):

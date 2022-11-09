@@ -406,6 +406,9 @@ def replace_transformer_layer(orig_layer_impl,
 
         quantizer = GroupQuantizer(q_int8=quantize)
         if inference:
+            scale_attn_by_inverse_layer_idx = config.scale_attn_by_inverse_layer_idx if hasattr(
+                config,
+                'scale_attn_by_inverse_layer_idx') else False
             if moe:
                 ep_world_size = dist.get_world_size()
                 local_ep_size = 1 if num_experts < ep_world_size else num_experts // ep_world_size
@@ -422,7 +425,8 @@ def replace_transformer_layer(orig_layer_impl,
                     q_int8=quantize,
                     moe_experts=local_ep_size,
                     global_experts=num_experts,
-                    mlp_type=moe_type)
+                    mlp_type=moe_type,
+                    scale_attn_by_inverse_layer_idx=scale_attn_by_inverse_layer_idx)
             else:
                 rotary_dim = config.rotary_dim if hasattr(config, 'rotary_dim') else child.attention.rotary_ndims \
                                             if hasattr(child, 'attention') and hasattr(child.attention,'rotary_ndims') else -1
@@ -454,7 +458,8 @@ def replace_transformer_layer(orig_layer_impl,
                     mlp_act_func_type=policy.mlp_act_func_type,
                     training_mp_size=training_mp_size,
                     bigscience_bloom=bigscience_bloom,
-                    max_out_tokens=max_out_tokens)
+                    max_out_tokens=max_out_tokens,
+                    scale_attn_by_inverse_layer_idx=scale_attn_by_inverse_layer_idx)
 
             if quantize and quantize_settings is not None:
                 (quantization_scales,
