@@ -7,11 +7,11 @@ title: "Latest News"
 ---
 <b> DeepSpeed trained the world's most powerful language models ([MT-530B](https://www.microsoft.com/en-us/research/blog/using-deepspeed-and-megatron-to-train-megatron-turing-nlg-530b-the-worlds-largest-and-most-powerful-generative-language-model/), [BLOOM](https://huggingface.co/blog/bloom-megatron-deepspeed)); [learn how](https://www.deepspeed.ai/tutorials/large-models-w-deepspeed/).</b>
 
+* [2022/11] [Stable Diffusion Image Generation under 1 second w. DeepSpeed MII](https://github.com/microsoft/DeepSpeed-MII/tree/main/examples/benchmark/txt2img)
 * [2022/10] [DeepSpeed-MII: instant speedup on 24,000+ open-source DL models with up to 40x cheaper inference](https://www.deepspeed.ai/2022/10/10/mii.html)
 * [2022/09] [ZeRO-Inference: Democratizing massive model inference](https://www.deepspeed.ai/2022/09/09/zero-inference.html)
 * [2022/07] [Azure and DeepSpeed empower easy-to-use and high-performance model training](https://azure.microsoft.com/en-us/blog/azure-empowers-easytouse-highperformance-and-hyperscale-model-training-using-deepspeed/)
 * [2022/07] [DeepSpeed Compression: A composable library for extreme compression](https://www.microsoft.com/en-us/research/blog/deepspeed-compression-a-composable-library-for-extreme-compression-and-zero-cost-quantization/)
-* [2022/03] [Supporting efficient large model training on AMD Instinct GPUs with DeepSpeed](https://cloudblogs.microsoft.com/opensource/2022/03/21/supporting-efficient-large-model-training-on-amd-instinct-gpus-with-deepspeed/)
 
 
 # Extreme Speed and Scale for DL Training and Inference
