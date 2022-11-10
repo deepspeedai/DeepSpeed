@@ -12,6 +12,7 @@ from .utils import UtilsBuilder
 from .async_io import AsyncIOBuilder
 from .transformer_inference import InferenceBuilder
 from .quantizer import QuantizerBuilder
+from .spatial_inference import SpatialInferenceBuilder
 from .builder import get_default_compute_capabilities, OpBuilder
 
 # TODO: infer this list instead of hard coded
@@ -27,6 +28,7 @@ __op_builders__ = [
     AsyncIOBuilder(),
     UtilsBuilder(),
     QuantizerBuilder(),
-    InferenceBuilder()
+    InferenceBuilder(),
+    SpatialInferenceBuilder(),
 ]
 ALL_OPS = {op.name: op for op in __op_builders__}

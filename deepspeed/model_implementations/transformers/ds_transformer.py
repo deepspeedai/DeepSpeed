@@ -104,10 +104,10 @@ class DeepSpeedTransformerInference(nn.Module):
         # Allocate memory only on first layer forward
         if self.config.layer_id == 0:
             self.allocate_workspace(self.config.hidden_size,
-                                    input.size()[0],
-                                    input.size()[1],
-                                    DeepSpeedTransformerInference.layer_id,
                                     self.config.heads,
+                                    input.size()[1],
+                                    input.size()[0],
+                                    DeepSpeedTransformerInference.layer_id,
                                     self.config.mp_size,
                                     self.config.bigscience_bloom,
                                     dist.get_rank() if dist.is_initialized() else 0,
@@ -151,12 +151,10 @@ class DeepSpeedTransformerInference(nn.Module):
             output = self.mlp(attention_output, input, inp_norm, self.attention.attn_ob)
 
             if not self.config.pre_layer_norm:
-                ds_layernorm = inference_cuda_module.layer_norm_fp16 if self.config.fp16 or self.config.q_int8 else \
-                                        inference_cuda_module.layer_norm_fp32
-                output = ds_layernorm(output,
-                                      self.norm_w,
-                                      self.norm_b,
-                                      self.config.epsilon)
+                output = inference_cuda_module.layer_norm(output,
+                                                          self.norm_w,
+                                                          self.norm_b,
+                                                          self.config.epsilon)
 
             output = output.to(input_type)
         if get_present:

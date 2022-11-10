@@ -101,11 +101,11 @@ at::Tensor ds_softmax(at::Tensor& attn_scores,
 }
 
 template <typename T>
-void allocate_workspace(size_t hidden_dim,
-                        size_t batch_size,
-                        size_t prompt_length,
-                        unsigned num_layers,
+void allocate_workspace(unsigned hidden_dim,
                         unsigned num_heads,
+                        unsigned prompt_length,
+                        unsigned batch_size,
+                        unsigned num_layers,
                         unsigned mp_size = 1,
                         bool external_cache = false,
                         unsigned rank = 0,
@@ -545,6 +545,41 @@ at::Tensor ds_bias_gelu(at::Tensor& input, at::Tensor& bias)
     return input_cont;
 }
 
+at::Tensor ds_bias_geglu(at::Tensor& activation, at::Tensor& bias)
+{
+    /*
+    Used in FF of Stable diffusion
+    */
+
+    const int batch_size = activation.size(0);
+    const int seq_len = activation.size(1);
+    const int channels = activation.size(2);
+
+    const int rows = batch_size * seq_len;
+    // Dimensionality is cut in half
+    const int out_channels = channels / 2;
+
+    auto output = at::empty({batch_size, seq_len, out_channels}, activation.options());
+
+    if (activation.options().dtype() == torch::kFloat32) {
+        launch_fused_bias_geglu((float*)output.data_ptr(),
+                                (const float*)activation.data_ptr(),
+                                (const float*)bias.data_ptr(),
+                                rows,
+                                channels,
+                                Context::Instance().GetCurrentStream());
+    } else {
+        launch_fused_bias_geglu((__half*)output.data_ptr(),
+                                (const __half*)activation.data_ptr(),
+                                (const __half*)bias.data_ptr(),
+                                rows,
+                                channels,
+                                Context::Instance().GetCurrentStream());
+    }
+
+    return output;
+}
+
 template <typename T>
 at::Tensor ds_bias_relu(at::Tensor& input, at::Tensor& bias)
 {
@@ -594,38 +629,132 @@ at::Tensor ds_bias_residual(at::Tensor& input, at::Tensor& residual, at::Tensor&
     return input_cont;
 }
 
-template <typename T>
-at::Tensor ds_layernorm(at::Tensor& input_cont, at::Tensor& gamma, at::Tensor& betta, float epsilon)
+at::Tensor ds_layer_norm(at::Tensor& input, at::Tensor& gamma, at::Tensor& beta, float epsilon)
 {
-    int bsz = input_cont.size(0) * input_cont.size(1);
-    auto inp_norm = at::empty_like(input_cont);
-    launch_layer_norm((T*)inp_norm.data_ptr(),
-                      (T*)input_cont.data_ptr(),
-                      (T*)gamma.data_ptr(),
-                      (T*)betta.data_ptr(),
-                      epsilon,
-                      bsz,
-                      input_cont.size(2),
-                      Context::Instance().GetCurrentStream());
-    return inp_norm;
+    const int rows = input.size(0) * input.size(1);
+    const int elems_per_row = input.size(2);
+    auto output = at::empty_like(input);
+
+    if (input.options().dtype() == torch::kFloat16) {
+        launch_fused_ln((__half*)output.data_ptr(),
+                        (const __half*)input.data_ptr(),
+                        (const __half*)gamma.data_ptr(),
+                        (const __half*)beta.data_ptr(),
+                        epsilon,
+                        rows,
+                        elems_per_row,
+                        Context::Instance().GetCurrentStream());
+    } else {
+        launch_fused_ln((float*)output.data_ptr(),
+                        (const float*)input.data_ptr(),
+                        (const float*)gamma.data_ptr(),
+                        (const float*)beta.data_ptr(),
+                        epsilon,
+                        rows,
+                        elems_per_row,
+                        Context::Instance().GetCurrentStream());
+    }
+
+    return output;
 }
 
 template <typename T>
-void ds_layernorm_internal(T* workspace,
-                           at::Tensor& input,
-                           at::Tensor& gamma,
-                           at::Tensor& betta,
-                           float epsilon)
+void ds_layer_norm_internal(T* workspace,
+                            at::Tensor& input,
+                            at::Tensor& gamma,
+                            at::Tensor& beta,
+                            float epsilon)
 {
     int bsz = input.size(0) * input.size(1);
-    launch_layer_norm(workspace,
-                      (T*)input.data_ptr(),
-                      (T*)gamma.data_ptr(),
-                      (T*)betta.data_ptr(),
-                      epsilon,
-                      bsz,
-                      input.size(2),
-                      Context::Instance().GetCurrentStream());
+    launch_fused_ln(workspace,
+                    (const T*)input.data_ptr(),
+                    (const T*)gamma.data_ptr(),
+                    (const T*)beta.data_ptr(),
+                    epsilon,
+                    bsz,
+                    input.size(2),
+                    Context::Instance().GetCurrentStream());
+}
+
+/* Currently only used in unit testing */
+at::Tensor ds_layer_norm_residual(at::Tensor& input,
+                                  at::Tensor& bias,
+                                  at::Tensor& residual,
+                                  at::Tensor& gamma,
+                                  at::Tensor& beta,
+                                  float epsilon)
+{
+    const int rows = input.size(0) * input.size(1);
+    const int elems_per_row = input.size(2);
+    auto output = at::empty_like(input);
+
+    if (input.options().dtype() == torch::kFloat16) {
+        launch_fused_residual_ln((__half*)output.data_ptr(),
+                                 (const __half*)input.data_ptr(),
+                                 (const __half*)residual.data_ptr(),
+                                 (const __half*)bias.data_ptr(),
+                                 (const __half*)gamma.data_ptr(),
+                                 (const __half*)beta.data_ptr(),
+                                 epsilon,
+                                 rows,
+                                 elems_per_row,
+                                 Context::Instance().GetCurrentStream());
+    } else {
+        launch_fused_residual_ln((float*)output.data_ptr(),
+                                 (const float*)input.data_ptr(),
+                                 (const float*)residual.data_ptr(),
+                                 (const float*)bias.data_ptr(),
+                                 (const float*)gamma.data_ptr(),
+                                 (const float*)beta.data_ptr(),
+                                 epsilon,
+                                 rows,
+                                 elems_per_row,
+                                 Context::Instance().GetCurrentStream());
+    }
+
+    return output;
+}
+
+/* Currently only used in unit testing */
+std::vector<at::Tensor> ds_layer_norm_residual_store(at::Tensor& input,
+                                                     at::Tensor& bias,
+                                                     at::Tensor& residual,
+                                                     at::Tensor& gamma,
+                                                     at::Tensor& beta,
+                                                     float epsilon)
+{
+    const int rows = input.size(0) * input.size(1);
+    const int elems_per_row = input.size(2);
+    auto norm_output = at::empty_like(input);
+    auto res_output = at::empty_like(input);
+
+    if (input.options().dtype() == torch::kFloat16) {
+        launch_fused_residual_ln_store((__half*)norm_output.data_ptr(),
+                                       (__half*)res_output.data_ptr(),
+                                       (const __half*)input.data_ptr(),
+                                       (const __half*)residual.data_ptr(),
+                                       (const __half*)bias.data_ptr(),
+                                       (const __half*)gamma.data_ptr(),
+                                       (const __half*)beta.data_ptr(),
+                                       epsilon,
+                                       rows,
+                                       elems_per_row,
+                                       Context::Instance().GetCurrentStream());
+    } else {
+        launch_fused_residual_ln_store((float*)norm_output.data_ptr(),
+                                       (float*)res_output.data_ptr(),
+                                       (const float*)input.data_ptr(),
+                                       (const float*)residual.data_ptr(),
+                                       (const float*)bias.data_ptr(),
+                                       (const float*)gamma.data_ptr(),
+                                       (const float*)beta.data_ptr(),
+                                       epsilon,
+                                       rows,
+                                       elems_per_row,
+                                       Context::Instance().GetCurrentStream());
+    }
+
+    return {norm_output, res_output};
 }
 
 template <typename T>
@@ -682,7 +811,7 @@ at::Tensor qkv_unfused_cublas(at::Tensor& output,
     int bsz = input.size(0) * input.size(1);
     T* workspace = (T*)Context::Instance().GetWorkSpace();
     workspace += (3 * bsz * input.size(2));
-    ds_layernorm_internal<T>(workspace, input, gamma, beta, epsilon);
+    ds_layer_norm_internal<T>(workspace, input, gamma, beta, epsilon);
 
     if (q_int8) {
         quantized_gemm<T>(output.data_ptr(), workspace, weight, q_scale, q_scale.size(0), bsz);
@@ -816,7 +945,7 @@ at::Tensor ds_qkv_gemm_int8(at::Tensor& input,
 
     auto output = at::empty({input_cont.size(0), input_cont.size(1), weight.size(1)}, options);
 
-    auto inp_norm = ds_layernorm<T>(input_cont, gamma, beta, epsilon);
+    auto inp_norm = ds_layer_norm(input_cont, gamma, beta, epsilon);
 
     quantized_gemm<T>(output, inp_norm, weight, q_scale, groups, 0);
     if (add_bias)
@@ -834,10 +963,8 @@ at::Tensor ds_linear_layer(at::Tensor& input,
                            at::Tensor& weight,
                            at::Tensor& bias,
                            bool add_bias,
-                           bool external_cache,
                            bool do_flash_attn,
-                           int num_heads,
-                           unsigned num_layers)
+                           int num_heads)
 {
     auto input_cont = input.contiguous();
     auto options = at::TensorOptions()
@@ -1151,19 +1278,21 @@ at::Tensor mlp_unfused_cublas(at::Tensor& output,
     T* inp_norm =
         (T*)Context::Instance().GetWorkSpace() + torch::numel(input) + torch::numel(output);
     T* intermediate = inp_norm + torch::numel(input);
-    launch_residual_layer_norm((T*)inp_norm,
-                               (T*)nullptr,
-                               (T*)input.data_ptr(),
-                               (T*)residual.data_ptr(),
-                               (T*)input_bias.data_ptr(),
-                               (T*)gamma.data_ptr(),
-                               (T*)beta.data_ptr(),
-                               epsilon,
-                               bsz,
-                               input.size(2),
-                               preLayerNorm,
-                               mlp_after_attn,
-                               Context::Instance().GetCurrentStream());
+
+    if (mlp_after_attn) {
+        launch_fused_residual_ln((T*)inp_norm,
+                                 (const T*)input.data_ptr(),
+                                 (const T*)residual.data_ptr(),
+                                 (const T*)input_bias.data_ptr(),
+                                 (const T*)gamma.data_ptr(),
+                                 (const T*)beta.data_ptr(),
+                                 epsilon,
+                                 bsz,
+                                 input.size(2),
+                                 Context::Instance().GetCurrentStream());
+    } else {
+        ds_layer_norm_internal(inp_norm, input, gamma, beta, epsilon);
+    }
 
     if (q_int8) {
         quantized_gemm<T>(intermediate, inp_norm, weight, q_scale, q_scale.size(0), bsz);
@@ -1532,6 +1661,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m)
           "DeepSpeed attention with int8 (CUDA)");
     m.def("bias_gelu_fp32", &ds_bias_gelu<float>, "DeepSpeed Gelu with fp32 (CUDA)");
     m.def("bias_gelu_fp16", &ds_bias_gelu<__half>, "DeepSpeed Gelu with fp16 (CUDA)");
+    m.def("bias_geglu", &ds_bias_geglu, "DeepSpeed Bias GEGLU (CUDA)");
     m.def("bias_add_fp32", &ds_bias_add<float>, "DeepSpeed Bias Add with fp32 (CUDA)");
     m.def("bias_add_fp16", &ds_bias_add<__half>, "DeepSpeed Gelu with fp16 (CUDA)");
     m.def("bias_relu_fp32", &ds_bias_relu<float>, "DeepSpeed ReLU with fp32 (CUDA)");
@@ -1542,8 +1672,12 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m)
     m.def("bias_residual_fp16",
           &ds_bias_residual<__half>,
           "DeepSpeed residual-bias add with fp16 (CUDA)");
-    m.def("layer_norm_fp32", &ds_layernorm<float>, "DeepSpeed layer-norm with fp32 (CUDA)");
-    m.def("layer_norm_fp16", &ds_layernorm<__half>, "DeepSpeed layer-norm with fp16 (CUDA)");
+    m.def("layer_norm", &ds_layer_norm, "DeepSpeed layer norm (CUDA)");
+    m.def(
+        "_layer_norm_residual", &ds_layer_norm_residual, "DeepSpeed layer norm + residual (CUDA)");
+    m.def("layer_norm_residual_store",
+          &ds_layer_norm_residual_store,
+          "DeepSpeed layer norm + store residual (CUDA)");
     m.def("qkv_gemm_fp32", &ds_qkv_gemm<float>, "DeepSpeed qkv gemm with fp32 (CUDA)");
     m.def("qkv_gemm_fp16", &ds_qkv_gemm<__half>, "DeepSpeed qkv gemm with fp16 (CUDA)");
     m.def("qkv_gemm_int8", &ds_qkv_gemm_int8<__half>, "DeepSpeed qkv gemm with int8 (CUDA)");

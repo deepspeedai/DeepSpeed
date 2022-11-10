@@ -379,7 +379,8 @@ class InferenceEngine(Module):
             self.checkpoint_engine) if checkpoint_dir is not None else None
 
         generic_injection(self.module,
-                          fp16=(self.dtype == torch.half) or (self.dtype == torch.int8))
+                          fp16=(self.dtype == torch.half) or (self.dtype == torch.int8),
+                          enable_cuda_graph=self.enable_cuda_graph)
 
         if isinstance(self.module, torch.nn.Module):
             replace_transformer_layer(

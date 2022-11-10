@@ -103,7 +103,7 @@ public:
         // Flash attention requires padded heads and we'll conservatively allocate
         // for that here. Flash attention is only enabled for head size <= 128 right now
         const int head_size = hidden_dim / num_heads;
-        const int padded_head_size = head_size < 32 ? 32 : (head_size < 64 ? 64 : 128);
+        const int padded_head_size = head_size <= 32 ? 32 : (head_size <= 64 ? 64 : 128);
         const int effective_head_size = (head_size > 128) ? head_size : padded_head_size;
 
         size_t activation_size = 16 * (num_heads * effective_head_size) * batch_size;
@@ -130,10 +130,15 @@ public:
         temp_size *= _max_seq_len * elem_size;
         if (rank == 0 && !_workspace)
             printf(
-                "Free memory : %lu (Bytes)  Total memory: %lu (Bytes)  Setting maximum total "
-                "tokens (input + output) to %lu \n",
-                _free_memory_size,
-                total_size,
+                "------------------------------------------------------\n"
+                "Free memory : %f (GigaBytes)  \n"
+                "Total memory: %f (GigaBytes)  \n"
+                "Requested memory: %f (GigaBytes) \n"
+                "Setting maximum total tokens (input + output) to %lu \n"
+                "------------------------------------------------------\n",
+                (float)_free_memory_size / GIGABYTE,
+                (float)total_size / GIGABYTE,
+                (float)workSpaceSize / GIGABYTE,
                 _max_seq_len);
         if (!_workspace) {
             assert(_workspace == nullptr);

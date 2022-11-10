@@ -308,9 +308,7 @@ class DeepSpeedSelfAttentionFunction(Function):
                                       attn_qkvb,
                                       attn_qkvb is not None,
                                       False,
-                                      False,
-                                      num_attention_heads_per_partition,
-                                      DeepSpeedSelfAttention.num_layers)
+                                      num_attention_heads_per_partition)
             else:
                 qkv_func = inference_cuda_module.qkv_gemm_fp16 if config.fp16 else \
                                     inference_cuda_module.qkv_gemm_fp32

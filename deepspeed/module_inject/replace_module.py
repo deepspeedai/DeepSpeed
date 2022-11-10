@@ -195,8 +195,8 @@ def _module_match(module):
     return None
 
 
-def generic_injection(module, fp16=False):
-    def replace_attn(child, policy, layer_id):
+def generic_injection(module, fp16=False, enable_cuda_graph=True):
+    def replace_attn(child, policy):
         policy_attn = policy.attention(child)
         if policy_attn is None:
             return child
@@ -212,7 +212,7 @@ def generic_injection(module, fp16=False):
             triangular_masking=False,
             max_out_tokens=4096,
         )
-        attn_module = transformer_inference.DeepSpeedAttention(config)
+        attn_module = transformer_inference.DeepSpeedDiffusersAttention(config)
 
         def transpose(data):
             data.reshape(-1).copy_(data.transpose(-1, -2).contiguous().reshape(-1))
@@ -233,13 +233,24 @@ def generic_injection(module, fp16=False):
         attn_module.attn_ob.data.copy_(attn_ob.data.to(torch.cuda.current_device()))
         return attn_module
 
+    def replace_attn_block(child, policy):
+        config = transformer_inference.Diffusers2DTransformerConfig()
+        return transformer_inference.DeepSpeedDiffusersTransformerBlock(child, config)
+
     if isinstance(module, torch.nn.Module):
         pass
     else:
+        if fp16 is False:
+            raise ValueError("Generic injection only supported with FP16")
+
         try:
             import diffusers
             cross_attention = diffusers.models.attention.CrossAttention
-            new_policies = {cross_attention: replace_attn}
+            attention_block = diffusers.models.attention.BasicTransformerBlock
+            new_policies = {
+                cross_attention: replace_attn,
+                attention_block: replace_attn_block,
+            }
         except ImportError:
             new_policies = {}
 
@@ -247,30 +258,29 @@ def generic_injection(module, fp16=False):
         #                          module.text_encoder,
         #                          training=False,
         #                          replace_with_kernel_inject=True,
-        #                          triangular_masking=True)
-        #from .encoder import DSClipEncoder
-        #cg_encoder = DSClipEncoder(module.text_encoder)
-        #setattr(module, 'text_encoder', cg_encoder)
+        #                          triangular_masking=True,
+        #                          max_out_tokens=8192)
+        from ..model_implementations.transformers.clip_encoder import DSClipEncoder
+        cg_encoder = DSClipEncoder(module.text_encoder,
+                                   enable_cuda_graph=enable_cuda_graph)
+        setattr(module, 'text_encoder', cg_encoder)
         for name in module.__dict__.keys():
             sub_module = getattr(module, name)
             policy = _module_match(sub_module)
 
             if policy is not None:
 
-                def _replace_module(module, policy, layer_id=0):
+                def _replace_module(module, policy):
                     for name, child in module.named_children():
+                        _replace_module(child, policy)
                         if child.__class__ in new_policies:
                             replaced_module = new_policies[child.__class__](child,
-                                                                            policy,
-                                                                            layer_id)
+                                                                            policy)
                             setattr(module, name, replaced_module)
-                            layer_id += 1
-                        else:
-                            layer_id = _replace_module(child, policy, layer_id=layer_id)
-                    return layer_id
 
                 _replace_module(sub_module, policy)
-                new_module = policy.apply(sub_module)
+                new_module = policy.apply(sub_module,
+                                          enable_cuda_graph=enable_cuda_graph)
                 print(f"**** found and replaced {name} w. {type(new_module)}")
                 setattr(module, name, new_module)
 

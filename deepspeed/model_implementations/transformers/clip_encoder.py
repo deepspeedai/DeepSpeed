@@ -5,13 +5,19 @@ import torch
 
 
 class DSClipEncoder(torch.nn.Module):
-    def __init__(self, enc):
+    def __init__(self, enc, enable_cuda_graph=False):
         super().__init__()
         enc.text_model._build_causal_attention_mask = self._build_causal_attention_mask
         self.enc = enc
         self.device = self.enc.device
         self.dtype = self.enc.dtype
-        self.cuda_graph_created = False
+        self.cuda_graph_created = [False, False]
+        self.static_inputs = [None, None]
+        self.static_kwargs = [None, None]
+        self.static_output = [None, None]
+        self._cuda_graphs = [None, None]
+        self.iter = 0
+        self.enable_cuda_graph = enable_cuda_graph
 
     def _build_causal_attention_mask(self, bsz, seq_len, dtype):
         mask = torch.empty(bsz,
@@ -27,20 +33,24 @@ class DSClipEncoder(torch.nn.Module):
     def _graph_replay(self, *inputs, **kwargs):
         for i in range(len(inputs)):
             if torch.is_tensor(inputs[i]):
-                self.static_inputs[i].copy_(inputs[i])
+                self.static_inputs[self.iter][i].copy_(inputs[i])
         for k in kwargs:
             if torch.is_tensor(kwargs[k]):
-                self.static_kwargs[k].copy_(kwargs[k])
-        self._cuda_graphs.replay()
-        return self.static_output
+                self.static_kwargs[self.iter][k].copy_(kwargs[k])
+        self._cuda_graphs[self.iter].replay()
+        return self.static_output[self.iter]
 
     def forward(self, *inputs, **kwargs):
-        if self.cuda_graph_created:
-            outputs = self._graph_replay(*inputs, **kwargs)
+        if self.enable_cuda_graph:
+            if self.cuda_graph_created[self.iter]:
+                outputs = self._graph_replay(*inputs, **kwargs)
+            else:
+                self._create_cuda_graph(*inputs, **kwargs)
+                outputs = self._graph_replay(*inputs, **kwargs)
+            self.iter = (self.iter + 1) % 2
+            return outputs
         else:
-            self._create_cuda_graph(*inputs, **kwargs)
-            outputs = self._graph_replay(*inputs, **kwargs)
-        return outputs
+            return self.enc(*inputs, **kwargs)
 
     def _create_cuda_graph(self, *inputs, **kwargs):
         # warmup to create the workspace and cublas handle
@@ -52,15 +62,16 @@ class DSClipEncoder(torch.nn.Module):
         torch.cuda.current_stream().wait_stream(cuda_stream)
 
         # create cuda_graph and assign static_inputs and static_outputs
-        self._cuda_graphs = torch.cuda.CUDAGraph()
-        self.static_inputs = inputs
-        self.static_kwargs = kwargs
+        self._cuda_graphs[self.iter] = torch.cuda.CUDAGraph()
+        self.static_inputs[self.iter] = inputs
+        self.static_kwargs[self.iter] = kwargs
 
-        with torch.cuda.graph(self._cuda_graphs):
-            self.static_output = self._forward(*self.static_inputs, **self.static_kwargs)
+        with torch.cuda.graph(self._cuda_graphs[self.iter]):
+            self.static_output[self.iter] = self._forward(
+                *self.static_inputs[self.iter],
+                **self.static_kwargs[self.iter])
 
-        self.cuda_graph_created = True
+        self.cuda_graph_created[self.iter] = True
 
     def _forward(self, *inputs, **kwargs):
-
         return self.enc(*inputs, **kwargs)

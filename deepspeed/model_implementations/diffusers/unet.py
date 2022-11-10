@@ -2,23 +2,21 @@
 Copyright 2022 The Microsoft DeepSpeed Team
 '''
 import torch
-import diffusers
 
 
 class DSUNet(torch.nn.Module):
-    def __init__(self, unet):
+    def __init__(self, unet, enable_cuda_graph=True):
         super().__init__()
         self.unet = unet
         # SD pipeline accesses this attribute
         self.in_channels = unet.in_channels
-        self._traced_unet = None
-        self._trace_enabled = False
         self.device = self.unet.device
         self.dtype = self.unet.dtype
         self.fwd_count = 0
         self.unet.requires_grad_(requires_grad=False)
         self.unet.to(memory_format=torch.channels_last)
         self.cuda_graph_created = False
+        self.enable_cuda_graph = enable_cuda_graph
 
     def _graph_replay(self, *inputs, **kwargs):
         for i in range(len(inputs)):
@@ -31,12 +29,15 @@ class DSUNet(torch.nn.Module):
         return self.static_output
 
     def forward(self, *inputs, **kwargs):
-        if self.cuda_graph_created:
-            outputs = self._graph_replay(*inputs, **kwargs)
+        if self.enable_cuda_graph:
+            if self.cuda_graph_created:
+                outputs = self._graph_replay(*inputs, **kwargs)
+            else:
+                self._create_cuda_graph(*inputs, **kwargs)
+                outputs = self._graph_replay(*inputs, **kwargs)
+            return outputs
         else:
-            self._create_cuda_graph(*inputs, **kwargs)
-            outputs = self._graph_replay(*inputs, **kwargs)
-        return outputs
+            return self._forward(*inputs, **kwargs)
 
     def _create_cuda_graph(self, *inputs, **kwargs):
         # warmup to create the workspace and cublas handle
@@ -58,25 +59,4 @@ class DSUNet(torch.nn.Module):
         self.cuda_graph_created = True
 
     def _forward(self, sample, timestamp, encoder_hidden_states, return_dict=True):
-        if self._trace_enabled:
-            if self._traced_unet is None:
-                print("Unet: start tracing with Nvfuser")
-                # force return tuple instead of dict
-                self._traced_unet = torch.jit.trace(
-                    lambda _sample,
-                    _timestamp,
-                    _encoder_hidden_states: self.unet(_sample,
-                                                      _timestamp,
-                                                      _encoder_hidden_states,
-                                                      return_dict=False),
-                    (sample,
-                     timestamp,
-                     encoder_hidden_states))
-                return self.unet(sample, timestamp, encoder_hidden_states)
-            else:
-                # convert return type to UNet2DConditionOutput
-                out_sample, *_ = self._traced_unet(sample, timestamp, encoder_hidden_states)
-                return diffusers.models.unet_2d_condition.UNet2DConditionOutput(
-                    out_sample)
-        else:
-            return self.unet(sample, timestamp, encoder_hidden_states, return_dict)
+        return self.unet(sample, timestamp, encoder_hidden_states, return_dict)

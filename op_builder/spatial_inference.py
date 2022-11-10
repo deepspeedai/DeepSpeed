@@ -1,16 +1,19 @@
+'''
+Copyright 2022 The Microsoft DeepSpeed Team
+'''
 from .builder import CUDAOpBuilder, installed_cuda_version
 
 
-class InferenceBuilder(CUDAOpBuilder):
-    BUILD_VAR = "DS_BUILD_TRANSFORMER_INFERENCE"
-    NAME = "transformer_inference"
+class SpatialInferenceBuilder(CUDAOpBuilder):
+    BUILD_VAR = "DS_BUILD_SPATIAL_INFERENCE"
+    NAME = "spatial_inference"
 
     def __init__(self, name=None):
         name = self.NAME if name is None else name
         super().__init__(name=name)
 
     def absolute_name(self):
-        return f'deepspeed.ops.transformer.inference.{self.NAME}_op'
+        return f'deepspeed.ops.spatial.{self.NAME}_op'
 
     def is_compatible(self, verbose=True):
         try:
@@ -34,21 +37,9 @@ class InferenceBuilder(CUDAOpBuilder):
 
     def sources(self):
         return [
-            'csrc/transformer/inference/csrc/pt_binding.cpp',
-            'csrc/transformer/inference/csrc/gelu.cu',
-            'csrc/transformer/inference/csrc/relu.cu',
-            'csrc/transformer/inference/csrc/layer_norm.cu',
-            'csrc/transformer/inference/csrc/softmax.cu',
-            'csrc/transformer/inference/csrc/dequantize.cu',
-            'csrc/transformer/inference/csrc/apply_rotary_pos_emb.cu',
-            'csrc/transformer/inference/csrc/transform.cu',
+            'csrc/spatial/csrc/opt_bias_add.cu',
+            'csrc/spatial/csrc/pt_binding.cpp',
         ]
 
-    def extra_ldflags(self):
-        if not self.is_rocm_pytorch():
-            return ['-lcurand']
-        else:
-            return []
-
     def include_paths(self):
-        return ['csrc/transformer/inference/includes', 'csrc/includes']
+        return ['csrc/spatial/includes', 'csrc/includes']
