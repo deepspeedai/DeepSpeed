@@ -207,9 +207,11 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
 
         if mpu is None:
             self.model_parallel_group = None
+            self.model_parallel_world_size = 1
             self.model_parallel_rank = 0
         else:
             self.model_parallel_group = mpu.get_model_parallel_group()
+            self.model_parallel_world_size = mpu.get_model_parallel_world_size()
             self.model_parallel_rank = bwc_tensor_model_parallel_rank(mpu)
 
         self.overflow = False
@@ -1545,7 +1547,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
     def _model_parallel_all_reduce(self, tensor, op):
         """ Perform all reduce within model parallel group, if any.
         """
-        if self.model_parallel_group is None:
+        if self.model_parallel_group is None or self.model_parallel_world_size == 1:
             pass
         else:
             dist.all_reduce(tensor=tensor, op=op, group=self.model_parallel_group)
