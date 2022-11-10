@@ -1048,10 +1048,6 @@ class DeepSpeedEngine(Module):
                     hasattr(param,
                             'ds_id') for param in self.module.parameters()):
                 self.__check_params(self.module, torch.bfloat16)
-            if self.zero_optimization_stage() == 0 and not self.pipeline_parallelism:
-                raise NotImplementedError(
-                    "When not running ZeRO, BF16 training support is only supported for Pipeline parallelism"
-                )
             self.module.bfloat16()
         else:
             self.__check_params(self.module, torch.float)
