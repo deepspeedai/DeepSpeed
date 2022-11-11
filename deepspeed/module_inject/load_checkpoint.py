@@ -15,6 +15,7 @@ def load_model_with_checkpoint(r_module,
     error_msgs = []
 
     def transpose(data):
+        data = data.contiguous()
         data1 = data.transpose(-1, -2).reshape(-1)
         data.reshape(-1).copy_(data1)
         data1 = None

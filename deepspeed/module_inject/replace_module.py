@@ -215,6 +215,7 @@ def generic_injection(module, fp16=False, enable_cuda_graph=True):
         attn_module = transformer_inference.DeepSpeedDiffusersAttention(config)
 
         def transpose(data):
+            data = data.contiguous()
             data.reshape(-1).copy_(data.transpose(-1, -2).contiguous().reshape(-1))
             data = data.reshape(data.shape[-1], data.shape[-2])
             data.to(torch.cuda.current_device())
@@ -531,7 +532,7 @@ def replace_transformer_layer(orig_layer_impl,
             # transpose it here to reduce inference cost!
             def transpose(data):
                 # temp move to cpu to avoid requiring extra GPU memory during the reshape
-                data = data.to('cpu')
+                data = data.to('cpu').contiguous()
                 data.reshape(-1).copy_(data.transpose(-1, -2).contiguous().reshape(-1))
                 data = data.reshape(data.shape[-1], data.shape[-2])
                 data.to(torch.cuda.current_device())
