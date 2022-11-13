@@ -605,7 +605,7 @@ class Init(InsertPostInitMethodToModuleSubClasses):
 
         .. note::
             Initializes ``deepspeed.comm`` if it has not already been done so.
-            See :meth:`deepseed.init_distributed` for more information.
+            See :meth:`deepspeed.init_distributed` for more information.
 
         .. note::
             Can also be used as a decorator:
