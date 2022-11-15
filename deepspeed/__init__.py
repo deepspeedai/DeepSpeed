@@ -235,27 +235,39 @@ def init_inference(model, config=None, **kwargs):
     Description: all four cases are valid and supported in DS init_inference() API.
 
     # Case 1: user provides no config and no kwargs. Default config will be used.
-    generator.model = deepspeed.init_inference(generator.model)
-    string = generator("DeepSpeed is")
-    print(string)
+
+    .. code-block:: python
+
+        generator.model = deepspeed.init_inference(generator.model)
+        string = generator("DeepSpeed is")
+        print(string)
 
     # Case 2: user provides a config and no kwargs. User supplied config will be used.
-    generator.model = deepspeed.init_inference(generator.model, config=config)
-    string = generator("DeepSpeed is")
-    print(string)
+
+    .. code-block:: python
+
+        generator.model = deepspeed.init_inference(generator.model, config=config)
+        string = generator("DeepSpeed is")
+        print(string)
 
     # Case 3: user provides no config and uses keyword arguments (kwargs) only.
-    generator.model = deepspeed.init_inference(generator.model,
-                                                mp_size=world_size,
-                                                dtype=torch.half,
-                                                replace_with_kernel_inject=True)
-    string = generator("DeepSpeed is")
-    print(string)
+
+    .. code-block:: python
+
+        generator.model = deepspeed.init_inference(generator.model,
+                                                    mp_size=world_size,
+                                                    dtype=torch.half,
+                                                    replace_with_kernel_inject=True)
+        string = generator("DeepSpeed is")
+        print(string)
 
     # Case 4: user provides config and keyword arguments (kwargs). Both config and kwargs are merged and kwargs take precedence.
-    generator.model = deepspeed.init_inference(generator.model, config={"dtype": torch.half}, replace_with_kernel_inject=True)
-    string = generator("DeepSpeed is")
-    print(string)
+
+    .. code-block:: python
+
+        generator.model = deepspeed.init_inference(generator.model, config={"dtype": torch.half}, replace_with_kernel_inject=True)
+        string = generator("DeepSpeed is")
+        print(string)
 
     Arguments:
         model: Required: original nn.module object without any wrappers

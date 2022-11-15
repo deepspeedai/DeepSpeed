@@ -1,3 +1,4 @@
+autodoc_pydantic
 docutils<0.18
 hjson
 packaging

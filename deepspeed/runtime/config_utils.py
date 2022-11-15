@@ -100,6 +100,23 @@ class DeepSpeedConfigModel(BaseModel):
         extra = "forbid"
 
 
+class pp_int(int):
+    """
+    A wrapper for integers that will return a custom string or comma-formatted
+    string of the integer. For example, print(pp_int(1e5)) will return
+    "10,000". This is useful mainly for auto-generated documentation purposes.
+    """
+    def __new__(cls, val, custom_print_str=None):
+        inst = super().__new__(cls, val)
+        inst.custom_print_str = custom_print_str
+        return inst
+
+    def __repr__(self):
+        if self.custom_print_str:
+            return self.custom_print_str
+        return f"{self.real:,}"
+
+
 # adapted from https://stackoverflow.com/a/50701137/9201239
 class ScientificNotationEncoder(json.JSONEncoder):
     """
