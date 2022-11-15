@@ -55,17 +55,20 @@ class DeepSpeedConfigModel(BaseModel):
         self._deprecated_fields_check(self)
 
     def _process_deprecated_field(self, pydantic_config, field):
+        # Get information about the deprecated field
         fields_set = pydantic_config.__fields_set__
         dep_param = field.name
+        kwargs = field.field_info.extra
+        new_param = kwargs.get("new_param", "")
         if dep_param in fields_set:
-            kwargs = field.field_info.extra
-            new_param = kwargs.get("new_param", "")
             logger.warning(f"Config parameter {dep_param} is deprecated" +
                            (f" use {new_param} instead" if new_param else ""))
             if new_param and kwargs.get("set_new_param", True):
+                # If the deprecate field was set and set_new_param is True, set new param value
                 assert (
                     new_param not in fields_set
                 ), f"Cannot provide deprecated parameter '{dep_param}' and replacing parameter '{new_param}' together"
+                # A custom function for converting the old param value to new param value can be provided
                 new_param_fn = kwargs.get("new_param_fn", lambda x: x)
                 param_value = new_param_fn(getattr(pydantic_config, dep_param))
                 try:
@@ -75,6 +78,13 @@ class DeepSpeedConfigModel(BaseModel):
                         f"Tried setting value for '{new_param}' with value from deprecated '{dep_param}'"
                     )
                     raise e
+        if new_param:
+            # Remember to remove the deprecate field if there is a replacing field
+            try:
+                delattr(pydantic_config, dep_param)
+            except Exception as e:
+                logger.error(f"Tried removing deprecated '{dep_param}' from config")
+                raise e
 
     def _deprecated_fields_check(self, pydantic_config):
         fields = pydantic_config.__fields__
