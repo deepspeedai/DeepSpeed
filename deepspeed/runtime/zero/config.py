@@ -139,7 +139,7 @@ class DeepSpeedZeroConfig(DeepSpeedConfigModel):
     """
     Enable offloading of model parameters to CPU or NVMe. This frees up GPU
     memory for larger models or batch sizes. Valid only with stage 3. Expects a
-    dictionary containing values for `DeepSpeedZeroOffloadParamConfig`_.
+    dictionary containing values for :any:`DeepSpeedZeroOffloadParamConfig`.
     """
 
     offload_optimizer: Optional[DeepSpeedZeroOffloadOptimizerConfig] = None
@@ -147,7 +147,7 @@ class DeepSpeedZeroConfig(DeepSpeedConfigModel):
     Enable offloading of optimizer state to CPU or NVMe, and optimizer
     computation to CPU. This frees up GPU memory for larger models or batch
     sizes. Valid for ZeRO stage 1, 2, 3. Expects a dictionary containing values
-    for `DeepSpeedZeroOffloadOptimizerConfig`_.
+    for :any:`DeepSpeedZeroOffloadOptimizerConfig`.
     """
 
     sub_group_size: int = Field(pp_int(1e9), ge=0)

@@ -125,19 +125,20 @@ class DeepSpeedInferenceConfig(DeepSpeedConfigModel):
     """
     Set to true to inject inference kernels for models such as, Bert, GPT2,
     GPT-Neo and GPT-J.  Otherwise, the injection_dict provides the names of two
-    linear layers as a tuple: (attention_output projection, transformer output
-    projection)
+    linear layers as a tuple:
+    `(attention_output projection, transformer output projection)`
     """
 
     dtype: DtypeEnum = torch.float16
     """
     Desired model data type, will convert model to this type.
-    Supported target types: torch.half, torch.int8, torch.float
+    Supported target types: `torch.half`, `torch.int8`, `torch.float`
     """
 
     tensor_parallel: DeepSpeedTPConfig = Field({}, alias="tp")
     """
-    Configuration for tensor parallelism used to split the model across several GPUs.
+    Configuration for tensor parallelism used to split the model across several
+    GPUs. Expects a dictionary containing values for :any:`DeepSpeedTPConfig`.
     """
 
     enable_cuda_graph: bool = False
@@ -147,7 +148,10 @@ class DeepSpeedInferenceConfig(DeepSpeedConfigModel):
     """
 
     zero: DeepSpeedZeroConfig = {}
-    """ ZeRO configuration to use with the Inference Engine. """
+    """
+    ZeRO configuration to use with the Inference Engine. Expects a dictionary
+    containing values for :any:`DeepSpeedZeroConfig`.
+    """
 
     triangular_masking: bool = Field(True, alias="tm")
     """
@@ -156,7 +160,10 @@ class DeepSpeedInferenceConfig(DeepSpeedConfigModel):
     """
 
     moe: Union[bool, DeepSpeedMoEConfig] = {}
-    """ Specify if the type of Transformer is MoE. """
+    """
+    Specify if the type of Transformer is MoE. Expects a dictionary containing
+    values for :any:`DeepSpeedMoEConfig`.
+    """
 
     quant: QuantizationConfig = {}
     """
@@ -167,7 +174,8 @@ class DeepSpeedInferenceConfig(DeepSpeedConfigModel):
     in if we want to mention that there is extra-grouping for the MLP part of a
     Transformer layer (e.g. (True, 8) shows we quantize the model using 8
     groups for all the network except the MLP part that we use 8 extra
-    grouping).
+    grouping). Expects a dictionary containing values for
+    :any:`QuantizationConfig`.
     """
 
     #todo: refactor the following 3 into the new checkpoint_config
@@ -191,7 +199,10 @@ class DeepSpeedInferenceConfig(DeepSpeedConfigModel):
     """
 
     checkpoint_config: InferenceCheckpointConfig = Field({}, alias="ckpt_config")
-    """ TODO: Add docs """
+    """
+    TODO: Add docs. Expects a dictionary containing values for
+    :any:`InferenceCheckpointConfig`.
+    """
 
     return_tuple: bool = True
     """
@@ -216,7 +227,7 @@ class DeepSpeedInferenceConfig(DeepSpeedConfigModel):
     injection_policy: Dict = Field(None, alias="injection_dict")
     """
     Dictionary mapping a client nn.Module to its corresponding injection
-    policy. e.g., {BertLayer : deepspeed.inference.HFBertLayerPolicy}
+    policy. e.g., `{BertLayer : deepspeed.inference.HFBertLayerPolicy}`
     """
 
     injection_policy_tuple: tuple = None

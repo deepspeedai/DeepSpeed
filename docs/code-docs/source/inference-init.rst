@@ -15,6 +15,19 @@ the ``InferenceEngine``. The config should be passed as a dictionary to
 .. _DeepSpeedInferenceConfig:
 .. autopydantic_model:: deepspeed.inference.config.DeepSpeedInferenceConfig
 
+.. _DeepSpeedTPConfig:
+.. autopydantic_model:: deepspeed.inference.config.DeepSpeedTPConfig
+
+.. _DeepSpeedMoEConfig:
+.. autopydantic_model:: deepspeed.inference.config.DeepSpeedMoEConfig
+
+.. _QuantizationConfig:
+.. autopydantic_model:: deepspeed.inference.config.QuantizationConfig
+
+.. _InferenceCheckpointConfig:
+.. autopydantic_model:: deepspeed.inference.config.InferenceCheckpointConfig
+
+
 Example config:
 
 .. code-block:: python
