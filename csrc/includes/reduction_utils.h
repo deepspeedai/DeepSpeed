@@ -514,11 +514,11 @@ DS_D_INLINE void partitioned_block(cg::thread_block& tb,
                                    float& val)
 {
     if (num_threads <= hw_warp_size) {
-        _warp<Op, num_threads>(warp, val);
+        _warp<Op, num_threads>(warp, &val);
     } else {
         constexpr int num_warps = num_threads / hw_warp_size;
         const int warp_offset = warp.meta_group_rank() & ~(num_warps - 1);
-        _block<num_warps, Op>(tb, warp, val, warp_offset);
+        _block<num_warps, Op>(tb, warp, &val, warp_offset);
     }
 }
 

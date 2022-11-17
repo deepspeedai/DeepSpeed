@@ -5,6 +5,7 @@ Copyright 2022 The Microsoft DeepSpeed Team
 #pragma once
 
 #include "ds_kernel_utils.h"
+#include "quantization.h"
 
 #include <cuda.h>
 #include <cuda_fp16.h>
@@ -41,30 +42,6 @@ Copyright 2022 The Microsoft DeepSpeed Team
 
 #define WARP_SIZE_BITS 5
 
-template <typename T>
-void launch_quantize_kernel(T* vals,
-                            int total_count,
-                            int group_num,
-                            int num_bits,
-                            cudaStream_t stream);
-template <typename T>
-void launch_sr_quantize_kernel(T* vals,
-                               int total_count,
-                               int group_num,
-                               int num_bits,
-                               cudaStream_t stream);
-template <typename T>
-void launch_quantize_kernel_asym(T* vals,
-                                 int total_count,
-                                 int group_num,
-                                 int num_bits,
-                                 cudaStream_t stream);
-template <typename T>
-void launch_sr_quantize_kernel_asym(T* vals,
-                                    int total_count,
-                                    int group_num,
-                                    int num_bits,
-                                    cudaStream_t stream);
 // Fused bias add with gelu activation
 template <typename T>
 void launch_bias_gelu(const T* input,
