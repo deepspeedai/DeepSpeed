@@ -1,9 +1,9 @@
 import torch
-from pydantic import validator
 from deepspeed.runtime.config_utils import DeepSpeedConfigModel
 from deepspeed.runtime.zero.config import DeepSpeedZeroConfig
 from pydantic import Field
-from typing import Dict
+from pydantic import validator
+from typing import Dict, Union
 from enum import Enum
 
 
@@ -155,7 +155,7 @@ class DeepSpeedInferenceConfig(DeepSpeedConfigModel):
     Note that the masking is application specific.
     """
 
-    moe: DeepSpeedMoEConfig = {}
+    moe: Union[bool, DeepSpeedMoEConfig] = {}
     """ Specify if the type of Transformer is MoE. """
 
     quant: QuantizationConfig = {}
@@ -231,24 +231,27 @@ class DeepSpeedInferenceConfig(DeepSpeedConfigModel):
     to the required token-length required for your use-case.
     """
 
-    mp_size: int = Field(1,
-                         deprecated=True,
-                         new_param="tensor_parallel",
-                         set_new_param=False)
+    mp_size: int = Field(1, deprecated=True, new_param="tensor_parallel.tp_size")
     """
     Desired model parallel size, default is 1 meaning no model parallelism.
     Deprecated, please use the ``tensor_parallel` config to control model
     parallelism.
     """
-    @validator("mp_size")
-    def tp_size_set(cls, field_value, values):
-        print(values["tensor_parallel"].__fields_set__)
-        if "tp_size" in values["tensor_parallel"].__fields_set__:
-            assert (
-                values["tensor_parallel"].tp_size == field_value
-            ), f"Cannot provide different values for mp_size ({field_value}) and tensor_parallel.tp_size ({values['tensor_parallel'].tp_size})"
-        else:
-            values["tensor_parallel"].tp_size = field_value
+    mpu: object = Field(None, deprecated=True, new_param="tensor_parallel.mpu")
+    ep_size: int = Field(1, deprecated=True, new_param="moe.ep_size")
+    ep_group: object = Field(None,
+                             alias="expert_group",
+                             deprecated=True,
+                             new_param="moe.ep_group")
+    ep_mp_group: object = Field(None,
+                                alias="expert_mp_group",
+                                deprecated=True,
+                                new_param="moe.ep_mp_group")
+
+    @validator("moe")
+    def moe_backward_compat(cls, field_value, values):
+        if isinstance(field_value, bool):
+            return DeepSpeedMoEConfig(moe=field_value)
         return field_value
 
     class Config:
