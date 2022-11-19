@@ -1,4 +1,8 @@
-#include <cstdio>
+/*
+Copyright 2022 The Microsoft DeepSpeed Team
+*/
+
+#include <cassert>
 #include "conversion_utils.h"
 #include "ds_kernel_utils.h"
 #include "memory_access_utils.h"
@@ -33,7 +37,12 @@ public:
     */
     DS_D_INLINE int8_t quantize(__half val);
 
+    DS_D_INLINE __half dequantize(int8_t val);
+
     DS_D_INLINE void store(float* params, int group_index);
+
+    // Initialize from memory
+    DS_D_INLINE Params(const float* params, int group_index);
 };
 
 template <int numBits>
@@ -61,10 +70,21 @@ public:
         return (int8_t)data_i32;
     }
 
+    DS_D_INLINE __half dequantize(int8_t val)
+    {
+        const float val_deq_f = conversion::to<float>(val) * scale;
+        return conversion::to<__half>(val_deq_f);
+    }
+
     DS_D_INLINE void store(float* params, int group_index)
     {
         const float store_scale = 1 / scale;
         mem_access::store_global<sizeof(float)>(params + group_index, &store_scale);
+    }
+
+    DS_D_INLINE Params(const float* params, int group_index)
+    {
+        mem_access::load_global<sizeof(float)>(&scale, params + group_index);
     }
 };
 
@@ -84,10 +104,14 @@ public:
         return (int8_t)data_i32;
     }
 
+    DS_D_INLINE __half dequantize(int8_t val) { assert(false); }
+
     DS_D_INLINE void store(float* params, int group_index)
     {
         mem_access::store_global<sizeof(float)>(params + group_index, &scale);
     }
+
+    DS_D_INLINE Params(const float* params, int group_index) { assert(false); }
 };
 
 template <int numBits>
@@ -117,11 +141,25 @@ public:
         return (int8_t)data_i32;
     }
 
+    DS_D_INLINE __half dequantize(int8_t val)
+    {
+        const float val_deq_f = conversion::to<float>(val) * scale + offset;
+        return conversion::to<__half>(val_deq_f);
+    }
+
     DS_D_INLINE void store(float* params, int group_index)
     {
+        // Codegen should turn this into stg.64
         const float store_scale = 1 / scale;
         mem_access::store_global<sizeof(float)>(params + 2 * group_index, &store_scale);
         mem_access::store_global<sizeof(float)>(params + 2 * group_index + 1, &offset);
+    }
+
+    DS_D_INLINE Params(const float* params, int group_index)
+    {
+        // Codegen should turn this into ldg.64
+        mem_access::load_global<sizeof(float)>(&scale, params + 2 * group_index);
+        mem_access::load_global<sizeof(float)>(&offset, params + 2 * group_index + 1);
     }
 };
 
@@ -293,7 +331,7 @@ Template Arguments :
     numBits -   Number of bits in quantized element.    int : 8 or 4
     qType   - Type of quantization to perform.          Type::Symmetric or Type::Asymmetric
 Function Arguments :
-    local_output -  Pointer to shared memory to store quantized data.   int8_t*
+    local_output -  Pointer to local memory to store quantized data.    int8_t*
     data         -  Pointer to input data.                              __half*
     Params       -  Parameters for quantization.                        Params<qType, numBits>
 */
@@ -306,7 +344,7 @@ Template Arguments :
     numBits -   Number of bits in quantized element.    int : 8 or 4
     qType   -   Type of quantization to perform.        Type::Symmetric or Type::Asymmetric
 Function Arguments :
-    local_output -  Pointer to shared memory to store quantized data.   int8_t*
+    local_output -  Pointer to local memory to store quantized data.    int8_t*
     data         -  Pointer to input data.                              __half2*
     Params       -  Parameters for quantization.                        Params<qType, numBits>
 */

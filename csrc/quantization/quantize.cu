@@ -1,5 +1,7 @@
-#include <cstdio>
-#include "custom_cuda_layers.h"
+/*
+Copyright 2022 The Microsoft DeepSpeed Team
+*/
+
 #include "memory_access_utils.h"
 #include "quantization.h"
 #include "quantization_utils.h"
@@ -99,7 +101,6 @@ void launch_quant(int8_t* output_data,
     // warp-sized blocks rather than stepping up to 64/96 threads
     const int one_step_threads = next_pow2((elems_per_group + h_per_step - 1) / h_per_step);
     const int threads_per_group = (one_step_threads < max_threads) ? one_step_threads : max_threads;
-    const int warps_per_group = threads_per_group / hw_warp_size;
 
     const int groups_per_block =
         is_subblock_schedule ? (max_threads + threads_per_group - 1) / threads_per_group : 1;

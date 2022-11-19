@@ -263,7 +263,7 @@ DS_D_INLINE __half init<ROpType::Min>()
 }
 
 template <>
-__half init<ROpType::Max>()
+DS_D_INLINE __half init<ROpType::Max>()
 {
     constexpr __half_raw neg_inf = {0xFC00};
     return __half(neg_inf);

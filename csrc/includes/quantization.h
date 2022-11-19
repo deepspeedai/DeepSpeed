@@ -25,6 +25,15 @@ void launch_quant(int8_t* output_data,
                   int elems_per_group,
                   cudaStream_t stream);
 
+void launch_dequantize_kernel(__half* dequant_data,
+                              const int8_t* q_data,
+                              const float* q_params,
+                              quantize::Type q_type,
+                              int num_bits,
+                              int elems_per_group,
+                              int total_elems,
+                              cudaStream_t stream);
+
 template <typename T>
 void launch_fake_quantize_kernel(T* vals,
                                  int total_count,

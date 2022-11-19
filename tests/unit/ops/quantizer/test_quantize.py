@@ -7,7 +7,6 @@ import torch
 from deepspeed.ops import op_builder
 
 inference_module = None
-torch_minor_version = None
 
 
 def run_quantize_ds(activations, num_groups, q_bits, is_symmetric_quant):

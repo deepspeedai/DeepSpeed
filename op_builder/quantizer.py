@@ -17,6 +17,7 @@ class QuantizerBuilder(CUDAOpBuilder):
             'csrc/quantization/pt_binding.cpp',
             'csrc/quantization/fake_quantizer.cu',
             'csrc/quantization/quantize.cu',
+            'csrc/quantization/dequantize.cu',
         ]
 
     def include_paths(self):

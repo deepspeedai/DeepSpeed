@@ -1,5 +1,6 @@
 #include <ATen/cuda/CUDAContext.h>
 #include <torch/extension.h>
+#include <cassert>
 #include <vector>
 #include "quantization.h"
 
@@ -112,6 +113,47 @@ std::vector<at::Tensor> quantize_kernel(at::Tensor& input_vals,
     return {output, params};
 }
 
+int num_decompressed_elems(at::Tensor& quantized_data, int num_bits)
+{
+    if (num_bits == 8) {
+        return quantized_data.size(-1);
+    } else if (num_bits == 4) {
+        return quantized_data.size(-1) * 2;
+    } else {
+        assert(false);
+        return 0;
+    }
+}
+
+at::Tensor dequantize(at::Tensor& quantized_data,
+                      at::Tensor& params,
+                      int groups,
+                      int num_bits,
+                      quantize::Type quant_type)
+{
+    auto output_options = at::TensorOptions()
+                              .dtype(torch::kFloat16)
+                              .layout(at::kStrided)
+                              .device(at::kCUDA)
+                              .requires_grad(false);
+    const int final_dim_size = num_decompressed_elems(quantized_data, num_bits);
+    auto output = torch::empty({quantized_data.size(0), final_dim_size}, output_options);
+
+    const int total_elems = quantized_data.size(0) * final_dim_size;
+    const int elems_per_group = total_elems / groups;
+
+    launch_dequantize_kernel((__half*)output.data_ptr(),
+                             (const int8_t*)quantized_data.data_ptr(),
+                             (const float*)params.data_ptr(),
+                             quant_type,
+                             num_bits,
+                             elems_per_group,
+                             total_elems,
+                             at::cuda::getCurrentCUDAStream());
+
+    return output;
+}
+
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m)
 {
     m.def("ds_quantize_fp32", &ds_quantize<float>, "DeepSpeed Quantize with fp32 (CUDA)");
@@ -133,4 +175,5 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m)
         .value("IntegerSymmetric", quantize::Type::IntegerSymmetric)
         .export_values();
     m.def("quantize", &quantize_kernel);
+    m.def("dequantize", &dequantize);
 }
