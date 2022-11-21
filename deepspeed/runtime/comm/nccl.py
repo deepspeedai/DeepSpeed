@@ -68,7 +68,7 @@ class NcclBackend(object):
             buffer_m = torch.cat([buffer_m, empty_tensor])
 
         buffer_m.add_(worker_error)
-        worker_scale = torch.norm(buffer_m) / np.sqrt(torch.numel(buffer_m))
+        worker_scale = torch.norm(buffer_m) / np.sqrt(buffer_m.numel())
         worker_error.set_(buffer_m - worker_scale *
                           buffer_m.sign().add_(1).bool().float().add_(-0.5).mul_(2.0))
 
