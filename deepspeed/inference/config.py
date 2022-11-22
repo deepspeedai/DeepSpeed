@@ -233,7 +233,9 @@ class DeepSpeedInferenceConfig(DeepSpeedConfigModel):
     injection_policy_tuple: tuple = None
     """ TODO: Add docs """
 
-    config: Dict = None  # todo: really no need for this field if we can refactor
+    config: Dict = Field(
+        None,
+        alias="args")  # todo: really no need for this field if we can refactor
 
     max_out_tokens: int = Field(1024, alias="max_tokens")
     """
