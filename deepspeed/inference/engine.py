@@ -102,6 +102,8 @@ class InferenceEngine(Module):
 
         if isinstance(self.module, torch.nn.Module):
             moe, _ = has_moe_layers(self.module)
+        else:
+            moe = False
 
         if moe and dist.get_world_size() > 1:
             self._create_ep_parallel_group(config.moe.moe_experts)
