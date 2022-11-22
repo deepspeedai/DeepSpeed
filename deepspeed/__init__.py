@@ -4,6 +4,7 @@ Copyright 2020 The Microsoft DeepSpeed Team
 
 import sys
 import types
+import json
 from typing import Optional, Union
 import torch
 from torch.optim import Optimizer
@@ -229,7 +230,7 @@ def default_inference_config():
     return DeepSpeedInferenceConfig().dict()
 
 
-def init_inference(model, config=None, **kwargs):
+def init_inference(model, config={}, **kwargs):
     """Initialize the DeepSpeed InferenceEngine.
 
     Description: all four cases are valid and supported in DS init_inference() API.
@@ -272,7 +273,7 @@ def init_inference(model, config=None, **kwargs):
     Arguments:
         model: Required: original nn.module object without any wrappers
 
-        config: Optional: instead of arguments, you can pass in a DS inference config dict
+        config: Optional: instead of arguments, you can pass in a DS inference config dict or path to JSON file
 
     Returns:
         A deepspeed.InferenceEngine wrapped model.
@@ -283,17 +284,25 @@ def init_inference(model, config=None, **kwargs):
         __git_branch__),
              ranks=[0])
 
-    # User did not pass a config, use defaults
-    if config is None:
-        config_dict = kwargs
-    else:
+    # Load config_dict from config first
+    if isinstance(config, str):
+        with open(config, "r") as f:
+            config_dict = json.load(f)
+    elif isinstance(config, dict):
         config_dict = config
+    else:
+        raise ValueError(
+            f"'config' argument expected string or dictionary, got {type(config)}")
 
-    # if config and kwargs both are passed, merge them, and overwrite using kwargs
-    if config and kwargs:
-        config_dict = {}
-        config_dict.update(config)
-        config_dict.update(kwargs)
+    # Update with values from kwargs, ensuring no conflicting overlap between config and kwargs
+    overlap_keys = set(config_dict.keys()).intersection(kwargs.keys())
+    # If there is overlap, error out if values are different
+    for key in overlap_keys:
+        if config_dict[key] != kwargs[key]:
+            raise ValueError(
+                f"Conflicting argument '{key}' in 'config':{config_dict[key]} and kwargs:{kwargs[key]}"
+            )
+    config_dict.update(kwargs)
 
     ds_inference_config = DeepSpeedInferenceConfig(**config_dict)
 
