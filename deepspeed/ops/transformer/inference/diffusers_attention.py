@@ -62,73 +62,47 @@ class DeepSpeedDiffusersAttentionFunction(Function):
             x = x.permute(0, 2, 1, 3)
             return x.contiguous()
 
-        def compute_attention(qkv_out, input_mask):
-            no_masking = input_mask is None
-
-            head_size = (qkv_out.shape[-1] // 3 // num_attention_heads_per_partition)
-            if no_masking:
-                input_mask = torch.empty(1)
-
-            context_layer, _, _ = score_context_func(
-                qkv_out,
-                ((1 - input_mask).to(qkv_out.dype) *
-                 minus_inf) if input_mask.dtype == torch.int64 else input_mask,
-                config.rotary_dim,
-                config.rotate_half,
-                config.rotate_every_two,
-                num_attention_heads_per_partition,
-                (1 / norm_factor if config.scale_attention else 1.0),
-                config.triangular_masking,
-                config.local_attention,
-                config.window_size,
-                no_masking,
-                config.layer_id,
-                DeepSpeedDiffusersAttention.layer_id,
-                torch.empty(1))
-            return context_layer
-
         def selfAttention_fp(input, context, input_mask):
             if config.fp16 and input.dtype == torch.float32:
                 input = input.half()
             head_size = input.shape[-1] // config.heads
             do_flash_attn = (head_size <= 128)
             scale = (1 / norm_factor) * (1 / norm_factor)
-            if context == None:
+            if do_flash_attn and context == None:
                 qkv_out = linear_func(input,
                                       attn_qkvw,
                                       attn_qkvb if attn_qkvb is not None else attn_qkvw,
                                       attn_qkvb is not None,
                                       do_flash_attn,
                                       config.heads)
-                if do_flash_attn:
-                    context_layer = triton_flash_attn_kernel(qkv_out[0],
-                                                             qkv_out[1],
-                                                             qkv_out[2],
-                                                             scale,
-                                                             input.shape[-2] % 128 == 0)
-                    context_layer = _transpose_for_context(context_layer[:,:,:,:head_size])
-                else:
-                    context_layer = compute_attention(qkv_out, input_mask)
+
+                context_layer = triton_flash_attn_kernel(qkv_out[0],
+                                                         qkv_out[1],
+                                                         qkv_out[2],
+                                                         scale,
+                                                         input.shape[-2] % 128 == 0)
+                context_layer = _transpose_for_context(context_layer[:,:,:,:head_size])
+
             else:
-                query = torch.matmul(input, attn_qw)
-                key = torch.matmul(context, attn_kw)
-                value = torch.matmul(context, attn_vw)
-                query, key, value = inference_cuda_module.pad_transform_fp16(query, key, value, config.heads, do_flash_attn)
-                if do_flash_attn:
-                    context_layer = triton_flash_attn_kernel(query,
-                                                             key,
-                                                             value,
-                                                             scale,
-                                                             input.shape[-2] % 128 == 0)
-                    context_layer = _transpose_for_context(context_layer[:,:,:,:head_size])
+                do_flash_attn = False
+                if context is not None:
+                    query = torch.matmul(input, attn_qw)
+                    key = torch.matmul(context, attn_kw)
+                    value = torch.matmul(context, attn_vw)
                 else:
-                    attention_scores = (torch.matmul(query,
-                                                     key.transpose(-1,
-                                                                   -2)) *
-                                        scale).softmax(dim=-1)
-                    context_layer = _transpose_for_context(
-                        torch.matmul(attention_scores,
-                                     value))
+                    qkv = torch.matmul(input, attn_qkvw)
+                    query, key, value = qkv.chunk(3, dim=-1)
+                    query = query.contiguous()
+                    key = key.contiguous()
+                    value = value.contiguous()
+                query, key, value = inference_cuda_module.pad_transform_fp16(query, key, value, config.heads, do_flash_attn)
+                attention_scores = (torch.matmul(query,
+                                                 key.transpose(-1,
+                                                               -2)) *
+                                    scale).softmax(dim=-1)
+                context_layer = _transpose_for_context(
+                    torch.matmul(attention_scores,
+                                 value))
 
             output = linear_func(context_layer,
                                  attn_ow,

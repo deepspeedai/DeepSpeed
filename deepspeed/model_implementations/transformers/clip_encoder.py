@@ -18,6 +18,7 @@ class DSClipEncoder(torch.nn.Module):
         self._cuda_graphs = [None, None]
         self.iter = 0
         self.enable_cuda_graph = enable_cuda_graph
+        self.config = self.enc.config
 
     def _build_causal_attention_mask(self, bsz, seq_len, dtype):
         mask = torch.empty(bsz,
