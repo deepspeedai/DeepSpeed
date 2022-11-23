@@ -230,7 +230,7 @@ def default_inference_config():
     return DeepSpeedInferenceConfig().dict()
 
 
-def init_inference(model, config={}, **kwargs):
+def init_inference(model, config=None, **kwargs):
     """Initialize the DeepSpeed InferenceEngine.
 
     Description: all four cases are valid and supported in DS init_inference() API.
@@ -285,6 +285,8 @@ def init_inference(model, config={}, **kwargs):
              ranks=[0])
 
     # Load config_dict from config first
+    if config is None:
+        config = {}
     if isinstance(config, str):
         with open(config, "r") as f:
             config_dict = json.load(f)
