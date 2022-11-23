@@ -333,7 +333,6 @@ class InferenceEngine(Module):
         load_module_recursive(r_module)
 
     def _apply_injection_policy(self, config, client_module=None):
-
         # client_module is only passed when using the injection_dict method.
         checkpoint_dir = config.checkpoint
         checkpoint = SDLoaderFactory.get_sd_loader_json(
@@ -346,34 +345,12 @@ class InferenceEngine(Module):
                           enable_cuda_graph=config.enable_cuda_graph)
 
         if isinstance(self.module, torch.nn.Module):
-            replace_transformer_layer(
-                client_module,
-                self.module,
-                triangular_masking=config.triangular_masking,
-                policy=config.injection_policy_tuple,
-                mp_size=config.tensor_parallel.tp_size,
-                mp_group=self.mp_group,
-                ep_group=self.ep_group,
-                expert_mp_group=self.expert_mp_group,
-                config=self.config,
-                fp16=(config.dtype == torch.half) or (config.dtype == torch.int8),
-                training=False,
-                return_tuple=config.return_tuple,
-                quantize=(config.dtype == torch.int8),
-                quantize_settings=(self.quantization_scales,
-                                   self.quantize_merge_count,
-                                   self.mlp_extra_grouping,
-                                   self.quantize_groups),
-                replace_with_kernel_inject=config.replace_with_kernel_inject,
-                moe=config.moe,
-                moe_experts=config.moe.moe_experts,
-                moe_type=config.moe.moe_type,
-                training_mp_size=config.training_mp_size,
-                checkpoint_dict=checkpoint,
-                save_mp_checkpoint_path=config.save_mp_checkpoint_path,
-                base_dir=config.base_dir,
-                enable_cuda_graph=config.enable_cuda_graph,
-                max_out_tokens=config.max_out_tokens)
+            # config is our DeepSpeedInferenceConfig and self.config is the HF model config
+            replace_transformer_layer(client_module,
+                                      self.module,
+                                      checkpoint,
+                                      config,
+                                      self.config)
 
     def _get_all_ckpt_names(self, checkpoints_path, tag):
         ckpt_file_pattern = self._get_ckpt_name(checkpoints_path,
