@@ -392,6 +392,18 @@ CHECKPOINT_PARALLEL_WRITE_PIPELINE_STAGE = "pipeline_stage"
 CHECKPOINT_PARALLEL_WRITE_PIPELINE_STAGE_DEFAULT = False
 
 #########################################
+# Data types config params
+#########################################
+# "data_types": {
+#   grad_accum_dtype=["bf16"|"fp16"|"fp32"]
+#   }
+# }
+
+DATA_TYPES = "data_types"
+GRAD_ACCUM_DTYPE = "grad_accum_dtype"
+GRAD_ACCUM_DTYPE_DEFAULT = None
+
+#########################################
 # Drop the last incomplete Batch
 # #########################################
 # dataloader_drop_last. By default, this feature is not enabled.

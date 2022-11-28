@@ -6,7 +6,7 @@ from torch.optim.lr_scheduler import _LRScheduler, LambdaLR
 
 from unit.simple_model import SimpleModel, random_dataloader
 from unit.common import DistributedTest
-from unit.util import required_torch_version
+from unit.util import required_torch_version, bf16_required_version_check, required_amp_check
 
 import deepspeed
 from deepspeed.ops.adam import FusedAdam
@@ -114,6 +114,89 @@ class TestConfigOptimizer(DistributedTest):
                                                     model_parameters=model_parameters)
 
         assert isinstance(ds_optimizer, FusedAdam)
+
+
+@pytest.mark.parametrize('optimizer_extension', ['zero', 'amp', None])
+@pytest.mark.parametrize('model_dtype', ['fp16', 'bf16', 'fp32'])
+@pytest.mark.parametrize('grad_accum_dtype', [None, 'fp16', 'bf16', 'fp32'])
+class TestOptimizerImplementation(DistributedTest):
+    world_size = 1
+
+    def test(self, optimizer_extension, model_dtype, grad_accum_dtype):
+        zero_stage = 1 if optimizer_extension == 'zero' else 0
+        amp = True if optimizer_extension == 'amp' else False
+        fp16 = True if model_dtype == 'fp16' else False
+        bf16 = True if model_dtype == 'bf16' else False
+        # Skip checks
+        if bf16 and not bf16_required_version_check():
+            pytest.skip(
+                "DeepSpeed BFloat16 tests need torch >= 1.10, NCCL >= 2.10.3, CUDA > =11.0 and HW support for BFloat16 to run correctly"
+            )
+        if amp and not required_amp_check():
+            pytest.skip("Amp is not installed can't run amp check")
+        # Config declaration
+        ds_config = {
+            "train_batch_size": 1,
+            'fp16': {
+                'enabled': fp16
+            },
+            'bf16': {
+                'enabled': bf16
+            },
+            'amp': {
+                'enabled': amp
+            },
+            'zero_optimization': {
+                "stage": zero_stage
+            },
+            "data_types": {
+                "grad_accum_dtype": grad_accum_dtype
+            },
+            "optimizer": {
+                "type": "Adam",
+                "params": {
+                    "lr": 0.001
+                }
+            }
+        }
+
+        key = (optimizer_extension, model_dtype, grad_accum_dtype)
+
+        # Enumerate supported configurations
+        is_supported = {}
+        # Zero Wrapper
+        is_supported[('zero', 'fp16', None)] = True
+        is_supported[('zero', 'fp16', 'fp16')] = True
+        is_supported[('zero', 'bf16', 'bf16')] = True
+        is_supported[('zero', 'fp32', None)] = True
+        is_supported[('zero', 'fp32', 'fp32')] = True
+        # Amp Wrapper
+        is_supported[('amp', 'fp32', None)] = True
+        is_supported[('amp', 'fp32', 'fp32')] = True
+        # FP16 Wrapper
+        is_supported[(None, 'fp16', None)] = True
+        is_supported[(None, 'fp16', 'fp16')] = True
+        # BF16 Wrapper
+        is_supported[(None, 'bf16', 'fp32')] = True
+        is_supported[(None, 'bf16', None)] = True
+        # No Wrapper
+        is_supported[(None, 'fp32', None)] = True
+        is_supported[(None, 'fp32', 'fp32')] = True
+
+        hidden_dim = 10
+        model = SimpleModel(hidden_dim)
+        model_parameters = list(model.parameters())
+
+        if key in is_supported:
+            _, ds_optimizer, _, _ = deepspeed.initialize(config=ds_config,
+                                                        model=model,
+                                                        model_parameters=model_parameters)
+            assert True
+        else:
+            with pytest.raises(NotImplementedError):
+                _, ds_optimizer, _, _ = deepspeed.initialize(config=ds_config,
+                                                            model=model,
+                                                            model_parameters=model_parameters)
 
 
 @pytest.mark.parametrize("scheduler_type", [None, _LRScheduler, Callable])

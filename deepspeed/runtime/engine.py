@@ -25,6 +25,7 @@ from deepspeed.runtime.zero.stage_1_and_2 import DeepSpeedZeroOptimizer
 from deepspeed.runtime.zero.partition_parameters import ZeroParamStatus
 from deepspeed.runtime.zero.utils import is_zero_supported_optimizer, ZeRORuntimeException
 from deepspeed.runtime.zero.parameter_offload import DeepSpeedZeRoOffload
+from deepspeed.runtime.zero.config import ZERO_OPTIMIZATION
 
 from deepspeed.runtime.fp16.fused_optimizer import FP16_Optimizer
 from deepspeed.runtime.fp16.unfused_optimizer import FP16_UnfusedOptimizer
@@ -37,7 +38,7 @@ from deepspeed.runtime.config import DeepSpeedConfig, DEEPSPEED_OPTIMIZERS, \
 from deepspeed.runtime.dataloader import DeepSpeedDataLoader
 from deepspeed.runtime.constants import \
     ROUTE_TRAIN, ROUTE_PREDICT, ROUTE_EVAL, \
-    PLD_THETA, PLD_GAMMA, BFLOAT16, FP16
+    PLD_THETA, PLD_GAMMA, BFLOAT16, FP16, AMP
 from deepspeed.runtime.zero.config import ZeroStageEnum
 from deepspeed.compression import compression_scheduler
 from deepspeed.compression.constants import \
@@ -77,6 +78,8 @@ from ..git_version_info import version
 
 from deepspeed.profiling.flops_profiler.profiler import FlopsProfiler
 from deepspeed.utils.logging import print_json_dist
+
+from deepspeed.inference.config import DtypeEnum
 
 # Set to torch's distributed package or deepspeed.comm based inside DeepSpeedEngine init
 dist = None
@@ -796,6 +799,23 @@ class DeepSpeedEngine(Module):
     def aio_config(self):
         return self._config.aio_config
 
+    def get_data_types(self):
+        model_dtype = torch.float32
+        if self.fp16_enabled():
+            model_dtype = torch.float16
+        elif self.bfloat16_enabled():
+            model_dtype = torch.bfloat16
+
+        if self._config.grad_accum_dtype == None:
+            if model_dtype == torch.bfloat16:
+                grad_accum_dtype = torch.float32
+            else:
+                grad_accum_dtype = model_dtype
+        else:
+            grad_accum_dtype = DtypeEnum(self._config.grad_accum_dtype).value
+
+        return (model_dtype, grad_accum_dtype)
+
     def _configure_lr_scheduler(self, client_lr_scheduler):
         # First check for scheduler in json configuration
         lr_scheduler = self._scheduler_from_config(self.optimizer)
@@ -1106,6 +1126,61 @@ class DeepSpeedEngine(Module):
             ])
             assert occurrence <= 1, f"Parameter with name: {name} occurs multiple times in optimizer.param_groups. Make sure it only appears once to prevent undefined behaviour."
 
+    def _do_optimizer_sanity_check(self, basic_optimizer):
+        model_dtype, grad_accum_dtype = self.get_data_types()
+        zero_enabled = self.zero_optimization()
+        amp_enabled = self.amp_enabled()
+        # config based assertions
+        assert (
+            not (amp_enabled and zero_enabled)
+        ), "Amp and ZeRO are not currently compatible, please use (legacy) fp16 mode which performs similar to amp opt_mode=O2"
+        if zero_enabled:
+            if model_dtype != grad_accum_dtype:
+                raise NotImplementedError(
+                    "Model data type and gradient accumulation data type must be equal to use ZeRO"
+                )
+            if not is_zero_supported_optimizer(basic_optimizer):
+                assert (
+                    self.zero_allow_untested_optimizer()
+                ), 'You are using an untested ZeRO Optimizer. Please add <"zero_allow_untested_optimizer": true> in the configuration file to use it.'
+
+                if self.global_rank == 0:
+                    logger.warning(
+                        "**** You are using ZeRO with an untested optimizer, proceed with caution *****"
+                    )
+            return ZERO_OPTIMIZATION
+        elif amp_enabled:
+            if model_dtype != grad_accum_dtype:
+                raise NotImplementedError(
+                    "Model data type and gradient accumulation data type must be equal to use Amp"
+                )
+            if model_dtype == torch.bfloat16 or model_dtype == torch.float16:
+                raise NotImplementedError(
+                    "Cannot enable both amp with (legacy) fp16 or bfloat16 mode")
+            try:
+                logger.info("Initializing Apex amp from: {}".format(amp.__path__))
+            except NameError:
+                # If apex/amp is available it will be imported above
+                raise RuntimeError(
+                    "Unable to import apex/amp, please make sure it is installed")
+            return AMP
+        # data type checks
+        elif model_dtype == grad_accum_dtype:
+            if model_dtype == torch.bfloat16:
+                raise NotImplementedError(
+                    "Bfloat16 wrapper must use a gradient accumulation type of fp32, enable ZeRO to use Bfloat16 gradient accumulation"
+                )
+            if model_dtype == torch.float16:
+                return FP16
+            # else optimizer_wrapper = None
+        elif model_dtype == torch.bfloat16 and grad_accum_dtype == torch.float32:
+            return BFLOAT16
+        else:
+            raise NotImplementedError(
+                "unsupported mix of model dtype and gradient accummulation type")
+
+        return None
+
     # Configure optimizer
     def _configure_optimizer(self, client_optimizer, model_parameters):
         if client_optimizer is not None:
@@ -1135,44 +1210,26 @@ class DeepSpeedEngine(Module):
             basic_optimizer.__class__.__name__),
                  ranks=[0])
 
-        if self.zero_optimization():
-            assert (
-                not self.amp_enabled()
-            ), "Amp and ZeRO are not currently compatible, please use (legacy) fp16 mode which performs similar to amp opt_mode=O2"
-            if not is_zero_supported_optimizer(basic_optimizer):
-                assert (
-                    self.zero_allow_untested_optimizer()
-                ), 'You are using an untested ZeRO Optimizer. Please add <"zero_allow_untested_optimizer": true> in the configuration file to use it.'
+        optimizer_wrapper = self._do_optimizer_sanity_check(basic_optimizer)
 
-                if self.global_rank == 0:
-                    logger.warning(
-                        "**** You are using ZeRO with an untested optimizer, proceed with caution *****"
-                    )
-            # This optimizer in engine is ZeRO optimizer of stage1_2 or stage3 based on the 'stage' config,
-            # while ZeRO optimizer itself wraps the original optimizer.
+        if optimizer_wrapper == ZERO_OPTIMIZATION:
             self.optimizer = self._configure_zero_optimizer(basic_optimizer)
-        elif self.amp_enabled():
-            assert not (self.fp16_enabled() or self.bfloat16_enabled()), "Cannot enable both amp with (legacy) fp16 or bfloat16 mode"
+        elif optimizer_wrapper == AMP:
             amp_params = self.amp_params()
             log_dist(f"Initializing AMP with these params: {amp_params}", ranks=[0])
-            try:
-                logger.info("Initializing Apex amp from: {}".format(amp.__path__))
-            except NameError:
-                # If apex/amp is available it will be imported above
-                raise RuntimeError(
-                    "Unable to import apex/amp, please make sure it is installed")
             model, self.optimizer = amp.initialize(
                 self.module, basic_optimizer, **amp_params
             )
             self._set_client_model(model)
             self._broadcast_model()
             # TODO: maybe need to broadcast experts differently?
-        elif self.fp16_enabled():
+        elif optimizer_wrapper == FP16:
             self.optimizer = self._configure_fp16_optimizer(basic_optimizer)
-        elif self.bfloat16_enabled():
+        elif optimizer_wrapper == BFLOAT16:
             self.optimizer = self._configure_bf16_optimizer(basic_optimizer)
         else:
             self.optimizer = basic_optimizer
+
         log_dist("DeepSpeed Final Optimizer = {}".format(self.optimizer_name()),
                  ranks=[0])
 

@@ -45,3 +45,11 @@ def required_maximum_torch_version(major_version, minor_version):
         return False
 
     return TORCH_MAJOR < major_version or TORCH_MINOR <= minor_version
+
+
+def required_amp_check():
+    from importlib.util import find_spec
+    if find_spec('apex') is None:
+        return False
+    else:
+        return True

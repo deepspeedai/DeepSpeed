@@ -1513,3 +1513,18 @@ Different pruning sets, this is used for different pruning parameters. In this e
 | Description                                                   | Default |
 | ------------------------------------------------------------- | ------- |
 | Use pipeline stages to parallelize the writing of checkpoints.| `false` |
+
+### Data Type options
+
+```json
+"data_types": {
+    "grad_accum_dtype"=["fp32"|"fp16"|"bf16"]
+    }
+}
+```
+
+<i>**grad_accum_dtype**</i>: ["fp32"|"fp16"|"bf16"]
+
+| Description                                                                                                   | Default |
+| --------------------------------------------------------------------------------------------------------------| ------- |
+| Specifies the data type in which to do gradient accumulation. If None the default is to match the model type. |  None   |

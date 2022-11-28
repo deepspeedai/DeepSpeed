@@ -656,6 +656,10 @@ def get_checkpoint_params(param_dict):
     return param_dict.get(CHECKPOINT, {})
 
 
+def get_data_types_params(param_dict):
+    return param_dict.get(DATA_TYPES, {})
+
+
 def get_checkpoint_tag_validation_mode(checkpoint_params):
     tag_validation_mode = checkpoint_params.get(CHECKPOINT_TAG_VALIDATION,
                                                 CHECKPOINT_TAG_VALIDATION_DEFAULT)
@@ -904,6 +908,10 @@ class DeepSpeedConfig(object):
         self.use_node_local_storage = checkpoint_params.get(
             USE_NODE_LOCAL_STORAGE_CHECKPOINT,
             USE_NODE_LOCAL_STORAGE_CHECKPOINT_DEFAULT)
+
+        data_types_params = get_data_types_params(param_dict)
+        self.grad_accum_dtype = data_types_params.get(GRAD_ACCUM_DTYPE,
+                                                      GRAD_ACCUM_DTYPE_DEFAULT)
 
         par_write_pipe = get_checkpoint_parallel_write_pipeline(checkpoint_params)
         self.checkpoint_parallel_write_pipeline = par_write_pipe
