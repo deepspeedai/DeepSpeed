@@ -2038,7 +2038,7 @@ class DeepSpeedEngine(Module):
         assert self.optimizer is not None and not isinstance(self.optimizer, DummyOptim), \
             "must provide optimizer during init in order to use step"
 
-        report_progress = self.global_rank == 0 if self.global_rank else True
+        report_progress = False
 
         self._step_applied = False  # assume False, will flip to True
 
@@ -2064,6 +2064,8 @@ class DeepSpeedEngine(Module):
                 self._take_model_step(lr_kwargs, self.block_eigenvalue)
             else:
                 self._take_model_step(lr_kwargs)
+
+            report_progress = self.global_rank == 0 if self.global_rank else True
 
         self.tput_timer.stop(report_progress)
 

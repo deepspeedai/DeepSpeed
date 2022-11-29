@@ -193,18 +193,19 @@ class ThroughputTimer:
 
             curr_samples_sec = (self.batch_size * self.num_workers) / duration
 
-            if self.local_step_count % self.steps_per_output == 0:
-                if report_speed:
-                    self.logging(
-                        "{}/{}, RunningAvgSamplesPerSec={}, CurrSamplesPerSec={}, MemAllocated={}GB, MaxMemAllocated={}GB"
-                        .format(self.epoch_count,
-                                self.local_step_count,
-                                self.avg_samples_per_sec(),
-                                curr_samples_sec,
-                                round(torch.cuda.memory_allocated() / 1024**3,
-                                      2),
-                                round(torch.cuda.max_memory_allocated() / 1024**3,
-                                      2)))
+            if report_speed:
+                self.logging(
+                    "{}/{}, RunningAvgSamplesPerSec={}, CurrSamplesPerSec={}, MemAllocated={}GB, MaxMemAllocated={}GB"
+                    .format(
+                        self.epoch_count,
+                        self.local_step_count,
+                        self.avg_samples_per_sec(),
+                        curr_samples_sec,
+                        round(torch.cuda.memory_allocated() / 1024**3,
+                              2),
+                        round(torch.cuda.max_memory_allocated() / 1024**3,
+                              2),
+                    ))
                 if self.monitor_memory:
                     virt_mem = psutil.virtual_memory()
                     swap = psutil.swap_memory()
