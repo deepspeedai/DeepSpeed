@@ -260,6 +260,10 @@ class DeepSpeedInferenceConfig(DeepSpeedConfigModel):
                                 alias="expert_mp_group",
                                 deprecated=True,
                                 new_param="moe.ep_mp_group")
+    moe_experts: list = Field([1], deprecated=True, new_param="moe.moe_experts")
+    moe_type: MoETypeEnum = Field(MoETypeEnum.standard,
+                                  deprecated=True,
+                                  new_param="moe.type")
 
     @validator("moe")
     def moe_backward_compat(cls, field_value, values):
