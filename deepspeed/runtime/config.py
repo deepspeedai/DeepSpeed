@@ -8,6 +8,7 @@ from typing import Union
 import torch
 import json
 import copy
+import base64
 
 from .constants import *
 from .fp16.loss_scaler import (
@@ -724,9 +725,13 @@ class DeepSpeedConfig(object):
                      "r"),
                 object_pairs_hook=dict_raise_error_on_duplicate_keys)
         else:
-            raise ValueError(
-                f"Expected a string path to an existing deepspeed config, or a dictionary. Received: {config}"
-            )
+            try:
+                config_decoded = base64.urlsafe_b64decode(config).decode('utf-8')
+                self._param_dict = json.loads(config_decoded)
+            except (UnicodeDecodeError, AttributeError):
+                raise ValueError(
+                    f"Expected a string path to an existing deepspeed config, or a dictionary or a valid base64. Received: {config}"
+                )
         try:
             self.global_rank = dist.get_rank()
             if mpu is None:

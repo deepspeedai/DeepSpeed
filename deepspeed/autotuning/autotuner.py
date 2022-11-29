@@ -87,6 +87,8 @@ class Autotuner:
             self.rm.nodes), "num_nodes in the autotuning configuration must not be less than the --num_nodes value in the train script if any"
 
         self.records = {}
+        self.optimal_cmd = None
+        self.optmal_ds_config = None
 
     def print_tuning_results(self):
         """Print the autotuning results in tabular format.
@@ -1125,9 +1127,6 @@ class Autotuner:
             ds_config_path = os.path.join(self.results_dir, "ds_config_optimal.json")
             json.dump(ds_config, open(ds_config_path, "w"))
 
-            idx = cmd.index(os.path.join(exp_dir, "ds_config.json"))
-            cmd[idx] = ds_config_path
-
             cmd_path = os.path.join(self.results_dir, "cmd_optimal.txt")
             with open(cmd_path, "w") as fd:
                 fd.write(" ".join(cmd))
@@ -1138,9 +1137,6 @@ class Autotuner:
             logger.info(
                 f"Wrote the optimal DeepSpeed configuration found by autotuning to {ds_config_path}, and the corresponding DeepSpeed command to {cmd_path}"
             )
-        else:
-            self.optimal_cmd = None
-            self.optmal_ds_config = None
 
     def run_after_tuning(self):
         """ Launches the training with the optimal DeepSpeed configuration found through the autotuning process.
