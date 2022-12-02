@@ -19,7 +19,10 @@ if older_torch():
         return group.WORLD
 
     def get_global_rank(group, group_rank):
-        from torch.distributed.distributed_c10d import _get_global_rank
+        if hasattr(torch.distributed.distributed_c10d, "get_global_rank"):
+            from torch.distributed.distributed_c10d import get_global_rank as _get_global_rank
+        else:
+            from torch.distributed.distributed_c10d import _get_global_rank
         return _get_global_rank(group, group_rank)
 
     def allgather_fn(output_tensor, input_tensor, group=None, async_op=False):
