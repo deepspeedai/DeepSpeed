@@ -17,6 +17,9 @@ inline __device__ float gelu(const float x)
     return x * 0.5f * (1.0f + tanhf(sqrt_param * (x + mul_param * x * x * x)));
 }
 
+/*
+In-place gelu(biasAdd(x)) for channels last
+*/
 template <typename T>
 __global__ void fused_bias_gelu(T* input, const T* bias, int total_count, int intermediate_size)
 {
@@ -64,63 +67,51 @@ void launch_bias_gelu(T* input,
 template void launch_bias_gelu<float>(float*, const float*, int, int, cudaStream_t);
 template void launch_bias_gelu<__half>(__half*, const __half*, int, int, cudaStream_t);
 
-// Not called directly from DeepSpeed, but used in ds_qkv_gemm_int8, ds_linear_layer, etc.
-__global__ void fused_bias_add(float* input, const float* bias, int total_count, int hidden_size)
+/*
+In-place channels-last bias add
+*/
+template <typename T>
+__global__ void fused_bias_add(T* input, const T* bias, int total_count, int intermediate_size)
 {
+    // Input restriction: intermediate_size % vals_per_access == 0
     constexpr int granularity = 16;
-    constexpr int vals_per_access = granularity / sizeof(float);
-    const int offset = (blockIdx.x * blockDim.x + threadIdx.x) * vals_per_access;
+    constexpr int values_per_access = granularity / sizeof(T);
+    const int offset = (blockIdx.x * blockDim.x + threadIdx.x) * values_per_access;
 
     if (offset < total_count) {
-        float data[vals_per_access];
-        float bias_data[vals_per_access];
+        T data[values_per_access];
+        T data_bias[values_per_access];
         mem_access::load_global<granularity>(data, input + offset);
-        mem_access::load_global<granularity>(bias_data, bias + (offset % hidden_size));
+        mem_access::load_global<granularity>(data_bias, bias + (offset % intermediate_size));
 
 #pragma unroll
-        for (int i = 0; i < vals_per_access; i++) { data[i] += bias_data[i]; }
-
-        mem_access::store_global<granularity>(input + offset, data);
-    }
-}
-
-__global__ void fused_bias_add(__half* input, const __half* bias, int total_count, int hidden_size)
-{
-#ifdef HALF_PRECISION_AVAILABLE
-    constexpr int granularity = 16;
-    constexpr int vals_per_access = granularity / sizeof(__half);
-    const int offset = (blockIdx.x * blockDim.x + threadIdx.x) * vals_per_access;
-
-    if (offset < total_count) {
-        __half2 data[vals_per_access / 2];
-        __half2 bias_data[vals_per_access / 2];
-        mem_access::load_global<granularity>(data, input + offset);
-        mem_access::load_global<granularity>(bias_data, bias + (offset % hidden_size));
-
-#pragma unroll
-        for (int i = 0; i < vals_per_access / 2; i++) {
-            float2 data_f = __half22float2(data[i]);
-            float2 bias_f = __half22float2(bias_data[i]);
-            data[i] = __floats2half2_rn(data_f.x + bias_f.x, data_f.y + bias_f.y);
+        for (int i = 0; i < values_per_access; i++) {
+            float data_f = conversion::to<float>(data[i]);
+            float bias_f = conversion::to<float>(data_bias[i]);
+            data[i] = conversion::to<T>(data_f + bias_f);
         }
 
         mem_access::store_global<granularity>(input + offset, data);
     }
-#endif
 }
 
 template <typename T>
-void launch_bias_add(T* input, const T* bias, int hidden_size, int batch_size, cudaStream_t stream)
+void launch_bias_add(T* input,
+                     const T* bias,
+                     int intermediate_size,
+                     int batch_size,
+                     cudaStream_t stream)
 {
     constexpr int threads = 1024;
     constexpr int granularity = 16;
 
-    const int total_count = batch_size * hidden_size;
+    const int total_count = batch_size * intermediate_size;
     const int elems_per_block = threads * (granularity / sizeof(T));
     dim3 block_dims(threads);
     dim3 grid_dims((total_count + elems_per_block - 1) / elems_per_block);
 
-    fused_bias_add<<<grid_dims, block_dims, 0, stream>>>(input, bias, total_count, hidden_size);
+    fused_bias_add<<<grid_dims, block_dims, 0, stream>>>(
+        input, bias, total_count, intermediate_size);
 }
 
 template void launch_bias_add<float>(float*, const float*, int, int, cudaStream_t);
@@ -181,8 +172,6 @@ __global__ void fused_bias_residual(__half* residual,
                                     const float mp_scale,
                                     const bool preln)
 {
-#ifdef HALF_PRECISION_AVAILABLE
-
     float2* res_fl2_ptr = reinterpret_cast<float2*>(residual);
     const float2* hs_fl2_ptr = reinterpret_cast<const float2*>(hidden_state);
     const float2* attn_fl2_ptr = reinterpret_cast<const float2*>(attn);
@@ -241,7 +230,6 @@ __global__ void fused_bias_residual(__half* residual,
 
         res_fl2_ptr[offset] = res_fl2;
     }
-#endif
 }
 
 template <typename T>
@@ -325,8 +313,6 @@ __global__ void gptj_residual_add(__half* residual,
                                   const int intermediate_size,
                                   const float mp_scale)
 {
-#ifdef HALF_PRECISION_AVAILABLE
-
     float2* res_fl2_ptr = reinterpret_cast<float2*>(residual);
     const float2* hs_fl2_ptr = reinterpret_cast<const float2*>(hidden_state);
     const float2* attn_fl2_ptr = reinterpret_cast<const float2*>(attn);
@@ -379,7 +365,6 @@ __global__ void gptj_residual_add(__half* residual,
 
         res_fl2_ptr[offset] = res_fl2;
     }
-#endif
 }
 
 template <typename T>

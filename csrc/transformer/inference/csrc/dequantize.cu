@@ -50,8 +50,6 @@ __global__ void dequantize_kernel(__half* output,
                                   unsigned groups,
                                   unsigned merge_count)
 {
-#ifdef HALF_PRECISION_AVAILABLE
-
     unsigned merge_hidden = hidden_dim >> merge_count;
     unsigned quantization_stride = (merge_hidden * output_size) / groups;
 
@@ -75,7 +73,6 @@ __global__ void dequantize_kernel(__half* output,
         output[q_index] = __float2half(scale_data * (float)q);
         tid += blockDim.x;
     }
-#endif
 }
 
 template <typename T>

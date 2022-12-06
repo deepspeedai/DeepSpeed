@@ -67,7 +67,6 @@ __global__ void apply_rotary_pos_emb(__half* mixed_query,
                                      unsigned total_count,
                                      int max_out_tokens)
 {
-#if __CUDA_ARCH__ >= 700
     cg::thread_block b = cg::this_thread_block();
     cg::thread_block_tile<WARP_SIZE> g = cg::tiled_partition<WARP_SIZE>(b);
 
@@ -102,7 +101,6 @@ __global__ void apply_rotary_pos_emb(__half* mixed_query,
             lane += WARP_SIZE;
         }
     }
-#endif
 }
 __global__ void apply_rotary_pos_emb1(float* mixed_query,
                                       float* key_layer,
@@ -159,7 +157,6 @@ __global__ void apply_rotary_pos_emb1(__half* mixed_query,
                                       unsigned total_count,
                                       int max_out_tokens)
 {
-#if __CUDA_ARCH__ >= 700
     cg::thread_block b = cg::this_thread_block();
     cg::thread_block_tile<WARP_SIZE> g = cg::tiled_partition<WARP_SIZE>(b);
 
@@ -205,7 +202,6 @@ __global__ void apply_rotary_pos_emb1(__half* mixed_query,
             lane += WARP_SIZE;
         }
     }
-#endif
 }
 
 template <typename T>
