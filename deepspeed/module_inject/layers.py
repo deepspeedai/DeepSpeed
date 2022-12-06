@@ -23,7 +23,7 @@ class LinearAllreduce(nn.Module):
 
 
 class LinearLayer(nn.Module):
-    def __init__(self, weight_shape=None, dtype=None, weight=None, bias=None):
+    def __init__(self, weight_shape=None, dtype=torch.half, weight=None, bias=None):
         super(LinearLayer, self).__init__()
         if weight is not None:
             self.weight = weight
@@ -33,10 +33,12 @@ class LinearLayer(nn.Module):
                 torch.empty(weight_shape,
                             dtype=dtype,
                             device=torch.cuda.current_device()))
+
             self.bias = Parameter(
                 torch.empty(weight_shape[0],
                             dtype=dtype,
-                            device=torch.cuda.current_device()))
+                            device=torch.cuda.current_device())) \
+                if bias is not None else None
 
     def forward(self, input):
         output = torch.matmul(input, self.weight.transpose(-1, -2))
@@ -57,7 +59,7 @@ class Normalize(nn.Module):
 
 
 class EmbeddingLayer(nn.Module):
-    def __init__(self, weight_shape, dtype=torch.float):
+    def __init__(self, weight_shape, dtype=torch.half):
         super(EmbeddingLayer, self).__init__()
         self.weight = Parameter(
             torch.empty(weight_shape[0],
@@ -67,3 +69,28 @@ class EmbeddingLayer(nn.Module):
 
     def forward(self, input):
         return F.embedding(input, self.weight)
+
+
+class OPTEmbedding(EmbeddingLayer):
+    """
+    This module learns positional embeddings up to a fixed maximum size.
+    """
+    def __init__(self, weight_shape):
+        # OPT is set up so that if padding_idx is specified then offset the embedding ids by 2
+        # and adjust num_embeddings appropriately. Other models don't have this hack
+        self.offset = 2
+        super().__init__(weight_shape)
+
+    def forward(self, attention_mask: torch.LongTensor, past_key_values_length: int = 0):
+        """`input_ids_shape` is expected to be [bsz x seqlen]."""
+        attention_mask = attention_mask.long()
+
+        # create positions depending on attention_mask
+        positions = (torch.cumsum(attention_mask,
+                                  dim=1).type_as(attention_mask) *
+                     attention_mask).long() - 1
+
+        # cut positions if `past_key_values_length` is > 0
+        positions = positions[:, past_key_values_length:]
+
+        return super().forward(positions + self.offset)

@@ -1,7 +1,7 @@
 from torch import nn
 import deepspeed.ops.transformer as transformer_inference
 from ..runtime.zero import GatheredParameters
-from .layers import LinearLayer, Normalize, EmbeddingLayer
+from .layers import LinearLayer, Normalize, EmbeddingLayer, OPTEmbedding
 import torch
 import gc
 
@@ -11,14 +11,18 @@ def load_model_with_checkpoint(r_module,
                                mp_replace,
                                ckpt_type,
                                weight_quantizer=None,
-                               rank=0):
+                               rank=0,
+                               param_names=None,
+                               transformer_config=None,
+                               megatron_v2=False):
     error_msgs = []
 
     def transpose(data):
-        data = data.contiguous()
-        data1 = data.transpose(-1, -2).reshape(-1)
-        data.reshape(-1).copy_(data1)
-        data1 = None
+        with torch.no_grad():
+            data = data.contiguous()
+            data1 = data.transpose(-1, -2).reshape(-1)
+            data.reshape(-1).copy_(data1)
+            data1 = None
         return data.reshape(data.shape[-1], data.shape[-2])
 
     def load(module, prefix):
@@ -87,7 +91,7 @@ def load_model_with_checkpoint(r_module,
                                 else:
                                     assert tmp_data.dtype != torch.int8, \
                                         '''Merging of the checkpoints are not supported when using INT8 checkpoint! \
-                                           Please use a as many GPUs as TP-size for the checkpoint'''
+                                          Please use a as many GPUs as TP-size for the checkpoint'''
                                     all_data = [
                                         sd[j][prefix +
                                               n] if type(sd[j][prefix + n]) is list else
@@ -138,37 +142,146 @@ def load_model_with_checkpoint(r_module,
             for n, child in module.named_children():
                 load_parameters(child, prefix + n + '.')
         else:
-            module.norm_w.data.copy_(sd[0][prefix + 'input_layernorm.' + 'weight'])
-            module.norm_b.data.copy_(sd[0][prefix + 'input_layernorm.' + 'bias'])
-            module.attention.attn_qkvw = mp_replace.copy(module.attention.attn_qkvw,
-                weight_quantizer.quantize(sd[0][prefix + 'self_attention.query_key_value.' + 'weight']) if weight_quantizer.q_int8 else \
-                weight_quantizer.quantize(transpose(sd[0][prefix + 'self_attention.query_key_value.' + 'weight'])))
-            module.attention.attn_qkvb = mp_replace.copy(
-                module.attention.attn_qkvb.data,
-                sd[0][prefix + 'self_attention.query_key_value.' + 'bias'])
-            module.attention.attn_ow = mp_replace.copy(module.attention.attn_ow,
-                weight_quantizer.quantize(sd[0][prefix + 'self_attention.dense.' + 'weight']) if weight_quantizer.q_int8 else \
-                weight_quantizer.quantize(transpose(sd[0][prefix + 'self_attention.dense.' + 'weight'])))
-            module.attention.attn_ob = mp_replace.copy(
-                module.attention.attn_ob.data,
-                sd[0][prefix + 'self_attention.dense.' + 'bias'])
-            module.mlp.attn_nw.data.copy_(sd[0][prefix + 'post_attention_layernorm.' +
-                                                'weight'])
-            module.mlp.attn_nb.data.copy_(sd[0][prefix + 'post_attention_layernorm.' +
-                                                'bias'])
-            module.mlp.inter_w = mp_replace.copy(module.mlp.inter_w,
-                weight_quantizer.quantize(sd[0][prefix + 'mlp.dense_h_to_4h.' + 'weight']) if weight_quantizer.q_int8 else \
-                weight_quantizer.quantize(transpose(sd[0][prefix + 'mlp.dense_h_to_4h.' + 'weight'])))
-            module.mlp.inter_b = mp_replace.copy(
-                module.mlp.inter_b.data,
-                sd[0][prefix + 'mlp.dense_h_to_4h.' + 'bias'])
-            module.mlp.output_w = mp_replace.copy(module.mlp.output_w,
-                weight_quantizer.quantize(sd[0][prefix + 'mlp.dense_4h_to_h.' + 'weight']) if weight_quantizer.q_int8 else \
-                weight_quantizer.quantize(transpose(sd[0][prefix + 'mlp.dense_4h_to_h.' + 'weight'])))
-            module.mlp.output_b = mp_replace.copy(
-                module.mlp.output_b.data,
-                sd[0][prefix + 'mlp.dense_4h_to_h.' + 'bias'])
 
+            def _transpose(x):
+                heads = transformer_config.heads // mp_replace.mp_size
+                attention_head_size = x.shape[-1] // heads
+                new_x_shape = x.size()[:-1] + (heads, attention_head_size)
+                x_1 = x.view(*new_x_shape)
+                (q, k, v) = torch.split(x_1, (x_1.shape[-1] // 3), dim=(x_1.dim() - 1))
+                if len(q.shape) > 2:
+                    return torch.cat((q.reshape(q.shape[0],
+                                                -1),
+                                      k.reshape(q.shape[0],
+                                                -1),
+                                      v.reshape(q.shape[0],
+                                                -1)),
+                                     dim=-1).reshape(x.shape)
+                else:
+                    return torch.cat((q.reshape(-1),
+                                      k.reshape(-1),
+                                      v.reshape(-1)),
+                                     dim=-1).reshape(x.shape)
+
+            # This checks if the parameter exits in the checkpoint file and maybe copies it into the corresponding destination tensor.
+            # Note that not all parameters are saved in one checkpoint, that's why we always need to check if they exist!
+            def maybe_copy(module,
+                           dst_name,
+                           src_name,
+                           qkv=False,
+                           megatron_v2=False,
+                           split_qkv=False):
+                if src_name in sd[0]:
+                    dst = getattr(module, dst_name)
+                    tmp = sd[0][src_name].cuda()
+                    if len(dst.shape) == 1:
+                        if split_qkv:
+                            dst = mp_replace.qkv_copy(dst, tmp)
+                        else:
+                            dst = mp_replace.copy(dst, tmp)
+                        if qkv and megatron_v2:
+                            dst = torch.nn.parameter.Parameter(
+                                _transpose(dst).contiguous())
+                    else:
+                        if split_qkv:
+                            dst = weight_quantizer.quantize(mp_replace.qkv_copy(dst, tmp if weight_quantizer.q_int8 else \
+                                                            (transpose(tmp).contiguous())))
+                        else:
+                            dst = weight_quantizer.quantize(mp_replace.copy(dst, tmp if weight_quantizer.q_int8 else \
+                                                            transpose(tmp)))
+                        if qkv and megatron_v2:
+                            scale1 = dst.scale
+                            dst = torch.nn.parameter.Parameter(
+                                _transpose(dst).contiguous())
+                            dst.scale = scale1
+                    setattr(module, dst_name, dst)
+
+            # Extending the maybe_copy function for when the q, k, and v are in separate parameters!
+            def maybe_copy_qkv(module, dst_name, src_names, split_qkv=False):
+                if src_names[0] in sd[0]:
+                    q = sd[0][src_names[0]]
+                    k = sd[0][src_names[1]]
+                    v = sd[0][src_names[2]]
+                    qkv_data = torch.cat((q, k, v), dim=0)
+                    dst = getattr(module, dst_name)
+                    if len(dst.shape) == 1:
+                        if split_qkv:
+                            dst = mp_replace.qkv_copy(dst,
+                                                      (qkv_data.cuda()).contiguous())
+                        else:
+                            dst = mp_replace.copy(dst, qkv_data.cuda())
+                    else:
+                        if split_qkv:
+                            dst = weight_quantizer.quantize(mp_replace.qkv_copy(dst, qkv_data.cuda() if weight_quantizer.q_int8 else \
+                                                            ((transpose(qkv_data.cuda())).contiguous())))
+                        else:
+                            dst = weight_quantizer.quantize(mp_replace.copy(dst, qkv_data.cuda() if weight_quantizer.q_int8 else \
+                                                            transpose(qkv_data.cuda())))
+                    setattr(module, dst_name, dst)
+
+            if len(param_names) == 14:
+                qkv_w, qkv_b, attn_ow, attn_ob, \
+                mlp_intw, mlp_intb, mlp_ow, mlp_ob, \
+                inp_normw, inp_normb, attn_nw, attn_nb, _, split_qkv = param_names
+            elif len(param_names) < 14:
+                q_w, k_w, v_w, attn_ow, \
+                mlp_intw, mlp_intb, mlp_ow, mlp_ob, \
+                inp_normw, inp_normb, _, split_qkv = param_names
+            else:
+                q_w, q_b, k_w, k_b, v_w, v_b, attn_ow, attn_ob, \
+                mlp_intw, mlp_intb, mlp_ow, mlp_ob, \
+                inp_normw, inp_normb, attn_nw, attn_nb, _, split_qkv = param_names
+
+            maybe_copy(module, 'norm_w', prefix + inp_normw)
+            maybe_copy(module, 'norm_b', prefix + inp_normb)
+            if len(param_names) == 14:
+                maybe_copy(module.attention,
+                           'attn_qkvw',
+                           prefix + qkv_w,
+                           qkv=True,
+                           megatron_v2=megatron_v2,
+                           split_qkv=split_qkv)
+                maybe_copy(module.attention,
+                           'attn_qkvb',
+                           prefix + qkv_b,
+                           qkv=True,
+                           megatron_v2=megatron_v2,
+                           split_qkv=split_qkv)
+            elif len(param_names) < 14:
+                maybe_copy_qkv(module.attention,
+                               'attn_qkvw',
+                               [prefix + q_w,
+                                prefix + k_w,
+                                prefix + v_w],
+                               split_qkv=split_qkv)
+            else:
+                maybe_copy_qkv(module.attention,
+                               'attn_qkvw',
+                               [prefix + q_w,
+                                prefix + k_w,
+                                prefix + v_w],
+                               split_qkv=split_qkv)
+                maybe_copy_qkv(module.attention,
+                               'attn_qkvb',
+                               [prefix + q_b,
+                                prefix + k_b,
+                                prefix + v_b],
+                               split_qkv=split_qkv)
+            maybe_copy(module.attention, 'attn_ow', prefix + attn_ow)
+            if len(param_names) >= 14:
+                maybe_copy(module.attention, 'attn_ob', prefix + attn_ob)
+                maybe_copy(module.mlp, 'attn_nw', prefix + attn_nw)
+                maybe_copy(module.mlp, 'attn_nb', prefix + attn_nb)
+            maybe_copy(module.mlp, 'inter_w', prefix + mlp_intw)
+            maybe_copy(module.mlp, 'inter_b', prefix + mlp_intb)
+            maybe_copy(module.mlp, 'output_w', prefix + mlp_ow)
+            maybe_copy(module.mlp, 'output_b', prefix + mlp_ob)
+
+    try:
+        import transformers
+        OPTLearnedPositionalEmbedding = transformers.models.opt.modeling_opt.OPTLearnedPositionalEmbedding
+    except:
+        OPTLearnedPositionalEmbedding = None
     layer_policies = {
         nn.Linear: load,
         nn.Embedding: load,
@@ -176,7 +289,9 @@ def load_model_with_checkpoint(r_module,
         EmbeddingLayer: load,
         LinearLayer: load,
         Normalize: load,
-        transformer_inference.DeepSpeedTransformerInference: load_transformer_layer
+        transformer_inference.DeepSpeedTransformerInference: load_transformer_layer,
+        OPTLearnedPositionalEmbedding: load,
+        OPTEmbedding: load
     }
 
     all_ds_ids = {}
@@ -201,14 +316,17 @@ def load_model_with_checkpoint(r_module,
                         ds_shape = child.weight.shape
                     else:
                         ds_shape = child.weight.ds_shape
-
                     if child.__class__ is nn.LayerNorm:
                         child = Normalize(dim=ds_shape[-1],
                                           dtype=child.weight.dtype,
                                           eps=child.eps)
                         setattr(module, name, child)
                     elif child.__class__ is nn.Linear:
-                        child = LinearLayer(weight=child.weight, bias=child.bias)
+                        child = LinearLayer(weight_shape=child.weight.shape,
+                                            bias=child.bias)
+                        setattr(module, name, child)
+                    elif child.__class__ is OPTLearnedPositionalEmbedding:
+                        child = OPTEmbedding(weight_shape=ds_shape)
                         setattr(module, name, child)
                     else:
                         ds_id = None
@@ -224,7 +342,8 @@ def load_model_with_checkpoint(r_module,
             else:
                 load_module_recursive(
                     child,
-                    prefix if level == 0 and ckpt_type == 'pp' else prefix + name + '.',
+                    prefix if (level == 0 and ckpt_type == 'pp') and param_names[-2] else \
+                    prefix + name + '.',
                     level + 1)
 
     load_module_recursive(r_module)
@@ -232,10 +351,11 @@ def load_model_with_checkpoint(r_module,
     #XXX: hack to tie embedding w. lm_head for BLOOM, need to revist soon
     embedding_weight = None
     for n, p in r_module.named_parameters():
-        if "word_embeddings." in n:
+        if "word_embeddings." in n or "embed_tokens." in n:
             embedding_weight = p
-    assert hasattr(r_module, 'lm_head'), "attempting to set lm_head but it doesn't exist"
-    r_module.lm_head.weight = embedding_weight
+
+    if embedding_weight is not None:
+        r_module.lm_head.weight = embedding_weight
     for sd_ in sd:
         del sd_
     sd = None

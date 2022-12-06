@@ -763,11 +763,18 @@ void quantized_gemm(void* output,
                     at::Tensor& weight,
                     at::Tensor& qscale,
                     int groups,
-                    int bsz)
+                    int bsz,
+                    int hidden_size)
 {
-    T* weight16 = (T*)Context::Instance().GetWorkSpace() +
-                  12 * Context::Instance().GetMaxTokenLenght() * weight.size(1);
+    T* weight16 = (T*)Context::Instance().GetWorkSpace() + 12 * hidden_size * bsz;
 
+    // auto options = at::TensorOptions()
+    //                    .dtype(at::kHalf)
+    //                    .layout(at::kStrided)
+    //                    .device(at::kCUDA)
+    //                    .requires_grad(false);
+    // auto tmp = torch::empty(weight.sizes(), options);
+    // T* weight16 = (T*)tmp.data_ptr();
     launch_dequantize(weight16,
                       (int8_t*)weight.data_ptr(),
                       (float*)qscale.data_ptr(),
@@ -814,7 +821,8 @@ at::Tensor qkv_unfused_cublas(at::Tensor& output,
     ds_layer_norm_internal<T>(workspace, input, gamma, beta, epsilon);
 
     if (q_int8) {
-        quantized_gemm<T>(output.data_ptr(), workspace, weight, q_scale, q_scale.size(0), bsz);
+        quantized_gemm<T>(
+            output.data_ptr(), workspace, weight, q_scale, q_scale.size(0), bsz, input.size(2));
     } else {
         float alpha = (T)1.0;
         float gemm_beta = (T)0.0;
@@ -1202,15 +1210,19 @@ at::Tensor ds_vector_matmul(at::Tensor& input,
                        .layout(at::kStrided)
                        .device(at::kCUDA)
                        .requires_grad(false);
-
     int out_size = q_int8 ? weight.size(0) : weight.size(1);
     int bsz = input.size(0) * input.size(1);
 
     T* workspace = (T*)Context::Instance().GetWorkSpace();
     auto output = at::from_blob(workspace, {input.size(0), input.size(1), out_size}, options);
     if (q_int8) {
-        quantized_gemm<T>(
-            output.data_ptr(), (T*)input.data_ptr(), weight, q_scale, q_scale.size(0), bsz);
+        quantized_gemm<T>(output.data_ptr(),
+                          (T*)input.data_ptr(),
+                          weight,
+                          q_scale,
+                          q_scale.size(0),
+                          bsz,
+                          input.size(2));
     } else {
         float alpha = (T)1.0;
         float gemm_beta = (T)0.0;
@@ -1293,9 +1305,9 @@ at::Tensor mlp_unfused_cublas(at::Tensor& output,
     } else {
         ds_layer_norm_internal(inp_norm, input, gamma, beta, epsilon);
     }
-
     if (q_int8) {
-        quantized_gemm<T>(intermediate, inp_norm, weight, q_scale, q_scale.size(0), bsz);
+        quantized_gemm<T>(
+            intermediate, inp_norm, weight, q_scale, q_scale.size(0), bsz, input.size(2));
     } else {
         float alpha = (T)1.0;
         float gemm_beta = (T)0.0;
@@ -1331,9 +1343,15 @@ at::Tensor mlp_unfused_cublas(at::Tensor& output,
                          bsz,
                          Context::Instance().GetCurrentStream());
     }
+
     if (q_int8) {
-        quantized_gemm<T>(
-            output.data_ptr(), intermediate, weight1, q_scale1, q_scale1.size(0), bsz);
+        quantized_gemm<T>(output.data_ptr(),
+                          intermediate,
+                          weight1,
+                          q_scale1,
+                          q_scale1.size(0),
+                          bsz,
+                          input.size(2));
     } else {
         float alpha = (T)1.0;
         float gemm_beta = (T)0.0;
@@ -1449,64 +1467,95 @@ std::vector<at::Tensor> ds_mlp_gemm_int8(at::Tensor& input,
 template <typename T>
 at::Tensor fused_gemm_gelu(at::Tensor& input,
                            at::Tensor& weight,
+                           at::Tensor& weight_scale,
                            at::Tensor& bias,
                            at::Tensor& weight_out,
+                           at::Tensor& weight_out_scale,
                            const float epsilon,
                            bool preLayerNorm,
+                           bool q_int8,
                            bool async_op)
 {
-    auto input_cont = input.contiguous();
     auto options = at::TensorOptions()
-                       .dtype(input_cont.options().dtype())
+                       .dtype(input.options().dtype())
                        .layout(at::kStrided)
                        .device(at::kCUDA)
                        .requires_grad(false);
 
-    auto intermediate =
-        at::empty({input_cont.size(0), input_cont.size(1), weight.size(1)}, options);
-    auto output = at::empty({input_cont.size(0), input_cont.size(1), weight_out.size(1)}, options);
-    int bsz = input_cont.size(0) * input_cont.size(1);
+    int intm_dim = q_int8 ? weight.size(0) : weight.size(1);
+
+    // auto output = at::from_blob((T*)Context::Instance().GetWorkSpace() + torch::numel(input),
+    //                            {input.size(0), input.size(1), out_size},
+    //                            options);
+    // T* intermediate = (T*)input.data_ptr() + torch::numel(input);
+    auto intermediate = at::empty({input.size(0), input.size(1), intm_dim}, options);
+
+    int bsz = input.size(0) * input.size(1);
+
     float alpha = (T)1.0;
     float gemm_beta = (T)0.0;
-    cublasSetStream(Context::Instance().GetCublasHandle(), Context::Instance().GetCurrentStream());
-    cublas_gemm_ex(Context::Instance().GetCublasHandle(),
-                   CUBLAS_OP_N,
-                   CUBLAS_OP_N,
-                   weight.size(1),
-                   bsz,
-                   input.size(2),
-                   &alpha,
-                   &gemm_beta,
-                   (T*)weight.data_ptr(),
-                   (T*)input_cont.data_ptr(),
-                   (T*)intermediate.data_ptr(),
+    if (q_int8) {
+        quantized_gemm<T>(intermediate.data_ptr(),
+                          (T*)input.data_ptr(),
+                          weight,
+                          weight_scale,
+                          weight_scale.size(0),
+                          bsz,
+                          input.size(2));
+    } else {
+        cublasSetStream(Context::Instance().GetCublasHandle(),
+                        Context::Instance().GetCurrentStream());
+        cublas_gemm_ex(Context::Instance().GetCublasHandle(),
+                       CUBLAS_OP_N,
+                       CUBLAS_OP_N,
+                       intm_dim,
+                       bsz,
+                       input.size(2),
+                       &alpha,
+                       &gemm_beta,
+                       (T*)weight.data_ptr(),
+                       (T*)input.data_ptr(),
+                       (T*)intermediate.data_ptr(),
 #ifdef __HIP_PLATFORM_HCC__
-                   rocblas_gemm_algo_standard);
+                       rocblas_gemm_algo_standard);
 #else
-                   CUBLAS_GEMM_DEFAULT_TENSOR_OP);
+                       CUBLAS_GEMM_DEFAULT_TENSOR_OP);
 #endif
+    }
     launch_bias_gelu((T*)intermediate.data_ptr(),
                      (T*)bias.data_ptr(),
-                     weight.size(1),
+                     intm_dim,
                      bsz,
                      Context::Instance().GetCurrentStream());
 
-    cublas_gemm_ex(Context::Instance().GetCublasHandle(),
-                   CUBLAS_OP_N,
-                   CUBLAS_OP_N,
-                   weight_out.size(1),
-                   bsz,
-                   intermediate.size(2),
-                   &alpha,
-                   &gemm_beta,
-                   (T*)weight_out.data_ptr(),
-                   (T*)intermediate.data_ptr(),
-                   (T*)output.data_ptr(),
+    int out_size = q_int8 ? weight_out.size(0) : weight_out.size(1);
+    auto output = at::empty({input.size(0), input.size(1), out_size}, options);
+    if (q_int8) {
+        quantized_gemm<T>(output.data_ptr(),
+                          (T*)intermediate.data_ptr(),
+                          weight_out,
+                          weight_out_scale,
+                          weight_out_scale.size(0),
+                          bsz,
+                          input.size(2));
+    } else {
+        cublas_gemm_ex(Context::Instance().GetCublasHandle(),
+                       CUBLAS_OP_N,
+                       CUBLAS_OP_N,
+                       out_size,
+                       bsz,
+                       intm_dim,
+                       &alpha,
+                       &gemm_beta,
+                       (T*)weight_out.data_ptr(),
+                       (T*)intermediate.data_ptr(),
+                       (T*)output.data_ptr(),
 #ifdef __HIP_PLATFORM_HCC__
-                   rocblas_gemm_algo_standard);
+                       rocblas_gemm_algo_standard);
 #else
-                   CUBLAS_GEMM_DEFAULT_TENSOR_OP);
+                       CUBLAS_GEMM_DEFAULT_TENSOR_OP);
 #endif
+    }
     // cudaEventRecord(Context::Instance().GetCompEvent(2),
     //                Context::Instance().GetCurrentStream(true));
     return output;

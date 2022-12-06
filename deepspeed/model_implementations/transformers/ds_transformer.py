@@ -68,7 +68,7 @@ class DeepSpeedTransformerInference(nn.Module):
                                 merge_count,
                                 mlp_extra_grouping)
 
-        device = torch.cuda.current_device() if config.bigscience_bloom else 'cpu'
+        device = torch.cuda.current_device()  #if config.bigscience_bloom else 'cpu'
         self.norm_w = nn.Parameter(torch.empty(self.config.hidden_size,
                                                dtype=data_type,
                                                device=device),
@@ -131,7 +131,6 @@ class DeepSpeedTransformerInference(nn.Module):
         if (self.config.fp16 or self.config.q_int8) \
             and input.dtype == torch.float:
             input = input.half()
-
         with torch.no_grad():
             attention_output, key, value, context_outputtn_ctx, inp_norm = \
                                      self.attention(input,
