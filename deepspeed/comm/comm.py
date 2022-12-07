@@ -255,6 +255,7 @@ def has_reduce_scatter_base():
 
 def reduce_scatter_fn(output_tensor,
                       tensor,
+                      op=ReduceOp.SUM,
                       group=None,
                       async_op=False,
                       prof=False,
@@ -265,6 +266,7 @@ def reduce_scatter_fn(output_tensor,
     if cdb.has_reduce_scatter_base:
         return reduce_scatter_base(output_tensor,
                                    tensor,
+                                   op=op,
                                    group=group,
                                    async_op=async_op,
                                    prof=prof,
@@ -279,6 +281,7 @@ def reduce_scatter_fn(output_tensor,
         input_tensor_lst = list(torch.chunk(tensor, cdb.get_world_size(group)))
         return reduce_scatter(output_tensor,
                               input_tensor_lst,
+                              op=op,
                               group=group,
                               async_op=async_op,
                               prof=prof,
@@ -288,6 +291,7 @@ def reduce_scatter_fn(output_tensor,
 @timed_op
 def reduce_scatter_base(output_tensor,
                         tensor,
+                        op=ReduceOp.SUM,
                         group=None,
                         async_op=False,
                         prof=False,
@@ -296,6 +300,7 @@ def reduce_scatter_base(output_tensor,
     global cdb
     return cdb.reduce_scatter_base(output_tensor=output_tensor,
                                    input_tensor=tensor,
+                                   op=op,
                                    group=group,
                                    async_op=async_op)
 
@@ -453,9 +458,25 @@ def scatter(tensor,
 
 
 @timed_op
-def barrier(group=None, prof=False, log_name='barrier', debug=get_caller_func()):
+def barrier(group=None,
+            async_op=False,
+            device_ids=None,
+            prof=False,
+            log_name='barrier',
+            debug=get_caller_func()):
     global cdb
-    return cdb.barrier()
+    return cdb.barrier(group=group, async_op=async_op, device_ids=device_ids)
+
+
+@timed_op
+def monitored_barrier(group=None,
+                      timeout=None,
+                      wait_all_ranks=False,
+                      prof=False,
+                      log_name='monitored_barrier',
+                      debug=get_caller_func()):
+    global cdb
+    return cdb.barrier(group=group, timeout=timeout, wait_all_ranks=wait_all_ranks)
 
 
 def log_summary():
