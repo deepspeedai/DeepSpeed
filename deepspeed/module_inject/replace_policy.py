@@ -404,9 +404,10 @@ class MegatronLayerPolicy(TransformerPolicy):
     _orig_layer_class = None
     version = 0
     moe_type = 'standard'
+    megatron_v2 = True
 
     def __init__(self, client_module, inference=True):
-        super().__init__(inference)
+        super().__init__(inference, megatron_v2=MegatronLayerPolicy.megatron_v2)
         self.client_module = client_module
         # we use megatron version to differentiate between the old and new
         # megatron-lm source code
