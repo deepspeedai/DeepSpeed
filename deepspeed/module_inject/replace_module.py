@@ -1022,7 +1022,7 @@ def replace_transformer_layer(orig_layer_impl,
                     if transformer_name not in k
                 }),
                 f'{config.save_mp_checkpoint_path}/{non_tp_ckpt_name}')
-            new_config = json.dumps({
+            ckpt_config = json.dumps({
                 'type':
                 ckpt_name,
                 'base_dir':
@@ -1044,9 +1044,9 @@ def replace_transformer_layer(orig_layer_impl,
                 'dtype':
                 'int8' if quantize else ('float16' if fp16 else 'float32')
             })
-            with open(f"{config.save_mp_checkpoint_path}/ds-inference_config.json",
+            with open(f"{config.save_mp_checkpoint_path}/ds_inference_config.json",
                       "w") as cfg:
-                cfg.write(new_config)
+                cfg.write(ckpt_config)
 
         rep_sd = replaced_module.state_dict()
         for n, p in replaced_module.named_parameters():

@@ -31,7 +31,7 @@ class SDLoaderFactory:
         version = data['version']
         ckpt_type = data.get('parallelization', 'pp')
         mp_size = data.get('mp_size', 0)
-        if 'bloom' in sd_type.lower():
+        if sd_type.lower() in ['bloom', 'ds_model']:
             return data
         return SDLoaderFactory.get_sd_loader(ckpt_list,
                                              checkpoint_engine,
