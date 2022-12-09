@@ -12,6 +12,7 @@ class DSUNet(torch.nn.Module):
         self.in_channels = unet.in_channels
         self.device = self.unet.device
         self.dtype = self.unet.dtype
+        self.config = self.unet.config
         self.fwd_count = 0
         self.unet.requires_grad_(requires_grad=False)
         self.unet.to(memory_format=torch.channels_last)

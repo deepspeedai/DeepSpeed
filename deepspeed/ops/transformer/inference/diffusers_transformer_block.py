@@ -5,8 +5,8 @@ Copyright 2022 The Microsoft DeepSpeed Team
 import torch
 import torch.nn as nn
 from ... import op_builder
-from ....module_inject import GroupQuantizer
 
+from deepspeed import module_inject
 from .diffusers_attention import DeepSpeedDiffusersAttention
 from .bias_add import nhwc_bias_add
 from .diffusers_2d_transformer import Diffusers2DTransformerConfig
@@ -35,7 +35,7 @@ class DeepSpeedDiffusersTransformerBlock(nn.Module):
                  equivalent_module: nn.Module,
                  config: Diffusers2DTransformerConfig):
         super(DeepSpeedDiffusersTransformerBlock, self).__init__()
-        self.quantizer = GroupQuantizer(q_int8=config.int8_quantization)
+        self.quantizer = module_inject.GroupQuantizer(q_int8=config.int8_quantization)
         # Ensure ops are built by the time we start running
         self.config = config
 
