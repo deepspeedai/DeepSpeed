@@ -55,7 +55,7 @@ def run_ref_dequantize(quantized_data, params, num_groups, q_bits, is_symmetric_
         return (quantized_data * scales + offsets).to(torch.float16)
 
 
-@pytest.mark.inference
+@pytest.mark.inference_ops
 @pytest.mark.parametrize("num_groups", [1, 13, 512])
 @pytest.mark.parametrize("num_elems",
                          [8,

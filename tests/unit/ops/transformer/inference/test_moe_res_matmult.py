@@ -32,7 +32,7 @@ def run_moe_res_matmul_ds(residual, coef, output):
     return inference_module.moe_res_matmul(residual, coef_t, output)
 
 
-@pytest.mark.inference
+@pytest.mark.inference_ops
 @pytest.mark.parametrize("hidden_dim", [16, 64])
 @pytest.mark.parametrize("c", [1, 4])
 @pytest.mark.parametrize("dtype", [torch.float32, torch.float16])

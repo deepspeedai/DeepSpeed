@@ -35,7 +35,7 @@ channels_list = [
 ]
 
 
-@pytest.mark.inference
+@pytest.mark.inference_ops
 @pytest.mark.parametrize("batch", [1, 2, 10])
 @pytest.mark.parametrize("image_size", [16, 32, 64])
 @pytest.mark.parametrize("channels", channels_list)
@@ -58,7 +58,7 @@ def ref_bias_add_add(activations, bias, other):
     return (activations + bias.reshape(1, -1, 1, 1)) + other
 
 
-@pytest.mark.inference
+@pytest.mark.inference_ops
 @pytest.mark.parametrize("batch", [1, 2, 10])
 @pytest.mark.parametrize("image_size", [16, 32, 64])
 @pytest.mark.parametrize("channels", channels_list)
@@ -93,7 +93,7 @@ def ref_bias_add_bias_add(activations, bias, other, other_bias):
                                                                          1))
 
 
-@pytest.mark.inference
+@pytest.mark.inference_ops
 @pytest.mark.parametrize("batch", [1, 2, 10])
 @pytest.mark.parametrize("image_size", [16, 32, 64])
 @pytest.mark.parametrize("channels", channels_list)

@@ -37,7 +37,7 @@ def run_bias_relu_ds(activations, bias):
         return inference_module.bias_relu_fp32(activations, bias)
 
 
-@pytest.mark.inference
+@pytest.mark.inference_ops
 @pytest.mark.parametrize("batch", [1, 2])
 @pytest.mark.parametrize("sequence", [1, 128, 255])
 @pytest.mark.parametrize("channels", [512, 1232, 4096])

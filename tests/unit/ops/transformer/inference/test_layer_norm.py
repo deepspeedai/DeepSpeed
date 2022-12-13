@@ -38,7 +38,7 @@ def ds_implementation(vals, gamma, beta, epsilon):
     return inference_module.layer_norm(vals, gamma, beta, epsilon)
 
 
-@pytest.mark.inference
+@pytest.mark.inference_ops
 @pytest.mark.parametrize("batch", [1, 32])
 @pytest.mark.parametrize("seq_len", [1, 128])
 @pytest.mark.parametrize("channels", [384, 512, 768, 1024, 2048, 8192, 14432])
@@ -79,7 +79,7 @@ def residual_ds_implementation(vals, bias, res, gamma, beta, epsilon):
     return inference_module._layer_norm_residual(vals, bias, res, gamma, beta, epsilon)
 
 
-@pytest.mark.inference
+@pytest.mark.inference_ops
 @pytest.mark.parametrize("batch", [1, 32])
 @pytest.mark.parametrize("seq_len", [1, 128])
 @pytest.mark.parametrize("channels", [384, 512, 768, 1024, 2048, 8192, 14432])
@@ -147,7 +147,7 @@ def residual_store_ds_implementation(vals, bias, res, gamma, beta, epsilon):
                                                       epsilon)
 
 
-@pytest.mark.inference
+@pytest.mark.inference_ops
 @pytest.mark.parametrize("batch", [1, 32])
 @pytest.mark.parametrize("seq_len", [1, 128])
 @pytest.mark.parametrize("channels", [384, 512, 768, 1024, 2048, 8192, 14432])

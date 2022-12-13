@@ -34,7 +34,7 @@ def run_quant_dequant(inputs, groups, bits):
     return quantizer_cuda_module.ds_quantize_fp16(inputs, groups, bits)
 
 
-@pytest.mark.inference
+@pytest.mark.inference_ops
 @pytest.mark.parametrize("tensor_shape", [(16, 4096), (128, 256)])
 # Test with two tensor shapes as (16, 4096) and (128, 256).
 @pytest.mark.parametrize("groups", [1, 16])

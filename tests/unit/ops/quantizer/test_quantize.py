@@ -99,7 +99,7 @@ def run_float_quantize(q_bits, is_symmetric_quant, activations_ref, num_groups):
     return data_i8, params
 
 
-@pytest.mark.inference
+@pytest.mark.inference_ops
 @pytest.mark.parametrize("num_groups", [1, 13, 512])
 @pytest.mark.parametrize("num_elems",
                          [8,
@@ -198,7 +198,7 @@ def run_integer_quantize(q_bits, activations_ref, num_groups):
     return data_i8, max_abs_activations_ref.to(torch.int32)
 
 
-@pytest.mark.inference
+@pytest.mark.inference_ops
 @pytest.mark.parametrize("num_groups", [1, 2, 4, 8, 16, 32, 64, 512])
 @pytest.mark.parametrize("num_elems", [4096, 8192, 12288, 16384])
 @pytest.mark.parametrize("q_bits", [4, 8])

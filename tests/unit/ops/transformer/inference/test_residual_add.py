@@ -77,7 +77,7 @@ def run_residual_add_reference(hidden_state,
                                      mp_size)
 
 
-@pytest.mark.inference
+@pytest.mark.inference_ops
 @pytest.mark.parametrize("batch", [1, 2])
 @pytest.mark.parametrize("sequence", [1, 128, 255])
 @pytest.mark.parametrize("hidden_dim", [512, 1232, 4096])
