@@ -44,6 +44,8 @@ lnav:
         url: /docs/config-json/#communication-logging
       - title: 'Model Compression'
         url: /docs/config-json/#compression
+      - title: 'Data Efficiency'
+        url: /docs/config-json/#data-efficiency
   - title: 'Tutorials'
     url: /tutorials/
     children:
@@ -61,6 +63,8 @@ lnav:
         url: /tutorials/cifar-10/
       - title: 'Curriculum Learning'
         url: /tutorials/curriculum-learning/
+      - title: 'Data Efficiency'
+        url: /tutorials/data-efficiency/
       - title: 'Flops Profiler'
         url: /tutorials/flops-profiler/
       - title: 'PyTorch Profiler'

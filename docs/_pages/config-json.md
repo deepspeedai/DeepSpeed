@@ -898,7 +898,132 @@ Configuring the asynchronous I/O module for offloading parameter and optimizer s
   }
 ```
 
+### Data Efficiency
+DeepSpeed Data Efficiency Library includes two techniques: curriculum learning and random layerwise token dropping (random-LTD). Read more about how to use the DeepSpeed Data Efficiency Library in our [tutorial](/tutorials/data-efficiency/).
+
+```json
+"data_efficiency": {
+  "enabled": true,
+  "seed": 1234,
+  "data_routing": {
+    "enabled": true,
+    "random_ltd":{
+      "enabled": true,
+      "total_layer_num": 24,
+      "random_ltd_layer_num": 22,
+      "random_ltd_layer_id": [1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22],
+      "model_mask_name": "attention_mask",
+      "model_type": "decoder",
+      "hidden_state_order": "seq_batch_dim",
+      "random_ltd_schedule": {
+        "min_value": 128,
+        "max_value": 2048,
+        "schedule_type":"fixed_linear",
+        "schedule_config": {
+          "require_steps": 200000,
+          "seq_per_step": 16
+        }
+      }
+    }
+  },
+  "data_sampling": {
+    "enabled": true,
+    "num_epochs": 1,
+    "num_workers": 0,
+    "curriculum_learning": {
+      "enabled": true,
+      "data_cluster_path": "/path/to/data_clusters",
+      "curriculum_metrics": {
+        "vocabularyrarity": {
+          "index_to_sample_path": "/path/to/index_to_sample",
+          "index_to_metric_path": "/path/to/index_to_metric",
+          "difficulty_type": "percentile",
+          "clustering_type": "schedule_based",
+          "min_difficulty": 1,
+          "max_difficulty": 100,
+          "schedule_type": "fixed_root",
+          "schedule_config": {
+            "total_curriculum_step": 110000,
+            "difficulty_step": 1,
+            "root_degree": 2
+          }
+        }
+      }
+    }
+  }
+}
+```
+
+<i>**data_efficiency**</i>: [dictionary]
+
+| Fields | Value | Default |
+| ----- | ----- | ----- |
+| <i>**enabled**</i>: [boolean] | Enable data efficiency or not. | `false` |
+| <i>**seed**</i>: [integer] | Random seed for data sampling. | 1234 |
+| <i>**data_routing**</i>: [dictionary] | Configs for data routing techniques. | N/A |
+| <i>**data_sampling**</i>: [dictionary] | Configs for data sampling techniques. | N/A |
+
+<i>**data_routing**</i>: [dictionary]
+
+| Fields | Value | Default |
+| ----- | ----- | ----- |
+| <i>**enabled**</i>: [boolean] | Enable data routing techniques or not. | `false` |
+| <i>**random_ltd**</i>: [dictionary] | Configs for random-LTD technique. | N/A |
+
+<i>**data_sampling**</i>: [dictionary]
+
+| Fields | Value | Default |
+| ----- | ----- | ----- |
+| <i>**enabled**</i>: [boolean] | Enable data sampling techniques or not. | `false` |
+| <i>**num_epochs**</i>: [integer] | At most how many epoches of the original dataset will be iterated. | 1000 |
+| <i>**num_workers**</i>: [integer] | Data loader number of workers. | 0 |
+| <i>**curriculum_learning**</i>: [dictionary] | Configs for curriculum learing technique. | N/A |
+
+<i>**random_ltd**</i>: [dictionary]
+
+| Fields | Value | Default |
+| ----- | ----- | ----- |
+| <i>**enabled**</i>: [boolean] | Enable random-LTD technique or not. | `false` |
+| <i>**total_layer_num**</i>: [integer] | The number of layer (or the depth) for the pretraining/fine-tuning model. | N/A |
+| <i>**random_ltd_layer_num**</i>: [integer] | The number of layers that will be applied with random-LTD. | N/A |
+| <i>**random_ltd_layer_id**</i>: [list] | The exact layer_id that will be applied with random-LTD. The length of this list must be the same as `random_ltd_layer_num`. | N/A |
+| <i>**model_mask_name**</i>: [str] | The variable name of the attention_mask. Different libraries have different names, such as att_mask. For huggingface model, it’s named “attention_mask”. Users need to check the forward function in the original model files. If the attention mask input in the original model's forward function is not a keyword/named argument (e.g., attention_mask=None), user would need to change it to a keyword/named argument and provide that keyword as `model_mask_name`. | N/A |
+| <i>**model_type**</i>: [str] | Users need to identify whether the model is `decoder` or `encoder`. Currently we only support these two. | N/A |
+| <i>**hidden_state_order**</i>: [str] | Users need to know the input order of the hidden state tensor. Normally, it’s batch, sequence and then the hidden dimension, which is `batch_seq_dim`. Somethings, the order between batch and sequence will be switch like `seq_batch_dim`. Currently, we support these two.  | N/A |
+| <i>**random_ltd_schedule**</i>: [dictionary] | The schedule of the effective sequence length after token dropping. It's a linear function where random-LTD gradually drops less tokens and increases effective sequence length. | N/A |
+| <i>&emsp;&emsp;**min_value**</i>: [integer] | The initial effective sequence length (after token dropping) at step/iteration 0. | N/A |
+| <i>&emsp;&emsp;**max_value**</i>: [integer] | The max effective sequence length (usually the case without any token dropping). Usually this is set as baseline's seqlen. | N/A |
+| <i>&emsp;&emsp;**schedule_type**</i>: [str] | The sequence length follows a linear increasing function starting from `min_value` and reaching `max_value`. We currently only support this type. | N/A |
+| <i>&emsp;&emsp;**schedule_config**</i>: [dictionary] | Configs for the linear increasing function. | N/A |
+| <i>&emsp;&emsp;&emsp;&emsp;**require_steps**</i>: [integer] | How many iterations will be needed to reach max_value from min_value. | N/A |
+| <i>&emsp;&emsp;&emsp;&emsp;**seq_per_step**</i>: [integer] | At any time, the effective sequence length be multiple of this `seq_per_step`. Set this to multiple of 8 (for FP16 data) or 16 (for INT8 data) to enable NVIDIA Tensor Core acceleration. | N/A |
+
+<i>**curriculum_learning**</i>: [dictionary]
+
+| Fields | Value | Default |
+| ----- | ----- | ----- |
+| <i>**enabled**</i>: [boolean] | Enable curriculum learing technique or not. | `false` |
+| <i>**data_cluster_path**</i>: [str] | Path to directory where curriculum learning will store the indexes of data samples within the same difficulty ranges. | N/A |
+| <i>**curriculum_metrics**</i>: [dictionary] | This dictionary includes all desired curriculum metrics and their configs. Each metric will be a separate sub-dictionary, where the key is the metric name and the values are configs below. | N/A |
+| <i>&emsp;&emsp;**index_to_sample_path**</i>: [str] | Path to the index_to_sample file generated during offline data analysis. Note that data analysis will generate two kinds of index_to_sample files: The metric_name_index_to_sample_percentile_merged file is a concatenated index for perf improvement, but it only works when you set difficulty_type=`percentile`. If you use difficulty_type=`value`, you need to change this to use the metric_name_index_to_sample file. | N/A |
+| <i>&emsp;&emsp;**index_to_metric_path**</i>: [str] | Path to the index_to_metric_path file generated during offline data analysis. | N/A |
+| <i>&emsp;&emsp;**difficulty_type**</i>: [str] | During training, how to increase the max accepted difficulty. Currently support `value` (increase by absolute value) and `percentile` (increase by difficulty percentile). | N/A |
+| <i>&emsp;&emsp;**clustering_type**</i>: [str] | Currently support `schedule_based` (cluster data based on the difficulty schedule (pacing function) below) and `single_cluster` (no clustering required and probably CL is achieved by data postprocessing, such as sequence length truncation). | N/A |
+| <i>&emsp;&emsp;**min_difficulty**</i>: [integer] | Starting difficulty at first step. When difficulty_type=`value` the `min_difficulty` is an absolute difficulty value. When difficulty_type=`percentile` the `min_difficulty` is a difficulty percentile value. | N/A |
+| <i>&emsp;&emsp;**max_difficulty**</i>: [integer] | Final max difficulty. When difficulty_type=`value` the `max_difficulty` is an absolute difficulty value. When difficulty_type=`percentile` the `max_difficulty` is a difficulty percentile value. | N/A |
+| <i>&emsp;&emsp;**schedule_type**</i>: [str] | The difficulty schedule (pacing function) that defines how the max accepted difficulty increases from `min_difficulty` to `max_difficulty` during training. Currently support `fixed_linear`, `fixed_root`, `fixed_discrete`, and `custom`. | N/A |
+| <i>&emsp;&emsp;**schedule_config**</i>: [dictionary] | Configs for the pacing function. When schedule_type=`custom` this dictionary is not necessary. Instead user needs to provide a callback function (via the `set_custom_curriculum_learning_schedule` API in deepspeed/runtime/engine.py) which will update the max accepted difficulty during training. Configs below are all belongs to `schedule_config`. | N/A |
+| <i>&emsp;&emsp;&emsp;&emsp;**total_curriculum_step**</i>: [integer] | How many steps the curriculum learning takes to go from min difficulty to max difficulty. Used by `fixed_linear` and `fixed_root` schedule. | N/A |
+| <i>&emsp;&emsp;&emsp;&emsp;**difficulty_step**</i>: [integer] | The max accepted difficulty level determined every step must be a multiple of this `difficulty_step`. This is used to ensure the use of NVIDIA Tensor Core acceleration (requires multiple of 8 (FP16) or 16 (INT8)). Used by `fixed_linear` and `fixed_root` schedule. | N/A |
+| <i>&emsp;&emsp;&emsp;&emsp;**root_degree**</i>: [integer] | The degree of the root function. Degree of 2 means square root and degree of 3 means cube root. Degree of 1 is equivalent to linear. Used by `fixed_root` schedule. | N/A |
+| <i>&emsp;&emsp;&emsp;&emsp;**difficulty**</i>: [list] | List of max accepted difficulty levels to be used during schedule. Used by `fixed_discrete` schedule. | N/A |
+| <i>&emsp;&emsp;&emsp;&emsp;**max_step**</i>: [list] | List of which step to change max accepted difficulty level. Used by `fixed_discrete` schedule. | N/A |
+
+
 ### Curriculum Learning
+
+**Note:** On 12/12/2022, we released [DeepSpeed Data Efficiency Library](/tutorials/data-efficiency/) which provides a more general curriculum learning support. This legacy curriculum learning feature below is still supported but we recommend to use the Data Efficiency Library.
+
 ```json
   "curriculum_learning": {
     "enabled": true,

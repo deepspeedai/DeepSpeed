@@ -101,6 +101,9 @@ Pipeline parallelism of DeepSpeed reduce communication volume during distributed
 
 1-bit Adam, 0/1 Adam and 1-bit LAMB reduce communication volume by up to 26x while achieving similar convergence efficiency to Adam, allowing for scaling to different types of GPU clusters and networks.  [1-bit Adam blog post](https://www.deepspeed.ai/2020/09/08/onebit-adam-blog-post.html), [1-bit Adam tutorial](https://www.deepspeed.ai/tutorials/onebit-adam/), [0/1 Adam tutorial](https://www.deepspeed.ai/tutorials/zero-one-adam/), [1-bit LAMB tutorial](https://www.deepspeed.ai/tutorials/onebit-lamb/).
 
+## Data efficiency
+DeepSpeed Data Efficiency Library provides efficient data sampling via curriculum learning and efficient data routing via random layerwise token dropping. The composed solution enables up to 2x data and 2x time saving during GPT-3/BERT pretraining and GPT/ViT finetuning, or further improve model quality under the same data/time. See more in [the tutorial](/tutorials/data-efficiency).
+
 ## Supporting long sequence length
 DeepSpeed offers sparse attention kernels—an instrumental technology to support long sequences of model inputs, whether for text, image, or sound. Compared with the classic dense Transformers, it powers **an order-of-magnitude longer input sequence** and obtains up to 6x faster execution with comparable accuracy. It also outperforms state-of-the-art sparse implementations with 1.5–3x faster execution. Furthermore, our sparse kernels support efficient execution of flexible sparse format and empower users to innovate on their custom sparse structures.  [Read more here](https://www.deepspeed.ai/2020/09/08/sparse-attention.html).
 
@@ -164,10 +167,15 @@ Below we provide a brief feature list, see our detailed [feature overview](https
   * Learning Rate Range Test
   * 1Cycle Learning Rate Schedule
 * [Simplified Data Loader](https://www.deepspeed.ai/features/#simplified-data-loader)
+* [Data Efficiency](https://www.deepspeed.ai/tutorials/data-efficiency/)
+  * Efficient data sampling via curriculum learning and efficient data routing via random layerwise token dropping
+  * Up to 2x data and 2x time saving during GPT-3/BERT pretraining and GPT/ViT finetuning
+  * Or further improve model quality under the same data/time
 * [Curriculum Learning](https://www.deepspeed.ai/tutorials/curriculum-learning/)
   * A curriculum learning-based data pipeline that presents easier or simpler examples earlier during training
   * Stable and 3.3x faster GPT-2 pre-training with 8x/4x larger batch size/learning rate while maintaining token-wise convergence speed
   * Complementary to many other DeepSpeed features
+  * Note that the Data Efficiency Library above provides more general curriculum learning support. This legacy curriculum learning feature is still supported but we recommend to use the Data Efficiency Library.
 * [Progressive Layer Dropping](https://www.deepspeed.ai/2020/10/28/progressive-layer-dropping-news.html)
   * Efficient and robust compressed training
   * Up to 2.5x convergence speedup for pre-training
@@ -419,8 +427,11 @@ DeepSpeed abstracts away data parallelism and model parallelism from the user wh
 comes to data loading. Users simply provide a PyTorch dataset, and DeepSpeed data loader
 can automatically handle batch creation appropriately.
 
+## Data Efficiency
+Please refer to the [Data Efficiency](/tutorials/data-efficiency/) tutorial.
+
 ## Curriculum Learning
-Please refer to the [Curriculum Learning](/tutorials/curriculum-learning/) tutorial.
+Please refer to the [Curriculum Learning](/tutorials/curriculum-learning/) tutorial. Note that the Data Efficiency Library above provides more general curriculum learning support. This legacy curriculum learning feature is still supported but we recommend to use the Data Efficiency Library.
 
 ## Performance Analysis and Debugging
 

@@ -343,14 +343,6 @@ PLD_THETA_DEFAULT = 1.0
 PLD_GAMMA = "gamma"
 PLD_GAMMA_DEFAULT = 0.001
 
-#########################################
-# Curriculum Learning
-#########################################
-CURRICULUM_LEARNING = "curriculum_learning"
-
-CURRICULUM_ENABLED = "enabled"
-CURRICULUM_ENABLED_DEFAULT = False
-
 
 #########################################
 # Validation modes
@@ -419,3 +411,9 @@ DATALOADER_DROP_LAST_DEFAULT = False
 # PIPELINE PARALLELISM
 #########################################
 PIPE_REPLICATED = 'ds_pipe_replicated'
+
+#########################################
+# DATA PARALLELISM
+#########################################
+DATA_PARALLEL_GROUP = "data_parallel_group"
+GLOBAL_RANK = "global_rank"

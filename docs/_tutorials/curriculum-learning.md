@@ -3,6 +3,10 @@ title: "Curriculum Learning: A Regularization Method for Efficient and Stable Bi
 tags: training pre-training
 ---
 
+**Watch out!**
+On 12/12/2022, we released DeepSpeed Data Efficiency Library which provides a more general curriculum learning support. This legacy curriculum learning feature below is still supported but we recommend to use the Data Efficiency Library.
+{: .notice--warning}
+
 **Note:**
 This tutorial was updated on 10/29/2021. Changes include: 1) A more detailed tuning strategy. 2) Pipeline parallelism support. 3) Token-based learning rate decay. 4) A new GPT-2 example at [github.com/microsoft/Megatron-DeepSpeed](https://github.com/microsoft/Megatron-DeepSpeed). See details below.
 {: .notice--info}

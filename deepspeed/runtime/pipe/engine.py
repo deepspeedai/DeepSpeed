@@ -322,13 +322,13 @@ class PipelineEngine(DeepSpeedEngine):
                 f'train_batch() requires gradients enabled. Use eval_batch() instead.')
 
         # Curriculum learning could change activation shape
-        if self.curriculum_enabled():
-            new_difficulty = self.curriculum_scheduler.update_difficulty( \
+        if self.curriculum_enabled_legacy():
+            new_difficulty = self.curriculum_scheduler_legacy.update_difficulty( \
                 self.global_steps + 1)
-            if self.global_steps == 0 or self.curriculum_scheduler.first_step:
+            if self.global_steps == 0 or self.curriculum_scheduler_legacy.first_step:
                 self.reset_activation_shape()
-                self.curriculum_scheduler.first_step = False
-            elif new_difficulty != self.curriculum_scheduler.get_difficulty( \
+                self.curriculum_scheduler_legacy.first_step = False
+            elif new_difficulty != self.curriculum_scheduler_legacy.get_difficulty( \
                 self.global_steps):
                 self.reset_activation_shape()
 
@@ -413,13 +413,13 @@ class PipelineEngine(DeepSpeedEngine):
         self.module.eval()
 
         # Curriculum learning could change activation shape
-        if self.curriculum_enabled():
-            new_difficulty = self.curriculum_scheduler.update_difficulty( \
+        if self.curriculum_enabled_legacy():
+            new_difficulty = self.curriculum_scheduler_legacy.update_difficulty( \
                 self.global_steps + 1)
-            if self.global_steps == 0 or self.curriculum_scheduler.first_step:
+            if self.global_steps == 0 or self.curriculum_scheduler_legacy.first_step:
                 self.reset_activation_shape()
-                self.curriculum_scheduler.first_step = False
-            elif new_difficulty != self.curriculum_scheduler.get_difficulty( \
+                self.curriculum_scheduler_legacy.first_step = False
+            elif new_difficulty != self.curriculum_scheduler_legacy.get_difficulty( \
                 self.global_steps):
                 self.reset_activation_shape()
 

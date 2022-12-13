@@ -39,6 +39,7 @@ collections:
       - bert-pretraining.md
       - cifar-10.md
       - curriculum-learning.md
+      - data-efficiency.md
       - flops-profiler.md
       - pytorch-profiler.md
       - autotuning.md
