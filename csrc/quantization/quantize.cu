@@ -2,6 +2,7 @@
 Copyright 2022 The Microsoft DeepSpeed Team
 */
 
+#include "ds_kernel_utils.h"
 #include "memory_access_utils.h"
 #include "quantization.h"
 #include "quantization_utils.h"
@@ -59,18 +60,6 @@ __global__ void cached_quantization(int8_t* __restrict__ output_data,
 }
 
 /********* Launcher methods ***********/
-int next_pow2(const int val)
-{
-    int rounded_val = val - 1;
-    rounded_val |= rounded_val >> 1;
-    rounded_val |= rounded_val >> 2;
-    rounded_val |= rounded_val >> 4;
-    rounded_val |= rounded_val >> 8;
-    return rounded_val + 1;
-}
-
-int32_t round_to_32(int32_t raw_value) { return (((raw_value - 1) >> 5) + 1) << 5; }
-
 #define LAUNCH_CACHED_QUANT(                                                            \
     q_bits, quant_type, unroll_factor, internal_unroll, threads_per_group, max_threads) \
     cached_quantization<q_bits,                                                         \

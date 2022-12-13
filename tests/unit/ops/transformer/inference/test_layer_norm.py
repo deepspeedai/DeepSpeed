@@ -139,12 +139,13 @@ def residual_store_ds_implementation(vals, bias, res, gamma, beta, epsilon):
     global inference_module
     if inference_module is None:
         inference_module = InferenceBuilder().load()
-    return inference_module.layer_norm_residual_store(vals,
-                                                      bias,
-                                                      res,
-                                                      gamma,
-                                                      beta,
-                                                      epsilon)
+    return inference_module.layer_norm_residual_store_pre_ln_res(
+        vals,
+        bias,
+        res,
+        gamma,
+        beta,
+        epsilon)
 
 
 @pytest.mark.inference_ops
@@ -152,7 +153,7 @@ def residual_store_ds_implementation(vals, bias, res, gamma, beta, epsilon):
 @pytest.mark.parametrize("seq_len", [1, 128])
 @pytest.mark.parametrize("channels", [384, 512, 768, 1024, 2048, 8192, 14432])
 @pytest.mark.parametrize("dtype", [torch.float16, torch.float32])
-def test_layer_norm_residual_store(batch, seq_len, channels, dtype):
+def test_layer_norm_residual_store_pre_ln_res(batch, seq_len, channels, dtype):
     vals = torch.randn((batch,
                         seq_len,
                         channels),
@@ -180,5 +181,5 @@ def test_layer_norm_residual_store(batch, seq_len, channels, dtype):
 
     ds_norm_output, ds_res_output = residual_store_ds_implementation(vals, bias, residual, gamma, beta, epsilon)
 
-    assert allclose(ds_norm_output, ref_norm_output)
     assert allclose(ds_res_output, norm_res_output)
+    assert allclose(ds_norm_output, ref_norm_output)

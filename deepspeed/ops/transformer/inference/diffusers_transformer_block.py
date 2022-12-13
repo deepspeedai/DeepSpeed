@@ -98,14 +98,14 @@ class DeepSpeedDiffusersTransformerBlock(nn.Module):
                                                              self.norm1_eps)
         out_attn_1 = self.attn_1(out_norm_1)
 
-        out_norm_2, out_attn_1 = self.transformer_cuda_module.layer_norm_residual_store(out_attn_1,
+        out_norm_2, out_attn_1 = self.transformer_cuda_module.layer_norm_residual_store_pre_ln_res(out_attn_1,
                                                                  self.attn_1_bias,
                                                                  hidden_states,
                                                                  self.norm2_g,
                                                                  self.norm2_b,
                                                                  self.norm2_eps)
         out_attn_2 = self.attn_2(out_norm_2, context=context)
-        out_norm_3, out_attn_2 = self.transformer_cuda_module.layer_norm_residual_store(out_attn_2,
+        out_norm_3, out_attn_2 = self.transformer_cuda_module.layer_norm_residual_store_pre_ln_res(out_attn_2,
                                                                  self.attn_2_bias,
                                                                  out_attn_1,
                                                                  self.norm3_g,

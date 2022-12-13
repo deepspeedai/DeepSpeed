@@ -716,12 +716,12 @@ at::Tensor ds_layer_norm_residual(at::Tensor& input,
 }
 
 /* Currently only used in unit testing */
-std::vector<at::Tensor> ds_layer_norm_residual_store(at::Tensor& input,
-                                                     at::Tensor& bias,
-                                                     at::Tensor& residual,
-                                                     at::Tensor& gamma,
-                                                     at::Tensor& beta,
-                                                     float epsilon)
+std::vector<at::Tensor> ds_layer_norm_residual_store_pre_ln_res(at::Tensor& input,
+                                                                at::Tensor& bias,
+                                                                at::Tensor& residual,
+                                                                at::Tensor& gamma,
+                                                                at::Tensor& beta,
+                                                                float epsilon)
 {
     const int rows = input.size(0) * input.size(1);
     const int elems_per_row = input.size(2);
@@ -729,29 +729,29 @@ std::vector<at::Tensor> ds_layer_norm_residual_store(at::Tensor& input,
     auto res_output = at::empty_like(input);
 
     if (input.options().dtype() == torch::kFloat16) {
-        launch_fused_residual_ln_store((__half*)norm_output.data_ptr(),
-                                       (__half*)res_output.data_ptr(),
-                                       (const __half*)input.data_ptr(),
-                                       (const __half*)residual.data_ptr(),
-                                       (const __half*)bias.data_ptr(),
-                                       (const __half*)gamma.data_ptr(),
-                                       (const __half*)beta.data_ptr(),
-                                       epsilon,
-                                       rows,
-                                       elems_per_row,
-                                       Context::Instance().GetCurrentStream());
+        launch_fused_residual_ln_store_pre_ln_res((__half*)norm_output.data_ptr(),
+                                                  (__half*)res_output.data_ptr(),
+                                                  (const __half*)input.data_ptr(),
+                                                  (const __half*)residual.data_ptr(),
+                                                  (const __half*)bias.data_ptr(),
+                                                  (const __half*)gamma.data_ptr(),
+                                                  (const __half*)beta.data_ptr(),
+                                                  epsilon,
+                                                  rows,
+                                                  elems_per_row,
+                                                  Context::Instance().GetCurrentStream());
     } else {
-        launch_fused_residual_ln_store((float*)norm_output.data_ptr(),
-                                       (float*)res_output.data_ptr(),
-                                       (const float*)input.data_ptr(),
-                                       (const float*)residual.data_ptr(),
-                                       (const float*)bias.data_ptr(),
-                                       (const float*)gamma.data_ptr(),
-                                       (const float*)beta.data_ptr(),
-                                       epsilon,
-                                       rows,
-                                       elems_per_row,
-                                       Context::Instance().GetCurrentStream());
+        launch_fused_residual_ln_store_pre_ln_res((float*)norm_output.data_ptr(),
+                                                  (float*)res_output.data_ptr(),
+                                                  (const float*)input.data_ptr(),
+                                                  (const float*)residual.data_ptr(),
+                                                  (const float*)bias.data_ptr(),
+                                                  (const float*)gamma.data_ptr(),
+                                                  (const float*)beta.data_ptr(),
+                                                  epsilon,
+                                                  rows,
+                                                  elems_per_row,
+                                                  Context::Instance().GetCurrentStream());
     }
 
     return {norm_output, res_output};
@@ -1724,9 +1724,9 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m)
     m.def("layer_norm", &ds_layer_norm, "DeepSpeed layer norm (CUDA)");
     m.def(
         "_layer_norm_residual", &ds_layer_norm_residual, "DeepSpeed layer norm + residual (CUDA)");
-    m.def("layer_norm_residual_store",
-          &ds_layer_norm_residual_store,
-          "DeepSpeed layer norm + store residual (CUDA)");
+    m.def("layer_norm_residual_store_pre_ln_res",
+          &ds_layer_norm_residual_store_pre_ln_res,
+          "DeepSpeed layer norm + store pre Layernorm residual (CUDA)");
     m.def("qkv_gemm_fp32", &ds_qkv_gemm<float>, "DeepSpeed qkv gemm with fp32 (CUDA)");
     m.def("qkv_gemm_fp16", &ds_qkv_gemm<__half>, "DeepSpeed qkv gemm with fp16 (CUDA)");
     m.def("qkv_gemm_int8", &ds_qkv_gemm_int8<__half>, "DeepSpeed qkv gemm with int8 (CUDA)");

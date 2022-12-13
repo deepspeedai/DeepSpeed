@@ -37,3 +37,13 @@ constexpr int hw_warp_size = 32;
 #include <cooperative_groups.h>
 
 #endif  //__HIP_PLATFORM_HCC__
+
+inline int next_pow2(const int val)
+{
+    int rounded_val = val - 1;
+    rounded_val |= rounded_val >> 1;
+    rounded_val |= rounded_val >> 2;
+    rounded_val |= rounded_val >> 4;
+    rounded_val |= rounded_val >> 8;
+    return rounded_val + 1;
+}
