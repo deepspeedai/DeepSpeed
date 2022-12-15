@@ -109,6 +109,7 @@ class DeepSpeedConfigModel(BaseModel):
         use_enum_values = True
         allow_population_by_field_name = True
         extra = "forbid"
+        arbitrary_types_allowed = True
 
 
 class pp_int(int):
