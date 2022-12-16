@@ -270,8 +270,8 @@ def gather_partitioned_activations(tensors, device=None):
             inputs.append(item)
             continue
 
-        # don't need to do all_gather if model parallel size is 1
-        if mp_size == 1:
+        # don't need to do all_gather if model parallel is not enabled
+        if mp_group is None or mp_size == 1:
             item = item.view(list(size.numpy()))
             inputs.append(item)
             continue
@@ -290,8 +290,7 @@ def gather_partitioned_activations(tensors, device=None):
             if i == mp_rank:
                 part_i.copy_(item)
             partitions.append(part_i)
-        if mp_group is not None:
-            dist.all_gather(partitions, partitions[mp_rank], group=mp_group)
+        dist.all_gather(partitions, partitions[mp_rank], group=mp_group)
         input_tensor = flat_tensor.view(list(size.numpy()))
         item.data = input_tensor.data
 
