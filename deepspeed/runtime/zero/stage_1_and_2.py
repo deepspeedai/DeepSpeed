@@ -13,6 +13,7 @@ from deepspeed.runtime import ZeROOptimizer
 from deepspeed.runtime.fp16.loss_scaler import LossScaler, DynamicLossScaler
 from deepspeed.runtime.utils import (bwc_tensor_model_parallel_rank,
                                      get_global_norm,
+                                     empty_cache,
                                      see_memory_usage,
                                      is_model_parallel_parameter,
                                      align_dense_tensors,
@@ -295,6 +296,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
             see_memory_usage(f"Before moving param group {i} to CPU")
             # move all the parameters to cpu to free up GPU space for creating flat buffer
             move_to_cpu(self.bit16_groups[i])
+            empty_cache()
             see_memory_usage(f"After moving param group {i} to CPU", force=False)
 
             # Reorder group parameters for load balancing of gradient partitioning during backward among ranks.

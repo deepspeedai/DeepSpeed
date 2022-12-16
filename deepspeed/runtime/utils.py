@@ -814,6 +814,10 @@ def get_ma_status():
     return torch.cuda.memory_allocated()
 
 
+def empty_cache():
+    torch.cuda.empty_cache()
+
+
 def see_memory_usage(message, force=False):
     if not force:
         return
