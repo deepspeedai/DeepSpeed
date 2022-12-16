@@ -19,7 +19,6 @@ from ..module_inject.replace_module import replace_transformer_layer, generic_in
 from ..comm.comm import init_distributed
 from ..pipe import PipelineModule
 from ..moe.utils import has_moe_layers
-from ..runtime.zero import GatheredParameters
 from ..module_inject import LinearAllreduce, LinearLayer, Normalize, ReplaceWithTensorSlicing
 from ..module_inject.replace_policy import DSPolicy
 
@@ -273,35 +272,25 @@ class InferenceEngine(Module):
 
         def load(module, state_dict, prefix):
             args = (state_dict, prefix, {}, True, [], [], error_msgs)
-            if len(list(module.parameters())) > 0 and list(
-                    module.parameters())[0].numel() == 0:
-                with GatheredParameters(list(module.parameters(recurse=False)),
-                                        modifier_rank=0):
-                    if dist.get_rank() == 0:
-                        module._load_from_state_dict(*args)
-            else:
-                if hasattr(module, 'weight'):
-                    if 'query_key_value' in prefix:
-                        module.weight = self.mp_replace.qkv_copy(
-                            module.weight.data,
-                            state_dict[prefix + 'weight'])
-                    else:
-                        module.weight = self.mp_replace.copy(
-                            module.weight.data,
-                            state_dict[prefix + 'weight'])
-                else:
-                    module.norm.weight = self.mp_replace.copy(
-                        module.norm.weight.data,
+            if hasattr(module, 'weight'):
+                if 'query_key_value' in prefix:
+                    module.weight = self.mp_replace.qkv_copy(
+                        module.weight.data,
                         state_dict[prefix + 'weight'])
-                if prefix + 'bias' in self.key_list:
-                    if hasattr(module, 'norm'):
-                        module.norm.bias = self.mp_replace.copy(
-                            module.norm.bias,
-                            state_dict[prefix + 'bias'])
-                    else:
-                        data = state_dict[prefix + 'bias']
-                        data = data.to(torch.cuda.current_device())
-                        module.bias = self.mp_replace.copy(module.bias, data)
+                else:
+                    module.weight = self.mp_replace.copy(module.weight.data,
+                                                         state_dict[prefix + 'weight'])
+            else:
+                module.norm.weight = self.mp_replace.copy(module.norm.weight.data,
+                                                          state_dict[prefix + 'weight'])
+            if prefix + 'bias' in self.key_list:
+                if hasattr(module, 'norm'):
+                    module.norm.bias = self.mp_replace.copy(module.norm.bias,
+                                                            state_dict[prefix + 'bias'])
+                else:
+                    data = state_dict[prefix + 'bias']
+                    data = data.to(torch.cuda.current_device())
+                    module.bias = self.mp_replace.copy(module.bias, data)
 
         layer_policies = {
             nn.Linear: load,
