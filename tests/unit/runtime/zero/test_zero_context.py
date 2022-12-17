@@ -9,6 +9,7 @@ from deepspeed.runtime.zero.partition_parameters import ZeroParamStatus, partiti
 import deepspeed.comm as dist
 
 from unit.common import DistributedTest, get_master_port
+from unit.simple_model import SimpleModel
 
 
 def setup_serial_env():
@@ -87,6 +88,95 @@ config = {
         "stage3_param_persistence_threshold": 1,
     }
 }
+
+
+def test_throughput_calculation():
+    setup_serial_env()
+
+    train_micro_batch_size_per_gpu = 7
+    gradient_accumulation_steps = 6
+    config_dict = {
+        "train_micro_batch_size_per_gpu": train_micro_batch_size_per_gpu,
+        "gradient_accumulation_steps": gradient_accumulation_steps,
+        "optimizer": {
+            "type": "Adam",
+            "params": {
+                "lr": 0.001,
+            }
+        },
+        "zero_optimization": {
+            "stage": 0
+        },
+    }
+
+    args = SimpleNamespace(local_rank=0)
+    net = SimpleModel(hidden_dim=4)
+    engine, _, _, _ = deepspeed.initialize(args=args,
+                                           config=config_dict,
+                                           model=net,
+                                           model_parameters=net.parameters())
+    assert engine.tput_timer.batch_size == train_micro_batch_size_per_gpu * gradient_accumulation_steps
+
+    assert not engine.tput_timer.initialized
+    assert not engine.tput_timer.started
+    assert engine.tput_timer.start_step == 2
+    assert engine.tput_timer.start_time == 0
+    assert engine.tput_timer.micro_step_count == 0
+    assert engine.tput_timer.global_step_count == 0
+    assert engine.tput_timer.total_elapsed_time == 0
+
+    # calling stop() while uninitialized - has no effect
+    engine.tput_timer.stop()
+    assert not engine.tput_timer.initialized
+    assert not engine.tput_timer.started
+    assert engine.tput_timer.start_time == 0
+    assert engine.tput_timer.micro_step_count == 0
+    assert engine.tput_timer.global_step_count == 0
+    assert engine.tput_timer.total_elapsed_time == 0
+
+    # any call to start() (from dataloader or not) initializes the timer
+    engine.tput_timer.start()
+    assert engine.tput_timer.initialized
+    assert engine.tput_timer.started
+    assert engine.tput_timer.start_time == 0
+    assert engine.tput_timer.micro_step_count == 0
+    assert engine.tput_timer.global_step_count == 0
+    assert engine.tput_timer.total_elapsed_time == 0
+
+    # calling stop() after initialized - increments the local micro step counter
+    engine.tput_timer.stop()
+    assert engine.tput_timer.initialized
+    assert not engine.tput_timer.started
+    assert engine.tput_timer.start_time == 0
+    assert engine.tput_timer.micro_step_count == 1
+    assert engine.tput_timer.global_step_count == 0
+    assert engine.tput_timer.total_elapsed_time == 0
+
+    # calling start()/stop() to increment the step counter until start_step
+    while engine.tput_timer.micro_step_count < (gradient_accumulation_steps *
+                                                engine.tput_timer.start_step):
+        engine.tput_timer.start()
+        global_step = (engine.tput_timer.micro_step_count +
+                       1) % gradient_accumulation_steps == 0
+        engine.tput_timer.stop(global_step=global_step)
+    assert engine.tput_timer.global_step_count == engine.tput_timer.start_step
+    assert engine.tput_timer.total_elapsed_time == 0
+
+    # calling start()/stop() accumulates duration during gradient accumulation
+    while engine.tput_timer.global_step_count == engine.tput_timer.start_step:
+        engine.tput_timer.start()
+        current_duration = engine.tput_timer.step_elapsed_time
+        total_duration = engine.tput_timer.total_elapsed_time
+
+        global_step = (engine.tput_timer.micro_step_count +
+                       1) % gradient_accumulation_steps == 0
+        engine.tput_timer.stop(global_step=global_step)
+        duration = engine.tput_timer.end_time - engine.tput_timer.start_time
+        # step elapsed time is reset after gradient accumulation steps
+        assert engine.tput_timer.step_elapsed_time == (
+            0 if engine.tput_timer.global_step_count != engine.tput_timer.start_step else
+            current_duration + duration)
+        assert engine.tput_timer.total_elapsed_time == total_duration + duration
 
 
 def test_ext_param_getattr():

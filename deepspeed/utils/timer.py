@@ -136,7 +136,6 @@ class ThroughputTimer:
     def __init__(
         self,
         batch_size,
-        num_workers,
         start_step=2,
         steps_per_output=50,
         monitor_memory=False,
@@ -146,15 +145,13 @@ class ThroughputTimer:
         self.start_time = 0
         self.end_time = 0
         self.started = False
-        self.batch_size = batch_size
-        if batch_size is None:
-            self.batch_size = 1
-        self.num_workers = num_workers
+        self.batch_size = 1 if batch_size is None else batch_size
         self.start_step = start_step
         self.epoch_count = 0
-        self.local_step_count = 0
-        self.total_step_count = 0
+        self.micro_step_count = 0
+        self.global_step_count = 0
         self.total_elapsed_time = 0
+        self.step_elapsed_time = 0
         self.steps_per_output = steps_per_output
         self.monitor_memory = monitor_memory
         self.logging = logging_fn
@@ -167,7 +164,7 @@ class ThroughputTimer:
 
     def update_epoch_count(self):
         self.epoch_count += 1
-        self.local_step_count = 0
+        self.micro_step_count = 0
 
     def _init_timer(self):
         self.initialized = True
@@ -175,54 +172,60 @@ class ThroughputTimer:
     def start(self):
         self._init_timer()
         self.started = True
-        if self.total_step_count >= self.start_step:
+        if self.global_step_count >= self.start_step:
             torch.cuda.synchronize()
             self.start_time = time.time()
 
-    def stop(self, report_speed=True):
+    def stop(self, global_step=False, report_speed=True):
         if not self.started:
             return
         self.started = False
-        self.total_step_count += 1
-        self.local_step_count += 1
-        if self.total_step_count > self.start_step:
+        self.micro_step_count += 1
+        if global_step:
+            self.global_step_count += 1
+
+        if self.start_time > 0:
             torch.cuda.synchronize()
             self.end_time = time.time()
             duration = self.end_time - self.start_time
             self.total_elapsed_time += duration
+            self.step_elapsed_time += duration
 
-            curr_samples_sec = (self.batch_size * self.num_workers) / duration
-
-            if report_speed:
-                self.logging(
-                    "{}/{}, RunningAvgSamplesPerSec={}, CurrSamplesPerSec={}, MemAllocated={}GB, MaxMemAllocated={}GB"
-                    .format(
-                        self.epoch_count,
-                        self.local_step_count,
-                        self.avg_samples_per_sec(),
-                        curr_samples_sec,
-                        round(torch.cuda.memory_allocated() / 1024**3,
-                              2),
-                        round(torch.cuda.max_memory_allocated() / 1024**3,
-                              2),
-                    ))
-                if self.monitor_memory:
-                    virt_mem = psutil.virtual_memory()
-                    swap = psutil.swap_memory()
-                    self.logging("{}/{}, vm percent: {}, swap percent: {}".format(
-                        self.epoch_count,
-                        self.local_step_count,
-                        virt_mem.percent,
-                        swap.percent,
-                    ))
+            if global_step:
+                if report_speed and self.global_step_count % self.steps_per_output == 0:
+                    self.logging(
+                        "epoch={}/micro_step={}/global_step={}, RunningAvgSamplesPerSec={}, CurrSamplesPerSec={}, "
+                        "MemAllocated={}GB, MaxMemAllocated={}GB".format(
+                            self.epoch_count,
+                            self.micro_step_count,
+                            self.global_step_count,
+                            self.avg_samples_per_sec(),
+                            self.batch_size / self.step_elapsed_time,
+                            round(torch.cuda.memory_allocated() / 1024**3,
+                                  2),
+                            round(torch.cuda.max_memory_allocated() / 1024**3,
+                                  2),
+                        ))
+                    if self.monitor_memory:
+                        virt_mem = psutil.virtual_memory()
+                        swap = psutil.swap_memory()
+                        self.logging(
+                            "epoch={}/micro_step={}/global_step={}, vm %: {}, swap %: {}"
+                            .format(
+                                self.epoch_count,
+                                self.micro_step_count,
+                                self.global_step_count,
+                                virt_mem.percent,
+                                swap.percent,
+                            ))
+                self.step_elapsed_time = 0
 
     def avg_samples_per_sec(self):
-        if self.total_step_count > 0:
-            samples_per_step = self.batch_size * self.num_workers
-            total_step_offset = self.total_step_count - self.start_step
+        if self.global_step_count > 0:
+            total_step_offset = self.global_step_count - self.start_step
             avg_time_per_step = self.total_elapsed_time / total_step_offset
             # training samples per second
-            return samples_per_step / avg_time_per_step
+            return self.batch_size / avg_time_per_step
         return float("-inf")
 
 
