@@ -376,6 +376,8 @@ class OpBuilder(ABC):
             cpu_info['arch'] = 'X86_64'
             if 'avx512' in result:
                 cpu_info['flags'] += 'avx512,'
+            elif 'avx512f' in result:
+                cpu_info['flags'] += 'avx512f,'
             if 'avx2' in result:
                 cpu_info['flags'] += 'avx2'
         elif 'ppc64le' in result:
@@ -402,7 +404,7 @@ class OpBuilder(ABC):
                 return '-D__SCALAR__'
 
         if cpu_info['arch'] == 'X86_64':
-            if 'avx512' in cpu_info['flags']:
+            if 'avx512' in cpu_info['flags'] or 'avx512f' in cpu_info['flags']:
                 return '-D__AVX512__'
             elif 'avx2' in cpu_info['flags']:
                 return '-D__AVX256__'
