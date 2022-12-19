@@ -7,6 +7,7 @@ per rank for training.
 """
 
 import os
+import re
 import sys
 import json
 import base64
@@ -182,25 +183,45 @@ def fetch_hostfile(hostfile_path):
 
     # e.g., worker-0 slots=16
     with open(hostfile_path, 'r') as fd:
-        resource_pool = collections.OrderedDict()
-        for line in fd.readlines():
-            line = line.strip()
-            if line == '':
-                # skip empty lines
-                continue
-            try:
-                hostname, slots = line.split()
-                _, slot_count = slots.split("=")
-                slot_count = int(slot_count)
-            except ValueError as err:
-                logger.error("Hostfile is not formatted correctly, unable to "
-                             "proceed with training.")
-                raise err
-            if hostname in resource_pool:
-                logger.error("Hostfile contains duplicate hosts, unable to "
-                             "proceed with training.")
-                raise ValueError(f"host {hostname} is already defined")
-            resource_pool[hostname] = slot_count
+        hostfile_text = fd.readlines()
+
+    return _parse_hostfile(hostfile_text)
+
+
+def _parse_hostfile(hostfile_lines):
+    # Regex matches one or more non-whitespace characters (\S+) at the start of
+    # the line, followed by one or more whitespace characters (\s+), followed
+    # by the string "slots=", followed by one or more digits (\d+).
+    pattern = r'^(\S+)\s+slots=(\d+)'
+
+    resource_pool = collections.OrderedDict()
+
+    for line in hostfile_lines:
+        line = line.strip()
+        match = re.search(pattern, line)
+        if line.startswith("#") or line == "":
+            # hostfile comment or empty line, ignore
+            continue
+        elif match:
+            host = match.group(1)
+            num_slots = int(match.group(2))
+            if host in resource_pool:
+                logger.error(f"Bad hostfile text: {hostfile_lines}")
+                raise ValueError(
+                    f"Hostfile contains multiple entries for {host}, unable to proceed with launching"
+                )
+            resource_pool[host] = num_slots
+        else:
+            logger.error(f"Bad hostfile text: {hostfile_lines}")
+            raise ValueError(
+                "Hostfile contains a bad entry: {line}, unable to proceed with launching"
+            )
+
+    if len(resource_pool) == 0:
+        logger.error(f"Bad hostfile text: {hostfile_lines}")
+        raise ValueError(
+            "Hostfile is empty or not formatted correctly, unable to proceed with launching."
+        )
 
     return resource_pool
 
