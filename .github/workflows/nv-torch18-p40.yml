@@ -22,16 +22,11 @@ jobs:
     steps:
       - uses: actions/checkout@v2
 
-      - name: environment
+      - id: setup-venv
+        uses: ./.github/workflows/setup-venv
+
+      - name: Install pytorch
         run: |
-          echo "JobID: $AISC_NODE_INSTANCE_ID"
-          nvidia-smi
-          which python
-          python --version
-          which nvcc
-          nvcc --version
-          pip install --upgrade pip
-          pip uninstall --yes torch torchvision triton
           pip install torch==1.8.2 torchvision==0.9.2 --extra-index-url https://download.pytorch.org/whl/lts/1.8/cu101
           python -c "import torch; print('torch:', torch.__version__, torch)"
           python -c "import torch; print('CUDA available:', torch.cuda.is_available())"
@@ -43,12 +38,10 @@ jobs:
           # if needed switch to the last known good SHA until transformers@master is fixed
           # git checkout 1cc453d33
           git rev-parse --short HEAD
-          pip uninstall --yes transformers
           pip install .
 
       - name: Install deepspeed
         run: |
-          pip uninstall --yes deepspeed
           pip install .[dev,1bit,autotuning]
           ds_report
 

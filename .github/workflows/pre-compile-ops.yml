@@ -19,14 +19,12 @@ jobs:
       # Checks-out your repository under $GITHUB_WORKSPACE, so your job can access it
       - uses: actions/checkout@v2
 
+      - id: setup-venv
+        uses: ./.github/workflows/setup-venv
+
       # Runs a single command using the runners shell
       - name: environment
         run: |
-          nvidia-smi
-          which python
-          python --version
-          which nvcc
-          nvcc --version
           python -c "import torch; print('torch:', torch.__version__, torch)"
           python -c "import torch; print('CUDA available:', torch.cuda.is_available())"
 

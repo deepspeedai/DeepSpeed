@@ -22,31 +22,34 @@ jobs:
     steps:
       - uses: actions/checkout@v2
 
-      - name: environment
+      - id: setup-venv
+        uses: ./.github/workflows/setup-venv
+
+      - name: Install pytorch
         run: |
-          echo "JobID: $AISC_NODE_INSTANCE_ID"
-          nvidia-smi
-          which python
-          python --version
-          which nvcc
-          nvcc --version
-          pip install --upgrade pip
-          pip uninstall --yes torch torchvision triton
           pip install torch torchvision --extra-index-url https://download.pytorch.org/whl/cu116
           python -c "import torch; print('torch:', torch.__version__, torch)"
           python -c "import torch; print('CUDA available:', torch.cuda.is_available())"
 
-      - name: Install MII
+      - name: Install transformers
         run: |
-          pip uninstall --yes deepspeed deepspeed-mii transformers
+          git clone https://github.com/huggingface/transformers
+          cd transformers
+          # if needed switch to the last known good SHA until transformers@master is fixed
+          # git checkout 1cc453d33
+          git rev-parse --short HEAD
+          pip install .
+
+      - name: Install deepspeed
+        run: |
           pip install .[dev]
-          pip install git+https://github.com/huggingface/transformers.git
+          ds_report
 
       - name: Python environment
         run: |
           pip list
 
-      - name: Unit tests
+      - name: MII unit tests
         run: |
           git clone https://github.com/microsoft/DeepSpeed-MII.git
           cd DeepSpeed-MII

@@ -22,10 +22,8 @@ jobs:
     steps:
       - uses: actions/checkout@v2
 
-      - name: environment
-        run: |
-          which python
-          python --version
+      - id: setup-venv
+        uses: ./.github/workflows/setup-venv
 
       - name: Install deepspeed
         run: |

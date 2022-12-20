@@ -1,0 +1,38 @@
+name: Create Virtual Environment
+
+runs:
+  using: "composite"
+  steps:
+    - id: update-env
+      run: |
+        sudo apt-get update && sudo apt-get -y upgrade
+        pip install --upgrade pip
+        python -m pip install -U virtualenv
+      shell: bash
+    - id: create-venv
+      run: |
+        sudo apt-get update && sudo apt-get -y upgrade
+        pip install --upgrade pip
+        python -m pip install -U virtualenv
+        python -m venv unit-test-venv
+        source ./unit-test-venv/bin/activate
+        pip install --upgrade pip
+        echo PATH=$PATH >> $GITHUB_ENV # Make it so venv is inherited for other steps
+      shell: bash
+    - id: print-env
+      run: |
+        which python
+        python --version
+        if [[ -z "${AISC_NODE_INSTANCE_ID}" ]]; then
+          echo "JobID: ${AISC_NODE_INSTANCE_ID}"
+        fi
+        if command -v nvidia-smi; then
+          nvidia-smi
+          which nvcc
+          nvcc --version
+        elif command -c rocm-smi; then
+          rocm-smi --showhw
+          which hipcc
+          hipcc --version
+        fi
+      shell: bash

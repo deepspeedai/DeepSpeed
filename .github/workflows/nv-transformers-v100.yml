@@ -22,25 +22,18 @@ jobs:
     steps:
       - uses: actions/checkout@v2
 
-      - name: environment
+      - id: setup-venv
+        uses: ./.github/workflows/setup-venv
+
+      - name: Install pytorch
         run: |
-          echo "JobID: $AISC_NODE_INSTANCE_ID"
-          nvidia-smi
-          which python
-          python --version
-          which nvcc
-          nvcc --version
-          pip install --upgrade pip
-          pip uninstall --yes torch torchvision triton
           pip install torch==1.8.2+cu111 torchvision==0.9.2+cu111 -f https://download.pytorch.org/whl/lts/1.8/torch_lts.html
           python -c "import torch; print('torch:', torch.__version__, torch)"
           python -c "import torch; print('CUDA available:', torch.cuda.is_available())"
-          sudo apt-get update
           sudo apt-get install -y libaio-dev
 
       - name: Install deepspeed
         run: |
-          pip uninstall --yes deepspeed
           pip install .[dev,autotuning]
           ds_report
 

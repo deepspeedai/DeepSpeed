@@ -22,23 +22,17 @@ jobs:
     steps:
       - uses: actions/checkout@v2
 
-      - name: environment
+      - id: setup-venv
+        uses: ./.github/workflows/setup-venv
+
+      - name: Install pytorch
         run: |
-          echo "JobID: $AISC_NODE_INSTANCE_ID"
-          nvidia-smi
-          which python
-          python --version
-          which nvcc
-          nvcc --version
-          pip install --upgrade pip
-          pip uninstall --yes torch torchvision
           pip install torch==1.9.1+cu111 torchvision==0.10.1+cu111 torchaudio==0.9.1 -f https://download.pytorch.org/whl/torch_stable.html
           python -c "import torch; print('torch:', torch.__version__, torch)"
           python -c "import torch; print('CUDA available:', torch.cuda.is_available())"
 
       - name: Install deepspeed
         run: |
-          pip uninstall --yes deepspeed
           pip install .[dev,autotuning]
           ds_report
 
@@ -49,7 +43,6 @@ jobs:
       - name: PyTorch Lightning Tests
         run: |
           if [[ -d ./torch-extensions ]]; then rm -rf ./torch-extensions; fi
-          pip uninstall --yes pytorch-lightning
           pip install pytorch-lightning
           pip install "protobuf<4.21.0"
           cd tests
