@@ -155,6 +155,12 @@ def parse_args(args=None):
         "Useful when launching deepspeed processes programmatically.")
 
     parser.add_argument(
+        "--enable_each_rank_log",
+        default="None",
+        type=str,
+        help="redirect the stdout and stderr from each rank into different log files")
+
+    parser.add_argument(
         "--autotuning",
         default="",
         choices=["tune",
@@ -481,6 +487,9 @@ def main(args=None):
             deepspeed_launch.append("--no_local_rank")
         if args.save_pid:
             deepspeed_launch += ["--save_pid", f"{os.getpid()}"]
+        if args.enable_each_rank_log:
+            deepspeed_launch.append(
+                f"--enable_each_rank_log={args.enable_each_rank_log}")
         if args.elastic_training:
             deepspeed_launch.append("--enable_elastic_training")
             deepspeed_launch.append(f"--max_elastic_nodes={args.max_elastic_nodes}")
