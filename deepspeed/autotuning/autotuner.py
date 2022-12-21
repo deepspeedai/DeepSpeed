@@ -373,11 +373,11 @@ class Autotuner:
 
         logger.debug(f"tuning_keys = {tuning_keys}")
 
-        logger.debug(f"before prunning total configs = {len(all_configs)}")
+        logger.debug(f"before pruning total configs = {len(all_configs)}")
 
         pruned_list = prune_configs(all_configs)
 
-        logger.debug(f"after prunning total configs = {len(pruned_list)}")
+        logger.debug(f"after pruning total configs = {len(pruned_list)}")
 
         for config in pruned_list:
             exp_config = copy.deepcopy(template_config)
