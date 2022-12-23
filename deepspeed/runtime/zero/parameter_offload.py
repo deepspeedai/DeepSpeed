@@ -46,8 +46,14 @@ def _apply_to_tensors_only(module, functional, backward_function, outputs):
                                                   outputs[key])
         return outputs
 
-    elif type(outputs) is torch.Tensor:
-        return functional.apply(module, backward_function, outputs)
+    elif isinstance(outputs, torch.Tensor):
+        # this also applies to torch.Tensor's subclasses like torch.nn.parameter.Parameter
+        touched_outputs = functional.apply(module, backward_function, outputs)
+
+        # restore zero param attributes if those get stripped by `backward_function`
+        if not is_zero_param(touched_outputs) and is_zero_param(outputs):
+            touched_outputs.ds_param_alias = outputs
+        return touched_outputs
     else:
         if not is_builtin_type(outputs):
             global warned
@@ -358,26 +364,33 @@ class DeepSpeedZeRoOffload(object):
                         if not name.startswith('__') and torch.is_tensor(val):
                             outputs.append(val)
                     output = outputs
-                    #print(f'convert output to {output}')
 
-            for item in filter(lambda item: is_zero_param(item), output):
-                if not any(id(item) in m._external_params for m in FWD_MODULE_STACK):
-                    item.is_external_param = True
+            for item in filter(
+                    lambda item: is_zero_param(item) or hasattr(item,
+                                                                'ds_param_alias'),
+                    output):
+                key = id(item) if hasattr(item, 'ds_id') else id(item.ds_param_alias)
+                actual_external_param = item if hasattr(item,
+                                                        'ds_id') else item.ds_param_alias
+
+                if not any(key in m._external_params for m in FWD_MODULE_STACK):
+                    actual_external_param.is_external_param = True
                     module_to_register = FWD_MODULE_STACK[-1]
-                    register_external_parameter(module_to_register, item)
+                    register_external_parameter(module_to_register,
+                                                actual_external_param)
                     print_rank_0(
-                        f'Registering dangling parameter for module {module_to_register.__class__.__name__}, ds_id = {item.ds_id}.',
+                        f'Registering dangling parameter for module {module_to_register.__class__.__name__}, ds_id = {actual_external_param.ds_id}.',
                         force=False)
 
                     # It's possible that the parameter was already external to the completed module. If so, remove it the
                     # registration as it will be covered by the outer module instead.
-                    if id(item) in module._external_params:
+                    if key in module._external_params:
                         print_rank_0(
-                            f'  Unregistering nested dangling parameter from module {module.__class__.__name__}, ds_id = {item.ds_id}',
+                            f'  Unregistering nested dangling parameter from module {module.__class__.__name__}, ds_id = {actual_external_param.ds_id}',
                             force=False)
-                        unregister_external_parameter(module, item)
+                        unregister_external_parameter(module, actual_external_param)
 
-                    item.all_gather()
+                    actual_external_param.all_gather()
 
             self.post_sub_module_forward_function(module)
 
