@@ -9,7 +9,7 @@ from deepspeed import comm as dist
 from deepspeed.utils.logging import log_dist
 
 from deepspeed.ops.transformer.inference.ds_mlp import DeepSpeedMLP
-from deepspeed.ops.transformer.inference.ds_attention import DeepSpeedSelfAttention
+from deepspeed.ops.transformer.inference.ds_attention import DeepSpeedSelfAttention, BloomSelfAttention
 
 inference_cuda_module = None
 
@@ -55,12 +55,20 @@ class DeepSpeedTransformerInference(nn.Module):
         if DeepSpeedTransformerInference.layer_id == 1:
             log_dist(f"DeepSpeed-Inference config: {self.config.__dict__}", [0])
 
-        self.attention = DeepSpeedSelfAttention(self.config,
+        if self.config.bigscience_bloom:
+            self.attention = BloomSelfAttention(self.config,
                                                 mp_group,
                                                 quantize_scales,
                                                 quantize_groups,
                                                 merge_count,
                                                 qkv_merging)
+        else:
+            self.attention = DeepSpeedSelfAttention(self.config,
+                                                    mp_group,
+                                                    quantize_scales,
+                                                    quantize_groups,
+                                                    merge_count,
+                                                    qkv_merging)
         self.mlp = DeepSpeedMLP(self.config,
                                 mp_group,
                                 quantize_scales,
