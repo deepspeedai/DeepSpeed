@@ -142,6 +142,8 @@ class GroupQuantizer:
         self.group_size = group_size
         self.num_bits = num_bits
         self.q_int8 = q_int8
+        # TODO(jeff): need to check w. Reza on why this is needed when changing tp size w. bloom
+        self.num_groups = 32
 
     def quantize(self, inputs, qkv=True, count=1, parallel_dim=0):
         if not self.q_int8 or not qkv:
