@@ -61,8 +61,9 @@ class DeepSpeedSelfAttention(nn.Module):
         self.q_groups = q_groups
         self.merge_count = int(math.log2(merge_count))
 
-        self.norm_factor = math.sqrt(
-            math.sqrt(self.config.hidden_size // self.config.heads))
+        self.norm_factor = math.sqrt(self.config.hidden_size // self.config.heads)
+        if not config.use_mup:
+            self.norm_factor = math.sqrt(self.norm_factor)
         self.qkv_merging = qkv_merging
 
         if self.config.scale_attn_by_inverse_layer_idx is True:
@@ -83,23 +84,16 @@ class DeepSpeedSelfAttention(nn.Module):
         if no_masking:
             input_mask = torch.empty(1)
 
-        if alibi is not None:
-            batch_heads = qkv_out.shape[0] * self.num_attention_heads_per_partition
-            offset = dist.get_rank() * batch_heads if dist.is_initialized() else 0
-            sliced_alibi = alibi[offset:batch_heads + offset, :, :]
-        else:
-            sliced_alibi = torch.empty(1)
-
         attn_key_value = self.score_context_func(
             query_key_value=qkv_out,
-            attn_mask=((1 - input_mask).to(qkv_out.dype) *
+            attn_mask=((1 - input_mask).to(qkv_out.dtype) *
                        minus_inf) if input_mask.dtype == torch.int64 else input_mask,
             heads=self.num_attention_heads_per_partition,
             norm_factor=(1 / self.norm_factor if self.config.scale_attention else 1.0),
             no_masking=no_masking,
             layer_id=self.config.layer_id,
             num_layers=DeepSpeedSelfAttention.num_layers,
-            alibi=sliced_alibi)
+            alibi=alibi)
 
         context_layer, key_layer, value_layer = attn_key_value
         return context_layer, key_layer, value_layer
@@ -123,7 +117,8 @@ class DeepSpeedSelfAttention(nn.Module):
                                        bias=self.attn_qkvb,
                                        add_bias=self.attn_qkvb is not None,
                                        do_flash_attn=False,
-                                       num_heads=self.num_attention_heads_per_partition)
+                                       num_heads=self.num_attention_heads_per_partition,
+                                       num_layers=DeepSpeedSelfAttention.num_layers)
         else:
             qkv_out = self.qkv_func(
                 input=input,
@@ -132,7 +127,8 @@ class DeepSpeedSelfAttention(nn.Module):
                 gamma=norm_w,
                 beta=norm_b,
                 add_bias=(self.attn_qkvb is not None),
-                num_layers=DeepSpeedSelfAttention.num_layers)
+                num_layers=DeepSpeedSelfAttention.num_layers,
+                num_heads=self.num_attention_heads_per_partition)
 
         context_layer, key_layer, value_layer = self.compute_attention(
             qkv_out=qkv_out,

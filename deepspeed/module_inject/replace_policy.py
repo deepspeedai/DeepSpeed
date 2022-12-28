@@ -106,6 +106,7 @@ class TransformerPolicy(DSPolicy):
             # whether or not the qkv is stored in the split-format
             split_qkv=True):
         super().__init__()
+        self.cuda_graph_supported = False
         self.inference = inference
         self.linear_layer = linear_layer
         self.scale_attention = scale_attention
@@ -406,6 +407,7 @@ class MegatronLayerPolicy(TransformerPolicy):
     version = 0
     moe_type = 'standard'
     megatron_v2 = True
+    use_mup = False
 
     def __init__(self, client_module, inference=True):
         super().__init__(inference, megatron_v2=MegatronLayerPolicy.megatron_v2)
@@ -731,6 +733,62 @@ class HFOPTLayerPolicy(TransformerPolicy):
                self.split_qkv
 
 
+class HFDistilBertLayerPolicy(TransformerPolicy):
+    _orig_layer_class = None
+
+    def __init__(self, client_module, inference=False, preln=False):
+        super().__init__(inference)
+        self.client_module = client_module
+        self.preln = preln
+        self.cuda_graph_supported = True
+        if HFDistilBertLayerPolicy._orig_layer_class is None:
+            try:
+                import transformers
+                HFDistilBertLayerPolicy._orig_layer_class = [
+                    transformers.models.distilbert.modeling_distilbert.TransformerBlock,
+                ]
+            except:
+                HFDistilBertLayerPolicy._orig_layer_class = None
+
+    def get_hidden_heads(self):
+        return self.client_module.attention.q_lin.weight.shape[1], \
+                self.client_module.attention.n_heads
+
+    def attention(self):
+        qw = self.client_module.attention.q_lin.weight
+        qb = self.client_module.attention.q_lin.bias
+        kw = self.client_module.attention.k_lin.weight
+        kb = self.client_module.attention.k_lin.bias
+        vw = self.client_module.attention.v_lin.weight
+        vb = self.client_module.attention.v_lin.bias
+
+        qkvw = Parameter(torch.cat((qw, kw, vw), dim=0))
+        qkvb = Parameter(torch.cat((qb, kb, vb), dim=0))
+
+        return self.linear_layer, \
+               qkvw, \
+               qkvb, \
+               self.client_module.attention.out_lin.weight, \
+               self.client_module.attention.out_lin.bias, \
+               self.scale_attention, \
+               False
+
+    def mlp(self):
+        intermediate_ff = self.client_module.ffn.lin1
+
+        return self.linear_layer, intermediate_ff.weight, intermediate_ff.bias, \
+            self.client_module.ffn.lin2.weight, \
+            self.client_module.ffn.lin2.bias
+
+    def layerNorm(self):
+        attention_layernorm = self.client_module.sa_layer_norm
+        transformer_layernorm = self.client_module.output_layer_norm
+        return attention_layernorm.weight, \
+               attention_layernorm.bias, \
+               transformer_layernorm.weight, \
+               transformer_layernorm.bias
+
+
 # transformer-based policies
 replace_policies = [
     HFBertLayerPolicy,
@@ -742,6 +800,7 @@ replace_policies = [
     BLOOMLayerPolicy,
     HFOPTLayerPolicy,
     HFCLIPLayerPolicy,
+    HFDistilBertLayerPolicy
 ]
 
 # non-transformer-based policies

@@ -6,7 +6,7 @@ import deepspeed.ops.transformer as transformer_inference
 from deepspeed.ops.transformer.inference.diffusers_attention import DeepSpeedDiffusersAttention
 from deepspeed.ops.transformer.inference.diffusers_transformer_block import DeepSpeedDiffusersTransformerBlock
 from deepspeed.ops.transformer.inference.diffusers_2d_transformer import Diffusers2DTransformerConfig
-from .replace_policy import HFBertLayerPolicy, HFGPT2LayerPolicy, BLOOMLayerPolicy
+from .replace_policy import HFBertLayerPolicy, HFGPT2LayerPolicy, BLOOMLayerPolicy, HFDistilBertLayerPolicy
 from .replace_policy import replace_policies, generic_policies
 
 from deepspeed import comm as dist
@@ -438,7 +438,8 @@ def replace_transformer_layer(orig_layer_impl,
                     q_int8=quantize,
                     return_tuple=(config.return_tuple
                                   or (policy_cls is HFBertLayerPolicy)),
-                    triangular_masking=(policy_cls is not HFBertLayerPolicy),
+                    triangular_masking=(policy_cls is not HFBertLayerPolicy
+                                        and policy_cls is not HFDistilBertLayerPolicy),
                     local_attention=((model_config.attention_layers[layer_id] == "local")
                                      if hasattr(model_config,
                                                 'attention_layers') else False),
@@ -451,7 +452,10 @@ def replace_transformer_layer(orig_layer_impl,
                     training_mp_size=config.training_mp_size,
                     bigscience_bloom=bigscience_bloom,
                     max_out_tokens=config.max_out_tokens,
-                    scale_attn_by_inverse_layer_idx=scale_attn_by_inverse_layer_idx)
+                    scale_attn_by_inverse_layer_idx=scale_attn_by_inverse_layer_idx,
+                    use_mup=policy_cls.use_mup if hasattr(policy_cls,
+                                                          'use_mup') else False,
+                    return_single_tuple=(policy_cls is HFDistilBertLayerPolicy))
                 global transformer_config_g
                 transformer_config_g = transformer_config
 

@@ -1,4 +1,5 @@
 import torch
+from deepspeed import comm as dist
 from ..config import DeepSpeedInferenceConfig
 from .base import BaseOp
 
@@ -19,9 +20,15 @@ class SoftmaxContextOp(BaseOp):
                 no_masking: bool,
                 layer_id: int,
                 num_layers: int,
-                alibi: torch.Tensor,
-                alibi_offset: int = None,
-                mp_size: int = None):
+                alibi: torch.Tensor):
+
+        if alibi is not None:
+            batch_heads = query_key_value.shape[0] * heads
+            offset = dist.get_rank() * batch_heads if dist.is_initialized() else 0
+            alibi = alibi[offset:batch_heads + offset, :, :]
+        else:
+            alibi = torch.empty(1)
+
         output = self.softmax_context_func(query_key_value,
                                            attn_mask,
                                            self.config.rotary_dim,

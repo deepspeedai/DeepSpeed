@@ -91,15 +91,17 @@ class DeepSpeedTransformerInference(nn.Module):
 
     def forward(
             self,
-            input,
+            input=None,
             input_mask=None,
             attention_mask=None,
+            attn_mask=None,
             head_mask=None,
             layer_past=None,
             get_key_value=False,
             get_present=False,
             encoder_output=None,
             enc_dec_attn_mask=None,
+            x=None,
             encoder_hidden_states=None,
             encoder_attention_mask=None,
             use_cache=False,
@@ -109,6 +111,13 @@ class DeepSpeedTransformerInference(nn.Module):
             # This needs to be redesigned later!
             layer_head_mask=None,
             past_key_value=None):
+
+        if x is not None:
+            input = x
+
+        input_mask = (input_mask if attn_mask is None else
+                      attn_mask) if attention_mask is None else attention_mask
+
         # Allocate memory only on first layer forward
         if self.config.layer_id == 0:
             self.allocate_workspace(self.config.hidden_size,
@@ -167,7 +176,9 @@ class DeepSpeedTransformerInference(nn.Module):
         if get_present:
             output = (output, presents)
 
-        if self.config.return_tuple:
+        if self.config.return_single_tuple:
+            return (output, )
+        elif self.config.return_tuple:
             return output if type(output) is tuple else (output, attn_mask)
         else:
             return output
