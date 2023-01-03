@@ -268,7 +268,7 @@ Example of <i>**scheduler**</i>
 
 | Description                                                                                           | Default |
 | ----------------------------------------------------------------------------------------------------- | ------- |
-| <i>**min_loss_scale**</i> is  a **fp16** parameter representing the minimum dynamic loss scale value. | `1000`  |
+| <i>**min_loss_scale**</i> is  a **fp16** parameter representing the minimum dynamic loss scale value. | `1`     |
 
 ### BFLOAT16 training options
 
