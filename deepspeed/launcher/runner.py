@@ -439,8 +439,18 @@ def main(args=None):
         assert multi_node_exec
         first_host = list(active_resources.keys())[0]
         hostname_cmd = [f"ssh {first_host} hostname -I"]
-        result = subprocess.check_output(hostname_cmd, shell=True)
+        try:
+            result = subprocess.check_output(hostname_cmd, shell=True)
+        except subprocess.CalledProcessError as err:
+            logger.error(
+                "Unable to detect suitable master address via `hostname -I`, please manually specify one via --master_addr"
+            )
+            raise err
         args.master_addr = result.decode('utf-8').split()[0]
+        if not args.master_addr:
+            raise RuntimeError(
+                f"Unable to detect suitable master address via `hostname -I`, please manually specify one via --master_addr"
+            )
         logger.info(f"Using IP address of {args.master_addr} for node {first_host}")
 
     if args.autotuning != "":
