@@ -12,6 +12,8 @@ from transformers import pipeline
 from transformers.models.t5.modeling_t5 import T5Block
 from transformers.models.roberta.modeling_roberta import RobertaLayer
 from huggingface_hub import HfApi
+from deepspeed.model_implementations import DeepSpeedTransformerInference
+from torch import nn
 
 rocm_version = OpBuilder.installed_rocm_version()
 if rocm_version != (0, 0):
@@ -214,6 +216,19 @@ def assert_fn(model_w_task):
     return assert_fn
 
 
+def check_injection(model):
+    def verify_injection(module):
+        for child in module.children():
+            if isinstance(child, nn.ModuleList):
+                assert isinstance(child[0], DeepSpeedTransformerInference),\
+                    "DeepSpeed-Inference Transformer kernels has not been injected in the model"
+                break
+            else:
+                verify_injection(child)
+
+    verify_injection(model)
+
+
 """
 Tests
 """
@@ -266,6 +281,7 @@ class TestModelTask(DistributedTest):
             replace_with_kernel_inject=True,
             enable_cuda_graph=enable_cuda_graph,
         )
+        check_injection(pipe.model)
         # Warm-up queries for perf measurement
         #for i in range(10):
         #    _ = pipe(query, **inf_kwargs)
@@ -328,6 +344,7 @@ class TestMPSize(DistributedTest):
                                               dtype=dtype,
                                               replace_method="auto",
                                               replace_with_kernel_inject=True)
+        check_injection(pipe.model)
         # Switch device to GPU so that input tensors are not on CPU
         pipe.device = torch.device(f"cuda:{local_rank}")
         ds_output = pipe(query, **inf_kwargs)
@@ -453,6 +470,7 @@ class TestLMCorrectness(DistributedTest):
             replace_with_kernel_inject=True,
             enable_cuda_graph=False,
         )
+        check_injection(ds_model)
         setattr(lm, model_family, ds_model)
         torch.cuda.synchronize()
         start = time.time()
