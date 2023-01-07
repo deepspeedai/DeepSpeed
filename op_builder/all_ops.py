@@ -4,7 +4,11 @@ Copyright 2020 The Microsoft DeepSpeed Team
 import os
 import pkgutil
 import importlib
-from deepspeed.accelerator import get_accelerator
+try:
+    # during installation time accelerator is visible, otherwise return deepspeed.accelerator
+    from accelerator import get_accelerator
+except ImportError:
+    from deepspeed.accelerator import get_accelerator
 
 # List of all available ops
 

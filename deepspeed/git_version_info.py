@@ -11,7 +11,7 @@ except ModuleNotFoundError:
     git_hash = '[none]'
     git_branch = '[none]'
 
-    from .ops.op_builder import ALL_OPS
+    from .ops.op_builder.all_ops import ALL_OPS
     installed_ops = dict.fromkeys(ALL_OPS.keys(), False)
     compatible_ops = dict.fromkeys(ALL_OPS.keys(), False)
     torch_info = {'version': "0.0", "cuda_version": "0.0", "hip_version": "0.0"}

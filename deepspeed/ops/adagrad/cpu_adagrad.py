@@ -3,7 +3,8 @@ Copyright 2020 The Microsoft DeepSpeed Team
 '''
 
 import torch
-from ..op_builder import CPUAdagradBuilder
+from deepspeed.accelerator import get_accelerator
+from deepspeed.ops.op_builder.builder_names import CPUAdagradBuilder
 from deepspeed.utils.logging import should_log_le
 
 
@@ -24,7 +25,8 @@ class DeepSpeedCPUAdagrad(torch.optim.Optimizer):
         self.opt_id = DeepSpeedCPUAdagrad.optimizer_id
         DeepSpeedCPUAdagrad.optimizer_id = DeepSpeedCPUAdagrad.optimizer_id + 1
         self.fp32_optimizer_states = fp32_optimizer_states
-        self.ds_opt_adagrad = CPUAdagradBuilder().load()
+        self.ds_opt_adagrad = get_accelerator().create_op_builder(
+            CPUAdagradBuilder).load()
 
         self.ds_opt_adagrad.create_adagrad(self.opt_id,
                                            lr,

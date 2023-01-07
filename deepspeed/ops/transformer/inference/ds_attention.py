@@ -6,6 +6,7 @@ import math
 import torch
 import torch.nn as nn
 from deepspeed import comm as dist
+from deepspeed.accelerator import get_accelerator
 from .op_binding import LinearOp, VectorMatMulOp, SoftmaxContextOp, QKVGemmOp, SoftmaxOp
 
 minus_inf = -10000.0
@@ -27,7 +28,8 @@ class DeepSpeedSelfAttention(nn.Module):
         data_type_fp = torch.half if config.fp16 else torch.float
         self.config.layer_id = DeepSpeedSelfAttention.num_layers
         DeepSpeedSelfAttention.num_layers = DeepSpeedSelfAttention.num_layers + 1
-        device = torch.cuda.current_device()  #if config.bigscience_bloom else 'cpu'
+        device = get_accelerator().current_device_name(
+        )  #if config.bigscience_bloom else 'cpu'
         qkv_size_per_partition = (self.config.hidden_size // self.config.mp_size) * 3
         self.attn_qkvw = nn.Parameter(torch.empty(self.config.hidden_size,
                                                   qkv_size_per_partition,
@@ -199,7 +201,7 @@ class BloomSelfAttention(DeepSpeedSelfAttention):
             input_mask = torch.empty(1)
 
         mixed_x_layer = qkv_out
-        alibi = alibi.to(torch.cuda.current_device())
+        alibi = alibi.to(get_accelerator().current_device_name())
         head_dim = self.hidden_size_per_partition // self.num_attention_heads_per_partition
         new_tensor_shape = mixed_x_layer.size()[:-1] + (
             self.num_attention_heads_per_partition,

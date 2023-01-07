@@ -5,7 +5,6 @@ import json
 import math
 import torch
 from torch.autograd import Function
-from ... import op_builder
 #from ...inference.engine import inference_cuda_module, specialized_mode
 # Cuda modules will be imported if needed
 inference_cuda_module = None
@@ -15,6 +14,8 @@ from .ds_attention import DeepSpeedSelfAttention
 from .config import DeepSpeedInferenceConfig
 from ....moe.sharded_moe import TopKGate
 from deepspeed import comm as dist
+from deepspeed.accelerator import get_accelerator
+from deepspeed.ops.op_builder.builder_names import InferenceBuilder
 
 
 class DeepSpeedMoEInferenceConfig(DeepSpeedInferenceConfig):
@@ -241,15 +242,14 @@ class DeepSpeedMoEInference(nn.Module):
         global specialized_mode
         if inference_cuda_module is None:
             specialized_mode = False
-            if hasattr(op_builder, 'InferenceSpecializedBuilder'):
-                builder = op_builder.InferenceSpecializedBuilder()
-                if builder.is_compatible():
-                    inference_cuda_module = builder.load()
-                    specialized_mode = True
-                else:
-                    inference_cuda_module = op_builder.InferenceBuilder().load()
+            # InferenceSpecializedBuilder is not among DeepSpeed provided builder yet, so we infer by builder name string
+            builder = get_accelerator().create_op_builder("InferenceSpecializedBuilder")
+            if builder != None and builder.is_compatible():
+                inference_cuda_module = builder.load()
+                specialized_mode = True
             else:
-                inference_cuda_module = op_builder.InferenceBuilder().load()
+                inference_cuda_module = get_accelerator().create_op_builder(
+                    InferenceBuilder).load()
         self.config.specialized_mode = specialized_mode
 
         DeepSpeedMoEInference.layer_id += 1

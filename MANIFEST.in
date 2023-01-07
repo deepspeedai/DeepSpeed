@@ -4,3 +4,4 @@ recursive-include deepspeed *.cpp *.h *.cu *.hip *.tr *.cuh *.cc *.json
 recursive-include csrc *.cpp *.h *.cu *.tr *.cuh *.cc
 recursive-include op_builder *.py
 recursive-include benchmarks *.py
+recursive-include accelerator *.py

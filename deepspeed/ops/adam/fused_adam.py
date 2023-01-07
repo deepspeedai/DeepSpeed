@@ -9,7 +9,8 @@ import torch
 from .multi_tensor_apply import MultiTensorApply
 
 multi_tensor_applier = MultiTensorApply(2048 * 32)
-from ..op_builder import FusedAdamBuilder
+from deepspeed.accelerator import get_accelerator
+from deepspeed.ops.op_builder.builder_names import FusedAdamBuilder
 
 
 class FusedAdam(torch.optim.Optimizer):
@@ -69,9 +70,9 @@ class FusedAdam(torch.optim.Optimizer):
         self.adam_w_mode = 1 if adam_w_mode else 0
         self.set_grad_none = set_grad_none
 
-        fused_adam_cuda = FusedAdamBuilder().load()
+        fused_adam_cuda = get_accelerator().create_op_builder(FusedAdamBuilder).load()
         # Skip buffer
-        self._dummy_overflow_buf = torch.cuda.IntTensor([0])
+        self._dummy_overflow_buf = get_accelerator().IntTensor([0])
         self.multi_tensor_adam = fused_adam_cuda.multi_tensor_adam
 
     def zero_grad(self):

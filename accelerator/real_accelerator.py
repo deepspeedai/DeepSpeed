@@ -24,7 +24,7 @@ def get_accelerator():
             _validate_accelerator(ds_accelerator)
             return ds_accelerator
 
-        from deepspeed.accelerator.cuda_accelerator import CUDA_Accelerator
+        from .cuda_accelerator import CUDA_Accelerator
         ds_accelerator = CUDA_Accelerator()
         _validate_accelerator(ds_accelerator)
     return ds_accelerator

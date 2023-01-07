@@ -31,6 +31,7 @@ import os
 
 from ..constants import TORCH_DISTRIBUTED_DEFAULT_PORT, default_pg_timeout
 from .constants import *
+from deepspeed.accelerator import get_accelerator
 
 
 class ReduceOp(Enum):
@@ -127,7 +128,7 @@ def timed_op(func):
         finally:
             if comms_logger.enabled:
                 # Need to make op blocking for accurate logging
-                torch.cuda.synchronize()
+                get_accelerator().synchronize()
                 # If we're using MPI, we can't simply sync the stream
                 if cdb.using_mpi:
                     cdb.barrier()
@@ -595,7 +596,7 @@ def get_global_rank(group=None, group_rank=0):
 
 
 # Main DeepSpeed Comms. public API.
-def init_distributed(dist_backend="nccl",
+def init_distributed(dist_backend=None,
                      auto_mpi_discovery=True,
                      distributed_port=TORCH_DISTRIBUTED_DEFAULT_PORT,
                      verbose=True,
@@ -650,6 +651,8 @@ def init_distributed(dist_backend="nccl",
                 utils.logger.info('Distributed backend already initialized')
         else:
             assert isinstance(timeout, timedelta)
+            if dist_backend == None:
+                dist_backend = get_accelerator().communication_backend_name()
             if int(os.getenv('RANK', '0')) == 0:
                 utils.logger.info(
                     'Initializing TorchBackend in DeepSpeed with backend {}'.format(

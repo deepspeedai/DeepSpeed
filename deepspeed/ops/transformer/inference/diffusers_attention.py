@@ -4,10 +4,12 @@ Copyright 2022 The Microsoft DeepSpeed Team
 import math
 import torch
 from torch.autograd import Function
-from ... import op_builder
 import torch.nn as nn
 from packaging import version as pkg_version
 from deepspeed.utils.logging import log_dist
+from deepspeed.accelerator import get_accelerator
+from deepspeed.ops.op_builder.builder_names import InferenceBuilder
+
 # Cuda modules will be imported if needed
 inference_cuda_module = None
 minus_inf = -10000.0
@@ -140,14 +142,15 @@ class DeepSpeedDiffusersAttention(nn.Module):
         self.config = config
         self.config.layer_id = DeepSpeedDiffusersAttention.layer_id
         DeepSpeedDiffusersAttention.layer_id += 1
-        device = torch.cuda.current_device() if config.bigscience_bloom else 'cpu'
+        device = get_accelerator().current_device_name(
+        ) if config.bigscience_bloom else 'cpu'
         qkv_size_per_partition = (self.config.hidden_size // self.config.mp_size) * 3
 
         data_type = torch.int8 if config.q_int8 else torch.half if config.fp16 else torch.float
         data_type_fp = torch.half if config.fp16 else torch.float
         global inference_cuda_module
         if inference_cuda_module is None:
-            builder = op_builder.InferenceBuilder()
+            builder = get_accelerator().create_op_builder(InferenceBuilder)
             inference_cuda_module = builder.load()
 
         if DeepSpeedDiffusersAttention.layer_id == 1:
