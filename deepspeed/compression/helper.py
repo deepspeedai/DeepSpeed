@@ -272,7 +272,7 @@ def convert_conv1d_to_linear(model, convert_type):
                 old_module.weight.data.size(0),
                 old_module.weight.data.size(1),
                 bias=True if old_module.bias is not None else False)
-            new_module.weight.data = old_module.weight.data.t()
+            new_module.weight.data = old_module.weight.data.t().contiguous()
             if new_module.bias is not None:
                 new_module.bias.data = old_module.bias.data.view(-1)
 
