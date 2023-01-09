@@ -122,7 +122,7 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
         # - assume all params requires grad
         # - flat by groups, not keeping state. TODO: remove state explicitly?
         # - master grad and unflat master weight never exist. TODO: a way to save out unflat master?
-        if not torch.cuda.is_available:
+        if not torch.cuda.is_available():
             raise SystemError("Cannot use fp16 without CUDA.")
 
         self.optimizer = init_optimizer

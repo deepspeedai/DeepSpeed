@@ -41,7 +41,7 @@ class FP16_Optimizer(DeepSpeedOptimizer):
         self.deepspeed = deepspeed
         self.has_moe_layers = has_moe_layers
         self.using_pipeline = self.deepspeed.pipeline_parallelism
-        if not torch.cuda.is_available:
+        if not torch.cuda.is_available():
             raise SystemError("Cannot use fp16 without CUDA.")
         self.optimizer = init_optimizer
 

@@ -40,7 +40,7 @@ class FP16_UnfusedOptimizer(DeepSpeedOptimizer):
         if dist.get_rank() == 0:
             logger.info(f'Fused Lamb Legacy : {self.fused_lamb_legacy} ')
 
-        if not torch.cuda.is_available:
+        if not torch.cuda.is_available():
             raise SystemError("Cannot use fp16 without CUDA.")
         self.optimizer = init_optimizer
 
