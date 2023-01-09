@@ -135,7 +135,7 @@ FP16 parameters should be of the format:
   "enabled": true,
   "auto_cast": false,
   "loss_scale": 0,
-  "initial_scale_power": 32,
+  "initial_scale_power": 16,
   "loss_scale_window": 1000,
   "hysteresis": 2,
   "min_loss_scale": 1
@@ -155,7 +155,7 @@ FP16_AUTO_CAST_DEFAULT = False
 
 # FP16 initial dynamic scale loss power
 FP16_INITIAL_SCALE_POWER = "initial_scale_power"
-FP16_INITIAL_SCALE_POWER_DEFAULT = 32
+FP16_INITIAL_SCALE_POWER_DEFAULT = 16
 
 # FP16 loss scale window
 FP16_LOSS_SCALE_WINDOW = "loss_scale_window"
