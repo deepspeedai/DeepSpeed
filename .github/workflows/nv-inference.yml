@@ -53,5 +53,5 @@ jobs:
           if [[ -d ./torch-extensions ]]; then rm -rf ./torch-extensions; fi
           cd tests
           TRANSFORMERS_CACHE=/blob/transformers_cache/ TORCH_EXTENSIONS_DIR=./torch-extensions pytest --color=yes --durations=0 --verbose -m 'seq_inference' unit/ --torch_ver="1.13" --cuda_ver="11.6"
-          TORCH_EXTENSIONS_DIR=./torch-extensions pytest --color=yes --durations=0 --verbose -m 'inference_ops' unit/ --torch_ver="1.13" --cuda_ver="11.6"
+          TRANSFORMERS_CACHE=/blob/transformers_cache/ TORCH_EXTENSIONS_DIR=./torch-extensions pytest --color=yes --durations=0 --verbose -m 'inference_ops' unit/ --torch_ver="1.13" --cuda_ver="11.6"
           TRANSFORMERS_CACHE=/blob/transformers_cache/ TORCH_EXTENSIONS_DIR=./torch-extensions pytest --color=yes --durations=0 --forked -n 4 --verbose -m 'inference' unit/ --torch_ver="1.13" --cuda_ver="11.6"
