@@ -265,7 +265,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
         # number of elements per partition in each group
         self.partition_size = []
 
-        #align nccl all-gather send buffers to 4-bye boundary
+        # align nccl all-gather send buffers to 4-byte boundary
         self.nccl_start_alignment_factor = 2  # 4-byte alignment/sizeof(fp16) = 2
 
         assert (allgather_bucket_size % self.nccl_start_alignment_factor == 0), f"allgather_bucket_size must be a multiple of nccl_start_alignment_factor, {self.nccl_start_alignment_factor} "
@@ -354,11 +354,6 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
                 assert (partitioned_data.data_ptr() %
                         (2 * self.nccl_start_alignment_factor) == 0)
 
-            # verify that data partition start locations are 4-byte aligned
-            for partitioned_data in data_parallel_partitions:
-                assert (partitioned_data.data_ptr() %
-                        (2 * self.nccl_start_alignment_factor) == 0)
-
             # A partition of the fp32 master weights that will be updated by this process.
             # Note that the params in single_partition_of_fp32_groups is cloned and detached
             # from the origin params of the model.
@@ -396,7 +391,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
                     f"Rank: {rank} partition count {self.partition_count} and sizes{[(p.numel(), self.is_moe_param_group[i] if hasattr(self, 'is_moe_param_group') else False) for i,p in enumerate(self.single_partition_of_fp32_groups)]} "
                 )
                 dist.barrier()
-        #exit(0)
+
         self.reduce_bucket_size = int(reduce_bucket_size)
         self.allgather_bucket_size = int(allgather_bucket_size)
 
