@@ -588,6 +588,7 @@ class DeepSpeedTransformerLayer(nn.Module):
                 output_attentions=False,
                 grads=None):
         self.config.is_grad_enabled = torch.is_grad_enabled()
+        self.config.training = self.training
         return DeepSpeedTransformerFunction.apply(hidden_states,
                                                   attention_mask,
                                                   self,
