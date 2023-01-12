@@ -58,13 +58,13 @@ Function Arguments :
 template <int numBits, Type qType>
 DS_D_INLINE void chunk(__half2* local_output, const int8_t* data, Params<qType, numBits> q_params);
 
-template <int numBits, Type qType>
-DS_D_INLINE void chunk(__half* local_output, const int8_t* data, Params<qType, numBits> q_params);
+template <typename T, int numBits, Type qType>
+DS_D_INLINE void chunk(T* local_output, const int8_t* data, Params<qType, numBits> q_params);
 
 /**************** Implementations ******************/
 
-template <int numBits, Type qType>
-DS_D_INLINE void chunk(__half* local_output, const int8_t* data, Params<qType, numBits> q_params)
+template <typename T, int numBits, Type qType>
+DS_D_INLINE void chunk(T* local_output, const int8_t* data, Params<qType, numBits> q_params)
 {
     constexpr int32_t num_elems_packed = 8 / numBits;
     constexpr int32_t iters = h_per_chunk / num_elems_packed;
@@ -72,11 +72,11 @@ DS_D_INLINE void chunk(__half* local_output, const int8_t* data, Params<qType, n
 #pragma unroll
     for (int i = 0; i < iters; i++) {
         if constexpr (num_elems_packed == 1) {
-            local_output[i] = q_params.dequantize(data[i]);
+            local_output[i] = q_params.template dequantize<T>(data[i]);
         } else {
             auto accessible_data = *(PackedInt4*)(&data[i]);
-            local_output[2 * i] = q_params.dequantize(accessible_data.low);
-            local_output[2 * i + 1] = q_params.dequantize(accessible_data.high);
+            local_output[2 * i] = q_params.template dequantize<T>(accessible_data.low);
+            local_output[2 * i + 1] = q_params.template dequantize<T>(accessible_data.high);
         }
     }
 }
@@ -85,11 +85,11 @@ template <int numBits, Type qType>
 DS_D_INLINE void chunk(__half2* local_output, const int8_t* data, Params<qType, numBits> q_params)
 {
     __half* local_output_cast = reinterpret_cast<__half*>(local_output);
-    chunk<numBits>(local_output_cast, data, q_params);
+    chunk<__half, numBits>(local_output_cast, data, q_params);
 }
 
-template <int numBits, Type qType, int unroll, int threads>
-DS_D_INLINE void _to_global(__half* global_output,
+template <typename T, int numBits, Type qType, int unroll, int threads>
+DS_D_INLINE void _to_global(T* global_output,
                             const int8_t* data,
                             const float* global_params,
                             const int elems_per_group,
@@ -100,12 +100,13 @@ DS_D_INLINE void _to_global(__half* global_output,
 
     // Load constants
     // TODO(cmikeh2): Refactor into functions?
-    constexpr int load_granularity = granularity * numBits / 16;
+    constexpr int load_granularity = (granularity / (sizeof(T))) / (numBits == 8 ? 1 : 2);
     constexpr int load_step_stride = load_granularity * threads;
     constexpr int load_block_stride = load_step_stride * unroll;
 
     // Store constants
-    constexpr int store_step_stride = h_per_chunk * threads;
+    constexpr int T_per_chunk = granularity / sizeof(T);
+    constexpr int store_step_stride = T_per_chunk * threads;
     constexpr int store_block_stride = store_step_stride * unroll;
 
     // Load offsets
@@ -116,11 +117,11 @@ DS_D_INLINE void _to_global(__half* global_output,
 
     // Store offsets
     const int store_block_offset = tb.group_index().x * store_block_stride;
-    const int store_thread_offset = tb.thread_index().x * h_per_chunk;
+    const int store_thread_offset = tb.thread_index().x * T_per_chunk;
     const int elem_id_base = store_block_offset + store_thread_offset;
 
     int8_t local_load_buffer[load_granularity * unroll];
-    __half local_dequant_buffer[h_per_chunk * unroll];
+    T local_dequant_buffer[T_per_chunk * unroll];
 
     /*
     Note: Splitting this loop in half gave about 3-5% performance increase for reasons that aren't
@@ -145,24 +146,24 @@ DS_D_INLINE void _to_global(__half* global_output,
             const int group_index = elem_id_iter / elems_per_group;
             Params<qType, numBits> q_params(global_params, group_index);
 
-            chunk<numBits, qType>(local_dequant_buffer + i * h_per_chunk,
-                                  local_load_buffer + i * load_granularity,
-                                  q_params);
+            chunk<T, numBits, qType>(local_dequant_buffer + i * T_per_chunk,
+                                     local_load_buffer + i * load_granularity,
+                                     q_params);
             mem_access::store_global<granularity>(global_output + elem_id_iter,
-                                                  local_dequant_buffer + i * h_per_chunk);
+                                                  local_dequant_buffer + i * T_per_chunk);
         }
     }
 }
 
-template <int numBits, Type qType, int unroll, int threads>
-DS_D_INLINE void to_global(__half* global_output,
+template <typename T, int numBits, Type qType, int unroll, int threads>
+DS_D_INLINE void to_global(T* global_output,
                            const int8_t* data,
                            const float* global_params,
                            const int elems_per_group,
                            const int total_elems)
 {
     if constexpr (numBits == 4 || numBits == 8) {
-        _to_global<numBits, qType, unroll, threads>(
+        _to_global<T, numBits, qType, unroll, threads>(
             global_output, data, global_params, elems_per_group, total_elems);
     } else if constexpr (numBits == 3) {
         // TODO(cmikeh2): Need this implementation

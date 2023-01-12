@@ -465,6 +465,119 @@ __device__ __forceinline__ void load_global<4, LoadPolicy::CacheStreaming>(void*
 #endif
 }
 
+template <>
+__device__ __forceinline__ void load_global<2>(void* dst, const void* src)
+{
+    int16_t* data = reinterpret_cast<int16_t*>(dst);
+#ifdef PTX_AVAILABLE
+    asm volatile("ld.global.ca.u16 {%0}, [%1];\n" : "=h"(*data) : "l"(src));
+#else
+    const int16_t* src_cast = reinterpret_cast<const int16_t*>(src);
+    data[0] = src_cast[0];
+#endif
+}
+
+template <>
+__device__ __forceinline__ void load_global<2>(void* dst, const void* src, bool do_access)
+{
+    int16_t* data = reinterpret_cast<int16_t*>(dst);
+#ifdef PTX_AVAILABLE
+    asm volatile(
+        "{\n"
+        "\t.reg .pred p;\n"
+        "\tsetp.ne.b32 p, %2, 0;\n"
+        "\tmov.u16 %0, 0;\n"
+        "\t@p ld.global.u16 {%0}, [%1];\n"
+        "}\n"
+        : "=h"(*data)
+        : "l"(src), "r"((int)do_access));
+#else
+    const int16_t* src_cast = reinterpret_cast<const int16_t*>(src);
+    if (do_access) {
+        data[0] = src_cast[0];
+    } else {
+        data[0] = 0;
+    }
+#endif
+}
+
+template <>
+__device__ __forceinline__ void load_global<2, LoadPolicy::CacheGlobal>(void* dst, const void* src)
+{
+    int16_t* data = reinterpret_cast<int16_t*>(dst);
+#ifdef PTX_AVAILABLE
+    asm volatile("ld.global.cg.u16 {%0}, [%1];\n" : "=h"(*data) : "l"(src));
+#else
+    const int16_t* src_cast = reinterpret_cast<const int16_t*>(src);
+    data[0] = src_cast[0];
+#endif
+}
+
+template <>
+__device__ __forceinline__ void load_global<2, LoadPolicy::CacheGlobal>(void* dst,
+                                                                        const void* src,
+                                                                        bool do_access)
+{
+    int16_t* data = reinterpret_cast<int16_t*>(dst);
+#ifdef PTX_AVAILABLE
+    asm volatile(
+        "{\n"
+        "\t.reg .pred p;\n"
+        "\tsetp.ne.b32 p, %2, 0;\n"
+        "\tmov.u16 %0, 0;\n"
+        "\t@p ld.global.cg.u16 {%0}, [%1];\n"
+        "}\n"
+        : "=h"(*data)
+        : "l"(src), "r"((int)do_access));
+#else
+    const int16_t* src_cast = reinterpret_cast<const int16_t*>(src);
+    if (do_access) {
+        data[0] = src_cast[0];
+    } else {
+        data[0] = 0;
+    }
+#endif
+}
+
+template <>
+__device__ __forceinline__ void load_global<2, LoadPolicy::CacheStreaming>(void* dst,
+                                                                           const void* src)
+{
+    int16_t* data = reinterpret_cast<int16_t*>(dst);
+#ifdef PTX_AVAILABLE
+    asm volatile("ld.global.cs.u16 {%0}, [%1];\n" : "=h"(*data) : "l"(src));
+#else
+    const int16_t* src_cast = reinterpret_cast<const int16_t*>(src);
+    data[0] = src_cast[0];
+#endif
+}
+
+template <>
+__device__ __forceinline__ void load_global<2, LoadPolicy::CacheStreaming>(void* dst,
+                                                                           const void* src,
+                                                                           bool do_access)
+{
+    int16_t* data = reinterpret_cast<int16_t*>(dst);
+#ifdef PTX_AVAILABLE
+    asm volatile(
+        "{\n"
+        "\t.reg .pred p;\n"
+        "\tsetp.ne.b32 p, %2, 0;\n"
+        "\tmov.u16 %0, 0;\n"
+        "\t@p ld.global.cs.u16 {%0}, [%1];\n"
+        "}\n"
+        : "=h"(*data)
+        : "l"(src), "r"((int)do_access));
+#else
+    const int16_t* src_cast = reinterpret_cast<const int16_t*>(src);
+    if (do_access) {
+        data[0] = src_cast[0];
+    } else {
+        data[0] = 0;
+    }
+#endif
+}
+
 /////////// Load Shared ///////////
 namespace internal {
 

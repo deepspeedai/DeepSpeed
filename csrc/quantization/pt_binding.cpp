@@ -60,22 +60,12 @@ at::Tensor ds_sr_quantize_asym(at::Tensor& vals, int groups, int bits)
     return vals;
 }
 
-#define QUANTIZATION_CASE(TYPE, BITS)                               \
-    case TYPE:                                                      \
-        launch_quant<BITS, TYPE>((int8_t*)output.data_ptr(),        \
-                                 (float*)params.data_ptr(),         \
-                                 (__half*)input_vals.data_ptr(),    \
-                                 groups,                            \
-                                 elems_per_group,                   \
-                                 at::cuda::getCurrentCUDAStream()); \
-        break;
-
 std::vector<at::Tensor> quantize_kernel(at::Tensor& input_vals,
                                         int groups,
                                         int numBits,
                                         quantize::Type quantType)
 {
-    auto dtype = (quantType == quantize::Type::IntegerSymmetric) ? torch::kInt32 : at::kFloat;
+    auto dtype = at::kFloat;
     auto params_options = at::TensorOptions()
                               .dtype(dtype)
                               .layout(at::kStrided)
@@ -96,31 +86,28 @@ std::vector<at::Tensor> quantize_kernel(at::Tensor& input_vals,
 
     const int elems_per_group = at::numel(input_vals) / groups;
 
-    if (numBits == 4) {
-        switch (quantType) {
-            QUANTIZATION_CASE(quantize::Type::Symmetric, 4)
-            QUANTIZATION_CASE(quantize::Type::Asymmetric, 4)
-            QUANTIZATION_CASE(quantize::Type::IntegerSymmetric, 4)
-        }
-    } else {
-        switch (quantType) {
-            QUANTIZATION_CASE(quantize::Type::Symmetric, 8)
-            QUANTIZATION_CASE(quantize::Type::Asymmetric, 8)
-            QUANTIZATION_CASE(quantize::Type::IntegerSymmetric, 8)
-        }
-    }
+    launch_quant((int8_t*)output.data_ptr(),
+                 (float*)params.data_ptr(),
+                 (__half*)input_vals.data_ptr(),
+                 groups,
+                 elems_per_group,
+                 numBits,
+                 quantType,
+                 at::cuda::getCurrentCUDAStream());
 
     return {output, params};
 }
 
+template <typename T>
 at::Tensor dequantize(at::Tensor& quantized_data,
                       at::Tensor& params,
                       int groups,
                       int num_bits,
                       quantize::Type quant_type)
 {
+    auto dtype = (std::is_same<T, float>::value) ? torch::kFloat32 : torch::kFloat16;
     auto output_options = at::TensorOptions()
-                              .dtype(torch::kFloat16)
+                              .dtype(dtype)
                               .layout(at::kStrided)
                               .device(at::kCUDA)
                               .requires_grad(false);
@@ -132,7 +119,7 @@ at::Tensor dequantize(at::Tensor& quantized_data,
     const int total_elems = at::numel(output);
     const int elems_per_group = total_elems / groups;
 
-    launch_dequantize_kernel((__half*)output.data_ptr(),
+    launch_dequantize_kernel((T*)output.data_ptr(),
                              (const int8_t*)quantized_data.data_ptr(),
                              (const float*)params.data_ptr(),
                              quant_type,
@@ -162,8 +149,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m)
     pybind11::enum_<quantize::Type>(m, "QuantizationType")
         .value("Symmetric", quantize::Type::Symmetric)
         .value("Asymmetric", quantize::Type::Asymmetric)
-        .value("IntegerSymmetric", quantize::Type::IntegerSymmetric)
         .export_values();
     m.def("quantize", &quantize_kernel);
-    m.def("dequantize", &dequantize);
+    m.def("dequantize", &dequantize<__half>);
+    m.def("dequantize_fp32", &dequantize<float>);
 }

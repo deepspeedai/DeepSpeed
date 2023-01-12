@@ -7,22 +7,23 @@ Copyright 2022 The Microsoft DeepSpeed Team
 
 namespace cg = cooperative_groups;
 
-template <int numBits, dequantize::Type qType, int unroll, int threads>
-__global__ void dequantize_kernel(__half* __restrict__ dequant_data,
+template <typename T, int numBits, dequantize::Type qType, int unroll, int threads>
+__global__ void dequantize_kernel(T* __restrict__ dequant_data,
                                   const int8_t* __restrict__ q_data,
                                   const float* __restrict__ q_params,
                                   int elems_per_group,
                                   int total_elems)
 {
-    dequantize::to_global<numBits, qType, unroll, threads>(
+    dequantize::to_global<T, numBits, qType, unroll, threads>(
         dequant_data, q_data, q_params, elems_per_group, total_elems);
 }
 
-#define LAUNCH_DEQUANT_KERNEL(num_bits, q_type)                                       \
-    dequantize_kernel<num_bits, q_type, unroll, threads><<<grid, block, 0, stream>>>( \
+#define LAUNCH_DEQUANT_KERNEL(num_bits, q_type)                                          \
+    dequantize_kernel<T, num_bits, q_type, unroll, threads><<<grid, block, 0, stream>>>( \
         dequant_data, q_data, q_params, elems_per_group, total_elems);
 
-void launch_dequantize_kernel(__half* dequant_data,
+template <typename T>
+void launch_dequantize_kernel(T* dequant_data,
                               const int8_t* q_data,
                               const float* q_params,
                               quantize::Type q_type,
@@ -33,7 +34,7 @@ void launch_dequantize_kernel(__half* dequant_data,
 {
     constexpr int unroll = 8;
     constexpr int threads = 512;
-    constexpr int elems_per_block = unroll * threads * dequantize::h_per_chunk;
+    constexpr int elems_per_block = unroll * threads * dequantize::granularity / (sizeof(T));
 
     const dim3 block(threads);
     const dim3 grid((total_elems + elems_per_block - 1) / elems_per_block);
@@ -50,3 +51,21 @@ void launch_dequantize_kernel(__half* dequant_data,
         LAUNCH_DEQUANT_KERNEL(4, quantize::Type::Asymmetric);
     }
 }
+
+template void launch_dequantize_kernel(__half* dequant_data,
+                                       const int8_t* q_data,
+                                       const float* q_params,
+                                       quantize::Type q_type,
+                                       int num_bits,
+                                       int elems_per_group,
+                                       int total_elems,
+                                       cudaStream_t stream);
+
+template void launch_dequantize_kernel(float* dequant_data,
+                                       const int8_t* q_data,
+                                       const float* q_params,
+                                       quantize::Type q_type,
+                                       int num_bits,
+                                       int elems_per_group,
+                                       int total_elems,
+                                       cudaStream_t stream);
