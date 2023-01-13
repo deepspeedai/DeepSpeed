@@ -1516,7 +1516,7 @@ class GatheredParameters:
         again upon exit.
 
         Args:
-            params (``torch.nn.Parameter``): A single parameter, a list, or a tuple of parameters to collect.
+            params (``torch.nn.Parameter``): A single parameter, or an iterable of parameters (list, tuple, generator) of parameters to collect.
                 It's assumed that all parameters are zero params.
             modifier_rank (int, optional): If specified, this rank's parameter will be
                 broadcasted on exit from the context. This argument is required if ``params`` are
@@ -1528,6 +1528,8 @@ class GatheredParameters:
 
         Important: Make sure to use ``modifier_rank`` that is not ``None`` (e.g., ``modifier_rank=0``)
         if you need the GPU memory allocated by gather to be released upon exit from the context manager.
+
+        Important: if ``params`` isn't an iterable of parameters or a single parameter it'll be silently ignored!
 
         Examples
         ========
@@ -1598,7 +1600,12 @@ class GatheredParameters:
         if not enabled:
             return
 
-        if not (isinstance(params, list) or isinstance(params, tuple)):
+        if isinstance(params, Iterable) and not isinstance(params, torch.Tensor):
+            # deal with generators like model.parameters()
+            # must convert to list to be able to iterate more than once if we get a generator
+            params = list(params)
+        else:
+            # single param
             params = [params]
 
         # enable if at least one is zero-param, otherwise a noop

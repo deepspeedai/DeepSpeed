@@ -455,7 +455,7 @@ def test_subclass_param_init():
 
     # test that the weights manipulation during each __init__ worked in all w/o needing gathering
     ones = torch.ones(5).half().cuda()
-    with deepspeed.zero.GatheredParameters(list(model.parameters(recurse=False))):
+    with deepspeed.zero.GatheredParameters(model.parameters(recurse=False)):
         assert torch.equal(model.param, ones + 1)
         assert torch.equal(model.param_pa, ones + 2)
         assert torch.equal(model.param_grandpa, ones + 3)
