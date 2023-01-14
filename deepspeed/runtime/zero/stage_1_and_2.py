@@ -1781,7 +1781,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
         # Step 1:- Calculate gradient norm using fp-16 grads
         see_memory_usage('Before norm calculation')
         scaled_global_grad_norm = self.scaled_global_norm()
-        self._global_grad_norm = scaled_global_grad_norm / self.loss_scale
+        self._global_grad_norm = scaled_global_grad_norm / prev_scale
 
         see_memory_usage('After norm before optimizer')
         # Step 2:- run optimizer and upscaling simultaneously
