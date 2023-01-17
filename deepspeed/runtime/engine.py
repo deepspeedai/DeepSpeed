@@ -1529,6 +1529,9 @@ class DeepSpeedEngine(Module):
             if zero_stage == ZeroStageEnum.optimizer_states:
                 overlap_comm = False
                 round_robin_gradients = False
+                # Non-MoE requires contiguous grads to be disabled w. stage 1
+                if not self.has_moe_layers:
+                    contiguous_gradients = False
 
             if isinstance(self.module, PipelineModule):
                 if overlap_comm:
