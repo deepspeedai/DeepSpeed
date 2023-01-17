@@ -1313,3 +1313,63 @@ class TestZeroAdamOptimizerStepCount(DistributedTest):
                         state = optimizer.optimizer.state[param]
                         step_counts.append(state['step'])
                 assert all(step == step_counts[0] for step in step_counts)
+
+
+class TestZeroFrozenWeights(DistributedTest):
+    world_size = 1
+
+    def test(self):
+        config_dict = {
+            "train_batch_size": 4,
+            "steps_per_print": 1,
+            "optimizer": {
+                "type": "Adam",
+                "params": {
+                    "lr": 1e-4
+                }
+            },
+            "fp16": {
+                "enabled": True
+            },
+            "zero_optimization": {
+                "stage": 3
+            }
+        }
+        hidden_dim = 10
+
+        class MyModel(torch.nn.Module):
+            def __init__(self, hidden_dim):
+                super(MyModel, self).__init__()
+                self.l1 = torch.nn.Linear(hidden_dim, hidden_dim)
+                self.l2 = torch.nn.Linear(hidden_dim, hidden_dim)
+                self.act = torch.nn.ReLU()
+                self.cel = torch.nn.CrossEntropyLoss()
+
+                # freeze one fc
+                self.l2.weight.requires_grad = False
+                self.l2.bias.requires_grad = False
+
+            def forward(self, x, y):
+                x = self.l1(x)
+                x = self.act(x)
+                x = self.l2(x)
+                loss = self.cel(x, y)
+                val = (x, loss)
+                return val
+
+        with deepspeed.zero.Init(config_dict_or_path=config_dict):
+            model = MyModel(hidden_dim)
+
+        model, _, _, _ = deepspeed.initialize(model=model,
+                                              model_parameters=model.parameters(),
+                                              config=config_dict)
+        data_loader = random_dataloader(model=model,
+                                        total_samples=50,
+                                        hidden_dim=hidden_dim,
+                                        device=model.device)
+        dist.barrier()
+        for n, batch in enumerate(data_loader):
+            loss = model(batch[0], batch[1])
+            loss = loss[1]
+            model.backward(loss)
+            model.step()
