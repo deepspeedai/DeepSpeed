@@ -26,7 +26,6 @@ try:
     import mlflow
     has_mlflow = True
 except Exception as e:
-    print("MLFlow does not exist. Disabling MLFlow logging")
     has_mlflow = False
 
 ZERO_OPTIMIZATION_STAGE = "stage"
