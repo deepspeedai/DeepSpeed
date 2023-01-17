@@ -1,5 +1,5 @@
 import torch
-from deepspeed.ops.adam import DeepSpeedCPUAdam
+from deepspeed.ops.adagrad import DeepSpeedCPUAdagrad
 import time
 
 NUM_ITERS = 100
@@ -24,8 +24,8 @@ def _main():
     model_size = 1 * 1024**3
     group_size = [model_size, 274432]
     param = [torch.nn.Parameter(torch.ones(size, device=device)) for size in group_size]
-    torch_time = _test_perf(param, torch.optim.Adam)
-    ds_time = _test_perf(param, DeepSpeedCPUAdam)
+    torch_time = _test_perf(param, torch.optim.Adagrad)
+    ds_time = _test_perf(param, DeepSpeedCPUAdagrad)
     print(f"Step time: {torch_time=} {ds_time=}")
 
 

@@ -3,8 +3,8 @@ import pytest
 import torch
 import deepspeed
 from deepspeed.model_implementations import DeepSpeedTransformerInference
-from transformers import AutoConfig, AutoModelForCausalLM
 from unit.common import DistributedTest, DistributedFixture
+from transformers import AutoConfig, AutoModelForCausalLM
 
 
 def check_dtype(model, expected_dtype):

@@ -8,6 +8,7 @@ from unit.modeling import BertConfig
 from unit.modelingpreln import BertEncoder as BertEncoderPreln
 from deepspeed.compression.basic_layer import LinearLayer_Compress, ColumnParallelLinear_Compress, RowParallelLinear_Compress
 from deepspeed.compression.helper import convert_conv1d_to_linear
+from unit.common import DistributedTest
 
 TORCH_MAJOR = int(torch.__version__.split('.')[0])
 TORCH_MINOR = int(torch.__version__.split('.')[1])
@@ -90,7 +91,7 @@ def create_conv1d_model():
     return torch.nn.ModuleList([Conv1D(nf, nx) for i in range(4)])
 
 
-class TestCompression:
+class TestCompression(DistributedTest):
     def setup_method(self, method):
         reset_random()
 

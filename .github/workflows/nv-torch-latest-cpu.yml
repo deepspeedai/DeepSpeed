@@ -1,0 +1,49 @@
+name: nv-torch-latest-cpu
+
+on:
+  push:
+    branches:
+      - 'master'
+      - 'staging**'
+    paths-ignore:
+      - 'docs/**'
+  pull_request:
+    paths-ignore:
+      - 'docs/**'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  unit-tests:
+    runs-on: ubuntu-20.04
+
+    steps:
+      - uses: actions/checkout@v2
+
+      - id: setup-venv
+        uses: ./.github/workflows/setup-venv
+
+      - name: Install pytorch
+        run: |
+          pip install torch==1.12.0+cpu torchvision==0.13.0+cpu torchaudio==0.12.0 --extra-index-url https://download.pytorch.org/whl/cpu
+          python -c "import torch; print('torch:', torch.__version__, torch)"
+          python -c "import torch; print('CUDA available:', torch.cuda.is_available())"
+
+      - name: Install deepspeed
+        run: |
+          pip install .[dev,autotuning]
+          ds_report
+
+      - name: Python environment
+        run: |
+          pip list
+
+      - name: Unit tests
+        run: |
+          unset TORCH_CUDA_ARCH_LIST # only jit compile for current arch
+          if [[ -d ./torch-extensions ]]; then rm -rf ./torch-extensions; fi
+          cd tests
+          TORCH_EXTENSIONS_DIR=./torch-extensions pytest --color=yes --durations=0 --verbose -n 4 unit/ --torch_ver="1.12"
+          TORCH_EXTENSIONS_DIR=./torch-extensions pytest --color=yes --durations=0 --verbose -m 'sequential' unit/ --torch_ver="1.12"

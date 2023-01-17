@@ -8,6 +8,7 @@ from torch import nn
 from unit.modelingpreln import BertEncoder as BertEncoderPreln
 from unit.modeling import BertLayerNorm, BertConfig, BertEncoder as BertEncoderPostln
 from deepspeed import DeepSpeedTransformerLayer, DeepSpeedTransformerConfig
+from unit.common import DistributedTest
 
 
 def check_equal(first, second, atol=1e-2, verbose=False):
@@ -227,32 +228,36 @@ def run_forward(ds_config, seq_len, atol=1e-2, verbose=False, test_bsz=None):
                              (8,8192,128,64,3,False,True),
                              (1,256,2048,32,3,True,True),
                          ]) # yapf: disable
-def test_forward(batch_size,
-                 hidden_size,
-                 seq_len,
-                 heads,
-                 num_layers,
-                 is_preln,
-                 use_fp16):
-    # Only run fp16 test cases on devices with 7+ capability.
-    major, _ = torch.cuda.get_device_capability()
-    if major < 7 and use_fp16 is True:
-        return
+class TestCUDAForward(DistributedTest):
+    world_size = 1
 
-    ds_config = DeepSpeedTransformerConfig()
-    ds_config.layer_id = None
-    ds_config.batch_size = batch_size
-    ds_config.hidden_size = hidden_size
-    ds_config.intermediate_size = 4 * hidden_size
-    ds_config.heads = heads
-    ds_config.attn_dropout_ratio = 0.0
-    ds_config.hidden_dropout_ratio = 0.0
-    ds_config.num_hidden_layers = num_layers
-    ds_config.pre_layer_norm = is_preln
-    ds_config.initializer_range = 0.02
-    ds_config.fp16 = use_fp16
+    def test_forward(self,
+                     batch_size,
+                     hidden_size,
+                     seq_len,
+                     heads,
+                     num_layers,
+                     is_preln,
+                     use_fp16):
+        # Only run fp16 test cases on devices with 7+ capability.
+        major, _ = torch.cuda.get_device_capability()
+        if major < 7 and use_fp16 is True:
+            return
 
-    run_forward(ds_config, seq_len, atol=3e-2)
+        ds_config = DeepSpeedTransformerConfig()
+        ds_config.layer_id = None
+        ds_config.batch_size = batch_size
+        ds_config.hidden_size = hidden_size
+        ds_config.intermediate_size = 4 * hidden_size
+        ds_config.heads = heads
+        ds_config.attn_dropout_ratio = 0.0
+        ds_config.hidden_dropout_ratio = 0.0
+        ds_config.num_hidden_layers = num_layers
+        ds_config.pre_layer_norm = is_preln
+        ds_config.initializer_range = 0.02
+        ds_config.fp16 = use_fp16
+
+        run_forward(ds_config, seq_len, atol=3e-2)
 
 
 @pytest.mark.parametrize('batch_size, small_bsz, hidden_size, seq_len, heads, num_layers, is_preln, use_fp16',
@@ -262,33 +267,37 @@ def test_forward(batch_size,
                              (8,3,1024,512,16,3,False,False),
                              (8,7,1024,512,16,3,False,True),
                          ]) # yapf: disable
-def test_forward_with_small_bsz(batch_size,
-                                small_bsz,
-                                hidden_size,
-                                seq_len,
-                                heads,
-                                num_layers,
-                                is_preln,
-                                use_fp16):
-    # Only run fp16 test cases on devices with 7+ capability.
-    major, _ = torch.cuda.get_device_capability()
-    if major < 7 and use_fp16 is True:
-        return
+class TestCUDAForwardSmallBatchSize(DistributedTest):
+    world_size = 1
 
-    ds_config = DeepSpeedTransformerConfig()
-    ds_config.layer_id = None
-    ds_config.batch_size = batch_size
-    ds_config.hidden_size = hidden_size
-    ds_config.intermediate_size = 4 * hidden_size
-    ds_config.heads = heads
-    ds_config.attn_dropout_ratio = 0.0
-    ds_config.hidden_dropout_ratio = 0.0
-    ds_config.num_hidden_layers = num_layers
-    ds_config.pre_layer_norm = is_preln
-    ds_config.initializer_range = 0.02
-    ds_config.fp16 = use_fp16
+    def test_forward_with_small_bsz(self,
+                                    batch_size,
+                                    small_bsz,
+                                    hidden_size,
+                                    seq_len,
+                                    heads,
+                                    num_layers,
+                                    is_preln,
+                                    use_fp16):
+        # Only run fp16 test cases on devices with 7+ capability.
+        major, _ = torch.cuda.get_device_capability()
+        if major < 7 and use_fp16 is True:
+            return
 
-    run_forward(ds_config, seq_len, atol=3e-2, test_bsz=small_bsz)
+        ds_config = DeepSpeedTransformerConfig()
+        ds_config.layer_id = None
+        ds_config.batch_size = batch_size
+        ds_config.hidden_size = hidden_size
+        ds_config.intermediate_size = 4 * hidden_size
+        ds_config.heads = heads
+        ds_config.attn_dropout_ratio = 0.0
+        ds_config.hidden_dropout_ratio = 0.0
+        ds_config.num_hidden_layers = num_layers
+        ds_config.pre_layer_norm = is_preln
+        ds_config.initializer_range = 0.02
+        ds_config.fp16 = use_fp16
+
+        run_forward(ds_config, seq_len, atol=3e-2, test_bsz=small_bsz)
 
 @pytest.mark.parametrize('batch_size, hidden_size, seq_len, heads, num_layers, is_preln, use_fp16',
                          [
@@ -297,30 +306,34 @@ def test_forward_with_small_bsz(batch_size,
                              #(64,1024,128,16,3,False,False),
                              #(64,1024,128,16,3,False,True),
                          ]) # yapf: disable
-def test_forward_stochastic(batch_size,
-                            hidden_size,
-                            seq_len,
-                            heads,
-                            num_layers,
-                            is_preln,
-                            use_fp16):
-    # Only run fp16 test cases on devices with 7+ capability.
-    major, _ = torch.cuda.get_device_capability()
-    if major < 7 and use_fp16 is True:
-        return
+class TestCUDAForwardStochastic(DistributedTest):
+    world_size = 1
 
-    ds_config = DeepSpeedTransformerConfig()
-    ds_config.layer_id = None
-    ds_config.batch_size = batch_size
-    ds_config.hidden_size = hidden_size
-    ds_config.intermediate_size = 4 * hidden_size
-    ds_config.heads = heads
-    ds_config.attn_dropout_ratio = 0.0
-    ds_config.hidden_dropout_ratio = 0.0
-    ds_config.num_hidden_layers = num_layers
-    ds_config.pre_layer_norm = is_preln
-    ds_config.initializer_range = 0.02
-    ds_config.fp16 = use_fp16
-    ds_config.stochastic_mode = True
+    def test_forward_stochastic(self,
+                                batch_size,
+                                hidden_size,
+                                seq_len,
+                                heads,
+                                num_layers,
+                                is_preln,
+                                use_fp16):
+        # Only run fp16 test cases on devices with 7+ capability.
+        major, _ = torch.cuda.get_device_capability()
+        if major < 7 and use_fp16 is True:
+            return
 
-    run_forward(ds_config, seq_len, atol=7e-2)
+        ds_config = DeepSpeedTransformerConfig()
+        ds_config.layer_id = None
+        ds_config.batch_size = batch_size
+        ds_config.hidden_size = hidden_size
+        ds_config.intermediate_size = 4 * hidden_size
+        ds_config.heads = heads
+        ds_config.attn_dropout_ratio = 0.0
+        ds_config.hidden_dropout_ratio = 0.0
+        ds_config.num_hidden_layers = num_layers
+        ds_config.pre_layer_norm = is_preln
+        ds_config.initializer_range = 0.02
+        ds_config.fp16 = use_fp16
+        ds_config.stochastic_mode = True
+
+        run_forward(ds_config, seq_len, atol=7e-2)

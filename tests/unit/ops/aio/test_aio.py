@@ -49,7 +49,7 @@ def _validate_handle_state(handle, single_submit, overlap_events):
 @pytest.mark.parametrize("single_submit", [True, False])
 @pytest.mark.parametrize("overlap_events", [True, False])
 class TestRead(DistributedTest):
-    world_size = 2
+    world_size = 1
 
     def test_parallel_read(self, tmpdir, single_submit, overlap_events):
         ref_file, _ = _do_ref_write(tmpdir)
@@ -103,7 +103,7 @@ class TestRead(DistributedTest):
 @pytest.mark.parametrize("single_submit", [True, False])
 @pytest.mark.parametrize("overlap_events", [True, False])
 class TestWrite(DistributedTest):
-    world_size = 2
+    world_size = 1
 
     def test_parallel_write(self, tmpdir, single_submit, overlap_events):
         ref_file, ref_buffer = _do_ref_write(tmpdir)
@@ -152,7 +152,7 @@ class TestWrite(DistributedTest):
 
 @pytest.mark.parametrize("cuda_device", [True, False])
 class TestAsyncQueue(DistributedTest):
-    world_size = 2
+    world_size = 1
 
     @pytest.mark.parametrize("async_queue", [2, 4])
     def test_read(self, tmpdir, async_queue, cuda_device):

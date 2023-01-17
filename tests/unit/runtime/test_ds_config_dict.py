@@ -15,6 +15,21 @@ import deepspeed
 from deepspeed.runtime.config import DeepSpeedConfig, get_bfloat16_enabled
 
 
+class TestBasicConfig(DistributedTest):
+    world_size = 1
+
+    def test_cuda(self):
+        assert (torch.cuda.is_available())
+
+    def test_check_version(self):
+        assert hasattr(deepspeed, "__git_hash__")
+        assert hasattr(deepspeed, "__git_branch__")
+        assert hasattr(deepspeed, "__version__")
+        assert hasattr(deepspeed, "__version_major__")
+        assert hasattr(deepspeed, "__version_minor__")
+        assert hasattr(deepspeed, "__version_patch__")
+
+
 @pytest.fixture
 def base_config():
     config_dict = {
@@ -30,19 +45,6 @@ def base_config():
         }
     }
     return config_dict
-
-
-def test_cuda():
-    assert (torch.cuda.is_available())
-
-
-def test_check_version():
-    assert hasattr(deepspeed, "__git_hash__")
-    assert hasattr(deepspeed, "__git_branch__")
-    assert hasattr(deepspeed, "__version__")
-    assert hasattr(deepspeed, "__version_major__")
-    assert hasattr(deepspeed, "__version_minor__")
-    assert hasattr(deepspeed, "__version_patch__")
 
 
 def _run_batch_config(ds_config, train_batch=None, micro_batch=None, gas=None):
