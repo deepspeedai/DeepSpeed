@@ -3,7 +3,6 @@ name: nv-transformers-v100
 on:
   push:
     branches:
-      - 'master'
       - 'staging**'
     paths-ignore:
       - 'docs/**'

@@ -3,7 +3,6 @@ name: nv-inference
 on:
   push:
     branches:
-      - 'master'
       - 'staging**'
     paths-ignore:
       - 'docs/**'

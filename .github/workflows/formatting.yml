@@ -3,7 +3,6 @@ name: Formatting
 on:
   push:
     branches:
-      - 'master'
       - 'staging**'
   pull_request:
     branches:

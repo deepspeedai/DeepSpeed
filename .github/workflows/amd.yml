@@ -3,7 +3,6 @@ name: amd
 on:
   push:
     branches:
-      - 'master'
       - 'staging**'
     paths-ignore:
       - 'docs/**'

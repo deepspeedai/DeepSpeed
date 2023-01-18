@@ -3,7 +3,6 @@ name: nv-torch18-p40
 on:
   push:
     branches:
-      - 'master'
       - 'staging**'
     paths-ignore:
       - 'docs/**'

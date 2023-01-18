@@ -3,7 +3,6 @@ name: nv-torch18-v100
 on:
   push:
     branches:
-      - 'master'
       - 'staging**'
     paths-ignore:
       - 'docs/**'
