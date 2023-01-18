@@ -116,14 +116,19 @@ class TestConfigOptimizer(DistributedTest):
         assert isinstance(ds_optimizer, FusedAdam)
 
 
-@pytest.mark.parametrize('optimizer_extension', ['zero', 'amp', None])
+@pytest.mark.parametrize('optimizer_extension', ['zero1', 'zero2', 'amp', None])
 @pytest.mark.parametrize('model_dtype', ['fp16', 'bf16', 'fp32'])
 @pytest.mark.parametrize('grad_accum_dtype', [None, 'fp16', 'bf16', 'fp32'])
 class TestOptimizerImplementation(DistributedTest):
     world_size = 1
 
     def test(self, optimizer_extension, model_dtype, grad_accum_dtype):
-        zero_stage = 1 if optimizer_extension == 'zero' else 0
+        if optimizer_extension == 'zero1':
+            zero_stage = 1
+        elif optimizer_extension == 'zero2':
+            zero_stage = 2
+        else:
+            zero_stage = 0
         amp = True if optimizer_extension == 'amp' else False
         fp16 = True if model_dtype == 'fp16' else False
         bf16 = True if model_dtype == 'bf16' else False
@@ -164,12 +169,17 @@ class TestOptimizerImplementation(DistributedTest):
 
         # Enumerate supported configurations
         is_supported = {}
-        # Zero Wrapper
-        is_supported[('zero', 'fp16', None)] = True
-        is_supported[('zero', 'fp16', 'fp16')] = True
-        is_supported[('zero', 'bf16', 'bf16')] = True
-        is_supported[('zero', 'fp32', None)] = True
-        is_supported[('zero', 'fp32', 'fp32')] = True
+        # ZeRO 1 Wrapper
+        is_supported[('zero1', 'fp16', None)] = True
+        is_supported[('zero1', 'fp16', 'fp16')] = True
+        is_supported[('zero1', 'bf16', 'fp32')] = True
+        is_supported[('zero1', 'fp32', None)] = True
+        is_supported[('zero1', 'fp32', 'fp32')] = True
+        # ZeRO 2 Wrapper
+        is_supported[('zero2', 'fp16', None)] = True
+        is_supported[('zero2', 'fp16', 'fp16')] = True
+        is_supported[('zero2', 'fp32', None)] = True
+        is_supported[('zero2', 'fp32', 'fp32')] = True
         # Amp Wrapper
         is_supported[('amp', 'fp32', None)] = True
         is_supported[('amp', 'fp32', 'fp32')] = True
