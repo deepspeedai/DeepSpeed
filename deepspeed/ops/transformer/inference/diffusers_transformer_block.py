@@ -79,8 +79,8 @@ class DeepSpeedDiffusersTransformerBlock(nn.Module):
             self.attn_1.do_out_bias = False
             self.attn_1_bias = self.attn_1.attn_ob
         else:
-            self.attn_1_bias = nn.Paramaeter(torch.zeros_like(self.norm2_g),
-                                             requires_grad=False)
+            self.attn_1_bias = nn.Parameter(torch.zeros_like(self.norm2_g),
+                                            requires_grad=False)
 
         # Pull the bias in if we can
         if isinstance(self.attn_2, DeepSpeedDiffusersAttention):
