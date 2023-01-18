@@ -38,12 +38,6 @@ jobs:
           pip install .[dev,1bit,autotuning,inf]
           ds_report
 
-      - name: Install lm-eval
-        run: |
-          pip install git+https://github.com/EleutherAI/lm-evaluation-harness
-          # This is required until lm-eval makes a new release. v0.2.0 is
-          # broken for latest version of transformers
-
       - name: Python environment
         run: |
           pip list

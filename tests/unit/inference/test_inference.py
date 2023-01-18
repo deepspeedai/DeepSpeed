@@ -427,7 +427,7 @@ class TestInjectionPolicy(DistributedTest):
          "gpt2-xl"],
     ),
 )
-@pytest.mark.parametrize("task", ["lambada"])
+@pytest.mark.parametrize("task", ["lambada_standard"])
 class TestLMCorrectness(DistributedTest):
     world_size = 1
 
