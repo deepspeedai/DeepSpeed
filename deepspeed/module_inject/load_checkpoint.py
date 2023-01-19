@@ -1,4 +1,10 @@
 from torch import nn
+from deepspeed.model_implementations.transformers.ds_bloom import DeepSpeedBloomInference
+from deepspeed.model_implementations.transformers.ds_gpt import DeepSpeedGPTInference
+from deepspeed.model_implementations.transformers.ds_bert import DeepSpeedBERTInference
+from deepspeed.model_implementations.transformers.ds_megatron_gpt import DeepSpeedMegatronGPTInference
+from deepspeed.model_implementations.transformers.ds_opt import DeepSpeedOPTInference
+
 import deepspeed.ops.transformer as transformer_inference
 from .layers import LinearLayer, Normalize, EmbeddingLayer, OPTEmbedding
 import torch
@@ -282,6 +288,11 @@ def load_model_with_checkpoint(r_module,
         LinearLayer: load,
         Normalize: load,
         transformer_inference.DeepSpeedTransformerInference: load_transformer_layer,
+        DeepSpeedBloomInference: load_transformer_layer,
+        DeepSpeedGPTInference: load_transformer_layer,
+        DeepSpeedBERTInference: load_transformer_layer,
+        DeepSpeedMegatronGPTInference: load_transformer_layer,
+        DeepSpeedOPTInference: load_transformer_layer,
         OPTLearnedPositionalEmbedding: load,
         OPTEmbedding: load
     }

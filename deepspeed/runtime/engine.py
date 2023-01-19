@@ -88,7 +88,7 @@ from ..moe.utils import is_moe_param
 from ..git_version_info import version
 
 from deepspeed.profiling.flops_profiler.profiler import FlopsProfiler
-from deepspeed.utils.logging import print_json_dist
+from deepspeed.utils.logging import print_json_dist, print_configuration
 
 from deepspeed.inference.config import DtypeEnum
 
@@ -129,13 +129,6 @@ def split_half_float_double_sparse(tensors):
         if bucket:
             buckets.append((dtype, bucket))
     return buckets
-
-
-def print_configuration(args, name):
-    logger.info("{}:".format(name))
-    for arg in sorted(vars(args)):
-        dots = "." * (29 - len(arg))
-        logger.info("  {} {} {}".format(arg, dots, getattr(args, arg)))
 
 
 FORWARD_MICRO_TIMER = 'forward_microstep'
