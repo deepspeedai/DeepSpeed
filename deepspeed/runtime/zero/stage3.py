@@ -1509,7 +1509,7 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
         return params_in_partition, params_not_in_partition, first_offset
 
     @instrument_w_nvtx
-    def zero_grad(self, set_grads_to_None=True):
+    def zero_grad(self, set_to_none=False):
         """
         Zero FP16 parameter grads.
         """
@@ -1519,7 +1519,7 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
         # For speed, set model fp16 grad to None by default
         for group in self.fp16_groups:
             for p in group:
-                if set_grads_to_None:
+                if set_to_none:
                     if p.grad is not None and p.grad.is_cuda:
                         p.grad.record_stream(torch.cuda.current_stream())
                     p.grad = None
@@ -1708,7 +1708,7 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
         self.fp32_partitioned_groups_flat[sub_group_id].grad = single_grad_partition
 
         # release all the gradient since we have already created a necessary copy in dp_grad_partition
-        self.zero_grad()
+        self.zero_grad(set_to_none=True)
 
         for grad in filter(lambda g: g.is_cuda, self.averaged_gradients[sub_group_id]):
             grad.record_stream(torch.cuda.current_stream())
@@ -1816,7 +1816,7 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
 
     def _overflow_clean_up(self, prev_scale):
         see_memory_usage('After overflow before clearing gradients', force=False)
-        self.zero_grad()
+        self.zero_grad(set_to_none=True)
 
         if self.offload_optimizer:
             self.reset_cpu_buffers()
