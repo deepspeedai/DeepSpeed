@@ -2,6 +2,7 @@
 Copyright 2022 The Microsoft DeepSpeed Team
 '''
 import torch
+from deepspeed.accelerator import get_accelerator
 
 
 class DSClipEncoder(torch.nn.Module):
@@ -25,7 +26,7 @@ class DSClipEncoder(torch.nn.Module):
                            seq_len,
                            seq_len,
                            dtype=dtype,
-                           device=torch.cuda.current_device())
+                           device=get_accelerator().current_device_name())
         mask.fill_(torch.tensor(torch.finfo(dtype).min))
         mask.triu_(1)
         mask = mask.unsqueeze(1)

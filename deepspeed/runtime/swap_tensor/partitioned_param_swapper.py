@@ -10,8 +10,8 @@ import shutil
 from enum import Enum
 import torch
 from deepspeed import comm as dist
-
-from deepspeed.ops.aio import AsyncIOBuilder
+from deepspeed.accelerator import get_accelerator
+from deepspeed.ops.op_builder import AsyncIOBuilder
 from .constants import *
 from .utils import swap_in_tensors, swap_out_tensors, MIN_AIO_BYTES, AIO_ALIGNED_BYTES, print_object, SwapBufferPool
 
@@ -107,11 +107,10 @@ class AsyncPartitionedParameterSwapper(object):
 
         self.available_buffer_ids = [i for i in range(self.param_buffer_count)]
         self.reserved_buffer_ids = []
-        self.buffers = torch.empty(int(self.aligned_elements_per_buffer *
-                                       self.param_buffer_count),
-                                   dtype=self.dtype,
-                                   pin_memory=True,
-                                   requires_grad=False)
+        self.buffers = get_accelerator().pin_memory(
+            torch.empty(int(self.aligned_elements_per_buffer * self.param_buffer_count),
+                        dtype=self.dtype,
+                        requires_grad=False))
 
         self.aio_read_handle = self.aio_handle(self.aio_config[AIO_BLOCK_SIZE],
                                                self.aio_config[AIO_QUEUE_DEPTH],
@@ -393,9 +392,10 @@ class AsyncPartitionedParameterSwapper(object):
     def reserve_partitioned_swap_space(self, partition_num_elems):
         aligned_numel = sum(
             [self._io_aligned_numel(numel) for numel in partition_num_elems])
-        self.partitioned_swap_buffer = torch.zeros(aligned_numel,
-                                                   device='cpu',
-                                                   dtype=self.dtype).pin_memory()
+        self.partitioned_swap_buffer = get_accelerator().pin_memory(
+            torch.zeros(aligned_numel,
+                        device='cpu',
+                        dtype=self.dtype))
         self.partitioned_swap_pool = SwapBufferPool([self.partitioned_swap_buffer])
 
     def swap_out_partitioned_params(self, dst_fp16_params, src_fp32_params):

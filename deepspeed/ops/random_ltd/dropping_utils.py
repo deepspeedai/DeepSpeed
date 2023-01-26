@@ -3,8 +3,7 @@ Copyright 2022 The Microsoft DeepSpeed Team
 """
 import torch
 
-from deepspeed.accelerator import get_accelerator
-from deepspeed.ops.op_builder.builder_names import RandomLTDBuilder
+from deepspeed.ops.op_builder import RandomLTDBuilder
 """
 Returns:
     sampled_indices: [layers, batch_size, reserved_length]
@@ -29,7 +28,7 @@ def gpt_sample_tokens(reserved_length: int,
                                               reserved_length).to(torch.int32)
     global random_ltd_module
     if random_ltd_module is None:
-        random_ltd_module = get_accelerator().create_op_builder(RandomLTDBuilder).load()
+        random_ltd_module = RandomLTDBuilder().load()
     sampled_indices = random_ltd_module.token_sort_(sampled_indices, seq_length)
 
     # Not certain the optimized kernel is actually better here, cause it kind of screws
@@ -65,7 +64,7 @@ def bert_sample_tokens(reserved_length: int,
                                               reserved_length).to(torch.int32)
     global random_ltd_module
     if random_ltd_module is None:
-        random_ltd_module = get_accelerator().create_op_builder(RandomLTDBuilder).load()
+        random_ltd_module = RandomLTDBuilder().load()
 
     sampled_indices = random_ltd_module.token_sort_(sampled_indices, seq_length)
     dtype = sampled_indices.dtype
@@ -90,8 +89,7 @@ class GatherTokens(torch.autograd.Function):
                 batch_first: bool):
         global random_ltd_module
         if random_ltd_module is None:
-            random_ltd_module = get_accelerator().create_op_builder(
-                RandomLTDBuilder).load()
+            random_ltd_module = RandomLTDBuilder().load()
         ctx.save_for_backward(activations, sorted_indices)
         ctx.batch_first = batch_first
         return activations, random_ltd_module.token_gather(activations, sorted_indices, batch_first)
@@ -102,8 +100,7 @@ class GatherTokens(torch.autograd.Function):
         g_gradients = g_gradients.contiguous()
         global random_ltd_module
         if random_ltd_module is None:
-            random_ltd_module = get_accelerator().create_op_builder(
-                RandomLTDBuilder).load()
+            random_ltd_module = RandomLTDBuilder().load()
         activations, sorted_indices = ctx.saved_tensors
         batch_first = ctx.batch_first
 
@@ -122,8 +119,7 @@ class ScatterTokens(torch.autograd.Function):
                 batch_first: bool):
         global random_ltd_module
         if random_ltd_module is None:
-            random_ltd_module = get_accelerator().create_op_builder(
-                RandomLTDBuilder).load()
+            random_ltd_module = RandomLTDBuilder().load()
         scatter_results = random_ltd_module.token_scatter_(all_activations.clone(),
                                                            layer_activations,
                                                            sorted_indices,
@@ -139,8 +135,7 @@ class ScatterTokens(torch.autograd.Function):
         out_gradients = out_gradients.contiguous()
         global random_ltd_module
         if random_ltd_module is None:
-            random_ltd_module = get_accelerator().create_op_builder(
-                RandomLTDBuilder).load()
+            random_ltd_module = RandomLTDBuilder().load()
         sorted_indices, = ctx.saved_tensors
         batch_first = ctx.batch_first
 

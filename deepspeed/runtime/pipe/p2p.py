@@ -11,6 +11,7 @@ from deepspeed import comm as dist
 # To query whether we have send/recv support
 from packaging.version import Version
 from deepspeed.git_version_info import torch_info
+from deepspeed.accelerator import get_accelerator
 
 _groups = None
 _grid = None
@@ -92,7 +93,7 @@ def wait():
         op.wait()
     _async = []
 
-    torch.cuda.synchronize()
+    get_accelerator().synchronize()
 
 
 def send_obj(msg: typing.Any, dest: int):
@@ -110,10 +111,12 @@ def send_obj(msg: typing.Any, dest: int):
     # serialize the message
     msg = pickle.dumps(msg)
     # construct a tensor to send
-    msg = torch.ByteTensor(torch.ByteStorage.from_buffer(msg)).cuda()
+    msg = torch.ByteTensor(torch.ByteStorage.from_buffer(msg)).to(
+        get_accelerator().device_name())
 
     # Send meta and message
-    length_tensor = torch.tensor([len(msg)], dtype=torch.long).cuda()
+    length_tensor = torch.tensor([len(msg)],
+                                 dtype=torch.long).to(get_accelerator().device_name())
     dist.send(length_tensor, dst=dest)
     dist.send(msg, dst=dest)
 
@@ -128,11 +131,12 @@ def recv_obj(sender: int) -> typing.Any:
         sender (int): The rank sending the message.
     """
     # Get message meta
-    length = torch.tensor([0], dtype=torch.long).cuda()
+    length = torch.tensor([0], dtype=torch.long).to(get_accelerator().device_name())
     dist.recv(length, src=sender)
 
     # Receive and deserialize
-    msg = torch.empty(length.item(), dtype=torch.uint8).cuda()
+    msg = torch.empty(length.item(),
+                      dtype=torch.uint8).to(get_accelerator().device_name())
     dist.recv(msg, src=sender)
 
     msg = pickle.loads(msg.cpu().numpy().tobytes())
@@ -140,7 +144,7 @@ def recv_obj(sender: int) -> typing.Any:
     def _to(x):
         """Recursively move to the current device."""
         if torch.is_tensor(x):
-            return x.cuda()
+            return x.to(get_accelerator().device_name())
         if isinstance(x, (tuple, list)):
             ret = [_to(x_) for x_ in x]
             if isinstance(x, tuple):

@@ -23,6 +23,7 @@ import numpy as np
 
 import deepspeed.comm as dist
 from deepspeed.utils import logger
+from deepspeed.accelerator import get_accelerator
 from ..constants import *
 from ..curriculum_scheduler import CurriculumScheduler
 from .indexed_dataset import MMapIndexedDataset
@@ -326,11 +327,11 @@ class DeepSpeedDataSampler(object):
                                                           samples_per_cluster[cidx])
                 self.np_rng.shuffle(batch)
                 batch = torch.tensor(batch,
-                                     device=torch.cuda.current_device(),
+                                     device=get_accelerator().current_device_name(),
                                      dtype=torch.long).view(-1)
             else:
                 batch = torch.empty(self.global_batch_size,
-                                    device=torch.cuda.current_device(),
+                                    device=get_accelerator().current_device_name(),
                                     dtype=torch.long)
             dist.broadcast(batch, 0, group=self.data_parallel_group)
             self.batch = batch.tolist()

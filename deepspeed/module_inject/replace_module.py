@@ -6,6 +6,7 @@ import deepspeed.ops.transformer as transformer_inference
 from deepspeed.ops.transformer.inference.diffusers_attention import DeepSpeedDiffusersAttention
 from deepspeed.ops.transformer.inference.diffusers_transformer_block import DeepSpeedDiffusersTransformerBlock
 from deepspeed.ops.transformer.inference.diffusers_2d_transformer import Diffusers2DTransformerConfig
+from deepspeed.accelerator import get_accelerator
 from .replace_policy import HFGPT2LayerPolicy
 from .replace_policy import replace_policies, generic_policies
 
@@ -63,10 +64,10 @@ class ReplaceWithTensorSlicing:
                               axis=self.out_dim) for i in range(len(qkv_split[0]))
                 ]
                 dst.data.copy_(weight_split[self.gpu_index].to(
-                    torch.cuda.current_device()).contiguous())
+                    get_accelerator().current_device_name()).contiguous())
             else:
                 dst.data.copy_(src_split[self.gpu_index].to(
-                    torch.cuda.current_device()).contiguous())
+                    get_accelerator().current_device_name()).contiguous())
         else:
             if src_shape[0] == dst_shape[0]:
                 return torch.nn.parameter.Parameter(src)
@@ -78,10 +79,10 @@ class ReplaceWithTensorSlicing:
                               axis=0) for i in range(len(qkv_split[0]))
                 ]
                 dst.data.copy_(bias_split[self.gpu_index].to(
-                    torch.cuda.current_device()).contiguous())
+                    get_accelerator().current_device_name()).contiguous())
             else:
                 dst.data.copy_(src_split[self.gpu_index].to(
-                    torch.cuda.current_device()).contiguous())
+                    get_accelerator().current_device_name()).contiguous())
 
         return torch.nn.parameter.Parameter(dst)
 
@@ -101,22 +102,23 @@ class ReplaceWithTensorSlicing:
                         src,
                         dst_shape[self.in_dim],
                         dim=self.in_dim)[self.gpu_index].to(
-                            torch.cuda.current_device()).contiguous()
+                            get_accelerator().current_device_name()).contiguous()
                 else:
                     self.merge_assert(src_shape[self.out_dim], dst_shape[self.out_dim])
                     weight_split = torch.split(
                         src.data,
                         dst_shape[self.out_dim],
                         dim=self.out_dim)[self.gpu_index].to(
-                            torch.cuda.current_device()).contiguous()
+                            get_accelerator().current_device_name()).contiguous()
                 dst.data.copy_(weight_split.contiguous())
         else:
             if src_shape[0] == dst_shape[0]:
                 dst.data.copy_(src)
             else:
-                bias_split = torch.split(src.data,
-                                         dst_shape[-1])[self.gpu_index].to(
-                                             torch.cuda.current_device()).contiguous()
+                bias_split = torch.split(
+                    src.data,
+                    dst_shape[-1])[self.gpu_index].to(
+                        get_accelerator().current_device_name()).contiguous()
                 dst.data.copy_(bias_split)
         dst = torch.nn.parameter.Parameter(dst, requires_grad=False)
         if hasattr(src, 'scale'):
@@ -154,7 +156,7 @@ class GroupQuantizer:
             return inputs
         q_range = 2**self.num_bits
         num_groups = inputs.shape[0] // self.group_size
-        inputs = inputs.to(torch.cuda.current_device())
+        inputs = inputs.to(get_accelerator().current_device_name())
         input_flat = inputs.reshape(num_groups, -1).contiguous()
         input_min = torch.min(input_flat, dim=1, keepdim=True)[0].float()
         input_max = torch.max(input_flat, dim=1, keepdim=True)[0].float()
@@ -223,7 +225,7 @@ def generic_injection(module, fp16=False, enable_cuda_graph=True):
             data = data.contiguous()
             data.reshape(-1).copy_(data.transpose(-1, -2).contiguous().reshape(-1))
             data = data.reshape(data.shape[-1], data.shape[-2])
-            data.to(torch.cuda.current_device())
+            data.to(get_accelerator().current_device_name())
             return data
 
         if len(policy_attn) == 5:
@@ -236,7 +238,8 @@ def generic_injection(module, fp16=False, enable_cuda_graph=True):
 
         attn_module.attn_qkvb = None
         attn_module.attn_ow.data = transpose(attn_ow.data)
-        attn_module.attn_ob.data.copy_(attn_ob.data.to(torch.cuda.current_device()))
+        attn_module.attn_ob.data.copy_(
+            attn_ob.data.to(get_accelerator().current_device_name()))
         return attn_module
 
     def replace_attn_block(child, policy):
@@ -421,7 +424,7 @@ def replace_transformer_layer(orig_layer_impl,
                 if child.bias is not None:
                     new_bias.data.copy_(child.bias.data)
                 return LinearAllreduce(data, child.bias if child.bias is None else \
-                            torch.nn.parameter.Parameter(new_bias.to(torch.cuda.current_device())), mp_group)
+                            torch.nn.parameter.Parameter(new_bias.to(get_accelerator().current_device_name())), mp_group)
             else:
                 new_weight = torch.empty((
                     (weight_shape[1] if conv_linear_layer else weight_shape[0]) //
@@ -439,8 +442,9 @@ def replace_transformer_layer(orig_layer_impl,
                                        dtype=child.weight.dtype)
                 bias_data = None if child.bias is None else mp_replace.copy(
                     new_bias,
-                    child.bias.data).to(torch.cuda.current_device())
-                return LinearLayer(weight=data.to(torch.cuda.current_device()),
+                    child.bias.data).to(get_accelerator().current_device_name())
+                return LinearLayer(weight=data.to(
+                    get_accelerator().current_device_name()),
                                    bias=bias_data)
 
         def _slice_embedding(child, name, conv_linear_layer):

@@ -9,8 +9,7 @@ from deepspeed import module_inject
 from .diffusers_attention import DeepSpeedDiffusersAttention
 from .bias_add import nhwc_bias_add
 from .diffusers_2d_transformer import Diffusers2DTransformerConfig
-from deepspeed.accelerator import get_accelerator
-from deepspeed.ops.op_builder.builder_names import InferenceBuilder, SpatialInferenceBuilder
+from deepspeed.ops.op_builder import InferenceBuilder, SpatialInferenceBuilder
 
 # Ops will be loaded on demand
 transformer_cuda_module = None
@@ -20,16 +19,14 @@ spatial_cuda_module = None
 def load_transformer_module():
     global transformer_cuda_module
     if transformer_cuda_module is None:
-        transformer_cuda_module = get_accelerator().create_op_builder(
-            InferenceBuilder).load()
+        transformer_cuda_module = InferenceBuilder().load()
     return transformer_cuda_module
 
 
 def load_spatial_module():
     global spatial_cuda_module
     if spatial_cuda_module is None:
-        spatial_cuda_module = get_accelerator().create_op_builder(
-            SpatialInferenceBuilder).load()
+        spatial_cuda_module = SpatialInferenceBuilder().load()
     return spatial_cuda_module
 
 

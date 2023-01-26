@@ -3,9 +3,9 @@ Copyright 2019 The Microsoft DeepSpeed Team
 """
 
 import time
-import torch
 from numpy import mean
 from deepspeed.utils.logging import log_dist
+from deepspeed.accelerator import get_accelerator
 from deepspeed import comm as dist
 
 try:
@@ -18,12 +18,14 @@ except ImportError:
 
 
 class CudaEventTimer(object):
-    def __init__(self, start_event: torch.cuda.Event, end_event: torch.cuda.Event):
+    def __init__(self,
+                 start_event: get_accelerator().Event,
+                 end_event: get_accelerator().Event):
         self.start_event = start_event
         self.end_event = end_event
 
     def get_elapsed_msec(self):
-        torch.cuda.current_stream().wait_event(self.end_event)
+        get_accelerator().current_stream().wait_event(self.end_event)
         self.end_event.synchronize()
         return self.start_event.elapsed_time(self.end_event)
 
@@ -42,14 +44,14 @@ class SynchronizedWallClockTimer:
         def start(self):
             """Start the timer."""
             assert not self.started_, f"{self.name_} timer has already been started"
-            self.start_event = torch.cuda.Event(enable_timing=True)
+            self.start_event = get_accelerator().Event(enable_timing=True)
             self.start_event.record()
             self.started_ = True
 
         def stop(self, reset=False, record=False):
             """Stop the timer."""
             assert self.started_, "timer is not started"
-            end_event = torch.cuda.Event(enable_timing=True)
+            end_event = get_accelerator().Event(enable_timing=True)
             end_event.record()
             self.event_timers.append(CudaEventTimer(self.start_event, end_event))
             self.start_event = None
@@ -100,14 +102,14 @@ class SynchronizedWallClockTimer:
 
     @staticmethod
     def memory_usage():
-        alloc = "mem_allocated: {:.4f} GB".format(torch.cuda.memory_allocated() /
+        alloc = "mem_allocated: {:.4f} GB".format(get_accelerator().memory_allocated() /
                                                   (1024 * 1024 * 1024))
         max_alloc = "max_mem_allocated: {:.4f} GB".format(
-            torch.cuda.max_memory_allocated() / (1024 * 1024 * 1024))
-        cache = "cache_allocated: {:.4f} GB".format(torch.cuda.memory_cached() /
+            get_accelerator().max_memory_allocated() / (1024 * 1024 * 1024))
+        cache = "cache_allocated: {:.4f} GB".format(get_accelerator().memory_cached() /
                                                     (1024 * 1024 * 1024))
         max_cache = "max_cache_allocated: {:.4f} GB".format(
-            torch.cuda.max_memory_cached() / (1024 * 1024 * 1024))
+            get_accelerator().max_memory_cached() / (1024 * 1024 * 1024))
         return " | {} | {} | {} | {}".format(alloc, max_alloc, cache, max_cache)
 
     def log(self, names, normalizer=1.0, reset=True, memory_breakdown=False, ranks=None):
@@ -173,7 +175,7 @@ class ThroughputTimer:
         self._init_timer()
         self.started = True
         if self.global_step_count >= self.start_step:
-            torch.cuda.synchronize()
+            get_accelerator().synchronize()
             self.start_time = time.time()
 
     def stop(self, global_step=False, report_speed=True):
@@ -185,7 +187,7 @@ class ThroughputTimer:
             self.global_step_count += 1
 
         if self.start_time > 0:
-            torch.cuda.synchronize()
+            get_accelerator().synchronize()
             self.end_time = time.time()
             duration = self.end_time - self.start_time
             self.total_elapsed_time += duration
@@ -201,9 +203,9 @@ class ThroughputTimer:
                             self.global_step_count,
                             self.avg_samples_per_sec(),
                             self.batch_size / self.step_elapsed_time,
-                            round(torch.cuda.memory_allocated() / 1024**3,
+                            round(get_accelerator().memory_allocated() / 1024**3,
                                   2),
-                            round(torch.cuda.max_memory_allocated() / 1024**3,
+                            round(get_accelerator().max_memory_allocated() / 1024**3,
                                   2),
                         ))
                     if self.monitor_memory:

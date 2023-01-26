@@ -1,5 +1,6 @@
 import torch
 from ..module_inject.replace_policy import HFBertLayerPolicy, replace_policies
+from deepspeed.accelerator import get_accelerator
 
 
 class WeightQuantization(object):
@@ -44,9 +45,11 @@ class WeightQuantization(object):
             q_scale.append(data_scale)
             value_list[index] = data_int
             index += 1
-        q_scale = (1 / torch.cat(q_scale,
-                                 dim=merge_dim).to(
-                                     torch.cuda.current_device()).view(-1).unsqueeze(0))
+        q_scale = (
+            1 /
+            torch.cat(q_scale,
+                      dim=merge_dim).to(
+                          get_accelerator().current_device_name()).view(-1).unsqueeze(0))
         if "mlp.dense_4h_to_h.weight" in key:
             self.mlp4hh_scales.append(q_scale)
         elif "mlp.dense_h_to_4h.weight" in key:
@@ -63,7 +66,7 @@ class WeightQuantization(object):
             torch.cat((s,
                        torch.zeros((1,
                                     max_dim - s.shape[-1]),
-                                   device=torch.cuda.current_device())),
+                                   device=get_accelerator().current_device_name())),
                       dim=-1) if s.shape[-1] < max_dim else s for s in layer_scales
         ]
         return torch.cat(layer_scales).unsqueeze(0)
@@ -134,9 +137,8 @@ class WeightQuantization(object):
                 else:
                     data_quantized, data_scale = self.quantize_data(keys[key], quantize_bits, groups)
                 keys[key].copy_(data_quantized)
-                layer_scales.append(
-                    (1 /
-                     data_scale.to(torch.cuda.current_device()).view(-1).unsqueeze(0)))
+                layer_scales.append((1 / data_scale.to(
+                    get_accelerator().current_device_name()).view(-1).unsqueeze(0)))
             all_scales.append(self.merge_layer_scales(layer_scales))
             return layer
 

@@ -6,6 +6,7 @@ import torch
 import numpy as np
 from deepspeed import comm as dist
 from torch._utils import _flatten_dense_tensors, _unflatten_dense_tensors
+from deepspeed.accelerator import get_accelerator
 
 
 class OnebitLamb(torch.optim.Optimizer):
@@ -283,7 +284,7 @@ class OnebitLamb(torch.optim.Optimizer):
                 p.data = q.data
 
         if self.initialize and len(self.worker_errors) == 0:
-            torch.cuda.empty_cache()
+            get_accelerator().empty_cache()
             for i in range(len(self.exp_avg_flat)):
                 self.worker_errors.append(
                     torch.zeros(self.corrected_tensor_sizes[i],
@@ -291,20 +292,20 @@ class OnebitLamb(torch.optim.Optimizer):
                 self.server_errors.append(
                     torch.zeros(self.server_chunk_sizes[i],
                                 device=self.exp_avg_flat[i].device))
-            torch.cuda.empty_cache()
+            get_accelerator().empty_cache()
 
         if self.lamb_freeze_key:
             if self.size > 1:
                 for i in range(len(self.exp_avg_flat)):
                     if not self.initialize:
-                        torch.cuda.empty_cache()
+                        get_accelerator().empty_cache()
                         self.worker_errors.append(
                             torch.zeros(self.corrected_tensor_sizes[i],
                                         device=self.exp_avg_flat[i].device))
                         self.server_errors.append(
                             torch.zeros(self.server_chunk_sizes[i],
                                         device=self.exp_avg_flat[i].device))
-                        torch.cuda.empty_cache()
+                        get_accelerator().empty_cache()
                         if dist.get_rank() == 0:
                             print("Cupy Buffers Initialized Successfully.")
 

@@ -19,7 +19,7 @@ __op_builders__ = []
 
 for _, module_name, _ in pkgutil.iter_modules([os.path.dirname(op_builder_module.__file__)]):
     # avoid self references
-    if module_name != 'all_ops' and module_name != 'builder' and module_name != 'builder_names':
+    if module_name != 'all_ops' and module_name != 'builder':
         module = importlib.import_module("{}.{}".format(op_builder_dir, module_name))
         for member_name in module.__dir__():
             if member_name.endswith('Builder'):

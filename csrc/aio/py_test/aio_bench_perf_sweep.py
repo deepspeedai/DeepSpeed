@@ -15,8 +15,7 @@ import shutil
 from test_ds_aio_utils import refine_integer_value
 from perf_sweep_utils import READ_OP_DESC, WRITE_OP_DESC, BENCH_LOG_DIR, \
     READ_IO_DIR, WRITE_IO_DIR, READ_LOG_DIR, WRITE_LOG_DIR
-from deepspeed.accelerator import get_accelerator
-from deepspeed.ops.op_builder.builder_names import AsyncIOBuilder
+from deepspeed.ops.op_builder import AsyncIOBuilder
 
 OTHER_OPTIONS = '--handle'
 PERF_SCRIPT = 'test_ds_aio.py'
@@ -279,7 +278,7 @@ def script_path():
 
 
 def async_io_setup():
-    return get_accelerator().create_op_builder(AsyncIOBuilder).is_compatible()
+    return AsyncIOBuilder().is_compatible()
 
 
 def get_block_size_and_count(io_bytes):

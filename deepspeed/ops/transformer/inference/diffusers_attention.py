@@ -8,7 +8,7 @@ import torch.nn as nn
 from packaging import version as pkg_version
 from deepspeed.utils.logging import log_dist
 from deepspeed.accelerator import get_accelerator
-from deepspeed.ops.op_builder.builder_names import InferenceBuilder
+from deepspeed.ops.op_builder import InferenceBuilder
 
 # Cuda modules will be imported if needed
 inference_cuda_module = None
@@ -150,7 +150,7 @@ class DeepSpeedDiffusersAttention(nn.Module):
         data_type_fp = torch.half if config.fp16 else torch.float
         global inference_cuda_module
         if inference_cuda_module is None:
-            builder = get_accelerator().create_op_builder(InferenceBuilder)
+            builder = InferenceBuilder()
             inference_cuda_module = builder.load()
 
         if DeepSpeedDiffusersAttention.layer_id == 1:

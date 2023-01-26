@@ -31,6 +31,7 @@ from deepspeed.utils.debug import (debug_param2name_id_shape,
                                    debug_module2name,
                                    debug_param2name_id,
                                    debug_param2name_id_shape_status)
+from deepspeed.accelerator import get_accelerator
 from ..swap_tensor.partitioned_param_swapper import AsyncPartitionedParameterSwapper, PartitionedParamStatus
 
 param_count = 0
@@ -191,7 +192,8 @@ def zero_wrapper_for_fp_tensor_constructor(fn: Callable,
                                            target_fp_dtype: torch.dtype) -> Callable:
     def wrapped_fn(*args, **kwargs) -> Tensor:
         if kwargs.get("device", None) is None:
-            kwargs['device'] = torch.device('cuda:{}'.format(os.environ["LOCAL_RANK"]))
+            kwargs['device'] = torch.device(get_accelerator().device_name(
+                os.environ["LOCAL_RANK"]))
         tensor: Tensor = fn(*args, **kwargs)
         if tensor.is_floating_point():
             tensor = tensor.to(target_fp_dtype)
@@ -203,7 +205,7 @@ def zero_wrapper_for_fp_tensor_constructor(fn: Callable,
 
 def get_new_tensor_fn_for_dtype(dtype: torch.dtype) -> Callable:
     def new_tensor(cls, *args) -> Tensor:
-        device = torch.device('cuda:{}'.format(os.environ["LOCAL_RANK"]))
+        device = torch.device(get_accelerator().device_name(os.environ["LOCAL_RANK"]))
         tensor = _orig_torch_empty(0, device=device).new_empty(*args)
         if tensor.is_floating_point():
             tensor = tensor.to(dtype)
@@ -231,10 +233,10 @@ def get_all_subclasses(cls):
 def free_param(param: Parameter) -> None:
     """Free underlying storage of a parameter."""
     assert not param.ds_active_sub_modules, param.ds_summary()
-    if param.data.is_cuda:
+    if get_accelerator().on_accelerator(param.data):
         # need to make sure that we don't free the parameter while it is still
         # being used for computation
-        param.data.record_stream(torch.cuda.current_stream())
+        param.data.record_stream(get_accelerator().current_stream())
     # param.data doesn't store anything meaningful in partitioned state
     param.data = torch.empty(0, dtype=param.dtype, device=param.device)
     param.ds_status = ZeroParamStatus.NOT_AVAILABLE
@@ -526,7 +528,7 @@ class AllGatherCoalescedHandle:
             param.ds_status = ZeroParamStatus.AVAILABLE
 
             for part_to_copy in partitions:
-                part_to_copy.record_stream(torch.cuda.current_stream())
+                part_to_copy.record_stream(get_accelerator().current_stream())
 
             param_offset += param.ds_tensor.ds_numel
 
@@ -672,8 +674,9 @@ class Init(InsertPostInitMethodToModuleSubClasses):
 
         # Local device is the device where the parameters are consumed, must be default device.
         # It is the device where parameters are fully instantiated using allgather
-        self.local_device = torch.device('cuda:{}'.format(os.environ["LOCAL_RANK"]))
-        torch.cuda.set_device(self.local_device)
+        self.local_device = torch.device(get_accelerator().device_name(
+            os.environ["LOCAL_RANK"]))
+        get_accelerator().set_device(self.local_device)
 
         if _ds_config is not None and _ds_config.zero_config.offload_param is not None:
             remote_device = _ds_config.zero_config.offload_param.device
@@ -747,7 +750,7 @@ class Init(InsertPostInitMethodToModuleSubClasses):
                     f"Partitioning param {debug_param2name_id_shape(param)} module={debug_module2name(module)}"
                 )
 
-                if param.is_cuda:
+                if get_accelerator().on_accelerator(param):
                     dist.broadcast(param, 0, self.ds_process_group)
                 else:
                     if dist.get_rank() == 0:
@@ -839,11 +842,11 @@ class Init(InsertPostInitMethodToModuleSubClasses):
                 param_buffer = torch.empty(
                     math.ceil(param.ds_numel / self.world_size) * self.world_size,
                     dtype=param.dtype,
-                    device=torch.cuda.current_device(),
+                    device=get_accelerator().current_device_name(),
                     requires_grad=False,
                 )
                 handle = _dist_allgather_fn(
-                    param.ds_tensor.to(torch.cuda.current_device()),
+                    param.ds_tensor.to(get_accelerator().current_device_name()),
                     param_buffer,
                     self.ds_process_group)
                 param.data = param_buffer.narrow(0,
@@ -856,7 +859,7 @@ class Init(InsertPostInitMethodToModuleSubClasses):
                 flat_tensor = torch.empty(partition_sz * self.world_size,
                                           dtype=get_only_unique_item(p.dtype
                                                                      for p in params),
-                                          device=torch.cuda.current_device(),
+                                          device=get_accelerator().current_device_name(),
                                           requires_grad=False)
                 partitions: List[Parameter] = []
                 for i in range(self.world_size):
@@ -865,9 +868,11 @@ class Init(InsertPostInitMethodToModuleSubClasses):
                                            partition_sz * i,
                                            partition_sz))
 
-                instrument_w_nvtx(torch.cat)(
-                    [p.ds_tensor.to(torch.cuda.current_device()) for p in params],
-                    out=partitions[self.rank])
+                instrument_w_nvtx(torch.cat)([
+                    p.ds_tensor.to(get_accelerator().current_device_name())
+                    for p in params
+                ],
+                                             out=partitions[self.rank])
                 handle = _dist_allgather_fn(partitions[self.rank],
                                             flat_tensor,
                                             self.ds_process_group)
@@ -1103,7 +1108,8 @@ class Init(InsertPostInitMethodToModuleSubClasses):
                         device=OffloadDeviceEnum.cpu if self.remote_device
                         == OffloadDeviceEnum.nvme else self.remote_device)
                     if self.pin_memory:
-                        partitioned_tensor = partitioned_tensor.pin_memory()
+                        partitioned_tensor = get_accelerator().pin_memory(
+                            partitioned_tensor)
 
                 partitioned_tensor.requires_grad = False
                 param.ds_tensor = partitioned_tensor
@@ -1195,7 +1201,7 @@ class Init(InsertPostInitMethodToModuleSubClasses):
             f'After allocate allgather param {debug_param2name_id_shape_status(param)} {aligned_param_size} {partition_size} ',
             force=False)
 
-        torch.cuda.synchronize()
+        get_accelerator().synchronize()
 
         print_rank_0(
             f"{'--'* hierarchy}----allgather param with {debug_param2name_id_shape_status(param)} partition size={partition_size}"
@@ -1209,7 +1215,8 @@ class Init(InsertPostInitMethodToModuleSubClasses):
         if self.use_all_gather_base:
             # try the _all_gather_base on PyTorch master branch
             handle = dist.all_gather_base(flat_tensor,
-                                          param.ds_tensor.cuda(),
+                                          param.ds_tensor.to(
+                                              get_accelerator().device_name()),
                                           group=self.ds_process_group,
                                           async_op=async_op)
         else:
@@ -1243,7 +1250,7 @@ class Init(InsertPostInitMethodToModuleSubClasses):
         local_tensors = []
         for param in param_list:
             partition_sizes.append(param.ds_tensor.ds_numel)
-            local_tensors.append(param.ds_tensor.cuda())
+            local_tensors.append(param.ds_tensor.to(get_accelerator().device_name()))
 
         # allocate memory for allgather params
         allgather_params = []
@@ -1274,7 +1281,7 @@ class Init(InsertPostInitMethodToModuleSubClasses):
                     psize = partition_sizes[param_idx]
                     partition = allgather_params[param_idx].narrow(0, i * psize, psize)
                     output_list.append(partition)
-                    if not partition.is_cuda:
+                    if not get_accelerator().on_accelerator(partition):
                         logger.warning(
                             f'param {param_idx}, partition {i} is not on CUDA, partition shape {partition.size()}'
                         )
@@ -1297,7 +1304,7 @@ class Init(InsertPostInitMethodToModuleSubClasses):
                                                 param.ds_numel).view(param.ds_shape).data
 
         # guarantee the communication to be completed
-        torch.cuda.synchronize()
+        get_accelerator().synchronize()
 
         return None
 

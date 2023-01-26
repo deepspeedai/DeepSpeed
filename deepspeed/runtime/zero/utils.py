@@ -7,6 +7,7 @@ from deepspeed.utils import logger
 from deepspeed.ops.adam import DeepSpeedCPUAdam
 from deepspeed.ops.adam import FusedAdam
 from deepspeed.utils.nvtx import instrument_w_nvtx
+from deepspeed.accelerator import get_accelerator
 
 
 def _initialize_parameter_parallel_groups(parameter_parallel_size=None):
@@ -63,8 +64,8 @@ def get_lst_from_rank0(lst: List[int]) -> None:
     lst_tensor = torch.tensor(
         lst if dist.get_rank() == 0 else [-1] * len(lst),
         dtype=int,
-        # device=torch.cuda.current_device(),
-        device=torch.device('cuda:{}'.format(os.environ["LOCAL_RANK"])),
+        # device=get_accelerator().current_device_name(),
+        device=torch.device(get_accelerator().device_name(os.environ["LOCAL_RANK"])),
         requires_grad=False,
     )
     dist.broadcast(lst_tensor, src=0, async_op=False)

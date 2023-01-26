@@ -20,12 +20,12 @@ from deepspeed import comm as dist
 
 import mmap
 from torch import _C
-from torch.cuda import _lazy_call, device as device_ctx_manager
 
 from deepspeed.runtime.config import DeepSpeedConfig
 from deepspeed.utils import logger
 from deepspeed.runtime.utils import copy_to_device, move_to_device, see_memory_usage, bwc_tensor_model_parallel_rank
 from deepspeed.utils.timer import SynchronizedWallClockTimer as Timers
+from deepspeed.accelerator import get_accelerator
 
 # DeepSpeed Checkpointing Enabled or Disabled
 deepspeed_checkpointing_enabled = False
@@ -98,25 +98,25 @@ def _set_cuda_rng_state(new_state, device=-1):
     if hasattr(_C, '_cuda_setRNGState') and callable(_C._cuda_setRNGState):
         # older PyTorch
         def cb():
-            with device_ctx_manager(device):
+            with get_accelerator().device(device):
                 _C._cuda_setRNGState(new_state)
     else:
         # newer PyTorch
         if device == -1:
-            device = torch.device('cuda')
+            device = torch.device(get_accelerator().device_name())
         elif isinstance(device, str):
             device = torch.device(device)
         elif isinstance(device, int):
-            device = torch.device('cuda', device)
+            device = torch.device(get_accelerator().device_name(), device)
 
         def cb():
             idx = device.index
             if idx is None:
-                idx = torch.cuda.current_device()
-            default_generator = torch.cuda.default_generators[idx]
+                idx = get_accelerator().current_device()
+            default_generator = get_accelerator().default_generator(idx)
             default_generator.set_state(new_state)
 
-    _lazy_call(cb)
+    get_accelerator().lazy_call(cb)
 
 
 class CudaRNGStatesTracker:
@@ -158,10 +158,10 @@ class CudaRNGStatesTracker:
         if name in self.states_:
             raise Exception('cuda rng state {} already exists'.format(name))
         # Get the current rng state.
-        orig_rng_state = torch.cuda.get_rng_state()
+        orig_rng_state = get_accelerator().get_rng_state()
         # Set the new state and store it.
-        torch.cuda.manual_seed(seed)
-        self.states_[name] = torch.cuda.get_rng_state()
+        get_accelerator().manual_seed(seed)
+        self.states_[name] = get_accelerator().get_rng_state()
         # Reset rng state to what it was.
         _set_cuda_rng_state(orig_rng_state)
 
@@ -173,7 +173,7 @@ class CudaRNGStatesTracker:
         if name not in self.states_:
             raise Exception('cuda rng state {} is not added'.format(name))
         # Store current rng state.
-        orig_cuda_rng_state = torch.cuda.get_rng_state()
+        orig_cuda_rng_state = get_accelerator().get_rng_state()
         # Set rng state to the desired one
         _set_cuda_rng_state(self.states_[name])
         # Do the stuff we wanted to do.
@@ -181,7 +181,7 @@ class CudaRNGStatesTracker:
             yield
         finally:
             # Update the current rng state for later use.
-            self.states_[name] = torch.cuda.get_rng_state()
+            self.states_[name] = get_accelerator().get_rng_state()
             # And set the state to the original state we started with.
             _set_cuda_rng_state(orig_cuda_rng_state)
 
@@ -199,7 +199,7 @@ def model_parallel_cuda_manual_seed(seed):
     """Initialize model parallel cuda seed.
 
     This function should be called after the model parallel is
-    initialized. Also, no torch.cuda.manual_seed should be called
+    initialized. Also, no get_accelerator().manual_seed should be called
     after this function. Basically, this is replacement for that
     function.
     Two set of RNG states are tracked:
@@ -235,7 +235,7 @@ def model_parallel_cuda_manual_seed(seed):
         )
     _CUDA_RNG_STATE_TRACKER.reset()
     # Set the default state.
-    torch.cuda.manual_seed(data_parallel_seed)
+    get_accelerator().manual_seed(data_parallel_seed)
     # and model parallel state.
     _CUDA_RNG_STATE_TRACKER.add(_MODEL_PARALLEL_RNG_TRACKER_NAME, model_parallel_seed)
 
@@ -516,7 +516,7 @@ class CheckpointFunction(torch.autograd.Function):
             ctx.tensor_flags = tensor_flags
 
         if SYNCHRONIZE:
-            torch.cuda.synchronize()
+            get_accelerator().synchronize()
 
         if timers is None and PROFILE_TIME:
             timers = Timers()
@@ -559,8 +559,8 @@ class CheckpointFunction(torch.autograd.Function):
                 logger.info(f"----Synchronization {SYNCHRONIZE}")
                 logger.info(f"----Profiling time in checkpointing {PROFILE_TIME}")
 
-            cuda_device = torch.cuda.current_device()
-            transport_stream = torch.cuda.Stream(device=cuda_device)
+            cuda_device = get_accelerator().current_device_name()
+            transport_stream = get_accelerator().Stream(device=cuda_device)
 
         if PARTITION_ACTIVATIONS:
             inputs = partition_activations(args,
@@ -578,7 +578,7 @@ class CheckpointFunction(torch.autograd.Function):
 
         # Copy the rng states.
         ctx.fwd_cpu_rng_state = torch.get_rng_state()
-        ctx.fwd_cuda_rng_state = torch.cuda.get_rng_state()
+        ctx.fwd_cuda_rng_state = get_accelerator().get_rng_state()
         ctx.fwd_cuda_rng_state_tracker = get_cuda_rng_tracker().get_states()
 
         see_memory_usage("Before running forward on the layer", force=False)
@@ -606,7 +606,7 @@ class CheckpointFunction(torch.autograd.Function):
             timers('forward').stop()
             timers.log(['forward'])
         if SYNCHRONIZE:
-            torch.cuda.synchronize()
+            get_accelerator().synchronize()
 
         # Tensors returned from forward() may not be differentiable.
         if torch.is_tensor(outputs):
@@ -633,7 +633,7 @@ class CheckpointFunction(torch.autograd.Function):
         # so that they can be garbage collected once the checkpoints
         # have been used
         if SYNCHRONIZE:
-            torch.cuda.synchronize()
+            get_accelerator().synchronize()
         if PROFILE_TIME:
             timers('backward').start()
 
@@ -659,7 +659,7 @@ class CheckpointFunction(torch.autograd.Function):
         global cuda_device, transport_stream, PARTITION_ACTIVATIONS
 
         if PARTITION_ACTIVATIONS:
-            # with torch.cuda.stream(transport_stream):
+            # with get_accelerator().stream(transport_stream):
             inputs = gather_partitioned_activations(
                 ctx.deepspeed_saved_tensors,
                 device=cuda_device if CPU_CHECKPOINT else None)
@@ -680,7 +680,7 @@ class CheckpointFunction(torch.autograd.Function):
 
         # Store the current states.
         bwd_cpu_rng_state = torch.get_rng_state()
-        bwd_cuda_rng_state = torch.cuda.get_rng_state()
+        bwd_cuda_rng_state = get_accelerator().get_rng_state()
         bwd_cuda_rng_state_tracker = get_cuda_rng_tracker().get_states()
 
         # Set the states to what it used to be before the forward pass.
@@ -689,7 +689,7 @@ class CheckpointFunction(torch.autograd.Function):
         get_cuda_rng_tracker().set_states(ctx.fwd_cuda_rng_state_tracker)
 
         # if PARTITION_ACTIVATIONS:
-        #     current_stream=torch.cuda.current_stream()
+        #     current_stream=get_accelerator().current_stream()
         #     current_stream.wait_stream(transport_stream)
 
         see_memory_usage("In backward checkpointing code before forward", force=False)
@@ -734,7 +734,7 @@ class CheckpointFunction(torch.autograd.Function):
             timers('backward').stop()
             timers.log(['backward'])
         if SYNCHRONIZE:
-            torch.cuda.synchronize()
+            get_accelerator().synchronize()
         ret_list = [None, None]  # first None for ctx
         for inp in detached_inputs:
             if torch.is_tensor(inp):
@@ -861,7 +861,7 @@ def configure(
         checkpoint_in_cpu: Optional: Moves the activation checkpoint to CPU. Only works with
             partition_activation. Default is false. Will overwrite deepspeed_config if provided
 
-        synchronize: Optional: Performs torch.cuda.synchronize() at the beginning and end of
+        synchronize: Optional: Performs get_accelerator().synchronize() at the beginning and end of
             each call to deepspeed.checkpointing.checkpoint for both forward and backward pass.
             By default false. Will overwrite deepspeed_config if provided
 
