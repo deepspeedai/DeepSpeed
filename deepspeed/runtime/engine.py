@@ -1524,8 +1524,7 @@ class DeepSpeedEngine(Module):
             round_robin_gradients = self.zero_round_robin_gradients()
             assert not isinstance(optimizer, DummyOptim), "zero stage {} requires an optimizer".format(zero_stage)
 
-            log_dist('Creating fp16 ZeRO stage {} optimizer'.format(zero_stage),
-                     ranks=[0])
+            log_dist('Creating ZeRO stage {} optimizer'.format(zero_stage), ranks=[0])
             # Overlap and contiguous grads are meaningless in stage 1 and are ignored
             if zero_stage == ZeroStageEnum.optimizer_states:
                 overlap_comm = False
