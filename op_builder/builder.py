@@ -693,6 +693,8 @@ class CUDAOpBuilder(OpBuilder):
                 '-U__CUDA_NO_HALF_CONVERSIONS__',
                 '-U__CUDA_NO_HALF2_OPERATORS__'
             ]
+            if os.environ.get('DS_DEBUG_CUDA_BUILD', '0') == '1':
+                args.append('--ptxas-options=-v')
             args += self.compute_capability_args()
         return args
 
