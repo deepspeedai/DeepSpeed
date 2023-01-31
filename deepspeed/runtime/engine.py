@@ -1440,7 +1440,7 @@ class DeepSpeedEngine(Module):
         if isinstance(optimizer, fused_opts) \
                 or self.optimizer_name() in [ONEBIT_ADAM_OPTIMIZER, ZERO_ONE_ADAM_OPTIMIZER]:
             if self.dynamic_loss_scale():
-                log_dist("Creating fp16 optimizer with dynamic loss scale", ranks=[0])
+                log_dist(f'Creating fp16 optimizer with dynamic loss scale', ranks=[0])
                 timers = self.timers if self.wall_clock_breakdown() else None
                 optimizer = FP16_Optimizer(
                     optimizer,
@@ -1456,10 +1456,8 @@ class DeepSpeedEngine(Module):
                 )
             else:
                 log_dist(
-                    "Creating fp16 optimizer with static loss scale: {}".format(
-                        self.loss_scale()),
-                    ranks=[0],
-                )
+                    f'Creating fp16 optimizer with static loss scale: {self.loss_scale()}',
+                    ranks=[0])
                 optimizer = FP16_Optimizer(
                     optimizer,
                     deepspeed=self,
@@ -1470,7 +1468,7 @@ class DeepSpeedEngine(Module):
                     has_moe_layers=self.has_moe_layers,
                 )
         else:
-            log_dist("Creating fp16 unfused optimizer with dynamic loss scale",
+            log_dist(f'Creating fp16 unfused optimizer with dynamic loss scale',
                      ranks=[0])
             optimizer = FP16_UnfusedOptimizer(
                 optimizer,
@@ -1507,6 +1505,7 @@ class DeepSpeedEngine(Module):
 
     def _configure_zero_optimizer(self, optimizer):
         zero_stage = self.zero_optimization_stage()
+        model_dtype, grad_accum_dtype = self.get_data_types()
         assert self.communication_data_type in (torch.float16, torch.bfloat16), "ZeRO supports only 'communication_data_type': ['fp16', 'bfp16']"
         timers = self.timers if self.wall_clock_breakdown() else None
 
@@ -1524,7 +1523,8 @@ class DeepSpeedEngine(Module):
             round_robin_gradients = self.zero_round_robin_gradients()
             assert not isinstance(optimizer, DummyOptim), "zero stage {} requires an optimizer".format(zero_stage)
 
-            log_dist('Creating ZeRO stage {} optimizer'.format(zero_stage), ranks=[0])
+            log_dist(f'Creating {model_dtype} ZeRO stage {zero_stage} optimizer',
+                     ranks=[0])
             # Overlap and contiguous grads are meaningless in stage 1 and are ignored
             if zero_stage == ZeroStageEnum.optimizer_states:
                 overlap_comm = False
@@ -1588,7 +1588,7 @@ class DeepSpeedEngine(Module):
                     offload_param_config=self.zero_offload_param(),
                     mpu=self.mpu)
             else:
-                log_dist('Creating fp16 ZeRO stage {} optimizer'.format(zero_stage),
+                log_dist(f'Creating {model_dtype} ZeRO stage {zero_stage} optimizer',
                          ranks=[0])
                 from deepspeed.runtime.zero.stage3 import DeepSpeedZeroOptimizer_Stage3
                 optimizer = DeepSpeedZeroOptimizer_Stage3(
