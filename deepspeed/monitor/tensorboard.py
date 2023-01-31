@@ -6,14 +6,14 @@ import deepspeed.comm as dist
 
 
 class TensorBoardMonitor(Monitor):
-    def __init__(self, monitor_config):
-        super().__init__(monitor_config)
+    def __init__(self, tensorboard_config):
+        super().__init__(tensorboard_config)
         check_tb_availability()
 
         self.summary_writer = None
-        self.enabled = monitor_config.tensorboard_config.enabled
-        self.output_path = monitor_config.tensorboard_config.output_path
-        self.job_name = monitor_config.tensorboard_config.job_name
+        self.enabled = tensorboard_config.enabled
+        self.output_path = tensorboard_config.output_path
+        self.job_name = tensorboard_config.job_name
 
         if self.enabled and dist.get_rank() == 0:
             self.get_summary_writer()

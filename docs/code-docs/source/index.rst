@@ -98,6 +98,13 @@ Memory Usage
 
    memory
 
+Monitoring
+----------
+.. toctree::
+   :maxdepth: 2
+
+   monitor
+
 Indices and tables
 ------------------
 
