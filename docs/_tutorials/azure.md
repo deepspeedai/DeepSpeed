@@ -9,7 +9,9 @@ If you don't already have an Azure account please see more details here: [https:
 
 # DeepSpeed on Azure via AzureML
 
-The recommended and simplest method to try DeepSpeed on Azure is through [AzureML](https://azure.microsoft.com/en-us/services/machine-learning/). Please take a look at easy-to-use examples for Megatron-DeepSpeed, Transformers and CIFAR training [here](https://github.com/Azure/azureml-examples/tree/main/python-sdk/workflows/train/deepspeed).
+The recommended and simplest method to try DeepSpeed on Azure is through [AzureML](https://azure.microsoft.com/en-us/services/machine-learning/). A training example and a DeepSpeed autotuning example using AzureML v2 can be found [here](https://github.com/Azure/azureml-examples/tree/main/cli/jobs/deepspeed).
+
+For AzureML v1 examples, please take a look at easy-to-use examples for Megatron-DeepSpeed, Transformers and CIFAR training [here](https://github.com/Azure/azureml-examples/tree/main/v1/python-sdk/workflows/train/deepspeed).
 
 > Our [Megatron-DeepSpeed](https://github.com/microsoft/megatron-deepspeed) contains the most up to date [recipe](https://github.com/microsoft/Megatron-DeepSpeed/tree/main/examples/azureml) for end-to-end training on AzureML.
 

@@ -120,3 +120,7 @@ Note that the performance metric used in autotuning is calculated using the timi
 Tuning completed in 0:27:33.988447. Total number of experiments: 13.
 
 As we can see the DeepSpeed Autotuner can select a better than hand-tuned configuration with a reasonable number of experiments. Examples in [Autotuning Hugging Face Examples](https://github.com/microsoft/DeepSpeedExamples/tree/master/autotuning/hf#autotuning-hugging-face-examples) would demonstrate the effectiveness of autotuning across different models.
+
+### DeepSpeed Autotuning with AzureML
+
+To try DeepSpeed autotuning with AzureML, please see the example [here](https://github.com/Azure/azureml-examples/tree/main/cli/jobs/deepspeed/deepspeed-autotuning).
