@@ -14,12 +14,10 @@ class DeepSpeedOPTInference(DeepSpeedTransformerInference):
                  quantize_scales=None,
                  quantize_groups=1,
                  merge_count=1,
-                 mlp_extra_grouping=False,
-                 qkv_merging=False):
+                 mlp_extra_grouping=False):
         super().__init__(config,
                          mp_group,
                          quantize_scales,
                          quantize_groups,
                          merge_count,
-                         mlp_extra_grouping,
-                         qkv_merging)
+                         mlp_extra_grouping)

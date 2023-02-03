@@ -232,8 +232,7 @@ class DeepSpeedMoEInference(nn.Module):
                  quantize_scales=None,
                  quantize_groups=1,
                  merge_count=1,
-                 mlp_extra_grouping=False,
-                 qkv_merging=False):
+                 mlp_extra_grouping=False):
         super(DeepSpeedMoEInference, self).__init__()
 
         self.config = config
@@ -256,8 +255,7 @@ class DeepSpeedMoEInference(nn.Module):
                                                 mp_group,
                                                 quantize_scales,
                                                 quantize_groups,
-                                                merge_count,
-                                                qkv_merging)
+                                                merge_count)
         self.attn_nw = nn.Parameter(torch.Tensor(self.config.hidden_size))
         self.attn_nb = nn.Parameter(torch.Tensor(self.config.hidden_size))
 

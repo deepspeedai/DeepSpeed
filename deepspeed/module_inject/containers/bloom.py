@@ -14,7 +14,7 @@ class DS_BloomContainer(MetaTensorContainer, BaseTransformerContainer):
         self.bigscience_bloom = True
 
     def create_module(self, config=None):
-        _config = config if config is not None else self.config
+        _config = config if config is not None else self.ds_model_config
 
         self.module = DeepSpeedBloomInference(_config, mp_group=self.mp_group)
         self.module.config.scale_attention = self.scale_attention

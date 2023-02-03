@@ -71,13 +71,13 @@ class BaseTransformerContainer(ABC):
         self.input_nw = None
         self.input_nb = None
 
-    def create_config(self):
+    def create_ds_model_config(self):
         self.set_hidden_heads(*self.policy.get_hidden_heads())
         assert self.num_attention_heads % self.mp_size == 0,\
                 "To run the model parallel across the GPUs, the attention_heads require to be divisible by the world_size!" +\
                 "This is because the attention computation is partitioned evenly among the parallel GPUs."
 
-        self.config = DeepSpeedInferenceConfig(
+        self.ds_model_config = DeepSpeedInferenceConfig(
             hidden_size=self.hidden_size,
             heads=self.num_attention_heads,
             layer_norm_eps=self.layer_norm_eps,
@@ -100,7 +100,7 @@ class BaseTransformerContainer(ABC):
             return_single_tuple=self.return_single_tuple,
         )
 
-        return self.config
+        return self.ds_model_config
 
     def initialize_tensors(self):
         # Set the tensors from policy (user module) to container (DS module)

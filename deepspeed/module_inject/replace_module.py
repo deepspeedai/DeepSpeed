@@ -373,7 +373,7 @@ def replace_transformer_layer(orig_layer_impl,
         _container.set_quantization_config(quantize, quantizer)
 
         # 6. create a DS Inference config object
-        _container.create_config()
+        _container.create_ds_model_config()
 
         # 7. use the config and create the module
         _container.create_module()
@@ -396,7 +396,7 @@ def replace_transformer_layer(orig_layer_impl,
             selected_policy_g = _container.policy
 
         megatron_v2_g = _container.megatron_v2
-        transformer_config_g = _container.config
+        transformer_config_g = _container.ds_model_config
 
         return _container.module
 
