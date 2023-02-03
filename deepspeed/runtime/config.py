@@ -7,6 +7,7 @@ from typing import Union
 
 import torch
 import json
+import hjson
 import copy
 import base64
 
@@ -705,14 +706,14 @@ class DeepSpeedConfig(object):
         if isinstance(config, dict):
             self._param_dict = config
         elif os.path.exists(config):
-            self._param_dict = json.load(
+            self._param_dict = hjson.load(
                 open(config,
                      "r"),
                 object_pairs_hook=dict_raise_error_on_duplicate_keys)
         else:
             try:
                 config_decoded = base64.urlsafe_b64decode(config).decode('utf-8')
-                self._param_dict = json.loads(config_decoded)
+                self._param_dict = hjson.loads(config_decoded)
             except (UnicodeDecodeError, AttributeError):
                 raise ValueError(
                     f"Expected a string path to an existing deepspeed config, or a dictionary or a valid base64. Received: {config}"
