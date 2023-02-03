@@ -421,6 +421,8 @@ void attention_unfused(T* prev_key_cont,
 #endif
 }
 
+void reset_cache() { Context::Instance().reset_tokens(); }
+
 template <typename T>
 std::vector<at::Tensor> ds_softmax_context(at::Tensor& query_key_value,
                                            at::Tensor& attn_mask,
@@ -1774,4 +1776,5 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m)
     m.def("allocate_workspace_fp16",
           &allocate_workspace<__half>,
           "DeepSpeed memory allocation for GPT inference with fp16 (CUDA)");
+    m.def("reset_cache", &reset_cache, "Reset Cache for generation tasks");
 }

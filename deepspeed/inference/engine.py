@@ -535,6 +535,9 @@ class InferenceEngine(Module):
         return outputs
 
     def _generate(self, *inputs, **kwargs):
+        # Reset KV-cache at the beginning of generate
+        if hasattr(self.module, 'reset_cache'):
+            self.module.reset_cache()
         num_beams = 1
         if "generation_config" in kwargs:
             gen_config = kwargs["generation_config"]

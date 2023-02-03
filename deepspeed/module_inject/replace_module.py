@@ -826,4 +826,6 @@ def _replace_module(model, policies, layer_id=0):
         else:
             _, layer_id = _replace_module(child, policies, layer_id=layer_id)
 
+    # Add the reset_cache func to the model, so that it can be called in the beginning of text-generation.
+    model.reset_cache = transformer_inference.DeepSpeedTransformerInference.reset_cache
     return model, layer_id
