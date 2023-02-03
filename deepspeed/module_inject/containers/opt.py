@@ -27,7 +27,8 @@ class HFOPTLayerPolicy(TransformerPolicy):
         super().__init__(inference,
                          linear_layer=True,
                          mlp_act_func_type=ActivationFuncType.ReLU,
-                         pre_attn_norm=True)
+                         pre_attn_norm=True,
+                         use_load_prefix=use_load_prefix)
         self.client_module = client_module
 
         try:

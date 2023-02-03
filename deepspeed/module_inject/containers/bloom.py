@@ -37,7 +37,10 @@ class BLOOMLayerPolicy(TransformerPolicy):
                  inference=True,
                  use_load_prefix=True,
                  split_qkv=False):
-        super().__init__(inference, linear_layer=True)
+        super().__init__(inference,
+                         linear_layer=True,
+                         use_load_prefix=use_load_prefix,
+                         split_qkv=split_qkv)
         self.client_module = client_module
         try:
             import transformers
