@@ -32,7 +32,6 @@ jobs:
           pip install torch torchvision --extra-index-url https://download.pytorch.org/whl/rocm5.1.1
           python -c "import torch; print('torch:', torch.__version__, torch)"
           python -c "import torch; print('CUDA available:', torch.cuda.is_available())"
-          sudo apt-get install -y libaio-dev
 
       - name: Install transformers
         run: |
