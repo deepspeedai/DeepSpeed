@@ -63,6 +63,10 @@ def parse_arguments():
 
     parser.add_argument('--gpu', action='store_true', help='Use GPU memory')
 
+    parser.add_argument('--use_accelerator_pin_memory',
+                        action='store_true',
+                        help='Obtain pinned (CPU page-locked) tensors from accelerator')
+
     args = parser.parse_args()
     print(f'args = {args}')
     return args

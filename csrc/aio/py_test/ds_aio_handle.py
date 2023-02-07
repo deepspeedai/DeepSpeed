@@ -19,28 +19,30 @@ def pre_handle(args, tid, read_op):
     num_bytes = os.path.getsize(args.read_file) if read_op else args.write_size
     file = args.read_file if read_op else f'{args.write_file}.{tid}'
 
-    task_log(tid, f'Allocate tensor of size {num_bytes} bytes')
-    if args.gpu:
-        buffer = torch.empty(num_bytes,
-                             dtype=torch.uint8,
-                             device=get_accelerator().device_name())
-    else:
-        buffer = get_accelerator().pin_memory(
-            torch.empty(num_bytes,
-                        dtype=torch.uint8,
-                        device='cpu'))
-    task_log(
-        tid,
-        f'{io_string} file {file} of size {num_bytes} bytes from buffer on device {buffer.device}'
-    )
-
     io_parallel = args.io_parallel if args.io_parallel else 1
     handle = AsyncIOBuilder().load().aio_handle(args.block_size,
                                                 args.queue_depth,
                                                 args.single_submit,
                                                 args.overlap_events,
                                                 io_parallel)
-    task_log(tid, f'created deepspeed aio handle')
+    task_log(tid, f'Created deepspeed aio handle')
+
+    if args.gpu:
+        buffer = torch.empty(num_bytes,
+                             dtype=torch.uint8,
+                             device=get_accelerator().device_name())
+    else:
+        if args.use_accelerator_pin_memory:
+            buffer = get_accelerator().pin_memory(
+                torch.empty(num_bytes,
+                            dtype=torch.uint8,
+                            device='cpu'))
+        else:
+            buffer = handle.new_cpu_locked_tensor(num_bytes,
+                                                  torch.empty(0,
+                                                              dtype=torch.uint8))
+
+    task_log(tid, f'Allocate tensor of size {num_bytes} bytes')
 
     ctxt = {}
     ctxt['file'] = file
@@ -48,6 +50,11 @@ def pre_handle(args, tid, read_op):
     ctxt['handle'] = handle
     ctxt['buffer'] = buffer
     ctxt['elapsed_sec'] = 0
+
+    task_log(
+        tid,
+        f'{io_string} file {file} of size {num_bytes} bytes from buffer on device {buffer.device}'
+    )
 
     return ctxt
 

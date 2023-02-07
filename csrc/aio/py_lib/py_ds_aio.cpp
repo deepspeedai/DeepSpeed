@@ -37,5 +37,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m)
         .def("async_pread", &deepspeed_aio_handle_t::async_pread)
         .def("async_pwrite", &deepspeed_aio_handle_t::async_pwrite)
 
+        .def("new_cpu_locked_tensor", &deepspeed_aio_handle_t::new_cpu_locked_tensor)
+        .def("free_cpu_locked_tensor", &deepspeed_aio_handle_t::free_cpu_locked_tensor)
+
         .def("wait", &deepspeed_aio_handle_t::wait);
 }

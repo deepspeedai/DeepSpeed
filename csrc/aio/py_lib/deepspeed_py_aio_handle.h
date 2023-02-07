@@ -8,6 +8,7 @@ Functionality for swapping optimizer tensors to/from (NVMe) storage devices.
 #include <condition_variable>
 #include <memory>
 #include "deepspeed_aio_thread.h"
+#include "deepspeed_pin_tensor.h"
 
 struct deepspeed_aio_handle_t {
     std::unique_ptr<struct aio_context> _aio_ctxt;
@@ -19,6 +20,7 @@ struct deepspeed_aio_handle_t {
     std::vector<std::shared_ptr<struct deepspeed_aio_thread_t>> _thread_contexts;
     std::vector<std::thread> _threads;
     int _num_pending_ops;
+    std::unique_ptr<struct deepspeed_pin_tensor_t> _pinned_tensor_mgr;
 
     deepspeed_aio_handle_t(const int block_size,
                            const int queue_depth,
@@ -55,6 +57,11 @@ struct deepspeed_aio_handle_t {
     int async_pread(torch::Tensor& buffer, const char* filename);
 
     int async_pwrite(const torch::Tensor& buffer, const char* filename);
+
+    // TODO: Make API's args to be shape and dtype.
+    torch::Tensor new_cpu_locked_tensor(const size_t num_elem, const torch::Tensor& example_tensor);
+
+    bool free_cpu_locked_tensor(torch::Tensor&);
 
     int wait();
 

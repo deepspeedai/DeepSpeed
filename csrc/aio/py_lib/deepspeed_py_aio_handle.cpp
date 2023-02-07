@@ -22,7 +22,8 @@ deepspeed_aio_handle_t::deepspeed_aio_handle_t(const int block_size,
       _overlap_events(overlap_events),
       _num_threads(num_threads),
       _aio_config(block_size, queue_depth, single_submit, overlap_events, false),
-      _num_pending_ops(0)
+      _num_pending_ops(0),
+      _pinned_tensor_mgr(new deepspeed_pin_tensor_t())
 {
     for (auto i = 0; i < num_threads; ++i) {
         _thread_contexts.push_back(std::make_shared<deepspeed_aio_thread_t>(i, _aio_config));
@@ -279,4 +280,15 @@ int deepspeed_aio_handle_t::async_pread(torch::Tensor& buffer, const char* filen
 int deepspeed_aio_handle_t::async_pwrite(const torch::Tensor& buffer, const char* filename)
 {
     return pwrite(buffer, filename, false, true);
+}
+
+at::Tensor deepspeed_aio_handle_t::new_cpu_locked_tensor(const size_t num_elem,
+                                                         const torch::Tensor& example_tensor)
+{
+    return _pinned_tensor_mgr->alloc(num_elem, example_tensor.scalar_type());
+}
+
+bool deepspeed_aio_handle_t::free_cpu_locked_tensor(torch::Tensor& locked_tensor)
+{
+    return _pinned_tensor_mgr->free(locked_tensor);
 }
