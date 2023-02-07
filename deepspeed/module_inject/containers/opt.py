@@ -19,6 +19,26 @@ class DS_OPTContainer(MetaTensorContainer, BaseTransformerContainer):
         self.module.config.scale_attention = self.scale_attention
         return self.module
 
+    def get_param_names(self):
+        return 'self_attn.q_proj.weight', \
+               'self_attn.q_proj.bias', \
+               'self_attn.k_proj.weight', \
+               'self_attn.k_proj.bias', \
+               'self_attn.v_proj.weight', \
+               'self_attn.v_proj.bias', \
+               'self_attn.out_proj.weight', \
+               'self_attn.out_proj.bias', \
+               'fc1.weight', \
+               'fc1.bias', \
+               'fc2.weight', \
+               'fc2.bias', \
+               'self_attn_layer_norm.weight', \
+               'self_attn_layer_norm.bias', \
+               'final_layer_norm.weight', \
+               'final_layer_norm.bias', \
+               self.policy.use_load_prefix, \
+               self.policy.split_qkv
+
 
 class HFOPTLayerPolicy(TransformerPolicy):
     _orig_layer_class = None
@@ -73,23 +93,3 @@ class HFOPTLayerPolicy(TransformerPolicy):
                self.client_module.final_layer_norm.bias, \
                self.client_module.self_attn_layer_norm.weight, \
                self.client_module.self_attn_layer_norm.bias
-
-    def get_param_names(self):
-        return 'self_attn.q_proj.weight', \
-               'self_attn.q_proj.bias', \
-               'self_attn.k_proj.weight', \
-               'self_attn.k_proj.bias', \
-               'self_attn.v_proj.weight', \
-               'self_attn.v_proj.bias', \
-               'self_attn.out_proj.weight', \
-               'self_attn.out_proj.bias', \
-               'fc1.weight', \
-               'fc1.bias', \
-               'fc2.weight', \
-               'fc2.bias', \
-               'self_attn_layer_norm.weight', \
-               'self_attn_layer_norm.bias', \
-               'final_layer_norm.weight', \
-               'final_layer_norm.bias', \
-               self.use_load_prefix, \
-               self.split_qkv

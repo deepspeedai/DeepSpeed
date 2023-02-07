@@ -86,29 +86,3 @@ class TransformerPolicy(DSPolicy):
         gamma and beta with shape: (hidden)
         """
         raise NotImplementedError
-
-    @abstractmethod
-    def get_param_names(self):
-        """
-        Returns all the transformer parameter names to
-        be loaded from checkpoint files. The order of
-        the names is as follows:
-            1. Attention weights and biases;
-            2. MLP weights and biases;
-            3. LayerNorm weights and biases;
-        In addition to the parameter names, we require two
-        more parameters to help read the the data correctly
-        from the checkpoint and split the qkv heads in the
-        right order:
-            1. `use_load_prefix` (Default: False): this specifies
-                whether we need to use the name of first abstraction
-                layer of the model for searching the parameter's name
-                in a checkpoint file. For more information of how this
-                is used please see
-                https://github.com/microsoft/DeepSpeed/blob/fix-ckpt-loading/deepspeed/module_inject/load_checkpoint.py#L341
-            2. `split_qkv` (Default: True): we use this flag when splitting
-                the qkv parameter into heads. If it is False, it means the heads
-                of q, k, and v are stored together and needs to split in the
-                DeepSpeed-Inference API.
-        """
-        raise NotImplementedError

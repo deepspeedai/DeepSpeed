@@ -102,6 +102,3 @@ class MegatronLayerPolicy(TransformerPolicy):
                self.client_module.post_attention_layernorm.bias, \
                self.client_module.input_layernorm.weight, \
                self.client_module.input_layernorm.bias
-
-    def get_param_names(self):
-        pass

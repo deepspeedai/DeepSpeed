@@ -21,6 +21,7 @@ class BaseTransformerContainer(ABC):
 
         self.megatron_v2 = self.policy.is_megatron_v2
         self.scale_attention = self.policy.scale_attention
+        self.ckpt_load_enabled = False
 
         # configuration for models. todo: can this be moved to a pydantic model config?
         self.hidden_size = None

@@ -28,6 +28,22 @@ class DS_BloomContainer(MetaTensorContainer, BaseTransformerContainer):
             self.module.attention.attn_qkvb,
             self.qkvb)
 
+    def get_param_names(self):
+        return 'self_attention.query_key_value.weight', \
+               'self_attention.query_key_value.bias', \
+               'self_attention.dense.weight', \
+               'self_attention.dense.bias', \
+               'mlp.dense_h_to_4h.weight', \
+               'mlp.dense_h_to_4h.bias', \
+               'mlp.dense_4h_to_h.weight', \
+               'mlp.dense_4h_to_h.bias', \
+               'input_layernorm.weight', \
+               'input_layernorm.bias', \
+               'post_attention_layernorm.weight', \
+               'post_attention_layernorm.bias', \
+               self.policy.use_load_prefix, \
+               self.policy.split_qkv
+
 
 class BLOOMLayerPolicy(TransformerPolicy):
     _orig_layer_class = None
@@ -75,19 +91,3 @@ class BLOOMLayerPolicy(TransformerPolicy):
                self.client_module.post_attention_layernorm.bias, \
                self.client_module.input_layernorm.weight, \
                self.client_module.input_layernorm.bias
-
-    def get_param_names(self):
-        return 'self_attention.query_key_value.weight', \
-               'self_attention.query_key_value.bias', \
-               'self_attention.dense.weight', \
-               'self_attention.dense.bias', \
-               'mlp.dense_h_to_4h.weight', \
-               'mlp.dense_h_to_4h.bias', \
-               'mlp.dense_4h_to_h.weight', \
-               'mlp.dense_4h_to_h.bias', \
-               'input_layernorm.weight', \
-               'input_layernorm.bias', \
-               'post_attention_layernorm.weight', \
-               'post_attention_layernorm.bias', \
-               self.use_load_prefix, \
-               self.split_qkv

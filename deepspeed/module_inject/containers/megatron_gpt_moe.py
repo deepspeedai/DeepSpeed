@@ -78,6 +78,3 @@ class MegatronMoELayerPolicy(MegatronLayerPolicy):
                     self.client_module.mlp.mlp.dense_4h_to_h.weight, \
                     self.client_module.mlp.mlp.dense_4h_to_h.bias, \
                     self.client_module.mlp.coefficient.weight
-
-    def get_param_names(self):
-        pass

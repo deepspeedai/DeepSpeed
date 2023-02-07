@@ -77,6 +77,3 @@ class HFBertLayerPolicy(TransformerPolicy):
                attention_layernorm.bias, \
                transformer_layernorm.weight, \
                transformer_layernorm.bias
-
-    def get_param_names(self):
-        pass

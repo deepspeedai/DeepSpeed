@@ -62,6 +62,3 @@ class HFCLIPLayerPolicy(TransformerPolicy):
                self.client_module.layer_norm2.bias, \
                self.client_module.layer_norm1.weight, \
                self.client_module.layer_norm1.bias
-
-    def get_param_names(self):
-        pass

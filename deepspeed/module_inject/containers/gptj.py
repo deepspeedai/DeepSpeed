@@ -18,6 +18,20 @@ class DS_GPTJContainer(MetaTensorContainer, BaseTransformerContainer):
         self.module.config.scale_attention = self.scale_attention
         return self.module
 
+    def get_param_names(self):
+        return 'attn.q_proj.weight', \
+               'attn.k_proj.weight', \
+               'attn.v_proj.weight', \
+               'attn.out_proj.weight', \
+               'mlp.fc_in.weight', \
+               'mlp.fc_in.bias', \
+               'mlp.fc_out.weight', \
+               'mlp.fc_out.bias', \
+               'ln_1.weight', \
+               'ln_1.bias', \
+               self.policy.use_load_prefix, \
+               self.policy.split_qkv
+
 
 class HFGPTJLayerPolicy(TransformerPolicy):
     _orig_layer_class = None
@@ -58,17 +72,3 @@ class HFGPTJLayerPolicy(TransformerPolicy):
                None, \
                self.client_module.ln_1.weight, \
                self.client_module.ln_1.bias
-
-    def get_param_names(self):
-        return 'attn.q_proj.weight', \
-               'attn.k_proj.weight', \
-               'attn.v_proj.weight', \
-               'attn.out_proj.weight', \
-               'mlp.fc_in.weight', \
-               'mlp.fc_in.bias', \
-               'mlp.fc_out.weight', \
-               'mlp.fc_out.bias', \
-               'ln_1.weight', \
-               'ln_1.bias', \
-               self.use_load_prefix, \
-               self.split_qkv
