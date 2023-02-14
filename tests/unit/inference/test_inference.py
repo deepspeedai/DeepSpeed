@@ -281,7 +281,7 @@ class TestModelTask(DistributedTest):
         local_rank = int(os.getenv("LOCAL_RANK", "0"))
 
         # Load the model on CPU first to avoid OOM for large models @fp32
-        pipe = pipeline(task, model=model, device=-1, framework="pt")
+        pipe = pipeline(task, model=model, device=torch.device("cpu"), framework="pt")
         if dtype == torch.half:
             pipe.model.half()
 
@@ -362,7 +362,7 @@ class TestMPSize(DistributedTest):
 
         # We have to load these large models on CPU with pipeline because not
         # enough GPU memory
-        pipe = pipeline(task, model=model, device=-1, framework="pt")
+        pipe = pipeline(task, model=model, device=torch.device("cpu"), framework="pt")
         bs_output = pipe(query, **inf_kwargs)
 
         pipe.model = deepspeed.init_inference(pipe.model,
@@ -425,7 +425,7 @@ class TestInjectionPolicy(DistributedTest):
 
         # We have to load these large models on CPU with pipeline because not
         # enough GPU memory
-        pipe = pipeline(task, model=model, device=-1, framework="pt")
+        pipe = pipeline(task, model=model, device=torch.device("cpu"), framework="pt")
         bs_output = pipe(query, **inf_kwargs)
 
         pipe.model = deepspeed.init_inference(pipe.model,
@@ -476,7 +476,7 @@ class TestAutoTensorParallelism(DistributedTest):
 
         # We have to load these large models on CPU with pipeline because not
         # enough GPU memory
-        pipe = pipeline(task, model=model, device=-1, framework="pt")
+        pipe = pipeline(task, model=model, device=torch.device("cpu"), framework="pt")
         bs_output = pipe(query, **inf_kwargs)
 
         pipe.model = deepspeed.init_inference(pipe.model,
