@@ -7,14 +7,14 @@ runs:
       run: |
         sudo apt-get update && sudo apt-get -y upgrade
         sudo apt-get install -y libaio-dev
-        pip install --upgrade pip
-        python -m pip install -U virtualenv
+        python -m pip install --user --upgrade pip
+        python -m pip install --user --upgrade virtualenv
       shell: bash
     - id: create-venv
       run: |
         python -m venv unit-test-venv
         source ./unit-test-venv/bin/activate
-        pip install --upgrade pip
+        python -m pip install --upgrade pip
         echo PATH=$PATH >> $GITHUB_ENV # Make it so venv is inherited for other steps
       shell: bash
     - id: print-env
@@ -22,13 +22,15 @@ runs:
         which python
         python --version
         if [[ -z "${AISC_NODE_INSTANCE_ID}" ]]; then
+          echo "Not on self-hosted node"
+        else
           echo "JobID: ${AISC_NODE_INSTANCE_ID}"
         fi
         if command -v nvidia-smi; then
           nvidia-smi
           which nvcc
           nvcc --version
-        elif command -c rocm-smi; then
+        elif command -v rocm-smi; then
           rocm-smi --showhw
           which hipcc
           hipcc --version
