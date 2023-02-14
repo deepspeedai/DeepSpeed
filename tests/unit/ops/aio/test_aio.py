@@ -250,6 +250,7 @@ class TestWrite(DistributedTest):
         assert filecmp.cmp(ref_file, aio_file, shallow=False)
 
 
+@pytest.mark.sequential
 @pytest.mark.parametrize("use_cuda_pinned_tensor", [True, False])
 @pytest.mark.parametrize("cuda_device", [True, False])
 class TestAsyncQueue(DistributedTest):
