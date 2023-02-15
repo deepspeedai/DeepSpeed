@@ -463,6 +463,8 @@ def replace_transformer_layer(orig_layer_impl,
                 child.num_heads = child.num_heads // mp_size
             if hasattr(child, 'num_attention_heads'):
                 child.num_attention_heads = child.num_attention_heads // mp_size
+            if hasattr(child, 'num_attn_heads'):
+                child.num_attn_heads = child.num_attn_heads // mp_size
             if hasattr(child, 'all_head_size'):
                 child.all_head_size = child.all_head_size // mp_size
             if hasattr(child, 'embed_dim'):
