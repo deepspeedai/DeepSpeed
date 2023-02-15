@@ -23,7 +23,7 @@ In this part, we elaborate the usage of MoE inference support in the DeepSpeed l
 
 ### Initializing for Inference
 
-For inference with DeepSpeed-MoE, use `init_inference` API to load the DeepSpeed MoE model for inference. Here, you can specify the model-parallelism/tensor-slicing degree (mp_size), expert parallelism degree (ep_size), and number of experts (moe_exeperts). We create various process groups based on minimum of the world\_size (total number of GPUs) and expert parallel size. By using this group, we can partition the experts among expert-parallel GPUs. If number of experts is lower than total number of GPUs, DeepSpeed-MoE leverages expert-slicing for partitioning the expert parameters between the expert-parallel GPUs. Furthermore, if the model has not been loaded with the appropriate checkpoint, you can also provide the checkpoint description using a `json` file or simply pass the `'checkpoint'` path to load the model. To inject the high-performance inference kernels, you can pass int the `replace_method` as `'auto'` and set the `replace_with_kernel_inject` to True.
+For inference with DeepSpeed-MoE, use `init_inference` API to load the DeepSpeed MoE model for inference. Here, you can specify the model-parallelism/tensor-slicing degree (mp_size), expert parallelism degree (ep_size), and number of experts (moe_exeperts). We create various process groups based on minimum of the world\_size (total number of GPUs) and expert parallel size. By using this group, we can partition the experts among expert-parallel GPUs. If number of experts is lower than total number of GPUs, DeepSpeed-MoE leverages expert-slicing for partitioning the expert parameters between the expert-parallel GPUs. Furthermore, if the model has not been loaded with the appropriate checkpoint, you can also provide the checkpoint description using a `json` file or simply pass the `'checkpoint'` path to load the model. To inject the high-performance inference kernels, you can set `replace_with_kernel_inject` to True.
 
 ```python
 
@@ -44,7 +44,6 @@ ds_engine = deepspeed.init_inference(moe_model,
                                      dtype=torch.half,
                                      moe_experts=args.num_experts,
                                      checkpoint=args.checkpoint_path,
-                                     replace_method='auto',
                                      replace_with_kernel_inject=True,)
 model = ds_engine.module
 output = model('Input String')

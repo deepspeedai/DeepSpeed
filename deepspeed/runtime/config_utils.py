@@ -24,6 +24,8 @@ class DeepSpeedConfigModel(BaseModel):
     Deprecated Field kwargs:
     - deprecated: [True|False], default False
         Enables / Disables deprecated fields
+    - deprecated_msg: str, default ""
+        Message to include with deprecation warning
     - new_param: str, default ""
         Name of the field replacing the deprecated field
     - set_new_param: [True|False], default True
@@ -51,7 +53,11 @@ class DeepSpeedConfigModel(BaseModel):
         if (
                 not strict
         ):  # This is temporary until we refactor all DS configs, allows HF to load models
-            data = {k: v for k, v in data.items() if v != "auto"}
+            data = {
+                k: v
+                for k,
+                v in data.items() if (v != "auto" or k == "replace_method")
+            }
         super().__init__(**data)
         self._deprecated_fields_check(self)
 
@@ -63,9 +69,11 @@ class DeepSpeedConfigModel(BaseModel):
         new_param_fn = kwargs.get("new_param_fn", lambda x: x)
         param_value = new_param_fn(getattr(pydantic_config, dep_param))
         new_param = kwargs.get("new_param", "")
+        dep_msg = kwargs.get("deprecated_msg", "")
         if dep_param in fields_set:
             logger.warning(f"Config parameter {dep_param} is deprecated" +
-                           (f" use {new_param} instead" if new_param else ""))
+                           (f" use {new_param} instead" if new_param else "") +
+                           (f". {dep_msg}" if dep_msg else ""))
             # Check if there is a new param and if it should be set with a value
             if new_param and kwargs.get("set_new_param", True):
                 # Remove the deprecate field if there is a replacing field

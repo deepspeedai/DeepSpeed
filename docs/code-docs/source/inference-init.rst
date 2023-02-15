@@ -36,8 +36,7 @@ Example config:
 	"kernel_inject": True,
 	"tensor_parallel": {"tp_size": 4},
 	"dtype": "fp16",
-	"enable_cuda_graph": False,
-	"replace_method": "auto",
+	"enable_cuda_graph": False
     }
 
 .. autofunction:: deepspeed.init_inference

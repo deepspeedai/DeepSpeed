@@ -11,7 +11,7 @@ DeepSpeed provides a seamless inference mode for compatible transformer based mo
 
 For inference with DeepSpeed, use `init_inference` API to load the model for inference. Here, you can specify the MP degree, and if the model has not been loaded with the appropriate checkpoint, you can also provide the checkpoint description using a `json` file or the checkpoint path.
 
-To inject the high-performance kernels, you need to set the `replace_with_kernel_inject` to True and pass int the `replace_method` as `'auto'` for the compatible models, or define a new policy in [replace_policy class](https://github.com/microsoft/DeepSpeed/blob/master/deepspeed/module_inject/replace_policy.py) and pass in the `injection_policy` that specifies the different parameters of a Transformer layer, such as attention and feed-forward parts. The `injection_policy` shows the mapping between the parameters of the original layer implementation with the inference-customized Transformer layer.
+To inject the high-performance kernels, you need to set the `replace_with_kernel_inject` to True for the compatible models. For models not supported by DeepSpeed, the users can submit a PR that defines a new policy in [replace_policy class](https://github.com/microsoft/DeepSpeed/blob/master/deepspeed/module_inject/replace_policy.py) that specifies the different parameters of a Transformer layer, such as attention and feed-forward parts. The policy classes in DeepSpeed create a mapping between the parameters of the original user-supplied layer implementation with DeepSpeed's inference-optimized Transformer layer.
 
 ```python
 # create the model
@@ -28,7 +28,6 @@ ds_engine = deepspeed.init_inference(model,
                                  mp_size=2,
                                  dtype=torch.half,
                                  checkpoint=None if args.pre_load_checkpoint else args.checkpoint_json,
-                                 replace_method='auto',
                                  replace_with_kernel_inject=True)
 model = ds_engine.module
 output = model('Input String')
@@ -111,8 +110,7 @@ generator = pipeline('text-generation', model='EleutherAI/gpt-neo-2.7B',
 generator.model = deepspeed.init_inference(generator.model,
                                            mp_size=world_size,
                                            dtype=torch.float,
-                                           replace_method='auto',
-					   replace_with_kernel_inject=True)
+                                           replace_with_kernel_inject=True)
 
 string = generator("DeepSpeed is", do_sample=True, min_length=50)
 if not torch.distributed.is_initialized() or torch.distributed.get_rank() == 0:

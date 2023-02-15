@@ -66,7 +66,6 @@ class TestModelProfiling(DistributedTest):
                                               dtype=dtype,
                                               mp_size=world_size,
                                               replace_with_kernel_inject=True,
-                                              replace_method="auto",
                                               enable_cuda_graph=cuda_graphs)
         pipe.model.profile_model_time(use_cuda_events=use_cuda_events)
 

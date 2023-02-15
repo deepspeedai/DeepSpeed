@@ -116,7 +116,11 @@ class InferenceEngine(Module):
         # retain this from the old conditional argument being passed to apply_injection_policy()
         if not config.replace_with_kernel_inject:
             config.checkpoint = None
+
+        # We only support three modes: 1) user specified policy for tensor-parallelism, 2) kernel injection (replace_with_kernel_inject), and 3) automatic tensor parallelism.
         if self.injection_dict:
+            # 1. User specified Tensor Parallelism
+            assert not config.replace_with_kernel_inject, "Cannot use both user specified injection policy and kernel injection"
             for client_module, injection_policy in self.injection_dict.items():
                 # construct the tuple and pass that instead of a string or dict.
                 if isinstance(injection_policy, str):
@@ -124,17 +128,20 @@ class InferenceEngine(Module):
                 else:
                     config.injection_policy_tuple = injection_policy
                 self._apply_injection_policy(config, client_module)
-        elif config.replace_method == 'auto':
-            self._apply_injection_policy(config)
-        elif not config.replace_with_kernel_inject:
-            # Automatic Tensor Parallelism
-            parser_dict = AutoTP.tp_parser(model)
-            for client_module, injection_policy in parser_dict:
-                if isinstance(injection_policy, str):
-                    config.injection_policy_tuple = (injection_policy, )
-                else:
-                    config.injection_policy_tuple = injection_policy
-                self._apply_injection_policy(config, client_module)
+        else:
+            if config.replace_with_kernel_inject:
+                # 2. DeepSpeed Kernel Injection
+                self._apply_injection_policy(config)
+            else:
+                # 3. Automatic Tensor Parallelism
+                parser_dict = AutoTP.tp_parser(model)
+                print("AutoTP: ", parser_dict)
+                for client_module, injection_policy in parser_dict:
+                    if isinstance(injection_policy, str):
+                        config.injection_policy_tuple = (injection_policy, )
+                    else:
+                        config.injection_policy_tuple = injection_policy
+                    self._apply_injection_policy(config, client_module)
 
         device = get_accelerator().current_device_name()
         self.module.to(device)
