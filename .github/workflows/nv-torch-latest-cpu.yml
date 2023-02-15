@@ -3,7 +3,6 @@ name: nv-torch-latest-cpu
 on:
   push:
     branches:
-      - 'master'
       - 'staging**'
     paths-ignore:
       - 'docs/**'

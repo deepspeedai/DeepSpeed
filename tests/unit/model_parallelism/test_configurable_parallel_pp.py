@@ -123,12 +123,19 @@ class TestConfigurablePP(ConfigurablePP):
                         assert torch.allclose(b, t, atol=1e-07), f"Baseline output {baseline} is not equal to save-then-load output {test}"
 
 
+# Fixture for defining the checkpoint path since all tests in
+# TestConfigurableResizePP will use the same tmpdir
+@pytest.fixture
+def checkpoint_tag(mp_size, pp_size, mp_resize, pp_resize):
+    return f"{mp_size}-{pp_size}-{mp_resize}-{pp_resize}"
+
+
 # Base class for creating / saving model output for baseline models. This is
 # not meant to be used directly as a fixture to any classes
 class _baseline(DistributedFixture):
     world_size = None
 
-    def run(self, inputs, class_tmpdir, mp_size, pp_size):
+    def run(self, inputs, class_tmpdir, checkpoint_tag, mp_size, pp_size):
         assert int(os.environ["WORLD_SIZE"]) == (pp_size * mp_size), "world size does not match provided pp_size and mp_size"
         args_defaults = {
             'num_layers': 8,
@@ -162,12 +169,14 @@ class _baseline(DistributedFixture):
                 assert len(baseline) == 1
                 assert len(baseline[0]) == 1
                 assert torch.is_tensor(baseline[0][0])
-                save_path = os.path.join(class_tmpdir, "output.pt")
+                save_path = os.path.join(class_tmpdir, f"output-{checkpoint_tag}.pt")
                 torch.save(baseline[0][0].cpu(), save_path)
 
             state_dict = {}
             state_dict['checkpoint_version'] = get_megatron_version()
-            model.save_checkpoint(class_tmpdir, client_state=state_dict)
+            model.save_checkpoint(class_tmpdir,
+                                  tag=checkpoint_tag,
+                                  client_state=state_dict)
 
 
 # This may look odd, but there is a limitation with DistributedFixture that
@@ -186,7 +195,14 @@ class baseline_ws4(_baseline):
 
 
 class TestConfigurableResizePP(ConfigurablePP):
-    def _test(self, inputs, class_tmpdir, mp_size, pp_size, mp_resize, pp_resize):
+    def _test(self,
+              inputs,
+              class_tmpdir,
+              checkpoint_tag,
+              mp_size,
+              pp_size,
+              mp_resize,
+              pp_resize):
         args_defaults = {
             'num_layers': 8,
             'hidden_size': 128,
@@ -204,6 +220,7 @@ class TestConfigurableResizePP(ConfigurablePP):
 
         with torch.no_grad():
             model.load_checkpoint(class_tmpdir,
+                                  tag=checkpoint_tag,
                                   load_optimizer_states=False,
                                   load_lr_scheduler_states=False)
             inputs = [x.cuda() for x in inputs]
@@ -223,7 +240,7 @@ class TestConfigurableResizePP(ConfigurablePP):
                 assert len(test[0]) == 1
                 assert torch.is_tensor(test[0][0])
                 test = test[0][0].cpu()
-                load_path = os.path.join(class_tmpdir, "output.pt")
+                load_path = os.path.join(class_tmpdir, f"output-{checkpoint_tag}.pt")
                 baseline = torch.load(load_path)
                 assert torch.allclose(baseline, test, atol=1e-03), f"Baseline output {baseline} is not equal to save-then-load output {test}"
 
@@ -233,48 +250,76 @@ class TestConfigurableResizePP(ConfigurablePP):
     def test_world_size_2to1(self,
                              inputs,
                              class_tmpdir,
+                             checkpoint_tag,
                              baseline_ws2,
                              mp_size,
                              pp_size,
                              mp_resize,
                              pp_resize):
-        self._test(inputs, class_tmpdir, mp_size, pp_size, mp_resize, pp_resize)
+        self._test(inputs,
+                   class_tmpdir,
+                   checkpoint_tag,
+                   mp_size,
+                   pp_size,
+                   mp_resize,
+                   pp_resize)
 
     @pytest.mark.world_size(1)
     @pytest.mark.parametrize("mp_size, pp_size, mp_resize, pp_resize", [(2, 2, 1, 1)])
     def test_world_size_4to1(self,
                              inputs,
                              class_tmpdir,
+                             checkpoint_tag,
                              baseline_ws4,
                              mp_size,
                              pp_size,
                              mp_resize,
                              pp_resize):
-        self._test(inputs, class_tmpdir, mp_size, pp_size, mp_resize, pp_resize)
+        self._test(inputs,
+                   class_tmpdir,
+                   checkpoint_tag,
+                   mp_size,
+                   pp_size,
+                   mp_resize,
+                   pp_resize)
 
     @pytest.mark.world_size(2)
     @pytest.mark.parametrize("mp_size, pp_size, mp_resize, pp_resize", [(2, 2, 2, 1)])
     def test_world_size_4to2(self,
                              inputs,
                              class_tmpdir,
+                             checkpoint_tag,
                              baseline_ws4,
                              mp_size,
                              pp_size,
                              mp_resize,
                              pp_resize):
-        self._test(inputs, class_tmpdir, mp_size, pp_size, mp_resize, pp_resize)
+        self._test(inputs,
+                   class_tmpdir,
+                   checkpoint_tag,
+                   mp_size,
+                   pp_size,
+                   mp_resize,
+                   pp_resize)
 
     @pytest.mark.world_size(4)
     @pytest.mark.parametrize("mp_size, pp_size, mp_resize, pp_resize", [(1, 1, 2, 2)])
     def test_world_size_1to4(self,
                              inputs,
                              class_tmpdir,
+                             checkpoint_tag,
                              baseline_ws1,
                              mp_size,
                              pp_size,
                              mp_resize,
                              pp_resize):
-        self._test(inputs, class_tmpdir, mp_size, pp_size, mp_resize, pp_resize)
+        self._test(inputs,
+                   class_tmpdir,
+                   checkpoint_tag,
+                   mp_size,
+                   pp_size,
+                   mp_resize,
+                   pp_resize)
 
     @pytest.mark.world_size(4)
     @pytest.mark.parametrize("mp_size, pp_size, mp_resize, pp_resize",
@@ -289,9 +334,16 @@ class TestConfigurableResizePP(ConfigurablePP):
     def test_world_size_2to4(self,
                              inputs,
                              class_tmpdir,
+                             checkpoint_tag,
                              baseline_ws2,
                              mp_size,
                              pp_size,
                              mp_resize,
                              pp_resize):
-        self._test(inputs, class_tmpdir, mp_size, pp_size, mp_resize, pp_resize)
+        self._test(inputs,
+                   class_tmpdir,
+                   checkpoint_tag,
+                   mp_size,
+                   pp_size,
+                   mp_resize,
+                   pp_resize)
