@@ -768,15 +768,15 @@ void quantized_gemm(void* output,
                     int bsz,
                     int hidden_size)
 {
-    T* weight16 = (T*)Context::Instance().GetWorkSpace() + 12 * hidden_size * bsz;
+    // T* weight16 = (T*)Context::Instance().GetWorkSpace() + 12 * hidden_size * bsz;
 
-    // auto options = at::TensorOptions()
-    //                    .dtype(at::kHalf)
-    //                    .layout(at::kStrided)
-    //                    .device(at::kCUDA)
-    //                    .requires_grad(false);
-    // auto tmp = torch::empty(weight.sizes(), options);
-    // T* weight16 = (T*)tmp.data_ptr();
+    auto options = at::TensorOptions()
+                       .dtype(at::kHalf)
+                       .layout(at::kStrided)
+                       .device(at::kCUDA)
+                       .requires_grad(false);
+    auto tmp = torch::empty(weight.sizes(), options);
+    T* weight16 = (T*)tmp.data_ptr();
     launch_dequantize(weight16,
                       (int8_t*)weight.data_ptr(),
                       (float*)qscale.data_ptr(),

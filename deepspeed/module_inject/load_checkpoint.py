@@ -16,11 +16,10 @@ def load_model_with_checkpoint(r_module,
                                sd,
                                mp_replace,
                                ckpt_type,
+                               ckpt_mp_size,
                                weight_quantizer=None,
                                rank=0,
-                               param_names=None,
-                               transformer_config=None,
-                               megatron_v2=False):
+                               replace_policy=None):
     error_msgs = []
 
     def transpose(data):
@@ -37,6 +36,12 @@ def load_model_with_checkpoint(r_module,
         if hasattr(module, 'weight'):
             module.weight = mp_replace.copy(module.weight.data, sd[0][prefix + 'weight'])
         if prefix + 'bias' in sd[0].keys():
+            if module.bias.data.is_meta:
+                # meta tensor cannot be casted or copied to, so we need to replace it with a normal tensor here
+                module.bias = torch.nn.parameter.Parameter(
+                    data=torch.empty_like(module.bias.data,
+                                          device="cpu"),
+                    requires_grad=module.bias.data.requires_grad)
             module.bias = mp_replace.copy(module.bias.data, sd[0][prefix + 'bias'])
         args = None
         gc.collect()
@@ -51,6 +56,8 @@ def load_model_with_checkpoint(r_module,
                             tmp_data, scale = sd[0][prefix + n]
                             tmp_data = tmp_data
                             scale = scale.to(get_accelerator().current_device_name())
+                            # set the quantizer number of groups using the checkpoint scale shape
+                            weight_quantizer.num_groups = scale.shape[0]
                         else:
                             tmp_data = sd[0][prefix + n].to(
                                 get_accelerator().current_device_name())
@@ -100,11 +107,31 @@ def load_model_with_checkpoint(r_module,
                                             get_accelerator().current_device_name())
                                         for j in range(len(sd))
                                     ]
-                                    weight_partition = torch.cat([
-                                        ad[0].to(get_accelerator().current_device_name())
-                                        if type(ad) is list else ad for ad in all_data
-                                    ],
-                                                                 dim=dim)
+                                    # Check if the weight tensor is for the QKV parameter
+                                    if src_shape[1] == (3 *
+                                                        src_shape[0]) // ckpt_mp_size:
+                                        qkv_size = src_shape[outer_dim] // 3
+                                        src_split = [
+                                            torch.split(src[0].data,
+                                                        qkv_size,
+                                                        dim=outer_dim)
+                                            for src in all_data
+                                        ]
+
+                                        weight_partition = torch.cat([
+                                            torch.cat([qkv_s[i] for qkv_s in src_split],
+                                                      axis=outer_dim)
+                                            for i in range(len(src_split[0]))
+                                        ],
+                                                                     dim=dim)
+                                    else:
+                                        weight_partition = torch.cat([
+                                            ad[0].to(
+                                                get_accelerator().current_device_name())
+                                            if type(ad) is list else ad
+                                            for ad in all_data
+                                        ],
+                                                                     dim=dim)
                                     if tmp_data.dtype == torch.int8:
                                         scale = torch.cat([
                                             ad[1].to(
@@ -135,150 +162,46 @@ def load_model_with_checkpoint(r_module,
                                         ).current_device_name()).contiguous()
                                     p.data.copy_(bias_split)
                                 else:
-                                    p.data.copy_(
-                                        torch.cat(
-                                            [sd[j][prefix + n] for j in range(len(sd))],
-                                            dim=0).to(get_accelerator(
-                                            ).current_device_name()).contiguous())
+                                    # Check if the weight tensor is for the QKV parameter
+                                    if src_shape[0] == (3 * r_module.config.hidden_size
+                                                        ) // ckpt_mp_size:
+                                        qkv_size = src_shape[0] // 3
+                                        src_split = [
+                                            torch.split(sd[j][prefix + n],
+                                                        qkv_size,
+                                                        dim=0) for j in range(len(sd))
+                                        ]
+
+                                        p.data.copy_(
+                                            torch.cat(
+                                                [
+                                                    torch.cat([
+                                                        qkv_s[i] for qkv_s in src_split
+                                                    ],
+                                                              axis=0)
+                                                    for i in range(len(src_split[0]))
+                                                ],
+                                                dim=0).to(get_accelerator(
+                                                ).current_device_name()).contiguous())
+                                    else:
+                                        p.data.copy_(
+                                            torch.cat(
+                                                [
+                                                    sd[j][prefix + n]
+                                                    for j in range(len(sd))
+                                                ],
+                                                dim=0).to(get_accelerator(
+                                                ).current_device_name()).contiguous())
 
             load_parameters(module, prefix)
             for n, child in module.named_children():
                 load_parameters(child, prefix + n + '.')
         else:
-
-            def _transpose(x):
-                heads = transformer_config.heads // mp_replace.mp_size
-                attention_head_size = x.shape[-1] // heads
-                new_x_shape = x.size()[:-1] + (heads, attention_head_size)
-                x_1 = x.view(*new_x_shape)
-                (q, k, v) = torch.split(x_1, (x_1.shape[-1] // 3), dim=(x_1.dim() - 1))
-                if len(q.shape) > 2:
-                    return torch.cat((q.reshape(q.shape[0],
-                                                -1),
-                                      k.reshape(q.shape[0],
-                                                -1),
-                                      v.reshape(q.shape[0],
-                                                -1)),
-                                     dim=-1).reshape(x.shape)
-                else:
-                    return torch.cat((q.reshape(-1),
-                                      k.reshape(-1),
-                                      v.reshape(-1)),
-                                     dim=-1).reshape(x.shape)
-
-            # This checks if the parameter exits in the checkpoint file and maybe copies it into the corresponding destination tensor.
-            # Note that not all parameters are saved in one checkpoint, that's why we always need to check if they exist!
-            def maybe_copy(module,
-                           dst_name,
-                           src_name,
-                           qkv=False,
-                           megatron_v2=False,
-                           split_qkv=False):
-                if src_name in sd[0]:
-                    dst = getattr(module, dst_name)
-                    tmp = sd[0][src_name].cuda()
-                    if len(dst.shape) == 1:
-                        if split_qkv:
-                            dst = mp_replace.qkv_copy(dst, tmp)
-                        else:
-                            dst = mp_replace.copy(dst, tmp)
-                        if qkv and megatron_v2:
-                            dst = torch.nn.parameter.Parameter(
-                                _transpose(dst).contiguous())
-                    else:
-                        if split_qkv:
-                            dst = weight_quantizer.quantize(mp_replace.qkv_copy(dst, tmp if weight_quantizer.q_int8 else \
-                                                            (transpose(tmp).contiguous())))
-                        else:
-                            dst = weight_quantizer.quantize(mp_replace.copy(dst, tmp if weight_quantizer.q_int8 else \
-                                                            transpose(tmp)))
-                        if qkv and megatron_v2:
-                            scale1 = dst.scale
-                            dst = torch.nn.parameter.Parameter(
-                                _transpose(dst).contiguous())
-                            dst.scale = scale1
-                    setattr(module, dst_name, dst)
-
-            # Extending the maybe_copy function for when the q, k, and v are in separate parameters!
-            def maybe_copy_qkv(module, dst_name, src_names, split_qkv=False):
-                if src_names[0] in sd[0]:
-                    q = sd[0][src_names[0]]
-                    k = sd[0][src_names[1]]
-                    v = sd[0][src_names[2]]
-                    qkv_data = torch.cat((q, k, v), dim=0)
-                    dst = getattr(module, dst_name)
-                    if len(dst.shape) == 1:
-                        if split_qkv:
-                            dst = mp_replace.qkv_copy(dst,
-                                                      (qkv_data.cuda()).contiguous())
-                        else:
-                            dst = mp_replace.copy(dst, qkv_data.cuda())
-                    else:
-                        if split_qkv:
-                            dst = weight_quantizer.quantize(mp_replace.qkv_copy(dst, qkv_data.cuda() if weight_quantizer.q_int8 else \
-                                                            ((transpose(qkv_data.cuda())).contiguous())))
-                        else:
-                            dst = weight_quantizer.quantize(mp_replace.copy(dst, qkv_data.cuda() if weight_quantizer.q_int8 else \
-                                                            transpose(qkv_data.cuda())))
-                    setattr(module, dst_name, dst)
-
-            if len(param_names) == 14:
-                qkv_w, qkv_b, attn_ow, attn_ob, \
-                mlp_intw, mlp_intb, mlp_ow, mlp_ob, \
-                inp_normw, inp_normb, attn_nw, attn_nb, _, split_qkv = param_names
-            elif len(param_names) < 14:
-                q_w, k_w, v_w, attn_ow, \
-                mlp_intw, mlp_intb, mlp_ow, mlp_ob, \
-                inp_normw, inp_normb, _, split_qkv = param_names
-            else:
-                q_w, q_b, k_w, k_b, v_w, v_b, attn_ow, attn_ob, \
-                mlp_intw, mlp_intb, mlp_ow, mlp_ob, \
-                inp_normw, inp_normb, attn_nw, attn_nb, _, split_qkv = param_names
-
-            maybe_copy(module, 'norm_w', prefix + inp_normw)
-            maybe_copy(module, 'norm_b', prefix + inp_normb)
-            if len(param_names) == 14:
-                maybe_copy(module.attention,
-                           'attn_qkvw',
-                           prefix + qkv_w,
-                           qkv=True,
-                           megatron_v2=megatron_v2,
-                           split_qkv=split_qkv)
-                maybe_copy(module.attention,
-                           'attn_qkvb',
-                           prefix + qkv_b,
-                           qkv=True,
-                           megatron_v2=megatron_v2,
-                           split_qkv=split_qkv)
-            elif len(param_names) < 14:
-                maybe_copy_qkv(module.attention,
-                               'attn_qkvw',
-                               [prefix + q_w,
-                                prefix + k_w,
-                                prefix + v_w],
-                               split_qkv=split_qkv)
-            else:
-                maybe_copy_qkv(module.attention,
-                               'attn_qkvw',
-                               [prefix + q_w,
-                                prefix + k_w,
-                                prefix + v_w],
-                               split_qkv=split_qkv)
-                maybe_copy_qkv(module.attention,
-                               'attn_qkvb',
-                               [prefix + q_b,
-                                prefix + k_b,
-                                prefix + v_b],
-                               split_qkv=split_qkv)
-            maybe_copy(module.attention, 'attn_ow', prefix + attn_ow)
-            if len(param_names) >= 14:
-                maybe_copy(module.attention, 'attn_ob', prefix + attn_ob)
-                maybe_copy(module.mlp, 'attn_nw', prefix + attn_nw)
-                maybe_copy(module.mlp, 'attn_nb', prefix + attn_nb)
-            maybe_copy(module.mlp, 'inter_w', prefix + mlp_intw)
-            maybe_copy(module.mlp, 'inter_b', prefix + mlp_intb)
-            maybe_copy(module.mlp, 'output_w', prefix + mlp_ow)
-            maybe_copy(module.mlp, 'output_b', prefix + mlp_ob)
+            replace_policy.load_params(module,
+                                       sd[0],
+                                       weight_quantizer,
+                                       mp_replace,
+                                       prefix)
 
     try:
         import transformers
@@ -345,24 +268,22 @@ def load_model_with_checkpoint(r_module,
                         if ds_id is not None:
                             all_ds_ids[ds_id] = child.weight
                         setattr(module, name, child)
-
                 layer_policies[child.__class__](child, prefix + name + '.')
             else:
                 load_module_recursive(
                     child,
-                    prefix if (level == 0 and ckpt_type == 'pp') and param_names[-2] else \
+                    prefix if (level == 0 and ckpt_type == 'pp') and replace_policy.use_load_prefix else \
                     prefix + name + '.',
                     level + 1)
 
     load_module_recursive(r_module)
 
-    #XXX: hack to tie embedding w. lm_head for BLOOM, need to revist soon
     embedding_weight = None
-    for n, p in r_module.named_parameters():
-        if "word_embeddings." in n or "embed_tokens." in n:
-            embedding_weight = p
 
-    if embedding_weight is not None:
+    for n, p in r_module.named_parameters():
+        if "word_embeddings." in n or "embed_tokens." in n or "wte." in n:
+            embedding_weight = p
+    if embedding_weight is not None and r_module.lm_head.weight.is_meta:
         r_module.lm_head.weight = embedding_weight
     for sd_ in sd:
         del sd_

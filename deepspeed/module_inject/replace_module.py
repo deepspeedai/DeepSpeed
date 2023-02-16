@@ -36,35 +36,39 @@ class ReplaceWithTensorSlicing:
             for merging your checkpoints before replacing the transformer layer with\
             inference-kernels'
 
-    def qkv_copy(self, dst, src):
+    def qkv_copy(self, dst, src, int8=False):
         if src is None:
             return src
         src_shape = src.shape
         dst_shape = dst.shape
 
-        if self.out_dim == 0:
-            src_split = torch.split(src.data,
-                                    src_shape[self.out_dim] // self.mp_size,
-                                    dim=0)
-        else:
-            src_split = torch.split(src.data, src.shape[-1] // 3, dim=-1)
+        outer_dim = 0 if int8 else -1
+        inner_dim = -1 if int8 else 0
+
+        src_split = torch.split(src.data, src.shape[outer_dim] // 3, dim=outer_dim)
         if (len(src_shape) == 2 and len(dst_shape) == 2):
-            if src_shape[self.out_dim] == dst_shape[self.out_dim]:
-                return torch.nn.parameter.Parameter(src)
+            if src_shape[outer_dim] == dst_shape[self.out_dim]:
+                dst = dst.reshape(-1).data.copy_(src.data.reshape(-1)).reshape(src.shape)
+                dst = torch.nn.parameter.Parameter(dst, requires_grad=False)
+                if hasattr(src, 'scale'):
+                    dst.scale = src.scale
+                return dst
             if self.out_dim == 1:
-                self.merge_assert(src_shape[self.out_dim], dst_shape[self.out_dim])
+                self.merge_assert(src_shape[outer_dim], dst_shape[self.out_dim])
                 qkv_size = dst_shape[self.out_dim] // 3
                 qkv_split = [
                     torch.split(src_s,
                                 qkv_size,
-                                dim=self.out_dim) for src_s in src_split
+                                dim=outer_dim) for src_s in src_split
                 ]
+
                 weight_split = [
                     torch.cat([qkv_s[i] for qkv_s in qkv_split],
-                              axis=self.out_dim) for i in range(len(qkv_split[0]))
+                              axis=outer_dim) for i in range(len(qkv_split[0]))
                 ]
-                dst.data.copy_(weight_split[self.gpu_index].to(
-                    get_accelerator().current_device_name()).contiguous())
+                dst = dst.reshape(-1).data.copy_(
+                    weight_split[self.gpu_index].contiguous().reshape(-1)).reshape(
+                        weight_split[self.gpu_index].shape)
             else:
                 dst.data.copy_(src_split[self.gpu_index].to(
                     get_accelerator().current_device_name()).contiguous())
@@ -78,47 +82,49 @@ class ReplaceWithTensorSlicing:
                     torch.cat([qkv_s[i] for qkv_s in qkv_split],
                               axis=0) for i in range(len(qkv_split[0]))
                 ]
-                dst.data.copy_(bias_split[self.gpu_index].to(
-                    get_accelerator().current_device_name()).contiguous())
+                dst.data.copy_(bias_split[self.gpu_index].contiguous())
             else:
-                dst.data.copy_(src_split[self.gpu_index].to(
-                    get_accelerator().current_device_name()).contiguous())
+                dst.data.copy_(src_split[self.gpu_index].contiguous())
 
-        return torch.nn.parameter.Parameter(dst)
+        dst = torch.nn.parameter.Parameter(dst, requires_grad=False)
+        if hasattr(src, 'scale'):
+            dst.scale = src.scale
+        return dst
 
-    def copy(self, dst, src):
+    def copy(self, dst, src, int8=False):
         if src is None:
             return src
+        assert not dst.data.is_meta  # the torch.Tensor.copy_ method used below will silently fail on meta tensors
+        outer_dim = 0 if int8 else 1
+        inner_dim = 1 if int8 else 0
         src_shape = src.shape
         dst_shape = dst.shape
         if (len(src_shape) == 2 and len(dst_shape) == 2):
 
-            if src_shape[0] == dst_shape[0] and src_shape[1] == dst_shape[1]:
-                dst.data.copy_(src)
+            if src_shape[inner_dim] == dst_shape[
+                    self.in_dim] and src_shape[outer_dim] == dst_shape[self.out_dim]:
+                dst = dst.reshape(-1).data.copy_(src.data.reshape(-1)).reshape(src.shape)
             else:
-                if src_shape[self.in_dim] != dst_shape[self.in_dim]:
-                    self.merge_assert(src_shape[self.in_dim], dst_shape[self.in_dim])
+                if src_shape[inner_dim] != dst_shape[self.in_dim]:
+                    self.merge_assert(src_shape[inner_dim], dst_shape[self.in_dim])
                     weight_split = torch.split(
                         src,
                         dst_shape[self.in_dim],
-                        dim=self.in_dim)[self.gpu_index].to(
-                            get_accelerator().current_device_name()).contiguous()
+                        dim=inner_dim)[self.gpu_index].contiguous()
                 else:
-                    self.merge_assert(src_shape[self.out_dim], dst_shape[self.out_dim])
+                    self.merge_assert(src_shape[outer_dim], dst_shape[self.out_dim])
                     weight_split = torch.split(
                         src.data,
                         dst_shape[self.out_dim],
-                        dim=self.out_dim)[self.gpu_index].to(
-                            get_accelerator().current_device_name()).contiguous()
-                dst.data.copy_(weight_split.contiguous())
+                        dim=outer_dim)[self.gpu_index].contiguous()
+                dst = dst.reshape(-1).data.copy_(weight_split.reshape(-1)).reshape(
+                    weight_split.shape)
         else:
             if src_shape[0] == dst_shape[0]:
                 dst.data.copy_(src)
             else:
-                bias_split = torch.split(
-                    src.data,
-                    dst_shape[-1])[self.gpu_index].to(
-                        get_accelerator().current_device_name()).contiguous()
+                bias_split = torch.split(src.data,
+                                         dst_shape[-1])[self.gpu_index].contiguous()
                 dst.data.copy_(bias_split)
         dst = torch.nn.parameter.Parameter(dst, requires_grad=False)
         if hasattr(src, 'scale'):
@@ -142,12 +148,12 @@ def get_transformer_name(replaced_module):
 
 
 class GroupQuantizer:
-    def __init__(self, q_int8=True, group_size=1, num_bits=8):
+    def __init__(self, q_int8=True, group_size=1, num_bits=8, num_groups=0):
         self.group_size = group_size
         self.num_bits = num_bits
         self.q_int8 = q_int8
-        # TODO(jeff): need to check w. Reza on why this is needed when changing tp size w. bloom
-        self.num_groups = 32
+
+        self.num_groups = num_groups
 
     def quantize(self, inputs, qkv=True, count=1, parallel_dim=0):
         if not self.q_int8 or not qkv:
@@ -155,7 +161,8 @@ class GroupQuantizer:
             inputs.scale = torch.empty(1)
             return inputs
         q_range = 2**self.num_bits
-        num_groups = inputs.shape[0] // self.group_size
+        num_groups = self.num_groups if self.num_groups > 0 else inputs.shape[
+            0] // self.group_size
         inputs = inputs.to(get_accelerator().current_device_name())
         input_flat = inputs.reshape(num_groups, -1).contiguous()
         input_min = torch.min(input_flat, dim=1, keepdim=True)[0].float()
@@ -164,7 +171,6 @@ class GroupQuantizer:
         input_flat = (input_flat / scale).round().clamp(-q_range // 2, q_range // 2 - 1)
         inputs_q = input_flat.reshape(inputs.shape).to(torch.int8).contiguous()
         out = torch.nn.Parameter(inputs_q, requires_grad=False)
-        #print(inputs.shape)
         inputs_split = inputs.split(inputs.shape[parallel_dim] // 2, dim=parallel_dim)
         input_flat = [
             inputs_split[i].reshape(num_groups,
@@ -385,7 +391,7 @@ def replace_transformer_layer(orig_layer_impl,
         # 10. copy the tensors from the model-specific container to the new module
         _container.copy_data_to_new_module()
 
-        # 11. set globals for generic checkpoint loading
+        # 11. set global for generic checkpoint loading
         global container_g
 
         if container_g is None:
@@ -552,15 +558,13 @@ def replace_transformer_layer(orig_layer_impl,
                                             checkpoint[i]),
                                map_location='cpu')
                 ]
-                load_model_with_checkpoint(
-                    replaced_module,
-                    sd,
-                    mp_replace,
-                    ckpt_type,
-                    quantizer,
-                    param_names=container_g.get_param_names(),
-                    transformer_config=container_g.ds_model_config,
-                    megatron_v2=container_g.megatron_v2)
+                load_model_with_checkpoint(replaced_module,
+                                           sd,
+                                           mp_replace,
+                                           ckpt_type,
+                                           ckpt_mp_size,
+                                           quantizer,
+                                           replace_policy=container_g.policy)
                 pbar.update(1)
         else:
             import gc
@@ -584,16 +588,14 @@ def replace_transformer_layer(orig_layer_impl,
                     torch.load(ckpt_file,
                                map_location='cpu') for ckpt_file in ckpt_files
                 ]
-                load_model_with_checkpoint(
-                    replaced_module,
-                    sds,
-                    mp_replace,
-                    ckpt_type,
-                    quantizer,
-                    int(rank % tp_split_size),
-                    param_names=container_g.get_param_names(),
-                    transformer_config=container_g.ds_model_config,
-                    megatron_v2=container_g.megatron_v2)
+                load_model_with_checkpoint(replaced_module,
+                                           sds,
+                                           mp_replace,
+                                           ckpt_type,
+                                           ckpt_mp_size,
+                                           quantizer,
+                                           int(rank % tp_split_size),
+                                           replace_policy=container_g.policy)
                 sds = [None for _ in sds]
                 gc.collect()
 
@@ -608,16 +610,14 @@ def replace_transformer_layer(orig_layer_impl,
                                              checkpoint["non_tp"][i]
                                              ) if base_dir1 else checkpoint["non_tp"][i]
                     sds = [torch.load(ckpt_file, map_location='cpu')]
-                    load_model_with_checkpoint(
-                        replaced_module,
-                        sds,
-                        mp_replace,
-                        ckpt_type,
-                        quantizer,
-                        int(rank % tp_split_size),
-                        param_names=container_g.get_param_names(),
-                        transformer_config=container_g.ds_model_config,
-                        megatron_v2=container_g.megatron_v2)
+                    load_model_with_checkpoint(replaced_module,
+                                               sds,
+                                               mp_replace,
+                                               ckpt_type,
+                                               ckpt_mp_size,
+                                               quantizer,
+                                               int(rank % tp_split_size),
+                                               replace_policy=container_g.policy)
                     sds = [None for _ in sds]
                     gc.collect()
         print(f"checkpoint loading time at rank {rank}: {time.time()-start_time} sec")

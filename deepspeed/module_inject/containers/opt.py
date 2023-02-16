@@ -4,6 +4,9 @@ from deepspeed.model_implementations.transformers.ds_opt import DeepSpeedOPTInfe
 import torch
 from torch.nn.parameter import Parameter
 from ..policy import TransformerPolicy
+from ..policy import transformer_param_names
+from ..policy import maybe_copy
+from ..policy import maybe_copy_qkv
 from deepspeed.utils.types import ActivationFuncType
 
 
@@ -19,25 +22,59 @@ class DS_OPTContainer(MetaTensorContainer, BaseTransformerContainer):
         self.module.config.scale_attention = self.scale_attention
         return self.module
 
-    def get_param_names(self):
-        return 'self_attn.q_proj.weight', \
-               'self_attn.q_proj.bias', \
-               'self_attn.k_proj.weight', \
-               'self_attn.k_proj.bias', \
-               'self_attn.v_proj.weight', \
-               'self_attn.v_proj.bias', \
-               'self_attn.out_proj.weight', \
-               'self_attn.out_proj.bias', \
-               'fc1.weight', \
-               'fc1.bias', \
-               'fc2.weight', \
-               'fc2.bias', \
-               'self_attn_layer_norm.weight', \
-               'self_attn_layer_norm.bias', \
-               'final_layer_norm.weight', \
-               'final_layer_norm.bias', \
-               self.policy.use_load_prefix, \
-               self.policy.split_qkv
+    def load_params(self, module, sd, weight_quantizer, mp_replace, prefix):
+        param_names = (
+            'self_attn.q_proj.weight', \
+            'self_attn.k_proj.weight', \
+            'self_attn.v_proj.weight', \
+            'self_attn.q_proj.bias', \
+            'self_attn.k_proj.bias', \
+            'self_attn.v_proj.bias', \
+            'self_attn.out_proj.weight', \
+            'self_attn.out_proj.bias', \
+            'fc1.weight', \
+            'fc1.bias', \
+            'fc2.weight', \
+            'fc2.bias', \
+            'final_layer_norm.weight', \
+            'final_layer_norm.bias', \
+            'self_attn_layer_norm.weight', \
+            'self_attn_layer_norm.bias'
+        )
+
+        for i in range(0, 6, 3):
+            maybe_copy_qkv(module.attention,
+                           sd,
+                           weight_quantizer,
+                           mp_replace,
+                           transformer_param_names[i // 3],
+                           [
+                               prefix + param_names[i],
+                               prefix + param_names[i + 1],
+                               prefix + param_names[i + 2]
+                           ],
+                           split_qkv=self.split_qkv)
+        for i in range(6, 8):
+            maybe_copy(module.attention,
+                       sd,
+                       weight_quantizer,
+                       mp_replace,
+                       transformer_param_names[i - 4],
+                       prefix + param_names[i])
+        for i in range(8, 14):
+            maybe_copy(module.mlp,
+                       sd,
+                       weight_quantizer,
+                       mp_replace,
+                       transformer_param_names[i - 4],
+                       prefix + param_names[i])
+        for i in range(14, 16):
+            maybe_copy(module,
+                       sd,
+                       weight_quantizer,
+                       mp_replace,
+                       transformer_param_names[i - 4],
+                       prefix + param_names[i])
 
 
 class HFOPTLayerPolicy(TransformerPolicy):
