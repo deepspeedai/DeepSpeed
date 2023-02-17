@@ -15,7 +15,7 @@ jobs:
         with:
           token: ${{ secrets.GHP_TOKEN }}
           repository: ${{ secrets.DST_REPO }}
-          ref: ${{ secretes.DST_REPO_BRANCH }}
+          ref: ${{ secrets.DST_REPO_BRANCH }}
           path: dst-repo
 
       - name: Get PR data
