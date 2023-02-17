@@ -5,7 +5,7 @@ runs:
   steps:
     - id: update-env
       run: |
-        sudo apt-get update && sudo apt-get -y upgrade
+        sudo apt-get update
         sudo apt-get install -y libaio-dev
         python -m pip install --user --upgrade pip
         python -m pip install --user --upgrade virtualenv
