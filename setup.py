@@ -204,7 +204,7 @@ if sys.platform == "win32":
 version_str = open('version.txt', 'r').read().strip()
 
 # Build specifiers like .devX can be added at install time. Otherwise, add the git hash.
-# example: DS_BUILD_STR=".dev20201022" python setup.py sdist bdist_wheel
+# example: DS_BUILD_STRING=".dev20201022" python setup.py sdist bdist_wheel
 
 # Building wheel for distribution, update version file
 if 'DS_BUILD_STRING' in os.environ:
