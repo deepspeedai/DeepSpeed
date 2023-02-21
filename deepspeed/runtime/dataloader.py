@@ -126,10 +126,17 @@ class DeepSpeedDataLoader(object):
 
     def _create_dataloader(self):
         if self.curriculum_learning_enabled:
-            self.dataloader = DataLoader(self.dataset,
-                                         pin_memory=self.pin_memory,
-                                         batch_sampler=self.data_sampler,
-                                         num_workers=self.num_local_io_workers)
+            if self.collate_fn is None:
+                self.dataloader = DataLoader(self.dataset,
+                                             pin_memory=self.pin_memory,
+                                             batch_sampler=self.data_sampler,
+                                             num_workers=self.num_local_io_workers)
+            else:
+                self.dataloader = DataLoader(self.dataset,
+                                             pin_memory=self.pin_memory,
+                                             batch_sampler=self.data_sampler,
+                                             collate_fn=self.collate_fn,
+                                             num_workers=self.num_local_io_workers)
             self.data_iterator = iter(self.dataloader)
             return self.dataloader
         else:

@@ -41,7 +41,7 @@ To solve the limitation of existing solutions, we design and implement a general
 
 ## Evaluation Results
 
-Using this general and extensible curriculum learning solution for GPT-3 and BERT-Large model pretraining, we are able to easily analyze and index the huge training data based on up to 7 difficulty metrics and enable better data and training efficiency. For GPT-3 pretraining, our solution with the best difficulty metric (combination of truncation-based sequence length and vocabulary rarity) achieves 1.5x data and training cost saving while still maintaining model quality as baseline (Table 1 Case (8) vs. (1)). For BERT-Large pretraining, our solution with the best difficulty metric (vocabulary rarity) achieves 1.4x saving while still maintaining model quality (Table 2 Case (7) vs. (1)). On the other hand, our solutions can further improve model quality when using the same amount of data as baseline (Table 1 Case (2) to (6), Table 2 Case (2) to (6)).
+Using this general and extensible curriculum learning solution for GPT-3 and BERT-Large model pretraining, we are able to easily analyze and index the huge training data based on up to 7 difficulty metrics and enable better data and training efficiency. For GPT-3 pretraining, our solution with the best difficulty metric (combination of truncation-based sequence length and vocabulary rarity) achieves 1.5x data and training cost saving while still maintaining model quality as baseline (Table 1 Case (8) vs. (1)). For BERT-Large pretraining, our solution with the best difficulty metric (vocabulary rarity) achieves 1.5x saving while still maintaining model quality (Table 2 Case (8) vs. (1)). On the other hand, our solutions can further improve model quality when using the same amount of data as baseline (Table 1 Case (2) to (6), Table 2 Case (2) to (6)).
 
 | **Case** | **Pretrain data** | **Avg 0-shot accuracy** | **Avg 10-shot accuracy** |
 | ---------- |---------- |---------- |---------- |
@@ -56,17 +56,18 @@ Using this general and extensible curriculum learning solution for GPT-3 and BER
 
 *Table 1: GPT-3 1.3B pretraining data consumption and average evaluation accuracy on 19 tasks.*
 
-| **Case** | **Pretrain data** | **Avg finetune accuracy** |
+| **Case** | **Pretrain data** | **GLUE finetune score** |
 | ---------- |---------- |---------- |
-| (1) Baseline | 1049B | 85.42 |
-| (2) CL truncation-based sequence length | 1049B | 85.77 |
-| (3) CL reorder-based sequence length | 1049B | 85.46 |
-| (4) CL vocabulary rarity | 1049B | **86.13** |
-| (5) CL combining (2) and (4) | 1049B | 85.8 |
-| (6) CL combining (3) and (4) | 1049B | 85.61 |
-| (7) CL vocabulary rarity | **734B (1.4x)** | 85.59 |
+| (1) Baseline | 1049B | 87.29 |
+| (2) CL truncation-based sequence length | 1049B | 87.31 |
+| (3) CL reorder-based sequence length | 1049B | 87.48 |
+| (4) CL vocabulary rarity | 1049B | 87.36 |
+| (5) CL combining (2) and (4) | 1049B | **87.60** |
+| (6) CL combining (3) and (4) | 1049B | 87.06 |
+| (7) Baseline | 703B (1.5x) | 87.19 |
+| (8) CL combining (2) and (4) | **703B (1.5x)** | 87.29 |
 
-*Table 2: BERT-Large pretraining data consumption and average finetuning accuracy on 4 tasks.*
+*Table 2: BERT-Large pretraining data consumption and average GLUE finetuning score on 8 tasks.*
 
 # Efficient Data Routing via Random Layerwise Token Dropping
 
@@ -88,7 +89,7 @@ Random-LTD is simple yet very effective. Particularly, compared to other existin
 
 ## Evaluation Results
 
-Thanks to its great flexibility, we were able to apply random-LTD method to broader applications, including BERT and GPT pretraining as well as ViT and GPT finetuning tasks. For all cases, random-LTD achieves similar model quality as baseline while using less data, and/or achieve better model quality while using the same amount of data (Table 3 to 6). For GPT-3 and BERT-Large pretraining, random-LTD achieves 1.5x data saving while still maintaining the same model quality. For GPT-3 we also tested random-LTD with full data which further improves the model quality compared to baseline.
+Thanks to its great flexibility, we were able to apply random-LTD method to broader applications, including BERT and GPT pretraining as well as ViT and GPT finetuning tasks. For all cases, random-LTD achieves similar model quality as baseline while using less data, and/or achieve better model quality while using the same amount of data (Table 3 to 6). For GPT-3 and BERT-Large pretraining, random-LTD achieves 1.5-2x data saving while still maintaining the same model quality. For GPT-3 we also tested random-LTD with full data which further improves the model quality compared to baseline.
 
 | **Case** | **Pretrain data** | **Avg 0-shot accuracy** |
 | ---------- |---------- |---------- |
@@ -98,12 +99,12 @@ Thanks to its great flexibility, we were able to apply random-LTD method to broa
 
 *Table 3: GPT-3 1.3B pretraining data consumption and average evaluation accuracy on 19 tasks.*
 
-| **Case** | **Pretrain data** | **Avg finetune accuracy** |
+| **Case** | **Pretrain data** | **GLUE finetune score** |
 | ---------- |---------- |---------- |
-| (1) Baseline | 1049B | 85.42 |
-| (2) Random-LTD | **723B (1.5x)** | **86.42** |
+| (1) Baseline | 1049B | 87.29 |
+| (2) Random-LTD | **524B (2x)** | **87.32** |
 
-*Table 4: BERT-Large pretraining data consumption and average finetuning accuracy on 4 tasks.*
+*Table 4: BERT-Large pretraining data consumption and average GLUE finetuning score on 8 tasks.*
 
 | **Case** | **Train data** | **ImageNet Top-1 Acc** |
 | ---------- |---------- |---------- |
@@ -123,7 +124,7 @@ Thanks to its great flexibility, we were able to apply random-LTD method to broa
 
 The curriculum learning and random-LTD techniques are complementary. Inside DeepSpeed Data Efficiency framework, we seamlessly compose the two techniques as shown in Figure 2 above, where curriculum learning helps to sample the next data batch and random-LTD helps to decide how to route each sampled data inside the model. DeepSpeed Data Efficiency solves several complexities when composing the two techniques so that users can easily apply each technique or both to their training pipeline. The composability of DeepSpeed Data Efficiency also applies to data sampling and routing techniques in general, so that it provides a platform to implement and compose additional data efficiency techniques.
 
-The composed DeepSpeed Data Efficiency solution leverages both data efficiency techniques and achieves even better data and training efficiency. Take the GPT-3 pretraining task as an example, composing CL and random-LTD, with 100% data, leads to the best model quality in our experiments (Table 7 Case (1) to (4)). When pretraining with 50% data, the baseline training results in worse zero-shot and 10-shot evaluation accuracy, and using either CL or random-LTD can only recover part of the 10-shot accuracy loss. On the other hand, the composed data efficiency solution achieves the same or better accuracy results as baseline with 100% data, demonstrating a 2x data and 2x time saving (Case (5) to (8)).
+The composed DeepSpeed Data Efficiency solution leverages both data efficiency techniques and achieves even better data and training efficiency. Take the GPT-3 pretraining task as an example, composing CL and random-LTD, with 100% data, leads to the best model quality in our experiments (Table 7 Case (1) to (4)). When pretraining with 50% data, the baseline training results in worse zero-shot and 10-shot evaluation accuracy, and using either CL or random-LTD can only recover part of the 10-shot accuracy loss. On the other hand, the composed data efficiency solution achieves the same or better accuracy results as baseline with 100% data, demonstrating a 2x data and 2x time saving (Case (5) to (8)). Similar benefit such as 2x data saving was also observed when applying our solution to BERT pretraining.
 
 | **Case** | **Pretrain data** | **Pretrain time (on 64 V100)** | **Avg 0-shot accuracy** | **Avg 10-shot accuracy** |
 | ---------- |---------- |---------- |---------- |---------- |

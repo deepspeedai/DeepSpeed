@@ -29,6 +29,7 @@ class DataAnalyzer(object):
                  metric_types=[],
                  metric_dtypes=[],
                  save_path="./",
+                 collate_fn=None,
                  custom_map_init=None,
                  custom_map_update=None,
                  custom_map_finalize=None,
@@ -46,6 +47,7 @@ class DataAnalyzer(object):
         self.metric_types = metric_types
         self.metric_dtypes = metric_dtypes
         self.save_path = save_path
+        self.collate_fn = collate_fn
         self.custom_map_init = custom_map_init
         self.custom_map_update = custom_map_update
         self.custom_map_finalize = custom_map_finalize
@@ -153,11 +155,19 @@ class DataAnalyzer(object):
         sampler = BatchSampler(SequentialSampler(thread_dataset),
                                batch_size=self.batch_size,
                                drop_last=False)
-        iterator = iter(
-            DataLoader(thread_dataset,
-                       batch_sampler=sampler,
-                       num_workers=0,
-                       pin_memory=False))
+        if self.collate_fn is None:
+            iterator = iter(
+                DataLoader(thread_dataset,
+                           batch_sampler=sampler,
+                           num_workers=0,
+                           pin_memory=False))
+        else:
+            iterator = iter(
+                DataLoader(thread_dataset,
+                           batch_sampler=sampler,
+                           num_workers=0,
+                           collate_fn=self.collate_fn,
+                           pin_memory=False))
         if self.custom_map_init is None:
             metric_results = self.init_metric_results(thread_id,
                                                       self.metric_names,

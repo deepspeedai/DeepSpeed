@@ -4,7 +4,7 @@ tags: training pre-training
 ---
 
 **Watch out!**
-On 12/12/2022, we released DeepSpeed Data Efficiency Library which provides a more general curriculum learning support. This legacy curriculum learning feature below is still supported but we recommend to use the Data Efficiency Library.
+On 12/12/2022, we released DeepSpeed Data Efficiency Library which provides a more general curriculum learning support. This legacy curriculum learning feature below is still supported but we recommend to use the Data Efficiency Library ([tutorial](/tutorials/data-efficiency/)).
 {: .notice--warning}
 
 **Note:**
