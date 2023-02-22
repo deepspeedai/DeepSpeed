@@ -213,7 +213,7 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
         self.reduce_bucket_size = int(reduce_bucket_size)
 
         if self.reduce_scatter:
-            assert self.communication_data_type in (torch.float16, torch.bfloat16), f"ZeRO-3 supports only float16 or bfloat16 communication_data_type with reduce scatter enabled. Got: '{self.communication_data_type}'"
+            assert self.communication_data_type in (torch.float16, torch.bfloat16, torch.float32), f"ZeRO-3 supports only float16 or bfloat16 communication_data_type with reduce scatter enabled. Got: '{self.communication_data_type}'"
             assert self.gradient_predivide_factor == 1.0, "gradient_predivide_factor != 1.0 is not yet supported with ZeRO-3 with reduce scatter enabled"
             assert self.postscale_gradients, "pre-scale gradients is not yet supported with ZeRO-3 with reduce scatter enabled"
 
@@ -1162,11 +1162,12 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
     @instrument_w_nvtx
     def __avg_scatter_grads(self, params_to_reduce: List[Parameter]) -> List[Tensor]:
         """average gradients and scatter partitions across ranks"""
-        dtype = get_only_unique_item(p.grad.dtype for p in params_to_reduce)
 
         full_grads_for_rank = [p.grad for p in params_to_reduce]
-        if self.communication_data_type == torch.float32:
-            full_grads_for_rank = [g.float() for g in full_grads_for_rank]
+        if self.communication_data_type != self.dtype:
+            full_grads_for_rank = [
+                g.to(self.communication_data_type) for g in full_grads_for_rank
+            ]
 
         if self.postscale_gradients and self.gradient_predivide_factor != 1.0:
             full_grads_for_rank = [
@@ -1182,8 +1183,10 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
                 g.mul(self.gradient_predivide_factor) for g in grad_partitions_for_rank
             ]
 
-        if self.communication_data_type == torch.float32:
-            grad_partitions_for_rank = [g.to(dtype) for g in grad_partitions_for_rank]
+        if self.communication_data_type != self.dtype:
+            grad_partitions_for_rank = [
+                g.to(self.dtype) for g in grad_partitions_for_rank
+            ]
 
         return grad_partitions_for_rank
 

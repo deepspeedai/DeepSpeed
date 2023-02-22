@@ -1124,15 +1124,7 @@ class DeepSpeedEngine(Module):
             if self.zero_optimization_partition_weights() and any(
                 [hasattr(param,
                          "ds_id") for param in self.module.parameters()]):
-                if not all(
-                    [param.dtype == torch.half for param in self.module.parameters()]):
-                    names = [
-                        n for n,
-                        p in self.module.named_parameters() if p.dtype != torch.half
-                    ]
-                    raise ValueError(
-                        f"fp16 is enabled but the following parameters have dtype that is not fp16: {', '.join(names)}"
-                    )
+                self.__check_params(self.module, torch.half)
             self.module.half()
         elif self.bfloat16_enabled():
             if self.zero_optimization_partition_weights() and any(
@@ -1506,7 +1498,6 @@ class DeepSpeedEngine(Module):
     def _configure_zero_optimizer(self, optimizer):
         zero_stage = self.zero_optimization_stage()
         model_dtype, grad_accum_dtype = self.get_data_types()
-        assert self.communication_data_type in (torch.float16, torch.bfloat16), "ZeRO supports only 'communication_data_type': ['fp16', 'bfp16']"
         timers = self.timers if self.wall_clock_breakdown() else None
 
         if optimizer is None:
