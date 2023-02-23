@@ -53,6 +53,8 @@ lnav:
         url: /getting-started/
       - title: 'Getting started on Azure'
         url: /tutorials/azure/
+      - title: 'Automatic Tensor Parallelism'
+        url: /tutorials/automatic-tensor-parallelism/
       - title: 'Autotuning'
         url: /tutorials/autotuning/
       - title: 'BingBertSQuAD Fine-tuning'

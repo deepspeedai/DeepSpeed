@@ -35,6 +35,7 @@ collections:
       - advanced-install.md
       - getting-started.md
       - azure.md
+      - automatic-tensor-parallelism.md
       - bert-finetuning.md
       - bert-pretraining.md
       - cifar-10.md
