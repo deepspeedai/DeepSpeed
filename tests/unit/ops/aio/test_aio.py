@@ -7,10 +7,10 @@ import deepspeed.comm as dist
 from deepspeed.ops.aio import AsyncIOBuilder
 from unit.common import DistributedTest
 
-MEGA_BYTE = 1024**2
-BLOCK_SIZE = MEGA_BYTE
+KILO_BYTE = 1024
+BLOCK_SIZE = KILO_BYTE
 QUEUE_DEPTH = 2
-IO_SIZE = 4 * 1024
+IO_SIZE = 4 * BLOCK_SIZE
 IO_PARALLEL = 2
 
 if not deepspeed.ops.__compatible_ops__[AsyncIOBuilder.NAME]:
