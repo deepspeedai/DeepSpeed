@@ -5,7 +5,6 @@ Copyright 2019 The Microsoft DeepSpeed Team
 import torch
 import os
 from deepspeed import comm as dist
-from torch._six import inf
 from packaging import version as pkg_version
 from collections import OrderedDict
 
@@ -15,6 +14,7 @@ from deepspeed.runtime.utils import (bwc_tensor_model_parallel_rank,
                                      get_global_norm,
                                      empty_cache,
                                      see_memory_usage,
+                                     inf,
                                      is_model_parallel_parameter,
                                      align_dense_tensors,
                                      all_gather_dp_groups)

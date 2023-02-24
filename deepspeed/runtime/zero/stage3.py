@@ -7,13 +7,12 @@ import sys
 import gc
 import collections
 from typing import Deque, Dict, Tuple
-from torch._six import inf
 
 from deepspeed.runtime import ZeROOptimizer
 from deepspeed.utils import logger
 from deepspeed.runtime.fp16.loss_scaler import LossScaler, DynamicLossScaler
 from deepspeed.runtime.comm.coalesced_collectives import reduce_scatter_coalesced
-from deepspeed.runtime.utils import get_global_norm, is_model_parallel_parameter
+from deepspeed.runtime.utils import inf, get_global_norm, is_model_parallel_parameter
 from deepspeed.runtime.zero.partition_parameters import *
 from deepspeed.runtime.zero.config import ZeroStageEnum
 from deepspeed.runtime.zero.offload_config import OffloadDeviceEnum
