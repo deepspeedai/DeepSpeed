@@ -1,3 +1,6 @@
+'''Copyright The Microsoft DeepSpeed Team'''
+
+
 def check_tb_availability():
     try:
         # torch.utils.tensorboard will fail if `tensorboard` is not available,

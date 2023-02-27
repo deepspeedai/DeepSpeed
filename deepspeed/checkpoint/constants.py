@@ -1,3 +1,4 @@
+'''Copyright The Microsoft DeepSpeed Team'''
 '''
     Various symbolic constants used for model checkpointing
 '''

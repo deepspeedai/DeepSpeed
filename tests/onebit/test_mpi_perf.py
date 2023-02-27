@@ -1,3 +1,5 @@
+'''Copyright The Microsoft DeepSpeed Team'''
+
 from mpi4py import MPI
 import torch
 import deepspeed

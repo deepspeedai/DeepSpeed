@@ -1,3 +1,5 @@
+'''Copyright The Microsoft DeepSpeed Team'''
+
 import pytest
 import deepspeed.runtime.pipe.schedule as schedule
 

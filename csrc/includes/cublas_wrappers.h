@@ -1,3 +1,7 @@
+/*
+Copyright The Microsoft DeepSpeed Team
+*/
+
 #pragma once
 
 #include <assert.h>

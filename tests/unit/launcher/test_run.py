@@ -1,3 +1,5 @@
+'''Copyright The Microsoft DeepSpeed Team'''
+
 import pytest
 
 from deepspeed.launcher import runner as dsrun

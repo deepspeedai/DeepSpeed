@@ -1,3 +1,5 @@
+'''Copyright The Microsoft DeepSpeed Team'''
+
 import torch
 import deepspeed
 from deepspeed.runtime.zero.partition_parameters import ZeroParamStatus

@@ -1,3 +1,5 @@
+'''Copyright The Microsoft DeepSpeed Team'''
+
 import deepspeed
 from deepspeed.ops.op_builder import CPUAdamBuilder
 

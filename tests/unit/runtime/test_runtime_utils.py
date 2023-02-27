@@ -1,3 +1,5 @@
+'''Copyright The Microsoft DeepSpeed Team'''
+
 import torch
 from torch._utils import _flatten_dense_tensors
 import deepspeed.comm as dist

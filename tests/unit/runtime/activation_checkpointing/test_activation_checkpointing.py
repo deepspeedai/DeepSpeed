@@ -1,3 +1,5 @@
+'''Copyright The Microsoft DeepSpeed Team'''
+
 # TODO: add tests with model parallelism for activation partitioning and other features.
 
 import pytest

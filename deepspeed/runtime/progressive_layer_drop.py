@@ -1,3 +1,5 @@
+'''Copyright The Microsoft DeepSpeed Team'''
+
 import numpy as np
 from deepspeed.utils import log_dist
 

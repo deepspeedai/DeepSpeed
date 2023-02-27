@@ -1,3 +1,5 @@
+'''Copyright The Microsoft DeepSpeed Team'''
+
 from torch import nn
 from deepspeed.model_implementations.transformers.ds_bloom import DeepSpeedBloomInference
 from deepspeed.model_implementations.transformers.ds_gpt import DeepSpeedGPTInference

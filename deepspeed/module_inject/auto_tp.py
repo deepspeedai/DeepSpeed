@@ -1,3 +1,5 @@
+'''Copyright The Microsoft DeepSpeed Team'''
+
 # Automatic Tensor Parallelism
 import re
 

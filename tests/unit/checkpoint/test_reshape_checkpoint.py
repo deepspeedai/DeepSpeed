@@ -1,3 +1,5 @@
+'''Copyright The Microsoft DeepSpeed Team'''
+
 from deepspeed.checkpoint import model_3d_desc
 
 

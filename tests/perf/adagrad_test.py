@@ -1,3 +1,5 @@
+'''Copyright The Microsoft DeepSpeed Team'''
+
 import torch
 from deepspeed.ops.adagrad import DeepSpeedCPUAdagrad
 import time

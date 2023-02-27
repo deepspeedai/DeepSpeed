@@ -1,3 +1,5 @@
+'''Copyright The Microsoft DeepSpeed Team'''
+
 from .base import *
 from .base_moe import *
 from .features.megatron import MegatronContainer

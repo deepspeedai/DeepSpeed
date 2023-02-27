@@ -1,3 +1,7 @@
+/*
+Copyright The Microsoft DeepSpeed Team
+*/
+
 #include "cublas_wrappers.h"
 
 #ifdef __HIP_PLATFORM_HCC__

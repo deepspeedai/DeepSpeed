@@ -1,3 +1,5 @@
+'''Copyright The Microsoft DeepSpeed Team'''
+
 from packaging import version as pkg_version
 
 with open('../version.txt') as fd:

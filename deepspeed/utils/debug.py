@@ -1,3 +1,4 @@
+'''Copyright The Microsoft DeepSpeed Team'''
 """ debug utils """
 
 # For lazy import with printflock()

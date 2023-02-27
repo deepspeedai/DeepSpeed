@@ -1,3 +1,7 @@
+/*
+Copyright The Microsoft DeepSpeed Team
+*/
+
 #ifndef __FEEDFORWARD_H__
 #define __FEEDFORWARD_H__
 

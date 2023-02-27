@@ -1,3 +1,5 @@
+'''Copyright The Microsoft DeepSpeed Team'''
+
 try:
     from accelerator.abstract_accelerator import DeepSpeedAccelerator as dsa1
 except ImportError as e:

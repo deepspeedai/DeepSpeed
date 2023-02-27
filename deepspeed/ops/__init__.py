@@ -1,3 +1,5 @@
+'''Copyright The Microsoft DeepSpeed Team'''
+
 from . import adam
 from . import adagrad
 from . import lamb

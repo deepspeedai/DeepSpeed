@@ -1,3 +1,5 @@
+'''Copyright The Microsoft DeepSpeed Team'''
+
 #########################################
 # Compression Methods
 # It has several sub-components

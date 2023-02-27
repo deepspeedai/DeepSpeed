@@ -1,3 +1,5 @@
+'''Copyright The Microsoft DeepSpeed Team'''
+
 import hjson
 
 from ..constants import AUTOTUNING, AUTOTUNING_METRIC_PATH

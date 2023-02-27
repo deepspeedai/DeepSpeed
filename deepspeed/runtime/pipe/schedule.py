@@ -1,3 +1,5 @@
+'''Copyright The Microsoft DeepSpeed Team'''
+
 from ..utils import call_to_str
 
 from abc import ABC, abstractmethod

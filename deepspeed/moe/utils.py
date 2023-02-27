@@ -1,3 +1,5 @@
+'''Copyright The Microsoft DeepSpeed Team'''
+
 from typing import List, Tuple, Dict
 import torch
 from .layer import MoE

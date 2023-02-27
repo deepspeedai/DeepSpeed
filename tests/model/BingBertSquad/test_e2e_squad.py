@@ -1,3 +1,5 @@
+'''Copyright The Microsoft DeepSpeed Team'''
+
 import subprocess as sp
 import os
 from math import isclose

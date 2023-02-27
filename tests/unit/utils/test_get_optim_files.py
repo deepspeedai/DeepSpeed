@@ -1,3 +1,5 @@
+'''Copyright The Microsoft DeepSpeed Team'''
+
 import os
 import pytest
 from deepspeed.utils.zero_to_fp32 import get_optim_files

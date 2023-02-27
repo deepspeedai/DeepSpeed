@@ -1,3 +1,5 @@
+'''Copyright The Microsoft DeepSpeed Team'''
+
 import pytest
 from unit.common import DistributedTest
 from unit.simple_model import UnusedParametersModel, random_dataloader

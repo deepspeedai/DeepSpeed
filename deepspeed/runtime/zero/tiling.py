@@ -1,3 +1,5 @@
+'''Copyright The Microsoft DeepSpeed Team'''
+
 import torch
 import deepspeed
 from deepspeed.runtime.utils import partition_uniform as partition

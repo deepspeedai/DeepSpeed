@@ -1,3 +1,5 @@
+'''Copyright The Microsoft DeepSpeed Team'''
+
 import numpy as np
 import itertools
 from ..utils import *

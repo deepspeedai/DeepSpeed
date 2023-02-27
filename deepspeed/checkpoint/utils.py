@@ -1,3 +1,5 @@
+'''Copyright The Microsoft DeepSpeed Team'''
+
 import os
 from .constants import (MODEL_FILE_PREFIX,
                         MODEL_FILE_SUFFIX,

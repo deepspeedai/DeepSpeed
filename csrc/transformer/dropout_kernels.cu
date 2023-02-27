@@ -1,3 +1,7 @@
+/*
+Copyright The Microsoft DeepSpeed Team
+*/
+
 #include "custom_cuda_layers.h"
 
 const int unroll_factor = 4;

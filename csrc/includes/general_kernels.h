@@ -1,3 +1,7 @@
+/*
+Copyright The Microsoft DeepSpeed Team
+*/
+
 #include <cuda.h>
 #include <cuda_fp16.h>
 #include <stdio.h>

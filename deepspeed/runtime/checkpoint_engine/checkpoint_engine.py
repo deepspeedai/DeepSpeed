@@ -1,3 +1,6 @@
+'''Copyright The Microsoft DeepSpeed Team'''
+
+
 class CheckpointEngine(object):
 
     # init checkpoint engine for save/load

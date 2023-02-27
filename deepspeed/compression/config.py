@@ -1,3 +1,5 @@
+'''Copyright The Microsoft DeepSpeed Team'''
+
 from .constants import *
 import copy
 from ..runtime.config_utils import get_scalar_param

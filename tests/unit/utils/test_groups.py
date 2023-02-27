@@ -1,3 +1,5 @@
+'''Copyright The Microsoft DeepSpeed Team'''
+
 from deepspeed.utils.groups import _get_expert_parallel_ranks
 
 

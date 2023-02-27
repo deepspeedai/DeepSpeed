@@ -1,3 +1,4 @@
+'''Copyright The Microsoft DeepSpeed Team'''
 ''' DeepSpeed Communication Backend.
 
 In the future, directly use NCCL/MPI/Gloo/etc without requiring torch.distributed. Simply wrap torch.distributed for now.

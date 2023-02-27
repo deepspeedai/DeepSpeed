@@ -1,3 +1,5 @@
+'''Copyright The Microsoft DeepSpeed Team'''
+
 #!/usr/bin/env python
 # run the benchmark under timeit (-t), cProfile (-c), line_profiler (-l)
 #

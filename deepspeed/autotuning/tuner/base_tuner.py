@@ -1,3 +1,5 @@
+'''Copyright The Microsoft DeepSpeed Team'''
+
 import sys
 
 from deepspeed.autotuning.constants import *

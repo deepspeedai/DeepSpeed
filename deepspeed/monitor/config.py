@@ -1,3 +1,4 @@
+'''Copyright The Microsoft DeepSpeed Team'''
 """
 Copyright (c) Microsoft Corporation
 Licensed under the MIT license.

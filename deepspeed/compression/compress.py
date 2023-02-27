@@ -1,3 +1,5 @@
+'''Copyright The Microsoft DeepSpeed Team'''
+
 import re
 from .helper import compression_preparation, fix_compression, recursive_getattr, is_module_compressible
 from .config import get_compression_config

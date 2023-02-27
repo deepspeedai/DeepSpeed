@@ -1,3 +1,5 @@
+'''Copyright The Microsoft DeepSpeed Team'''
+
 import math
 from deepspeed.utils import log_dist
 

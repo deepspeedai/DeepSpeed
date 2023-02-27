@@ -1,3 +1,7 @@
+/*
+Copyright The Microsoft DeepSpeed Team
+*/
+
 #include "general_kernels.h"
 
 namespace cg = cooperative_groups;

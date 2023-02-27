@@ -1,3 +1,5 @@
+'''Copyright The Microsoft DeepSpeed Team'''
+
 from .utils import check_wandb_availability
 from .monitor import Monitor
 

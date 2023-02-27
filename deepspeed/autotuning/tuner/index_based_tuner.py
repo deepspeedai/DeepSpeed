@@ -1,3 +1,5 @@
+'''Copyright The Microsoft DeepSpeed Team'''
+
 import random
 
 from .base_tuner import BaseTuner

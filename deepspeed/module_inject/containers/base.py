@@ -1,3 +1,5 @@
+'''Copyright The Microsoft DeepSpeed Team'''
+
 # Create a container object to save model-specific tensors using the policy file above.
 from abc import ABC
 import torch

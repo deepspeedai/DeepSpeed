@@ -1,3 +1,5 @@
+'''Copyright The Microsoft DeepSpeed Team'''
+
 from benchmarks.communication.utils import *
 from benchmarks.communication.constants import *
 

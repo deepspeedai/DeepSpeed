@@ -1,3 +1,5 @@
+'''Copyright The Microsoft DeepSpeed Team'''
+
 import math
 from typing import Dict, List, Set
 import pytest

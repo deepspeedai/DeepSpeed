@@ -1,3 +1,7 @@
+/*
+Copyright The Microsoft DeepSpeed Team
+*/
+
 #pragma once
 #ifdef _WIN32
 #include <windows.h>

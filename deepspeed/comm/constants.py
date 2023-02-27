@@ -1,3 +1,5 @@
+'''Copyright The Microsoft DeepSpeed Team'''
+
 NCCL_BACKEND = 'nccl'
 MPI_BACKEND = 'mpi'
 GLOO_BACKEND = 'gloo'

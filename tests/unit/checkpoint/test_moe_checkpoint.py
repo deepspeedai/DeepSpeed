@@ -1,3 +1,5 @@
+'''Copyright The Microsoft DeepSpeed Team'''
+
 from deepspeed.moe.utils import split_params_into_different_moe_groups_for_optimizer
 
 from unit.common import DistributedTest

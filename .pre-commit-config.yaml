@@ -42,6 +42,14 @@ repos:
         exclude: ^(deepspeed/comm/|docs/|benchmarks/|scripts/check-torchdist.py|deepspeed/moe/sharded_moe.py|deepspeed/runtime/comm/coalesced_collectives.py|deepspeed/elasticity/elastic_agent.py|deepspeed/launcher/launch.py|tests/unit/comm/test_dist.py)
         # Specific deepspeed/ files are excluded for now until we wrap ProcessGroup in deepspeed.comm
 
+-   repo: local
+    hooks:
+    -   id: check-license
+        name: check-license
+        entry: ./scripts/check-license.py
+        language: script
+        files: \.(py|cc|cu|h|cuh|hip)$
+
 -   repo: https://github.com/codespell-project/codespell
     rev: v2.1.0
     hooks:

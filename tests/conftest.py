@@ -1,3 +1,5 @@
+'''Copyright The Microsoft DeepSpeed Team'''
+
 # tests directory-specific settings - this file is run automatically by pytest before any tests are run
 
 import sys

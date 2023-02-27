@@ -1,3 +1,4 @@
+'''Copyright The Microsoft DeepSpeed Team'''
 """batched collective operations for overhead amortization and better
 bandwidth utilization"""
 

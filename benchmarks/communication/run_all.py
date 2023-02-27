@@ -1,3 +1,5 @@
+'''Copyright The Microsoft DeepSpeed Team'''
+
 from benchmarks.communication.utils import *
 from benchmarks.communication.all_reduce import run_all_reduce
 from benchmarks.communication.all_gather import run_all_gather

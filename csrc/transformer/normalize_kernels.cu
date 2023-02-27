@@ -1,3 +1,7 @@
+/*
+Copyright The Microsoft DeepSpeed Team
+*/
+
 #include "custom_cuda_layers.h"
 
 namespace cg = cooperative_groups;

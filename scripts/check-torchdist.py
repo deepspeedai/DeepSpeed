@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
+from __future__ import annotations
+'''Copyright The Microsoft DeepSpeed Team'''
 """
 Checks each file in sys.argv for the string "torch.distributed".
 Modified from https://github.com/jlebar/pre-commit-hooks/blob/master/check_do_not_submit.py
 """
-from __future__ import annotations
 
 import subprocess
 import sys

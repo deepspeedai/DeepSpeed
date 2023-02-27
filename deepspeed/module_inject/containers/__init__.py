@@ -1,3 +1,5 @@
+'''Copyright The Microsoft DeepSpeed Team'''
+
 from .bert import DS_BERTContainer, HFBertLayerPolicy
 from .bloom import DS_BloomContainer, BLOOMLayerPolicy, supported_models
 from .distil_bert import DS_DistilBERTContainer, HFDistilBertLayerPolicy

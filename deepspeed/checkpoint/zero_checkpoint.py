@@ -1,3 +1,5 @@
+'''Copyright The Microsoft DeepSpeed Team'''
+
 import torch
 
 from .constants import (BASE_OPTIMIZER_STATE,

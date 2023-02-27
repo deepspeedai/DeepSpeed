@@ -1,3 +1,5 @@
+'''Copyright The Microsoft DeepSpeed Team'''
+
 from deepspeed.utils import RepeatingLoader
 import torch
 import pytest

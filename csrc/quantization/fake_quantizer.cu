@@ -1,3 +1,7 @@
+/*
+Copyright The Microsoft DeepSpeed Team
+*/
+
 #include <math.h>
 #include "custom_cuda_layers.h"
 #include "memory_access_utils.h"

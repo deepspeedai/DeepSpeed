@@ -1,3 +1,5 @@
+'''Copyright The Microsoft DeepSpeed Team'''
+
 try:
     #  This is populated by setup.py
     from .git_version_info_installed import *  # noqa: F401

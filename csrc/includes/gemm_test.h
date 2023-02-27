@@ -1,3 +1,6 @@
+/*
+Copyright The Microsoft DeepSpeed Team
+*/
 
 #pragma once
 

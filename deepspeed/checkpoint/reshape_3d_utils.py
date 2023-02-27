@@ -1,3 +1,5 @@
+'''Copyright The Microsoft DeepSpeed Team'''
+
 from .reshape_utils import (get_files,
                             get_files_with_prefix,
                             partition_data,

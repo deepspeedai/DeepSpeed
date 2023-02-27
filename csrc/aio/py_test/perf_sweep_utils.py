@@ -1,3 +1,5 @@
+'''Copyright The Microsoft DeepSpeed Team'''
+
 SCRIPT_PREFIX = '_aio_bench'
 WRITE_OP_DESC = 'write'
 READ_OP_DESC = 'read'

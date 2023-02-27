@@ -1,3 +1,6 @@
+/*
+Copyright The Microsoft DeepSpeed Team
+*/
 
 #ifndef __TIMER_H__
 #define __TIMER_H__

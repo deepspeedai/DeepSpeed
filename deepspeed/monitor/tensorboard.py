@@ -1,3 +1,5 @@
+'''Copyright The Microsoft DeepSpeed Team'''
+
 from .utils import check_tb_availability
 from .monitor import Monitor
 import os

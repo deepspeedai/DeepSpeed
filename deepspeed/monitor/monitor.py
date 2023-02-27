@@ -1,3 +1,4 @@
+'''Copyright The Microsoft DeepSpeed Team'''
 """
  Support different forms of monitoring such as wandb and tensorboard
 """

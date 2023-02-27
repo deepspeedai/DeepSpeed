@@ -1,3 +1,5 @@
+'''Copyright The Microsoft DeepSpeed Team'''
+
 from .linear import LinearOp
 from .vector_matmul import VectorMatMulOp
 from .softmax_context import SoftmaxContextOp

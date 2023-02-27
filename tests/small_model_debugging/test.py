@@ -1,3 +1,5 @@
+'''Copyright The Microsoft DeepSpeed Team'''
+
 import torch
 from deepspeed.pt.deepspeed_linear import LinearModuleForZeroStage3
 from deepspeed.pt.log_utils import logger

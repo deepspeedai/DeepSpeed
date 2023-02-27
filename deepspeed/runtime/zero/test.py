@@ -1,3 +1,5 @@
+'''Copyright The Microsoft DeepSpeed Team'''
+
 import torch
 from deepspeed.runtime.zero.contiguous_memory_allocator import ContiguousMemoryAllocator
 

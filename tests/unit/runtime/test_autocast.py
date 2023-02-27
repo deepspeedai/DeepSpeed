@@ -1,3 +1,5 @@
+'''Copyright The Microsoft DeepSpeed Team'''
+
 import pytest
 import torch
 from deepspeed.runtime.zero.linear import LinearModuleForZeroStage3

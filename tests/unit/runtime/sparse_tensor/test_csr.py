@@ -1,3 +1,5 @@
+'''Copyright The Microsoft DeepSpeed Team'''
+
 import torch
 import random
 from deepspeed.runtime.sparse_tensor import SparseTensor

@@ -1,3 +1,4 @@
+'''Copyright The Microsoft DeepSpeed Team'''
 """unit tests for coalesced collectives"""
 
 import torch

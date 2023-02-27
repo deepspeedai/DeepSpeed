@@ -1,3 +1,5 @@
+'''Copyright The Microsoft DeepSpeed Team'''
+
 #Linear Module to use with ZeRO Stage 3 to allow for parameter memory release
 #after the module execution during forward
 #Instead of saving variables using save_for_backward, we save variable ids

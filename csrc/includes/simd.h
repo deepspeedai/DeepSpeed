@@ -1,3 +1,7 @@
+/*
+Copyright The Microsoft DeepSpeed Team
+*/
+
 #pragma once
 
 #if (__x86_64__ || __i386__)
