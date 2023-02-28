@@ -48,7 +48,7 @@ class DS_GPTNEOContainer(MetaTensorContainer, BaseTransformerContainer):
             [prefix + param_names[0],
              prefix + param_names[1],
              prefix + param_names[2]],
-            split_qkv=self.split_qkv)
+            split_qkv=self.policy.split_qkv)
         for i in range(3, 5):
             maybe_copy(module.attention,
                        sd,

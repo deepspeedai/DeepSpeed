@@ -55,8 +55,8 @@ class DS_BloomContainer(MetaTensorContainer, BaseTransformerContainer):
                        transformer_param_names[i],
                        prefix + param_names[i],
                        qkv=True,
-                       megatron_v2=self.is_megatron_v2,
-                       split_qkv=self.split_qkv)
+                       megatron_v2=self.policy.is_megatron_v2,
+                       split_qkv=self.policy.split_qkv)
         for i in range(2, 4):
             maybe_copy(module.attention,
                        sd,
