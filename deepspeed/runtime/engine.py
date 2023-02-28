@@ -1673,9 +1673,6 @@ class DeepSpeedEngine(Module):
                 or self.is_iterable_style_dataset(dataset)):
             raise ValueError("Training data must be a torch Dataset")
 
-        if data_sampler is None and (route == ROUTE_PREDICT or route == ROUTE_EVAL):
-            data_sampler = torch.utils.data.SequentialSampler(dataset)
-
         if batch_size is None:
             batch_size = self.train_micro_batch_size_per_gpu()
 
@@ -1693,6 +1690,14 @@ class DeepSpeedEngine(Module):
         if self.mpu is not None:
             data_parallel_world_size = self.mpu.get_data_parallel_world_size()
             data_parallel_rank = self.mpu.get_data_parallel_rank()
+
+        if data_sampler is None and (route == ROUTE_PREDICT or route == ROUTE_EVAL):
+            data_sampler = torch.utils.data.DistributedSampler(
+                dataset,
+                num_replicas=data_parallel_world_size,
+                rank=data_parallel_rank,
+                shuffle=False,
+            )
 
         deepspeed_dataloader_config = {}
         if self.curriculum_learning_enabled():
