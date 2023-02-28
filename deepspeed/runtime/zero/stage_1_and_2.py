@@ -486,6 +486,9 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
         # will store the averaged gradients required by this partition
         self.averaged_gradients = {}
 
+        # For cpu_offload, will store the averaged gradients required by this partition
+        self.offload_gradient_dict = {}
+
         # store index of first parameter in each partition
         self.first_param_index_in_partition = {}
 
@@ -552,6 +555,9 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
 
     def _link_all_hp_params(self):
         dp_world_size = dist.get_world_size(group=self.dp_process_group)
+        if self.cpu_offload:
+            self._get_offload_gradient_dict()
+
         for i, _ in enumerate(self.optimizer.param_groups):
             # Link bit16 and fp32 params in partition
             partition_id = dist.get_rank(group=self.real_dp_process_group[i])
@@ -560,6 +566,10 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
             link_hp_params(
                 lp_param_list=self.bit16_groups[i],
                 flat_hp_partition=flat_hp_partition,
+                gradient_dict=self.averaged_gradients,
+                offload_gradient_dict=self.offload_gradient_dict,
+                use_offload=self.cpu_offload,
+                param_group_index=i,
                 partition_start=partition_id * partition_size,
                 partition_size=partition_size,
                 partition_optimizer_state=self.optimizer.state[flat_hp_partition],
@@ -1070,6 +1080,18 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
     def update_overflow_tracker_for_param_grad(self, param):
         if param.grad is not None and self._has_inf_or_nan(param.grad.data):
             self.local_overflow = True
+
+    def _get_offload_gradient_dict(self):
+        for param_group_index, _ in enumerate(self.optimizer.param_groups):
+            self.offload_gradient_dict[param_group_index] = []
+            for lp_param in self.params_in_partition[param_group_index]:
+                param_id = self.get_param_id(lp_param)
+                [_, _, dest_offset, num_elements] = self.grad_position[param_id]
+                dest_tensor = self.single_partition_of_fp32_groups[
+                    param_group_index].grad.view(-1).narrow(0,
+                                                            dest_offset,
+                                                            num_elements)
+                self.offload_gradient_dict[param_group_index].append(dest_tensor)
 
     def async_accumulate_grad_in_cpu_via_gpu(self, param):
         param_id = self.get_param_id(param)

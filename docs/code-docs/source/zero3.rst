@@ -293,3 +293,41 @@ parallelism to fit them in limited GPU memory.
 
 .. autoclass:: deepspeed.zero.TiledLinear
     :members:
+
+
+Debugging
+---------
+
+Debugging ZeRO training is complicated by the partitioning of parameters, gradients, and optimizer states. None of these 3 groups of tensors (model states) can be normally accessed because of that. To overcome that DeepSpeed provides the following routines for accessing individual model states in their unpartitioned form.
+
+Important: Please note that these utilities must be called by all processes participating in the training, even if you decide to do something with the result only in the main process. If all processes don't participate these utilities will hang waiting for all processes to send their contribution.
+
+Additionally, you must be aware that these routines return correct data only in specific phases of the training. So for examples the gradients are valid after ``backward`` and before ``step``. The optimizer states are updated after ``step``. Same goes for fp32 master weights.
+
+.. autofunction:: deepspeed.utils.safe_get_full_fp32_param
+
+.. autofunction:: deepspeed.utils.safe_get_full_grad
+
+.. autofunction:: deepspeed.utils.safe_get_full_optimizer_state
+
+
+These routines can be used in a training loop as shown in the following snippet.
+
+.. code-block:: python
+
+    backward(loss)
+    [...]
+    from deepspeed.utils import safe_get_full_fp32_param, safe_get_full_grad, safe_get_full_optimizer_state
+    for n, lp in model.named_parameters():
+        # 1. gradient lookup
+        # For zero1 and zero2, gradient lookup must be called after `backward` and before `step`
+        # For zero3, gradient lookup must be called after `backward`
+        hp_grad = safe_get_full_grad(lp)
+
+        # 2. fp32 and optim states can probably be called anywhere in the training loop, but will be updated after `step`
+        hp = safe_get_full_fp32_param(lp)
+        exp_avg = safe_get_full_optimizer_state(lp, "exp_avg")
+        exp_avg_sq = safe_get_full_optimizer_state(lp, "exp_avg_sq")
+
+    [...]
+    optimizer.step()

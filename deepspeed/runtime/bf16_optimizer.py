@@ -79,6 +79,7 @@ class BF16_Optimizer(ZeROOptimizer):
 
         # Maintain different fp32 gradients views for convenience
         self.fp32_groups_gradients = []
+        self.fp32_groups_gradient_dict = {}
         self.fp32_groups_gradients_flat = []
         self.fp32_groups_actual_gradients_flat = []
         self.fp32_groups_gradient_flat_partition = []
@@ -144,6 +145,7 @@ class BF16_Optimizer(ZeROOptimizer):
                 flat_tensor=self.fp32_groups_gradients_flat[i],
                 num_elem_list=num_elem_list)
             self.fp32_groups_gradients.append(fp32_gradients)
+            self.fp32_groups_gradient_dict[i] = fp32_gradients
 
             # flat tensor corresponding to actual fp32 gradients (i.e., minus alignment padding)
             length_without_padding = sum(num_elem_list)
@@ -213,6 +215,10 @@ class BF16_Optimizer(ZeROOptimizer):
             link_hp_params(
                 lp_param_list=self.bf16_groups[i],
                 flat_hp_partition=flat_hp_partition,
+                gradient_dict=self.fp32_groups_gradient_dict,
+                offload_gradient_dict=None,
+                use_offload=False,
+                param_group_index=i,
                 partition_start=partition_id * partition_size,
                 partition_size=partition_size,
                 partition_optimizer_state=self.optimizer.state[flat_hp_partition],
