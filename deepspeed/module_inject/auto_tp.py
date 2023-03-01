@@ -27,13 +27,25 @@ class AutoTP():
         return mlist
 
     def supported(model):
-        unsupported = ['bloom', 'codegen', 'flaubert', 'xlm']
+        unsupported = [
+            'bloom',
+            'codegen',
+            'deberta',
+            'flaubert',
+            'fsmt',
+            'gpt2',
+            'led',
+            'longformer',
+            'xlm',
+            'xlnet'
+        ]
         model = str(model)
         key = re.search(r": (.*?)Model", model)
         if key is None:
             key = re.search(r": (.*?)Stack", model)
         if key is None:
             key = re.match(r"(.*?)Model", model)
+        assert key is not None, "Not able to determine model policy automatically. Please provide policy."
         if key.group(1).lower() in unsupported:
             return False
         return True
@@ -91,4 +103,5 @@ class AutoTP():
                 gem_list = list(set(gem_list))
                 policy_list = AutoTP.update_policy_list(policy_list, module, gem_list)
                 gem_list = []
+        assert len(policy_list), "Not able to determine model policy automatically. Please provide policy."
         return policy_list

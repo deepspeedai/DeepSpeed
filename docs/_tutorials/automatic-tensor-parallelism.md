@@ -88,6 +88,7 @@ deepspeed --num_gpus <num_gpus> DeepSpeedExamples/inference/huggingface/text-gen
 The following results were collected using V100 SXM2 32GB GPUs.
 
 ### Max New Tokens = 50
+
 | Test       | Memory Allocated per GPU   | Max Batch Size   | Max Throughput per GPU   |
 | ---------- | -------------------------- | ---------------- | ------------------------ |
 | No TP      | 23.94 GB                   | 64               | 18.84 TFlops             |
@@ -95,6 +96,7 @@ The following results were collected using V100 SXM2 32GB GPUs.
 | 4 GPU TP   | 6.36 GB                    | 664              | 27.63 TFlops             |
 
 ### Max New Tokens = 1024
+
 | Test       | Memory Allocated per GPU   | Max Batch Size   | Max Throughput per GPU   |
 | ---------- | -------------------------- | ---------------- | ------------------------ |
 | No TP      | 23.94 GB                   | 2                | 1.65 TFlops              |
@@ -113,7 +115,6 @@ The following model families have been successfully tested with automatic tensor
 - electra
 - ernie
 - esm
-- gpt2
 - gpt-j
 - gpt-neo
 - gpt-neox
@@ -146,6 +147,7 @@ The following models are not currently supported with automatic tensor paralleli
 - deberta
 - flaubert
 - fsmt
+- gpt2
 - led
 - longformer
 - xlm
