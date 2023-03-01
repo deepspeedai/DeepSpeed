@@ -34,9 +34,9 @@ class MonitorMaster(Monitor):
             if monitor_config.tensorboard.enabled:
                 self.tb_monitor = TensorBoardMonitor(monitor_config.tensorboard)
             if monitor_config.wandb.enabled:
-                self.wandb_monitor = WandbMonitor(monitor_config.csv_monitor)
+                self.wandb_monitor = WandbMonitor(monitor_config.wandb)
             if monitor_config.csv_monitor.enabled:
-                self.csv_monitor = csvMonitor(monitor_config.wandb)
+                self.csv_monitor = csvMonitor(monitor_config.csv_monitor)
 
     def write_events(self, event_list):
         if dist.get_rank() == 0:
