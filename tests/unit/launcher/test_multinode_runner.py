@@ -31,6 +31,13 @@ def test_openmpi_runner(runner_info):
     assert cmd[0] == 'mpirun'
 
 
+def test_mpich_runner(runner_info):
+    env, resource_pool, world_info, args = runner_info
+    runner = mnrunner.MPICHRunner(args, world_info, resource_pool)
+    cmd = runner.get_cmd(env, resource_pool)
+    assert cmd[0] == 'mpirun'
+
+
 def test_slurm_runner(runner_info):
     env, resource_pool, world_info, args = runner_info
     runner = mnrunner.SlurmRunner(args, world_info, resource_pool)
