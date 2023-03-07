@@ -18,6 +18,7 @@ import deepspeed
 from deepspeed.runtime.engine import DeepSpeedEngine
 from deepspeed.runtime.zero.partition_parameters import ZeroParamStatus
 from deepspeed.utils.zero_to_fp32 import load_state_dict_from_zero_checkpoint
+from deepspeed.accelerator import get_accelerator
 
 
 def run_unbalanced_gradients(model, data_loader):
@@ -698,30 +699,30 @@ class TestZero3ParamPartitioningBase(DistributedTest):
             grad_multiplier = 1 if zero_grad else (train_iter + 1)
             if dist.get_rank() == 0:
                 assert torch.allclose(
-                    dloss_wrt_layer3.cuda(),
+                    dloss_wrt_layer3.to(get_accelerator().device_name()),
                     grad_multiplier * create_tensor([2] * 8,
                                                     torch.float))
                 assert torch.allclose(
-                    dloss_wrt_layer2.cuda(),
+                    dloss_wrt_layer2.to(get_accelerator().device_name()),
                     grad_multiplier * create_tensor([3 * 1] * 8,
                                                     torch.float))
                 assert torch.allclose(
-                    dloss_wrt_layer1.cuda(),
+                    dloss_wrt_layer1.to(get_accelerator().device_name()),
                     grad_multiplier * create_tensor([3 * 2 * 1] * 8,
                                                     torch.float))
             elif dist.get_rank() == 1:
                 # parameters dont split evenly across ranks so rank 1 has a zero-padded
                 # partition
                 assert torch.allclose(
-                    dloss_wrt_layer3.cuda(),
+                    dloss_wrt_layer3.to(get_accelerator().device_name()),
                     grad_multiplier * create_tensor(([8] * 7) + [0],
                                                     torch.float))
                 assert torch.allclose(
-                    dloss_wrt_layer2.cuda(),
+                    dloss_wrt_layer2.to(get_accelerator().device_name()),
                     grad_multiplier * create_tensor(([6 * 2] * 7) + [0],
                                                     torch.float))
                 assert torch.allclose(
-                    dloss_wrt_layer1.cuda(),
+                    dloss_wrt_layer1.to(get_accelerator().device_name()),
                     grad_multiplier * create_tensor(([6 * 4 * 1] * 7) + [0],
                                                     torch.float))
             else:
@@ -1128,28 +1129,28 @@ class TestZero3ParamPartitioningBaseBF16(DistributedTest):
             grad_multiplier = 1 if zero_grad else (train_iter + 1)
             if dist.get_rank() == 0:
                 assert torch.allclose(
-                    dloss_wrt_layer3.cuda(),
+                    dloss_wrt_layer3.to(get_accelerator().device_name()),
                     grad_multiplier * create_tensor([2] * 8).to(expected_grad_dtype))
                 assert torch.allclose(
-                    dloss_wrt_layer2.cuda(),
+                    dloss_wrt_layer2.to(get_accelerator().device_name()),
                     grad_multiplier * create_tensor([3 * 1] * 8).to(expected_grad_dtype))
                 assert torch.allclose(
-                    dloss_wrt_layer1.cuda(),
+                    dloss_wrt_layer1.to(get_accelerator().device_name()),
                     grad_multiplier *
                     create_tensor([3 * 2 * 1] * 8).to(expected_grad_dtype))
             elif dist.get_rank() == 1:
                 # parameters dont split evenly across ranks so rank 1 has a zero-padded
                 # partition
                 assert torch.allclose(
-                    dloss_wrt_layer3.cuda(),
+                    dloss_wrt_layer3.to(get_accelerator().device_name()),
                     grad_multiplier *
                     create_tensor(([8] * 7) + [0]).to(expected_grad_dtype))
                 assert torch.allclose(
-                    dloss_wrt_layer2.cuda(),
+                    dloss_wrt_layer2.to(get_accelerator().device_name()),
                     grad_multiplier *
                     create_tensor(([6 * 2] * 7) + [0]).to(expected_grad_dtype))
                 assert torch.allclose(
-                    dloss_wrt_layer1.cuda(),
+                    dloss_wrt_layer1.to(get_accelerator().device_name()),
                     grad_multiplier *
                     create_tensor(([6 * 4 * 1] * 7) + [0]).to(expected_grad_dtype))
             else:

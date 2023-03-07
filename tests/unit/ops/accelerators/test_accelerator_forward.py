@@ -10,6 +10,7 @@ from torch import nn
 from unit.modelingpreln import BertEncoder as BertEncoderPreln
 from unit.modeling import BertLayerNorm, BertConfig, BertEncoder as BertEncoderPostln
 from deepspeed import DeepSpeedTransformerLayer, DeepSpeedTransformerConfig
+from deepspeed.accelerator import get_accelerator
 from unit.common import DistributedTest
 
 
@@ -31,7 +32,7 @@ def zero_grad(variables):
         variable.grad.zero_()
 
 
-device = torch.device("cuda")
+device = torch.device(get_accelerator().device_name())
 kwargs_fp32 = {'dtype': torch.float, 'device': device, 'requires_grad': True}
 kwargs_fp16 = {'dtype': torch.half, 'device': device, 'requires_grad': True}
 
@@ -150,8 +151,8 @@ def create_models(ds_config):
         bert_encoder.half()
         ds_encoder.half()
 
-    bert_encoder.cuda()
-    ds_encoder.cuda()
+    bert_encoder.to(get_accelerator().device_name())
+    ds_encoder.to(get_accelerator().device_name())
 
     return bert_encoder, ds_encoder
 
@@ -241,9 +242,8 @@ class TestCUDAForward(DistributedTest):
                      num_layers,
                      is_preln,
                      use_fp16):
-        # Only run fp16 test cases on devices with 7+ capability.
-        major, _ = torch.cuda.get_device_capability()
-        if major < 7 and use_fp16 is True:
+        # Only run fp16 test cases on devices with FP16 capability.
+        if not get_accelerator().is_fp16_supported() and use_fp16 is True:
             return
 
         ds_config = DeepSpeedTransformerConfig()
@@ -281,9 +281,8 @@ class TestCUDAForwardSmallBatchSize(DistributedTest):
                                     num_layers,
                                     is_preln,
                                     use_fp16):
-        # Only run fp16 test cases on devices with 7+ capability.
-        major, _ = torch.cuda.get_device_capability()
-        if major < 7 and use_fp16 is True:
+        # Only run fp16 test cases on devices with FP16 capability.
+        if not get_accelerator().is_fp16_supported() and use_fp16 is True:
             return
 
         ds_config = DeepSpeedTransformerConfig()
@@ -319,9 +318,8 @@ class TestCUDAForwardStochastic(DistributedTest):
                                 num_layers,
                                 is_preln,
                                 use_fp16):
-        # Only run fp16 test cases on devices with 7+ capability.
-        major, _ = torch.cuda.get_device_capability()
-        if major < 7 and use_fp16 is True:
+        # Only run fp16 test cases on devices with FP16 capability.
+        if not get_accelerator().is_fp16_supported() and use_fp16 is True:
             return
 
         ds_config = DeepSpeedTransformerConfig()

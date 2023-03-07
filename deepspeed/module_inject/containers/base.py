@@ -5,6 +5,7 @@ from abc import ABC
 import torch
 
 from deepspeed.ops.transformer.inference.config import DeepSpeedInferenceConfig
+from deepspeed.accelerator import get_accelerator
 
 
 class BaseConvolutionContainer(ABC):
@@ -216,12 +217,14 @@ class BaseTransformerContainer(ABC):
             self.module.mlp.attn_nb = self.attn_nb
         else:
             self.module.mlp.attn_nw.data.copy_(
-                self.attn_nw.to(torch.cuda.current_device()))
+                self.attn_nw.to(get_accelerator().current_device_name()))
             self.module.mlp.attn_nb.data.copy_(
-                self.attn_nb.to(torch.cuda.current_device()))
+                self.attn_nb.to(get_accelerator().current_device_name()))
 
-        self.module.norm_w.data.copy_(self.input_nw.to(torch.cuda.current_device()))
-        self.module.norm_b.data.copy_(self.input_nb.to(torch.cuda.current_device()))
+        self.module.norm_w.data.copy_(
+            self.input_nw.to(get_accelerator().current_device_name()))
+        self.module.norm_b.data.copy_(
+            self.input_nb.to(get_accelerator().current_device_name()))
 
     def transpose(self):
         self.transpose_attention()
@@ -241,5 +244,5 @@ class BaseTransformerContainer(ABC):
         data = data.contiguous()
         data.reshape(-1).copy_(data.transpose(-1, -2).contiguous().reshape(-1))
         data = data.reshape(data.shape[-1], data.shape[-2])
-        data.to(torch.cuda.current_device())
+        data.to(get_accelerator().current_device_name())
         return data

@@ -5,6 +5,7 @@ Copyright 2022 The Microsoft DeepSpeed Team
 import pytest
 import torch
 import deepspeed
+from deepspeed.accelerator import get_accelerator
 from deepspeed.ops.op_builder import InferenceBuilder
 
 if not deepspeed.ops.__compatible_ops__[InferenceBuilder.NAME]:
@@ -43,8 +44,14 @@ def run_bias_relu_ds(activations, bias):
 @pytest.mark.parametrize("channels", [512, 1232, 4096])
 @pytest.mark.parametrize("dtype", [torch.float16, torch.float32])
 def test_bias_relu(batch, sequence, channels, dtype):
-    activations_ds = torch.randn((batch, sequence, channels), dtype=dtype, device='cuda')
-    bias_ds = torch.randn((channels), dtype=dtype, device='cuda')
+    activations_ds = torch.randn((batch,
+                                  sequence,
+                                  channels),
+                                 dtype=dtype,
+                                 device=get_accelerator().device_name())
+    bias_ds = torch.randn((channels),
+                          dtype=dtype,
+                          device=get_accelerator().device_name())
 
     activations_ref = activations_ds.clone().detach()
     bias_ref = bias_ds.clone().detach()

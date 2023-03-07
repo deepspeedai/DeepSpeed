@@ -6,6 +6,7 @@ import pytest
 import torch
 import deepspeed
 from deepspeed.ops.op_builder import InferenceBuilder
+from deepspeed.accelerator import get_accelerator
 
 if not deepspeed.ops.__compatible_ops__[InferenceBuilder.NAME]:
     pytest.skip("Inference ops are not available on this system",
@@ -43,8 +44,14 @@ def run_bias_geglu_ds(activation, bias):
 @pytest.mark.parametrize("channels", [512, 1232, 4096])
 @pytest.mark.parametrize("dtype", [torch.float16, torch.float32])
 def test_bias_geglu(batch, sequence, channels, dtype):
-    activation = torch.randn((batch, sequence, channels * 2), dtype=dtype, device='cuda')
-    bias = torch.randn((channels * 2), dtype=dtype, device='cuda')
+    activation = torch.randn((batch,
+                              sequence,
+                              channels * 2),
+                             dtype=dtype,
+                             device=get_accelerator().device_name())
+    bias = torch.randn((channels * 2),
+                       dtype=dtype,
+                       device=get_accelerator().device_name())
 
     ds_out = run_bias_geglu_ds(activation, bias)
     ref_out = run_bias_geglu_reference(activation, bias)

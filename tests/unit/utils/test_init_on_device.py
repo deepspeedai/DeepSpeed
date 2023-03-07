@@ -5,10 +5,11 @@ import pytest
 from unit.simple_model import SimpleModel
 from deepspeed import OnDevice
 from packaging import version as pkg_version
+from deepspeed.accelerator import get_accelerator
 from unit.common import DistributedTest
 
 
-@pytest.mark.parametrize('device', ['meta', 'cuda:0'])
+@pytest.mark.parametrize('device', ['meta', get_accelerator().device_name(0)])
 class TestOnDevice(DistributedTest):
     world_size = 1
 

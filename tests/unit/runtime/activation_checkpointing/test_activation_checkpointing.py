@@ -5,6 +5,7 @@
 import pytest
 import torch
 import deepspeed
+from deepspeed.accelerator import get_accelerator
 from copy import deepcopy
 from unit.common import DistributedTest
 
@@ -38,7 +39,7 @@ def _prep_inputs(*inputs):
     for inp in inputs:
         inp = deepcopy(inp)
         if torch.is_tensor(inp):
-            inp = inp.cuda()
+            inp = inp.to(get_accelerator().device_name())
         _inputs.append(inp)
 
     return tuple(_inputs)
@@ -59,7 +60,7 @@ def _match_outputs(ref, tgt):
 
 def _test_activation_checkpoint(module, *inputs):
     # Move to device
-    module.cuda()
+    module.to(get_accelerator().device_name())
 
     # Get rid of dropouts until we fork the RNG between tests.
     module.eval()
@@ -79,7 +80,7 @@ def _test_activation_checkpoint(module, *inputs):
 
 def _test_activation_checkpoint_ordering(module, expected_ordering, *inputs):
     # Move to device
-    module.cuda()
+    module.to(get_accelerator().device_name())
 
     # Get rid of dropouts until we fork the RNG between tests.
     module.eval()

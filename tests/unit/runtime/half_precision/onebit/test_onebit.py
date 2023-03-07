@@ -15,6 +15,7 @@ from deepspeed.runtime.pipe.module import PipelineModule
 from unit.common import DistributedTest
 from unit.simple_model import SimpleModel, random_dataloader
 from unit.alexnet_model import AlexNetPipe, train_cifar
+from deepspeed.accelerator import get_accelerator
 
 PipeTopo = PipeDataParallelTopology
 
@@ -48,7 +49,7 @@ class TestOneBitAdamBasic(DistributedTest):
                     "weight_decay": 0.01,
                     "freeze_step": 2,
                     "cuda_aware": False,
-                    "comm_backend_name": "nccl",
+                    "comm_backend_name": get_accelerator().communication_backend_name(),
                 },
             },
             "gradient_clipping": 1.0,
@@ -91,7 +92,7 @@ class TestOneBitAdamExpAvgMask(DistributedTest):
                     "weight_decay": 0.01,
                     "freeze_step": 2,
                     "cuda_aware": False,
-                    "comm_backend_name": "nccl",
+                    "comm_backend_name": get_accelerator().communication_backend_name(),
                 },
             },
             "gradient_clipping": 1.0,
@@ -158,7 +159,7 @@ class TestOneBitAdamCheckpointing(DistributedTest):
                     "weight_decay": 0.01,
                     "freeze_step": 2,
                     "cuda_aware": False,
-                    "comm_backend_name": "nccl",
+                    "comm_backend_name": get_accelerator().communication_backend_name(),
                 },
             },
             "gradient_clipping": 1.0,
@@ -314,7 +315,7 @@ class TestOneBitAdamCheckpointing(DistributedTest):
                     "weight_decay": 0.01,
                     "freeze_step": 2,
                     "cuda_aware": False,
-                    "comm_backend_name": "nccl",
+                    "comm_backend_name": get_accelerator().communication_backend_name(),
                 },
             },
             "gradient_clipping": 1.0,
@@ -381,7 +382,7 @@ class TestOneBitAdamFP16Pipeline(DistributedTest):
                     "weight_decay": 3e-7,
                     "freeze_step": 200,
                     "cuda_aware": False,
-                    "comm_backend_name": "nccl",
+                    "comm_backend_name": get_accelerator().communication_backend_name(),
                 },
             },
             "gradient_clipping": 1.0,
@@ -436,7 +437,7 @@ class TestZeroOneAdamBasic(DistributedTest):
                     "local_step_scaler": 1,
                     "local_step_clipper": 2,
                     "cuda_aware": False,
-                    "comm_backend_name": "nccl",
+                    "comm_backend_name": get_accelerator().communication_backend_name(),
                 },
             },
             "gradient_clipping": 1.0,
@@ -482,7 +483,7 @@ class TestZeroOneAdamExpAvgMask(DistributedTest):
                     "local_step_scaler": 1,
                     "local_step_clipper": 2,
                     "cuda_aware": False,
-                    "comm_backend_name": "nccl",
+                    "comm_backend_name": get_accelerator().communication_backend_name(),
                 },
             },
             "gradient_clipping": 1.0,
@@ -552,7 +553,7 @@ class TestZeroOneAdamCheckpointing(DistributedTest):
                     "local_step_scaler": 1,
                     "local_step_clipper": 2,
                     "cuda_aware": False,
-                    "comm_backend_name": "nccl",
+                    "comm_backend_name": get_accelerator().communication_backend_name(),
                 },
             },
             "gradient_clipping": 1.0,
@@ -707,7 +708,7 @@ class TestZeroOneAdamCheckpointing(DistributedTest):
                     "local_step_scaler": 1,
                     "local_step_clipper": 2,
                     "cuda_aware": False,
-                    "comm_backend_name": "nccl",
+                    "comm_backend_name": get_accelerator().communication_backend_name(),
                 },
             },
             "gradient_clipping": 1.0,
@@ -777,7 +778,7 @@ class TestZeroOneAdamFP16Pipeline(DistributedTest):
                     "local_step_scaler": 1,
                     "local_step_clipper": 2,
                     "cuda_aware": False,
-                    "comm_backend_name": "nccl",
+                    "comm_backend_name": get_accelerator().communication_backend_name(),
                 },
             },
             "gradient_clipping": 1.0,
@@ -831,7 +832,7 @@ class TestOneBitLambBasic(DistributedTest):
                     "min_coeff": 0.01,
                     "freeze_step": 2,
                     "cuda_aware": False,
-                    "comm_backend_name": "nccl",
+                    "comm_backend_name": get_accelerator().communication_backend_name(),
                     "coeff_beta": 0.9,
                     "factor_max": 1.0,
                     "factor_min": 0.5,
@@ -880,7 +881,7 @@ class TestOneBitLampExpAvgMask(DistributedTest):
                     "min_coeff": 0.01,
                     "freeze_step": 2,
                     "cuda_aware": False,
-                    "comm_backend_name": "nccl",
+                    "comm_backend_name": get_accelerator().communication_backend_name(),
                     "coeff_beta": 0.9,
                     "factor_max": 1.0,
                     "factor_min": 0.5,
@@ -952,7 +953,7 @@ class TestOneBitLambCheckpointing(DistributedTest):
                     "min_coeff": 0.01,
                     "freeze_step": 2,
                     "cuda_aware": False,
-                    "comm_backend_name": "nccl",
+                    "comm_backend_name": get_accelerator().communication_backend_name(),
                     "coeff_beta": 0.9,
                     "factor_max": 1.0,
                     "factor_min": 0.5,
@@ -1127,7 +1128,7 @@ class TestOneBitLambCheckpointing(DistributedTest):
                     "min_coeff": 0.01,
                     "freeze_step": 2,
                     "cuda_aware": False,
-                    "comm_backend_name": "nccl",
+                    "comm_backend_name": get_accelerator().communication_backend_name(),
                     "coeff_beta": 0.9,
                     "factor_max": 1.0,
                     "factor_min": 0.5,
@@ -1198,7 +1199,7 @@ class TestOneBitLambFP16Pipeline(DistributedTest):
                     "weight_decay": 3e-7,
                     "freeze_step": 200,
                     "cuda_aware": False,
-                    "comm_backend_name": "nccl",
+                    "comm_backend_name": get_accelerator().communication_backend_name(),
                 },
             },
             "gradient_clipping": 1.0,
@@ -1246,7 +1247,7 @@ class TestCompressedAllReduceBasic(DistributedTest):
         rank = dist.get_rank()
         backend = NcclBackend()
         local_rank = dist.get_rank()
-        device = torch.device("cuda", dist.get_rank())
+        device = torch.device(get_accelerator().device_name(), dist.get_rank())
 
         # A simulated compression function using deepspeed.comm
         def torch_sim(a):
@@ -1268,7 +1269,7 @@ class TestCompressedAllReduceBasic(DistributedTest):
                 [server_scale[i] * a_sign_list[i] for i in range(dist.get_world_size())])
             rank = dist.get_rank()
             server_error = a_list[rank] - server_scale[rank] * a_sign_list[rank]
-            torch.cuda.synchronize()
+            get_accelerator().synchronize()
             dist.barrier()
             return a_server_compressed, worker_error, server_error
 
@@ -1288,7 +1289,7 @@ class TestCompressedAllReduceBasic(DistributedTest):
         server_error = torch.zeros(right_server_size, device=device)
 
         a_torch, worker_error_torch, server_error_torch = torch_sim(a)
-        torch.cuda.empty_cache()
+        get_accelerator().empty_cache()
 
         a_after = backend.compressed_allreduce(a, worker_error, server_error, local_rank)
 

@@ -2,6 +2,7 @@
 
 from benchmarks.communication.utils import *
 from benchmarks.communication.constants import *
+from deepspeed.accelerator import get_accelerator
 
 import time
 
@@ -63,8 +64,10 @@ def run_all_to_all(local_rank, args):
             try:
                 mat = torch.ones(world_size,
                                  M,
-                                 dtype=getattr(torch,
-                                               args.dtype)).cuda(local_rank)
+                                 dtype=getattr(
+                                     torch,
+                                     args.dtype)).to(
+                                         get_accelerator().device_name(local_rank))
                 assert mat.numel() % world_size == 0, f"tensor cannot be divided in {world_size} chunks"
                 sync_all()
                 input = ((mat.mul_(float(global_rank))).view(-1))
@@ -88,15 +91,17 @@ def run_all_to_all(local_rank, args):
         try:
             mat = torch.ones(elements_per_gpu,
                              dtype=getattr(torch,
-                                           args.dtype)).cuda(local_rank)
+                                           args.dtype)).to(
+                                               get_accelerator().device_name(local_rank))
             assert mat.numel() % world_size == 0, f"tensor with {mat.numel()} elements cannot be divided in {world_size} chunks"
             input = ((mat.mul_(float(global_rank))).view(-1))
             # Delete original mat to avoid OOM
             del mat
-            torch.cuda.empty_cache()
-            output = torch.zeros(elements_per_gpu,
-                                 dtype=getattr(torch,
-                                               args.dtype)).cuda(local_rank)
+            get_accelerator().empty_cache()
+            output = torch.zeros(
+                elements_per_gpu,
+                dtype=getattr(torch,
+                              args.dtype)).to(get_accelerator().device_name(local_rank))
         except RuntimeError as e:
             if 'out of memory' in str(e):
                 if dist.get_rank() == 0:

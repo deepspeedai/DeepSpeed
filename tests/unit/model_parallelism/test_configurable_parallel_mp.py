@@ -7,6 +7,7 @@ import pytest
 import random
 import numpy as np
 import deepspeed.comm as dist
+from deepspeed.accelerator import get_accelerator
 from unit.common import DistributedTest, DistributedFixture
 from unit.megatron_model import get_gpt2_model, get_megatron_version
 
@@ -42,7 +43,7 @@ class ConfigurableMP(DistributedTest):
         random.seed(seed)
         np.random.seed(seed)
         torch.manual_seed(seed)
-        torch.cuda.manual_seed_all(seed)
+        get_accelerator().manual_seed_all(seed)
 
     @pytest.fixture
     def inputs(self, bs=1, seq_len=20):
@@ -70,7 +71,10 @@ class TestConfigurableMP(ConfigurableMP):
         model = get_deepspeed_model(model)
 
         model.eval()
-        baseline = model(inputs[0].cuda(), inputs[1].cuda(), inputs[2].cuda())
+        device_name = get_accelerator().device_name()
+        baseline = model(inputs[0].to(device_name),
+                         inputs[1].to(device_name),
+                         inputs[2].to(device_name))
 
         tag = 'mp_1'
         state_dict = {}
@@ -99,7 +103,10 @@ class TestConfigurableMP(ConfigurableMP):
 
         model.eval()
 
-        baseline = model(inputs[0].cuda(), inputs[1].cuda(), inputs[2].cuda())
+        device_name = get_accelerator().device_name()
+        baseline = model(inputs[0].to(device_name),
+                         inputs[1].to(device_name),
+                         inputs[2].to(device_name))
 
         tag = 'mp_2'
         state_dict = {}
@@ -111,7 +118,10 @@ class TestConfigurableMP(ConfigurableMP):
                               load_optimizer_states=False,
                               load_lr_scheduler_states=False)
 
-        test = model(inputs[0].cuda(), inputs[1].cuda(), inputs[2].cuda())
+        device_name = get_accelerator().device_name()
+        test = model(inputs[0].to(device_name),
+                     inputs[1].to(device_name),
+                     inputs[2].to(device_name))
         assert torch.allclose(baseline, test, rtol=1.0, atol=1e-07), f"Baseline output {baseline} is not equal to save-then-load output {test}"
 
 
@@ -133,7 +143,10 @@ class baseline_mp2(DistributedFixture):
         model.eval()
 
         with torch.no_grad():
-            baseline = model(inputs[0].cuda(), inputs[1].cuda(), inputs[2].cuda())
+            device_name = get_accelerator().device_name()
+            baseline = model(inputs[0].to(device_name),
+                             inputs[1].to(device_name),
+                             inputs[2].to(device_name))
             if dist.get_rank() == 0:
                 save_path = os.path.join(class_tmpdir, "output.pt")
                 torch.save(baseline.cpu(), save_path)
@@ -164,7 +177,10 @@ class TestConfigurableResizeMP(ConfigurableMP):
             model.load_checkpoint(class_tmpdir,
                                   load_optimizer_states=False,
                                   load_lr_scheduler_states=False)
-            test = model(inputs[0].cuda(), inputs[1].cuda(), inputs[2].cuda())
+            device_name = get_accelerator().device_name()
+            test = model(inputs[0].to(device_name),
+                         inputs[1].to(device_name),
+                         inputs[2].to(device_name))
             if dist.get_rank() == 0:
                 load_path = os.path.join(class_tmpdir, "output.pt")
                 baseline = torch.load(load_path)

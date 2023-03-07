@@ -7,17 +7,19 @@ import numpy as np
 import deepspeed
 
 from deepspeed.runtime.comm.mpi import MpiBackend
+from deepspeed.accelerator import get_accelerator
 
 comm = MPI.COMM_WORLD
 size = comm.Get_size()
 rank = comm.Get_rank()
 
-deepspeed.init_distributed(dist_backend='nccl')
+deepspeed.init_distributed(dist_backend=get_accelerator().communication_backend_name())
 
 # Change cuda_aware to True to test out CUDA-Aware MPI communication
 backend = MpiBackend(cuda_aware=False)
 
-device = torch.device('cuda', rank % torch.cuda.device_count())
+local_rank = rank % get_accelerator().device_count()
+device = torch.device(get_accelerator().device_name(), local_rank)
 
 
 # A simulated compression function using deepspeed.comm
@@ -37,7 +39,7 @@ def torch_sim(a):
         [server_scale[i] * a_sign_list[i] for i in range(dist.get_world_size())])
     rank = dist.get_rank()
     server_error = a_list[rank] - server_scale[rank] * a_sign_list[rank]
-    torch.cuda.synchronize()
+    get_accelerator().synchronize()
     dist.barrier()
     return a_server_compressed, worker_error, server_error
 
@@ -58,8 +60,7 @@ worker_error = torch.zeros(right_tensor_size, device=device)
 server_error = torch.zeros(right_server_size, device=device)
 
 a_torch, worker_error_torch, server_error_torch = torch_sim(a)
-torch.cuda.empty_cache()
-local_rank = rank % torch.cuda.device_count()
+get_accelerator().empty_cache()
 
 a_after = backend.compressed_allreduce(a, worker_error, server_error, local_rank)
 

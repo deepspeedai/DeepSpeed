@@ -4,6 +4,7 @@ Copyright 2022 The Microsoft DeepSpeed Team
 from abc import ABC, abstractmethod
 from deepspeed.utils.types import ActivationFuncType
 import torch
+from deepspeed.accelerator import get_accelerator
 
 transformer_param_names = (
         'attn_qkvw', \
@@ -196,9 +197,9 @@ def maybe_copy_qkv(module,
                 dst = mp_replace.copy(dst, qkv_data)
         else:
             if split_qkv:
-                dst = mp_replace.qkv_copy(dst, weight_quantizer.quantize(qkv_data.cuda() if weight_quantizer.q_int8 else \
+                dst = mp_replace.qkv_copy(dst, weight_quantizer.quantize(qkv_data.to(get_accelerator().device_name()) if weight_quantizer.q_int8 else \
                                                 ((transpose(qkv_data)).contiguous())), int8=weight_quantizer.q_int8)
             else:
-                dst = mp_replace.copy(dst, weight_quantizer.quantize(qkv_data.cuda() if weight_quantizer.q_int8 else \
+                dst = mp_replace.copy(dst, weight_quantizer.quantize(qkv_data.to(get_accelerator().device_name()) if weight_quantizer.q_int8 else \
                                                 transpose(qkv_data)), int8=weight_quantizer.q_int8)
         setattr(module, dst_name, dst)

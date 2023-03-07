@@ -5,6 +5,7 @@ Copyright 2022 The Microsoft DeepSpeed Team
 import pytest
 import torch
 from deepspeed.ops import op_builder
+from deepspeed.accelerator import get_accelerator
 
 quantize_module = None
 
@@ -75,7 +76,7 @@ def test_dequantize(num_elems, num_groups, is_symmetric_quant, q_bits):
     activations = torch.randn((num_groups,
                                num_elems),
                               dtype=torch.float16,
-                              device='cuda')
+                              device=get_accelerator().device_name())
     quantized_data, params = run_quantize(activations, num_groups, q_bits, is_symmetric_quant)
 
     ds_dequant = run_dequantize(quantized_data,

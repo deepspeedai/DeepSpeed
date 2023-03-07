@@ -8,6 +8,7 @@
 import pytest
 import torch
 import deepspeed
+from deepspeed.accelerator import get_accelerator
 from deepspeed.ops.op_builder import SparseAttnBuilder
 
 if not deepspeed.ops.__compatible_ops__[SparseAttnBuilder.NAME]:
@@ -94,7 +95,13 @@ def init_softmax_inputs(Z, H, M, N, scale, rho, block, dtype, dense_x=True, layo
     if layout is None:
         layout = make_layout(rho, (H, M // block, N // block))
     if dense_x:
-        x = torch.rand((Z, H, M, N), dtype=dtype, requires_grad=True, device='cuda')
+        x = torch.rand((Z,
+                        H,
+                        M,
+                        N),
+                       dtype=dtype,
+                       requires_grad=True,
+                       device=get_accelerator().device_name())
     else:
         x = torch.rand((Z,
                         layout.sum(),
@@ -102,7 +109,7 @@ def init_softmax_inputs(Z, H, M, N, scale, rho, block, dtype, dense_x=True, layo
                         block),
                        dtype=dtype,
                        requires_grad=True,
-                       device='cuda')
+                       device=get_accelerator().device_name())
     dx = torch.rand_like(x)
     bool_attn_mask = torch.randint(low=0,
                                    high=2,
@@ -110,7 +117,7 @@ def init_softmax_inputs(Z, H, M, N, scale, rho, block, dtype, dense_x=True, layo
                                          N),
                                    dtype=torch.bool,
                                    requires_grad=False,
-                                   device='cuda')
+                                   device=get_accelerator().device_name())
     fp_attn_mask = bool_attn_mask.type(dtype)
     kp_mask = torch.randint(low=0,
                             high=2,
@@ -118,20 +125,24 @@ def init_softmax_inputs(Z, H, M, N, scale, rho, block, dtype, dense_x=True, layo
                                   N),
                             dtype=dtype,
                             requires_grad=False,
-                            device='cuda')
+                            device=get_accelerator().device_name())
     kp_mask[kp_mask == 1.] = float('-inf')
     return layout, x, dx, bool_attn_mask, fp_attn_mask, kp_mask
 
 
 def _skip_on_cuda_compatability():
-    if torch.cuda.get_device_capability()[0] < 7:
-        pytest.skip("needs higher compute capability than 7")
-    cuda_major = int(torch.version.cuda.split('.')[0]) * 10
-    cuda_minor = int(torch.version.cuda.split('.')[1])
-    cuda_version = cuda_major + cuda_minor
-    if (cuda_version != 101 and cuda_version != 102) and \
-            (cuda_version != 111 and cuda_version != 110):
-        pytest.skip("requires cuda 10.1 or 10.2 or 11.0 or 11.1")
+    if deepspeed.accelerator.get_accelerator().device_name() == 'cuda':
+        if torch.cuda.get_device_capability()[0] < 7:
+            pytest.skip("needs higher compute capability than 7")
+        cuda_major = int(torch.version.cuda.split('.')[0]) * 10
+        cuda_minor = int(torch.version.cuda.split('.')[1])
+        cuda_version = cuda_major + cuda_minor
+        if (cuda_version != 101 and cuda_version != 102) and \
+                (cuda_version != 111 and cuda_version != 110):
+            pytest.skip("requires cuda 10.1 or 10.2 or 11.0 or 11.1")
+    else:
+        assert deepspeed.accelerator.get_accelerator().device_name() == 'xpu'
+        return
 
 
 @pytest.mark.parametrize("block", [16, 32])
@@ -195,9 +206,21 @@ def init_matmul_inputs(Z, H, M, N, K, rho, mode, trans_a, trans_b, block, dtype,
     BS0 = N if trans_b else K
     BS1 = K if trans_b else N
     shape = {'sdd': (M, N), 'dsd': (AS0, AS1), 'dds': (BS0, BS1)}[mode]
-    x = torch.rand((Z, H, AS0, AS1), dtype=dtype, requires_grad=True, device='cuda')
-    w = torch.rand((Z, H, BS0, BS1), dtype=dtype, requires_grad=True, device='cuda')
-    dy = torch.rand((Z, H, M, N), dtype=dtype, device='cuda')
+    x = torch.rand((Z,
+                    H,
+                    AS0,
+                    AS1),
+                   dtype=dtype,
+                   requires_grad=True,
+                   device=get_accelerator().device_name())
+    w = torch.rand((Z,
+                    H,
+                    BS0,
+                    BS1),
+                   dtype=dtype,
+                   requires_grad=True,
+                   device=get_accelerator().device_name())
+    dy = torch.rand((Z, H, M, N), dtype=dtype, device=get_accelerator().device_name())
     if layout is None:
         layout = make_layout(rho, (H, shape[0] // block, shape[1] // block))
     else:

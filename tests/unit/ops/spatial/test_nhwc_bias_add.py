@@ -5,6 +5,7 @@ Copyright 2022 The Microsoft DeepSpeed Team
 import pytest
 import torch
 from deepspeed.ops.transformer.inference.bias_add import nhwc_bias_add
+from deepspeed.accelerator import get_accelerator
 
 
 def allclose(x, y):
@@ -40,13 +41,16 @@ channels_list = [
 @pytest.mark.parametrize("image_size", [16, 32, 64])
 @pytest.mark.parametrize("channels", channels_list)
 def test_bias_add(batch, image_size, channels):
-    activations = torch.randn((batch,
-                               channels,
-                               image_size,
-                               image_size),
-                              dtype=torch.float16,
-                              device="cuda").to(memory_format=torch.channels_last)
-    bias = torch.randn((channels), dtype=torch.float16, device="cuda")
+    activations = torch.randn(
+        (batch,
+         channels,
+         image_size,
+         image_size),
+        dtype=torch.float16,
+        device=get_accelerator().device_name()).to(memory_format=torch.channels_last)
+    bias = torch.randn((channels),
+                       dtype=torch.float16,
+                       device=get_accelerator().device_name())
 
     ref_vals = ref_bias_add(activations.clone().detach(), bias)
     ds_vals = nhwc_bias_add(activations, bias)
@@ -63,19 +67,23 @@ def ref_bias_add_add(activations, bias, other):
 @pytest.mark.parametrize("image_size", [16, 32, 64])
 @pytest.mark.parametrize("channels", channels_list)
 def test_bias_add_add(batch, image_size, channels):
-    activations = torch.randn((batch,
-                               channels,
-                               image_size,
-                               image_size),
-                              dtype=torch.float16,
-                              device="cuda").to(memory_format=torch.channels_last)
-    other = torch.randn((batch,
-                         channels,
-                         image_size,
-                         image_size),
-                        dtype=torch.float16,
-                        device="cuda").to(memory_format=torch.channels_last)
-    bias = torch.randn((channels), dtype=torch.float16, device="cuda")
+    activations = torch.randn(
+        (batch,
+         channels,
+         image_size,
+         image_size),
+        dtype=torch.float16,
+        device=get_accelerator().device_name()).to(memory_format=torch.channels_last)
+    other = torch.randn(
+        (batch,
+         channels,
+         image_size,
+         image_size),
+        dtype=torch.float16,
+        device=get_accelerator().device_name()).to(memory_format=torch.channels_last)
+    bias = torch.randn((channels),
+                       dtype=torch.float16,
+                       device=get_accelerator().device_name())
 
     ref_vals = ref_bias_add_add(activations.clone().detach(), bias, other)
     ds_vals = nhwc_bias_add(activations, bias, other=other)
@@ -98,20 +106,26 @@ def ref_bias_add_bias_add(activations, bias, other, other_bias):
 @pytest.mark.parametrize("image_size", [16, 32, 64])
 @pytest.mark.parametrize("channels", channels_list)
 def test_bias_add_bias_add(batch, image_size, channels):
-    activations = torch.randn((batch,
-                               channels,
-                               image_size,
-                               image_size),
-                              dtype=torch.float16,
-                              device="cuda").to(memory_format=torch.channels_last)
-    other = torch.randn((batch,
-                         channels,
-                         image_size,
-                         image_size),
-                        dtype=torch.float16,
-                        device="cuda").to(memory_format=torch.channels_last)
-    bias = torch.randn((channels), dtype=torch.float16, device="cuda")
-    other_bias = torch.randn((channels), dtype=torch.float16, device="cuda")
+    activations = torch.randn(
+        (batch,
+         channels,
+         image_size,
+         image_size),
+        dtype=torch.float16,
+        device=get_accelerator().device_name()).to(memory_format=torch.channels_last)
+    other = torch.randn(
+        (batch,
+         channels,
+         image_size,
+         image_size),
+        dtype=torch.float16,
+        device=get_accelerator().device_name()).to(memory_format=torch.channels_last)
+    bias = torch.randn((channels),
+                       dtype=torch.float16,
+                       device=get_accelerator().device_name())
+    other_bias = torch.randn((channels),
+                             dtype=torch.float16,
+                             device=get_accelerator().device_name())
 
     ref_vals = ref_bias_add_bias_add(activations.clone().detach(),
                                      bias,

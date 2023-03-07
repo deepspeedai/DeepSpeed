@@ -5,6 +5,7 @@ Copyright 2022 The Microsoft DeepSpeed Team
 import pytest
 import torch
 import deepspeed
+from deepspeed.accelerator import get_accelerator
 from deepspeed.ops.op_builder import InferenceBuilder
 
 if not deepspeed.ops.__compatible_ops__[InferenceBuilder.NAME]:
@@ -95,11 +96,27 @@ def test_residual_add(inference_module,
                       add_bias,
                       mp_size,
                       pre_attn_norm):
-    ds_out = torch.randn((batch, sequence, hidden_dim), dtype=dtype, device='cuda')
-    residual = torch.randn((batch, sequence, hidden_dim), dtype=dtype, device='cuda')
-    attn_output = torch.randn((batch, sequence, hidden_dim), dtype=dtype, device='cuda')
-    final_bias = torch.randn((hidden_dim), dtype=dtype, device='cuda')
-    attn_bias = torch.randn((hidden_dim), dtype=dtype, device='cuda')
+    ds_out = torch.randn((batch,
+                          sequence,
+                          hidden_dim),
+                         dtype=dtype,
+                         device=get_accelerator().device_name())
+    residual = torch.randn((batch,
+                            sequence,
+                            hidden_dim),
+                           dtype=dtype,
+                           device=get_accelerator().device_name())
+    attn_output = torch.randn((batch,
+                               sequence,
+                               hidden_dim),
+                              dtype=dtype,
+                              device=get_accelerator().device_name())
+    final_bias = torch.randn((hidden_dim),
+                             dtype=dtype,
+                             device=get_accelerator().device_name())
+    attn_bias = torch.randn((hidden_dim),
+                            dtype=dtype,
+                            device=get_accelerator().device_name())
 
     ref_out = ds_out.clone()
     ref_out = run_residual_add_reference(ref_out,

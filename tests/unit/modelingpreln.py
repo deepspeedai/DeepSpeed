@@ -39,6 +39,7 @@ import deepspeed.comm as dist
 from torch.nn import Module
 import torch.nn.functional as F
 import torch.nn.init as init
+from deepspeed.accelerator import get_accelerator
 
 #from numba import cuda
 
@@ -184,8 +185,8 @@ ACT2FN = {"gelu": gelu, "relu": torch.nn.functional.relu, "swish": swish}
 class GPUTimer:
     def __init__(self):
         super().__init__()
-        self.start = cuda.event()  # noqa: F821
-        self.stop = cuda.event()  # noqa: F821
+        self.start = get_accelerator().Event()  # noqa: F821
+        self.stop = get_accelerator().Event()  # noqa: F821
 
     def record(self):
         self.start.record()
@@ -844,12 +845,12 @@ class BertLMPredictionHead(nn.Module):
 
     def forward(self, hidden_states):
         hidden_states = self.transform(hidden_states)
-        torch.cuda.nvtx.range_push(
+        get_accelerator().range_push(
             "decoder input.size() = {}, weight.size() = {}".format(
                 hidden_states.size(),
                 self.decoder.weight.size()))
         hidden_states = self.decoder(hidden_states) + self.bias
-        torch.cuda.nvtx.range_pop()
+        get_accelerator().range_pop()
         return hidden_states
 
 
@@ -979,7 +980,7 @@ class BertPreTrainedModel(nn.Module):
             weights_path = os.path.join(serialization_dir, WEIGHTS_NAME)
             state_dict = torch.load(
                 weights_path,
-                map_location='cpu' if not torch.cuda.is_available() else None)
+                map_location='cpu' if not get_accelerator().is_available() else None)
         if tempdir:
             # Clean up temp dir
             shutil.rmtree(tempdir)

@@ -2,9 +2,9 @@
 
 # Create a container object to save model-specific tensors using the policy file above.
 from .base import *
-import torch
 from deepspeed import comm as dist
 import deepspeed.ops.transformer as transformer_inference
+from deepspeed.accelerator import get_accelerator
 
 
 class BaseTransformerMoEContainer(BaseTransformerContainer):
@@ -104,33 +104,38 @@ class BaseTransformerMoEContainer(BaseTransformerContainer):
             # mlp inter
             self.module.mlp[ep_index].inter_w.data = self._h4h_w[
                 gpu_index * self.local_ep_size + ep_index].to(
-                    torch.cuda.current_device())
+                    get_accelerator().current_device_name())
             self.module.mlp[ep_index].inter_b.data = self._h4h_b[
                 gpu_index * self.local_ep_size + ep_index].to(
-                    torch.cuda.current_device())
+                    get_accelerator().current_device_name())
 
             # mlp output
             self.module.mlp[ep_index].output_w.data = self._4hh_w[
                 gpu_index * self.local_ep_size + ep_index].to(
-                    torch.cuda.current_device())
+                    get_accelerator().current_device_name())
             self.module.mlp[ep_index].output_b.data = self._4hh_b[
                 gpu_index * self.local_ep_size + ep_index].to(
-                    torch.cuda.current_device())
+                    get_accelerator().current_device_name())
 
     def copy_data_to_new_module(self):
-        self.module.attn_nw.data = self.attn_nw.to(torch.cuda.current_device())
-        self.module.attn_nb.data = self.attn_nb.to(torch.cuda.current_device())
+        self.module.attn_nw.data = self.attn_nw.to(
+            get_accelerator().current_device_name())
+        self.module.attn_nb.data = self.attn_nb.to(
+            get_accelerator().current_device_name())
 
-        self.module.norm_w.data.copy_(self.input_nw.to(torch.cuda.current_device()))
-        self.module.norm_b.data.copy_(self.input_nb.to(torch.cuda.current_device()))
+        self.module.norm_w.data.copy_(
+            self.input_nw.to(get_accelerator().current_device_name()))
+        self.module.norm_b.data.copy_(
+            self.input_nb.to(get_accelerator().current_device_name()))
 
         if self.config.moe.type == 'residual':
             self.module.res_mlp.inter_w.data = self._res_h4h_w.to(
-                torch.cuda.current_device())
+                get_accelerator().current_device_name())
             self.module.res_mlp.inter_b.data = self._res_h4h_b.to(
-                torch.cuda.current_device())
+                get_accelerator().current_device_name())
             self.module.res_mlp.output_w.data = self._res_4hh_w.to(
-                torch.cuda.current_device())
+                get_accelerator().current_device_name())
             self.module.res_mlp.output_b.data = self._res_4hh_b.to(
-                torch.cuda.current_device())
-            self.module.res_coef.data = self._res_coef.to(torch.cuda.current_device())
+                get_accelerator().current_device_name())
+            self.module.res_coef.data = self._res_coef.to(
+                get_accelerator().current_device_name())

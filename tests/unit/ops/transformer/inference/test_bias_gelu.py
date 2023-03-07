@@ -5,6 +5,7 @@ Copyright 2022 The Microsoft DeepSpeed Team
 import pytest
 import torch
 import deepspeed
+from deepspeed.accelerator import get_accelerator
 from deepspeed.ops.op_builder import InferenceBuilder
 from packaging import version as pkg_version
 
@@ -48,8 +49,14 @@ def test_bias_gelu(batch, sequence, channels, dtype):
     if pkg_version.parse(torch.__version__) < pkg_version.parse("1.12"):
         pytest.skip("gelu implementation matches only after torch 1.12")
 
-    activations_ds = torch.randn((batch, sequence, channels), dtype=dtype, device='cuda')
-    bias_ds = torch.randn((channels), dtype=dtype, device='cuda')
+    activations_ds = torch.randn((batch,
+                                  sequence,
+                                  channels),
+                                 dtype=dtype,
+                                 device=get_accelerator().device_name())
+    bias_ds = torch.randn((channels),
+                          dtype=dtype,
+                          device=get_accelerator().device_name())
 
     activations_ref = activations_ds.clone().detach()
     bias_ref = bias_ds.clone().detach()

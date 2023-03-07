@@ -5,6 +5,7 @@ import time
 import deepspeed
 import argparse
 from transformers import pipeline
+from deepspeed.accelerator import get_accelerator
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--model", "-m", type=str, help="hf model name")
@@ -46,7 +47,7 @@ def print_latency(latency_set, title, warmup=3):
         print("\t999 Latency: {0:8.2f} ms".format(p999 * 1000))
 
 
-deepspeed.init_distributed("nccl")
+deepspeed.init_distributed()
 
 print(args.model, args.max_tokens, args.dtype)
 
@@ -75,10 +76,10 @@ responses = []
 times = []
 mtimes = []
 for i in range(args.trials):
-    torch.cuda.synchronize()
+    get_accelerator().synchronize()
     start = time.time()
     r = pipe(f"Hello I'm a {mask} model")
-    torch.cuda.synchronize()
+    get_accelerator().synchronize()
     end = time.time()
     responses.append(r)
     times.append((end - start))

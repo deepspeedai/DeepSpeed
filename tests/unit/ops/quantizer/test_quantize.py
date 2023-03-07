@@ -5,6 +5,7 @@ Copyright 2022 The Microsoft DeepSpeed Team
 import pytest
 import torch
 from deepspeed.ops import op_builder
+from deepspeed.accelerator import get_accelerator
 
 inference_module = None
 
@@ -27,8 +28,8 @@ def get_q_props(q_bits):
     q_min = -(2**(q_bits - 1))
     q_max = (2**(q_bits - 1) - 1)
 
-    q_min = torch.IntTensor([q_min]).to(device='cuda')
-    q_max = torch.IntTensor([q_max]).to(device='cuda')
+    q_min = torch.IntTensor([q_min]).to(device=get_accelerator().device_name())
+    q_max = torch.IntTensor([q_max]).to(device=get_accelerator().device_name())
     return q_range, q_max, q_min
 
 
@@ -46,7 +47,9 @@ def get_scale_zero_point(q_bits,
         scale = torch.empty_like(absmax)
         for i, x in enumerate(absmax):
             scale[i] = torch.ones_like(x) if x == 0 else q_range / (2 * x)
-        zero_point = torch.zeros(scale.shape, dtype=torch.float32, device='cuda')
+        zero_point = torch.zeros(scale.shape,
+                                 dtype=torch.float32,
+                                 device=get_accelerator().device_name())
     else:
         scale = torch.empty_like(max)
         for i, x in enumerate(max):
@@ -125,12 +128,12 @@ def test_float_quantize(num_elems,
         activations_ds = torch.zeros((num_groups,
                                       num_elems),
                                      dtype=torch.float16,
-                                     device='cuda')
+                                     device=get_accelerator().device_name())
     else:
         activations_ds = torch.randn((num_groups,
                                       num_elems),
                                      dtype=torch.float16,
-                                     device='cuda')
+                                     device=get_accelerator().device_name())
     activations_ref = activations_ds.clone().detach()
 
     ref_out_tensor, ref_params = run_float_quantize(q_bits, is_symmetric_quant, activations_ref, num_groups)

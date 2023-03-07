@@ -3,6 +3,7 @@
 import torch
 import deepspeed
 from deepspeed.runtime.zero.partition_parameters import ZeroParamStatus
+from deepspeed.accelerator import get_accelerator
 
 from utils import setup_serial_env
 from unit.common import DistributedTest
@@ -74,7 +75,7 @@ class TestSerialParamInit(DistributedTest):
         assert model.param.ds_status == ZeroParamStatus.NOT_AVAILABLE
 
         # test that the weights manipulation during each __init__ worked in all w/o needing gathering
-        ones = torch.ones(5).half().cuda()
+        ones = torch.ones(5).half().to(get_accelerator().device_name())
         with deepspeed.zero.GatheredParameters(list(model.parameters(recurse=False))):
             assert torch.equal(model.param, ones + 1)
             assert torch.equal(model.param_pa, ones + 2)

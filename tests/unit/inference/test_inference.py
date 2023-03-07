@@ -16,6 +16,7 @@ from transformers.models.roberta.modeling_roberta import RobertaLayer
 from huggingface_hub import HfApi
 from deepspeed.model_implementations import DeepSpeedTransformerInference
 from torch import nn
+from deepspeed.accelerator import get_accelerator
 
 rocm_version = OpBuilder.installed_rocm_version()
 if rocm_version != (0, 0):
@@ -288,17 +289,17 @@ class TestModelTask(DistributedTest):
             pipe.model.half()
 
         # Switch device to GPU after converting to half
-        device = torch.device(f"cuda:{local_rank}")
+        device = torch.device(get_accelerator().device_name(local_rank))
         pipe.device = device
         pipe.model.to(device)
 
         # Warm-up queries for perf measurement
         #for i in range(10):
         #    _ = pipe(query, **inf_kwargs)
-        torch.cuda.synchronize()
+        get_accelerator().synchronize()
         start = time.time()
         bs_output = pipe(query, **inf_kwargs)
-        torch.cuda.synchronize()
+        get_accelerator().synchronize()
         bs_time = time.time() - start
 
         pipe.model = deepspeed.init_inference(
@@ -312,10 +313,10 @@ class TestModelTask(DistributedTest):
         # Warm-up queries for perf measurement
         #for i in range(10):
         #    _ = pipe(query, **inf_kwargs)
-        torch.cuda.synchronize()
+        get_accelerator().synchronize()
         start = time.time()
         ds_output = pipe(query, **inf_kwargs)
-        torch.cuda.synchronize()
+        get_accelerator().synchronize()
         ds_time = time.time() - start
 
         # facebook/opt* and some bigscient/bloom* models are not matching
@@ -372,7 +373,7 @@ class TestMPSize(DistributedTest):
                                               replace_with_kernel_inject=True)
         check_injection(pipe.model)
         # Switch device to GPU so that input tensors are not on CPU
-        pipe.device = torch.device(f"cuda:{local_rank}")
+        pipe.device = torch.device(get_accelerator().device_name(local_rank))
         ds_output = pipe(query, **inf_kwargs)
 
         print(local_rank, "baseline", bs_output)
@@ -433,7 +434,7 @@ class TestInjectionPolicy(DistributedTest):
                                               dtype=dtype,
                                               injection_policy=injection_policy)
         # Switch device to GPU so that input tensors are not on CPU
-        pipe.device = torch.device(f"cuda:{local_rank}")
+        pipe.device = torch.device(get_accelerator().device_name(local_rank))
         ds_output = pipe(query, **inf_kwargs)
 
         print(local_rank, "baseline", bs_output)
@@ -483,7 +484,7 @@ class TestAutoTensorParallelism(DistributedTest):
                                               mp_size=world_size,
                                               dtype=dtype)
         # Switch device to GPU so that input tensors are not on CPU
-        pipe.device = torch.device(f"cuda:{local_rank}")
+        pipe.device = torch.device(get_accelerator().device_name(local_rank))
         ds_output = pipe(query, **inf_kwargs)
 
         print(local_rank, "baseline", bs_output)
@@ -515,7 +516,7 @@ class TestLMCorrectness(DistributedTest):
         import lm_eval.evaluator
 
         local_rank = os.getenv("LOCAL_RANK", "0")
-        device = torch.device(f"cuda:{local_rank}")
+        device = torch.device(get_accelerator().device_name(local_rank))
         dtype = torch.float
         task_dict = lm_eval.tasks.get_task_dict([task])
 
@@ -529,12 +530,12 @@ class TestLMCorrectness(DistributedTest):
         else:
             lm = lm_eval.models.get_model(model_family).create_from_arg_string(
                 f"pretrained={model_name}",
-                {"device": "cuda"})
+                {"device": get_accelerator().device_name()})
 
-        torch.cuda.synchronize()
+        get_accelerator().synchronize()
         start = time.time()
         bs_output = lm_eval.evaluator.evaluate(lm=lm, task_dict=task_dict)
-        torch.cuda.synchronize()
+        get_accelerator().synchronize()
         bs_time = time.time() - start
 
         ds_model = deepspeed.init_inference(
@@ -547,10 +548,10 @@ class TestLMCorrectness(DistributedTest):
         )
         check_injection(ds_model)
         setattr(lm, model_family, ds_model)
-        torch.cuda.synchronize()
+        get_accelerator().synchronize()
         start = time.time()
         ds_output = lm_eval.evaluator.evaluate(lm=lm, task_dict=task_dict)
-        torch.cuda.synchronize()
+        get_accelerator().synchronize()
         ds_time = time.time() - start
 
         ppl_diff = abs(bs_output["results"][task]["ppl"] -

@@ -6,9 +6,10 @@ import deepspeed
 import pytest
 from deepspeed.ops.adam import FusedAdam
 from unit.common import DistributedTest
-from deepspeed.ops.op_builder import CPUAdamBuilder
 from unit.simple_model import SimpleModel, SimpleOptimizer, random_dataloader, SimpleMoEModel, sequence_dataloader
 from unit.util import required_torch_version
+from deepspeed.accelerator import get_accelerator
+from deepspeed.ops.op_builder import CPUAdamBuilder
 
 try:
     from apex import amp  # noqa: F401
@@ -195,7 +196,7 @@ class TestFP16OptimizerForMoE(DistributedTest):
         hidden_dim = 10
 
         def mock_unscale_and_clip_grads(total_norm, apply_scale=True):
-            torch_norm_tensor = torch.cuda.FloatTensor([total_norm])
+            torch_norm_tensor = get_accelerator().FloatTensor([total_norm])
             all_gather_results = [
                 torch.zeros_like(torch_norm_tensor) for _ in range(dist.get_world_size())
             ]
@@ -236,7 +237,7 @@ class TestFP16OptimizerForMoE(DistributedTest):
         hidden_dim = 10
 
         def mock_unscale_and_clip_grads(grads_groups_flat, total_norm, apply_scale=True):
-            torch_norm_tensor = torch.cuda.FloatTensor([total_norm])
+            torch_norm_tensor = get_accelerator().FloatTensor([total_norm])
             all_gather_results = [
                 torch.zeros_like(torch_norm_tensor) for _ in range(dist.get_world_size())
             ]
@@ -285,7 +286,7 @@ class TestFP16OptimizerForMoE(DistributedTest):
         hidden_dim = 10
 
         def mock_unscale_and_clip_grads(total_norm, apply_scale=True):
-            torch_norm_tensor = torch.cuda.FloatTensor([total_norm])
+            torch_norm_tensor = get_accelerator().FloatTensor([total_norm])
             all_gather_results = [
                 torch.zeros_like(torch_norm_tensor) for _ in range(dist.get_world_size())
             ]

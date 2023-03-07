@@ -1,0 +1,19 @@
+{
+  "train_batch_size": 1,
+  "gradient_accumulation_steps": 1,
+  "steps_per_print": 1,
+  "optimizer": {
+    "type": "Adam",
+    "params": {
+      "lr": 0.00015,
+      "weight_decay": 1e-2
+    }
+  },
+  "fp16": {
+    "enabled": false,
+    "loss_scale": 0,
+    "loss_scale_window": 1000,
+    "hysteresis": 2,
+    "min_loss_scale": 1
+  }
+}
