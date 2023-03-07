@@ -2,11 +2,12 @@
 Copyright 2022 The Microsoft DeepSpeed Team
 '''
 import torch
+from ..features.cuda_graph import CUDAGraph
 
 
-class DSUNet(torch.nn.Module):
+class DSUNet(CUDAGraph, torch.nn.Module):
     def __init__(self, unet, enable_cuda_graph=True):
-        super().__init__()
+        super().__init__(enable_cuda_graph=enable_cuda_graph)
         self.unet = unet
         # SD pipeline accesses this attribute
         self.in_channels = unet.in_channels
@@ -17,7 +18,6 @@ class DSUNet(torch.nn.Module):
         self.unet.requires_grad_(requires_grad=False)
         self.unet.to(memory_format=torch.channels_last)
         self.cuda_graph_created = False
-        self.enable_cuda_graph = enable_cuda_graph
 
     def _graph_replay(self, *inputs, **kwargs):
         for i in range(len(inputs)):

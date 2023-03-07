@@ -24,6 +24,8 @@ from deepspeed.accelerator import get_accelerator
 from ..module_inject.policy import TransformerPolicy
 from ..module_inject.auto_tp import AutoTP
 
+from ..module_inject.replace_policy import generic_policies
+
 DS_INFERENCE_ENABLED = False
 from torch import nn
 
@@ -154,6 +156,9 @@ class InferenceEngine(Module):
 
         if config.tensor_parallel.tp_size > 1:
             assert not config.enable_cuda_graph, "Cuda graph is not supported for model parallelism"
+
+        # Check if local CUDA graphs can be created in replacement modules
+        self.local_cuda_graph = self._local_cuda_graph_used(self.module)
 
     def profile_model_time(self, use_cuda_events=True):
         if not self.model_profile_enabled and not self._config.enable_cuda_graph:
@@ -512,6 +517,27 @@ class InferenceEngine(Module):
         self._model_times = []
         return model_times
 
+    def _module_match(self, module):
+        for policy in generic_policies:
+            policy = policy()
+            if policy.match_replaced(module):
+                return True
+        return False
+
+    def _local_cuda_graph_used(self, module):
+        if isinstance(module, torch.nn.Module):
+            return False
+        else:
+            sub_module_cuda_graph = False
+            for name in module.__dict__.keys():
+                sub_module = getattr(module, name)
+
+                if self._module_match(sub_module) and hasattr(sub_module,
+                                                              "enable_cuda_graph"):
+                    sub_module_cuda_graph = True
+
+            return sub_module_cuda_graph
+
     def forward(self, *inputs, **kwargs):
         """Execute forward propagation
 
@@ -525,7 +551,8 @@ class InferenceEngine(Module):
             get_accelerator().synchronize()
             start = time.time()
 
-        if get_accelerator().device_name() == 'cuda' and self._config.enable_cuda_graph:
+        if get_accelerator().device_name(
+        ) == 'cuda' and self._config.enable_cuda_graph and not self.local_cuda_graph:
             if self.cuda_graph_created:
                 outputs = self._graph_replay(*inputs, **kwargs)
             else:

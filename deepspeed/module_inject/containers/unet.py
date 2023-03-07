@@ -5,6 +5,7 @@ import torch
 from torch.nn.parameter import Parameter
 
 from ..policy import DSPolicy
+from ...model_implementations.diffusers.unet import DSUNet
 
 
 class UNetPolicy(DSPolicy):
@@ -19,9 +20,11 @@ class UNetPolicy(DSPolicy):
     def match(self, module):
         return isinstance(module, self._orig_layer_class)
 
+    def match_replaced(self, module):
+        return isinstance(module, DSUNet)
+
     def apply(self, module, enable_cuda_graph=True):
         # TODO(cmikeh2): Enable cuda graph should be an inference configuration
-        from ...model_implementations.diffusers.unet import DSUNet
         return DSUNet(module, enable_cuda_graph=enable_cuda_graph)
 
     def attention(self, client_module):

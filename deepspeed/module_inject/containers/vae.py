@@ -2,6 +2,7 @@
 Copyright 2022 The Microsoft DeepSpeed Team
 '''
 from ..policy import DSPolicy
+from ...model_implementations.diffusers.vae import DSVAE
 
 
 class VAEPolicy(DSPolicy):
@@ -20,9 +21,11 @@ class VAEPolicy(DSPolicy):
     def match(self, module):
         return isinstance(module, self._orig_layer_class)
 
+    def match_replaced(self, module):
+        return isinstance(module, DSVAE)
+
     def apply(self, module, enable_cuda_graph=True):
         # TODO(cmikeh2): Enable cuda graph should be an inference configuration
-        from ...model_implementations.diffusers.vae import DSVAE
         return DSVAE(module, enable_cuda_graph=enable_cuda_graph)
 
     # NOTE (lekurile): Should we have a diffusers policy class?
