@@ -603,7 +603,9 @@ def init_distributed(dist_backend=None,
                      timeout=default_pg_timeout,
                      init_method=None,
                      dist_init_required=None,
-                     config=None):
+                     config=None,
+                     rank=-1,
+                     world_size=-1):
     ''' Initialize dist backend, potentially performing MPI discovery if needed
 
     Arguments:
@@ -614,6 +616,8 @@ def init_distributed(dist_backend=None,
         timeout: Optional (timedelta). Timeout for operations executed against the process group. Default value equals 30 minutes.
         init_method: Optional (string). Torch distributed, URL specifying how to initialize the process group. Default is “env://” if no init_method or store is specified.
         config: Optional (dict). DeepSpeed configuration for setting up comms options (e.g. Comms profiling)
+        rank: Optional (int). The current manually specified rank. Some init_method like “tcp://” need the rank and world_size as well (see: https://pytorch.org/docs/stable/distributed.html#tcp-initialization)
+        world_size: Optional (int). Desired world_size for the TCP or Shared file-system initialization.
     '''
     global cdb
 
@@ -658,7 +662,7 @@ def init_distributed(dist_backend=None,
                     'Initializing TorchBackend in DeepSpeed with backend {}'.format(
                         dist_backend))
             # Create a torch backend object, initialize torch distributed, and assign to cdb
-            cdb = TorchBackend(dist_backend, timeout, init_method)
+            cdb = TorchBackend(dist_backend, timeout, init_method, rank, world_size)
 
 
 def mpi_discovery(distributed_port=TORCH_DISTRIBUTED_DEFAULT_PORT, verbose=True):
