@@ -10,7 +10,7 @@ from typing import Deque, Dict, Tuple
 
 from deepspeed.runtime import ZeROOptimizer
 from deepspeed.utils import logger
-from deepspeed.runtime.fp16.loss_scaler import LossScaler, DynamicLossScaler
+from deepspeed.runtime.fp16.loss_scaler import CreateLossScaler
 from deepspeed.runtime.comm.coalesced_collectives import reduce_scatter_coalesced
 from deepspeed.runtime.utils import inf, get_global_norm, is_model_parallel_parameter
 from deepspeed.runtime.zero.partition_parameters import *
@@ -332,18 +332,11 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
         #exit(0)
 
         # we may have a way of fusing dynamic scale. Do not support for now
-        if self.dtype == torch.float or not dynamic_loss_scale:
-            loss_scale_value = 1.0 if self.dtype == torch.float else static_loss_scale
-
-            self.dynamic_loss_scale = False
-            self.loss_scaler = LossScaler(scale=loss_scale_value)
-        else:
-            if dynamic_loss_args is None:
-                self.loss_scaler = DynamicLossScaler()
-            else:
-                self.loss_scaler = DynamicLossScaler(**dynamic_loss_args)
-
-            self.dynamic_loss_scale = True
+        self.loss_scaler = CreateLossScaler(dtype=self.dtype,
+                                            static_loss_scale=static_loss_scale,
+                                            dynamic_scaling=dynamic_loss_scale,
+                                            dynamic_loss_args=dynamic_loss_args)
+        self.dynamic_loss_scale = self.loss_scaler.dynamic
 
         self.debug_fp16_grads = [{} for _ in self.fp16_groups]
 
@@ -1844,11 +1837,10 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
         see_memory_usage('After overflow after clearing gradients', force=False)
 
         if dist.get_rank() == 0:
-            logger.info(
-                "[deepspeed] OVERFLOW! Rank {} Skipping step. Attempted loss scale: {}, "
-                "reducing to {}".format(dist.get_rank(),
-                                        prev_scale,
-                                        self.loss_scale))
+            overflow_msg = f"[deepspeed] OVERFLOW! Rank {dist.get_rank()} Skipping step."
+            if self.dtype == torch.half:
+                overflow_msg += f" Attempted loss scale: {prev_scale}, reducing to {self.loss_scale}"
+            logger.info(overflow_msg)
 
     @instrument_w_nvtx
     def _overflow_check_and_loss_scale_update(self):

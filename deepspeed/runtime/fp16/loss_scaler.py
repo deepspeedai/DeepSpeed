@@ -16,6 +16,8 @@
 #    https://github.com/NVIDIA/Megatron-LM/blob/master/fp16/loss_scaler.py
 #Commit: 93ab4bea59dc5cbf97c079d313741866af4deac9
 
+import torch
+
 INITIAL_LOSS_SCALE = 'init_scale'
 SCALE_WINDOW = 'scale_window'
 DELAYED_SHIFT = 'delayed_shift'
@@ -35,6 +37,7 @@ class LossScalerBase:
     """
     def __init__(self, cur_scale):
         self.cur_scale = cur_scale
+        self.dynamic = False
 
     @property
     def loss_scale(self):
@@ -117,6 +120,7 @@ class DynamicLossScaler(LossScalerBase):
         self.cur_hysteresis = delayed_shift
         self.consecutive_hysteresis = consecutive_hysteresis
         self.raise_error_at_min_scale = raise_error_at_min_scale
+        self.dynamic = True
 
     # `params` is a list / generator of torch.Variable
     def has_overflow_serial(self, params):
@@ -168,6 +172,18 @@ class DynamicLossScaler(LossScalerBase):
                     self.cur_hysteresis = self.delayed_shift
                 self.cur_scale *= self.scale_factor
         self.cur_iter += 1
+
+
+# Although loss scaling is only defined for fp16, yet for backwards compatibility
+# we still create a scaler for other dtypes (fp32, bf16) which does not perform any scaling.
+def CreateLossScaler(dtype, static_loss_scale, dynamic_scaling, dynamic_loss_args):
+    if dtype == torch.half and dynamic_scaling:
+        if dynamic_loss_args is None:
+            return DynamicLossScaler()
+        return DynamicLossScaler(**dynamic_loss_args)
+
+    loss_scale_value = static_loss_scale if dtype == torch.half else 1.0
+    return LossScaler(scale=loss_scale_value)
 
 
 ##############################################################
