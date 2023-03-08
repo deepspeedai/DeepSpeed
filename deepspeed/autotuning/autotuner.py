@@ -1125,7 +1125,7 @@ class Autotuner:
         min_gas = max_train_batch_size_per_gpu // max_micro_batch_size
         # if gas is the same as min_gas, do not add mbs to the tuning list
         for mbs in range(min_micro_batch_size, max_micro_batch_size, stride):
-            if max_micro_batch_size // mbs != min_gas:
+            if max_train_batch_size_per_gpu // mbs != min_gas:
                 ls.append(mbs)
         ls.append(max_micro_batch_size)
 
