@@ -8,6 +8,9 @@ import importlib
 
 from .builder import get_default_compute_capabilities, OpBuilder
 
+# Do not remove, required for abstract accelerator to detect if we have a deepspeed or 3p op_builder
+__deepspeed__ = True
+
 # List of all available op builders from deepspeed op_builder
 try:
     import deepspeed.ops.op_builder  # noqa: F401
