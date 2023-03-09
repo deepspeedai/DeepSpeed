@@ -466,7 +466,8 @@ class TestZeroAllowUntestedOptimizer(DistributedTest):
                 "stage": zero_stage,
                 "cpu_offload": use_cpu_offload
             },
-            "zero_allow_untested_optimizer": False
+            "zero_allow_untested_optimizer": False,
+            "zero_force_ds_cpu_optimizer": False
         }
         hidden_dim = 10
 

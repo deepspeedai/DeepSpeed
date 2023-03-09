@@ -719,6 +719,9 @@ class DeepSpeedEngine(Module):
     def zero_allow_untested_optimizer(self):
         return self._config.zero_allow_untested_optimizer
 
+    def zero_force_ds_cpu_optimizer(self):
+        return self._config.zero_force_ds_cpu_optimizer
+
     def zero_reduce_scatter(self):
         return self._config.zero_config.reduce_scatter
 
@@ -1265,6 +1268,13 @@ class DeepSpeedEngine(Module):
             else:
                 basic_optimizer = client_optimizer(model_parameters)
                 log_dist('Using client callable to create basic optimizer', ranks=[0])
+
+            if self.zero_use_cpu_optimizer() and not isinstance(
+                    basic_optimizer,
+                    deepspeed.ops.adam.DeepSpeedCPUAdam):
+                if self.zero_force_ds_cpu_optimizer():
+                    msg = f'You are using ZeRO-Offload with a client provided optimizer ({type(basic_optimizer)}) which in most cases will yield poor performance. Please either use deepspeed.ops.adam.DeepSpeedCPUAdam or set an optimizer in your ds-config (https://www.deepspeed.ai/docs/config-json/#optimizer-parameters). If you really want to use a custom optimizer w. ZeRO-Offload and understand the performance impacts you can also set <"zero_force_ds_cpu_optimizer": false> in your configuration file.'
+                    raise ZeRORuntimeException(msg)
         else:
             basic_optimizer = self._configure_basic_optimizer(model_parameters)
             log_dist(

@@ -18,6 +18,7 @@ import deepspeed
 from deepspeed.runtime.engine import DeepSpeedEngine
 from deepspeed.runtime.zero.partition_parameters import ZeroParamStatus
 from deepspeed.utils.zero_to_fp32 import load_state_dict_from_zero_checkpoint
+from deepspeed.runtime.zero.utils import ZeRORuntimeException
 from deepspeed.accelerator import get_accelerator
 
 
@@ -1384,3 +1385,40 @@ class TestZeroFrozenWeights(DistributedTest):
             loss = loss[1]
             model.backward(loss)
             model.step()
+
+
+@pytest.mark.parametrize('force_ds_optim', [True, False])
+class TestZeroOffloadOptim(DistributedTest):
+    world_size = 1
+
+    def test(self, force_ds_optim):
+        config_dict = {
+            "train_batch_size": 4,
+            "gradient_accumulation_steps": 2,
+            "steps_per_print": 1,
+            "fp16": {
+                "enabled": True
+            },
+            "zero_optimization": {
+                "stage": 1,
+                "offload_optimizer": {
+                    "device": "cpu"
+                }
+            },
+            "zero_force_ds_cpu_optimizer": force_ds_optim,
+        }
+        hidden_dim = 10
+
+        model = SimpleModel(hidden_dim)
+
+        optimizer = torch.optim.Adam(model.parameters())
+
+        if force_ds_optim:
+            with pytest.raises(ZeRORuntimeException):
+                model, _, _, _ = deepspeed.initialize(model=model,
+                                                      optimizer=optimizer,
+                                                      config=config_dict)
+        else:
+            model, _, _, _ = deepspeed.initialize(model=model,
+                                                  optimizer=optimizer,
+                                                  config=config_dict)
