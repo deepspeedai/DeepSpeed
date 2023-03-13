@@ -206,19 +206,19 @@ class TrainSchedule(PipeSchedule):
 
             # Exchange activations
             if is_forward:
-                if self._valid_micro_batch(micro_batch_id) and self._valid_stage(
-                        self.prev_stage):
-                    cmds.append(RecvActivation(curr_buffer))
                 if self._valid_micro_batch(prev_micro_batch_id) and self._valid_stage(
                         self.prev_stage):
                     cmds.append(SendGrad(prev_buffer))
+                if self._valid_micro_batch(micro_batch_id) and self._valid_stage(
+                        self.prev_stage):
+                    cmds.append(RecvActivation(curr_buffer))
             else:
-                if self._valid_micro_batch(prev_micro_batch_id) and self._valid_stage(
-                        self.next_stage):
-                    cmds.append(SendActivation(prev_buffer))
                 if self._valid_micro_batch(micro_batch_id) and self._valid_stage(
                         self.next_stage):
                     cmds.append(RecvGrad(curr_buffer))
+                if self._valid_micro_batch(prev_micro_batch_id) and self._valid_stage(
+                        self.next_stage):
+                    cmds.append(SendActivation(prev_buffer))
 
             # First/last stage loads
             if self.stage_id == 0 or self.stage_id == self.stages - 1:
@@ -243,9 +243,14 @@ class TrainSchedule(PipeSchedule):
             yield cmds
 
     def num_pipe_buffers(self):
-        """As many buffers as the distance from this stage to the last stage.
+        """Return the number of pipeline buffers required for this stage.
+
+        This is equivalent to the maximum number of in-flight forward passes,
+        since we need to remember the activations of forward passes in order
+        to run backpropagation. For synchronous 1F1B, this is equivalent to
+        the index difference between this stage and the last stage.
         """
-        buffers = min(self.stages - self.stage_id + 1, self.micro_batches)
+        buffers = min(self.stages - self.stage_id, self.micro_batches)
         return max(2, buffers)
 
     def _step_to_micro_batch(self, step_id):
