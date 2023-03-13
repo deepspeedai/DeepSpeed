@@ -1,5 +1,7 @@
 '''Copyright The Microsoft DeepSpeed Team'''
 
+import os
+
 
 class CheckpointEngine(object):
 
@@ -10,6 +12,9 @@ class CheckpointEngine(object):
     def create(self, tag):
         # create checkpoint on give tag for save/load.
         pass
+
+    def makedirs(self, path, exist_ok=False):
+        os.makedirs(path, exist_ok=exist_ok)
 
     def save(self, state_dict, path: str):
         pass

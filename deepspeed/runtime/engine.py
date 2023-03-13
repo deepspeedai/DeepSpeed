@@ -79,7 +79,7 @@ from deepspeed.runtime.data_pipeline.data_routing.basic_layer import RandomLayer
 from deepspeed.runtime.checkpoint_engine.torch_checkpoint_engine import TorchCheckpointEngine
 
 from .pipe.module import PipelineModule
-from .utils import ensure_directory_exists, get_ma_status
+from .utils import get_ma_status
 from ..ops.adam import FusedAdam
 from ..moe.sharded_moe import TopKGate, MOELayer
 from ..moe.layer import MoE
@@ -3100,7 +3100,7 @@ class DeepSpeedEngine(Module):
         # There seems to be issue creating them in parallel
 
         # Ensure save_dir directory exists
-        os.makedirs(save_dir, exist_ok=True)
+        self.checkpoint_engine.makedirs(save_dir, exist_ok=True)
         dist.barrier()
 
         if tag is None:
@@ -3278,7 +3278,8 @@ class DeepSpeedEngine(Module):
                          if zero_checkpoint else self._get_ckpt_name)
         try:
             checkpoint_name = name_function(save_dir, tag)
-            ensure_directory_exists(checkpoint_name)
+            path = os.path.dirname(checkpoint_name)
+            self.checkpoint_engine.makedirs(path, exist_ok=True)
         except:
             logger.error(f"Failed saving model checkpoint to {save_dir} with tag {tag}")
             return False
@@ -3528,7 +3529,7 @@ class DeepSpeedEngine(Module):
             state_dict = self.module.state_dict()
 
         if dist.get_rank() == 0:
-            os.makedirs(save_dir, exist_ok=True)
+            self.checkpoint_engine.makedirs(save_dir, exist_ok=True)
             logger.info(f"Saving model weights to {path}")
             self.checkpoint_engine.save(state_dict, path)
 
