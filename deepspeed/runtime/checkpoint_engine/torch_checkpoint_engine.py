@@ -11,7 +11,7 @@ class TorchCheckpointEngine(CheckpointEngine):
         super().__init__(config_params)
 
     def create(self, tag):
-        log_dist(f"[Torch] Checkpoint {tag} is begin to save!", ranks=[0])
+        log_dist(f"[Torch] Checkpoint {tag} is about to be saved!", ranks=[0])
 
     def save(self, state_dict, path: str):
         logger.info(f"[Torch] Saving {path}...")
