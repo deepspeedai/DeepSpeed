@@ -17,6 +17,8 @@
 #Commit: 93ab4bea59dc5cbf97c079d313741866af4deac9
 
 import torch
+from deepspeed import comm as dist
+from deepspeed.utils import logger
 
 INITIAL_LOSS_SCALE = 'init_scale'
 SCALE_WINDOW = 'scale_window'
@@ -109,7 +111,8 @@ class DynamicLossScaler(LossScalerBase):
                  min_scale=1,
                  delayed_shift=1,
                  consecutive_hysteresis=False,
-                 raise_error_at_min_scale=True):
+                 raise_error_at_min_scale=True,
+                 dtype=torch.half):
         super(DynamicLossScaler, self).__init__(init_scale)
         self.cur_iter = 0
         self.last_overflow_iter = -1
@@ -121,6 +124,7 @@ class DynamicLossScaler(LossScalerBase):
         self.consecutive_hysteresis = consecutive_hysteresis
         self.raise_error_at_min_scale = raise_error_at_min_scale
         self.dynamic = True
+        self.dtype = dtype
 
     # `params` is a list / generator of torch.Variable
     def has_overflow_serial(self, params):
@@ -160,8 +164,20 @@ class DynamicLossScaler(LossScalerBase):
                     raise Exception(
                         "Current loss scale already at minimum - cannot decrease scale anymore. Exiting run."
                     )
-                self.cur_scale = max(self.cur_scale / self.scale_factor, self.min_scale)
+                else:
+                    next_scale = max(self.cur_scale / self.scale_factor, self.min_scale)
+                    if dist.get_rank() == 0:
+                        overflow_msg = f"[deepspeed] OVERFLOW! Rank {dist.get_rank()} Skipping step."
+                        if self.dtype == torch.half:
+                            overflow_msg += f" Attempted loss scale: {int(self.cur_scale)}, reducing to {int(next_scale)}"
+                        logger.info(overflow_msg)
+                    self.cur_scale = next_scale
             else:
+                if dist.get_rank() == 0:
+                    overflow_msg = f"[deepspeed] OVERFLOW! Rank {dist.get_rank()} Skipping step."
+                    if self.dtype == torch.half:
+                        overflow_msg += f" Attempted loss scale: {int(self.cur_scale)}, but hysteresis is {self.cur_hysteresis}. Reducing hysteresis to {self.cur_hysteresis-1}"
+                    logger.info(overflow_msg)
                 self.cur_hysteresis -= 1
             self.last_overflow_iter = self.cur_iter
         else:
@@ -179,8 +195,8 @@ class DynamicLossScaler(LossScalerBase):
 def CreateLossScaler(dtype, static_loss_scale, dynamic_scaling, dynamic_loss_args):
     if dtype == torch.half and dynamic_scaling:
         if dynamic_loss_args is None:
-            return DynamicLossScaler()
-        return DynamicLossScaler(**dynamic_loss_args)
+            return DynamicLossScaler(dtype=dtype)
+        return DynamicLossScaler(dtype=dtype, **dynamic_loss_args)
 
     loss_scale_value = static_loss_scale if dtype == torch.half else 1.0
     return LossScaler(scale=loss_scale_value)

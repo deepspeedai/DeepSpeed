@@ -1777,12 +1777,6 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
         prev_scale = self.loss_scale
         self._update_scale(self.overflow)
         if self.overflow:
-            if dist.get_rank() == 0:
-                overflow_msg = f"[deepspeed] OVERFLOW! Rank {dist.get_rank()} Skipping step."
-                if self.dtype == torch.half:
-                    overflow_msg += f" Attempted loss scale: {prev_scale}, reducing to {self.loss_scale}"
-                logger.info(overflow_msg)
-
             see_memory_usage('After overflow before clearing gradients')
             self.zero_grad(set_to_none=True)
             if self.cpu_offload:
