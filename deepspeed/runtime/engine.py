@@ -332,6 +332,10 @@ class DeepSpeedEngine(Module):
         if model_parameters is None:
             model_parameters = self.module.parameters()
 
+        # Convert model parameters from generator to list
+        if not isinstance(model_parameters, list):
+            model_parameters = list(model_parameters)
+
         if has_optimizer:
             self._configure_optimizer(optimizer, model_parameters)
             self._configure_lr_scheduler(lr_scheduler)
