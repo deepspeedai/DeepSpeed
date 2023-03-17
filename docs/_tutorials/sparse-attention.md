@@ -9,7 +9,7 @@ In this tutorial we describe how to use DeepSpeed Sparse Attention (SA) and its 
 {: .notice--warning}
 
 ## Sparse attention modules
-* **MatMul**: This module handles block-sparse matrix-matrix multiplication. Currently it supports SDD, DSD, and DDS as described in [DeepSpeed Sparse Attention](https://www.deepspeed.ai/news/2020/09/08/sparse-attention.html) section.
+* **MatMul**: This module handles block-sparse matrix-matrix multiplication. Currently it supports SDD, DSD, and DDS as described in [DeepSpeed Sparse Attention](https://www.deepspeed.ai/2020/09/08/sparse-attention.html) section.
 * **Softmax**: This module applies block sparse softmax. It handles both forward and backward pass.
 * **SparseSelfAttention**: This module uses MatMul and Softmax kernels and generates Context Layer output given Query, Keys and Values. It is a simplified version of common operations in any self-attention layer. It can also apply:
   * `Relative position embedding`

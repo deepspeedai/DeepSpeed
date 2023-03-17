@@ -16,7 +16,7 @@ This tutorial is updated on 03/04/2021 to reflect the 1-bit Adam v2. Changes inc
 1) The NCCL-based implementation requires PyTorch >= 1.8 (and NCCL >= 2.8.3 when you have 64 or more GPUs). See details below. 2) Although 1-bit Adam is compatible with both FP16 and FP32, currently we only verified the convergence under mixed precision/FP16 training. 3) Currently the MPI-based implementation is not compatible with pipeline parallelism. 4) Frequent checkpoint loading could hurt 1-bit Adam's convergence. See details below.
 {: .notice--warning}
 
-In this tutorial, we are going to introduce the 1-bit Adam optimizer in DeepSpeed. 1-bit Adam can improve model training speed on communication-constrained clusters, especially for communication-intensive large models by reducing the overall communication volume by up to 5x. Detailed description of the 1-bit Adam algorithm, its implementation in DeepSpeed, and performance evaluation is available from our [blog post](https://www.deepspeed.ai/news/2020/09/08/onebit-adam-blog-post.html). We also have a [paper](https://arxiv.org/abs/2102.02888) which provides the most complete details including algorithm, system implementation, theoretical analysis, and more evaluations.
+In this tutorial, we are going to introduce the 1-bit Adam optimizer in DeepSpeed. 1-bit Adam can improve model training speed on communication-constrained clusters, especially for communication-intensive large models by reducing the overall communication volume by up to 5x. Detailed description of the 1-bit Adam algorithm, its implementation in DeepSpeed, and performance evaluation is available from our [blog post](https://www.deepspeed.ai/2020/09/08/onebit-adam-blog-post.html). We also have a [paper](https://arxiv.org/abs/2102.02888) which provides the most complete details including algorithm, system implementation, theoretical analysis, and more evaluations.
 
 To illustrate the benefits and usage of 1-bit Adam optimizer in DeepSpeed, we use the following two training tasks as examples:
 
@@ -77,7 +77,7 @@ mpirun -np [#processes] -ppn [#GPUs on each node] -hostfile [hostfile] [MPI flag
 
 ### 1.3 1-bit Algorithm
 
-The detailed description of the 1-bit Algorithm can be seen from our [blog post](https://www.deepspeed.ai/news/2020/09/08/onebit-adam-blog-post.html) and our [paper](https://arxiv.org/abs/2102.02888).
+The detailed description of the 1-bit Algorithm can be seen from our [blog post](https://www.deepspeed.ai/2020/09/08/onebit-adam-blog-post.html) and our [paper](https://arxiv.org/abs/2102.02888).
 
 ### 1.4 Configuration of 1-bit Adam
 The 1-bit Adam feature can be used by setting the optimizer configuration options as follows. An example json config file is shown below.
@@ -215,7 +215,7 @@ We fixed the learning rate to 3e-5. The table below shows the F1 and the EM scor
 
 Figure 1: Scalability of 1-bit Adam for SQuAD Finetuning on V100 GPUs with batch size of 3/GPU. -->
 
-Performance results of SQuAD Fine-tuning can be seen from our [blog post](https://www.deepspeed.ai/news/2020/09/08/onebit-adam-blog-post.html) and our [paper](https://arxiv.org/abs/2102.02888).
+Performance results of SQuAD Fine-tuning can be seen from our [blog post](https://www.deepspeed.ai/2020/09/08/onebit-adam-blog-post.html) and our [paper](https://arxiv.org/abs/2102.02888).
 
 
 
@@ -295,4 +295,4 @@ The above file is for BERT-large. For BERT-base training (sequence length 128), 
 
 ### 3.3 Performance Results for BERT Pre-training
 
-Performance results of BERT Pre-training can be seen from our [blog post](https://www.deepspeed.ai/news/2020/09/08/onebit-adam-blog-post.html) and our [paper](https://arxiv.org/abs/2102.02888).
+Performance results of BERT Pre-training can be seen from our [blog post](https://www.deepspeed.ai/2020/09/08/onebit-adam-blog-post.html) and our [paper](https://arxiv.org/abs/2102.02888).

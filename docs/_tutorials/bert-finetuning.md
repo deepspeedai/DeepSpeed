@@ -201,7 +201,7 @@ the `--predict_batch_size` should also be 8.
 
 For further details about the transformer kernel, please see our [usage
 tutorial](/tutorials/transformer_kernel/) and [technical deep
-dive](https://www.deepspeed.ai/news/2020/05/27/fastest-bert-training.html) on
+dive](https://www.deepspeed.ai/2020/05/27/fastest-bert-training.html) on
 the fastest BERT training.
 
 
@@ -302,7 +302,7 @@ Table 4. The setting of memory-optimization flags for a range of micro-batch siz
 
 ### FineTuning model pre-trained with DeepSpeed Transformer Kernels
 
-Fine-tuning the model pre-trained using DeepSpeed Transformer and the recipe in [DeepSpeed Fast-Bert Training](https://www.deepspeed.ai/news/2020/05/27/fastest-bert-training.html) should yield F1 score of 90.5 and is expected to increase if you let the pre-training longer than suggested in the tutorial.
+Fine-tuning the model pre-trained using DeepSpeed Transformer and the recipe in [DeepSpeed Fast-Bert Training](https://www.deepspeed.ai/2020/05/27/fastest-bert-training.html) should yield F1 score of 90.5 and is expected to increase if you let the pre-training longer than suggested in the tutorial.
 
 To get these results, we do require some tuning of the dropout settings as described below:
 
