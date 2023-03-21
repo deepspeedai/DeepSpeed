@@ -42,7 +42,8 @@ jobs:
       - name: PyTorch Lightning Tests
         run: |
           if [[ -d ./torch-extensions ]]; then rm -rf ./torch-extensions; fi
-          pip install pytorch-lightning
+          # Pin pytorch-lightning version to latest pre-2.0.0+ as these require updating the pinned torch versions above.
+          pip install pytorch-lightning==1.9.4
           pip install "protobuf<4.21.0"
           cd tests
           TORCH_EXTENSIONS_DIR=./torch-extensions pytest --color=yes --durations=0 --verbose lightning/

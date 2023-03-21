@@ -4,6 +4,8 @@ import copy
 import torch.nn as nn
 import pytest
 
+import torch
+import deepspeed
 import deepspeed.comm as dist
 from deepspeed.runtime.pipe.topology import PipeDataParallelTopology
 from deepspeed.runtime.pipe.module import PipelineModule
@@ -15,6 +17,15 @@ PipeTopo = PipeDataParallelTopology
 
 def rel_diff(A, B):
     return abs(A - B) / abs(A)
+
+
+def _skip_on_older_arch(arch=7):
+    if deepspeed.accelerator.get_accelerator().device_name() == 'cuda':
+        if torch.cuda.get_device_capability()[0] < arch:
+            pytest.skip("needs higher compute capability than 7")
+    else:
+        assert deepspeed.accelerator.get_accelerator().device_name() == 'xpu'
+        return
 
 
 @pytest.mark.parametrize('topo_config',
@@ -36,6 +47,8 @@ class TestPipeCifar10(DistributedTest):
     world_size = 4
 
     def test(self, topo_config):
+        _skip_on_older_arch()
+
         config_dict = {
             "train_batch_size": 16,
             "train_micro_batch_size_per_gpu": 4,

@@ -18,6 +18,13 @@ git_repo_path = abspath(join(dirname(dirname(__file__)), "src"))
 sys.path.insert(1, git_repo_path)
 
 
+def pytest_configure(config):
+    config.option.color = "yes"
+    config.option.durations = 0
+    config.option.durations_min = 1
+    config.option.verbose = True
+
+
 def pytest_addoption(parser):
     parser.addoption("--torch_ver", default=None, type=str)
     parser.addoption("--cuda_ver", default=None, type=str)

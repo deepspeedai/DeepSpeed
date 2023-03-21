@@ -44,8 +44,6 @@ jobs:
           if [[ -d ./torch-extensions ]]; then rm -rf ./torch-extensions; fi
           git clone https://github.com/huggingface/accelerate
           cd accelerate
-          # tmp fix
-          git checkout 5f4ba04628eeea14f9d248ab0e54399899503532
           git rev-parse --short HEAD
           # installing dependencies
           pip install .[testing]

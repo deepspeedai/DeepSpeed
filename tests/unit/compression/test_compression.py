@@ -228,6 +228,9 @@ class TestCompression(DistributedTest):
                           LinearLayer_Compress)
 
     def test_mpu_compress(self, tmpdir):
+        TORCH_MAJOR = int(torch.__version__.split(".")[0])
+        if TORCH_MAJOR > 1:
+            pytest.skip("megatron not compatible with torch >1.13")
         from megatron import mpu
         args_defaults = {
             'num_layers': 2,

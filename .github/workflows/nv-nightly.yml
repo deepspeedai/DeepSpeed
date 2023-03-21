@@ -20,7 +20,7 @@ jobs:
 
       - name: Install pytorch
         run: |
-          pip install torch torchvision --extra-index-url https://download.pytorch.org/whl/cu116
+          pip install torch==1.13.1 torchvision --extra-index-url https://download.pytorch.org/whl/cu116
           python -c "import torch; print('torch:', torch.__version__, torch)"
           python -c "import torch; print('CUDA available:', torch.cuda.is_available())"
 
@@ -47,4 +47,4 @@ jobs:
           unset TORCH_CUDA_ARCH_LIST # only jit compile for current arch
           if [[ -d ./torch-extensions ]]; then rm -rf ./torch-extensions; fi
           cd tests
-          TRANSFORMERS_CACHE=/blob/transformers_cache/ TORCH_EXTENSIONS_DIR=./torch-extensions pytest --color=yes --durations=0 --forked --verbose -m 'nightly' unit/ --torch_ver="1.13" --cuda_ver="11.6"
+          TRANSFORMERS_CACHE=/blob/transformers_cache/ TORCH_EXTENSIONS_DIR=./torch-extensions pytest --forked -m 'nightly' unit/ --torch_ver="1.13" --cuda_ver="11.6"

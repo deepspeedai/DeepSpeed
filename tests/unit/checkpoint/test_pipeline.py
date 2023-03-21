@@ -7,6 +7,17 @@ from unit.simple_model import *
 from unit.checkpoint.common import checkpoint_correctness_verification
 
 import pytest
+import deepspeed
+import torch
+
+
+def _skip_on_older_arch(arch=7):
+    if deepspeed.accelerator.get_accelerator().device_name() == 'cuda':
+        if torch.cuda.get_device_capability()[0] < arch:
+            pytest.skip("needs higher compute capability than 7")
+    else:
+        assert deepspeed.accelerator.get_accelerator().device_name() == 'xpu'
+        return
 
 
 class TestPipelineCheckpoint(DistributedTest):
@@ -14,6 +25,8 @@ class TestPipelineCheckpoint(DistributedTest):
 
     @pytest.mark.parametrize("zero_stage", [0, 1])
     def test_checkpoint_pipe_engine(self, zero_stage, tmpdir):
+        _skip_on_older_arch()
+
         config_dict = {
             "train_batch_size": 2,
             "train_micro_batch_size_per_gpu": 1,
