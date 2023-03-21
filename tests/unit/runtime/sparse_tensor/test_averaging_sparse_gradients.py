@@ -3,6 +3,7 @@
 import torch
 import deepspeed
 from unit.common import DistributedTest
+from unit.util import skip_on_arch
 
 
 class Model(torch.nn.Module):
@@ -49,6 +50,8 @@ class TestSparseAdam(DistributedTest):
     world_size = 2
 
     def test(self):
+        skip_on_arch(min_arch=7)
+
         config_dict = {
             "train_batch_size": 2,
             "steps_per_print": 1,
