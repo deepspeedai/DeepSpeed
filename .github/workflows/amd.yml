@@ -15,7 +15,7 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  unit-tests:
+  amd-tests:
     # The type of runner that the job will run on
     runs-on: [self-hosted, amd]
 
