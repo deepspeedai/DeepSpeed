@@ -12,7 +12,6 @@ Copyright 2022 The Microsoft DeepSpeed Team
 #include <cstdlib>
 #include <ctime>
 
-#define ATTN_THREADS 256
 #define MAX_REG_SIZE 8
 
 #define minus_infinity -10000.0
@@ -423,33 +422,51 @@ void launch_attn_softmax_v2(T* vals,
                             int mp_size,
                             cudaStream_t stream)
 {
-    int total_count = batch_size * heads * num_seq;
-    int warp_num = ATTN_THREADS / WARP_SIZE;
-    int reduce_width = ((sequence_length - 1) / ATTN_THREADS + 1);
-    reduce_width = (int)pow(2.0, floor(log2((float)(reduce_width)))) * WARP_SIZE;
-    dim3 grid_dim((total_count - 1) / (ATTN_THREADS / reduce_width) + 1);
-    dim3 block_dim(ATTN_THREADS);
+    const int total_count = batch_size * heads * num_seq;
 
-    const int iterations = (sequence_length - 1) / (reduce_width << 2) + 1;
+    // Scheduling Overview
+    // 4 element unroll with power of 2 `reduce_width` threads to a ceiling of `attn_threads`
+    // Each block should be partitioned into as many `reduce_width` blocks
+    // as can be fit.
+    constexpr int attn_threads = 256;
+    constexpr int min_reduce_width = hw_warp_size;
+    constexpr int internal_unroll = 4;
+
+    // Handle internal unroll then round to next power of 2. Bump up to minimum granularity.
+    const int thread_steps_rounded =
+        next_pow2((sequence_length + internal_unroll - 1) / internal_unroll);
+    const int thread_steps_schedule =
+        (thread_steps_rounded < min_reduce_width) ? min_reduce_width : thread_steps_rounded;
+    // Bound reduce width to the number of threads
+    const int reduce_width = (thread_steps_schedule < attn_threads) ? thread_steps_schedule
+                                                                    : attn_threads;
+    // Scale for the excess
+    const int iterations = thread_steps_schedule / reduce_width;
+    // Should be safe since reduce_width is capped to attn_threads
+    const int partitions = attn_threads / reduce_width;
+
+    // Launch params
+    dim3 grid((total_count + partitions - 1) / partitions);
+    dim3 block(attn_threads);
 
     if (sequence_length <= 32768)
-        attn_softmax_v2<<<grid_dim, block_dim, 0, stream>>>(vals,
-                                                            mask,
-                                                            alibi,
-                                                            layer_scale,
-                                                            triangular,
-                                                            recompute,
-                                                            local_attention,
-                                                            window_size,
-                                                            total_count,
-                                                            heads,
-                                                            sequence_length,
-                                                            num_seq,
-                                                            head_offset,
-                                                            mask_stride,
-                                                            mp_size,
-                                                            iterations,
-                                                            reduce_width);
+        attn_softmax_v2<<<grid, block, 0, stream>>>(vals,
+                                                    mask,
+                                                    alibi,
+                                                    layer_scale,
+                                                    triangular,
+                                                    recompute,
+                                                    local_attention,
+                                                    window_size,
+                                                    total_count,
+                                                    heads,
+                                                    sequence_length,
+                                                    num_seq,
+                                                    head_offset,
+                                                    mask_stride,
+                                                    mp_size,
+                                                    iterations,
+                                                    reduce_width);
     else
         throw std::runtime_error("Unsupport Seq_Length!");
 }
