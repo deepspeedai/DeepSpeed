@@ -5,6 +5,7 @@ Licensed under the MIT license.
 """
 import os
 from typing import Union
+from enum import Enum
 
 import torch
 import json
@@ -90,6 +91,33 @@ ADAM_W_MODE_DEFAULT = True
 
 class DeepSpeedConfigError(Exception):
     pass
+
+
+class DtypeEnum(Enum):
+    # The torch dtype must always be the first value (so we return torch.dtype)
+    fp16 = torch.float16, "torch.float16", "fp16", "float16", "half"
+    fp32 = torch.float32, "torch.float32", "fp32", "float32", "float"
+    int8 = torch.int8, "torch.int8", "int8"
+    bf16 = torch.bfloat16, "torch.bfloat16", "bf16", "bfloat16"
+
+    # Copied from https://stackoverflow.com/a/43210118
+    # Allows us to use multiple values for each Enum index and returns first
+    # listed value when Enum is called
+    def __new__(cls, *values):
+        obj = object.__new__(cls)
+        # first value is canonical value
+        obj._value_ = values[0]
+        for other_value in values[1:]:
+            cls._value2member_map_[other_value] = obj
+        obj._all_values = values
+        return obj
+
+    def __repr__(self):
+        return "<%s.%s: %s>" % (
+            self.__class__.__name__,
+            self._name_,
+            ", ".join([repr(v) for v in self._all_values]),
+        )
 
 
 def get_pld_enabled(param_dict):

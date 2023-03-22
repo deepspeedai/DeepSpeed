@@ -92,7 +92,7 @@ from deepspeed.utils.logging import print_json_dist, print_configuration
 from deepspeed.accelerator import get_accelerator
 from deepspeed.ops.op_builder import UtilsBuilder
 
-from deepspeed.inference.config import DtypeEnum
+from deepspeed.runtime.config import DtypeEnum
 
 # Set to torch's distributed package or deepspeed.comm based inside DeepSpeedEngine init
 dist = None
