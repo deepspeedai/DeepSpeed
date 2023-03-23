@@ -795,7 +795,7 @@ class PipelineEngine(DeepSpeedEngine):
                 loaded = batch[0].clone().to(self.device).detach()
                 loaded.requires_grad = loaded.is_floating_point()
             else:
-                assert isinstance(batch[0], tuple)
+                assert isinstance(batch[0], (tuple, list))
                 # Assume list or tuple
                 loaded = []
                 for x in batch[0]:
