@@ -3534,9 +3534,15 @@ class DeepSpeedEngine(Module):
         else:
             state_dict = self.module.state_dict()
 
+        tag = f"global_step{self.global_steps}"
+        tag = str(tag)
+        self.checkpoint_engine.create(tag)
+
         if dist.get_rank() == 0:
             self.checkpoint_engine.makedirs(save_dir, exist_ok=True)
-            logger.info(f"Saving model weights to {path}")
+            logger.info(f"Saving model weights to {path}, tag: {tag}")
             self.checkpoint_engine.save(state_dict, path)
+
+        self.checkpoint_engine.commit(tag)
 
         return True
