@@ -1,4 +1,4 @@
-name: nv-torch18-v100
+name: nv-torch19-p40
 
 on:
   push:
@@ -9,8 +9,6 @@ on:
   pull_request:
     paths-ignore:
       - 'docs/**'
-  schedule:
-    - cron: "0 0 * * *"
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -18,7 +16,7 @@ concurrency:
 
 jobs:
   unit-tests:
-    runs-on: [self-hosted, nvidia, cu111, v100]
+    runs-on: [self-hosted, nvidia, cu111, p40]
 
     steps:
       - uses: actions/checkout@v2
@@ -28,7 +26,7 @@ jobs:
 
       - name: Install pytorch
         run: |
-          pip install torch==1.8.2+cu111 torchvision==0.9.2+cu111 -f https://download.pytorch.org/whl/lts/1.8/torch_lts.html
+          pip install torch==1.9.0+cu111 torchvision==0.10.0+cu111 -f https://download.pytorch.org/whl/torch_stable.html
           python -c "import torch; print('torch:', torch.__version__, torch)"
           python -c "import torch; print('CUDA available:', torch.cuda.is_available())"
 
@@ -52,8 +50,6 @@ jobs:
 
       - name: Unit tests
         run: |
-          unset TORCH_CUDA_ARCH_LIST # only jit compile for current arch
           if [[ -d ./torch-extensions ]]; then rm -rf ./torch-extensions; fi
           cd tests
-          TORCH_EXTENSIONS_DIR=./torch-extensions pytest --forked -n 4  unit/ --torch_ver="1.8" --cuda_ver="11"
-          TORCH_EXTENSIONS_DIR=./torch-extensions pytest --forked -m 'sequential' unit/ --torch_ver="1.8" --cuda_ver="11"
+          TORCH_EXTENSIONS_DIR=./torch-extensions pytest --forked -n 4 unit/ --torch_ver="1.9" --cuda_ver="11.1"

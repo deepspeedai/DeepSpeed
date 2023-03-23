@@ -114,10 +114,13 @@ class DeepSpeedTransformerInference(nn.Module):
             # TODO(arashb): 'layer_head_mask' and 'past_key_value' are only added to satisfy the OPT models API.
             # This needs to be redesigned later!
             layer_head_mask=None,
-            past_key_value=None):
+            past_key_value=None,
+            **kwargs):
 
         if x is not None:
             input = x
+        if "hidden_states" in kwargs:
+            input = kwargs["hidden_states"]
 
         input_mask = (input_mask if attn_mask is None else
                       attn_mask) if attention_mask is None else attention_mask
