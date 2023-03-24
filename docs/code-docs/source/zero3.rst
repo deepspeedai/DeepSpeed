@@ -331,3 +331,29 @@ These routines can be used in a training loop as shown in the following snippet.
 
     [...]
     optimizer.step()
+
+
+GPU Memory Management
+---------------------
+
+By default at the end of training with ZeRO stage 3 some parameters could remain unpartitioned and use up some gpu memory.
+This is done on purpose as an optimization should you resume training again. If you'd like to clear out the cached
+parameters that use up gpu memory, you can call ``empty_partition_cache`` method of a DeepSpeed engine.
+
+.. autofunction::deepspeed.DeepSpeedEngine.empty_partition_cache
+
+The following code snippet illustrates this functionality.
+
+.. code-block:: python
+
+    with zero.Init():
+        model = MyLargeModel()
+
+    ds_engine, _, _, _ = deepspeed.initialize(model, ...)
+    for batch in ...:
+        loss = ds_engine(batch)
+        ds_engine.backward(batch)
+        ds_engine.step()
+
+    # Free GPU memory consumed by model parameters
+    ds_engine.empty_partition_cache()

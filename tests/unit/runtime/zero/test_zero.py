@@ -1422,3 +1422,49 @@ class TestZeroOffloadOptim(DistributedTest):
             model, _, _, _ = deepspeed.initialize(model=model,
                                                   optimizer=optimizer,
                                                   config=config_dict)
+
+
+@pytest.mark.parametrize('training', [True, False])
+class TestZeroPartitionCache(DistributedTest):
+    world_size = 1
+
+    def test_training_partition_cache(self, training):
+        hidden_dim = 10
+        config_dict = {
+            "train_batch_size": 2,
+            "fp16": {
+                "enabled": True,
+                "initial_scale_power": 8
+            },
+            "zero_optimization": {
+                "stage": 3,
+                "stage3_param_persistence_threshold": hidden_dim
+            }
+        }
+        if training:
+            config_dict["optimizer"] = {"type": "Adam"}
+
+        with deepspeed.zero.Init(config_dict_or_path=config_dict):
+            model = SimpleModel(hidden_dim, empty_grad=False)
+
+        model, _, _, _ = deepspeed.initialize(model=model, config=config_dict)
+
+        dtype = torch.half
+        data_loader = random_dataloader(model=model,
+                                        total_samples=6,
+                                        hidden_dim=hidden_dim,
+                                        device=model.device,
+                                        dtype=dtype)
+
+        for _, batch in enumerate(data_loader):
+            loss = model(batch[0], batch[1])
+            if training:
+                model.backward(loss)
+                model.step()
+
+        persist_param_size = sum([p.numel() for p in model.parameters() if p.ds_persist])
+
+        assert persist_param_size >= sum([p.numel() for p in model.parameters()])
+
+        model.empty_partition_cache()
+        assert sum([p.numel() for p in model.parameters()]) == 0

@@ -2467,6 +2467,9 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
         if len(self.persistent_parameters) > 0:
             self.persistent_parameters[0].all_gather(self.persistent_parameters)
 
+    def empty_partition_cache(self):
+        self.parameter_offload.empty_partition_cache()
+
 
 def _handle_overflow(cpu_sum, x, i):
     import math

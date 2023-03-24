@@ -9,6 +9,7 @@ import torch
 import hashlib
 from collections import defaultdict, OrderedDict, deque
 from shutil import copyfile
+import gc
 
 from torch.nn.modules import Module
 from torch.nn.parameter import Parameter
@@ -3546,3 +3547,12 @@ class DeepSpeedEngine(Module):
         self.checkpoint_engine.commit(tag)
 
         return True
+
+    def empty_partition_cache(self):
+        """
+        Release GPU memory consumed by offloaded model parameters.
+        """
+        if hasattr(self.optimizer, 'empty_partition_cache'):
+            self.optimizer.empty_partition_cache()
+            gc.collect()
+            get_accelerator().empty_cache()

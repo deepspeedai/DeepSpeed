@@ -259,6 +259,9 @@ class DeepSpeedZeRoOffload(object):
 
         return self.param_coordinators[training]
 
+    def empty_partition_cache(self):
+        self.partition_all_parameters()
+
     def _convert_to_zero_parameters(self, ds_config, module, mpu):
         non_zero_params = [p for p in module.parameters() if not is_zero_param(p)]
         if non_zero_params:
@@ -321,7 +324,7 @@ class DeepSpeedZeRoOffload(object):
             if param.ds_numel + total_persistent_parameters > model_threshold:
                 continue
 
-            if param.ds_numel < param_threshold:
+            if param.ds_numel <= param_threshold:
                 params_count += 1
                 param.ds_persist = True
                 persistent_params.append(param)
