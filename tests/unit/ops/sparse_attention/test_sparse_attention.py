@@ -10,6 +10,7 @@ import torch
 import deepspeed
 from deepspeed.accelerator import get_accelerator
 from deepspeed.ops.op_builder import SparseAttnBuilder
+from unit.util import skip_on_arch, skip_on_cuda
 
 if not deepspeed.ops.__compatible_ops__[SparseAttnBuilder.NAME]:
     pytest.skip("sparse attention op is not compatible on this system",
@@ -130,26 +131,14 @@ def init_softmax_inputs(Z, H, M, N, scale, rho, block, dtype, dense_x=True, layo
     return layout, x, dx, bool_attn_mask, fp_attn_mask, kp_mask
 
 
-def _skip_on_cuda_compatability():
-    if deepspeed.accelerator.get_accelerator().device_name() == 'cuda':
-        if torch.cuda.get_device_capability()[0] < 7:
-            pytest.skip("needs higher compute capability than 7")
-        cuda_major = int(torch.version.cuda.split('.')[0]) * 10
-        cuda_minor = int(torch.version.cuda.split('.')[1])
-        cuda_version = cuda_major + cuda_minor
-        if (cuda_version != 101 and cuda_version != 102) and \
-                (cuda_version != 111 and cuda_version != 110):
-            pytest.skip("requires cuda 10.1 or 10.2 or 11.0 or 11.1")
-    else:
-        assert deepspeed.accelerator.get_accelerator().device_name() == 'xpu'
-        return
-
-
 @pytest.mark.parametrize("block", [16, 32])
 @pytest.mark.parametrize("width", [256, 576])
 @pytest.mark.parametrize("dtype", [torch.float16, torch.float32])
 def test_softmax(block, width, dtype):
-    _skip_on_cuda_compatability()
+    valid_cuda_versions = [101, 102, 110, 111]
+    skip_on_arch(min_arch=7)
+    skip_on_cuda(valid_cuda=valid_cuda_versions)
+
     Z = 2
     H = 4
     scale = 0.4
@@ -256,7 +245,10 @@ testdata = [
 
 @pytest.mark.parametrize("block, dtype, mode, trans_a, trans_b", testdata)
 def test_matmul(block, dtype, mode, trans_a, trans_b):
-    _skip_on_cuda_compatability()
+    valid_cuda_versions = [101, 102, 110, 111]
+    skip_on_arch(min_arch=7)
+    skip_on_cuda(valid_cuda=valid_cuda_versions)
+
     Z = 3
     H = 2
     M = 128
@@ -266,6 +258,7 @@ def test_matmul(block, dtype, mode, trans_a, trans_b):
     x, w, dy, shape, layout = init_matmul_inputs(Z, H, M, N, K, rho, mode, trans_a, trans_b, block, dtype, layout=None)
     ref_y, ref_dx, ref_dw = run_matmul_reference(x.clone(), w.clone(), mode, trans_a, trans_b, layout, block, dy)
     st_y, st_dx, st_dw = run_matmul_sparse(x.clone(), w.clone(), mode, trans_a, trans_b, layout, block, dy)
+
     assert allclose(ref_y, st_y)
     assert allclose(ref_dx, st_dx)
     assert allclose(ref_dw, st_dw)
