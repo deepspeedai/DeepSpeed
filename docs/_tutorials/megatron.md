@@ -275,7 +275,7 @@ DeepSpeed's `save_checkpoint()`.
          sd['random_rng_state'] = random.getstate()
          sd['np_rng_state'] = np.random.get_state()
          sd['torch_rng_state'] = torch.get_rng_state()
-         sd['cuda_rng_state'] = torch.cuda.get_rng_state()
+         sd['cuda_rng_state'] = get_accelerator().get_rng_state()
          sd['rng_tracker_states'] = mpu.get_cuda_rng_tracker().get_states()
 
      model.save_checkpoint(args.save, iteration, client_state = sd)

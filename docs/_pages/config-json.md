@@ -849,7 +849,7 @@ Configuring the asynchronous I/O module for offloading parameter and optimizer s
 
 | Description                                                   | Default |
 | ------------------------------------------------------------- | ------- |
-| Inserts torch.cuda.synchronize() at each checkpoint boundary. | `false` |
+| Inserts get_accelerator().synchronize() at each checkpoint boundary. | `false` |
 
 
 <i>**profile**</i>: [boolean]

@@ -68,3 +68,12 @@ repos:
     hooks:
     -   id: flake8
         args: ['--ignore=E,F403,F405,F541,F841,W', '--select=E9,F,W6', '--per-file-ignores=__init__.py:F401']
+
+-   repo: local
+    hooks:
+    -   id: check-torchcuda
+        name: check-torchcuda
+        entry: ./scripts/check-torchcuda.py
+        language: script
+        exclude: ^(.github/workflows/|scripts/check-torchcuda.py|accelerator/cuda_accelerator.py|deepspeed/inference/engine.py|deepspeed/model_implementations/transformers/clip_encoder.py|deepspeed/model_implementations/diffusers/vae.py|deepspeed/model_implementations/diffusers/unet.py|op_builder/spatial_inference.py|op_builder/transformer_inference.py|op_builder/builder.py|setup.py|tests/unit/ops/sparse_attention/test_sparse_attention.py)
+        # Specific deepspeed/ files are excluded for now until we wrap ProcessGroup in deepspeed.comm

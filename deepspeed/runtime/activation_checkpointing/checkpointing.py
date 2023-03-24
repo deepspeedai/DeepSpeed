@@ -92,7 +92,7 @@ def _set_cuda_rng_state(new_state, device=-1):
 
     Arguments:
         new_state (torch.ByteTensor): The desired state
-    This function is adapted from PyTorch repo (torch.cuda.set_rng_state)
+    This function is adapted from PyTorch repo (torch.cuda.set_rng_state) #ignore-cuda
     with a single change: the input state is not cloned. Cloning caused
     major performance issues for +4 GPU cases.
     """
@@ -499,7 +499,7 @@ def get_cpu_activations_for_backward(args, inputs):
 class CheckpointFunction(torch.autograd.Function):
     """This function is adapted from torch.utils.checkpoint with
        two main changes:
-           1) torch.cuda.set_rng_state is replaced with `_set_cuda_rng_state`
+           1) torch.cuda.set_rng_state is replaced with `_set_cuda_rng_state`  #ignore-cuda
            2) the states in the model parallel tracker are also properly
               tracked/set/reset.
            3) Performance activation partitioning, contiguous memory optimization
