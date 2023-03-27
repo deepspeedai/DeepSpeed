@@ -14,8 +14,7 @@ import pytest
 class TestOtherOptimizerCheckpoint(DistributedTest):
     world_size = 2
 
-    @pytest.mark.skipif(not deepspeed.ops.__compatible_ops__[FusedLambBuilder.NAME],
-                        reason="lamb is not compatible")
+    @pytest.mark.skipif(not deepspeed.ops.__compatible_ops__[FusedLambBuilder.NAME], reason="lamb is not compatible")
     def test_checkpoint_unfused_optimizer(self, tmpdir):
         config_dict = {
             "train_batch_size": 2,
@@ -74,8 +73,7 @@ class TestOtherOptimizerCheckpoint(DistributedTest):
                 "type": "Adam",
                 "params": {
                     "lr": 0.00015,
-                    "betas": [0.8,
-                              0.999],
+                    "betas": [0.8, 0.999],
                     "eps": 1e-8,
                     "weight_decay": 3e-7
                 }
@@ -111,8 +109,7 @@ class TestOtherOptimizerCheckpoint(DistributedTest):
                 "type": "Adam",
                 "params": {
                     "lr": 0.00015,
-                    "betas": [0.8,
-                              0.999],
+                    "betas": [0.8, 0.999],
                     "eps": 1e-8,
                     "weight_decay": 3e-7
                 }

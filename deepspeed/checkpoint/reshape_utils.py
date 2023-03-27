@@ -49,11 +49,7 @@ def partition_data(data_list, num_partitions):
     num_elems = len(data_list)
     assert num_elems % num_partitions == 0
     partition_size = num_elems // num_partitions
-    partitions_list = [
-        data_list[i:i + partition_size] for i in range(0,
-                                                       num_elems,
-                                                       partition_size)
-    ]
+    partitions_list = [data_list[i:i + partition_size] for i in range(0, num_elems, partition_size)]
     return partitions_list
 
 
@@ -76,9 +72,7 @@ def merge_state_dict(dict_a, dict_b, key_list):
 def merge_state_list(list_a, list_b, key_list):
     if len(list_a) != len(list_b):
         print(f'{_key_list_to_string(key_list)}')
-        raise ValueError(
-            f'Cannot merge lists of different lengths, a = {len(list_a)} b = {len(list_b)}'
-        )
+        raise ValueError(f'Cannot merge lists of different lengths, a = {len(list_a)} b = {len(list_b)}')
 
     return [merge_state(a, b, key_list) for a, b in zip(list_a, list_b)]
 
@@ -87,8 +81,7 @@ def merge_state(state_a, state_b, key_list=[]):
     if type(state_a) != type(state_b):
         key_list_string = _key_list_to_string(key_list)
         print(f'key_list = {key_list_string}')
-        raise ValueError(
-            f'Cannot merge two states of types {type(state_a)} and type {type(state_b)}')
+        raise ValueError(f'Cannot merge two states of types {type(state_a)} and type {type(state_b)}')
 
     if type(state_a) in (dict, OrderedDict):
         return merge_state_dict(state_a, state_b, key_list)

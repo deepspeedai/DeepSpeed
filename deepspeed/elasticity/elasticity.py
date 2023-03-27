@@ -17,44 +17,8 @@ from ..utils import logger
 # Thirty eight smallest highly composite numbers. The list should
 # be enough to support up to 720K batch size.
 HCN_LIST = [
-    1,
-    2,
-    4,
-    6,
-    12,
-    24,
-    36,
-    48,
-    60,
-    120,
-    180,
-    240,
-    360,
-    720,
-    840,
-    1260,
-    1680,
-    2520,
-    5040,
-    7560,
-    10080,
-    15120,
-    20160,
-    25200,
-    27720,
-    45360,
-    50400,
-    55440,
-    83160,
-    110880,
-    166320,
-    221760,
-    277200,
-    332640,
-    498960,
-    554400,
-    665280,
-    720720
+    1, 2, 4, 6, 12, 24, 36, 48, 60, 120, 180, 240, 360, 720, 840, 1260, 1680, 2520, 5040, 7560, 10080, 15120, 20160,
+    25200, 27720, 45360, 50400, 55440, 83160, 110880, 166320, 221760, 277200, 332640, 498960, 554400, 665280, 720720
 ]
 
 
@@ -94,11 +58,7 @@ def get_valid_gpus(batch_size, micro_batches, min_valid_gpus, max_valid_gpus):
     return valid_gpus
 
 
-def get_best_candidates(candidate_batch_sizes,
-                        micro_batches,
-                        min_gpus,
-                        max_gpus,
-                        prefer_larger):
+def get_best_candidates(candidate_batch_sizes, micro_batches, min_gpus, max_gpus, prefer_larger):
 
     max_valid_gpus = 0
     valid_gpus = None
@@ -106,15 +66,11 @@ def get_best_candidates(candidate_batch_sizes,
 
     for batch_size in candidate_batch_sizes:
 
-        current_valid_gpus = get_valid_gpus(batch_size,
-                                            micro_batches,
-                                            min_gpus,
-                                            max_gpus)
+        current_valid_gpus = get_valid_gpus(batch_size, micro_batches, min_gpus, max_gpus)
 
-        if (len(current_valid_gpus) > max_valid_gpus
-                or (len(current_valid_gpus) == max_valid_gpus and
-                    ((prefer_larger and batch_size > final_batch_size) or
-                     (not prefer_larger and batch_size < final_batch_size)))):
+        if (len(current_valid_gpus) > max_valid_gpus or (len(current_valid_gpus) == max_valid_gpus and
+                                                         ((prefer_larger and batch_size > final_batch_size) or
+                                                          (not prefer_larger and batch_size < final_batch_size)))):
             max_valid_gpus = len(current_valid_gpus)
             valid_gpus = current_valid_gpus
             final_batch_size = batch_size
@@ -157,15 +113,10 @@ def _get_compatible_gpus_v01(micro_batches,
     base_list.extend(micro_batches)
     base_list.append(lcm)
 
-    candidate_batch_sizes = get_candidate_batch_sizes(base_list,
-                                                      max_acceptable_batch_size)
+    candidate_batch_sizes = get_candidate_batch_sizes(base_list, max_acceptable_batch_size)
 
-    final_batch_size, valid_gpus = get_best_candidates(
-        candidate_batch_sizes,
-        micro_batches,
-        min_gpus,
-        max_gpus,
-        prefer_larger)
+    final_batch_size, valid_gpus = get_best_candidates(candidate_batch_sizes, micro_batches, min_gpus, max_gpus,
+                                                       prefer_larger)
 
     return final_batch_size, valid_gpus
 
@@ -203,11 +154,12 @@ def _get_compatible_gpus_v02(micro_batches,
 
     dp_size_per_node = num_gpus_per_node // model_parallel_size
 
-    final_batch_size, valid_world_size = _get_compatible_gpus_v01(micro_batches,
-                             int(max_acceptable_batch_size/dp_size_per_node),
-                             int(min_gpus/num_gpus_per_node),
-                             int(max_gpus/num_gpus_per_node), # Passing number of max nodes as Elasticity v2 works at node level
-                             prefer_larger=prefer_larger)
+    final_batch_size, valid_world_size = _get_compatible_gpus_v01(
+        micro_batches,
+        int(max_acceptable_batch_size / dp_size_per_node),
+        int(min_gpus / num_gpus_per_node),
+        int(max_gpus / num_gpus_per_node),  # Passing number of max nodes as Elasticity v2 works at node level
+        prefer_larger=prefer_larger)
 
     final_batch_size = int(final_batch_size) * dp_size_per_node
     valid_dp_world_size = [i * dp_size_per_node for i in valid_world_size]
@@ -256,38 +208,27 @@ def ensure_immutable_elastic_config(runtime_elastic_config_dict: dict):
     Ensure the resource scheduler saw the same elastic config we are using at runtime
     """
     if DEEPSPEED_ELASTICITY_CONFIG in os.environ:
-        scheduler_elastic_config_dict = json.loads(
-            os.environ[DEEPSPEED_ELASTICITY_CONFIG])
+        scheduler_elastic_config_dict = json.loads(os.environ[DEEPSPEED_ELASTICITY_CONFIG])
         scheduler_elastic_config = ElasticityConfig(scheduler_elastic_config_dict)
         runtime_elastic_config = ElasticityConfig(runtime_elastic_config_dict)
         err_str = "Elastic config '{}={}' seen by resource scheduler does not match config passed to runtime {}={}"
         if runtime_elastic_config.max_acceptable_batch_size != scheduler_elastic_config.max_acceptable_batch_size:
             raise ElasticityConfigError(
-                err_str.format('max_acceptable_batch_size',
-                               scheduler_elastic_config.max_acceptable_batch_size,
-                               'max_acceptable_batch_size',
-                               runtime_elastic_config.max_acceptable_batch_size))
+                err_str.format('max_acceptable_batch_size', scheduler_elastic_config.max_acceptable_batch_size,
+                               'max_acceptable_batch_size', runtime_elastic_config.max_acceptable_batch_size))
         if runtime_elastic_config.micro_batches != scheduler_elastic_config.micro_batches:
             raise ElasticityConfigError(
-                err_str.format('micro_batches',
-                               scheduler_elastic_config.micro_batches,
-                               'micro_batches',
+                err_str.format('micro_batches', scheduler_elastic_config.micro_batches, 'micro_batches',
                                runtime_elastic_config.micro_batches))
         if runtime_elastic_config.version != scheduler_elastic_config.version:
             raise ElasticityConfigError(
-                err_str.format('version',
-                               scheduler_elastic_config.version,
-                               'version',
-                               runtime_elastic_config.version))
+                err_str.format('version', scheduler_elastic_config.version, 'version', runtime_elastic_config.version))
     else:
         logger.warning("Unable to find DEEPSPEED_ELASTICITY_CONFIG environment variable, cannot " \
             "guarantee resource scheduler will scale this job using compatible GPU counts.")
 
 
-def compute_elastic_config(ds_config: dict,
-                           target_deepspeed_version: str,
-                           world_size=0,
-                           return_microbatch=False):
+def compute_elastic_config(ds_config: dict, target_deepspeed_version: str, world_size=0, return_microbatch=False):
     """Core deepspeed elasticity API. Given an elastic config (similar to the example below)
     DeepSpeed will compute a total train batch size corresponding valid GPU count list that
     provides a high level of elasticity. Elasticity in this case means we are safe to scale
@@ -397,8 +338,7 @@ def compute_elastic_config(ds_config: dict,
         # ensure batch size is int dtype
         final_batch_size = int(final_batch_size)
     else:
-        raise NotImplementedError(
-            f"Unable to find elastic logic for version: {elastic_config.version}")
+        raise NotImplementedError(f"Unable to find elastic logic for version: {elastic_config.version}")
 
     logger.info(f"Valid World Size (GPUs / Model Parallel Size): {valid_gpus}")
 

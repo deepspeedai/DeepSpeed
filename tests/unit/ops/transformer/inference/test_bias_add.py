@@ -7,8 +7,7 @@ from deepspeed.accelerator import get_accelerator
 from deepspeed.ops.op_builder import InferenceBuilder
 
 if not deepspeed.ops.__compatible_ops__[InferenceBuilder.NAME]:
-    pytest.skip("Inference ops are not available on this system",
-                allow_module_level=True)
+    pytest.skip("Inference ops are not available on this system", allow_module_level=True)
 
 inference_module = None
 torch_minor_version = None
@@ -40,14 +39,8 @@ def run_bias_add_ds(activations, bias):
 @pytest.mark.parametrize("channels", [512, 1232, 4096])
 @pytest.mark.parametrize("dtype", [torch.float16, torch.float32], ids=["fp16", "fp32"])
 def test_bias_add(batch, sequence, channels, dtype):
-    activations_ds = torch.randn((batch,
-                                  sequence,
-                                  channels),
-                                 dtype=dtype,
-                                 device=get_accelerator().device_name())
-    bias_ds = torch.randn((channels),
-                          dtype=dtype,
-                          device=get_accelerator().device_name())
+    activations_ds = torch.randn((batch, sequence, channels), dtype=dtype, device=get_accelerator().device_name())
+    bias_ds = torch.randn((channels), dtype=dtype, device=get_accelerator().device_name())
 
     activations_ref = activations_ds.clone().detach()
     bias_ref = bias_ds.clone().detach()

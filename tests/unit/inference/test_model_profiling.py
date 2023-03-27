@@ -32,32 +32,19 @@ def inf_kwargs(task):
 
 
 @pytest.mark.inference
-@pytest.mark.parametrize("model,task",
-                         [
-                             ("bert-base-cased",
-                              "fill-mask"),
-                             ("roberta-base",
-                              "fill-mask"),
-                             ("gpt2",
-                              "text-generation"),
-                             ("facebook/opt-125m",
-                              "text-generation"),
-                             ("bigscience/bloom-560m",
-                              "text-generation"),
-                         ])
+@pytest.mark.parametrize("model,task", [
+    ("bert-base-cased", "fill-mask"),
+    ("roberta-base", "fill-mask"),
+    ("gpt2", "text-generation"),
+    ("facebook/opt-125m", "text-generation"),
+    ("bigscience/bloom-560m", "text-generation"),
+])
 @pytest.mark.parametrize("cuda_graphs", [True, False])
 @pytest.mark.parametrize("use_cuda_events", [True, False])
 class TestModelProfiling(DistributedTest):
     world_size = 1
 
-    def test(self,
-             model,
-             task,
-             query,
-             inf_kwargs,
-             cuda_graphs,
-             use_cuda_events,
-             dtype=torch.float16):
+    def test(self, model, task, query, inf_kwargs, cuda_graphs, use_cuda_events, dtype=torch.float16):
         if cuda_graphs and "bert" not in model:
             pytest.skip(f"CUDA Graph not supported for {model}")
 

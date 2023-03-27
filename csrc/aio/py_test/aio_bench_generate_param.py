@@ -14,13 +14,10 @@ from perf_sweep_utils import BENCH_LOG_DIR, READ_LOG_DIR, WRITE_LOG_DIR
 def parse_arguments():
     parser = argparse.ArgumentParser()
 
-    parser.add_argument(
-        '--log_dir',
-        type=str,
-        default=BENCH_LOG_DIR,
-        help=
-        f'Folder of performance sweep logs. Default is {os.path.join(".", BENCH_LOG_DIR)}'
-    )
+    parser.add_argument('--log_dir',
+                        type=str,
+                        default=BENCH_LOG_DIR,
+                        help=f'Folder of performance sweep logs. Default is {os.path.join(".", BENCH_LOG_DIR)}')
 
     args = parser.parse_args()
     print(f'args = {args}')
@@ -75,9 +72,7 @@ def generate_aio_param(read_log_dir, write_log_dir):
     optimal_config_read = read_results.get(read_perf_keys[optimal_key], None)
     optimal_config_write = write_results.get(write_perf_keys[optimal_key], None)
 
-    print(
-        f'Best performance (GB/sec): read = {optimal_config_read:5.2f}, write = {optimal_config_write:5.2f}'
-    )
+    print(f'Best performance (GB/sec): read = {optimal_config_read:5.2f}, write = {optimal_config_write:5.2f}')
     print(json.dumps(aio_param, indent=3))
 
 

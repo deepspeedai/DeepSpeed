@@ -6,6 +6,7 @@ from deepspeed.accelerator import get_accelerator
 
 
 class WeightQuantization(object):
+
     def __init__(self, mlp_extra_grouping=True, mp_size=1):
         self.dense_scales = []
         self.qkv_scales = []
@@ -20,8 +21,7 @@ class WeightQuantization(object):
         data_scale = [float(1 << quantize_bits) / (2 * mx + 1e-5) for mx in max_d]
         data_int = [(g * s) for g, s in zip(data_groups, data_scale)]
         data_int = [
-            di.round().clamp(-(1 << (quantize_bits - 1)),
-                             (((1 << (quantize_bits - 1)) - 1))) for di in data_int
+            di.round().clamp(-(1 << (quantize_bits - 1)), (((1 << (quantize_bits - 1)) - 1))) for di in data_int
         ]
         data_int = torch.cat(data_int).reshape(data.shape)
         data_int = data_int.to(torch.int8)
@@ -37,8 +37,7 @@ class WeightQuantization(object):
                 (self.mp_size * data.shape[1]) / data.shape[0] == 3)
 
     def Quantize(self, value_list, quantize_bits, groups, key, merge_dim=0):
-        if self.mlp_extra_grouping and self.is_mlp(value_list[0],
-                                                   merge_count=len(value_list)):
+        if self.mlp_extra_grouping and self.is_mlp(value_list[0], merge_count=len(value_list)):
             groups *= 2
         q_scale = []
         index = 0
@@ -47,11 +46,8 @@ class WeightQuantization(object):
             q_scale.append(data_scale)
             value_list[index] = data_int
             index += 1
-        q_scale = (
-            1 /
-            torch.cat(q_scale,
-                      dim=merge_dim).to(
-                          get_accelerator().current_device_name()).view(-1).unsqueeze(0))
+        q_scale = (1 /
+                   torch.cat(q_scale, dim=merge_dim).to(get_accelerator().current_device_name()).view(-1).unsqueeze(0))
         if "mlp.dense_4h_to_h.weight" in key:
             self.mlp4hh_scales.append(q_scale)
         elif "mlp.dense_h_to_4h.weight" in key:
@@ -65,10 +61,7 @@ class WeightQuantization(object):
     def merge_layer_scales(self, layer_scales):
         max_dim = max([s.shape[-1] for s in layer_scales])
         layer_scales = [
-            torch.cat((s,
-                       torch.zeros((1,
-                                    max_dim - s.shape[-1]),
-                                   device=get_accelerator().current_device_name())),
+            torch.cat((s, torch.zeros((1, max_dim - s.shape[-1]), device=get_accelerator().current_device_name())),
                       dim=-1) if s.shape[-1] < max_dim else s for s in layer_scales
         ]
         return torch.cat(layer_scales).unsqueeze(0)
@@ -77,11 +70,7 @@ class WeightQuantization(object):
         all_scales = []
         for dense_scale, qkv_scale, m4hh_scale, mh4h_scale in \
             zip(self.dense_scales, self.qkv_scales, self.mlp4hh_scales, self.mlph4h_scales):
-            all_scales.append(
-                self.merge_layer_scales([qkv_scale,
-                                         dense_scale,
-                                         mh4h_scale,
-                                         m4hh_scale]))
+            all_scales.append(self.merge_layer_scales([qkv_scale, dense_scale, mh4h_scale, m4hh_scale]))
         return torch.cat(all_scales)
 
     def merge_scales_split(self, split_count):
@@ -95,13 +84,8 @@ class WeightQuantization(object):
             for s in range(split_count):
                 all_scales[s].append(
                     torch.cat([
-                        torch.cat((qkv_scale[s],
-                                   torch.zeros_like(qkv_scale[s])),
-                                  dim=1),
-                        torch.cat((dense_scale[s],
-                                   torch.zeros_like(dense_scale[s])),
-                                  dim=1),
-                        mh4h_scale[s],
+                        torch.cat((qkv_scale[s], torch.zeros_like(qkv_scale[s])), dim=1),
+                        torch.cat((dense_scale[s], torch.zeros_like(dense_scale[s])), dim=1), mh4h_scale[s],
                         m4hh_scale[s]
                     ]).unsqueeze(0))
             for scales_a in all_scales:
@@ -139,8 +123,7 @@ class WeightQuantization(object):
                 else:
                     data_quantized, data_scale = self.quantize_data(keys[key], quantize_bits, groups)
                 keys[key].copy_(data_quantized)
-                layer_scales.append((1 / data_scale.to(
-                    get_accelerator().current_device_name()).view(-1).unsqueeze(0)))
+                layer_scales.append((1 / data_scale.to(get_accelerator().current_device_name()).view(-1).unsqueeze(0)))
             all_scales.append(self.merge_layer_scales(layer_scales))
             return layer
 

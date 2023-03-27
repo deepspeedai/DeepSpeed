@@ -28,13 +28,8 @@ TIMEOUT = 5
 
 
 class ResourceManager:
-    def __init__(self,
-                 args,
-                 hosts,
-                 num_gpus_per_node,
-                 results_dir,
-                 exps_dir,
-                 arg_mappings):
+
+    def __init__(self, args, hosts, num_gpus_per_node, results_dir, exps_dir, arg_mappings):
         self.results_dir = results_dir
         self.exps_dir = exps_dir
 
@@ -69,13 +64,10 @@ class ResourceManager:
                     exp["exp_id"] = self.experiment_count
                     self.experiment_count += 1
 
-                    result_dir = exp["result_dir"] = os.path.join(
-                        self.results_dir,
-                        exp['name'])
+                    result_dir = exp["result_dir"] = os.path.join(self.results_dir, exp['name'])
                     if AUTOTUNING in exp["ds_config"]:
                         metric_file = os.path.join(result_dir, "metrics.json")
-                        exp["ds_config"][AUTOTUNING][
-                            AUTOTUNING_METRIC_PATH] = metric_file
+                        exp["ds_config"][AUTOTUNING][AUTOTUNING_METRIC_PATH] = metric_file
                     stderr_file = os.path.join(result_dir, "stderr.log")
                     model_info_file = os.path.join(result_dir, "model_info.json")
                     metric_file = os.path.join(result_dir, "metrics.json")
@@ -86,11 +78,8 @@ class ResourceManager:
                             err = search_error(stderr_file)
                             exp_id = exp["exp_id"]
                             self.finished_experiments[exp_id] = (exp, err)
-                            if err or os.path.exists(metric_file) or os.path.exists(
-                                    model_info_file):
-                                logger.info(
-                                    f"Skipping exp {exp['name']} whose result already exists"
-                                )
+                            if err or os.path.exists(metric_file) or os.path.exists(model_info_file):
+                                logger.info(f"Skipping exp {exp['name']} whose result already exists")
                                 continue
 
                     self.experiment_queue.append(exp)
@@ -113,11 +102,7 @@ class ResourceManager:
                     user_args.append(val)
                     user_args.append(str(nval))
 
-        t = threading.Thread(target=run_experiment,
-                             args=(exp,
-                                   reservations,
-                                   user_script,
-                                   user_args))
+        t = threading.Thread(target=run_experiment, args=(exp, reservations, user_script, user_args))
         t.start()
         self.running_experiments[exp_id] = (t, exp, reservations, time.time())
 
@@ -270,6 +255,7 @@ class ResourceManager:
 
 
 class Node:
+
     def __init__(self, host, max_slots):
         self.host = host
         self.max_slots = max_slots
@@ -284,6 +270,7 @@ class Node:
 
 
 class Reservation:
+
     def __init__(self, node, slots):
         self.node = node
         self.slots = slots
@@ -389,9 +376,8 @@ def run_experiment(exp: dict, reservations, user_script, user_args):
         f"Launching exp_id = {exp['exp_id']}, exp_name = {exp['name']}, with resource = {include_str}, and ds_config = {os.path.abspath(ds_config_path)}"
     )
 
-    with open(os.path.join(exp_dir, "stdout.log"), "wb") as out, open(
-        os.path.join(exp_dir, "stderr.log"), "wb"
-    ) as err:
+    with open(os.path.join(exp_dir, "stdout.log"), "wb") as out, open(os.path.join(exp_dir, "stderr.log"),
+                                                                      "wb") as err:
         result = subprocess.Popen(cmd, stdout=out, stderr=err)
         result.wait()
         out.flush()
@@ -401,9 +387,7 @@ def run_experiment(exp: dict, reservations, user_script, user_args):
 
     clean_up(exp, reservations)
 
-    logger.info(
-        f"Done running exp_id = {exp['exp_id']}, exp_name = {exp['name']}, with resource = {include_str}"
-    )
+    logger.info(f"Done running exp_id = {exp['exp_id']}, exp_name = {exp['name']}, with resource = {include_str}")
 
 
 PDSH_MAX_FAN_OUT = 1024
@@ -417,8 +401,7 @@ def clean_up(exp: dict, reservations):
     for reservation in reservations:
         nodes_str += f"{reservation.node.host},"
     nodes_str = nodes_str[:-1]
-    logger.debug(
-        f"Cleaning up exp_id = {exp['exp_id']} on the following workers: {nodes_str}")
+    logger.debug(f"Cleaning up exp_id = {exp['exp_id']} on the following workers: {nodes_str}")
 
     # PDSH flags for max node fan out and specific hosts to launch on
     # See https://linux.die.net/man/1/pdsh for flag details
@@ -441,6 +424,4 @@ def clean_up(exp: dict, reservations):
     if result.returncode > 0:
         sys.exit(result.returncode)
 
-    logger.info(
-        f"Done cleaning up exp_id = {exp['exp_id']} on the following workers: {nodes_str}"
-    )
+    logger.info(f"Done cleaning up exp_id = {exp['exp_id']} on the following workers: {nodes_str}")

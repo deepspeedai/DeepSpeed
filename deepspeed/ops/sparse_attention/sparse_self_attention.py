@@ -15,6 +15,7 @@ class SparseSelfAttention(nn.Module):
 
     For usage example please see, TODO DeepSpeed Sparse Transformer Tutorial.
     """
+
     def __init__(
             self,
             # SparsityConfig parameters needs to be set accordingly
@@ -53,8 +54,7 @@ class SparseSelfAttention(nn.Module):
 
         if (L % self.sparsity_config.block != 0):
             raise ValueError(
-                f'Sequence Length, {L}, needs to be dividable by Block size {self.sparsity_config.block}!'
-            )
+                f'Sequence Length, {L}, needs to be dividable by Block size {self.sparsity_config.block}!')
 
         num_blocks = L // self.sparsity_config.block
         return self.master_layout[..., :num_blocks, :num_blocks].cpu()  # layout needs to be a CPU tensor
@@ -65,11 +65,7 @@ class SparseSelfAttention(nn.Module):
         from deepspeed.ops.sparse_attention.softmax import Softmax
         if L not in SparseSelfAttention.ops:
             sparsity_layout = self.get_layout(L)
-            sparse_dot_sdd_nt = MatMul(sparsity_layout,
-                                       self.sparsity_config.block,
-                                       'sdd',
-                                       trans_a=False,
-                                       trans_b=True)
+            sparse_dot_sdd_nt = MatMul(sparsity_layout, self.sparsity_config.block, 'sdd', trans_a=False, trans_b=True)
 
             sparse_dot_dsd_nn = MatMul(sparsity_layout,
                                        self.sparsity_config.block,
@@ -79,9 +75,7 @@ class SparseSelfAttention(nn.Module):
 
             sparse_softmax = Softmax(sparsity_layout, self.sparsity_config.block)
 
-            SparseSelfAttention.ops[L] = (sparse_dot_sdd_nt,
-                                          sparse_dot_dsd_nn,
-                                          sparse_softmax)
+            SparseSelfAttention.ops[L] = (sparse_dot_sdd_nt, sparse_dot_dsd_nn, sparse_softmax)
         return SparseSelfAttention.ops[L]
 
     def transpose_key_for_scores(self, x, L):
@@ -100,13 +94,7 @@ class SparseSelfAttention(nn.Module):
         return x.squeeze()
 
     # forward pass
-    def forward(self,
-                query,
-                key,
-                value,
-                rpe=None,
-                key_padding_mask=None,
-                attn_mask=None):
+    def forward(self, query, key, value, rpe=None, key_padding_mask=None, attn_mask=None):
         """Applies forward phase of sparse self attention
 
         Arguments:
@@ -134,9 +122,7 @@ class SparseSelfAttention(nn.Module):
 
         # squeeze key_padding_mask if it is given
         if key_padding_mask is not None:
-            key_padding_mask = self.transpose_mask_for_sparse(query.dtype,
-                                                              key_padding_mask,
-                                                              is_key_padding_mask=True)
+            key_padding_mask = self.transpose_mask_for_sparse(query.dtype, key_padding_mask, is_key_padding_mask=True)
 
         # squeeze attn_mask if it is given
         if attn_mask is not None:
@@ -149,14 +135,13 @@ class SparseSelfAttention(nn.Module):
 
         # attention scores
         attn_output_weights = sparse_dot_sdd_nt(query, key)
-        attn_output_weights = sparse_softmax(
-            attn_output_weights,
-            scale=scaling,
-            rpe=rpe,
-            key_padding_mask=key_padding_mask,
-            attn_mask=attn_mask,
-            key_padding_mask_mode=self.key_padding_mask_mode,
-            attn_mask_mode=self.attn_mask_mode)
+        attn_output_weights = sparse_softmax(attn_output_weights,
+                                             scale=scaling,
+                                             rpe=rpe,
+                                             key_padding_mask=key_padding_mask,
+                                             attn_mask=attn_mask,
+                                             key_padding_mask_mode=self.key_padding_mask_mode,
+                                             attn_mask_mode=self.attn_mask_mode)
 
         # outputs
         attn_output = sparse_dot_dsd_nn(attn_output_weights, value)

@@ -13,6 +13,7 @@ from deepspeed.utils.types import ActivationFuncType
 
 
 class DS_OPTContainer(MetaTensorContainer, BaseTransformerContainer):
+
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
 
@@ -50,32 +51,16 @@ class DS_OPTContainer(MetaTensorContainer, BaseTransformerContainer):
                            weight_quantizer,
                            mp_replace,
                            transformer_param_names[i // 3],
-                           [
-                               prefix + param_names[i],
-                               prefix + param_names[i + 1],
-                               prefix + param_names[i + 2]
-                           ],
+                           [prefix + param_names[i], prefix + param_names[i + 1], prefix + param_names[i + 2]],
                            split_qkv=self.policy.split_qkv)
         for i in range(6, 8):
-            maybe_copy(module.attention,
-                       sd,
-                       weight_quantizer,
-                       mp_replace,
-                       transformer_param_names[i - 4],
+            maybe_copy(module.attention, sd, weight_quantizer, mp_replace, transformer_param_names[i - 4],
                        prefix + param_names[i])
         for i in range(8, 14):
-            maybe_copy(module.mlp,
-                       sd,
-                       weight_quantizer,
-                       mp_replace,
-                       transformer_param_names[i - 4],
+            maybe_copy(module.mlp, sd, weight_quantizer, mp_replace, transformer_param_names[i - 4],
                        prefix + param_names[i])
         for i in range(14, 16):
-            maybe_copy(module,
-                       sd,
-                       weight_quantizer,
-                       mp_replace,
-                       transformer_param_names[i - 4],
+            maybe_copy(module, sd, weight_quantizer, mp_replace, transformer_param_names[i - 4],
                        prefix + param_names[i])
 
 
@@ -93,8 +78,7 @@ class HFOPTLayerPolicy(TransformerPolicy):
         try:
             import transformers
             HFOPTLayerPolicy._orig_layer_class = transformers.models.opt.modeling_opt.OPTDecoderLayer
-            if isinstance(TransformerPolicy.hf_model_config,
-                          transformers.models.opt.configuration_opt.OPTConfig):
+            if isinstance(TransformerPolicy.hf_model_config, transformers.models.opt.configuration_opt.OPTConfig):
                 self.pre_attn_norm = TransformerPolicy.hf_model_config.do_layer_norm_before
         except:
             HFOPTLayerPolicy._orig_layer_class = None

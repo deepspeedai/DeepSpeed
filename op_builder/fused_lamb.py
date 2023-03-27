@@ -30,14 +30,9 @@ class FusedLambBuilder(CUDAOpBuilder):
         nvcc_flags = ['-O3'] + self.version_dependent_macros()
         if self.is_rocm_pytorch():
             ROCM_MAJOR, ROCM_MINOR = self.installed_rocm_version()
-            nvcc_flags += [
-                '-DROCM_VERSION_MAJOR=%s' % ROCM_MAJOR,
-                '-DROCM_VERSION_MINOR=%s' % ROCM_MINOR
-            ]
+            nvcc_flags += ['-DROCM_VERSION_MAJOR=%s' % ROCM_MAJOR, '-DROCM_VERSION_MINOR=%s' % ROCM_MINOR]
         else:
-            nvcc_flags.extend([
-                '-allow-unsupported-compiler' if sys.platform == "win32" else '',
-                '-lineinfo',
-                '--use_fast_math'
-            ] + self.compute_capability_args())
+            nvcc_flags.extend(
+                ['-allow-unsupported-compiler' if sys.platform == "win32" else '', '-lineinfo', '--use_fast_math'] +
+                self.compute_capability_args())
         return nvcc_flags

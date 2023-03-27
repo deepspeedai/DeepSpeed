@@ -19,6 +19,7 @@ class ProcessTopology:
 
     Some methods return ProcessCoord namedtuples.
     """
+
     def __init__(self, axes, dims):
         """Create a mapping of n-dimensional tensor coordinates to linear indices.
 
@@ -62,12 +63,7 @@ class ProcessTopology:
         """Return a list of the axis names in the ordering of the topology. """
         return self.axes
 
-    def get_rank_repr(self,
-                      rank,
-                      omit_axes=['data',
-                                 'pipe'],
-                      inner_sep='_',
-                      outer_sep='-'):
+    def get_rank_repr(self, rank, omit_axes=['data', 'pipe'], inner_sep='_', outer_sep='-'):
         """Return a string representation of a rank.
 
         This method is primarily used for checkpointing model data.
@@ -181,6 +177,7 @@ class ProcessTopology:
         Returns:
             The list of ranks whose coordinates match filter_kwargs.
         """
+
         def _filter_helper(x):
             for key, val in filter_kwargs.items():
                 if getattr(x, key) != val:
@@ -236,12 +233,14 @@ class PipeDataParallelTopology(ProcessTopology):
         reductions to use high-bandwidth intra-node links and lower-volume
         pipeline communications to use low-bandwidth inter-node links.
     """
+
     def __init__(self, num_pp, num_dp):
         super().__init__(axes=['pipe', 'data'], dims=[num_pp, num_dp])
 
 
 class PipeModelDataParallelTopology(ProcessTopology):
     """ A topology for hybrid pipeline, model, and data parallelism. """
+
     def __init__(self, num_pp, num_mp, num_dp):
         super().__init__(axes=['pipe', 'data', 'model'], dims=[num_pp, num_dp, num_mp])
 
@@ -268,6 +267,7 @@ class PipelineParallelGrid:
     data_parallel_id = 0, or similarly [9,5] represents wrapped around stages [4,0]
     for data_parallel_id = 1.
     """
+
     def __init__(self, topology=None, process_group=None):
         # TODO use process_group if provided
         self.global_rank = dist.get_rank()

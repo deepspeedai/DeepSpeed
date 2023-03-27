@@ -93,10 +93,7 @@ class TestBatchConfig(DistributedTest):
         ds_config = DeepSpeedConfig(ds_batch_config)
 
         #test cases when all parameters are provided
-        status = _run_batch_config(ds_config,
-                                   train_batch=batch,
-                                   micro_batch=micro_batch,
-                                   gas=gas)
+        status = _run_batch_config(ds_config, train_batch=batch, micro_batch=micro_batch, gas=gas)
         _batch_assert(status, ds_config, batch, micro_batch, gas, success)
 
         #test cases when two out of three parameters are provided
@@ -139,10 +136,7 @@ def test_temp_config_json(tmpdir):
 
 
 @pytest.mark.parametrize("gather_weights_key",
-                         [
-                             "stage3_gather_16bit_weights_on_model_save",
-                             "stage3_gather_fp16_weights_on_model_save"
-                         ])
+                         ["stage3_gather_16bit_weights_on_model_save", "stage3_gather_fp16_weights_on_model_save"])
 def test_gather_16bit_params_on_model_save(gather_weights_key):
     config_dict = {
         gather_weights_key: True,
@@ -168,9 +162,7 @@ class TestConfigLoad(DistributedTest):
     def test_dict(self, base_config):
         hidden_dim = 10
         model = SimpleModel(hidden_dim)
-        model, _, _, _ = deepspeed.initialize(config=base_config,
-                                              model=model,
-                                              model_parameters=model.parameters())
+        model, _, _, _ = deepspeed.initialize(config=base_config, model=model, model_parameters=model.parameters())
 
     def test_json(self, base_config, tmpdir):
         config_path = os.path.join(tmpdir, "config.json")
@@ -178,9 +170,7 @@ class TestConfigLoad(DistributedTest):
             json.dump(base_config, fp)
         hidden_dim = 10
         model = SimpleModel(hidden_dim)
-        model, _, _, _ = deepspeed.initialize(config=config_path,
-                                              model=model,
-                                              model_parameters=model.parameters())
+        model, _, _, _ = deepspeed.initialize(config=config_path, model=model, model_parameters=model.parameters())
 
     def test_hjson(self, base_config, tmpdir):
         config_path = os.path.join(tmpdir, "config.json")
@@ -188,9 +178,7 @@ class TestConfigLoad(DistributedTest):
             hjson.dump(base_config, fp)
         hidden_dim = 10
         model = SimpleModel(hidden_dim)
-        model, _, _, _ = deepspeed.initialize(config=config_path,
-                                              model=model,
-                                              model_parameters=model.parameters())
+        model, _, _, _ = deepspeed.initialize(config=config_path, model=model, model_parameters=model.parameters())
 
 
 class TestDeprecatedDeepScaleConfig(DistributedTest):
@@ -206,13 +194,8 @@ class TestDeprecatedDeepScaleConfig(DistributedTest):
         hidden_dim = 10
 
         model = SimpleModel(hidden_dim)
-        model, _, _,_ = deepspeed.initialize(args=args,
-                                             model=model,
-                                             model_parameters=model.parameters())
-        data_loader = random_dataloader(model=model,
-                                        total_samples=5,
-                                        hidden_dim=hidden_dim,
-                                        device=model.device)
+        model, _, _, _ = deepspeed.initialize(args=args, model=model, model_parameters=model.parameters())
+        data_loader = random_dataloader(model=model, total_samples=5, hidden_dim=hidden_dim, device=model.device)
         for n, batch in enumerate(data_loader):
             loss = model(batch[0], batch[1])
             model.backward(loss)
@@ -226,14 +209,11 @@ class TestDistInit(DistributedTest):
         hidden_dim = 10
 
         model = SimpleModel(hidden_dim)
-        model, _, _,_ = deepspeed.initialize(config=base_config,
-                                             model=model,
-                                             model_parameters=model.parameters(),
-                                             dist_init_required=True)
-        data_loader = random_dataloader(model=model,
-                                        total_samples=5,
-                                        hidden_dim=hidden_dim,
-                                        device=model.device)
+        model, _, _, _ = deepspeed.initialize(config=base_config,
+                                              model=model,
+                                              model_parameters=model.parameters(),
+                                              dist_init_required=True)
+        data_loader = random_dataloader(model=model, total_samples=5, hidden_dim=hidden_dim, device=model.device)
         for n, batch in enumerate(data_loader):
             loss = model(batch[0], batch[1])
             model.backward(loss)
@@ -250,10 +230,7 @@ class TestInitNoOptimizer(DistributedTest):
         model = SimpleModel(hidden_dim=hidden_dim)
 
         model, _, _, _ = deepspeed.initialize(config=base_config, model=model)
-        data_loader = random_dataloader(model=model,
-                                        total_samples=5,
-                                        hidden_dim=hidden_dim,
-                                        device=model.device)
+        data_loader = random_dataloader(model=model, total_samples=5, hidden_dim=hidden_dim, device=model.device)
         for n, batch in enumerate(data_loader):
             loss = model(batch[0], batch[1])
             with pytest.raises(AssertionError):
@@ -268,20 +245,14 @@ class TestArgs(DistributedTest):
     def test_none_args(self, base_config):
         model = SimpleModel(hidden_dim=10)
         model, _, _, _ = deepspeed.initialize(args=None, model=model, config=base_config)
-        data_loader = random_dataloader(model=model,
-                                        total_samples=5,
-                                        hidden_dim=10,
-                                        device=model.device)
+        data_loader = random_dataloader(model=model, total_samples=5, hidden_dim=10, device=model.device)
         for n, batch in enumerate(data_loader):
             loss = model(batch[0], batch[1])
 
     def test_no_args(self, base_config):
         model = SimpleModel(hidden_dim=10)
         model, _, _, _ = deepspeed.initialize(model=model, config=base_config)
-        data_loader = random_dataloader(model=model,
-                                        total_samples=5,
-                                        hidden_dim=10,
-                                        device=model.device)
+        data_loader = random_dataloader(model=model, total_samples=5, hidden_dim=10, device=model.device)
         for n, batch in enumerate(data_loader):
             loss = model(batch[0], batch[1])
 

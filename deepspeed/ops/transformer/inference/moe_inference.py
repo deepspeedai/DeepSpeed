@@ -43,6 +43,7 @@ class DeepSpeedMoEInferenceConfig(DeepSpeedInferenceConfig):
             scale_attention: If true, both q and k are scaled by 1/sqrt(attention_heads) before attention computation.
             return_tuple: if True, returns the transformer output as a tuple, otherwise returns as a tensor
     """
+
     def __init__(self,
                  hidden_size=-1,
                  intermediate_size=-1,
@@ -72,23 +73,10 @@ class DeepSpeedMoEInferenceConfig(DeepSpeedInferenceConfig):
                  mlp_type='standard',
                  scale_attn_by_inverse_layer_idx=False):
         super(DeepSpeedMoEInferenceConfig,
-              self).__init__(
-                  hidden_size,
-                  (intermediate_size if intermediate_size > 0 else 4 * hidden_size),
-                  heads,
-                  num_hidden_layers,
-                  layer_norm_eps,
-                  local_rank,
-                  mp_size,
-                  fp16,
-                  q_int8,
-                  pre_layer_norm,
-                  stochastic_mode,
-                  scale_attention,
-                  triangular_masking,
-                  local_attention,
-                  window_size,
-                  return_tuple)
+              self).__init__(hidden_size, (intermediate_size if intermediate_size > 0 else 4 * hidden_size), heads,
+                             num_hidden_layers, layer_norm_eps, local_rank, mp_size, fp16, q_int8, pre_layer_norm,
+                             stochastic_mode, scale_attention, triangular_masking, local_attention, window_size,
+                             return_tuple)
         self.moe_experts = moe_experts
         self.k = k
         self.capacity_factor = capacity_factor
@@ -116,44 +104,21 @@ class DeepSpeedMoEInferenceConfig(DeepSpeedInferenceConfig):
 
 
 class DeepSpeedMLPFunction(Function):
+
     @staticmethod
-    def forward(ctx,
-                input,
-                inter_w,
-                inter_b,
-                config,
-                output_b,
-                output_w,
-                q_scales,
-                q_groups,
-                merge_count,
-                mp_group,
+    def forward(ctx, input, inter_w, inter_b, config, output_b, output_w, q_scales, q_groups, merge_count, mp_group,
                 async_op):
         if config.q_int8:
-            intermediate = inference_cuda_module.fused_gemm_gelu_int8(
-                input,
-                inter_w,
-                inter_b,
-                config.epsilon,
-                q_scales[2],
-                (q_groups * (2**merge_count)),
-                config.pre_layer_norm)
-            output = inference_cuda_module.vector_matmul_int8(intermediate,
-                                                              output_w,
-                                                              q_scales[3],
-                                                              q_groups,
+            intermediate = inference_cuda_module.fused_gemm_gelu_int8(input, inter_w, inter_b, config.epsilon,
+                                                                      q_scales[2], (q_groups * (2**merge_count)),
+                                                                      config.pre_layer_norm)
+            output = inference_cuda_module.vector_matmul_int8(intermediate, output_w, q_scales[3], q_groups,
                                                               (merge_count))
         else:
             mlp_gemm_func = inference_cuda_module.fused_gemm_gelu_fp16 if config.fp16 else \
                                     inference_cuda_module.fused_gemm_gelu_fp32
 
-            output = mlp_gemm_func(input,
-                                   inter_w,
-                                   inter_b,
-                                   output_w,
-                                   config.epsilon,
-                                   config.pre_layer_norm,
-                                   async_op)
+            output = mlp_gemm_func(input, inter_w, inter_b, output_w, config.epsilon, config.pre_layer_norm, async_op)
         if mp_group is not None and dist.get_world_size(group=mp_group) > 1:
             dist.all_reduce(output, group=mp_group, async_op=async_op)
 
@@ -166,24 +131,17 @@ class DeepSpeedMLPFunction(Function):
 
 
 class DeepSpeedMoEMLP(nn.Module):
-    def __init__(self,
-                 config,
-                 q_scales=None,
-                 q_groups=1,
-                 merge_count=1,
-                 mlp_extra_grouping=False,
-                 mp_group=None):
+
+    def __init__(self, config, q_scales=None, q_groups=1, merge_count=1, mlp_extra_grouping=False, mp_group=None):
         super(DeepSpeedMoEMLP, self).__init__()
 
         self.config = config
         self.attn_nw = nn.Parameter(torch.Tensor(self.config.hidden_size))
         self.attn_nb = nn.Parameter(torch.Tensor(self.config.hidden_size))
-        interm_size = self.config.intermediate_size // (
-            1 if mp_group is None else dist.get_world_size(group=mp_group))
+        interm_size = self.config.intermediate_size // (1 if mp_group is None else dist.get_world_size(group=mp_group))
         self.inter_w = nn.Parameter(torch.Tensor(self.config.hidden_size, interm_size))
         self.inter_b = nn.Parameter(torch.Tensor(interm_size))
-        self.output_w = nn.Parameter(torch.Tensor((interm_size),
-                                                  self.config.hidden_size))
+        self.output_w = nn.Parameter(torch.Tensor((interm_size), self.config.hidden_size))
         self.output_b = nn.Parameter(torch.Tensor(self.config.hidden_size))
 
         # used for quantization
@@ -193,17 +151,8 @@ class DeepSpeedMoEMLP(nn.Module):
         self.mp_group = mp_group
 
     def forward(self, input, async_op=False):
-        return DeepSpeedMLPFunction.apply(input,
-                                          self.inter_w,
-                                          self.inter_b,
-                                          self.config,
-                                          self.output_b,
-                                          self.output_w,
-                                          self.q_scales,
-                                          self.q_groups,
-                                          self.merge_count,
-                                          self.mp_group,
-                                          async_op)
+        return DeepSpeedMLPFunction.apply(input, self.inter_w, self.inter_b, self.config, self.output_b, self.output_w,
+                                          self.q_scales, self.q_groups, self.merge_count, self.mp_group, async_op)
 
 
 class DeepSpeedMoEInference(nn.Module):
@@ -251,11 +200,7 @@ class DeepSpeedMoEInference(nn.Module):
         self.config.specialized_mode = specialized_mode
 
         DeepSpeedMoEInference.layer_id += 1
-        self.attention = DeepSpeedSelfAttention(self.config,
-                                                mp_group,
-                                                quantize_scales,
-                                                quantize_groups,
-                                                merge_count)
+        self.attention = DeepSpeedSelfAttention(self.config, mp_group, quantize_scales, quantize_groups, merge_count)
         self.attn_nw = nn.Parameter(torch.Tensor(self.config.hidden_size))
         self.attn_nb = nn.Parameter(torch.Tensor(self.config.hidden_size))
 
@@ -263,11 +208,7 @@ class DeepSpeedMoEInference(nn.Module):
         self.norm_b = nn.Parameter(torch.Tensor(self.config.hidden_size))
 
         if config.mlp_type == 'residual':
-            self.res_mlp = DeepSpeedMoEMLP(config,
-                                           quantize_scales,
-                                           quantize_groups,
-                                           merge_count,
-                                           mlp_extra_grouping,
+            self.res_mlp = DeepSpeedMoEMLP(config, quantize_scales, quantize_groups, merge_count, mlp_extra_grouping,
                                            mp_group)
             self.res_coef = nn.Parameter(torch.Tensor(self.config.hidden_size, 2))
             self.coef_func = inference_cuda_module.softmax_fp16 if self.config.fp16 or self.config.q_int8 else \
@@ -277,21 +218,12 @@ class DeepSpeedMoEInference(nn.Module):
 
         config.mp_size = 1
         self.mlp = nn.ModuleList(
-            DeepSpeedMoEMLP(config,
-                            quantize_scales,
-                            quantize_groups,
-                            merge_count,
-                            mlp_extra_grouping,
-                            expert_mp_group) for i in range(self.config.moe_experts))
+            DeepSpeedMoEMLP(config, quantize_scales, quantize_groups, merge_count, mlp_extra_grouping, expert_mp_group)
+            for i in range(self.config.moe_experts))
 
-        self.moe_gate = TopKGate(self.config.hidden_size,
-                                 self.config.global_experts,
-                                 self.config.k,
-                                 self.config.capacity_factor,
-                                 self.config.eval_capacity_factor,
-                                 self.config.min_capacity,
-                                 self.config.noisy_gate_policy,
-                                 self.config.drop_tokens,
+        self.moe_gate = TopKGate(self.config.hidden_size, self.config.global_experts, self.config.k,
+                                 self.config.capacity_factor, self.config.eval_capacity_factor,
+                                 self.config.min_capacity, self.config.noisy_gate_policy, self.config.drop_tokens,
                                  self.config.use_rts)
 
         self.ep_group = ep_group
@@ -315,19 +247,14 @@ class DeepSpeedMoEInference(nn.Module):
         _, combined_weights, dispatch_mask, _ = self.moe_gate(
             attention_output.view(-1, self.config.hidden_size),
             None,
-            )
-        dispatched_attention = self.einsum_sec_sm_ecm(
-            dispatch_mask.type_as(attention_output),
-            attention_output.view(-1,
-                                  self.config.hidden_size))
+        )
+        dispatched_attention = self.einsum_sec_sm_ecm(dispatch_mask.type_as(attention_output),
+                                                      attention_output.view(-1, self.config.hidden_size))
         return dispatched_attention, combined_weights
 
     def expert_exec(self, dispatched_input):
-        dispatched_input = dispatched_input.reshape(
-            self.config.global_experts // self.config.moe_experts,
-            self.config.moe_experts,
-            -1,
-            self.config.hidden_size)
+        dispatched_input = dispatched_input.reshape(self.config.global_experts // self.config.moe_experts,
+                                                    self.config.moe_experts, -1, self.config.hidden_size)
 
         chunks = dispatched_input.chunk(self.config.moe_experts, dim=1)
         expert_outputs = torch.empty((
@@ -337,29 +264,22 @@ class DeepSpeedMoEInference(nn.Module):
                                      dtype=dispatched_input.dtype,
                                      device=dispatched_input.device)
         for chunk, expert in zip(chunks, range(len(self.mlp))):
-            expert_outputs[expert] = self.mlp[expert](chunk.view(
-                -1,
-                dispatched_input.shape[-2],
-                dispatched_input.shape[-1]))
+            expert_outputs[expert] = self.mlp[expert](chunk.view(-1, dispatched_input.shape[-2],
+                                                                 dispatched_input.shape[-1]))
         return expert_outputs
 
     def _alltoall(self, dispatched_attention):
         if dist.get_world_size(group=self.ep_group) > 1:
             dispatched_input = torch.empty_like(dispatched_attention)
-            dist.all_to_all_single(dispatched_input,
-                                   dispatched_attention,
-                                   group=self.ep_group)
+            dist.all_to_all_single(dispatched_input, dispatched_attention, group=self.ep_group)
             return dispatched_input
         else:
             return dispatched_attention
 
     def scale_expert_output(self, attention_output, expert_output, combined_weights):
         combined_output = torch.matmul(
-            combined_weights.type_as(attention_output).reshape(
-                combined_weights.shape[0],
-                -1),
-            expert_output.reshape(-1,
-                                  expert_output.shape[-1]))
+            combined_weights.type_as(attention_output).reshape(combined_weights.shape[0], -1),
+            expert_output.reshape(-1, expert_output.shape[-1]))
         return combined_output.reshape(attention_output.shape)
 
     def forward(self,
@@ -385,16 +305,9 @@ class DeepSpeedMoEInference(nn.Module):
             input = input.half()
 
         with torch.no_grad():
-            attention_output = self.attention(input,
-                                              input_mask,
-                                              head_mask,
-                                              layer_past,
-                                              get_present,
-                                              encoder_hidden_states,
-                                              encoder_attention_mask,
-                                              output_attentions,
-                                              self.norm_w,
-                                              self.norm_b)
+            attention_output = self.attention(input, input_mask, head_mask, layer_past, get_present,
+                                              encoder_hidden_states, encoder_attention_mask, output_attentions,
+                                              self.norm_w, self.norm_b)
 
             if get_present:
                 attention_output, p_key, p_value = attention_output[0:3]
@@ -405,10 +318,7 @@ class DeepSpeedMoEInference(nn.Module):
                 attention_output = attention_output[0]
 
             residual_add = attention_output + self.attention.attn_ob
-            attention_output = self.ds_layernorm(residual_add,
-                                                 self.attn_nw,
-                                                 self.attn_nb,
-                                                 self.config.epsilon)
+            attention_output = self.ds_layernorm(residual_add, self.attn_nw, self.attn_nb, self.config.epsilon)
 
             if self.config.mlp_type == 'residual':
                 res_mlp_out = self.res_mlp(attention_output, async_op=True)
@@ -416,13 +326,10 @@ class DeepSpeedMoEInference(nn.Module):
 
             if self.expert_mp_group is not None:
                 tensor_list = [
-                    torch.empty_like(attention_output)
-                    for _ in range(dist.get_world_size(group=self.expert_mp_group))
+                    torch.empty_like(attention_output) for _ in range(dist.get_world_size(group=self.expert_mp_group))
                 ]
                 tensor_list[dist.get_rank(group=self.expert_mp_group)] = attention_output
-                dist.all_gather(tensor_list,
-                                attention_output,
-                                group=self.expert_mp_group)
+                dist.all_gather(tensor_list, attention_output, group=self.expert_mp_group)
                 attention_output = torch.cat(tensor_list).contiguous()
 
             ############## MoE Gating + Experts ###############
@@ -430,14 +337,11 @@ class DeepSpeedMoEInference(nn.Module):
             dispatched_input = self._alltoall(dispatched_attention)
             expert_outputs = self.expert_exec(dispatched_input)
             expert_output = self._alltoall(expert_outputs)
-            output = self.scale_expert_output(attention_output,
-                                              expert_output,
-                                              combined_weights)
+            output = self.scale_expert_output(attention_output, expert_output, combined_weights)
             ################################################
 
             if self.expert_mp_group is not None:
-                output = output.split(output.shape[0] //
-                                      dist.get_world_size(group=self.expert_mp_group),
+                output = output.split(output.shape[0] // dist.get_world_size(group=self.expert_mp_group),
                                       dim=0)[dist.get_rank(group=self.expert_mp_group)]
 
             if self.config.mlp_type == 'residual':
@@ -446,10 +350,7 @@ class DeepSpeedMoEInference(nn.Module):
             output = self.bias_residual_func(output, residual_add, torch.empty(1))
 
             if not self.config.pre_layer_norm:
-                output = self.ds_layernorm(output,
-                                           self.norm_w,
-                                           self.norm_b,
-                                           self.config.epsilon)
+                output = self.ds_layernorm(output, self.norm_w, self.norm_b, self.config.epsilon)
 
             if input_type != output.dtype:
                 output = output.to(input_type)

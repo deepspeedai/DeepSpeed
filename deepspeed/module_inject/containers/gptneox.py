@@ -11,9 +11,8 @@ from ..policy import maybe_copy
 from packaging import version as pkg_version
 
 
-class DS_GPTNEOXContainer(MetaTensorContainer,
-                          MegatronContainer,
-                          BaseTransformerContainer):
+class DS_GPTNEOXContainer(MetaTensorContainer, MegatronContainer, BaseTransformerContainer):
+
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
 
@@ -57,26 +56,13 @@ class DS_GPTNEOXContainer(MetaTensorContainer,
                        split_qkv=self.policy.split_qkv,
                        heads=self.policy.client_module.attention.num_attention_heads)
         for i in range(2, 4):
-            maybe_copy(module.attention,
-                       sd,
-                       weight_quantizer,
-                       mp_replace,
-                       transformer_param_names[i],
+            maybe_copy(module.attention, sd, weight_quantizer, mp_replace, transformer_param_names[i],
                        prefix + param_names[i])
         for i in range(4, 10):
-            maybe_copy(module.mlp,
-                       sd,
-                       weight_quantizer,
-                       mp_replace,
-                       transformer_param_names[i],
+            maybe_copy(module.mlp, sd, weight_quantizer, mp_replace, transformer_param_names[i],
                        prefix + param_names[i])
         for i in range(10, 12):
-            maybe_copy(module,
-                       sd,
-                       weight_quantizer,
-                       mp_replace,
-                       transformer_param_names[i],
-                       prefix + param_names[i])
+            maybe_copy(module, sd, weight_quantizer, mp_replace, transformer_param_names[i], prefix + param_names[i])
 
 
 class GPTNEOXLayerPolicy(TransformerPolicy):

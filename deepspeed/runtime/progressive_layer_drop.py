@@ -13,6 +13,7 @@ class ProgressiveLayerDrop(object):
         The lower the theta value, the faster the training speed. Default value: 0.5.
         gamma (float): a hyper-parameter that controls how fast the drop ratio increases. Default value: 0.001.
     """
+
     def __init__(self, theta=0.5, gamma=0.001):
         super().__init__()
 
@@ -29,6 +30,7 @@ class ProgressiveLayerDrop(object):
         return self.current_theta
 
     def update_state(self, global_step):
+
         def _prob(x, gamma, p):
             return (1. - p) * np.exp(-gamma * x) + p
 

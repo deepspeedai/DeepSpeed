@@ -56,33 +56,17 @@ class DeepSpeedTransformerInference(nn.Module):
             log_dist(f"DeepSpeed-Inference config: {self.config.__dict__}", [0])
 
         if self.config.bigscience_bloom:
-            self.attention = BloomSelfAttention(self.config,
-                                                mp_group,
-                                                quantize_scales,
-                                                quantize_groups,
-                                                merge_count)
+            self.attention = BloomSelfAttention(self.config, mp_group, quantize_scales, quantize_groups, merge_count)
         else:
-            self.attention = DeepSpeedSelfAttention(self.config,
-                                                    mp_group,
-                                                    quantize_scales,
-                                                    quantize_groups,
+            self.attention = DeepSpeedSelfAttention(self.config, mp_group, quantize_scales, quantize_groups,
                                                     merge_count)
-        self.mlp = DeepSpeedMLP(self.config,
-                                mp_group,
-                                quantize_scales,
-                                quantize_groups,
-                                merge_count,
+        self.mlp = DeepSpeedMLP(self.config, mp_group, quantize_scales, quantize_groups, merge_count,
                                 mlp_extra_grouping)
 
-        device = get_accelerator().current_device_name(
-        )  # if config.bigscience_bloom else 'cpu'
-        self.norm_w = nn.Parameter(torch.empty(self.config.hidden_size,
-                                               dtype=data_type,
-                                               device=device),
+        device = get_accelerator().current_device_name()  # if config.bigscience_bloom else 'cpu'
+        self.norm_w = nn.Parameter(torch.empty(self.config.hidden_size, dtype=data_type, device=device),
                                    requires_grad=False)
-        self.norm_b = nn.Parameter(torch.empty(self.config.hidden_size,
-                                               dtype=data_type,
-                                               device=device),
+        self.norm_b = nn.Parameter(torch.empty(self.config.hidden_size, dtype=data_type, device=device),
                                    requires_grad=False)
         self.layer_past = None
         self.allocate_workspace = inference_cuda_module.allocate_workspace_fp32 if (not config.fp16) else \
@@ -122,20 +106,15 @@ class DeepSpeedTransformerInference(nn.Module):
         if "hidden_states" in kwargs:
             input = kwargs["hidden_states"]
 
-        input_mask = (input_mask if attn_mask is None else
-                      attn_mask) if attention_mask is None else attention_mask
+        input_mask = (input_mask if attn_mask is None else attn_mask) if attention_mask is None else attention_mask
 
         # Allocate memory only on first layer forward
         if self.config.layer_id == 0:
-            self.allocate_workspace(self.config.hidden_size,
-                                    self.config.heads,
+            self.allocate_workspace(self.config.hidden_size, self.config.heads,
                                     input.size()[1],
-                                    input.size()[0],
-                                    DeepSpeedTransformerInference.layer_id,
-                                    self.config.mp_size,
+                                    input.size()[0], DeepSpeedTransformerInference.layer_id, self.config.mp_size,
                                     self.config.bigscience_bloom,
-                                    dist.get_rank() if dist.is_initialized() else 0,
-                                    self.config.max_out_tokens)
+                                    dist.get_rank() if dist.is_initialized() else 0, self.config.max_out_tokens)
 
         get_present = (get_present or get_key_value or use_cache)
         input_mask = input_mask if attention_mask is None else attention_mask
@@ -174,10 +153,7 @@ class DeepSpeedTransformerInference(nn.Module):
             output = self.mlp(attention_output, input, inp_norm, self.attention.attn_ob)
 
             if not self.config.pre_layer_norm:
-                output = inference_cuda_module.layer_norm(output,
-                                                          self.norm_w,
-                                                          self.norm_b,
-                                                          self.config.epsilon)
+                output = inference_cuda_module.layer_norm(output, self.norm_w, self.norm_b, self.config.epsilon)
 
             output = output.to(input_type)
         if get_present:

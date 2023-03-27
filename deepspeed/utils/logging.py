@@ -15,6 +15,7 @@ log_levels = {
 
 
 class LoggerFactory:
+
     @staticmethod
     def create_logger(name=None, level=logging.INFO):
         """create a logger
@@ -30,9 +31,8 @@ class LoggerFactory:
         if name is None:
             raise ValueError("name for logger cannot be None")
 
-        formatter = logging.Formatter(
-            "[%(asctime)s] [%(levelname)s] "
-            "[%(filename)s:%(lineno)d:%(funcName)s] %(message)s")
+        formatter = logging.Formatter("[%(asctime)s] [%(levelname)s] "
+                                      "[%(filename)s:%(lineno)d:%(funcName)s] %(message)s")
 
         logger_ = logging.getLogger(name)
         logger_.setLevel(level)

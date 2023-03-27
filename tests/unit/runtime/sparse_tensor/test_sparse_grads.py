@@ -8,6 +8,7 @@ import deepspeed.utils.groups as groups
 
 
 class Model(torch.nn.Module):
+
     def __init__(self):
         super().__init__()
         self.emb = torch.nn.EmbeddingBag(10, 3, mode="sum", sparse=True)
@@ -18,6 +19,7 @@ class Model(torch.nn.Module):
 
 
 class Adam(torch.optim.Optimizer):
+
     def __init__(self, dense_params, sparse_params):
         super().__init__(dense_params + sparse_params, defaults={})
         self.adam = torch.optim.Adam(dense_params)
@@ -37,38 +39,19 @@ class TestSparseAdam(DistributedTest):
     world_size = 2
 
     def test(self):
-        config_dict = {
-            "train_batch_size": 2,
-            "steps_per_print": 1,
-            "sparse_gradients": True
-        }
+        config_dict = {"train_batch_size": 2, "steps_per_print": 1, "sparse_gradients": True}
 
         model = Model()
         optimizer = Adam(list(model.linear.parameters()), list(model.emb.parameters()))
-        engine, _, _, _ = deepspeed.initialize(model=model,
-                                              optimizer=optimizer,
-                                              config=config_dict)
+        engine, _, _, _ = deepspeed.initialize(model=model, optimizer=optimizer, config=config_dict)
         loss = torch.nn.BCEWithLogitsLoss()
-        x = torch.tensor([1,
-                          2,
-                          4,
-                          5,
-                          4,
-                          3,
-                          2,
-                          9],
-                         dtype=torch.long,
-                         device=engine.device)
+        x = torch.tensor([1, 2, 4, 5, 4, 3, 2, 9], dtype=torch.long, device=engine.device)
         offsets = torch.tensor([0, 4], dtype=torch.long, device=engine.device)
         y = torch.tensor([[1.0], [0.0]], device=engine.device)
         res = engine(x, offsets)
         engine.backward(loss(res, y))
         engine.step()
 
-        results = [
-            engine.all_gather_scalar(i,
-                                     groups._get_data_parallel_group())
-            for i in model.emb.parameters()
-        ]
+        results = [engine.all_gather_scalar(i, groups._get_data_parallel_group()) for i in model.emb.parameters()]
         for res in results:
             assert torch.allclose(res[0], res[1])

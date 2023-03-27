@@ -20,14 +20,8 @@ def pre_basic(args, tid, read_op):
     file = args.read_file if read_op else f'{args.write_file}.{tid}'
 
     task_log(tid, f'Allocate tensor of size {num_bytes} bytes')
-    buffer = get_accelerator().pin_memory(
-        torch.empty(num_bytes,
-                    dtype=torch.uint8,
-                    device='cpu'))
-    task_log(
-        tid,
-        f'{io_string} file {file} of size {num_bytes} bytes from buffer on device {buffer.device}'
-    )
+    buffer = get_accelerator().pin_memory(torch.empty(num_bytes, dtype=torch.uint8, device='cpu'))
+    task_log(tid, f'{io_string} file {file} of size {num_bytes} bytes from buffer on device {buffer.device}')
 
     ctxt = {}
     ctxt['file'] = file
@@ -60,13 +54,8 @@ def post_basic(pool_params):
 def main_basic_read(pool_params):
     args, tid, ctxt = pool_params
     start_time = time.time()
-    AsyncIOBuilder().load().aio_read(ctxt['buffer'],
-                                     ctxt['file'],
-                                     args.block_size,
-                                     args.queue_depth,
-                                     args.single_submit,
-                                     args.overlap_events,
-                                     args.validate)
+    AsyncIOBuilder().load().aio_read(ctxt['buffer'], ctxt['file'], args.block_size, args.queue_depth,
+                                     args.single_submit, args.overlap_events, args.validate)
     end_time = time.time()
     ctxt['elapsed_sec'] += end_time - start_time
 
@@ -76,13 +65,8 @@ def main_basic_read(pool_params):
 def main_basic_write(pool_params):
     args, tid, ctxt = pool_params
     start_time = time.time()
-    AsyncIOBuilder().load().aio_write(ctxt['buffer'],
-                                      ctxt['file'],
-                                      args.block_size,
-                                      args.queue_depth,
-                                      args.single_submit,
-                                      args.overlap_events,
-                                      args.validate)
+    AsyncIOBuilder().load().aio_write(ctxt['buffer'], ctxt['file'], args.block_size, args.queue_depth,
+                                      args.single_submit, args.overlap_events, args.validate)
     end_time = time.time()
     ctxt['elapsed_sec'] += end_time - start_time
 

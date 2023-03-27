@@ -10,6 +10,7 @@ class SparsityConfig:
     """Abstract Configuration class to store `sparsity configuration of a self attention layer`.
     It contains shared property of different block-sparse sparsity patterns. However, each class needs to extend it based on required property and functionality.
     """
+
     def __init__(self, num_heads, block=16, different_layout_per_head=False):
         """Initialize the Sparsity Pattern Config.
 
@@ -37,9 +38,7 @@ class SparsityConfig:
         """
 
         if (seq_len % self.block != 0):
-            raise ValueError(
-                f'Sequence Length, {seq_len}, needs to be dividable by Block size {self.block}!'
-            )
+            raise ValueError(f'Sequence Length, {seq_len}, needs to be dividable by Block size {self.block}!')
         num_blocks = seq_len // self.block
         # TODO Currently we allocate layout per head; needs to be updated if heads share a single layout.
         layout = torch.zeros((self.num_heads, num_blocks, num_blocks), dtype=torch.int64)
@@ -64,6 +63,7 @@ class DenseSparsityConfig(SparsityConfig):
     """Configuration class to store `Dense` configuration.
     In reality, this is not sparse and all blocks are used. We keep it for the sake of comparison and comprehension.
     """
+
     def __init__(self, num_heads, block=16, different_layout_per_head=False):
         """Initialize the Dense Sparsity Pattern Config.
         In reality, this is not sparse and all blocks are used. We keep it for the sake of comparison and comprehension.
@@ -96,6 +96,7 @@ class FixedSparsityConfig(SparsityConfig):
     For more details about this sparsity config, please see `Generative Modeling with Sparse Transformers`: https://arxiv.org/abs/1904.10509; this has been customized.
     This class extends parent class of `SparsityConfig` and customizes it for `Fixed` sparsity.
     """
+
     def __init__(self,
                  num_heads,
                  block=16,
@@ -131,14 +132,11 @@ class FixedSparsityConfig(SparsityConfig):
         self.num_global_blocks = num_global_blocks
 
         if (attention != 'unidirectional' and attention != 'bidirectional'):
-            raise NotImplementedError(
-                'only \"uni/bi-directional\" attentions are supported for now!')
+            raise NotImplementedError('only \"uni/bi-directional\" attentions are supported for now!')
         self.attention = attention
 
         if (attention != 'bidirectional' and horizontal_global_attention):
-            raise ValueError(
-                'only \"bi-directional\" attentions can support horizontal global attention!'
-            )
+            raise ValueError('only \"bi-directional\" attentions can support horizontal global attention!')
         self.horizontal_global_attention = horizontal_global_attention
 
         if (num_different_global_patterns > 1 and not different_layout_per_head):
@@ -166,9 +164,7 @@ class FixedSparsityConfig(SparsityConfig):
         for i in range(0, num_blocks, self.num_local_blocks):
             end = min(i + self.num_local_blocks, num_blocks)
             for row in range(i, end):
-                for col in range(
-                        i,
-                    (row + 1 if self.attention == 'unidirectional' else end)):
+                for col in range(i, (row + 1 if self.attention == 'unidirectional' else end)):
                     layout[h, row, col] = 1
         return layout
 
@@ -206,8 +202,7 @@ class FixedSparsityConfig(SparsityConfig):
 
         # set last global blocks; handle possible short last local window
         if (end < num_blocks):
-            start = min(end + first_global_block_idx,
-                        num_blocks - self.num_global_blocks)
+            start = min(end + first_global_block_idx, num_blocks - self.num_global_blocks)
             end = start + self.num_global_blocks
 
             # vertical global attention
@@ -250,6 +245,7 @@ class VariableSparsityConfig(SparsityConfig):
     For more details about `Fixed` sparsity config, please see `Generative Modeling with Sparse Transformers`: https://arxiv.org/abs/1904.10509; this has been customized.
     This class extends parent class of `SparsityConfig` and customizes it for `Fixed` sparsity.
     """
+
     def __init__(self,
                  num_heads,
                  block=16,
@@ -296,14 +292,11 @@ class VariableSparsityConfig(SparsityConfig):
         self.global_block_end_indices = global_block_end_indices
 
         if (attention != 'unidirectional' and attention != 'bidirectional'):
-            raise NotImplementedError(
-                'only \"uni/bi-directional\" attentions are supported for now!')
+            raise NotImplementedError('only \"uni/bi-directional\" attentions are supported for now!')
         self.attention = attention
 
         if (attention != 'bidirectional' and horizontal_global_attention):
-            raise ValueError(
-                'only \"bi-directional\" attentions can support horizontal global attention!'
-            )
+            raise ValueError('only \"bi-directional\" attentions can support horizontal global attention!')
         self.horizontal_global_attention = horizontal_global_attention
 
     def set_random_layout(self, h, layout):
@@ -345,9 +338,7 @@ class VariableSparsityConfig(SparsityConfig):
             end_block_idx += block_size
             end_block_idx = min(end_block_idx, num_blocks)
             for row in range(start_block_idx, end_block_idx):
-                for col in range(
-                        start_block_idx,
-                    (row + 1 if self.attention == 'unidirectional' else end_block_idx)):
+                for col in range(start_block_idx, (row + 1 if self.attention == 'unidirectional' else end_block_idx)):
                     layout[h, row, col] = 1
             start_block_idx += block_size
 
@@ -355,9 +346,7 @@ class VariableSparsityConfig(SparsityConfig):
         for i in range(start_block_idx, num_blocks, block_size):
             end_block_idx = min(i + block_size, num_blocks)
             for row in range(i, end_block_idx):
-                for col in range(
-                        i,
-                    (row + 1 if self.attention == 'unidirectional' else end_block_idx)):
+                for col in range(i, (row + 1 if self.attention == 'unidirectional' else end_block_idx)):
                     layout[h, row, col] = 1
         return layout
 
@@ -423,6 +412,7 @@ class BigBirdSparsityConfig(SparsityConfig):
     For more details about this sparsity config, please see `Big Bird: Transformers for Longer Sequences`: https://arxiv.org/pdf/2007.14062.pdf
     This class extends parent class of `SparsityConfig` and customizes it for `BigBird` sparsity.
     """
+
     def __init__(self,
                  num_heads,
                  block=16,
@@ -452,8 +442,7 @@ class BigBirdSparsityConfig(SparsityConfig):
         self.num_global_blocks = num_global_blocks
 
         if (attention != 'unidirectional' and attention != 'bidirectional'):
-            raise NotImplementedError(
-                'only \"uni/bi-directional\" attentions are supported for now!')
+            raise NotImplementedError('only \"uni/bi-directional\" attentions are supported for now!')
         self.attention = attention
 
     def set_random_layout(self, h, layout):
@@ -475,10 +464,7 @@ class BigBirdSparsityConfig(SparsityConfig):
             )
 
         for row in range(0, num_blocks):
-            sample_range = range(
-                0,
-                num_blocks) if self.attention == 'bidirectional' else range(0,
-                                                                            row + 1)
+            sample_range = range(0, num_blocks) if self.attention == 'bidirectional' else range(0, row + 1)
             rnd_cols = random.sample(sample_range, self.num_random_blocks)
             layout[h, row, rnd_cols] = 1
         return layout
@@ -564,6 +550,7 @@ class BSLongformerSparsityConfig(SparsityConfig):
     For more details about this sparsity config, please see `Longformer: The Long-Document Transformer`: https://arxiv.org/pdf/2004.05150.pdf
     This class extends parent class of `SparsityConfig` and customizes it for `Longformer` sparsity.
     """
+
     def __init__(self,
                  num_heads,
                  block=16,
@@ -687,11 +674,8 @@ class LocalSlidingWindowSparsityConfig(SparsityConfig):
     """Configuration class to store `Local Sliding Window` sparsity configuration - a purely-local sliding window attention.
     This class extends parent class of `SparsityConfig` and customizes it for `Local` sparsity.
     """
-    def __init__(self,
-                 num_heads,
-                 block=16,
-                 num_sliding_window_blocks=3,
-                 attention='unidirectional'):
+
+    def __init__(self, num_heads, block=16, num_sliding_window_blocks=3, attention='unidirectional'):
         """Initialize the Local Sliding Window Sparsity Pattern Config.
         For usage example please see, TODO DeepSpeed Sparse Transformer Tutorial
         Arguments:
@@ -723,8 +707,7 @@ class LocalSlidingWindowSparsityConfig(SparsityConfig):
         w = self.num_sliding_window_blocks // 2
         for row in range(0, num_blocks):
             start = max(0, row - w)
-            end = min(row + w + 1,
-                      num_blocks) if self.attention == "bidirectional" else row + 1
+            end = min(row + w + 1, num_blocks) if self.attention == "bidirectional" else row + 1
             layout[h, row, start:end] = 1
         return layout
 

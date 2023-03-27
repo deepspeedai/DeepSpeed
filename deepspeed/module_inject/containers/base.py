@@ -15,6 +15,7 @@ class BaseConvolutionContainer(ABC):
 
 
 class BaseTransformerContainer(ABC):
+
     def __init__(self, policy, config, model_config, layer_id, child):
         self.policy = policy
         self.config = config
@@ -40,18 +41,14 @@ class BaseTransformerContainer(ABC):
             hasattr(self.model_config, 'layernorm_epsilon') else 1.0e-12)
         self.return_tuple = self.config.return_tuple
         self.triangular_masking = True
-        self.local_attention = ((self.model_config.attention_layers[self.layer_id]
-                                 == "local") if hasattr(self.model_config,
-                                                        'attention_layers') else False)
+        self.local_attention = ((self.model_config.attention_layers[self.layer_id] == "local") if hasattr(
+            self.model_config, 'attention_layers') else False)
         self.window_size = getattr(self.model_config, "window_size", 1)
         self.mlp_act_func_type = self.policy.mlp_act_func_type
         self.training_mp_size = self.config.training_mp_size
         self.bigscience_bloom = False
         self.max_out_tokens = self.config.max_out_tokens
-        self.scale_attn_by_inverse_layer_idx = getattr(
-            self.config,
-            "scale_attn_by_inverse_layer_idx",
-            False)
+        self.scale_attn_by_inverse_layer_idx = getattr(self.config, "scale_attn_by_inverse_layer_idx", False)
         self.use_mup = self.policy.use_mup
         self.return_single_tuple = False
         self.rotary_dim = self.model_config.rotary_dim if hasattr(self.model_config, 'rotary_dim') \
@@ -168,10 +165,8 @@ class BaseTransformerContainer(ABC):
         self.mlp_quantization()
 
     def attention_quantization(self):
-        self.module.attention.attn_qkvw = self.quantizer.quantize(
-            self.module.attention.attn_qkvw)
-        self.module.attention.attn_ow = self.quantizer.quantize(
-            self.module.attention.attn_ow)
+        self.module.attention.attn_qkvw = self.quantizer.quantize(self.module.attention.attn_qkvw)
+        self.module.attention.attn_ow = self.quantizer.quantize(self.module.attention.attn_ow)
 
     def mlp_quantization(self):
         self.module.mlp.inter_w = self.quantizer.quantize(self.module.mlp.inter_w)
@@ -190,18 +185,12 @@ class BaseTransformerContainer(ABC):
         self.apply_weight_quantization()
 
     def attention_qkv_mp(self, mp_replace):
-        self.module.attention.attn_qkvw = mp_replace.qkv_copy(
-            self.module.attention.attn_qkvw,
-            self.qkvw)
-        self.module.attention.attn_qkvb = mp_replace.qkv_copy(
-            self.module.attention.attn_qkvb,
-            self.qkvb)
+        self.module.attention.attn_qkvw = mp_replace.qkv_copy(self.module.attention.attn_qkvw, self.qkvw)
+        self.module.attention.attn_qkvb = mp_replace.qkv_copy(self.module.attention.attn_qkvb, self.qkvb)
 
     def attention_o_mp(self, mp_replace):
-        self.module.attention.attn_ow = mp_replace.copy(self.module.attention.attn_ow,
-                                                        self.dense_w)
-        self.module.attention.attn_ob = mp_replace.copy(self.module.attention.attn_ob,
-                                                        self.dense_b)
+        self.module.attention.attn_ow = mp_replace.copy(self.module.attention.attn_ow, self.dense_w)
+        self.module.attention.attn_ob = mp_replace.copy(self.module.attention.attn_ob, self.dense_b)
 
     def mlp_inter_mp(self, mp_replace):
         self.module.mlp.inter_w = mp_replace.copy(self.module.mlp.inter_w, self._h4h_w)
@@ -216,15 +205,11 @@ class BaseTransformerContainer(ABC):
             self.module.mlp.attn_nw = self.attn_nw
             self.module.mlp.attn_nb = self.attn_nb
         else:
-            self.module.mlp.attn_nw.data.copy_(
-                self.attn_nw.to(get_accelerator().current_device_name()))
-            self.module.mlp.attn_nb.data.copy_(
-                self.attn_nb.to(get_accelerator().current_device_name()))
+            self.module.mlp.attn_nw.data.copy_(self.attn_nw.to(get_accelerator().current_device_name()))
+            self.module.mlp.attn_nb.data.copy_(self.attn_nb.to(get_accelerator().current_device_name()))
 
-        self.module.norm_w.data.copy_(
-            self.input_nw.to(get_accelerator().current_device_name()))
-        self.module.norm_b.data.copy_(
-            self.input_nb.to(get_accelerator().current_device_name()))
+        self.module.norm_w.data.copy_(self.input_nw.to(get_accelerator().current_device_name()))
+        self.module.norm_b.data.copy_(self.input_nb.to(get_accelerator().current_device_name()))
 
     def transpose(self):
         self.transpose_attention()

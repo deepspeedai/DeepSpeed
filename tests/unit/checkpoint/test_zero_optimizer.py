@@ -15,27 +15,11 @@ import pytest
 class TestZeROCheckpoint(DistributedTest):
     world_size = 2
 
-    @pytest.mark.parametrize('zero_stage, use_cpu_offload, adam_optimizer',
-                             [(1,
-                               False,
-                               'Adam'),
-                              (2,
-                               False,
-                               'Adam'),
-                              (2,
-                               True,
-                               'deepspeed_adam'),
-                              (3,
-                               False,
-                               'Adam'),
-                              (3,
-                               True,
-                               'deepspeed_adam')])
-    def test_load_optimizer_state(self,
-                                  tmpdir,
-                                  zero_stage,
-                                  use_cpu_offload,
-                                  adam_optimizer):
+    @pytest.mark.parametrize('zero_stage, use_cpu_offload, adam_optimizer', [(1, False, 'Adam'), (2, False, 'Adam'),
+                                                                             (2, True, 'deepspeed_adam'),
+                                                                             (3, False, 'Adam'),
+                                                                             (3, True, 'deepspeed_adam')])
+    def test_load_optimizer_state(self, tmpdir, zero_stage, use_cpu_offload, adam_optimizer):
         if use_cpu_offload and not deepspeed.ops.__compatible_ops__[CPUAdamBuilder.NAME]:
             pytest.skip("cpu-adam is not compatible")
 
@@ -46,8 +30,7 @@ class TestZeROCheckpoint(DistributedTest):
                 "type": 'Adam',
                 "params": {
                     "lr": 0.00015,
-                    "betas": [0.8,
-                              0.999],
+                    "betas": [0.8, 0.999],
                     "eps": 1e-8,
                     "weight_decay": 3e-7
                 }
@@ -70,33 +53,13 @@ class TestZeROCheckpoint(DistributedTest):
         else:
             models = [SimpleModel(hidden_dim, empty_grad=False) for _ in range(2)]
 
-        checkpoint_correctness_verification(config_dict,
-                                            models,
-                                            hidden_dim,
-                                            tmpdir,
-                                            load_optimizer_states=True)
+        checkpoint_correctness_verification(config_dict, models, hidden_dim, tmpdir, load_optimizer_states=True)
 
-    @pytest.mark.parametrize('zero_stage, use_cpu_offload, adam_optimizer',
-                             [(1,
-                               False,
-                               "Adam"),
-                              (2,
-                               False,
-                               "Adam"),
-                              (2,
-                               True,
-                               'deepspeed_adam'),
-                              (3,
-                               False,
-                               'Adam'),
-                              (3,
-                               True,
-                               'deepspeed_adam')])
-    def test_not_load_optimizer_state(self,
-                                      tmpdir,
-                                      zero_stage,
-                                      use_cpu_offload,
-                                      adam_optimizer):
+    @pytest.mark.parametrize('zero_stage, use_cpu_offload, adam_optimizer', [(1, False, "Adam"), (2, False, "Adam"),
+                                                                             (2, True, 'deepspeed_adam'),
+                                                                             (3, False, 'Adam'),
+                                                                             (3, True, 'deepspeed_adam')])
+    def test_not_load_optimizer_state(self, tmpdir, zero_stage, use_cpu_offload, adam_optimizer):
         if use_cpu_offload and not deepspeed.ops.__compatible_ops__[CPUAdamBuilder.NAME]:
             pytest.skip("cpu-adam is not compatible")
 
@@ -107,8 +70,7 @@ class TestZeROCheckpoint(DistributedTest):
                 "type": 'Adam',
                 "params": {
                     "lr": 0.00015,
-                    "betas": [0.8,
-                              0.999],
+                    "betas": [0.8, 0.999],
                     "eps": 1e-8,
                     "weight_decay": 3e-7
                 }
@@ -131,11 +93,7 @@ class TestZeROCheckpoint(DistributedTest):
         else:
             models = [SimpleModel(hidden_dim, empty_grad=False) for _ in range(2)]
 
-        checkpoint_correctness_verification(config_dict,
-                                            models,
-                                            hidden_dim,
-                                            tmpdir,
-                                            load_optimizer_states=False)
+        checkpoint_correctness_verification(config_dict, models, hidden_dim, tmpdir, load_optimizer_states=False)
 
     @pytest.mark.parametrize('zero_stage', [1, 2])
     def test_hybrid_optimizer_state(self, tmpdir, zero_stage):
@@ -186,11 +144,7 @@ class TestZeROCheckpoint(DistributedTest):
         else:
             models = [SimpleModel(hidden_dim, empty_grad=False) for _ in range(2)]
 
-        checkpoint_correctness_verification(config_dict,
-                                            models,
-                                            hidden_dim,
-                                            tmpdir,
-                                            load_module_only=True)
+        checkpoint_correctness_verification(config_dict, models, hidden_dim, tmpdir, load_module_only=True)
 
 
 class ws4_model_checkpoint(DistributedFixture):
@@ -214,22 +168,15 @@ class ws4_model_checkpoint(DistributedFixture):
         hidden_dim = 10
         model = SimpleModel(hidden_dim)
 
-        model, _, _, _ = deepspeed.initialize(config=ds_config,
-                                            model=model,
-                                            model_parameters=model.parameters())
-        data_loader = random_dataloader(model=model,
-                                        total_samples=8,
-                                        hidden_dim=hidden_dim,
-                                        device=model.device)
+        model, _, _, _ = deepspeed.initialize(config=ds_config, model=model, model_parameters=model.parameters())
+        data_loader = random_dataloader(model=model, total_samples=8, hidden_dim=hidden_dim, device=model.device)
         for n, batch in enumerate(data_loader):
             loss = model(batch[0], batch[1])
             model.backward(loss)
             model.step()
 
         if load_optim:
-            torch.save(model.optimizer.optimizer.state_dict(),
-                       os.path.join(class_tmpdir,
-                                    'opt-state-dict'))
+            torch.save(model.optimizer.optimizer.state_dict(), os.path.join(class_tmpdir, 'opt-state-dict'))
         model.save_checkpoint(class_tmpdir)
 
 
@@ -239,11 +186,7 @@ class ws4_model_checkpoint(DistributedFixture):
 class TestZeROElasticCheckpoint(DistributedTest):
     world_size = 2
 
-    def test_elastic_checkpoint_fixed_dp(self,
-                                         tmpdir,
-                                         elastic_save,
-                                         elastic_load,
-                                         load_optim):
+    def test_elastic_checkpoint_fixed_dp(self, tmpdir, elastic_save, elastic_load, load_optim):
         ds_config = {
             "train_batch_size": 2,
             "optimizer": {
@@ -263,54 +206,39 @@ class TestZeROElasticCheckpoint(DistributedTest):
         # torch 1.2.* stores raw tensor id numbers in checkpoint state which leads to
         # false positive mismatches in checkpoint state comparisons.
         # Newer torch versions store tensor ids as 0, 1, 2, ...
-        expected_mismatch_keys = [] if required_minimum_torch_version(1,
-                                                                      4) else ['params']
+        expected_mismatch_keys = [] if required_minimum_torch_version(1, 4) else ['params']
         models = [SimpleModel(hidden_dim) for _ in range(2)]
         model, _, _, _ = deepspeed.initialize(config=ds_config,
-                                            model=models[0],
-                                            model_parameters=models[0].parameters())
-        data_loader = random_dataloader(model=model,
-                                        total_samples=8,
-                                        hidden_dim=hidden_dim,
-                                        device=model.device)
+                                              model=models[0],
+                                              model_parameters=models[0].parameters())
+        data_loader = random_dataloader(model=model, total_samples=8, hidden_dim=hidden_dim, device=model.device)
         for n, batch in enumerate(data_loader):
             loss = model(batch[0], batch[1])
             model.backward(loss)
             model.step()
         if load_optim:
-            torch.save(model.optimizer.optimizer.state_dict(),
-                       os.path.join(tmpdir,
-                                    'opt-state-dict'))
+            torch.save(model.optimizer.optimizer.state_dict(), os.path.join(tmpdir, 'opt-state-dict'))
         model.save_checkpoint(tmpdir)
 
         ds_config["zero_optimization"]["elastic_checkpoint"] = elastic_load
         model, _, _, _ = deepspeed.initialize(config=ds_config,
-                                            model=models[1],
-                                            model_parameters=models[1].parameters())
+                                              model=models[1],
+                                              model_parameters=models[1].parameters())
         model.load_checkpoint(tmpdir, load_optimizer_states=load_optim)
 
         if load_optim:
             saved_sd = torch.load(os.path.join(tmpdir, 'opt-state-dict'))
             curr_sd = model.optimizer.optimizer.state_dict()
             for curr_param_group, saved_param_group in zip(curr_sd['param_groups'], saved_sd['param_groups']):
-                compare_state_dicts(curr_param_group,
-                                    saved_param_group,
-                                    expected_mismatch_keys)
+                compare_state_dicts(curr_param_group, saved_param_group, expected_mismatch_keys)
 
-        data_loader = random_dataloader(model=model,
-                                        total_samples=8,
-                                        hidden_dim=hidden_dim,
-                                        device=model.device)
+        data_loader = random_dataloader(model=model, total_samples=8, hidden_dim=hidden_dim, device=model.device)
         for n, batch in enumerate(data_loader):
             loss = model(batch[0], batch[1])
             model.backward(loss)
             model.step()
 
-    def test_elastic_checkpoint_change_dp(self,
-                                          ws4_model_checkpoint,
-                                          class_tmpdir,
-                                          elastic_save,
-                                          elastic_load,
+    def test_elastic_checkpoint_change_dp(self, ws4_model_checkpoint, class_tmpdir, elastic_save, elastic_load,
                                           load_optim):
         ds_config = {
             "train_batch_size": 4,
@@ -330,9 +258,7 @@ class TestZeROElasticCheckpoint(DistributedTest):
         model = SimpleModel(hidden_dim)
 
         # Load checkpoint with dp world size = 2
-        model, _, _, _ = deepspeed.initialize(config=ds_config,
-                                                model=model,
-                                                model_parameters=model.parameters())
+        model, _, _, _ = deepspeed.initialize(config=ds_config, model=model, model_parameters=model.parameters())
         if load_optim:
             with pytest.raises(deepspeed.runtime.zero.utils.ZeRORuntimeException):
                 model.load_checkpoint(class_tmpdir, load_optimizer_states=load_optim)
@@ -361,9 +287,7 @@ class TestZeROSaveLoadEdgeCase(DistributedTest):
         hidden_dim = 10
         model = SimpleModel(hidden_dim)
 
-        ds_model = create_deepspeed_model(config_dict=config_dict,
-                                          model=model,
-                                          base_optimizer=None)
+        ds_model = create_deepspeed_model(config_dict=config_dict, model=model, base_optimizer=None)
         ds_model.save_checkpoint(tmpdir)
         ds_model.load_checkpoint(tmpdir,
                                  load_optimizer_states=False,
@@ -390,9 +314,7 @@ class TestZeROSaveLoadEdgeCase(DistributedTest):
 
         # 1. pretrain a model and save it
         dtype = torch.half
-        ds_model = create_deepspeed_model(config_dict=config_dict,
-                                          model=model,
-                                          base_optimizer=None)
+        ds_model = create_deepspeed_model(config_dict=config_dict, model=model, base_optimizer=None)
         data_loader = random_dataloader(model=ds_model,
                                         total_samples=1,
                                         hidden_dim=hidden_dim,
@@ -405,9 +327,7 @@ class TestZeROSaveLoadEdgeCase(DistributedTest):
         ds_model.save_checkpoint(tmpdir)
 
         # 2. load and immediately save a model with a fresh ds engine
-        ds_model = create_deepspeed_model(config_dict=config_dict,
-                                          model=model,
-                                          base_optimizer=None)
+        ds_model = create_deepspeed_model(config_dict=config_dict, model=model, base_optimizer=None)
         ds_model.load_checkpoint(tmpdir,
                                  load_optimizer_states=False,
                                  load_lr_scheduler_states=False,
@@ -438,9 +358,7 @@ class TestZeROSaveLoadEdgeCase(DistributedTest):
         # This test reproduces a bug where one tries to retrieve a 16bit model before grad_accum
         # cycle was completed.
         # So we config grad_accum=2 and step only once and save_16bit_model
-        ds_model = create_deepspeed_model(config_dict=config_dict,
-                                          model=model,
-                                          base_optimizer=None)
+        ds_model = create_deepspeed_model(config_dict=config_dict, model=model, base_optimizer=None)
 
         data_loader = random_dataloader(model=ds_model,
                                         total_samples=2,

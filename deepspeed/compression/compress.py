@@ -13,21 +13,13 @@ def check_deepspeed_config(config):
     if isinstance(config, dict):
         return config
     elif os.path.exists(config):
-        return json.load(open(config,
-                              "r"),
-                         object_pairs_hook=dict_raise_error_on_duplicate_keys)
+        return json.load(open(config, "r"), object_pairs_hook=dict_raise_error_on_duplicate_keys)
     else:
         raise ValueError(
-            f"Expected a string path to an existing deepspeed config, or a dictionary. Received: {config}"
-        )
+            f"Expected a string path to an existing deepspeed config, or a dictionary. Received: {config}")
 
 
-def get_module_name(group_name,
-                    model,
-                    key_word,
-                    exist_module_name,
-                    mpu=None,
-                    verbose=True):
+def get_module_name(group_name, model, key_word, exist_module_name, mpu=None, verbose=True):
     '''
     get the associated module name from the model based on the key_word provided by users
     '''
@@ -40,8 +32,7 @@ def get_module_name(group_name,
             if name in exist_module_name and verbose:
                 # logger.warning
                 raise ValueError(
-                    f"{name} is already added to compression, please check your config file for {group_name}."
-                )
+                    f"{name} is already added to compression, please check your config file for {group_name}.")
             if name not in exist_module_name:
                 exist_module_name.add(name)
                 return_module_name.append(name)
@@ -56,8 +47,7 @@ def get_compress_methods(model, compress_methods, mpu=None):
             continue
         # for loop different methods, i.e., weight quantization, activation quantization etc
         exist_module_name = set()
-        shared_parameters = method_content[
-            SHARED_PARAMETERS]  # get all the shared parameters
+        shared_parameters = method_content[SHARED_PARAMETERS]  # get all the shared parameters
         for group_name, method_parameters in method_content[DIFFERENT_GROUPS].items():
             # for loop different groups, i.e., weight quantization group 1, weight quantization group 2 etc
             module_name_list = []
@@ -65,8 +55,13 @@ def get_compress_methods(model, compress_methods, mpu=None):
             if method_parameters[DIFFERENT_GROUPS_RELATED_MODULE_SCOPE]:
                 # this is used for head/row/channel pruning, if users provide the related module scope, we can shrink the layer dim for them
                 # otherwise we just mask those as zeros
-                for key_word, related_key_words in zip(method_parameters[DIFFERENT_GROUPS_MODULE_SCOPE], method_parameters[DIFFERENT_GROUPS_RELATED_MODULE_SCOPE]):
-                    module_name, exist_module_name = get_module_name(group_name, model, key_word, exist_module_name, mpu=mpu)
+                for key_word, related_key_words in zip(method_parameters[DIFFERENT_GROUPS_MODULE_SCOPE],
+                                                       method_parameters[DIFFERENT_GROUPS_RELATED_MODULE_SCOPE]):
+                    module_name, exist_module_name = get_module_name(group_name,
+                                                                     model,
+                                                                     key_word,
+                                                                     exist_module_name,
+                                                                     mpu=mpu)
                     module_name_list.append(module_name)
                     tmp_related_module_name_list = []
                     for rkw in related_key_words:
@@ -76,7 +71,11 @@ def get_compress_methods(model, compress_methods, mpu=None):
                     related_module_name_list.append(tmp_related_module_name_list)
             else:
                 for key_word in method_parameters[DIFFERENT_GROUPS_MODULE_SCOPE]:
-                    module_name, exist_module_name = get_module_name(group_name, model, key_word, exist_module_name, mpu=mpu)
+                    module_name, exist_module_name = get_module_name(group_name,
+                                                                     model,
+                                                                     key_word,
+                                                                     exist_module_name,
+                                                                     mpu=mpu)
                     module_name_list.append(module_name)
 
             if module_name_list:
@@ -85,13 +84,7 @@ def get_compress_methods(model, compress_methods, mpu=None):
                     **(method_parameters.copy().pop(DIFFERENT_GROUPS_PARAMETERS)),
                     **shared_parameters
                 }
-                compression_item = [
-                    module_name_list,
-                    related_module_name_list,
-                    {
-                        method: combined_method_parameters
-                    }
-                ]
+                compression_item = [module_name_list, related_module_name_list, {method: combined_method_parameters}]
                 layer_added_compress_methods.append(compression_item)
     return layer_added_compress_methods
 
@@ -118,9 +111,7 @@ def init_compression(model, deepspeed_config, teacher_model=None, mpu=None):
         assert teacher_model is not None, "Teacher model is required for layer reduction"
         student_initialization(c_model, teacher_model, deepspeed_config)
 
-    layer_added_compress_methods = get_compress_methods(c_model,
-                                                        compress_methods,
-                                                        mpu=mpu)
+    layer_added_compress_methods = get_compress_methods(c_model, compress_methods, mpu=mpu)
     compression_preparation(c_model, layer_added_compress_methods, mpu)
 
     return model
@@ -143,31 +134,20 @@ def redundancy_clean(model, deepspeed_config, mpu=None):
     else:
         c_model = model
 
-    layer_added_compress_methods_tmp = get_compress_methods(c_model,
-                                                            compress_methods,
-                                                            mpu=mpu)
+    layer_added_compress_methods_tmp = get_compress_methods(c_model, compress_methods, mpu=mpu)
     # sort methods
     order_list = [
-        WEIGHT_QUANTIZATION,
-        SPARSE_PRUNING,
-        ROW_PRUNING,
-        HEAD_PRUNING,
-        CHANNEL_PRUNING,
-        ACTIVATION_QUANTIZATION
+        WEIGHT_QUANTIZATION, SPARSE_PRUNING, ROW_PRUNING, HEAD_PRUNING, CHANNEL_PRUNING, ACTIVATION_QUANTIZATION
     ]
-    layer_added_compress_methods = sorted(
-        layer_added_compress_methods_tmp,
-        key=lambda x: order_list.index(list(x[2].keys())[0]))
+    layer_added_compress_methods = sorted(layer_added_compress_methods_tmp,
+                                          key=lambda x: order_list.index(list(x[2].keys())[0]))
 
     for module_name_lists, related_module_name_lists, compression_technique in layer_added_compress_methods:
         stored_mask = []
         need_mask = True if related_module_name_lists else False
         for i, mnl in enumerate(module_name_lists):
             for module_name in mnl:
-                mask = fix_compression(c_model,
-                                       module_name,
-                                       compression_technique,
-                                       dim_reduction=need_mask)
+                mask = fix_compression(c_model, module_name, compression_technique, dim_reduction=need_mask)
                 if need_mask:
                     stored_mask.append(mask)
             if need_mask:
@@ -219,10 +199,8 @@ def student_initialization(student_model, teacher_model, deepspeed_config):
     '''
     assert len(student_layer) == len(teacher_layer)
     for s_name, t_name in zip(student_layer, teacher_layer):
-        s_module = recursive_getattr(student_model,
-                                     module_name_prefix + '.' + str(s_name))
-        t_module = recursive_getattr(teacher_model,
-                                     module_name_prefix + '.' + str(t_name))
+        s_module = recursive_getattr(student_model, module_name_prefix + '.' + str(s_name))
+        t_module = recursive_getattr(teacher_model, module_name_prefix + '.' + str(t_name))
         for s_param, t_param in zip(s_module.parameters(), t_module.parameters()):
             s_param.data.copy_(t_param.data)
     for name in other_module_name:

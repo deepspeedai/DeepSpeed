@@ -52,9 +52,7 @@ def test_topology_rank_repr():
     assert topo.get_rank_repr(rank=3) == 'a_01-b_01'
 
     assert topo.get_rank_repr(rank=3, inner_sep='+') == 'a+01-b+01'
-    assert topo.get_rank_repr(rank=3,
-                              inner_sep='🤗',
-                              outer_sep='_JEFF_') == 'a🤗01_JEFF_b🤗01'
+    assert topo.get_rank_repr(rank=3, inner_sep='🤗', outer_sep='_JEFF_') == 'a🤗01_JEFF_b🤗01'
 
     topo = Topo(axes=['pipe', 'data'], dims=[2, 2])
     assert topo.get_rank_repr(rank=0) == ''
@@ -132,26 +130,26 @@ def test_topology_comm_list():
     assert topo.get_rank(pipe=1, data=1, model=1) == 7
 
     pipe_list = [
-        [0, 4], # data=0, model=0
-        [1, 5], # data=0, model=1
-        [2, 6], # data=1, model=0
-        [3, 7], # data=1, model=1
+        [0, 4],  # data=0, model=0
+        [1, 5],  # data=0, model=1
+        [2, 6],  # data=1, model=0
+        [3, 7],  # data=1, model=1
     ]
     assert topo.get_axis_comm_lists('pipe') == pipe_list
 
     data_list = [
-        [0, 2], # pipe=0, model=0
-        [1, 3], # pipe=0, model=1
-        [4, 6], # pipe=1, model=0
-        [5, 7], # pipe=1, model=1
+        [0, 2],  # pipe=0, model=0
+        [1, 3],  # pipe=0, model=1
+        [4, 6],  # pipe=1, model=0
+        [5, 7],  # pipe=1, model=1
     ]
     assert topo.get_axis_comm_lists('data') == data_list
 
     model_list = [
-        [0, 1], # pipe=0, data=0
-        [2, 3], # pipe=0, data=1
-        [4, 5], # pipe=1, data=0
-        [6, 7], # pipe=1, data=1
+        [0, 1],  # pipe=0, data=0
+        [2, 3],  # pipe=0, data=1
+        [4, 5],  # pipe=1, data=0
+        [6, 7],  # pipe=1, data=1
     ]
     assert topo.get_axis_comm_lists('model') == model_list
 
@@ -172,8 +170,7 @@ class TestDistributedTopology(DistributedTest):
         rank = dist.get_rank()
 
         assert grid.is_first_stage == (grid.get_stage_id() == 0)
-        assert grid.is_last_stage == (
-            grid.get_stage_id() == grid.get_pipe_parallel_world_size() - 1)
+        assert grid.is_last_stage == (grid.get_stage_id() == grid.get_pipe_parallel_world_size() - 1)
 
         # Test collectives along the pipeline parallel process groups
         rank_tensor = torch.LongTensor(data=[rank]).to(get_accelerator().device_name())
@@ -209,6 +206,7 @@ class TestDistributedTopology(DistributedTest):
 
 def test_primes():
     """ Test prime factorizations. """
+
     def _product(ps):
         p = 1
         for num in ps:

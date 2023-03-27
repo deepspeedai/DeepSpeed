@@ -20,20 +20,16 @@ from deepspeed.ops.op_builder import AsyncIOBuilder
 OTHER_OPTIONS = '--handle'
 PERF_SCRIPT = 'test_ds_aio.py'
 DEFAULT_SWEEP_CONFIG = {
-    "block_size": ["128K",
-                   "256K"],
-    "queue_depth": [4,
-                    16,
-                    32],
-    "overlap_events": [True,
-                       False],
-    "io_parallel": [2,
-                    8],
+    "block_size": ["128K", "256K"],
+    "queue_depth": [4, 16, 32],
+    "overlap_events": [True, False],
+    "io_parallel": [2, 8],
     "single_submit": [False]
 }
 
 
 class Job(object):
+
     def __init__(self, cmd_line, output_file=None, work_dir=None):
         self.cmd_line = cmd_line
         self.output_file = output_file
@@ -63,6 +59,7 @@ class Job(object):
 
 
 class SweepConfig(object):
+
     def __init__(self, args):
         self.nvme_dir = args.nvme_dir
         self.io_size = args.io_size
@@ -78,52 +75,35 @@ class SweepConfig(object):
 def parse_arguments():
     parser = argparse.ArgumentParser()
 
-    parser.add_argument(
-        '--nvme_dir',
-        required=True,
-        type=str,
-        help=
-        'Directory in which to perform I/O tests. A writeable directory on a NVMe device.'
-    )
-
-    parser.add_argument('--sweep_config',
+    parser.add_argument('--nvme_dir',
+                        required=True,
                         type=str,
-                        default=None,
-                        help='Performance sweep configuration json file.')
+                        help='Directory in which to perform I/O tests. A writeable directory on a NVMe device.')
 
-    parser.add_argument('--no_read',
-                        action='store_true',
-                        help='Disable read performance measurements.')
+    parser.add_argument('--sweep_config', type=str, default=None, help='Performance sweep configuration json file.')
 
-    parser.add_argument('--no_write',
-                        action='store_true',
-                        help='Disable write performance measurements.')
+    parser.add_argument('--no_read', action='store_true', help='Disable read performance measurements.')
 
-    parser.add_argument(
-        '--io_size',
-        type=str,
-        default="400M",
-        help='Number of I/O bytes to read/write for performance measurements.')
+    parser.add_argument('--no_write', action='store_true', help='Disable write performance measurements.')
+
+    parser.add_argument('--io_size',
+                        type=str,
+                        default="400M",
+                        help='Number of I/O bytes to read/write for performance measurements.')
 
     parser.add_argument(
         '--no_sudo',
         action='store_true',
         help=
-        'Run without sudo access. Page cache will not be flushed and reported read speeds may be higher than actual.'
-    )
+        'Run without sudo access. Page cache will not be flushed and reported read speeds may be higher than actual.')
 
     parser.add_argument(
         '--log_dir',
         type=str,
         default=BENCH_LOG_DIR,
-        help=
-        f'Output directory for performance log files. Default is {os.path.join(".", BENCH_LOG_DIR)}'
-    )
+        help=f'Output directory for performance log files. Default is {os.path.join(".", BENCH_LOG_DIR)}')
 
-    parser.add_argument('--loops',
-                        type=int,
-                        default=1,
-                        help='Count of operation repetitions')
+    parser.add_argument('--loops', type=int, default=1, help='Count of operation repetitions')
 
     args = parser.parse_args()
     print(f'args = {args}')
@@ -147,6 +127,7 @@ def get_sweep_config_dict(sweep_config_json):
 
 
 def get_sweep_cmd_lines(sweep_config_dict):
+
     def flatten_options(key, value_list):
         flat_list = []
         for v in value_list:
@@ -170,11 +151,7 @@ def run_job(job):
     args = ' '.join(job.cmd())
     print(f'args = {args}')
     job.open_output_file()
-    proc = subprocess.run(args=args,
-                          shell=True,
-                          stdout=job.get_stdout(),
-                          stderr=job.get_stderr(),
-                          cwd=job.get_cwd())
+    proc = subprocess.run(args=args, shell=True, stdout=job.get_stdout(), stderr=job.get_stderr(), cwd=job.get_cwd())
     job.close_output_file()
     assert proc.returncode == 0, \
     f"This command failed: {job.cmd()}"
@@ -240,14 +217,7 @@ def get_log_file(io_op_desc, cmd_line):
             return tag_key
         return f'{tag_key}{value}'
 
-    tag_list = [
-        SINGLE_SUBMIT,
-        OVERLAP_EVENTS,
-        THREAD_COUNT,
-        IO_PARALLEL,
-        QUEUE_DEPTH,
-        BLOCK_SIZE
-    ]
+    tag_list = [SINGLE_SUBMIT, OVERLAP_EVENTS, THREAD_COUNT, IO_PARALLEL, QUEUE_DEPTH, BLOCK_SIZE]
     log_tags = [io_op_desc]
     cmd_tags = create_cmd_tags(cmd_line)
     for tag in tag_list:
@@ -298,16 +268,10 @@ def create_read_file(sweep_config):
     os.makedirs(read_folder, exist_ok=True)
     read_file_name = os.path.join(read_folder, f'random_{sweep_config.io_size}B.pt')
     block_size, block_count = get_block_size_and_count(refine_integer_value(sweep_config.io_size))
-    dd_job = Job(cmd_line=[
-        f'dd if=/dev/urandom of={read_file_name} bs={block_size} count={block_count}'
-    ])
-    print(
-        f'[Start] Create read file of {sweep_config.io_size} bytes by running {dd_job.cmd()} ....'
-    )
+    dd_job = Job(cmd_line=[f'dd if=/dev/urandom of={read_file_name} bs={block_size} count={block_count}'])
+    print(f'[Start] Create read file of {sweep_config.io_size} bytes by running {dd_job.cmd()} ....')
     run_job(dd_job)
-    print(
-        f'[Done] Create read file of {sweep_config.io_size} bytes by running {dd_job.cmd()} ....'
-    )
+    print(f'[Done] Create read file of {sweep_config.io_size} bytes by running {dd_job.cmd()} ....')
     return read_folder, read_file_name
 
 
@@ -319,20 +283,15 @@ def remove_folder(folder):
 def run_read_sweep(sweep_config, flush_cache_job, sync_job, cmd_lines):
     read_folder, read_file_name = create_read_file(sweep_config)
     read_option = f'--read_file {read_file_name}'
-    read_cmd_lines = [[f'{read_option} {sweep_config.other_options}'] + cmd
-                      for cmd in cmd_lines]
+    read_cmd_lines = [[f'{read_option} {sweep_config.other_options}'] + cmd for cmd in cmd_lines]
     #dump_cmd_lines(read_cmd_lines)
 
     log_folder = os.path.join(sweep_config.log_dir, f'{READ_LOG_DIR}')
     os.makedirs(log_folder, exist_ok=True)
 
-    perf_jobs = create_perf_jobs(io_op_desc=READ_OP_DESC,
-                                 log_dir=log_folder,
-                                 cmd_lines=read_cmd_lines)
+    perf_jobs = create_perf_jobs(io_op_desc=READ_OP_DESC, log_dir=log_folder, cmd_lines=read_cmd_lines)
 
-    launch_sweep(sweep_jobs=perf_jobs,
-                 sync_job=sync_job,
-                 flush_cache_job=flush_cache_job)
+    launch_sweep(sweep_jobs=perf_jobs, sync_job=sync_job, flush_cache_job=flush_cache_job)
 
     remove_folder(read_folder)
 
@@ -342,20 +301,15 @@ def run_write_sweep(sweep_config, flush_cache_job, sync_job, cmd_lines):
     os.makedirs(write_folder, exist_ok=True)
     write_file_name = os.path.join(write_folder, f'random_{sweep_config.io_size}B.pt')
     write_option = f'--write_size {sweep_config.io_size} --write_file {write_file_name}'
-    write_cmd_lines = [[f'{write_option} {sweep_config.other_options}'] + cmd
-                       for cmd in cmd_lines]
+    write_cmd_lines = [[f'{write_option} {sweep_config.other_options}'] + cmd for cmd in cmd_lines]
     #dump_cmd_lines(write_cmd_lines)
 
     log_folder = os.path.join(sweep_config.log_dir, f'{WRITE_LOG_DIR}')
     os.makedirs(log_folder, exist_ok=True)
 
-    perf_jobs = create_perf_jobs(io_op_desc=WRITE_OP_DESC,
-                                 log_dir=log_folder,
-                                 cmd_lines=write_cmd_lines)
+    perf_jobs = create_perf_jobs(io_op_desc=WRITE_OP_DESC, log_dir=log_folder, cmd_lines=write_cmd_lines)
 
-    launch_sweep(sweep_jobs=perf_jobs,
-                 sync_job=sync_job,
-                 flush_cache_job=flush_cache_job)
+    launch_sweep(sweep_jobs=perf_jobs, sync_job=sync_job, flush_cache_job=flush_cache_job)
 
     remove_folder(write_folder)
 
@@ -376,10 +330,7 @@ def main():
     cmd_lines = get_sweep_cmd_lines(sweep_config.search_space)
 
     if sweep_config.flush_cache:
-        flush_cache_job = Job(
-            cmd_line=['sudo',
-                      'bash -c',
-                      "'echo 1 > /proc/sys/vm/drop_caches'"])
+        flush_cache_job = Job(cmd_line=['sudo', 'bash -c', "'echo 1 > /proc/sys/vm/drop_caches'"])
     else:
         flush_cache_job = None
 

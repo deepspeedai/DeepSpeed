@@ -19,14 +19,10 @@ class AsyncIOBuilder(OpBuilder):
 
     def sources(self):
         return [
-            'csrc/aio/py_lib/deepspeed_py_copy.cpp',
-            'csrc/aio/py_lib/py_ds_aio.cpp',
-            'csrc/aio/py_lib/deepspeed_py_aio.cpp',
-            'csrc/aio/py_lib/deepspeed_py_aio_handle.cpp',
-            'csrc/aio/py_lib/deepspeed_aio_thread.cpp',
-            'csrc/aio/common/deepspeed_aio_utils.cpp',
-            'csrc/aio/common/deepspeed_aio_common.cpp',
-            'csrc/aio/common/deepspeed_aio_types.cpp',
+            'csrc/aio/py_lib/deepspeed_py_copy.cpp', 'csrc/aio/py_lib/py_ds_aio.cpp',
+            'csrc/aio/py_lib/deepspeed_py_aio.cpp', 'csrc/aio/py_lib/deepspeed_py_aio_handle.cpp',
+            'csrc/aio/py_lib/deepspeed_aio_thread.cpp', 'csrc/aio/common/deepspeed_aio_utils.cpp',
+            'csrc/aio/common/deepspeed_aio_common.cpp', 'csrc/aio/common/deepspeed_aio_types.cpp',
             'csrc/aio/py_lib/deepspeed_pin_tensor.cpp'
         ]
 
@@ -56,15 +52,9 @@ class AsyncIOBuilder(OpBuilder):
 
     def check_for_libaio_pkg(self):
         libs = dict(
-            dpkg=["-l",
-                  "libaio-dev",
-                  "apt"],
-            pacman=["-Q",
-                    "libaio",
-                    "pacman"],
-            rpm=["-q",
-                 "libaio-devel",
-                 "yum"],
+            dpkg=["-l", "libaio-dev", "apt"],
+            pacman=["-Q", "libaio", "pacman"],
+            rpm=["-q", "libaio-devel", "yum"],
         )
 
         found = False
@@ -73,15 +63,11 @@ class AsyncIOBuilder(OpBuilder):
             path = distutils.spawn.find_executable(pkgmgr)
             if path is not None:
                 cmd = f"{pkgmgr} {flag} {lib}"
-                result = subprocess.Popen(cmd,
-                                          stdout=subprocess.PIPE,
-                                          stderr=subprocess.PIPE,
-                                          shell=True)
+                result = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, shell=True)
                 if result.wait() == 0:
                     found = True
                 else:
-                    self.warning(
-                        f"{self.NAME}: please install the {lib} package with {tool}")
+                    self.warning(f"{self.NAME}: please install the {lib} package with {tool}")
                 break
         return found
 
@@ -93,9 +79,7 @@ class AsyncIOBuilder(OpBuilder):
         # respectively to specify the directories for libaio.h and libaio.so.
         aio_compatible = self.has_function('io_submit', ('aio', ))
         if verbose and not aio_compatible:
-            self.warning(
-                f"{self.NAME} requires the dev libaio .so object and headers but these were not found."
-            )
+            self.warning(f"{self.NAME} requires the dev libaio .so object and headers but these were not found.")
 
             # Check for the libaio package via known package managers
             # to print suggestions on which package to install.

@@ -72,12 +72,7 @@ ONEBIT_ADAM_OPTIMIZER = 'onebitadam'
 ZERO_ONE_ADAM_OPTIMIZER = 'zerooneadam'
 ONEBIT_LAMB_OPTIMIZER = 'onebitlamb'
 DEEPSPEED_OPTIMIZERS = [
-    ADAGRAD_OPTIMIZER,
-    ADAM_OPTIMIZER,
-    ADAMW_OPTIMIZER,
-    LAMB_OPTIMIZER,
-    ONEBIT_ADAM_OPTIMIZER,
-    ONEBIT_LAMB_OPTIMIZER,
+    ADAGRAD_OPTIMIZER, ADAM_OPTIMIZER, ADAMW_OPTIMIZER, LAMB_OPTIMIZER, ONEBIT_ADAM_OPTIMIZER, ONEBIT_LAMB_OPTIMIZER,
     ZERO_ONE_ADAM_OPTIMIZER
 ]
 
@@ -122,9 +117,7 @@ class DtypeEnum(Enum):
 
 def get_pld_enabled(param_dict):
     if PROGRESSIVE_LAYER_DROP in param_dict.keys():
-        return get_scalar_param(param_dict[PROGRESSIVE_LAYER_DROP],
-                                PLD_ENABLED,
-                                PLD_ENABLED_DEFAULT)
+        return get_scalar_param(param_dict[PROGRESSIVE_LAYER_DROP], PLD_ENABLED, PLD_ENABLED_DEFAULT)
     else:
         return False
 
@@ -164,17 +157,13 @@ def get_fp16_enabled(param_dict):
 def get_bfloat16_enabled(param_dict):
     for key in [BFLOAT16, BFLOAT16_OLD]:
         if key in param_dict.keys():
-            return get_scalar_param(param_dict[key],
-                                    BFLOAT16_ENABLED,
-                                    BFLOAT16_ENABLED_DEFAULT)
+            return get_scalar_param(param_dict[key], BFLOAT16_ENABLED, BFLOAT16_ENABLED_DEFAULT)
     return False
 
 
 def get_fp16_master_weights_and_grads_enabled(param_dict):
     if get_fp16_enabled(param_dict):
-        return get_scalar_param(param_dict[FP16],
-                                FP16_MASTER_WEIGHTS_AND_GRADS,
-                                FP16_MASTER_WEIGHTS_AND_GRADS_DEFAULT)
+        return get_scalar_param(param_dict[FP16], FP16_MASTER_WEIGHTS_AND_GRADS, FP16_MASTER_WEIGHTS_AND_GRADS_DEFAULT)
     else:
         return False
 
@@ -186,9 +175,7 @@ def get_fp16_auto_cast(param_dict):
 
 def get_loss_scale(param_dict):
     if get_fp16_enabled(param_dict):
-        return get_scalar_param(param_dict[FP16],
-                                FP16_LOSS_SCALE,
-                                FP16_LOSS_SCALE_DEFAULT)
+        return get_scalar_param(param_dict[FP16], FP16_LOSS_SCALE, FP16_LOSS_SCALE_DEFAULT)
     elif get_bfloat16_enabled(param_dict):
         return 1.0
     else:
@@ -197,8 +184,7 @@ def get_loss_scale(param_dict):
 
 def get_initial_dynamic_scale(param_dict):
     if get_fp16_enabled(param_dict):
-        initial_scale_power = get_scalar_param(param_dict[FP16],
-                                               FP16_INITIAL_SCALE_POWER,
+        initial_scale_power = get_scalar_param(param_dict[FP16], FP16_INITIAL_SCALE_POWER,
                                                FP16_INITIAL_SCALE_POWER_DEFAULT)
     elif get_bfloat16_enabled(param_dict):
         initial_scale_power = 0
@@ -219,18 +205,10 @@ def get_dynamic_loss_scale_args(param_dict):
             FP16_HYSTERESIS,
         ]
         if any(arg in list(fp16_dict.keys()) for arg in dynamic_loss_args):
-            init_scale = get_scalar_param(fp16_dict,
-                                          FP16_INITIAL_SCALE_POWER,
-                                          FP16_INITIAL_SCALE_POWER_DEFAULT)
-            scale_window = get_scalar_param(fp16_dict,
-                                            FP16_LOSS_SCALE_WINDOW,
-                                            FP16_LOSS_SCALE_WINDOW_DEFAULT)
-            delayed_shift = get_scalar_param(fp16_dict,
-                                             FP16_HYSTERESIS,
-                                             FP16_HYSTERESIS_DEFAULT)
-            min_loss_scale = get_scalar_param(fp16_dict,
-                                              FP16_MIN_LOSS_SCALE,
-                                              FP16_MIN_LOSS_SCALE_DEFAULT)
+            init_scale = get_scalar_param(fp16_dict, FP16_INITIAL_SCALE_POWER, FP16_INITIAL_SCALE_POWER_DEFAULT)
+            scale_window = get_scalar_param(fp16_dict, FP16_LOSS_SCALE_WINDOW, FP16_LOSS_SCALE_WINDOW_DEFAULT)
+            delayed_shift = get_scalar_param(fp16_dict, FP16_HYSTERESIS, FP16_HYSTERESIS_DEFAULT)
+            min_loss_scale = get_scalar_param(fp16_dict, FP16_MIN_LOSS_SCALE, FP16_MIN_LOSS_SCALE_DEFAULT)
             loss_scale_args = {
                 INITIAL_LOSS_SCALE: 2**init_scale,
                 SCALE_WINDOW: scale_window,
@@ -242,9 +220,7 @@ def get_dynamic_loss_scale_args(param_dict):
 
 
 def get_gradient_accumulation_steps(param_dict):
-    return get_scalar_param(param_dict,
-                            GRADIENT_ACCUMULATION_STEPS,
-                            GRADIENT_ACCUMULATION_STEPS_DEFAULT)
+    return get_scalar_param(param_dict, GRADIENT_ACCUMULATION_STEPS, GRADIENT_ACCUMULATION_STEPS_DEFAULT)
 
 
 def get_sparse_gradients_enabled(param_dict):
@@ -252,9 +228,7 @@ def get_sparse_gradients_enabled(param_dict):
 
 
 def get_communication_data_type(param_dict):
-    val = get_scalar_param(param_dict,
-                           COMMUNICATION_DATA_TYPE,
-                           COMMUNICATION_DATA_TYPE_DEFAULT)
+    val = get_scalar_param(param_dict, COMMUNICATION_DATA_TYPE, COMMUNICATION_DATA_TYPE_DEFAULT)
     val = val.lower() if val is not None else val
     if val is None:
         return val  # we must determine it by other parameters
@@ -265,9 +239,7 @@ def get_communication_data_type(param_dict):
     elif val == "bfp16":
         return torch.bfloat16
 
-    raise ValueError(
-        f"Invalid communication_data_type. Supported data types: ['fp16', 'bfp16', 'fp32']. Got: {val}"
-    )
+    raise ValueError(f"Invalid communication_data_type. Supported data types: ['fp16', 'bfp16', 'fp32']. Got: {val}")
 
 
 def get_prescale_gradients(param_dict):
@@ -275,9 +247,7 @@ def get_prescale_gradients(param_dict):
 
 
 def get_gradient_predivide_factor(param_dict):
-    return get_scalar_param(param_dict,
-                            GRADIENT_PREDIVIDE_FACTOR,
-                            GRADIENT_PREDIVIDE_FACTOR_DEFAULT)
+    return get_scalar_param(param_dict, GRADIENT_PREDIVIDE_FACTOR, GRADIENT_PREDIVIDE_FACTOR_DEFAULT)
 
 
 def get_steps_per_print(param_dict):
@@ -312,8 +282,7 @@ def get_sparse_attention(param_dict):
         elif mode == SPARSE_BSLONGFORMER_MODE:
             return get_sparse_bslongformer_config(sparsity)
         else:
-            raise NotImplementedError(
-                f"Given sparsity mode, {mode}, has not been implemented yet!")
+            raise NotImplementedError(f"Given sparsity mode, {mode}, has not been implemented yet!")
 
     else:
         return None
@@ -331,15 +300,9 @@ def get_sparse_fixed_config(sparsity):
         SPARSE_DIFFERENT_LAYOUT_PER_HEAD,
         SPARSE_DIFFERENT_LAYOUT_PER_HEAD_DEFAULT,
     )
-    num_local_blocks = get_scalar_param(sparsity,
-                                        SPARSE_NUM_LOCAL_BLOCKS,
-                                        SPARSE_NUM_LOCAL_BLOCKS_DEFAULT)
-    num_global_blocks = get_scalar_param(sparsity,
-                                         SPARSE_NUM_GLOBAL_BLOCKS,
-                                         SPARSE_NUM_GLOBAL_BLOCKS_DEFAULT)
-    attention = get_scalar_param(sparsity,
-                                 SPARSE_ATTENTION_TYPE,
-                                 SPARSE_ATTENTION_TYPE_DEFAULT)
+    num_local_blocks = get_scalar_param(sparsity, SPARSE_NUM_LOCAL_BLOCKS, SPARSE_NUM_LOCAL_BLOCKS_DEFAULT)
+    num_global_blocks = get_scalar_param(sparsity, SPARSE_NUM_GLOBAL_BLOCKS, SPARSE_NUM_GLOBAL_BLOCKS_DEFAULT)
+    attention = get_scalar_param(sparsity, SPARSE_ATTENTION_TYPE, SPARSE_ATTENTION_TYPE_DEFAULT)
     horizontal_global_attention = get_scalar_param(
         sparsity,
         SPARSE_HORIZONTAL_GLOBAL_ATTENTION,
@@ -370,23 +333,15 @@ def get_sparse_variable_config(sparsity):
         SPARSE_DIFFERENT_LAYOUT_PER_HEAD,
         SPARSE_DIFFERENT_LAYOUT_PER_HEAD_DEFAULT,
     )
-    num_random_blocks = get_scalar_param(sparsity,
-                                         SPARSE_NUM_RANDOM_BLOCKS,
-                                         SPARSE_NUM_RANDOM_BLOCKS_DEFAULT)
-    local_window_blocks = get_scalar_param(sparsity,
-                                           SPARSE_LOCAL_WINDOW_BLOCKS,
-                                           SPARSE_LOCAL_WINDOW_BLOCKS_DEFAULT)
-    global_block_indices = get_scalar_param(sparsity,
-                                            SPARSE_GLOBAL_BLOCK_INDICES,
-                                            SPARSE_GLOBAL_BLOCK_INDICES_DEFAULT)
+    num_random_blocks = get_scalar_param(sparsity, SPARSE_NUM_RANDOM_BLOCKS, SPARSE_NUM_RANDOM_BLOCKS_DEFAULT)
+    local_window_blocks = get_scalar_param(sparsity, SPARSE_LOCAL_WINDOW_BLOCKS, SPARSE_LOCAL_WINDOW_BLOCKS_DEFAULT)
+    global_block_indices = get_scalar_param(sparsity, SPARSE_GLOBAL_BLOCK_INDICES, SPARSE_GLOBAL_BLOCK_INDICES_DEFAULT)
     global_block_end_indices = get_scalar_param(
         sparsity,
         SPARSE_GLOBAL_BLOCK_END_INDICES,
         SPARSE_GLOBAL_BLOCK_END_INDICES_DEFAULT,
     )
-    attention = get_scalar_param(sparsity,
-                                 SPARSE_ATTENTION_TYPE,
-                                 SPARSE_ATTENTION_TYPE_DEFAULT)
+    attention = get_scalar_param(sparsity, SPARSE_ATTENTION_TYPE, SPARSE_ATTENTION_TYPE_DEFAULT)
     horizontal_global_attention = get_scalar_param(
         sparsity,
         SPARSE_HORIZONTAL_GLOBAL_ATTENTION,
@@ -413,17 +368,13 @@ def get_sparse_bigbird_config(sparsity):
         SPARSE_DIFFERENT_LAYOUT_PER_HEAD,
         SPARSE_DIFFERENT_LAYOUT_PER_HEAD_DEFAULT,
     )
-    num_random_blocks = get_scalar_param(sparsity,
-                                         SPARSE_NUM_RANDOM_BLOCKS,
-                                         SPARSE_NUM_RANDOM_BLOCKS_DEFAULT)
+    num_random_blocks = get_scalar_param(sparsity, SPARSE_NUM_RANDOM_BLOCKS, SPARSE_NUM_RANDOM_BLOCKS_DEFAULT)
     num_sliding_window_blocks = get_scalar_param(
         sparsity,
         SPARSE_NUM_SLIDING_WINDOW_BLOCKS,
         SPARSE_NUM_SLIDING_WINDOW_BLOCKS_DEFAULT,
     )
-    num_global_blocks = get_scalar_param(sparsity,
-                                         SPARSE_NUM_GLOBAL_BLOCKS,
-                                         SPARSE_NUM_GLOBAL_BLOCKS_DEFAULT)
+    num_global_blocks = get_scalar_param(sparsity, SPARSE_NUM_GLOBAL_BLOCKS, SPARSE_NUM_GLOBAL_BLOCKS_DEFAULT)
 
     return {
         SPARSE_MODE: SPARSE_BIGBIRD_MODE,
@@ -447,9 +398,7 @@ def get_sparse_bslongformer_config(sparsity):
         SPARSE_NUM_SLIDING_WINDOW_BLOCKS,
         SPARSE_NUM_SLIDING_WINDOW_BLOCKS_DEFAULT,
     )
-    global_block_indices = get_scalar_param(sparsity,
-                                            SPARSE_GLOBAL_BLOCK_INDICES,
-                                            SPARSE_GLOBAL_BLOCK_INDICES_DEFAULT)
+    global_block_indices = get_scalar_param(sparsity, SPARSE_GLOBAL_BLOCK_INDICES, SPARSE_GLOBAL_BLOCK_INDICES_DEFAULT)
     global_block_end_indices = get_scalar_param(
         sparsity,
         SPARSE_GLOBAL_BLOCK_END_INDICES,
@@ -502,8 +451,7 @@ def get_optimizer_name(param_dict):
 
 
 def get_optimizer_params(param_dict):
-    if (get_optimizer_name(param_dict) is not None
-            and OPTIMIZER_PARAMS in param_dict[OPTIMIZER].keys()):
+    if (get_optimizer_name(param_dict) is not None and OPTIMIZER_PARAMS in param_dict[OPTIMIZER].keys()):
         return param_dict[OPTIMIZER][OPTIMIZER_PARAMS]
     else:
         return None
@@ -525,15 +473,11 @@ def get_optimizer_legacy_fusion(param_dict):
 
 
 def get_zero_allow_untested_optimizer(param_dict):
-    return get_scalar_param(param_dict,
-                            ZERO_ALLOW_UNTESTED_OPTIMIZER,
-                            ZERO_ALLOW_UNTESTED_OPTIMIZER_DEFAULT)
+    return get_scalar_param(param_dict, ZERO_ALLOW_UNTESTED_OPTIMIZER, ZERO_ALLOW_UNTESTED_OPTIMIZER_DEFAULT)
 
 
 def get_zero_force_ds_cpu_optimizer(param_dict):
-    return get_scalar_param(param_dict,
-                            ZERO_FORCE_DS_CPU_OPTIMIZER,
-                            ZERO_FORCE_DS_CPU_OPTIMIZER_DEFAULT)
+    return get_scalar_param(param_dict, ZERO_FORCE_DS_CPU_OPTIMIZER, ZERO_FORCE_DS_CPU_OPTIMIZER_DEFAULT)
 
 
 def get_scheduler_name(param_dict):
@@ -544,8 +488,7 @@ def get_scheduler_name(param_dict):
 
 
 def get_scheduler_params(param_dict):
-    if (get_scheduler_name(param_dict) is not None
-            and SCHEDULER_PARAMS in param_dict[SCHEDULER].keys()):
+    if (get_scheduler_name(param_dict) is not None and SCHEDULER_PARAMS in param_dict[SCHEDULER].keys()):
         return param_dict[SCHEDULER][SCHEDULER_PARAMS]
     else:
         return None
@@ -564,9 +507,7 @@ def get_train_micro_batch_size_per_gpu(param_dict):
 
 
 def get_wall_clock_breakdown(param_dict):
-    return get_scalar_param(param_dict,
-                            WALL_CLOCK_BREAKDOWN,
-                            WALL_CLOCK_BREAKDOWN_DEFAULT)
+    return get_scalar_param(param_dict, WALL_CLOCK_BREAKDOWN, WALL_CLOCK_BREAKDOWN_DEFAULT)
 
 
 def get_memory_breakdown(param_dict):
@@ -602,45 +543,35 @@ def get_eigenvalue_config(param_dict):
 
 def get_eigenvalue_enabled(param_dict):
     if EIGENVALUE in param_dict.keys():
-        return get_scalar_param(param_dict[EIGENVALUE],
-                                EIGENVALUE_ENABLED,
-                                EIGENVALUE_ENABLED_DEFAULT)
+        return get_scalar_param(param_dict[EIGENVALUE], EIGENVALUE_ENABLED, EIGENVALUE_ENABLED_DEFAULT)
     else:
         return EIGENVALUE_ENABLED_DEFAULT
 
 
 def get_eigenvalue_verbose(param_dict):
     if EIGENVALUE in param_dict.keys():
-        return get_scalar_param(param_dict[EIGENVALUE],
-                                EIGENVALUE_VERBOSE,
-                                EIGENVALUE_VERBOSE_DEFAULT)
+        return get_scalar_param(param_dict[EIGENVALUE], EIGENVALUE_VERBOSE, EIGENVALUE_VERBOSE_DEFAULT)
     else:
         return EIGENVALUE_VERBOSE_DEFAULT
 
 
 def get_eigenvalue_max_iter(param_dict):
     if EIGENVALUE in param_dict.keys():
-        return get_scalar_param(param_dict[EIGENVALUE],
-                                EIGENVALUE_MAX_ITER,
-                                EIGENVALUE_MAX_ITER_DEFAULT)
+        return get_scalar_param(param_dict[EIGENVALUE], EIGENVALUE_MAX_ITER, EIGENVALUE_MAX_ITER_DEFAULT)
     else:
         return EIGENVALUE_MAX_ITER_DEFAULT
 
 
 def get_eigenvalue_tol(param_dict):
     if EIGENVALUE in param_dict.keys():
-        return get_scalar_param(param_dict[EIGENVALUE],
-                                EIGENVALUE_TOL,
-                                EIGENVALUE_TOL_DEFAULT)
+        return get_scalar_param(param_dict[EIGENVALUE], EIGENVALUE_TOL, EIGENVALUE_TOL_DEFAULT)
     else:
         return EIGENVALUE_TOL_DEFAULT
 
 
 def get_eigenvalue_stability(param_dict):
     if EIGENVALUE in param_dict.keys():
-        return get_scalar_param(param_dict[EIGENVALUE],
-                                EIGENVALUE_STABILITY,
-                                EIGENVALUE_STABILITY_DEFAULT)
+        return get_scalar_param(param_dict[EIGENVALUE], EIGENVALUE_STABILITY, EIGENVALUE_STABILITY_DEFAULT)
     else:
         return EIGENVALUE_STABILITY_DEFAULT
 
@@ -658,18 +589,14 @@ def get_eigenvalue_gas_boundary_resolution(param_dict):
 
 def get_eigenvalue_layer_name(param_dict):
     if EIGENVALUE in param_dict.keys():
-        return get_scalar_param(param_dict[EIGENVALUE],
-                                EIGENVALUE_LAYER_NAME,
-                                EIGENVALUE_LAYER_NAME_DEFAULT)
+        return get_scalar_param(param_dict[EIGENVALUE], EIGENVALUE_LAYER_NAME, EIGENVALUE_LAYER_NAME_DEFAULT)
     else:
         return EIGENVALUE_LAYER_NAME_DEFAULT
 
 
 def get_eigenvalue_layer_num(param_dict):
     if EIGENVALUE in param_dict.keys():
-        return get_scalar_param(param_dict[EIGENVALUE],
-                                EIGENVALUE_LAYER_NUM,
-                                EIGENVALUE_LAYER_NUM_DEFAULT)
+        return get_scalar_param(param_dict[EIGENVALUE], EIGENVALUE_LAYER_NUM, EIGENVALUE_LAYER_NUM_DEFAULT)
     else:
         return EIGENVALUE_LAYER_NUM_DEFAULT
 
@@ -683,35 +610,29 @@ def get_data_types_params(param_dict):
 
 
 def get_checkpoint_tag_validation_mode(checkpoint_params):
-    tag_validation_mode = checkpoint_params.get(CHECKPOINT_TAG_VALIDATION,
-                                                CHECKPOINT_TAG_VALIDATION_DEFAULT)
+    tag_validation_mode = checkpoint_params.get(CHECKPOINT_TAG_VALIDATION, CHECKPOINT_TAG_VALIDATION_DEFAULT)
     tag_validation_mode = tag_validation_mode.upper()
     if tag_validation_mode in CHECKPOINT_TAG_VALIDATION_MODES:
         return tag_validation_mode
     else:
         raise DeepSpeedConfigError(
             "Checkpoint config contains invalid tag_validation "
-            f"value of {tag_validation_mode}, expecting one of {CHECKPOINT_TAG_VALIDATION_MODES}"
-        )
+            f"value of {tag_validation_mode}, expecting one of {CHECKPOINT_TAG_VALIDATION_MODES}")
 
 
 def get_checkpoint_parallel_write_pipeline(checkpoint_params):
     par_write_params = checkpoint_params.get(CHECKPOINT_PARALLEL_WRITE, {})
-    par_write_pipeline = par_write_params.get(
-        CHECKPOINT_PARALLEL_WRITE_PIPELINE_STAGE,
-        CHECKPOINT_PARALLEL_WRITE_PIPELINE_STAGE_DEFAULT)
+    par_write_pipeline = par_write_params.get(CHECKPOINT_PARALLEL_WRITE_PIPELINE_STAGE,
+                                              CHECKPOINT_PARALLEL_WRITE_PIPELINE_STAGE_DEFAULT)
     if par_write_pipeline in [True, False]:
         return par_write_pipeline
     else:
-        raise DeepSpeedConfigError(
-            "checkpoint::parallel_write::pipeline_stage "
-            f"value of '{par_write_pipeline}' is invalid, expecting: true or false")
+        raise DeepSpeedConfigError("checkpoint::parallel_write::pipeline_stage "
+                                   f"value of '{par_write_pipeline}' is invalid, expecting: true or false")
 
 
 def get_dataloader_drop_last(param_dict):
-    return get_scalar_param(param_dict,
-                            DATALOADER_DROP_LAST,
-                            DATALOADER_DROP_LAST_DEFAULT)
+    return get_scalar_param(param_dict, DATALOADER_DROP_LAST, DATALOADER_DROP_LAST_DEFAULT)
 
 
 '''Write deepspeed config files by modifying basic templates.
@@ -719,6 +640,7 @@ Can be used for quickly changing parameters via command line parameters.'''
 
 
 class DeepSpeedConfigWriter:
+
     def __init__(self, data=None):
         self.data = data if data is not None else {}
 
@@ -726,9 +648,7 @@ class DeepSpeedConfigWriter:
         self.data[key] = value
 
     def load_config(self, filename):
-        self.data = json.load(open(filename,
-                                   "r"),
-                              object_pairs_hook=dict_raise_error_on_duplicate_keys)
+        self.data = json.load(open(filename, "r"), object_pairs_hook=dict_raise_error_on_duplicate_keys)
 
     def write_config(self, filename):
         with open(filename, "w") as outfile:
@@ -736,15 +656,13 @@ class DeepSpeedConfigWriter:
 
 
 class DeepSpeedConfig(object):
+
     def __init__(self, config: Union[str, dict], mpu=None):
         super(DeepSpeedConfig, self).__init__()
         if isinstance(config, dict):
             self._param_dict = config
         elif os.path.exists(config):
-            self._param_dict = hjson.load(
-                open(config,
-                     "r"),
-                object_pairs_hook=dict_raise_error_on_duplicate_keys)
+            self._param_dict = hjson.load(open(config, "r"), object_pairs_hook=dict_raise_error_on_duplicate_keys)
         else:
             try:
                 config_decoded = base64.urlsafe_b64decode(config).decode('utf-8')
@@ -778,24 +696,18 @@ class DeepSpeedConfig(object):
             # Ensure the resource scheduler saw the same elastic config we are using at runtime
             ensure_immutable_elastic_config(runtime_elastic_config_dict=elastic_dict)
 
-            self.elastic_model_parallel_size = elastic_dict.get(
-                MODEL_PARLLEL_SIZE,
-                MODEL_PARLLEL_SIZE_DEFAULT)
+            self.elastic_model_parallel_size = elastic_dict.get(MODEL_PARLLEL_SIZE, MODEL_PARLLEL_SIZE_DEFAULT)
             if self.elastic_model_parallel_size < 1:
-                raise ElasticityConfigError(
-                    "Model-Parallel size cannot be less than 1, "
-                    f"given model-parallel size: {self.elastic_model_parallel_size}")
+                raise ElasticityConfigError("Model-Parallel size cannot be less than 1, "
+                                            f"given model-parallel size: {self.elastic_model_parallel_size}")
 
-            self.num_gpus_per_node = elastic_dict.get(NUM_GPUS_PER_NODE,
-                                                      NUM_GPUS_PER_NODE_DEFAULT)
+            self.num_gpus_per_node = elastic_dict.get(NUM_GPUS_PER_NODE, NUM_GPUS_PER_NODE_DEFAULT)
             if self.num_gpus_per_node < 1:
-                raise ElasticityConfigError(
-                    "NUmber of GPUs per node cannot be less than 1, "
-                    f"given number of GPUs per node: {self.num_gpus_per_node}")
+                raise ElasticityConfigError("NUmber of GPUs per node cannot be less than 1, "
+                                            f"given number of GPUs per node: {self.num_gpus_per_node}")
 
-            ignore_non_elastic_batch_info = elastic_dict.get(
-                IGNORE_NON_ELASTIC_BATCH_INFO,
-                IGNORE_NON_ELASTIC_BATCH_INFO_DEFAULT)
+            ignore_non_elastic_batch_info = elastic_dict.get(IGNORE_NON_ELASTIC_BATCH_INFO,
+                                                             IGNORE_NON_ELASTIC_BATCH_INFO_DEFAULT)
 
             if not ignore_non_elastic_batch_info:
                 batch_params = [
@@ -813,23 +725,17 @@ class DeepSpeedConfig(object):
 
             # micro_bsz * world_size * gas = total_batch_size
             # gas = total_batch_size // (micro_bsz * world_size)
-            gradient_accu_steps = final_batch_size // (micro_batch_size *
-                                                       self.world_size)
+            gradient_accu_steps = final_batch_size // (micro_batch_size * self.world_size)
 
             if TRAIN_BATCH_SIZE in self._param_dict:
-                logger.warning(
-                    "[Elasticity] overriding training_batch_size: "
-                    f"{self._param_dict[TRAIN_BATCH_SIZE]} -> {final_batch_size}")
+                logger.warning("[Elasticity] overriding training_batch_size: "
+                               f"{self._param_dict[TRAIN_BATCH_SIZE]} -> {final_batch_size}")
             if TRAIN_MICRO_BATCH_SIZE_PER_GPU in self._param_dict:
-                logger.warning(
-                    "[Elasticity] overriding train_micro_batch_size_per_gpu: "
-                    f"{self._param_dict[TRAIN_MICRO_BATCH_SIZE_PER_GPU]} -> {micro_batch_size}"
-                )
+                logger.warning("[Elasticity] overriding train_micro_batch_size_per_gpu: "
+                               f"{self._param_dict[TRAIN_MICRO_BATCH_SIZE_PER_GPU]} -> {micro_batch_size}")
             if GRADIENT_ACCUMULATION_STEPS in self._param_dict:
-                logger.warning(
-                    "[Elasticity] overriding gradient_accumulation_steps: "
-                    f"{self._param_dict[GRADIENT_ACCUMULATION_STEPS]} -> {gradient_accu_steps}"
-                )
+                logger.warning("[Elasticity] overriding gradient_accumulation_steps: "
+                               f"{self._param_dict[GRADIENT_ACCUMULATION_STEPS]} -> {gradient_accu_steps}")
 
             logger.info(f"[Elasticity] valid GPU counts: {valid_gpus}")
 
@@ -845,8 +751,7 @@ class DeepSpeedConfig(object):
     def _initialize_params(self, param_dict):
         self.train_batch_size = get_train_batch_size(param_dict)
         #print(f"beginning get_train_batch_size = {get_train_batch_size}")
-        self.train_micro_batch_size_per_gpu = get_train_micro_batch_size_per_gpu(
-            param_dict)
+        self.train_micro_batch_size_per_gpu = get_train_micro_batch_size_per_gpu(param_dict)
         self.gradient_accumulation_steps = get_gradient_accumulation_steps(param_dict)
         self.steps_per_print = get_steps_per_print(param_dict)
         self.dump_state = get_dump_state(param_dict)
@@ -861,8 +766,7 @@ class DeepSpeedConfig(object):
         self.zero_optimization_stage = self.zero_config.stage
         self.zero_enabled = self.zero_optimization_stage > 0
 
-        self.activation_checkpointing_config = DeepSpeedActivationCheckpointingConfig(
-            param_dict)
+        self.activation_checkpointing_config = DeepSpeedActivationCheckpointingConfig(param_dict)
 
         self.comms_config = DeepSpeedCommsConfig(param_dict)
         self.monitor_config = get_monitor_config(param_dict)
@@ -871,9 +775,9 @@ class DeepSpeedConfig(object):
         self.fp16_enabled = get_fp16_enabled(param_dict)
         self.fp16_auto_cast = get_fp16_auto_cast(param_dict)
         self.bfloat16_enabled = get_bfloat16_enabled(param_dict)
-        assert not (self.fp16_enabled and self.bfloat16_enabled), 'bfloat16 and fp16 modes cannot be simultaneously enabled'
-        self.fp16_master_weights_and_gradients = get_fp16_master_weights_and_grads_enabled(
-            param_dict)
+        assert not (self.fp16_enabled
+                    and self.bfloat16_enabled), 'bfloat16 and fp16 modes cannot be simultaneously enabled'
+        self.fp16_master_weights_and_gradients = get_fp16_master_weights_and_grads_enabled(param_dict)
         self.amp_enabled = get_amp_enabled(param_dict)
         self.amp_params = get_amp_params(param_dict)
         self.loss_scale = get_loss_scale(param_dict)
@@ -883,15 +787,13 @@ class DeepSpeedConfig(object):
         self.compression_config = get_compression_config(param_dict)
 
         self.optimizer_name = get_optimizer_name(param_dict)
-        if (self.optimizer_name is not None
-                and self.optimizer_name.lower() in DEEPSPEED_OPTIMIZERS):
+        if (self.optimizer_name is not None and self.optimizer_name.lower() in DEEPSPEED_OPTIMIZERS):
             self.optimizer_name = self.optimizer_name.lower()
 
         self.optimizer_params = get_optimizer_params(param_dict)
         self.optimizer_legacy_fusion = get_optimizer_legacy_fusion(param_dict)
 
-        self.zero_allow_untested_optimizer = get_zero_allow_untested_optimizer(
-            param_dict)
+        self.zero_allow_untested_optimizer = get_zero_allow_untested_optimizer(param_dict)
 
         self.zero_force_ds_cpu_optimizer = get_zero_force_ds_cpu_optimizer(param_dict)
 
@@ -899,8 +801,7 @@ class DeepSpeedConfig(object):
         self.scheduler_params = get_scheduler_params(param_dict)
 
         self.flops_profiler_config = DeepSpeedFlopsProfilerConfig(param_dict)
-        self.wall_clock_breakdown = (get_wall_clock_breakdown(param_dict)
-                                     | self.flops_profiler_config.enabled)
+        self.wall_clock_breakdown = (get_wall_clock_breakdown(param_dict) | self.flops_profiler_config.enabled)
         self.memory_breakdown = get_memory_breakdown(param_dict)
         self.autotuning_config = DeepSpeedAutotuningConfig(param_dict)
 
@@ -929,20 +830,16 @@ class DeepSpeedConfig(object):
 
         checkpoint_params = get_checkpoint_params(param_dict)
         validation_mode = get_checkpoint_tag_validation_mode(checkpoint_params)
-        self.checkpoint_tag_validation_enabled = (validation_mode !=
-                                                  ValidationMode.IGNORE)
+        self.checkpoint_tag_validation_enabled = (validation_mode != ValidationMode.IGNORE)
         self.checkpoint_tag_validation_fail = validation_mode == ValidationMode.FAIL
-        self.load_universal_checkpoint = checkpoint_params.get(
-            LOAD_UNIVERSAL_CHECKPOINT,
-            LOAD_UNIVERSAL_CHECKPOINT_DEFAULT)
+        self.load_universal_checkpoint = checkpoint_params.get(LOAD_UNIVERSAL_CHECKPOINT,
+                                                               LOAD_UNIVERSAL_CHECKPOINT_DEFAULT)
 
-        self.use_node_local_storage = checkpoint_params.get(
-            USE_NODE_LOCAL_STORAGE_CHECKPOINT,
-            USE_NODE_LOCAL_STORAGE_CHECKPOINT_DEFAULT)
+        self.use_node_local_storage = checkpoint_params.get(USE_NODE_LOCAL_STORAGE_CHECKPOINT,
+                                                            USE_NODE_LOCAL_STORAGE_CHECKPOINT_DEFAULT)
 
         data_types_params = get_data_types_params(param_dict)
-        self.grad_accum_dtype = data_types_params.get(GRAD_ACCUM_DTYPE,
-                                                      GRAD_ACCUM_DTYPE_DEFAULT)
+        self.grad_accum_dtype = data_types_params.get(GRAD_ACCUM_DTYPE, GRAD_ACCUM_DTYPE_DEFAULT)
 
         par_write_pipe = get_checkpoint_parallel_write_pipeline(checkpoint_params)
         self.checkpoint_parallel_write_pipeline = par_write_pipe
@@ -959,23 +856,16 @@ class DeepSpeedConfig(object):
         micro_batch = self.train_micro_batch_size_per_gpu
         grad_acc = self.gradient_accumulation_steps
 
-        assert (
-            train_batch > 0
-        ), f"Train batch size: {train_batch} has to be greater than 0"
+        assert (train_batch > 0), f"Train batch size: {train_batch} has to be greater than 0"
 
-        assert (
-            micro_batch > 0
-        ), f"Micro batch size per gpu: {micro_batch} has to be greater than 0"
+        assert (micro_batch > 0), f"Micro batch size per gpu: {micro_batch} has to be greater than 0"
 
-        assert (
-            grad_acc > 0
-        ), f"Gradient accumulation steps: {grad_acc} has to be greater than 0"
+        assert (grad_acc > 0), f"Gradient accumulation steps: {grad_acc} has to be greater than 0"
 
         assert train_batch == micro_batch * grad_acc * self.world_size, (
             f"Check batch related parameters. train_batch_size is not equal "
             "to micro_batch_per_gpu * gradient_acc_step * world_size "
-            f"{train_batch} != {micro_batch} * {grad_acc} * {self.world_size}"
-        )
+            f"{train_batch} != {micro_batch} * {grad_acc} * {self.world_size}")
 
     def _set_batch_related_parameters(self):
 
@@ -1038,8 +928,7 @@ class DeepSpeedConfig(object):
                 sort_keys=True,
                 indent=4,
                 cls=ScientificNotationEncoder,
-                separators=(",",
-                            ":"),
+                separators=(",", ":"),
             )))
 
     def print(self, name):
@@ -1052,20 +941,16 @@ class DeepSpeedConfig(object):
         self.print_user_config()
 
     def _do_error_check(self):
-        assert (
-            self.train_micro_batch_size_per_gpu
-        ), "DeepSpeedConfig: {} is not defined".format(TRAIN_MICRO_BATCH_SIZE_PER_GPU)
+        assert (self.train_micro_batch_size_per_gpu
+                ), "DeepSpeedConfig: {} is not defined".format(TRAIN_MICRO_BATCH_SIZE_PER_GPU)
 
         assert (
-            self.gradient_accumulation_steps
-        ), "DeepSpeedConfig: {} is not defined".format(GRADIENT_ACCUMULATION_STEPS)
+            self.gradient_accumulation_steps), "DeepSpeedConfig: {} is not defined".format(GRADIENT_ACCUMULATION_STEPS)
 
         if self.zero_enabled:
-            assert (
-                self.zero_optimization_stage <= ZeroStageEnum.max_stage
-            ), "DeepSpeedConfig: Maximum supported ZeRO stage is {}".format(
-                ZeroStageEnum.max_stage
-            )
+            assert (self.zero_optimization_stage <=
+                    ZeroStageEnum.max_stage), "DeepSpeedConfig: Maximum supported ZeRO stage is {}".format(
+                        ZeroStageEnum.max_stage)
 
         if self.fp16_master_weights_and_gradients:
             assert self.zero_enabled and self.zero_optimization_stage == ZeroStageEnum.gradients, "Fp16_master_weights_and_grads is only supported with ZeRO Stage 2 for now."
@@ -1076,19 +961,15 @@ class DeepSpeedConfig(object):
         vocabulary_size = self._param_dict.get(VOCABULARY_SIZE, VOCABULARY_SIZE_DEFAULT)
         if vocabulary_size and vocabulary_size % TENSOR_CORE_ALIGN_SIZE != 0:
             logger.warning(
-                "DeepSpeedConfig: vocabulary size {} is not aligned to {}, may import tensor core utilization."
-                .format(vocabulary_size,
-                        TENSOR_CORE_ALIGN_SIZE))
+                "DeepSpeedConfig: vocabulary size {} is not aligned to {}, may import tensor core utilization.".format(
+                    vocabulary_size, TENSOR_CORE_ALIGN_SIZE))
 
-        if (self.optimizer_params is not None
-                and MAX_GRAD_NORM in self.optimizer_params.keys()
+        if (self.optimizer_params is not None and MAX_GRAD_NORM in self.optimizer_params.keys()
                 and self.optimizer_params[MAX_GRAD_NORM] > 0):
             if fp16_enabled:
                 if self.global_rank == 0:
-                    logger.warning(
-                        "DeepSpeedConfig: In FP16 mode, DeepSpeed will pass {}:{} to FP16 wrapper"
-                        .format(MAX_GRAD_NORM,
-                                self.optimizer_params[MAX_GRAD_NORM]))
+                    logger.warning("DeepSpeedConfig: In FP16 mode, DeepSpeed will pass {}:{} to FP16 wrapper".format(
+                        MAX_GRAD_NORM, self.optimizer_params[MAX_GRAD_NORM]))
             else:
                 if self.global_rank == 0:
                     logger.warning(

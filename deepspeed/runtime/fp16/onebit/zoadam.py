@@ -49,13 +49,13 @@ class ZeroOneAdam(torch.optim.Optimizer):
     .. _On the Convergence of Adam and Beyond:
         https://openreview.net/forum?id=ryQu7f-RZ
     """
+
     def __init__(self,
                  params,
                  deepspeed=None,
                  lr=1e-3,
                  bias_correction=True,
-                 betas=(0.9,
-                        0.999),
+                 betas=(0.9, 0.999),
                  eps=1e-8,
                  eps_inside_sqrt=False,
                  weight_decay=0.,
@@ -105,8 +105,7 @@ class ZeroOneAdam(torch.optim.Optimizer):
             assert TORCH_MAJOR >= 1 and TORCH_MINOR >= 8, "Please use torch 1.8 or greater to enable NCCL backend in 0/1 Adam. Alternatively, please specify 'mpi' as the 'comm_backend_name' in config file to proceed with the MPI backend"
             assert dist.is_initialized() == True, "Please initialize the torch distributed backend."
             from deepspeed.runtime.comm.nccl import NcclBackend
-            self.using_pipeline = hasattr(self.deepspeed,
-                                          'pipeline_enable_backward_allreduce')
+            self.using_pipeline = hasattr(self.deepspeed, 'pipeline_enable_backward_allreduce')
             self.comm_backend_handle = NcclBackend(self.deepspeed.mpu)
 
         elif self.comm_backend_name == 'mpi':
@@ -181,16 +180,12 @@ class ZeroOneAdam(torch.optim.Optimizer):
                     state['corrected_tensor_size'] = state['tensor_size']
 
                     if state['tensor_size'] % (self.size * self.divider) != 0:
-                        state['corrected_tensor_size'] += ((self.size * self.divider) -
-                                                           (state['tensor_size'] %
-                                                            (self.size * self.divider)))
-                    state['server_chunk_size'] = state[
-                        'corrected_tensor_size'] // self.size
+                        state['corrected_tensor_size'] += ((self.size * self.divider) - (state['tensor_size'] %
+                                                                                         (self.size * self.divider)))
+                    state['server_chunk_size'] = state['corrected_tensor_size'] // self.size
                     get_accelerator().empty_cache()
-                    state['worker_error'] = torch.zeros(state['corrected_tensor_size'],
-                                                        device=p.device)
-                    state['server_error'] = torch.zeros(state['server_chunk_size'],
-                                                        device=p.device)
+                    state['worker_error'] = torch.zeros(state['corrected_tensor_size'], device=p.device)
+                    state['server_error'] = torch.zeros(state['server_chunk_size'], device=p.device)
                     # Accumulation of momentum, i.e., the u variable in the 0/1 Adam paper
                     state['momentum_accumulator'] = torch.zeros_like(p.data)
                     get_accelerator().empty_cache()
@@ -213,16 +208,10 @@ class ZeroOneAdam(torch.optim.Optimizer):
                             if self.size > 1:
                                 with torch.no_grad():
                                     grad_onebit = self.comm_backend_handle.compressed_allreduce(
-                                        grad,
-                                        state['worker_error'],
-                                        state['server_error'],
-                                        self.deepspeed.local_rank)
+                                        grad, state['worker_error'], state['server_error'], self.deepspeed.local_rank)
                                     if 'exp_avg_mask' in group:
-                                        if grad_onebit.device != group[
-                                                'exp_avg_mask'].device:
-                                            group['exp_avg_mask'] = group[
-                                                'exp_avg_mask'].to(
-                                                    device=grad_onebit.device)
+                                        if grad_onebit.device != group['exp_avg_mask'].device:
+                                            group['exp_avg_mask'] = group['exp_avg_mask'].to(device=grad_onebit.device)
                                         grad_onebit.mul_(group['exp_avg_mask'])
                                     exp_avg.mul_(beta1).add_(1 - beta1, grad_onebit)
                     else:
@@ -233,15 +222,12 @@ class ZeroOneAdam(torch.optim.Optimizer):
                 if not self.initialize:
                     if self.size > 1:
                         comm_buffer.set_(
-                            self.comm_backend_handle.compressed_allreduce(
-                                comm_buffer,
-                                state['worker_error'],
-                                state['server_error'],
-                                self.deepspeed.local_rank))
+                            self.comm_backend_handle.compressed_allreduce(comm_buffer, state['worker_error'],
+                                                                          state['server_error'],
+                                                                          self.deepspeed.local_rank))
                         if 'exp_avg_mask' in group:
                             if comm_buffer.device != group['exp_avg_mask'].device:
-                                group['exp_avg_mask'] = group['exp_avg_mask'].to(
-                                    device=comm_buffer.device)
+                                group['exp_avg_mask'] = group['exp_avg_mask'].to(device=comm_buffer.device)
                             comm_buffer.mul_(group['exp_avg_mask'])
 
                 if self.initialize:
@@ -252,22 +238,18 @@ class ZeroOneAdam(torch.optim.Optimizer):
                         p.data.add_(-group['lr'] * update)
                         if self.freeze_key is True:
                             comm_buffer.add_(-group['lr'] * update)
-                    if state['step'] % state[
-                            'local_step_interval'] == 0 and self.freeze_key:
+                    if state['step'] % state['local_step_interval'] == 0 and self.freeze_key:
                         with torch.no_grad():
                             p.data.add_(-1 * comm_buffer)
                             comm_buffer.mul_(exp_avg_sq.sqrt() + group['eps'])
                             if self.size > 1:
                                 comm_buffer.copy_(
-                                    self.comm_backend_handle.compressed_allreduce(
-                                        comm_buffer,
-                                        state['worker_error'],
-                                        state['server_error'],
-                                        self.deepspeed.local_rank))
+                                    self.comm_backend_handle.compressed_allreduce(comm_buffer, state['worker_error'],
+                                                                                  state['server_error'],
+                                                                                  self.deepspeed.local_rank))
                                 if 'exp_avg_mask' in group:
                                     if comm_buffer.device != group['exp_avg_mask'].device:
-                                        group['exp_avg_mask'] = group['exp_avg_mask'].to(
-                                            device=comm_buffer.device)
+                                        group['exp_avg_mask'] = group['exp_avg_mask'].to(device=comm_buffer.device)
                                     comm_buffer.mul_(group['exp_avg_mask'])
                             exp_avg.zero_().add_(comm_buffer / state['lrs'], alpha=-1)
                             p.data.add_(comm_buffer / (exp_avg_sq.sqrt() + group['eps']))
@@ -298,9 +280,8 @@ class ZeroOneAdam(torch.optim.Optimizer):
                         state['local_step_counter'] += 1
                         if state['local_step_counter'] == self.local_step_scaler:
                             state['local_step_counter'] = 0
-                            state['local_step_interval'] = min(
-                                self.local_step_clipper,
-                                state['local_step_interval'] * 2)
+                            state['local_step_interval'] = min(self.local_step_clipper,
+                                                               state['local_step_interval'] * 2)
 
             if not self.initialize:
                 print('Pop out errors', flush=True)
@@ -343,14 +324,13 @@ class ZeroOneAdam(torch.optim.Optimizer):
         for i, group in enumerate(self.param_groups):
             if 'exp_avg_mask' in group:
                 state_dict['param_groups'][i]['exp_avg_mask'] = group['exp_avg_mask']
-            elif 'exp_avg_mask' not in group and 'exp_avg_mask' in state_dict[
-                    'param_groups'][i]:
+            elif 'exp_avg_mask' not in group and 'exp_avg_mask' in state_dict['param_groups'][i]:
                 state_dict['param_groups'][i].pop('exp_avg_mask')
         super().load_state_dict(state_dict)
         if self.state[self.param_groups[0]['params'][0]]['step'] < self.var_freeze_step:
             self.var_freeze_key = False
-            if (self.state[self.param_groups[0]['params'][0]]['step'] + 1
-                ) % self.state[self.param_groups[0]['params'][0]]['var_interval'] == 0:
+            if (self.state[self.param_groups[0]['params'][0]]['step'] +
+                    1) % self.state[self.param_groups[0]['params'][0]]['var_interval'] == 0:
                 if self.using_pipeline:
                     self.deepspeed.pipeline_enable_backward_allreduce = True
                 else:

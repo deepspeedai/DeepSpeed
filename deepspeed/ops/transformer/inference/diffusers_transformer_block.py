@@ -31,41 +31,30 @@ def load_spatial_module():
 
 
 class DeepSpeedDiffusersTransformerBlock(nn.Module):
-    def __init__(self,
-                 equivalent_module: nn.Module,
-                 config: Diffusers2DTransformerConfig):
+
+    def __init__(self, equivalent_module: nn.Module, config: Diffusers2DTransformerConfig):
         super(DeepSpeedDiffusersTransformerBlock, self).__init__()
         self.quantizer = module_inject.GroupQuantizer(q_int8=config.int8_quantization)
         # Ensure ops are built by the time we start running
         self.config = config
 
         self.ff1_w = self.quantizer.quantize(
-            nn.Parameter(equivalent_module.ff.net[0].proj.weight.data,
-                         requires_grad=False))
-        self.ff1_b = nn.Parameter(equivalent_module.ff.net[0].proj.bias.data,
-                                  requires_grad=False)
-        self.ff2_w = self.quantizer.quantize(
-            nn.Parameter(equivalent_module.ff.net[2].weight.data,
-                         requires_grad=False))
-        self.ff2_b = nn.Parameter(equivalent_module.ff.net[2].bias.data,
-                                  requires_grad=False)
+            nn.Parameter(equivalent_module.ff.net[0].proj.weight.data, requires_grad=False))
+        self.ff1_b = nn.Parameter(equivalent_module.ff.net[0].proj.bias.data, requires_grad=False)
+        self.ff2_w = self.quantizer.quantize(nn.Parameter(equivalent_module.ff.net[2].weight.data,
+                                                          requires_grad=False))
+        self.ff2_b = nn.Parameter(equivalent_module.ff.net[2].bias.data, requires_grad=False)
 
-        self.norm1_g = nn.Parameter(equivalent_module.norm1.weight.data,
-                                    requires_grad=False)
-        self.norm1_b = nn.Parameter(equivalent_module.norm1.bias.data,
-                                    requires_grad=False)
+        self.norm1_g = nn.Parameter(equivalent_module.norm1.weight.data, requires_grad=False)
+        self.norm1_b = nn.Parameter(equivalent_module.norm1.bias.data, requires_grad=False)
         self.norm1_eps = equivalent_module.norm1.eps
 
-        self.norm2_g = nn.Parameter(equivalent_module.norm2.weight.data,
-                                    requires_grad=False)
-        self.norm2_b = nn.Parameter(equivalent_module.norm2.bias.data,
-                                    requires_grad=False)
+        self.norm2_g = nn.Parameter(equivalent_module.norm2.weight.data, requires_grad=False)
+        self.norm2_b = nn.Parameter(equivalent_module.norm2.bias.data, requires_grad=False)
         self.norm2_eps = equivalent_module.norm2.eps
 
-        self.norm3_g = nn.Parameter(equivalent_module.norm3.weight.data,
-                                    requires_grad=False)
-        self.norm3_b = nn.Parameter(equivalent_module.norm3.bias.data,
-                                    requires_grad=False)
+        self.norm3_g = nn.Parameter(equivalent_module.norm3.weight.data, requires_grad=False)
+        self.norm3_b = nn.Parameter(equivalent_module.norm3.bias.data, requires_grad=False)
         self.norm3_eps = equivalent_module.norm3.eps
 
         self.attn_1 = equivalent_module.attn1
@@ -76,16 +65,14 @@ class DeepSpeedDiffusersTransformerBlock(nn.Module):
             self.attn_1.do_out_bias = False
             self.attn_1_bias = self.attn_1.attn_ob
         else:
-            self.attn_1_bias = nn.Parameter(torch.zeros_like(self.norm2_g),
-                                            requires_grad=False)
+            self.attn_1_bias = nn.Parameter(torch.zeros_like(self.norm2_g), requires_grad=False)
 
         # Pull the bias in if we can
         if isinstance(self.attn_2, DeepSpeedDiffusersAttention):
             self.attn_2.do_out_bias = False
             self.attn_2_bias = self.attn_2.attn_ob
         else:
-            self.attn_2_bias = nn.Paramaeter(torch.zeros_like(self.norm3_g),
-                                             requires_grad=False)
+            self.attn_2_bias = nn.Paramaeter(torch.zeros_like(self.norm3_g), requires_grad=False)
 
         self.transformer_cuda_module = load_transformer_module()
         load_spatial_module()
@@ -99,25 +86,14 @@ class DeepSpeedDiffusersTransformerBlock(nn.Module):
         if "encoder_hidden_states" in kwargs and kwargs["encoder_hidden_states"] != None:
             context = kwargs["encoder_hidden_states"]
 
-        out_norm_1 = self.transformer_cuda_module.layer_norm(hidden_states,
-                                                             self.norm1_g,
-                                                             self.norm1_b,
-                                                             self.norm1_eps)
+        out_norm_1 = self.transformer_cuda_module.layer_norm(hidden_states, self.norm1_g, self.norm1_b, self.norm1_eps)
         out_attn_1 = self.attn_1(out_norm_1)
 
-        out_norm_2, out_attn_1 = self.transformer_cuda_module.layer_norm_residual_store_pre_ln_res(out_attn_1,
-                                                                 self.attn_1_bias,
-                                                                 hidden_states,
-                                                                 self.norm2_g,
-                                                                 self.norm2_b,
-                                                                 self.norm2_eps)
+        out_norm_2, out_attn_1 = self.transformer_cuda_module.layer_norm_residual_store_pre_ln_res(
+            out_attn_1, self.attn_1_bias, hidden_states, self.norm2_g, self.norm2_b, self.norm2_eps)
         out_attn_2 = self.attn_2(out_norm_2, context=context)
-        out_norm_3, out_attn_2 = self.transformer_cuda_module.layer_norm_residual_store_pre_ln_res(out_attn_2,
-                                                                 self.attn_2_bias,
-                                                                 out_attn_1,
-                                                                 self.norm3_g,
-                                                                 self.norm3_b,
-                                                                 self.norm3_eps)
+        out_norm_3, out_attn_2 = self.transformer_cuda_module.layer_norm_residual_store_pre_ln_res(
+            out_attn_2, self.attn_2_bias, out_attn_1, self.norm3_g, self.norm3_b, self.norm3_eps)
 
         out_ff1 = nn.functional.linear(out_norm_3, self.ff1_w)
         out_geglu = self.transformer_cuda_module.bias_geglu(out_ff1, self.ff1_b)

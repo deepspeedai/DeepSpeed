@@ -22,10 +22,8 @@ LAYERS = 8
 @pytest.fixture
 def sequential_model():
     model = torch.nn.Sequential(
-        *[nn.Linear(HIDDEN_DIM,
-                    HIDDEN_DIM) for _ in range(LAYERS)],
-        nn.Linear(HIDDEN_DIM,
-                  1),
+        *[nn.Linear(HIDDEN_DIM, HIDDEN_DIM) for _ in range(LAYERS)],
+        nn.Linear(HIDDEN_DIM, 1),
     )
     return model
 
@@ -40,8 +38,7 @@ def simple_config():
             "type": "Adam",
             "params": {
                 "lr": 0.001,
-                "betas": [0.9,
-                          0.999],
+                "betas": [0.9, 0.999],
                 "eps": 1e-8,
                 "weight_decay": 3e-7
             }
@@ -73,16 +70,14 @@ class TestPipeModuleSequential(DistributedTest):
 
         # Ensure all parameters are accounted for.
         my_params = sum(p.numel() for p in pipe_model.parameters())
-        total_pipe_params = torch.LongTensor([my_params
-                                              ]).to(get_accelerator().device_name())
+        total_pipe_params = torch.LongTensor([my_params]).to(get_accelerator().device_name())
         dist.all_reduce(total_pipe_params)
         total_pipe_params = total_pipe_params.item()
         assert total_pipe_params == base_params
 
-        pipe_model, _, _, _ = deepspeed.initialize(
-            config=simple_config,
-            model=pipe_model,
-            model_parameters=[p for p in pipe_model.parameters()])
+        pipe_model, _, _, _ = deepspeed.initialize(config=simple_config,
+                                                   model=pipe_model,
+                                                   model_parameters=[p for p in pipe_model.parameters()])
 
         if pipe_model.is_first_stage or pipe_model.is_last_stage:
             pipe_input = base_input.clone().detach().to(get_accelerator().device_name())

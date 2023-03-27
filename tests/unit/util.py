@@ -49,10 +49,8 @@ def bf16_required_version_check(accelerator_check=True):
     else:
         accelerator_pass = True
 
-    if (TORCH_MAJOR > 1 or
-        (TORCH_MAJOR == 1 and TORCH_MINOR >= 10)) and (CUDA_MAJOR >= 11) and (
-            NCCL_MAJOR > 2 or
-            (NCCL_MAJOR == 2 and NCCL_MINOR >= 10)) and accelerator_pass:
+    if (TORCH_MAJOR > 1 or (TORCH_MAJOR == 1 and TORCH_MINOR >= 10)) and (CUDA_MAJOR >= 11) and (
+            NCCL_MAJOR > 2 or (NCCL_MAJOR == 2 and NCCL_MINOR >= 10)) and accelerator_pass:
         return True
     else:
         return False

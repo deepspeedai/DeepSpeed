@@ -2,10 +2,7 @@
 
 import torch
 
-from .constants import (BASE_OPTIMIZER_STATE,
-                        GROUP_PADDINGS,
-                        OPTIMIZER_STATE_DICT,
-                        PARTITION_COUNT)
+from .constants import (BASE_OPTIMIZER_STATE, GROUP_PADDINGS, OPTIMIZER_STATE_DICT, PARTITION_COUNT)
 
 from .reshape_utils import (basic_folder_validation, get_zero_files, merge_state)
 
@@ -15,6 +12,7 @@ GROUP_STATE_KEY = 'state'
 
 
 class ZeROCheckpoint(object):
+
     def __init__(self, dir):
         basic_folder_validation(dir)
         self.dir = dir
@@ -49,12 +47,7 @@ class ZeROCheckpoint(object):
         file_idx_list = self.get_file_indices_for_rank(pp_index, tp_index, dp_index)
         return [self.file_list[idx] for idx in file_idx_list]
 
-    def get_state_for_rank(self,
-                           pp_index,
-                           tp_index,
-                           dp_index,
-                           keys_to_ignore=[],
-                           strip_tensor_paddings=True):
+    def get_state_for_rank(self, pp_index, tp_index, dp_index, keys_to_ignore=[], strip_tensor_paddings=True):
         state_file_list = self.get_files_for_rank(pp_index, tp_index, dp_index)
         merged_sd = None
         for state_file in state_file_list:
@@ -111,10 +104,7 @@ class ZeROCheckpoint(object):
             for state_name, state_value in group_state.items():
                 if torch.is_tensor(state_value):
                     raw_length = state_value.numel() - group_paddings[key]
-                    group_state[state_name] = torch.narrow(state_value,
-                                                           0,
-                                                           0,
-                                                           raw_length).clone()
+                    group_state[state_name] = torch.narrow(state_value, 0, 0, raw_length).clone()
 
     def _clear_group_paddings(self, sd):
         group_paddings = self._get_optimizer_state(sd, GROUP_PADDINGS)
@@ -144,5 +134,4 @@ class ZeROCheckpoint(object):
         partition_counts = self._get_optimizer_state(sd, PARTITION_COUNT)
         if partition_counts:
             num_groups = len(partition_counts)
-            sd[OPTIMIZER_STATE_DICT][PARTITION_COUNT] = [self.target_3d.dp_degree
-                                                         ] * num_groups
+            sd[OPTIMIZER_STATE_DICT][PARTITION_COUNT] = [self.target_3d.dp_degree] * num_groups

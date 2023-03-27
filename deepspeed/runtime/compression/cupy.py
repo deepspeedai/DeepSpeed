@@ -8,6 +8,7 @@ from torch.utils.dlpack import from_dlpack
 
 
 class CupyBackend(object):
+
     def __init__(self):
         pass
 

@@ -11,26 +11,17 @@ from .op_binding import MLPGemmOp, VectorMatMulOp, GELUGemmOp, ResidualAddOp
 
 
 class DeepSpeedMLP(nn.Module):
-    def __init__(self,
-                 config,
-                 mp_group=None,
-                 q_scales=None,
-                 q_groups=1,
-                 merge_count=1,
-                 mlp_extra_grouping=False):
+
+    def __init__(self, config, mp_group=None, q_scales=None, q_groups=1, merge_count=1, mlp_extra_grouping=False):
         super(DeepSpeedMLP, self).__init__()
 
         self.config = config
         data_type = torch.int8 if config.q_int8 else torch.half if config.fp16 else torch.float
         data_type_fp = torch.half if config.fp16 else torch.float
         device = get_accelerator().current_device_name()
-        self.attn_nw = nn.Parameter(torch.empty(self.config.hidden_size,
-                                                dtype=data_type_fp,
-                                                device=device),
+        self.attn_nw = nn.Parameter(torch.empty(self.config.hidden_size, dtype=data_type_fp, device=device),
                                     requires_grad=False)
-        self.attn_nb = nn.Parameter(torch.empty(self.config.hidden_size,
-                                                dtype=data_type_fp,
-                                                device=device),
+        self.attn_nb = nn.Parameter(torch.empty(self.config.hidden_size, dtype=data_type_fp, device=device),
                                     requires_grad=False)
         intm_size_per_partition = self.config.intermediate_size // self.config.mp_size
         self.inter_w = nn.Parameter(torch.empty(self.config.hidden_size,
@@ -38,18 +29,14 @@ class DeepSpeedMLP(nn.Module):
                                                 dtype=data_type,
                                                 device=device),
                                     requires_grad=False)
-        self.inter_b = nn.Parameter(torch.empty(intm_size_per_partition,
-                                                dtype=data_type_fp,
-                                                device=device),
+        self.inter_b = nn.Parameter(torch.empty(intm_size_per_partition, dtype=data_type_fp, device=device),
                                     requires_grad=False)
         self.output_w = nn.Parameter(torch.empty(intm_size_per_partition,
                                                  self.config.hidden_size,
                                                  dtype=data_type,
                                                  device=device),
                                      requires_grad=False)
-        self.output_b = nn.Parameter(torch.empty(self.config.hidden_size,
-                                                 dtype=data_type_fp,
-                                                 device=device),
+        self.output_b = nn.Parameter(torch.empty(self.config.hidden_size, dtype=data_type_fp, device=device),
                                      requires_grad=False)
 
         # used for quantization
@@ -79,14 +66,13 @@ class DeepSpeedMLP(nn.Module):
                                                       bias=self.inter_b,
                                                       gamma=self.attn_nw,
                                                       beta=self.attn_nb)
-        residual = self.residual_add_func(
-            hidden_state=output,
-            residual=residual,
-            attention_output=input,
-            attention_bias=bias if bias is not None else self.output_b,
-            final_bias=self.output_b,
-            add_bias=bias is not None,
-            residual_add=residual_add)
+        residual = self.residual_add_func(hidden_state=output,
+                                          residual=residual,
+                                          attention_output=input,
+                                          attention_bias=bias if bias is not None else self.output_b,
+                                          final_bias=self.output_b,
+                                          add_bias=bias is not None,
+                                          residual_add=residual_add)
 
         if self.mp_group is not None and dist.get_world_size(group=self.mp_group) > 1:
             dist.all_reduce(residual, group=self.mp_group)

@@ -23,6 +23,7 @@ import subprocess
 
 
 class DSElasticAgent(LocalElasticAgent):
+
     def __init__(
         self,
         spec: WorkerSpec,
@@ -35,9 +36,7 @@ class DSElasticAgent(LocalElasticAgent):
         self.ds_env = env
 
     @staticmethod
-    def _set_master_addr_port(store: Store,
-                              master_addr: Optional[str],
-                              master_port: Optional[int]):
+    def _set_master_addr_port(store: Store, master_addr: Optional[str], master_port: Optional[int]):
         if master_port is None:
             sock = _get_socket_with_port()
             with closing(sock):
@@ -82,8 +81,7 @@ class DSElasticAgent(LocalElasticAgent):
                 "TORCHELASTIC_MAX_RESTARTS": str(spec.max_restarts),
                 "TORCHELASTIC_RUN_ID": spec.rdzv_handler.get_run_id(),
                 "TORCHELASTIC_USE_AGENT_STORE": str(use_agent_store),
-                "NCCL_ASYNC_ERROR_HANDLING": os.getenv("NCCL_ASYNC_ERROR_HANDLING",
-                                                       str(1)),
+                "NCCL_ASYNC_ERROR_HANDLING": os.getenv("NCCL_ASYNC_ERROR_HANDLING", str(1)),
             }
             worker_env_ds.update(worker_env_elastic)
             if "OMP_NUM_THREADS" in os.environ:
@@ -120,8 +118,7 @@ class DSElasticAgent(LocalElasticAgent):
         spec = self._worker_group.spec
         role = spec.role
 
-        log.info(
-            f"[{role}] starting workers for entrypoint: {spec.get_entrypoint_name()}")
+        log.info(f"[{role}] starting workers for entrypoint: {spec.get_entrypoint_name()}")
 
         self._initialize_workers(self._worker_group)
         monitor_interval = spec.monitor_interval
@@ -136,13 +133,10 @@ class DSElasticAgent(LocalElasticAgent):
             state = run_result.state
             self._worker_group.state = state
 
-            expire_time = datetime.utcnow() - (
-                rdzv_handler._settings.keep_alive_interval *
-                rdzv_handler._settings.keep_alive_max_attempt)
+            expire_time = datetime.utcnow() - (rdzv_handler._settings.keep_alive_interval *
+                                               rdzv_handler._settings.keep_alive_max_attempt)
             _dead_nodes = [
-                node for node,
-                last_heartbeat in
-                rdzv_handler._state_holder.state.last_heartbeats.items()
+                node for node, last_heartbeat in rdzv_handler._state_holder.state.last_heartbeats.items()
                 if last_heartbeat < expire_time
             ]
 
@@ -150,21 +144,16 @@ class DSElasticAgent(LocalElasticAgent):
             put_metric(f"workers.{role}.{state.name.lower()}", 1)
 
             if state == WorkerState.SUCCEEDED:
-                log.info(
-                    f"[{role}] worker group successfully finished."
-                    f" Waiting {self._exit_barrier_timeout} seconds for other agents to finish."
-                )
+                log.info(f"[{role}] worker group successfully finished."
+                         f" Waiting {self._exit_barrier_timeout} seconds for other agents to finish.")
                 self._exit_barrier()
                 return run_result
-            elif state in {
-                    WorkerState.UNHEALTHY,
-                    WorkerState.FAILED
-            } or len(participants) > len(rdzv_handler._state_holder.state.participants):
+            elif state in {WorkerState.UNHEALTHY, WorkerState.FAILED
+                           } or len(participants) > len(rdzv_handler._state_holder.state.participants):
                 if self._remaining_restarts > 0:
-                    log.info(
-                        f"[{role}] Worker group {state.name}. "
-                        f"{self._remaining_restarts}/{spec.max_restarts} attempts left;"
-                        f" will restart worker group")
+                    log.info(f"[{role}] Worker group {state.name}. "
+                             f"{self._remaining_restarts}/{spec.max_restarts} attempts left;"
+                             f" will restart worker group")
                     self._remaining_restarts -= 1
                     # rdzv_handler._state_holder.state.restart = False
                     self._restart_workers(self._worker_group)

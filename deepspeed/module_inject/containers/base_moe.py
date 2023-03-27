@@ -8,6 +8,7 @@ from deepspeed.accelerator import get_accelerator
 
 
 class BaseTransformerMoEContainer(BaseTransformerContainer):
+
     def __init__(self, **kwargs):
         # Call the init function of the parent class to initialize the tensors and configs from parent class
         super().__init__(**kwargs)
@@ -16,9 +17,7 @@ class BaseTransformerMoEContainer(BaseTransformerContainer):
         self.ep_world_size = dist.get_world_size()
         self.local_ep_size = 1 if self.num_experts < self.ep_world_size else self.num_experts // self.ep_world_size
 
-        self.layer_norm_eps = self.config.layer_norm_eps if hasattr(
-            self.config,
-            'layer_norm_eps') else 1e-12,
+        self.layer_norm_eps = self.config.layer_norm_eps if hasattr(self.config, 'layer_norm_eps') else 1e-12,
 
         # MoE models will have a list of mlp related tensors
         self._h4h_w = []
@@ -102,40 +101,27 @@ class BaseTransformerMoEContainer(BaseTransformerContainer):
         gpu_index = dist.get_rank()
         for ep_index in range(self.local_ep_size):
             # mlp inter
-            self.module.mlp[ep_index].inter_w.data = self._h4h_w[
-                gpu_index * self.local_ep_size + ep_index].to(
-                    get_accelerator().current_device_name())
-            self.module.mlp[ep_index].inter_b.data = self._h4h_b[
-                gpu_index * self.local_ep_size + ep_index].to(
-                    get_accelerator().current_device_name())
+            self.module.mlp[ep_index].inter_w.data = self._h4h_w[gpu_index * self.local_ep_size + ep_index].to(
+                get_accelerator().current_device_name())
+            self.module.mlp[ep_index].inter_b.data = self._h4h_b[gpu_index * self.local_ep_size + ep_index].to(
+                get_accelerator().current_device_name())
 
             # mlp output
-            self.module.mlp[ep_index].output_w.data = self._4hh_w[
-                gpu_index * self.local_ep_size + ep_index].to(
-                    get_accelerator().current_device_name())
-            self.module.mlp[ep_index].output_b.data = self._4hh_b[
-                gpu_index * self.local_ep_size + ep_index].to(
-                    get_accelerator().current_device_name())
+            self.module.mlp[ep_index].output_w.data = self._4hh_w[gpu_index * self.local_ep_size + ep_index].to(
+                get_accelerator().current_device_name())
+            self.module.mlp[ep_index].output_b.data = self._4hh_b[gpu_index * self.local_ep_size + ep_index].to(
+                get_accelerator().current_device_name())
 
     def copy_data_to_new_module(self):
-        self.module.attn_nw.data = self.attn_nw.to(
-            get_accelerator().current_device_name())
-        self.module.attn_nb.data = self.attn_nb.to(
-            get_accelerator().current_device_name())
+        self.module.attn_nw.data = self.attn_nw.to(get_accelerator().current_device_name())
+        self.module.attn_nb.data = self.attn_nb.to(get_accelerator().current_device_name())
 
-        self.module.norm_w.data.copy_(
-            self.input_nw.to(get_accelerator().current_device_name()))
-        self.module.norm_b.data.copy_(
-            self.input_nb.to(get_accelerator().current_device_name()))
+        self.module.norm_w.data.copy_(self.input_nw.to(get_accelerator().current_device_name()))
+        self.module.norm_b.data.copy_(self.input_nb.to(get_accelerator().current_device_name()))
 
         if self.config.moe.type == 'residual':
-            self.module.res_mlp.inter_w.data = self._res_h4h_w.to(
-                get_accelerator().current_device_name())
-            self.module.res_mlp.inter_b.data = self._res_h4h_b.to(
-                get_accelerator().current_device_name())
-            self.module.res_mlp.output_w.data = self._res_4hh_w.to(
-                get_accelerator().current_device_name())
-            self.module.res_mlp.output_b.data = self._res_4hh_b.to(
-                get_accelerator().current_device_name())
-            self.module.res_coef.data = self._res_coef.to(
-                get_accelerator().current_device_name())
+            self.module.res_mlp.inter_w.data = self._res_h4h_w.to(get_accelerator().current_device_name())
+            self.module.res_mlp.inter_b.data = self._res_h4h_b.to(get_accelerator().current_device_name())
+            self.module.res_mlp.output_w.data = self._res_4hh_w.to(get_accelerator().current_device_name())
+            self.module.res_mlp.output_b.data = self._res_4hh_b.to(get_accelerator().current_device_name())
+            self.module.res_coef.data = self._res_coef.to(get_accelerator().current_device_name())

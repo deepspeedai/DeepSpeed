@@ -19,24 +19,12 @@ def test_repeating_loader():
         assert next(loader) == 3
 
 
-@pytest.mark.parametrize('train_batch_size, drop_last',
-                         [(1,
-                           True),
-                          (4,
-                           True),
-                          (1,
-                           False),
-                          (4,
-                           False)])
+@pytest.mark.parametrize('train_batch_size, drop_last', [(1, True), (4, True), (1, False), (4, False)])
 class TestDataLoaderDropLast(DistributedTest):
     world_size = 1
 
     def test(self, train_batch_size, drop_last):
-        config_dict = {
-            "train_batch_size": train_batch_size,
-            "dataloader_drop_last": drop_last,
-            "steps_per_print": 1
-        }
+        config_dict = {"train_batch_size": train_batch_size, "dataloader_drop_last": drop_last, "steps_per_print": 1}
         hidden_dim = 10
 
         model = SimpleModel(hidden_dim)

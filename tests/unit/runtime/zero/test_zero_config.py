@@ -55,20 +55,11 @@ def test_zero_offload_optimizer_config_pipeline():
     config = DeepSpeedZeroOffloadOptimizerConfig()
     assert config.pipeline == False
 
-    config = DeepSpeedZeroOffloadOptimizerConfig(**{
-        "pipeline_read": True,
-        "pipeline_write": False
-    })
+    config = DeepSpeedZeroOffloadOptimizerConfig(**{"pipeline_read": True, "pipeline_write": False})
     assert config.pipeline == True
 
-    config = DeepSpeedZeroOffloadOptimizerConfig(**{
-        "pipeline_read": False,
-        "pipeline_write": True
-    })
+    config = DeepSpeedZeroOffloadOptimizerConfig(**{"pipeline_read": False, "pipeline_write": True})
     assert config.pipeline == True
 
-    config = DeepSpeedZeroOffloadOptimizerConfig(**{
-        "pipeline_read": True,
-        "pipeline_write": True
-    })
+    config = DeepSpeedZeroOffloadOptimizerConfig(**{"pipeline_read": True, "pipeline_write": True})
     assert config.pipeline == True

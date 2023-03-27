@@ -11,19 +11,8 @@ from unit.checkpoint.common import checkpoint_correctness_verification
 import pytest
 
 
-@pytest.mark.parametrize('zero_stage, use_cpu_offload',
-                         [(0,
-                           False),
-                          (1,
-                           False),
-                          (2,
-                           False),
-                          (2,
-                           True),
-                          (3,
-                           False),
-                          (3,
-                           True)])
+@pytest.mark.parametrize('zero_stage, use_cpu_offload', [(0, False), (1, False), (2, False), (2, True), (3, False),
+                                                         (3, True)])
 class TestLRSchedulerCheckpoint(DistributedTest):
     world_size = 2
 
@@ -38,8 +27,7 @@ class TestLRSchedulerCheckpoint(DistributedTest):
                 "type": 'Adam',
                 "params": {
                     "lr": 0.00015,
-                    "betas": [0.8,
-                              0.999],
+                    "betas": [0.8, 0.999],
                     "eps": 1e-8,
                     "weight_decay": 3e-7
                 }

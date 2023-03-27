@@ -21,12 +21,7 @@ def err(s: str) -> None:
 #  - unlike plain grep, which is slower and has different flags on MacOS versus
 #    Linux, git grep is always the same.
 res = subprocess.run(
-    ["git",
-     "grep",
-     "-Hn",
-     "--no-index",
-     r"torch\.distributed",
-     *sys.argv[1:]],
+    ["git", "grep", "-Hn", "--no-index", r"torch\.distributed", *sys.argv[1:]],
     capture_output=True,
 )
 if res.returncode == 0:

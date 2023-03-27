@@ -6,6 +6,7 @@ from ..policy import TransformerPolicy
 
 
 class DS_GPT2Container(BaseTransformerContainer):
+
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
 

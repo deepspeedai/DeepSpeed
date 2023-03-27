@@ -14,6 +14,7 @@ from utils import setup_serial_env
 
 # Test that no sub-class or super-class is missed
 class ConvX(torch.nn.Conv1d):
+
     def __init__(self, *args):
         super().__init__(*args)
         # This would not be partitioned before bugfix 5ca8167
@@ -24,6 +25,7 @@ class ConvX(torch.nn.Conv1d):
 
 
 class ConvNet(torch.nn.Module):
+
     def __init__(self):
         super().__init__()
         self.conv1 = ConvX(1, 3, 4)
@@ -61,6 +63,7 @@ class TestZeroGatheredParametersFree(DistributedTest):
         hidden_dim = 10
 
         class MyModel(torch.nn.Module):
+
             def __init__(self, hidden_dim):
                 super(MyModel, self).__init__()
                 self.l1 = torch.nn.Linear(hidden_dim, hidden_dim)
@@ -126,9 +129,9 @@ class TestSerialContext(DistributedTest):
         args = SimpleNamespace(local_rank=0)
         net = SimpleModel(hidden_dim=4)
         engine, _, _, _ = deepspeed.initialize(args=args,
-                                            config=config_dict,
-                                            model=net,
-                                            model_parameters=net.parameters())
+                                               config=config_dict,
+                                               model=net,
+                                               model_parameters=net.parameters())
         assert engine.tput_timer.batch_size == train_micro_batch_size_per_gpu * gradient_accumulation_steps
 
         assert not engine.tput_timer.initialized
@@ -167,11 +170,9 @@ class TestSerialContext(DistributedTest):
         assert engine.tput_timer.total_elapsed_time == 0
 
         # calling start()/stop() to increment the step counter until start_step
-        while engine.tput_timer.micro_step_count < (gradient_accumulation_steps *
-                                                    engine.tput_timer.start_step):
+        while engine.tput_timer.micro_step_count < (gradient_accumulation_steps * engine.tput_timer.start_step):
             engine.tput_timer.start()
-            global_step = (engine.tput_timer.micro_step_count +
-                           1) % gradient_accumulation_steps == 0
+            global_step = (engine.tput_timer.micro_step_count + 1) % gradient_accumulation_steps == 0
             engine.tput_timer.stop(global_step=global_step)
         assert engine.tput_timer.global_step_count == engine.tput_timer.start_step
         assert engine.tput_timer.total_elapsed_time == 0
@@ -182,20 +183,20 @@ class TestSerialContext(DistributedTest):
             current_duration = engine.tput_timer.step_elapsed_time
             total_duration = engine.tput_timer.total_elapsed_time
 
-            global_step = (engine.tput_timer.micro_step_count +
-                           1) % gradient_accumulation_steps == 0
+            global_step = (engine.tput_timer.micro_step_count + 1) % gradient_accumulation_steps == 0
             engine.tput_timer.stop(global_step=global_step)
             duration = engine.tput_timer.end_time - engine.tput_timer.start_time
             # step elapsed time is reset after gradient accumulation steps
             assert engine.tput_timer.step_elapsed_time == (
-                0 if engine.tput_timer.global_step_count != engine.tput_timer.start_step
-                else current_duration + duration)
+                0 if engine.tput_timer.global_step_count != engine.tput_timer.start_step else current_duration +
+                duration)
             assert engine.tput_timer.total_elapsed_time == total_duration + duration
 
     def test_ext_param_getattr(self):
         setup_serial_env()
 
         class ExtLinear(torch.nn.Module):
+
             def __init__(self, dim=16):
                 super().__init__()
                 self.dim = dim
@@ -214,9 +215,9 @@ class TestSerialContext(DistributedTest):
 
         args = SimpleNamespace(local_rank=0)
         engine, optim, _, _ = deepspeed.initialize(args=args,
-                                                model=net,
-                                                model_parameters=net.parameters(),
-                                                config=config)
+                                                   model=net,
+                                                   model_parameters=net.parameters(),
+                                                   config=config)
 
         with deepspeed.zero.GatheredParameters(net.linear1.weight):
             assert net.linear1.weight.numel() == net.dim**2

@@ -35,12 +35,12 @@ class FusedLamb(torch.optim.Optimizer):
         min_coeff(float, optional): minimum value of the lamb coefficient (default: 0.01)
         amsgrad (boolean, optional): NOT SUPPORTED in FusedLamb!
     """
+
     def __init__(self,
                  params,
                  lr=1e-3,
                  bias_correction=True,
-                 betas=(0.9,
-                        0.999),
+                 betas=(0.9, 0.999),
                  eps=1e-8,
                  eps_inside_sqrt=False,
                  weight_decay=0.,
@@ -64,12 +64,7 @@ class FusedLamb(torch.optim.Optimizer):
         self.eps_mode = 0 if eps_inside_sqrt else 1
         self.lamb_coeffs = []
 
-    def step(self,
-             closure=None,
-             grads=None,
-             output_params=None,
-             scale=1.,
-             grad_norms=None):
+    def step(self, closure=None, grads=None, output_params=None, scale=1., grad_norms=None):
         """Performs a single optimization step.
 
         Arguments:
@@ -114,7 +109,8 @@ class FusedLamb(torch.optim.Optimizer):
         #remove the previous coeffs
         del self.lamb_coeffs[:]
 
-        for group, grads_this_group, output_params_this_group, grad_norm_group in zip(self.param_groups, grads_group, output_params_group, grad_norms):
+        for group, grads_this_group, output_params_this_group, grad_norm_group in zip(
+                self.param_groups, grads_group, output_params_group, grad_norms):
             if grads_this_group is None:
                 grads_this_group = [None] * len(group['params'])
             if output_params_this_group is None:
@@ -127,7 +123,8 @@ class FusedLamb(torch.optim.Optimizer):
 
             bias_correction = 1 if group['bias_correction'] else 0
 
-            for p, grad, output_param, grad_norm in zip(group['params'], grads_this_group, output_params_this_group, grad_norm_group):
+            for p, grad, output_param, grad_norm in zip(group['params'], grads_this_group, output_params_this_group,
+                                                        grad_norm_group):
 
                 # compute combined scale factor for this group
                 combined_scale = scale
@@ -162,24 +159,10 @@ class FusedLamb(torch.optim.Optimizer):
 
                 state['step'] += 1
 
-                out_p = torch.tensor(
-                    [],
-                    dtype=torch.float) if output_param is None else output_param
-                lamb_coeff = self.fused_lamb_cuda.lamb(p.data,
-                                                       out_p,
-                                                       exp_avg,
-                                                       exp_avg_sq,
-                                                       grad,
-                                                       group['lr'],
-                                                       beta1,
-                                                       beta2,
-                                                       max_coeff,
-                                                       min_coeff,
-                                                       group['eps'],
-                                                       combined_scale,
-                                                       state['step'],
-                                                       self.eps_mode,
-                                                       bias_correction,
+                out_p = torch.tensor([], dtype=torch.float) if output_param is None else output_param
+                lamb_coeff = self.fused_lamb_cuda.lamb(p.data, out_p, exp_avg, exp_avg_sq, grad, group['lr'], beta1,
+                                                       beta2, max_coeff, min_coeff, group['eps'], combined_scale,
+                                                       state['step'], self.eps_mode, bias_correction,
                                                        group['weight_decay'])
                 self.lamb_coeffs.append(lamb_coeff)
         return loss

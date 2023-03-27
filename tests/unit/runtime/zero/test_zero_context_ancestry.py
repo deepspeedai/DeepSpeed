@@ -31,32 +31,30 @@ config = {
 # test that sub-classes get params that aren't prematurely partitioned and thus requiring gathering
 # fixed by https://github.com/microsoft/DeepSpeed/pull/1202
 class GrandPa(torch.nn.Module):
+
     def __init__(self, *args):
         super().__init__(*args)
         self.param_grandpa = torch.nn.Parameter(torch.ones(5))
-        self.param_grandpa.data = (self.param_grandpa.data +
-                                   1).data  # test param is not yet partitioned
+        self.param_grandpa.data = (self.param_grandpa.data + 1).data  # test param is not yet partitioned
 
 
 class Pa(GrandPa):
+
     def __init__(self, *args):
         super().__init__(*args)
         self.param_pa = torch.nn.Parameter(torch.ones(5))
-        self.param_pa.data = (self.param_pa.data +
-                              1).data  # test param is not yet partitioned
-        self.param_grandpa.data = (self.param_grandpa.data +
-                                   1).data  # test param is not yet partitioned
+        self.param_pa.data = (self.param_pa.data + 1).data  # test param is not yet partitioned
+        self.param_grandpa.data = (self.param_grandpa.data + 1).data  # test param is not yet partitioned
 
 
 class Son(Pa):
+
     def __init__(self):
         super().__init__()
         self.param = torch.nn.Parameter(torch.ones(5))
         self.param.data = (self.param.data + 1).data  # test param is not yet partitioned
-        self.param_pa.data = (self.param_pa.data +
-                              1).data  # test param is not yet partitioned
-        self.param_grandpa.data = (self.param_grandpa.data +
-                                   1).data  # test param is not yet partitioned
+        self.param_pa.data = (self.param_pa.data + 1).data  # test param is not yet partitioned
+        self.param_grandpa.data = (self.param_grandpa.data + 1).data  # test param is not yet partitioned
 
 
 class TestSerialParamInit(DistributedTest):
@@ -98,6 +96,7 @@ class TestDSInitWZinit(DistributedTest):
         }
 
         class Model(torch.nn.Module):
+
             def __init__(self):
                 super(Model, self).__init__()
                 self.linear = torch.nn.Linear(4, 4)

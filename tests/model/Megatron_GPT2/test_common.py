@@ -8,6 +8,7 @@ import time
 
 
 class BaseTestCase(unittest.TestCase):
+
     def __init__(self, methodName="DeepSpeed performance test"):
         super(BaseTestCase, self).__init__(methodName)
         self.test_dir = "./test"
@@ -24,30 +25,14 @@ class BaseTestCase(unittest.TestCase):
 
         if test_config["deepspeed"] and not baseline_config:
             file_name = "_mp{0}_gpu{1}_node{2}_bs{3}_step{4}_layer{5}_hidden{6}_seq{7}_head{8}{9}_ds{10}-{11}.log".format(
-                test_config["mp"],
-                test_config["gpus"],
-                test_config["nodes"],
-                test_config["bs"],
-                test_config["steps"],
-                test_config["layers"],
-                test_config["hidden_size"],
-                test_config["seq_length"],
-                test_config["heads"],
-                other_args,
-                zero_args,
-                self.timestr)
+                test_config["mp"], test_config["gpus"], test_config["nodes"], test_config["bs"], test_config["steps"],
+                test_config["layers"], test_config["hidden_size"], test_config["seq_length"], test_config["heads"],
+                other_args, zero_args, self.timestr)
             save_dir = self.test_dir
         else:
             file_name = "_mp{0}_gpu{1}_node{2}_bs{3}_step{4}_layer{5}_hidden{6}_seq{7}_head{8}{9}.log".format(
-                test_config["mp"],
-                test_config["gpus"],
-                test_config["nodes"],
-                test_config["bs"],
-                test_config["steps"],
-                test_config["layers"],
-                test_config["hidden_size"],
-                test_config["seq_length"],
-                test_config["heads"],
+                test_config["mp"], test_config["gpus"], test_config["nodes"], test_config["bs"], test_config["steps"],
+                test_config["layers"], test_config["hidden_size"], test_config["seq_length"], test_config["heads"],
                 other_args)
             save_dir = self.baseline_dir
 
@@ -66,31 +51,15 @@ class BaseTestCase(unittest.TestCase):
 
     def run_gpt2_test(self, test_config, output):
         ds_flag = "-d " + test_config["json"] if test_config["deepspeed"] else ""
-        ckpt_num = test_config[
-            "ckpt_num_layers"] if "ckpt_num_layers" in test_config else 1
-        other_args = "-o " + test_config[
-            "other_args"] if "other_args" in test_config else ""
+        ckpt_num = test_config["ckpt_num_layers"] if "ckpt_num_layers" in test_config else 1
+        other_args = "-o " + test_config["other_args"] if "other_args" in test_config else ""
 
         cmd = "./ds_gpt2_test.sh -m {0} -g {1} -n {2} -b {3} -s {4} -l {5} -h {6} -q {7} -e {8} -c {9} {10} {11}".format(
-            test_config["mp"],
-            test_config["gpus"],
-            test_config["nodes"],
-            test_config["bs"],
-            test_config["steps"],
-            test_config["layers"],
-            test_config["hidden_size"],
-            test_config["seq_length"],
-            test_config["heads"],
-            ckpt_num,
-            other_args,
-            ds_flag)
+            test_config["mp"], test_config["gpus"], test_config["nodes"], test_config["bs"], test_config["steps"],
+            test_config["layers"], test_config["hidden_size"], test_config["seq_length"], test_config["heads"],
+            ckpt_num, other_args, ds_flag)
 
         self.ensure_directory_exists(output)
         with open(output, "w") as f:
             print(cmd)
-            subprocess.run(cmd,
-                           shell=True,
-                           check=False,
-                           executable='/bin/bash',
-                           stdout=f,
-                           stderr=f)
+            subprocess.run(cmd, shell=True, check=False, executable='/bin/bash', stdout=f, stderr=f)

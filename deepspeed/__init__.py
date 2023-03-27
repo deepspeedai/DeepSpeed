@@ -51,12 +51,10 @@ __git_branch__ = git_branch
 
 def initialize(args=None,
                model: torch.nn.Module = None,
-               optimizer: Optional[Union[Optimizer,
-                                         DeepSpeedOptimizerCallable]] = None,
+               optimizer: Optional[Union[Optimizer, DeepSpeedOptimizerCallable]] = None,
                model_parameters: Optional[torch.nn.Module] = None,
                training_data: Optional[torch.utils.data.Dataset] = None,
-               lr_scheduler: Optional[Union[_LRScheduler,
-                                            DeepSpeedSchedulerCallable]] = None,
+               lr_scheduler: Optional[Union[_LRScheduler, DeepSpeedSchedulerCallable]] = None,
                mpu=None,
                dist_init_required: Optional[bool] = None,
                collate_fn=None,
@@ -110,10 +108,8 @@ def initialize(args=None,
         * ``lr_scheduler``: Wrapped lr scheduler if user ``lr_scheduler`` is passed, or
           if ``lr_scheduler`` specified in JSON configuration. Otherwise ``None``.
     """
-    log_dist("DeepSpeed info: version={}, git-hash={}, git-branch={}".format(
-        __version__,
-        __git_hash__,
-        __git_branch__),
+    log_dist("DeepSpeed info: version={}, git-hash={}, git-branch={}".format(__version__, __git_hash__,
+                                                                             __git_branch__),
              ranks=[0])
 
     # Disable zero.Init context if it's currently enabled
@@ -147,12 +143,7 @@ def initialize(args=None,
                                 config=config,
                                 config_params=config_params)
 
-    return_items = [
-        engine,
-        engine.optimizer,
-        engine.training_dataloader,
-        engine.lr_scheduler
-    ]
+    return_items = [engine, engine.optimizer, engine.training_dataloader, engine.lr_scheduler]
     return tuple(return_items)
 
 
@@ -171,38 +162,28 @@ def _add_core_arguments(parser):
     """
     group = parser.add_argument_group('DeepSpeed', 'DeepSpeed configurations')
 
-    group.add_argument(
-        '--deepspeed',
-        default=False,
-        action='store_true',
-        help=
-        'Enable DeepSpeed (helper flag for user code, no impact on DeepSpeed backend)')
+    group.add_argument('--deepspeed',
+                       default=False,
+                       action='store_true',
+                       help='Enable DeepSpeed (helper flag for user code, no impact on DeepSpeed backend)')
 
-    group.add_argument('--deepspeed_config',
-                       default=None,
-                       type=str,
-                       help='DeepSpeed json configuration file.')
+    group.add_argument('--deepspeed_config', default=None, type=str, help='DeepSpeed json configuration file.')
 
-    group.add_argument(
-        '--deepscale',
-        default=False,
-        action='store_true',
-        help=
-        'Deprecated enable DeepSpeed (helper flag for user code, no impact on DeepSpeed backend)'
-    )
+    group.add_argument('--deepscale',
+                       default=False,
+                       action='store_true',
+                       help='Deprecated enable DeepSpeed (helper flag for user code, no impact on DeepSpeed backend)')
 
     group.add_argument('--deepscale_config',
                        default=None,
                        type=str,
                        help='Deprecated DeepSpeed json configuration file.')
 
-    group.add_argument(
-        '--deepspeed_mpi',
-        default=False,
-        action='store_true',
-        help=
-        "Run via MPI, this will attempt to discover the necessary variables to initialize torch "
-        "distributed from the MPI environment")
+    group.add_argument('--deepspeed_mpi',
+                       default=False,
+                       action='store_true',
+                       help="Run via MPI, this will attempt to discover the necessary variables to initialize torch "
+                       "distributed from the MPI environment")
 
     return parser
 
@@ -278,10 +259,8 @@ def init_inference(model, config=None, **kwargs):
     Returns:
         A deepspeed.InferenceEngine wrapped model.
     """
-    log_dist("DeepSpeed info: version={}, git-hash={}, git-branch={}".format(
-        __version__,
-        __git_hash__,
-        __git_branch__),
+    log_dist("DeepSpeed info: version={}, git-hash={}, git-branch={}".format(__version__, __git_hash__,
+                                                                             __git_branch__),
              ranks=[0])
 
     # Load config_dict from config first
@@ -293,17 +272,14 @@ def init_inference(model, config=None, **kwargs):
     elif isinstance(config, dict):
         config_dict = config
     else:
-        raise ValueError(
-            f"'config' argument expected string or dictionary, got {type(config)}")
+        raise ValueError(f"'config' argument expected string or dictionary, got {type(config)}")
 
     # Update with values from kwargs, ensuring no conflicting overlap between config and kwargs
     overlap_keys = set(config_dict.keys()).intersection(kwargs.keys())
     # If there is overlap, error out if values are different
     for key in overlap_keys:
         if config_dict[key] != kwargs[key]:
-            raise ValueError(
-                f"Conflicting argument '{key}' in 'config':{config_dict[key]} and kwargs:{kwargs[key]}"
-            )
+            raise ValueError(f"Conflicting argument '{key}' in 'config':{config_dict[key]} and kwargs:{kwargs[key]}")
     config_dict.update(kwargs)
 
     ds_inference_config = DeepSpeedInferenceConfig(**config_dict)

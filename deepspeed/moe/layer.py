@@ -31,6 +31,7 @@ class MoE(torch.nn.Module):
         use_tutel (bool, optional): default=False, whether to use Tutel optimizations (if installed).
         enable_expert_tensor_parallelism (bool, optional): default=False, whether to use tensor parallelism for experts
     """
+
     def __init__(self,
                  hidden_size,
                  expert,
@@ -65,15 +66,8 @@ class MoE(torch.nn.Module):
             'Unsupported noisy_gate_policy: ' + noisy_gate_policy
 
         experts = Experts(expert, self.num_local_experts, self.expert_group_name)
-        self.deepspeed_moe = MOELayer(TopKGate(hidden_size,
-                                               num_experts,
-                                               k,
-                                               capacity_factor,
-                                               eval_capacity_factor,
-                                               min_capacity,
-                                               noisy_gate_policy,
-                                               drop_tokens,
-                                               use_rts),
+        self.deepspeed_moe = MOELayer(TopKGate(hidden_size, num_experts, k, capacity_factor, eval_capacity_factor,
+                                               min_capacity, noisy_gate_policy, drop_tokens, use_rts),
                                       experts,
                                       self.expert_group_name,
                                       self.ep_size,
@@ -90,20 +84,16 @@ class MoE(torch.nn.Module):
     def _create_process_groups(self):
         # Create process group for a layer if needed
         if self.expert_group_name not in groups._get_expert_parallel_group_dict():
-            print(
-                f"No existing process group found, creating a new group named: {self.expert_group_name}"
-            )
+            print(f"No existing process group found, creating a new group named: {self.expert_group_name}")
             if (groups.mpu is None) or (not self.enable_expert_tensor_parallelism):
                 # Condition 1 - no groups.mpu means no tensor parallelism
                 # Condition 2 - disabling expert tensor parallelism on purpose
                 groups._create_expert_and_data_parallel(self.ep_size)
             else:
                 # expert tensor parallelism is enabled
-                groups._create_expert_data_and_model_parallel(self.ep_size,
-                                                              mpu=groups.mpu)
+                groups._create_expert_data_and_model_parallel(self.ep_size, mpu=groups.mpu)
         # Set the group handle for the MOELayer (deepspeed_moe) object
-        self.deepspeed_moe._set_ep_group(
-            groups._get_expert_parallel_group(self.expert_group_name))
+        self.deepspeed_moe._set_ep_group(groups._get_expert_parallel_group(self.expert_group_name))
 
     def forward(self, hidden_states, used_token=None):
         """ MoE forward

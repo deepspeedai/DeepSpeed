@@ -40,6 +40,7 @@ class Autotuner:
     """The DeepSpeed Autotuner automatically discovers the optimal DeepSpeed configuration that delivers good training speed. The Autotuner uses model information, system information, and heuristics to efficiently tune system knobs that affect compute and memory efficiencies, such as ZeRO optimization stages, micro-batch sizes, and many other ZeRO optimization configurations. It not only reduces the time and resources user spend on tuning, but also can discover configurations better than hand-tuned methods.
     Autotuning with DeepSpeed requires no code change from DeepSpeed users. Please refer to the README for usage details.
     """
+
     def __init__(self, args, active_resources):
         self.args = args
         self.selected_exp_dir = None
@@ -92,7 +93,8 @@ class Autotuner:
 
         assert self.exp_num_gpus <= self.rm.num_gpus_per_node, "num_gpus in the autotuning configuration must not be less than the --num_gpus value in the train script if any"
         assert self.exp_num_nodes <= len(
-            self.rm.nodes), "num_nodes in the autotuning configuration must not be less than the --num_nodes value in the train script if any"
+            self.rm.nodes
+        ), "num_nodes in the autotuning configuration must not be less than the --num_nodes value in the train script if any"
 
         self.records = {}
         self.optimal_cmd = None
@@ -125,18 +127,10 @@ class Autotuner:
                 row.append(val[0]['name'])
                 tab.append(row)
             summary = tabulate(tab,
-                               headers=[
-                                   "tuning_space",
-                                   "num_experiments",
-                                   "best_metric_val",
-                                   "best_exp_name"
-                               ],
+                               headers=["tuning_space", "num_experiments", "best_metric_val", "best_exp_name"],
                                tablefmt="pipe")
             print(summary)
-            with open(os.path.join(self.results_dir,
-                                   'summary.txt'),
-                      'w',
-                      buffering=BUFSIZE) as fd:
+            with open(os.path.join(self.results_dir, 'summary.txt'), 'w', buffering=BUFSIZE) as fd:
                 fd.write(summary)
                 fd.flush()
                 os.fsync(fd)
@@ -148,9 +142,7 @@ class Autotuner:
                     f"{best_exp['name']} is the optimal setup after tuning. The exp result is at {best_exp['result_dir']}."
                 )
             else:
-                logger.info(
-                    f"No optimal setup is found. Please check that experiments were run successfully."
-                )
+                logger.info(f"No optimal setup is found. Please check that experiments were run successfully.")
             tuning_duration = datetime.timedelta(seconds=(time.time() - self.start_time))
 
             logger.info(f"Tuning completed in {tuning_duration}")
@@ -172,8 +164,8 @@ class Autotuner:
         user_config_file = None
         if "--deepspeed_config" in user_args:
             idx = user_args.index("--deepspeed_config")
-            assert ".json" in user_args[idx +
-                                        1],  "DeepSpeed --deepspeed_config requires a json file to specify the configuration"
+            assert ".json" in user_args[
+                idx + 1], "DeepSpeed --deepspeed_config requires a json file to specify the configuration"
 
             user_config_file = user_args[idx + 1]
         elif "--deepspeed" in user_args:
@@ -183,15 +175,10 @@ class Autotuner:
 
         logger.debug(f"user_config_file = {user_config_file}")
         if user_config_file is not None:
-            assert os.path.isfile(
-                user_config_file
-            ), "DeepSpeed configuration file: {} is not an existing file".format(
-                user_config_file
-            )
+            assert os.path.isfile(user_config_file), "DeepSpeed configuration file: {} is not an existing file".format(
+                user_config_file)
             if os.path.exists(user_config_file):
-                return json.load(open(user_config_file,
-                                      "r"),
-                                 object_pairs_hook=dict_raise_error_on_duplicate_keys)
+                return json.load(open(user_config_file, "r"), object_pairs_hook=dict_raise_error_on_duplicate_keys)
 
         return None
 
@@ -258,13 +245,11 @@ class Autotuner:
         return self.autotuning_config.mp_size
 
     def max_train_micro_batch_size_per_gpu(self):
-        if self.max_train_batch_size() and self.max_train_batch_size(
-        ) > 0:  # if the user specifies a max_train_batch_size
-            max_train_micro_batch_size = self.max_train_batch_size() * self.mp_size(
-            ) // (self.exp_num_gpus * self.exp_num_nodes
-                  )  # gradient accumulation steps >=1
-            return min(self.autotuning_config.max_train_micro_batch_size_per_gpu,
-                       max_train_micro_batch_size)
+        if self.max_train_batch_size(
+        ) and self.max_train_batch_size() > 0:  # if the user specifies a max_train_batch_size
+            max_train_micro_batch_size = self.max_train_batch_size() * self.mp_size() // (
+                self.exp_num_gpus * self.exp_num_nodes)  # gradient accumulation steps >=1
+            return min(self.autotuning_config.max_train_micro_batch_size_per_gpu, max_train_micro_batch_size)
         else:
             return self.autotuning_config.max_train_micro_batch_size_per_gpu
 
@@ -361,19 +346,14 @@ class Autotuner:
             if model_info and "hidden_size" in model_info:
                 hs = model_info["hidden_size"]
                 template_config[ZERO_OPTIMIZATION]['reduce_bucket_size'] = hs * hs
-                template_config[ZERO_OPTIMIZATION][
-                    'stage3_prefetch_bucket_size'] = 0.9 * hs * hs
-                template_config[ZERO_OPTIMIZATION][
-                    'stage3_param_persistence_threshold'] = 10 * hs
+                template_config[ZERO_OPTIMIZATION]['stage3_prefetch_bucket_size'] = 0.9 * hs * hs
+                template_config[ZERO_OPTIMIZATION]['stage3_param_persistence_threshold'] = 10 * hs
             prefix = "z3_"
         else:
             return exps
 
         # replace the corresponding parameter values if the user specifies them in the DeepSpeed configuration file
-        replace_dict(tuning_space,
-                     self.user_config,
-                     [ZERO_OPTIMIZATION,
-                      TRAIN_MICRO_BATCH_SIZE_PER_GPU])
+        replace_dict(tuning_space, self.user_config, [ZERO_OPTIMIZATION, TRAIN_MICRO_BATCH_SIZE_PER_GPU])
 
         logger.debug(f"tuning_space = {json.dumps(tuning_space)}")
 
@@ -397,11 +377,9 @@ class Autotuner:
             # if the config does not use offloading, remove the offloading section
             config_zero = config.get(ZERO_OPTIMIZATION, None)
             if config_zero:
-                if OFFLOAD_OPTIMIZER not in config_zero and OFFLOAD_OPTIMIZER in exp_config[
-                        ZERO_OPTIMIZATION]:
+                if OFFLOAD_OPTIMIZER not in config_zero and OFFLOAD_OPTIMIZER in exp_config[ZERO_OPTIMIZATION]:
                     del exp_config[ZERO_OPTIMIZATION][OFFLOAD_OPTIMIZER]
-                if OFFLOAD_PARAM not in config_zero and OFFLOAD_PARAM in exp_config[
-                        ZERO_OPTIMIZATION]:
+                if OFFLOAD_PARAM not in config_zero and OFFLOAD_PARAM in exp_config[ZERO_OPTIMIZATION]:
                     del exp_config[ZERO_OPTIMIZATION][OFFLOAD_PARAM]
             # set gradient accumulation steps according to max_train_batch_size_per_gpu
             mbs = exp_config[TRAIN_MICRO_BATCH_SIZE_PER_GPU]
@@ -438,13 +416,10 @@ class Autotuner:
         else:
             return
 
-        logger.info(
-            f"The model has {number_to_string(self.get_model_num_params())} parameters.")
+        logger.info(f"The model has {number_to_string(self.get_model_num_params())} parameters.")
 
         self.gpu_mem = self.get_gpu_memory_info()
-        logger.info(
-            f"Memory per GPU in the system is {memory_to_string(self.gpu_mem, postfix='B')}."
-        )
+        logger.info(f"Memory per GPU in the system is {memory_to_string(self.gpu_mem, postfix='B')}.")
 
         self.activation_mem = self.get_activation_memory_per_gpu()
         logger.info(
@@ -452,9 +427,7 @@ class Autotuner:
         )
 
         #TODO: FIX THIS
-        stage = self.user_config.get(ZERO_OPTIMIZATION,
-                                     {}).get(ZERO_OPTIMIZATION_STAGE,
-                                             "all")
+        stage = self.user_config.get(ZERO_OPTIMIZATION, {}).get(ZERO_OPTIMIZATION_STAGE, "all")
         stage = "all"
         user_zero_stages = [stage] if not isinstance(stage, list) else stage
         logger.info(f"User-defined zero stages are {stage}.")
@@ -463,15 +436,13 @@ class Autotuner:
         max_mbs = 0
         metric_val = 0
 
-        required_gpu_mem = self.get_instantiation_memory_required_per_gpu(
-            ZeroStageEnum.disabled) + self.activation_mem
+        required_gpu_mem = self.get_instantiation_memory_required_per_gpu(ZeroStageEnum.disabled) + self.activation_mem
         if self.gpu_mem > required_gpu_mem:
             if "all" in user_zero_stages or ZeroStageEnum.disabled in user_zero_stages:
                 logger.info(
                     f"The model might be runable with ZERO 0 (which requires at least {memory_to_string(required_gpu_mem, postfix='B')} memory with mbs = 1), adding DEFAULT_TUNING_SPACE_ZERO_0 to the global tuning space"
                 )
-                next_max_mbs, next_mbs, next_metric_val = self.tune_space(
-                    DEFAULT_TUNING_SPACE_ZERO_0)
+                next_max_mbs, next_mbs, next_metric_val = self.tune_space(DEFAULT_TUNING_SPACE_ZERO_0)
                 if next_mbs > mbs:
                     mbs = next_mbs
                     max_mbs = next_max_mbs
@@ -490,8 +461,10 @@ class Autotuner:
                 logger.info(
                     f"The model might be runable with ZERO 1 (which requires at least {memory_to_string(required_gpu_mem, postfix='B')} memory), adding DEFAULT_TUNING_SPACE_ZERO_1 to the global tuning space"
                 )
-                next_max_mbs, next_mbs, next_metric_val = self.tune_space(
-                    DEFAULT_TUNING_SPACE_ZERO_1, prev_max_mbs = max_mbs, prev_best_mbs=mbs, prev_best_metric_val=metric_val)
+                next_max_mbs, next_mbs, next_metric_val = self.tune_space(DEFAULT_TUNING_SPACE_ZERO_1,
+                                                                          prev_max_mbs=max_mbs,
+                                                                          prev_best_mbs=mbs,
+                                                                          prev_best_metric_val=metric_val)
                 if next_mbs > mbs:
                     mbs = next_mbs
                     max_mbs = next_max_mbs
@@ -510,8 +483,10 @@ class Autotuner:
                 logger.info(
                     f"The model might be runable with ZERO 2 (which requires at least {memory_to_string(required_gpu_mem, postfix='B')} memory), adding DEFAULT_TUNING_SPACE_ZERO_2 to the global tuning space"
                 )
-                next_max_mbs, next_mbs, next_metric_val = self.tune_space(
-                    DEFAULT_TUNING_SPACE_ZERO_2, prev_max_mbs = max_mbs, prev_best_mbs=mbs, prev_best_metric_val=metric_val)
+                next_max_mbs, next_mbs, next_metric_val = self.tune_space(DEFAULT_TUNING_SPACE_ZERO_2,
+                                                                          prev_max_mbs=max_mbs,
+                                                                          prev_best_mbs=mbs,
+                                                                          prev_best_metric_val=metric_val)
                 if next_mbs > mbs:
                     mbs = next_mbs
                     max_mbs = next_max_mbs
@@ -523,15 +498,16 @@ class Autotuner:
                 f"The model is not runable with ZERO stage {ZeroStageEnum.gradients} (which requires at least {memory_to_string(required_gpu_mem, postfix='B')} memory with mbs = 1)"
             )
 
-        required_gpu_mem = self.get_instantiation_memory_required_per_gpu(
-            ZeroStageEnum.weights) + self.activation_mem
+        required_gpu_mem = self.get_instantiation_memory_required_per_gpu(ZeroStageEnum.weights) + self.activation_mem
         if self.gpu_mem > required_gpu_mem:
             if "all" in user_zero_stages or ZeroStageEnum.weights in user_zero_stages:
                 logger.info(
                     f"The model might be runable with ZERO 3 (which requires at least {memory_to_string(required_gpu_mem, postfix='B')} memory), adding DEFAULT_TUNING_SPACE_ZERO_3 to the global tuning space"
                 )
-                _, _, next_metric_val = self.tune_space(
-                    DEFAULT_TUNING_SPACE_ZERO_3, prev_max_mbs = max_mbs, prev_best_mbs=mbs, prev_best_metric_val=metric_val)
+                _, _, next_metric_val = self.tune_space(DEFAULT_TUNING_SPACE_ZERO_3,
+                                                        prev_max_mbs=max_mbs,
+                                                        prev_best_mbs=mbs,
+                                                        prev_best_metric_val=metric_val)
                 if has_mlflow:
                     mlflow.log_metric(f"z3{self.metric()}", next_metric_val)
         else:
@@ -542,11 +518,7 @@ class Autotuner:
         if has_mlflow:
             mlflow.end_run()
 
-    def tune_space(self,
-                   tuning_space,
-                   prev_max_mbs=0,
-                   prev_best_mbs=0,
-                   prev_best_metric_val=0):
+    def tune_space(self, tuning_space, prev_max_mbs=0, prev_best_mbs=0, prev_best_metric_val=0):
         config_zero = tuning_space.get(ZERO_OPTIMIZATION, {})
         stage = config_zero.get(ZERO_OPTIMIZATION_STAGE, None)
         tuning_space_name = TUNING_MICRO_BATCH_SIZE_PREFIX + str(stage)
@@ -557,26 +529,20 @@ class Autotuner:
         # calculate max micro batch size using gpu memory, model instantiation memory and activation memory
         # calculated_max_micro_batch_size = (memory_per_gpu - instantiation_memory) // activation_memory_micro_batch_size_1
         calculated_max_micro_batch_size = int(
-            self.gpu_mem -
-            self.get_instantiation_memory_required_per_gpu(stage)) // self.activation_mem
+            self.gpu_mem - self.get_instantiation_memory_required_per_gpu(stage)) // self.activation_mem
         logger.info(
             f"Start tuning for space {tuning_space_name}, calculated_max_micro_batch_size = {calculated_max_micro_batch_size}"
         )
 
         if calculated_max_micro_batch_size < prev_max_mbs:
-            logger.info(
-                f"No need to tune Zero stage {stage}. End tuning for space {tuning_space_name}"
-            )
+            logger.info(f"No need to tune Zero stage {stage}. End tuning for space {tuning_space_name}")
             return 0, 0, 0
 
         if TRAIN_MICRO_BATCH_SIZE_PER_GPU in self.user_config and isinstance(
-                self.user_config[TRAIN_MICRO_BATCH_SIZE_PER_GPU],
-                list):
+                self.user_config[TRAIN_MICRO_BATCH_SIZE_PER_GPU], list):
             # user-specified micro batch size per gpu is a list which overwrites the default tuning behavior
             tuning_micro_batch_sizes = [
-                s for s in self.user_config[TRAIN_MICRO_BATCH_SIZE_PER_GPU]
-                if isinstance(s,
-                              int)
+                s for s in self.user_config[TRAIN_MICRO_BATCH_SIZE_PER_GPU] if isinstance(s, int)
             ]
             gas = self.get_gas_from_user_config()
             min_micro_batch_size = min(tuning_micro_batch_sizes)
@@ -589,9 +555,7 @@ class Autotuner:
                 stage, prev_max_mbs, calculated_max_micro_batch_size)
 
             if max_micro_batch_size < prev_max_mbs:
-                logger.info(
-                    f"No need to tune Zero stage {stage}. End tuning for space {tuning_space_name}"
-                )
+                logger.info(f"No need to tune Zero stage {stage}. End tuning for space {tuning_space_name}")
                 return 0, 0, 0
 
             tuning_micro_batch_sizes, max_train_batch_size_per_gpu = self.get_tuning_micro_batch_size_list(
@@ -609,19 +573,15 @@ class Autotuner:
             return 0, 0, 0
 
         # tune micro batch sizes and gradient accumulation steps given max_train_batch_size_per_gpu
-        tuning_micro_batch_sizes = self.run_tuning_micro_batch_sizes(
-            tuning_micro_batch_sizes,
-            max_train_batch_size_per_gpu,
-            min_micro_batch_size,
-            stage,
-            tuning_micro_batch_sizes_overwritten)
+        tuning_micro_batch_sizes = self.run_tuning_micro_batch_sizes(tuning_micro_batch_sizes,
+                                                                     max_train_batch_size_per_gpu,
+                                                                     min_micro_batch_size, stage,
+                                                                     tuning_micro_batch_sizes_overwritten)
 
         fast_best_record = self.get_best_space_record(tuning_space_name)
         fast_best_metric_val = fast_best_record[1] if fast_best_record else 0
-        fast_best_mbs = fast_best_record[0][DS_CONFIG][
-            TRAIN_MICRO_BATCH_SIZE_PER_GPU] if fast_best_record else 0
-        logger.info(
-            f"fast_best_mbs = {fast_best_mbs}, name = {fast_best_record[0]['name']}")
+        fast_best_mbs = fast_best_record[0][DS_CONFIG][TRAIN_MICRO_BATCH_SIZE_PER_GPU] if fast_best_record else 0
+        logger.info(f"fast_best_mbs = {fast_best_mbs}, name = {fast_best_record[0]['name']}")
 
         if self.fast_enabled() or stage == 0:
             logger.info(f"End tuning for space: {tuning_space_name}")
@@ -631,8 +591,7 @@ class Autotuner:
         if stage > 0:
             if fast_best_mbs <= prev_best_mbs or fast_best_metric_val < prev_best_metric_val:
                 logger.info(
-                    f"End tuning for space: {tuning_space_name}. No need to tune other Zero configuration parameters."
-                )
+                    f"End tuning for space: {tuning_space_name}. No need to tune other Zero configuration parameters.")
                 return max_micro_batch_size, fast_best_mbs, fast_best_metric_val
 
         tuning_space[TRAIN_MICRO_BATCH_SIZE_PER_GPU] = tuning_micro_batch_sizes
@@ -654,8 +613,7 @@ class Autotuner:
         else:
             t = GridSearchTuner(exps, self.rm, self.metric())
 
-        sample_size = len(self.rm.nodes) * self.rm.num_gpus_per_node // (
-            self.exp_num_gpus * self.exp_num_nodes)
+        sample_size = len(self.rm.nodes) * self.rm.num_gpus_per_node // (self.exp_num_gpus * self.exp_num_nodes)
         num_exps = t.tune(sample_size=sample_size,
                           n_trials=self.autotuning_config.tuner_num_trials,
                           early_stopping=self.autotuning_config.tuner_early_stopping)
@@ -669,8 +627,7 @@ class Autotuner:
 
         if full_best_metric_val > fast_best_metric_val:
             best_metric_val = full_best_metric_val
-            best_mbs = full_best_record[0][DS_CONFIG][
-                TRAIN_MICRO_BATCH_SIZE_PER_GPU] if full_best_record else -1
+            best_mbs = full_best_record[0][DS_CONFIG][TRAIN_MICRO_BATCH_SIZE_PER_GPU] if full_best_record else -1
         else:
             best_metric_val = fast_best_metric_val
             best_mbs = fast_best_mbs
@@ -682,9 +639,7 @@ class Autotuner:
         if tuning_space_name not in self.records:
             return 0
         space_records = self.records[tuning_space_name]
-        sorted_space_records = sorted(
-            space_records,
-            key=lambda x: x[0][DS_CONFIG][TRAIN_MICRO_BATCH_SIZE_PER_GPU])
+        sorted_space_records = sorted(space_records, key=lambda x: x[0][DS_CONFIG][TRAIN_MICRO_BATCH_SIZE_PER_GPU])
         prev_metric_val = None
         prev_micro_batch_size = 0
         for (exp, metric_val, _) in sorted_space_records:
@@ -692,8 +647,7 @@ class Autotuner:
                 if metric_val < prev_metric_val:
                     break
                 if (metric_val >= prev_metric_val
-                        and (metric_val - prev_metric_val) / prev_metric_val <
-                        METRIC_PERCENT_DIFF_CONST):
+                        and (metric_val - prev_metric_val) / prev_metric_val < METRIC_PERCENT_DIFF_CONST):
                     break
             prev_metric_val = metric_val
             prev_micro_batch_size = exp[DS_CONFIG][TRAIN_MICRO_BATCH_SIZE_PER_GPU]
@@ -718,16 +672,8 @@ class Autotuner:
         ds_config = copy.deepcopy(self.user_config)
         replace_dict(ds_config, DEFAULT_MIN_MEM_CONFIG)
 
-        model_info_path = os.path.join(self.results_dir,
-                                       "profile_model_info",
-                                       "model_info.json")
-        ds_config[AUTOTUNING] = {
-            "enabled": True,
-            "model_info_path": model_info_path,
-            "model_info": {
-                "profile": True
-            }
-        }
+        model_info_path = os.path.join(self.results_dir, "profile_model_info", "model_info.json")
+        ds_config[AUTOTUNING] = {"enabled": True, "model_info_path": model_info_path, "model_info": {"profile": True}}
 
         exp_config = {}
         exp_name = "profile_model_info"
@@ -748,8 +694,7 @@ class Autotuner:
         for exp_id, (exp_json, err) in self.rm.finished_experiments.items():
             self.rm.clear()
             if err:
-                logger.error(
-                    f"The model is not runnable with DeepSpeed with error = {err}")
+                logger.error(f"The model is not runnable with DeepSpeed with error = {err}")
                 return None
 
         if os.path.exists(model_info_path):
@@ -790,12 +735,8 @@ class Autotuner:
             best_space_records[GLOBAL_TUNING_SPACE] = global_best_record
         return best_space_records
 
-    def run_tuning_micro_batch_sizes(self,
-                                     tuning_micro_batch_sizes,
-                                     max_train_batch_size_per_gpu,
-                                     min_micro_batch_size,
-                                     stage,
-                                     tuning_micro_batch_sizes_overwritten):
+    def run_tuning_micro_batch_sizes(self, tuning_micro_batch_sizes, max_train_batch_size_per_gpu,
+                                     min_micro_batch_size, stage, tuning_micro_batch_sizes_overwritten):
         assert tuning_micro_batch_sizes, "the tuning micro batch size list is empty"
         tuning_micro_batch_sizes.sort()
         max_micro_batch_size = tuning_micro_batch_sizes[-1]
@@ -838,8 +779,7 @@ class Autotuner:
                         results = hjson.load(f)
                         metric_val = results[self.metric()]
                         self.update_records(tuning_space_name, exp, metric_val, 1)
-                        if max_micro_batch_size == exp[DS_CONFIG][
-                                TRAIN_MICRO_BATCH_SIZE_PER_GPU]:
+                        if max_micro_batch_size == exp[DS_CONFIG][TRAIN_MICRO_BATCH_SIZE_PER_GPU]:
                             max_micro_batch_size_metric_val = metric_val
                         if has_mlflow:
                             os.environ.pop('MLFLOW_RUN_ID')
@@ -862,9 +802,8 @@ class Autotuner:
         # in a auto-detected tuning_micro_batch_sizs list, max_micro_batch_size might not be performant as the memory consumption is close to max
         # try smaller values while gas stays the same
         # if finding a more performant mbs value, use it to replace max_micro_batch_size in the list
-        min_micro_batch_size_with_same_gas = (
-            tuning_micro_batch_sizes[-2] +
-            1) if len(tuning_micro_batch_sizes) > 1 else min_micro_batch_size
+        min_micro_batch_size_with_same_gas = (tuning_micro_batch_sizes[-2] +
+                                              1) if len(tuning_micro_batch_sizes) > 1 else min_micro_batch_size
 
         prev_best_metric_val = max_micro_batch_size_metric_val
         prev_best_mbs = max_micro_batch_size
@@ -872,10 +811,7 @@ class Autotuner:
         stride = (max_micro_batch_size - min_micro_batch_size_with_same_gas) // 3
         if stride == 0:
             stride = 1
-        for mbs in reversed(
-                range(min_micro_batch_size_with_same_gas,
-                      max_micro_batch_size,
-                      stride)):
+        for mbs in reversed(range(min_micro_batch_size_with_same_gas, max_micro_batch_size, stride)):
             ds_config[TRAIN_MICRO_BATCH_SIZE_PER_GPU] = mbs
             gas = max_train_batch_size_per_gpu // mbs
             ds_config[GRADIENT_ACCUMULATION_STEPS] = gas
@@ -908,10 +844,7 @@ class Autotuner:
             tuning_micro_batch_sizes[-1] = prev_best_mbs
         return tuning_micro_batch_sizes
 
-    def get_min_max_micro_batch_size(self,
-                                     stage,
-                                     min_micro_batch_size,
-                                     calculated_max_micro_batch_size):
+    def get_min_max_micro_batch_size(self, stage, min_micro_batch_size, calculated_max_micro_batch_size):
         # get min and max micro batch size with gradient accumulation steps = 1
         if min_micro_batch_size > calculated_max_micro_batch_size:
             return -1, -1
@@ -927,8 +860,7 @@ class Autotuner:
         # search for the min micro batch size
         if min_micro_batch_size < 1:
             if TRAIN_MICRO_BATCH_SIZE_PER_GPU in self.user_config and isinstance(
-                    self.user_config[TRAIN_MICRO_BATCH_SIZE_PER_GPU],
-                    int):
+                    self.user_config[TRAIN_MICRO_BATCH_SIZE_PER_GPU], int):
                 # user specifies train_micro_batch_size_per_gpu as an int
                 mbs = int(self.user_config[TRAIN_MICRO_BATCH_SIZE_PER_GPU])
             else:
@@ -951,8 +883,7 @@ class Autotuner:
                 min_micro_batch_size = mbs
             else:
                 self.update_records(tuning_space_name, exp, 0, 1)
-                logger.info(
-                    f"User-specified micro batch size per GPU {mbs} does not run")
+                logger.info(f"User-specified micro batch size per GPU {mbs} does not run")
                 if self.min_train_micro_batch_size_per_gpu() == mbs:
                     return -1, -1
                 mbs = self.min_train_micro_batch_size_per_gpu()
@@ -964,8 +895,7 @@ class Autotuner:
                 exp, metric_val = self.run_ds_config(ds_config, exp_name)
                 if not metric_val:
                     self.update_records(tuning_space_name, exp, 0, 1)
-                    logger.info(
-                        f"min_train_micro_batch_size_per_gpu {mbs} is not runnable.")
+                    logger.info(f"min_train_micro_batch_size_per_gpu {mbs} is not runnable.")
                     return -1, -1
                 self.update_records(tuning_space_name, exp, metric_val, 1)
                 min_micro_batch_size = mbs
@@ -975,8 +905,7 @@ class Autotuner:
             ds_config[GRADIENT_ACCUMULATION_STEPS] = gas
             ds_config[TRAIN_BATCH_SIZE] = min_micro_batch_size * gas * \
                 self.exp_num_gpus * self.exp_num_nodes // self.mp_size()
-            exp_name = tuning_space_name + "_gas" + str(gas) + "_tmbspg" + str(
-                min_micro_batch_size)
+            exp_name = tuning_space_name + "_gas" + str(gas) + "_tmbspg" + str(min_micro_batch_size)
             exp, metric_val = self.run_ds_config(ds_config, exp_name)
             if metric_val:
                 self.update_records(tuning_space_name, exp, metric_val, 1)
@@ -986,13 +915,8 @@ class Autotuner:
                 return -1, -1
 
         # search for the max micro batch size
-        max_micro_batch_size = min(calculated_max_micro_batch_size,
-                                   self.max_train_micro_batch_size_per_gpu())
-        for mbs in [
-                math.ceil(1.05 * max_micro_batch_size),
-                max_micro_batch_size,
-                int(0.95 * max_micro_batch_size)
-        ]:
+        max_micro_batch_size = min(calculated_max_micro_batch_size, self.max_train_micro_batch_size_per_gpu())
+        for mbs in [math.ceil(1.05 * max_micro_batch_size), max_micro_batch_size, int(0.95 * max_micro_batch_size)]:
             if mbs > self.max_train_micro_batch_size_per_gpu():
                 continue
             if mbs in used_micro_batch_sizes:
@@ -1011,12 +935,11 @@ class Autotuner:
             else:
                 self.update_records(tuning_space_name, exp, 0, 1)
 
-        space_records = self.records[
-            tuning_space_name] if tuning_space_name in self.records else []
+        space_records = self.records[tuning_space_name] if tuning_space_name in self.records else []
         if space_records:
             prev_idx = min(range(len(space_records)),
-                           key=lambda i: abs(space_records[i][0][DS_CONFIG][
-                               TRAIN_MICRO_BATCH_SIZE_PER_GPU] - min_micro_batch_size))
+                           key=lambda i: abs(space_records[i][0][DS_CONFIG][TRAIN_MICRO_BATCH_SIZE_PER_GPU] -
+                                             min_micro_batch_size))
             prev_metric_val = space_records[prev_idx][1]
         else:
             prev_metric_val = None
@@ -1037,8 +960,8 @@ class Autotuner:
                     low = mid + 1
                     self.update_records(tuning_space_name, exp, metric_val, 1)
                     used_micro_batch_sizes.append(mid)
-                    if prev_metric_val and ((metric_val - prev_metric_val) /
-                                            prev_metric_val) < METRIC_PERCENT_DIFF_CONST:
+                    if prev_metric_val and (
+                        (metric_val - prev_metric_val) / prev_metric_val) < METRIC_PERCENT_DIFF_CONST:
                         logger.info(f"performance plateaus at mbs = {low}")
                         break
                     prev_metric_val = metric_val
@@ -1049,9 +972,7 @@ class Autotuner:
                 low = mid + 1
         max_micro_batch_size = low - 1
 
-        logger.info(
-            f"min_micro_batch_size = {min_micro_batch_size}, max_micro_batch_size = {max_micro_batch_size}."
-        )
+        logger.info(f"min_micro_batch_size = {min_micro_batch_size}, max_micro_batch_size = {max_micro_batch_size}.")
 
         return min_micro_batch_size, max_micro_batch_size
 
@@ -1067,8 +988,7 @@ class Autotuner:
                     gas = int(val)
             elif isinstance(gas_in_config, list):
                 logger.info(
-                    f"Specifying a list of {GRADIENT_ACCUMULATION_STEPS} to tune is not supported. 1 would be used."
-                )
+                    f"Specifying a list of {GRADIENT_ACCUMULATION_STEPS} to tune is not supported. 1 would be used.")
         assert gas > 0, "Gradient accumulation steps must be positive."
         return gas
 
@@ -1083,9 +1003,7 @@ class Autotuner:
                     return (user_args[idx + 1])
         return None
 
-    def get_tuning_micro_batch_size_list(self,
-                                         min_micro_batch_size,
-                                         max_micro_batch_size,
+    def get_tuning_micro_batch_size_list(self, min_micro_batch_size, max_micro_batch_size,
                                          num_tuning_micro_batch_sizes):
         """Get a list of micro batch sizes to tune based on min and max values, as well as the size of the list.
         Args:
@@ -1098,17 +1016,16 @@ class Autotuner:
         """
         if min_micro_batch_size <= 0 or max_micro_batch_size <= 0:
             logger.info(
-                f"min_micro_batch_size = {min_micro_batch_size}, max_micro_batch_size = {max_micro_batch_size}"
-            )
+                f"min_micro_batch_size = {min_micro_batch_size}, max_micro_batch_size = {max_micro_batch_size}")
             return [], 0
 
         # NUM_GPUS=$(( ${NUM_WORKERS} * ${NUM_GPUS_PER_WORKER} ))
         # DP_SIZE=$(( ${NUM_GPUS} / (${PP_SIZE} * ${MP_SIZE}) ))
         # GRAD_ACC_STEPS=$(( ${TARGET_GLOBAL_BATCH_SIZE} / (${BATCH_SIZE} * ${DP_SIZE}) ))
-        if self.max_train_batch_size() and self.max_train_batch_size(
-        ) > 0:  # if the user specifies a max_train_batch_size
-            max_train_batch_size_per_gpu = self.max_train_batch_size() * self.mp_size(
-            ) // (self.exp_num_gpus * self.exp_num_nodes)
+        if self.max_train_batch_size(
+        ) and self.max_train_batch_size() > 0:  # if the user specifies a max_train_batch_size
+            max_train_batch_size_per_gpu = self.max_train_batch_size() * self.mp_size() // (self.exp_num_gpus *
+                                                                                            self.exp_num_nodes)
         else:
             gas = self.get_gas_from_user_config()
             max_train_batch_size_per_gpu = max_micro_batch_size * gas // self.mp_size()
@@ -1117,8 +1034,7 @@ class Autotuner:
             min_micro_batch_size = max_micro_batch_size // 2
 
         # constant stride
-        stride = (max_micro_batch_size -
-                  min_micro_batch_size) // num_tuning_micro_batch_sizes
+        stride = (max_micro_batch_size - min_micro_batch_size) // num_tuning_micro_batch_sizes
         if stride == 0:
             stride = 1
         ls = []
@@ -1187,8 +1103,6 @@ class Autotuner:
             result = subprocess.Popen(self.optimal_cmd)
             result.wait()
 
-            logger.info(
-                f"Done running with the optimal DeepSpeed configuration using {self.optimal_cmd}"
-            )
+            logger.info(f"Done running with the optimal DeepSpeed configuration using {self.optimal_cmd}")
         else:
             logger.info(f"No optimal DeepSpeed configuration found by autotuning.")

@@ -120,8 +120,7 @@ def max_numel(comm_op, dtype, mem_factor, local_rank, args):
         # Number of elements must be divisible by world_size
         # all_to_all performance is lower for non-powers of two. Round down like all_gather.
         elements_per_gpu = int(max_memory_per_gpu // dtype_size)
-        elements_per_gpu = int(dist.get_world_size() *
-                               round(elements_per_gpu / dist.get_world_size()))
+        elements_per_gpu = int(dist.get_world_size() * round(elements_per_gpu / dist.get_world_size()))
         elements_per_gpu = int(pow(2, int(math.log(elements_per_gpu, 2))))
     else:
         print(f"This communication operation: {comm_op} is not supported yet")
@@ -162,59 +161,32 @@ def _element_size(dtype):
 def benchmark_parser():
     parser = argparse.ArgumentParser()
     parser.add_argument("--local_rank", type=int)
-    parser.add_argument("--trials",
-                        type=int,
-                        default=DEFAULT_TRIALS,
-                        help='Number of timed iterations')
-    parser.add_argument("--warmups",
-                        type=int,
-                        default=DEFAULT_WARMUPS,
-                        help='Number of warmup (non-timed) iterations')
-    parser.add_argument("--maxsize",
-                        type=int,
-                        default=24,
-                        help='Max message size as a power of 2')
-    parser.add_argument("--async-op",
-                        action="store_true",
-                        help='Enables non-blocking communication')
-    parser.add_argument("--bw-unit",
-                        type=str,
-                        default=DEFAULT_UNIT,
-                        choices=['Gbps',
-                                 'GBps'])
+    parser.add_argument("--trials", type=int, default=DEFAULT_TRIALS, help='Number of timed iterations')
+    parser.add_argument("--warmups", type=int, default=DEFAULT_WARMUPS, help='Number of warmup (non-timed) iterations')
+    parser.add_argument("--maxsize", type=int, default=24, help='Max message size as a power of 2')
+    parser.add_argument("--async-op", action="store_true", help='Enables non-blocking communication')
+    parser.add_argument("--bw-unit", type=str, default=DEFAULT_UNIT, choices=['Gbps', 'GBps'])
     parser.add_argument("--backend",
                         type=str,
                         default=DEFAULT_BACKEND,
-                        choices=['nccl',
-                                 'ccl'],
+                        choices=['nccl', 'ccl'],
                         help='Communication library to use')
     parser.add_argument("--dist",
                         type=str,
                         default=DEFAULT_DIST,
-                        choices=['deepspeed',
-                                 'torch'],
+                        choices=['deepspeed', 'torch'],
                         help='Distributed DL framework to use')
-    parser.add_argument("--scan",
-                        action="store_true",
-                        help='Enables scanning all message sizes')
-    parser.add_argument("--raw",
-                        action="store_true",
-                        help='Print the message size and latency without units')
+    parser.add_argument("--scan", action="store_true", help='Enables scanning all message sizes')
+    parser.add_argument("--raw", action="store_true", help='Print the message size and latency without units')
     parser.add_argument("--all-reduce", action="store_true", help='Run all_reduce')
     parser.add_argument("--all-gather", action="store_true", help='Run all_gather')
     parser.add_argument("--all-to-all", action="store_true", help='Run all_to_all')
     parser.add_argument("--pt2pt", action="store_true", help='Run pt2pt')
     parser.add_argument("--broadcast", action="store_true", help='Run broadcast')
-    parser.add_argument("--dtype",
-                        type=str,
-                        default=DEFAULT_TYPE,
-                        help='PyTorch tensor dtype')
-    parser.add_argument(
-        "--mem-factor",
-        type=float,
-        default=.4,
-        help='Proportion of max available GPU memory to use for single-size evals')
-    parser.add_argument("--debug",
-                        action="store_true",
-                        help='Enables all_to_all debug prints')
+    parser.add_argument("--dtype", type=str, default=DEFAULT_TYPE, help='PyTorch tensor dtype')
+    parser.add_argument("--mem-factor",
+                        type=float,
+                        default=.4,
+                        help='Proportion of max available GPU memory to use for single-size evals')
+    parser.add_argument("--debug", action="store_true", help='Enables all_to_all debug prints')
     return parser

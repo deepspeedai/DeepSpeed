@@ -15,15 +15,8 @@ import torch.nn.functional
 from deepspeed.utils import instrument_w_nvtx
 
 
-def _torch_reduce_scatter_fn(input_tensor: Tensor,
-                             output_tensor: Tensor,
-                             group=None,
-                             async_op=False,
-                             prof=False):
-    return instrument_w_nvtx(dist.reduce_scatter_fn)(output_tensor,
-                                                     input_tensor,
-                                                     group=group,
-                                                     async_op=async_op)
+def _torch_reduce_scatter_fn(input_tensor: Tensor, output_tensor: Tensor, group=None, async_op=False, prof=False):
+    return instrument_w_nvtx(dist.reduce_scatter_fn)(output_tensor, input_tensor, group=group, async_op=async_op)
 
 
 @instrument_w_nvtx
@@ -45,13 +38,10 @@ def reduce_scatter_coalesced(
         flattened_tensor = tensor.view(-1)
         chunk_sz = math.ceil(tensor.numel() / world_sz)
         partition_lst_for_each_tensor[tensor_idx] = [
-            flattened_tensor[rank * chunk_sz:rank * chunk_sz + chunk_sz]
-            for rank in range(0,
-                              world_sz)
+            flattened_tensor[rank * chunk_sz:rank * chunk_sz + chunk_sz] for rank in range(0, world_sz)
         ]
 
-    padded_partition_sz_for_each_tensor = tuple(
-        math.ceil(t.numel() / world_sz) for t in tensors)
+    padded_partition_sz_for_each_tensor = tuple(math.ceil(t.numel() / world_sz) for t in tensors)
 
     if len(tensors) == 1 and tensors[0].numel() % world_sz == 0:
         # if there's only one tensor being reduced and we don't need to pad
@@ -68,21 +58,15 @@ def reduce_scatter_coalesced(
                 tensor_partitions_lst_with_padding.append(tensor_chunk)
 
                 # add padding if necessary
-                padding_sz = padded_partition_sz_for_each_tensor[
-                    tensor_idx] - tensor_chunk.numel()
+                padding_sz = padded_partition_sz_for_each_tensor[tensor_idx] - tensor_chunk.numel()
                 if padding_sz > 0:
                     tensor_partitions_lst_with_padding.append(
-                        torch.empty(padding_sz,
-                                    dtype=tensor_chunk.dtype,
-                                    device=tensor_chunk.device))
+                        torch.empty(padding_sz, dtype=tensor_chunk.dtype, device=tensor_chunk.device))
 
-        tensor_partition_flat_buffer = instrument_w_nvtx(
-            torch.cat)(tensor_partitions_lst_with_padding)
+        tensor_partition_flat_buffer = instrument_w_nvtx(torch.cat)(tensor_partitions_lst_with_padding)
 
     tensor_partition_flat_buffer.div_(world_sz)  # pre-divide
-    tensor_partition_buffer_for_each_rank: List[Tensor] = torch.chunk(
-        tensor_partition_flat_buffer,
-        world_sz)
+    tensor_partition_buffer_for_each_rank: List[Tensor] = torch.chunk(tensor_partition_flat_buffer, world_sz)
 
     # batched reduce-scatter call
     _torch_reduce_scatter_fn(tensor_partition_flat_buffer,
@@ -95,9 +79,7 @@ def reduce_scatter_coalesced(
     offset = 0
     for tensor_idx in range(len(tensors)):
         output_lst[tensor_idx] = tensor_partition_buffer_for_each_rank[this_rank].narrow(
-            0,
-            offset,
-            partition_lst_for_each_tensor[tensor_idx][this_rank].numel())
+            0, offset, partition_lst_for_each_tensor[tensor_idx][this_rank].numel())
 
         offset += padded_partition_sz_for_each_tensor[tensor_idx]
 

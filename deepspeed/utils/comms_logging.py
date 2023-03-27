@@ -56,6 +56,7 @@ def calc_bw_log(comm_op, size, duration):
 
 
 class CommsLogger:
+
     def __init__(self):
         from deepspeed.comm.constants import COMMS_LOGGER_VERBOSE_DEFAULT, COMMS_LOGGER_DEBUG_DEFAULT, COMMS_LOGGER_PROF_OPS_DEFAULT, COMMS_LOGGER_PROF_ALL_DEFAULT, COMMS_LOGGER_ENABLED_DEFAULT
         self.comms_dict = {}
@@ -111,8 +112,7 @@ class CommsLogger:
         # TODO: Add to tensorboard
         if self.verbose:
             n = dist.get_world_size()
-            log_str = f"rank={dist.get_rank()} | comm op: " + record_name + " | time (ms): {:.2f}".format(
-                latency)
+            log_str = f"rank={dist.get_rank()} | comm op: " + record_name + " | time (ms): {:.2f}".format(latency)
             log_str += " | msg size: " + convert_size(msg_size)
             log_str += " | algbw (Gbps): {:.2f} ".format(algbw)
             log_str += " | busbw (Gbps): {:.2f} ".format(busbw)

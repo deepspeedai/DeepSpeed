@@ -8,6 +8,7 @@ from test_common import BaseTestCase
 
 
 class GPT2PerfBaselineTestCase(BaseTestCase):
+
     def __init__(self, methodName="DeepSpeed performance test on GPT2 model"):
         super(GPT2PerfBaselineTestCase, self).__init__(methodName)
 
@@ -88,9 +89,7 @@ class GPT2PerfBaselineTestCase(BaseTestCase):
         if exec_time == 0.0:
             print("{0}: no latency found in file {1}".format(self.id(), test_file))
         else:
-            print("{0}: execution time per iteration is {1}ms.".format(
-                self.id(),
-                exec_time))
+            print("{0}: execution time per iteration is {1}ms.".format(self.id(), exec_time))
 
     def grep_latency_from_file(self, file_name):
         latency = 0.0
@@ -99,9 +98,7 @@ class GPT2PerfBaselineTestCase(BaseTestCase):
         with open(file_name, 'r') as f:
             lines = f.readlines()
             line_filter = "elapsed time per iteration"
-            match_number = re.compile(
-                r'elapsed time per iteration \(ms\): ([-+]?[0-9]+\.?[0-9]*(?:[Ee][-+]?[0-9]+)?)'
-            )
+            match_number = re.compile(r'elapsed time per iteration \(ms\): ([-+]?[0-9]+\.?[0-9]*(?:[Ee][-+]?[0-9]+)?)')
 
             for line in lines:
                 if line_filter in line:

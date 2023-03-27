@@ -15,12 +15,8 @@ def run_quantize_ds(activations, num_groups, q_bits, is_symmetric_quant):
     if inference_module is None:
         inference_module = op_builder.QuantizerBuilder().load()
 
-    return inference_module.quantize(
-        activations,
-        num_groups,
-        q_bits,
-        inference_module.Symmetric
-        if is_symmetric_quant else inference_module.Asymmetric)
+    return inference_module.quantize(activations, num_groups, q_bits,
+                                     inference_module.Symmetric if is_symmetric_quant else inference_module.Asymmetric)
 
 
 def get_q_props(q_bits):
@@ -33,13 +29,7 @@ def get_q_props(q_bits):
     return q_range, q_max, q_min
 
 
-def get_scale_zero_point(q_bits,
-                         is_symmetric_quant,
-                         max,
-                         min,
-                         absmax,
-                         scales=None,
-                         zero_points=None):
+def get_scale_zero_point(q_bits, is_symmetric_quant, max, min, absmax, scales=None, zero_points=None):
 
     q_range, q_max, q_min = get_q_props(q_bits)
 
@@ -47,14 +37,11 @@ def get_scale_zero_point(q_bits,
         scale = torch.empty_like(absmax)
         for i, x in enumerate(absmax):
             scale[i] = torch.ones_like(x) if x == 0 else q_range / (2 * x)
-        zero_point = torch.zeros(scale.shape,
-                                 dtype=torch.float32,
-                                 device=get_accelerator().device_name())
+        zero_point = torch.zeros(scale.shape, dtype=torch.float32, device=get_accelerator().device_name())
     else:
         scale = torch.empty_like(max)
         for i, x in enumerate(max):
-            scale[i] = torch.ones_like(x) if max[i] == min[i] else q_range / (max[i] -
-                                                                              min[i])
+            scale[i] = torch.ones_like(x) if max[i] == min[i] else q_range / (max[i] - min[i])
         zero_point = q_min - (min * scale)
 
     return scale, zero_point
@@ -73,15 +60,14 @@ def run_float_quantize(q_bits, is_symmetric_quant, activations_ref, num_groups):
 
     activations_ref = activations_ref.reshape(num_groups, -1).to(dtype=torch.float32)
 
-    max_abs_activations_ref = torch.amax(torch.abs(activations_ref),
-                                         dim=-1).view(num_groups,
-                                                      -1)
+    max_abs_activations_ref = torch.amax(torch.abs(activations_ref), dim=-1).view(num_groups, -1)
     max_activations_ref = torch.amax(activations_ref, dim=-1).view(num_groups, -1)
     min_activations_ref = torch.amin(activations_ref, dim=-1).view(num_groups, -1)
 
     _, q_max, q_min = get_q_props(q_bits)
 
-    scale, zero_point = get_scale_zero_point(q_bits, is_symmetric_quant, max_activations_ref, min_activations_ref, max_abs_activations_ref)
+    scale, zero_point = get_scale_zero_point(q_bits, is_symmetric_quant, max_activations_ref, min_activations_ref,
+                                             max_abs_activations_ref)
 
     data_f = activations_ref * scale
 
@@ -90,9 +76,7 @@ def run_float_quantize(q_bits, is_symmetric_quant, activations_ref, num_groups):
 
     data_i32 = torch.round(data_f).to(dtype=torch.int32)
 
-    data_i32 = torch.minimum(torch.maximum(data_i32,
-                                           q_min.expand_as(data_i32)),
-                             q_max.expand_as(data_i32))
+    data_i32 = torch.minimum(torch.maximum(data_i32, q_min.expand_as(data_i32)), q_max.expand_as(data_i32))
     data_i8 = data_i32.to(dtype=torch.int8)
 
     scales = (1.0 / scale).reshape(-1, 1)
@@ -104,34 +88,18 @@ def run_float_quantize(q_bits, is_symmetric_quant, activations_ref, num_groups):
 
 @pytest.mark.inference_ops
 @pytest.mark.parametrize("num_groups", [1, 13, 512])
-@pytest.mark.parametrize("num_elems",
-                         [8,
-                          16,
-                          32,
-                          64,
-                          128,
-                          256,
-                          4096,
-                          8192,
-                          12288,
-                          16384])
+@pytest.mark.parametrize("num_elems", [8, 16, 32, 64, 128, 256, 4096, 8192, 12288, 16384])
 @pytest.mark.parametrize("is_symmetric_quant", [True, False])
 @pytest.mark.parametrize("q_bits", [4, 8])
 @pytest.mark.parametrize("directed_case", ["all_zeros", None])
-def test_float_quantize(num_elems,
-                        num_groups,
-                        is_symmetric_quant,
-                        q_bits,
-                        directed_case):
+def test_float_quantize(num_elems, num_groups, is_symmetric_quant, q_bits, directed_case):
 
     if directed_case == "all_zeros":
-        activations_ds = torch.zeros((num_groups,
-                                      num_elems),
+        activations_ds = torch.zeros((num_groups, num_elems),
                                      dtype=torch.float16,
                                      device=get_accelerator().device_name())
     else:
-        activations_ds = torch.randn((num_groups,
-                                      num_elems),
+        activations_ds = torch.randn((num_groups, num_elems),
                                      dtype=torch.float16,
                                      device=get_accelerator().device_name())
     activations_ref = activations_ds.clone().detach()
@@ -144,19 +112,9 @@ def test_float_quantize(num_elems,
         ds_out_tensor = int4x2to2xint4(ds_out_tensor)
 
     # Allow a max difference of 1 to account for differences in rounding in pytorch implementation
-    assert (torch.all(
-        torch.lt(torch.abs(ds_out_tensor.flatten() - ref_out_tensor.flatten()),
-                 2)))
+    assert (torch.all(torch.lt(torch.abs(ds_out_tensor.flatten() - ref_out_tensor.flatten()), 2)))
     if is_symmetric_quant:
         assert (torch.allclose(ds_out_params.flatten(), ref_params[:, 0].flatten()))
     else:
-        assert (torch.allclose(ds_out_params[:,
-                                             0].flatten(),
-                               ref_params[:,
-                                          0].flatten()))
-        assert (torch.allclose(ds_out_params[:,
-                                             1].flatten(),
-                               ref_params[:,
-                                          1].flatten(),
-                               atol=5e-5,
-                               rtol=5e-5))
+        assert (torch.allclose(ds_out_params[:, 0].flatten(), ref_params[:, 0].flatten()))
+        assert (torch.allclose(ds_out_params[:, 1].flatten(), ref_params[:, 1].flatten(), atol=5e-5, rtol=5e-5))

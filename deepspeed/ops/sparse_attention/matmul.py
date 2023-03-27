@@ -12,29 +12,8 @@ from deepspeed.accelerator import get_accelerator
 
 
 @triton.jit
-def _kernel(A,
-            B,
-            C,
-            stride_za,
-            stride_ha,
-            stride_ma,
-            stride_ka,
-            stride_zb,
-            stride_hb,
-            stride_kb,
-            stride_nb,
-            stride_zc,
-            stride_hc,
-            stride_mc,
-            stride_nc,
-            DS0,
-            DS1,
-            SDD_K,
-            SDD_off_width,
-            lut,
-            locks,
-            nlocks,
-            **meta):
+def _kernel(A, B, C, stride_za, stride_ha, stride_ma, stride_ka, stride_zb, stride_hb, stride_kb, stride_nb, stride_zc,
+            stride_hc, stride_mc, stride_nc, DS0, DS1, SDD_K, SDD_off_width, lut, locks, nlocks, **meta):
     TM = meta['TM']
     TN = meta['TN']
     TK = meta['TK']
@@ -194,8 +173,7 @@ def _kernel(A,
         tl.store(pc, c, mask=checkc)
     # accumulate partial results using spin-locks
     else:
-        plock = locks + tl.program_id(2) * nlocks * tl.num_programs(1) + tl.program_id(
-            1) * nlocks + lockid - 1
+        plock = locks + tl.program_id(2) * nlocks * tl.num_programs(1) + tl.program_id(1) * nlocks + lockid - 1
         pcount = plock + tl.num_programs(2) * tl.num_programs(1) * nlocks
         while tl.atomic_cas(plock, 0, 1) == 1:
             pass
@@ -292,10 +270,7 @@ class _sparse_matmul(torch.autograd.Function):
         #segmented = _sparse_matmul.sdd_segment(layout.type(torch.int32), start_width)
         start_width = (128 if block > 16 else 32) // block
         layout = layout.type(torch.int32)
-        segmented = libtriton.superblock(layout.data_ptr(),
-                                         layout.shape[0],
-                                         layout.shape[1],
-                                         layout.shape[2],
+        segmented = libtriton.superblock(layout.data_ptr(), layout.shape[0], layout.shape[1], layout.shape[2],
                                          start_width)
         luts, widths, packs = [], [], []
         for size, nnz in segmented:
@@ -317,19 +292,7 @@ class _sparse_matmul(torch.autograd.Function):
         return luts, None, widths, packs
 
     @staticmethod
-    def _sdd_matmul(a,
-                    b,
-                    trans_a,
-                    trans_b,
-                    trans_c,
-                    spdims,
-                    block,
-                    luts,
-                    num_locks,
-                    widths,
-                    packs,
-                    bench,
-                    time):
+    def _sdd_matmul(a, b, trans_a, trans_b, trans_c, spdims, block, luts, num_locks, widths, packs, bench, time):
         if trans_c:
             a, b = b, a
             trans_a, trans_b = not trans_b, not trans_a
@@ -339,9 +302,8 @@ class _sparse_matmul(torch.autograd.Function):
         b_dim = -1 if trans_b else -2
         a_inner, b_inner = a.shape[a_dim], b.shape[b_dim]
         if a_inner != b_inner:
-            raise ValueError(
-                f"Size of tensor A along the {a_dim} dim ({a_inner}) must match size "
-                f"of tensor B along the {b_dim} dim ({b_inner})")
+            raise ValueError(f"Size of tensor A along the {a_dim} dim ({a_inner}) must match size "
+                             f"of tensor B along the {b_dim} dim ({b_inner})")
         if a_inner % 16 != 0:
             raise ValueError('Reduction size for SDD must be a multiple of 16')
 
@@ -356,12 +318,7 @@ class _sparse_matmul(torch.autograd.Function):
         device = a.device
         # create kernel
         total_width = sum([width * pack * pack for width, pack in zip(widths, packs)])
-        c = torch.empty((batch_size,
-                         total_width,
-                         block,
-                         block),
-                        dtype=dtype,
-                        device=a.device)
+        c = torch.empty((batch_size, total_width, block, block), dtype=dtype, device=a.device)
         for lut, width, pack in zip(luts, widths, packs):
             F32TK = [8, 16]
             F16TK = [16]
@@ -387,12 +344,7 @@ class _sparse_matmul(torch.autograd.Function):
             max_width = 49152
             total = 0 if bench else None
             for off_width in range(0, width, max_width):
-                grid = lambda meta: [
-                    meta['TZ'],
-                    min(max_width,
-                        width - off_width),
-                    batch_size
-                ]
+                grid = lambda meta: [meta['TZ'], min(max_width, width - off_width), batch_size]
                 _kernel[grid](a,
                               b,
                               c,
@@ -504,13 +456,7 @@ class _sparse_matmul(torch.autograd.Function):
         # create header
         width = column.size(0)
         offsets += 6 * width
-        header = torch.stack((offsets,
-                              segments,
-                              column,
-                              depth,
-                              lockid,
-                              maxid),
-                             dim=1).view(-1).contiguous()
+        header = torch.stack((offsets, segments, column, depth, lockid, maxid), dim=1).view(-1).contiguous()
         incs = torch.stack((xincs, wincs), dim=1).view(-1).contiguous()
         incs = torch.cat((incs, torch.zeros(2, device=incs.device, dtype=incs.dtype)))
         # create lut
@@ -521,19 +467,7 @@ class _sparse_matmul(torch.autograd.Function):
         return lut, num_locks, width, None
 
     @staticmethod
-    def _dds_matmul(a,
-                    b,
-                    trans_a,
-                    trans_b,
-                    trans_c,
-                    spdims,
-                    block,
-                    lut,
-                    num_locks,
-                    width,
-                    packs,
-                    bench,
-                    time):
+    def _dds_matmul(a, b, trans_a, trans_b, trans_c, spdims, block, lut, num_locks, width, packs, bench, time):
         global triton
         if triton is None:
             triton = importlib.import_module('triton')
@@ -548,16 +482,7 @@ class _sparse_matmul(torch.autograd.Function):
         BS2 = block * spdims[1 if trans_b else 2]
         dtype = a.dtype
         # kernel
-        meta = {
-            'TN': block,
-            'TM': 128,
-            'TK': 16,
-            'BLOCK': block,
-            'TZ': 1,
-            'SDD': False,
-            'DSD': False,
-            'DDS': True
-        }
+        meta = {'TN': block, 'TM': 128, 'TK': 16, 'BLOCK': block, 'TZ': 1, 'SDD': False, 'DSD': False, 'DDS': True}
         # output
         CS0 = AS0
         CS1 = AS1
@@ -593,19 +518,7 @@ class _sparse_matmul(torch.autograd.Function):
         return c
 
     @staticmethod
-    def _dsd_matmul(a,
-                    b,
-                    trans_a,
-                    trans_b,
-                    trans_c,
-                    spdims,
-                    block,
-                    lut,
-                    num_locks,
-                    width,
-                    packs,
-                    bench,
-                    time):
+    def _dsd_matmul(a, b, trans_a, trans_b, trans_c, spdims, block, lut, num_locks, width, packs, bench, time):
         global triton
         if triton is None:
             triton = importlib.import_module('triton')
@@ -621,16 +534,7 @@ class _sparse_matmul(torch.autograd.Function):
         dtype = a.dtype
         # kernel
 
-        meta = {
-            'TM': block,
-            'TN': 128,
-            'TK': 16,
-            'BLOCK': block,
-            'TZ': 1,
-            'SDD': False,
-            'DSD': True,
-            'DDS': False
-        }
+        meta = {'TM': block, 'TN': 128, 'TK': 16, 'BLOCK': block, 'TZ': 1, 'SDD': False, 'DSD': True, 'DDS': False}
         # output
         CS0 = BS0
         CS1 = BS1
@@ -665,53 +569,14 @@ class _sparse_matmul(torch.autograd.Function):
                       **meta)
         return c
 
-    fn = {
-        'sdd': _sdd_matmul.__get__(object),
-        'dsd': _dsd_matmul.__get__(object),
-        'dds': _dds_matmul.__get__(object)
-    }
+    fn = {'sdd': _sdd_matmul.__get__(object), 'dsd': _dsd_matmul.__get__(object), 'dds': _dds_matmul.__get__(object)}
 
     @staticmethod
-    def forward(ctx,
-                a,
-                b,
-                trans_a,
-                trans_b,
-                trans_c,
-                mode,
-                spdims,
-                block,
-                c_lut,
-                c_num_locks,
-                c_width,
-                c_packs,
-                c_bench,
-                c_time,
-                da_lut,
-                da_num_locks,
-                da_width,
-                da_packs,
-                da_bench,
-                da_time,
-                db_lut,
-                db_num_locks,
-                db_width,
-                db_packs,
-                db_bench,
-                db_time):
-        c = _sparse_matmul.fn[mode](a,
-                                    b,
-                                    trans_a,
-                                    trans_b,
-                                    trans_c,
-                                    spdims,
-                                    block,
-                                    c_lut,
-                                    c_num_locks,
-                                    c_width,
-                                    c_packs,
-                                    c_bench,
-                                    c_time)
+    def forward(ctx, a, b, trans_a, trans_b, trans_c, mode, spdims, block, c_lut, c_num_locks, c_width, c_packs,
+                c_bench, c_time, da_lut, da_num_locks, da_width, da_packs, da_bench, da_time, db_lut, db_num_locks,
+                db_width, db_packs, db_bench, db_time):
+        c = _sparse_matmul.fn[mode](a, b, trans_a, trans_b, trans_c, spdims, block, c_lut, c_num_locks, c_width,
+                                    c_packs, c_bench, c_time)
         # save for backward
         ctx.save_for_backward(a, b)
         ctx.da_num_locks = da_num_locks
@@ -741,34 +606,14 @@ class _sparse_matmul(torch.autograd.Function):
         # gradients w.r.t. a
         if ctx.needs_input_grad[0]:
             mode_da = mode[1] + mode[0] + mode[2]
-            da = _sparse_matmul.fn[mode_da](dc,
-                                            b,
-                                            False,
-                                            not ctx.trans_b,
-                                            ctx.trans_a,
-                                            ctx.spdims,
-                                            ctx.block,
-                                            ctx.da_lut,
-                                            ctx.da_num_locks,
-                                            ctx.da_width,
-                                            ctx.da_packs,
-                                            ctx.da_bench,
+            da = _sparse_matmul.fn[mode_da](dc, b, False, not ctx.trans_b, ctx.trans_a, ctx.spdims, ctx.block,
+                                            ctx.da_lut, ctx.da_num_locks, ctx.da_width, ctx.da_packs, ctx.da_bench,
                                             ctx.da_time)
         # gradients w.r.t. b
         if ctx.needs_input_grad[1]:
             mode_db = mode[2] + mode[1] + mode[0]
-            db = _sparse_matmul.fn[mode_db](a,
-                                            dc,
-                                            not ctx.trans_a,
-                                            False,
-                                            ctx.trans_b,
-                                            ctx.spdims,
-                                            ctx.block,
-                                            ctx.db_lut,
-                                            ctx.db_num_locks,
-                                            ctx.db_width,
-                                            ctx.db_packs,
-                                            ctx.db_bench,
+            db = _sparse_matmul.fn[mode_db](a, dc, not ctx.trans_a, False, ctx.trans_b, ctx.spdims, ctx.block,
+                                            ctx.db_lut, ctx.db_num_locks, ctx.db_width, ctx.db_packs, ctx.db_bench,
                                             ctx.db_time)
         return da, db, None, None, None,\
                None, None, None, None,\
@@ -785,6 +630,7 @@ class MatMul:
 
     For more details about sparsity config, please see `Generative Modeling with Sparse Transformers`: https://arxiv.org/abs/1904.10509
     """
+
     def make_lut(self, dtype, device):
         """Generates the sparsity layout/s used in block-sparse matmul
         """
@@ -797,21 +643,25 @@ class MatMul:
         if self.mode == 'sdd':
             c_lut, c_num_locks, c_width, c_packs = _sparse_matmul.make_sdd_lut(layout, block, dtype, device)
         elif self.mode == 'dsd':
-            c_lut, c_num_locks, c_width, c_packs = _sparse_matmul.make_dxx_lut(layout, block, step, not self.trans_a, device)
+            c_lut, c_num_locks, c_width, c_packs = _sparse_matmul.make_dxx_lut(layout, block, step, not self.trans_a,
+                                                                               device)
         elif self.mode == 'dds':
-            c_lut, c_num_locks, c_width, c_packs = _sparse_matmul.make_dxx_lut(layout, block, step, self.trans_b, device)
+            c_lut, c_num_locks, c_width, c_packs = _sparse_matmul.make_dxx_lut(layout, block, step, self.trans_b,
+                                                                               device)
         # DA look-up table
         if self.mode == 'sdd':
             da_lut, da_num_locks, da_width, da_packs = _sparse_matmul.make_dxx_lut(layout, block, step, True, device)
         elif self.mode == 'dsd':
             da_lut, da_num_locks, da_width, da_packs = _sparse_matmul.make_sdd_lut(layout, block, dtype, device)
         elif self.mode == 'dds':
-            da_lut, da_num_locks, da_width, da_packs = _sparse_matmul.make_dxx_lut(layout, block, step, not self.trans_b, device)
+            da_lut, da_num_locks, da_width, da_packs = _sparse_matmul.make_dxx_lut(layout, block, step,
+                                                                                   not self.trans_b, device)
         # DB look-up table
         if self.mode == 'sdd':
             db_lut, db_num_locks, db_width, db_packs = _sparse_matmul.make_dxx_lut(layout, block, step, False, device)
         elif self.mode == 'dsd':
-            db_lut, db_num_locks, db_width, db_packs = _sparse_matmul.make_dxx_lut(layout, block, step, self.trans_a, device)
+            db_lut, db_num_locks, db_width, db_packs = _sparse_matmul.make_dxx_lut(layout, block, step, self.trans_a,
+                                                                                   device)
         elif self.mode == 'dds':
             db_lut, db_num_locks, db_width, db_packs = _sparse_matmul.make_sdd_lut(layout, block, dtype, device)
         self.lut_cache[key] = (c_lut, c_num_locks, c_width, c_packs,\
@@ -845,11 +695,10 @@ class MatMul:
         assert layout_dim in (2, 3), "Layout should be a 2 or 3 dimensional tensor of 0s and 1s"
         if not mode == 'sdd':
             # Dims to be reduced on the 'inside' of the matmul, either -1 or -2
-            trans_dense, trans_sparse, sparse_inner = (trans_b, trans_a, -1) if mode == 'dsd' else (trans_a, trans_b, -2)
-            self.dense_inner_dim = -(
-                (sparse_inner % 2) + 1) if not trans_dense else sparse_inner
-            sparse_inner = sparse_inner if not trans_sparse else -(
-                (sparse_inner % 2) + 1)
+            trans_dense, trans_sparse, sparse_inner = (trans_b, trans_a, -1) if mode == 'dsd' else (trans_a, trans_b,
+                                                                                                    -2)
+            self.dense_inner_dim = -((sparse_inner % 2) + 1) if not trans_dense else sparse_inner
+            sparse_inner = sparse_inner if not trans_sparse else -((sparse_inner % 2) + 1)
 
             # Inner dim of the dense input should be equal to the inner dim of the sparse input
             self.dense_inner_size = layout.shape[sparse_inner] * block
@@ -860,8 +709,7 @@ class MatMul:
         if layout_dim == 2:
             layout = layout.unsqueeze(0)
 
-        layout = layout.long(
-        )  # Above code assumes the layout tensor is an integral type
+        layout = layout.long()  # Above code assumes the layout tensor is an integral type
 
         self.spdims = layout.shape
         # timings
@@ -909,31 +757,9 @@ class MatMul:
         b = MatMul._pad_shape(b, self.mode == 'dds')
         # execute
 
-        c = _sparse_matmul.apply(a,
-                                 b,
-                                 self.trans_a,
-                                 self.trans_b,
-                                 False,
-                                 self.mode,
-                                 self.spdims,
-                                 self.block,
-                                 c_lut,
-                                 c_num_locks,
-                                 c_width,
-                                 c_packs,
-                                 self.bench,
-                                 time_c,
-                                 da_lut,
-                                 da_num_locks,
-                                 da_width,
-                                 da_packs,
-                                 self.bench,
-                                 time_da,
-                                 db_lut,
-                                 db_num_locks,
-                                 db_width,
-                                 db_packs,
-                                 self.bench,
+        c = _sparse_matmul.apply(a, b, self.trans_a, self.trans_b, False, self.mode, self.spdims, self.block, c_lut,
+                                 c_num_locks, c_width, c_packs, self.bench, time_c, da_lut, da_num_locks, da_width,
+                                 da_packs, self.bench, time_da, db_lut, db_num_locks, db_width, db_packs, self.bench,
                                  time_db)
 
         # This removes any leading singleton dimensions we may have added to the tensor that weren't in the input
@@ -948,9 +774,8 @@ class MatMul:
 
     def _validate_inputs(self, a, b):
         if a.device != b.device:
-            raise ValueError(
-                f"Inputs must be on the same device; got {a.device} for tensor A "
-                f"and {b.device} for tensor B")
+            raise ValueError(f"Inputs must be on the same device; got {a.device} for tensor A "
+                             f"and {b.device} for tensor B")
         if not get_accelerator().on_accelerator(a):
             raise ValueError("Only GPU devices are supported for now")
 
@@ -958,9 +783,7 @@ class MatMul:
         if torch.is_autocast_enabled():
             a, b = a.half(), b.half()
         elif a.dtype != b.dtype:
-            raise ValueError(
-                f"Inputs must be the same dtype; got {a.dtype} for A and {b.dtype} for B"
-            )
+            raise ValueError(f"Inputs must be the same dtype; got {a.dtype} for A and {b.dtype} for B")
 
         mode, trans_a, trans_b = self.mode, self.trans_a, self.trans_b
         if mode != 'sdd':
@@ -968,14 +791,12 @@ class MatMul:
             dense, dense_name, sparse, sparse_name = (a, 'A', b, 'B') if mode == 'dds' else (b, 'B', a, 'A')
             dense_inner = dense.shape[self.dense_inner_dim]
             if dense_inner != self.dense_inner_size:
-                raise ValueError(
-                    f"Expected tensor {dense_name} to have size {self.dense_inner_size} at dim "
-                    f"{self.dense_inner_dim % dense.ndim}, got {dense_inner}.")
+                raise ValueError(f"Expected tensor {dense_name} to have size {self.dense_inner_size} at dim "
+                                 f"{self.dense_inner_dim % dense.ndim}, got {dense_inner}.")
 
             if sparse.shape[-len(self.sparse_shape):] != self.sparse_shape:
-                raise ValueError(
-                    f"Expected tensor with trailing dimensions of shape {self.sparse_shape} for argument "
-                    f"{sparse_name}, got {sparse.shape}")
+                raise ValueError(f"Expected tensor with trailing dimensions of shape {self.sparse_shape} for argument "
+                                 f"{sparse_name}, got {sparse.shape}")
 
         def add_extra_dims(x):
             # Add extra leading singleton dimensions if needed
@@ -984,8 +805,7 @@ class MatMul:
                 singletons = [1] * dims_needed
                 x = x.view(*singletons, *x.shape)
             elif dims_needed < 0:
-                raise ValueError(
-                    "Tensors with more than 4 dimensions are not currently supported")
+                raise ValueError("Tensors with more than 4 dimensions are not currently supported")
 
             return x
 

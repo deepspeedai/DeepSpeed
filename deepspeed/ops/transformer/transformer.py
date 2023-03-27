@@ -15,15 +15,9 @@ stochastic_transformer_cuda_module = None
 
 
 class TransformerConfig():
-    def __init__(self,
-                 batch_size,
-                 hidden_size,
-                 intermediate_size,
-                 heads,
-                 attn_dropout_ratio,
-                 hidden_dropout_ratio,
-                 num_hidden_layers,
-                 initializer_range):
+
+    def __init__(self, batch_size, hidden_size, intermediate_size, heads, attn_dropout_ratio, hidden_dropout_ratio,
+                 num_hidden_layers, initializer_range):
         self.layer_id = -1
         self.batch_size = batch_size
         self.hidden_size = hidden_size
@@ -89,6 +83,7 @@ class DeepSpeedTransformerConfig(TransformerConfig):
 
             training: Enable for training rather than inference.
     """
+
     def __init__(self,
                  batch_size=-1,
                  hidden_size=-1,
@@ -111,15 +106,9 @@ class DeepSpeedTransformerConfig(TransformerConfig):
                  return_tuple=False,
                  training=True):
         super(DeepSpeedTransformerConfig,
-              self).__init__(
-                  batch_size,
-                  hidden_size,
-                  (intermediate_size if intermediate_size > 0 else 4 * hidden_size),
-                  heads,
-                  attn_dropout_ratio,
-                  hidden_dropout_ratio,
-                  num_hidden_layers,
-                  initializer_range)
+              self).__init__(batch_size, hidden_size,
+                             (intermediate_size if intermediate_size > 0 else 4 * hidden_size), heads,
+                             attn_dropout_ratio, hidden_dropout_ratio, num_hidden_layers, initializer_range)
         self.fp16 = fp16
         self.pre_layer_norm = pre_layer_norm
         self.local_rank = local_rank
@@ -150,97 +139,42 @@ class DeepSpeedTransformerConfig(TransformerConfig):
 
 
 class DeepSpeedTransformerFunction(Function):
+
     @staticmethod
-    def forward(ctx,
-                input,
-                input_mask,
-                self,
-                grads,
-                layer_id,
-                attn_qkvw,
-                attn_qkvb,
-                attn_ow,
-                attn_ob,
-                attn_nw,
-                attn_nb,
-                inter_w,
-                inter_b,
-                output_w,
-                output_b,
-                norm_w,
-                norm_b,
-                config):
+    def forward(ctx, input, input_mask, self, grads, layer_id, attn_qkvw, attn_qkvb, attn_ow, attn_ob, attn_nw,
+                attn_nb, inter_w, inter_b, output_w, output_b, norm_w, norm_b, config):
 
         cuda_module = stochastic_transformer_cuda_module if config.stochastic_mode else transformer_cuda_module
         forward_func = cuda_module.forward_fp16 if config.fp16 else cuda_module.forward_fp32
 
         inp_size = input.size()
         if inp_size[1] % 16 != 0:
-            input = torch.cat((input,
-                               torch.randn((inp_size[0],
-                                            (16 - (inp_size[1] % 16)),
-                                            inp_size[2]),
-                                           device=input.device,
-                                           dtype=input.dtype)),
-                              1)
+            input = torch.cat(
+                (input,
+                 torch.randn(
+                     (inp_size[0], (16 - (inp_size[1] % 16)), inp_size[2]), device=input.device, dtype=input.dtype)),
+                1)
             input_mask = torch.cat((input_mask, torch.ones((inp_size[0], input_mask.shape[1], input_mask.shape[2], \
                                             (16 - (inp_size[1] % 16))), device=input_mask.device, dtype=input_mask.dtype) * -10000), 3)
 
-        (output,
-         inp_norm,
-         qkv_tf,
-         soft_inp,
-         ctx_bufB,
-         attn_o_inp,
-         add_res,
-         ff1_inp,
-         gelu_inp,
-         ff2_inp,
-         attn_prob_dropout_mask,
-         attn_output_dropout_mask,
-         layer_output_dropout_mask,
-         attn_layer_norm_var,
-         attn_layer_norm_mean,
-         layer_norm_var,
-         layer_norm_mean) = forward_func(config.layer_id,
-                                         input,
-                                         input_mask,
-                                         attn_qkvw,
-                                         attn_qkvb,
-                                         attn_ow,
-                                         attn_ob,
-                                         attn_nw,
-                                         attn_nb,
-                                         inter_w,
-                                         inter_b,
-                                         output_w,
-                                         output_b,
-                                         norm_w,
-                                         norm_b,
-                                         config.training and config.is_grad_enabled,
-                                         config.pre_layer_norm,
-                                         config.attn_dropout_checkpoint,
-                                         config.normalize_invertible,
-                                         config.gelu_checkpoint)
+        (output, inp_norm, qkv_tf, soft_inp, ctx_bufB, attn_o_inp, add_res, ff1_inp, gelu_inp, ff2_inp,
+         attn_prob_dropout_mask, attn_output_dropout_mask, layer_output_dropout_mask, attn_layer_norm_var,
+         attn_layer_norm_mean, layer_norm_var, layer_norm_mean) = forward_func(
+             config.layer_id, input, input_mask, attn_qkvw, attn_qkvb, attn_ow, attn_ob, attn_nw, attn_nb, inter_w,
+             inter_b, output_w, output_b, norm_w, norm_b, config.training and config.is_grad_enabled,
+             config.pre_layer_norm, config.attn_dropout_checkpoint, config.normalize_invertible,
+             config.gelu_checkpoint)
 
         # For testing only.
         if grads is not None:
             for i in [2]:
-                attn_qkvw.register_hook(
-                    lambda x,
-                    i=i,
-                    self=self: grads.append([
-                        x[i * attn_ow.size(0):(i + 1) * attn_ow.size(0)],
-                        ("Q_W" if i == 0 else "K_W" if i == 1 else "V_W")
-                    ]))
+                attn_qkvw.register_hook(lambda x, i=i, self=self: grads.append([
+                    x[i * attn_ow.size(0):(i + 1) * attn_ow.size(0)], ("Q_W" if i == 0 else "K_W" if i == 1 else "V_W")
+                ]))
             for i in [2]:
-                attn_qkvb.register_hook(
-                    lambda x,
-                    i=i,
-                    self=self: grads.append([
-                        x[i * attn_ow.size(0):(i + 1) * attn_ow.size(0)],
-                        ("Q_B" if i == 0 else "K_B" if i == 1 else "V_B")
-                    ]))
+                attn_qkvb.register_hook(lambda x, i=i, self=self: grads.append([
+                    x[i * attn_ow.size(0):(i + 1) * attn_ow.size(0)], ("Q_B" if i == 0 else "K_B" if i == 1 else "V_B")
+                ]))
 
             attn_ow.register_hook(lambda x, self=self: grads.append([x, "O_W"]))
             attn_ob.register_hook(lambda x, self=self: grads.append([x, "O_B"]))
@@ -255,35 +189,11 @@ class DeepSpeedTransformerFunction(Function):
 
         if config.is_grad_enabled and config.training:
             if (config.pre_layer_norm and config.normalize_invertible):
-                ctx.save_for_backward(input_mask,
-                                      attn_qkvw,
-                                      attn_qkvb,
-                                      attn_ow,
-                                      attn_ob,
-                                      attn_nw,
-                                      attn_nb,
-                                      inter_w,
-                                      inter_b,
-                                      output_w,
-                                      output_b,
-                                      norm_w,
-                                      norm_b)
+                ctx.save_for_backward(input_mask, attn_qkvw, attn_qkvb, attn_ow, attn_ob, attn_nw, attn_nb, inter_w,
+                                      inter_b, output_w, output_b, norm_w, norm_b)
             else:
-                ctx.save_for_backward(output,
-                                      input,
-                                      input_mask,
-                                      attn_qkvw,
-                                      attn_qkvb,
-                                      attn_ow,
-                                      attn_ob,
-                                      attn_nw,
-                                      attn_nb,
-                                      inter_w,
-                                      inter_b,
-                                      output_w,
-                                      output_b,
-                                      norm_w,
-                                      norm_b)
+                ctx.save_for_backward(output, input, input_mask, attn_qkvw, attn_qkvb, attn_ow, attn_ob, attn_nw,
+                                      attn_nb, inter_w, inter_b, output_w, output_b, norm_w, norm_b)
 
             ctx.config = config
             if (config.pre_layer_norm or not config.normalize_invertible):
@@ -331,88 +241,28 @@ class DeepSpeedTransformerFunction(Function):
         assert ctx.config.training
 
         if (ctx.config.pre_layer_norm and ctx.config.normalize_invertible):
-            (input_mask,
-             attn_qkvw,
-             attn_qkvb,
-             attn_ow,
-             attn_ob,
-             attn_nw,
-             attn_nb,
-             inter_w,
-             inter_b,
-             output_w,
-             output_b,
-             norm_w,
-             norm_b) = ctx.saved_tensors
+            (input_mask, attn_qkvw, attn_qkvb, attn_ow, attn_ob, attn_nw, attn_nb, inter_w, inter_b, output_w,
+             output_b, norm_w, norm_b) = ctx.saved_tensors
         else:
-            (output,
-             input,
-             input_mask,
-             attn_qkvw,
-             attn_qkvb,
-             attn_ow,
-             attn_ob,
-             attn_nw,
-             attn_nb,
-             inter_w,
-             inter_b,
-             output_w,
-             output_b,
-             norm_w,
-             norm_b) = ctx.saved_tensors
+            (output, input, input_mask, attn_qkvw, attn_qkvb, attn_ow, attn_ob, attn_nw, attn_nb, inter_w, inter_b,
+             output_w, output_b, norm_w, norm_b) = ctx.saved_tensors
 
         cuda_module = stochastic_transformer_cuda_module if ctx.config.stochastic_mode else transformer_cuda_module
         backward_func = cuda_module.backward_fp16 if ctx.config.fp16 else cuda_module.backward_fp32
 
-        (grad_input,
-         grad_attn_qkvw,
-         grad_attn_qkvb,
-         grad_attn_ow,
-         grad_attn_ob,
-         grad_attn_nw,
-         grad_attn_nb,
-         grad_inter_w,
-         grad_inter_b,
-         grad_output_w,
-         grad_output_b,
-         grad_norm_w,
-         grad_norm_b) = backward_func(
-             ctx.config.layer_id,
-             grad_output,
-             (ctx.inp_norm if (ctx.config.pre_layer_norm
-                               and ctx.config.normalize_invertible) else output),
-             (ctx.inp_norm if (ctx.config.pre_layer_norm
-                               or not ctx.config.normalize_invertible) else input),
-             ctx.qkv_tf,
-             ctx.soft_inp,
-             (ctx.soft_inp if ctx.config.attn_dropout_checkpoint else ctx.ctx_bufB),
-             ctx.attn_o_inp,
-             (ctx.ff1_inp if ctx.config.normalize_invertible else ctx.add_res),
-             ctx.ff1_inp,
-             (ctx.ff2_inp if ctx.config.gelu_checkpoint else ctx.gelu_inp),
-             ctx.ff2_inp,
-             ctx.attn_prob_dropout_mask,
-             ctx.attn_output_dropout_mask,
-             ctx.layer_output_dropout_mask,
-             ctx.attn_layer_norm_var,
-             ctx.attn_layer_norm_mean,
-             ctx.layer_norm_var,
-             ctx.layer_norm_mean,
-             (ctx.inp_norm if (ctx.config.pre_layer_norm
-                               and ctx.config.normalize_invertible) else input),
-             input_mask,
-             attn_qkvw,
-             attn_qkvb,
-             attn_ow,
-             attn_ob,
-             attn_nw,
-             attn_nb,
-             inter_w,
-             inter_b,
-             output_w,
-             output_b,
-             norm_w,
-             norm_b)
+        (grad_input, grad_attn_qkvw, grad_attn_qkvb, grad_attn_ow, grad_attn_ob, grad_attn_nw, grad_attn_nb,
+         grad_inter_w, grad_inter_b, grad_output_w, grad_output_b, grad_norm_w, grad_norm_b) = backward_func(
+             ctx.config.layer_id, grad_output,
+             (ctx.inp_norm if (ctx.config.pre_layer_norm and ctx.config.normalize_invertible) else output),
+             (ctx.inp_norm if (ctx.config.pre_layer_norm or not ctx.config.normalize_invertible) else input),
+             ctx.qkv_tf, ctx.soft_inp, (ctx.soft_inp if ctx.config.attn_dropout_checkpoint else ctx.ctx_bufB),
+             ctx.attn_o_inp, (ctx.ff1_inp if ctx.config.normalize_invertible else ctx.add_res), ctx.ff1_inp,
+             (ctx.ff2_inp if ctx.config.gelu_checkpoint else ctx.gelu_inp), ctx.ff2_inp, ctx.attn_prob_dropout_mask,
+             ctx.attn_output_dropout_mask, ctx.layer_output_dropout_mask, ctx.attn_layer_norm_var,
+             ctx.attn_layer_norm_mean, ctx.layer_norm_var, ctx.layer_norm_mean,
+             (ctx.inp_norm if
+              (ctx.config.pre_layer_norm and ctx.config.normalize_invertible) else input), input_mask, attn_qkvw,
+             attn_qkvb, attn_ow, attn_ob, attn_nw, attn_nb, inter_w, inter_b, output_w, output_b, norm_w, norm_b)
 
         # This appears to be an effective way to release context memory
         ctx.qkv_tf = None
@@ -436,24 +286,9 @@ class DeepSpeedTransformerFunction(Function):
         if grad_output_shape[1] % 16 != 0:
             grad_input = torch.narrow(grad_input, 1, 0, grad_output_shape[1])
 
-        return (grad_input,
-                None,
-                None,
-                None,
-                None,
-                grad_attn_qkvw,
-                grad_attn_qkvb,
-                grad_attn_ow,
-                grad_attn_ob,
-                grad_attn_nw,
-                grad_attn_nb,
-                grad_inter_w,
-                grad_inter_b,
-                grad_output_w,
-                grad_output_b,
-                grad_norm_w,
-                grad_norm_b,
-                None)
+        return (grad_input, None, None, None, None, grad_attn_qkvw, grad_attn_qkvb, grad_attn_ow, grad_attn_ob,
+                grad_attn_nw, grad_attn_nb, grad_inter_w, grad_inter_b, grad_output_w, grad_output_b, grad_norm_w,
+                grad_norm_b, None)
 
 
 class DeepSpeedTransformerLayer(nn.Module):
@@ -484,23 +319,15 @@ class DeepSpeedTransformerLayer(nn.Module):
             get_accelerator().set_device(self.config.local_rank)
 
         if initial_weights is None and initial_biases is None:
-            self.attn_qkvw = nn.Parameter(
-                torch.Tensor(self.config.hidden_size * 3,
-                             self.config.hidden_size))
+            self.attn_qkvw = nn.Parameter(torch.Tensor(self.config.hidden_size * 3, self.config.hidden_size))
             self.attn_qkvb = nn.Parameter(torch.Tensor(self.config.hidden_size * 3))
-            self.attn_ow = nn.Parameter(
-                torch.Tensor(self.config.hidden_size,
-                             self.config.hidden_size))
+            self.attn_ow = nn.Parameter(torch.Tensor(self.config.hidden_size, self.config.hidden_size))
             self.attn_ob = nn.Parameter(torch.Tensor(self.config.hidden_size))
             self.attn_nw = nn.Parameter(torch.Tensor(self.config.hidden_size))
             self.attn_nb = nn.Parameter(torch.Tensor(self.config.hidden_size))
-            self.inter_w = nn.Parameter(
-                torch.Tensor(self.config.intermediate_size,
-                             self.config.hidden_size))
+            self.inter_w = nn.Parameter(torch.Tensor(self.config.intermediate_size, self.config.hidden_size))
             self.inter_b = nn.Parameter(torch.Tensor(self.config.intermediate_size))
-            self.output_w = nn.Parameter(
-                torch.Tensor(self.config.hidden_size,
-                             self.config.intermediate_size))
+            self.output_w = nn.Parameter(torch.Tensor(self.config.hidden_size, self.config.intermediate_size))
             self.output_b = nn.Parameter(torch.Tensor(self.config.hidden_size))
             self.norm_w = nn.Parameter(torch.Tensor(self.config.hidden_size))
             self.norm_b = nn.Parameter(torch.Tensor(self.config.hidden_size))
@@ -539,21 +366,11 @@ class DeepSpeedTransformerLayer(nn.Module):
         cuda_module = stochastic_transformer_cuda_module if self.config.stochastic_mode else transformer_cuda_module
         create_layer_func = cuda_module.create_transformer_layer_fp16 if self.config.fp16 else cuda_module.create_transformer_layer_fp32
 
-        create_layer_func(self.config.layer_id,
-                          self.config.batch_size,
-                          self.config.hidden_size,
-                          self.config.heads,
-                          self.config.intermediate_size,
-                          self.config.attn_dropout_ratio,
-                          self.config.hidden_dropout_ratio,
-                          self.config.layer_norm_eps,
-                          self.config.seed,
-                          self.config.pre_layer_norm,
-                          self.config.test_gemm,
-                          self.config.attn_dropout_checkpoint,
-                          self.config.normalize_invertible,
-                          self.config.gelu_checkpoint,
-                          self.config.stochastic_mode)
+        create_layer_func(self.config.layer_id, self.config.batch_size, self.config.hidden_size, self.config.heads,
+                          self.config.intermediate_size, self.config.attn_dropout_ratio,
+                          self.config.hidden_dropout_ratio, self.config.layer_norm_eps, self.config.seed,
+                          self.config.pre_layer_norm, self.config.test_gemm, self.config.attn_dropout_checkpoint,
+                          self.config.normalize_invertible, self.config.gelu_checkpoint, self.config.stochastic_mode)
 
     def init_transformer_weights(self, adjust_init_range=False):
         num_layers = self.config.num_hidden_layers
@@ -587,21 +404,7 @@ class DeepSpeedTransformerLayer(nn.Module):
                 grads=None):
         self.config.is_grad_enabled = torch.is_grad_enabled()
         self.config.training = self.training
-        return DeepSpeedTransformerFunction.apply(hidden_states,
-                                                  attention_mask,
-                                                  self,
-                                                  grads,
-                                                  self.config.layer_id,
-                                                  self.attn_qkvw,
-                                                  self.attn_qkvb,
-                                                  self.attn_ow,
-                                                  self.attn_ob,
-                                                  self.attn_nw,
-                                                  self.attn_nb,
-                                                  self.inter_w,
-                                                  self.inter_b,
-                                                  self.output_w,
-                                                  self.output_b,
-                                                  self.norm_w,
-                                                  self.norm_b,
-                                                  self.config)
+        return DeepSpeedTransformerFunction.apply(hidden_states, attention_mask, self, grads, self.config.layer_id,
+                                                  self.attn_qkvw, self.attn_qkvb, self.attn_ow, self.attn_ob,
+                                                  self.attn_nw, self.attn_nb, self.inter_w, self.inter_b,
+                                                  self.output_w, self.output_b, self.norm_w, self.norm_b, self.config)

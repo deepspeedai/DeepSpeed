@@ -5,6 +5,7 @@ from abc import ABC, abstractmethod
 
 
 class CUDAGraph(ABC):
+
     def __init__(self, enable_cuda_graph=False):
         super().__init__()
         self.enable_cuda_graph = enable_cuda_graph

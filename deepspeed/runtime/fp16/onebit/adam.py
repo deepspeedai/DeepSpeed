@@ -39,14 +39,14 @@ class OnebitAdam(torch.optim.Optimizer):
     .. _On the Convergence of Adam and Beyond:
         https://openreview.net/forum?id=ryQu7f-RZ
     """
+
     def __init__(self,
                  params,
                  deepspeed=None,
                  lr=1e-3,
                  freeze_step=100000,
                  bias_correction=True,
-                 betas=(0.9,
-                        0.999),
+                 betas=(0.9, 0.999),
                  eps=1e-8,
                  eps_inside_sqrt=False,
                  weight_decay=0.,
@@ -92,8 +92,7 @@ class OnebitAdam(torch.optim.Optimizer):
             assert TORCH_MAJOR >= 1 and TORCH_MINOR >= 8, "Please use torch 1.8 or greater to enable NCCL backend in 1-bit Adam. Alternatively, please specify 'mpi' as the 'comm_backend_name' in config file to proceed with the MPI backend"
             assert dist.is_initialized() == True, "Please initialize the torch distributed backend."
             from deepspeed.runtime.comm.nccl import NcclBackend
-            self.using_pipeline = hasattr(self.deepspeed,
-                                          'pipeline_enable_backward_allreduce')
+            self.using_pipeline = hasattr(self.deepspeed, 'pipeline_enable_backward_allreduce')
             self.comm_backend_handle = NcclBackend(self.deepspeed.mpu)
 
         elif self.comm_backend_name == 'mpi':
@@ -164,22 +163,17 @@ class OnebitAdam(torch.optim.Optimizer):
                     # Exponential moving average of squared gradient values
                     state['exp_avg_sq'] = torch.zeros_like(p.data)
 
-                if not self.initialize or (self.adam_freeze_key
-                                           and 'worker_error' not in state.keys()):
+                if not self.initialize or (self.adam_freeze_key and 'worker_error' not in state.keys()):
                     state['tensor_size'] = torch.numel(p.data)
                     state['corrected_tensor_size'] = state['tensor_size']
 
                     if state['tensor_size'] % (self.size * self.divider) != 0:
-                        state['corrected_tensor_size'] += ((self.size * self.divider) -
-                                                           (state['tensor_size'] %
-                                                            (self.size * self.divider)))
-                    state['server_chunk_size'] = state[
-                        'corrected_tensor_size'] // self.size
+                        state['corrected_tensor_size'] += ((self.size * self.divider) - (state['tensor_size'] %
+                                                                                         (self.size * self.divider)))
+                    state['server_chunk_size'] = state['corrected_tensor_size'] // self.size
                     get_accelerator().empty_cache()
-                    state['worker_error'] = torch.zeros(state['corrected_tensor_size'],
-                                                        device=p.device)
-                    state['server_error'] = torch.zeros(state['server_chunk_size'],
-                                                        device=p.device)
+                    state['worker_error'] = torch.zeros(state['corrected_tensor_size'], device=p.device)
+                    state['server_error'] = torch.zeros(state['server_chunk_size'], device=p.device)
                     get_accelerator().empty_cache()
                     self.adam_freeze_key = True
                     if not self.initialize and dist.get_rank() == 0:
@@ -211,11 +205,9 @@ class OnebitAdam(torch.optim.Optimizer):
 
                         if self.size > 1:
                             exp_avg.set_(
-                                self.comm_backend_handle.compressed_allreduce(
-                                    exp_avg,
-                                    state['worker_error'],
-                                    state['server_error'],
-                                    self.deepspeed.local_rank))
+                                self.comm_backend_handle.compressed_allreduce(exp_avg, state['worker_error'],
+                                                                              state['server_error'],
+                                                                              self.deepspeed.local_rank))
                         # Because 1-bit compression cannot represent exact zero, it is required to
                         # provide a momentum mask for those params that have constant exact zeros in their
                         # momentums, otherwise the compression error would keep accumulating.
@@ -225,8 +217,7 @@ class OnebitAdam(torch.optim.Optimizer):
                         # (See example in DeepSpeedExamples/bing_bert/deepspeed_train.py.)
                         if 'exp_avg_mask' in group:
                             if exp_avg.device != group['exp_avg_mask'].device:
-                                group['exp_avg_mask'] = group['exp_avg_mask'].to(
-                                    device=exp_avg.device)
+                                group['exp_avg_mask'] = group['exp_avg_mask'].to(device=exp_avg.device)
                             exp_avg.mul_(group['exp_avg_mask'])
 
                     if self.initialize:
@@ -272,8 +263,7 @@ class OnebitAdam(torch.optim.Optimizer):
         for i, group in enumerate(self.param_groups):
             if 'exp_avg_mask' in group:
                 state_dict['param_groups'][i]['exp_avg_mask'] = group['exp_avg_mask']
-            elif 'exp_avg_mask' not in group and 'exp_avg_mask' in state_dict[
-                    'param_groups'][i]:
+            elif 'exp_avg_mask' not in group and 'exp_avg_mask' in state_dict['param_groups'][i]:
                 state_dict['param_groups'][i].pop('exp_avg_mask')
         super().load_state_dict(state_dict)
         if self.state[self.param_groups[0]['params'][0]]['step'] < self.freeze_step:
@@ -287,9 +277,7 @@ class OnebitAdam(torch.optim.Optimizer):
                     self.deepspeed.enable_backward_allreduce = True
         else:
             if dist.get_rank() == 0:
-                print(
-                    "Checkpoint loaded and OnebitAdam compression stage starts/continues."
-                )
+                print("Checkpoint loaded and OnebitAdam compression stage starts/continues.")
             if self.adam_freeze_key is False:
                 self.adam_freeze_key = True
                 if self.using_pipeline:

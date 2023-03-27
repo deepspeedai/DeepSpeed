@@ -8,6 +8,7 @@ import deepspeed.comm as dist
 
 
 class Monitor(ABC):
+
     @abstractmethod
     def __init__(self, monitor_config):
         self.monitor_config = monitor_config
@@ -23,6 +24,7 @@ from .csv_monitor import csvMonitor
 
 
 class MonitorMaster(Monitor):
+
     def __init__(self, monitor_config):
         super().__init__(monitor_config)
         self.tb_monitor = None

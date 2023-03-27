@@ -11,6 +11,7 @@ def print_rank_0(message):
 
 
 class ContiguousMemoryAllocator(object):
+
     def __init__(self, size, dtype, device):
         self.buffer = torch.zeros(size, dtype=dtype, device=device)
 
@@ -98,8 +99,7 @@ class ContiguousMemoryAllocator(object):
         self._unassign_params(tensor_id)
         self.total_free += tensor_size
         print_rank_0(
-            f"Free before release {free_before}. Released {tensor.numel()}. Total free after {self.total_free}."
-        )
+            f"Free before release {free_before}. Released {tensor.numel()}. Total free after {self.total_free}.")
         assert self.total_free - tensor_size == free_before, "Release bookkeeping error"
 
     def release_tensor_with_id(self, tensor_id):
@@ -111,8 +111,7 @@ class ContiguousMemoryAllocator(object):
         self._unassign_params(tensor_id)
         self.total_free += tensor_size
         print_rank_0(
-            f"Free before release {free_before}. Released {tensor.numel()}. Total free after {self.total_free}."
-        )
+            f"Free before release {free_before}. Released {tensor.numel()}. Total free after {self.total_free}.")
         assert self.total_free - tensor_size == free_before, "Release bookkeeping error"
 
     #shows the current memory allocation at specified resolution
@@ -136,9 +135,7 @@ class ContiguousMemoryAllocator(object):
     def _reset_param_data(self):
         for id, tensor in self.tensor_map.items():
             for param in self.id_to_params[id]:
-                param.data = tensor.narrow(0,
-                                           0,
-                                           param.numel()).view(param.data.shape).data
+                param.data = tensor.narrow(0, 0, param.numel()).view(param.data.shape).data
 
     def _unassign_params(self, tensor_id):
         if tensor_id in self.id_to_params.keys():

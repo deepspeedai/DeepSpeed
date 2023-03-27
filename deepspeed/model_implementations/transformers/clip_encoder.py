@@ -7,6 +7,7 @@ from ..features.cuda_graph import CUDAGraph
 
 
 class DSClipEncoder(CUDAGraph, torch.nn.Module):
+
     def __init__(self, enc, enable_cuda_graph=False):
         super().__init__(enable_cuda_graph=enable_cuda_graph)
         enc.text_model._build_causal_attention_mask = self._build_causal_attention_mask
@@ -22,11 +23,7 @@ class DSClipEncoder(CUDAGraph, torch.nn.Module):
         self.config = self.enc.config
 
     def _build_causal_attention_mask(self, bsz, seq_len, dtype):
-        mask = torch.empty(bsz,
-                           seq_len,
-                           seq_len,
-                           dtype=dtype,
-                           device=get_accelerator().current_device_name())
+        mask = torch.empty(bsz, seq_len, seq_len, dtype=dtype, device=get_accelerator().current_device_name())
         mask.fill_(torch.tensor(torch.finfo(dtype).min))
         mask.triu_(1)
         mask = mask.unsqueeze(1)
@@ -69,9 +66,8 @@ class DSClipEncoder(CUDAGraph, torch.nn.Module):
         self.static_kwargs[self.iter] = kwargs
 
         with torch.cuda.graph(self._cuda_graphs[self.iter]):
-            self.static_output[self.iter] = self._forward(
-                *self.static_inputs[self.iter],
-                **self.static_kwargs[self.iter])
+            self.static_output[self.iter] = self._forward(*self.static_inputs[self.iter],
+                                                          **self.static_kwargs[self.iter])
 
         self.cuda_graph_created[self.iter] = True
 

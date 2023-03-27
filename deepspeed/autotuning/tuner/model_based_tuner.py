@@ -15,6 +15,7 @@ INIT_NUM = 2
 
 class ModelBasedTuner(BaseTuner):
     """Exploring the search space with a cost model"""
+
     def __init__(self, exps: list, resource_manager, metric, tuning_sapce):
         super().__init__(exps, resource_manager, metric)
         self.tuning_space = tuning_sapce
@@ -25,8 +26,7 @@ class ModelBasedTuner(BaseTuner):
 
         self.dims = dict_to_dims(self.tuning_space)
 
-        logger.info(
-            f"Create config dim: {self.dims}, all configs: {self.num_all_configs}")
+        logger.info(f"Create config dim: {self.dims}, all configs: {self.num_all_configs}")
 
         self.visited = set([])
 
@@ -71,9 +71,7 @@ class ModelBasedTuner(BaseTuner):
 
         n = len(estimates)
         top_idx = np.argsort(estimates)
-        top_idx_ret = top_idx if self.metric == AUTOTUNING_METRIC_LATENCY else top_idx[::
-                                                                                       -1][:
-                                                                                           n]
+        top_idx_ret = top_idx if self.metric == AUTOTUNING_METRIC_LATENCY else top_idx[::-1][:n]
 
         # top_configs = [self.all_configs[i] for i in top_idx]
 
@@ -145,9 +143,7 @@ class ModelBasedTuner(BaseTuner):
                 self.evaluated_configs.append(feature_val)
                 self.evaluated_perf.append(curr_iter)
 
-        logger.debug(
-            f"**Evaluated configs: {len(self.evaluated_configs)}, evaluated perf: {self.evaluated_perf}"
-        )
+        logger.debug(f"**Evaluated configs: {len(self.evaluated_configs)}, evaluated perf: {self.evaluated_perf}")
 
         self.cost_model.fit(self.evaluated_configs, self.evaluated_perf)
 

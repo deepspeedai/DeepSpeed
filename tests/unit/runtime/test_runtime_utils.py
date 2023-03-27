@@ -41,9 +41,7 @@ class TestClibGradNorm(DistributedTest):
         norm = ds_utils.clip_grad_norm_(parameters, max_norm=0.1)
         norm = torch.Tensor([norm]).to(get_accelerator().device_name(dist.get_rank()))
         world_size = dist.get_world_size()
-        gathered_norm = [
-            torch.zeros(1).to(get_accelerator().device_name()) for i in range(world_size)
-        ]
+        gathered_norm = [torch.zeros(1).to(get_accelerator().device_name()) for i in range(world_size)]
 
         dist.all_gather(gathered_norm, norm)
 

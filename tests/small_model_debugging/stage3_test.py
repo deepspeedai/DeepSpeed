@@ -10,6 +10,7 @@ import deepspeed
 
 
 class VerboseLinear(torch.nn.Linear):
+
     def __init__(self, **kwargs):
         print(f'Begin VerboseLinear.__init__')
         super().__init__(**kwargs)
@@ -17,21 +18,19 @@ class VerboseLinear(torch.nn.Linear):
 
 
 class LinearStack(torch.nn.Module):
+
     def __init__(self, input_dim=2, hidden_dim=4, output_dim=4, num_layers=2):
         super().__init__()
         self.input_dim = input_dim
         self.output_dim = output_dim
         self.hidden_dim = hidden_dim
 
-        self.input_layer = VerboseLinear(in_features=self.input_dim,
-                                         out_features=self.hidden_dim)
+        self.input_layer = VerboseLinear(in_features=self.input_dim, out_features=self.hidden_dim)
         self.layers = torch.nn.ModuleList([
-            torch.nn.Linear(in_features=self.hidden_dim,
-                            out_features=self.hidden_dim,
-                            bias=False) for x in range(num_layers)
+            torch.nn.Linear(in_features=self.hidden_dim, out_features=self.hidden_dim, bias=False)
+            for x in range(num_layers)
         ])
-        self.output_layer = torch.nn.Linear(in_features=self.hidden_dim,
-                                            out_features=self.output_dim)
+        self.output_layer = torch.nn.Linear(in_features=self.hidden_dim, out_features=self.output_dim)
         self.identity = torch.nn.Identity()
 
     def forward(self, x):

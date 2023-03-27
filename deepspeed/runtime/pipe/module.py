@@ -45,6 +45,7 @@ class LayerSpec:
             LayerSpec(torch.nn.Linear, self.hidden_hidden, self.out_dim)]
         ]
     """
+
     def __init__(self, typename, *module_args, **module_kwargs):
         self.typename = typename
         self.module_args = module_args
@@ -59,9 +60,7 @@ class LayerSpec:
             self.global_rank = -1
 
     def __repr__(self):
-        return ds_utils.call_to_str(self.typename.__name__,
-                                    self.module_args,
-                                    self.module_kwargs)
+        return ds_utils.call_to_str(self.typename.__name__, self.module_args, self.module_kwargs)
 
     def build(self, log=False):
         """Build the stored specification."""
@@ -72,13 +71,8 @@ class LayerSpec:
 
 
 class TiedLayerSpec(LayerSpec):
-    def __init__(self,
-                 key,
-                 typename,
-                 *module_args,
-                 forward_fn=None,
-                 tied_weight_attr='weight',
-                 **module_kwargs):
+
+    def __init__(self, key, typename, *module_args, forward_fn=None, tied_weight_attr='weight', **module_kwargs):
         super().__init__(typename, *module_args, **module_kwargs)
         self.key = key
         self.forward_fn = forward_fn
@@ -120,6 +114,7 @@ class PipelineModule(nn.Module):
         activation_checkpoint_func (callable, optional): The function to use for activation checkpointing. Defaults to ``deepspeed.checkpointing.checkpoint``.
         checkpointable_layers(list, optional): Checkpointable layers may not be checkpointed. Defaults to None which does not additional filtering.
     """
+
     def __init__(self,
                  layers,
                  num_stages=None,
@@ -154,9 +149,7 @@ class PipelineModule(nn.Module):
                 seed_str = self.seed_fn.__name__
             except AttributeError:
                 seed_str = None
-            print(
-                f'SEED_LAYERS={self.seed_layers} BASE_SEED={self.base_seed} SEED_FN={seed_str}'
-            )
+            print(f'SEED_LAYERS={self.seed_layers} BASE_SEED={self.base_seed} SEED_FN={seed_str}')
 
         # Setup world info
         self.world_group = dist.new_group(ranks=range(dist.get_world_size()))
@@ -173,15 +166,13 @@ class PipelineModule(nn.Module):
             if topology is None:
                 if self.world_size % self.num_stages != 0:
                     raise RuntimeError(
-                        f'num_stages ({self.num_stages}) must divide distributed world size ({self.world_size})'
-                    )
+                        f'num_stages ({self.num_stages}) must divide distributed world size ({self.world_size})')
                 dp = self.world_size // num_stages
                 topology = PipeDataParallelTopology(num_pp=num_stages, num_dp=dp)
                 self._topo = topology
 
         # Construct communicators for pipeline topology
-        self._grid = PipelineParallelGrid(process_group=self.world_group,
-                                          topology=self._topo)
+        self._grid = PipelineParallelGrid(process_group=self.world_group, topology=self._topo)
 
         self.stage_id = self._topo.get_coord(self.global_rank).pipe
 
@@ -245,9 +236,7 @@ class PipelineModule(nn.Module):
                     self.forward_funcs.append(self.tied_modules[layer.key])
                 else:
                     # User specified fn with args (module, input)
-                    self.forward_funcs.append(
-                        partial(layer.forward_fn,
-                                self.tied_modules[layer.key]))
+                    self.forward_funcs.append(partial(layer.forward_fn, self.tied_modules[layer.key]))
 
             # LayerSpec objects contain an nn.Module that should be allocated now.
             elif isinstance(layer, LayerSpec):
@@ -304,8 +293,7 @@ class PipelineModule(nn.Module):
                 idxs.append(idx)
 
         if len(idxs) == 0:
-            raise RuntimeError(
-                f"Partitioning '{layername}' found no valid layers to partition.")
+            raise RuntimeError(f"Partitioning '{layername}' found no valid layers to partition.")
         return idxs
 
     def forward(self, forward_input):
@@ -327,8 +315,7 @@ class PipelineModule(nn.Module):
                 for idx, layer in enumerate(self.forward_funcs[start:end]):
                     self.curr_layer = idx + self._local_start
                     if self.seed_layers:
-                        new_seed = (self.base_seed *
-                                    local_micro_offset) + self.curr_layer
+                        new_seed = (self.base_seed * local_micro_offset) + self.curr_layer
                         if self.seed_fn:
                             self.seed_fn(new_seed)
                         else:
@@ -346,8 +333,7 @@ class PipelineModule(nn.Module):
             num_layers = len(self.forward_funcs)
             x = forward_input
             for start_idx in range(0, num_layers, self.activation_checkpoint_interval):
-                end_idx = min(start_idx + self.activation_checkpoint_interval,
-                              num_layers)
+                end_idx = min(start_idx + self.activation_checkpoint_interval, num_layers)
 
                 funcs = self.forward_funcs[start_idx:end_idx]
                 # Since we either pass tensors or tuples of tensors without unpacking, we
@@ -356,10 +342,7 @@ class PipelineModule(nn.Module):
                     x = (x, )
 
                 if self._is_checkpointable(funcs):
-                    x = self.activation_checkpoint_func(
-                        exec_range_func(start_idx,
-                                        end_idx),
-                        *x)
+                    x = self.activation_checkpoint_func(exec_range_func(start_idx, end_idx), *x)
                 else:
                     x = exec_range_func(start_idx, end_idx)(*x)
         return x
@@ -376,19 +359,16 @@ class PipelineModule(nn.Module):
         # Each stage gets a simple uniform number of layers.
         if method == 'uniform':
             num_layers = len(self._layer_specs)
-            self.parts = ds_utils.partition_uniform(num_items=num_layers,
-                                                    num_parts=num_stages)
+            self.parts = ds_utils.partition_uniform(num_items=num_layers, num_parts=num_stages)
         elif method == 'parameters':
             param_counts = self._count_layer_params()
-            self.parts = ds_utils.partition_balanced(weights=param_counts,
-                                                     num_parts=num_stages)
+            self.parts = ds_utils.partition_balanced(weights=param_counts, num_parts=num_stages)
         elif method.startswith('type:'):
             layertype = method.split(':')[1]
             binary_weights = [0] * len(self._layer_specs)
             for idx in self._find_layer_type(layertype):
                 binary_weights[idx] = 1
-            self.parts = ds_utils.partition_balanced(weights=binary_weights,
-                                                     num_parts=num_stages)
+            self.parts = ds_utils.partition_balanced(weights=binary_weights, num_parts=num_stages)
         elif method == 'profile':
             raise NotImplementedError(f'Partitioning method {method} not implemented.')
         else:
@@ -436,8 +416,7 @@ class PipelineModule(nn.Module):
     def _synchronize_tied_weights(self):
         for key, comm in self.tied_comms.items():
             dist.broadcast(
-                getattr(comm['module'],
-                        comm['weight_attr']),
+                getattr(comm['module'], comm['weight_attr']),
                 src=min(comm['ranks']),
                 group=comm['group'],
             )
@@ -467,14 +446,9 @@ class PipelineModule(nn.Module):
                     tied_ranks = []
                     for s in sorted(tied_stages):
                         if self._grid.get_slice_parallel_world_size() > 1:
-                            tied_ranks.append(
-                                self._grid.stage_to_global(stage_id=s,
-                                                           data=dp,
-                                                           model=mp))
+                            tied_ranks.append(self._grid.stage_to_global(stage_id=s, data=dp, model=mp))
                         else:
-                            tied_ranks.append(
-                                self._grid.stage_to_global(stage_id=s,
-                                                           data=dp))
+                            tied_ranks.append(self._grid.stage_to_global(stage_id=s, data=dp))
                     group = dist.new_group(ranks=tied_ranks)
 
                     # Record this tied module if we own a local copy of it.
@@ -599,10 +573,7 @@ class PipelineModule(nn.Module):
             # It is expected that the garbage collector will reclaim the cloned tensor storage to avoid memory bloat.
             # See https://pytorch.org/docs/stable/notes/serialization.html#preserve-storage-sharing
             orig_state_dict = layer.state_dict()
-            final_state_dict = type(orig_state_dict)(
-                {k: v.clone()
-                 for k,
-                 v in orig_state_dict.items()})
+            final_state_dict = type(orig_state_dict)({k: v.clone() for k, v in orig_state_dict.items()})
             checkpoint_engine.save(final_state_dict, model_ckpt_path)
 
     def load_state_dir(self, load_dir, checkpoint_engine, strict=True):
@@ -616,10 +587,9 @@ class PipelineModule(nn.Module):
             mp_rank = self._grid.get_slice_parallel_rank()
             mp_world_size = self._grid.get_slice_parallel_world_size()
 
-            sd_loader = SDLoaderFactory.get_sd_loader(
-                model_ckpt_list,
-                version=2.0,
-                checkpoint_engine=checkpoint_engine)
+            sd_loader = SDLoaderFactory.get_sd_loader(model_ckpt_list,
+                                                      version=2.0,
+                                                      checkpoint_engine=checkpoint_engine)
             load_path, checkpoint, _ = sd_loader.load(mp_world_size, mp_rank, module_key=None, is_pipe_parallel=True)
 
             layer.load_state_dict(checkpoint)
@@ -636,8 +606,7 @@ class PipelineModule(nn.Module):
         # Some layers like torch.nn.Embedding will not receive grads if checkpointed, which breaks things.
         # I presume it's related to the discrete inputs that cannot require_grad? Need to revisit.
         if self.__class__.__name__ in ('GPTModelPipe', 'GPT2ModelPipe'):
-            return all('ParallelTransformerLayerPipe' in f.__class__.__name__
-                       for f in funcs)
+            return all('ParallelTransformerLayerPipe' in f.__class__.__name__ for f in funcs)
         if self.checkpointable_layers is not None:
             return all(f.__class__.__name__ in self.checkpointable_layers for f in funcs)
 

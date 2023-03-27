@@ -14,13 +14,11 @@ TUNE_OPTION = 'tune'
 def test_command_line():
     '''Validate handling of command line arguments'''
     for opt in [RUN_OPTION, TUNE_OPTION]:
-        dsrun.parse_args(
-            args=f"--num_nodes 1 --num_gpus 1 --autotuning {opt} foo.py".split())
+        dsrun.parse_args(args=f"--num_nodes 1 --num_gpus 1 --autotuning {opt} foo.py".split())
 
     for error_opts in [
             "--autotuning --num_nodes 1 --num_gpus 1 foo.py".split(),
-            "--autotuning test --num_nodes 1 -- num_gpus 1 foo.py".split(),
-            "--autotuning".split()
+            "--autotuning test --num_nodes 1 -- num_gpus 1 foo.py".split(), "--autotuning".split()
     ]:
         with pytest.raises(SystemExit):
             dsrun.parse_args(args=error_opts)
@@ -65,18 +63,9 @@ def test_resource_manager_arg_mappings(arg_mappings):
                         ]
                         ) # yapf: disable
 def test_autotuner_resources(tmpdir, active_resources):
-    config_dict = {
-        "autotuning": {
-            "enabled": True,
-            "exps_dir": os.path.join(tmpdir,
-                                     'exps_dir'),
-            "arg_mappings": {}
-        }
-    }
+    config_dict = {"autotuning": {"enabled": True, "exps_dir": os.path.join(tmpdir, 'exps_dir'), "arg_mappings": {}}}
     config_path = create_config_from_dict(tmpdir, config_dict)
-    args = dsrun.parse_args(
-        args=f'--autotuning {TUNE_OPTION} foo.py --deepspeed_config {config_path}'.split(
-        ))
+    args = dsrun.parse_args(args=f'--autotuning {TUNE_OPTION} foo.py --deepspeed_config {config_path}'.split())
     tuner = Autotuner(args=args, active_resources=active_resources)
 
     expected_num_nodes = len(list(active_resources.keys()))

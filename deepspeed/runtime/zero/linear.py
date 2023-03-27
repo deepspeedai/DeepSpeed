@@ -99,9 +99,7 @@ class LinearFunctionForZeroStage3(torch.autograd.Function):
             dim = grad_output.dim()
             if dim > 2:
                 grad_weight = grad_output.reshape(-1,
-                                                  grad_output.shape[-1]).t().matmul(
-                                                      input.reshape(-1,
-                                                                    input.shape[-1]))
+                                                  grad_output.shape[-1]).t().matmul(input.reshape(-1, input.shape[-1]))
             else:
                 grad_weight = grad_output.t().matmul(input)
             #print(f"Computed grad weight grad_weight {grad_weight.shape}")
@@ -184,7 +182,5 @@ class LinearModuleForZeroStage3(Module):
         return LinearFunctionForZeroStage3.apply(input, self.weight, self.bias)
 
     def extra_repr(self) -> str:
-        return 'in_features={}, out_features={}, bias={}'.format(
-            self.in_features,
-            self.out_features,
-            self.bias is not None)
+        return 'in_features={}, out_features={}, bias={}'.format(self.in_features, self.out_features, self.bias
+                                                                 is not None)

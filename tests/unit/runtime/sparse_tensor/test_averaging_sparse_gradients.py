@@ -7,6 +7,7 @@ from unit.util import skip_on_arch
 
 
 class Model(torch.nn.Module):
+
     def __init__(self):
         super().__init__()
         self.emb = torch.nn.EmbeddingBag(10, 3, mode="sum", sparse=True)
@@ -17,6 +18,7 @@ class Model(torch.nn.Module):
 
 
 class Adam(torch.optim.Optimizer):
+
     def __init__(self, dense_params, sparse_params):
         super().__init__(dense_params + sparse_params, defaults={})
         self.adam = torch.optim.Adam(dense_params)
@@ -52,16 +54,10 @@ class TestSparseAdam(DistributedTest):
     def test(self):
         skip_on_arch(min_arch=7)
 
-        config_dict = {
-            "train_batch_size": 2,
-            "steps_per_print": 1,
-            "sparse_gradients": True
-        }
+        config_dict = {"train_batch_size": 2, "steps_per_print": 1, "sparse_gradients": True}
         model, optimizer = get_model_optimizer()
         loss = torch.nn.BCEWithLogitsLoss()
-        engine, _, _, _ = deepspeed.initialize(model=model,
-                                              optimizer=optimizer,
-                                              config=config_dict)
+        engine, _, _, _ = deepspeed.initialize(model=model, optimizer=optimizer, config=config_dict)
 
         x, offsets, y = get_data(engine.device)
 

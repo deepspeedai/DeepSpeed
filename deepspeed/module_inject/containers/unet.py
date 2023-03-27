@@ -9,6 +9,7 @@ from ...model_implementations.diffusers.unet import DSUNet
 
 
 class UNetPolicy(DSPolicy):
+
     def __init__(self):
         super().__init__()
         try:

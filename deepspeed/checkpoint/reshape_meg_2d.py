@@ -4,6 +4,7 @@ from .reshape_utils import partition_data
 
 
 class meg_2d_parallel_map(object):
+
     def __init__(self, pp_degree, tp_degree):
         self.pp_degree = pp_degree
         self.tp_degree = tp_degree
@@ -11,8 +12,7 @@ class meg_2d_parallel_map(object):
 
     def simple_init(self):
         self.map = {
-            self._make_key(i // self.tp_degree,
-                           i % self.tp_degree): [i]
+            self._make_key(i // self.tp_degree, i % self.tp_degree): [i]
             for i in range(self.pp_degree * self.tp_degree)
         }
 
@@ -74,11 +74,7 @@ def _reshape_pp_dimension(old_2d_map, new_pp_degree):
     return new_2d_map
 
 
-def reshape_meg_2d_parallel(old_pp_degree,
-                            old_tp_degree,
-                            new_pp_degree,
-                            new_tp_degree,
-                            verbose=False):
+def reshape_meg_2d_parallel(old_pp_degree, old_tp_degree, new_pp_degree, new_tp_degree, verbose=False):
     assert new_pp_degree <= old_pp_degree
     assert new_tp_degree <= old_tp_degree
 
@@ -137,8 +133,7 @@ def get_mpu_ranks(tp_size=1, pp_size=1, dp_size=1, virtual_pp_size=None):
 
     tensor_model_parallel_size = min(tp_size, world_size)
     pipeline_model_parallel_size = min(pp_size, world_size)
-    data_parallel_size = world_size // (tensor_model_parallel_size *
-                                        pipeline_model_parallel_size)
+    data_parallel_size = world_size // (tensor_model_parallel_size * pipeline_model_parallel_size)
 
     num_tensor_model_parallel_groups = world_size // tensor_model_parallel_size
     num_pipeline_model_parallel_groups = world_size // pipeline_model_parallel_size
@@ -158,10 +153,7 @@ def get_mpu_ranks(tp_size=1, pp_size=1, dp_size=1, virtual_pp_size=None):
     # Build the model-parallel groups.
     all_pp_group_ranks = []
     for i in range(data_parallel_size):
-        ranks = [
-            data_parallel_group_ranks[i]
-            for data_parallel_group_ranks in all_dp_group_ranks
-        ]
+        ranks = [data_parallel_group_ranks[i] for data_parallel_group_ranks in all_dp_group_ranks]
         all_pp_group_ranks.append(list(ranks))
 
     print(f"PP", all_pp_group_ranks)
@@ -169,8 +161,7 @@ def get_mpu_ranks(tp_size=1, pp_size=1, dp_size=1, virtual_pp_size=None):
     # Build the tensor model-parallel groups.
     all_tp_group_ranks = []
     for i in range(num_tensor_model_parallel_groups):
-        ranks = range(i * tensor_model_parallel_size,
-                      (i + 1) * tensor_model_parallel_size)
+        ranks = range(i * tensor_model_parallel_size, (i + 1) * tensor_model_parallel_size)
         all_tp_group_ranks.append(list(ranks))
 
     print(f"TP", all_tp_group_ranks)

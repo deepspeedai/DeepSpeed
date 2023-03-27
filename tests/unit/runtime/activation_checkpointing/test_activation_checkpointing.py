@@ -106,6 +106,7 @@ def _test_activation_checkpoint_ordering(module, expected_ordering, *inputs):
 
 
 class MaskedLinear(torch.nn.Linear):
+
     def forward(self, x, mask):
         out = super().forward(x)
         if mask.is_floating_point():
@@ -118,12 +119,14 @@ class MaskedLinear(torch.nn.Linear):
 
 class MaskedLinearSeq(MaskedLinear):
     """Tests pipeline modules by also returning the mask."""
+
     def forward(self, x, mask):
         return super().forward(x, mask), mask
 
 
 class MaskedLinearSeqDup(MaskedLinearSeq):
     """MaskedLinearSeq, but with more outputs than inputs and in a different order."""
+
     def forward(self, x, mask):
         dup = x.clone().detach() * 1.38  # just an arbitrary scaling
         x, mask = super().forward(x, mask)
@@ -131,16 +134,19 @@ class MaskedLinearSeqDup(MaskedLinearSeq):
 
 
 class DropMaskLinear(torch.nn.Linear):
+
     def forward(self, x, mask):
         return super().forward(x)
 
 
 class LinearNonTensorInput(torch.nn.Linear):
+
     def forward(self, x, non_tensor_input):
         return super().forward(x)
 
 
 class LinearNonTensorOutput(torch.nn.Linear):
+
     def __init__(self, non_tensor_output):
         super().__init__(HIDDEN_DIM, HIDDEN_DIM)
         self.non_tensor_output = non_tensor_output
@@ -173,11 +179,10 @@ def _bool_to_float(btensor, dtype=torch.float32):
 
 
 # both bool and float are important, as bool is not differentiable
-@pytest.mark.parametrize('mask',
-                         [
-                             _mixed_mask(),
-                             _bool_to_float(_mixed_mask()),
-                         ])
+@pytest.mark.parametrize('mask', [
+    _mixed_mask(),
+    _bool_to_float(_mixed_mask()),
+])
 class TestActivationCheckpoint(DistributedTest):
     world_size = 1
 
@@ -212,16 +217,7 @@ class TestActivationCheckpoint(DistributedTest):
         _test_activation_checkpoint(module, *inputs)
 
 
-@pytest.mark.parametrize(
-    'non_tensor',
-    [None,
-     2,
-     True,
-     (None,
-      2.5),
-     (None,
-      True,
-      torch.randn(HIDDEN_DIM))])
+@pytest.mark.parametrize('non_tensor', [None, 2, True, (None, 2.5), (None, True, torch.randn(HIDDEN_DIM))])
 class TestCheckpointNonTensor(DistributedTest):
     world_size = 1
 
@@ -238,18 +234,9 @@ class TestCheckpointNonTensor(DistributedTest):
         _test_activation_checkpoint(module, inputs)
 
 
-@pytest.mark.parametrize('non_tensor_output',
-                         [
-                             None,
-                             (torch.randn(HIDDEN_DIM),
-                              2.5),
-                             (None,
-                              torch.randn(HIDDEN_DIM),
-                              True),
-                             (None,
-                              True,
-                              torch.randn(HIDDEN_DIM))
-                         ])
+@pytest.mark.parametrize('non_tensor_output', [
+    None, (torch.randn(HIDDEN_DIM), 2.5), (None, torch.randn(HIDDEN_DIM), True), (None, True, torch.randn(HIDDEN_DIM))
+])
 class TestCheckpointNonTensorOutputOrdering(DistributedTest):
     world_size = 1
 

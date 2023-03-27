@@ -7,6 +7,7 @@ from .constants import *
 
 
 class CurriculumScheduler(object):
+
     def __init__(self, config):
         super().__init__()
         self.state = {}
@@ -16,17 +17,12 @@ class CurriculumScheduler(object):
             f"Curriculum learning requires the config '{CURRICULUM_LEARNING_MAX_DIFFICULTY}'"
         assert CURRICULUM_LEARNING_SCHEDULE_TYPE in config, \
             f"Curriculum learning requires the config '{CURRICULUM_LEARNING_SCHEDULE_TYPE}'"
-        self.state[CURRICULUM_LEARNING_MIN_DIFFICULTY] = config[
-            CURRICULUM_LEARNING_MIN_DIFFICULTY]
-        self.state[CURRICULUM_LEARNING_MAX_DIFFICULTY] = config[
-            CURRICULUM_LEARNING_MAX_DIFFICULTY]
-        self.state[CURRICULUM_LEARNING_CURRENT_DIFFICULTY] = config[
-            CURRICULUM_LEARNING_MIN_DIFFICULTY]
-        self.state[CURRICULUM_LEARNING_SCHEDULE_TYPE] = config[
-            CURRICULUM_LEARNING_SCHEDULE_TYPE]
+        self.state[CURRICULUM_LEARNING_MIN_DIFFICULTY] = config[CURRICULUM_LEARNING_MIN_DIFFICULTY]
+        self.state[CURRICULUM_LEARNING_MAX_DIFFICULTY] = config[CURRICULUM_LEARNING_MAX_DIFFICULTY]
+        self.state[CURRICULUM_LEARNING_CURRENT_DIFFICULTY] = config[CURRICULUM_LEARNING_MIN_DIFFICULTY]
+        self.state[CURRICULUM_LEARNING_SCHEDULE_TYPE] = config[CURRICULUM_LEARNING_SCHEDULE_TYPE]
         self.first_step = True
-        if config[
-                CURRICULUM_LEARNING_SCHEDULE_TYPE] == CURRICULUM_LEARNING_SCHEDULE_FIXED_DISCRETE:
+        if config[CURRICULUM_LEARNING_SCHEDULE_TYPE] == CURRICULUM_LEARNING_SCHEDULE_FIXED_DISCRETE:
             """
             The schedule_config is a list of difficulty and a list of max
             step belonging to each difficulty. Example json config:
@@ -43,18 +39,12 @@ class CurriculumScheduler(object):
                 f"Curriculum learning with fixed_discrete schedule requires the schedule_config '{CURRICULUM_LEARNING_SCHEDULE_DIFFICULTY}'"
             assert CURRICULUM_LEARNING_SCHEDULE_MAX_STEP in config[CURRICULUM_LEARNING_SCHEDULE_CONFIG], \
                 f"Curriculum learning with fixed_discrete schedule requires the schedule_config '{CURRICULUM_LEARNING_SCHEDULE_MAX_STEP}'"
-            assert len(config[CURRICULUM_LEARNING_SCHEDULE_CONFIG]
-                       [CURRICULUM_LEARNING_SCHEDULE_MAX_STEP]) > 0
-            assert len(config[CURRICULUM_LEARNING_SCHEDULE_CONFIG]
-                       [CURRICULUM_LEARNING_SCHEDULE_DIFFICULTY]) > 0
-            assert len(config[CURRICULUM_LEARNING_SCHEDULE_CONFIG]
-                       [CURRICULUM_LEARNING_SCHEDULE_DIFFICULTY]) == len(
-                           config[CURRICULUM_LEARNING_SCHEDULE_CONFIG]
-                           [CURRICULUM_LEARNING_SCHEDULE_MAX_STEP]) + 1
-            self.state[CURRICULUM_LEARNING_SCHEDULE_CONFIG] = config[
-                CURRICULUM_LEARNING_SCHEDULE_CONFIG]
-        elif config[
-                CURRICULUM_LEARNING_SCHEDULE_TYPE] == CURRICULUM_LEARNING_SCHEDULE_FIXED_ROOT:
+            assert len(config[CURRICULUM_LEARNING_SCHEDULE_CONFIG][CURRICULUM_LEARNING_SCHEDULE_MAX_STEP]) > 0
+            assert len(config[CURRICULUM_LEARNING_SCHEDULE_CONFIG][CURRICULUM_LEARNING_SCHEDULE_DIFFICULTY]) > 0
+            assert len(config[CURRICULUM_LEARNING_SCHEDULE_CONFIG][CURRICULUM_LEARNING_SCHEDULE_DIFFICULTY]) == len(
+                config[CURRICULUM_LEARNING_SCHEDULE_CONFIG][CURRICULUM_LEARNING_SCHEDULE_MAX_STEP]) + 1
+            self.state[CURRICULUM_LEARNING_SCHEDULE_CONFIG] = config[CURRICULUM_LEARNING_SCHEDULE_CONFIG]
+        elif config[CURRICULUM_LEARNING_SCHEDULE_TYPE] == CURRICULUM_LEARNING_SCHEDULE_FIXED_ROOT:
             """
             The schedule_config includes:
             total_curriculum_step: how many steps the curriculum learning takes to go
@@ -79,15 +69,12 @@ class CurriculumScheduler(object):
                 f"Curriculum learning with fixed_root schedule requires the schedule_config '{CURRICULUM_LEARNING_SCHEDULE_DIFFICULTY_STEP}'"
             assert CURRICULUM_LEARNING_SCHEDULE_ROOT_DEGREE in config[CURRICULUM_LEARNING_SCHEDULE_CONFIG], \
                 f"Curriculum learning with fixed_root schedule requires the schedule_config '{CURRICULUM_LEARNING_SCHEDULE_ROOT_DEGREE}'"
-            if config[CURRICULUM_LEARNING_SCHEDULE_CONFIG][
-                    CURRICULUM_LEARNING_SCHEDULE_DIFFICULTY_STEP] % 8 != 0:
+            if config[CURRICULUM_LEARNING_SCHEDULE_CONFIG][CURRICULUM_LEARNING_SCHEDULE_DIFFICULTY_STEP] % 8 != 0:
                 logger.warning(
                     f'When using seqlen metric, the difficulty_step for curriculum learning has to be multiple of 8 (for FP16 data) or 16 (for INT8 data) to enable NVIDIA Tensor Core acceleration. Disregard this warning if this is unrelated to your metric/hardware.'
                 )
-            self.state[CURRICULUM_LEARNING_SCHEDULE_CONFIG] = config[
-                CURRICULUM_LEARNING_SCHEDULE_CONFIG]
-        elif config[
-                CURRICULUM_LEARNING_SCHEDULE_TYPE] == CURRICULUM_LEARNING_SCHEDULE_FIXED_LINEAR:
+            self.state[CURRICULUM_LEARNING_SCHEDULE_CONFIG] = config[CURRICULUM_LEARNING_SCHEDULE_CONFIG]
+        elif config[CURRICULUM_LEARNING_SCHEDULE_TYPE] == CURRICULUM_LEARNING_SCHEDULE_FIXED_LINEAR:
             """
             The schedule_config is the same as CURRICULUM_LEARNING_SCHEDULE_FIXED_ROOT but without the
             root_degree.
@@ -100,15 +87,12 @@ class CurriculumScheduler(object):
                 f"Curriculum learning with fixed_linear schedule requires the schedule_config '{CURRICULUM_LEARNING_SCHEDULE_TOTAL_STEP}'"
             assert CURRICULUM_LEARNING_SCHEDULE_DIFFICULTY_STEP in config[CURRICULUM_LEARNING_SCHEDULE_CONFIG], \
                 f"Curriculum learning with fixed_linear schedule requires the schedule_config '{CURRICULUM_LEARNING_SCHEDULE_DIFFICULTY_STEP}'"
-            if config[CURRICULUM_LEARNING_SCHEDULE_CONFIG][
-                    CURRICULUM_LEARNING_SCHEDULE_DIFFICULTY_STEP] % 8 != 0:
+            if config[CURRICULUM_LEARNING_SCHEDULE_CONFIG][CURRICULUM_LEARNING_SCHEDULE_DIFFICULTY_STEP] % 8 != 0:
                 logger.warning(
                     f'When using seqlen metric, the difficulty_step for curriculum learning has to be multiple of 8 (for FP16 data) or 16 (for INT8 data) to enable NVIDIA Tensor Core acceleration. Disregard this warning if this is unrelated to your metric/hardware.'
                 )
-            self.state[CURRICULUM_LEARNING_SCHEDULE_CONFIG] = config[
-                CURRICULUM_LEARNING_SCHEDULE_CONFIG]
-        elif config[
-                CURRICULUM_LEARNING_SCHEDULE_TYPE] == CURRICULUM_LEARNING_SCHEDULE_CUSTOM:
+            self.state[CURRICULUM_LEARNING_SCHEDULE_CONFIG] = config[CURRICULUM_LEARNING_SCHEDULE_CONFIG]
+        elif config[CURRICULUM_LEARNING_SCHEDULE_TYPE] == CURRICULUM_LEARNING_SCHEDULE_CUSTOM:
             """
             Fully customized schedule. User need to provide a custom schedule
             function by using the set_custom_curriculum_learning_schedule API
@@ -145,38 +129,28 @@ class CurriculumScheduler(object):
         s_state = self.state[CURRICULUM_LEARNING_SCHEDULE_CONFIG]
         if root_degree is None:
             root_degree = s_state[CURRICULUM_LEARNING_SCHEDULE_ROOT_DEGREE]
-        next_difficulty = (float(global_steps) /
-                           s_state[CURRICULUM_LEARNING_SCHEDULE_TOTAL_STEP])**(
-                               1.0 / root_degree)
-        next_difficulty = math.floor(next_difficulty *
-                                     (self.state[CURRICULUM_LEARNING_MAX_DIFFICULTY] -
-                                      self.state[CURRICULUM_LEARNING_MIN_DIFFICULTY]) +
-                                     self.state[CURRICULUM_LEARNING_MIN_DIFFICULTY])
-        next_difficulty -= (next_difficulty %
-                            s_state[CURRICULUM_LEARNING_SCHEDULE_DIFFICULTY_STEP])
-        next_difficulty = min(next_difficulty,
-                              self.state[CURRICULUM_LEARNING_MAX_DIFFICULTY])
+        next_difficulty = (float(global_steps) / s_state[CURRICULUM_LEARNING_SCHEDULE_TOTAL_STEP])**(1.0 / root_degree)
+        next_difficulty = math.floor(
+            next_difficulty *
+            (self.state[CURRICULUM_LEARNING_MAX_DIFFICULTY] - self.state[CURRICULUM_LEARNING_MIN_DIFFICULTY]) +
+            self.state[CURRICULUM_LEARNING_MIN_DIFFICULTY])
+        next_difficulty -= (next_difficulty % s_state[CURRICULUM_LEARNING_SCHEDULE_DIFFICULTY_STEP])
+        next_difficulty = min(next_difficulty, self.state[CURRICULUM_LEARNING_MAX_DIFFICULTY])
         return next_difficulty
 
     def get_difficulty(self, global_steps):
-        if self.state[
-                CURRICULUM_LEARNING_SCHEDULE_TYPE] == CURRICULUM_LEARNING_SCHEDULE_FIXED_DISCRETE:
+        if self.state[CURRICULUM_LEARNING_SCHEDULE_TYPE] == CURRICULUM_LEARNING_SCHEDULE_FIXED_DISCRETE:
             return self.__fixed_discrete_get_difficulty(global_steps)
-        elif self.state[
-                CURRICULUM_LEARNING_SCHEDULE_TYPE] == CURRICULUM_LEARNING_SCHEDULE_FIXED_LINEAR:
+        elif self.state[CURRICULUM_LEARNING_SCHEDULE_TYPE] == CURRICULUM_LEARNING_SCHEDULE_FIXED_LINEAR:
             return self.__fixed_root_get_difficulty(global_steps, 1)
-        elif self.state[
-                CURRICULUM_LEARNING_SCHEDULE_TYPE] == CURRICULUM_LEARNING_SCHEDULE_FIXED_ROOT:
+        elif self.state[CURRICULUM_LEARNING_SCHEDULE_TYPE] == CURRICULUM_LEARNING_SCHEDULE_FIXED_ROOT:
             return self.__fixed_root_get_difficulty(global_steps)
-        elif self.state[
-                CURRICULUM_LEARNING_SCHEDULE_TYPE] == CURRICULUM_LEARNING_SCHEDULE_CUSTOM:
+        elif self.state[CURRICULUM_LEARNING_SCHEDULE_TYPE] == CURRICULUM_LEARNING_SCHEDULE_CUSTOM:
             return self.custom_get_difficulty(global_steps)
         else:
             raise RuntimeError('Unsupported curriculum schedule type')
 
     def update_difficulty(self, global_steps):
-        if self.state[CURRICULUM_LEARNING_CURRENT_DIFFICULTY] < self.state[
-                CURRICULUM_LEARNING_MAX_DIFFICULTY]:
-            self.state[CURRICULUM_LEARNING_CURRENT_DIFFICULTY] = self.get_difficulty(
-                global_steps)
+        if self.state[CURRICULUM_LEARNING_CURRENT_DIFFICULTY] < self.state[CURRICULUM_LEARNING_MAX_DIFFICULTY]:
+            self.state[CURRICULUM_LEARNING_CURRENT_DIFFICULTY] = self.get_difficulty(global_steps)
         return self.state[CURRICULUM_LEARNING_CURRENT_DIFFICULTY]

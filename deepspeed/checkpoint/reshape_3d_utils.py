@@ -1,9 +1,6 @@
 '''Copyright The Microsoft DeepSpeed Team'''
 
-from .reshape_utils import (get_files,
-                            get_files_with_prefix,
-                            partition_data,
-                            get_zero_files)
+from .reshape_utils import (get_files, get_files_with_prefix, partition_data, get_zero_files)
 
 from .constants import (MODEL_FILE_PREFIX, LAYER_FILE_PREFIX)
 
@@ -15,6 +12,7 @@ DP_DIM = 'DP'
 
 
 class model_3d_desc(object):
+
     def __init__(self, pp_degree=1, tp_degree=1, dp_degree=1):
         self.pp_degree = pp_degree
         self.tp_degree = tp_degree
@@ -33,8 +31,7 @@ class model_3d_desc(object):
                                            src_2d_size=self.pp_degree * self.tp_degree,
                                            dp_degree=self.dp_degree)
 
-        return unflatten_dp_dimension(meg_2d_map=flat_3d_map,
-                                      dp_degree=target_3d_desc.dp_degree)
+        return unflatten_dp_dimension(meg_2d_map=flat_3d_map, dp_degree=target_3d_desc.dp_degree)
 
     def get_desc(self):
         return f'{PP_DIM},{TP_DIM},{DP_DIM} = ({self.pp_degree}, {self.tp_degree}, {self.dp_degree})'
@@ -45,14 +42,11 @@ class model_3d_desc(object):
     def is_valid(self, pp_index, tp_index, dp_index):
         err_msg = []
         valid = True
-        for index, degree, dim_name in [
-            (pp_index, self.pp_degree, PP_DIM),
-            (tp_index, self.tp_degree, TP_DIM),
-            (dp_index, self.dp_degree, DP_DIM)]:
+        for index, degree, dim_name in [(pp_index, self.pp_degree, PP_DIM), (tp_index, self.tp_degree, TP_DIM),
+                                        (dp_index, self.dp_degree, DP_DIM)]:
             if index >= degree:
                 valid = False
-                err_msg.append(
-                    f'{dim_name} indexing error: index {index} >= degree {degree}')
+                err_msg.append(f'{dim_name} indexing error: index {index} >= degree {degree}')
 
         return valid, err_msg
 
@@ -60,18 +54,15 @@ class model_3d_desc(object):
         err_msg = []
         if target_3d_desc.pp_degree > self.pp_degree:
             err_msg.append(
-                f'Expansion reshape not supported - {PP_DIM}: {self.pp_degree} ---> {target_3d_desc.pp_degree}'
-            )
+                f'Expansion reshape not supported - {PP_DIM}: {self.pp_degree} ---> {target_3d_desc.pp_degree}')
 
         if target_3d_desc.tp_degree > self.tp_degree:
             err_msg.append(
-                f'Expansion reshape not supported - {TP_DIM}: {self.tp_degree} ---> {target_3d_desc.tp_degree}'
-            )
+                f'Expansion reshape not supported - {TP_DIM}: {self.tp_degree} ---> {target_3d_desc.tp_degree}')
 
         if target_3d_desc.dp_degree > self.dp_degree:
             err_msg.append(
-                f'Expansion reshape not supported - {DP_DIM}: {self.dp_degree} ---> {target_3d_desc.dp_degree}'
-            )
+                f'Expansion reshape not supported - {DP_DIM}: {self.dp_degree} ---> {target_3d_desc.dp_degree}')
 
         return len(err_msg) == 0, err_msg
 
@@ -106,10 +97,7 @@ def flatten_dp_dimension(meg_2d_map, src_2d_size, dp_degree):
 def unflatten_dp_dimension(meg_2d_map, dp_degree):
     pp_degree = meg_2d_map.pp_degree
     tp_degree = meg_2d_map.tp_degree
-    meg_2d_map_list = [
-        meg_2d_parallel_map(pp_degree=pp_degree,
-                            tp_degree=tp_degree) for _ in range(dp_degree)
-    ]
+    meg_2d_map_list = [meg_2d_parallel_map(pp_degree=pp_degree, tp_degree=tp_degree) for _ in range(dp_degree)]
     for pp_index in range(pp_degree):
         for tp_index in range(tp_degree):
             flat_dp_indices = meg_2d_map.get_data(pp_index, tp_index)

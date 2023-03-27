@@ -21,11 +21,8 @@ def run_quantize(data, num_groups, q_bits, is_symmetric_quant):
     if quantize_module is None:
         quantize_module = op_builder.QuantizerBuilder().load()
 
-    return quantize_module.quantize(
-        data,
-        num_groups,
-        q_bits,
-        quantize_module.Symmetric if is_symmetric_quant else quantize_module.Asymmetric)
+    return quantize_module.quantize(data, num_groups, q_bits,
+                                    quantize_module.Symmetric if is_symmetric_quant else quantize_module.Asymmetric)
 
 
 def run_dequantize(quantized_data, params, num_groups, q_bits, is_symmetric_quant):
@@ -33,12 +30,8 @@ def run_dequantize(quantized_data, params, num_groups, q_bits, is_symmetric_quan
     if quantize_module is None:
         quantize_module = op_builder.QuantizerBuilder().load()
 
-    return quantize_module.dequantize(
-        quantized_data,
-        params,
-        num_groups,
-        q_bits,
-        quantize_module.Symmetric if is_symmetric_quant else quantize_module.Asymmetric)
+    return quantize_module.dequantize(quantized_data, params, num_groups, q_bits,
+                                      quantize_module.Symmetric if is_symmetric_quant else quantize_module.Asymmetric)
 
 
 def run_ref_dequantize(quantized_data, params, num_groups, q_bits, is_symmetric_quant):
@@ -58,39 +51,15 @@ def run_ref_dequantize(quantized_data, params, num_groups, q_bits, is_symmetric_
 
 @pytest.mark.inference_ops
 @pytest.mark.parametrize("num_groups", [1, 13, 512])
-@pytest.mark.parametrize("num_elems",
-                         [8,
-                          16,
-                          32,
-                          64,
-                          128,
-                          256,
-                          4096,
-                          8192,
-                          12288,
-                          16384])
+@pytest.mark.parametrize("num_elems", [8, 16, 32, 64, 128, 256, 4096, 8192, 12288, 16384])
 @pytest.mark.parametrize("is_symmetric_quant", [True, False])
 @pytest.mark.parametrize("q_bits", [4, 8])
 def test_dequantize(num_elems, num_groups, is_symmetric_quant, q_bits):
 
-    activations = torch.randn((num_groups,
-                               num_elems),
-                              dtype=torch.float16,
-                              device=get_accelerator().device_name())
+    activations = torch.randn((num_groups, num_elems), dtype=torch.float16, device=get_accelerator().device_name())
     quantized_data, params = run_quantize(activations, num_groups, q_bits, is_symmetric_quant)
 
-    ds_dequant = run_dequantize(quantized_data,
-                                params,
-                                num_groups,
-                                q_bits,
-                                is_symmetric_quant)
-    ref_dequant = run_ref_dequantize(quantized_data,
-                                     params,
-                                     num_groups,
-                                     q_bits,
-                                     is_symmetric_quant)
+    ds_dequant = run_dequantize(quantized_data, params, num_groups, q_bits, is_symmetric_quant)
+    ref_dequant = run_ref_dequantize(quantized_data, params, num_groups, q_bits, is_symmetric_quant)
 
-    assert (torch.allclose(ds_dequant.flatten(),
-                           ref_dequant.flatten(),
-                           rtol=3e-2,
-                           atol=2e-3))
+    assert (torch.allclose(ds_dequant.flatten(), ref_dequant.flatten(), rtol=3e-2, atol=2e-3))

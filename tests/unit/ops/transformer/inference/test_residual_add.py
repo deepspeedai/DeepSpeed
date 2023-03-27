@@ -9,8 +9,7 @@ from deepspeed.accelerator import get_accelerator
 from deepspeed.ops.op_builder import InferenceBuilder
 
 if not deepspeed.ops.__compatible_ops__[InferenceBuilder.NAME]:
-    pytest.skip("Inference ops are not available on this system",
-                allow_module_level=True)
+    pytest.skip("Inference ops are not available on this system", allow_module_level=True)
 
 
 def allclose(x, y):
@@ -24,13 +23,7 @@ def inference_module():
     return InferenceBuilder().load()
 
 
-def res_add_bias_ref(hidden_state,
-                     residual,
-                     attn_output,
-                     attn_bias,
-                     final_bias,
-                     mp_size=1,
-                     pre_attn_norm=True):
+def res_add_bias_ref(hidden_state, residual, attn_output, attn_bias, final_bias, mp_size=1, pre_attn_norm=True):
     if pre_attn_norm:
         hidden_state += (residual + final_bias + attn_output + attn_bias) / mp_size
     else:
@@ -38,43 +31,19 @@ def res_add_bias_ref(hidden_state,
     return hidden_state
 
 
-def res_add_bias_ref_gptj(hidden_state,
-                          residual,
-                          attn_output,
-                          attn_bias,
-                          final_bias,
-                          add_attn_bias,
-                          mp_size):
+def res_add_bias_ref_gptj(hidden_state, residual, attn_output, attn_bias, final_bias, add_attn_bias, mp_size):
     hidden_state += attn_output + (residual + final_bias) / mp_size
     if add_attn_bias:
         hidden_state += attn_bias / mp_size
     return hidden_state
 
 
-def run_residual_add_reference(hidden_state,
-                               residual,
-                               attn_output,
-                               attn_bias,
-                               final_bias,
-                               mlp_after_attn,
-                               add_attn_bias,
-                               mp_size,
-                               pre_attn_norm):
+def run_residual_add_reference(hidden_state, residual, attn_output, attn_bias, final_bias, mlp_after_attn,
+                               add_attn_bias, mp_size, pre_attn_norm):
     if mlp_after_attn:
-        return res_add_bias_ref(hidden_state,
-                                residual,
-                                attn_output,
-                                attn_bias,
-                                final_bias,
-                                mp_size,
-                                pre_attn_norm)
+        return res_add_bias_ref(hidden_state, residual, attn_output, attn_bias, final_bias, mp_size, pre_attn_norm)
     else:
-        return res_add_bias_ref_gptj(hidden_state,
-                                     residual,
-                                     attn_output,
-                                     attn_bias,
-                                     final_bias,
-                                     add_attn_bias,
+        return res_add_bias_ref_gptj(hidden_state, residual, attn_output, attn_bias, final_bias, add_attn_bias,
                                      mp_size)
 
 
@@ -87,58 +56,20 @@ def run_residual_add_reference(hidden_state,
 @pytest.mark.parametrize("add_bias", [True, False])
 @pytest.mark.parametrize("mp_size", [1, 2])
 @pytest.mark.parametrize("pre_attn_norm", [True, False])
-def test_residual_add(inference_module,
-                      batch,
-                      sequence,
-                      hidden_dim,
-                      dtype,
-                      mlp_after_attn,
-                      add_bias,
-                      mp_size,
+def test_residual_add(inference_module, batch, sequence, hidden_dim, dtype, mlp_after_attn, add_bias, mp_size,
                       pre_attn_norm):
-    ds_out = torch.randn((batch,
-                          sequence,
-                          hidden_dim),
-                         dtype=dtype,
-                         device=get_accelerator().device_name())
-    residual = torch.randn((batch,
-                            sequence,
-                            hidden_dim),
-                           dtype=dtype,
-                           device=get_accelerator().device_name())
-    attn_output = torch.randn((batch,
-                               sequence,
-                               hidden_dim),
-                              dtype=dtype,
-                              device=get_accelerator().device_name())
-    final_bias = torch.randn((hidden_dim),
-                             dtype=dtype,
-                             device=get_accelerator().device_name())
-    attn_bias = torch.randn((hidden_dim),
-                            dtype=dtype,
-                            device=get_accelerator().device_name())
+    ds_out = torch.randn((batch, sequence, hidden_dim), dtype=dtype, device=get_accelerator().device_name())
+    residual = torch.randn((batch, sequence, hidden_dim), dtype=dtype, device=get_accelerator().device_name())
+    attn_output = torch.randn((batch, sequence, hidden_dim), dtype=dtype, device=get_accelerator().device_name())
+    final_bias = torch.randn((hidden_dim), dtype=dtype, device=get_accelerator().device_name())
+    attn_bias = torch.randn((hidden_dim), dtype=dtype, device=get_accelerator().device_name())
 
     ref_out = ds_out.clone()
-    ref_out = run_residual_add_reference(ref_out,
-                                         residual,
-                                         attn_output,
-                                         attn_bias,
-                                         final_bias,
-                                         mlp_after_attn,
-                                         add_bias,
-                                         mp_size,
-                                         pre_attn_norm)
+    ref_out = run_residual_add_reference(ref_out, residual, attn_output, attn_bias, final_bias, mlp_after_attn,
+                                         add_bias, mp_size, pre_attn_norm)
 
     res_add_args = [
-        ds_out,
-        residual,
-        attn_output,
-        attn_bias,
-        final_bias,
-        mp_size,
-        mlp_after_attn,
-        add_bias,
-        pre_attn_norm
+        ds_out, residual, attn_output, attn_bias, final_bias, mp_size, mlp_after_attn, add_bias, pre_attn_norm
     ]
 
     if dtype == torch.float16:

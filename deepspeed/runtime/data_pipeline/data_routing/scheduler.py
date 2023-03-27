@@ -12,6 +12,7 @@ from ..constants import *
 
 
 class BaseScheduler(object):
+
     def __init__(self):
         self.state = {}
 
@@ -19,12 +20,9 @@ class BaseScheduler(object):
         s_state = self.state[RANDOM_LTD_SCHEDULE_CONFIG]
         if root_degree is None:
             root_degree = s_state['root_degree']
-        next_seq = (float(global_steps) /
-                    s_state[RANDOM_LTD_REQUIRE_STEP])**(1.0 / root_degree)
-        next_seq = math.floor(
-            next_seq *
-            (self.state[RANDOM_LTD_MAX_VALUE] - self.state[RANDOM_LTD_MIN_VALUE]) +
-            self.state[RANDOM_LTD_MIN_VALUE])
+        next_seq = (float(global_steps) / s_state[RANDOM_LTD_REQUIRE_STEP])**(1.0 / root_degree)
+        next_seq = math.floor(next_seq * (self.state[RANDOM_LTD_MAX_VALUE] - self.state[RANDOM_LTD_MIN_VALUE]) +
+                              self.state[RANDOM_LTD_MIN_VALUE])
         next_seq -= (next_seq % s_state[RANDOM_LTD_INCREASE_STEP])
         next_seq = min(next_seq, self.state[RANDOM_LTD_MAX_VALUE])
         return next_seq
@@ -37,6 +35,7 @@ class BaseScheduler(object):
 
 
 class RandomLTDScheduler(BaseScheduler):
+
     def __init__(self, config):
         super().__init__()
         self.model_layer_num = config[RANDOM_LTD_TOTAL_LAYER_NUM]
@@ -61,12 +60,9 @@ class RandomLTDScheduler(BaseScheduler):
         if self.config_schedule is not None:
             self.state[RANDOM_LTD_MIN_VALUE] = self.config_schedule[RANDOM_LTD_MIN_VALUE]
             self.state[RANDOM_LTD_MAX_VALUE] = self.config_schedule[RANDOM_LTD_MAX_VALUE]
-            self.state[RANDOM_LTD_CURRENT_VALUE] = self.config_schedule[
-                RANDOM_LTD_MIN_VALUE]
-            self.state[RANDOM_LTD_SCHEDULE_CONFIG] = self.config_schedule[
-                RANDOM_LTD_SCHEDULE_CONFIG]
-            self.state[RANDOM_LTD_SCHEDULER_TYPE] = self.config_schedule[
-                RANDOM_LTD_SCHEDULER_TYPE]
+            self.state[RANDOM_LTD_CURRENT_VALUE] = self.config_schedule[RANDOM_LTD_MIN_VALUE]
+            self.state[RANDOM_LTD_SCHEDULE_CONFIG] = self.config_schedule[RANDOM_LTD_SCHEDULE_CONFIG]
+            self.state[RANDOM_LTD_SCHEDULER_TYPE] = self.config_schedule[RANDOM_LTD_SCHEDULER_TYPE]
         self.state[RANDOM_LTD_CONSUMED_LAYER_TOKENS] = 0
         self.state[RANDOM_LTD_CURR_STEP] = -1
 
@@ -95,8 +91,7 @@ class RandomLTDScheduler(BaseScheduler):
 
     def state_dict(self):
         return {
-            RANDOM_LTD_CONSUMED_LAYER_TOKENS:
-            self.state[RANDOM_LTD_CONSUMED_LAYER_TOKENS],
+            RANDOM_LTD_CONSUMED_LAYER_TOKENS: self.state[RANDOM_LTD_CONSUMED_LAYER_TOKENS],
             RANDOM_LTD_CURR_STEP: self.state[RANDOM_LTD_CURR_STEP],
             RANDOM_LTD_CURRENT_VALUE: self.state[RANDOM_LTD_CURRENT_VALUE],
             RANDOM_LTD_MIN_VALUE: self.state[RANDOM_LTD_MIN_VALUE],
@@ -104,8 +99,7 @@ class RandomLTDScheduler(BaseScheduler):
         }
 
     def load_state_dict(self, state_dict):
-        self.state[RANDOM_LTD_CONSUMED_LAYER_TOKENS] = state_dict[
-            RANDOM_LTD_CONSUMED_LAYER_TOKENS]
+        self.state[RANDOM_LTD_CONSUMED_LAYER_TOKENS] = state_dict[RANDOM_LTD_CONSUMED_LAYER_TOKENS]
         self.state[RANDOM_LTD_CURR_STEP] = state_dict[RANDOM_LTD_CURR_STEP]
         self.state[RANDOM_LTD_CURRENT_VALUE] = state_dict[RANDOM_LTD_CURRENT_VALUE]
         self.state[RANDOM_LTD_MIN_VALUE] = state_dict[RANDOM_LTD_MIN_VALUE]

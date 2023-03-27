@@ -15,6 +15,7 @@ class SparseAttentionUtils:
     Such utilities include extending position embeddings, replacing current self-attention layer with sparse attention, padding sequences to multiple of block size, etc.
 
     """
+
     @staticmethod
     def extend_position_embedding(model, max_position):
         """This function extends the position embedding weights of a model loaded from a checkpoint.
@@ -28,13 +29,11 @@ class SparseAttentionUtils:
         """
 
         if hasattr(model, 'bert'):
-            original_max_position = model.bert.embeddings.position_embeddings.weight.size(
-                0)
+            original_max_position = model.bert.embeddings.position_embeddings.weight.size(0)
             assert max_position > original_max_position
             extend_multiples = max(1, max_position // original_max_position)
             model.bert.embeddings.position_embeddings.weight.data = model.bert.embeddings.position_embeddings.weight.repeat(
-                extend_multiples,
-                1)
+                extend_multiples, 1)
         elif hasattr(model, 'roberta'):
             # RoBERTa has positions 0 & 1 reserved, so embedding size is max position + 2
             original_max_position, embed_size = model.roberta.embeddings.position_embeddings.weight.shape
@@ -43,13 +42,11 @@ class SparseAttentionUtils:
             assert max_position > original_max_position
             max_position += 2
             extended_position_embedding = model.roberta.embeddings.position_embeddings.weight.new_empty(
-                max_position,
-                embed_size)
+                max_position, embed_size)
             k = 2
             for i in range(extend_multiples):
                 extended_position_embedding[k:(
-                    k + original_max_position
-                )] = model.roberta.embeddings.position_embeddings.weight[2:]
+                    k + original_max_position)] = model.roberta.embeddings.position_embeddings.weight[2:]
                 k += original_max_position
             model.roberta.embeddings.position_embeddings.weight.data = extended_position_embedding
         else:
@@ -58,9 +55,7 @@ class SparseAttentionUtils:
             )
 
         model.config.max_position_embeddings = max_position
-        print(
-            f'Extended position embeddings to {original_max_position * extend_multiples}'
-        )
+        print(f'Extended position embeddings to {original_max_position * extend_multiples}')
 
         return model
 
@@ -102,21 +97,17 @@ class SparseAttentionUtils:
 
         if hasattr(model, 'bert'):
             model.config.max_position_embeddings = max_position
-            model.replace_self_attention_layer_with_sparse_self_attention_layer(
-                model.config,
-                model.bert.encoder.layer,
-                sparsity_config)
+            model.replace_self_attention_layer_with_sparse_self_attention_layer(model.config, model.bert.encoder.layer,
+                                                                                sparsity_config)
         elif hasattr(model, 'roberta'):
             model.config.max_position_embeddings = max_position + 2
-            model.replace_self_attention_layer_with_sparse_self_attention_layer(
-                model.config,
-                model.roberta.encoder.layer,
-                sparsity_config)
+            model.replace_self_attention_layer_with_sparse_self_attention_layer(model.config,
+                                                                                model.roberta.encoder.layer,
+                                                                                sparsity_config)
         else:
             raise ValueError(
                 'Please extend \"update_model_self_attention_to_sparse_self_attention\" function to support \
-                                     your model type. It currently only supports \"bert\" & \"roberta\"!'
-            )
+                                     your model type. It currently only supports \"bert\" & \"roberta\"!')
         return model
 
     @staticmethod
@@ -148,14 +139,8 @@ class SparseAttentionUtils:
         return layers
 
     @staticmethod
-    def pad_to_block_size(block_size,
-                          input_ids,
-                          attention_mask,
-                          token_type_ids,
-                          position_ids,
-                          inputs_embeds,
-                          pad_token_id,
-                          model_embeddings):
+    def pad_to_block_size(block_size, input_ids, attention_mask, token_type_ids, position_ids, inputs_embeds,
+                          pad_token_id, model_embeddings):
         """This function pads input tokens and attention mask on sequence length dimension to be multiple of block size.
             This is a requirement for Sparse Transformer in which the self attention layer works on sequences of length multiple of block size.
             It needs to be called in your model, such as BertModel, right before you calculate the embedding outputs.
@@ -187,10 +172,7 @@ class SparseAttentionUtils:
         pad_len = (block_size - seq_len % block_size) % block_size
         if pad_len > 0:
             if inputs_embeds is not None:
-                pad_input_ids = inputs_embeds.new_full((batch_size,
-                                                        pad_len),
-                                                       pad_token_id,
-                                                       dtype=torch.long)
+                pad_input_ids = inputs_embeds.new_full((batch_size, pad_len), pad_token_id, dtype=torch.long)
                 pad_inputs_embeds = model_embeddings(pad_input_ids)
                 inputs_embeds = torch.cat([inputs_embeds, pad_inputs_embeds], dim=-2)
             # may not be needed as input_ids are not used if inputs_embeds are given

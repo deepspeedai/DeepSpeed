@@ -10,6 +10,7 @@ from packaging import version as pkg_version
 
 
 class DS_MegatronGPTMoEContainer(MegatronContainer, BaseTransformerMoEContainer):
+
     def __init__(self, policy, config, model_config, layer_id):
         super().__init__(policy, config, model_config, layer_id)
 

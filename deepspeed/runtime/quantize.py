@@ -9,6 +9,7 @@ TWO_D_PARAMS = 6
 
 
 class Quantizer(object):
+
     def __init__(self,
                  q_groups=1,
                  q_mixed_fp16=False,
@@ -39,17 +40,12 @@ class Quantizer(object):
         result = False
         for index in range(self.layer_num):
             if self.q_start_bits[index] != self.q_target_bits:
-                next_step = self.qsteps + (
-                    TWO_D_PARAMS * (self.layer_num if self.layer_num != 0 else 1))
+                next_step = self.qsteps + (TWO_D_PARAMS * (self.layer_num if self.layer_num != 0 else 1))
                 if next_step >= self.q_period[index]:
                     result = True
         return result
 
-    def quantize(self,
-                 parameter_group,
-                 overflow,
-                 eigenvalue_enabled,
-                 block_eigenvalue={}):
+    def quantize(self, parameter_group, overflow, eigenvalue_enabled, block_eigenvalue={}):
 
         if overflow and not eigenvalue_enabled:
             return
@@ -65,7 +61,8 @@ class Quantizer(object):
                     if block_eigenvalue is None:
                         eigenvalue, layer_id = None, 0
                     else:
-                        eigenvalue, layer_id = block_eigenvalue[param_id] if param_id in block_eigenvalue else (None, 0)
+                        eigenvalue, layer_id = block_eigenvalue[param_id] if param_id in block_eigenvalue else (None,
+                                                                                                                0)
                     if eigenvalue is not None:
                         factor = 1 + math.floor(eigenvalue * 4)
                         p.data = self.compute_quantization(p.data, layer_id, factor)
@@ -91,15 +88,11 @@ class Quantizer(object):
         if self.q_type == 'symmetric':
             scale = 2 * torch.max(torch.abs(g_min), torch.abs(g_max)) / q_range
             zero_point = 0.
-            input_flat = (input_flat / scale + p).round().clamp(
-                -(q_range >> 1),
-                (q_range >> 1) - 1) * scale
+            input_flat = (input_flat / scale + p).round().clamp(-(q_range >> 1), (q_range >> 1) - 1) * scale
         elif self.q_type == 'asymmetric':
             scale = (g_max - g_min) / q_range
             zero_point = (g_min / scale).round() * scale
-            input_flat = ((input_flat - zero_point) / scale + p).round().clamp(
-                0,
-                (q_range - 1)) * scale + zero_point
+            input_flat = ((input_flat - zero_point) / scale + p).round().clamp(0, (q_range - 1)) * scale + zero_point
         output = input_flat.reshape(inputs.shape).contiguous()
         return output
 
@@ -126,8 +119,7 @@ class Quantizer(object):
 
     def mixed_fp16_quantize(self, input, input_q, index):
         if self.q_mixed_fp16 and self.q_start_bits[index] >= (self.q_target_bits - 1):
-            input_q = input * self.quantize_real_ratio + (
-                1 - self.quantize_real_ratio) * input_q
+            input_q = input * self.quantize_real_ratio + (1 - self.quantize_real_ratio) * input_q
             return input_q
         return input_q
 
@@ -152,15 +144,12 @@ class Quantizer(object):
 
         if self.use_quantizer_kernel:
             if input.start_bits <= 2:
-                raise ValueError(
-                    'Quantization bit is too low, please do it without quantization kernel!'
-                )
-            input_q = ds_quantizer(
-                input.data.clone(),
-                self.q_groups,
-                input.start_bits,
-                asym=False if self.q_type == 'symmetric' else True,
-                sr=False if self.q_rounding == 'nearest_neighbor' else True)
+                raise ValueError('Quantization bit is too low, please do it without quantization kernel!')
+            input_q = ds_quantizer(input.data.clone(),
+                                   self.q_groups,
+                                   input.start_bits,
+                                   asym=False if self.q_type == 'symmetric' else True,
+                                   sr=False if self.q_rounding == 'nearest_neighbor' else True)
         else:
             if input.start_bits >= 3:
                 input_flat = self.quantize_highbit(input.data, input.start_bits)

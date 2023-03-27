@@ -21,6 +21,7 @@ class QuantAct(nn.Module):
         Momentum for updating the activation quantization range.
     quant_mode : str, default 'symmetric'
     """
+
     def __init__(self, act_range_momentum=0.95, quant_mode='symmetric'):
         super(QuantAct, self).__init__()
 
@@ -50,10 +51,8 @@ class QuantAct(nn.Module):
                 self.x_min_max[1] = x_max
 
             # if do not need momentum, please set self.act_range_momentum = 0
-            self.x_min_max[0] = self.x_min_max[0] * self.act_range_momentum + x_min * (
-                1 - self.act_range_momentum)
-            self.x_min_max[1] = self.x_min_max[1] * self.act_range_momentum + x_max * (
-                1 - self.act_range_momentum)
+            self.x_min_max[0] = self.x_min_max[0] * self.act_range_momentum + x_min * (1 - self.act_range_momentum)
+            self.x_min_max[1] = self.x_min_max[1] * self.act_range_momentum + x_max * (1 - self.act_range_momentum)
 
         x_q = self.act_function(x, num_bits, self.x_min_max[0], self.x_min_max[1])
 
@@ -61,6 +60,7 @@ class QuantAct(nn.Module):
 
 
 class Embedding_Compress(nn.Embedding):
+
     def __init__(self, *kargs):
         super(Embedding_Compress, self).__init__(*kargs)
         self.weight.start_bits = None
@@ -71,17 +71,10 @@ class Embedding_Compress(nn.Embedding):
 
     def extra_repr(self):
         return 'num_embeddings={}, embedding_dim={}, weight_quantization={}'.format(
-            self.num_embeddings,
-            self.embedding_dim,
-            self.weight.target_bits)
+            self.num_embeddings, self.embedding_dim, self.weight.target_bits)
 
-    def enable_weight_quantization(self,
-                                   start_bits,
-                                   target_bits,
-                                   quantization_period,
-                                   weight_quantization_enabled_in_forward,
-                                   quantization_type,
-                                   num_groups):
+    def enable_weight_quantization(self, start_bits, target_bits, quantization_period,
+                                   weight_quantization_enabled_in_forward, quantization_type, num_groups):
         self.weight.start_bits = start_bits
         self.weight.target_bits = target_bits
         self.weight.q_period = quantization_period
@@ -105,31 +98,20 @@ class Embedding_Compress(nn.Embedding):
             self.weight_quantize_num_groups = self.weight.size(0)
 
     def fix_weight_quantization(self):
-        self.weight.data = self.weight_quantizer(self.weight,
-                                                 self.weight.target_bits,
-                                                 None,
-                                                 None,
+        self.weight.data = self.weight_quantizer(self.weight, self.weight.target_bits, None, None,
                                                  self.weight_quantize_num_groups).data
         self.weight_quantization_enabled_in_forward = False
         return None
 
     def forward(self, input):
         if self.weight_quantization_enabled_in_forward and self.weight_quantization_enabled:
-            weight = self.weight_quantizer(self.weight,
-                                           self.weight.target_bits,
-                                           None,
-                                           None,
+            weight = self.weight_quantizer(self.weight, self.weight.target_bits, None, None,
                                            self.weight_quantize_num_groups)
         else:
             weight = self.weight
 
-        out = nn.functional.embedding(input,
-                                      weight,
-                                      self.padding_idx,
-                                      self.max_norm,
-                                      self.norm_type,
-                                      self.scale_grad_by_freq,
-                                      self.sparse)
+        out = nn.functional.embedding(input, weight, self.padding_idx, self.max_norm, self.norm_type,
+                                      self.scale_grad_by_freq, self.sparse)
         return out
 
 
@@ -137,6 +119,7 @@ class LinearLayer_Compress(nn.Linear):
     """
     Linear layer with compression.
     """
+
     def __init__(self, *kargs, bias=True):
         super(LinearLayer_Compress, self).__init__(*kargs, bias=bias)
         self.sparse_pruning_method = None
@@ -169,8 +152,7 @@ class LinearLayer_Compress(nn.Linear):
             mask = mask.to(self.weight.device)
         elif method == 'topk':
             self.sparse_mask_scores = nn.Parameter(torch.Tensor(self.weight.size()))
-            self.sparse_mask_scores.data = self.sparse_mask_scores.data.to(
-                self.weight.device)
+            self.sparse_mask_scores.data = self.sparse_mask_scores.data.to(self.weight.device)
             init.kaiming_uniform_(self.sparse_mask_scores, a=math.sqrt(5))
             mask = None
         else:
@@ -209,11 +191,9 @@ class LinearLayer_Compress(nn.Linear):
             raise NotImplementedError
         else:
             self.head_pruning_ratio = ratio
-            self.head_pruning_scores = nn.Parameter(torch.Tensor(
-                1,
-                self.num_heads))  # we apply the pruning to O matrix
-            self.head_pruning_scores.data = self.head_pruning_scores.data.to(
-                self.weight.device)
+            self.head_pruning_scores = nn.Parameter(torch.Tensor(1,
+                                                                 self.num_heads))  # we apply the pruning to O matrix
+            self.head_pruning_scores.data = self.head_pruning_scores.data.to(self.weight.device)
             init.kaiming_uniform_(self.head_pruning_scores, a=math.sqrt(5))
 
     def fix_sparse_pruning_helper(self):
@@ -279,18 +259,17 @@ class LinearLayer_Compress(nn.Linear):
                     start_bits = self.weight.start_bits
                     target_bits = self.weight.target_bits
                     q_period = self.weight.q_period
-                    self.weight = nn.Parameter(self.weight.data.t().reshape(num_heads, -1)[mask.view(-1), :].reshape(-1, shape).t())
+                    self.weight = nn.Parameter(self.weight.data.t().reshape(num_heads,
+                                                                            -1)[mask.view(-1), :].reshape(-1,
+                                                                                                          shape).t())
                     self.weight.start_bits = start_bits
                     self.weight.target_bits = target_bits
                     self.weight.q_period = q_period
                 else:
 
                     shape = self.weight.size()
-                    self.weight.data = (self.weight.data.t().reshape(self.num_heads,
-                                                                     -1) *
-                                        mask.view(-1,
-                                                  1)).reshape(shape[1],
-                                                              shape[0]).t()
+                    self.weight.data = (self.weight.data.t().reshape(self.num_heads, -1) * mask.view(-1, 1)).reshape(
+                        shape[1], shape[0]).t()
 
                 if self.head_pruning_method == 'topk':
                     del self.head_pruning_scores
@@ -316,37 +295,26 @@ class LinearLayer_Compress(nn.Linear):
             if self.sparse_pruning_method == 'l1':
                 return self.sparse_pruning_mask.to(self.weight.device)
             elif self.sparse_pruning_method == 'topk':
-                return TopKBinarizer.apply(self.sparse_mask_scores,
-                                           self.sparse_pruning_ratio,
-                                           False)
+                return TopKBinarizer.apply(self.sparse_mask_scores, self.sparse_pruning_ratio, False)
             else:
                 raise NotImplementedError
         if pruning_type == 'row':
             if self.row_pruning_method == 'l1':
                 return self.row_pruning_mask.to(self.weight.device)
             elif self.row_pruning_method == 'topk':
-                return TopKBinarizer.apply(self.row_mask_scores,
-                                           self.row_pruning_ratio,
-                                           False)
+                return TopKBinarizer.apply(self.row_mask_scores, self.row_pruning_ratio, False)
             else:
                 raise NotImplementedError
         elif pruning_type == 'head':
             if self.head_pruning_method == 'topk':
-                return TopKBinarizer.apply(self.head_pruning_scores,
-                                           self.head_pruning_ratio,
-                                           False)
+                return TopKBinarizer.apply(self.head_pruning_scores, self.head_pruning_ratio, False)
             else:
                 raise NotImplementedError
         else:
             raise NotImplementedError
 
-    def enable_weight_quantization(self,
-                                   start_bits,
-                                   target_bits,
-                                   quantization_period,
-                                   weight_quantization_enabled_in_forward,
-                                   quantization_type,
-                                   num_groups):
+    def enable_weight_quantization(self, start_bits, target_bits, quantization_period,
+                                   weight_quantization_enabled_in_forward, quantization_type, num_groups):
         self.weight.start_bits = start_bits
         self.weight.target_bits = target_bits
         self.weight.q_period = quantization_period
@@ -369,10 +337,7 @@ class LinearLayer_Compress(nn.Linear):
             self.weight_quantize_num_groups = num_groups
 
     def fix_weight_quantization(self):
-        self.weight.data = self.weight_quantizer(self.weight,
-                                                 self.weight.target_bits,
-                                                 None,
-                                                 None,
+        self.weight.data = self.weight_quantizer(self.weight, self.weight.target_bits, None, None,
                                                  self.weight_quantize_num_groups).data
         self.weight_quantization_enabled_in_forward = False
         return None
@@ -391,18 +356,12 @@ class LinearLayer_Compress(nn.Linear):
 
     def head_pruning_reshape(self, w, mask):
         shape = w.shape
-        return (w.t().reshape(self.num_heads,
-                              -1) * mask.view(-1,
-                                              1)).reshape(shape[1],
-                                                          shape[0]).t()
+        return (w.t().reshape(self.num_heads, -1) * mask.view(-1, 1)).reshape(shape[1], shape[0]).t()
 
     def forward(self, input, skip_bias_add=False):
 
         if self.weight_quantization_enabled_in_forward and self.weight_quantization_enabled:
-            weight = self.weight_quantizer(self.weight,
-                                           self.weight.target_bits,
-                                           None,
-                                           None,
+            weight = self.weight_quantizer(self.weight, self.weight.target_bits, None, None,
                                            self.weight_quantize_num_groups)
             bias = self.bias
         else:
@@ -428,11 +387,7 @@ class LinearLayer_Compress(nn.Linear):
                 num_groups = input.numel() // input.size(-1)
             else:
                 num_groups = 1
-            input = self.activation_quantizer(input,
-                                              self.activation_quantization_bits,
-                                              None,
-                                              None,
-                                              num_groups)
+            input = self.activation_quantizer(input, self.activation_quantization_bits, None, None, num_groups)
 
         if skip_bias_add:
             # used for mpu linear layers
@@ -447,6 +402,7 @@ class Conv2dLayer_Compress(nn.Conv2d):
     """
     Conv2D layer with compression.
     """
+
     def __init__(self, *kargs):
         super(Conv2dLayer_Compress, self).__init__(*kargs)
         self.sparse_pruning_method = None
@@ -478,10 +434,8 @@ class Conv2dLayer_Compress(nn.Conv2d):
         output = s.format(**self.__dict__)
 
         return output + ' sparse pruning={}, channel pruning={}, activation quantization={}, weight_quantization={}'.format(
-            self.sparse_pruning_method is not None,
-            self.channel_pruning_method is not None,
-            self.activation_quantization_method is not None,
-            self.weight.target_bits)
+            self.sparse_pruning_method is not None, self.channel_pruning_method is not None,
+            self.activation_quantization_method is not None, self.weight.target_bits)
 
     def enable_sparse_pruning(self, ratio, method):
         self.sparse_pruning_ratio = ratio
@@ -493,8 +447,7 @@ class Conv2dLayer_Compress(nn.Conv2d):
             mask = mask.to(self.weight.device)
         elif method == 'topk':
             self.sparse_mask_scores = nn.Parameter(torch.Tensor(self.weight.size()))
-            self.sparse_mask_scores.data = self.sparse_mask_scores.data.to(
-                self.weight.device)
+            self.sparse_mask_scores.data = self.sparse_mask_scores.data.to(self.weight.device)
             init.kaiming_uniform_(self.sparse_mask_scores, a=math.sqrt(5))
             mask = None
         else:
@@ -514,13 +467,8 @@ class Conv2dLayer_Compress(nn.Conv2d):
             mask = mask.view(-1, 1, 1, 1)
             mask = mask.to(self.weight.device)
         elif method == 'topk':
-            self.channel_mask_scores = nn.Parameter(
-                torch.Tensor(self.weight.size(0),
-                             1,
-                             1,
-                             1))
-            self.channel_mask_scores.data = self.channel_mask_scores.data.to(
-                self.weight.device)
+            self.channel_mask_scores = nn.Parameter(torch.Tensor(self.weight.size(0), 1, 1, 1))
+            self.channel_mask_scores.data = self.channel_mask_scores.data.to(self.weight.device)
             init.kaiming_uniform_(self.channel_mask_scores, a=math.sqrt(5))
             mask = None
         else:
@@ -579,39 +527,27 @@ class Conv2dLayer_Compress(nn.Conv2d):
             if self.sparse_pruning_method == 'l1':
                 return self.sparse_pruning_mask.to(self.weight.device)
             elif self.sparse_pruning_method == 'topk':
-                return TopKBinarizer.apply(self.sparse_mask_scores,
-                                           self.sparse_pruning_ratio,
-                                           False)
+                return TopKBinarizer.apply(self.sparse_mask_scores, self.sparse_pruning_ratio, False)
             else:
                 raise NotImplementedError
         elif pruning_type == 'channel':
             if self.channel_pruning_method == 'l1':
                 return self.channel_pruning_mask.to(self.weight.device)
             elif self.channel_pruning_method == 'topk':
-                return TopKBinarizer.apply(self.channel_mask_scores,
-                                           self.channel_pruning_ratio,
-                                           False)
+                return TopKBinarizer.apply(self.channel_mask_scores, self.channel_pruning_ratio, False)
             else:
                 raise NotImplementedError
         else:
             raise NotImplementedError
 
     def fix_weight_quantization(self):
-        self.weight.data = self.weight_quantizer(self.weight,
-                                                 self.weight.target_bits,
-                                                 None,
-                                                 None,
+        self.weight.data = self.weight_quantizer(self.weight, self.weight.target_bits, None, None,
                                                  self.weight_quantize_num_groups).data
         self.weight_quantization_enabled_in_forward = False
         return None
 
-    def enable_weight_quantization(self,
-                                   start_bits,
-                                   target_bits,
-                                   quantization_period,
-                                   weight_quantization_enabled_in_forward,
-                                   quantization_type,
-                                   num_groups):
+    def enable_weight_quantization(self, start_bits, target_bits, quantization_period,
+                                   weight_quantization_enabled_in_forward, quantization_type, num_groups):
         self.weight.start_bits = start_bits
         self.weight.target_bits = target_bits
         self.weight.q_period = quantization_period
@@ -642,10 +578,7 @@ class Conv2dLayer_Compress(nn.Conv2d):
     def forward(self, input):
 
         if self.weight_quantization_enabled_in_forward and self.weight_quantization_enabled:
-            weight = self.weight_quantizer(self.weight,
-                                           self.weight.target_bits,
-                                           None,
-                                           None,
+            weight = self.weight_quantizer(self.weight, self.weight.target_bits, None, None,
                                            self.weight_quantize_num_groups)
             bias = self.bias
         else:
@@ -667,22 +600,13 @@ class Conv2dLayer_Compress(nn.Conv2d):
                 num_groups = input.numel() // input[0].numel()
             else:
                 num_groups = 1
-            input = self.activation_quantizer(input,
-                                              self.activation_quantization_bits,
-                                              None,
-                                              None,
-                                              num_groups)
+            input = self.activation_quantizer(input, self.activation_quantization_bits, None, None, num_groups)
 
-        return nn.functional.conv2d(input,
-                                    weight,
-                                    bias,
-                                    self.stride,
-                                    self.padding,
-                                    self.dilation,
-                                    self.groups)
+        return nn.functional.conv2d(input, weight, bias, self.stride, self.padding, self.dilation, self.groups)
 
 
 class BNLayer_Compress(nn.BatchNorm2d):
+
     def fix_channel_pruning_helper(self, mask, dim_reduction=True):
         self.weight = nn.Parameter(self.weight.data[mask.view(-1)])
         self.bias = nn.Parameter(self.bias.data[mask.view(-1)])
@@ -770,6 +694,7 @@ def _gather(input_):
 
 class _CopyToModelParallelRegion(torch.autograd.Function):
     """Pass the input to the model parallel region."""
+
     @staticmethod
     def forward(ctx, input_):
         return input_
@@ -781,6 +706,7 @@ class _CopyToModelParallelRegion(torch.autograd.Function):
 
 class _ReduceFromModelParallelRegion(torch.autograd.Function):
     """All-redcue the input from the model parallel region."""
+
     @staticmethod
     def forward(ctx, input_):
         return _reduce(input_)
@@ -792,6 +718,7 @@ class _ReduceFromModelParallelRegion(torch.autograd.Function):
 
 class _ScatterToModelParallelRegion(torch.autograd.Function):
     """Split the input and keep only the corresponding chuck to the rank."""
+
     @staticmethod
     def forward(ctx, input_):
         return _split(input_)
@@ -803,6 +730,7 @@ class _ScatterToModelParallelRegion(torch.autograd.Function):
 
 class _GatherFromModelParallelRegion(torch.autograd.Function):
     """Gather the input from model parallel region and concatinate."""
+
     @staticmethod
     def forward(ctx, input_):
         return _gather(input_)
@@ -834,13 +762,8 @@ def gather_from_model_parallel_region(input_):
 
 
 class ColumnParallelLinear_Compress(LinearLayer_Compress):
-    def __init__(self,
-                 mpu,
-                 input_size,
-                 output_size,
-                 bias=True,
-                 gather_output=True,
-                 skip_bias_add=False):
+
+    def __init__(self, mpu, input_size, output_size, bias=True, gather_output=True, skip_bias_add=False):
         # Keep input parameters
         global g_mpu
         g_mpu = mpu
@@ -854,10 +777,7 @@ class ColumnParallelLinear_Compress(LinearLayer_Compress):
         assert output_size % world_size == 0
         self.output_size_per_partition = output_size // world_size
 
-        super(ColumnParallelLinear_Compress,
-              self).__init__(self.input_size,
-                             self.output_size_per_partition,
-                             bias=bias)
+        super(ColumnParallelLinear_Compress, self).__init__(self.input_size, self.output_size_per_partition, bias=bias)
 
     def forward(self, input_):
         # Set up backprop all-reduce.
@@ -877,13 +797,8 @@ class ColumnParallelLinear_Compress(LinearLayer_Compress):
 
 
 class RowParallelLinear_Compress(LinearLayer_Compress):
-    def __init__(self,
-                 mpu,
-                 input_size,
-                 output_size,
-                 bias=True,
-                 input_is_parallel=False,
-                 skip_bias_add=False):
+
+    def __init__(self, mpu, input_size, output_size, bias=True, input_is_parallel=False, skip_bias_add=False):
         # Keep input parameters
         global g_mpu
         g_mpu = mpu
@@ -897,10 +812,7 @@ class RowParallelLinear_Compress(LinearLayer_Compress):
         assert input_size % world_size == 0
         self.input_size_per_partition = input_size // world_size
 
-        super(RowParallelLinear_Compress,
-              self).__init__(self.input_size_per_partition,
-                             self.output_size,
-                             bias=bias)
+        super(RowParallelLinear_Compress, self).__init__(self.input_size_per_partition, self.output_size, bias=bias)
 
     def forward(self, input_):
         # Set up backprop all-reduce.

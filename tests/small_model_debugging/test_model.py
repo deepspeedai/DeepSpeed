@@ -10,6 +10,7 @@ import deepspeed.comm as dist
 
 
 class SimpleModel(torch.nn.Module):
+
     def __init__(self, hidden_dim, empty_grad=False):
         super(SimpleModel, self).__init__()
         self.linear = torch.nn.Linear(hidden_dim, hidden_dim)
@@ -33,14 +34,10 @@ def create_config_from_dict(tmpdir, config_dict):
 def get_data_loader(model, total_samples, hidden_dim, device):
     batch_size = model.train_micro_batch_size_per_gpu()
     train_data = torch.randn(total_samples, hidden_dim, device=device, dtype=torch.half)
-    train_label = torch.empty(total_samples,
-                              dtype=torch.long,
-                              device=device).random_(hidden_dim)
+    train_label = torch.empty(total_samples, dtype=torch.long, device=device).random_(hidden_dim)
     train_dataset = torch.utils.data.TensorDataset(train_data, train_label)
     sampler = DistributedSampler(train_dataset)
-    train_loader = torch.utils.data.DataLoader(train_dataset,
-                                               batch_size=batch_size,
-                                               sampler=sampler)
+    train_loader = torch.utils.data.DataLoader(train_dataset, batch_size=batch_size, sampler=sampler)
     return train_loader
 
 
@@ -91,10 +88,10 @@ hidden_dim = 4
 
 model = SimpleModel(hidden_dim, empty_grad=False)
 
-model, _, _,_ = deepspeed.initialize(args=args,
-                                     model=model,
-                                     model_parameters=model.parameters(),
-                                     dist_init_required=True)
+model, _, _, _ = deepspeed.initialize(args=args,
+                                      model=model,
+                                      model_parameters=model.parameters(),
+                                      dist_init_required=True)
 
 
 def print_params(tag, model):
@@ -103,10 +100,7 @@ def print_params(tag, model):
             print0("{} {}:{}".format(tag, n, p))
 
 
-data_loader = get_data_loader(model=model,
-                              total_samples=1000,
-                              hidden_dim=hidden_dim,
-                              device=model.device)
+data_loader = get_data_loader(model=model, total_samples=1000, hidden_dim=hidden_dim, device=model.device)
 #print_params('pre-train', model)
 for n, batch in enumerate(data_loader):
     loss = model(batch[0], batch[1])

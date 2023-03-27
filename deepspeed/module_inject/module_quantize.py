@@ -18,34 +18,25 @@ def quantize_transformer_layer(orig_layer_impl, model, megatron=False, preln=Fal
     Returns:
         Updated nn.module with quantized transformer layers
     """
+
     def quantize_weight(weight):
         return weight.to(torch.int8)
 
     def megatron_layer_quantize(layer):
-        layer.attention.query_key_value.weight.data = quantize_weight(
-            layer.attention.query_key_value.weight.data)
-        layer.attention.dense.weight.data = quantize_weight(
-            layer.attention.dense.weight.data)
-        layer.mlp.dense_h_to_4h.weight.data = quantize_weight(
-            layer.mlp.dense_h_to_4h.weight.data)
-        layer.mlp.dense_4h_to_h.weight.data = quantize_weight(
-            layer.mlp.dense_4h_to_h.weight.data)
+        layer.attention.query_key_value.weight.data = quantize_weight(layer.attention.query_key_value.weight.data)
+        layer.attention.dense.weight.data = quantize_weight(layer.attention.dense.weight.data)
+        layer.mlp.dense_h_to_4h.weight.data = quantize_weight(layer.mlp.dense_h_to_4h.weight.data)
+        layer.mlp.dense_4h_to_h.weight.data = quantize_weight(layer.mlp.dense_4h_to_h.weight.data)
 
     def bert_layer_quantize(layer):
-        layer.attention.self.query.weight.data = quantize_weight(
-            layer.attention.self.query.weight.data)
-        layer.attention.self.key.weight.data = quantize_weight(
-            layer.attention.self.key.weight.data)
-        layer.attention.self.value.weight.data = quantize_weight(
-            layer.attention.self.value.weight.data)
-        layer.attention.output.dense.weight.data = quantize_weight(
-            layer.attention.output.dense.weight.data)
+        layer.attention.self.query.weight.data = quantize_weight(layer.attention.self.query.weight.data)
+        layer.attention.self.key.weight.data = quantize_weight(layer.attention.self.key.weight.data)
+        layer.attention.self.value.weight.data = quantize_weight(layer.attention.self.value.weight.data)
+        layer.attention.output.dense.weight.data = quantize_weight(layer.attention.output.dense.weight.data)
         if preln:
-            layer.intermediate.dense_act.weight.data = quantize_weight(
-                layer.intermediate.dense_act.weight.data)
+            layer.intermediate.dense_act.weight.data = quantize_weight(layer.intermediate.dense_act.weight.data)
         else:
-            layer.intermediate.dense.weight.data = quantize_weight(
-                layer.intermediate.dense.weight.data)
+            layer.intermediate.dense.weight.data = quantize_weight(layer.intermediate.dense.weight.data)
         layer.output.dense.weight.data = quantize_weight(layer.output.dense.weight.data)
 
     def quantize_fn(child):
@@ -58,9 +49,7 @@ def quantize_transformer_layer(orig_layer_impl, model, megatron=False, preln=Fal
 
         return child
 
-    return quantize_module(model=model,
-                           orig_class=orig_layer_impl,
-                           quantize_fn=quantize_fn)
+    return quantize_module(model=model, orig_class=orig_layer_impl, quantize_fn=quantize_fn)
 
 
 def quantize_module(model, orig_class, quantize_fn):

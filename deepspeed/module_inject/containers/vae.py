@@ -6,6 +6,7 @@ from ...model_implementations.diffusers.vae import DSVAE
 
 
 class VAEPolicy(DSPolicy):
+
     def __init__(self):
         super().__init__()
         try:

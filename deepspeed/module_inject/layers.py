@@ -10,6 +10,7 @@ from deepspeed.accelerator import get_accelerator
 
 
 class LinearAllreduce(nn.Module):
+
     def __init__(self, weight, bias=None, mp_group=None):
         super(LinearAllreduce, self).__init__()
         self.weight = weight
@@ -26,6 +27,7 @@ class LinearAllreduce(nn.Module):
 
 
 class LinearLayer(nn.Module):
+
     def __init__(self, weight_shape=None, dtype=torch.half, weight=None, bias=None):
         super(LinearLayer, self).__init__()
         if weight is not None:
@@ -33,9 +35,7 @@ class LinearLayer(nn.Module):
             self.bias = bias
         else:
             self.weight = Parameter(
-                torch.empty(weight_shape,
-                            dtype=dtype,
-                            device=get_accelerator().current_device_name()))
+                torch.empty(weight_shape, dtype=dtype, device=get_accelerator().current_device_name()))
 
             self.bias = Parameter(
                 torch.empty(weight_shape[0],
@@ -51,11 +51,10 @@ class LinearLayer(nn.Module):
 
 
 class Normalize(nn.Module):
+
     def __init__(self, dim, dtype=torch.float, eps=1e-5):
         super(Normalize, self).__init__()
-        self.norm = nn.LayerNorm(dim,
-                                 eps=eps).to(dtype).to(
-                                     get_accelerator().current_device_name())
+        self.norm = nn.LayerNorm(dim, eps=eps).to(dtype).to(get_accelerator().current_device_name())
         self.weight = self.norm.weight
         self.bias = self.norm.bias
 
@@ -64,13 +63,11 @@ class Normalize(nn.Module):
 
 
 class EmbeddingLayer(nn.Module):
+
     def __init__(self, weight_shape, dtype=torch.half):
         super(EmbeddingLayer, self).__init__()
         self.weight = Parameter(
-            torch.empty(weight_shape[0],
-                        weight_shape[1],
-                        dtype=dtype,
-                        device=get_accelerator().current_device_name()))
+            torch.empty(weight_shape[0], weight_shape[1], dtype=dtype, device=get_accelerator().current_device_name()))
 
     def forward(self, input):
         return F.embedding(input, self.weight)
@@ -80,6 +77,7 @@ class OPTEmbedding(EmbeddingLayer):
     """
     This module learns positional embeddings up to a fixed maximum size.
     """
+
     def __init__(self, weight_shape):
         # OPT is set up so that if padding_idx is specified then offset the embedding ids by 2
         # and adjust num_embeddings appropriately. Other models don't have this hack
@@ -91,9 +89,7 @@ class OPTEmbedding(EmbeddingLayer):
         attention_mask = attention_mask.long()
 
         # create positions depending on attention_mask
-        positions = (torch.cumsum(attention_mask,
-                                  dim=1).type_as(attention_mask) *
-                     attention_mask).long() - 1
+        positions = (torch.cumsum(attention_mask, dim=1).type_as(attention_mask) * attention_mask).long() - 1
 
         # cut positions if `past_key_values_length` is > 0
         positions = positions[:, past_key_values_length:]

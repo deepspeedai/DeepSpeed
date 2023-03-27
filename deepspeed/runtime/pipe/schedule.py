@@ -42,6 +42,7 @@ class PipeSchedule(ABC):
         stages (int): The number of pipeline stages.
         stage_id (int): The pipe stage that will execute the generated schedule.
     """
+
     def __init__(self, micro_batches, stages, stage_id):
         super().__init__()
         self.micro_batches = micro_batches
@@ -131,6 +132,7 @@ class PipeSchedule(ABC):
 class InferenceSchedule(PipeSchedule):
     """A schedule for inferencing batches using pipeline parallelism.
     """
+
     def steps(self):
         """"""
         prev_micro_batch_id = -1
@@ -188,6 +190,7 @@ class TrainSchedule(PipeSchedule):
     convergence follows that of a data parallel approach with the same batch
     size.
     """
+
     def steps(self):
         """"""
         prev_micro_batch_id = -1
@@ -206,18 +209,14 @@ class TrainSchedule(PipeSchedule):
 
             # Exchange activations
             if is_forward:
-                if self._valid_micro_batch(prev_micro_batch_id) and self._valid_stage(
-                        self.prev_stage):
+                if self._valid_micro_batch(prev_micro_batch_id) and self._valid_stage(self.prev_stage):
                     cmds.append(SendGrad(prev_buffer))
-                if self._valid_micro_batch(micro_batch_id) and self._valid_stage(
-                        self.prev_stage):
+                if self._valid_micro_batch(micro_batch_id) and self._valid_stage(self.prev_stage):
                     cmds.append(RecvActivation(curr_buffer))
             else:
-                if self._valid_micro_batch(micro_batch_id) and self._valid_stage(
-                        self.next_stage):
+                if self._valid_micro_batch(micro_batch_id) and self._valid_stage(self.next_stage):
                     cmds.append(RecvGrad(curr_buffer))
-                if self._valid_micro_batch(prev_micro_batch_id) and self._valid_stage(
-                        self.next_stage):
+                if self._valid_micro_batch(prev_micro_batch_id) and self._valid_stage(self.next_stage):
                     cmds.append(SendActivation(prev_buffer))
 
             # First/last stage loads
@@ -300,6 +299,7 @@ class DataParallelSchedule(PipeSchedule):
     """An example schedule that trains using traditional data parallelism with gradient
     accumulation.
     """
+
     def steps(self):
         """"""
         for step_id in range(self.micro_batches):
@@ -330,6 +330,7 @@ class PipeInstruction:
     Args:
         kwargs (optional): keyword arguments to store as members
     """
+
     def __init__(self, **kwargs):
         self.name = self.__class__.__name__
         self.kwargs = kwargs
@@ -374,6 +375,7 @@ class BufferOpInstruction(PipeInstruction):
     Args:
         buffer_id (int): the index of the pipeline buffer() to modify.
     """
+
     def __init__(self, buffer_id, **kwargs):
         super().__init__(buffer_id=buffer_id, **kwargs)
 

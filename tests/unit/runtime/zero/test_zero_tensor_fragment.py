@@ -28,18 +28,15 @@ def validate_full_tensors(model):
 
 
 class MyModel(torch.nn.Module):
+
     def __init__(self, hidden_dim, frozen_weights):
         super(MyModel, self).__init__()
         self.act = torch.nn.ReLU()
         self.cel = torch.nn.CrossEntropyLoss()
-        self.linears = torch.nn.ModuleList([
-            torch.nn.Linear(hidden_dim,
-                            1),
-            torch.nn.Linear(1,
-                            1),
-            torch.nn.Linear(1,
-                            hidden_dim)
-        ])
+        self.linears = torch.nn.ModuleList(
+            [torch.nn.Linear(hidden_dim, 1),
+             torch.nn.Linear(1, 1),
+             torch.nn.Linear(1, hidden_dim)])
         if frozen_weights:
             self.linears[0].weight.requires_grad = False
             self.linears[0].bias.requires_grad = False
@@ -54,9 +51,7 @@ class MyModel(torch.nn.Module):
 
 
 def run_fragmented_model(model, config_dict, hidden_dim, dtype):
-    model, _, _, _ = deepspeed.initialize(model=model,
-                                            model_parameters=model.parameters(),
-                                            config=config_dict)
+    model, _, _, _ = deepspeed.initialize(model=model, model_parameters=model.parameters(), config=config_dict)
     data_loader = random_dataloader(model=model,
                                     total_samples=10,
                                     hidden_dim=hidden_dim,
@@ -77,11 +72,7 @@ class TestTensorFragment(DistributedTest):
     world_size = 2
 
     @pytest.mark.parametrize('zero_stage', [1, 2, 3])
-    @pytest.mark.parametrize(
-        'offload_device',
-        [OffloadDeviceEnum.none,
-         OffloadDeviceEnum.cpu,
-         OffloadDeviceEnum.nvme])
+    @pytest.mark.parametrize('offload_device', [OffloadDeviceEnum.none, OffloadDeviceEnum.cpu, OffloadDeviceEnum.nvme])
     def test_zero_fragments(self, tmpdir, zero_stage, offload_device, frozen_weights):
         if offload_device == OffloadDeviceEnum.nvme:
             if zero_stage != 3:
@@ -108,9 +99,7 @@ class TestTensorFragment(DistributedTest):
         }
 
         if offload_device == OffloadDeviceEnum.cpu:
-            config_dict["zero_optimization"]["offload_optimizer"] = {
-                "device": offload_device
-            }
+            config_dict["zero_optimization"]["offload_optimizer"] = {"device": offload_device}
         elif offload_device == OffloadDeviceEnum.nvme:
             config_dict["zero_optimization"]["offload_optimizer"] = {
                 "device": offload_device,

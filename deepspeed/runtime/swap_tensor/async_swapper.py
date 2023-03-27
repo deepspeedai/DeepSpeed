@@ -15,6 +15,7 @@ ASYNC_SWAPPER_WAIT_TIMER = 'async_swap_gradient_wait'
 
 
 class AsyncTensorSwapper(object):
+
     def __init__(self, aio_handle, numel_alignment, timers):
         self.free_buffer_index = []
         self.swapping_buffer_index = []
@@ -70,9 +71,7 @@ class AsyncTensorSwapper(object):
         if dist.get_rank() == 0:
             element_size = torch.tensor([], dtype=self.dtype).element_size()
             swapped_GB = (self.num_elements_swapped * element_size) / (1024**3)
-            logger.debug(
-                f'{message} num_elems = {self.num_elements_swapped}, {swapped_GB:5.2f} GB'
-            )
+            logger.debug(f'{message} num_elems = {self.num_elements_swapped}, {swapped_GB:5.2f} GB')
 
     def _swap_out_tensor(self, tensor, swap_path):
         assert len(self.all_buffers) > 0

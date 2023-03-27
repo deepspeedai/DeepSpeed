@@ -34,18 +34,14 @@ class TestTwoOutputModel(DistributedTest):
         weight_value = 0.1
 
         model = MultiOutputModel(hidden_dim, weight_value)
-        model, _, _, _ = deepspeed.initialize(config=config_dict,
-                                              model=model,
-                                              model_parameters=model.parameters())
+        model, _, _, _ = deepspeed.initialize(config=config_dict, model=model, model_parameters=model.parameters())
         total_samples = 4
         data_loader = multi_output_dataloader(model=model,
                                               total_samples=total_samples,
                                               hidden_dim=hidden_dim,
                                               device=model.device,
-                                              inputs=[1.0,
-                                                      2.0],
-                                              targets=[1,
-                                                       2])
+                                              inputs=[1.0, 2.0],
+                                              targets=[1, 2])
         for n, batch in enumerate(data_loader):
             assert len(batch) % 2 == 0, \
                  f"multi_output_dataloader failed to return even number of data samples (input+target)"
@@ -54,9 +50,7 @@ class TestTwoOutputModel(DistributedTest):
             inputs, targets = batch[:midpoint], batch[midpoint:]
             loss_tuple = model(inputs, targets)
 
-            expected_loss = torch.tensor(2.302734375,
-                                         dtype=torch.half,
-                                         device=model.device)
+            expected_loss = torch.tensor(2.302734375, dtype=torch.half, device=model.device)
             for loss in loss_tuple:
                 assert loss.shape == torch.Size([])
                 assert loss.item() == approx(expected_loss.item())
@@ -96,21 +90,15 @@ class TestThreeOutputModel(DistributedTest):
         weight_value = 0.1
 
         model = MultiOutputModel(hidden_dim, weight_value)
-        model, _, _, _ = deepspeed.initialize(config=config_dict,
-                                              model=model,
-                                              model_parameters=model.parameters())
+        model, _, _, _ = deepspeed.initialize(config=config_dict, model=model, model_parameters=model.parameters())
 
         total_samples = grad_accumulation_steps * micro_batch_size * 2
         data_loader = multi_output_dataloader(model=model,
                                               total_samples=total_samples,
                                               hidden_dim=hidden_dim,
                                               device=model.device,
-                                              inputs=[1.0,
-                                                      2.0,
-                                                      3.0],
-                                              targets=[1,
-                                                       2,
-                                                       3])
+                                              inputs=[1.0, 2.0, 3.0],
+                                              targets=[1, 2, 3])
         for n, batch in enumerate(data_loader):
             assert len(batch) % 2 == 0, \
                  f"multi_output_dataloader failed to return even number of data samples (input+target)"
@@ -120,9 +108,7 @@ class TestThreeOutputModel(DistributedTest):
             loss_tuple = model(inputs, targets)
             assert len(loss_tuple) == 3
 
-            expected_loss = torch.tensor(2.302734375,
-                                         dtype=torch.half,
-                                         device=model.device)
+            expected_loss = torch.tensor(2.302734375, dtype=torch.half, device=model.device)
 
             for loss in loss_tuple:
                 assert loss.shape == torch.Size([])

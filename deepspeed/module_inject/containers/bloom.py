@@ -11,6 +11,7 @@ supported_models = {None}
 
 
 class DS_BloomContainer(MetaTensorContainer, BaseTransformerContainer):
+
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
 
@@ -25,12 +26,8 @@ class DS_BloomContainer(MetaTensorContainer, BaseTransformerContainer):
         return self.module
 
     def attention_qkv_mp(self, mp_replace):
-        self.module.attention.attn_qkvw = mp_replace.copy(
-            self.module.attention.attn_qkvw,
-            self.qkvw)
-        self.module.attention.attn_qkvb = mp_replace.copy(
-            self.module.attention.attn_qkvb,
-            self.qkvb)
+        self.module.attention.attn_qkvw = mp_replace.copy(self.module.attention.attn_qkvw, self.qkvw)
+        self.module.attention.attn_qkvb = mp_replace.copy(self.module.attention.attn_qkvb, self.qkvb)
 
     def load_params(self, module, sd, weight_quantizer, mp_replace, prefix):
         param_names = (
@@ -58,51 +55,28 @@ class DS_BloomContainer(MetaTensorContainer, BaseTransformerContainer):
                        megatron_v2=self.policy.is_megatron_v2,
                        split_qkv=self.policy.split_qkv)
         for i in range(2, 4):
-            maybe_copy(module.attention,
-                       sd,
-                       weight_quantizer,
-                       mp_replace,
-                       transformer_param_names[i],
+            maybe_copy(module.attention, sd, weight_quantizer, mp_replace, transformer_param_names[i],
                        prefix + param_names[i])
         for i in range(4, 10):
-            maybe_copy(module.mlp,
-                       sd,
-                       weight_quantizer,
-                       mp_replace,
-                       transformer_param_names[i],
+            maybe_copy(module.mlp, sd, weight_quantizer, mp_replace, transformer_param_names[i],
                        prefix + param_names[i])
         for i in range(10, 12):
-            maybe_copy(module,
-                       sd,
-                       weight_quantizer,
-                       mp_replace,
-                       transformer_param_names[i],
-                       prefix + param_names[i])
+            maybe_copy(module, sd, weight_quantizer, mp_replace, transformer_param_names[i], prefix + param_names[i])
 
 
 class BLOOMLayerPolicy(TransformerPolicy):
     _orig_layer_class = None
 
-    def __init__(self,
-                 client_module,
-                 inference=True,
-                 use_load_prefix=True,
-                 split_qkv=False):
-        super().__init__(inference,
-                         linear_layer=True,
-                         use_load_prefix=use_load_prefix,
-                         split_qkv=split_qkv)
+    def __init__(self, client_module, inference=True, use_load_prefix=True, split_qkv=False):
+        super().__init__(inference, linear_layer=True, use_load_prefix=use_load_prefix, split_qkv=split_qkv)
         self.client_module = client_module
         try:
             import transformers
             BLOOMLayerPolicy._orig_layer_class = transformers.models.bloom.modeling_bloom.BloomBlock
             global supported_models
-            supported_models.update(
-                {transformers.models.bloom.modeling_bloom.BloomModel})
+            supported_models.update({transformers.models.bloom.modeling_bloom.BloomModel})
         except Exception as e:
-            print(
-                f"WARNING! Setting BLOOMLayerPolicy._orig_layer_class to None due to Exception: {e}"
-            )
+            print(f"WARNING! Setting BLOOMLayerPolicy._orig_layer_class to None due to Exception: {e}")
             BLOOMLayerPolicy._orig_layer_class = None
 
     def get_hidden_heads(self):

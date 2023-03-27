@@ -17,13 +17,7 @@ class TestMoE(DistributedTest):
         if not required_torch_version():
             pytest.skip("DeepSpeed MoE tests need torch 1.8 or higher to run correctly")
 
-        config_dict = {
-            "train_batch_size": 8,
-            "steps_per_print": 1,
-            "fp16": {
-                "enabled": True
-            }
-        }
+        config_dict = {"train_batch_size": 8, "steps_per_print": 1, "fp16": {"enabled": True}}
         hidden_dim = 16
 
         # E+D -- ep_size = 2
@@ -36,10 +30,7 @@ class TestMoE(DistributedTest):
                                               dist_init_required=False)
         #dist_init_required=False -- parameterize to True/False?
 
-        data_loader = sequence_dataloader(model=model,
-                                          total_samples=50,
-                                          hidden_dim=hidden_dim,
-                                          device=model.device)
+        data_loader = sequence_dataloader(model=model, total_samples=50, hidden_dim=hidden_dim, device=model.device)
 
         for n, batch in enumerate(data_loader):
             loss = model(batch[0], batch[1])
@@ -55,13 +46,7 @@ class TestPRMoE(DistributedTest):
         if not required_torch_version():
             pytest.skip("DeepSpeed MoE tests need torch 1.8 or higher to run correctly")
 
-        config_dict = {
-            "train_batch_size": 8,
-            "steps_per_print": 1,
-            "fp16": {
-                "enabled": True
-            }
-        }
+        config_dict = {"train_batch_size": 8, "steps_per_print": 1, "fp16": {"enabled": True}}
         hidden_dim = 16
 
         # E+D -- ep_size = 2
@@ -73,10 +58,7 @@ class TestPRMoE(DistributedTest):
                                               optimizer=optimizer,
                                               dist_init_required=False)
 
-        data_loader = sequence_dataloader(model=model,
-                                          total_samples=50,
-                                          hidden_dim=hidden_dim,
-                                          device=model.device)
+        data_loader = sequence_dataloader(model=model, total_samples=50, hidden_dim=hidden_dim, device=model.device)
 
         for n, batch in enumerate(data_loader):
             loss = model(batch[0], batch[1])

@@ -53,28 +53,15 @@ TOTAL_NUM_STEPS = 'total_num_steps'
 
 
 def add_tuning_arguments(parser):
-    group = parser.add_argument_group('Convergence Tuning',
-                                      'Convergence tuning configurations')
+    group = parser.add_argument_group('Convergence Tuning', 'Convergence tuning configurations')
 
     # LR scheduler
-    group.add_argument('--lr_schedule',
-                       type=str,
-                       default=None,
-                       help='LR schedule for training.')
+    group.add_argument('--lr_schedule', type=str, default=None, help='LR schedule for training.')
 
     # Learning rate range test
-    group.add_argument("--lr_range_test_min_lr",
-                       type=float,
-                       default=0.001,
-                       help='Starting lr value.')
-    group.add_argument("--lr_range_test_step_rate",
-                       type=float,
-                       default=1.0,
-                       help='scaling rate for LR range test.')
-    group.add_argument("--lr_range_test_step_size",
-                       type=int,
-                       default=1000,
-                       help='training steps per LR change.')
+    group.add_argument("--lr_range_test_min_lr", type=float, default=0.001, help='Starting lr value.')
+    group.add_argument("--lr_range_test_step_rate", type=float, default=1.0, help='scaling rate for LR range test.')
+    group.add_argument("--lr_range_test_step_size", type=int, default=1000, help='training steps per LR change.')
     group.add_argument("--lr_range_test_staircase",
                        type=bool,
                        default=False,
@@ -89,66 +76,34 @@ def add_tuning_arguments(parser):
                        type=int,
                        default=-1,
                        help='first stair count for 1Cycle schedule.')
-    group.add_argument(
-        "--cycle_second_step_size",
-        type=int,
-        default=-1,
-        help='size of second step of 1Cycle schedule (default first_step_size).')
+    group.add_argument("--cycle_second_step_size",
+                       type=int,
+                       default=-1,
+                       help='size of second step of 1Cycle schedule (default first_step_size).')
     group.add_argument("--cycle_second_stair_count",
                        type=int,
                        default=-1,
                        help='second stair count for 1Cycle schedule.')
-    group.add_argument(
-        "--decay_step_size",
-        type=int,
-        default=1000,
-        help='size of intervals for applying post cycle decay (training steps).')
-
-    # 1Cycle LR
-    group.add_argument("--cycle_min_lr",
-                       type=float,
-                       default=0.01,
-                       help='1Cycle LR lower bound.')
-    group.add_argument("--cycle_max_lr",
-                       type=float,
-                       default=0.1,
-                       help='1Cycle LR upper bound.')
-    group.add_argument("--decay_lr_rate",
-                       type=float,
-                       default=0.0,
-                       help='post cycle LR decay rate.')
-
-    # 1Cycle Momentum
-    group.add_argument('--cycle_momentum',
-                       default=False,
-                       action='store_true',
-                       help='Enable 1Cycle momentum schedule.')
-    group.add_argument("--cycle_min_mom",
-                       type=float,
-                       default=0.8,
-                       help='1Cycle momentum lower bound.')
-    group.add_argument("--cycle_max_mom",
-                       type=float,
-                       default=0.9,
-                       help='1Cycle momentum upper bound.')
-    group.add_argument("--decay_mom_rate",
-                       type=float,
-                       default=0.0,
-                       help='post cycle momentum decay rate.')
-
-    # Warmup LR
-    group.add_argument('--warmup_min_lr',
-                       type=float,
-                       default=0,
-                       help='WarmupLR minimum/initial LR value')
-    group.add_argument('--warmup_max_lr',
-                       type=float,
-                       default=0.001,
-                       help='WarmupLR maximum LR value.')
-    group.add_argument('--warmup_num_steps',
+    group.add_argument("--decay_step_size",
                        type=int,
                        default=1000,
-                       help='WarmupLR step count for LR warmup.')
+                       help='size of intervals for applying post cycle decay (training steps).')
+
+    # 1Cycle LR
+    group.add_argument("--cycle_min_lr", type=float, default=0.01, help='1Cycle LR lower bound.')
+    group.add_argument("--cycle_max_lr", type=float, default=0.1, help='1Cycle LR upper bound.')
+    group.add_argument("--decay_lr_rate", type=float, default=0.0, help='post cycle LR decay rate.')
+
+    # 1Cycle Momentum
+    group.add_argument('--cycle_momentum', default=False, action='store_true', help='Enable 1Cycle momentum schedule.')
+    group.add_argument("--cycle_min_mom", type=float, default=0.8, help='1Cycle momentum lower bound.')
+    group.add_argument("--cycle_max_mom", type=float, default=0.9, help='1Cycle momentum upper bound.')
+    group.add_argument("--decay_mom_rate", type=float, default=0.0, help='post cycle momentum decay rate.')
+
+    # Warmup LR
+    group.add_argument('--warmup_min_lr', type=float, default=0, help='WarmupLR minimum/initial LR value')
+    group.add_argument('--warmup_max_lr', type=float, default=0.001, help='WarmupLR maximum LR value.')
+    group.add_argument('--warmup_num_steps', type=int, default=1000, help='WarmupLR step count for LR warmup.')
     group.add_argument('--warmup_type',
                        type=str,
                        default=WARMUP_LOG_RATE,
@@ -168,16 +123,13 @@ def override_lr_range_test_params(args, params):
     if hasattr(args, LR_RANGE_TEST_MIN_LR) and args.lr_range_test_min_lr is not None:
         params[LR_RANGE_TEST_MIN_LR] = args.lr_range_test_min_lr
 
-    if hasattr(args,
-               LR_RANGE_TEST_STEP_RATE) and args.lr_range_test_step_rate is not None:
+    if hasattr(args, LR_RANGE_TEST_STEP_RATE) and args.lr_range_test_step_rate is not None:
         params[LR_RANGE_TEST_STEP_RATE] = args.lr_range_test_step_rate
 
-    if hasattr(args,
-               LR_RANGE_TEST_STEP_SIZE) and args.lr_range_test_step_size is not None:
+    if hasattr(args, LR_RANGE_TEST_STEP_SIZE) and args.lr_range_test_step_size is not None:
         params[LR_RANGE_TEST_STEP_SIZE] = args.lr_range_test_step_size
 
-    if hasattr(args,
-               LR_RANGE_TEST_STAIRCASE) and args.lr_range_test_staircase is not None:
+    if hasattr(args, LR_RANGE_TEST_STAIRCASE) and args.lr_range_test_staircase is not None:
         params[LR_RANGE_TEST_STAIRCASE] = args.lr_range_test_staircase
 
 
@@ -185,15 +137,13 @@ def override_1cycle_params(args, params):
     if hasattr(args, CYCLE_FIRST_STEP_SIZE) and args.cycle_first_step_size is not None:
         params[CYCLE_FIRST_STEP_SIZE] = args.cycle_first_step_size
 
-    if hasattr(args,
-               CYCLE_FIRST_STAIR_COUNT) and args.cycle_first_stair_count is not None:
+    if hasattr(args, CYCLE_FIRST_STAIR_COUNT) and args.cycle_first_stair_count is not None:
         params[CYCLE_FIRST_STAIR_COUNT] = args.cycle_first_stair_count
 
     if hasattr(args, CYCLE_SECOND_STEP_SIZE) and args.cycle_second_step_size is not None:
         params[CYCLE_SECOND_STEP_SIZE] = args.cycle_second_step_size
 
-    if hasattr(args,
-               CYCLE_SECOND_STAIR_COUNT) and args.cycle_second_stair_count is not None:
+    if hasattr(args, CYCLE_SECOND_STAIR_COUNT) and args.cycle_second_stair_count is not None:
         params[CYCLE_SECOND_STAIR_COUNT] = args.cycle_second_stair_count
 
     if hasattr(args, DECAY_STEP_SIZE) and args.decay_step_size is not None:
@@ -301,8 +251,7 @@ def get_torch_optimizer(optimizer):
     if hasattr(optimizer, 'optimizer') and isinstance(optimizer.optimizer, Optimizer):
         return optimizer.optimizer
 
-    raise TypeError('{} is not a subclass of torch.optim.Optimizer'.format(
-        type(optimizer).__name__))
+    raise TypeError('{} is not a subclass of torch.optim.Optimizer'.format(type(optimizer).__name__))
 
 
 class LRRangeTest(object):
@@ -343,6 +292,7 @@ class LRRangeTest(object):
         _A disciplined approach to neural network hyper-parameters: Part 1 -- learning rate, batch size, momentum, and weight decay:
         https://arxiv.org/abs/1803.09820
 """
+
     def __init__(self,
                  optimizer: Optimizer,
                  lr_range_test_min_lr: float = 1e-3,
@@ -353,13 +303,10 @@ class LRRangeTest(object):
 
         self.optimizer = get_torch_optimizer(optimizer)
 
-        if isinstance(lr_range_test_min_lr,
-                      list) or isinstance(lr_range_test_min_lr,
-                                          tuple):
+        if isinstance(lr_range_test_min_lr, list) or isinstance(lr_range_test_min_lr, tuple):
             if len(lr_range_test_min_lr) != len(self.optimizer.param_groups):
-                raise ValueError("expected {} lr_range_test_min_lr, got {}".format(
-                    len(self.optimizer.param_groups),
-                    len(lr_range_test_min_lr)))
+                raise ValueError("expected {} lr_range_test_min_lr, got {}".format(len(self.optimizer.param_groups),
+                                                                                   len(lr_range_test_min_lr)))
             self.min_lr = list(lr_range_test_min_lr)
         else:
             self.min_lr = [lr_range_test_min_lr] * len(self.optimizer.param_groups)
@@ -384,9 +331,7 @@ class LRRangeTest(object):
 
     def get_lr(self):
         lr_increase = self._get_increase()
-        return [
-            lr_range_test_min_lr * lr_increase for lr_range_test_min_lr in self.min_lr
-        ]
+        return [lr_range_test_min_lr * lr_increase for lr_range_test_min_lr in self.min_lr]
 
     def get_last_lr(self):
         """ Return last computed learning rate by current scheduler.
@@ -480,6 +425,7 @@ class OneCycle(object):
 
     .. _A disciplined approach to neural network hyper-parameters: Part 1 -- learning rate, batch size, momentum, and weight decay: https://arxiv.org/abs/1803.09820
     """
+
     def __init__(self,
                  optimizer,
                  cycle_min_lr,
@@ -499,26 +445,16 @@ class OneCycle(object):
         self.optimizer = get_torch_optimizer(optimizer)
 
         # Initialize cycle shape
-        self._initialize_cycle(cycle_first_step_size,
-                               cycle_second_step_size,
-                               cycle_first_stair_count,
-                               cycle_second_stair_count,
-                               decay_step_size)
+        self._initialize_cycle(cycle_first_step_size, cycle_second_step_size, cycle_first_stair_count,
+                               cycle_second_stair_count, decay_step_size)
 
         # Initialize cycle lr
-        self._initialize_lr(self.optimizer,
-                            cycle_min_lr,
-                            cycle_max_lr,
-                            decay_lr_rate,
-                            last_batch_iteration)
+        self._initialize_lr(self.optimizer, cycle_min_lr, cycle_max_lr, decay_lr_rate, last_batch_iteration)
 
         # Initialize cyclic momentum
         self.cycle_momentum = cycle_momentum
         if cycle_momentum:
-            self._initialize_momentum(self.optimizer,
-                                      cycle_min_mom,
-                                      cycle_max_mom,
-                                      decay_mom_rate,
+            self._initialize_momentum(self.optimizer, cycle_min_mom, cycle_max_mom, decay_mom_rate,
                                       last_batch_iteration)
 
         # Initialize batch iteration tracker
@@ -526,16 +462,11 @@ class OneCycle(object):
 
     # Configure cycle shape
 
-    def _initialize_cycle(self,
-                          cycle_first_step_size,
-                          cycle_second_step_size,
-                          cycle_first_stair_count,
-                          cycle_second_stair_count,
-                          decay_step_size):
+    def _initialize_cycle(self, cycle_first_step_size, cycle_second_step_size, cycle_first_stair_count,
+                          cycle_second_stair_count, decay_step_size):
         cycle_first_step_size = float(cycle_first_step_size)
         cycle_second_step_size = float(
-            cycle_second_step_size
-        ) if cycle_second_step_size is not None else cycle_first_step_size
+            cycle_second_step_size) if cycle_second_step_size is not None else cycle_first_step_size
 
         self.total_size = cycle_first_step_size + cycle_second_step_size
         self.step_ratio = cycle_first_step_size / self.total_size
@@ -551,12 +482,7 @@ class OneCycle(object):
             self.skip_mom_decay = False
 
     # Configure lr schedule
-    def _initialize_lr(self,
-                       optimizer,
-                       cycle_min_lr,
-                       cycle_max_lr,
-                       decay_lr_rate,
-                       last_batch_iteration):
+    def _initialize_lr(self, optimizer, cycle_min_lr, cycle_max_lr, decay_lr_rate, last_batch_iteration):
         self.min_lrs = [cycle_min_lr] * len(optimizer.param_groups)
         if last_batch_iteration == -1:
             for lr, group in zip(self.min_lrs, optimizer.param_groups):
@@ -569,12 +495,7 @@ class OneCycle(object):
             self.skip_lr_decay = True
 
     # Configure momentum schedule
-    def _initialize_momentum(self,
-                             optimizer,
-                             cycle_min_mom,
-                             cycle_max_mom,
-                             decay_mom_rate,
-                             last_batch_iteration):
+    def _initialize_momentum(self, optimizer, cycle_min_mom, cycle_max_mom, decay_mom_rate, last_batch_iteration):
         if 'betas' not in optimizer.defaults:
             optimizer_name = type(optimizer).__name__
             logger.warn(
@@ -722,6 +643,7 @@ class WarmupLR(object):
             >>>         scheduler.step()
 
     """
+
     def __init__(self,
                  optimizer: Optimizer,
                  warmup_min_lr: float = 0.0,
@@ -738,9 +660,8 @@ class WarmupLR(object):
         self.warmup_num_steps = max(2, warmup_num_steps)
         # Currently only support linear and log function
         if warmup_type not in {WARMUP_LOG_RATE, WARMUP_LINEAR_RATE}:
-            logger.warning(
-                f"Using unknown warmup_type: {warmup_type}. The increasing function "
-                f"is set to default (log)")
+            logger.warning(f"Using unknown warmup_type: {warmup_type}. The increasing function "
+                           f"is set to default (log)")
             warmup_type = WARMUP_LOG_RATE
         self.warmup_type = warmup_type
         self.inverse_log_warm_up = 1.0 / math.log(self.warmup_num_steps)
@@ -748,15 +669,10 @@ class WarmupLR(object):
 
     def get_lr(self):
         if self.last_batch_iteration < 0:
-            logger.warning(
-                "Attempting to get learning rate from scheduler before it has started")
+            logger.warning("Attempting to get learning rate from scheduler before it has started")
             return [0.0]
         gamma = self._get_gamma()
-        return [
-            min_lr + (delta_lr * gamma) for min_lr,
-            delta_lr in zip(self.min_lrs,
-                            self.delta_lrs)
-        ]
+        return [min_lr + (delta_lr * gamma) for min_lr, delta_lr in zip(self.min_lrs, self.delta_lrs)]
 
     def get_last_lr(self):
         """ Return last computed learning rate by current scheduler.
@@ -789,10 +705,8 @@ class WarmupLR(object):
     def _format_param(self, optimizer, param_value, param_name):
         if isinstance(param_value, list) or isinstance(param_value, tuple):
             if len(param_value) != len(optimizer.param_groups):
-                raise ValueError("expected {} value for {}, got {}".format(
-                    len(optimizer.param_groups),
-                    param_name,
-                    FileNotFoundError(param_value)))
+                raise ValueError("expected {} value for {}, got {}".format(len(optimizer.param_groups), param_name,
+                                                                           FileNotFoundError(param_value)))
             return list(param_value)
         return [param_value] * len(optimizer.param_groups)
 
@@ -819,6 +733,7 @@ class WarmupDecayLR(WarmupLR):
             >>>         scheduler.step()
 
     """
+
     def __init__(self,
                  optimizer: Optimizer,
                  total_num_steps: int,
@@ -829,17 +744,11 @@ class WarmupDecayLR(WarmupLR):
                  last_batch_iteration: int = -1):
 
         self.total_num_steps = total_num_steps
-        super(WarmupDecayLR,
-              self).__init__(optimizer,
-                             warmup_min_lr,
-                             warmup_max_lr,
-                             warmup_num_steps,
-                             warmup_type,
-                             last_batch_iteration)
+        super(WarmupDecayLR, self).__init__(optimizer, warmup_min_lr, warmup_max_lr, warmup_num_steps, warmup_type,
+                                            last_batch_iteration)
         if self.total_num_steps < self.warmup_num_steps:
             logger.warning('total_num_steps {} is less than warmup_num_steps {}'.format(
-                total_num_steps,
-                warmup_num_steps))
+                total_num_steps, warmup_num_steps))
 
     def _get_gamma(self):
         if self.last_batch_iteration < self.warmup_num_steps:
@@ -850,5 +759,4 @@ class WarmupDecayLR(WarmupLR):
         return max(
             0.0,
             float(self.total_num_steps - self.last_batch_iteration) /
-            float(max(1.0,
-                      self.total_num_steps - self.warmup_num_steps)))
+            float(max(1.0, self.total_num_steps - self.warmup_num_steps)))

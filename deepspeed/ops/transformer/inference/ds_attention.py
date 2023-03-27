@@ -22,17 +22,14 @@ class DeepSpeedSelfAttention(nn.Module):
         data_type_fp = torch.half if config.fp16 else torch.float
         self.config.layer_id = DeepSpeedSelfAttention.num_layers
         DeepSpeedSelfAttention.num_layers = DeepSpeedSelfAttention.num_layers + 1
-        device = get_accelerator().current_device_name(
-        )  #if config.bigscience_bloom else 'cpu'
+        device = get_accelerator().current_device_name()  #if config.bigscience_bloom else 'cpu'
         qkv_size_per_partition = (self.config.hidden_size // self.config.mp_size) * 3
         self.attn_qkvw = nn.Parameter(torch.empty(self.config.hidden_size,
                                                   qkv_size_per_partition,
                                                   dtype=data_type,
                                                   device=device),
                                       requires_grad=False)
-        self.attn_qkvb = nn.Parameter(torch.empty(qkv_size_per_partition,
-                                                  dtype=data_type_fp,
-                                                  device=device),
+        self.attn_qkvb = nn.Parameter(torch.empty(qkv_size_per_partition, dtype=data_type_fp, device=device),
                                       requires_grad=False)
         out_size_per_partition = self.config.hidden_size // self.config.mp_size
         self.attn_ow = nn.Parameter(torch.empty(out_size_per_partition,
@@ -41,9 +38,7 @@ class DeepSpeedSelfAttention(nn.Module):
                                                 device=device),
                                     requires_grad=False)
 
-        self.attn_ob = nn.Parameter(torch.empty(self.config.hidden_size,
-                                                dtype=data_type_fp,
-                                                device=device),
+        self.attn_ob = nn.Parameter(torch.empty(self.config.hidden_size, dtype=data_type_fp, device=device),
                                     requires_grad=False)
 
         self.num_attention_heads_per_partition = self.config.heads // self.config.mp_size
@@ -115,34 +110,32 @@ class DeepSpeedSelfAttention(nn.Module):
                                        num_heads=self.num_attention_heads_per_partition,
                                        num_layers=DeepSpeedSelfAttention.num_layers)
         else:
-            qkv_out = self.qkv_func(
-                input=input,
-                weight=self.attn_qkvw,
-                bias=(self.attn_qkvb if self.attn_qkvb is not None else norm_b),
-                gamma=norm_w,
-                beta=norm_b,
-                add_bias=(self.attn_qkvb is not None),
-                num_layers=DeepSpeedSelfAttention.num_layers,
-                num_heads=self.num_attention_heads_per_partition)
+            qkv_out = self.qkv_func(input=input,
+                                    weight=self.attn_qkvw,
+                                    bias=(self.attn_qkvb if self.attn_qkvb is not None else norm_b),
+                                    gamma=norm_w,
+                                    beta=norm_b,
+                                    add_bias=(self.attn_qkvb is not None),
+                                    num_layers=DeepSpeedSelfAttention.num_layers,
+                                    num_heads=self.num_attention_heads_per_partition)
 
-        context_layer, key_layer, value_layer = self.compute_attention(
-            qkv_out=qkv_out,
-            input_mask=input_mask,
-            layer_past=layer_past,
-            alibi=alibi)
+        context_layer, key_layer, value_layer = self.compute_attention(qkv_out=qkv_out,
+                                                                       input_mask=input_mask,
+                                                                       layer_past=layer_past,
+                                                                       alibi=alibi)
 
         output = self.vector_matmul_func(input=context_layer, weight=self.attn_ow)
 
         inp_norm = qkv_out[-1]
 
-        if self.config.mlp_after_attn and self.mp_group is not None and dist.get_world_size(
-                group=self.mp_group) > 1:
+        if self.config.mlp_after_attn and self.mp_group is not None and dist.get_world_size(group=self.mp_group) > 1:
             dist.all_reduce(output, group=self.mp_group)
 
         return (output, key_layer, value_layer, context_layer, inp_norm)
 
 
 class BloomSelfAttention(DeepSpeedSelfAttention):
+
     def __init__(self, *args, **kwargs):
         super(BloomSelfAttention, self).__init__(*args, **kwargs)
         self.softmax_func = SoftmaxOp(self.config)
@@ -156,10 +149,7 @@ class BloomSelfAttention(DeepSpeedSelfAttention):
                                     (self.hidden_size_per_partition,)
         return x.view(*new_x_layer_shape).contiguous()
 
-    def _split_tensor_along_last_dim(self,
-                                     tensor,
-                                     num_partitions,
-                                     contiguous_split_chunks=True):
+    def _split_tensor_along_last_dim(self, tensor, num_partitions, contiguous_split_chunks=True):
         """Split a tensor along its last dimension.
 
         Args:
@@ -196,64 +186,43 @@ class BloomSelfAttention(DeepSpeedSelfAttention):
         mixed_x_layer = qkv_out
         alibi = alibi.to(get_accelerator().current_device_name())
         head_dim = self.hidden_size_per_partition // self.num_attention_heads_per_partition
-        new_tensor_shape = mixed_x_layer.size()[:-1] + (
-            self.num_attention_heads_per_partition,
-            3 * head_dim)
+        new_tensor_shape = mixed_x_layer.size()[:-1] + (self.num_attention_heads_per_partition, 3 * head_dim)
         mixed_x_layer = mixed_x_layer.view(*new_tensor_shape)
 
         query_layer, key_layer, value_layer = self._split_tensor_along_last_dim(mixed_x_layer, 3)
 
         # [batch_size, head_dim, q_length, k_length]
-        output_size = (query_layer.size(0),
-                       query_layer.size(2),
-                       query_layer.size(1),
-                       key_layer.size(1))
+        output_size = (query_layer.size(0), query_layer.size(2), query_layer.size(1), key_layer.size(1))
         # [batch_size, q_length, num_heads, head_dim] -> [q_length, batch_size * num_heads, head_dim]
-        query_layer = query_layer.transpose(1,
-                                            2).reshape(output_size[0] * output_size[1],
-                                                       output_size[2],
-                                                       -1)
+        query_layer = query_layer.transpose(1, 2).reshape(output_size[0] * output_size[1], output_size[2], -1)
         # [batch_size, k_length, num_heads, head_dim] -> [k_length, batch_size * num_heads, head_dim]
-        key_layer = key_layer.transpose(1,
-                                        2).reshape(output_size[0] * output_size[1],
-                                                   output_size[3],
-                                                   -1).transpose(-1,
-                                                                 -2)
-        value_layer = value_layer.transpose(1,
-                                            2).reshape(output_size[0] * output_size[1],
-                                                       output_size[3],
-                                                       -1)
+        key_layer = key_layer.transpose(1, 2).reshape(output_size[0] * output_size[1], output_size[3],
+                                                      -1).transpose(-1, -2)
+        value_layer = value_layer.transpose(1, 2).reshape(output_size[0] * output_size[1], output_size[3], -1)
         if layer_past is not None:
             past_key, past_value = layer_past
             # concatenate along seq_length dimension -> [batch_size, qk_length, num_heads, head_dim]
             key_layer = torch.cat((past_key.type_as(key_layer), key_layer), dim=-1)
-            value_layer = torch.cat((past_value.type_as(value_layer),
-                                     value_layer),
-                                    dim=-2)
+            value_layer = torch.cat((past_value.type_as(value_layer), value_layer), dim=-2)
 
         presents = (key_layer, value_layer)
         # Raw attention scores. [batch_size * num_heads, q_length, k_length]
         matmul_result = torch.matmul(query_layer, key_layer)
         # change view to [batch_size, num_heads, q_length, k_length]
-        attention_scores = matmul_result.view(output_size[0],
-                                              output_size[1],
-                                              output_size[2],
-                                              -1)
+        attention_scores = matmul_result.view(output_size[0], output_size[1], output_size[2], -1)
 
-        offset = dist.get_rank(
-        ) * self.num_attention_heads_per_partition if dist.is_initialized() else 0
-        attention_probs = self.softmax_func(
-            attn_scores=attention_scores,
-            attn_mask=((1 - input_mask).half() * minus_inf),
-            alibi=alibi,
-            triangular=(self.config.triangular_masking
-                        and (attention_scores.shape[-2] > 1)),
-            recompute=False,
-            local_attention=False,
-            window_size=1,
-            async_op=False,
-            layer_scale=1 / (self.norm_factor * self.norm_factor),
-            head_offset=offset)
+        offset = dist.get_rank() * self.num_attention_heads_per_partition if dist.is_initialized() else 0
+        attention_probs = self.softmax_func(attn_scores=attention_scores,
+                                            attn_mask=((1 - input_mask).half() * minus_inf),
+                                            alibi=alibi,
+                                            triangular=(self.config.triangular_masking
+                                                        and (attention_scores.shape[-2] > 1)),
+                                            recompute=False,
+                                            local_attention=False,
+                                            window_size=1,
+                                            async_op=False,
+                                            layer_scale=1 / (self.norm_factor * self.norm_factor),
+                                            head_offset=offset)
 
         # change view [batch_size x num_heads, q_length, k_length]
         attention_probs_reshaped = attention_probs.view(*matmul_result.shape)
@@ -263,10 +232,8 @@ class BloomSelfAttention(DeepSpeedSelfAttention):
 
         # change view [batch_size, num_heads, q_length, head_dim]
         context_layer = context_layer.view(
-            context_layer.size(0) // self.num_attention_heads_per_partition,
-            self.num_attention_heads_per_partition,
-            context_layer.size(1),
-            context_layer.shape[-1])
+            context_layer.size(0) // self.num_attention_heads_per_partition, self.num_attention_heads_per_partition,
+            context_layer.size(1), context_layer.shape[-1])
 
         context_layer = self._transpose_for_context(context_layer)
         key_layer = presents[0]

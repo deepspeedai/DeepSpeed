@@ -7,6 +7,7 @@ from torch.utils.data import DataLoader, Dataset
 
 
 class RandomDataset(Dataset):
+
     def __init__(self, size, length):
         self.len = length
         self.data = torch.randn(length, size)
@@ -19,6 +20,7 @@ class RandomDataset(Dataset):
 
 
 class BoringModel(LightningModule):
+
     def __init__(self):
         super().__init__()
         self.layer = torch.nn.Linear(32, 2)
@@ -53,9 +55,5 @@ def test_lightning_model():
     """Test that DeepSpeed works with a simple LightningModule and LightningDataModule."""
 
     model = BoringModel()
-    trainer = Trainer(strategy=DeepSpeedStrategy(),
-                      max_epochs=1,
-                      precision=16,
-                      accelerator="gpu",
-                      devices=1)
+    trainer = Trainer(strategy=DeepSpeedStrategy(), max_epochs=1, precision=16, accelerator="gpu", devices=1)
     trainer.fit(model)

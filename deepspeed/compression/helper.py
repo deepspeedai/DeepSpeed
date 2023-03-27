@@ -59,23 +59,17 @@ def module_replacement(model, module_name, compression_technique=None, mpu=None)
         need_bias = True
 
     # Initialize the new module
-    if isinstance(old_module,
-                  LinearLayer_Compress) or isinstance(old_module,
-                                                      torch.nn.Linear):
+    if isinstance(old_module, LinearLayer_Compress) or isinstance(old_module, torch.nn.Linear):
         if isinstance(old_module, LinearLayer_Compress):
             new_module = old_module
         else:
-            new_module = LinearLayer_Compress(old_module.in_features,
-                                              old_module.out_features,
-                                              bias=need_bias).to(
-                                                  device=old_module.weight.device,
-                                                  dtype=old_module.weight.dtype)
+            new_module = LinearLayer_Compress(old_module.in_features, old_module.out_features,
+                                              bias=need_bias).to(device=old_module.weight.device,
+                                                                 dtype=old_module.weight.dtype)
             new_module.weight.data = old_module.weight.data
             if need_bias:
                 new_module.bias.data = old_module.bias.data
-    elif isinstance(old_module,
-                    Conv2dLayer_Compress) or isinstance(old_module,
-                                                        torch.nn.Conv2d):
+    elif isinstance(old_module, Conv2dLayer_Compress) or isinstance(old_module, torch.nn.Conv2d):
         if isinstance(old_module, Conv2dLayer_Compress):
             new_module = old_module
         else:
@@ -86,60 +80,48 @@ def module_replacement(model, module_name, compression_technique=None, mpu=None)
             if need_bias:
                 new_module.bias.data = old_module.bias.data
     elif isinstance(old_module, torch.nn.BatchNorm2d):
-        new_module = BNLayer_Compress(old_module.num_features,
-                                      old_module.eps,
-                                      old_module.momentum,
-                                      old_module.affine,
-                                      old_module.track_running_stats).to(
-                                          old_module.weight.device,
-                                          old_module.weight.dtype)
+        new_module = BNLayer_Compress(old_module.num_features, old_module.eps, old_module.momentum, old_module.affine,
+                                      old_module.track_running_stats).to(old_module.weight.device,
+                                                                         old_module.weight.dtype)
         new_module.weight.data = old_module.weight.data
         if need_bias:
             new_module.bias.data = old_module.bias.data
         new_module.running_mean.data = old_module.running_mean.data
         new_module.running_var.data = old_module.running_var.data
-    elif isinstance(old_module,
-                    Embedding_Compress) or isinstance(old_module,
-                                                      torch.nn.Embedding):
+    elif isinstance(old_module, Embedding_Compress) or isinstance(old_module, torch.nn.Embedding):
         if isinstance(old_module, Embedding_Compress):
             new_module = old_module
         else:
             new_module = Embedding_Compress(old_module.num_embeddings, old_module.embedding_dim, old_module.padding_idx, old_module.max_norm, old_module.norm_type, \
                                         old_module.scale_grad_by_freq, old_module.sparse).to(device=old_module.weight.device, dtype=old_module.weight.dtype)
             new_module.weight.data = old_module.weight.data
-    elif mpu is not None and (isinstance(old_module,
-                                         ColumnParallelLinear_Compress)
-                              or isinstance(old_module,
-                                            mpu.ColumnParallelLinear)):
+    elif mpu is not None and (isinstance(old_module, ColumnParallelLinear_Compress)
+                              or isinstance(old_module, mpu.ColumnParallelLinear)):
         if isinstance(old_module, ColumnParallelLinear_Compress):
             new_module = old_module
         else:
-            new_module = ColumnParallelLinear_Compress(
-                mpu,
-                old_module.input_size,
-                old_module.output_size,
-                gather_output=old_module.gather_output,
-                skip_bias_add=old_module.skip_bias_add,
-                bias=need_bias).to(device=old_module.weight.device,
-                                   dtype=old_module.weight.dtype)
+            new_module = ColumnParallelLinear_Compress(mpu,
+                                                       old_module.input_size,
+                                                       old_module.output_size,
+                                                       gather_output=old_module.gather_output,
+                                                       skip_bias_add=old_module.skip_bias_add,
+                                                       bias=need_bias).to(device=old_module.weight.device,
+                                                                          dtype=old_module.weight.dtype)
             new_module.weight.data = old_module.weight.data
             if need_bias:
                 new_module.bias.data = old_module.bias.data
-    elif mpu is not None and (isinstance(old_module,
-                                         RowParallelLinear_Compress)
-                              or isinstance(old_module,
-                                            mpu.RowParallelLinear)):
+    elif mpu is not None and (isinstance(old_module, RowParallelLinear_Compress)
+                              or isinstance(old_module, mpu.RowParallelLinear)):
         if isinstance(old_module, RowParallelLinear_Compress):
             new_module = old_module
         else:
-            new_module = RowParallelLinear_Compress(
-                mpu,
-                old_module.input_size,
-                old_module.output_size,
-                input_is_parallel=old_module.input_is_parallel,
-                skip_bias_add=old_module.skip_bias_add,
-                bias=need_bias).to(device=old_module.weight.device,
-                                   dtype=old_module.weight.dtype)
+            new_module = RowParallelLinear_Compress(mpu,
+                                                    old_module.input_size,
+                                                    old_module.output_size,
+                                                    input_is_parallel=old_module.input_is_parallel,
+                                                    skip_bias_add=old_module.skip_bias_add,
+                                                    bias=need_bias).to(device=old_module.weight.device,
+                                                                       dtype=old_module.weight.dtype)
             new_module.weight.data = old_module.weight.data
             if need_bias:
                 new_module.bias.data = old_module.bias.data
@@ -150,39 +132,30 @@ def module_replacement(model, module_name, compression_technique=None, mpu=None)
         for k, v in compression_technique.items():
             if k == SPARSE_PRUNING:
                 if v[SPARSE_PRUNING_ENABLED]:
-                    new_module.enable_sparse_pruning(v[SPARSE_PRUNING_DENSE_RATIO],
-                                                     v[SPARSE_PRUNING_METHOD])
+                    new_module.enable_sparse_pruning(v[SPARSE_PRUNING_DENSE_RATIO], v[SPARSE_PRUNING_METHOD])
             elif k == ROW_PRUNING:
                 if v[ROW_PRUNING_ENABLED]:
-                    new_module.enable_row_pruning(v[ROW_PRUNING_DENSE_RATIO],
-                                                  v[ROW_PRUNING_METHOD])
+                    new_module.enable_row_pruning(v[ROW_PRUNING_DENSE_RATIO], v[ROW_PRUNING_METHOD])
             elif k == HEAD_PRUNING:
                 if v[HEAD_PRUNING_ENABLED]:
-                    new_module.enable_head_pruning(v[HEAD_PRUNING_DENSE_RATIO],
-                                                   v[HEAD_PRUNING_METHOD],
+                    new_module.enable_head_pruning(v[HEAD_PRUNING_DENSE_RATIO], v[HEAD_PRUNING_METHOD],
                                                    v[HEAD_PRUNING_NUM_HEADS])
             elif k == ACTIVATION_QUANTIZATION:
                 if v[ACTIVATION_QUANTIZATION_ENABLED]:
-                    new_module.enable_activation_quantization(
-                        v[ACTIVATION_QUANTIZE_BITS],
-                        v[ACTIVATION_QUANTIZE_TYPE],
-                        v[ACTIVATION_QUANTIZE_RANGE])
+                    new_module.enable_activation_quantization(v[ACTIVATION_QUANTIZE_BITS], v[ACTIVATION_QUANTIZE_TYPE],
+                                                              v[ACTIVATION_QUANTIZE_RANGE])
             elif k == WEIGHT_QUANTIZATION:
                 if v[WEIGHT_QUANTIZE_ENABLED]:
-                    new_module.enable_weight_quantization(
-                        v[WEIGHT_QUANTIZE_START_BITS],
-                        v[WEIGHT_QUANTIZE_TARGET_BITS],
-                        v[WEIGHT_QUANTIZATION_PERIOD],
-                        v[WEIGHT_QUANTIZE_IN_FORWARD_ENABLED],
-                        v[WEIGHT_QUANTIZE_TYPE],
-                        v[WEIGHT_QUANTIZE_GROUPS])
+                    new_module.enable_weight_quantization(v[WEIGHT_QUANTIZE_START_BITS],
+                                                          v[WEIGHT_QUANTIZE_TARGET_BITS],
+                                                          v[WEIGHT_QUANTIZATION_PERIOD],
+                                                          v[WEIGHT_QUANTIZE_IN_FORWARD_ENABLED],
+                                                          v[WEIGHT_QUANTIZE_TYPE], v[WEIGHT_QUANTIZE_GROUPS])
             elif k == CHANNEL_PRUNING:
                 if v[CHANNEL_PRUNING_ENABLED]:
-                    new_module.enable_channel_pruning(v[CHANNEL_PRUNING_DENSE_RATIO],
-                                                      v[CHANNEL_PRUNING_METHOD])
+                    new_module.enable_channel_pruning(v[CHANNEL_PRUNING_DENSE_RATIO], v[CHANNEL_PRUNING_METHOD])
             else:
-                raise NotImplementedError(
-                    'Compression technique {} is not implemented'.format(k))
+                raise NotImplementedError('Compression technique {} is not implemented'.format(k))
 
     # Replace the old module with the new one
     recursive_setattr(model, module_name, new_module)
@@ -195,10 +168,7 @@ def is_module_compressible(module, mpu=None):
           isinstance(module, torch.nn.BatchNorm2d)
 
     if mpu is not None:
-        ret = ret or isinstance(module,
-                                mpu.RowParallelLinear) or isinstance(
-                                    module,
-                                    mpu.ColumnParallelLinear)
+        ret = ret or isinstance(module, mpu.RowParallelLinear) or isinstance(module, mpu.ColumnParallelLinear)
 
     return ret
 
@@ -225,11 +195,7 @@ def compression_preparation(model, compression_techinique_list, mpu):
     return model
 
 
-def fix_compression(model,
-                    module_name,
-                    compression_technique,
-                    mask=None,
-                    dim_reduction=False):
+def fix_compression(model, module_name, compression_technique, mask=None, dim_reduction=False):
     """
     Fix the compression technique of a module.
     Args:
@@ -243,17 +209,14 @@ def fix_compression(model,
     # Here we can make things much simpler by just replacing the module
     module = recursive_getattr(model, module_name)
     for k, v in compression_technique.items():
-        if k == WEIGHT_QUANTIZATION and v[WEIGHT_QUANTIZE_IN_FORWARD_ENABLED] and v[
-                WEIGHT_QUANTIZE_ENABLED]:
+        if k == WEIGHT_QUANTIZATION and v[WEIGHT_QUANTIZE_IN_FORWARD_ENABLED] and v[WEIGHT_QUANTIZE_ENABLED]:
             return module.fix_weight_quantization()
         elif k == SPARSE_PRUNING and v[SPARSE_PRUNING_ENABLED]:
             return module.fix_sparse_pruning_helper()
         elif k == ROW_PRUNING and (v[ROW_PRUNING_ENABLED] or mask is not None):
             return module.fix_row_col_pruning_helper(mask, dim_reduction=dim_reduction)
         elif k == HEAD_PRUNING and (v[HEAD_PRUNING_ENABLED] or mask is not None):
-            return module.fix_head_pruning_helper(mask,
-                                                  v[HEAD_PRUNING_NUM_HEADS],
-                                                  dim_reduction=dim_reduction)
+            return module.fix_head_pruning_helper(mask, v[HEAD_PRUNING_NUM_HEADS], dim_reduction=dim_reduction)
         elif k == CHANNEL_PRUNING and (v[CHANNEL_PRUNING_ENABLED] or mask is not None):
             return module.fix_channel_pruning_helper(mask, dim_reduction=dim_reduction)
 
@@ -270,10 +233,9 @@ def convert_conv1d_to_linear(model, convert_type):
     for name, module in c_model.named_modules():
         if isinstance(module, convert_type):
             old_module = recursive_getattr(c_model, name)
-            new_module = torch.nn.Linear(
-                old_module.weight.data.size(0),
-                old_module.weight.data.size(1),
-                bias=True if old_module.bias is not None else False)
+            new_module = torch.nn.Linear(old_module.weight.data.size(0),
+                                         old_module.weight.data.size(1),
+                                         bias=True if old_module.bias is not None else False)
             new_module.weight.data = old_module.weight.data.t().contiguous()
             if new_module.bias is not None:
                 new_module.bias.data = old_module.bias.data.view(-1)

@@ -48,14 +48,9 @@ class TestPLDModel(DistributedTest):
         hidden_dim = 10
 
         model = PLD_SimpleModel(hidden_dim, empty_grad=False)
-        model, _, _, _ = deepspeed.initialize(config=config_dict,
-                                              model=model,
-                                              model_parameters=model.parameters())
+        model, _, _, _ = deepspeed.initialize(config=config_dict, model=model, model_parameters=model.parameters())
 
-        data_loader = random_dataloader(model=model,
-                                        total_samples=50,
-                                        hidden_dim=hidden_dim,
-                                        device=model.device)
+        data_loader = random_dataloader(model=model, total_samples=50, hidden_dim=hidden_dim, device=model.device)
 
         for i, batch in enumerate(data_loader):
             loss = model(batch[0], batch[1])
@@ -94,14 +89,9 @@ class TestNonPLDModel(DistributedTest):
         hidden_dim = 10
 
         model = SimpleModel(hidden_dim, empty_grad=False)
-        model, _, _, _ = deepspeed.initialize(config=config_dict,
-                                              model=model,
-                                              model_parameters=model.parameters())
+        model, _, _, _ = deepspeed.initialize(config=config_dict, model=model, model_parameters=model.parameters())
 
-        data_loader = random_dataloader(model=model,
-                                        total_samples=1,
-                                        hidden_dim=hidden_dim,
-                                        device=model.device)
+        data_loader = random_dataloader(model=model, total_samples=1, hidden_dim=hidden_dim, device=model.device)
 
         for i, batch in enumerate(data_loader):
             with pytest.raises(TypeError):

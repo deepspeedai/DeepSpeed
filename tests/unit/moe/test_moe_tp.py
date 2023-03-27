@@ -9,6 +9,7 @@ from deepspeed.moe.layer import MoE
 
 
 class MPU():
+
     def __init__(self, tp_world_size):
         self.rank = deepspeed.comm.get_rank()
         self.world_size = deepspeed.comm.get_world_size()
@@ -57,21 +58,12 @@ class TestMOETensorParallel(DistributedTest):
         if not required_torch_version():
             pytest.skip("DeepSpeed MoE tests need torch 1.8 or higher to run correctly")
 
-        config_dict = {
-            "train_batch_size": 8,
-            "steps_per_print": 1,
-            "fp16": {
-                "enabled": True
-            }
-        }
+        config_dict = {"train_batch_size": 8, "steps_per_print": 1, "fp16": {"enabled": True}}
         hidden_dim = 16
 
-        tensor_parallel_expert = torch.nn.Sequential(
-            torch.nn.Linear(hidden_dim,
-                            4 * hidden_dim // tp_size),
-            torch.nn.ReLU(),
-            torch.nn.Linear(4 * hidden_dim // tp_size,
-                            hidden_dim))
+        tensor_parallel_expert = torch.nn.Sequential(torch.nn.Linear(hidden_dim, 4 * hidden_dim // tp_size),
+                                                     torch.nn.ReLU(),
+                                                     torch.nn.Linear(4 * hidden_dim // tp_size, hidden_dim))
 
         # set num experts to world size
         world_size = deepspeed.comm.get_world_size()
@@ -92,7 +84,6 @@ class TestMOETensorParallel(DistributedTest):
 
         assert model.num_local_experts == world_size // ep_size
         if enable_expert_tp:
-            assert deepspeed.utils.groups._get_expert_model_parallel_world_size(
-            ) == tp_size
+            assert deepspeed.utils.groups._get_expert_model_parallel_world_size() == tp_size
         else:
             assert deepspeed.utils.groups._get_expert_model_parallel_world_size() == 1

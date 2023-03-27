@@ -16,14 +16,7 @@ def err(s: str) -> None:
 success = True
 failures = []
 for f in sys.argv[1:]:
-    res = subprocess.run(
-        ["git",
-         "grep",
-         "--quiet",
-         "-e",
-         r"Copyright .* DeepSpeed Team",
-         f],
-        capture_output=True)
+    res = subprocess.run(["git", "grep", "--quiet", "-e", r"Copyright .* DeepSpeed Team", f], capture_output=True)
     if res.returncode == 1:
         success = False
         failures.append(f)

@@ -61,6 +61,7 @@ class TestClientOptimizer(DistributedTest):
     world_size = 1
 
     def test(self, optimizer_type):
+
         def _optimizer_callable(params) -> Optimizer:
             return AdamW(params=params)
 
@@ -77,9 +78,9 @@ class TestClientOptimizer(DistributedTest):
             client_optimizer = _optimizer_callable
 
         _, ds_optimizer, _, _ = deepspeed.initialize(config=config_dict,
-                                                    model=model,
-                                                    model_parameters=list(model.parameters()),
-                                                    optimizer=client_optimizer)
+                                                     model=model,
+                                                     model_parameters=list(model.parameters()),
+                                                     optimizer=client_optimizer)
         if client_optimizer is None:
             assert isinstance(ds_optimizer, FusedAdam)
         elif isinstance(client_optimizer, Optimizer):
@@ -93,15 +94,7 @@ class TestConfigOptimizer(DistributedTest):
     world_size = 1
 
     def test(self, client_parameters):
-        ds_config = {
-            "train_batch_size": 1,
-            "optimizer": {
-                "type": "Adam",
-                "params": {
-                    "lr": 0.001
-                }
-            }
-        }
+        ds_config = {"train_batch_size": 1, "optimizer": {"type": "Adam", "params": {"lr": 0.001}}}
 
         hidden_dim = 10
         model = SimpleModel(hidden_dim)
@@ -111,9 +104,7 @@ class TestConfigOptimizer(DistributedTest):
         else:
             model_parameters = None
 
-        _, ds_optimizer, _, _ = deepspeed.initialize(config=ds_config,
-                                                    model=model,
-                                                    model_parameters=model_parameters)
+        _, ds_optimizer, _, _ = deepspeed.initialize(config=ds_config, model=model, model_parameters=model_parameters)
 
         assert isinstance(ds_optimizer, FusedAdam)
 
@@ -205,14 +196,14 @@ class TestOptimizerImplementation(DistributedTest):
 
         if key in is_supported:
             _, ds_optimizer, _, _ = deepspeed.initialize(config=ds_config,
-                                                        model=model,
-                                                        model_parameters=model_parameters)
+                                                         model=model,
+                                                         model_parameters=model_parameters)
             assert True
         else:
             with pytest.raises(NotImplementedError):
                 _, ds_optimizer, _, _ = deepspeed.initialize(config=ds_config,
-                                                            model=model,
-                                                            model_parameters=model_parameters)
+                                                             model=model,
+                                                             model_parameters=model_parameters)
 
 
 @pytest.mark.parametrize("scheduler_type", [None, _LRScheduler, Callable])
@@ -221,6 +212,7 @@ class TestClientLrScheduler(DistributedTest):
     world_size = 1
 
     def test(self, scheduler_type, optimizer_type):
+
         def _my_lambda(epoch):
             return epoch // 10
 
@@ -252,14 +244,11 @@ class TestClientLrScheduler(DistributedTest):
                 client_scheduler = LambdaLR(client_optimizer, _my_lambda)
             else:
                 # Verify invalid combination is correctly handled
-                client_scheduler = LambdaLR(torch.optim.Adam(model.parameters()),
-                                            _my_lambda)
+                client_scheduler = LambdaLR(torch.optim.Adam(model.parameters()), _my_lambda)
         else:
             client_scheduler = _lr_scheduler_callable
 
-        if isinstance(client_scheduler,
-                      _LRScheduler) and not isinstance(client_optimizer,
-                                                       Optimizer):
+        if isinstance(client_scheduler, _LRScheduler) and not isinstance(client_optimizer, Optimizer):
             with pytest.raises(AssertionError):
                 _, _, _, _ = deepspeed.initialize(config=config_dict,
                                                   model=model,

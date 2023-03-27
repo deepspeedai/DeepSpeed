@@ -14,6 +14,7 @@ class RandomLayerTokenDrop(Module):
     """
     A  layer wrapper for random LTD
     """
+
     def __init__(self, layer: Module):
         super(RandomLayerTokenDrop, self).__init__()
         self.random_ltd_layer = layer
@@ -52,9 +53,7 @@ class RandomLayerTokenDrop(Module):
         elif self.model_type == 'decoder':
             self.index_generator = gpt_sample_tokens
         else:
-            logger.warning(
-                "************For now, we only support encoder-only or decoder-only models************"
-            )
+            logger.warning("************For now, we only support encoder-only or decoder-only models************")
             raise NotImplementedError
 
     def get_bsh(self, hidden_stats):
@@ -78,40 +77,36 @@ class RandomLayerTokenDrop(Module):
                                                                                       self.curr_micro_batch, \
                                                                                       self.random_ltd_num_layer, \
                                                                                       hidden_states.device, mask)
-                self.random_ltd_scheduler.state[
-                    RANDOM_LTD_SAMPLE_INDEX] = sampled_indices
-                self.random_ltd_scheduler.state[
-                    RANDOM_LTD_ATTENTION_MASK] = part_attention_mask
+                self.random_ltd_scheduler.state[RANDOM_LTD_SAMPLE_INDEX] = sampled_indices
+                self.random_ltd_scheduler.state[RANDOM_LTD_ATTENTION_MASK] = part_attention_mask
             else:
-                sampled_indices = self.random_ltd_scheduler.state[
-                    RANDOM_LTD_SAMPLE_INDEX]
-                part_attention_mask = self.random_ltd_scheduler.state[
-                    RANDOM_LTD_ATTENTION_MASK]
+                sampled_indices = self.random_ltd_scheduler.state[RANDOM_LTD_SAMPLE_INDEX]
+                part_attention_mask = self.random_ltd_scheduler.state[RANDOM_LTD_ATTENTION_MASK]
 
-
-            hidden_states, part_hidden_states = GatherTokens.apply(hidden_states, sampled_indices[self.random_ltd_layer_id,:,:], self.batch_first)
+            hidden_states, part_hidden_states = GatherTokens.apply(hidden_states,
+                                                                   sampled_indices[self.random_ltd_layer_id, :, :],
+                                                                   self.batch_first)
             if self.mask_name is not None:
                 if self.model_type == 'encoder':
-                    kwargs[self.mask_name] = part_attention_mask[
-                        self.random_ltd_layer_id]
+                    kwargs[self.mask_name] = part_attention_mask[self.random_ltd_layer_id]
                 else:
                     kwargs[self.mask_name] = part_attention_mask
 
             outputs = self.random_ltd_layer(part_hidden_states, **kwargs)
 
             if isinstance(outputs, tuple):
-                hidden_states = ScatterTokens.apply(hidden_states, outputs[0], sampled_indices[self.random_ltd_layer_id,:,:], self.batch_first)
+                hidden_states = ScatterTokens.apply(hidden_states, outputs[0],
+                                                    sampled_indices[self.random_ltd_layer_id, :, :], self.batch_first)
                 my_list = list(outputs)
                 my_list[0] = hidden_states
                 return tuple(my_list)
             elif isinstance(outputs, Tensor):
-                hidden_states = ScatterTokens.apply(hidden_states, outputs, sampled_indices[self.random_ltd_layer_id,:,:], self.batch_first)
+                hidden_states = ScatterTokens.apply(hidden_states, outputs,
+                                                    sampled_indices[self.random_ltd_layer_id, :, :], self.batch_first)
                 return hidden_states
             else:
-                logger.warning(
-                    "************For now, we only support tuple and tensor output.  \
-                       You need to adjust the output according to the layer in your model************"
-                )
+                logger.warning("************For now, we only support tuple and tensor output.  \
+                       You need to adjust the output according to the layer in your model************")
                 raise NotImplementedError
         else:
             return self.random_ltd_layer(hidden_states, **kwargs)

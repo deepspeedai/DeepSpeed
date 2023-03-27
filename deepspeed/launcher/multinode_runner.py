@@ -13,6 +13,7 @@ from .constants import PDSH_MAX_FAN_OUT, MVAPICH_TMP_HOSTFILE
 
 
 class MultiNodeRunner(ABC):
+
     def __init__(self, args, world_info_base64):
         self.args = args
         self.validate_args()
@@ -45,6 +46,7 @@ class MultiNodeRunner(ABC):
 
 
 class PDSHRunner(MultiNodeRunner):
+
     def __init__(self, args, world_info_base64):
         super().__init__(args, world_info_base64)
 
@@ -56,9 +58,7 @@ class PDSHRunner(MultiNodeRunner):
         return "pdsh"
 
     def parse_user_args(self):
-        return list(
-            map(lambda x: x if x.startswith("-") else f"'{x}'",
-                self.args.user_args))
+        return list(map(lambda x: x if x.startswith("-") else f"'{x}'", self.args.user_args))
 
     def get_cmd(self, environment, active_resources):
         environment['PDSH_RCMD_TYPE'] = 'ssh'
@@ -68,14 +68,8 @@ class PDSHRunner(MultiNodeRunner):
 
         # PDSH flags for max node fan out and specific hosts to launch on
         # See https://linux.die.net/man/1/pdsh for flag details
-        pdsh_cmd_args = [
-            'pdsh',
-            '-S',
-            '-f',
-            str(PDSH_MAX_FAN_OUT),
-            '-w',
-            active_workers
-        ] + split(self.args.launcher_args)
+        pdsh_cmd_args = ['pdsh', '-S', '-f', str(PDSH_MAX_FAN_OUT), '-w', active_workers] + split(
+            self.args.launcher_args)
 
         exports = ""
         for key, val in self.exports.items():
@@ -84,15 +78,8 @@ class PDSHRunner(MultiNodeRunner):
         # https://linux.die.net/man/1/pdsh
         # %n will be replaced by pdsh command
         deepspeed_launch = [
-            exports,
-            f"cd {os.path.abspath('.')};",
-            sys.executable,
-            "-u",
-            "-m",
-            "deepspeed.launcher.launch",
-            f'--world_info={self.world_info_base64}',
-            "--node_rank=%n",
-            f"--master_addr={self.args.master_addr}",
+            exports, f"cd {os.path.abspath('.')};", sys.executable, "-u", "-m", "deepspeed.launcher.launch",
+            f'--world_info={self.world_info_base64}', "--node_rank=%n", f"--master_addr={self.args.master_addr}",
             f"--master_port={self.args.master_port}"
         ]
         if self.args.no_python:
@@ -111,11 +98,11 @@ class PDSHRunner(MultiNodeRunner):
         cmd_to_search = [i + "\\" for i in deepspeed_launch[2:6]]
 
         kill_command = pdsh_cmd_args + ["pkill -f ", " ".join(cmd_to_search)[:-2]]
-        return pdsh_cmd_args + deepspeed_launch + [self.user_script
-                                                   ] + self.user_arguments, kill_command
+        return pdsh_cmd_args + deepspeed_launch + [self.user_script] + self.user_arguments, kill_command
 
 
 class OpenMPIRunner(MultiNodeRunner):
+
     def __init__(self, args, world_info_base64, resource_pool):
         super().__init__(args, world_info_base64)
         self.resource_pool = resource_pool
@@ -133,11 +120,9 @@ class OpenMPIRunner(MultiNodeRunner):
         super().validate_args()
         #TODO: Allow for include/exclude at node-level but not gpu-level
         if self.args.include != "" or self.args.exclude != "":
-            raise ValueError(
-                f"{self.name} backend does not support worker include/exclusion")
+            raise ValueError(f"{self.name} backend does not support worker include/exclusion")
         if self.args.num_nodes != -1 or self.args.num_gpus != -1:
-            raise ValueError(
-                f"{self.name} backend does not support limiting num nodes/gpus")
+            raise ValueError(f"{self.name} backend does not support limiting num nodes/gpus")
 
     def get_cmd(self, environment, active_resources):
         total_process_count = sum(self.resource_pool.values())
@@ -166,11 +151,11 @@ class OpenMPIRunner(MultiNodeRunner):
             if self.args.module:
                 python_exec.append("-m")
 
-        return mpirun_cmd + export_cmd + python_exec + [self.user_script
-                                                        ] + self.user_arguments
+        return mpirun_cmd + export_cmd + python_exec + [self.user_script] + self.user_arguments
 
 
 class MPICHRunner(MultiNodeRunner):
+
     def __init__(self, args, world_info_base64, resource_pool):
         super().__init__(args, world_info_base64)
         self.resource_pool = resource_pool
@@ -187,12 +172,10 @@ class MPICHRunner(MultiNodeRunner):
         super().validate_args()
         #TODO: Allow for include/exclude at node-level but not gpu-level
         if self.args.include != "" or self.args.exclude != "":
-            raise ValueError(
-                f"{self.name} backend does not support worker include/exclusion")
+            raise ValueError(f"{self.name} backend does not support worker include/exclusion")
 
         if self.args.num_nodes != -1 or self.args.num_gpus != -1:
-            raise ValueError(
-                f"{self.name} backend does not support limiting num nodes/gpus")
+            raise ValueError(f"{self.name} backend does not support limiting num nodes/gpus")
 
     def get_cmd(self, environment, active_resources):
         devices_per_node = self.resource_pool.values()
@@ -220,6 +203,7 @@ class MPICHRunner(MultiNodeRunner):
 
 
 class SlurmRunner(MultiNodeRunner):
+
     def __init__(self, args, world_info_base64, resource_pool):
         super().__init__(args, world_info_base64)
         self.resource_pool = resource_pool
@@ -232,7 +216,8 @@ class SlurmRunner(MultiNodeRunner):
         return 'slurm'
 
     def get_cmd(self, environment, active_resources):
-        assert not getattr(self.args, 'detect_nvlink_pairs', False), "slurm backend does not support remapping visible devices"
+        assert not getattr(self.args, 'detect_nvlink_pairs',
+                           False), "slurm backend does not support remapping visible devices"
         total_process_count = sum(self.resource_pool.values())
         srun_cmd = [
             'srun',
@@ -261,12 +246,12 @@ class SlurmRunner(MultiNodeRunner):
             exports += f",{key}={val}"
 
         python_exec = [sys.executable, "-u"]
-        command = srun_cmd + [exports] + python_exec + [self.user_script
-                                                        ] + self.user_arguments
+        command = srun_cmd + [exports] + python_exec + [self.user_script] + self.user_arguments
         return command
 
 
 class MVAPICHRunner(MultiNodeRunner):
+
     def __init__(self, args, world_info_base64, resource_pool):
         super().__init__(args, world_info_base64)
         self.resource_pool = resource_pool
@@ -303,9 +288,7 @@ class MVAPICHRunner(MultiNodeRunner):
             if "MVAPICH2-GDR" in mpiname_results:
                 exists = True
             else:
-                warnings.warn(
-                    f"Expected MVAPICH2-GDR as return for mpiname but received {mpiname_results}"
-                )
+                warnings.warn(f"Expected MVAPICH2-GDR as return for mpiname but received {mpiname_results}")
         return exists
 
     @property
@@ -316,11 +299,9 @@ class MVAPICHRunner(MultiNodeRunner):
         super().validate_args()
         #TODO: Allow for include/exclude at node-level but not gpu-level
         if self.args.include != "" or self.args.exclude != "":
-            raise ValueError(
-                f"{self.name} backend does not support worker include/exclusion")
+            raise ValueError(f"{self.name} backend does not support worker include/exclusion")
         if self.args.num_nodes != -1 or self.args.num_gpus != -1:
-            raise ValueError(
-                f"{self.name} backend does not support limiting num nodes/gpus")
+            raise ValueError(f"{self.name} backend does not support limiting num nodes/gpus")
 
     def get_cmd(self, environment, active_resources):
         devices_per_node = self.resource_pool.values()
@@ -353,5 +334,4 @@ class MVAPICHRunner(MultiNodeRunner):
             if self.args.module:
                 python_exec.append("-m")
 
-        return mpirun_cmd + export_cmd + python_exec + [self.user_script
-                                                        ] + self.user_arguments
+        return mpirun_cmd + export_cmd + python_exec + [self.user_script] + self.user_arguments

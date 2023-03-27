@@ -176,6 +176,7 @@ def fetch_hostfile(hostfile_path):
 
 
 def validate_ds_config(config: dict):
+
     def is_False(config: dict, key):
         if config is None:
             return False
@@ -189,9 +190,7 @@ def validate_ds_config(config: dict):
     if stage == 1:
         return True
     elif stage == 2:
-        if is_False(config_zero,
-                    "cpu_offload") and is_False(config_zero,
-                                                "cpu_offload_params"):
+        if is_False(config_zero, "cpu_offload") and is_False(config_zero, "cpu_offload_params"):
             return False
     elif stage == 3:
         offload_devices = ["cpu", "nvme"]
@@ -289,14 +288,13 @@ def get_all_configs(tuning_space: dict, ignore_keys=None):
     Args:
         tuning_space (dict): the tuning space where tunable parameters are lists of values.
     """
+
     def gen_combinations(d: dict):
         keys, values = d.keys(), d.values()
         for v in values:
             if not isinstance(v, list):
                 v = [v]
-        values_choices = (gen_combinations(v) if isinstance(v,
-                                                            dict) else get_list(v)
-                          for v in values)
+        values_choices = (gen_combinations(v) if isinstance(v, dict) else get_list(v) for v in values)
         for comb in itertools.product(*values_choices):
             yield dict(zip(keys, comb))
 

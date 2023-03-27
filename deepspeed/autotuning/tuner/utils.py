@@ -44,9 +44,7 @@ def gen_combinations(d: dict):
     for v in values:
         if not isinstance(v, list):
             v = [v]
-    values_choices = (gen_combinations(v) if isinstance(v,
-                                                        dict) else get_list(v)
-                      for v in values)
+    values_choices = (gen_combinations(v) if isinstance(v, dict) else get_list(v) for v in values)
     for comb in itertools.product(*values_choices):
         yield dict(zip(keys, comb))
 

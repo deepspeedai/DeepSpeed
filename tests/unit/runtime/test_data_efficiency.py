@@ -9,6 +9,7 @@ from unit.simple_model import Curriculum_SimpleModel, SimpleModel, random_datalo
 
 
 class MPU():
+
     def __init__(self, tp_world_size):
         self.rank = deepspeed.comm.get_rank()
         self.world_size = deepspeed.comm.get_world_size()
@@ -103,10 +104,10 @@ class TestDataEfficiency(DistributedTest):
         model = SimpleModel(hidden_dim)
         dataset = random_dataset(20, hidden_dim, torch.device('cpu'), dtype=torch.half)
         model, _, data_loader, _ = deepspeed.initialize(config=config_dict,
-                                              model=model,
-                                              training_data=dataset,
-                                              model_parameters=model.parameters(),
-                                              mpu=MPU(1))
+                                                        model=model,
+                                                        training_data=dataset,
+                                                        model_parameters=model.parameters(),
+                                                        mpu=MPU(1))
         if model.mpu.get_data_parallel_rank() == 0 and not os.path.exists('/tmp'):
             os.makedirs('/tmp')
         model.set_data_post_process_func(data_post_process)
@@ -147,15 +148,8 @@ class TestLegacyCurriculumScheduler(DistributedTest):
                 "max_difficulty": 5,
                 "schedule_type": "fixed_discrete",
                 "schedule_config": {
-                    "difficulty": [1,
-                                   2,
-                                   3,
-                                   4,
-                                   5],
-                    "max_step": [2,
-                                 4,
-                                 6,
-                                 8]
+                    "difficulty": [1, 2, 3, 4, 5],
+                    "max_step": [2, 4, 6, 8]
                 }
             }
         }
@@ -163,13 +157,8 @@ class TestLegacyCurriculumScheduler(DistributedTest):
         ground_truths = {1: 1, 2: 1, 3: 2, 4: 2, 5: 3, 6: 3, 7: 4, 8: 4}
 
         model = Curriculum_SimpleModel(hidden_dim)
-        model, _, _, _ = deepspeed.initialize(config=config_dict,
-                                              model=model,
-                                              model_parameters=model.parameters())
-        data_loader = random_dataloader(model=model,
-                                        total_samples=20,
-                                        hidden_dim=hidden_dim,
-                                        device=model.device)
+        model, _, _, _ = deepspeed.initialize(config=config_dict, model=model, model_parameters=model.parameters())
+        data_loader = random_dataloader(model=model, total_samples=20, hidden_dim=hidden_dim, device=model.device)
         for n, batch in enumerate(data_loader):
             loss, seqlen = model(batch[0], batch[1])
             model.backward(loss)
@@ -212,13 +201,8 @@ class TestLegacyCurriculumScheduler(DistributedTest):
         ground_truths = {1: 2, 2: 4, 3: 4, 4: 6, 5: 6, 6: 8, 7: 8, 8: 10, 9: 10, 10: 10}
 
         model = Curriculum_SimpleModel(hidden_dim)
-        model, _, _, _ = deepspeed.initialize(config=config_dict,
-                                              model=model,
-                                              model_parameters=model.parameters())
-        data_loader = random_dataloader(model=model,
-                                        total_samples=20,
-                                        hidden_dim=hidden_dim,
-                                        device=model.device)
+        model, _, _, _ = deepspeed.initialize(config=config_dict, model=model, model_parameters=model.parameters())
+        data_loader = random_dataloader(model=model, total_samples=20, hidden_dim=hidden_dim, device=model.device)
         for n, batch in enumerate(data_loader):
             loss, seqlen = model(batch[0], batch[1])
             model.backward(loss)

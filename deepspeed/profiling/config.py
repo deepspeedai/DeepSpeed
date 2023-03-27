@@ -9,6 +9,7 @@ from deepspeed.profiling.constants import *
 
 
 class DeepSpeedFlopsProfilerConfig(DeepSpeedConfigObject):
+
     def __init__(self, param_dict):
         super(DeepSpeedFlopsProfilerConfig, self).__init__()
 
@@ -25,26 +26,18 @@ class DeepSpeedFlopsProfilerConfig(DeepSpeedConfigObject):
         self._initialize(flops_profiler_dict)
 
     def _initialize(self, flops_profiler_dict):
-        self.enabled = get_scalar_param(flops_profiler_dict,
-                                        FLOPS_PROFILER_ENABLED,
-                                        FLOPS_PROFILER_ENABLED_DEFAULT)
+        self.enabled = get_scalar_param(flops_profiler_dict, FLOPS_PROFILER_ENABLED, FLOPS_PROFILER_ENABLED_DEFAULT)
 
-        self.profile_step = get_scalar_param(flops_profiler_dict,
-                                             FLOPS_PROFILER_PROFILE_STEP,
+        self.profile_step = get_scalar_param(flops_profiler_dict, FLOPS_PROFILER_PROFILE_STEP,
                                              FLOPS_PROFILER_PROFILE_STEP_DEFAULT)
 
-        self.module_depth = get_scalar_param(flops_profiler_dict,
-                                             FLOPS_PROFILER_MODULE_DEPTH,
+        self.module_depth = get_scalar_param(flops_profiler_dict, FLOPS_PROFILER_MODULE_DEPTH,
                                              FLOPS_PROFILER_MODULE_DEPTH_DEFAULT)
 
-        self.top_modules = get_scalar_param(flops_profiler_dict,
-                                            FLOPS_PROFILER_TOP_MODULES,
+        self.top_modules = get_scalar_param(flops_profiler_dict, FLOPS_PROFILER_TOP_MODULES,
                                             FLOPS_PROFILER_TOP_MODULES_DEFAULT)
 
-        self.detailed = get_scalar_param(flops_profiler_dict,
-                                         FLOPS_PROFILER_DETAILED,
-                                         FLOPS_PROFILER_DETAILED_DEFAULT)
+        self.detailed = get_scalar_param(flops_profiler_dict, FLOPS_PROFILER_DETAILED, FLOPS_PROFILER_DETAILED_DEFAULT)
 
-        self.output_file = get_scalar_param(flops_profiler_dict,
-                                            FLOPS_PROFILER_OUTPUT_FILE,
+        self.output_file = get_scalar_param(flops_profiler_dict, FLOPS_PROFILER_OUTPUT_FILE,
                                             FLOPS_PROFILER_OUTPUT_FILE_DEFAULT)

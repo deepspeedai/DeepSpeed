@@ -84,11 +84,7 @@ def get_world_size_from_launcher():
 
 def get_default_args(func):
     signature = inspect.signature(func)
-    return {
-        k: v.default
-        for k,
-        v in signature.parameters.items() if v.default is not inspect.Parameter.empty
-    }
+    return {k: v.default for k, v in signature.parameters.items() if v.default is not inspect.Parameter.empty}
 
 
 # We need this hacky function since torch doesn't consistently name or place the input tensor args

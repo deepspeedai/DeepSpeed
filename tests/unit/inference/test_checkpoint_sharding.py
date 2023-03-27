@@ -10,6 +10,7 @@ from transformers import AutoConfig, AutoModelForCausalLM
 
 
 def check_dtype(model, expected_dtype):
+
     def find_dtype(module):
         for child in module.children():
             if isinstance(child, DeepSpeedTransformerInference):
@@ -21,17 +22,11 @@ def check_dtype(model, expected_dtype):
 
     found_dtype = find_dtype(model)
     assert found_dtype, "Did not find DeepSpeedTransformerInference in model"
-    assert (
-        found_dtype == expected_dtype
-    ), f"Expected transformer dtype {expected_dtype}, but found {found_dtype}"
+    assert (found_dtype == expected_dtype), f"Expected transformer dtype {expected_dtype}, but found {found_dtype}"
 
 
-@pytest.fixture(params=[
-    "bigscience/bloom-560m",
-    "EleutherAI/gpt-j-6B",
-    "EleutherAI/gpt-neo-125M",
-    "facebook/opt-125m"
-])
+@pytest.fixture(
+    params=["bigscience/bloom-560m", "EleutherAI/gpt-j-6B", "EleutherAI/gpt-neo-125M", "facebook/opt-125m"])
 def model_name(request):
     return request.param
 
@@ -55,13 +50,11 @@ class save_shard(DistributedFixture):
                 "tensor_parallel": {
                     "tp_size": world_size
                 },
-                "save_mp_checkpoint_path": os.path.join(str(class_tmpdir),
-                                                        model_name),
+                "save_mp_checkpoint_path": os.path.join(str(class_tmpdir), model_name),
             }
 
             # Load model and save sharded checkpoint
-            model = AutoModelForCausalLM.from_pretrained(model_name,
-                                                         torch_dtype=torch.float16)
+            model = AutoModelForCausalLM.from_pretrained(model_name, torch_dtype=torch.float16)
             model = deepspeed.init_inference(model, config=inf_config)
 
 
@@ -78,17 +71,14 @@ class TestCheckpointShard(DistributedTest):
             "tensor_parallel": {
                 "tp_size": world_size
             },
-            "checkpoint": os.path.join(class_tmpdir,
-                                       model_name,
-                                       "ds_inference_config.json"),
+            "checkpoint": os.path.join(class_tmpdir, model_name, "ds_inference_config.json"),
         }
 
         # Load model on meta tensors
         model_config = AutoConfig.from_pretrained(model_name)
         # Note that we use half precision to load initially, even for int8
         with deepspeed.OnDevice(dtype=torch.float16, device="meta"):
-            model = AutoModelForCausalLM.from_config(model_config,
-                                                     torch_dtype=torch.bfloat16)
+            model = AutoModelForCausalLM.from_config(model_config, torch_dtype=torch.bfloat16)
         model = model.eval()
         model = deepspeed.init_inference(model, config=inf_config)
         check_dtype(model, dtype)

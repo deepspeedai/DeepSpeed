@@ -9,8 +9,7 @@ from deepspeed.ops.op_builder import InferenceBuilder
 from deepspeed.accelerator import get_accelerator
 
 if not deepspeed.ops.__compatible_ops__[InferenceBuilder.NAME]:
-    pytest.skip("Inference ops are not available on this system",
-                allow_module_level=True)
+    pytest.skip("Inference ops are not available on this system", allow_module_level=True)
 
 inference_module = None
 torch_minor_version = None
@@ -27,8 +26,7 @@ def run_bias_geglu_reference(activations, bias):
     # Explicitly using the default GeLU
     activations = activations + bias.reshape(1, 1, -1)
     hidden_states, gate = activations.chunk(2, dim=-1)
-    return hidden_states * torch.nn.functional.gelu(gate.to(torch.float32)).to(
-        activations.dtype)
+    return hidden_states * torch.nn.functional.gelu(gate.to(torch.float32)).to(activations.dtype)
 
 
 def run_bias_geglu_ds(activation, bias):
@@ -44,14 +42,8 @@ def run_bias_geglu_ds(activation, bias):
 @pytest.mark.parametrize("channels", [512, 1232, 4096])
 @pytest.mark.parametrize("dtype", [torch.float16, torch.float32])
 def test_bias_geglu(batch, sequence, channels, dtype):
-    activation = torch.randn((batch,
-                              sequence,
-                              channels * 2),
-                             dtype=dtype,
-                             device=get_accelerator().device_name())
-    bias = torch.randn((channels * 2),
-                       dtype=dtype,
-                       device=get_accelerator().device_name())
+    activation = torch.randn((batch, sequence, channels * 2), dtype=dtype, device=get_accelerator().device_name())
+    bias = torch.randn((channels * 2), dtype=dtype, device=get_accelerator().device_name())
 
     ds_out = run_bias_geglu_ds(activation, bias)
     ref_out = run_bias_geglu_reference(activation, bias)

@@ -13,21 +13,9 @@ parser.add_argument(
     default="./results",
     help="directory containing sweep results",
 )
-parser.add_argument("--version",
-                    "-v",
-                    type=int,
-                    default=0,
-                    help="version to be collected")
-parser.add_argument("--gen-text-n",
-                    "-n",
-                    type=int,
-                    default=1,
-                    help="expected number of generated text")
-parser.add_argument("--output",
-                    "-o",
-                    type=str,
-                    default="./results.csv",
-                    help="output file")
+parser.add_argument("--version", "-v", type=int, default=0, help="version to be collected")
+parser.add_argument("--gen-text-n", "-n", type=int, default=1, help="expected number of generated text")
+parser.add_argument("--output", "-o", type=str, default="./results.csv", help="output file")
 args = parser.parse_args()
 
 
@@ -107,9 +95,7 @@ if __name__ == "__main__":
 
             params = get_benchmark_params(args.results_dir, file_path)
             if not params:
-                print(
-                    f"WARNING: Could not detect benchmark settings for file {file_path}, skipping"
-                )
+                print(f"WARNING: Could not detect benchmark settings for file {file_path}, skipping")
                 continue
 
             # Verify that the version matches that which we want to collect
@@ -121,9 +107,7 @@ if __name__ == "__main__":
 
             perf_data = get_perf_data(file_content)
             if not perf_data:
-                print(
-                    f"WARNING: Could not detect benchmark performance data for file {file_path}"
-                )
+                print(f"WARNING: Could not detect benchmark performance data for file {file_path}")
 
             generated_text = get_generated_text(file_content, args.gen_text_n)
             if not generated_text:
@@ -135,12 +119,7 @@ if __name__ == "__main__":
                 benchmarks_data.append({"branch": branch, **params, **error})
                 continue
 
-            benchmarks_data.append({
-                "branch": branch,
-                **params,
-                **perf_data,
-                **generated_text
-            })
+            benchmarks_data.append({"branch": branch, **params, **perf_data, **generated_text})
 
     # Convert to a DataFrame and save
     benchmarks_df = pd.DataFrame(benchmarks_data)

@@ -8,6 +8,7 @@ import time
 
 
 class BaseTestCase(unittest.TestCase):
+
     def __init__(self, methodName="DeepSpeed performance test"):
         super(BaseTestCase, self).__init__(methodName)
         self.test_dir = "./test"
@@ -23,10 +24,7 @@ class BaseTestCase(unittest.TestCase):
             other_args = "_" + other_args
 
         if test_config["deepspeed"]:
-            file_name = "_gpu{0}_{1}_ds{2}-{3}.log".format(test_config["gpus"],
-                                                           other_args,
-                                                           zero_args,
-                                                           self.timestr)
+            file_name = "_gpu{0}_{1}_ds{2}-{3}.log".format(test_config["gpus"], other_args, zero_args, self.timestr)
             save_dir = self.test_dir
         else:
             file_name = "_gpu{0}_{1}.log".format(test_config["gpus"], other_args)
@@ -46,22 +44,12 @@ class BaseTestCase(unittest.TestCase):
         time.sleep(20)
 
     def run_BingBertSquad_test(self, test_config, output):
-        ds_flag = " -d --deepspeed_config " + test_config["json"] if test_config[
-            "deepspeed"] else " "
-        other_args = " " + test_config[
-            "other_args"] if "other_args" in test_config else " "
+        ds_flag = " -d --deepspeed_config " + test_config["json"] if test_config["deepspeed"] else " "
+        other_args = " " + test_config["other_args"] if "other_args" in test_config else " "
 
-        cmd = "./run_BingBertSquad_sanity.sh -e 1 -g {0} {1} {2}".format(
-            test_config["gpus"],
-            other_args,
-            ds_flag)
+        cmd = "./run_BingBertSquad_sanity.sh -e 1 -g {0} {1} {2}".format(test_config["gpus"], other_args, ds_flag)
 
         self.ensure_directory_exists(output)
         with open(output, "w") as f:
             print(cmd)
-            subprocess.run(cmd,
-                           shell=True,
-                           check=False,
-                           executable='/bin/bash',
-                           stdout=f,
-                           stderr=f)
+            subprocess.run(cmd, shell=True, check=False, executable='/bin/bash', stdout=f, stderr=f)

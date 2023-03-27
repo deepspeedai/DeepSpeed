@@ -9,18 +9,15 @@ from unit.common import DistributedTest
 
 @pytest.mark.parametrize('half_op', [False, True])
 class TestAutoCastDisable(DistributedTest):
+
     def test_missing_amp_autocast(self, half_op):
         hidden_dim = 4
         if half_op:
             input = torch.randn(hidden_dim).to(get_accelerator().device_name()).half()
-            ds_linear = LinearModuleForZeroStage3(
-                hidden_dim,
-                hidden_dim).to(get_accelerator().device_name()).half()
+            ds_linear = LinearModuleForZeroStage3(hidden_dim, hidden_dim).to(get_accelerator().device_name()).half()
         else:
             input = torch.randn(hidden_dim).to(get_accelerator().device_name())
-            ds_linear = LinearModuleForZeroStage3(hidden_dim,
-                                                  hidden_dim).to(
-                                                      get_accelerator().device_name())
+            ds_linear = LinearModuleForZeroStage3(hidden_dim, hidden_dim).to(get_accelerator().device_name())
 
         output = ds_linear(input)
         assert output.dtype == ds_linear.weight.dtype
@@ -31,14 +28,10 @@ class TestAutoCastDisable(DistributedTest):
         hidden_dim = 4
         if half_op:
             input = torch.randn(hidden_dim).to(get_accelerator().device_name()).half()
-            ds_linear = LinearModuleForZeroStage3(
-                hidden_dim,
-                hidden_dim).to(get_accelerator().device_name()).half()
+            ds_linear = LinearModuleForZeroStage3(hidden_dim, hidden_dim).to(get_accelerator().device_name()).half()
         else:
             input = torch.randn(hidden_dim).to(get_accelerator().device_name())
-            ds_linear = LinearModuleForZeroStage3(hidden_dim,
-                                                  hidden_dim).to(
-                                                      get_accelerator().device_name())
+            ds_linear = LinearModuleForZeroStage3(hidden_dim, hidden_dim).to(get_accelerator().device_name())
 
         with amp.autocast(False):
             output = ds_linear(input)
@@ -46,24 +39,15 @@ class TestAutoCastDisable(DistributedTest):
 
 
 @pytest.mark.skipif(get_accelerator().amp() is None, reason='amp is not installed')
-@pytest.mark.parametrize('half_input, half_weight',
-                         [(False,
-                           False),
-                          (False,
-                           True),
-                          (True,
-                           False),
-                          (True,
-                           True)])
+@pytest.mark.parametrize('half_input, half_weight', [(False, False), (False, True), (True, False), (True, True)])
 class TestAutoCastEnable(DistributedTest):
+
     def test_autocast_linear(self, tmpdir, half_input, half_weight):
         amp = get_accelerator().amp()
 
         hidden_dim = 4
         input = torch.randn(hidden_dim).to(get_accelerator().device_name())
-        ds_linear = LinearModuleForZeroStage3(hidden_dim,
-                                              hidden_dim).to(
-                                                  get_accelerator().device_name())
+        ds_linear = LinearModuleForZeroStage3(hidden_dim, hidden_dim).to(get_accelerator().device_name())
 
         if half_input:
             input = input.half()
