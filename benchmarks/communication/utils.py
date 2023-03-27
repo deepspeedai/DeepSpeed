@@ -1,18 +1,61 @@
 '''Copyright The Microsoft DeepSpeed Team'''
 
 import torch
-import os
+import os, sys
 import math
 import argparse
-from benchmarks.communication.constants import *
+
+COMMS_BENCH_DIR = os.path.join(os.path.dirname(__file__), "../")
+sys.path.append(COMMS_BENCH_DIR)
+from communication.constants import *
 from deepspeed.accelerator import get_accelerator
 
 global dist
 
 
+def env2int(env_list, default=-1):
+    for e in env_list:
+        val = int(os.environ.get(e, -1))
+        if val >= 0: return val
+    return default
+
+
 def init_torch_distributed(backend):
     global dist
     import torch.distributed as dist
+
+    # discover rank/size info from env
+    if 'MASTER_PORT' not in os.environ:
+        os.environ['MASTER_PORT'] = str(TORCH_DISTRIBUTED_DEFAULT_PORT)
+    if 'MASTER_ADDR' not in os.environ:
+        try:
+            from mpi4py import MPI
+        except ModuleNotFoundError:
+            print(
+                "Cannot import mpi4py and MASTER_ADDR not set. Please either install mpi4py or set the MASTER_ADDR on all ranks"
+            )
+            raise Exception
+        import subprocess
+        comm = MPI.COMM_WORLD
+        rank = comm.Get_rank()
+        master_addr = None
+        if rank == 0:
+            hostname_cmd = ["hostname -I"]
+            result = subprocess.check_output(hostname_cmd, shell=True)
+            master_addr = result.decode('utf-8').split()[0]
+        master_addr = comm.bcast(master_addr, root=0)
+        os.environ['MASTER_ADDR'] = master_addr
+    local_rank = env2int(
+        ['LOCAL_RANK', 'MPI_LOCALRANKID', 'OMPI_COMM_WORLD_LOCAL_RANK', 'MV2_COMM_WORLD_LOCAL_RANK', 'SLURM_LOCALID'])
+    if 'LOCAL_RANK' not in os.environ:
+        os.environ['LOCAL_RANK'] = str(local_rank)
+    rank = env2int(['RANK', 'MPI_RANKID', 'OMPI_COMM_WORLD_RANK', 'MV2_COMM_WORLD_RANK', 'SLURM_PROCID'])
+    if 'RANK' not in os.environ:
+        os.environ['RANK'] = str(rank)
+    world_size = env2int(['WORLD_SIZE', 'OMPI_COMM_WORLD_SIZE', 'MV2_COMM_WORLD_SIZE', 'SLURM_NPROCS'])
+    if 'WORLD_SIZE' not in os.environ:
+        os.environ['WORLD_SIZE'] = str(world_size)
+
     torch.distributed.init_process_group(backend)
     local_rank = int(os.environ['LOCAL_RANK'])
     get_accelerator().set_device(local_rank)
@@ -169,7 +212,7 @@ def benchmark_parser():
     parser.add_argument("--backend",
                         type=str,
                         default=DEFAULT_BACKEND,
-                        choices=['nccl', 'ccl'],
+                        choices=['nccl', 'ccl', 'mpi'],
                         help='Communication library to use')
     parser.add_argument("--dist",
                         type=str,

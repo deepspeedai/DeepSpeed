@@ -8,3 +8,4 @@ DEFAULT_BACKEND = get_accelerator().communication_backend_name()
 DEFAULT_UNIT = 'Gbps'
 DEFAULT_DIST = 'deepspeed'
 DEFAULT_MAXSIZE = 24
+TORCH_DISTRIBUTED_DEFAULT_PORT = 29500

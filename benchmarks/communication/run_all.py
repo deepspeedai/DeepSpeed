@@ -1,12 +1,17 @@
 '''Copyright The Microsoft DeepSpeed Team'''
 
-from benchmarks.communication.utils import *
-from benchmarks.communication.all_reduce import run_all_reduce
-from benchmarks.communication.all_gather import run_all_gather
-from benchmarks.communication.all_to_all import run_all_to_all
-from benchmarks.communication.pt2pt import run_pt2pt
-from benchmarks.communication.broadcast import run_broadcast
-from benchmarks.communication.constants import *
+import sys, os
+
+COMMS_BENCH_DIR = os.path.join(os.path.dirname(__file__), "../")
+sys.path.append(COMMS_BENCH_DIR)
+
+from communication.utils import *
+from communication.all_reduce import run_all_reduce
+from communication.all_gather import run_all_gather
+from communication.all_to_all import run_all_to_all
+from communication.pt2pt import run_pt2pt
+from communication.broadcast import run_broadcast
+from communication.constants import *
 
 
 # For importing

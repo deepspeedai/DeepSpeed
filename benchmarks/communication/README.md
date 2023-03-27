@@ -1,11 +1,14 @@
-# Running Communication Benchmarks
+# The DeepSpeed Communication Benchmarking Suite
 
+The intent of these benchmarks is to measure communication latency/bw of deepspeed and/or pytorch distributed communication operations at the Python layer. These benchmarks are complementary to C-level comms benchmarks like [OSU Micro-Benchmarks](https://mvapich.cse.ohio-state.edu/benchmarks/) and [NCCL Tests](https://github.com/NVIDIA/nccl-tests) in that users can:
+- Easily debug which layer of the communication software stack hangs or performance degradations originate from.
+- Measure the expected communication performance of either DeepSpeed comms or pure PyTorch distributed
 
 To run benchmarks, there are two options:
 
 1. Run a single communication operation:
 
-For example, run with a single large message size:
+For example, run with a single large message size (calculated to barely fit within GPU mem):
 <pre>
 deepspeed all_reduce.py
 </pre>
@@ -14,6 +17,17 @@ Scan across message sizes:
 <pre>
 deepspeed all_reduce.py --scan
 </pre>
+
+Benchmark pure PyTorch distributed comms (without importing or using DeepSpeed) with MPI
+<pre>
+mpirun -np 16 --hostfile ${HOSTFILE} -x LD_LIBRARY_PATH -x PATH -x LD_PRELOAD python all_reduce.py --scan --dist="torch"
+</pre>
+
+or Slurm
+<pre>
+srun -n 16 python all_reduce.py --scan --dist="torch"
+</pre>
+
 
 2. Run all available communication benchmarks:
 

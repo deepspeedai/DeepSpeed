@@ -1,11 +1,14 @@
 '''Copyright The Microsoft DeepSpeed Team'''
 
 import torch
-from benchmarks.communication.utils import *
-from benchmarks.communication.constants import *
-from deepspeed.accelerator import get_accelerator
+import sys, os, time
 
-import time
+COMMS_BENCH_DIR = os.path.join(os.path.dirname(__file__), "../")
+sys.path.append(COMMS_BENCH_DIR)
+
+from communication.utils import *
+from communication.constants import *
+from deepspeed.accelerator import get_accelerator
 
 
 def timed_broadcast(input, args):
@@ -73,6 +76,8 @@ def run_broadcast(local_rank, args):
                         print('WARNING: Ran out of GPU memory. Exiting comm op.')
                     sync_all()
                     break
+                else:
+                    raise e
             sync_all()
             timed_broadcast(input, args)
     else:

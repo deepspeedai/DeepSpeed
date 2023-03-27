@@ -1,10 +1,14 @@
 '''Copyright The Microsoft DeepSpeed Team'''
 
-from benchmarks.communication.utils import *
-from benchmarks.communication.constants import *
-from deepspeed.accelerator import get_accelerator
+import torch
+import sys, os, time
 
-import time
+COMMS_BENCH_DIR = os.path.join(os.path.dirname(__file__), "../")
+sys.path.append(COMMS_BENCH_DIR)
+
+from communication.utils import *
+from communication.constants import *
+from deepspeed.accelerator import get_accelerator
 
 
 def timed_all_reduce(input, args):
@@ -72,6 +76,8 @@ def run_all_reduce(local_rank, args):
                         print('WARNING: Ran out of GPU memory. Exiting comm op.')
                     sync_all()
                     break
+                else:
+                    raise e
             sync_all()
             timed_all_reduce(input, args)
     else:
@@ -92,6 +98,8 @@ def run_all_reduce(local_rank, args):
                     print('WARNING: Ran out of GPU memory. Try to reduce the --mem-factor argument!')
                 sync_all()
                 return
+            else:
+                raise e
         sync_all()
         timed_all_reduce(input, args)
 
