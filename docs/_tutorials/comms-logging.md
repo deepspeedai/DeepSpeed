@@ -46,9 +46,9 @@ There are currently two ways to view communication log records:
 If the `enabled` configuration option is selected, all communication operations will be immediately printed to the console. This mode is intended for detailed debugging, and is not recommended for most users. The following is an example snippet of `verbose` output:
 
 ```
-[2022-06-26 01:39:55,722] [INFO] [logging.py:69:log_dist] [Rank 0] rank=0 | comm op: reduce_scatter_base | time (ms): 9.46 | msg size: 678.86 MB | algbw (Gbps): 1204.52  | busbw (Gbps): 1129.23
-[2022-06-26 01:39:56,470] [INFO] [logging.py:69:log_dist] [Rank 0] rank=0 | comm op: all_gather_base | time (ms): 0.11 | msg size: 6.0 MB | algbw (Gbps): 954.41  | busbw (Gbps): 894.76
-[2022-06-26 01:39:56,471] [INFO] [logging.py:69:log_dist] [Rank 0] rank=0 | comm op: all_gather_base | time (ms): 0.08 | msg size: 6.0 MB | algbw (Gbps): 1293.47  | busbw (Gbps): 1212.63
+[2022-06-26 01:39:55,722] [INFO] [logging.py:69:log_dist] [Rank 0] rank=0 | comm op: reduce_scatter_tensor | time (ms): 9.46 | msg size: 678.86 MB | algbw (Gbps): 1204.52  | busbw (Gbps): 1129.23
+[2022-06-26 01:39:56,470] [INFO] [logging.py:69:log_dist] [Rank 0] rank=0 | comm op: all_gather_into_tensor | time (ms): 0.11 | msg size: 6.0 MB | algbw (Gbps): 954.41  | busbw (Gbps): 894.76
+[2022-06-26 01:39:56,471] [INFO] [logging.py:69:log_dist] [Rank 0] rank=0 | comm op: all_gather_into_tensor | time (ms): 0.08 | msg size: 6.0 MB | algbw (Gbps): 1293.47  | busbw (Gbps): 1212.63
 ```
 
 For advanced users, the `debug` option will append the calling function of each communication operation to that operation's `log_name`. See [Log Summaries](#log-summaries) for an example of a `deepspeed.comm.log_summary()` call with `debug` enabled.
@@ -99,7 +99,7 @@ Comm. Op            Message Size        Count               Total Latency(ms)   
 broadcast
                     2.0 KB              146                 11.12               0.08                0.43                0.41
                     98.25 MB            1                   8317.12             8317.12             0.20                0.19
-reduce_scatter_base
+reduce_scatter_tensor
                     678.86 MB           40                  602.29              9.69                1468.06             1376.31
 ```
 
@@ -111,6 +111,6 @@ Comm. Op            Message Size        Count               Total Latency(ms)   
 broadcast | [Caller Func: _broadcast_model]
                     2.0 KB              146                 9.39                0.06                0.52                0.48
                     98.25 MB            1                   8540.60             8540.60             0.19                0.18
-reduce_scatter_base | [Caller Func: reduce_scatter_fn]
+reduce_scatter_tensor | [Caller Func: reduce_scatter_fn]
                     678.86 MB           80                  1527.17             13.94               1211.75             1136.01
 ```

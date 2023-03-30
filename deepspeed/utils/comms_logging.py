@@ -31,7 +31,7 @@ def calc_bw_log(comm_op, size, duration):
     if comm_op == "all_to_all_single":
         tput = (size / duration)
         busbw = (size / duration) * ((n - 1) / n)
-    elif comm_op == "all_gather" or comm_op == "all_gather_base" or comm_op == "reduce_scatter" or comm_op == "reduce_scatter_base":
+    elif comm_op == "all_gather" or comm_op == "all_gather_into_tensor" or comm_op == "reduce_scatter" or comm_op == "reduce_scatter_tensor":
         size *= n
         tput = (size / duration)
         busbw = (size / duration) * ((n - 1) / n)

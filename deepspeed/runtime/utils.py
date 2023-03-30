@@ -19,9 +19,9 @@ import torch
 from deepspeed import comm as dist
 
 try:
-    from torch._six import inf as inf
+    from torch._six import inf
 except ModuleNotFoundError:
-    from torch import inf as inf
+    from torch import inf
 
 from deepspeed.utils import groups, logger
 from deepspeed.runtime.constants import PIPE_REPLICATED
