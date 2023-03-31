@@ -7,6 +7,7 @@ title: "Latest News"
 ---
 <b> DeepSpeed trained the world's most powerful language models ([MT-530B](https://www.microsoft.com/en-us/research/blog/using-deepspeed-and-megatron-to-train-megatron-turing-nlg-530b-the-worlds-largest-and-most-powerful-generative-language-model/), [BLOOM](https://huggingface.co/blog/bloom-megatron-deepspeed)); [learn how](https://www.deepspeed.ai/tutorials/large-models-w-deepspeed/).</b>
 
+* [2023/03] [Scaling Large-Scale Generative Mixture-of-Expert Multimodal Model With VL-MoE](https://www.deepspeed.ai/2023/03/31/multi-modal.html)
 * [2023/02] [Automatic Tensor Parallelism: Enables tensor parallelism by default without providing an injection policy](https://www.deepspeed.ai/tutorials/automatic-tensor-parallelism/)
 * [2022/12] [DeepSpeed Data Efficiency: A composable library that makes better use of data, increases training efficiency, and improves model quality](https://www.deepspeed.ai/2022/12/11/data-efficiency.html)
 * [2022/11] [Stable Diffusion Image Generation under 1 second w. DeepSpeed MII](https://github.com/microsoft/DeepSpeed-MII/tree/main/examples/benchmark/txt2img)
