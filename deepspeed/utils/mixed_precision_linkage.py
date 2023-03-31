@@ -1,6 +1,8 @@
-"""
-Copyright 2022 The Microsoft DeepSpeed Team
-"""
+# Copyright (c) Microsoft Corporation.
+# SPDX-License-Identifier: Apache-2.0
+
+# DeepSpeed Team
+
 import types
 from deepspeed.utils import get_full_hp_param, get_full_hp_grad, get_hp_fragment_mapping
 

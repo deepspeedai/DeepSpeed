@@ -1,9 +1,11 @@
-'''
-Copyright 2019 The Microsoft DeepSpeed Team
+# Copyright (c) Microsoft Corporation.
+# SPDX-License-Identifier: Apache-2.0
 
+# DeepSpeed Team
+"""
 Copyright NVIDIA/apex
 This file is adapted from FP16_Optimizer in NVIDIA/apex
-'''
+"""
 
 import torch
 from torch._utils import _flatten_dense_tensors, _unflatten_dense_tensors

@@ -1,3 +1,8 @@
+// Copyright (c) Microsoft Corporation.
+// SPDX-License-Identifier: Apache-2.0
+
+// DeepSpeed Team
+
 #include "cpu_adagrad.h"
 #include <torch/extension.h>
 #include <iostream>

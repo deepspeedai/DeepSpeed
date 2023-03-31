@@ -48,7 +48,7 @@ repos:
         name: check-license
         entry: ./scripts/check-license.py
         language: script
-        files: \.(py|cc|cu|h|cuh|hip)$
+        files: \.(py|c|cpp|cu|cc|h|hpp|cuh|hip|tr)$
 
 -   repo: https://github.com/codespell-project/codespell
     rev: v2.1.0

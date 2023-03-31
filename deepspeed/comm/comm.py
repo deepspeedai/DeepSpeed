@@ -1,26 +1,22 @@
+# Copyright (c) Microsoft Corporation.
+# SPDX-License-Identifier: Apache-2.0
+
+# DeepSpeed Team
 """
-    Copyright 2021 The Microsoft DeepSpeed Team
-
     DeepSpeed Communication Package: deepspeed.comm
-
     deepspeed.comm
         -- import and use deepspeeed.ops.comm
         -- use torch.distributed directly if both this package and torch.distributed use the same NCCL version
         -- use custom collectives
             -- can either use torch.dist or ds.ops.comm?
-
         Note: the old 1-bit compressed allreduce variants that resided in deepspeed.runtime.comm will be moved here as well.
-
     deepspeed.comm API
         -- must be kept fully compatible (same signatures) as torch.dist API to ensure backward/cross-framework compatibility.
         -- e.g. if a client code used
             from deepspeed import comm as dist
-
             instead of
             import torch.distributed as dist
-
             The code should work without breaking any of the public torch.distributed functionality
-
     Future:
         -- deepspeed groups API should be brought into ds.comm
 """

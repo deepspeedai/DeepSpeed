@@ -1,8 +1,8 @@
-'''Copyright The Microsoft DeepSpeed Team'''
-'''
-Copyright (c) Microsoft Corporation
-Licensed under the MIT license.
+# Copyright (c) Microsoft Corporation.
+# SPDX-License-Identifier: Apache-2.0
 
+# DeepSpeed Team
+"""
 Use to partition the activations stored for backward propagation
 Therefore reduces the memory consumption
 Also implements CPU checkpointing and contiguous memory checkpointing
@@ -10,7 +10,7 @@ Reduces memory consumption and memory fragmentation
 
 Code for rng checkpointing taken from NVIDIA Megatron-LM mpu/random.py
 b886b7bb972afe72bac0f5de4f42a4a7bae8ebef
-'''
+"""
 
 # Parts of the code here are adapted from PyTorch
 # repo: https://github.com/pytorch/pytorch

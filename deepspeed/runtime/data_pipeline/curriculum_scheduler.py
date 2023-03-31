@@ -1,6 +1,8 @@
-'''
-Copyright 2021 The Microsoft DeepSpeed Team
-'''
+# Copyright (c) Microsoft Corporation.
+# SPDX-License-Identifier: Apache-2.0
+
+# DeepSpeed Team
+
 import math
 from deepspeed.utils import logger
 from .constants import *

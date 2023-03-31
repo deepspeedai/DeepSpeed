@@ -1,6 +1,11 @@
-'''Copyright The Microsoft DeepSpeed Team'''
-"""batched collective operations for overhead amortization and better
-bandwidth utilization"""
+# Copyright (c) Microsoft Corporation.
+# SPDX-License-Identifier: Apache-2.0
+
+# DeepSpeed Team
+"""
+batched collective operations for overhead amortization and better
+bandwidth utilization
+"""
 
 import math
 from typing import List

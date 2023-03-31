@@ -1,4 +1,9 @@
 #!/usr/bin/env python3
+# Copyright (c) Microsoft Corporation.
+# SPDX-License-Identifier: Apache-2.0
+
+# DeepSpeed Team
+
 from __future__ import annotations
 '''Copyright The Microsoft DeepSpeed Team'''
 """
@@ -12,11 +17,17 @@ import sys
 def err(s: str) -> None:
     print(s, file=sys.stderr)
 
+COPYRIGHT = \
+r"""# Copyright (c) Microsoft Corporation.
+# SPDX-License-Identifier: Apache-2.0
+
+# DeepSpeed Team
+"""
 
 success = True
 failures = []
 for f in sys.argv[1:]:
-    res = subprocess.run(["git", "grep", "--quiet", "-e", r"Copyright .* DeepSpeed Team", f], capture_output=True)
+    res = subprocess.run(["git", "grep", "--quiet", "-e", COPYRIGHT, f], capture_output=True)
     if res.returncode == 1:
         success = False
         failures.append(f)

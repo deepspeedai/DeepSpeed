@@ -1,10 +1,11 @@
-'''
-Copyright 2022 The Microsoft DeepSpeed Team
-'''
-#########################################
-# Data efficiency library
-# See sample config at https://www.deepspeed.ai/docs/config-json/#data-efficiency
-#########################################
+# Copyright (c) Microsoft Corporation.
+# SPDX-License-Identifier: Apache-2.0
+
+# DeepSpeed Team
+"""
+Data efficiency library
+ See sample config at https://www.deepspeed.ai/docs/config-json/data-efficiency
+"""
 DATA_EFFICIENCY = "data_efficiency"
 DATA_EFFICIENCY_ENABLED = "enabled"
 DATA_EFFICIENCY_ENABLED_DEFAULT = False

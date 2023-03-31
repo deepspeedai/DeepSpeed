@@ -1,11 +1,14 @@
-'''
-Copyright 2021 The Microsoft DeepSpeed Team
-'''
-# The file has been adapted from two fairscale files:
-# (1) https://github.com/facebookresearch/fairscale/blob/master/fairscale/nn/moe/moe_layer.py
-# (2) https://github.com/facebookresearch/fairscale/blob/master/fairscale/nn/moe/top2gate.py
-# Git commit hash: 34df606902a240567a0d898037ece55c2f1336cf
-# We retain the following license from the original files:
+# Copyright (c) Microsoft Corporation.
+# SPDX-License-Identifier: Apache-2.0
+
+# DeepSpeed Team
+"""
+The file has been adapted from two fairscale files:
+ (1) https://github.com/facebookresearch/fairscale/blob/master/fairscale/nn/moe/moe_layer.py
+ (2) https://github.com/facebookresearch/fairscale/blob/master/fairscale/nn/moe/top2gate.py
+ Git commit hash: 34df606902a240567a0d898037ece55c2f1336cf
+ We retain the following license from the original files:
+"""
 
 # Copyright (c) Facebook, Inc. and its affiliates. All rights reserved.
 #

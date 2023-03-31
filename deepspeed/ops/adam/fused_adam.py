@@ -1,9 +1,11 @@
-'''
-Copyright 2020 The Microsoft DeepSpeed Team
+# Copyright (c) Microsoft Corporation.
+# SPDX-License-Identifier: Apache-2.0
 
+# DeepSpeed Team
+"""
 Copyright NVIDIA/apex
 This file is adapted from fused adam in NVIDIA/apex, commit a109f85
-'''
+"""
 
 import torch
 from .multi_tensor_apply import MultiTensorApply

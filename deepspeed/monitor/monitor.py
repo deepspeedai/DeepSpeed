@@ -1,6 +1,9 @@
-'''Copyright The Microsoft DeepSpeed Team'''
+# Copyright (c) Microsoft Corporation.
+# SPDX-License-Identifier: Apache-2.0
+
+# DeepSpeed Team
 """
- Support different forms of monitoring such as wandb and tensorboard
+Support different forms of monitoring such as wandb and tensorboard
 """
 
 from abc import ABC, abstractmethod

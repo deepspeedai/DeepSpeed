@@ -1,5 +1,9 @@
-'''Copyright The Microsoft DeepSpeed Team'''
-''' DeepSpeed Communication Backend.
+# Copyright (c) Microsoft Corporation.
+# SPDX-License-Identifier: Apache-2.0
+
+# DeepSpeed Team
+"""
+DeepSpeed Communication Backend.
 
 In the future, directly use NCCL/MPI/Gloo/etc without requiring torch.distributed. Simply wrap torch.distributed for now.
 
@@ -8,15 +12,14 @@ In the future, directly use NCCL/MPI/Gloo/etc without requiring torch.distribute
  - MPI -- [EXPERIMENTAL]
  - RCCL -- [EXPERIMENTAL]
  - GLOO -- [EXPERIMENTAL]
-
 # DS backend wrapper for torch.distributed [DEFAULT]
  - T-NCCL -- [DEFAULT]
  - T-GLOO
  - T-MPI
-'''
-''' Backend is the base class
+
+# Backend is the base class
      -- NcclBackend, MpiBackend, and TorchBackend are the main subclasses. TorchBackend is the only officially supported backend for now.
-'''
+"""
 
 
 class Backend(object):

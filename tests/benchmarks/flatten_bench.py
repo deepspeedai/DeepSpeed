@@ -1,4 +1,7 @@
-'''Copyright The Microsoft DeepSpeed Team'''
+# Copyright (c) Microsoft Corporation.
+# SPDX-License-Identifier: Apache-2.0
+
+# DeepSpeed Team
 
 #!/usr/bin/env python
 # run the benchmark under timeit (-t), cProfile (-c), line_profiler (-l)

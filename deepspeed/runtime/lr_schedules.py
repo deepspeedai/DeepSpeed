@@ -1,11 +1,12 @@
-"""
-Copyright 2019 The Microsoft DeepSpeed Team
+# Copyright (c) Microsoft Corporation.
+# SPDX-License-Identifier: Apache-2.0
 
+# DeepSpeed Team
+"""
 Implementation of learning rate schedules.
 
 Taken and modified from PyTorch v1.0.1 source
 https://github.com/pytorch/pytorch/blob/v1.1.0/torch/optim/lr_scheduler.py
-
 """
 
 import argparse

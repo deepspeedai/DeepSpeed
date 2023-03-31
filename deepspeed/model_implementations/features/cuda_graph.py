@@ -1,6 +1,8 @@
-'''
-Copyright 2023 The Microsoft DeepSpeed Team
-'''
+# Copyright (c) Microsoft Corporation.
+# SPDX-License-Identifier: Apache-2.0
+
+# DeepSpeed Team
+
 from abc import ABC, abstractmethod
 
 

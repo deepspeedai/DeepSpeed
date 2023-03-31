@@ -1,6 +1,8 @@
-"""
-Copyright 2020 The Microsoft DeepSpeed Team
+# Copyright (c) Microsoft Corporation.
+# SPDX-License-Identifier: Apache-2.0
 
+# DeepSpeed Team
+"""
 Implementation of a compressed sparse tensor. Similar in
 functionality to TensorFlow's IndexedSlices implementation.
 """

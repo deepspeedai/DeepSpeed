@@ -1,4 +1,8 @@
-/* Copyright 2019 The Microsoft DeepSpeed Team */
+// Copyright (c) Microsoft Corporation.
+// SPDX-License-Identifier: Apache-2.0
+
+// DeepSpeed Team
+
 #include <torch/extension.h>
 
 // CUDA forward declaration

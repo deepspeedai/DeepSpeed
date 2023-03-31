@@ -1,6 +1,7 @@
-'''
-Copyright 2021 The Microsoft DeepSpeed Team
-'''
+# Copyright (c) Microsoft Corporation.
+# SPDX-License-Identifier: Apache-2.0
+
+# DeepSpeed Team
 
 # The file has been adapted from https://github.com/NVIDIA/Megatron-LM and retains the following license from the original file
 

@@ -1,7 +1,9 @@
-/*
-Copyright 2023 The Microsoft DeepSpeed Team
-Licensed under the MIT license.
+// Copyright (c) Microsoft Corporation.
+// SPDX-License-Identifier: Apache-2.0
 
+// DeepSpeed Team
+
+/*
 Functionality for managing CPU tensors occupying page-locked memory.
 */
 

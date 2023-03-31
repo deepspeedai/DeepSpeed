@@ -1,7 +1,10 @@
-'''
-Copyright 2022 The Microsoft DeepSpeed Team
+# Copyright (c) Microsoft Corporation.
+# SPDX-License-Identifier: Apache-2.0
+
+# DeepSpeed Team
+"""
 Part of this code was adopted from https://github.com/NVIDIA/Megatron-LM/blob/main/megatron/data/indexed_dataset.py
-'''
+"""
 
 # Copyright (c) Facebook, Inc. and its affiliates.
 #

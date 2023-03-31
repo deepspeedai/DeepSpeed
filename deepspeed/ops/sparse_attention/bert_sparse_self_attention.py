@@ -1,6 +1,7 @@
-"""
-Copyright 2020 The Microsoft DeepSpeed Team
-"""
+# Copyright (c) Microsoft Corporation.
+# SPDX-License-Identifier: Apache-2.0
+
+# DeepSpeed Team
 
 from torch import nn
 from deepspeed.ops.sparse_attention import SparseSelfAttention, FixedSparsityConfig

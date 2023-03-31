@@ -1,4 +1,7 @@
-# Copyright 2020 The Microsoft DeepSpeed Team
+# Copyright (c) Microsoft Corporation.
+# SPDX-License-Identifier: Apache-2.0
+
+# DeepSpeed Team
 
 PDSH_LAUNCHER = 'pdsh'
 PDSH_MAX_FAN_OUT = 1024

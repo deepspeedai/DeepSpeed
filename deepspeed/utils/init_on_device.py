@@ -1,6 +1,8 @@
-'''
-Copyright 2020 The Microsoft DeepSpeed Team
-'''
+# Copyright (c) Microsoft Corporation.
+# SPDX-License-Identifier: Apache-2.0
+
+# DeepSpeed Team
+
 import torch
 from typing import Callable
 from torch import Tensor

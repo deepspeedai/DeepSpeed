@@ -1,9 +1,11 @@
-'''
-Copyright 2019 The Microsoft DeepSpeed Team
+# Copyright (c) Microsoft Corporation.
+# SPDX-License-Identifier: Apache-2.0
 
+# DeepSpeed Team
+"""
 Copyright NVIDIA/apex
 This file is adapted from FP16_Optimizer in NVIDIA/apex
-'''
+"""
 
 from deepspeed.moe.utils import split_params_grads_into_shared_and_expert_params
 import torch

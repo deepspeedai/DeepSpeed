@@ -1,7 +1,7 @@
-'''
-Copyright 2020 The Microsoft DeepSpeed Team.
-Licensed under the MIT license.
-'''
+# Copyright (c) Microsoft Corporation.
+# SPDX-License-Identifier: Apache-2.0
+
+# DeepSpeed Team
 
 from deepspeed.runtime.config_utils import get_scalar_param
 from deepspeed.runtime.swap_tensor.constants import *

@@ -1,5 +1,12 @@
-// DeepSpeed note, code taken & adapted from commit 9aa94789f13ada713af36cfd8cca2fc9a7f6b79a
-// https://github.com/ptillet/torch-blocksparse/blob/master/csrc/utils.cpp
+// Copyright (c) Microsoft Corporation.
+// SPDX-License-Identifier: Apache-2.0
+
+// DeepSpeed Team
+
+/*
+DeepSpeed note, code taken & adapted from commit 9aa94789f13ada713af36cfd8cca2fc9a7f6b79a
+ https:github.com/ptillet/torch-blocksparse/blob/master/csrc/utils.cpp
+*/
 
 #include <torch/extension.h>
 #include <string>

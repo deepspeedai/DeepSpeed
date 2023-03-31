@@ -1,9 +1,11 @@
-'''
-Copyright 2019 The Microsoft DeepSpeed Team
+# Copyright (c) Microsoft Corporation.
+# SPDX-License-Identifier: Apache-2.0
 
+# DeepSpeed Team
+"""
 Copyright NVIDIA/apex
 This file is adapted from NVIDIA/apex/optimizer/fused_adam and implements the LAMB optimizer
-'''
+"""
 import types
 import torch
 from deepspeed.ops.op_builder import FusedLambBuilder

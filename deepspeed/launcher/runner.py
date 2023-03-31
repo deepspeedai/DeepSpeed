@@ -1,4 +1,7 @@
-# Copyright 2020 The Microsoft DeepSpeed Team
+# Copyright (c) Microsoft Corporation.
+# SPDX-License-Identifier: Apache-2.0
+
+# DeepSpeed Team
 """
 DeepSpeed runner is the main front-end to launching multi-worker
 training jobs with DeepSpeed. By default this uses pdsh to parallel
