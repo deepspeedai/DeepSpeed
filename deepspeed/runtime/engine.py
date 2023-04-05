@@ -112,7 +112,6 @@ try:
 except ImportError:
     # Fail silently so we don't spam logs unnecessarily if user isn't using amp
     APEX_INSTALLED = False
-    pass
 
 
 def split_half_float_double_sparse(tensors):
@@ -1702,7 +1701,6 @@ class DeepSpeedEngine(Module):
             # we are in a forward pass.
             for module in self.module.modules():
                 module._parameters._in_forward = True
-                pass
 
         self._start_timers(self.engine_timers.forward_timers)
 
