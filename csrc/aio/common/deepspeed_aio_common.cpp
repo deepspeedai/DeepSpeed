@@ -264,7 +264,7 @@ void report_file_error(const char* filename, const std::string file_op, const in
 
 int open_file(const char* filename, const bool read_op)
 {
-    const int flags = read_op ? (O_RDONLY | __O_DIRECT) : (O_WRONLY | O_CREAT | __O_DIRECT);
+    const int flags = read_op ? (O_RDONLY | O_DIRECT) : (O_WRONLY | O_CREAT | O_DIRECT);
     const int mode = 0600;
     const auto fd = open(filename, flags, mode);
     if (fd == -1) {
