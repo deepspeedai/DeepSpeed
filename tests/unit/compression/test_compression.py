@@ -15,10 +15,9 @@ from deepspeed.compression.basic_layer import LinearLayer_Compress, ColumnParall
 from deepspeed.compression.helper import convert_conv1d_to_linear
 from deepspeed.accelerator import get_accelerator
 from unit.common import DistributedTest
+from unit.util import required_minimum_torch_version, required_maximum_torch_version
 
-TORCH_MAJOR = int(torch.__version__.split('.')[0])
-TORCH_MINOR = int(torch.__version__.split('.')[1])
-pytestmark = pytest.mark.skipif(TORCH_MAJOR < 1 or (TORCH_MAJOR == 1 and TORCH_MINOR < 5),
+pytestmark = pytest.mark.skipif(not required_minimum_torch_version(major_version=1, minor_version=5),
                                 reason='Megatron-LM package requires Pytorch version 1.5 or above')
 
 
@@ -226,8 +225,7 @@ class TestCompression(DistributedTest):
         assert isinstance(compressed_model.layer[0].attention.self.value, LinearLayer_Compress)
 
     def test_mpu_compress(self, tmpdir):
-        TORCH_MAJOR = int(torch.__version__.split(".")[0])
-        if TORCH_MAJOR > 1:
+        if not required_maximum_torch_version(major_version=1, minor_version=13):
             pytest.skip("megatron not compatible with torch >1.13")
         from megatron import mpu
         args_defaults = {

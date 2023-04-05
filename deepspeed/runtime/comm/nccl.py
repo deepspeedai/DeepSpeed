@@ -26,7 +26,7 @@ class NcclBackend(object):
         self.bool_not_supported = False
         TORCH_MAJOR = int(torch.__version__.split('.')[0])
         TORCH_MINOR = int(torch.__version__.split('.')[1])
-        if TORCH_MAJOR >= 1 and TORCH_MINOR >= 10:
+        if (TORCH_MAJOR == 1 and TORCH_MINOR >= 10) or TORCH_MAJOR == 2:
             self.bool_not_supported = True
 
     def my_igather(self, rank, size, group, sendbuf, recvbuf, root):

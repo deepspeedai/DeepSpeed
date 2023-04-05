@@ -18,13 +18,12 @@ from deepspeed.runtime.pipe.module import PipelineModule
 from unit.common import DistributedTest
 from unit.simple_model import SimpleModel, random_dataloader
 from unit.alexnet_model import AlexNetPipe, train_cifar
+from unit.util import required_minimum_torch_version
 from deepspeed.accelerator import get_accelerator
 
 PipeTopo = PipeDataParallelTopology
 
-TORCH_MAJOR = int(torch.__version__.split(".")[0])
-TORCH_MINOR = int(torch.__version__.split(".")[1])
-if TORCH_MAJOR < 1 or TORCH_MINOR < 8:
+if not required_minimum_torch_version(major_version=1, minor_version=8):
     pytest.skip(
         "NCCL-based 1-bit compression requires torch 1.8 or higher",
         allow_module_level=True,
