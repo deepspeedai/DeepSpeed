@@ -66,7 +66,7 @@ MASTER_ADDR=localhost
 MASTER_PORT=6000
 
 gpt_options=" \
-       --tensor-model-parallel-size ${mp} \
+       --model-parallel-size ${mp} \
        --num-layers ${layers} \
        --hidden-size ${hidden_size} \
        --num-attention-heads ${heads} \
