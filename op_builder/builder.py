@@ -601,7 +601,10 @@ class CUDAOpBuilder(OpBuilder):
             curr_file = Path(__file__).parent.parent  # ds root
             for i in range(len(sources)):
                 src = Path(sources[i])
-                sources[i] = str(src.relative_to(curr_file))
+                if src.is_absolute():
+                    sources[i] = str(src.relative_to(curr_file))
+                else:
+                    sources[i] = str(src)
             cuda_ext.sources = sources
         return cuda_ext
 
