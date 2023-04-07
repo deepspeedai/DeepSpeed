@@ -130,7 +130,7 @@ In our [paper](https://arxiv.org/abs/2108.06084) section 5.4 we demonstrate that
 
 ### 2.3 Token-based training termination
 
-Because curriculum learning changes length of each sequence/sample during training, it is very hard/impossible to use number of steps/samples to terminate the training exactly at the desired number of tokens. Thus, we add a `--train-tokens` config for accurate token-based termination. We recommend increasing your original `--train-samples` or `--train-iters` to a large enough number (e.g., 3X of what you used for baseline), and set `--train-tokens` at the exact desired number of training tokens.
+Because curriculum learning changes the length of each sequence/sample during training, it is very hard/impossible to use  a number of steps/samples to terminate the training exactly at the desired number of tokens. Thus, we add a `--train-tokens` config for accurate token-based termination. We recommend increasing your original `--train-samples` or `--train-iters` to a large enough number (e.g., 3X of what you used for baseline), and set `--train-tokens` at the exact desired number of training tokens.
 
 ### 2.4 Token-based LR decay
 
