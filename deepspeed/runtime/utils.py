@@ -765,6 +765,7 @@ def get_ma_status():
 
 def empty_cache():
     get_accelerator().empty_cache()
+    get_accelerator().reset_peak_memory_stats()
 
 
 def see_memory_usage(message, force=False):
