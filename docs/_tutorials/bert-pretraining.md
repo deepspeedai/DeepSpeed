@@ -130,7 +130,7 @@ The `model` returned by `deepspeed.initialize` is the DeepSpeed _model
 engine_ that we will use to train the model using the forward, backward and
 step API. Since the model engine exposes the same forward pass API as
 `nn.Module` objects, there is no change in the forward pass.
-Thus, we only modify the the backward pass and optimizer/scheduler steps.
+Thus, we only modify the backward pass and optimizer/scheduler steps.
 
 Backward propagation is performed by calling `backward(loss)` directly with
 the model engine.
