@@ -89,6 +89,8 @@ pip install .
 git clone https://github.com/microsoft/DeepSpeedExamples.git
 cd DeepSpeedExamples/applications/DeepSpeed-Chat/
 pip install -r requirements.txt
+
+python train.py --actor-model facebook/opt-13b --reward-model facebook/opt-350m --num-gpus 8
 ```
 
 In about half a day, your 13B model would be fully trained with its checkpoints ready.  The following table demonstrates a breakdown of the training time for each of the three steps:
