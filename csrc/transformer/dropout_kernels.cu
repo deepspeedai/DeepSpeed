@@ -278,7 +278,7 @@ void launch_dropout(T* out,
         grid_dim.x <<= 1;
     }
     uint64_t inc = total_count / grid_dim.x / block_dim.x;
-    std::pair<uint64_t, uint64_t> seed = Context::Instance().IncrementOffset(inc);
+    std::pair<uint64_t, uint64_t> seed = TrainingContext::Instance().IncrementOffset(inc);
     if (bwd)
         dropout_kernel_bwd<<<grid_dim, block_dim, 0, stream>>>(
             total_count, ratio, vals, out, mask, seed);
@@ -625,7 +625,7 @@ void launch_dropout(T* out,
     dim3 block_dim = DS_CUDA_NUM_THREADS;
 
     uint64_t inc = (batch * dim) / grid_dim.x / block_dim.x;
-    std::pair<uint64_t, uint64_t> seed = Context::Instance().IncrementOffset(inc);
+    std::pair<uint64_t, uint64_t> seed = TrainingContext::Instance().IncrementOffset(inc);
 
     dropout_kernel<<<grid_dim, block_dim, 0, stream>>>(
         total_count, dim, ratio, bias, out, mask, seed);
@@ -847,7 +847,7 @@ void launch_dropout(T* out,
     dim3 block_dim = DS_CUDA_NUM_THREADS;
 
     uint64_t inc = (batch * dim) / grid_dim.x / block_dim.x;
-    std::pair<uint64_t, uint64_t> seed = Context::Instance().IncrementOffset(inc);
+    std::pair<uint64_t, uint64_t> seed = TrainingContext::Instance().IncrementOffset(inc);
 
     dropout_kernel<<<grid_dim, block_dim, 0, stream>>>(
         total_count, dim, ratio, input, residual, bias, out, mask, seed);

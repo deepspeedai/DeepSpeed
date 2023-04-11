@@ -20,8 +20,10 @@ class MLPGemmOp(BaseOp):
     def forward(self, input: torch.Tensor, residual: torch.Tensor, input_bias: torch.Tensor,
                 weight_interm: torch.Tensor, weight_out: torch.Tensor, bias: torch.Tensor, gamma: torch.Tensor,
                 beta: torch.Tensor):
-        output, residual_add = self.mlp_gemm_func(input, residual, input_bias, weight_interm, weight_out, bias, gamma,
-                                                  beta, self.config.epsilon, self.config.pre_layer_norm,
-                                                  self.config.mlp_after_attn, weight_interm.scale, weight_out.scale,
-                                                  self.config.q_int8, self.config.mlp_act_func_type)
+        output, residual_add = self.mlp_gemm_func(
+            input, residual, input_bias, weight_interm, weight_out, bias, gamma, beta, self.config.epsilon,
+            self.config.pre_layer_norm, self.config.mlp_after_attn,
+            weight_interm.scale if hasattr(weight_interm, 'scale') else torch.empty(1),
+            weight_out.scale if hasattr(weight_out, 'scale') else torch.empty(1), self.config.q_int8,
+            self.config.mlp_act_func_type, self.config.transposed_mode)
         return output, residual_add

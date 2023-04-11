@@ -87,10 +87,12 @@ class ReplaceWithTensorSlicing:
             dst.scale = src.scale
         return dst
 
-    def copy(self, dst, src, int8=False):
+    def copy(self, dst, src, int8=False, allocat_tensor=False):
         if src is None:
             return src
         assert not dst.data.is_meta  # the torch.Tensor.copy_ method used below will silently fail on meta tensors
+        if allocat_tensor:
+            dst = torch.empty_like(dst)
         outer_dim = 0 if int8 else 1
         inner_dim = 1 if int8 else 0
         src_shape = src.shape
@@ -102,21 +104,21 @@ class ReplaceWithTensorSlicing:
             else:
                 if src_shape[inner_dim] != dst_shape[self.in_dim]:
                     self.merge_assert(src_shape[inner_dim], dst_shape[self.in_dim])
-                    weight_split = torch.split(src, dst_shape[self.in_dim], dim=inner_dim)[self.gpu_index].contiguous()
+                    dst.data.copy_(src[:, self.gpu_index * dst_shape[self.in_dim]: (self.gpu_index + 1) * dst_shape[self.in_dim]] if inner_dim == 1 else \
+                                   src[self.gpu_index * dst_shape[self.in_dim]: (self.gpu_index + 1) * dst_shape[self.in_dim], :])
                 else:
                     self.merge_assert(src_shape[outer_dim], dst_shape[self.out_dim])
-                    weight_split = torch.split(src.data, dst_shape[self.out_dim],
-                                               dim=outer_dim)[self.gpu_index].contiguous()
-                dst = dst.reshape(-1).data.copy_(weight_split.reshape(-1)).reshape(weight_split.shape)
+                    dst.data.copy_(src[:, self.gpu_index * dst_shape[self.out_dim]: (self.gpu_index + 1) * dst_shape[self.out_dim]] if outer_dim == 1 else \
+                                   src[self.gpu_index * dst_shape[self.out_dim]: (self.gpu_index + 1) * dst_shape[self.out_dim], :])
         else:
             if src_shape[0] == dst_shape[0]:
-                dst.data.copy_(src)
+                dst = src
             else:
-                bias_split = torch.split(src.data, dst_shape[-1])[self.gpu_index].contiguous()
-                dst.data.copy_(bias_split)
+                dst.data.copy_(src[self.gpu_index * dst_shape[-1]:(self.gpu_index + 1) * dst_shape[-1]])
         dst = torch.nn.parameter.Parameter(dst, requires_grad=False)
         if hasattr(src, 'scale'):
             dst.scale = src.scale
+
         return dst
 
 

@@ -15,6 +15,7 @@ minus_inf = -10000.0
 
 class DeepSpeedSelfAttention(nn.Module):
     num_layers = 0
+    _qkv_buffers = []
 
     def __init__(self, config, mp_group=None, q_scales=None, q_groups=1, merge_count=1):
         super(DeepSpeedSelfAttention, self).__init__()
@@ -24,23 +25,35 @@ class DeepSpeedSelfAttention(nn.Module):
         self.config.layer_id = DeepSpeedSelfAttention.num_layers
         DeepSpeedSelfAttention.num_layers = DeepSpeedSelfAttention.num_layers + 1
         device = get_accelerator().current_device_name()  #if config.bigscience_bloom else 'cpu'
-        qkv_size_per_partition = (self.config.hidden_size // self.config.mp_size) * 3
-        self.attn_qkvw = nn.Parameter(torch.empty(self.config.hidden_size,
-                                                  qkv_size_per_partition,
-                                                  dtype=data_type,
-                                                  device=device),
-                                      requires_grad=False)
-        self.attn_qkvb = nn.Parameter(torch.empty(qkv_size_per_partition, dtype=data_type_fp, device=device),
-                                      requires_grad=False)
-        out_size_per_partition = self.config.hidden_size // self.config.mp_size
-        self.attn_ow = nn.Parameter(torch.empty(out_size_per_partition,
-                                                self.config.hidden_size,
-                                                dtype=data_type,
-                                                device=device),
-                                    requires_grad=False)
+        if self.config.set_empty_params:
+            self.attn_qw = None
+            self.attn_qb = None
+            self.attn_kw = None
+            self.attn_kb = None
+            self.attn_vw = None
+            self.attn_vb = None
+            self.attn_qkvw = None
+            self.attn_qkvb = None
+            self.attn_ow = None
+            self.attn_ob = None
+        else:
+            qkv_size_per_partition = (self.config.hidden_size // self.config.mp_size) * 3
+            self.attn_qkvw = nn.Parameter(torch.empty(self.config.hidden_size,
+                                                      qkv_size_per_partition,
+                                                      dtype=data_type,
+                                                      device=device),
+                                          requires_grad=False)
+            self.attn_qkvb = nn.Parameter(torch.empty(qkv_size_per_partition, dtype=data_type_fp, device=device),
+                                          requires_grad=False)
+            out_size_per_partition = self.config.hidden_size // self.config.mp_size
+            self.attn_ow = nn.Parameter(torch.empty(out_size_per_partition,
+                                                    self.config.hidden_size,
+                                                    dtype=data_type,
+                                                    device=device),
+                                        requires_grad=False)
 
-        self.attn_ob = nn.Parameter(torch.empty(self.config.hidden_size, dtype=data_type_fp, device=device),
-                                    requires_grad=False)
+            self.attn_ob = nn.Parameter(torch.empty(self.config.hidden_size, dtype=data_type_fp, device=device),
+                                        requires_grad=False)
 
         self.num_attention_heads_per_partition = self.config.heads // self.config.mp_size
         self.hidden_size_per_partition = self.config.hidden_size // self.config.mp_size
@@ -65,6 +78,14 @@ class DeepSpeedSelfAttention(nn.Module):
         self.score_context_func = SoftmaxContextOp(config)
         self.linear_func = LinearOp(config)
         self.vector_matmul_func = VectorMatMulOp(config)
+        if len(DeepSpeedSelfAttention._qkv_buffers) == 0:
+            DeepSpeedSelfAttention._qkv_buffers = [
+                torch.empty(self.hidden_size_per_partition * 3,
+                            self.config.hidden_size,
+                            dtype=data_type_fp,
+                            device=device),
+                torch.empty(self.hidden_size_per_partition * 3, dtype=data_type_fp, device=device)
+            ]
 
     def compute_attention(self, qkv_out, input_mask, layer_past, alibi):
         if isinstance(qkv_out, list):
@@ -89,6 +110,18 @@ class DeepSpeedSelfAttention(nn.Module):
         context_layer, key_layer, value_layer = attn_key_value
         return context_layer, key_layer, value_layer
 
+    def _merge_qkv(self):
+        qvkw = DeepSpeedSelfAttention._qkv_buffers[0]
+        qvkw[:self.hidden_size_per_partition, :] = self.attn_qw
+        qvkw[self.hidden_size_per_partition:2 * self.hidden_size_per_partition, :] = self.attn_kw
+        qvkw[2 * self.hidden_size_per_partition:, :] = self.attn_vw
+        if self.attn_qb is not None:
+            qvkb = DeepSpeedSelfAttention._qkv_buffers[1]
+            qvkb[:self.hidden_size_per_partition] = self.attn_qb
+            qvkb[self.hidden_size_per_partition:2 * self.hidden_size_per_partition] = self.attn_kb
+            qvkb[2 * self.hidden_size_per_partition:] = self.attn_vb
+        return DeepSpeedSelfAttention._qkv_buffers
+
     def forward(self,
                 input,
                 input_mask,
@@ -101,30 +134,33 @@ class DeepSpeedSelfAttention(nn.Module):
                 norm_w=None,
                 norm_b=None,
                 alibi=None):
+        if self.attn_qkvw is None:
+            self._attn_qkvw, self._attn_qkvb = self._merge_qkv()
+        else:
+            self._attn_qkvw = self.attn_qkvw
+            self._attn_qkvb = self.attn_qkvb
 
         if not self.config.pre_layer_norm:
             qkv_out = self.linear_func(input=input,
-                                       weight=self.attn_qkvw,
-                                       bias=self.attn_qkvb,
+                                       weight=self._attn_qkvw,
+                                       bias=self._attn_qkvb,
                                        add_bias=self.attn_qkvb is not None,
                                        do_flash_attn=False,
                                        num_heads=self.num_attention_heads_per_partition,
                                        num_layers=DeepSpeedSelfAttention.num_layers)
         else:
             qkv_out = self.qkv_func(input=input,
-                                    weight=self.attn_qkvw,
-                                    bias=(self.attn_qkvb if self.attn_qkvb is not None else norm_b),
+                                    weight=self._attn_qkvw,
+                                    bias=(self._attn_qkvb if self._attn_qkvb is not None else norm_b),
                                     gamma=norm_w,
                                     beta=norm_b,
                                     add_bias=(self.attn_qkvb is not None),
                                     num_layers=DeepSpeedSelfAttention.num_layers,
                                     num_heads=self.num_attention_heads_per_partition)
-
         context_layer, key_layer, value_layer = self.compute_attention(qkv_out=qkv_out,
                                                                        input_mask=input_mask,
                                                                        layer_past=layer_past,
                                                                        alibi=alibi)
-
         output = self.vector_matmul_func(input=context_layer, weight=self.attn_ow)
 
         inp_norm = qkv_out[-1]

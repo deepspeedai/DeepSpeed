@@ -49,7 +49,6 @@ class LinearFunctionForZeroStage3(torch.autograd.Function):
     @autocast_custom_fwd
     # bias is an optional argument
     def forward(ctx, input, weight, bias=None):
-        #print("In ZeRO Linear Function")
 
         weight_id = id(weight)
         bias_id = id(bias)

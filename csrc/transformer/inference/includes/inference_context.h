@@ -46,17 +46,20 @@ inline int DS_GET_BLOCKS(const int N)
         1);
 }
 
-class Context {
+class InferenceContext {
 public:
-    Context()
+    InferenceContext()
         : _workspace(nullptr),
           _seed(42),
           _curr_offset(0),
           _stream(0),
           _free_memory_size(0),
           _num_tokens(1),
-          _attention_unfused_workspace_offset(0)
+          _attention_unfused_workspace_offset(0),
+          _workSpaceSize(0)
     {
+        _workSpaceSize = 0;
+        _workspace = 0;
         if (cublasCreate(&_cublasHandle) != CUBLAS_STATUS_SUCCESS) {
             auto message = std::string("Fail to create cublas handle.");
             std::cerr << message << std::endl;
@@ -71,7 +74,7 @@ public:
         cudaEventCreate(&_comm_event);
     }
 
-    virtual ~Context()
+    virtual ~InferenceContext()
     {
         cublasDestroy(_cublasHandle);
         cudaFree(_workspace);
@@ -81,9 +84,9 @@ public:
         cudaEventDestroy(_comm_event);
     }
 
-    static Context& Instance()
+    static InferenceContext& Instance()
     {
-        static Context _ctx;
+        static InferenceContext _ctx;
         return _ctx;
     }
 
@@ -96,7 +99,8 @@ public:
                       const bool& external_cache,
                       const size_t& elem_size,
                       const unsigned& rank,
-                      unsigned max_out_tokens)
+                      unsigned max_out_tokens,
+                      unsigned min_out_tokens)
     {
         size_t total_size;
         if (!_free_memory_size) { cudaMemGetInfo(&_free_memory_size, &total_size); }
@@ -107,9 +111,9 @@ public:
         const int padded_head_size = head_size <= 32 ? 32 : (head_size <= 64 ? 64 : 128);
         const int effective_head_size = (head_size > 128) ? head_size : padded_head_size;
 
-        size_t activation_size = 16 * (num_heads * effective_head_size) * batch_size;
+        size_t activation_size = 10 * (num_heads * effective_head_size) * batch_size;
         // Other sequence length dimension is added when the final workSpaceSize is calculated
-        size_t temp_size = batch_size * num_heads * max_out_tokens * 2;
+        size_t temp_size = batch_size * (num_heads / mp_size) * max_out_tokens;
         size_t cache_size =
             num_layers * batch_size * ((num_heads * effective_head_size) / mp_size) * 2;
         size_t minimal_requirements =
@@ -129,18 +133,16 @@ public:
                                                 : (activation_size + temp_size + cache_size))) *
                                _max_seq_len * elem_size;
         temp_size *= _max_seq_len * elem_size;
-        if (rank == 0 && !_workspace)
+
+        if (_max_seq_len < min_out_tokens) {
             printf(
-                "------------------------------------------------------\n"
-                "Free memory : %f (GigaBytes)  \n"
-                "Total memory: %f (GigaBytes)  \n"
-                "Requested memory: %f (GigaBytes) \n"
-                "Setting maximum total tokens (input + output) to %lu \n"
-                "------------------------------------------------------\n",
-                (float)_free_memory_size / GIGABYTE,
-                (float)total_size / GIGABYTE,
-                (float)workSpaceSize / GIGABYTE,
-                _max_seq_len);
+                "Allocatable workspace available (%d tokens) is less than minimum requested "
+                "workspace (%d tokens)\n",
+                _max_seq_len,
+                min_out_tokens);
+            throw std::runtime_error("Workspace can't be allocated, not enough memory");
+        }
+
         if (!_workspace) {
             assert(_workspace == nullptr);
             cudaMalloc(&_workspace, workSpaceSize);
@@ -148,6 +150,20 @@ public:
             cudaFree(_workspace);
             cudaMalloc(&_workspace, workSpaceSize);
         }
+        if (rank == 0 && (!_workspace || _workSpaceSize < workSpaceSize))
+            printf(
+                "------------------------------------------------------\n"
+                "Free memory : %f (GigaBytes)  \n"
+                "Total memory: %f (GigaBytes)  \n"
+                "Requested memory: %f (GigaBytes) \n"
+                "Setting maximum total tokens (input + output) to %lu \n"
+                "WorkSpace: %p \n"
+                "------------------------------------------------------\n",
+                (float)_free_memory_size / GIGABYTE,
+                (float)total_size / GIGABYTE,
+                (float)workSpaceSize / GIGABYTE,
+                _max_seq_len,
+                _workspace);
 
         if (!_workspace) {
             printf("Requested:\t%lu\nFree:\t%lu\nTotal:\t%lu\n",
@@ -203,6 +219,17 @@ public:
         return stream;
     }
 
+    void release_workspace()
+    {
+        cudaFree(_workspace);
+        _workspace = nullptr;
+    }
+    bool retake_workspace()
+    {
+        if (_workspace != nullptr || _workSpaceSize == 0) return true;
+        cudaMalloc(&_workspace, _workSpaceSize);
+        return _workspace != nullptr;
+    }
     cublasHandle_t GetCublasHandle() { return _cublasHandle; }
 
     std::pair<uint64_t, uint64_t> IncrementOffset(uint64_t offset_inc)

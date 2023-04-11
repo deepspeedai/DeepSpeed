@@ -28,7 +28,7 @@ class DS_BloomContainer(MetaTensorContainer, BaseTransformerContainer):
         self.module.config.scale_attention = self.scale_attention
         return self.module
 
-    def attention_qkv_mp(self, mp_replace):
+    def attention_qkv_mp(self, mp_replace, reversed_dim=False):
         self.module.attention.attn_qkvw = mp_replace.copy(self.module.attention.attn_qkvw, self.qkvw)
         self.module.attention.attn_qkvb = mp_replace.copy(self.module.attention.attn_qkvb, self.qkvb)
 
@@ -84,9 +84,13 @@ class BLOOMLayerPolicy(TransformerPolicy):
 
     def get_hidden_heads(self):
         return self.client_module.self_attention.hidden_size, \
-                self.client_module.self_attention.num_heads
+                self.client_module.self_attention.num_heads, \
+                self.client_module.input_layernorm.eps
 
-    def attention(self):
+    def get_q_k_v(self):
+        return None
+
+    def attention(self, enable_training=False):
         return self.client_module.self_attention.query_key_value.weight, \
                 self.client_module.self_attention.query_key_value.bias, \
                 self.client_module.self_attention.dense.weight, \
@@ -103,3 +107,6 @@ class BLOOMLayerPolicy(TransformerPolicy):
                self.client_module.post_attention_layernorm.bias, \
                self.client_module.input_layernorm.weight, \
                self.client_module.input_layernorm.bias
+
+    def get_lora_params(self):
+        return []

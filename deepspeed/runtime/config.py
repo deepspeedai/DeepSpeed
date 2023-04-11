@@ -31,6 +31,7 @@ from ..comm.config import DeepSpeedCommsConfig
 from ..monitor.config import get_monitor_config
 
 from deepspeed import comm as dist
+from deepspeed.runtime.config_utils import DeepSpeedConfigModel
 
 from ..git_version_info import version as __version__
 from ..utils import logger
@@ -514,6 +515,21 @@ def get_memory_breakdown(param_dict):
     return get_scalar_param(param_dict, MEMORY_BREAKDOWN, MEMORY_BREAKDOWN_DEFAULT)
 
 
+class HybridEngineConfig(DeepSpeedConfigModel):
+    enabled: bool = False
+    max_out_tokens: int = 512
+    inference_tp_size: int = 1
+    release_inference_cache: bool = False
+    pin_parameters: bool = True
+    tp_gather_partition_size: int = 8
+
+
+def get_hybrid_engine_config(param_dict):
+    hybrid_engine_config_dict = param_dict.get("hybrid_engine", {})
+    hybrid_engine_config = HybridEngineConfig(**hybrid_engine_config_dict)
+    return hybrid_engine_config
+
+
 def get_eigenvalue_config(param_dict):
     if get_quantize_enabled(param_dict):
         param_dict = param_dict[QUANTIZE_TRAINING]
@@ -815,6 +831,8 @@ class DeepSpeedConfig(object):
             self.eigenvalue_layer_name,
             self.eigenvalue_layer_num,
         ) = get_eigenvalue_config(param_dict)
+
+        self.hybrid_engine = get_hybrid_engine_config(param_dict)
 
         self.sparse_attention = get_sparse_attention(param_dict)
         self.pipeline = get_pipeline_config(param_dict)

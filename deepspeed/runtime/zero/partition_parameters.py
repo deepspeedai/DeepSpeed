@@ -11,7 +11,6 @@ from enum import Enum
 import functools
 import itertools
 from typing import List
-
 import torch
 from torch import Tensor
 from deepspeed import comm as dist
@@ -688,9 +687,10 @@ class Init(InsertPostInitMethodToModuleSubClasses):
             config_dict_or_path = config
             logger.warning(
                 f'zero.Init: the `config` argument is deprecated. Please use `config_dict_or_path` instead.')
-
         _ds_config = deepspeed.runtime.config.DeepSpeedConfig(config_dict_or_path,
                                                               mpu) if config_dict_or_path is not None else None
+        if _ds_config is not None:
+            mem_efficient_linear = _ds_config.zero_config.memory_efficient_linear
         super().__init__(enabled=enabled, mem_efficient_linear=mem_efficient_linear, ds_config=_ds_config, dtype=dtype)
         if not dist.is_initialized():
             init_distributed()

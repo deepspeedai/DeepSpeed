@@ -30,6 +30,9 @@ from deepspeed.runtime.constants import PIPE_REPLICATED
 from numpy import prod
 from deepspeed.accelerator import get_accelerator
 
+from deepspeed.module_inject.policy import transpose
+from torch.nn import functional as F
+
 torch_memory_reserved = get_accelerator().memory_reserved
 torch_max_memory_reserved = get_accelerator().max_memory_reserved
 
@@ -300,6 +303,7 @@ def get_global_norm(norm_list):
     total_norm = 0.0
     for norm in norm_list:
         total_norm += norm**2.0
+    # logger.info(f'norm_list = {norm_list} global = {sqrt(total_norm)}')
     return sqrt(total_norm)
 
 
@@ -944,3 +948,28 @@ def all_gather_dp_groups(partitioned_param_groups, dp_process_group, start_align
                 shard_list.append(curr_shard)
 
             dist.all_gather(shard_list, shard_list[partition_id], dp_process_group[group_id])
+
+
+class TLinear(torch.nn.Linear):
+
+    def __init__(self, orig_layer, name=""):
+        self.name = name
+        super().__init__(orig_layer.weight.shape[1], orig_layer.weight.shape[0], bias=(orig_layer.bias is not None))
+        self.weight.data = transpose(orig_layer.weight.data)
+        self.bias = orig_layer.bias
+        self._fwd_func = self._fwd_bias_add if self.bias is not None else self._fwd
+
+    def _fwd(self, input):
+        return F.linear(input, self.weight)
+
+    def _fwd_bias_add(self, input):
+        return F.linear(input, self.weight, bias=self.bias)
+
+    def forward(self, input):
+        return self._fwd_func(input)
+
+
+def get_inactive_params(param_list):
+    from deepspeed.runtime.zero.partition_parameters import ZeroParamStatus
+    return [param for param in param_list if (hasattr(param, 'ds_id') and \
+                            param.ds_status == ZeroParamStatus.NOT_AVAILABLE)]

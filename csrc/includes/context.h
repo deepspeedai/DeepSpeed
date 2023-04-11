@@ -44,9 +44,9 @@ inline int DS_GET_BLOCKS(const int N)
         1);
 }
 
-class Context {
+class TrainingContext {
 public:
-    Context() : _workspace(nullptr), _seed(42), _curr_offset(0)
+    TrainingContext() : _workspace(nullptr), _seed(42), _curr_offset(0)
     {
         curandCreateGenerator(&_gen, CURAND_RNG_PSEUDO_DEFAULT);
         curandSetPseudoRandomGeneratorSeed(_gen, 123);
@@ -57,15 +57,15 @@ public:
         }
     }
 
-    virtual ~Context()
+    virtual ~TrainingContext()
     {
         cublasDestroy(_cublasHandle);
         cudaFree(_workspace);
     }
 
-    static Context& Instance()
+    static TrainingContext& Instance()
     {
-        static Context _ctx;
+        static TrainingContext _ctx;
         return _ctx;
     }
 

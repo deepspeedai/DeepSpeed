@@ -78,8 +78,8 @@ BertTransformerLayer<T>::BertTransformerLayer(unsigned layer_id,
       _normalize_invertible(normalize_invertible),
       _gelu_checkpoint(gelu_checkpoint),
       _stochastic_mode(stochastic_mode),
-      _stream(Context::Instance().GetCurrentStream()),
-      _cublasHandle(Context::Instance().GetCublasHandle()),
+      _stream(TrainingContext::Instance().GetCurrentStream()),
+      _cublasHandle(TrainingContext::Instance().GetCublasHandle()),
       _qkv_linear(typename FeedForward<T>::Config(batch_size * seq_length,
                                                   3 * hidden_size,
                                                   hidden_size,
@@ -183,7 +183,7 @@ void BertTransformerLayer<T>::Forward(unsigned bsz,
 
     if (!_stochastic_mode) cudaStreamSynchronize(_stream);
 
-    T* workspace = static_cast<T*>(Context::Instance().GetWorkSpace());
+    T* workspace = static_cast<T*>(TrainingContext::Instance().GetWorkSpace());
     size_t small_buf_size = bsz * _seq_length * _hidden_size;
     T* buf_0 = workspace;
     T* buf_1 = buf_0 + small_buf_size;
@@ -343,7 +343,7 @@ void BertTransformerLayer<T>::Backward(unsigned bsz,
 
     if (!_stochastic_mode) cudaStreamSynchronize(_stream);
 
-    T* workspace = static_cast<T*>(Context::Instance().GetWorkSpace());
+    T* workspace = static_cast<T*>(TrainingContext::Instance().GetWorkSpace());
     size_t small_buf_size = bsz * _seq_length * _hidden_size;
     T* buf_0 = workspace;
     T* buf_1 = buf_0 + small_buf_size;
@@ -609,25 +609,26 @@ int create_transformer_layer(unsigned layer_id,
                              bool gelu_checkpoint,
                              bool stochastic_mode)
 {
-    Context::Instance().SetSeed(seed);
-    Context::Instance().TestGemmFP16(
+    TrainingContext::Instance().SetSeed(seed);
+    TrainingContext::Instance().TestGemmFP16(
         test_gemm, batch_size, init_seq_length, num_heads, hidden_dim / num_heads);
 
-    auto layer = std::make_shared<BertTransformerLayer<T>>(layer_id,
-                                                           batch_size,
-                                                           hidden_dim,
-                                                           num_heads,
-                                                           intermediate_size,
-                                                           init_seq_length,
-                                                           attn_dropout_ratio,
-                                                           hidden_dropout_ratio,
-                                                           layer_norm_eps,
-                                                           pre_or_postLayerNorm,
-                                                           Context::Instance().GetGemmAlgos(),
-                                                           attn_dropout_checkpoint,
-                                                           normalize_invertible,
-                                                           gelu_checkpoint,
-                                                           stochastic_mode);
+    auto layer =
+        std::make_shared<BertTransformerLayer<T>>(layer_id,
+                                                  batch_size,
+                                                  hidden_dim,
+                                                  num_heads,
+                                                  intermediate_size,
+                                                  init_seq_length,
+                                                  attn_dropout_ratio,
+                                                  hidden_dropout_ratio,
+                                                  layer_norm_eps,
+                                                  pre_or_postLayerNorm,
+                                                  TrainingContext::Instance().GetGemmAlgos(),
+                                                  attn_dropout_checkpoint,
+                                                  normalize_invertible,
+                                                  gelu_checkpoint,
+                                                  stochastic_mode);
 
     s_transformer_layers[layer_id] = layer;
 
@@ -725,7 +726,7 @@ std::vector<torch::Tensor> ds_transformer_forward(unsigned layer_id,
                                                          layer->IsTrainingMode(),
                                                          layer->GeluCheckpoint())},
                                   options);
-    Context::Instance().SetWorkSpace((T*)workspace.data_ptr());
+    TrainingContext::Instance().SetWorkSpace((T*)workspace.data_ptr());
 
     auto inp_norm = ((prelayernorm || !normalize_invertible) ? torch::empty_like(input) : output);
     auto add_res = (normalize_invertible ? inp_norm : torch::empty_like(input));
@@ -909,7 +910,7 @@ std::vector<torch::Tensor> ds_transformer_backward(unsigned layer_id,
                                                          layer->IsTrainingMode(),
                                                          layer->GeluCheckpoint())},
                                   options);
-    Context::Instance().SetWorkSpace((T*)workspace.data_ptr());
+    TrainingContext::Instance().SetWorkSpace((T*)workspace.data_ptr());
 
     auto grad_input = torch::empty_like(input);
     auto grad_attn_qkvw = torch::empty_like(attn_qkvw);

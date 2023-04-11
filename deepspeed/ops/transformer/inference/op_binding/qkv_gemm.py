@@ -28,10 +28,11 @@ class QKVGemmOp(BaseOp):
                 num_layers: int,
                 num_heads: int = None,
                 max_out_tokens: int = None):
-        q_scale = weight.scale
+        q_scale = weight.scale if hasattr(weight, 'scale') else torch.empty(1)
         external_cache = self.config.bigscience_bloom
         rank = dist.get_rank() if dist.is_initialized() else 0
         q_int8 = self.config.q_int8
         output = self.qkv_gemm_func(input, weight, q_scale, bias, gamma, beta, self.config.epsilon, add_bias,
-                                    num_layers, external_cache, self.config.mp_size, rank, q_int8)
+                                    num_layers, external_cache, self.config.mp_size, rank, q_int8,
+                                    self.config.transposed_mode)
         return output

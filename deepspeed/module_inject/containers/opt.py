@@ -12,6 +12,7 @@ from ..policy import TransformerPolicy
 from ..policy import transformer_param_names
 from ..policy import maybe_copy
 from ..policy import maybe_copy_qkv
+from ..policy import maybe_get_lora
 from deepspeed.utils.types import ActivationFuncType
 
 
@@ -77,20 +78,26 @@ class HFOPTLayerPolicy(TransformerPolicy):
                          pre_attn_norm=True,
                          use_load_prefix=use_load_prefix)
         self.client_module = client_module
-
         try:
             import transformers
             HFOPTLayerPolicy._orig_layer_class = transformers.models.opt.modeling_opt.OPTDecoderLayer
-            if isinstance(TransformerPolicy.hf_model_config, transformers.models.opt.configuration_opt.OPTConfig):
-                self.pre_attn_norm = TransformerPolicy.hf_model_config.do_layer_norm_before
         except:
             HFOPTLayerPolicy._orig_layer_class = None
 
     def get_hidden_heads(self):
         return self.client_module.self_attn.embed_dim, \
-                self.client_module.self_attn.num_heads
+                self.client_module.self_attn.num_heads, \
+                self.client_module.self_attn_layer_norm.eps
 
-    def attention(self):
+    def get_q_k_v(self):
+        return self.client_module.self_attn.q_proj.weight, \
+               self.client_module.self_attn.q_proj.bias, \
+               self.client_module.self_attn.k_proj.weight, \
+               self.client_module.self_attn.k_proj.bias, \
+               self.client_module.self_attn.v_proj.weight, \
+               self.client_module.self_attn.v_proj.bias
+
+    def attention(self, enable_training=False):
         qw = self.client_module.self_attn.q_proj.weight
         qb = self.client_module.self_attn.q_proj.bias
 
@@ -100,9 +107,8 @@ class HFOPTLayerPolicy(TransformerPolicy):
         vw = self.client_module.self_attn.v_proj.weight
         vb = self.client_module.self_attn.v_proj.bias
 
-        qkvw = Parameter(torch.cat((qw, kw, vw), dim=0), requires_grad=False)
-        qkvb = Parameter(torch.cat((qb, kb, vb), dim=0), requires_grad=False)
-
+        qkvw = Parameter(torch.cat((qw, kw, vw), dim=0), requires_grad=enable_training)
+        qkvb = Parameter(torch.cat((qb, kb, vb), dim=0), requires_grad=enable_training)
         return qkvw, \
                qkvb, \
                self.client_module.self_attn.out_proj.weight, \
@@ -119,3 +125,16 @@ class HFOPTLayerPolicy(TransformerPolicy):
                self.client_module.final_layer_norm.bias, \
                self.client_module.self_attn_layer_norm.weight, \
                self.client_module.self_attn_layer_norm.bias
+
+    def get_lora_params(self):
+        all_lora_params = []
+        for p in [
+            self.client_module.fc1, \
+            self.client_module.fc2, \
+            self.client_module.self_attn.q_proj, \
+            self.client_module.self_attn.k_proj, \
+            self.client_module.self_attn.v_proj, \
+            self.client_module.self_attn.out_proj, \
+            ]:
+            all_lora_params.append(maybe_get_lora(p))
+        return all_lora_params

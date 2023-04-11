@@ -72,11 +72,18 @@ class TransformerPolicy(DSPolicy):
         self.split_qkv = split_qkv
 
     @abstractmethod
-    def attention(self):
+    def attention(self, enable_training=False):
         """
         Returns attention qkv and dense parameters
         weight: (3*hidden, hidden) and (hidden, hidden)
         bias: (3*hidden) and (hidden)
+        """
+        raise NotImplementedError
+
+    @abstractmethod
+    def get_q_k_v(self):
+        """
+        return all q,k,v parameters without merging them together
         """
         raise NotImplementedError
 
@@ -102,6 +109,14 @@ class TransformerPolicy(DSPolicy):
         Returns LayerNorms used in transformer layer
         Post-Attention and pre/post layer norm
         gamma and beta with shape: (hidden)
+        """
+        raise NotImplementedError
+
+    @abstractmethod
+    def get_lora_params(self):
+        """
+        Returns lora parameters used in transformer layer
+
         """
         raise NotImplementedError
 
@@ -189,3 +204,19 @@ def maybe_copy_qkv(module, sd, weight_quantizer, mp_replace, dst_name, src_names
                 dst = mp_replace.copy(dst, weight_quantizer.quantize(qkv_data.to(get_accelerator().device_name()) if weight_quantizer.q_int8 else \
                                                 transpose(qkv_data)), int8=weight_quantizer.q_int8)
         setattr(module, dst_name, dst)
+
+
+def pack_lora_weights(p):
+    return [
+        p.lora_right_weight, \
+        p.lora_left_weight, \
+        p.lora_scaling
+    ]
+
+
+def maybe_get_lora(p):
+    if hasattr(p, 'lora_right_weight'):
+        lora_param = pack_lora_weights(p)
+    else:
+        lora_param = []
+    return lora_param

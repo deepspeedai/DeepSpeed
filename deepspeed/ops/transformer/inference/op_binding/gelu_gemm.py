@@ -24,5 +24,6 @@ class GELUGemmOp(BaseOp):
                 weight_out: torch.Tensor,
                 async_op: bool = False):
         output = self.fused_gemm_gelu(input, weight, weight.scale, bias, weight_out, weight_out.scale,
-                                      self.config.epsilon, self.config.pre_layer_norm, self.config.q_int8, async_op)
+                                      self.config.epsilon, self.config.pre_layer_norm, self.config.q_int8, async_op,
+                                      self.config.transposed_mode)
         return output

@@ -73,14 +73,18 @@ class HFGPTNEOLayerPolicy(TransformerPolicy):
 
     def get_hidden_heads(self):
         return self.client_module.attn.attention.q_proj.weight.shape[1], \
-                self.client_module.attn.attention.num_heads
+                self.client_module.attn.attention.num_heads, \
+                self.client_module.ln_1.eps
 
-    def attention(self):
+    def get_q_k_v(self):
+        return None
+
+    def attention(self, enable_training=False):
         qw = self.client_module.attn.attention.q_proj.weight
         kw = self.client_module.attn.attention.k_proj.weight
         vw = self.client_module.attn.attention.v_proj.weight
 
-        qkvw = Parameter(torch.cat((qw, kw, vw), dim=0), requires_grad=False)
+        qkvw = Parameter(torch.cat((qw, kw, vw), dim=0), requires_grad=enable_training)
 
         return qkvw, \
                None, \
@@ -98,3 +102,6 @@ class HFGPTNEOLayerPolicy(TransformerPolicy):
                self.client_module.ln_2.bias, \
                self.client_module.ln_1.weight, \
                self.client_module.ln_1.bias
+
+    def get_lora_params(self):
+        return []

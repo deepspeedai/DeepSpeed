@@ -39,8 +39,8 @@ public:
         cudaMallocHost((void**)_doubled_buffer, TILE * sizeof(float));
         cudaMallocHost((void**)(_doubled_buffer + 1), TILE * sizeof(float));
 
-        _streams[0] = Context::Instance().GetCurrentStream();
-        _streams[1] = Context::Instance().GetNewStream();
+        _streams[0] = TrainingContext::Instance().GetCurrentStream();
+        _streams[1] = TrainingContext::Instance().GetNewStream();
         _buf_index = false;
 #endif
     }

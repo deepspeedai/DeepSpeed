@@ -18,7 +18,7 @@ class VectorMatMulOp(BaseOp):
             self.vector_matmul_func = self.inference_cuda_module.vector_matmul_fp32
 
     def forward(self, input: torch.Tensor, weight: torch.Tensor, async_op: bool = False):
-        q_scale = weight.scale
+        q_scale = weight.scale if hasattr(weight, 'scale') else torch.empty(1)
         q_int8 = self.config.q_int8
-        output = self.vector_matmul_func(input, weight, async_op, q_scale, q_int8)
+        output = self.vector_matmul_func(input, weight, async_op, q_scale, q_int8, self.config.transposed_mode)
         return output

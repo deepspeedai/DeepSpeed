@@ -55,22 +55,34 @@ class LinearLayer(nn.Module):
 
 class Normalize(nn.Module):
 
-    def __init__(self, dim, dtype=torch.float, eps=1e-5):
+    def __init__(self, dim=None, dtype=torch.float, eps=1e-5, weight=None, bias=None):
         super(Normalize, self).__init__()
-        self.norm = nn.LayerNorm(dim, eps=eps).to(dtype).to(get_accelerator().current_device_name())
-        self.weight = self.norm.weight
-        self.bias = self.norm.bias
+        if weight is not None:
+            self.weight = weight
+            self.bias = bias
+        else:
+            self.norm = nn.LayerNorm(dim, eps=eps).to(dtype).to(get_accelerator().current_device_name())
+            self.weight = self.norm.weight
+            self.bias = self.norm.bias
+
+        self.eps = eps
 
     def forward(self, input):
-        return self.norm(input)
+        return nn.functional.layer_norm(input, input.shape[-1:], self.weight, self.bias, eps=self.eps)
 
 
 class EmbeddingLayer(nn.Module):
 
-    def __init__(self, weight_shape, dtype=torch.half):
+    def __init__(self, weight_shape=None, dtype=torch.half, weight=None, bias=None):
         super(EmbeddingLayer, self).__init__()
-        self.weight = Parameter(
-            torch.empty(weight_shape[0], weight_shape[1], dtype=dtype, device=get_accelerator().current_device_name()))
+        if weight is None:
+            self.weight = Parameter(
+                torch.empty(weight_shape[0],
+                            weight_shape[1],
+                            dtype=dtype,
+                            device=get_accelerator().current_device_name()))
+        else:
+            self.weight = weight
 
     def forward(self, input):
         return F.embedding(input, self.weight)
@@ -81,11 +93,11 @@ class OPTEmbedding(EmbeddingLayer):
     This module learns positional embeddings up to a fixed maximum size.
     """
 
-    def __init__(self, weight_shape):
+    def __init__(self, weight_shape=None, weight=None, bias=None):
         # OPT is set up so that if padding_idx is specified then offset the embedding ids by 2
         # and adjust num_embeddings appropriately. Other models don't have this hack
         self.offset = 2
-        super().__init__(weight_shape)
+        super().__init__(weight_shape, weight=weight)
 
     def forward(self, attention_mask: torch.LongTensor, past_key_values_length: int = 0):
         """`input_ids_shape` is expected to be [bsz x seqlen]."""

@@ -65,13 +65,18 @@ class DeepSpeedTransformerInference(nn.Module):
                                 mlp_extra_grouping)
 
         device = get_accelerator().current_device_name()  # if config.bigscience_bloom else 'cpu'
-        self.norm_w = nn.Parameter(torch.empty(self.config.hidden_size, dtype=data_type, device=device),
-                                   requires_grad=False)
-        self.norm_b = nn.Parameter(torch.empty(self.config.hidden_size, dtype=data_type, device=device),
-                                   requires_grad=False)
+        if self.config.set_empty_params:
+            self.norm_w = None
+            self.norm_b = None
+        else:
+            self.norm_w = nn.Parameter(torch.empty(self.config.hidden_size, dtype=data_type, device=device),
+                                       requires_grad=False)
+            self.norm_b = nn.Parameter(torch.empty(self.config.hidden_size, dtype=data_type, device=device),
+                                       requires_grad=False)
         self.layer_past = None
         self.allocate_workspace = inference_cuda_module.allocate_workspace_fp32 if (not config.fp16) else \
                                 inference_cuda_module.allocate_workspace_fp16
+        self._alloc_workspace = True
 
     @classmethod
     def reset_cache(cls):
@@ -110,12 +115,14 @@ class DeepSpeedTransformerInference(nn.Module):
         input_mask = (input_mask if attn_mask is None else attn_mask) if attention_mask is None else attention_mask
 
         # Allocate memory only on first layer forward
-        if self.config.layer_id == 0:
+        if self.config.layer_id == 0 and self._alloc_workspace:
             self.allocate_workspace(self.config.hidden_size, self.config.heads,
                                     input.size()[1],
                                     input.size()[0], DeepSpeedTransformerInference.layer_id, self.config.mp_size,
                                     self.config.bigscience_bloom,
-                                    dist.get_rank() if dist.is_initialized() else 0, self.config.max_out_tokens)
+                                    dist.get_rank() if dist.is_initialized() else 0, self.config.max_out_tokens,
+                                    self.config.min_out_tokens)
+            self._alloc_workspace = False
 
         get_present = (get_present or get_key_value or use_cache)
         input_mask = input_mask if attention_mask is None else attention_mask

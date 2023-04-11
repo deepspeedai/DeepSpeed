@@ -33,7 +33,7 @@ pg_correctness_test = False
 def print_rank_0(message, debug=False, force=False):
     rank = dist.get_rank()
     if rank == 0 and (debug or force):
-        print(message)
+        logger.info(message)
     # other variations
     # - print for all ranks w/o interleaving
     # printflock(f"[{rank}] {message}")
@@ -1015,6 +1015,7 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
             self.__reduce_and_partition_ipg_grads()
 
         param_id = self.get_param_id(param)
+
         assert self.params_already_reduced[param_id] == False, \
             f"The parameter {param_id} has already been reduced. \
             Gradient computed twice for this partition. \

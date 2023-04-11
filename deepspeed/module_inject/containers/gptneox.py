@@ -92,9 +92,13 @@ class GPTNEOXLayerPolicy(TransformerPolicy):
             attention = self.client_module.self_attention
 
         return self.client_module.attention.query_key_value.weight.shape[1], \
-                self.client_module.attention.num_attention_heads
+                self.client_module.attention.num_attention_heads, \
+                self.client_module.input_layernorm.eps
 
-    def attention(self):
+    def get_q_k_v(self):
+        return None
+
+    def attention(self, enable_training=False):
         if GPTNEOXLayerPolicy.version == 0:
             attention = self.client_module.attention
         else:
@@ -116,3 +120,6 @@ class GPTNEOXLayerPolicy(TransformerPolicy):
                self.client_module.post_attention_layernorm.bias, \
                self.client_module.input_layernorm.weight, \
                self.client_module.input_layernorm.bias
+
+    def get_lora_params(self):
+        return []

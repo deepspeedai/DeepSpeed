@@ -33,7 +33,7 @@ from deepspeed.runtime.fp16.fused_optimizer import FP16_Optimizer
 from deepspeed.runtime.fp16.unfused_optimizer import FP16_UnfusedOptimizer
 from deepspeed.runtime.bf16_optimizer import BF16_Optimizer
 
-from deepspeed.runtime.config import DeepSpeedConfig, DEEPSPEED_OPTIMIZERS, \
+from deepspeed.runtime.config import DEEPSPEED_OPTIMIZERS, \
     ADAGRAD_OPTIMIZER, ADAM_OPTIMIZER, ADAMW_OPTIMIZER, LAMB_OPTIMIZER, ONEBIT_ADAM_OPTIMIZER, ONEBIT_LAMB_OPTIMIZER, \
     TORCH_ADAM_PARAM, ADAM_W_MODE, ADAM_W_MODE_DEFAULT, ZERO_ONE_ADAM_OPTIMIZER
 
@@ -195,7 +195,7 @@ class DeepSpeedEngine(Module):
         dist_init_required=None,
         collate_fn=None,
         config=None,
-        config_params=None,
+        config_class=None,
         dont_change_device=False,
     ):
         super(DeepSpeedEngine, self).__init__()
@@ -213,6 +213,7 @@ class DeepSpeedEngine(Module):
         self.gradient_average = True
         self.warn_unscaled_loss = True
         self.config = config
+        self._config = config_class
         self.loaded_checkpoint_mp_world_size = None
         self.loaded_checkpoint_dp_world_size = None
         self.enable_backward_allreduce = True
@@ -241,10 +242,6 @@ class DeepSpeedEngine(Module):
 
         # needed for zero_to_fp32 weights reconstruction to remap nameless data to state_dict
         self.param_names = {param: name for name, param in model.named_parameters()}
-
-        # Set config using config_params for backwards compat
-        if self.config is None and config_params is not None:
-            self.config = config_params
 
         from deepspeed.comm import supported_torch_version
         # This supported_torch_version check is for torch1.2 compatibility only
@@ -949,19 +946,8 @@ class DeepSpeedEngine(Module):
         if hasattr(args, 'local_rank'):
             args.local_rank = self.local_rank
 
-        if self.config is None:
-            self.config = (args.deepspeed_config if hasattr(args, "deepspeed_config") else None)
-        self._config = DeepSpeedConfig(self.config, mpu)
-
     # Validate command line arguments
     def _do_args_sanity_check(self, args):
-        if hasattr(args, "deepscale_config") and args.deepscale_config is not None:
-            logger.warning("************ --deepscale_config is deprecated, please use --deepspeed_config ************")
-            if hasattr(args, "deepspeed_config"):
-                assert (args.deepspeed_config is
-                        None), "Not sure how to proceed, we were given both a deepscale_config and deepspeed_config"
-            args.deepspeed_config = args.deepscale_config
-
         assert "LOCAL_RANK" in os.environ or "OMPI_COMM_WORLD_LOCAL_RANK" in os.environ, "DeepSpeed requires the LOCAL_RANK environment " \
             "variable, it is set by the deepspeed launcher, deepspeed.init_distributed, or the torch's launcher. If using a " \
             "different launcher please ensure LOCAL_RANK is set prior to initializing deepspeed."
@@ -974,10 +960,6 @@ class DeepSpeedEngine(Module):
                 assert (
                     env_local_rank == args.local_rank
                 ), f"Mismatch in local rank setting, args.local_rank={args.local_rank} but env['LOCAL_RANK']={env_local_rank}."
-
-        if self.config is None:
-            assert (hasattr(args, "deepspeed_config") and args.deepspeed_config
-                    is not None), "DeepSpeed requires --deepspeed_config to specify configuration file"
 
     def _is_supported_optimizer(self, optimizer_name):
         return (optimizer_name in DEEPSPEED_OPTIMIZERS or getattr(torch.optim, optimizer_name, None) is not None)

@@ -45,9 +45,13 @@ class HFDistilBertLayerPolicy(TransformerPolicy):
 
     def get_hidden_heads(self):
         return self.client_module.attention.q_lin.weight.shape[1], \
-                self.client_module.attention.n_heads
+                self.client_module.attention.n_heads, \
+                self.client_module.sa_layer_norm.eps
 
-    def attention(self):
+    def get_q_k_v(self):
+        return None
+
+    def attention(self, enable_training=False):
         qw = self.client_module.attention.q_lin.weight
         qb = self.client_module.attention.q_lin.bias
         kw = self.client_module.attention.k_lin.weight
@@ -55,8 +59,8 @@ class HFDistilBertLayerPolicy(TransformerPolicy):
         vw = self.client_module.attention.v_lin.weight
         vb = self.client_module.attention.v_lin.bias
 
-        qkvw = Parameter(torch.cat((qw, kw, vw), dim=0))
-        qkvb = Parameter(torch.cat((qb, kb, vb), dim=0))
+        qkvw = Parameter(torch.cat((qw, kw, vw), dim=0), requires_grad=enable_training)
+        qkvb = Parameter(torch.cat((qb, kb, vb), dim=0), requires_grad=enable_training)
 
         return qkvw, \
                qkvb, \
@@ -77,3 +81,6 @@ class HFDistilBertLayerPolicy(TransformerPolicy):
                attention_layernorm.bias, \
                transformer_layernorm.weight, \
                transformer_layernorm.bias
+
+    def get_lora_params(self):
+        return []
