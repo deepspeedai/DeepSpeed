@@ -4,7 +4,8 @@
 # DeepSpeed Team
 
 import math
-from typing import Dict, List, Set
+from collections import namedtuple
+from typing import Dict, List, NamedTuple, Set, Tuple
 import pytest
 import deepspeed.comm as dist
 import torch
@@ -426,7 +427,7 @@ class EltwiseMultiplicationModule(Module):
         return result
 
 
-class EltwiseMultiplicationTestNetwork(Module):
+class EltwiseMultiplicationTestNetwork_Dict(Module):
     """used for testing purposes"""
 
     def __init__(
@@ -481,6 +482,91 @@ class EltwiseMultiplicationTestNetwork(Module):
             "loss": loss,
         }
 
+    @staticmethod
+    def to_dict(outputs: Dict[str, Tensor]) -> Dict[str, Tensor]:
+        return outputs
+
+
+class EltwiseMultiplicationNamedTuple(NamedTuple):
+    hidden1: Tensor
+    hidden2: Tensor
+    y_hat: Tensor
+    loss: Tensor
+
+
+class EltwiseMultiplicationTestNetwork_NamedTuple(EltwiseMultiplicationTestNetwork_Dict):
+
+    def forward(self, *args, **kwargs) -> EltwiseMultiplicationNamedTuple:
+        outputs_dicts = super().forward(*args, **kwargs)
+        return EltwiseMultiplicationNamedTuple(hidden1=outputs_dicts['hidden1'],
+                                               hidden2=outputs_dicts['hidden2'],
+                                               y_hat=outputs_dicts['y_hat'],
+                                               loss=outputs_dicts['loss'])
+
+    @staticmethod
+    def to_dict(outputs: EltwiseMultiplicationNamedTuple) -> Dict[str, Tensor]:
+        return {
+            "hidden1": outputs.hidden1,
+            "hidden2": outputs.hidden2,
+            "y_hat": outputs.y_hat,
+            "loss": outputs.loss,
+        }
+
+
+EltwiseMultiplication_namedtuple = namedtuple('EltwiseMultiplication_namedtuple',
+                                              ['hidden1', 'hidden2', 'y_hat', 'loss'])
+
+
+class EltwiseMultiplicationTestNetwork_namedtuple(EltwiseMultiplicationTestNetwork_Dict):
+
+    def forward(self, *args, **kwargs) -> EltwiseMultiplication_namedtuple:
+        outputs_dicts = super().forward(*args, **kwargs)
+        return EltwiseMultiplication_namedtuple(hidden1=outputs_dicts['hidden1'],
+                                                hidden2=outputs_dicts['hidden2'],
+                                                y_hat=outputs_dicts['y_hat'],
+                                                loss=outputs_dicts['loss'])
+
+    @staticmethod
+    def to_dict(outputs: EltwiseMultiplicationNamedTuple) -> Dict[str, Tensor]:
+        return {
+            "hidden1": outputs.hidden1,
+            "hidden2": outputs.hidden2,
+            "y_hat": outputs.y_hat,
+            "loss": outputs.loss,
+        }
+
+
+class EltwiseMultiplicationTestNetwork_Tuple(EltwiseMultiplicationTestNetwork_Dict):
+
+    def forward(self, *args, **kwargs) -> Tuple[Tensor, Tensor, Tensor, Tensor]:
+        outputs_dicts = super().forward(*args, **kwargs)
+        return (outputs_dicts['hidden1'], outputs_dicts['hidden2'], outputs_dicts['y_hat'], outputs_dicts['loss'])
+
+    @staticmethod
+    def to_dict(outputs: Tuple[Tensor, Tensor, Tensor, Tensor]) -> Dict[str, Tensor]:
+        return {
+            "hidden1": outputs[0],
+            "hidden2": outputs[1],
+            "y_hat": outputs[2],
+            "loss": outputs[3],
+        }
+
+
+class EltwiseMultiplicationTestNetwork_List(EltwiseMultiplicationTestNetwork_Dict):
+
+    def forward(self, *args, **kwargs) -> List[Tensor]:
+        outputs_dicts = super().forward(*args, **kwargs)
+        return [outputs_dicts['hidden1'], outputs_dicts['hidden2'], outputs_dicts['y_hat'], outputs_dicts['loss']]
+
+    @staticmethod
+    def to_dict(outputs: List[Tensor]) -> Dict[str, Tensor]:
+        return {
+            "hidden1": outputs[0],
+            "hidden2": outputs[1],
+            "y_hat": outputs[2],
+            "loss": outputs[3],
+        }
+
 
 @pytest.mark.parametrize("param_persistence_threshold", [0, 10])
 @pytest.mark.parametrize("fp16_enabled", [True, False])
@@ -488,6 +574,11 @@ class EltwiseMultiplicationTestNetwork(Module):
 @pytest.mark.parametrize("offload_optimizer", [True, False])
 @pytest.mark.parametrize("zero_grad", [True, False])
 @pytest.mark.parametrize("prefetching", [True, False])
+@pytest.mark.parametrize("model_class", [
+    EltwiseMultiplicationTestNetwork_Dict, EltwiseMultiplicationTestNetwork_NamedTuple,
+    EltwiseMultiplicationTestNetwork_namedtuple, EltwiseMultiplicationTestNetwork_Tuple,
+    EltwiseMultiplicationTestNetwork_List
+])
 class TestZero3ParamPartitioningBase(DistributedTest):
     world_size = 2
 
@@ -499,6 +590,7 @@ class TestZero3ParamPartitioningBase(DistributedTest):
         offload_optimizer: bool,
         zero_grad: bool,
         prefetching: bool,
+        model_class: EltwiseMultiplicationTestNetwork_Dict,
     ) -> None:
         if offload_optimizer and not contiguous_gradients:
             return
@@ -506,7 +598,7 @@ class TestZero3ParamPartitioningBase(DistributedTest):
         m = 3
         n = 5
         weights = [Parameter(torch.zeros((m, n), dtype=torch.float32)) for _ in range(3)]
-        model = EltwiseMultiplicationTestNetwork(*weights)
+        model = model_class(*weights)
         prefetch_bucket_size = sum([p.numel() for p in model.parameters(recurse=True)])
         cfg = {
             "train_micro_batch_size_per_gpu": 1,
@@ -568,6 +660,8 @@ class TestZero3ParamPartitioningBase(DistributedTest):
                 use_module_trace=train_iter > 0,
                 param_prefetching=prefetching and train_iter > 0,
             )
+            # for ease in testing convert outputs to dict.
+            activations = model_class.to_dict(activations)
             assert torch.allclose(activations["hidden1"], expected_hidden1)
             assert torch.allclose(activations["hidden2"], expected_hidden2)
             assert torch.allclose(activations["y_hat"], expected_yhat)
@@ -832,24 +926,23 @@ class TestZero3InitForParentWeightInitialization(DistributedTest):
 @pytest.mark.parametrize("offload_optimizer", [True, False])
 @pytest.mark.parametrize("zero_grad", [True, False])
 @pytest.mark.parametrize("prefetching", [True, False])
+@pytest.mark.parametrize("model_class", [
+    EltwiseMultiplicationTestNetwork_Dict, EltwiseMultiplicationTestNetwork_NamedTuple,
+    EltwiseMultiplicationTestNetwork_namedtuple, EltwiseMultiplicationTestNetwork_Tuple,
+    EltwiseMultiplicationTestNetwork_List
+])
 class TestZero3ParamPartitioningBaseBF16(DistributedTest):
     world_size = 2
 
-    def test(
-        self,
-        param_persistence_threshold: int,
-        contiguous_gradients: bool,
-        offload_optimizer: bool,
-        zero_grad: bool,
-        prefetching: bool,
-    ) -> None:
+    def test(self, param_persistence_threshold: int, contiguous_gradients: bool, offload_optimizer: bool,
+             zero_grad: bool, prefetching: bool, model_class: EltwiseMultiplicationTestNetwork_Dict) -> None:
         if offload_optimizer and not contiguous_gradients:
             return
 
         m = 3
         n = 5
         weights = [Parameter(torch.zeros((m, n), dtype=torch.float32)) for _ in range(3)]
-        model = EltwiseMultiplicationTestNetwork(*weights)
+        model = model_class(*weights)
         prefetch_bucket_size = sum([p.numel() for p in model.parameters(recurse=True)])
         cfg = {
             "train_micro_batch_size_per_gpu": 1,
@@ -910,6 +1003,8 @@ class TestZero3ParamPartitioningBaseBF16(DistributedTest):
                 use_module_trace=train_iter > 0,
                 param_prefetching=prefetching and train_iter > 0,
             )
+            # for ease in testing convert outputs to dict.
+            activations = model_class.to_dict(activations)
             assert torch.allclose(activations["hidden1"], expected_hidden1)
             assert torch.allclose(activations["hidden2"], expected_hidden2)
             assert torch.allclose(activations["y_hat"], expected_yhat)

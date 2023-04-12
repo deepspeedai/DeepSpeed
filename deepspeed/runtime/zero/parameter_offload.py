@@ -22,17 +22,48 @@ def is_builtin_type(obj):
     return obj.__class__.__module__ == '__builtin__' or obj.__class__.__module__ == "builtins"
 
 
+def isinstance_namedtuple(obj: object) -> bool:
+    """
+    Is this an instance of namedtuple/NamedTuple?
+    From: https://stackoverflow.com/a/62692640
+
+    Args:
+        obj (object): An object.
+
+    Returns:
+        bool: True if namedtuple/NamedTuple else False.
+    """
+    return isinstance(obj, tuple) and hasattr(obj, '_asdict') and hasattr(obj, '_fields')
+
+
 # ensure we only warn once, otherwise every iteration will trigger a warning
 warned = False
 
 
-#apply torch.autograd.Function that calls a backward_function to tensors in output
 def _apply_to_tensors_only(module, functional, backward_function, outputs):
+    """
+    Apply a torch.autograd.Function that calls a `backward_function` to every Tensor in `outputs`.
+
+    Args:
+        module (torch.nn.Module):  A torch module
+        functional (Type[torch.autograd.Function]): The function class to apply.
+        backward_function (Callable[[torch.nn.Module], None]): A backward_function to pass to
+            `functional.apply`.
+        outputs (Any): The output of `module`.
+
+    Returns:
+        Any: The output of `module`.
+    """
     if isinstance(outputs, (tuple, list)):
         touched_outputs = []
         for output in outputs:
             touched_output = _apply_to_tensors_only(module, functional, backward_function, output)
             touched_outputs.append(touched_output)
+
+        if isinstance_namedtuple(outputs):
+            # namedtuples require a slightly different syntax.
+            return outputs.__class__(*touched_outputs)
+
         return outputs.__class__(touched_outputs)
     elif isinstance(outputs, dict):
         # apply inplace to avoid recreating dict inherited objects
