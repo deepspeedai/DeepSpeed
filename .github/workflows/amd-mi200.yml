@@ -1,4 +1,4 @@
-name: amd
+name: amd-mi200
 
 on:
   push:
@@ -19,7 +19,7 @@ concurrency:
 jobs:
   amd-tests:
     # The type of runner that the job will run on
-    runs-on: [self-hosted, amd]
+    runs-on: [self-hosted, amd, mi200]
 
     # Steps represent a sequence of tasks that will be executed as part of the job
     steps:
@@ -31,7 +31,7 @@ jobs:
 
       - name: Install pytorch
         run: |
-          pip install torch==1.13.1 torchvision --extra-index-url https://download.pytorch.org/whl/rocm5.1.1
+          pip install torch torchvision --extra-index-url https://download.pytorch.org/whl/rocm5.4.2
           python -c "import torch; print('torch:', torch.__version__, torch)"
           python -c "import torch; print('CUDA available:', torch.cuda.is_available())"
 
@@ -43,6 +43,11 @@ jobs:
           # git checkout 1cc453d33
           git rev-parse --short HEAD
           pip install .
+
+      - name: Install apex
+        run: |
+          pip install ninja
+          pip install -v --install-option="--cpp_ext" --install-option="--cuda_ext" 'git+https://github.com/ROCmSoftwarePlatform/apex.git'
 
       # Runs a set of commands using the runners shell
       - name: Install deepspeed
