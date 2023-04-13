@@ -84,7 +84,7 @@ git clone https://github.com/microsoft/DeepSpeedExamples.git
 cd DeepSpeedExamples/applications/DeepSpeed-Chat/
 pip install -r requirements.txt
 
-python train.py --actor-model facebook/opt-13b --reward-model facebook/opt-350m --num-gpus 8
+python train.py --actor-model facebook/opt-13b --reward-model facebook/opt-350m --deployment-type single_node
 ```
 
 
@@ -118,7 +118,7 @@ Assistant:    Sure, I can try.  Microsoft is a company that makes computers, and
 我们了解到用户通常喜欢尝试不同的模型大小和配置，以满足他们不同的训练时间、资源和质量的需求。借助 DeepSpeed-Chat，你可以轻松实现这些目标。例如，如果你想在 GPU 集群上训练一个更大、更高质量的模型，用于你的研究或业务，你可以使用相同的脚本，只需输入你期望的模型大小（例如 660 亿参数）和 GPU 数量（例如 64 个 GPU）：
 
 ```python
-python train.py --actor-model facebook/opt-66b --reward-model facebook/opt-350m --num-gpus 64
+python train.py --actor-model facebook/opt-66b --reward-model facebook/opt-350m --deployment-type multi_node
 ```
 
 在 接下来的9 小时内，你将拥有一个 660 亿参数的 ChatGPT 模型，并可以在你喜欢的前端 GUI 中使用：
@@ -136,7 +136,7 @@ python train.py --actor-model facebook/opt-66b --reward-model facebook/opt-350m 
 如果你只有大约 1-2 小时的咖啡或午餐休息时间，你也可以尝试使用 DeepSpeed-Chat 训练一个小型模型。例如，我们为单个数据集准备了一个 13 亿参数模型的训练示例，以便在你的消费级 GPU 上测试我们的框架。当你从午餐休息回来时，你的模型已经准备好供你使用！
 
 ```python
-python train.py --actor-model facebook/opt-1.3b --reward-model facebook/opt-350m --num-gpus 1
+python train.py --actor-model facebook/opt-1.3b --reward-model facebook/opt-350m --deployment-type single_gpu
 ```
 
 <div align="center">

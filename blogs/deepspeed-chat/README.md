@@ -88,7 +88,7 @@ git clone https://github.com/microsoft/DeepSpeedExamples.git
 cd DeepSpeedExamples/applications/DeepSpeed-Chat/
 pip install -r requirements.txt
 
-python train.py --actor-model facebook/opt-13b --reward-model facebook/opt-350m --num-gpus 8
+python train.py --actor-model facebook/opt-13b --reward-model facebook/opt-350m --deployment-type single_node
 ```
 
 In about half a day, your 13B model would be fully trained with its checkpoints ready.  The following table demonstrates a breakdown of the training time for each of the three steps:
@@ -121,7 +121,7 @@ Assistant:    Sure, I can try.  Microsoft is a company that makes computers, a
 We understand users often like to play with different model sizes and configurations to meet their training time, resources, and quality requirements. With DeepSpeed-Chat, users can easily do that. For example, if you want to train a larger and higher-quality model on your GPU cluster for your research or business, you can simply use the same script with your desired model size e.g., 66B and GPU counts e.g., 64 GPUs:
 
 ```python
-python train.py --actor-model facebook/opt-66b --reward-model facebook/opt-350m --num-gpus 64
+python train.py --actor-model facebook/opt-66b --reward-model facebook/opt-350m --deployment-type multi_node
 ```
 
 Within 9 hours, you can have your 66 billion parameters ChatGPT model ready to be served in your favorite front-end GUI:
@@ -140,7 +140,7 @@ Table 5. E2E time breakdown for training a 66 billion parameter ChatGPT model vi
 If you only have around 1-2 hours for coffee or lunch break, you can also try to train a small/toy model with DeepSpeed-Chat. For example, we prepared a training example for a 1.3B model with a single dataset to test our framework on your consumer-grade GPUs. The best part is that you will have your model checkpoint ready to play with when you are back from your lunch break!
 
 ```python
-python train.py --actor-model facebook/opt-1.3b --reward-model facebook/opt-350m --num-gpus 1
+python train.py --actor-model facebook/opt-1.3b --reward-model facebook/opt-350m --deployment-type single_gpu
 ```
 
 <div align="center">
