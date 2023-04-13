@@ -82,9 +82,7 @@ We start with the easy-to-use experience by showing how you can train OPT-13B an
 We use an example of pretrained OPT-13B as the actor model and OPT-350M as the reward model in the following single script to generate a final 13B ChatGPT-style model:
 
 ```python
-git clone https://github.com/microsoft/DeepSpeed.git
-cd DeepSpeed
-pip install .
+pip install deepspeed>=0.9.0
 
 git clone https://github.com/microsoft/DeepSpeedExamples.git
 cd DeepSpeedExamples/applications/DeepSpeed-Chat/

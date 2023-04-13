@@ -78,9 +78,7 @@ DeepSpeed-RLHF 系统在大规模训练中具有无与伦比的效率，使复�
 
 以下示例展示了如何使用一个脚本，以预训练的 OPT-13B 作为 actor 模型，OPT-350M 作为 reward 模型，生成一个最终的 130 亿参数的 ChatGPT 类型的模型：
 ```
-git clone https://github.com/microsoft/DeepSpeed.git
-cd DeepSpeed
-pip install .
+pip install deepspeed>=0.9.0
 
 git clone https://github.com/microsoft/DeepSpeedExamples.git
 cd DeepSpeedExamples/applications/DeepSpeed-Chat/

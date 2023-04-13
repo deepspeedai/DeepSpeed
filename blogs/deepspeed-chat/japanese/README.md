@@ -79,9 +79,7 @@ DeepSpeed-RLHFシステムは、大規模モデルの学習において類を見
 以下のスクリプトを実行すると、最終的に130億パラメータのChatGPTライクなモデルが生成されます。
 
 ```python
-git clone https://github.com/microsoft/DeepSpeed.git
-cd DeepSpeed
-pip install .
+pip install deepspeed>=0.9.0
 
 git clone https://github.com/microsoft/DeepSpeedExamples.git
 cd DeepSpeedExamples/applications/DeepSpeed-Chat/
