@@ -59,7 +59,7 @@ class DeepSpeedDiffusersAttentionFunction(Function):
             scale = (1 / norm_factor) * (1 / norm_factor)
             if do_flash_attn and context == None:
                 qkv_out = linear_func(input, attn_qkvw, attn_qkvb if attn_qkvb is not None else attn_qkvw, attn_qkvb
-                                      is not None, do_flash_attn, config.heads)
+                                      is not None, do_flash_attn, config.heads, False)
 
                 context_layer = triton_flash_attn_kernel(qkv_out[0], qkv_out[1], qkv_out[2], scale,
                                                          input.shape[-2] % 128 == 0)
@@ -82,7 +82,7 @@ class DeepSpeedDiffusersAttentionFunction(Function):
                 attention_scores = (torch.matmul(query, key.transpose(-1, -2)) * scale).softmax(dim=-1)
                 context_layer = _transpose_for_context(torch.matmul(attention_scores, value))
 
-            output = linear_func(context_layer, attn_ow, attn_ob, do_out_bias, False, config.heads)
+            output = linear_func(context_layer, attn_ow, attn_ob, do_out_bias, False, config.heads, False)
             return output
 
         output = selfAttention_fp(input, context, input_mask)
@@ -184,7 +184,7 @@ class DeepSpeedDiffusersAttention(nn.Module):
             self.allocate_workspace(self.config.hidden_size, self.config.heads,
                                     input.size()[1],
                                     input.size()[0], DeepSpeedDiffusersAttention.layer_id, self.config.mp_size, False,
-                                    0, self.config.max_out_tokens)
+                                    0, self.config.max_out_tokens, self.config.min_out_tokens)
         output = DeepSpeedDiffusersAttentionFunction.apply(input, context, input_mask, self.config, self.attn_qkvw,
                                                            self.attn_qw, self.attn_kw, self.attn_vw, self.attn_qkvb,
                                                            self.num_attention_heads_per_partition, self.norm_factor,
