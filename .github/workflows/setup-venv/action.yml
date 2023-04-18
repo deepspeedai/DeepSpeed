@@ -15,6 +15,7 @@ runs:
         python -m venv unit-test-venv
         source ./unit-test-venv/bin/activate
         python -m pip install --upgrade pip
+        pip install wheel # required after pip>=23.1
         echo PATH=$PATH >> $GITHUB_ENV # Make it so venv is inherited for other steps
       shell: bash
     - id: print-env

@@ -78,7 +78,12 @@ if torch_available and torch.cuda.is_available():
         if rocm_major <= 4:
             cupy = f"cupy-rocm-{rocm_major}-{rocm_minor}"
     else:
-        cupy = f"cupy-cuda{''.join(map(str,installed_cuda_version()))}"
+        cuda_major_ver, cuda_minor_ver = installed_cuda_version()
+        if (cuda_major_ver < 11) or ((cuda_major_ver == 11) and (cuda_minor_ver < 3)):
+            cupy = f"cupy-cuda{cuda_major_ver}{cuda_minor_ver}"
+        else:
+            cupy = f"cupy-cuda{cuda_major_ver}x"
+
     if cupy:
         extras_require['1bit'].append(cupy)
         extras_require['1bit_mpi'].append(cupy)
