@@ -177,7 +177,12 @@ All DeepSpeed documentation, tutorials, and blogs can be found on our website: [
 # Contributing
 DeepSpeed welcomes your contributions! Please see our
 [contributing](CONTRIBUTING.md) guide for more details on formatting, testing,
-etc.
+etc.<br/>
+Thanks so much to all of our amazing contributors!
+
+<a href="https://github.com/microsoft/DeepSpeed/graphs/contributors">
+  <img src="https://contrib.rocks/image?repo=microsoft/DeepSpeed"  width="800px"/>
+</a>
 
 ## Contributor License Agreement
 This project welcomes contributions and suggestions. Most contributions require you to
