@@ -1,9 +1,9 @@
-autodoc_pydantic
+autodoc_pydantic<2.0.0
 docutils<0.18
 hjson
 packaging
 psutil
 py-cpuinfo
-pydantic
+pydantic<2.0.0
 torch
 tqdm
