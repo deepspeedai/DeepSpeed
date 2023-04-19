@@ -48,8 +48,11 @@ jobs:
 
       - name: Install apex
         run: |
-          pip install ninja
-          pip install -v --install-option="--cpp_ext" --install-option="--cuda_ext" 'git+https://github.com/ROCmSoftwarePlatform/apex.git'
+          git clone https://github.com/ROCmSoftwarePlatform/apex.git
+          cd apex
+          python setup.py install --cpp_ext --cuda_ext
+          # Previous install without cloning source doesn't work due to latest pip removing `--install-option`
+          # pip install -v --install-option="--cpp_ext" --install-option="--cuda_ext" 'git+https://github.com/ROCmSoftwarePlatform/apex.git'
 
       # Runs a set of commands using the runners shell
       - name: Install deepspeed
