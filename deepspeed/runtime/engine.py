@@ -55,7 +55,7 @@ from deepspeed.compression.constants import \
     WEIGHT_QUANTIZE_ROUNDING, \
     WEIGHT_QUANTIZE_VERBOSE, \
     WEIGHT_QUANTIZE_KERNEL
-from deepspeed.checkpoint.constants import OPTIMIZER_STATE_DICT
+from deepspeed.checkpoint.constants import OPTIMIZER_STATE_DICT, FROZEN_PARAM_FRAGMENTS
 from deepspeed.runtime.sparse_tensor import SparseTensor
 
 from deepspeed.runtime import lr_schedules
@@ -2414,13 +2414,27 @@ class DeepSpeedEngine(Module):
                         state_dict.update(expert_state_dict)
                     moe_layer_id += 1
 
-    def load_module_state_dict(self, state_dict, strict=True, custom_load_fn=None):
+    def load_module_state_dict(self, checkpoint, strict=True, custom_load_fn=None):
+        module_state_dict = checkpoint['module']
         if custom_load_fn:
-            custom_load_fn(src=state_dict, dst=self.module)
+            custom_load_fn(src=module_state_dict, dst=self.module)
         else:
             self.module.load_state_dict(
-                state_dict,  # TODO
+                module_state_dict,  # TODO
                 strict=strict)
+
+        if checkpoint.get(FROZEN_PARAM_FRAGMENTS, None) is not None:
+            saved_frozen_params = checkpoint[FROZEN_PARAM_FRAGMENTS]
+            for param in self.module.parameters():
+                if param.requires_grad:
+                    continue
+                if param not in self.param_names:
+                    raise ValueError(f"failed to find frozen {param} in named params")
+                name = self.param_names[param]
+                if hasattr(param, 'ds_id'):
+                    param.ds_tensor.data.copy_(saved_frozen_params[name].data)
+                else:
+                    param.data.copy_(saved_frozen_params[name].data)
 
     def _get_zero_ckpt_prefix(self, dp_rank, bf16_mode):
         return f'{"bf16_" if bf16_mode else ""}zero_pp_rank_{dp_rank}'
@@ -2601,7 +2615,7 @@ class DeepSpeedEngine(Module):
                                                 num_experts=self.num_experts,
                                                 checkpoint_engine=self.checkpoint_engine)
         if not self.load_universal_checkpoint():
-            self.load_module_state_dict(state_dict=checkpoint['module'],
+            self.load_module_state_dict(checkpoint=checkpoint,
                                         strict=load_module_strict,
                                         custom_load_fn=custom_load_fn)
 
@@ -3011,6 +3025,8 @@ class DeepSpeedEngine(Module):
 
         zero_optimizer_state = self.zero_optimization() or self.bfloat16_enabled()
 
+        save_frozen_param = self.zero_optimization_partition_gradients()
+
         # A hack to save the checkpointing directory. Pipeline parallelism overrides
         # module_state_dict() and uses this path to save the model. module_state_dict()
         # then instead just returns None.  The module_state_dict() implementation in
@@ -3023,6 +3039,10 @@ class DeepSpeedEngine(Module):
                      buffer_names=self._get_buffer_names(),
                      optimizer=self.optimizer.state_dict() if self.optimizer and not zero_optimizer_state else None,
                      param_shapes=self._get_zero_param_shapes() if self.optimizer and zero_optimizer_state else None,
+                     frozen_param_shapes=self._get_zero_frozen_param_attributes(self._get_param_shape_func)
+                     if save_frozen_param else None,
+                     frozen_param_fragments=self._get_zero_frozen_param_attributes(self._get_param_fragment_func)
+                     if save_frozen_param else None,
                      lr_scheduler=self.lr_scheduler.state_dict() if self.lr_scheduler is not None else None,
                      data_sampler=self.training_dataloader.data_sampler.state_dict() if
                      (self.training_dataloader is not None and self.curriculum_learning_enabled()) else None,
@@ -3061,6 +3081,25 @@ class DeepSpeedEngine(Module):
         get_layer_named_buffers(self.module, prefix="")
 
         return buffer_names
+
+    def _get_param_shape_func(self, param):
+        return param.ds_shape if hasattr(param, 'ds_id') else param.shape
+
+    def _get_param_fragment_func(self, param):
+        return param.ds_tensor.detach().cpu() if hasattr(param, 'ds_id') else param.detach().cpu()
+
+    def _get_zero_frozen_param_attributes(self, attr_func):
+        frozen_param_fragments = OrderedDict()
+
+        for param in self.module.parameters():
+            if param.requires_grad:
+                continue
+            if param not in self.param_names:
+                raise ValueError(f"failed to find frozen {param} in named params")
+            name = self.param_names[param]
+            frozen_param_fragments[name] = attr_func(param)
+
+        return frozen_param_fragments
 
     def _get_zero_param_shapes(self):
         """Returns a dict of name to shape mapping, only for the flattened fp32 weights saved by the

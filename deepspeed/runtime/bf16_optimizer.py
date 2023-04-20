@@ -94,7 +94,8 @@ class BF16_Optimizer(ZeROOptimizer):
             partition_id = dist.get_rank(group=self.real_dp_process_group[i])
 
             # grab the original list
-            self.bf16_groups.append(param_group['params'])
+            trainable_parameters = [param for param in param_group['params'] if param.requires_grad]
+            self.bf16_groups.append(trainable_parameters)
 
             # create flat bf16 params
             self.bf16_groups_flat.append(

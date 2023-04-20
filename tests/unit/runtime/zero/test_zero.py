@@ -138,10 +138,11 @@ class TestZero3RepeatForwardLoop(DistributedTest):
 # testing the fix https://github.com/microsoft/DeepSpeed/pull/1227
 # also reproduces the https://github.com/microsoft/DeepSpeed/pull/1372
 @pytest.mark.parametrize('zero_stage', [2, 3])
+@pytest.mark.parametrize('freeze_params', [True, False])
 class TestZeroToFP32(DistributedTest):
     world_size = 2
 
-    def test_1_param_group(self, tmpdir, zero_stage):
+    def test_1_param_group(self, tmpdir, zero_stage, freeze_params):
         # XXX: ideally refactor with the 2_param_group test as 75% is the same
         # force all params to be partitioned by forcing threshold=0
         config_dict = {
@@ -166,7 +167,7 @@ class TestZeroToFP32(DistributedTest):
 
         class MyModel(torch.nn.Module):
 
-            def __init__(self, hidden_dim, n_layers):
+            def __init__(self, hidden_dim, n_layers, freeze_params):
                 super().__init__()
                 # to reproduce https://github.com/microsoft/DeepSpeed/pull/1372 it is important that
                 # the number of total elements is uneven:
@@ -176,6 +177,9 @@ class TestZeroToFP32(DistributedTest):
                 self.classifier = torch.nn.Linear(4, 1)
                 # total 48+5=53 (uneven as desired) elements
                 self.cross_entropy_loss = torch.nn.CrossEntropyLoss()
+                if freeze_params:
+                    self.ll[0].weight.requires_grad = False
+                    self.ll[0].bias.requires_grad = False
 
             def forward(self, x, y):
                 hidden = x
@@ -188,9 +192,12 @@ class TestZeroToFP32(DistributedTest):
         world_size = dist.get_world_size()
         # we want at least 2x layers as there are gpus to trigger round_robin_fp16_groups reshuffle in zero2
         n_layers = world_size * 2
-        model = MyModel(hidden_dim=hidden_dim, n_layers=n_layers)
+        model = MyModel(hidden_dim=hidden_dim, n_layers=n_layers, freeze_params=freeze_params)
 
         model, _, _, _ = deepspeed.initialize(config=config_dict, model=model, model_parameters=model.parameters())
+        # Flush zero stage 3 cache
+        model.empty_partition_cache()
+
         data_loader = random_dataloader(model=model, total_samples=16, hidden_dim=hidden_dim, device=model.device)
 
         for i, batch in enumerate(data_loader):
@@ -198,6 +205,7 @@ class TestZeroToFP32(DistributedTest):
             model.backward(loss)
             model.step()
 
+        model.empty_partition_cache()
         model.save_checkpoint(tmpdir)
 
         # make sure all sides saved it
@@ -226,7 +234,7 @@ class TestZeroToFP32(DistributedTest):
                 # float() workaround for torch<1.6
                 assert torch.allclose(orig_state_dict[name].float(), fp32_state_dict[name].float())
 
-    def test_2_param_groups(self, tmpdir, zero_stage):
+    def test_2_param_groups(self, tmpdir, zero_stage, freeze_params):
         # TODO:
         # - need to test with multiple param groups
         # force all params to be partitioned by forcing threshold=0
@@ -253,10 +261,13 @@ class TestZeroToFP32(DistributedTest):
 
         class MyModel(torch.nn.Module):
 
-            def __init__(self, hidden_dim, n_layers):
+            def __init__(self, hidden_dim, n_layers, freeze_params):
                 super().__init__()
                 self.ll = torch.nn.ModuleList(torch.nn.Linear(hidden_dim, hidden_dim) for i in range(n_layers))
                 self.cross_entropy_loss = torch.nn.CrossEntropyLoss()
+                if freeze_params:
+                    self.ll[0].weight.requires_grad = False
+                    self.ll[0].bias.requires_grad = False
 
             def forward(self, x, y):
                 hidden = x
@@ -268,7 +279,7 @@ class TestZeroToFP32(DistributedTest):
 
         world_size = dist.get_world_size()
         n_layers = world_size * 2
-        model = MyModel(hidden_dim=hidden_dim, n_layers=n_layers)
+        model = MyModel(hidden_dim=hidden_dim, n_layers=n_layers, freeze_params=freeze_params)
 
         optim_groups = [
             {
@@ -286,6 +297,8 @@ class TestZeroToFP32(DistributedTest):
                                               model_parameters=model.parameters(),
                                               optimizer=optim,
                                               config=config_dict)
+        model.empty_partition_cache()
+
         data_loader = random_dataloader(model=model, total_samples=16, hidden_dim=hidden_dim, device=model.device)
 
         for i, batch in enumerate(data_loader):
@@ -293,6 +306,7 @@ class TestZeroToFP32(DistributedTest):
             model.backward(loss)
             model.step()
 
+        model.empty_partition_cache()
         model.save_checkpoint(tmpdir)
 
         # make sure all sides saved it
