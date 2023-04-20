@@ -181,7 +181,7 @@ etc.<br/>
 Thanks so much to all of our amazing contributors!
 
 <a href="https://github.com/microsoft/DeepSpeed/graphs/contributors">
-  <img src="https://contrib.rocks/image?repo=microsoft/DeepSpeed"  width="800px"/>
+  <img src="https://contrib.rocks/image?repo=microsoft/DeepSpeed&r="  width="800px"/>
 </a>
 
 ## Contributor License Agreement
