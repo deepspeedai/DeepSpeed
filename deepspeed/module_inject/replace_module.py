@@ -233,7 +233,10 @@ def generic_injection(module, fp16=False, enable_cuda_graph=True):
 
         try:
             import diffusers
-            cross_attention = diffusers.models.attention.CrossAttention
+            if hasattr(diffusers.models.attention, 'CrossAttention'):
+                cross_attention = diffusers.models.attention.CrossAttention
+            else:
+                cross_attention = diffusers.models.attention_processor.Attention
             attention_block = diffusers.models.attention.BasicTransformerBlock
             new_policies = {
                 cross_attention: replace_attn,
