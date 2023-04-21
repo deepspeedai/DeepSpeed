@@ -162,7 +162,7 @@ void launch_fused_add2<float>(float* out,
     int total_count = batch_size * seq_length * hidden_dim / 4;
     dim3 grid_dim = DS_GET_BLOCKS(total_count);  //(batch_size * seq_length);
 
-    dim3 block_dim = DS_CUDA_NUM_THREADS;        //(hidden_dim / 4);
+    dim3 block_dim = DS_CUDA_NUM_THREADS;  //(hidden_dim / 4);
 
     fused_add2_kernel<<<grid_dim, block_dim, 0, stream>>>(total_count, out, inp1, inp2);
 }
@@ -179,7 +179,7 @@ void launch_fused_add2<__half>(__half* out,
     int total_count = batch_size * seq_length * hidden_dim / 4;
     dim3 grid_dim = DS_GET_BLOCKS(total_count);  //(batch_size * seq_length);
 
-    dim3 block_dim = DS_CUDA_NUM_THREADS;        //(hidden_dim / 4);
+    dim3 block_dim = DS_CUDA_NUM_THREADS;  //(hidden_dim / 4);
 
     fused_add2_kernel<<<grid_dim, block_dim, 0, stream>>>(total_count, out, inp1, inp2);
 }
