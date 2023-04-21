@@ -462,9 +462,9 @@ std::vector<at::Tensor> ds_softmax_context(at::Tensor& query_key_value,
 
     T* workspace = (T*)InferenceContext::Instance().GetWorkSpace();
     size_t buf_size = bsz * seq_len * hidden_dim;
-    auto output = torch::from_blob(workspace + 3 * buf_size, {bsz, seq_len, hidden_dim}, options);
+    auto output = torch::from_blob(workspace + 4 * buf_size, {bsz, seq_len, hidden_dim}, options);
 
-    auto query_cont = workspace + 4 * buf_size;
+    auto query_cont = workspace + 5 * buf_size;
     size_t offset =
         10 * (hidden_dim * bsz * InferenceContext::Instance().GetMaxTokenLenght()) +
         layer_id * 2 * bsz * InferenceContext::Instance().GetMaxTokenLenght() * hidden_dim;
