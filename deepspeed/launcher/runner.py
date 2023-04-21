@@ -40,7 +40,8 @@ PDSH_MAX_FAN_OUT = 1024
 
 def parse_args(args=None):
     parser = argparse.ArgumentParser(description="DeepSpeed runner to help launch distributed "
-                                     "multi-node/multi-gpu training jobs.")
+                                     "multi-node/multi-gpu training jobs.",
+                                     formatter_class=argparse.ArgumentDefaultsHelpFormatter)
 
     parser.add_argument("-H",
                         "--hostfile",
