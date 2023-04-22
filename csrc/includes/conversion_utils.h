@@ -334,6 +334,11 @@ DS_D_INLINE __half2 to(float2 val)
 {
     return __float22half2_rn(val);
 }
+template <>
+DS_D_INLINE __half2 to(float val)
+{
+    return __float2half2_rn(val);
+}
 
 #ifdef BF16_AVAILABLE
 // No direct conversion
@@ -404,6 +409,11 @@ template <>
 DS_D_INLINE __nv_bfloat162 to(float2 val)
 {
     return __float22bfloat162_rn(val);
+}
+template <>
+DS_D_INLINE __nv_bfloat162 to(float val)
+{
+    return __float2bfloat162_rn(val);
 }
 template <>
 DS_D_INLINE __nv_bfloat162 to(__half2 val)
