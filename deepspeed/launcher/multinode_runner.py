@@ -184,6 +184,13 @@ class MPICHRunner(MultiNodeRunner):
         devices_per_node = self.resource_pool.values()
         total_process_count = sum(devices_per_node)
         process_per_node = list(devices_per_node)[0]
+        hosts = ""
+
+        for i, host in enumerate(self.resource_pool.keys()):
+            if i == 0:
+                hosts = f"{host}"
+            else:
+                hosts += f",{host}"
 
         mpirun_cmd = [
             'mpirun',
@@ -191,18 +198,20 @@ class MPICHRunner(MultiNodeRunner):
             f'{total_process_count}',
             '-ppn',
             f'{process_per_node}',
+            '-hosts',
+            f'{hosts}',
         ] + split(self.args.launcher_args)
         export_cmd = []
 
         for k, v in self.exports.items():
-            export_cmd += ['-x', "{}={}".format(k, v)]
+            export_cmd += ['-genv', "{}={}".format(k, v)]
 
         python_exec = []
         if not self.args.no_python:
             python_exec = [sys.executable, "-u"]
             if self.args.module:
                 python_exec.append("-m")
-        return mpirun_cmd + python_exec + [self.user_script] + self.user_arguments
+        return mpirun_cmd + export_cmd + python_exec + [self.user_script] + self.user_arguments
 
 
 class SlurmRunner(MultiNodeRunner):
