@@ -8,7 +8,10 @@ assignees: ''
 ---
 
 **Describe the bug**
-A clear and concise description of what the bug is.
+A clear and concise description of what the bug is. Please include which training step you are using and which model you are training.
+
+**Log output**
+If you used `train.py` to launch the application, please include the contents of the output log file.
 
 **To Reproduce**
 Steps to reproduce the behavior:
