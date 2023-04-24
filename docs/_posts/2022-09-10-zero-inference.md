@@ -2,7 +2,7 @@
 title: "ZeRO-Inference: Democratizing massive model inference"
 excerpt: ""
 date: 2022-09-10 00:09:00
-tags: inference ZeRO
+tags: inference ZeRO English
 ---
 
 ## Introduction

@@ -2,7 +2,7 @@
 title: "DeepSpeed Inference: Multi-GPU inference with customized inference kernels and quantization support"
 excerpt: ""
 date: 2021-03-16 00:00:00
-tags: inference
+tags: inference English
 ---
 While DeepSpeed supports training advanced large-scale models, using these trained models in the desired application scenarios is still challenging due to three major limitations in existing inference solutions: 1) lack of support for multi-GPU inference to fit large models and meet latency requirements, 2) limited GPU kernel performance when running inference with small batch sizes, and 3) difficulties in exploiting quantization, which includes both quantizing the model to reduce the model size and latency as well as supporting high-performance inference of quantized models without specialized hardware.
 

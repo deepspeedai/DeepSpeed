@@ -2,7 +2,7 @@
 title: "DeepSpeed with 1-bit Adam: 5x less communication and 3.4x faster training"
 excerpt: ""
 date: 2020-09-09 00:00:00
-tags: training
+tags: training English
 ---
 
 ## 1. Introduction

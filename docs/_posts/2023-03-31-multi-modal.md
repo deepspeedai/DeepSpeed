@@ -2,7 +2,7 @@
 title: "Scaling Large-Scale Generative Mixture-of-Expert Multimodal Model With VL-MoE "
 excerpt: ""
 date: 2023-03-31 00:09:00
-tags: training
+tags: training English
 ---
 
 The field of Artificial Intelligence-Generated Content (AIGC) is rapidly growing, with the goal of making content creation more efficient and accessible. One of the most exciting areas of AIGC is the development of large-scale multi-modal models like [Flamingo](https://arxiv.org/abs/2204.14198), [BLIP](https://arxiv.org/abs/2301.12597), and [GPT4](https://arxiv.org/abs/2303.08774), which can accept inputs from multiple resources, e.g., image, text, audio, etc., and generate a variety of formats as outputs. For example, image creation can be made through stable diffusion and DALLE using the prompt text, and the new feature in the coming Office can create slides with texts, images, animations, etc., by leveraging the power of the new Microsoft Office Copilot.

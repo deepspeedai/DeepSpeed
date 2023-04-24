@@ -2,7 +2,7 @@
 title: "10x bigger model training on a single GPU with ZeRO-Offload"
 excerpt: ""
 date: 2020-09-09 00:00:00
-tags: training ZeRO
+tags: training ZeRO English
 toc: false
 ---
 

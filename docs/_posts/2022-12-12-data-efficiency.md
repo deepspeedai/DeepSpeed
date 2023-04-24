@@ -2,7 +2,7 @@
 title: "DeepSpeed Data Efficiency: A composable library that makes better use of data, increases training efficiency, and improves model quality"
 excerpt: ""
 date: 2022-12-12 00:09:00
-tags: training
+tags: training English
 ---
 
 [ ![DeepSpeed Data Efficiency](/assets/images/data_efficiency/data_efficiecy_fig0.png) ](/assets/images/data_efficiency/data_efficiecy_fig0.png){: .align-center}

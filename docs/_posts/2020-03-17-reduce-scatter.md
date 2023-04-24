@@ -1,6 +1,7 @@
 ---
 title: "ZeRO stage 1 with reduced communication"
 sneak_preview: true
+tags: training ZeRO English
 excerpt: "Partition-aware ZeRO with up to 2x reduction in communication time!"
 ---
 

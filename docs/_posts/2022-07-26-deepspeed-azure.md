@@ -2,7 +2,7 @@
 title: "Azure empowers easy-to-use, high-performance, and hyperscale model training using DeepSpeed"
 excerpt: ""
 date: 2022-07-26 00:09:00
-tags: training azure
+tags: training azure English
 ---
 
 ## Introduction

@@ -2,7 +2,7 @@
 title: "Up to 5x less communication and 3.4x faster training through 1-bit Adam"
 excerpt: ""
 date: 2020-09-09 00:00:00
-tags: training
+tags: training English
 toc: false
 ---
 

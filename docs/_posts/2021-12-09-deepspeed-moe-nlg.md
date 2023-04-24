@@ -2,7 +2,7 @@
 title: "DeepSpeed-MoE for NLG: Reducing the training cost of language models by 5 times"
 excerpt: ""
 date: 2021-12-09 22:00:00
-tags: training
+tags: training English
 ---
 
 Autoregressive transformer-based natural language generation (referred to as

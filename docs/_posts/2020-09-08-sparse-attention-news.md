@@ -1,7 +1,7 @@
 ---
 title: "Powering 10x longer sequences and 6x faster execution through DeepSpeed Sparse Attention"
 excerpt: ""
-tags: training
+tags: training English
 date: 2020-09-09 00:00:00
 toc: false
 ---

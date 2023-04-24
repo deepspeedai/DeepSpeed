@@ -2,7 +2,7 @@
 title: "Autotuning: Automatically discover the optimal DeepSpeed configuration that delivers good training speed"
 excerpt: ""
 date: 2021-11-16 10:00:00
-tags: training
+tags: training English
 toc: false
 ---
 
