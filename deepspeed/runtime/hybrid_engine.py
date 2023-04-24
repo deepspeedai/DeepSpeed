@@ -120,7 +120,7 @@ class DeepSpeedHybridEngine(DeepSpeedEngine):
     def _fuse_lora(self, params, lora_params):
         maybe_has_lora_params = [p for p in params if len(p.shape) > 1]
         for lora_param, weight in zip(lora_params, maybe_has_lora_params):
-            if len(lora_params) > 0:
+            if len(lora_param) == 3:
                 lora_right_weight, \
                 lora_left_weight, \
                 lora_scaling = lora_param
@@ -133,7 +133,7 @@ class DeepSpeedHybridEngine(DeepSpeedEngine):
     def _unfuse_lora(self, params, lora_params):
         maybe_has_lora_params = [p for p in params if len(p.shape) > 1]
         for lora_param, weight in zip(lora_params, maybe_has_lora_params):
-            if len(lora_params) > 0:
+            if len(lora_param) == 3:
                 lora_right_weight, \
                 lora_left_weight, \
                 lora_scaling = lora_param
