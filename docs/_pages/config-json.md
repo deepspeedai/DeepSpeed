@@ -181,7 +181,7 @@ Example of <i>**scheduler**</i>
 
 ### Communication options
 
-<i>**communication_data_type**</i>: [boolean]
+<i>**communication_data_type**</i>: [string]
 
 | Description                                                                                                                   | Default |
 | ----------------------------------------------------------------------------------------------------------------------------- | ------- |

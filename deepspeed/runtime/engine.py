@@ -778,6 +778,9 @@ class DeepSpeedEngine(Module):
         if self.fp16_enabled():
             return torch.float16
 
+        if self.bfloat16_enabled():
+            return torch.bfloat16
+
         return torch.float32
 
     def postscale_gradients(self):
