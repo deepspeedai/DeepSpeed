@@ -7,6 +7,7 @@ tags: inference
    * [Introduction](#introduction)
    * [Example Script](#example-script)
         * [Launching](#launching)
+        * [T5 11B Inference Performance Comparison](#t5-11b-inference-performance-comparison)
         * [OPT 13B Inference Performance Comparison](#opt-13b-inference-performance-comparison)
    * [Supported Models](#supported-models)
    * [Unsupported Models](#unsupported-models)
@@ -65,7 +66,7 @@ With automatic tensor parallelism, we do not need to provide the injection polic
 
 # Example Script
 
-We can observe performance improvement with automatic tensor parallelism using the [inference test suite](https://github.com/microsoft/DeepSpeedExamples/blob/master/inference/huggingface/text-generation/inference-test.py). The script includes per token latency, bandwidth, throughput and memory checks for comparison. See the [README](https://github.com/microsoft/DeepSpeedExamples/tree/master/inference/huggingface/text-generation#deepspeed-huggingface-text-generation-examples) for more information.
+We can observe performance improvement with automatic tensor parallelism using the [inference test suite](https://github.com/microsoft/DeepSpeedExamples/blob/master/inference/huggingface/text-generation/inference-test.py). This script is for testing text-generation models and includes per token latency, bandwidth, throughput and memory checks for comparison. See the [README](https://github.com/microsoft/DeepSpeedExamples/tree/master/inference/huggingface/text-generation#deepspeed-huggingface-text-generation-examples) for more information.
 
 
 ## Launching
@@ -83,19 +84,31 @@ To enable tensor parallelism, you need to use the flag `ds_inference` for the co
 deepspeed --num_gpus <num_gpus> DeepSpeedExamples/inference/huggingface/text-generation/inference-test.py --name <model> --batch_size <batch_size> --test_performance --ds_inference
 ```
 
+## T5 11B Inference Performance Comparison
+
+The following results were collected using V100 SXM2 32GB GPUs.
+
+### Latency
+
+![T5 Latency Graph](/assets/images/auto-tp-chart-latency.png){: .align-center}
+
+### Throughput
+
+![T5 Throughput Graph](/assets/images/auto-tp-chart-throughput.png){: .align-center}
+
+### Memory
+
+| Test           | Memory Allocated per GPU   | Max Batch Size | Max Throughput per GPU |
+| -------------- | -------------------------- | -------------- | ---------------------- |
+| No TP or 1 GPU | 21.06 GB                   | 64             | 9.29 TFLOPS            |
+| 2 GPU TP       | 10.56 GB                   | 320            | 13.04 TFLOPS           |
+| 4 GPU TP       | 5.31 GB                    | 768            | 14.04 TFLOPS           |
+
 ## OPT 13B Inference Performance Comparison
 
 The following results were collected using V100 SXM2 32GB GPUs.
 
-### Max New Tokens = 50
-
-| Test       | Memory Allocated per GPU   | Max Batch Size   | Max Throughput per GPU   |
-| ---------- | -------------------------- | ---------------- | ------------------------ |
-| No TP      | 23.94 GB                   | 64               | 18.84 TFlops             |
-| 2 GPU TP   | 12.23 GB                   | 320              | 27.17 TFlops             |
-| 4 GPU TP   | 6.36 GB                    | 664              | 27.63 TFlops             |
-
-### Max New Tokens = 1024
+![OPT Throughput Graph](/assets/images/auto-tp-chart-opt-throughput.png){: .align-center}
 
 | Test       | Memory Allocated per GPU   | Max Batch Size   | Max Throughput per GPU   |
 | ---------- | -------------------------- | ---------------- | ------------------------ |
