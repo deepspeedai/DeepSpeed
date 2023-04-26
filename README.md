@@ -2,6 +2,7 @@
 [![PyPI version](https://badge.fury.io/py/deepspeed.svg)](https://pypi.org/project/deepspeed/)
 [![Downloads](https://pepy.tech/badge/deepspeed)](https://pepy.tech/project/deepspeed)
 [![Build](https://badgen.net/badge/build/check-status/blue)](#build-pipeline-status)
+[![Twitter](https://img.shields.io/twitter/follow/MSFTDeepSpeed)](https://twitter.com/intent/follow?screen_name=MSFTDeepSpeed)
 
 
 <div align="center">
