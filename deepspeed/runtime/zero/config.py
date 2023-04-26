@@ -249,6 +249,9 @@ class DeepSpeedZeroConfig(DeepSpeedConfigModel):
     between optimizer steps) or GPU count (increased parallelism).
     """
 
+    mics_shard_size: int = Field(-1, new_param="mics_shard_size")
+
+    mics_hierarchical_params_gather: bool = False
     memory_efficient_linear: bool = True
     """
     Use memory efficient linear implementation, for Stage 3.

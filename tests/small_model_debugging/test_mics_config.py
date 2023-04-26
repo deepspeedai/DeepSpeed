@@ -3,6 +3,9 @@
 
 # DeepSpeed Team
 
+# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 import os
 import json
 import argparse
@@ -47,11 +50,11 @@ def get_data_loader(model, total_samples, hidden_dim, device):
 def get_args(tmpdir, config_dict):
     parser = argparse.ArgumentParser()
     parser.add_argument("--local_rank", type=int, default=0)
-    parser.add_argument('--zero', type=int, default=0)
+    parser.add_argument('--zero', type=int, default=3)
     args = parser.parse_args()  #args=''
 
     config_dict["zero_optimization"]["stage"] = args.zero
-    print('config_dict["zero_optimization"]', config_dict["zero_optimization"])
+    # print('config_dict["zero_optimization"]', config_dict["zero_optimization"])
     config_path = create_config_from_dict(tmpdir, config_dict)
 
     args.deepspeed_config = config_path
@@ -81,8 +84,10 @@ config_dict = {
         "initial_scale_power": 15
     },
     "zero_optimization": {
-        "stage": 0,
+        "stage": 3,
         "reduce_bucket_size": 20,
+        "mics_shard_size": 4,
+        "mics_hierarchical_params_gather": True,
         "stage3_model_persistence_threshold": 10
     }
 }
@@ -90,7 +95,9 @@ config_dict = {
 args = get_args('/tmp/', config_dict)
 hidden_dim = 32
 
+# with deepspeed.zero.Init():
 model = SimpleModel(hidden_dim, empty_grad=False)
+# print('------> init model with deepspeed.zero.Init()')
 
 model, _, _, _ = deepspeed.initialize(args=args,
                                       model=model,

@@ -11,3 +11,5 @@ from .partition_parameters import register_external_parameter
 
 from .tiling import TiledLinear
 from .tiling import TiledLinearReturnBias
+
+from .mics import MiCS_Init

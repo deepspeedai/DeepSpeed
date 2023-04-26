@@ -440,6 +440,30 @@ def reduce_scatter(output,
     return cdb.reduce_scatter(output=output, input_list=input_list, op=op, group=group, async_op=async_op)
 
 
+def has_all_reduce_coalesced():
+    """"""
+    global cdb
+    assert cdb is not None and cdb.is_initialized(
+    ), 'DeepSpeed backend not set, please initialize it using init_process_group()'
+    assert cdb.has_all_reduce_coalesced is not None, 'has_all_reduce_coalesced is not yet defined'
+    return cdb.has_all_reduce_coalesced
+
+
+def has_coalescing_manager():
+    global cdb
+    assert cdb is not None and cdb.is_initialized(
+    ), 'DeepSpeed backend not set, please initialize it using init_process_group()'
+    assert cdb.has_coalescing_manager is not None, 'has_coalescing_manager is not yet defined'
+    return cdb.has_coalescing_manager
+
+
+def all_gather_coalesced(output_tensors, input_tensors, group=None, async_op=False):
+    global cdb
+    assert cdb is not None and cdb.is_initialized(
+    ), 'DeepSpeed backend not set, please initialize it using init_process_group()'
+    return cdb.all_gather_coalesced(output_tensors, input_tensors, group=group, async_op=async_op)
+
+
 @timed_op
 def all_reduce(tensor,
                op=ReduceOp.SUM,
@@ -455,6 +479,18 @@ def all_reduce(tensor,
     global cdb
     #print(f'op = {op}, cdb= {cdb.name}')
     return cdb.all_reduce(tensor, op, group, async_op)
+
+
+@timed_op
+def all_reduce_coalesced(tensors,
+                         op=ReduceOp.SUM,
+                         group=None,
+                         async_op=False,
+                         prof=False,
+                         log_name='all_reduce',
+                         debug=get_caller_func()):
+    global cbd
+    return cdb.all_reduce_coalesced(tensors, op, group, async_op)
 
 
 def get_world_group():

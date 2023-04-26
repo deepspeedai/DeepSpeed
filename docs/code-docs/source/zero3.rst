@@ -155,7 +155,39 @@ Example ZeRO-3 Configurations
             ...
         }
 
+MiCS Configurations
+===================
 
+All MiCS configurations are set with `DeepSpeedZeroConfig`. MiCS assumes ZeRO
+stage 3 optimization is enabled. For now, there are two configuration fields of
+MiCS `mics_shard_size` and `mics_hierarchical_params_gather`. `mics_shard_size`
+controls how many devices are used for partitioning the model states.
+`mics_hierarchical_params_gather` controls whether we use a two-stage
+hierarchical way to gather parameters in the forward computation.
+`mics_hierarchical_params_gather` is useful when model states are partitioned
+across multiple nodes and the cross-node bandwidth is slow. By default this is
+turned off.
+
+
+Example MiCS Configurations
+===========================
+
+#. Use MiCS to partition the model states (including optimizer states,
+   gradients, and parameters). The following config example partitions the model
+   states to eight devices, and assumes the eight devices are located within a
+   single node (`mics_hierarchical_params_gather` is `False`).
+
+    .. code-block:: python
+        :emphasize-lines: 3
+
+        {
+            "zero_optimization": {
+                "stage": 3,
+                "mics_shard_size": 8,
+                "mics_hierarchical_params_gather": False,
+            },
+            ...
+        }
 
 Assumptions
 ===========
