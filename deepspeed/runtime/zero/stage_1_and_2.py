@@ -839,14 +839,14 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
             Gradient computed twice for this partition. \
             Multiple gradient reduction is currently not supported"
 
-        if param.numel() > self.reduce_bucket_size:
-            self.extra_large_param_to_reduce = param
-
-        elif self.contiguous_gradients:
-            # keeping the gradients contiguous to prevent memory fragmentation, and avoid flattening
-            new_grad_tensor = self.ipg_buffer[self.ipg_index].narrow(0, self.elements_in_ipg_bucket, param.numel())
-            new_grad_tensor.copy_(param.grad.view(-1))
-            param.grad.data = new_grad_tensor.data.view_as(param.grad)
+        if self.contiguous_gradients:
+            if param.numel() > self.reduce_bucket_size:
+                self.extra_large_param_to_reduce = param
+            else:
+                # keeping the gradients contiguous to prevent memory fragmentation, and avoid flattening
+                new_grad_tensor = self.ipg_buffer[self.ipg_index].narrow(0, self.elements_in_ipg_bucket, param.numel())
+                new_grad_tensor.copy_(param.grad.view(-1))
+                param.grad.data = new_grad_tensor.data.view_as(param.grad)
 
         self.elements_in_ipg_bucket += param.numel()
 
