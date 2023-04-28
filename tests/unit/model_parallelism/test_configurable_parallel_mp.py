@@ -60,6 +60,7 @@ class ConfigurableMP(DistributedTest):
 class TestConfigurableMP(ConfigurableMP):
 
     @pytest.mark.world_size(1)
+    @pytest.mark.skip(reason="megatron-lm is currently broken so this test cannot be run.")
     def test_gpt2_basic(self, tmpdir, inputs):
         args_defaults = {
             'num_layers': 2,
@@ -87,6 +88,7 @@ class TestConfigurableMP(ConfigurableMP):
                               atol=1e-07), f"Baseline output {baseline} is not equal to save-then-load output {test}"
 
     @pytest.mark.world_size(2)
+    @pytest.mark.skip(reason="megatron-lm is currently broken so this test cannot be run.")
     def test_gpt2_mp2_no_resize(self, tmpdir, inputs):
         args_defaults = {
             'num_layers': 2,
@@ -148,6 +150,7 @@ class baseline_mp2(DistributedFixture):
 class TestConfigurableResizeMP(ConfigurableMP):
     world_size = [1, 4]
 
+    @pytest.mark.skip(reason="megatron-lm is currently broken so this test cannot be run.")
     def test(self, baseline_mp2, inputs, class_tmpdir):
         args_defaults = {
             'num_layers': 2,

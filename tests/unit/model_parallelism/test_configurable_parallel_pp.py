@@ -69,6 +69,7 @@ class TestConfigurablePP(ConfigurablePP):
     pp_size = 2
     world_size = 4  # mp_size * pp_size
 
+    @pytest.mark.skip(reason="megatron-lm is currently broken so this test cannot be run.")
     def test_pp_basic(self, inputs, tmpdir):
         # basic test case, mp_size=2, pp_size=2, verify ckpt saving/loading.
         args_defaults = {
@@ -234,30 +235,35 @@ class TestConfigurableResizePP(ConfigurablePP):
     # These tests are divided by baseline model worldsize and test model worldsize
     @pytest.mark.world_size(1)
     @pytest.mark.parametrize("mp_size, pp_size, mp_resize, pp_resize", [(1, 2, 1, 1)])
+    @pytest.mark.skip(reason="megatron-lm is currently broken so this test cannot be run.")
     def test_world_size_2to1(self, inputs, class_tmpdir, checkpoint_tag, baseline_ws2, mp_size, pp_size, mp_resize,
                              pp_resize):
         self._test(inputs, class_tmpdir, checkpoint_tag, mp_size, pp_size, mp_resize, pp_resize)
 
     @pytest.mark.world_size(1)
     @pytest.mark.parametrize("mp_size, pp_size, mp_resize, pp_resize", [(2, 2, 1, 1)])
+    @pytest.mark.skip(reason="megatron-lm is currently broken so this test cannot be run.")
     def test_world_size_4to1(self, inputs, class_tmpdir, checkpoint_tag, baseline_ws4, mp_size, pp_size, mp_resize,
                              pp_resize):
         self._test(inputs, class_tmpdir, checkpoint_tag, mp_size, pp_size, mp_resize, pp_resize)
 
     @pytest.mark.world_size(2)
     @pytest.mark.parametrize("mp_size, pp_size, mp_resize, pp_resize", [(2, 2, 2, 1)])
+    @pytest.mark.skip(reason="megatron-lm is currently broken so this test cannot be run.")
     def test_world_size_4to2(self, inputs, class_tmpdir, checkpoint_tag, baseline_ws4, mp_size, pp_size, mp_resize,
                              pp_resize):
         self._test(inputs, class_tmpdir, checkpoint_tag, mp_size, pp_size, mp_resize, pp_resize)
 
     @pytest.mark.world_size(4)
     @pytest.mark.parametrize("mp_size, pp_size, mp_resize, pp_resize", [(1, 1, 2, 2)])
+    @pytest.mark.skip(reason="megatron-lm is currently broken so this test cannot be run.")
     def test_world_size_1to4(self, inputs, class_tmpdir, checkpoint_tag, baseline_ws1, mp_size, pp_size, mp_resize,
                              pp_resize):
         self._test(inputs, class_tmpdir, checkpoint_tag, mp_size, pp_size, mp_resize, pp_resize)
 
     @pytest.mark.world_size(4)
     @pytest.mark.parametrize("mp_size, pp_size, mp_resize, pp_resize", [(1, 2, 1, 4), (2, 1, 2, 2)])
+    @pytest.mark.skip(reason="megatron-lm is currently broken so this test cannot be run.")
     def test_world_size_2to4(self, inputs, class_tmpdir, checkpoint_tag, baseline_ws2, mp_size, pp_size, mp_resize,
                              pp_resize):
         self._test(inputs, class_tmpdir, checkpoint_tag, mp_size, pp_size, mp_resize, pp_resize)

@@ -224,6 +224,7 @@ class TestCompression(DistributedTest):
         assert isinstance(compressed_model.layer[0].attention.self.key, LinearLayer_Compress)
         assert isinstance(compressed_model.layer[0].attention.self.value, LinearLayer_Compress)
 
+    @pytest.mark.skip(reason="megatron-lm is currently broken so this test cannot be run.")
     def test_mpu_compress(self, tmpdir):
         if not required_maximum_torch_version(major_version=1, minor_version=13):
             pytest.skip("megatron not compatible with torch >1.13")
