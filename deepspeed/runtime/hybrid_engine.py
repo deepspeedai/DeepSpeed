@@ -12,7 +12,7 @@ from .utils import TLinear, get_inactive_params
 from deepspeed.runtime.zero import GatheredParameters
 import time
 import gc
-
+import math
 from deepspeed import comm as dist
 from deepspeed.accelerator import get_accelerator
 from torch import nn
@@ -94,7 +94,15 @@ class DeepSpeedHybridEngine(DeepSpeedEngine):
             child=orig_layer)
         _container.set_dtype(self._config.fp16_enabled)
 
-        _container.set_tensor_parallel_config(self._config.hybrid_engine.inference_tp_size, self.mp_group)
+        if self.mpu is not None:
+            if hasattr(self.mpu, 'get_model_parallel_world_size'):
+                _container.set_tensor_parallel_config(self.mpu.get_model_parallel_world_size(),
+                                                      self.mpu.get_model_parallel_group())
+            else:
+                _container.set_tensor_parallel_config(self.mpu.get_tensor_model_parallel_world_size(),
+                                                      self.mpu.get_tensor_model_parallel_group())
+        else:
+            _container.set_tensor_parallel_config(self._config.hybrid_engine.inference_tp_size, self.mp_group)
         _container.initialize_tensors(enable_training=True)
         _container.create_ds_model_config()
         _container.create_module()
@@ -181,7 +189,7 @@ class DeepSpeedHybridEngine(DeepSpeedEngine):
 
                 partition_size = self._config.hybrid_engine.tp_gather_partition_size
 
-                layer_groups = len(self.layer_params) // partition_size
+                layer_groups = math.ceil(len(self.layer_params) / partition_size)
                 for lg in range(layer_groups):
                     non_active_params = []
                     non_active_lora_params = []
@@ -195,8 +203,10 @@ class DeepSpeedHybridEngine(DeepSpeedEngine):
                                               min(len(self.layer_params), (lg + 1) * partition_size), 1):
                             if len(self.all_lora_params) > 0:
                                 self._fuse_lora(self.layer_params[layer_id], self.lora_params[layer_id])
-                            self._inference_containers[layer_id].apply_tensor_parallelism(
-                                mp_group=self.mp_group, tp_size=self._config.hybrid_engine.inference_tp_size)
+
+                            if self.mpu is not None:
+                                self._inference_containers[layer_id].apply_tensor_parallelism(
+                                    mp_group=self.mp_group, tp_size=self._config.hybrid_engine.inference_tp_size)
 
                 # TODO(cmikeh2) Evaluate if this can be deferred when release_inference_cache
                 # is enabled.
@@ -306,27 +316,32 @@ class DeepSpeedHybridEngine(DeepSpeedEngine):
         self._orig_fwds_others = []
 
         if self._config.hybrid_engine.inference_tp_size > 1:
-            global_rank = dist.get_rank()
-            world_size = dist.get_world_size()
-            mp_group_id = global_rank // self._config.hybrid_engine.inference_tp_size
-            num_mp_groups = world_size // self._config.hybrid_engine.inference_tp_size
-            for mp_group_id in range(num_mp_groups):
-                ranks = list(
-                    range(mp_group_id * self._config.hybrid_engine.inference_tp_size, \
-                          (mp_group_id + 1) * self._config.hybrid_engine.inference_tp_size, \
-                          1)
-                )
-                mp_group = dist.new_group(ranks)
-                if global_rank in ranks:
-                    self.mp_group = mp_group
+            if self.mpu is not None:
+                global_rank = dist.get_rank()
+                world_size = dist.get_world_size()
+                mp_group_id = global_rank // self._config.hybrid_engine.inference_tp_size
+                num_mp_groups = world_size // self._config.hybrid_engine.inference_tp_size
+                for mp_group_id in range(num_mp_groups):
+                    ranks = list(
+                        range(mp_group_id * self._config.hybrid_engine.inference_tp_size, \
+                            (mp_group_id + 1) * self._config.hybrid_engine.inference_tp_size, \
+                            1)
+                    )
+                    mp_group = dist.new_group(ranks)
+                    if global_rank in ranks:
+                        self.mp_group = mp_group
+            else:
+                self.mp_group = self.mpu.get_model_parallel_group() if hasattr(self.mpu, 'get_model_parallel_group') else \
+                    self.mpu.get_tensor_model_parallel_group()
         else:
             self.mp_group = None
         self.populate_all_inference_policies()
         self.all_layers_params = list(self.module.parameters())
         self.create_inference_containers(self.module)
 
-        self._generate = self.module.generate
-        self.module.generate = self.generate
+        if len(self._inference_containers) > 0:
+            self._generate = self.module.generate
+            self.module.generate = self.generate
 
         self._t0 = time.time()
 
@@ -374,6 +389,8 @@ class DeepSpeedHybridEngine(DeepSpeedEngine):
                 else:
                     orig_module.forward = inference_container.module.forward
 
+                inference_container.align_merged_qkv()
+
             if not self.Z3_enabled or self.gather_all_layers:
                 for orig_module, inference_layer in zip(self._orig_modules_others, self._other_layers):
                     orig_module.forward = inference_layer.forward
@@ -385,7 +402,9 @@ class DeepSpeedHybridEngine(DeepSpeedEngine):
 
     def train(self, mode=True):
         if mode and len(self._orig_modules) > 0:
-            for orig_module, orig_fwd in zip(self._orig_modules, self._orig_fwds):
+            for inference_container, orig_module, orig_fwd in zip(self._inference_containers, self._orig_modules,
+                                                                  self._orig_fwds):
+                inference_container.partition_merged_qkv()
                 orig_module.forward = orig_fwd
             for orig_module, orig_fwd in zip(self._orig_modules_others, self._orig_fwds_others):
                 orig_module.forward = orig_fwd
@@ -395,10 +414,13 @@ class DeepSpeedHybridEngine(DeepSpeedEngine):
 
     def step(self, lr_kwargs=None):
         super().step(lr_kwargs=lr_kwargs)
-        if(self._inference_containers[0].module.attention.attn_qkvw is not None and \
-            self._inference_containers[0].q_k_v is not None):
-            for inference_container in self._inference_containers:
-                inference_container.reset_qkv()
+
+        if len(self._inference_containers) > 0:
+            if(self._inference_containers[0].module.attention.attn_qkvw is not None and \
+                self._inference_containers[0].q_k_v is not None):
+                for inference_container in self._inference_containers:
+                    inference_container.reset_qkv()
+
         if self._training_start_time is not None:
             self._training_latency += (time.time() - self._training_start_time)
             self._training_start_time = time.time()

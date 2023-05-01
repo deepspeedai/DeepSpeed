@@ -42,7 +42,7 @@ class ReplaceWithTensorSlicing:
             for merging your checkpoints before replacing the transformer layer with\
             inference-kernels'
 
-    def qkv_copy(self, dst, src, int8=False):
+    def qkv_copy(self, dst, src, int8=False, allocat_tensor=False):
         if src is None:
             return src
         src_shape = src.shape
@@ -50,6 +50,9 @@ class ReplaceWithTensorSlicing:
 
         outer_dim = 0 if int8 else -1
         inner_dim = -1 if int8 else 0
+
+        if allocat_tensor:
+            dst = torch.empty_like(dst)
 
         src_split = torch.split(src.data, src.shape[outer_dim] // 3, dim=outer_dim)
         if (len(src_shape) == 2 and len(dst_shape) == 2):
@@ -59,28 +62,21 @@ class ReplaceWithTensorSlicing:
                 if hasattr(src, 'scale'):
                     dst.scale = src.scale
                 return dst
-            if self.out_dim == 1:
-                self.merge_assert(src_shape[outer_dim], dst_shape[self.out_dim])
-                qkv_size = dst_shape[self.out_dim] // 3
-                qkv_split = [torch.split(src_s, qkv_size, dim=outer_dim) for src_s in src_split]
-
-                weight_split = [
-                    torch.cat([qkv_s[i] for qkv_s in qkv_split], axis=outer_dim) for i in range(len(qkv_split[0]))
-                ]
-                dst = dst.reshape(-1).data.copy_(weight_split[self.gpu_index].contiguous().reshape(-1)).reshape(
-                    weight_split[self.gpu_index].shape)
-            else:
-                dst.data.copy_(src_split[self.gpu_index].to(get_accelerator().current_device_name()).contiguous())
+            self.merge_assert(src_shape[outer_dim], dst_shape[self.out_dim])
+            qkv_size = dst_shape[self.out_dim] // 3
+            qkv_split = [torch.split(src_s, qkv_size, dim=outer_dim) for src_s in src_split]
+            weight_split = [
+                torch.cat([qkv_s[i] for qkv_s in qkv_split], axis=outer_dim) for i in range(len(qkv_split[0]))
+            ]
+            dst = dst.reshape(-1).data.copy_(weight_split[self.gpu_index].contiguous().reshape(-1)).reshape(
+                weight_split[self.gpu_index].shape)
         else:
             if src_shape[0] == dst_shape[0]:
                 return torch.nn.parameter.Parameter(src)
-            if self.out_dim == 1:
-                qkv_size = dst_shape[0] // 3
-                qkv_split = [torch.split(src_s, qkv_size, dim=0) for src_s in src_split]
-                bias_split = [torch.cat([qkv_s[i] for qkv_s in qkv_split], axis=0) for i in range(len(qkv_split[0]))]
-                dst.data.copy_(bias_split[self.gpu_index].contiguous())
-            else:
-                dst.data.copy_(src_split[self.gpu_index].contiguous())
+            qkv_size = dst_shape[0] // 3
+            qkv_split = [torch.split(src_s, qkv_size, dim=0) for src_s in src_split]
+            bias_split = [torch.cat([qkv_s[i] for qkv_s in qkv_split], axis=0) for i in range(len(qkv_split[0]))]
+            dst.data.copy_(bias_split[self.gpu_index].contiguous())
 
         dst = torch.nn.parameter.Parameter(dst, requires_grad=False)
         if hasattr(src, 'scale'):

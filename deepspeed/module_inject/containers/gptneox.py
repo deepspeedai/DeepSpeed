@@ -13,6 +13,8 @@ from ..policy import transformer_param_names
 from ..policy import maybe_copy
 from packaging import version as pkg_version
 
+from ..policy import maybe_get_lora
+
 
 class DS_GPTNEOXContainer(MetaTensorContainer, MegatronContainer, BaseTransformerContainer):
 
@@ -91,7 +93,7 @@ class GPTNEOXLayerPolicy(TransformerPolicy):
         else:
             attention = self.client_module.self_attention
 
-        return self.client_module.attention.query_key_value.weight.shape[1], \
+        return self.client_module.attention.hidden_size, \
                 self.client_module.attention.num_attention_heads, \
                 self.client_module.input_layernorm.eps
 
@@ -122,4 +124,17 @@ class GPTNEOXLayerPolicy(TransformerPolicy):
                self.client_module.input_layernorm.bias
 
     def get_lora_params(self):
-        return []
+        if GPTNEOXLayerPolicy.version == 0:
+            attention = self.client_module.attention
+        else:
+            attention = self.client_module.self_attention
+
+        all_lora_params = []
+        for p in [
+            self.client_module.mlp.dense_h_to_4h, \
+            self.client_module.mlp.dense_4h_to_h, \
+            attention.query_key_value, \
+            attention.dense
+            ]:
+            all_lora_params.append(maybe_get_lora(p))
+        return all_lora_params

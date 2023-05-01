@@ -13,6 +13,8 @@ from ..policy import transformer_param_names
 from ..policy import maybe_copy
 from ..policy import maybe_copy_qkv
 
+from ..policy import maybe_get_lora
+
 
 class DS_GPTNEOContainer(MetaTensorContainer, BaseTransformerContainer):
 
@@ -72,12 +74,17 @@ class HFGPTNEOLayerPolicy(TransformerPolicy):
             HFGPTNEOLayerPolicy._orig_layer_class = None
 
     def get_hidden_heads(self):
-        return self.client_module.attn.attention.q_proj.weight.shape[1], \
+        return self.client_module.attn.attention.embed_dim, \
                 self.client_module.attn.attention.num_heads, \
                 self.client_module.ln_1.eps
 
     def get_q_k_v(self):
-        return None
+        return self.client_module.attn.attention.q_proj.weight, \
+               None, \
+               self.client_module.attn.attention.k_proj.weight, \
+               None, \
+               self.client_module.attn.attention.v_proj.weight, \
+               None
 
     def attention(self, enable_training=False):
         qw = self.client_module.attn.attention.q_proj.weight
@@ -104,4 +111,14 @@ class HFGPTNEOLayerPolicy(TransformerPolicy):
                self.client_module.ln_1.bias
 
     def get_lora_params(self):
-        return []
+        all_lora_params = []
+        for p in [
+            self.client_module.mlp.c_fc, \
+            self.client_module.mlp.c_proj, \
+            self.client_module.attn.attention.q_proj, \
+            self.client_module.attn.attention.k_proj, \
+            self.client_module.attn.attention.v_proj, \
+            self.client_module.attn.attention.out_proj, \
+            ]:
+            all_lora_params.append(maybe_get_lora(p))
+        return all_lora_params

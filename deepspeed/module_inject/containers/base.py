@@ -214,12 +214,22 @@ class BaseTransformerContainer(ABC):
         #self.apply_weight_quantization()
 
     def attention_qkv_mp(self, mp_replace, reversed_dim=False):
-        self.module.attention.attn_qkvw = mp_replace.qkv_copy(self.module.attention.attn_qkvw,
-                                                              self.qkvw,
-                                                              int8=reversed_dim)
-        self.module.attention.attn_qkvb = mp_replace.qkv_copy(self.module.attention.attn_qkvb,
-                                                              self.qkvb,
-                                                              int8=reversed_dim)
+        if reversed_dim:
+            self.module.attention.attn_qkvw = mp_replace.qkv_copy(
+                self.module.attention.attn_qkvw[:self.qkvw.shape[0] // mp_replace.mp_size],
+                self.qkvw,
+                int8=reversed_dim)
+            self.module.attention.attn_qkvb = mp_replace.qkv_copy(
+                self.module.attention.attn_qkvb[:self.qkvw.shape[0] // mp_replace.mp_size],
+                self.qkvb,
+                int8=reversed_dim)
+        else:
+            self.module.attention.attn_qkvw = mp_replace.qkv_copy(self.module.attention.attn_qkvw,
+                                                                  self.qkvw,
+                                                                  int8=reversed_dim)
+            self.module.attention.attn_qkvb = mp_replace.qkv_copy(self.module.attention.attn_qkvb,
+                                                                  self.qkvb,
+                                                                  int8=reversed_dim)
 
     def attention_q_k_v_mp(self, mp_replace, reversed_dim=False):
         self.module.attention.attn_qw = mp_replace.copy(self.module.attention.attn_qw[:self.qw.shape[0] //
@@ -237,21 +247,21 @@ class BaseTransformerContainer(ABC):
                                                         self.vw,
                                                         int8=reversed_dim,
                                                         allocat_tensor=reversed_dim)
-        self.module.attention.attn_qb = mp_replace.copy(self.module.attention.attn_qb[:self.qw.shape[0] //
-                                                                                      mp_replace.mp_size],
-                                                        self.qb,
-                                                        int8=reversed_dim,
-                                                        allocat_tensor=reversed_dim)
-        self.module.attention.attn_kb = mp_replace.copy(self.module.attention.attn_kb[:self.qw.shape[0] //
-                                                                                      mp_replace.mp_size],
-                                                        self.kb,
-                                                        int8=reversed_dim,
-                                                        allocat_tensor=reversed_dim)
-        self.module.attention.attn_vb = mp_replace.copy(self.module.attention.attn_vb[:self.qw.shape[0] //
-                                                                                      mp_replace.mp_size],
-                                                        self.vb,
-                                                        int8=reversed_dim,
-                                                        allocat_tensor=reversed_dim)
+        self.module.attention.attn_qb = mp_replace.copy(
+            self.module.attention.attn_qb[:self.qw.shape[0] // mp_replace.mp_size],
+            self.qb,
+            int8=reversed_dim,
+            allocat_tensor=reversed_dim) if self.module.attention.attn_qb is not None else None
+        self.module.attention.attn_kb = mp_replace.copy(
+            self.module.attention.attn_kb[:self.qw.shape[0] // mp_replace.mp_size],
+            self.kb,
+            int8=reversed_dim,
+            allocat_tensor=reversed_dim) if self.module.attention.attn_kb is not None else None
+        self.module.attention.attn_vb = mp_replace.copy(
+            self.module.attention.attn_vb[:self.qw.shape[0] // mp_replace.mp_size],
+            self.vb,
+            int8=reversed_dim,
+            allocat_tensor=reversed_dim) if self.module.attention.attn_vb is not None else None
 
     def attention_o_mp(self, mp_replace, reversed_dim=False):
         if reversed_dim:
@@ -276,11 +286,11 @@ class BaseTransformerContainer(ABC):
                                                       self._h4h_w,
                                                       int8=reversed_dim,
                                                       allocat_tensor=reversed_dim)
-            self.module.mlp.inter_b = mp_replace.copy(self.module.mlp.inter_b[:self._h4h_w.shape[0] //
-                                                                              mp_replace.mp_size],
-                                                      self._h4h_b,
-                                                      int8=reversed_dim,
-                                                      allocat_tensor=reversed_dim)
+            self.module.mlp.inter_b = mp_replace.copy(
+                self.module.mlp.inter_b[:self._h4h_w.shape[0] // mp_replace.mp_size],
+                self._h4h_b,
+                int8=reversed_dim,
+                allocat_tensor=reversed_dim) if self.module.mlp.inter_b is not None else None
         else:
             self.module.mlp.inter_w = mp_replace.copy(self.module.mlp.inter_w, self._h4h_w, int8=reversed_dim)
             self.module.mlp.inter_b = mp_replace.copy(self.module.mlp.inter_b, self._h4h_b, int8=reversed_dim)
@@ -302,24 +312,24 @@ class BaseTransformerContainer(ABC):
     def release_qkv(self):
         del self.module.attention.attn_qkvw
         del self.module.attention.attn_qkvb
-        self.module.attention.attn_qkvw = None
-        self.module.attention.attn_qkvb = None
+        self.module.attention.attn_qkvw = self.qkvw
+        self.module.attention.attn_qkvb = self.qkvb
+        if self.module.attention.attn_qw is not None:
+            qkv_data = [self.module.attention.attn_qw.data, \
+                        self.module.attention.attn_qb.data if self.module.attention.attn_qb is not None else None, \
+                        self.module.attention.attn_kw.data, \
+                        self.module.attention.attn_kb.data if self.module.attention.attn_kb is not None else None, \
+                        self.module.attention.attn_vw.data, \
+                        self.module.attention.attn_vb.data if self.module.attention.attn_vb is not None else None]
+            for data in qkv_data:
+                del data
 
-        qkv_data = [self.module.attention.attn_qw.data, \
-                    self.module.attention.attn_qb.data, \
-                    self.module.attention.attn_kw.data, \
-                    self.module.attention.attn_kb.data, \
-                    self.module.attention.attn_vw.data, \
-                    self.module.attention.attn_vb.data]
-        for data in qkv_data:
-            del data
-
-        self.module.attention.attn_qw = self.qw
-        self.module.attention.attn_qb = self.qb
-        self.module.attention.attn_kw = self.kw
-        self.module.attention.attn_kb = self.kb
-        self.module.attention.attn_vw = self.vw
-        self.module.attention.attn_vb = self.vb
+            self.module.attention.attn_qw = self.qw
+            self.module.attention.attn_qb = self.qb
+            self.module.attention.attn_kw = self.kw
+            self.module.attention.attn_kb = self.kb
+            self.module.attention.attn_vw = self.vw
+            self.module.attention.attn_vb = self.vb
 
     def release_memory(self):
         self.release_qkv()
@@ -346,6 +356,14 @@ class BaseTransformerContainer(ABC):
 
         self.module.norm_w.data.copy_(self.input_nw.to(get_accelerator().current_device_name()))
         self.module.norm_b.data.copy_(self.input_nb.to(get_accelerator().current_device_name()))
+
+    def align_merged_qkv(self):
+        if hasattr(self, '_align_merged_qkv'):
+            self._align_merged_qkv()
+
+    def partition_merged_qkv(self):
+        if hasattr(self, '_partition_merged_qkv'):
+            self._partition_merged_qkv()
 
     def transpose(self):
         self.transpose_attention()
@@ -403,25 +421,28 @@ class BaseTransformerContainer(ABC):
 
     def reset_qkv(self):
         self.qkvw.data[:self.qw.shape[0]] = self.qw.data
-        self.qkvb.data[:self.qw.shape[0]] = self.qb.data
         self.qkvw.data[self.qw.shape[0]:2 * self.qw.shape[0]] = self.kw.data
-        self.qkvb.data[self.qw.shape[0]:2 * self.qw.shape[0]] = self.kb.data
         self.qkvw.data[2 * self.qw.shape[0]:] = self.vw.data
-        self.qkvb.data[2 * self.qw.shape[0]:] = self.vb.data
+        if self.qkvb is not None:
+            self.qkvb.data[:self.qw.shape[0]] = self.qb.data
+            self.qkvb.data[self.qw.shape[0]:2 * self.qw.shape[0]] = self.kb.data
+            self.qkvb.data[2 * self.qw.shape[0]:] = self.vb.data
 
         qkv_data = [self.qw.data, \
-                    self.qb.data, \
+                    self.qb.data if self.qb is not None else None, \
                     self.kw.data, \
-                    self.kb.data, \
+                    self.kb.data if self.kb is not None else None, \
                     self.vw.data, \
-                    self.vb.data]
+                    self.vb.data if self.vb is not None else None]
 
         self.qw.data = self.qkvw.data[:self.qw.shape[0]]
-        self.qb.data = self.qkvb.data[:self.qw.shape[0]]
         self.kw.data = self.qkvw.data[self.qw.shape[0]:2 * self.qw.shape[0]]
-        self.kb.data = self.qkvb.data[self.qw.shape[0]:2 * self.qw.shape[0]]
         self.vw.data = self.qkvw.data[2 * self.qw.shape[0]:]
-        self.vb.data = self.qkvb.data[2 * self.qw.shape[0]:]
+
+        if self.qkvb is not None:
+            self.qb.data = self.qkvb.data[:self.qw.shape[0]]
+            self.kb.data = self.qkvb.data[self.qw.shape[0]:2 * self.qw.shape[0]]
+            self.vb.data = self.qkvb.data[2 * self.qw.shape[0]:]
 
         for data in qkv_data:
             del data
@@ -450,11 +471,12 @@ class BaseTransformerContainer(ABC):
                 self.module.attention.attn_vb = self.vb
             else:
                 self.qw.data = self.qkvw[:self.qw.shape[0], :]
-                self.qb.data = self.qkvb[:self.qw.shape[0]]
                 self.kw.data = self.qkvw[self.qw.shape[0]:2 * self.qw.shape[0], :]
-                self.kb.data = self.qkvb[self.qw.shape[0]:2 * self.qw.shape[0]]
                 self.vw.data = self.qkvw[self.qw.shape[0] * 2:, :]
-                self.vb.data = self.qkvb[self.qw.shape[0] * 2:]
+                if self.qkvb is not None:
+                    self.qb.data = self.qkvb[:self.qw.shape[0]]
+                    self.kb.data = self.qkvb[self.qw.shape[0]:2 * self.qw.shape[0]]
+                    self.vb.data = self.qkvb[self.qw.shape[0] * 2:]
 
     def get_lora_params(self):
         return self.lora_params
