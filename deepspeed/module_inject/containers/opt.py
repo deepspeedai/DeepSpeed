@@ -83,14 +83,14 @@ class HFOPTLayerPolicy(TransformerPolicy):
         if hasattr(TransformerPolicy, "hf_model_config") and hasattr(TransformerPolicy.hf_model_config,
                                                                      "activation_function"):
             if TransformerPolicy.hf_model_config.activation_function == "relu":
-                self.mlp_act_func_type == ActivationFuncType.ReLU
+                self.mlp_act_func_type = ActivationFuncType.ReLU
             elif TransformerPolicy.hf_model_config.activation_function in ["gelu", "gelu_new"]:
-                self.mlp_act_func_type == ActivationFuncType.GELU
+                self.mlp_act_func_type = ActivationFuncType.GELU
             else:
                 raise ValueError("Unsupported activation function: {}".format(
                     TransformerPolicy.hf_model_config.activation_function))
         else:
-            self.mlp_act_func_type == ActivationFuncType.ReLU  # default
+            self.mlp_act_func_type = ActivationFuncType.ReLU  # default
 
     def get_hidden_heads(self):
         return self.client_module.self_attn.embed_dim, \
