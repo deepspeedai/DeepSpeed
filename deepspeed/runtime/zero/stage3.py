@@ -859,6 +859,10 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
 
         timer_names = set()
 
+        # State initialization for the Adagrad optimizer occurs at construction as opposed to other optimizers
+        # which do lazy initialization of the state at the first call to step.
+        is_adagrad = isinstance(self.optimizer, torch.optim.Adagrad)
+
         if self.swap_optimizer:
             self.optimizer_swapper.init_timers()
 
@@ -888,7 +892,9 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
             else:
                 self.fp32_partitioned_groups_flat[i].grad = gradient_buffer.narrow(0, 0, num_elements)
 
-            self._optimizer_step(i)
+            # Initialize the optimizer states with the flattended fp32 partition.
+            if not is_adagrad:
+                self._optimizer_step(i)
 
             if swappable_param_subgroup:
                 self._partitioned_params_swap_out(i)
@@ -899,6 +905,10 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
             see_memory_usage(
                 f'[End] Initialize optimizer states {i} / {num_subgroups} subgroups, num_elems: {num_elements}, swappable opt/param:{swappable_optimizer_subgroup}/{swappable_param_subgroup}',
                 force=False)
+
+        # Initialize the optimizer states with the flattended fp32 partition.
+        if is_adagrad:
+            self.optimizer = torch.optim.Adagrad(self.fp32_partitioned_groups_flat, **self.optimizer.defaults)
 
         self.stop_timers([INIT_OPTIMIZER_TIMER])
         self.log_timers(timer_names)
