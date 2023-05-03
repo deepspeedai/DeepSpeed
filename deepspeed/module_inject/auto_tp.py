@@ -104,6 +104,10 @@ class AutoTP():
                         gem_list = gem_list + [layer_list[i - 1]]
                 elif 'out_proj' in layer:
                     gem_list = gem_list + [layer]
+                elif 'o_proj' in layer:
+                    gem_list = gem_list + [layer]
+                elif 'down_proj' in layer:
+                    gem_list = gem_list + [layer]
             layer_list = []
             if gem_list != []:
                 gem_list = list(set(gem_list))

@@ -133,6 +133,7 @@ The following model families have been successfully tested with automatic tensor
 - gpt-neox
 - longt5
 - luke
+- llama
 - m2m_100
 - marian
 - mvp
