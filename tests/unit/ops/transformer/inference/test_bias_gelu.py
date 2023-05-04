@@ -8,6 +8,7 @@ import torch
 import deepspeed
 from deepspeed.accelerator import get_accelerator
 from deepspeed.ops.op_builder import InferenceBuilder
+from .inference_test_utils import allclose, get_dtypes
 from packaging import version as pkg_version
 
 if not deepspeed.ops.__compatible_ops__[InferenceBuilder.NAME]:
@@ -15,12 +16,6 @@ if not deepspeed.ops.__compatible_ops__[InferenceBuilder.NAME]:
 
 inference_module = None
 torch_minor_version = None
-
-
-def allclose(x, y):
-    assert x.dtype == y.dtype
-    rtol, atol = {torch.float32: (5e-4, 5e-5), torch.float16: (3e-2, 2e-3)}[x.dtype]
-    return torch.allclose(x, y, rtol=rtol, atol=atol)
 
 
 def run_bias_gelu_reference(activations, bias):
@@ -35,6 +30,8 @@ def run_bias_gelu_ds(activations, bias):
         inference_module = InferenceBuilder().load()
     if activations.dtype == torch.float16:
         return inference_module.bias_gelu_fp16(activations, bias)
+    elif activations.dtype == torch.bfloat16:
+        return inference_module.bias_gelu_bf16(activations, bias)
     else:
         return inference_module.bias_gelu_fp32(activations, bias)
 
@@ -43,7 +40,7 @@ def run_bias_gelu_ds(activations, bias):
 @pytest.mark.parametrize("batch", [1, 2])
 @pytest.mark.parametrize("sequence", [1, 128, 255])
 @pytest.mark.parametrize("channels", [512, 1232, 4096])
-@pytest.mark.parametrize("dtype", [torch.float16, torch.float32])
+@pytest.mark.parametrize("dtype", get_dtypes())
 def test_bias_gelu(batch, sequence, channels, dtype):
     if pkg_version.parse(torch.__version__) < pkg_version.parse("1.12"):
         pytest.skip("gelu implementation matches only after torch 1.12")

@@ -56,10 +56,12 @@ class InferenceBuilder(CUDAOpBuilder):
             'csrc/transformer/inference/csrc/gelu.cu',
             'csrc/transformer/inference/csrc/relu.cu',
             'csrc/transformer/inference/csrc/layer_norm.cu',
+            'csrc/transformer/inference/csrc/rms_norm.cu',
             'csrc/transformer/inference/csrc/softmax.cu',
             'csrc/transformer/inference/csrc/dequantize.cu',
             'csrc/transformer/inference/csrc/apply_rotary_pos_emb.cu',
             'csrc/transformer/inference/csrc/transform.cu',
+            'csrc/transformer/inference/csrc/pointwise_ops.cu',
         ]
 
     def extra_ldflags(self):

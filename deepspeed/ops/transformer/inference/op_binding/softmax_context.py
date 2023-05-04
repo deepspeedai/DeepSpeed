@@ -13,8 +13,10 @@ class SoftmaxContextOp(BaseOp):
 
     def __init__(self, config: DeepSpeedInferenceConfig):
         super(SoftmaxContextOp, self).__init__(config)
-        if self.config.fp16:
+        if self.config.dtype in [torch.float16, torch.int8]:
             self.softmax_context_func = self.inference_cuda_module.softmax_context_fp16
+        elif self.config.dtype == torch.bfloat16:
+            self.softmax_context_func = self.inference_cuda_module.softmax_context_bf16
         else:
             self.softmax_context_func = self.inference_cuda_module.softmax_context_fp32
 
@@ -32,4 +34,5 @@ class SoftmaxContextOp(BaseOp):
                                            self.config.rotate_every_two, heads, norm_factor,
                                            self.config.triangular_masking, self.config.local_attention,
                                            self.config.window_size, no_masking, layer_id, num_layers, alibi)
+
         return output

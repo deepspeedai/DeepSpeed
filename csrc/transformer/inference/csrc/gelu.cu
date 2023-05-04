@@ -38,7 +38,8 @@ __global__ void fused_bias_gelu(T* input, const T* bias, int total_count, int in
         T data[values_per_access];
         T data_bias[values_per_access];
         mem_access::load_global<granularity>(data, input + offset);
-        mem_access::load_global<granularity>(data_bias, bias + (offset % intermediate_size));
+        mem_access::load_global<granularity>(
+            data_bias, bias + (offset % intermediate_size), bias != nullptr);
 
 #pragma unroll
         for (int i = 0; i < values_per_access; i++) {
@@ -70,15 +71,14 @@ void launch_bias_gelu(T* input,
         input, bias, total_count, intermediate_size);
 }
 
-template void launch_bias_gelu<float>(float*, const float*, int, int, cudaStream_t);
+#define INSTANTIATE_LAUNCH_BIAS_GELU(T) \
+    template void launch_bias_gelu<T>(T*, const T*, int, int, cudaStream_t);
+
+INSTANTIATE_LAUNCH_BIAS_GELU(float)
 #ifdef BF16_AVAILABLE
-template void launch_bias_gelu<__nv_bfloat16>(__nv_bfloat16*,
-                                              const __nv_bfloat16*,
-                                              int,
-                                              int,
-                                              cudaStream_t);
+INSTANTIATE_LAUNCH_BIAS_GELU(__nv_bfloat16)
 #endif
-template void launch_bias_gelu<__half>(__half*, const __half*, int, int, cudaStream_t);
+INSTANTIATE_LAUNCH_BIAS_GELU(__half)
 
 /*
 In-place channels-last bias add
@@ -95,7 +95,8 @@ __global__ void fused_bias_add(T* input, const T* bias, int total_count, int int
         T data[values_per_access];
         T data_bias[values_per_access];
         mem_access::load_global<granularity>(data, input + offset);
-        mem_access::load_global<granularity>(data_bias, bias + (offset % intermediate_size));
+        mem_access::load_global<granularity>(
+            data_bias, bias + (offset % intermediate_size), bias != nullptr);
 
 #pragma unroll
         for (int i = 0; i < values_per_access; i++) {
@@ -127,15 +128,14 @@ void launch_bias_add(T* input,
         input, bias, total_count, intermediate_size);
 }
 
-template void launch_bias_add<float>(float*, const float*, int, int, cudaStream_t);
+#define INSTANTIATE_LAUNCH_BIAS_ADD(T) \
+    template void launch_bias_add<T>(T*, const T*, int, int, cudaStream_t);
+
+INSTANTIATE_LAUNCH_BIAS_ADD(float)
 #ifdef BF16_AVAILABLE
-template void launch_bias_add<__nv_bfloat16>(__nv_bfloat16*,
-                                             const __nv_bfloat16*,
-                                             int,
-                                             int,
-                                             cudaStream_t);
+INSTANTIATE_LAUNCH_BIAS_ADD(__nv_bfloat16)
 #endif
-template void launch_bias_add<__half>(__half*, const __half*, int, int, cudaStream_t);
+INSTANTIATE_LAUNCH_BIAS_ADD(__half)
 
 __global__ void fused_bias_residual(float* residual,
                                     const float* hidden_state,
@@ -282,44 +282,14 @@ void launch_bias_residual(T* residual,
                                                               preln);
 }
 
-template void launch_bias_residual<
-    float>(float*, float*, float*, float*, float*, int, int, int, bool, cudaStream_t);
-#ifdef BF16_AVAILABLE
-template void launch_bias_residual<__nv_bfloat16>(__nv_bfloat16*,
-                                                  __nv_bfloat16*,
-                                                  __nv_bfloat16*,
-                                                  __nv_bfloat16*,
-                                                  __nv_bfloat16*,
-                                                  int,
-                                                  int,
-                                                  int,
-                                                  bool,
-                                                  cudaStream_t);
-#endif
-template void launch_bias_residual<
-    __half>(__half*, __half*, __half*, __half*, __half*, int, int, int, bool, cudaStream_t);
+#define INSTANTIATE_LAUNCH_BIAS_RESIDUAL(T) \
+    template void launch_bias_residual<T>(T*, T*, T*, T*, T*, int, int, int, bool, cudaStream_t);
 
+INSTANTIATE_LAUNCH_BIAS_RESIDUAL(float);
 #ifdef BF16_AVAILABLE
-template __global__ void fused_bias_residual(__nv_bfloat16* residual,
-                                             const __nv_bfloat16* hidden_state,
-                                             const __nv_bfloat16* attn,
-                                             const __nv_bfloat16* bias,
-                                             const __nv_bfloat16* attn_bias,
-                                             const int total_count,
-                                             const int intermediate_size,
-                                             const float mp_scale,
-                                             const bool preln);
+INSTANTIATE_LAUNCH_BIAS_RESIDUAL(__nv_bfloat16);
 #endif
-
-template __global__ void fused_bias_residual(__half* residual,
-                                             const __half* hidden_state,
-                                             const __half* attn,
-                                             const __half* bias,
-                                             const __half* attn_bias,
-                                             const int total_count,
-                                             const int intermediate_size,
-                                             const float mp_scale,
-                                             const bool preln);
+INSTANTIATE_LAUNCH_BIAS_RESIDUAL(__half);
 
 __global__ void gptj_residual_add(float* residual,
                                   const float* hidden_state,
@@ -446,57 +416,14 @@ void launch_gptj_residual_add(T* residual,
         residual, hidden_state, attn, bias, attn_bias, total_count, hidden_dim / 4, 1.0 / mp_size);
 }
 
-template void launch_gptj_residual_add<float>(float*,
-                                              float*,
-                                              float*,
-                                              float*,
-                                              float*,
-                                              int,
-                                              int,
-                                              int,
-                                              cudaStream_t);
+#define INSTANTIATE_GPT_RES_ADD(T) \
+    template void launch_gptj_residual_add<T>(T*, T*, T*, T*, T*, int, int, int, cudaStream_t);
 
+INSTANTIATE_GPT_RES_ADD(float);
+INSTANTIATE_GPT_RES_ADD(__half);
 #ifdef BF16_AVAILABLE
-template void launch_gptj_residual_add<__nv_bfloat16>(__nv_bfloat16*,
-                                                      __nv_bfloat16*,
-                                                      __nv_bfloat16*,
-                                                      __nv_bfloat16*,
-                                                      __nv_bfloat16*,
-                                                      int,
-                                                      int,
-                                                      int,
-                                                      cudaStream_t);
+INSTANTIATE_GPT_RES_ADD(__nv_bfloat16);
 #endif
-
-template void launch_gptj_residual_add<__half>(__half*,
-                                               __half*,
-                                               __half*,
-                                               __half*,
-                                               __half*,
-                                               int,
-                                               int,
-                                               int,
-                                               cudaStream_t);
-
-#ifdef BF16_AVAILABLE
-template __global__ void gptj_residual_add(__nv_bfloat16* residual,
-                                           const __nv_bfloat16* hidden_state,
-                                           const __nv_bfloat16* attn,
-                                           const __nv_bfloat16* bias,
-                                           const __nv_bfloat16* attn_bias,
-                                           const int total_count,
-                                           const int intermediate_size,
-                                           const float mp_scale);
-#endif
-
-template __global__ void gptj_residual_add(__half* residual,
-                                           const __half* hidden_state,
-                                           const __half* attn,
-                                           const __half* bias,
-                                           const __half* attn_bias,
-                                           const int total_count,
-                                           const int intermediate_size,
-                                           const float mp_scale);
 
 template <typename T>
 __global__ void moe_res_matmul(T* residual, T* coef, T* mlp_out, int seq_len, int hidden_dim)
@@ -542,28 +469,14 @@ void launch_moe_res_matmul(T* residual,
         residual, coef, mlp_out, seq_len, hidden_dim);
 }
 
-template void launch_moe_res_matmul(float* residual,
-                                    float* coef,
-                                    float* mlp_out,
-                                    int seq_len,
-                                    int hidden_dim,
-                                    cudaStream_t stream);
+#define INSTANTIATE_LAUNCH_MOE_RES_MATMUL(T) \
+    template void launch_moe_res_matmul<T>(T*, T*, T*, int, int, cudaStream_t);
 
+INSTANTIATE_LAUNCH_MOE_RES_MATMUL(float);
 #ifdef BF16_AVAILABLE
-template void launch_moe_res_matmul(__nv_bfloat16* residual,
-                                    __nv_bfloat16* coef,
-                                    __nv_bfloat16* mlp_out,
-                                    int seq_len,
-                                    int hidden_dim,
-                                    cudaStream_t stream);
+INSTANTIATE_LAUNCH_MOE_RES_MATMUL(__nv_bfloat16);
 #endif
-
-template void launch_moe_res_matmul(__half* residual,
-                                    __half* coef,
-                                    __half* mlp_out,
-                                    int seq_len,
-                                    int hidden_dim,
-                                    cudaStream_t stream);
+INSTANTIATE_LAUNCH_MOE_RES_MATMUL(__half);
 
 template <typename T>
 __global__ void pad_data_kernel(T* padded_output, T* output, int head_size, int padded_head_size)
@@ -607,40 +520,14 @@ void pad_data(T* padded_output,
     pad_data_kernel<<<grid_dim, block_dim, 0, stream>>>(
         padded_output, output, head_size / 8, padded_head_size / 8);
 }
-template void pad_data(__half* padded_output,
-                       __half* output,
-                       int bsz,
-                       int head_size,
-                       int padded_head_size,
-                       cudaStream_t stream);
 
+#define INSTANTIATE_PAD_DATA(T) template void pad_data(T*, T*, int, int, int, cudaStream_t stream);
+
+INSTANTIATE_PAD_DATA(float);
+INSTANTIATE_PAD_DATA(__half);
 #ifdef BF16_AVAILABLE
-template void pad_data(__nv_bfloat16* padded_output,
-                       __nv_bfloat16* output,
-                       int bsz,
-                       int head_size,
-                       int padded_head_size,
-                       cudaStream_t stream);
+INSTANTIATE_PAD_DATA(__nv_bfloat16);
 #endif
-
-template void pad_data(float* padded_output,
-                       float* output,
-                       int bsz,
-                       int head_size,
-                       int padded_head_size,
-                       cudaStream_t stream);
-
-#ifdef BF16_AVAILABLE
-template __global__ void pad_data_kernel(__nv_bfloat16* padded_output,
-                                         __nv_bfloat16* output,
-                                         int head_size,
-                                         int padded_head_size);
-#endif
-
-template __global__ void pad_data_kernel(__half* padded_output,
-                                         __half* output,
-                                         int head_size,
-                                         int padded_head_size);
 
 template <typename T>
 __global__ void pad_head_seq_kernel(T* padded_output,
@@ -696,34 +583,14 @@ void pad_head_seq(T* padded_output,
         padded_output, output, seq_len, padded_seq_len, head_size / 8, padded_head_size / 8);
 }
 
-template void pad_head_seq(__half* padded_output,
-                           __half* output,
-                           int bsz,
-                           int seq_len,
-                           int padded_seq_len,
-                           int head_size,
-                           int padded_head_size,
-                           cudaStream_t stream);
+#define INSTANTIATE_PAD_HEAD_SEQ(T) \
+    template void pad_head_seq<T>(T*, T*, int, int, int, int, int, cudaStream_t);
 
+INSTANTIATE_PAD_HEAD_SEQ(__half);
 #ifdef BF16_AVAILABLE
-template void pad_head_seq(__nv_bfloat16* padded_output,
-                           __nv_bfloat16* output,
-                           int bsz,
-                           int seq_len,
-                           int padded_seq_len,
-                           int head_size,
-                           int padded_head_size,
-                           cudaStream_t stream);
+INSTANTIATE_PAD_HEAD_SEQ(__nv_bfloat16);
 #endif
-
-template void pad_head_seq(float* padded_output,
-                           float* output,
-                           int bsz,
-                           int seq_len,
-                           int padded_seq_len,
-                           int head_size,
-                           int padded_head_size,
-                           cudaStream_t stream);
+INSTANTIATE_PAD_HEAD_SEQ(float);
 
 // TODO(cmikeh2): evaluate different GeLU performance
 __device__ __forceinline__ float old_gelu(float val)
@@ -739,12 +606,15 @@ constexpr int steps = 2;
 constexpr int granularity = 16;
 }  // namespace fused_geglu
 
-template <typename T>
-__global__ void fused_bias_geglu(T* output,
-                                 const T* activation,
-                                 const T* bias,
-                                 int base_channels,
-                                 int total_elems)
+__device__ __forceinline__ float silu(float val) { return val / (1.0f + expf(-val)); }
+
+template <typename T, bool useGelu>
+__global__ void fused_gate_activation(T* output,
+                                      const T* activation,
+                                      const T* bias,
+                                      int base_channels,
+                                      int output_stride,
+                                      int total_elems)
 {
     constexpr int T_per_access = fused_geglu::granularity / sizeof(T);
     constexpr int T_per_step = T_per_access * fused_geglu::threads;
@@ -769,9 +639,10 @@ __global__ void fused_bias_geglu(T* output,
                                                               activation + seq_offset + channel_id);
             mem_access::load_global<fused_geglu::granularity>(
                 activation_buffer_2, activation + seq_offset + channel_id + base_channels);
-            mem_access::load_global<fused_geglu::granularity>(bias_buffer_1, bias + channel_id);
-            mem_access::load_global<fused_geglu::granularity>(bias_buffer_2,
-                                                              bias + channel_id + base_channels);
+            mem_access::load_global<fused_geglu::granularity>(
+                bias_buffer_1, bias + channel_id, bias != nullptr);
+            mem_access::load_global<fused_geglu::granularity>(
+                bias_buffer_2, bias + channel_id + base_channels, bias != nullptr);
 
             // Since the GeLU is going to happen at float, might as well
             // convert
@@ -779,23 +650,26 @@ __global__ void fused_bias_geglu(T* output,
             for (int v = 0; v < T_per_access; v++) {
                 T hidden_state = activation_buffer_1[v] + bias_buffer_1[v];
                 T pre_gate = activation_buffer_2[v] + bias_buffer_2[v];
-                float gate_f = old_gelu(conversion::to<float>(pre_gate));
+                float pre_gate_f = conversion::to<float>(pre_gate);
+                float gate_f = (useGelu) ? old_gelu(pre_gate_f) : silu(pre_gate_f);
                 T gate = conversion::to<T>(gate_f);
                 activation_buffer_1[v] = hidden_state * gate;
             }
 
-            mem_access::store_global<fused_geglu::granularity>(output + iter_id,
-                                                               activation_buffer_1);
+            mem_access::store_global<fused_geglu::granularity>(
+                output + seq_id * output_stride + channel_id, activation_buffer_1);
         }
     }
 }
 
 template <typename T>
-void launch_fused_bias_geglu(T* output,
+void launch_gated_activation(T* output,
                              const T* activation,
                              const T* bias,
                              int rows,
+                             int output_stride,
                              int elems_per_row,
+                             bool use_gelu,
                              cudaStream_t stream)
 {
     /*
@@ -816,22 +690,21 @@ void launch_fused_bias_geglu(T* output,
     dim3 block(fused_geglu::threads);
     dim3 grid((total_elems + T_per_block - 1) / T_per_block);
 
-    fused_bias_geglu<<<grid, block, 0, stream>>>(
-        output, activation, bias, base_channels, total_elems);
+    if (use_gelu) {
+        fused_gate_activation<T, true><<<grid, block, 0, stream>>>(
+            output, activation, bias, base_channels, output_stride, total_elems);
+    } else {
+        fused_gate_activation<T, false><<<grid, block, 0, stream>>>(
+            output, activation, bias, base_channels, output_stride, total_elems);
+    }
 }
 
-template void launch_fused_bias_geglu(__half*,
-                                      const __half*,
-                                      const __half*,
-                                      int,
-                                      int,
-                                      cudaStream_t);
+#define INSTANTIATE_LAUNCH_GATED_ACTIVATION(T) \
+    template void launch_gated_activation(     \
+        T*, const T*, const T*, int, int, int, bool, cudaStream_t);
+
+INSTANTIATE_LAUNCH_GATED_ACTIVATION(__half);
 #ifdef BF16_AVAILABLE
-template void launch_fused_bias_geglu(__nv_bfloat16*,
-                                      const __nv_bfloat16*,
-                                      const __nv_bfloat16*,
-                                      int,
-                                      int,
-                                      cudaStream_t);
+INSTANTIATE_LAUNCH_GATED_ACTIVATION(__nv_bfloat16);
 #endif
-template void launch_fused_bias_geglu(float*, const float*, const float*, int, int, cudaStream_t);
+INSTANTIATE_LAUNCH_GATED_ACTIVATION(float);

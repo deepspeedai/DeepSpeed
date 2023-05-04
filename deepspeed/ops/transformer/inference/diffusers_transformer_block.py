@@ -11,6 +11,7 @@ from .diffusers_attention import DeepSpeedDiffusersAttention
 from .bias_add import nhwc_bias_add
 from .diffusers_2d_transformer import Diffusers2DTransformerConfig
 from deepspeed.ops.op_builder import InferenceBuilder, SpatialInferenceBuilder
+from deepspeed.utils.types import ActivationFuncType
 
 # Ops will be loaded on demand
 transformer_cuda_module = None
@@ -97,7 +98,7 @@ class DeepSpeedDiffusersTransformerBlock(nn.Module):
             out_attn_2, self.attn_2_bias, out_attn_1, self.norm3_g, self.norm3_b, self.norm3_eps)
 
         out_ff1 = nn.functional.linear(out_norm_3, self.ff1_w)
-        out_geglu = self.transformer_cuda_module.bias_geglu(out_ff1, self.ff1_b)
+        out_geglu = self.transformer_cuda_module.gated_activation(out_ff1, self.ff1_b, ActivationFuncType.GATED_GELU)
 
         out_ff2 = nn.functional.linear(out_geglu, self.ff2_w)
         return nhwc_bias_add(out_ff2, self.ff2_b, other=out_attn_2)

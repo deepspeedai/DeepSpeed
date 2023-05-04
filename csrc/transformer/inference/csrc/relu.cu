@@ -28,7 +28,8 @@ __global__ void fused_bias_relu(T* input, const T* bias, int total_count, int in
         T data[values_per_access];
         T data_bias[values_per_access];
         mem_access::load_global<granularity>(data, input + offset);
-        mem_access::load_global<granularity>(data_bias, bias + (offset % intermediate_size));
+        mem_access::load_global<granularity>(
+            data_bias, bias + (offset % intermediate_size), bias != nullptr);
 
 #pragma unroll
         for (int i = 0; i < values_per_access; i++) {
@@ -60,12 +61,11 @@ void launch_bias_relu(T* input,
         input, bias, total_count, intermediate_size);
 }
 
-template void launch_bias_relu<float>(float*, const float*, int, int, cudaStream_t);
+#define INSTANTIATE_LAUNCH_BIAS_RELU(T) \
+    template void launch_bias_relu<T>(T*, const T*, int, int, cudaStream_t);
+
+INSTANTIATE_LAUNCH_BIAS_RELU(float)
 #ifdef BF16_AVAILABLE
-template void launch_bias_relu<__nv_bfloat16>(__nv_bfloat16*,
-                                              const __nv_bfloat16*,
-                                              int,
-                                              int,
-                                              cudaStream_t);
+INSTANTIATE_LAUNCH_BIAS_RELU(__nv_bfloat16)
 #endif
-template void launch_bias_relu<__half>(__half*, const __half*, int, int, cudaStream_t);
+INSTANTIATE_LAUNCH_BIAS_RELU(__half)

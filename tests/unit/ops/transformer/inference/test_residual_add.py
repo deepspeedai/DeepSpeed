@@ -8,14 +8,31 @@ import torch
 import deepspeed
 from deepspeed.accelerator import get_accelerator
 from deepspeed.ops.op_builder import InferenceBuilder
+from .inference_test_utils import get_dtypes
 
 if not deepspeed.ops.__compatible_ops__[InferenceBuilder.NAME]:
     pytest.skip("Inference ops are not available on this system", allow_module_level=True)
 
+TOLERANCES = None
+
+
+def get_tolerances():
+    global TOLERANCES
+    if TOLERANCES is None:
+        # Residual add, as a sequence of casted additions, currently requires a higher tolerance
+        # than the other operators for FP16. We should instead better align the behaviors
+        # of the reference to match our kernel implementation (TODO(cmikeh2))
+        TOLERANCES = {torch.float32: (5e-4, 5e-5), torch.float16: (3e-2, 4e-3)}
+        if get_accelerator().is_bf16_supported():
+            # Note: BF16 tolerance is higher than FP16 because of the lower precision (7 (+1) bits vs
+            # 10 (+1) bits)
+            TOLERANCES[torch.bfloat16] = (4.8e-1, 3.2e-2)
+    return TOLERANCES
+
 
 def allclose(x, y):
     assert x.dtype == y.dtype
-    rtol, atol = {torch.float32: (5e-4, 5e-5), torch.float16: (3e-2, 2e-2)}[x.dtype]
+    rtol, atol = get_tolerances()[x.dtype]
     return torch.allclose(x, y, rtol=rtol, atol=atol)
 
 
@@ -52,7 +69,7 @@ def run_residual_add_reference(hidden_state, residual, attn_output, attn_bias, f
 @pytest.mark.parametrize("batch", [1, 2])
 @pytest.mark.parametrize("sequence", [1, 128, 255])
 @pytest.mark.parametrize("hidden_dim", [512, 1232, 4096])
-@pytest.mark.parametrize("dtype", [torch.float16, torch.float32])
+@pytest.mark.parametrize("dtype", get_dtypes())
 @pytest.mark.parametrize("mlp_after_attn", [True, False])
 @pytest.mark.parametrize("add_bias", [True, False])
 @pytest.mark.parametrize("mp_size", [1, 2])
@@ -77,7 +94,15 @@ def test_residual_add(inference_module, batch, sequence, hidden_dim, dtype, mlp_
         ds_out = inference_module.residual_add_bias_fp16(*res_add_args)
     elif dtype == torch.float32:
         ds_out = inference_module.residual_add_bias_fp32(*res_add_args)
+    elif dtype == torch.bfloat16:
+        ds_out = inference_module.residual_add_bias_bf16(*res_add_args)
     else:
         raise ValueError(f"Unsupported dtype: {dtype}")
+
+    if not allclose(ds_out, ref_out):
+        print((ds_out - ref_out).abs().max())
+        print((ds_out - ref_out).abs().mean())
+        print((ds_out - ref_out))
+        assert (allclose(ds_out, ref_out))
 
     assert (allclose(ds_out, ref_out))

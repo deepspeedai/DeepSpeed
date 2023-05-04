@@ -116,8 +116,8 @@ class DeepSpeedDiffusersAttention(nn.Module):
         device = get_accelerator().current_device_name() if config.bigscience_bloom else 'cpu'
         qkv_size_per_partition = (self.config.hidden_size // self.config.mp_size) * 3
 
-        data_type = torch.int8 if config.q_int8 else torch.half if config.fp16 else torch.float
-        data_type_fp = torch.half if config.fp16 else torch.float
+        data_type = self.config.dtype
+        data_type_fp = torch.half if self.config.dtype == torch.int8 else self.config.dtype
         global inference_cuda_module
         if inference_cuda_module is None:
             builder = InferenceBuilder()
@@ -172,12 +172,14 @@ class DeepSpeedDiffusersAttention(nn.Module):
             self.norm_factor *= math.sqrt(self.config.layer_id + 1)
             # https://github.com/huggingface/transformers/blob/v4.24.0/src/transformers/models/gpt2/modeling_gpt2.py#L191
 
-        self.score_context_func = inference_cuda_module.softmax_context_fp32 if (not config.fp16) else \
-                                    inference_cuda_module.softmax_context_fp16
-        self.linear_func = inference_cuda_module.linear_layer_fp16 if config.fp16 else \
-                                    inference_cuda_module.linear_layer_fp32
-        self.allocate_workspace = inference_cuda_module.allocate_workspace_fp32 if not (config.fp16) else \
-                                    inference_cuda_module.allocate_workspace_fp16
+        if self.config.dtype in [torch.float16, torch.int8]:
+            self.score_context_func = inference_cuda_module.softmax_context_fp16
+            self.linear_func = inference_cuda_module.linear_layer_fp16
+            self.allocate_workspace = inference_cuda_module.allocate_workspace_fp16
+        else:
+            self.score_context_func = inference_cuda_module.softmax_context_fp32
+            self.linear_func = inference_cuda_module.linear_layer_fp32
+            self.allocate_workspace = inference_cuda_module.allocate_workspace_fp32
 
     def forward(self, input, context=None, input_mask=None):
         if self.config.layer_id == 0:

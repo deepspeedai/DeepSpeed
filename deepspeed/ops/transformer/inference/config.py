@@ -4,7 +4,8 @@
 # DeepSpeed Team
 
 import json
-from deepspeed.utils.types import ActivationFuncType
+import torch
+from deepspeed.utils.types import ActivationFuncType, NormType
 
 
 class TransformerConfig():
@@ -52,9 +53,9 @@ class DeepSpeedInferenceConfig(TransformerConfig):
                  layer_norm_eps=1e-12,
                  local_rank=-1,
                  mp_size=1,
-                 fp16=False,
-                 q_int8=False,
+                 dtype=torch.float16,
                  pre_layer_norm=True,
+                 norm_type=NormType.LayerNorm,
                  stochastic_mode=False,
                  scale_attention=True,
                  triangular_masking=True,
@@ -79,13 +80,13 @@ class DeepSpeedInferenceConfig(TransformerConfig):
         super(DeepSpeedInferenceConfig,
               self).__init__(hidden_size, (intermediate_size if intermediate_size > 0 else 4 * hidden_size), heads,
                              num_hidden_layers)
-        self.fp16 = fp16
+        self.dtype = dtype
         self.pre_layer_norm = pre_layer_norm
+        self.norm_type = norm_type
         self.local_rank = local_rank
         self.stochastic_mode = stochastic_mode
         self.epsilon = layer_norm_eps
         self.mp_size = mp_size
-        self.q_int8 = q_int8
         self.scale_attention = scale_attention
         self.triangular_masking = triangular_masking
         self.local_attention = local_attention

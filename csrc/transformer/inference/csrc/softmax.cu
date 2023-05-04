@@ -487,58 +487,29 @@ void launch_attn_softmax_v2(T* vals,
         throw std::runtime_error("Unsupport Seq_Length!");
 }
 
-template void launch_attn_softmax_v2(float* vals,
-                                     float* mask,
-                                     float* alibi,
-                                     float layer_scale,
-                                     bool triangular,
-                                     bool recompute,
-                                     bool local_attention,
-                                     int window_size,
-                                     int batch_size,
-                                     int heads,
-                                     int num_seq,
-                                     int sequence_length,
-                                     int head_offset,
-                                     int mask_stride,
-                                     int mp_size,
-                                     cudaStream_t stream);
+#define INSTANTIATE_LAUNCH_ATTN_SOFTMAX_V2(T)                  \
+    template void launch_attn_softmax_v2(T* vals,              \
+                                         T* mask,              \
+                                         T* alibi,             \
+                                         float layer_scale,    \
+                                         bool triangular,      \
+                                         bool recompute,       \
+                                         bool local_attention, \
+                                         int window_size,      \
+                                         int batch_size,       \
+                                         int heads,            \
+                                         int num_seq,          \
+                                         int sequence_length,  \
+                                         int head_offset,      \
+                                         int mask_stride,      \
+                                         int mp_size,          \
+                                         cudaStream_t stream);
 
+INSTANTIATE_LAUNCH_ATTN_SOFTMAX_V2(float);
 #ifdef BF16_AVAILABLE
-template void launch_attn_softmax_v2(__nv_bfloat16* vals,
-                                     __nv_bfloat16* mask,
-                                     __nv_bfloat16* alibi,
-                                     float layer_scale,
-                                     bool triangular,
-                                     bool recompute,
-                                     bool local_attention,
-                                     int window_size,
-                                     int batch_size,
-                                     int heads,
-                                     int num_seq,
-                                     int sequence_length,
-                                     int head_offset,
-                                     int mask_stride,
-                                     int mp_size,
-                                     cudaStream_t stream);
+INSTANTIATE_LAUNCH_ATTN_SOFTMAX_V2(__nv_bfloat16);
 #endif
-
-template void launch_attn_softmax_v2(__half* vals,
-                                     __half* mask,
-                                     __half* alibi,
-                                     float layer_scale,
-                                     bool triangular,
-                                     bool recompute,
-                                     bool local_attention,
-                                     int window_size,
-                                     int batch_size,
-                                     int heads,
-                                     int num_seq,
-                                     int sequence_length,
-                                     int head_offset,
-                                     int mask_stride,
-                                     int mp_size,
-                                     cudaStream_t stream);
+INSTANTIATE_LAUNCH_ATTN_SOFTMAX_V2(__half);
 
 #define DEF_ATTN_SOFTMAX_V2_HALF(_iter)                                           \
     template __global__ void attn_softmax_v2<__half, _iter>(__half * vals,        \

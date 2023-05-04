@@ -485,11 +485,19 @@ class OpBuilder(ABC):
             torch_arch_list = os.environ.get("TORCH_CUDA_ARCH_LIST")
             os.environ["TORCH_CUDA_ARCH_LIST"] = ""
 
+        nvcc_args = self.strip_empty_entries(self.nvcc_args())
+        cxx_args = self.strip_empty_entries(self.cxx_args())
+
+        if isinstance(self, CUDAOpBuilder):
+            if not self.build_for_cpu and self.enable_bf16:
+                cxx_args.append("-DBF16_AVAILABLE")
+                nvcc_args.append("-DBF16_AVAILABLE")
+
         op_module = load(name=self.name,
                          sources=self.strip_empty_entries(sources),
                          extra_include_paths=self.strip_empty_entries(extra_include_paths),
-                         extra_cflags=self.strip_empty_entries(self.cxx_args()),
-                         extra_cuda_cflags=self.strip_empty_entries(self.nvcc_args()),
+                         extra_cflags=cxx_args,
+                         extra_cuda_cflags=nvcc_args,
                          extra_ldflags=self.strip_empty_entries(self.extra_ldflags()),
                          verbose=verbose)
 
@@ -555,11 +563,15 @@ class CUDAOpBuilder(OpBuilder):
                 f"Unable to load {self.name} op due to no compute capabilities remaining after filtering")
 
         args = []
+        self.enable_bf16 = True
         for cc in ccs:
             num = cc[0] + cc[2]
             args.append(f'-gencode=arch=compute_{num},code=sm_{num}')
             if cc.endswith('+PTX'):
                 args.append(f'-gencode=arch=compute_{num},code=compute_{num}')
+
+            if int(cc[0]) <= 7:
+                self.enable_bf16 = False
 
         return args
 
@@ -601,6 +613,9 @@ class CUDAOpBuilder(OpBuilder):
         compile_args = {'cxx': self.strip_empty_entries(self.cxx_args())} if self.build_for_cpu else \
                        {'cxx': self.strip_empty_entries(self.cxx_args()), \
                            'nvcc': self.strip_empty_entries(self.nvcc_args())}
+
+        if not self.build_for_cpu and self.enable_bf16:
+            compile_args['cxx'].append("-DBF16_AVAILABLE")
 
         cuda_ext = ExtensionBuilder(name=self.absolute_name(),
                                     sources=self.strip_empty_entries(self.sources()),

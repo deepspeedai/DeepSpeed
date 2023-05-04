@@ -12,8 +12,10 @@ class LinearOp(BaseOp):
 
     def __init__(self, config: DeepSpeedInferenceConfig):
         super(LinearOp, self).__init__(config)
-        if self.config.fp16:
+        if self.config.dtype in [torch.float16, torch.int8]:
             self.linear_func = self.inference_cuda_module.linear_layer_fp16
+        elif self.config.dtype == torch.bfloat16:
+            self.linear_func = self.inference_cuda_module.linear_layer_bf16
         else:
             self.linear_func = self.inference_cuda_module.linear_layer_fp32
 

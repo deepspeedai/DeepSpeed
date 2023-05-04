@@ -38,10 +38,8 @@ class HFGPT2LayerPolicy(TransformerPolicy):
     def get_hidden_heads(self):
         return self.client_module.attn.embed_dim, \
                 self.client_module.attn.num_heads, \
-                self.client_module.ln_1.eps
-
-    def get_q_k_v(self):
-        return None
+                self.client_module.ln_1.eps, \
+                DEFAULT_INTERMEDIATE_SIZE
 
     def attention(self, enable_training=False):
         return  self.client_module.attn.c_attn.weight, \
@@ -49,7 +47,7 @@ class HFGPT2LayerPolicy(TransformerPolicy):
                 self.client_module.attn.c_proj.weight, \
                 self.client_module.attn.c_proj.bias
 
-    def mlp(self):
+    def mlp(self, enable_training=False):
         return self.client_module.mlp.c_fc.weight, \
                self.client_module.mlp.c_fc.bias, \
                self.client_module.mlp.c_proj.weight, \
@@ -60,6 +58,3 @@ class HFGPT2LayerPolicy(TransformerPolicy):
                self.client_module.ln_2.bias, \
                self.client_module.ln_1.weight, \
                self.client_module.ln_1.bias
-
-    def get_lora_params(self):
-        return []

@@ -7,6 +7,11 @@ from abc import ABC, abstractmethod
 
 
 class MetaTensorContainer(ABC):
+    """
+    NOTE: If you are using this feature with a container that
+    also inherits from `HybridEngineContainer`, ensure that `MetaTensorContainer`
+    is inherited before `HybridEngineContainer` in the class definition.
+    """
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
@@ -17,14 +22,14 @@ class MetaTensorContainer(ABC):
         super().initialize_tensors(enable_training=enable_training)
         self.is_meta = self.qkvw.is_meta
 
-    def apply_tensor_parallelism(self, mp_replace=None, mp_group=None, tp_size=None):
+    def apply_tensor_parallelism(self, mp_replace, **kwargs):
         if self.is_meta:
             if self.qkvb is None:
                 self.module.attention.attn_qkvb = None
             if self.dense_b is None:
                 self.module.attention.attn_ob = None
         else:
-            super().apply_tensor_parallelism(mp_replace, mp_group, tp_size)
+            super().apply_tensor_parallelism(mp_replace, **kwargs)
 
     def copy_data_to_new_module(self):
         if self.is_meta:

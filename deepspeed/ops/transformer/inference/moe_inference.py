@@ -200,6 +200,7 @@ class DeepSpeedMoEInference(nn.Module):
             else:
                 inference_cuda_module = InferenceBuilder().load()
         self.config.specialized_mode = specialized_mode
+        assert self.config.dtype != torch.bfloat16, "DeepSpeed MoE Transformer Inference not yet tested for bfloat support"
 
         DeepSpeedMoEInference.layer_id += 1
         self.attention = DeepSpeedSelfAttention(self.config, mp_group, quantize_scales, quantize_groups, merge_count)
@@ -213,9 +214,9 @@ class DeepSpeedMoEInference(nn.Module):
             self.res_mlp = DeepSpeedMoEMLP(config, quantize_scales, quantize_groups, merge_count, mlp_extra_grouping,
                                            mp_group)
             self.res_coef = nn.Parameter(torch.Tensor(self.config.hidden_size, 2))
-            self.coef_func = inference_cuda_module.softmax_fp16 if self.config.fp16 or self.config.q_int8 else \
+            self.coef_func = inference_cuda_module.softmax_fp16 if self.config.dtype in [torch.float16, torch.int8] else \
                                         inference_cuda_module.softmax_fp32
-            self.vector_matmul_func = inference_cuda_module.vector_matmul_fp16 if config.fp16 else \
+            self.vector_matmul_func = inference_cuda_module.vector_matmul_fp16 if self.config.dtype == torch.float16 else \
                                     inference_cuda_module.vector_matmul_fp32
 
         config.mp_size = 1
@@ -234,11 +235,11 @@ class DeepSpeedMoEInference(nn.Module):
 
         print("DeepSpeed MoE Transformer Inference config is ", self.config.__dict__)
 
-        self.bias_residual_func = inference_cuda_module.bias_residual_fp16 if config.fp16 or config.q_int8 else \
+        self.bias_residual_func = inference_cuda_module.bias_residual_fp16 if self.config.dtype in [torch.float16, torch.int8] else \
                                         inference_cuda_module.bias_residual_fp32
-        self.ds_layernorm = inference_cuda_module.layer_norm_fp16 if self.config.fp16 or self.config.q_int8 else \
+        self.ds_layernorm = inference_cuda_module.layer_norm_fp16 if self.config.dtype in [torch.float16, torch.int8] else \
                                         inference_cuda_module.layer_norm_fp32
-        self.einsum_sec_sm_ecm = inference_cuda_module.einsum_sec_sm_ecm_fp16 if self.config.fp16 or self.config.q_int8 else \
+        self.einsum_sec_sm_ecm = inference_cuda_module.einsum_sec_sm_ecm_fp16 if self.config.dtype in [torch.float16, torch.int8] else \
                                         inference_cuda_module.einsum_sec_sm_ecm_fp32
 
     def res_coef_func(self, inp, async_op):
@@ -302,8 +303,7 @@ class DeepSpeedMoEInference(nn.Module):
         input_mask = input_mask if attention_mask is None else attention_mask
         input_type = input.dtype
 
-        if (self.config.fp16 or self.config.q_int8) \
-            and input.dtype == torch.float:
+        if (self.config.dtype in [torch.float16, torch.int8]) and input_type == torch.float:
             input = input.half()
 
         with torch.no_grad():

@@ -63,34 +63,15 @@ void launch_dequantize(T* output,
         output, input, qscale, output_size, hidden_dim, groups, merge_count);
 }
 
-template void launch_dequantize<float>(float*,
-                                       const int8_t*,
-                                       const float*,
-                                       unsigned,
-                                       unsigned,
-                                       unsigned,
-                                       unsigned,
-                                       cudaStream_t);
+#define INSTANTIATE_DEQUANTIZE_MERGE(T) \
+    template void launch_dequantize<T>( \
+        T*, const int8_t*, const float*, unsigned, unsigned, unsigned, unsigned, cudaStream_t);
 
+INSTANTIATE_DEQUANTIZE_MERGE(float);
 #ifdef BF16_AVAILABLE
-template void launch_dequantize<__nv_bfloat16>(__nv_bfloat16*,
-                                               const int8_t*,
-                                               const float*,
-                                               unsigned,
-                                               unsigned,
-                                               unsigned,
-                                               unsigned,
-                                               cudaStream_t);
+INSTANTIATE_DEQUANTIZE_MERGE(__nv_bfloat16);
 #endif
-
-template void launch_dequantize<__half>(__half*,
-                                        const int8_t*,
-                                        const float*,
-                                        unsigned,
-                                        unsigned,
-                                        unsigned,
-                                        unsigned,
-                                        cudaStream_t);
+INSTANTIATE_DEQUANTIZE_MERGE(__half);
 
 __global__ void dequantize_kernel(float* output,
                                   const int8_t* input,
@@ -161,70 +142,12 @@ void launch_dequantize(T* output,
         output, input, qscale, hidden_dim, hid_cnt * hidden_dim, thd_cnt);
 }
 
-template void launch_dequantize<float>(float*,
-                                       const int8_t*,
-                                       const float*,
-                                       unsigned,
-                                       unsigned,
-                                       unsigned,
-                                       cudaStream_t);
+#define INSTANTIATE_DEQUANTIZE_NO_MERGE(T) \
+    template void launch_dequantize<T>(    \
+        T*, const int8_t*, const float*, unsigned, unsigned, unsigned, cudaStream_t);
 
+INSTANTIATE_DEQUANTIZE_NO_MERGE(float);
 #ifdef BF16_AVAILABLE
-template void launch_dequantize<__nv_bfloat16>(__nv_bfloat16*,
-                                               const int8_t*,
-                                               const float*,
-                                               unsigned,
-                                               unsigned,
-                                               unsigned,
-                                               cudaStream_t);
+INSTANTIATE_DEQUANTIZE_NO_MERGE(__nv_bfloat16);
 #endif
-
-template void launch_dequantize<__half>(__half*,
-                                        const int8_t*,
-                                        const float*,
-                                        unsigned,
-                                        unsigned,
-                                        unsigned,
-                                        cudaStream_t);
-
-template __global__ void dequantize_kernel(float* output,
-                                           const int8_t* input,
-                                           const float* qscale,
-                                           int output_size,
-                                           int hidden_dim,
-                                           int groups,
-                                           int merge_count);
-
-#ifdef BF16_AVAILABLE
-template __global__ void dequantize_kernel(__nv_bfloat16* output,
-                                           const int8_t* input,
-                                           const float* qscale,
-                                           int output_size,
-                                           int hidden_dim,
-                                           int groups,
-                                           int merge_count);
-#endif
-
-template __global__ void dequantize_kernel(__half* output,
-                                           const int8_t* input,
-                                           const float* qscale,
-                                           int output_size,
-                                           int hidden_dim,
-                                           int groups,
-                                           int merge_count);
-
-#ifdef BF16_AVAILABLE
-template __global__ void dequantize_kernel(__nv_bfloat16* output,
-                                           const int8_t* input,
-                                           const float* qscale,
-                                           unsigned hidden_dim,
-                                           unsigned merge_hidden,
-                                           int cnt);
-#endif
-
-template __global__ void dequantize_kernel(__half* output,
-                                           const int8_t* input,
-                                           const float* qscale,
-                                           unsigned hidden_dim,
-                                           unsigned merge_hidden,
-                                           int cnt);
+INSTANTIATE_DEQUANTIZE_NO_MERGE(__half);

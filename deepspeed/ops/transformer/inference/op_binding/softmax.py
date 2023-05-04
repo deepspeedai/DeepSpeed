@@ -12,10 +12,12 @@ class SoftmaxOp(BaseOp):
 
     def __init__(self, config: DeepSpeedInferenceConfig):
         super(SoftmaxOp, self).__init__(config)
-        if self.config.fp16:
+        if self.config.dtype in [torch.float16, torch.int8]:
             self.softmax_func = self.inference_cuda_module.softmax_fp16
+        elif self.config.dtype == torch.bfloat16:
+            self.softmax_func = self.inference_cuda_module.softmax_bf16
         else:
-            self.softmax_func = self._not_implemented
+            self.softmax_func = self.inference_cuda_module.softmax_fp32
 
     def _not_implemented(self, *args, **kwargs):
         raise NotImplementedError

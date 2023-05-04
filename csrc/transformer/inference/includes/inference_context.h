@@ -136,7 +136,7 @@ public:
 
         if (_max_seq_len < min_out_tokens) {
             printf(
-                "Allocatable workspace available (%d tokens) is less than minimum requested "
+                "Allocatable workspace available (%ld tokens) is less than minimum requested "
                 "workspace (%d tokens)\n",
                 _max_seq_len,
                 min_out_tokens);

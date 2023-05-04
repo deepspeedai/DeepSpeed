@@ -4,7 +4,7 @@
 # DeepSpeed Team
 
 from abc import ABC, abstractmethod
-from deepspeed.utils.types import ActivationFuncType
+from deepspeed.utils.types import ActivationFuncType, NormType
 import torch
 from deepspeed.accelerator import get_accelerator
 
@@ -58,7 +58,9 @@ class TransformerPolicy(DSPolicy):
             # this flag shows whether or not using prefix in loading the checkpoint
             use_load_prefix=False,
             # whether or not the qkv is stored in the split-format
-            split_qkv=True):
+            split_qkv=True,
+            # Type of normalization to perform
+            norm_type=NormType.LayerNorm):
         super().__init__()
         self.cuda_graph_supported = False
         self.inference = inference
@@ -70,20 +72,14 @@ class TransformerPolicy(DSPolicy):
         self.pre_attn_norm = pre_attn_norm
         self.use_load_prefix = use_load_prefix
         self.split_qkv = split_qkv
+        self.norm_type = norm_type
 
     @abstractmethod
-    def attention(self, enable_training=False):
+    def attention(self):
         """
         Returns attention qkv and dense parameters
         weight: (3*hidden, hidden) and (hidden, hidden)
         bias: (3*hidden) and (hidden)
-        """
-        raise NotImplementedError
-
-    @abstractmethod
-    def get_q_k_v(self):
-        """
-        return all q,k,v parameters without merging them together
         """
         raise NotImplementedError
 
@@ -112,14 +108,6 @@ class TransformerPolicy(DSPolicy):
         """
         raise NotImplementedError
 
-    @abstractmethod
-    def get_lora_params(self):
-        """
-        Returns lora parameters used in transformer layer
-
-        """
-        raise NotImplementedError
-
 
 # TODO (lekurile): This function exists in base container as well, consolidate as some point
 def transpose(data):
@@ -133,7 +121,7 @@ def transpose(data):
 
 # TODO (lekurile): This function exists in megatron feature container as well, consolidate as some point
 def _transpose(x, heads=1, mp_replace=None):
-    heads = heads // mp_replace.mp_size
+    heads = heads // mp_replace.mp_size  # type: ignore
     outer_dim = -1
     attention_head_size = x.shape[outer_dim] // heads
     new_x_shape = x.size()[:outer_dim] + (heads, attention_head_size)
@@ -164,15 +152,15 @@ def maybe_copy(module,
         tmp = sd[src_name]
         if len(dst.shape) == 1:
             if split_qkv:
-                dst = mp_replace.qkv_copy(dst, tmp)
+                dst = mp_replace.strided_copy(dst, tmp, num_splits=3)
             else:
                 dst = mp_replace.copy(dst, tmp)
             if qkv and megatron_v2:
                 dst = torch.nn.parameter.Parameter(_transpose(dst, heads=heads, mp_replace=mp_replace).contiguous())
         else:
             if split_qkv:
-                dst = mp_replace.qkv_copy(dst, weight_quantizer.quantize(tmp if weight_quantizer.q_int8 else \
-                                                (transpose(tmp).contiguous())), int8=weight_quantizer.q_int8)
+                dst = mp_replace.strided_copy(dst, weight_quantizer.quantize(tmp if weight_quantizer.q_int8 else \
+                                                (transpose(tmp).contiguous())), num_splits=3, int8=weight_quantizer.q_int8)
             else:
                 if qkv and megatron_v2:
                     tmp = _transpose(transpose(tmp), heads=heads, mp_replace=mp_replace).contiguous()
@@ -193,16 +181,30 @@ def maybe_copy_qkv(module, sd, weight_quantizer, mp_replace, dst_name, src_names
         dst = getattr(module, dst_name)
         if len(dst.shape) == 1:
             if split_qkv:
-                dst = mp_replace.qkv_copy(dst, qkv_data.contiguous())
+                dst = mp_replace.strided_copy(dst, qkv_data.contiguous(), num_splits=3)
             else:
                 dst = mp_replace.copy(dst, qkv_data)
         else:
             if split_qkv:
-                dst = mp_replace.qkv_copy(dst, weight_quantizer.quantize(qkv_data.to(get_accelerator().device_name()) if weight_quantizer.q_int8 else \
-                                                ((transpose(qkv_data)).contiguous())), int8=weight_quantizer.q_int8)
+                dst = mp_replace.strided_copy(dst, weight_quantizer.quantize(qkv_data.to(get_accelerator().device_name()) if weight_quantizer.q_int8 else \
+                                                ((transpose(qkv_data)).contiguous())), num_splits=3, int8=weight_quantizer.q_int8)
             else:
                 dst = mp_replace.copy(dst, weight_quantizer.quantize(qkv_data.to(get_accelerator().device_name()) if weight_quantizer.q_int8 else \
                                                 transpose(qkv_data)), int8=weight_quantizer.q_int8)
+        setattr(module, dst_name, dst)
+
+
+# Extending the `maybe_copy` function for when mlp1 is in separate parameters for GeGLU
+def maybe_copy_geglu(module, sd, weight_quantizer, mp_replace, dst_name, src_names):
+    if src_names[0] in sd:
+        reg_proj = sd[src_names[0]]
+        gate_proj = sd[src_names[1]]
+
+        mlp1_data = torch.cat((reg_proj, gate_proj), dim=0)
+        dst = getattr(module, dst_name)
+
+        dst = mp_replace.strided_copy(dst, weight_quantizer.quantize(mlp1_data.to(get_accelerator().device_name()) if weight_quantizer.q_int8 else \
+                                            transpose(mlp1_data)), num_splits=2, int8=weight_quantizer.q_int8)
         setattr(module, dst_name, dst)
 
 
