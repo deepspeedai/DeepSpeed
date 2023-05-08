@@ -298,7 +298,7 @@ setup(name='deepspeed',
           'Programming Language :: Python :: 3.8', 'Programming Language :: Python :: 3.9',
           'Programming Language :: Python :: 3.10'
       ],
-      license='MIT',
+      license='Apache Software License 2.0',
       ext_modules=ext_modules,
       cmdclass=cmdclass)
 
