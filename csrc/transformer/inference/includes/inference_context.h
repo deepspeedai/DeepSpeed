@@ -175,7 +175,7 @@ public:
         _workSpaceSize = workSpaceSize;
         _attention_unfused_workspace_offset = workSpaceSize - temp_size;
     }
-    inline size_t GetMaxTokenLenght() const { return _max_seq_len; }
+    inline size_t GetMaxTokenLength() const { return _max_seq_len; }
 
     cudaEvent_t GetCompEvent(int id) { return id == 1 ? _comp1_event : _comp2_event; }
 
