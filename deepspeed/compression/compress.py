@@ -197,7 +197,7 @@ def student_initialization(student_model, teacher_model, deepspeed_config):
         other_module_name (`list of string`)
             The modules will be used for student's reinitializedion
             Example 1: ['bert.pooler', 'bert.embeddings', 'classifier'], means we want to apply the weight in teacher's embedding/pooler/classier module to the student
-            Example 2: ['transformer.w', 'transformer.ln_f', 'lm_head'], means we want to apply the weight in teacher's embeddingn layers module to the student
+            Example 2: ['transformer.w', 'transformer.ln_f', 'lm_head'], means we want to apply the weight in teacher's embedding layers module to the student
     Note that teacher_layer should matches student layer
     '''
     assert len(student_layer) == len(teacher_layer)

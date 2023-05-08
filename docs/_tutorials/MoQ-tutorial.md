@@ -134,7 +134,7 @@ python text-classification/run_glue.py \
   --deepspeed test.json
 ```
 
-Running this script will get `MPRC` accuracy and F1 metric results with MoQ quantization.
+Running this script will get `MRPC` accuracy and F1 metric results with MoQ quantization.
 
 
 ### Quantization with dynamic schedule using second-order information (Eigenvalue)

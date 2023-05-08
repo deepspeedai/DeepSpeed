@@ -16,7 +16,7 @@ g_mpu = None
 
 class QuantAct(nn.Module):
     """
-    Class to quantize given activations. Note that when using this function, the input acttivation quantization range will be fixed for all
+    Class to quantize given activations. Note that when using this function, the input activation quantization range will be fixed for all
     tokens/images for inference. This generally will affect some accuracy but achieve better latency performance.
     Parameters:
     ----------

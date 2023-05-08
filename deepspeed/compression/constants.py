@@ -32,7 +32,7 @@ TEACHER_LAYER = "teacher_layer"
 OTHER_MODULE_NAME = "other_module_name"
 
 ####
-# Weight Quantzation
+# Weight Quantization
 ####
 WEIGHT_QUANTIZATION = "weight_quantization"
 

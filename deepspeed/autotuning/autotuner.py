@@ -50,7 +50,7 @@ class Autotuner:
 
         assert tabulate is not None, "Missing required package `tabulate`, please install with `pip install deepspeed[autotuning]`."
 
-        logger.debug(f"autotunning args={args}")
+        logger.debug(f"autotuning args={args}")
 
         self.user_config = self._get_user_config(args.user_args)
         assert self.user_config is not None, "DeepSpeed configuration is not provided"
@@ -802,7 +802,7 @@ class Autotuner:
         if tuning_micro_batch_sizes_overwritten:
             return tuning_micro_batch_sizes
 
-        # in a auto-detected tuning_micro_batch_sizs list, max_micro_batch_size might not be performant as the memory consumption is close to max
+        # in a auto-detected tuning_micro_batch_sizes list, max_micro_batch_size might not be performant as the memory consumption is close to max
         # try smaller values while gas stays the same
         # if finding a more performant mbs value, use it to replace max_micro_batch_size in the list
         min_micro_batch_size_with_same_gas = (tuning_micro_batch_sizes[-2] +
@@ -1100,7 +1100,7 @@ class Autotuner:
 
     def run_after_tuning(self):
         """ Launches the training with the optimal DeepSpeed configuration found through the autotuning process.
-            "ds_config_optimal.json" describing the optmimal DeepSpeed configuration as well the command used to launch training "cmd_optimal.txt" are saved to self.results_dir.
+            "ds_config_optimal.json" describing the optimal DeepSpeed configuration as well the command used to launch training "cmd_optimal.txt" are saved to self.results_dir.
         """
         if self.optimal_cmd:
             result = subprocess.Popen(self.optimal_cmd)

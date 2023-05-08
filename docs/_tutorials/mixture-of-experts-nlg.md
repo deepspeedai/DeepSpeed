@@ -57,11 +57,11 @@ Regarding training data, we are not able to release our internal data but any pu
 Table 1: Zero-shot evaluation results (last six columns) for different dense and MoE NLG models. All zero-shot evaluation results use the accuracy metric.
 
 ### 2.4. Training MoS with reduced model size
-MoS, standing for Mixture-of-Students, is a staged distillation-based technique for compressing large MoE models. MoS further reduces the model size by 12.5%, leading to up 3.7x model size reduction when combined with PR-MoE over the standard MoE. The reduced model size helps reduce the latecy and cost during inference. To train an MoS model, one needs to specify a few additional parameters. We will use PR-MoE as an example:
+MoS, standing for Mixture-of-Students, is a staged distillation-based technique for compressing large MoE models. MoS further reduces the model size by 12.5%, leading to up 3.7x model size reduction when combined with PR-MoE over the standard MoE. The reduced model size helps reduce the latency and cost during inference. To train an MoS model, one needs to specify a few additional parameters. We will use PR-MoE as an example:
 
 `--mos`: This would enable Mixture-of-Students via knowledge distillation.
 
-`--load-teacher`: This specifies the path to the teacher model checkpoint. This is a mandatory argumentment for using MoS and the teacher model checkpoint can be obtained by either training a standard MoE or the PR-MoE.
+`--load-teacher`: This specifies the path to the teacher model checkpoint. This is a mandatory argument for using MoS and the teacher model checkpoint can be obtained by either training a standard MoE or the PR-MoE.
 
 `num-layers-teacher`, `--hidden-size-teacher`, `--hidden-size-teacher`, `--num-experts-teacher`: In addition to the teacher model checkpoint path, we also need to specify the model architecture of the teacher model such as its number of layers, hidden dimension size, and the number of experts per MoE layer. In the case of PR-MoE, we need to also provide a list of experts for the teacher model, where we remove a few expert layers from the teacher model.
 

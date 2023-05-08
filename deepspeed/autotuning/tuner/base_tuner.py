@@ -39,7 +39,7 @@ class BaseTuner:
         i = 0
         try:
             while i < n_trials and self.has_next():
-                # Select the next batch of configuratiosn for evaluation
+                # Select the next batch of configuration for evaluation
                 sampled_exps = self.next_batch(sample_size)
                 # Generate experiments for measurement of performance
                 exp_paths = write_experiments(sampled_exps, self.rm.exps_dir)
@@ -68,5 +68,5 @@ class BaseTuner:
                     break
             return i
         except:
-            logger.info("Tunner Error:", sys.exc_info()[0])
+            logger.info("Tuner Error:", sys.exc_info()[0])
             return i

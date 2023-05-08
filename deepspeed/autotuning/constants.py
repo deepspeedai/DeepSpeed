@@ -4,7 +4,7 @@
 # DeepSpeed Team
 
 #########################################
-# autotunner implementation constants
+# autotuner implementation constants
 #########################################
 
 import os
@@ -117,7 +117,7 @@ MODEL_INFO_PROFILE = "profile"
 MODEL_INFO_PROFILE_DEFAULT = False
 MODEL_INFO_NUM_PARAMS = "num_params"
 MODEL_INFO_NUM_PARAMS_DEFAULT = None
-MODEL_INFO_HIDDEN_SIZE = "hideen_size"
+MODEL_INFO_HIDDEN_SIZE = "hidden_size"
 MODEL_INFO_HIDDEN_SIZE_DEFAULT = None
 MODEL_INFO_NUM_LAYERS = "num_layers"
 MODEL_INFO_NUM_LAYERS_DEFAULT = None
@@ -130,7 +130,7 @@ MODEL_INFO_KEY_DEFAULT_DICT = {
 }
 
 #########################################
-# autotunner search space constants
+# autotuner search space constants
 #########################################
 
 DEFAULT_HF_CONFIG = {
