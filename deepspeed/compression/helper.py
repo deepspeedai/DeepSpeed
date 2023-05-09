@@ -176,13 +176,13 @@ def is_module_compressible(module, mpu=None):
     return ret
 
 
-def compression_preparation(model, compression_techinique_list, mpu):
+def compression_preparation(model, compression_technique_list, mpu):
     """
     Prepare the compression techniques of a model.
     Args:
         model (`torch.nn.Module`)
             The model to prepare the compression techniques of.
-        compression_techinique_list (`list`)
+        compression_technique_list (`list`)
             The list of compression techniques to prepare the model to.
             list[]
     """
@@ -190,7 +190,7 @@ def compression_preparation(model, compression_techinique_list, mpu):
     for module_name, module in model.named_modules():
         if is_module_compressible(module, mpu):
             module_replacement(model, module_name, mpu=mpu)
-    for module_name_lists, _, compression_technique in compression_techinique_list:
+    for module_name_lists, _, compression_technique in compression_technique_list:
         for mnl in module_name_lists:
             for module_name in mnl:
                 module_replacement(model, module_name, compression_technique)

@@ -191,7 +191,7 @@ def student_initialization(student_model, teacher_model, deepspeed_config):
             The layer of teacher will be used for student's reinitializedion
             Example 1: [1,3,5,7,9], means we want to matches the 2nd/4th/6th/8th/10th layer of teacher to the first 5 layers of student
         student_layer (`list` or None)
-            The layer of student need to be re-intiialized
+            The layer of student need to be re-initialized
             Example 1: None, means we want to reinitialize all the layers
             Example 1: [0,1,2,3,4], means  we want to reinitialize the first 5 layers
         other_module_name (`list of string`)

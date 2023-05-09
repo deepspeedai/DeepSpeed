@@ -101,7 +101,7 @@ class Autotuner:
 
         self.records = {}
         self.optimal_cmd = None
-        self.optmal_ds_config = None
+        self.optimal_ds_config = None
 
         self.mlflow_parent_id = None
 
@@ -1093,7 +1093,7 @@ class Autotuner:
                 fd.write("\n")
                 fd.flush()
             self.optimal_cmd = cmd
-            self.optmal_ds_config = ds_config
+            self.optimal_ds_config = ds_config
             logger.info(
                 f"Wrote the optimal DeepSpeed configuration found by autotuning to {ds_config_path}, and the corresponding DeepSpeed command to {cmd_path}"
             )

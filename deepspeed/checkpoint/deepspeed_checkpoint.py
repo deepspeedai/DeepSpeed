@@ -98,11 +98,11 @@ class DeepSpeedCheckpoint(object):
     def show_tp_final_norm_map(self):
         self._dump_mapping(self.tp_to_final_norm_map, 'tp_to_final_norm_layers')
 
-    def show_pp_tranformer_map(self):
-        self._dump_mapping(self.pp_to_transformer_map, 'pp_to_tranformer_layers')
+    def show_pp_transformer_map(self):
+        self._dump_mapping(self.pp_to_transformer_map, 'pp_to_transformer_layers')
 
     def show_transformer_file_map(self):
-        self._dump_mapping(self.transformer_file_map, 'rank_to_tranformer_files')
+        self._dump_mapping(self.transformer_file_map, 'rank_to_transformer_files')
 
     def _build_global_state(self):
         sd = torch.load(self.mp_rank_files[0], map_location=torch.device('cpu'))

@@ -5,7 +5,7 @@
 """
     DeepSpeed Communication Package: deepspeed.comm
     deepspeed.comm
-        -- import and use deepspeeed.ops.comm
+        -- import and use deepspeed.ops.comm
         -- use torch.distributed directly if both this package and torch.distributed use the same NCCL version
         -- use custom collectives
             -- can either use torch.dist or ds.ops.comm?
