@@ -65,6 +65,7 @@ extras_require = {
     'autotuning': fetch_requirements('requirements/requirements-autotuning.txt'),
     'autotuning_ml': fetch_requirements('requirements/requirements-autotuning-ml.txt'),
     'sparse_attn': fetch_requirements('requirements/requirements-sparse_attn.txt'),
+    'sparse': fetch_requirements('requirements/requirements-sparse_pruning.txt'),
     'inf': fetch_requirements('requirements/requirements-inf.txt'),
     'sd': fetch_requirements('requirements/requirements-sd.txt')
 }

@@ -6,6 +6,12 @@
 import torch
 from .basic_layer import Embedding_Compress, LinearLayer_Compress, Conv2dLayer_Compress, BNLayer_Compress, ColumnParallelLinear_Compress, RowParallelLinear_Compress
 from .constants import *
+from deepspeed.utils import logger
+
+try:
+    from neural_compressor.compression import pruner as nc_pruner
+except ImportError as e:
+    nc_pruner = None
 
 
 def recursive_getattr(model, module_name):
@@ -246,3 +252,71 @@ def convert_conv1d_to_linear(model, convert_type):
             recursive_setattr(c_model, name, new_module)
 
     return model
+
+
+def generate_pruners(config, model):
+    """Generate pruners.
+    Args:
+        config (`neural_compressor.WeightPruningConfig`)
+            The object to the class WeightPruningConfig.
+        model (`torch.nn.module`)
+            The torch module object to be pruned.
+    """
+    assert nc_pruner is not None, "please ensure the neural_compressor python package is installed by pip or conda if user wants to use snip_momentum sparse pruning"
+    from nc_pruner.utils import process_config, parse_to_prune
+    from nc_pruner.pruners import get_pruner
+    assert isinstance(model, torch.nn.Module)
+    pruners_info = process_config(config)
+    pruners = []
+    for info in pruners_info:
+        modules = parse_to_prune(info, model)
+        if modules == {}:
+            logger.warning("one pruner hooks no layers, please have a check")
+
+        pruners.append(get_pruner(info, modules))
+        info['modules'] = [key for key in modules.keys()]
+        info['len_of_modules'] = len(info['modules'])
+        logger.info(info)
+    return pruners
+
+
+def register_on_step_begin(model):
+    """Mount on_step_begin to the model.
+    Args:
+        model (`torch.nn.module`)
+            The torch module object to be pruned.
+    """
+
+    def hook(module, input):
+        for pruner in module.pruners:
+            pruner.on_step_begin(0)
+
+    hook_handle = model.register_forward_pre_hook(hook)
+    return hook_handle
+
+
+def rewrite_optimizer_step(opt: torch.optim.Optimizer):
+    """Mount on_before/after_optimizer_step to the optimizer.
+    Args:
+        model (`torch.opt.Optimizer`)
+            The torch optimizer object to be hooked.
+    """
+
+    def new_step(self, closure=None):
+        if hasattr(self, "pruners"):
+            for pruner in self.pruners:
+                pruner.on_before_optimizer_step()
+
+        if closure is not None:
+            res = self.orig_step(closure)
+        else:
+            res = self.orig_step()
+        if hasattr(self, "pruners"):
+            for pruner in self.pruners:
+                pruner.on_after_optimizer_step()
+        return res
+
+    opt.orig_step = opt.step
+    import types
+    opt.step = types.MethodType(new_step, opt)
+    return opt

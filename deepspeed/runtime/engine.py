@@ -314,6 +314,12 @@ class DeepSpeedEngine(Module):
         elif self.bfloat16_enabled():
             self.optimizer = self._configure_bf16_optimizer(optimizer=None)
 
+        # Hook optimizer for snip_momentum pruning
+        if hasattr(model, 'pruners'):
+            from ..compression.helper import rewrite_optimizer_step
+            self.optimizer.pruners = model.pruners
+            rewrite_optimizer_step(self.optimizer)
+
         # Bookkeeping for sparse support
         self.sparse_tensor_module_names = set()
         # if self.sparse_gradients_enabled():

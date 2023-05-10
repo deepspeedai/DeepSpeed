@@ -5,7 +5,7 @@
 
 from .constants import *
 import copy
-from ..runtime.config_utils import get_scalar_param
+from ..runtime.config_utils import get_scalar_param, get_list_param
 
 
 def get_compression_config(param_dict):
@@ -221,15 +221,17 @@ def get_sparse_pruning(param_dict):
     # shared parameters
     output[SHARED_PARAMETERS] = get_sparse_pruning_shared_parameters(sub_param_dict)
     # each sub-groups
-    if output[SHARED_PARAMETERS][SPARSE_PRUNING_ENABLED]:
+    if output[SHARED_PARAMETERS][SPARSE_PRUNING_ENABLED] and output[SHARED_PARAMETERS][
+            SPARSE_PRUNING_METHOD] != SPARSE_PRUNING_METHOD_SNIP_MOMENTUM:
         assert DIFFERENT_GROUPS in sub_param_dict.keys(
-        ), f"Sparse Pruning is enabled, {DIFFERENT_GROUPS} must be specified"
+        ), f"Sparse Pruning is enabled and not snip_momentum method, {DIFFERENT_GROUPS} must be specified"
     output[DIFFERENT_GROUPS] = get_sparse_pruning_different_groups(sub_param_dict)
     return output
 
 
 def get_sparse_pruning_shared_parameters(param_dict):
     output = {}
+
     if SHARED_PARAMETERS in param_dict.keys():
         sub_param_dict = param_dict[SHARED_PARAMETERS]
         output[SPARSE_PRUNING_ENABLED] = get_scalar_param(sub_param_dict, SPARSE_PRUNING_ENABLED,
@@ -237,10 +239,26 @@ def get_sparse_pruning_shared_parameters(param_dict):
         output[SPARSE_PRUNING_METHOD] = get_scalar_param(sub_param_dict, SPARSE_PRUNING_METHOD,
                                                          SPARSE_PRUNING_METHOD_DEFAULT)
         assert output[SPARSE_PRUNING_METHOD] in [
-            SPARSE_PRUNING_METHOD_L1, SPARSE_PRUNING_METHOD_TOPK
-        ], f"Invalid sparse pruning method. Supported types: [{SPARSE_PRUNING_METHOD_L1}, {SPARSE_PRUNING_METHOD_TOPK}]"
+            SPARSE_PRUNING_METHOD_L1, SPARSE_PRUNING_METHOD_TOPK, SPARSE_PRUNING_METHOD_SNIP_MOMENTUM
+        ], f"Invalid sparse pruning method. Supported types: [{SPARSE_PRUNING_METHOD_L1}, {SPARSE_PRUNING_METHOD_TOPK}, {SPARSE_PRUNING_METHOD_SNIP_MOMENTUM}]"
         output[SPARSE_PRUNING_SCHEDULE_OFFSET] = get_scalar_param(sub_param_dict, SPARSE_PRUNING_SCHEDULE_OFFSET,
                                                                   SPARSE_PRUNING_SCHEDULE_OFFSET_DEFAULT)
+        if output[SPARSE_PRUNING_METHOD] == SPARSE_PRUNING_METHOD_SNIP_MOMENTUM:
+            output[SPARSE_PRUNING_BLOCK_PATTERN] = get_scalar_param(sub_param_dict, SPARSE_PRUNING_BLOCK_PATTERN,
+                                                                    SPARSE_PRUNING_BLOCK_PATTERN_DEFAULT)
+            output[SPARSE_PRUNING_DENSE_RATIO] = get_scalar_param(sub_param_dict, SPARSE_PRUNING_DENSE_RATIO,
+                                                                  SPARSE_PRUNING_DENSE_RATIO_DEFAULT)
+            assert output[SPARSE_PRUNING_DENSE_RATIO] > 0 and output[
+                SPARSE_PRUNING_DENSE_RATIO] < 1, f"Invalid dense_ratio value. Must be less than 1"
+            output[SPARSE_PRUNING_SCHEDULE_OFFSET_STRIDE] = get_scalar_param(
+                sub_param_dict, SPARSE_PRUNING_SCHEDULE_OFFSET_STRIDE, SPARSE_PRUNING_SCHEDULE_OFFSET_STRIDE_DEFAULT)
+            output[SPARSE_PRUNING_EXCLUDED_MODULES] = get_list_param(sub_param_dict, SPARSE_PRUNING_EXCLUDED_MODULES,
+                                                                     SPARSE_PRUNING_EXCLUDED_MODULES_DEFAULT)
+            output[SPARSE_PRUNING_SCHEDULE_OFFSET_END] = get_scalar_param(sub_param_dict,
+                                                                          SPARSE_PRUNING_SCHEDULE_OFFSET_END,
+                                                                          output[SPARSE_PRUNING_SCHEDULE_OFFSET])
+            assert output[SPARSE_PRUNING_SCHEDULE_OFFSET] <= output[
+                SPARSE_PRUNING_SCHEDULE_OFFSET_END], f"Invalid schedule_offset and schedule_offset_end values"
     else:
         output[SPARSE_PRUNING_ENABLED] = SPARSE_PRUNING_ENABLED_DEFAULT
         output[SPARSE_PRUNING_METHOD] = SPARSE_PRUNING_METHOD_DEFAULT

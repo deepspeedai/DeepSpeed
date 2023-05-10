@@ -11,6 +11,11 @@ from .constants import *
 import os
 import json
 
+try:
+    import neural_compressor as nc
+except ImportError as e:
+    nc = None
+
 
 def check_deepspeed_config(config):
     if isinstance(config, dict):
@@ -116,6 +121,26 @@ def init_compression(model, deepspeed_config, teacher_model=None, mpu=None):
 
     layer_added_compress_methods = get_compress_methods(c_model, compress_methods, mpu=mpu)
     compression_preparation(c_model, layer_added_compress_methods, mpu)
+
+    # For sparse pruning snip_momentum method
+    shared_parameters = compress_methods[SPARSE_PRUNING][SHARED_PARAMETERS]
+    if shared_parameters[SPARSE_PRUNING_ENABLED] and \
+        shared_parameters[SPARSE_PRUNING_METHOD] == SPARSE_PRUNING_METHOD_SNIP_MOMENTUM:
+
+        assert nc is not None, "please ensure the neural_compressor python package is installed by pip or conda if user wants to use snip_momentum sparse pruning"
+
+        from .helper import generate_pruners, register_on_step_begin
+        from nc import WeightPruningConfig
+
+        config = WeightPruningConfig(target_sparsity=1 - shared_parameters[SPARSE_PRUNING_DENSE_RATIO],
+                                     pattern=shared_parameters[SPARSE_PRUNING_BLOCK_PATTERN],
+                                     pruning_frequency=shared_parameters[SPARSE_PRUNING_SCHEDULE_OFFSET_STRIDE],
+                                     start_step=shared_parameters[SPARSE_PRUNING_SCHEDULE_OFFSET],
+                                     end_step=shared_parameters[SPARSE_PRUNING_SCHEDULE_OFFSET_END],
+                                     excluded_op_names=shared_parameters[SPARSE_PRUNING_EXCLUDED_MODULES])
+        pruners = generate_pruners(config, c_model)
+        c_model.pruners = pruners
+        register_on_step_begin(c_model)
 
     return model
 
