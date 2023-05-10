@@ -115,7 +115,7 @@ class ReplaceWithTensorSlicing:
                                    src[self.gpu_index * dst_shape[self.out_dim]: (self.gpu_index + 1) * dst_shape[self.out_dim], :])
         else:
             if src_shape[0] == dst_shape[0]:
-                dst = src
+                dst = src if src.dtype == dst.dtype else dst.data.copy_(src)
             else:
                 dst.data.copy_(src[self.gpu_index * dst_shape[-1]:(self.gpu_index + 1) * dst_shape[-1]])
         dst = torch.nn.parameter.Parameter(dst, requires_grad=False)
@@ -404,6 +404,7 @@ def replace_transformer_layer(orig_layer_impl, model, checkpoint_dict, config, m
                                        dtype=child.weight.dtype)
                 bias_data = None if child.bias is None else mp_replace.copy(new_bias, child.bias.data).to(
                     get_accelerator().current_device_name())
+                setattr(child, "replaced", True)
                 return LinearLayer(weight=data.to(get_accelerator().current_device_name()), bias=bias_data)
 
         def _slice_embedding(child, name, conv_linear_layer):
@@ -474,9 +475,15 @@ def replace_transformer_layer(orig_layer_impl, model, checkpoint_dict, config, m
             else:
                 linear_policies = {nn.Linear: _replace, nn.Embedding: _slice_embedding}
 
-        def _replace_module(r_module, prev_name=''):
+        def _replace_module(r_module, prev_name='', prev_class_name=''):
             for name, child in r_module.named_children():
-                checking_key = prefix + '.' + prev_name + '.' + name + '.' if prev_name != "" else prefix + '.' + name + '.'
+                if prev_class_name == "":
+                    class_name = prev_name
+                elif prev_name == "":
+                    class_name = prev_class_name
+                else:
+                    class_name = prev_class_name + '.' + prev_name
+                checking_key = prefix + '.' + class_name + '.' + name + '.' if class_name != "" else prefix + '.' + name + '.'
                 if child.__class__ in [nn.Linear, nn.Embedding, nn.LayerNorm] and state_dict != None:
                     if any(checking_key in item for item in state_dict):
                         load(child, state_dict, checking_key, mp_group)
@@ -489,7 +496,7 @@ def replace_transformer_layer(orig_layer_impl, model, checkpoint_dict, config, m
                                                                              conv_linear_layer))
                 else:
                     update_mp_params(child)
-                    _replace_module(child, name)
+                    _replace_module(child, name, class_name)
             return r_module
 
         return _replace_module(module)
@@ -802,11 +809,11 @@ def skip_level_0_prefix(model, name):
 
 def load_buffer(module, state_dict, prefix):
     for name in module._buffers.keys():
+        if module._buffers[name].data.is_meta:
+            module._buffers[name] = torch.nn.parameter.Parameter(
+                data=torch.empty_like(module._buffers[name].data, device="cpu"),
+                requires_grad=module._buffers[name].data.requires_grad)
         if prefix + name in state_dict.keys():
-            if module._buffers[name].data.is_meta:
-                module._buffers[name] = torch.nn.parameter.Parameter(
-                    data=torch.empty_like(module._buffers[name].data, device="cpu"),
-                    requires_grad=module._buffers[name].data.requires_grad)
             module._buffers[name].data.copy_(state_dict[prefix + name])
 
 
@@ -818,7 +825,12 @@ def _replace_module(model, policies, prefix='', layer_id=0, level_id=0, state_di
     Returns:
         Modified ``model``.
     """
-    load_layers = [nn.Linear, nn.Embedding, nn.LayerNorm]
+    try:
+        import transformers
+        OPTLearnedPositionalEmbedding = transformers.models.opt.modeling_opt.OPTLearnedPositionalEmbedding
+    except:
+        OPTLearnedPositionalEmbedding = None
+    load_layers = [nn.Linear, nn.Embedding, nn.LayerNorm, OPTLearnedPositionalEmbedding]
     for name, child in model.named_children():
         if child.__class__ in policies:
             replaced_module = policies[child.__class__][0](child,
@@ -866,7 +878,9 @@ def load(module, state_dict, prefix, mp_group=None):
             module.weight = torch.nn.parameter.Parameter(data=torch.empty_like(module.weight.data, device="cpu"),
                                                          requires_grad=module.weight.data.requires_grad)
             if 'query_key_value' in prefix:
-                module.weight = mp_replace.qkv_copy(module.weight.data, state_dict[prefix + 'weight'])
+                module.weight = mp_replace.strided_copy(module.weight.data,
+                                                        state_dict[prefix + 'weight'],
+                                                        num_splits=3)
             else:
                 module.weight = mp_replace.copy(module.weight.data, state_dict[prefix + 'weight'])
     else:

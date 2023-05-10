@@ -156,9 +156,6 @@ class InferenceEngine(Module):
         # NOTE: This check assumes a Hugging Face hierarchy for the device type i.e. module.device.type
         self.model_meta_device = self.module.device.type == 'meta' if hasattr(self.module, "device") else False
 
-        if self.model_meta_device:
-            assert config.replace_with_kernel_inject, "Meta tensor support is only available when kernel injection is enabled"
-
         # convert model to intended dtype
         if config.dtype:
             self._convert_to_dtype(config)
