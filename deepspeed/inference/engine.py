@@ -151,6 +151,14 @@ class InferenceEngine(Module):
             assert pkg_version.parse(torch.__version__) >= pkg_version.parse("1.10"), \
                 "If you want to use cuda graph, please upgrade torch to at least v1.10"
 
+        # Check if model passed to engine is loaded w/ meta tensors, in which case
+        # kernel injection must be enabled.
+        # NOTE: This check assumes a Hugging Face hierarchy for the device type i.e. module.device.type
+        self.model_meta_device = self.module.device.type == 'meta' if hasattr(self.module, "device") else False
+
+        if self.model_meta_device:
+            assert config.replace_with_kernel_inject, "Meta tensor support is only available when kernel injection is enabled"
+
         # convert model to intended dtype
         if config.dtype:
             self._convert_to_dtype(config)
