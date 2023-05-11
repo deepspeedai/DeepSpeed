@@ -110,3 +110,24 @@ class OPTEmbedding(EmbeddingLayer):
         positions = positions[:, past_key_values_length:]
 
         return super().forward(positions + self.offset)
+
+
+class RMSNormalize(nn.Module):
+
+    def __init__(self, dim=None, dtype=torch.float, eps=1e-5, weight=None):
+        super(RMSNormalize, self).__init__()
+        if weight is not None:
+            self.weight = weight
+        else:
+            self.weight = nn.Parameter(torch.ones(dim, dtype=dtype, device=get_accelerator().current_device_name()))
+
+        self.eps = eps
+
+    def forward(self, hidden_states):
+        variance = hidden_states.to(torch.float32).pow(2).mean(-1, keepdim=True)
+        hidden_states = hidden_states * torch.rsqrt(variance + self.eps)
+        print(self.weight)
+        if self.weight.dtype in [torch.float16, torch.bfloat16]:
+            hidden_states = hidden_states.to(self.weight.dtype)
+
+        return hidden_states * self.weight

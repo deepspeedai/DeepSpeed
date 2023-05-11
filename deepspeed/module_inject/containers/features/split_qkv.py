@@ -135,11 +135,14 @@ class HybridSplitQKVContainer(HybridEngineContainer):
             # We reset the data for qw (which is the original model parameter) to point
             # to the fused weight matrix we have created here
             self.qw.data = self.qkvw[:self.qw.shape[0], :]
-            self.qb.data = self.qkvb[:self.qw.shape[0]]
             self.kw.data = self.qkvw[self.qw.shape[0]:2 * self.qw.shape[0], :]
-            self.kb.data = self.qkvb[self.qw.shape[0]:2 * self.qw.shape[0]]
             self.vw.data = self.qkvw[self.qw.shape[0] * 2:, :]
-            self.vb.data = self.qkvb[self.qw.shape[0] * 2:]
+
+            # Assume if one of the biases is not None, then all of them are not None
+            if self.qb is not None:
+                self.qb.data = self.qkvb[:self.qw.shape[0]]
+                self.kb.data = self.qkvb[self.qw.shape[0]:2 * self.qw.shape[0]]
+                self.vb.data = self.qkvb[self.qw.shape[0] * 2:]
         else:
             # In ZeRO-3 this will be managed by ZeRO and handled separately in the
             # forward of ds_attention

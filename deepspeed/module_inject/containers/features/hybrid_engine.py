@@ -47,7 +47,7 @@ class HybridEngineContainer(ABC):
         pass
 
     @abstractmethod
-    def set_lora_params(self, lora_params):
+    def set_lora_params(self):
         """
         If available, set the LoRA parameters for the module.  An implementation
         for this would iterate over all parameters of the model and use the `maybe_get_lora` helper
@@ -154,6 +154,8 @@ class HybridEngineContainer(ABC):
         """
         Return a list of all parameters that would have LoRA for the module.
         """
+        if not hasattr(self, "lora_params"):
+            self.set_lora_params()
         return self.lora_params
 
     def set_params_wo_copy(self, Z3_enabled=False):
@@ -168,7 +170,7 @@ class HybridEngineContainer(ABC):
         self.set_attn_params_wo_copy(Z3_enabled=Z3_enabled)
         self.set_mlp_params_wo_copy(Z3_enabled=Z3_enabled)
 
-    def set_attn_params_wo_copy(self, Z3_enabled=False):
+    def set_attn_params_wo_copy(self, **kwargs):
         """
         Narrower sub-method for finer grained overriding.
         """
@@ -177,7 +179,7 @@ class HybridEngineContainer(ABC):
         self.module.attention.attn_qkvw = self.qkvw
         self.module.attention.attn_qkvb = self.qkvb
 
-    def set_mlp_params_wo_copy(self, Z3_enabled=False):
+    def set_mlp_params_wo_copy(self, **kwargs):
         """
         Narrower sub-method for finer grained overriding.
         """
