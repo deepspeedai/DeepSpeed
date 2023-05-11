@@ -12,7 +12,7 @@ from deepspeed.ops.transformer.inference.config import DeepSpeedInferenceConfig
 from deepspeed.accelerator import get_accelerator
 
 # If the intermediate size attribute is set DEFAULT_INTERMEDIATE_SIZE
-# it is assumed the interemediate size is 4x the embedding dimension
+# it is assumed the intermediate size is 4x the embedding dimension
 DEFAULT_INTERMEDIATE_SIZE = -1
 
 
@@ -163,7 +163,7 @@ class BaseTransformerContainer(ABC):
             hidden_size: embedding dimension of the model
             num_attention_heads: number of attention heads in the model
             epsilon: epsilon value for layer norm (same value used for all norms)
-            intermediate_size: Size of MLP projection. If `DEFAUL_INTERMEDIATE_SIZE` is passed
+            intermediate_size: Size of MLP projection. If `DEFAULT_INTERMEDIATE_SIZE` is passed
                 it is assumed to be `4 * hidden_size`
         """
         self.hidden_size = hidden_size

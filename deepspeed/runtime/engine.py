@@ -375,7 +375,7 @@ class DeepSpeedEngine(Module):
             trainable_num_params = 0
 
             for p in self.module.parameters():
-                # since user code might call deepspeed.zero.Init() before deepspeed.initialize(), need to check the attrbuite to check if the parameter is partitioned in zero 3 already or not
+                # since user code might call deepspeed.zero.Init() before deepspeed.initialize(), need to check the attribute to check if the parameter is partitioned in zero 3 already or not
                 n = 0
                 if hasattr(p, "ds_tensor"):  # if the parameter is partitioned in zero 3
                     n += p.ds_numel
@@ -1090,7 +1090,7 @@ class DeepSpeedEngine(Module):
                 ids_list(group['params']).count(param_id) if param_id in ids_list(group['params']) else 0
                 for group in optimizer.param_groups
             ])
-            assert occurrence <= 1, f"Parameter with name: {name} occurs multiple times in optimizer.param_groups. Make sure it only appears once to prevent undefined behaviour."
+            assert occurrence <= 1, f"Parameter with name: {name} occurs multiple times in optimizer.param_groups. Make sure it only appears once to prevent undefined behavior."
 
     def _do_optimizer_sanity_check(self, basic_optimizer):
         model_dtype, grad_accum_dtype = self.get_data_types()
@@ -1141,7 +1141,7 @@ class DeepSpeedEngine(Module):
         elif model_dtype == torch.bfloat16 and grad_accum_dtype == torch.float32:
             return BFLOAT16
         else:
-            raise NotImplementedError("unsupported mix of model dtype and gradient accummulation type")
+            raise NotImplementedError("unsupported mix of model dtype and gradient accumulation type")
 
         return None
 
@@ -1964,7 +1964,7 @@ class DeepSpeedEngine(Module):
                     block_eigenvalue,
                 )
         # zero grad in basic optimizer could be unreliable and may not exhibit
-        # the behaviour that we want
+        # the behavior that we want
         if self.bfloat16_enabled():
             # TODO: Temporary until bf16_optimizer and zero_optimizer are integrated
             if self.zero_optimization() and hasattr(self.optimizer, "zero_grad"):

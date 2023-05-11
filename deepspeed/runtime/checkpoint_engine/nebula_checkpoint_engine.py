@@ -38,7 +38,7 @@ class NebulaCheckpointEngine(CheckpointEngine):
     def create(self, tag):
         log_dist(f"[Nebula] Start Checkpoint for tag:{tag}", ranks=[0])
         # -2 means: customer needs to  explicitly tell nebula
-        # current checkpoint is complete by commit methond.
+        # current checkpoint is complete by commit method.
         self.checkpoint = torch_nebula.Checkpoint(tag, -2)
 
     def save(self, state_dict, path: str):
