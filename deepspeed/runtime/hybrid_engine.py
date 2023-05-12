@@ -318,7 +318,7 @@ class DeepSpeedHybridEngine(DeepSpeedEngine):
         self._orig_fwds_others = []
 
         if self._config.hybrid_engine.inference_tp_size > 1:
-            if self.mpu is not None:
+            if self.mpu is None:
                 global_rank = dist.get_rank()
                 world_size = dist.get_world_size()
                 mp_group_id = global_rank // self._config.hybrid_engine.inference_tp_size
