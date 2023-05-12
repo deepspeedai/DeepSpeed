@@ -42,33 +42,33 @@ of learning rate and momentum because they are correlated hyperparameters. We
 have leveraged this recommendation to reduce configuration burden by organizing
 the 1-cycle parameters into two groups:
 
-1. Global parameters for configuring the cycle and decay phase
-2. Local parameters for configuring learning rate and momentum
+1. Global parameters for configuring the cycle and decay phase.
+2. Local parameters for configuring learning rate and momentum.
 
 The global parameters for configuring the 1-cycle phases are:
 
-1. `cycle_first_step_size`: The count of training steps to complete first step of cycle phase
-2. `cycle_first_stair_count`: The count of updates (or stairs) in first step of cycle phase
-3. `cycle_second_step_size`: The count of training steps to complete second step of cycle phase
-4. `cycle_second_stair_count`: The count of updates (or stairs) in the second step of cycle phase
-5. `post_cycle_decay_step_size`: The interval, in training steps, to decay hyperparameter in decay phase
+1. `cycle_first_step_size`: The count of training steps to complete first step of cycle phase.
+2. `cycle_first_stair_count`: The count of updates (or stairs) in first step of cycle phase.
+3. `cycle_second_step_size`: The count of training steps to complete second step of cycle phase.
+4. `cycle_second_stair_count`: The count of updates (or stairs) in the second step of cycle phase.
+5. `post_cycle_decay_step_size`: The interval, in training steps, to decay hyperparameter in decay phase.
 
 The local parameters for the hyperparameters are:
 
 **Learning rate**:
 
-1. `cycle_min_lr`: minimum learning rate in cycle phase
-2. `cycle_max_lr`: maximum learning rate in cycle phase
-3. `decay_lr_rate`: decay rate for learning rate in decay phase
+1. `cycle_min_lr`: Minimum learning rate in cycle phase.
+2. `cycle_max_lr`: Maximum learning rate in cycle phase.
+3. `decay_lr_rate`: Decay rate for learning rate in decay phase.
 
 Although appropriate values `cycle_min_lr` and `cycle_max_lr` values can be
 selected based on experience or expertise,  we recommend using [learning rate
 range test](/tutorials/lrrt/) feature of DeepSpeed to configure them.
 
 **Momentum**
-1. `cycle_min_mom`: minimum momentum in cycle phase
-2. `cycle_max_mom`: maximum momentum in cycle phase
-3. `decay_mom_rate`: decay rate for momentum in decay phase
+1. `cycle_min_mom`: Minimum momentum in cycle phase.
+2. `cycle_max_mom`: Maximum momentum in cycle phase.
+3. `decay_mom_rate`: Decay rate for momentum in decay phase.
 
 ## Required Model Configuration Changes
 
@@ -122,9 +122,9 @@ GPU, but was converging slowly to target performance (AUC) when training on 8
 GPUs (8X batch size). The plot below shows model convergence with 8 GPUs for
 these learning rate schedules:
 
-1. **Fixed**: using an optimal fixed learning rate for 1-GPU training.
-2. **LinearScale**: using a fixed learning rate that is 8X of **Fixed**.
-3. **1Cycle**: using 1-Cycle schedule.
+1. **Fixed**: Using an optimal fixed learning rate for 1-GPU training.
+2. **LinearScale**: Using a fixed learning rate that is 8X of **Fixed**.
+3. **1Cycle**: Using 1-Cycle schedule.
 
 ![model_convergence](/assets/images/model_convergence.png)
 

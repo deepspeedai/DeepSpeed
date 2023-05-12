@@ -22,12 +22,12 @@ from torch.profiler import profile, record_function, ProfilerActivity
 
 with torch.profiler.profile(
     schedule=torch.profiler.schedule(
-        wait=5, # during this phase profiler is not active
-        warmup=2, # during this phase profiler starts tracing, but the results are discarded
-        active=6, # during this phase profiler traces and records data
-        repeat=2), # specifies an upper bound on the number of cycles
+        wait=5, # During this phase profiler is not active.
+        warmup=2, # During this phase profiler starts tracing, but the results are discarded.
+        active=6, # During this phase profiler traces and records data.
+        repeat=2), # Specifies an upper bound on the number of cycles.
     on_trace_ready=tensorboard_trace_handler,
-    with_stack=True # enable stack tracing, adds extra profiling overhead
+    with_stack=True # Enable stack tracing, adds extra profiling overhead.
 ) as profiler:
     for step, batch in enumerate(data_loader):
         print("step:{}".format(step))
@@ -40,7 +40,7 @@ with torch.profiler.profile(
 
         #weight update
         model_engine.step()
-        profiler.step() # send the signal to the profiler that the next step has started
+        profiler.step() # Send the signal to the profiler that the next step has started.
 ```
 
 ## Label arbitrary code ranges
@@ -48,7 +48,7 @@ with torch.profiler.profile(
 The `record_function` context manager can be used to label arbitrary code ranges with user provided names. For example, the following code marks `"model_forward"` as a label:
 
 ```python
-with profile(record_shapes=True) as prof: # record_shapes indicates whether to record shapes of the operator inputs
+with profile(record_shapes=True) as prof: # record_shapes indicates whether to record shapes of the operator inputs.
     with record_function("""):"
         model_engine(inputs)
 ```
