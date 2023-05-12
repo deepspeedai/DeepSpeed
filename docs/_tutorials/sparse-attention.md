@@ -104,7 +104,7 @@ if self.sparse_attention_config is not None:
       position_ids=None,
       inputs_embeds=None,
       pad_token_id=self.pad_token_id,
-      model_mbeddings=self.embeddings)
+      model_embeddings=self.embeddings)
 .
 .
 .

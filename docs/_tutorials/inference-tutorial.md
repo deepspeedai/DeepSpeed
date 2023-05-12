@@ -140,7 +140,7 @@ model = deepspeed.init_inference(model,
                                  checkpoint='./checkpoint.json',
                                  dtype=torch.int8,
                                  quantization_setting=(quantize_groups,
-                                                       mlp_exra_grouping)
+                                                       mlp_extra_grouping)
                                 )
 ```
 

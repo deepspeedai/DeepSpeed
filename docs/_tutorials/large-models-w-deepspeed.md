@@ -36,7 +36,7 @@ Since, ZeRO is a replacement to data parallelism, it offers a seamless integrati
 
 **ZeRO based technologies**: For most training scenarios, ZeRO offer training efficiency that is on par with 3D parallelism without requiring model code refactoring. Therefore, if you do not already have your code ported to use 3D parallelism, we suggest first trying ZeRO lines of technology to see if it fits your need. Adding ZeRO to your training pipeline with DeepSpeed is simple and does not require you to make changes to your model.  Given the trivial cost of trying out ZeRO with DeepSpeed, it is the fastest way to evaluate and decide if you should further invest in porting your model to use 3D parallelism. Enabling ZeRO with DeepSpeed also gives you access to ZeRO-Offload and ZeRO-Infinity that can enable fine tuning large models on limited GPU resources. To get started, please checkout our [ZeRO Tutorial](https://www.deepspeed.ai/tutorials/zero/).
 
-For more indepth information on ZeRO lines of technologies, please checkout our papers:
+For more in-depth information on ZeRO lines of technologies, please checkout our papers:
 
 [ZeRO (SC20)](https://arxiv.org/pdf/1910.02054.pdf), [ZeRO Offload (ATC21) ](https://www.usenix.org/system/files/atc21-ren-jie.pdf), and [ZeRO-Infinity (SC21)](https://arxiv.org/pdf/2104.07857.pdf),
 
