@@ -78,7 +78,7 @@ class DenseSparsityConfig(SparsityConfig):
         super().__init__(num_heads, block, different_layout_per_head)
 
     def make_layout(self, seq_len):
-        """Set 1 to all blocks of the layout meanins the pattern is dense; not sparse.
+        """Set 1 to all blocks of the layout meaning the pattern is dense; not sparse.
 
         Arguments:
              seq_len: required: an integer determining the underling sequence length; must be <= max sequence length
@@ -702,7 +702,7 @@ class LocalSlidingWindowSparsityConfig(SparsityConfig):
         num_blocks = layout.shape[1]
         if (num_blocks < self.num_sliding_window_blocks):
             raise ValueError(
-                f'Number of sliding window blocks, {self.num_sliding_window_blocks}, must be smaller than overal number of blocks in a row, {num_blocks}!'
+                f'Number of sliding window blocks, {self.num_sliding_window_blocks}, must be smaller than overall number of blocks in a row, {num_blocks}!'
             )
 
         w = self.num_sliding_window_blocks // 2

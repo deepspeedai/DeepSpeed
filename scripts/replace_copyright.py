@@ -115,7 +115,7 @@ def get_header_c(fp):
                 # multiline comment not closed on same line
                 in_multiline = True
         elif l.endswith(C_ML_CLOSE):
-            # Ended a multline comment
+            # Ended a multiline comment
             in_multiline = False
         elif not in_multiline or l.startswith(C_SL_COMMENT) or l.isspace():
             # Not in a comment

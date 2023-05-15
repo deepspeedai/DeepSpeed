@@ -148,7 +148,7 @@ class FusedAdam(torch.optim.Optimizer):
                 # State initialization
                 if len(state) == 0:
                     # DeepSpeed ZeRO 3 processes each subgroup a time, so we need to keep tracking step count for each tensor separately.
-                    # While this is not an issue for ZeRO 1 & 2, since they apply a single optimizatin step to the whole param group at the same time.
+                    # While this is not an issue for ZeRO 1 & 2, since they apply a single optimization step to the whole param group at the same time.
                     # In order to keep backward compatibility for the existing checkpoints, we use group['state'] to initialize state['step'] if it exists.
                     state['step'] = group.get('step', 0)
                     # Exponential moving average of gradient values

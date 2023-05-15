@@ -212,7 +212,7 @@ def student_initialization(student_model, teacher_model, deepspeed_config):
             The prefix name before the layer #.
             Example 1: bert.encoder.layer, for BERT_base model's prefix name
             Example 2: transformer.h, for GPT-2 hugging face prefix name
-        teacher_layer (`list of intergers`)
+        teacher_layer (`list of integers`)
             The layer of teacher will be used for student's reinitializedion
             Example 1: [1,3,5,7,9], means we want to matches the 2nd/4th/6th/8th/10th layer of teacher to the first 5 layers of student
         student_layer (`list` or None)

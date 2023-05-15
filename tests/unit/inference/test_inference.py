@@ -54,7 +54,7 @@ _gpt_models = [
 ]
 _opt_models = [
     "facebook/opt-125m",  # 125m, 1.7B, ..., 175B variants have the same model architecture.
-    "facebook/opt-350m",  # 350m applies layer norm after attnention layer which is different than other variants.
+    "facebook/opt-350m",  # 350m applies layer norm after attention layer which is different than other variants.
 ]
 _all_models = HfApi().list_models()
 

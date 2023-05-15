@@ -32,7 +32,7 @@ def gpt_sample_tokens(reserved_length: int,
     sampled_indices = random_ltd_module.token_sort_(sampled_indices, seq_length)
 
     # Not certain the optimized kernel is actually better here, cause it kind of screws
-    # with alignment right if the sequence length is not divisble by like 16
+    # with alignment right if the sequence length is not divisible by like 16
     # new_mask = random_ltd_module.mask_gather_gpt(attn_mask, reserved_length)
     if attn_mask is not None:
         new_mask = attn_mask[:, :, :reserved_length, :reserved_length]

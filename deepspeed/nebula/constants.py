@@ -29,7 +29,7 @@ NEBULA_ENABLED_DEFAULT = False
 # There is a case where customer want to load the checkpoint saved
 # by raw torch. Because nebula cannot load torch checkpoint directly
 # as they have different folder structures to bring the gap for
-# loading(the data are totaly same in bytes for torch and enbula s
+# loading(the data are totally same in bytes for torch and nebula s
 # aving).
 # In this case, we must disable nebula load to use raw torch load.
 # Customer can just set NEBULA_ENABLE_NEBULA_LOAD to False. Then use
@@ -60,7 +60,7 @@ NEBULA_PERSISTENT_TIME_INTERVAL_DEFAULT = 100
 NEBULA_NUM_OF_VERSION_IN_RETENTION = "num_of_version_in_retention"
 NEBULA_NUM_OF_VERSION_IN_RETENTION_DEFAULT = 2
 
-# Neubla envs
+# Nebula envs
 NEBULA_EXPORT_ENVS = [
     'DLTS_JOB_ID', 'DLTS_NUM_WORKER', 'NEBULA_PERSISTENT_STORAGE_PATH', 'NEBULA_PERSISTENT_TIME_INTERVAL',
     'AML_RUN_ID', 'AZUREML_RUN_TOKEN', 'AZUREML_WORKSPACE_SCOPE', 'AZUREML_EXPERIMENT_SCOPE',
