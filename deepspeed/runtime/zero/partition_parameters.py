@@ -813,7 +813,11 @@ class Init(InsertPostInitMethodToModuleSubClasses):
                     f"Partitioning param {debug_param2name_id_shape(param)} module={debug_module2name(module)}")
 
                 if get_accelerator().on_accelerator(param):
-                    dist.broadcast(param, 0, self.get_dp_process_group())
+                    if dist.get_world_group() == self.get_dp_process_group():
+                        dist.broadcast(param, 0, self.get_dp_process_group())
+                    else:
+                        dist.broadcast(param, dist.get_global_rank(self.get_dp_process_group(), 0),
+                                       self.get_dp_process_group())
                 else:
                     if dist.get_rank() == 0:
                         logger.warn(f"param `{name}` in {module.__class__.__name__} "

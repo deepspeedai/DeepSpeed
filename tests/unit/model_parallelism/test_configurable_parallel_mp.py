@@ -21,6 +21,7 @@ pytestmark = pytest.mark.skipif(not required_maximum_torch_version(major_version
                                 reason='Megatron-LM package requires Pytorch version 1.13 or below')
 
 
+# TODO: integrated testing of TP and ZeRO 1/2/3
 def get_deepspeed_model(model):
     ds_config_dict = {
         "train_micro_batch_size_per_gpu": 1,
