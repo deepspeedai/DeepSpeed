@@ -10,7 +10,7 @@ from deepspeed.runtime.utils import see_memory_usage
 from deepspeed.runtime.zero.offload_config import OffloadDeviceEnum
 from deepspeed.runtime.zero.partition_parameters import _init_external_params
 from deepspeed.runtime.zero.partition_parameters import *
-from deepspeed.runtime.zero.partitioned_param_coordinator import PartitionedParameterCoordinator, iter_params
+from deepspeed.runtime.zero.partitioned_param_coordinator import PartitionedParameterCoordinator, InflightParamRegistry, iter_params
 from deepspeed import comm as dist
 from deepspeed.accelerator import get_accelerator
 
@@ -244,6 +244,10 @@ class DeepSpeedZeRoOffload(object):
         self._max_available_parameters_in_numel = int(max_live_parameters)
         self.__allgather_stream = get_accelerator().Stream() if overlap_comm else get_accelerator().default_stream()
 
+        if not hasattr(module, "ds_inflight_param_registry"):
+            module.ds_inflight_param_registry = InflightParamRegistry()
+        self.__inflight_param_registry = module.ds_inflight_param_registry
+
         self.forward_hooks = []
         self.backward_hooks = []
         self.setup_zero_stage3_hooks()
@@ -270,6 +274,7 @@ class DeepSpeedZeRoOffload(object):
                 max_reuse_distance_in_numel=self._max_reuse_distance_in_numel,
                 max_available_parameters_in_numel=self._max_available_parameters_in_numel,
                 allgather_stream=self.__allgather_stream,
+                inflight_param_registry=self.__inflight_param_registry,
                 prefetch_nvme=self.offload_device == OffloadDeviceEnum.nvme,
             )
 
