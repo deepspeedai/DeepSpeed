@@ -4,7 +4,7 @@
 # DeepSpeed Team
 """
 Copyright NVIDIA/apex
-This file is adapted from fused adam in NVIDIA/apex, commit a109f85
+This file is adapted from fused adam in NVIDIA/apex, commit 6bd01c4
 """
 
 import torch
@@ -18,12 +18,35 @@ from deepspeed.ops.op_builder import FusedAdamBuilder
 class FusedAdam(torch.optim.Optimizer):
     """Implements Adam algorithm.
 
-    Currently GPU-only.
+    Currently GPU-only.  Requires Apex to be installed via
+    ``pip install -v --no-cache-dir --global-option="--cpp_ext" --global-option="--cuda_ext" ./``.
 
     This version of fused Adam implements 2 fusions.
 
       * Fusion of the Adam update's elementwise operations
       * A multi-tensor apply launch that batches the elementwise updates applied to all the model's parameters into one or a few kernel launches.
+
+    :class:`apex.optimizers.FusedAdam` may be used as a drop-in replacement for ``torch.optim.AdamW``,
+    or ``torch.optim.Adam`` with ``adam_w_mode=False``::
+
+        opt = apex.optimizers.FusedAdam(model.parameters(), lr = ....)
+        ...
+        opt.step()
+
+    :class:`apex.optimizers.FusedAdam` may be used with or without Amp.  If you wish to use :class:`FusedAdam` with Amp,
+    you may choose any ``opt_level``::
+
+        opt = apex.optimizers.FusedAdam(model.parameters(), lr = ....)
+        model, opt = amp.initialize(model, opt, opt_level="O0" or "O1 or "O2")
+        ...
+        opt.step()
+
+    In general, ``opt_level="O1"`` is recommended.
+
+
+    .. warning::
+        A previous version of :class:`FusedAdam` allowed a number of additional arguments to ``step``.  These additional arguments
+        are now deprecated and unnecessary.
 
     Adam was been proposed in `Adam: A Method for Stochastic Optimization`_.
 
@@ -81,7 +104,7 @@ class FusedAdam(torch.optim.Optimizer):
         else:
             super(FusedAdam, self).zero_grad()
 
-    def step(self, closure=None, grads=None, output_params=None, scale=None, grad_norms=None):
+    def step(self, closure=None, grads=None, output_params=None, scale=None, grad_norms=None, grad_scaler=None):
         """Performs a single optimization step.
 
         Arguments:
@@ -99,14 +122,19 @@ class FusedAdam(torch.optim.Optimizer):
             loss = closure()
 
         for group in self.param_groups:
+            if len(group['params']) == 0:
+                continue
             bias_correction = 1 if group['bias_correction'] else 0
             beta1, beta2 = group['betas']
 
+            # assume same step across group now to simplify things
+            # per parameter step can be easily support by making it tensor, or pass list into kernel
             if 'step' not in group:
                 group['step'] = 0
 
             # create lists for multi-tensor apply
             g_16, p_16, m_16, v_16 = [], [], [], []
+            g_bf, p_bf, m_bf, v_bf = [], [], [], []
             g_32, p_32, m_32, v_32 = [], [], [], []
 
             for p in group['params']:
@@ -133,20 +161,32 @@ class FusedAdam(torch.optim.Optimizer):
                     p_16.append(p.data)
                     m_16.append(state['exp_avg'])
                     v_16.append(state['exp_avg_sq'])
+                elif p.dtype == torch.bfloat16:
+                    g_bf.append(p.grad)
+                    p_bf.append(p)
+                    m_bf.append(state['exp_avg'])
+                    v_bf.append(state['exp_avg_sq'])
                 elif p.dtype == torch.float32:
                     g_32.append(p.grad.data)
                     p_32.append(p.data)
                     m_32.append(state['exp_avg'])
                     v_32.append(state['exp_avg_sq'])
                 else:
-                    raise RuntimeError('FusedAdam only support fp16 and fp32.')
+                    raise RuntimeError('FusedAdam only support fp16, bf16 and fp32.')
 
-            if (len(g_16) > 0):
+            if len(g_16) > 0:
                 state['step'] += 1
                 multi_tensor_applier(self.multi_tensor_adam, self._dummy_overflow_buf, [g_16, p_16, m_16, v_16],
                                      group['lr'], beta1, beta2, group['eps'], state['step'], self.adam_w_mode,
                                      bias_correction, group['weight_decay'])
-            if (len(g_32) > 0):
+
+            if len(g_bf) > 0:
+                state['step'] += 1
+                multi_tensor_applier(self.multi_tensor_adam, self._dummy_overflow_buf, [g_bf, p_bf, m_bf, v_bf],
+                                     group['lr'], beta1, beta2, group['eps'], state['step'], self.adam_w_mode,
+                                     bias_correction, group['weight_decay'])
+
+            if len(g_32) > 0:
                 state['step'] += 1
                 multi_tensor_applier(self.multi_tensor_adam, self._dummy_overflow_buf, [g_32, p_32, m_32, v_32],
                                      group['lr'], beta1, beta2, group['eps'], state['step'], self.adam_w_mode,
