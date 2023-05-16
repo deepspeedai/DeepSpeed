@@ -5,6 +5,8 @@
 
 import deepspeed
 from deepspeed.ops.op_builder import CPUAdamBuilder
+from deepspeed.checkpoint.utils import clone_tensors_for_torch_save
+from deepspeed.accelerator import get_accelerator
 
 from unit.common import DistributedTest, DistributedFixture
 from unit.simple_model import *
@@ -469,3 +471,37 @@ class TestZeROCheckpointFrozenWeights(DistributedTest):
             models = [SimpleFrozenModel(hidden_dim, empty_grad=False) for _ in range(2)]
 
         checkpoint_correctness_verification(config_dict, models, hidden_dim, tmpdir, load_module_only=True)
+
+
+class TestSaveTensorClone(DistributedTest):
+    world_size = 1
+
+    @pytest.mark.parametrize('zero_stage', [1, 2])
+    @pytest.mark.parametrize('use_cpu_device', [True, False])
+    def test_save_tensor_clone(self, tmpdir, zero_stage, use_cpu_device):
+
+        ds_config = {
+            "optimizer": {
+                "type": "AdamW",
+            },
+            "zero_optimization": {
+                "stage": zero_stage
+            },
+            "train_batch_size": 1,
+            "train_micro_batch_size_per_gpu": 1
+        }
+        hidden_dim = 1024
+        model = SimpleModel(hidden_dim, nlayers=4).half()
+        ref_model_state_dict = model.state_dict()
+
+        ds_engine, _, _, _ = deepspeed.initialize(model=model, config_params=ds_config)
+        clone_device = torch.device('cpu') if use_cpu_device else get_accelerator().current_device()
+        clone_state_dict = clone_tensors_for_torch_save(ds_engine.module.state_dict())
+        compare_state_dicts(ref_model_state_dict, clone_state_dict)
+
+        ref_ckpt_file = os.path.join(tmpdir, 'ref_ckpt.pt')
+        torch.save(ref_model_state_dict, ref_ckpt_file)
+        clone_ckpt_file = os.path.join(tmpdir, 'clone_ckpt.pt')
+        torch.save(clone_state_dict, clone_ckpt_file)
+
+        compare_state_dicts(torch.load(ref_ckpt_file), torch.load(clone_ckpt_file))
