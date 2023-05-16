@@ -418,6 +418,7 @@ class InferenceEngine(Module):
 
         generic_injection(self.module,
                           fp16=(config.dtype == torch.half) or (config.dtype == torch.int8),
+                          bf16=(config.dtype == torch.bfloat16),
                           enable_cuda_graph=config.enable_cuda_graph)
 
         if isinstance(self.module, torch.nn.Module):

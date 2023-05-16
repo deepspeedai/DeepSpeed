@@ -6,7 +6,7 @@
 import argparse
 import pytest
 import deepspeed
-from deepspeed.launcher.launch import parse_range_list
+from deepspeed.utils.numa import parse_range_list
 
 
 def basic_parser():

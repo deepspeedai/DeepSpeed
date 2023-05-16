@@ -184,7 +184,7 @@ def _module_match(module):
     return None
 
 
-def generic_injection(module, fp16=False, enable_cuda_graph=True):
+def generic_injection(module, fp16=False, bf16=False, enable_cuda_graph=True):
 
     def replace_attn(child, policy):
         policy_attn = policy.attention(child)
@@ -199,6 +199,7 @@ def generic_injection(module, fp16=False, enable_cuda_graph=True):
             hidden_size=hidden_size,
             heads=heads,
             fp16=fp16,
+            bf16=bf16,
             triangular_masking=False,
             max_out_tokens=4096,
         )
@@ -231,8 +232,8 @@ def generic_injection(module, fp16=False, enable_cuda_graph=True):
     if isinstance(module, torch.nn.Module):
         pass
     else:
-        if fp16 is False:
-            raise ValueError("Generic injection only supported with FP16")
+        if fp16 is False and bf16 is False:
+            raise ValueError("Generic injection only supported with FP16 or BF16")
 
         try:
             import diffusers

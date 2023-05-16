@@ -13,6 +13,10 @@ class DeepSpeedAccelerator(ABC):
         self._name = None
         self._communication_backend_name = None
 
+    @abc.abstractmethod
+    def is_synchronized_device(self):
+        ...
+
     # Device APIs
     @abc.abstractmethod
     def device_name(self, device_index):

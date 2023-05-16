@@ -54,7 +54,7 @@ class TestModelProfiling(DistributedTest):
         local_rank = int(os.getenv("LOCAL_RANK", "0"))
         world_size = int(os.getenv("WORLD_SIZE", "1"))
 
-        pipe = pipeline(task, model, framework="pt", device=local_rank)
+        pipe = pipeline(task, model, framework="pt", device=get_accelerator().device_name(local_rank))
         pipe.model = deepspeed.init_inference(pipe.model,
                                               dtype=dtype,
                                               mp_size=world_size,

@@ -441,7 +441,7 @@ class OpBuilder(ABC):
 
     def load(self, verbose=True):
         from deepspeed.git_version_info import installed_ops, torch_info
-        if installed_ops[self.name]:
+        if installed_ops.get(self.name, False):
             # Ensure the op we're about to load was compiled with the same
             # torch/cuda versions we are currently using at runtime.
             self.validate_torch_version(torch_info)

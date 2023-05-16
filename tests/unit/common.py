@@ -56,22 +56,26 @@ def set_accelerator_visible():
             if is_rocm_pytorch:
                 rocm_smi = subprocess.check_output(['rocm-smi', '--showid'])
                 gpu_ids = filter(lambda s: 'GPU' in s, rocm_smi.decode('utf-8').strip().split('\n'))
-                num_gpus = len(list(gpu_ids))
+                num_accelerators = len(list(gpu_ids))
             else:
                 nvidia_smi = subprocess.check_output(['nvidia-smi', '--list-gpus'])
-                num_gpus = len(nvidia_smi.decode('utf-8').strip().split('\n'))
-        else:
-            assert get_accelerator().device_name() == 'xpu'
+                num_accelerators = len(nvidia_smi.decode('utf-8').strip().split('\n'))
+        elif get_accelerator().device_name() == 'xpu':
             import re
             clinfo = subprocess.check_output(['clinfo'])
             lines = clinfo.decode('utf-8').strip().split('\n')
-            num_gpus = 0
+            num_accelerators = 0
             for line in lines:
                 match = re.search('Device Type.*GPU', line)
                 if match:
-                    num_gpus += 1
+                    num_accelerators += 1
+        else:
+            assert get_accelerator().device_name() == 'cpu'
+            cpu_sockets = int(
+                subprocess.check_output('cat /proc/cpuinfo | grep "physical id" | sort -u | wc -l', shell=True))
+            num_accelerators = cpu_sockets
 
-        cuda_visible = ",".join(map(str, range(num_gpus)))
+        cuda_visible = ",".join(map(str, range(num_accelerators)))
 
     # rotate list based on xdist worker id, example below
     # wid=0 -> ['0', '1', '2', '3']

@@ -11,7 +11,7 @@ import warnings
 from shlex import split
 from abc import ABC, abstractmethod
 from deepspeed.accelerator import get_accelerator
-from ..utils import logger
+from ..utils import logger, get_numactl_cmd
 from .constants import PDSH_MAX_FAN_OUT, MVAPICH_TMP_HOSTFILE
 
 
@@ -225,6 +225,88 @@ class MPICHRunner(MultiNodeRunner):
                 host_id = host_id + 1
                 host_count = 0
 
+        return mpirun_cmd + export_cmd + per_host_cmd
+
+
+class IMPIRunner(MultiNodeRunner):
+
+    def __init__(self, args, world_info_base64, resource_pool):
+        super().__init__(args, world_info_base64)
+        self.resource_pool = resource_pool
+
+    def backend_exists(self):
+        #TODO: if IB is available we should suggestion mpich
+        return shutil.which('mpirun')  #mpich_info
+
+    @property
+    def name(self):
+        return "impi"
+
+    def validate_args(self):
+        super().validate_args()
+        #TODO: Allow for include/exclude at node-level but not gpu-level
+        if self.args.include != "" or self.args.exclude != "":
+            raise ValueError(f"{self.name} backend does not support worker include/exclusion")
+
+        if self.args.num_nodes != -1 or self.args.num_gpus != -1:
+            raise ValueError(f"{self.name} backend does not support limiting num nodes/gpus")
+
+    def get_cmd(self, environment, active_resources):
+        devices_per_node = self.resource_pool.values()
+        total_process_count = sum(devices_per_node)
+        process_per_node = list(devices_per_node)[0]
+        if not all([n == process_per_node for n in devices_per_node]):
+            raise ValueError("Intel MPI requires same number of devices per node")
+
+        mpirun_cmd = [
+            'mpirun',
+            '-ppn',
+            f'{process_per_node}',
+        ] + split(self.args.launcher_args)
+        export_cmd = []
+
+        for k, v in self.exports.items():
+            export_cmd += ['-genv', f'{k}', f'{v}']
+
+        if self.args.bind_cores_to_rank:
+            cores_per_rank, _ = get_numactl_cmd(self.args.bind_core_list, process_per_node, 0)
+            export_cmd += ['-genv', 'OMP_NUM_THREADS', str(cores_per_rank)]
+
+        export_cmd += ['-genv', 'MASTER_ADDR', str(self.args.master_addr)]
+        export_cmd += ['-genv', 'MASTER_PORT', str(self.args.master_port)]
+        export_cmd += ['-genv', 'WORLD_SIZE', str(total_process_count)]
+        export_cmd += ['-genv', 'LOCAL_SIZE', str(process_per_node)]
+
+        export_cmd += ['-hosts']
+        hosts = ""
+        for i, host in enumerate(self.resource_pool.keys()):
+            if i == 0:
+                hosts = f"{host}"
+            else:
+                hosts += f",{host}"
+        export_cmd += [hosts]
+
+        per_host_cmd = []
+
+        for i in range(total_process_count):
+            local_rank = i % process_per_node
+            python_exec = []
+            if self.args.bind_cores_to_rank:
+                _, numactl_cmd = get_numactl_cmd(self.args.bind_core_list, process_per_node, local_rank)
+                python_exec += numactl_cmd
+
+            if not self.args.no_python:
+                python_exec += [sys.executable, "-u"]
+                if self.args.module:
+                    python_exec.append("-m")
+            env_mapping = ['-env', 'RANK', str(i)]
+            env_mapping += ['-env', 'LOCAL_RANK', str(local_rank)]
+            if i == 0:
+                per_host_cmd = ['-n', '1'] + env_mapping + python_exec + [self.user_script] + self.user_arguments
+            else:
+                per_host_cmd = per_host_cmd + [':', '-n', '1'] + env_mapping + python_exec + [self.user_script
+                                                                                              ] + self.user_arguments
+        print(mpirun_cmd + export_cmd + per_host_cmd)
         return mpirun_cmd + export_cmd + per_host_cmd
 
 

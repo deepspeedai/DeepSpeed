@@ -4,6 +4,7 @@
 # DeepSpeed Team
 
 NCCL_BACKEND = 'nccl'
+CCL_BACKEND = 'ccl'
 MPI_BACKEND = 'mpi'
 GLOO_BACKEND = 'gloo'
 SCCL_BACKEND = 'sccl'

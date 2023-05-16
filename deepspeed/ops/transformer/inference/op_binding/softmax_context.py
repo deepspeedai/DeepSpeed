@@ -13,12 +13,20 @@ class SoftmaxContextOp(BaseOp):
 
     def __init__(self, config: DeepSpeedInferenceConfig):
         super(SoftmaxContextOp, self).__init__(config)
-        if self.config.dtype in [torch.float16, torch.int8]:
-            self.softmax_context_func = self.inference_cuda_module.softmax_context_fp16
-        elif self.config.dtype == torch.bfloat16:
-            self.softmax_context_func = self.inference_cuda_module.softmax_context_bf16
-        else:
-            self.softmax_context_func = self.inference_cuda_module.softmax_context_fp32
+        try:
+            if self.config.dtype in [torch.float16, torch.int8]:
+                self.softmax_context_func = self.inference_module.softmax_context_fp16
+            elif self.config.dtype == torch.bfloat16:
+                self.softmax_context_func = self.inference_module.softmax_context_bf16
+            else:
+                self.softmax_context_func = self.inference_module.softmax_context_fp32
+        except AttributeError:
+            self.softmax_context_func = self.softmax_context_fallback
+
+    def softmax_context_fallback(self, query_key_value, attn_mask, rotary_dim, rotate_half, roteate_every_two, heads,
+                                 norm_factor, triangular_masking, local_attention, window_size, no_masking, layer_id,
+                                 num_layers, alibi):
+        raise NotImplementedError
 
     def forward(self, query_key_value: torch.Tensor, attn_mask: torch.Tensor, heads: int, norm_factor: float,
                 no_masking: bool, layer_id: int, num_layers: int, alibi: torch.Tensor):

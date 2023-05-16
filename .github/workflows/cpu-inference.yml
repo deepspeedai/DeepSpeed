@@ -1,0 +1,83 @@
+name: cpu-inference
+
+on:
+  push:
+    branches:
+      - 'staging**'
+    paths-ignore:
+      - 'docs/**'
+  pull_request:
+    paths-ignore:
+      - 'docs/**'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  unit-tests:
+    runs-on: ubuntu-20.04
+
+    steps:
+      - uses: actions/checkout@v2
+
+      - id: setup-venv
+        uses: ./.github/workflows/setup-venv
+
+      - name: Detect instruction sets on instance
+        run: |
+          lscpu
+          pip install cmake
+          git clone https://github.com/intel/intel-extension-for-pytorch
+          cd intel-extension-for-pytorch/tests/cpu/isa
+          cmake .
+          make
+          ./cpu_features
+
+      - name: Install numactl
+        run: |
+          sudo apt-get install -y numactl
+
+      - name: Install oneCCL Bindings for PyTorch
+        run: |
+          python -m pip install intel_extension_for_pytorch
+          python -m pip install oneccl_bind_pt==2.0 -f https://developer.intel.com/ipex-whl-stable-cpu
+
+      - name: Install oneCCL
+        run: |
+          git clone https://github.com/oneapi-src/oneCCL
+          cd oneCCL
+          mkdir build
+          cd build
+          cmake ..
+          make
+          make install
+          #source ./_install/env/setvars.sh
+          # test whether oneCCL is correctly installed
+          #mpirun -n 2 ./examples/benchmark/benchmark
+
+      - name: Install transformers
+        run: |
+          git clone https://github.com/huggingface/transformers
+          cd transformers
+          git rev-parse --short HEAD
+          pip install .
+
+      - name: Install deepspeed
+        run: |
+          # check why the host does not have AVX2 support
+          pip install .[dev,1bit,autotuning,inf]
+          ds_report
+
+      - name: Python environment
+        run: |
+          pip list
+
+      - name: Unit tests
+        run: |
+          source oneCCL/build/_install/env/setvars.sh
+          unset TORCH_CUDA_ARCH_LIST # only jit compile for current arch
+          if [[ -d ./torch-extensions ]]; then rm -rf ./torch-extensions; fi
+          cd tests
+          TRANSFORMERS_CACHE=~/tmp/transformers_cache/ TORCH_EXTENSIONS_DIR=./torch-extensions pytest -m 'inference' unit/inference/test_inference_config.py
+          TRANSFORMERS_CACHE=~/tmp/transformers_cache/ TORCH_EXTENSIONS_DIR=./torch-extensions pytest -k TestDistAllReduce unit/comm/test_dist.py
