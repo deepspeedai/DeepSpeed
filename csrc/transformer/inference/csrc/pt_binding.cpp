@@ -1934,7 +1934,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m)
     m.def("softmax_" #_name, &ds_softmax<_dtype>, "DeepSpeed SoftMax with " #_name " (CUDA)");    \
     m.def("softmax_context_" #_name,                                                              \
           &ds_softmax_context<_dtype>,                                                            \
-          "DeepSpeed attention with _name (CUDA)");                                               \
+          "DeepSpeed attention with " #_name " (CUDA)");                                          \
     m.def("bias_gelu_" #_name, &ds_bias_gelu<_dtype>, "DeepSpeed Gelu with " #_name " (CUDA)");   \
     m.def("bias_add_" #_name, &ds_bias_add<_dtype>, "DeepSpeed Bias Add with " #_name " (CUDA)"); \
     m.def("bias_relu_" #_name, &ds_bias_relu<_dtype>, "DeepSpeed ReLU with " #_name " (CUDA)");   \
