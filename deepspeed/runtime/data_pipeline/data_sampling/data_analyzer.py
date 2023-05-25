@@ -378,7 +378,7 @@ class DataAnalyzer(object):
                         assert index_to_metric[v_idx] > index_to_metric[v_idx - 1]
                     num_sample_per_value[index_to_metric[v_idx][0]] = len(index_to_sample[v_idx])
                 assert sum(num_sample_per_value.values()) == total_num_samples
-                merge_step = len(index_to_sample) // 100
+                merge_step = max(1, len(index_to_sample) // 100)
                 for v_idx in range(0, len(index_to_sample), merge_step):
                     merged_samples = np.copy(
                         np.concatenate(index_to_sample[v_idx:min(len(index_to_sample), (v_idx + merge_step))],
