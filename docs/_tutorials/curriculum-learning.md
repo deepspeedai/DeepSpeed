@@ -37,6 +37,7 @@ Curriculum learning can be used by setting the `curriculum_learning` key in the 
     "loss_scale": 0,
     "loss_scale_window": 1000,
     "hysteresis": 2,
+    "consecutive_hysteresis": false,
     "min_loss_scale": 1
   },
   "curriculum_learning": {

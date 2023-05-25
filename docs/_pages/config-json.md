@@ -224,6 +224,7 @@ Example of <i>**scheduler**</i>
     "initial_scale_power": 16,
     "loss_scale_window": 1000,
     "hysteresis": 2,
+    "consecutive_hysteresis": false,
     "min_loss_scale": 1
 }
 ```
@@ -263,6 +264,12 @@ Example of <i>**scheduler**</i>
 | Description                                                                                         | Default |
 | --------------------------------------------------------------------------------------------------- | ------- |
 | <i>**hysteresis**</i> is a **fp16** parameter representing the delay shift in dynamic loss scaling. | `2`     |
+
+<i>**fp16:consecutive_hysteresis**</i>: [boolean]
+
+| Description                                                                                         | Default |
+| --------------------------------------------------------------------------------------------------- | ------- |
+| <i>**consecutive_hysteresis**</i> is a **fp16** parameter representing whether to refill the hysteresis if we reach an iteration that doesn't overflow | `false`     |
 
 <i>**fp16:min_loss_scale**</i>: [integer]
 
