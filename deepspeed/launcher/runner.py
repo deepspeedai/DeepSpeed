@@ -37,6 +37,10 @@ DEEPSPEED_ENVIRONMENT_NAME = ".deepspeed_env"
 DEEPSPEED_ENVIRONMENT_PATHS = [os.path.expanduser("~"), '.']
 PDSH_MAX_FAN_OUT = 1024
 
+# On AISC compute, each node sets environment variables independently, want to prevent
+# exporting rank-0 env variables in case of heterogeneous compute.
+EXCLUDE_ENVS = {'AISC_JOB_NAME': ['NCCL_IB_HCA', 'UCX_NET_DEVICES']}
+
 
 def parse_args(args=None):
     parser = argparse.ArgumentParser(description="DeepSpeed runner to help launch distributed "
@@ -523,10 +527,17 @@ def main(args=None):
         else:
             env['PYTHONPATH'] = curr_path
 
+        excluded_vars = []
+        for exclude_key, var_list in EXCLUDE_ENVS.items():
+            if exclude_key in env.keys():
+                # key exists in launcher env -> var list should be used
+                excluded_vars += var_list
+
         exports = ""
         for var in env.keys():
             if any([var.startswith(name) for name in EXPORT_ENVS]):
-                runner.add_export(var, env[var])
+                if not any([var == name for name in excluded_vars]):
+                    runner.add_export(var, env[var])
 
         for environ_path in DEEPSPEED_ENVIRONMENT_PATHS:
             environ_file = os.path.join(environ_path, DEEPSPEED_ENVIRONMENT_NAME)
