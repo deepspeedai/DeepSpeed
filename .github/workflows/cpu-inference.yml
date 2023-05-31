@@ -6,9 +6,11 @@ on:
       - 'staging**'
     paths-ignore:
       - 'docs/**'
+      - 'blogs/**'
   pull_request:
     paths-ignore:
       - 'docs/**'
+      - 'blogs/**'
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}

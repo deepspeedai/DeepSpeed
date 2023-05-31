@@ -4,9 +4,15 @@ on:
   push:
     branches:
       - 'staging**'
+    paths-ignore:
+      - 'docs/**'
+      - 'blogs/**'
   pull_request:
     branches:
       '**'
+    paths-ignore:
+      - 'docs/**'
+      - 'blogs/**'
   schedule:
     - cron: "0 0 * * *"
 
