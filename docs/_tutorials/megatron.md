@@ -53,7 +53,7 @@ To use DeepSpeed we will modify three files :
 
 
 ### Argument Parsing
-The first step is to apply DeepSpeed is adding DeepSpeed arguments to
+The first step is adding DeepSpeed arguments to
 Megatron-LM GPT2 model, using `deepspeed.add_config_arguments()` in
 `arguments.py`.
 
