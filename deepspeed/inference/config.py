@@ -184,7 +184,7 @@ class DeepSpeedInferenceConfig(DeepSpeedConfigModel):
     """
 
     #todo: refactor the following 3 into the new checkpoint_config
-    checkpoint: str = None
+    checkpoint: Union[str, Dict] = None
     """
     Path to deepspeed compatible checkpoint or path to JSON with load policy.
     """
