@@ -256,7 +256,7 @@ def reduce_scatter_fn(output_tensor,
     else:
         if get_rank() == 0:
             utils.logger.warning_once("unable to find torch.distributed.reduce_scatter_tensor. will fall back to "
-                                      "torch.distributed.all_gather which will result in suboptimal performance. "
+                                      "torch.distributed.reduce_scatter which will result in suboptimal performance. "
                                       "please consider upgrading your pytorch installation.")
         input_tensor_lst = list(torch.chunk(tensor, cdb.get_world_size(group)))
         return reduce_scatter(output_tensor,
