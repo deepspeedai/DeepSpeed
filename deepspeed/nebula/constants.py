@@ -29,8 +29,8 @@ NEBULA_ENABLED_DEFAULT = False
 # There is a case where customer want to load the checkpoint saved
 # by raw torch. Because nebula cannot load torch checkpoint directly
 # as they have different folder structures to bring the gap for
-# loading(the data are totally same in bytes for torch and nebula s
-# aving).
+# loading(the data are totally same in bytes for torch and nebula
+# saving).
 # In this case, we must disable nebula load to use raw torch load.
 # Customer can just set NEBULA_ENABLE_NEBULA_LOAD to False. Then use
 # original way of deepspeed to load, i.e. set the value of "--load".

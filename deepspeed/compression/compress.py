@@ -213,14 +213,14 @@ def student_initialization(student_model, teacher_model, deepspeed_config):
             Example 1: bert.encoder.layer, for BERT_base model's prefix name
             Example 2: transformer.h, for GPT-2 hugging face prefix name
         teacher_layer (`list of integers`)
-            The layer of teacher will be used for student's reinitializedion
+            The layer of teacher will be used for student's reinitialization
             Example 1: [1,3,5,7,9], means we want to matches the 2nd/4th/6th/8th/10th layer of teacher to the first 5 layers of student
         student_layer (`list` or None)
             The layer of student need to be re-initialized
             Example 1: None, means we want to reinitialize all the layers
             Example 1: [0,1,2,3,4], means  we want to reinitialize the first 5 layers
         other_module_name (`list of string`)
-            The modules will be used for student's reinitializedion
+            The modules will be used for student's reinitialization
             Example 1: ['bert.pooler', 'bert.embeddings', 'classifier'], means we want to apply the weight in teacher's embedding/pooler/classier module to the student
             Example 2: ['transformer.w', 'transformer.ln_f', 'lm_head'], means we want to apply the weight in teacher's embedding layers module to the student
     Note that teacher_layer should matches student layer

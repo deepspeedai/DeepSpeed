@@ -31,7 +31,7 @@ class CheckpointEngine(object):
         pass
 
     def commit(self, tag):
-        # to tell checkpoint services if all files are readys.
+        # to tell checkpoint services if all files are ready.
         pass
 
 ```
