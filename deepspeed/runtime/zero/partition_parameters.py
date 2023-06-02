@@ -800,9 +800,9 @@ class Init(InsertPostInitMethodToModuleSubClasses):
                 f'"nvme_path" in DeepSpeed Config cannot be None if remote device is {OffloadDeviceEnum.nvme}'
 
     def _post_init_method(self, module):
-        #see_memory_usage(f"Before converting parmas in {module.__class__.__name__}", force=False)
+        #see_memory_usage(f"Before converting params in {module.__class__.__name__}", force=False)
         print_rank_0(f'Converting Params in {module.__class__.__name__}', force=False)
-        see_memory_usage(f"Before converting and partitioning parmas in {module.__class__.__name__}", force=False)
+        see_memory_usage(f"Before converting and partitioning params in {module.__class__.__name__}", force=False)
 
         global param_count
         for name, param in module.named_parameters(recurse=False):
@@ -825,7 +825,7 @@ class Init(InsertPostInitMethodToModuleSubClasses):
 
                 param.partition()
         see_memory_usage(
-            f"Param count {param_count}. After converting and partitioning parmas in {module.__class__.__name__}",
+            f"Param count {param_count}. After converting and partitioning params in {module.__class__.__name__}",
             force=False)
 
     def _convert_to_deepspeed_param(self, param):
@@ -1404,7 +1404,7 @@ class Init(InsertPostInitMethodToModuleSubClasses):
             partition_size = param.ds_tensor.ds_numel
             start = self.get_partition_rank() * partition_size
             end = start + partition_size
-            #print_rank_0("REduce scatter was executed for praam {param.ds_id}")
+            #print_rank_0("REduce scatter was executed for param {param.ds_id}")
             if start < param.ds_numel and end > param.ds_numel:
                 elements = param.ds_numel - start
                 param.grad.view(-1).narrow(0, start, elements).copy_(reduced_partition.narrow(0, 0, elements))

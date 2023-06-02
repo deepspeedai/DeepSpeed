@@ -892,7 +892,7 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
             else:
                 self.fp32_partitioned_groups_flat[i].grad = gradient_buffer.narrow(0, 0, num_elements)
 
-            # Initialize the optimizer states with the flattended fp32 partition.
+            # Initialize the optimizer states with the flattened fp32 partition.
             if not is_adagrad:
                 self._optimizer_step(i)
 
@@ -906,7 +906,7 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
                 f'[End] Initialize optimizer states {i} / {num_subgroups} subgroups, num_elems: {num_elements}, swappable opt/param:{swappable_optimizer_subgroup}/{swappable_param_subgroup}',
                 force=False)
 
-        # Initialize the optimizer states with the flattended fp32 partition.
+        # Initialize the optimizer states with the flattened fp32 partition.
         if is_adagrad:
             self.optimizer = torch.optim.Adagrad(self.fp32_partitioned_groups_flat, **self.optimizer.defaults)
 

@@ -611,7 +611,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
             self.single_partition_of_fp32_groups[i].grad = get_accelerator().pin_memory(
                 single_grad_partition) if self.cpu_offload else single_grad_partition
 
-        # Initialize the optimizer states with the flattended fp32 partition.
+        # Initialize the optimizer states with the flattened fp32 partition.
         # State initialization for the Adagrad optimizer occurs at construction as opposed to other optimizers
         # which do lazy initialization of the state at the first call to step.
         if isinstance(self.optimizer, torch.optim.Adagrad):
