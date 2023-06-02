@@ -57,9 +57,10 @@ class FlopsProfiler(object):
         object (torch.nn.Module): The PyTorch model to profile.
     """
 
-    def __init__(self, model, ds_engine=None):
+    def __init__(self, model, ds_engine=None, recompute_fwd_factor=0.0):
         self.model = model
         self.ds_engine = ds_engine
+        self.recompute_fwd_factor = recompute_fwd_factor
         self.started = False
         self.func_patched = False
 
@@ -301,20 +302,22 @@ class FlopsProfiler(object):
                                      flops_to_string(total_flops / fwd_latency)))
 
         if self.ds_engine and self.ds_engine.wall_clock_breakdown():
+            bwd_factor = 2 + self.recompute_fwd_factor
             bwd_latency = self.ds_engine.timers('backward').elapsed(False) / 1000.0
             step_latency = self.ds_engine.timers('step').elapsed(False) / 1000.0
             print('{:<60}  {:<8}'.format('bwd latency: ', duration_to_string(bwd_latency)))
-            print('{:<60}  {:<8}'.format('bwd FLOPS per GPU = 2 * fwd flops per GPU / bwd latency: ',
-                                         flops_to_string(2 * total_flops / bwd_latency)))
-            print('{:<60}  {:<8}'.format('fwd+bwd FLOPS per GPU = 3 * fwd flops per GPU / (fwd+bwd latency): ',
-                                         flops_to_string(3 * total_flops / (fwd_latency + bwd_latency))))
+            print('{:<60}  {:<8}'.format(f'bwd FLOPS per GPU = {bwd_factor} * fwd flops per GPU / bwd latency: ',
+                                         flops_to_string(bwd_factor * total_flops / bwd_latency)))
+            print('{:<60}  {:<8}'.format(
+                f'fwd+bwd FLOPS per GPU = {bwd_factor+1} * fwd flops per GPU / (fwd+bwd latency): ',
+                flops_to_string((bwd_factor + 1) * total_flops / (fwd_latency + bwd_latency))))
 
             print('{:<60}  {:<8}'.format('step latency: ', duration_to_string(step_latency)))
 
             iter_latency = fwd_latency + bwd_latency + step_latency
             print('{:<60}  {:<8}'.format('iter latency: ', duration_to_string(iter_latency)))
-            print('{:<60}  {:<8}'.format('FLOPS per GPU = 3 * fwd flops per GPU / iter latency: ',
-                                         flops_to_string(3 * total_flops / iter_latency)))
+            print('{:<60}  {:<8}'.format(f'FLOPS per GPU = {bwd_factor+1} * fwd flops per GPU / iter latency: ',
+                                         flops_to_string((bwd_factor + 1) * total_flops / iter_latency)))
 
             samples_per_iter = self.ds_engine.train_micro_batch_size_per_gpu() * self.ds_engine.world_size
             print('{:<60}  {:<8.2f}'.format('samples/second: ', samples_per_iter / iter_latency))

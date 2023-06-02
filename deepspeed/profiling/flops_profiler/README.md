@@ -166,6 +166,7 @@ When using DeepSpeed for model training, the profiler can be configured in the d
 {
   "flops_profiler": {
     "enabled": true,
+    "recompute_fwd_factor": 0.0,
     "profile_step": 1,
     "module_depth": -1,
     "top_modules": 1,

@@ -282,7 +282,7 @@ class DeepSpeedEngine(Module):
         log_dist(f"DeepSpeed Flops Profiler Enabled: {self.flops_profiler_enabled()}", ranks=[0])
 
         if self.flops_profiler_enabled():
-            self.flops_profiler = FlopsProfiler(self.module, self)
+            self.flops_profiler = FlopsProfiler(self.module, self, self.flops_profiler_recompute_fwd_factor())
 
         if training_data:
             self.training_dataloader = self.deepspeed_io(training_data)
@@ -569,6 +569,9 @@ class DeepSpeedEngine(Module):
 
     def flops_profiler_enabled(self):
         return self._config.flops_profiler_config.enabled or self.autotuning_enabled()
+
+    def flops_profiler_recompute_fwd_factor(self):
+        return self._config.flops_profiler_config.recompute_fwd_factor
 
     def flops_profiler_profile_step(self):
         step = self._config.flops_profiler_config.profile_step
