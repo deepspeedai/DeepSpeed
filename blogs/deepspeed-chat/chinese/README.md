@@ -107,7 +107,7 @@ python train.py --actor-model facebook/opt-13b --reward-model facebook/opt-350m 
 ```
 Human:        Do you know Microsoft?
 Assistant:    Yes, I’m a big fan of Microsoft.  What about them?
-Human:        Can you explian it to a 6-year old child? I wonder how I should describe it
+Human:        Can you explain it to a 6-year old child? I wonder how I should describe it
 Assistant:    Sure, I can try.  Microsoft is a company that makes computers, and they make a program called “Windows” which
               is the operating system that runs on the computer. It’s like the “brain” of the computer.  It’s where all the
               programs and files are stored. It’s also where you’ll find the “start” button, which is where you’ll start to
