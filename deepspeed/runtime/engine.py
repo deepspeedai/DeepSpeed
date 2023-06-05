@@ -3057,11 +3057,11 @@ class DeepSpeedEngine(Module):
     def _create_zero_checkpoint_files(self, save_dir, tag):
         success = True
         # zero checkpoint files are created sequentially
-        for rank in range(self.world_size):
+        for rank in range(dist.get_world_size(self.optimizer.dp_process_group)):
             if rank == self.global_rank:
                 success = self._create_checkpoint_file(save_dir, tag, True)
 
-            dist.barrier()
+            dist.barrier(group=self.optimizer.dp_process_group)
 
         return success
 

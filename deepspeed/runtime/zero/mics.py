@@ -393,15 +393,20 @@ class MiCS_Optimizer(DeepSpeedZeroOptimizer_Stage3):
                          gradient_accumulation_steps, elastic_checkpoint, aio_config)
         first_param = next(module.parameters())
         # overload the dp_process_group and partition_count
+        assert hasattr(first_param, "comm"), " ".join([
+            "Sharded parameters don't have the MiCS_CommGroups attached.",
+            "Might due to the use of deepspeed.zero.Init context for initializing the weights.",
+            "To use MiCS sharding, please use deepspeed.zero.MiCS_Init instead for initializing parameter."
+        ])
         self.dp_process_group = first_param.comm.param_shard_group
         self.partition_count = first_param.comm.param_shard_size
 
     def initialize_ds_offload(self, module, timers, ds_config, overlap_comm, prefetch_bucket_size, max_reuse_distance,
                               max_live_parameters, param_persistence_threshold, model_persistence_threshold,
-                              offload_optimizer_config, mpu):
+                              offload_param_config, mpu):
         return MiCS_Offload(module, timers, ds_config, overlap_comm, prefetch_bucket_size, max_reuse_distance,
                             max_live_parameters, param_persistence_threshold, model_persistence_threshold,
-                            offload_optimizer_config, mpu)
+                            offload_param_config, mpu)
 
     def partition_grads(self, params_to_release: List[Parameter], grad_partitions: List[Tensor]) -> None:
         grad_buffers = super().partition_grads(params_to_release, grad_partitions)
@@ -440,14 +445,13 @@ class MiCS_Optimizer(DeepSpeedZeroOptimizer_Stage3):
                 grad_buff.view(-1).copy_(aggregated_buffer.narrow(0, offset, grad_buff.numel()))
                 offset += grad_buff.numel()
 
-    # TODO: Support different/changing load/save DP degree.
     def load_state_dict(self,
                         state_dict_list,
                         load_optimizer_states=True,
                         load_from_fp32_weights=False,
                         checkpoint_folder=None):
-        r""" Loading the MiCS checkpoints
-
-        TODO: move the implementation from zhen/merged_ds_master branch
+        r""" Loading the ZeRO-3/MiCS partitioned checkpoints
+        Because the self.dp_process_group is replaced with the communicator for
+        partition group we can call the load_state_dict logic from ZeRO-3.
         """
-        raise NotImplementedError("Not implemented for loading MiCS checkpoints")
+        super().load_state_dict(state_dict_list, load_optimizer_states, load_from_fp32_weights, checkpoint_folder)

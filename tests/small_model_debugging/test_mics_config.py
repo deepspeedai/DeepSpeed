@@ -5,6 +5,10 @@
 
 # Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 # SPDX-License-Identifier: Apache-2.0
+"""
+Testing on a 8 GPUs node
+NDEV_PER_NODE=2 torchrun --nnodes 1 --nproc-per-node 8 test_mics_config.py
+"""
 
 import os
 import json
@@ -39,7 +43,7 @@ def create_config_from_dict(tmpdir, config_dict):
 
 def get_data_loader(model, total_samples, hidden_dim, device):
     batch_size = model.train_micro_batch_size_per_gpu()
-    train_data = torch.randn(total_samples, hidden_dim, device=device, dtype=torch.half)
+    train_data = torch.randn(total_samples, hidden_dim, device=device, dtype=torch.float)
     train_label = torch.empty(total_samples, dtype=torch.long, device=device).random_(hidden_dim)
     train_dataset = torch.utils.data.TensorDataset(train_data, train_label)
     sampler = DistributedSampler(train_dataset)
@@ -49,11 +53,17 @@ def get_data_loader(model, total_samples, hidden_dim, device):
 
 def get_args(tmpdir, config_dict):
     parser = argparse.ArgumentParser()
-    parser.add_argument("--local_rank", type=int, default=0)
     parser.add_argument('--zero', type=int, default=3)
+    parser.add_argument('--local_rank', type=int)
+
+    parser.add_argument('--mics_shard_size', default=2, type=int)
+    parser.add_argument('--mics_hierarchical_params_gather', default=False, action='store_true')
     args = parser.parse_args()  #args=''
 
     config_dict["zero_optimization"]["stage"] = args.zero
+    config_dict["zero_optimization"]["mics_shard_size"] = args.mics_shard_size
+    config_dict["zero_optimization"]["mics_hierarchical_params_gather"] = args.mics_hierarchical_params_gather
+
     # print('config_dict["zero_optimization"]', config_dict["zero_optimization"])
     config_path = create_config_from_dict(tmpdir, config_dict)
 
@@ -80,7 +90,7 @@ config_dict = {
         }
     },
     "fp16": {
-        "enabled": True,
+        "enabled": False,
         "initial_scale_power": 15
     },
     "zero_optimization": {
@@ -95,8 +105,8 @@ config_dict = {
 args = get_args('/tmp/', config_dict)
 hidden_dim = 32
 
-# with deepspeed.zero.Init():
-model = SimpleModel(hidden_dim, empty_grad=False)
+with deepspeed.zero.MiCS_Init(config_dict_or_path=config_dict):
+    model = SimpleModel(hidden_dim, empty_grad=False)
 # print('------> init model with deepspeed.zero.Init()')
 
 model, _, _, _ = deepspeed.initialize(args=args,

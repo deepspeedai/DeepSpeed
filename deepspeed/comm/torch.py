@@ -20,13 +20,24 @@ def is_torch_two():
         return False
 
 
+def torch_ver_ge_1_13():
+    if is_torch_two():
+        return True
+    else:
+        TORCH_MAJOR = int(torch.__version__.split('.')[0])
+        assert TORCH_MAJOR == 1
+
+        TORCH_MINOR = int(torch.__version__.split('.')[1])
+        return TORCH_MINOR >= 13
+
+
 def has_coalescing_manager():
     has_c10d = hasattr(torch.distributed, 'distributed_c10d')
     return has_c10d and hasattr(torch.distributed.distributed_c10d, '_coalescing_manager')
 
 
 def has_all_reduce_coalesced():
-    return hasattr(torch.distributed, "all_reduce_coalesced")
+    return hasattr(torch.distributed, "all_reduce_coalesced") and torch_ver_ge_1_13()
 
 
 def get_coalescing_manager(group, device, reqs):
