@@ -601,7 +601,8 @@ class CUDAOpBuilder(OpBuilder):
 
     def builder(self):
         try:
-            assert_no_cuda_mismatch(self.name)
+            if not self.is_rocm_pytorch():
+                assert_no_cuda_mismatch(self.name)
             self.build_for_cpu = False
         except BaseException:
             self.build_for_cpu = True
