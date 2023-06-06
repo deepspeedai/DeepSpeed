@@ -28,8 +28,8 @@ class Backend(object):
         self.name = name
         # The world size and rank of the world process group
         self.world_group = None
-        self.world_size = rank
-        self.world_rank = size
+        self.world_size = size
+        self.world_rank = rank
         # Single process group (pg) implementation for now but keep a list for future
         self.process_groups = []
         self.initialized = False
