@@ -227,7 +227,7 @@ def _parse_hostfile(hostfile_lines):
             resource_pool[host] = num_slots
         else:
             logger.error(f"Bad hostfile text: {hostfile_lines}")
-            raise ValueError("Hostfile contains a bad entry: {line}, unable to proceed with launching")
+            raise ValueError(f"Hostfile contains a bad entry: {line}, unable to proceed with launching")
 
     if len(resource_pool) == 0:
         logger.error(f"Bad hostfile text: {hostfile_lines}")
