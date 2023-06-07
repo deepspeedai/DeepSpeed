@@ -55,7 +55,10 @@ def residual_ref_implementation(vals, bias, res, gamma, beta, epsilon, channels,
     res_f = res.to(torch.float32)
     gamma_f = gamma.to(torch.float32)
     beta_f = beta.to(torch.float32)
-    return torch.nn.functional.layer_norm(vals_f + bias_f + res_f, (channels, ), weight=gamma_f, bias=beta_f).to(dtype)
+    return torch.nn.functional.layer_norm(vals_f + bias_f + res_f, (channels, ),
+                                          weight=gamma_f,
+                                          bias=beta_f,
+                                          eps=epsilon).to(dtype)
 
 
 def residual_ds_implementation(vals, bias, res, gamma, beta, epsilon):
@@ -86,14 +89,15 @@ def test_layer_norm_residual(batch, seq_len, channels, dtype):
     assert allclose(new_output, ref_output)
 
 
-def residual_store_ref_implementation(vals, bias, res, gamma, beta, espilon, channels, dtype):
+def residual_store_ref_implementation(vals, bias, res, gamma, beta, epsilon, channels, dtype):
     vals_f = vals.to(torch.float32)
     bias_f = bias.to(torch.float32).reshape(1, 1, -1)
     res_f = res.to(torch.float32)
     gamma_f = gamma.to(torch.float32)
     beta_f = beta.to(torch.float32)
     res_output = vals_f + bias_f + res_f
-    norm_output = torch.nn.functional.layer_norm(res_output, (channels, ), weight=gamma_f, bias=beta_f).to(dtype)
+    norm_output = torch.nn.functional.layer_norm(res_output, (channels, ), weight=gamma_f, bias=beta_f,
+                                                 eps=epsilon).to(dtype)
     return norm_output, res_output.to(dtype)
 
 

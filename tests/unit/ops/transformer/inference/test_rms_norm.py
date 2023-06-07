@@ -16,9 +16,9 @@ if not deepspeed.ops.__compatible_ops__[InferenceBuilder.NAME]:
 inference_module = None
 
 
-def ref_implementation(vals, gamma, espilon):
+def ref_implementation(vals, gamma, epsilon):
     variance = vals.to(torch.float32).pow(2).mean(-1, keepdim=True)
-    vals = vals * torch.rsqrt(variance + espilon)
+    vals = vals * torch.rsqrt(variance + epsilon)
 
     if gamma.dtype in [torch.float16, torch.bfloat16]:
         vals = vals.to(gamma.dtype)
