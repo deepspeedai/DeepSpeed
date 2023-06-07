@@ -249,17 +249,21 @@ class BaseTransformerContainer(ABC):
                                                    allocate_tensor=reversed_dim)
 
     def copy_data_to_new_module(self):
-        params = {
-            self.module.mlp.attn_nw: self.attn_nw,
-            self.module.mlp.attn_nb: self.attn_nb,
-            self.module.norm_w: self.input_nw,
-            self.module.norm_b: self.input_nb
-        }
-        for dst, src in params.items():
-            if src is None:
-                dst = src
+        params = {'attn_nw': self.attn_nw, 'attn_nb': self.attn_nb}
+        for key in params:
+            if params[key] is None:
+                setattr(self.module.mlp, key, None)
             else:
-                dst.data.copy_(src.to(get_accelerator().current_device_name()))
+                setattr(self.module.mlp, key,
+                        torch.nn.parameter.Parameter(params[key].to(get_accelerator().current_device_name())))
+
+        params = {'norm_w': self.input_nw, 'norm_b': self.input_nb}
+        for key in params:
+            if params[key] is None:
+                setattr(self.module, key, None)
+            else:
+                setattr(self.module, key,
+                        torch.nn.parameter.Parameter(params[key].to(get_accelerator().current_device_name())))
 
     def transpose(self):
         self.transpose_attention()

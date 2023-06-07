@@ -49,7 +49,7 @@ _gpt_models = [
     "gpt2",
     "distilgpt2",
     "Norod78/hebrew-bad_wiki-gpt_neo-tiny",
-    #"EleutherAI/gpt-j-6B", # Removed as this is causing OOM errors randomly
+    "EleutherAI/gpt-j-6B",  # bring back this model as we did not catch an error before by merging some changes! TODO: we need to fix the OOM issue later!
     "bigscience/bloom-560m",
 ]
 _opt_models = [
