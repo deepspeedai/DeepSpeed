@@ -46,10 +46,10 @@ class NebulaCheckpointEngine(CheckpointEngine):
         torch.save("", path)
 
         tag = _get_tag_from_path(path)
-        partititon_name = os.path.basename(path)
-        logger.info(f"[Nebula] Saving {partititon_name} under tag {tag}...")
-        self.checkpoint.save(partititon_name, state_dict)
-        logger.info(f"[Nebula] Saved {partititon_name} under tag {tag}.")
+        partition_name = os.path.basename(path)
+        logger.info(f"[Nebula] Saving {partition_name} under tag {tag}...")
+        self.checkpoint.save(partition_name, state_dict)
+        logger.info(f"[Nebula] Saved {partition_name} under tag {tag}.")
         return None
 
     def load(self, path: str, map_location=None):
@@ -62,7 +62,7 @@ class NebulaCheckpointEngine(CheckpointEngine):
             logger.info(f"[Nebula] Disable nebula load. Loaded checkpoint from {path} .")
             return partition
 
-        partititon_name = os.path.basename(path)
+        partition_name = os.path.basename(path)
         logger.info(f"[Nebula] Loading {path} under tag {tag} from nebula path {self.nebula_load_path}...")
 
         checkpoint = None
@@ -93,7 +93,7 @@ class NebulaCheckpointEngine(CheckpointEngine):
 
         tag = checkpoint.tag
         self.tag_flag = -1
-        partition = checkpoint.load(partititon_name, map_location=map_location)
+        partition = checkpoint.load(partition_name, map_location=map_location)
         logger.info(f"[Nebula] Loaded {path} under tag {tag} from {self.nebula_load_path}.")
         return partition
 
