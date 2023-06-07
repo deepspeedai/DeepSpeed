@@ -123,7 +123,7 @@ class HybridSplitQKVContainer(HybridEngineContainer):
         for data in qkv_data:
             del data
 
-    def set_attn_params_wo_copy(self, Z3_enabled=False):
+    def set_attn_parameters_wo_copy(self, Z3_enabled=False):
         self.module.attention.attn_ow = self.dense_w
         self.module.attention.attn_ob = self.dense_b
         if not Z3_enabled:
