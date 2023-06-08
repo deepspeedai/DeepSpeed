@@ -736,10 +736,11 @@ class TestZero3ParamPartitioningBase(DistributedTest):
 
 
 @pytest.mark.parametrize("init_context_manager", [True, False])
+@pytest.mark.parametrize("reduce_scatter", [True, False])
 class TestZero3ParamPartitioningLargeParam(DistributedTest):
     world_size = 4
 
-    def test(self, init_context_manager: bool, param_sz: int = 8100) -> None:
+    def test(self, init_context_manager: bool, reduce_scatter: bool, param_sz: int = 8100) -> None:
 
         class LargeParamModel(Module):
 
@@ -767,6 +768,7 @@ class TestZero3ParamPartitioningLargeParam(DistributedTest):
                 "stage3_max_reuse_distance": 0,
                 "contiguous_gradients": True,
                 "overlap_comm": True,
+                "reduce_scatter": reduce_scatter,
             },
             "optimizer": {
                 "type": "Adam",

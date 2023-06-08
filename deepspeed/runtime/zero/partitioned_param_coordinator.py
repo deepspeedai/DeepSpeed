@@ -15,6 +15,7 @@ from deepspeed.runtime.zero.partition_parameters import *
 from deepspeed.runtime.swap_tensor.partitioned_param_swapper import PartitionedParamStatus
 from deepspeed.utils.debug import debug_module2name_id, debug_param2name_id
 from deepspeed.accelerator import get_accelerator
+import logging
 
 
 def debug_rank0(message: str) -> None:
@@ -235,25 +236,28 @@ class PartitionedParameterCoordinator:
         2. kick off fetch for next few parameters we will need later (prefetch)
         3. block on parameters in immediately required sub module
         """
-        debug_rank0(
-            f"{self.__step_id}: M{current_submodule.id}({type(current_submodule).__name__}) P{[p.ds_id for p in iter_params(current_submodule)]} "
-            + str({
-                "avail": f"{self.__n_available_params:.1e}",
-                "queue_sz": f"{len(self.__param_queue or [])}",
-                "inflight": [p.ds_id for p in self.__inflight_param_registry],
-            }))
+        if logger.isEnabledFor(logging.DEBUG):
+            debug_rank0(
+                f"{self.__step_id}: M{current_submodule.id}({type(current_submodule).__name__}) P{[p.ds_id for p in iter_params(current_submodule)]} "
+                + str({
+                    "avail": f"{self.__n_available_params:.1e}",
+                    "queue_sz": f"{len(self.__param_queue or [])}",
+                    "inflight": [p.ds_id for p in self.__inflight_param_registry],
+                }))
 
         params_to_fetch = frozenset(iter_params(current_submodule))
 
         # kick off all gather for params in the immediately required submodule
-        for param in params_to_fetch:
-            debug_rank0(f"-fetch: {param.ds_summary()}")
+        if logger.isEnabledFor(logging.DEBUG):
+            for param in params_to_fetch:
+                debug_rank0(f"-fetch: {param.ds_summary()}")
         self.__all_gather_params(params_to_fetch)
 
         # wait for parameters in the immediately needed submodule to become available
         for param in params_to_fetch:
             param.ds_active_sub_modules.add(current_submodule.id)
-            debug_rank0(f"-wait: {param.ds_summary()}")
+            if logger.isEnabledFor(logging.DEBUG):
+                debug_rank0(f"-wait: {param.ds_summary()}")
             if param in self.__inflight_param_registry:
                 with get_accelerator().stream(self.__allgather_stream):
                     while self.__ongoing_fetch_events and self.__ongoing_fetch_events[0].query():
@@ -328,8 +332,9 @@ class PartitionedParameterCoordinator:
                         params_to_prefetch.add(param_in_trace.param)
                         numel_prefetching += param_in_trace.param.ds_numel
 
-                for param in params_to_prefetch:
-                    debug_rank0(f"-prefetch: {param.ds_summary()}")
+                if logger.isEnabledFor(logging.DEBUG):
+                    for param in params_to_prefetch:
+                        debug_rank0(f"-prefetch: {param.ds_summary()}")
                 self.__all_gather_params(params_to_prefetch)
 
                 if self.__prefetch_nvme:
@@ -394,7 +399,8 @@ class PartitionedParameterCoordinator:
     @instrument_w_nvtx
     def __release_param(self, param: Parameter) -> None:
         if param.ds_status == ZeroParamStatus.AVAILABLE and not param.ds_active_sub_modules:
-            debug_rank0(f"-release: {param.ds_summary()}")
+            if logger.isEnabledFor(logging.DEBUG):
+                debug_rank0(f"-release: {param.ds_summary()}")
             param.partition()
             self.__n_available_params -= param.ds_numel
 

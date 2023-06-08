@@ -11,6 +11,7 @@ from enum import Enum
 import functools
 import itertools
 from typing import List
+import logging
 import torch
 from torch import Tensor
 from deepspeed import comm as dist
@@ -898,7 +899,8 @@ class Init(InsertPostInitMethodToModuleSubClasses):
             # to debug correctness issues.
             params = sorted(params, key=lambda p: p.ds_id)
 
-            debug_rank0(f"-allgather_coalesced: {[p.ds_id for p in params]}")
+            if logger.isEnabledFor(logging.DEBUG):
+                debug_rank0(f"-allgather_coalesced: {[p.ds_id for p in params]}")
 
             if safe_mode:
                 # ensure that same list (with same ordering) of parameters are
