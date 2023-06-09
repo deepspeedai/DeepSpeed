@@ -564,7 +564,7 @@ def main(args=None):
         time.sleep(1)
         sys.exit(1)
 
-    if args.launcher == PDSH_LAUNCHER:
+    if args.launcher == PDSH_LAUNCHER and multi_node_exec:
         signal.signal(signal.SIGINT, sigkill_handler)
 
     result.wait()
