@@ -28,7 +28,7 @@ class CPUOpBuilder(OpBuilder):
         return cpp_ext
 
     def cxx_args(self):
-        return ['-O3', '-std=c++14', '-g', '-Wno-reorder']
+        return ['-O3', '-g', '-Wno-reorder']
 
     def libraries_args(self):
         return []
