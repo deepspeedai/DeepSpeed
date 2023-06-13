@@ -50,8 +50,12 @@ public:
     {
         curandCreateGenerator(&_gen, CURAND_RNG_PSEUDO_DEFAULT);
         curandSetPseudoRandomGeneratorSeed(_gen, 123);
-        if (cublasCreate(&_cublasHandle) != CUBLAS_STATUS_SUCCESS) {
-            auto message = std::string("Fail to create cublas handle.");
+        cublasStatus_t stat = cublasCreate(&_cublasHandle);
+        if (stat != CUBLAS_STATUS_SUCCESS) {
+            // It would be nice to use cublasGetStatusName and
+            // cublasGetStatusString, but they were only added in CUDA 11.4.2.
+            auto message = std::string("Failed to create cublas handle: cublasStatus_t was ") +
+                           std::to_string(stat);
             std::cerr << message << std::endl;
             throw std::runtime_error(message);
         }
