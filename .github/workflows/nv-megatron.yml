@@ -41,7 +41,8 @@ jobs:
 
       - name: Install apex
         run: |
-          pip install -v --disable-pip-version-check --no-cache-dir --global-option="--cpp_ext" --global-option="--cuda_ext" git+https://github.com/NVIDIA/apex.git
+          # Install 82ee367 specifically before pyproject.toml changes due to incomplete dependencies causing errors.
+          pip install -v --disable-pip-version-check --no-cache-dir --global-option="--cpp_ext" --global-option="--cuda_ext" git+https://github.com/NVIDIA/apex.git@82ee367
 
       - name: Python environment
         run: |
