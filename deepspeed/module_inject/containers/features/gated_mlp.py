@@ -100,10 +100,10 @@ class HybridGatedMLPContainer(HybridEngineContainer):
                 self.inter_up_b.data = self._h4h_b[:self.inter_up_w.shape[0]] if self._h4h_b is not None else None
                 self.inter_gate_b.data = self._h4h_b[self.inter_up_w.shape[0]:] if self._h4h_b is not None else None
         else:
-            self.module.inter_up_w = self.inter_up_w
-            self.module.inter_up_b = self.inter_up_b
-            self.module.inter_gate_w = self.inter_gate_w
-            self.module.inter_gate_b = self.inter_gate_b
+            self.module.mlp.inter_up_w = self.inter_up_w
+            self.module.mlp.inter_up_b = self.inter_up_b
+            self.module.mlp.inter_gate_w = self.inter_gate_w
+            self.module.mlp.inter_gate_b = self.inter_gate_b
 
     def get_mlp_params(self):
         params = super().get_mlp_params()

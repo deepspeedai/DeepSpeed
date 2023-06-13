@@ -94,8 +94,8 @@ class HybridEngineContainer(ABC):
         general_params = [
             (self.module.attention.attn_ow, self.dense_w),
             (self.module.attention.attn_ob, self.dense_b),
-            (self.module.attn_nw, self.attn_nw),
-            (self.module.attn_nb, self.attn_nb),
+            (self.module.mlp.attn_nw, self.attn_nw),
+            (self.module.mlp.attn_nb, self.attn_nb),
             (self.module.norm_w, self.input_nw),
             (self.module.norm_b, self.input_nb),
         ]
