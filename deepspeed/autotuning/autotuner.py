@@ -985,7 +985,7 @@ class Autotuner:
             if isinstance(gas_in_config, int):
                 gas = gas_in_config
             elif gas_in_config == "auto":  # GRADIENT_ACCUMULATION_STEPS: "auto"
-                val = self.get_val_from_config(GRADIENT_ACCUMULATION_STEPS)
+                val = self.get_val_from_user_args(GRADIENT_ACCUMULATION_STEPS)
                 if val:
                     gas = int(val)
             elif isinstance(gas_in_config, list):
