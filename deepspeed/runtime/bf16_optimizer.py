@@ -7,9 +7,9 @@ from collections import OrderedDict
 import torch
 import sys
 import os
+from torch._utils import _flatten_dense_tensors, _unflatten_dense_tensors
 from deepspeed import comm as dist
 from deepspeed.runtime.constants import PIPE_REPLICATED
-from deepspeed.ops.op_builder import UtilsBuilder
 from deepspeed.runtime import ZeROOptimizer
 from packaging import version as pkg_version
 
@@ -53,10 +53,9 @@ class BF16_Optimizer(ZeROOptimizer):
         self.dp_rank = dist.get_rank(group=self.dp_process_group)
         self.real_dp_process_group = [dp_process_group for i in range(len(self.optimizer.param_groups))]
 
-        # Load pre-built or JIT compile (un)flatten ops
-        util_ops = UtilsBuilder().load()
-        self.flatten = util_ops.flatten
-        self.unflatten = util_ops.unflatten
+        # Use torch (un)flatten ops
+        self.flatten = _flatten_dense_tensors
+        self.unflatten = _unflatten_dense_tensors
 
         #align nccl all-gather send buffers to 4-bye boundary
         self.nccl_start_alignment_factor = 2  # 4-byte alignment/sizeof(fp16) = 2
