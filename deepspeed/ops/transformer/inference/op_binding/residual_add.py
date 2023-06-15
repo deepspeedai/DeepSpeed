@@ -21,9 +21,11 @@ class ResidualAddOp(BaseOp):
                 self.residual_add_func = self.inference_module.residual_add_bias_bf16
             else:
                 self.residual_add_func = self.inference_module.residual_add_bias_fp32
-            self._vector_add = self.inference_module._vector_add
         except AttributeError:
             self.residual_add_func = None
+        try:
+            self._vector_add = self.inference_module._vector_add
+        except AttributeError:
             self._vector_add = None
 
     def forward(self,

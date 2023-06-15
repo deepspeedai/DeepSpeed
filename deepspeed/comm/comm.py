@@ -145,8 +145,8 @@ def init_deepspeed_backend(ds_backend, timeout, init_method):
     global mpi_backend
     global ccl_backend
 
-    rank = int(os.environ["RANK"])
-    size = int(os.environ["WORLD_SIZE"])
+    rank = int(os.getenv('RANK', '-1'))
+    size = int(os.getenv('WORLD_SIZE', '-1'))
 
     if ds_backend == NCCL_BACKEND:
         utils.logger.warn("NCCL backend in DeepSpeed not yet implemented")
