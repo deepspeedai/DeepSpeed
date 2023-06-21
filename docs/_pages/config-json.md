@@ -373,6 +373,9 @@ Enabling and configuring ZeRO memory optimizations
     "stage3_gather_16bit_weights_on_model_save": [true|false],
     "ignore_unused_parameters": [true|false]
     "round_robin_gradients": [true|false]
+    "zero_hpz_partition_size": 1
+    "zero_quantized_weights": [true|false]
+    "zero_quantized_gradients": [true|false]
     }
 ```
 
@@ -480,6 +483,23 @@ Enabling and configuring ZeRO memory optimizations
 |--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------| ------- |
 | Consolidate the weights before saving the model by `save_16bit_model()`. Since the weights are partitioned across GPUs, they aren't part of `state_dict`, so this function automatically gathers the weights when this option is enabled and then saves the fp16 model weights. | `False` |
 
+***zero_hpz_partition_size***: [integer]
+
+| Description                                                                                                                         | Default |
+| ----------------------------------------------------------------------------------------------------------------------------------- | ------- |
+| Number of ranks in hiearchical partitioning ZeRO (hpZ) secondary tensor group of ZeRO++, default is 1 meaning no hpZ, ideal is number of ranks (gpus) per node. | `1`   |
+
+***zero_quantized_weights***: [boolean]
+
+| Description                                                                                                                         | Default |
+| ----------------------------------------------------------------------------------------------------------------------------------- | ------- |
+|Boolean indicating whether to enable communication efficient quantized weights of ZeRO++. | `False`   |
+
+***zero_quantized_gradients***: [boolean]
+
+| Description                                                                                                                         | Default |
+| ----------------------------------------------------------------------------------------------------------------------------------- | ------- |
+|Boolean indicating whether to enable communication efficient quantized gradients of ZeRO++. | `False`   |
 
 ***cpu_offload***: [boolean]
 
