@@ -547,9 +547,20 @@ def _conv_flops_compute(input, weight, bias=None, stride=1, padding=0, dilation=
 
     length = len(input_dims)
 
-    paddings = padding if type(padding) is tuple else (padding, ) * length
     strides = stride if type(stride) is tuple else (stride, ) * length
     dilations = dilation if type(dilation) is tuple else (dilation, ) * length
+    if isinstance(padding, str):
+        if padding == 'valid':
+            paddings = (0, ) * length
+        elif padding == 'same':
+            paddings = ()
+            for d, k in zip(dilations, kernel_dims):
+                total_padding = d * (k - 1)
+                paddings += (total_padding // 2, )
+    elif isinstance(padding, tuple):
+        paddings = padding
+    else:
+        paddings = (padding, ) * length
 
     output_dims = []
     for idx, input_dim in enumerate(input_dims):
