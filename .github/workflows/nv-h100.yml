@@ -1,0 +1,52 @@
+name: nv-h100
+
+on:
+  schedule:
+    - cron: "0 0 * * *"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  unit-tests:
+    runs-on: [self-hosted, nvidia, h100]
+    container:
+      image: nvcr.io/nvidia/pytorch:23.03-py3
+      ports:
+        - 80
+      options: --gpus all --shm-size "8G"
+
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Check container state
+        run: |
+          nvidia-smi
+          python -c "import torch; print('torch:', torch.__version__, torch)"
+          python -c "import torch; print('CUDA available:', torch.cuda.is_available())"
+
+      - name: Install transformers
+        run: |
+          git clone https://github.com/huggingface/transformers
+          cd transformers
+          git rev-parse --short HEAD
+          python -m pip install .
+
+      - name: Install deepspeed
+        run: |
+          python -m pip install docutils==0.18.1 jinja2==3.0 urllib3==1.26.11 ninja
+          python -m pip install .[dev,1bit,autotuning]
+          ds_report
+
+      - name: Python environment
+        run: |
+          python -m pip list
+
+      - name: Unit tests
+        run: |
+          unset TORCH_CUDA_ARCH_LIST # only jit compile for current arch
+          if [[ -d ./torch-extensions ]]; then rm -rf ./torch-extensions; fi
+          cd tests
+          TORCH_EXTENSIONS_DIR=./torch-extensions python -m pytest -n 4  unit/ --torch_ver="2.0" --cuda_ver="12"
+          TORCH_EXTENSIONS_DIR=./torch-extensions python -m pytest -m 'sequential' unit/ --torch_ver="2.0" --cuda_ver="12"
