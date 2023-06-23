@@ -113,5 +113,7 @@ lnav:
         url: /tutorials/zero-offload/
       - title: 'ZeRO'
         url: /tutorials/zero/
+      - title: 'ZeRO++'
+        url: /tutorials/zeropp/
   - title: 'Contributing'
     url: /contributing/
