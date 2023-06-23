@@ -48,7 +48,14 @@ class HybridGatedMLPContainer(HybridEngineContainer):
                                       int8=reversed_dim,
                                       allocate_tensor=reversed_dim) if src is not None else None
         else:
-            super().mlp_inter_mp(mp_replace)
+            self.module.mlp.inter_w = mp_replace.strided_copy(self.module.mlp.inter_w,
+                                                              self._h4h_w,
+                                                              num_splits=2,
+                                                              int8=reversed_dim)
+            self.module.mlp.inter_b = mp_replace.strided_copy(self.module.mlp.inter_b,
+                                                              self._h4h_b,
+                                                              num_splits=2,
+                                                              int8=reversed_dim)
 
     def release_mlp(self):
         super().release_mlp()
