@@ -94,7 +94,7 @@ Note that ZeRO stages, micro-batch sizes, and other ZeRO configurations to tune 
 The DeepSpeed Autotuner tunes ZeRO stages, micro-batch size per GPU, and ZeRO configurations. Other DeepSpeed configurations are used as defined by the user in the DeepSpeed configuration file. Users can overwrite any of the tuning parameters.
 ### Configuring ZeRO Stage
 
-By default, the DeepSpeed Autotuner tunes ZeRO stages. If `"zero_optimization"` is not defined or set to `"all"`, the Autotuner explores ZeRO stages in the order of `[0, 1, 2, 3]`. Users can overwrite this behavior if they already know what ZeRO stage(s) to use. For example, the below section in the DeepSpeed configuration file limits the Autotuner to only exploring ZeRO stage 2 and 3.
+By default, the DeepSpeed Autotuner does not tune ZeRO stages. If `"zero_optimization"` is not defined, DeepSpeed ZeRO is disabled. If `"zero_optimization"` is set to `"all"`, the Autotuner explores ZeRO stages in the order of `[0, 1, 2, 3]`. Users can overwrite this behavior if they already know what ZeRO stage(s) to use. For example, the below section in the DeepSpeed configuration file limits the Autotuner to only exploring ZeRO stage 2 and 3.
 
 ```json
 {
