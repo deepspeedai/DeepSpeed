@@ -425,6 +425,17 @@ class DeepSpeedEngine(Module):
         self._config.train_batch_size = train_batch_size
         self._config.gradient_accumulation_steps = new_gas
 
+    def set_train_micro_batch_size(self, micro_batch_size):
+        """Adjust the micro batch size(i.e., the micro batch size in every data parallel group),
+        while keep the gradient accumulation steps the same.
+        Args:
+            micro_batch_size (int): The new micro batch size for training.
+        """
+        # overwrite config
+        new_global_batch_size = micro_batch_size * self._config.gradient_accumulation_steps * self.dp_world_size
+        self._config.train_batch_size = new_global_batch_size
+        self._config.train_micro_batch_size_per_gpu = micro_batch_size
+
     def set_data_post_process_func(self, post_process_func):
         if self.training_dataloader is not None:
             self.training_dataloader.post_process_func = post_process_func
