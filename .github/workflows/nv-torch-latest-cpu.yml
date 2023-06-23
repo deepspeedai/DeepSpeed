@@ -1,12 +1,6 @@
 name: nv-torch-latest-cpu
 
 on:
-  push:
-    branches:
-      - 'staging**'
-    paths-ignore:
-      - 'docs/**'
-      - 'blogs/**'
   pull_request:
     paths-ignore:
       - 'docs/**'

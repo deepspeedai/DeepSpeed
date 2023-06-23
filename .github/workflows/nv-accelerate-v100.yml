@@ -1,12 +1,6 @@
 name: nv-accelerate-v100
 
 on:
-  push:
-    branches:
-      - 'staging**'
-    paths-ignore:
-      - 'docs/**'
-      - 'blogs/**'
   pull_request:
     paths-ignore:
       - 'docs/**'

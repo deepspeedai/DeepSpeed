@@ -1,12 +1,6 @@
 name: nv-pre-compile-ops
 
 on:
-  push:
-    branches:
-      - 'staging**'
-    paths-ignore:
-      - 'docs/**'
-      - 'blogs/**'
   pull_request:
     branches:
       '**'

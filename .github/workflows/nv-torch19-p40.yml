@@ -1,12 +1,6 @@
 name: nv-torch19-p40
 
 on:
-  push:
-    branches:
-      - 'staging**'
-    paths-ignore:
-      - 'docs/**'
-      - 'blogs/**'
   pull_request:
     paths-ignore:
       - 'docs/**'
