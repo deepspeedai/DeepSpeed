@@ -9,6 +9,14 @@ import pytest
 from deepspeed.accelerator import get_accelerator
 from deepspeed.ops.op_builder import InferenceBuilder
 from .inference_test_utils import allclose, get_dtypes
+try:
+    import triton  # noqa: F401
+    from deepspeed.ops.transformer.inference.triton import (
+        layer_norm,
+        layer_norm_residual,
+    )
+except ImportError:
+    print("triton import failed")
 
 if not deepspeed.ops.__compatible_ops__[InferenceBuilder.NAME]:
     pytest.skip("Inference ops are not available on this system", allow_module_level=True)
@@ -30,19 +38,32 @@ def ds_implementation(vals, gamma, beta, epsilon):
     return inference_module.layer_norm(vals, gamma, beta, epsilon)
 
 
+def ds_triton_implementation(vals, gamma, beta, epsilon):
+    return layer_norm(vals, gamma, beta, epsilon)
+
+
 @pytest.mark.inference_ops
 @pytest.mark.parametrize("batch", [1, 32])
 @pytest.mark.parametrize("seq_len", [1, 128])
 @pytest.mark.parametrize("channels", [384, 512, 768, 1024, 2048, 8192, 14432])
 @pytest.mark.parametrize("dtype", get_dtypes())
-def test_layer_norm(batch, seq_len, channels, dtype):
+@pytest.mark.parametrize("use_triton_ops", [False, True])
+def test_layer_norm(batch, seq_len, channels, dtype, use_triton_ops):
+    if not deepspeed.HAS_TRITON and use_triton_ops:
+        pytest.skip("triton has to be installed for the test")
+
     vals = torch.randn((batch, seq_len, channels), dtype=dtype, device=get_accelerator().current_device_name())
     gamma = torch.randn((channels), dtype=dtype, device=get_accelerator().current_device_name())
     beta = torch.rand((channels), dtype=dtype, device=get_accelerator().current_device_name())
     epsilon = 1e-5
 
     ref_output = ref_implementation(vals, gamma, beta, epsilon, channels, dtype)
-    new_output = ds_implementation(vals, gamma, beta, epsilon)
+    if use_triton_ops:
+        new_output = ds_triton_implementation(vals, gamma, beta, epsilon)
+        if dtype != torch.float16:  # fp16 supported in triton
+            return
+    else:
+        new_output = ds_implementation(vals, gamma, beta, epsilon)
 
     if not allclose(new_output, ref_output):
         #print(new_output - ref_output)
@@ -68,12 +89,20 @@ def residual_ds_implementation(vals, bias, res, gamma, beta, epsilon):
     return inference_module._layer_norm_residual(vals, bias, res, gamma, beta, epsilon)
 
 
+def residual_ds_triton_implementation(vals, bias, res, gamma, beta, epsilon):
+    return layer_norm_residual(vals, bias, res, gamma, beta, epsilon)
+
+
 @pytest.mark.inference_ops
 @pytest.mark.parametrize("batch", [1, 32])
 @pytest.mark.parametrize("seq_len", [1, 128])
 @pytest.mark.parametrize("channels", [384, 512, 768, 1024, 2048, 8192, 14432])
 @pytest.mark.parametrize("dtype", get_dtypes())
-def test_layer_norm_residual(batch, seq_len, channels, dtype):
+@pytest.mark.parametrize("use_triton_ops", [False, True])
+def test_layer_norm_residual(batch, seq_len, channels, dtype, use_triton_ops):
+    if not deepspeed.HAS_TRITON and use_triton_ops:
+        pytest.skip("triton has to be installed for the test")
+
     vals = torch.randn((batch, seq_len, channels), dtype=dtype, device=get_accelerator().current_device_name())
     residual = torch.randn((batch, seq_len, channels), dtype=dtype, device=get_accelerator().current_device_name())
     bias = torch.randn((channels), dtype=dtype, device=get_accelerator().current_device_name())
@@ -81,7 +110,13 @@ def test_layer_norm_residual(batch, seq_len, channels, dtype):
     beta = torch.rand((channels), dtype=dtype, device=get_accelerator().current_device_name())
     epsilon = 1e-5
 
-    new_output = residual_ds_implementation(vals, bias, residual, gamma, beta, epsilon)
+    if use_triton_ops:
+        new_output = residual_ds_triton_implementation(vals, bias, residual, gamma, beta, epsilon)
+        if dtype != torch.float16:  # fp16 supported in triton
+            return
+    else:
+        new_output = residual_ds_implementation(vals, bias, residual, gamma, beta, epsilon)
+
     ref_output = residual_ref_implementation(vals, bias, residual, gamma, beta, epsilon, channels, dtype)
 
     print((new_output - ref_output).abs().max())
@@ -129,3 +164,38 @@ def test_layer_norm_residual_store_pre_ln_res(batch, seq_len, channels, dtype):
 
     assert allclose(ds_res_output, norm_res_output)
     assert allclose(ds_norm_output, ref_norm_output)
+
+
+@pytest.mark.inference_ops
+@pytest.mark.parametrize("M", [4])
+@pytest.mark.parametrize("N", [4])
+@pytest.mark.parametrize("dtype", [torch.float16])
+@pytest.mark.parametrize("residual", [True, False])
+@pytest.mark.parametrize("input_bias", [True, False])
+def test_triton_layer_norm(M, N, dtype, residual, input_bias, eps=1e-5, device='cuda'):
+    if not deepspeed.HAS_TRITON:
+        pytest.skip("triton has to be installed for the test")
+    torch.manual_seed(0)
+    # create data
+    x_shape = (M, N)
+    w_shape = (x_shape[-1], )
+    weight = torch.rand(w_shape, dtype=dtype, device='cuda', requires_grad=False)
+    bias = torch.rand(w_shape, dtype=dtype, device='cuda', requires_grad=False)
+    x_bias = torch.rand(w_shape, dtype=dtype, device='cuda', requires_grad=False)
+    x = -2.3 + 0.5 * torch.randn(x_shape, dtype=dtype, device='cuda')
+    dy = .1 * torch.randn_like(x)
+    if residual:
+        res = torch.rand(x_shape, dtype=dtype, device='cuda', requires_grad=False)
+    else:
+        res = torch.zeros(x_shape, dtype=dtype, device='cuda', requires_grad=False)
+    x.requires_grad_(True)
+    # forward pass
+    if residual or input_bias:
+        y_tri = layer_norm_residual(x, x_bias if input_bias else None, res, weight, bias, eps)
+    else:
+        y_tri = layer_norm(x, weight, bias, eps)
+    y_ref = torch.nn.functional.layer_norm(x + res + (x_bias if input_bias else 0), w_shape, weight, bias,
+                                           eps).to(dtype)
+    # compare
+    #print(f"y_tri={y_tri}, y_ref={y_ref}")
+    triton.testing.assert_almost_equal(y_tri, y_ref)

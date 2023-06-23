@@ -6,6 +6,7 @@
 import torch
 from ..config import DeepSpeedInferenceConfig
 from .base import BaseOp
+import deepspeed
 
 
 class GELUGemmOp(BaseOp):
@@ -14,9 +15,13 @@ class GELUGemmOp(BaseOp):
         super(GELUGemmOp, self).__init__(config)
         try:
             if self.config.dtype in [torch.float16, torch.int8]:
-                self.fused_gemm_gelu = self.inference_module.fused_gemm_gelu_fp16  # type: ignore
+                if deepspeed.HAS_TRITON and self.config.use_triton and self.config.dtype == torch.float16:
+                    from deepspeed.ops.transformer.inference.triton.ops import fused_gemm_gelu as _triton_fused_gemm_gelu
+                    self.fused_gemm_gelu = _triton_fused_gemm_gelu  # type: ignore
+                else:
+                    self.fused_gemm_gelu = self.inference_module.fused_gemm_gelu_fp16  # type: ignore
             elif self.config.dtype == torch.bfloat16:
-                self.fused_gemm_gelu = self.inference_module.fused_gemm_gelu_bf16
+                self.fused_gemm_gelu = self.inference_module.fused_gemm_gelu_bf16  # type: ignore
             else:
                 self.fused_gemm_gelu = self.inference_module.fused_gemm_gelu_fp32  # type: ignore
         except AttributeError:

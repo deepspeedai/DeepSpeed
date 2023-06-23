@@ -18,6 +18,7 @@ class DS_DistilBERTContainer(BaseTransformerContainer):
         # All model specific things should be defined here instead of the base class.
         self.triangular_masking = False
         self.return_single_tuple = True
+        self.use_triton = kwargs['config'].use_triton and deepspeed.HAS_TRITON
 
     def create_module(self, config=None):
         _config = config if config is not None else self.ds_model_config

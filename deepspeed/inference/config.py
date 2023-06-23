@@ -4,6 +4,7 @@
 # DeepSpeed Team
 
 import torch
+import deepspeed
 from deepspeed.runtime.config_utils import DeepSpeedConfigModel
 from deepspeed.runtime.zero.config import DeepSpeedZeroConfig
 from pydantic import Field
@@ -152,6 +153,18 @@ class DeepSpeedInferenceConfig(DeepSpeedConfigModel):
     can run faster using the graph replay method.
     """
 
+    use_triton: bool = False
+    """
+    Use this flag to use triton kernels for inference ops.
+    """
+
+    triton_autotune: bool = False
+    """
+    Use this flag to enable triton autotuning.
+    Turning it on is better for performance but increase the 1st runtime for
+    autotuning.
+    """
+
     zero: DeepSpeedZeroConfig = {}
     """
     ZeRO configuration to use with the Inference Engine. Expects a dictionary
@@ -277,6 +290,12 @@ class DeepSpeedInferenceConfig(DeepSpeedConfigModel):
     def moe_backward_compat(cls, field_value, values):
         if isinstance(field_value, bool):
             return DeepSpeedMoEConfig(moe=field_value)
+        return field_value
+
+    @validator("use_triton")
+    def has_triton(cls, field_value, values):
+        if field_value and not deepspeed.HAS_TRITON:
+            raise ValueError('Triton needs to be installed to use deepspeed with triton kernels')
         return field_value
 
     class Config:

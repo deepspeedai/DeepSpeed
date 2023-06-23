@@ -607,6 +607,7 @@ class InferenceEngine(Module):
             else:
                 self._create_cuda_graph(*inputs, **kwargs)
                 outputs = self._graph_replay(*inputs, **kwargs)
+
         else:
             outputs = self.module(*inputs, **kwargs)
 

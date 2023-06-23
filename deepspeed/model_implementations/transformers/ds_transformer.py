@@ -12,6 +12,10 @@ from deepspeed.ops.transformer.inference.ds_mlp import DeepSpeedMLP
 from deepspeed.ops.transformer.inference.ds_attention import DeepSpeedSelfAttention, BloomSelfAttention
 from deepspeed.accelerator import get_accelerator
 from deepspeed.ops.op_builder import InferenceBuilder
+import deepspeed
+if deepspeed.HAS_TRITON:
+    from deepspeed.ops.transformer.inference.triton.mlp import TritonMLP
+    from deepspeed.ops.transformer.inference.triton.attention import TritonSelfAttention
 
 inference_module = None
 
@@ -55,14 +59,24 @@ class DeepSpeedTransformerInference(nn.Module):
 
         if DeepSpeedTransformerInference.layer_id == 1:
             log_dist(f"DeepSpeed-Inference config: {self.config.__dict__}", [0])
+            if deepspeed.HAS_TRITON and self.config.use_triton:
+                log_dist(f"Injecting Triton kernels ...", [0])
 
         if self.config.bigscience_bloom:
             self.attention = BloomSelfAttention(self.config, mp_group, quantize_scales, quantize_groups, merge_count)
+            assert not self.config.use_triton
         else:
-            self.attention = DeepSpeedSelfAttention(self.config, mp_group, quantize_scales, quantize_groups,
-                                                    merge_count)
-        self.mlp = DeepSpeedMLP(self.config, mp_group, quantize_scales, quantize_groups, merge_count,
-                                mlp_extra_grouping)
+            if deepspeed.HAS_TRITON and self.config.use_triton:
+                self.attention = TritonSelfAttention(self.config)
+            else:
+                self.attention = DeepSpeedSelfAttention(self.config, mp_group, quantize_scales, quantize_groups,
+                                                        merge_count)
+
+        if deepspeed.HAS_TRITON and self.config.use_triton:
+            self.mlp = TritonMLP(self.config)
+        else:
+            self.mlp = DeepSpeedMLP(self.config, mp_group, quantize_scales, quantize_groups, merge_count,
+                                    mlp_extra_grouping)
 
         device = get_accelerator().current_device_name()  # if config.bigscience_bloom else 'cpu'
         if self.config.set_empty_params:

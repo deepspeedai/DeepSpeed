@@ -44,6 +44,7 @@ class DeepSpeedInferenceConfig(TransformerConfig):
             scale_attention: If true, both q and k are scaled by 1/sqrt(attention_heads) before attention computation.
             return_tuple: if True, returns the transformer output as a tuple, otherwise returns as a tensor
             bigscience_bloom: This flag is added temporarily for supporting the BLOOM-176B model architecture.
+            use_triton: This flag is to enable triton kernels in inference or not.
     """
 
     def __init__(self,
@@ -77,7 +78,9 @@ class DeepSpeedInferenceConfig(TransformerConfig):
                  scale_attn_by_inverse_layer_idx=False,
                  return_single_tuple=False,
                  set_empty_params=False,
-                 transposed_mode=False):
+                 transposed_mode=False,
+                 use_triton=False,
+                 triton_autotune=False):
         super(DeepSpeedInferenceConfig,
               self).__init__(hidden_size, (intermediate_size if intermediate_size > 0 else 4 * hidden_size), heads,
                              num_hidden_layers)
@@ -109,6 +112,8 @@ class DeepSpeedInferenceConfig(TransformerConfig):
         self.return_single_tuple = return_single_tuple
         self.set_empty_params = set_empty_params
         self.transposed_mode = transposed_mode
+        self.use_triton = use_triton
+        self.triton_autotune = triton_autotune
 
     @classmethod
     def from_dict(cls, json_object):

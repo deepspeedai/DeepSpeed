@@ -74,8 +74,11 @@ def run_residual_add_reference(hidden_state, residual, attn_output, attn_bias, f
 @pytest.mark.parametrize("add_bias", [True, False])
 @pytest.mark.parametrize("mp_size", [1, 2])
 @pytest.mark.parametrize("pre_attn_norm", [True, False])
+@pytest.mark.parametrize("use_triton_ops", [True, False])
 def test_residual_add(inference_module, batch, sequence, hidden_dim, dtype, mlp_after_attn, add_bias, mp_size,
-                      pre_attn_norm):
+                      pre_attn_norm, use_triton_ops):
+    if not deepspeed.HAS_TRITON and use_triton_ops and dtype == torch.float16:
+        pytest.skip("triton has to be installed for the test")
     ds_out = torch.randn((batch, sequence, hidden_dim), dtype=dtype, device=get_accelerator().device_name())
     residual = torch.randn((batch, sequence, hidden_dim), dtype=dtype, device=get_accelerator().device_name())
     attn_output = torch.randn((batch, sequence, hidden_dim), dtype=dtype, device=get_accelerator().device_name())
@@ -90,6 +93,9 @@ def test_residual_add(inference_module, batch, sequence, hidden_dim, dtype, mlp_
         ds_out, residual, attn_output, attn_bias, final_bias, mp_size, mlp_after_attn, add_bias, pre_attn_norm
     ]
 
+    if use_triton_ops:
+        from deepspeed.ops.transformer.inference.triton import residual_add_bias
+        ds_out = residual_add_bias(*res_add_args)
     if dtype == torch.float16:
         ds_out = inference_module.residual_add_bias_fp16(*res_add_args)
     elif dtype == torch.float32:
@@ -97,7 +103,12 @@ def test_residual_add(inference_module, batch, sequence, hidden_dim, dtype, mlp_
     elif dtype == torch.bfloat16:
         ds_out = inference_module.residual_add_bias_bf16(*res_add_args)
     else:
-        raise ValueError(f"Unsupported dtype: {dtype}")
+        if dtype == torch.float16:
+            ds_out = inference_module.residual_add_bias_fp16(*res_add_args)
+        elif dtype == torch.float32:
+            ds_out = inference_module.residual_add_bias_fp32(*res_add_args)
+        else:
+            raise ValueError(f"Unsupported dtype: {dtype}")
 
     if not allclose(ds_out, ref_out):
         print((ds_out - ref_out).abs().max())

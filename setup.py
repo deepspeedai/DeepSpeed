@@ -67,7 +67,8 @@ extras_require = {
     'sparse_attn': fetch_requirements('requirements/requirements-sparse_attn.txt'),
     'sparse': fetch_requirements('requirements/requirements-sparse_pruning.txt'),
     'inf': fetch_requirements('requirements/requirements-inf.txt'),
-    'sd': fetch_requirements('requirements/requirements-sd.txt')
+    'sd': fetch_requirements('requirements/requirements-sd.txt'),
+    'triton': fetch_requirements('requirements/requirements-triton.txt'),
 }
 
 # Add specific cupy version to both onebit extension variants.
