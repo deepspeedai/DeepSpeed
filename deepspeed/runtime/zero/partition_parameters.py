@@ -20,6 +20,7 @@ from torch.nn import Parameter
 
 from .linear import zero3_linear_wrap
 
+from deepspeed.utils import groups
 import deepspeed
 from ..utils import get_only_unique_item, see_memory_usage
 from deepspeed.runtime.zero.config import DeepSpeedZeroConfig
@@ -537,16 +538,21 @@ def shutdown_init_context():
 
 class AllGatherHandle:
 
-    def __init__(self, handle, param: Parameter) -> None:
+    def __init__(self, handle, param: Parameter, quantization=None) -> None:
         if param.ds_status != ZeroParamStatus.INFLIGHT:
             raise RuntimeError(f"expected param {param.ds_summary()} to be available")
 
-        self.handle = handle
-        self.param = param
+        self.__handle = handle
+        self.__param = param
+        self.__quantization = quantization
 
     def wait(self) -> None:
-        instrument_w_nvtx(self.handle.wait)()
-        self.param.ds_status = ZeroParamStatus.AVAILABLE
+        instrument_w_nvtx(self.__handle.wait)()
+        if self.__quantization:
+            instrument_w_nvtx(self.__quantization.quant_handle.wait)()
+            self.__param.data = self.__quantization.backend.dequantize(
+                self.__quantization.quantized_param, self.__quantization.scale_buffer).to(self.__param.device)
+        self.__param.ds_status = ZeroParamStatus.AVAILABLE
 
 
 class AllGatherCoalescedHandle:
@@ -557,14 +563,18 @@ class AllGatherCoalescedHandle:
         params: List[Parameter],
         partitions: List[Tensor],
         world_size: int,
+        use_secondary_tensor=False,
+        forward=False,
+        quantization=None,
     ) -> None:
-        # renaming the fields without double underscore to ease
-        # the class inheritance
         self.allgather_handle = allgather_handle
         self.params = params
         self.partitions = partitions
         self.world_size = world_size
+        self.use_secondary_tensor = use_secondary_tensor
+        self.forward = forward
         self.complete = False
+        self.quantization = quantization
 
         for param in self.params:
             if param.ds_status != ZeroParamStatus.INFLIGHT:
@@ -577,16 +587,29 @@ class AllGatherCoalescedHandle:
 
         instrument_w_nvtx(self.allgather_handle.wait)()
 
+        if self.quantization:
+            instrument_w_nvtx(self.quantization.quant_handle.wait)()
+            flat_tensor = self.quantization.backend.dequantize(
+                self.quantization.quantized_param, self.quantization.scale_buffer).to(self.params[0].device)
+
+            self.partitions: List[Parameter] = []
+            for i in range(self.quantization.world_size):
+                self.partitions.append(
+                    flat_tensor.narrow(0, self.quantization.partition_sz * i, self.quantization.partition_sz))
+
         # split the single tensor out into individual tensors
         param_offset = 0
         for param in self.params:
             assert param.ds_status == ZeroParamStatus.INFLIGHT, f"expected param {param.ds_summary()} to be inflight"
             partitions: List[Tensor] = []
+            ds_tensor_numel = param.ds_tensor.ds_numel
+            if self.use_secondary_tensor and not self.forward:
+                ds_tensor_numel *= param.ds_secondary_tensor_num_of_groups
             for rank in range(self.world_size):
-                param_start = rank * param.ds_tensor.ds_numel
+                param_start = rank * ds_tensor_numel
                 if param_start < param.ds_numel:
-                    part_to_copy = self.partitions[rank].narrow(
-                        0, param_offset, min(param.ds_numel - param_start, param.ds_tensor.ds_numel))
+                    part_to_copy = self.partitions[rank].narrow(0, param_offset,
+                                                                min(param.ds_numel - param_start, ds_tensor_numel))
                     partitions.append(part_to_copy)
             param.data = instrument_w_nvtx(torch.cat)(partitions).view(param.ds_shape)
             param.ds_status = ZeroParamStatus.AVAILABLE
@@ -594,9 +617,57 @@ class AllGatherCoalescedHandle:
             for part_to_copy in partitions:
                 part_to_copy.record_stream(get_accelerator().current_stream())
 
-            param_offset += param.ds_tensor.ds_numel
+            param_offset += ds_tensor_numel
 
         self.complete = True
+
+
+class QuantizationInfo:
+    # a placeholder object to store all quant related vars used in handles
+    def __init__(self) -> None:
+        self.quantized_param = None
+        self.backend = None
+        self.quant_handle = None
+        self.scale_buffer = None
+
+
+class CUDAQuantizer:
+    async_flag = True
+    target_group_size = 8000  # the optimal size is 4k, so we set the target to be below 8k
+    group_size_cache = dict()
+
+    def __init__(self):
+        self.quantizer_cuda_module = deepspeed.ops.op_builder.QuantizerBuilder().load()
+
+    def quantize(self, param, groups=None):
+        if groups is None:
+            try:
+                groups = self.group_size_cache[param.numel()]
+            except KeyError:
+                groups = math.ceil(param.numel() / self.target_group_size)
+                while groups < param.numel():
+                    if param.numel() % (8 * groups) == 0:
+                        break
+                    groups += 1
+                while True:
+                    if param.numel() % (8 * groups * 2) == 0 and param.numel(
+                    ) / groups > self.target_group_size:  #hard limit of 16k group_size
+                        groups *= 2
+                    else:
+                        break
+                assert (
+                    param.numel() % (8 * groups) == 0
+                ), f"Qantized weight requires the number of weights be a multiple of 8. Yet {param.numel()} cannot be divided by 8*{groups}"
+                assert (param.numel() / groups < 16000), f"{param.numel()} / {groups} is larger than 16k"
+                assert param.numel(
+                ) > groups, f"Adaptive grouping algorithm cannot find a group size for input tensor of size {param.numel()}"
+                self.group_size_cache[param.numel()] = groups
+        return self.quantizer_cuda_module.quantize(param.to(get_accelerator().device_name()), groups, 8,
+                                                   self.quantizer_cuda_module.Symmetric)
+
+    def dequantize(self, quantized_param, scale):
+        return self.quantizer_cuda_module.dequantize(quantized_param, scale, scale.numel(), 8,
+                                                     self.quantizer_cuda_module.Symmetric)
 
 
 def _no_gather_coalesced(params: Iterable[Parameter]) -> AllGatherCoalescedHandle:
@@ -631,7 +702,9 @@ class Init(InsertPostInitMethodToModuleSubClasses):
                  config=None,
                  enabled=True,
                  dtype=None,
-                 mpu=None):
+                 mpu=None,
+                 zero_param_parallel_group=None,
+                 zero_quantized_weights=False):
         """A context to enable massive model construction for training with
         ZeRO-3. Models are automatically partitioned (or, sharded) across the
         system and converted to half precision.
@@ -660,6 +733,8 @@ class Init(InsertPostInitMethodToModuleSubClasses):
             dtype (``dtype``, optional): Can be used to change the data type of the parameters.
                 Supported options are ``torch.half`` and ``torch.float``. Defaults to ``None``
             mpu (``object``, optional): A model parallelism unit object that implements get_{model,data}_parallel_{rank,group,world_size}.
+            zero_param_parallel_group(``object``, optional): Parallel (comm) group for dual partitioning of ZeRO params.
+            zero_quantized_weights (bool, optional): If ``True``, turn on quantized weights in all gather weights. Default is ``False``
 
         This context accelerates model initialization and enables models that
         are too large to allocate in their entirety in CPU memory. It has the
@@ -750,17 +825,42 @@ class Init(InsertPostInitMethodToModuleSubClasses):
         self.rank = dist.get_rank(group=self.ds_process_group)
         self.dp_world_size = dist.get_world_size(group=self.ds_process_group)
 
+        self.zero_param_process_group = zero_param_parallel_group
+        if _ds_config is not None and _ds_config.zero_config.zero_hpz_partition_size > 1 and self.zero_param_process_group is None:
+            groups._create_zero_param_parallel_group(_ds_config.zero_config.zero_hpz_partition_size)
+            self.zero_param_process_group = groups._get_zero_param_intra_parallel_group()
+
+        self.num_ranks_in_param_group = self.dp_world_size
+        self.rank_in_group = self.rank
+        self.num_param_groups = 1
+
+        if self.zero_param_process_group is not None:
+            self.num_ranks_in_param_group = groups._get_zero_param_intra_parallel_group_world_size()
+            self.num_param_groups = int(self.dp_world_size / self.num_ranks_in_param_group)
+            self.rank_in_group = groups._get_zero_param_intra_parallel_rank_in_mygroup()
+            print_rank_0(f"hpZeRO group size? {self.num_ranks_in_param_group}", force=True)
+
+            logger.debug(
+                "hpZeRO partition parameter my rank in world {} my rank in group {} ranks in my param partition group: {} "
+                .format(self.rank, self.rank_in_group, groups._get_zero_param_intra_parallel_group_ranks()))
+
         # Local device is the device where the parameters are consumed, must be default device.
         # It is the device where parameters are fully instantiated using allgather
         self.local_device = torch.device(get_accelerator().device_name(os.environ["LOCAL_RANK"]))
         get_accelerator().set_device(self.local_device)
 
-        if _ds_config is not None:
-            self._update_persist_config(_ds_config)
+        self.quantized_weights = zero_quantized_weights
+        if _ds_config is not None and _ds_config.zero_config.zero_quantized_weights and not self.quantized_weights:
+            self.quantized_weights = _ds_config.zero_config.zero_quantized_weights
 
-            if _ds_config.zero_config.offload_param is not None:
-                remote_device = _ds_config.zero_config.offload_param.device
-                pin_memory = _ds_config.zero_config.offload_param.pin_memory
+        self.module = module
+        if (self.quantized_weights):
+            self.quantizer_module = CUDAQuantizer()
+            print_rank_0(f'Using quantizer: {self.quantizer_module.__class__.__name__}', force=True)
+
+        if _ds_config is not None and _ds_config.zero_config.offload_param is not None:
+            remote_device = _ds_config.zero_config.offload_param.device
+            pin_memory = _ds_config.zero_config.offload_param.pin_memory
 
         self._validate_remote_device(remote_device, _ds_config)
 
@@ -875,6 +975,14 @@ class Init(InsertPostInitMethodToModuleSubClasses):
         # The group that the parameter is scattered across.
         param.ds_process_group = self.ds_process_group
 
+        # Stores the secondary partitioned copy of the tensor
+        param.ds_secondary_tensor = None
+
+        #Process group for secondary partition all (group) gather
+        param.ds_zero_param_process_group = self.zero_param_process_group
+        param.ds_secondary_tensor_group_size = self.num_ranks_in_param_group
+        param.ds_secondary_tensor_num_of_groups = self.num_param_groups
+
         # This is set to the Async Param swapper if remote device is nvme
         # else this is set to None
         param.nvme_swapper = self.param_swapper
@@ -890,10 +998,16 @@ class Init(InsertPostInitMethodToModuleSubClasses):
             return self._all_gather(param_list, async_op=async_op, hierarchy=hierarchy)
 
         @instrument_w_nvtx
-        def all_gather_coalesced(params: Iterable[Parameter], safe_mode: bool = False) -> AllGatherCoalescedHandle:
+        def all_gather_coalesced(params: Iterable[Parameter],
+                                 forward: bool,
+                                 safe_mode: bool = False) -> AllGatherCoalescedHandle:
 
             # fetches from nvme if the partition is not available and in nvme
             self._ensure_availability_of_partitioned_params(params)
+
+            quant = self.quantized_weights
+            if self.module is not None and self.module.training is False:
+                quant = False
 
             if self.num_partitions == 1:
                 return _no_gather_coalesced(params)
@@ -903,6 +1017,17 @@ class Init(InsertPostInitMethodToModuleSubClasses):
                     raise RuntimeError(param.ds_summary())
                 param.ds_status = ZeroParamStatus.INFLIGHT
 
+            #use appropriate all gather process group
+            ds_process_group = self.ds_process_group
+            rank_in_group = self.rank
+            world_size = self.dp_world_size
+            use_secondary_tensor = False
+            if self.zero_param_process_group and not forward:
+                ds_process_group = self.zero_param_process_group  #intragroup
+                rank_in_group = self.rank_in_group
+                world_size = self.num_ranks_in_param_group
+
+            #pprint(dir(ds_process_group))
             # ensure that each rank has params in same order. the allgather
             # is done by flattening the parameter list into a single tensor that
             # can be allgathered in a single call - this means that if each rank
@@ -926,41 +1051,122 @@ class Init(InsertPostInitMethodToModuleSubClasses):
             if len(params) == 1:
                 # have an opportunity to avoid some intermediate memory allocations
                 param, = params
+                buffer_size = math.ceil(param.ds_numel / world_size) * world_size
+                if not forward and param.ds_secondary_tensor is not None:
+                    buffer_size = param.ds_secondary_tensor.shape[0] * world_size  #make sure out is appropriately sized
+
                 param_buffer = torch.empty(
-                    math.ceil(param.ds_numel / self.num_partitions) * self.num_partitions,
-                    dtype=param.dtype,
-                    device=get_accelerator().current_device_name(),
+                    buffer_size,
+                    dtype=param.dtype if not quant else torch.int8,
+                    device=get_accelerator().current_device(),
                     requires_grad=False,
                 )
-                handle = _dist_allgather_fn(param.ds_tensor.to(get_accelerator().current_device_name()), param_buffer,
-                                            self.get_partition_dp_group(param))
-                param.data = param_buffer.narrow(0, 0, param.ds_numel).view(param.ds_shape).to(param.device)
-                return AllGatherHandle(handle, param)
+                param_ds_tensor = param.ds_secondary_tensor if not forward and param.ds_secondary_tensor is not None else param.ds_tensor
+                if not quant:
+                    handles = _dist_allgather_fn(
+                        param_ds_tensor.to(get_accelerator().current_device()),
+                        param_buffer,
+                        ds_process_group,
+                    )
+                    param.data = param_buffer.narrow(0, 0, param.ds_numel).view(param.ds_shape).to(param.device)
+                    return AllGatherHandle(handles, param)
+                else:
+                    quantized_param, scales = self.quantizer_module.quantize(param_ds_tensor)
+                    handle = _dist_allgather_fn(quantized_param.to(get_accelerator().current_device()), param_buffer,
+                                                ds_process_group)
+
+                    quant_scale_buffer = torch.empty(
+                        scales.numel() * world_size,
+                        dtype=torch.float32,
+                        device=get_accelerator().current_device(),
+                        requires_grad=False,
+                    )
+                    quant_handle = _dist_allgather_fn(scales.to(get_accelerator().current_device()),
+                                                      quant_scale_buffer, ds_process_group)
+                    quant_info = QuantizationInfo()
+
+                    quant_info.quantized_param = param_buffer.narrow(0, 0, param.ds_numel).view(param.ds_shape).to(
+                        param.device)
+                    quant_info.backend = self.quantizer_module
+                    quant_info.quant_handle = quant_handle
+                    quant_info.scale_buffer = quant_scale_buffer
+                    return AllGatherHandle(handle, param, quantization=quant_info)
+
             else:
                 partition_sz = sum(p.ds_tensor.ds_numel for p in params)
-                flat_tensor = torch.empty(partition_sz * self.num_partitions,
-                                          dtype=get_only_unique_item(p.dtype for p in params),
-                                          device=get_accelerator().current_device_name(),
+
+                if params[0].ds_secondary_tensor is not None and not forward:
+                    partition_sz = sum(p.ds_tensor.ds_numel * p.ds_secondary_tensor_num_of_groups for p in params)
+
+                flat_tensor = torch.empty(partition_sz * world_size,
+                                          dtype=get_only_unique_item(p.dtype
+                                                                     for p in params) if not quant else torch.int8,
+                                          device=get_accelerator().current_device(),
                                           requires_grad=False)
-                partitions: List[Parameter] = []
-                for i in range(self.num_partitions):
-                    partitions.append(flat_tensor.narrow(0, partition_sz * i, partition_sz))
+                if not quant:
+                    partitions: List[Parameter] = []
+                    for i in range(world_size):
+                        partitions.append(flat_tensor.narrow(0, partition_sz * i, partition_sz))
 
-                instrument_w_nvtx(torch.cat)([p.ds_tensor.to(get_accelerator().current_device_name()) for p in params],
-                                             out=partitions[self.get_partition_rank()])
-                handle = _dist_allgather_fn(partitions[self.get_partition_rank()], flat_tensor,
-                                            self.get_partition_dp_group(params[0]))
+                    if params[0].ds_secondary_tensor is not None and not forward:
+                        use_secondary_tensor = True
+                        instrument_w_nvtx(torch.cat)(
+                            [p.ds_secondary_tensor.to(get_accelerator().current_device_name()) for p in params],
+                            out=partitions[rank_in_group])
+                    else:
+                        instrument_w_nvtx(
+                            torch.cat)([p.ds_tensor.to(get_accelerator().current_device_name()) for p in params],
+                                       out=partitions[rank_in_group])
+                    handle = _dist_allgather_fn(partitions[rank_in_group], flat_tensor, ds_process_group)
+                    #Fix get_partition_dp_group(params[0]))
 
-                return AllGatherCoalescedHandle(
-                    allgather_handle=handle,
-                    params=params,
-                    partitions=partitions,
-                    world_size=self.num_partitions,
-                )
+                    return AllGatherCoalescedHandle(
+                        allgather_handle=handle,
+                        params=params,
+                        partitions=partitions,
+                        world_size=world_size,
+                        use_secondary_tensor=use_secondary_tensor,
+                        forward=forward,
+                    )
+                else:
+                    if params[0].ds_secondary_tensor is not None and not forward:
+                        use_secondary_tensor = True
+                        quantized_param, scales = self.quantizer_module.quantize(
+                            instrument_w_nvtx(torch.cat)(
+                                [p.ds_secondary_tensor.to(get_accelerator().current_device()) for p in params]))
+                    else:
+                        quantized_param, scales = self.quantizer_module.quantize(
+                            instrument_w_nvtx(
+                                torch.cat)([p.ds_tensor.to(get_accelerator().current_device()) for p in params]))
+                    handle = _dist_allgather_fn(quantized_param, flat_tensor, ds_process_group)
+                    quant_info = QuantizationInfo()
+                    quant_scale_buffer = torch.empty(
+                        scales.numel() * world_size,
+                        dtype=torch.float32,
+                        device=get_accelerator().current_device(),
+                        requires_grad=False,
+                    )
+                    quant_handle = _dist_allgather_fn(scales, quant_scale_buffer, ds_process_group)
+                    quant_info.quantized_param = flat_tensor
+                    quant_info.backend = self.quantizer_module
+                    quant_info.quant_handle = quant_handle
+                    quant_info.scale_buffer = quant_scale_buffer
+                    quant_info.partition_sz = partition_sz
+                    quant_info.world_size = world_size
+                    return AllGatherCoalescedHandle(
+                        allgather_handle=handle,
+                        params=params,
+                        partitions=None,
+                        world_size=world_size,
+                        use_secondary_tensor=use_secondary_tensor,
+                        forward=forward,
+                        quantization=quant_info,
+                    )
 
-        def partition(param_list=None, hierarchy=0, has_been_updated=False):
+        def partition(param_list=None, backward=False, hierarchy=0, has_been_updated=False):
             cls = param
-            print_rank_0(f"{'--'*hierarchy}----Partitioning param {debug_param2name_id_shape_device(cls)}")
+            print_rank_0(f"{'--'*hierarchy}----Partitioning param {debug_param2name_id_shape_device(cls)}",
+                         force=False)
             if param_list is None:
                 param_list = [cls]
             self._partition(param_list, has_been_updated=has_been_updated)
@@ -1099,22 +1305,21 @@ class Init(InsertPostInitMethodToModuleSubClasses):
 
     def _partition(self, param_list, force=False, has_been_updated=False):
         for param in param_list:
-            #print_rank_0(f"Before Partitioning Param {param.ds_id}")
-            # self._param_status(param)
+            print_rank_0(f"Before Partitioning Param {param.ds_id} pri: {param.ds_tensor}", force=False)
+            if self.zero_param_process_group is not None:
+                self._partition_param_sec(param, has_been_updated=has_been_updated)
             self._partition_param(param, has_been_updated=has_been_updated)
+
             param.ds_status = ZeroParamStatus.NOT_AVAILABLE
             # if param.ds_tensor is not None:
             #    assert id(param.data) == id(param.ds_tensor.data), \
             #    "After the parameters are initially partitioned, make sure we are not recreating the partition."
-            #print_rank_0(f"After Partitioning Param {param.ds_id}")
-            # self._param_status(param)
-
+            #print_rank_0(f"After Partitioning Param {param.ds_id} {param.ds_tensor.size()} {param.ds_tensor}",force=False)
     @instrument_w_nvtx
     def _partition_param(self, param, buffer=None, has_been_updated=False):
         assert param.ds_status is not ZeroParamStatus.INFLIGHT, f" {param} Cannot partition a param in flight"
-
         global reuse_buffers
-        #print_rank_0(f"Param id {param.ds_id} status is {param.ds_status}")
+        print_rank_0(f"Param id {param.ds_id} status is {param.ds_status}", force=False)
         if param.ds_status is ZeroParamStatus.AVAILABLE:
             print_rank_0(f"Partitioning param id {param.ds_id} reuse buffers {reuse_buffers}", force=False)
             # if reuse_buffers and False:
@@ -1128,8 +1333,10 @@ class Init(InsertPostInitMethodToModuleSubClasses):
 
             # if deepspeed.comm.get_rank():
             #    print(f"Releasing {param.data.numel()}")
-            if param.ds_tensor is not None and not has_been_updated:
 
+            if param.ds_tensor is not None and not has_been_updated:  ##param already partitioned
+
+                #print_rank_0(f"Param  {param.ds_id} pri {param.ds_tensor.size()}  loc? {param.ds_tensor.final_location}", force=True)
                 #param.data = param.ds_tensor.data
 
                 see_memory_usage(f'Before partitioning param {param.ds_id} {param.shape}', force=False)
@@ -1140,6 +1347,9 @@ class Init(InsertPostInitMethodToModuleSubClasses):
                 if param.ds_tensor.final_location == OffloadDeviceEnum.nvme:
                     print_rank_0(f"Param {param.ds_id} partition released since it exists in nvme", force=False)
                     param.nvme_swapper.remove_partition_and_release_buffers([param])
+                    print_rank_0(
+                        f"after swap Param {param.ds_id} {param.ds_tensor.shape} partition released since it exists in nvme",
+                        force=False)
 
                 return
 
@@ -1184,6 +1394,7 @@ class Init(InsertPostInitMethodToModuleSubClasses):
                 src_tensor = one_dim_param.narrow(0, start, partition_size)
 
                 param.ds_tensor.copy_(src_tensor)
+
                 #partitioned_tensor = src_tensor.clone().detach().to(self.remote_device)
 
             else:
@@ -1214,6 +1425,59 @@ class Init(InsertPostInitMethodToModuleSubClasses):
                 see_memory_usage(f"ID {param.ds_id} Offloaded to nvme offload and buffers released.", force=False)
 
             print_rank_0(f"ID {param.ds_id} partitioned type {param.dtype} dev {param.device} shape {param.shape}")
+
+    @instrument_w_nvtx
+    def _partition_param_sec(self, param, buffer=None, has_been_updated=False):
+        assert param.ds_status is not ZeroParamStatus.INFLIGHT, f" {param} Cannot partition a param in flight"
+        global reuse_buffers
+        ##support for NVME secondary param offload
+        #print_rank_0(f"SEC Param id {param.ds_id} status is {param.ds_status}", force=True)
+        if param.ds_status is ZeroParamStatus.AVAILABLE:
+            if param.ds_secondary_tensor is not None and not has_been_updated:  ##param already partitioned
+
+                return
+            #check padding
+            tensor_size = self._aligned_size(param)
+            partition_size = tensor_size // self.dp_world_size
+
+            secondary_partition_size = int(tensor_size // self.num_ranks_in_param_group)
+            if param.ds_secondary_tensor is None:
+                final_location = None
+                secondary_partitioned_tensor = torch.empty(secondary_partition_size,
+                                                           dtype=param.dtype,
+                                                           device=self.remote_device)
+
+                if self.pin_memory:
+                    secondary_partitioned_tensor = secondary_partitioned_tensor.pin_memory()
+
+                secondary_partitioned_tensor.requires_grad = False
+                param.ds_secondary_tensor = secondary_partitioned_tensor
+                param.ds_secondary_tensor.ds_numel = secondary_partition_size
+                param.ds_secondary_tensor.status = PartitionedParamStatus.AVAILABLE
+                param.ds_secondary_tensor.final_location = final_location
+
+            #use rank in group for secondary tensor
+            secondary_start = secondary_partition_size * self.rank_in_group
+
+            secondary_end = secondary_start + secondary_partition_size
+
+            one_dim_param = param.contiguous().view(-1)
+            start = partition_size * self.rank
+            end = start + partition_size
+            if start < param.ds_numel and end <= param.ds_numel:
+                if secondary_start < param.ds_numel and secondary_end <= param.ds_numel:
+                    sec_src_tensor = one_dim_param.narrow(0, secondary_start, secondary_partition_size)
+                    param.ds_secondary_tensor.copy_(sec_src_tensor)
+
+            else:
+                if start < param.ds_numel:
+                    elements_to_copy = param.ds_numel - start
+                    elements_to_copy_sec = elements_to_copy * param.ds_secondary_tensor_num_of_groups
+                    param.ds_secondary_tensor.narrow(0, 0, elements_to_copy_sec).copy_(
+                        one_dim_param.narrow(0, secondary_start, elements_to_copy_sec))
+
+            print_rank_0(f"{param.ds_id} partitioned type {param.dtype} dev {param.device} shape {param.shape}",
+                         force=False)
 
     def _param_status(self, param):
         if param.ds_tensor is not None:

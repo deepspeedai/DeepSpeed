@@ -557,6 +557,21 @@ def get_global_rank(group=None, group_rank=0):
     return cdb.get_global_rank(group, group_rank)
 
 
+def get_all_ranks_from_group(group=None):
+    global cdb
+    assert cdb is not None and cdb.is_initialized(
+    ), 'DeepSpeed backend not set, please initialize it using init_process_group()'
+    rank = 0
+    group_ranks = []
+    try:
+        while True:
+            group_ranks.append(cdb.get_global_rank(group, rank))
+            rank += 1
+    except RuntimeError:
+        pass
+    return group_ranks
+
+
 # Main DeepSpeed Comms. public API.
 def init_distributed(dist_backend=None,
                      auto_mpi_discovery=True,

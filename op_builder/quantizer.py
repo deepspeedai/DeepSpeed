@@ -23,6 +23,8 @@ class QuantizerBuilder(CUDAOpBuilder):
             'csrc/quantization/fake_quantizer.cu',
             'csrc/quantization/quantize.cu',
             'csrc/quantization/dequantize.cu',
+            'csrc/quantization/swizzled_quantize.cu',
+            'csrc/quantization/quant_reduce.cu',
         ]
 
     def include_paths(self):

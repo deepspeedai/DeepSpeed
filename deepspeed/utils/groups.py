@@ -26,20 +26,25 @@
 """
 
 from deepspeed import comm as dist
-
 from deepspeed.utils import log_dist
 from deepspeed.utils.exceptions import DeprecatedException
-
+from deepspeed.accelerator import get_accelerator
 # Expert parallel group that the current rank belongs to.
 _EXPERT_PARALLEL_GROUP = {}
 # Expert data parallel group that the current rank belongs to.
 _EXPERT_DATA_PARALLEL_GROUP = {}
 # dist world group needs to be cloned for some cases
 _WORLD_GROUP = None
+# ZeRO parameter  partitioning group that the current rank belongs to.
+_ZERO_PARAM_INTRA_PARALLEL_GROUP = None
 # global object to maintain mpu object if passed by a Megatron client
 mpu = None
 # global object that stores tensor parallel world size for experts
 expert_tensor_parallel_world_size = 1
+# All to All quantized graident communication groups
+_ALL_TO_ALL_GROUP = {}
+
+_DATA_PARALLEL_GROUP = None
 
 
 # Deprecated groups initialize function.
@@ -316,10 +321,38 @@ def _clone_world_group():
     return _WORLD_GROUP
 
 
+def _get_local_all_to_all_group():
+    assert dist.is_initialized(), 'dist is not initialized'
+    global _ALL_TO_ALL_GROUP
+    device_per_node = get_accelerator().device_count()
+    num_local = dist.get_world_size() // device_per_node
+    if num_local == 0 and dist.get_world_size() > 0:
+        assert dist.get_world_size() >= 1, 'num_gpus must >=1, cannot initialize All-To-All'
+        cur_rank = []
+        for i in range(dist.get_world_size()):
+            cur_rank.append(i)
+        _ALL_TO_ALL_GROUP['local_0'] = dist.new_group(ranks=cur_rank)
+    elif num_local == 1:
+        assert dist.get_world_size(
+        ) == device_per_node, 'num_gpus not equal to device per node, cannot initialize All-To-All'
+        _ALL_TO_ALL_GROUP['local_0'] = dist.new_group(ranks=[i for i in range(device_per_node)])
+    else:
+        assert dist.get_world_size() > device_per_node, 'num_nodes<2 cannot initialize All-To-All'
+        for i in range(num_local):
+            local_rank = [j + device_per_node * i for j in range(device_per_node)]
+            _ALL_TO_ALL_GROUP[f"local_{i}"] = dist.new_group(ranks=local_rank)
+
+        for i in range(device_per_node):
+            cur_rank = []
+            for j in range(num_local):
+                cur_rank.append(i + j * device_per_node)
+            _ALL_TO_ALL_GROUP[f"global_{i}"] = dist.new_group(ranks=cur_rank)
+    return _ALL_TO_ALL_GROUP
+
+
 def _get_data_parallel_group():
     """Get the data parallel group the caller rank belongs to."""
-    assert dist.is_initialized(), \
-        'dist is not initialized'
+    assert dist.is_initialized(), 'dist is not initialized'
     global mpu
     if mpu is not None:
         return mpu.get_data_parallel_group()
@@ -390,3 +423,63 @@ def _get_data_parallel_rank():
 def _get_expert_model_parallel_world_size():
     global expert_tensor_parallel_world_size
     return expert_tensor_parallel_world_size
+
+
+def _create_zero_param_parallel_group(group_size):
+    """
+        Create parameter partitioning group within ZeRO data parallel groups.
+
+        Example - ZP + D parallel
+        world_size = 16
+        zero_hpz_partition_size = 2 # number of ranks with with replicated params (dual partitioning)
+        zero_param_intra_parallel_group = [0, 1], [2,3], [4,5], [6,7], [8,9] - segmented (subgroup) with rep partition
+        data_parallel_group = [0,1,...,15] - all reduce is on ZeRO model
+    """
+    assert dist.is_initialized()
+    global _ZERO_PARAM_INTRA_PARALLEL_GROUP
+    # Only create group if it does not already exist
+    assert _ZERO_PARAM_INTRA_PARALLEL_GROUP is None, \
+        'ZeRO parameter intra parallel group is already initialized'
+
+    world_size = dist.get_world_size()
+    rank = dist.get_rank()
+
+    zero_param_parallel_size_ = min(group_size, world_size)
+    _ensure_divisibility(world_size, zero_param_parallel_size_)
+
+    # Build the ZeRO param intra parallel groups.
+    for i in range(world_size // zero_param_parallel_size_):
+        ranks = range(i * zero_param_parallel_size_, (i + 1) * zero_param_parallel_size_)
+        group = dist.new_group(ranks)
+        if i == (rank // zero_param_parallel_size_):
+            _ZERO_PARAM_INTRA_PARALLEL_GROUP = group
+
+
+def _get_zero_param_intra_parallel_group():
+    """Get the ZeRO parameter partitioning intra parallel group the caller rank belongs to."""
+    #assert _ZERO_PARAM_INTRA_PARALLEL_GROUP is not None, \
+    #    'ZeRO parameter partitioning group is not initialized'
+    #TODO: Add warning
+    return _ZERO_PARAM_INTRA_PARALLEL_GROUP
+
+
+def _zero_param_parallel_is_initialized():
+    """Check if ZeRO data parallel with parameter partititioning groups are initialized."""
+    ###TODO: assert that MPU is not set
+    if _ZERO_PARAM_INTRA_PARALLEL_GROUP is None and _DATA_PARALLEL_GROUP is None:
+        return False
+
+
+def _get_zero_param_intra_parallel_rank_in_mygroup():
+    """Return my rank for the ZeRO parameter inter parallel group."""
+    return dist.get_rank(group=_get_zero_param_intra_parallel_group())
+
+
+def _get_zero_param_intra_parallel_group_world_size():
+    """Return world size for the ZeRO parameter parallel group."""
+    return dist.get_world_size(group=_get_zero_param_intra_parallel_group())
+
+
+def _get_zero_param_intra_parallel_group_ranks():
+    """Return all ranks for the ZeRO parameter intra parallel group."""
+    return dist.get_all_ranks_from_group(group=_get_zero_param_intra_parallel_group())

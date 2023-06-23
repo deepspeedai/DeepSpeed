@@ -35,6 +35,9 @@ ZeRO optimization should be enabled as:
     "offload_optimizer": {...},
     "ignore_unused_parameters": [true|false],
     "round_robin_gradients": [true|false],
+    "zero_hpz_partition_size": 1,
+    "zero_quantized_weights": [true|false],
+    "zero_quantized_gradients": [true|false],
     "memory_efficient_linear": [true|false]
     }
 }
@@ -247,6 +250,20 @@ class DeepSpeedZeroConfig(DeepSpeedConfigModel):
     copying to CPU memory among ranks by fine-grained gradient partitioning.
     Performance benefit grows with gradient accumulation steps (more copying
     between optimizer steps) or GPU count (increased parallelism).
+    """
+    zero_hpz_partition_size: int = Field(1, ge=0)
+    """
+    Number of ranks in zero parameters partitioning secondary group
+    """
+    zero_quantized_weights: bool = False
+    """
+    Boolean indicating whether to quantized zero parameters (weights)
+    for efficient all_gather comm
+    """
+    zero_quantized_gradients: bool = False
+    """
+    Boolean indicating whether to use quantized zero gradients
+    for efficient all_2_all_reduce comm
     """
 
     mics_shard_size: int = Field(-1, new_param="mics_shard_size")
