@@ -683,14 +683,14 @@ void launch_transform4d_0213<float>(float* out,
 }
 
 template <typename T>
-void launch_transform4d_0213<T>(T* out,
-                                const T* in,
-                                int batch_size,
-                                int heads,
-                                int seq_length,
-                                int hidden_dim,
-                                cudaStream_t stream,
-                                int trans_count)
+void launch_transform4d_0213(T* out,
+                             const T* in,
+                             int batch_size,
+                             int heads,
+                             int seq_length,
+                             int hidden_dim,
+                             cudaStream_t stream,
+                             int trans_count)
 {
     hidden_dim >>= 3;
     int head_ext = (hidden_dim - 1) / MAX_THREADS + 1;
