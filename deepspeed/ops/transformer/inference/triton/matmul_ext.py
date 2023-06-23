@@ -10,12 +10,15 @@ from filelock import FileLock
 import deepspeed.ops.transformer.inference.triton.triton_matmul_kernel as triton_matmul_kernel
 import pickle
 from io import open
+import deepspeed
+from pathlib import Path
+import atexit
 
 
 # -----------------------------------------------------------------------------
 # util class/functions for triton
 def _default_cache_dir():
-    return os.path.join(os.environ["HOME"], ".triton", "autotune")
+    return os.path.join(Path.home(), ".triton", "autotune")
 
 
 def bias_add_activation(C, bias=None, activation=""):
@@ -421,16 +424,21 @@ class Fp16Matmul(TritonMatmul):
 
 # -----------------------------------------------------------------------------
 # mapping
-matmul = MatmulExt.forward
-fp16_matmul = Fp16Matmul()
-matmul_4d = fp16_matmul._matmul_4d
-score_4d_matmul = fp16_matmul._score_4d_matmul
-context_4d_matmul = fp16_matmul._context_4d_matmul
-
-#
-import atexit
+if deepspeed.HAS_TRITON:
+    fp16_matmul = Fp16Matmul()
+    matmul = MatmulExt.forward
+    matmul_4d = fp16_matmul._matmul_4d
+    score_4d_matmul = fp16_matmul._score_4d_matmul
+    context_4d_matmul = fp16_matmul._context_4d_matmul
+else:
+    fp16_matmul = None
+    matmul = None
+    matmul_4d = None
+    score_4d_matmul = None
+    context_4d_matmul = None
 
 
 @atexit.register
 def matmul_ext_update_autotune_table():
-    fp16_matmul._update_autotune_table()
+    if deepspeed.HAS_TRITON:
+        fp16_matmul._update_autotune_table()
