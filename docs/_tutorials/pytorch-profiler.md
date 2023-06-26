@@ -5,7 +5,7 @@ tags: profiling performance-tuning
 
 This tutorial describes how to use [PyTorch Profiler](https://pytorch.org/blog/introducing-pytorch-profiler-the-new-and-improved-performance-tool/) with DeepSpeed.
 
-PyTorch Profiler is an open-source tool that enables accurate and efficient performance analysis and troubleshooting for large-scale deep learning models.  The profiling results can be outputted as a `.json` trace file and viewed in Google Chrome's trace viewer (chrome://tracing).
+PyTorch Profiler is an open-source tool that enables accurate and efficient performance analysis and troubleshooting for large-scale deep learning models.  The profiling results can be outputted as a `.json` trace file and viewed in Google's Perfetto trace viewer (https://ui.perfetto.dev).
 Microsoft Visual Studio Code's Python extension integrates TensorBoard into the code editor, including the support for the PyTorch Profiler.
 
 For more details, refer to [PYTORCH PROFILER](https://pytorch.org/tutorials/recipes/recipes/profiler_recipe.html#pytorch-profiler).
