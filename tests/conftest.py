@@ -39,14 +39,6 @@ def validate_version(expected, found):
     return found == expected
 
 
-# This fixture prevents hangs when 2+ pytest processes try to compile the same
-# code at once and causes deadlocks / hangs
-@pytest.fixture(scope="session", autouse=True)
-def set_torch_ext_dir(worker_id):
-    torch_ext_dir = os.environ["TORCH_EXTENSIONS_DIR"]
-    os.environ["TORCH_EXTENSIONS_DIR"] = os.path.join(torch_ext_dir, worker_id)
-
-
 @pytest.fixture(scope="session", autouse=True)
 def check_environment(pytestconfig):
     expected_torch_version = pytestconfig.getoption("torch_ver")
