@@ -195,6 +195,9 @@ def initialize(args=None,
                                 config=config,
                                 config_class=config_class)
 
+    # Restore zero.Init context if necessary
+    zero.partition_parameters.restore_init_context()
+
     return_items = [engine, engine.optimizer, engine.training_dataloader, engine.lr_scheduler]
     return tuple(return_items)
 
