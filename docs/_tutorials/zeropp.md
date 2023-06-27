@@ -36,7 +36,7 @@ An example snippet of deepspeed configurations with all three ZeRO++ optimizatio
     "zero_optimization": {
         "stage": 3,
         "reduce_bucket_size": 10000000,
-        "reduce_scatter": false,
+        "reduce_scatter": true,
 
         "zero_quantized_weights": true,
         "zero_hpz_partition_size": 16,
