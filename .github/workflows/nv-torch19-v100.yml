@@ -1,10 +1,6 @@
 name: nv-torch19-v100
 
 on:
-  pull_request:
-    paths-ignore:
-      - 'docs/**'
-      - 'blogs/**'
   schedule:
     - cron: "0 0 * * *"
 
