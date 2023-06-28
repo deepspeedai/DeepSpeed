@@ -67,7 +67,7 @@ repos:
     rev: 4.0.1
     hooks:
     -   id: flake8
-        args: ['--ignore=E,F403,F405,F541,F841,W', '--select=E9,F,W6', '--per-file-ignores=__init__.py:F401']
+        args: ['--config=.flake8']
 
 -   repo: local
     hooks:
