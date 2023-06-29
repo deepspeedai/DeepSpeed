@@ -17,6 +17,7 @@ from deepspeed.runtime.zero.parameter_offload import (DeepSpeedZeRoOffload, is_z
 from deepspeed.runtime.zero.partition_parameters import Init, AllGatherCoalescedHandle, ZeroParamStatus
 from deepspeed.runtime.zero.stage3 import DeepSpeedZeroOptimizer_Stage3
 from deepspeed.utils import instrument_w_nvtx, log_dist
+from deepspeed.accelerator import get_accelerator
 from torch import Tensor
 from torch.nn import Parameter
 
@@ -443,7 +444,7 @@ class MiCS_Optimizer(DeepSpeedZeroOptimizer_Stage3):
 
         if param_repli_size is None or param_repli_size <= 1:
             return
-        if not partitioned_grads_buffers[0].is_cuda:
+        if not get_accelerator().on_accelerator(partitioned_grads_buffers[0]):
             raise RuntimeError("Local sharding has no support for CPU offloading")
 
         if dist.has_all_reduce_coalesced():
