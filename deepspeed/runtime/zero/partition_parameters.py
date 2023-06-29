@@ -1899,13 +1899,15 @@ class GatheredParameters:
         else:
             # single param
             params = [params]
-
         # enable if at least one is zero-param, otherwise a noop
         if not any(is_zero_param(p) for p in params):
             self.enabled = False
             return
 
         self.params = [p for p in params if hasattr(p, "ds_id")]
+        self.params = sorted(
+            set(self.params), key=lambda x: x.ds_id
+        )  # remove the duplicates to prevent racing condition, we must also make sure the order is the same on all ranks otherwise we'll get deadlocks
         self.src_rank = None
         if modifier_rank is not None:
             if self.params[0].ds_process_group == dist.get_world_group():
