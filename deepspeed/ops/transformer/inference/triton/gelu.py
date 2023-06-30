@@ -6,6 +6,7 @@
 import torch
 import triton
 import triton.language as tl
+from deepspeed.accelerator import get_accelerator
 
 
 @triton.jit
@@ -28,7 +29,7 @@ def gelu_kernel(x_ptr, output_ptr, n_elements, BLOCK_SIZE: tl.constexpr):
 
 def gelu(activations: torch.Tensor) -> torch.Tensor:
     assert activations.is_contiguous()
-    assert activations.is_cuda
+    assert get_accelerator().on_accelerator(activations)
 
     output = torch.empty_like(activations)
     n_elements = output.numel()

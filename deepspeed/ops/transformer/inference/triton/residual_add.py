@@ -6,6 +6,7 @@
 import torch
 import triton
 import triton.language as tl
+from deepspeed.accelerator import get_accelerator
 
 
 @triton.jit
@@ -57,8 +58,11 @@ def residual_add_bias(hidden_state: torch.Tensor, residual: torch.Tensor, attn_o
                       attn_bias: torch.Tensor, final_bias: torch.Tensor, mp_size: int, mlp_after_attn: bool,
                       add_attn_bias: bool, pre_attn_norm: bool):
     # check that all tensors are on the same device
-    assert hidden_state.is_cuda and residual.is_cuda and attn_output.is_cuda \
-        and attn_bias.is_cuda and final_bias.is_cuda
+    assert get_accelerator().on_accelerator(hidden_state) \
+        and get_accelerator().on_accelerator(residual) \
+        and get_accelerator().on_accelerator(attn_output) \
+        and get_accelerator().on_accelerator(attn_bias) \
+        and get_accelerator().on_accelerator(final_bias)
 
     # check that all tensors have the same dtype
     assert hidden_state.dtype == residual.dtype == attn_output.dtype \
