@@ -915,7 +915,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
             rank_and_offsets = []
             real_dp_process_group = []
             curr_size = 0
-            prev_id = -1
+            prev_id, prev_process_group = -1, None
 
             process_group = self.dp_process_group
             # count = 0
@@ -958,14 +958,14 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
                         numel = partition_ids_w_offsets[idx + 1][1] - offset
 
                     # Merge bucket ranges if they belong to the same rank
-                    if partition_id == prev_id:
+                    if partition_id == prev_id and process_group == prev_process_group:
                         prev_pid, prev_size, prev_numel = rank_and_offsets[-1]
                         rank_and_offsets[-1] = (prev_pid, prev_size, prev_numel + numel)
                     else:
                         rank_and_offsets.append((partition_id, curr_size, numel))
                         real_dp_process_group.append(process_group)
                     curr_size += numel
-                    prev_id = partition_id
+                    prev_id, prev_process_group = partition_id, process_group
 
             if not self.ipg_bucket_has_moe_params:
                 tensor.div_(dist.get_world_size(group=self.dp_process_group))
