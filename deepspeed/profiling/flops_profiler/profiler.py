@@ -593,7 +593,7 @@ def _conv_trans_flops_compute(
 ):
     batch_size = input.shape[0]
     in_channels = input.shape[1]
-    out_channels = weight.shape[0]
+    out_channels = weight.shape[1]
     kernel_dims = list(weight.shape[2:])
     input_dims = list(input.shape[2:])
 
