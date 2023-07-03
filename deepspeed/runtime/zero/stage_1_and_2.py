@@ -480,6 +480,11 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
                                             dynamic_loss_args=dynamic_loss_args)
         self.dynamic_loss_scale = self.loss_scaler.dynamic
 
+        if self.dtype != torch.float16:
+            # Only fp16 should use dynamic loss scaling
+            assert self.loss_scaler.cur_scale == 1.0
+            assert not self.dynamic_loss_scale
+
         see_memory_usage("Before initializing optimizer states", force=True)
         self.initialize_optimizer_states()
         see_memory_usage("After initializing optimizer states", force=True)
@@ -1669,12 +1674,11 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
             self.stop_timers(timer_names)
             return
 
-        # Step 1:- Calculate gradient norm using fp-16 grads
-        if self.dtype == torch.float16:
-            see_memory_usage('Before norm calculation')
-            scaled_global_grad_norm = self.scaled_global_norm()
-            self._global_grad_norm = scaled_global_grad_norm / prev_scale
-            see_memory_usage('After norm before optimizer')
+        # Step 1:- Calculate gradient norm using bit-16 grads
+        see_memory_usage('Before norm calculation')
+        scaled_global_grad_norm = self.scaled_global_norm()
+        self._global_grad_norm = scaled_global_grad_norm / prev_scale
+        see_memory_usage('After norm before optimizer')
 
         # Step 2:- run optimizer and upscaling simultaneously
         for i, group in enumerate(self.bit16_groups):
@@ -1682,8 +1686,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
             partition_id = dist.get_rank(group=self.real_dp_process_group[i])
             if self.cpu_offload:
                 single_grad_partition = self.single_partition_of_fp32_groups[i].grad
-                if self.dtype == torch.float16:
-                    self.unscale_and_clip_grads([single_grad_partition], scaled_global_grad_norm)
+                self.unscale_and_clip_grads([single_grad_partition], scaled_global_grad_norm)
 
                 self.stop_timers([OPTIMIZER_GRADIENTS])
                 self.start_timers([OPTIMIZER_STEP])
@@ -1723,8 +1726,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
 
                 self.averaged_gradients[i] = None
 
-                if self.dtype == torch.float16:
-                    self.unscale_and_clip_grads([single_grad_partition], scaled_global_grad_norm)
+                self.unscale_and_clip_grads([single_grad_partition], scaled_global_grad_norm)
 
                 self.stop_timers([OPTIMIZER_GRADIENTS])
 
