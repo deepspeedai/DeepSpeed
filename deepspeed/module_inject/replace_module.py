@@ -426,38 +426,14 @@ def replace_transformer_layer(orig_layer_impl, model, checkpoint_dict, config, m
         def update_mp_params(child):
             if getattr(child, "replaced", False) == True:
                 return
-            if hasattr(child, 'n_heads'):
-                assert child.n_heads % mp_size == 0, "n_heads ({}) must be divisible by mp_size ({})".format(
-                    child.n_heads, mp_size)
-                child.n_heads = child.n_heads // mp_size
-            if hasattr(child, 'inner_dim'):
-                assert child.inner_dim % mp_size == 0, "inner_dim ({}) must be divisible by mp_size ({})".format(
-                    child.inner_dim, mp_size)
-                child.inner_dim = child.inner_dim // mp_size
-            if hasattr(child, 'num_heads'):
-                assert child.num_heads % mp_size == 0, "num_heads ({}) must be divisible by mp_size ({})".format(
-                    child.num_heads, mp_size)
-                child.num_heads = child.num_heads // mp_size
-            if hasattr(child, 'num_attention_heads'):
-                assert child.num_attention_heads % mp_size == 0, "num_attention_heads ({}) must be divisible by mp_size ({})".format(
-                    child.num_attention_heads, mp_size)
-                child.num_attention_heads = child.num_attention_heads // mp_size
-            if hasattr(child, 'num_attn_heads'):
-                assert child.num_attn_heads % mp_size == 0, "num_attn_heads ({}) must be divisible by mp_size ({})".format(
-                    child.num_attn_heads, mp_size)
-                child.num_attn_heads = child.num_attn_heads // mp_size
-            if hasattr(child, 'all_head_size'):
-                assert child.all_head_size % mp_size == 0, "all_head_size ({}) must be divisible by mp_size ({})".format(
-                    child.all_head_size, mp_size)
-                child.all_head_size = child.all_head_size // mp_size
-            if hasattr(child, 'embed_dim'):
-                assert child.embed_dim % mp_size == 0, "embed_dim must ({}) be divisible by mp_size ({})".format(
-                    child.embed_dim, mp_size)
-                child.embed_dim = child.embed_dim // mp_size
-            if hasattr(child, 'hidden_size'):
-                assert child.hidden_size % mp_size == 0, "hidden_size ({}) must be divisible by mp_size ({})".format(
-                    child.hidden_size, mp_size)
-                child.hidden_size = child.hidden_size // mp_size
+            for param in [
+                    "n_heads", "inner_dim", "num_heads", "num_kv", "num_attention_heads", "num_attn_heads",
+                    "all_head_size", "embed_dim", "hidden_size"
+            ]:
+                if hasattr(child, param):
+                    param_val = getattr(child, param)
+                    assert param_val % mp_size == 0, f"{param} ({param_val}) must be divisible by mp_size ({mp_size})"
+                    setattr(child, param, param_val // mp_size)
             setattr(child, "replaced", True)
 
         conv_linear_layer = False
@@ -495,6 +471,16 @@ def replace_transformer_layer(orig_layer_impl, model, checkpoint_dict, config, m
                 if child.__class__ in linear_policies:
                     setattr(r_module, name, linear_policies[child.__class__](child, prev_name + '.' + name,
                                                                              conv_linear_layer))
+                elif any(isinstance(child, lp) for lp in linear_policies):
+                    # Added for falcon model support
+                    # Note: isinstance will account for class inheritance, child.__class__ does not
+                    key = None
+                    for lp in linear_policies:
+                        if isinstance(child, lp):
+                            key = lp
+                            break
+                    assert key is not None
+                    setattr(r_module, name, linear_policies[key](child, prev_name + '.' + name, conv_linear_layer))
                 else:
                     update_mp_params(child)
                     _replace_module(child, name, class_name)

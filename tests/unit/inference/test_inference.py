@@ -13,7 +13,7 @@ from deepspeed.git_version_info import torch_info
 from unit.common import DistributedTest
 from packaging import version as pkg_version
 from deepspeed.ops.op_builder import OpBuilder
-from transformers import pipeline
+from transformers import pipeline, AutoTokenizer
 from transformers.models.t5.modeling_t5 import T5Block
 from transformers.models.roberta.modeling_roberta import RobertaLayer
 from huggingface_hub import HfApi
@@ -378,6 +378,46 @@ class TestMPSize(DistributedTest):
         print(local_rank, "baseline", bs_output)
         print(local_rank, "deepspeed", ds_output)
         assert assert_fn(bs_output, ds_output)
+
+
+@pytest.mark.seq_inference
+@pytest.mark.parametrize("model_w_task", [("tiiuae/falcon-7b", "text-generation")], ids=["falcon"])
+class TestAutoTP(DistributedTest):
+    world_size = 1
+
+    def test(
+        self,
+        model_w_task,
+        query,
+        inf_kwargs,
+        assert_fn,
+    ):
+        # TODO: enable this test for H100 tests
+        pytest.skip("Not enough GPU memory for this on V100 runners")
+        model, task = model_w_task
+        dtype = torch.bfloat16
+        local_rank = int(os.getenv("LOCAL_RANK", "0"))
+
+        # We have to load these large models on CPU with pipeline because not
+        # enough GPU memory
+        tokenizer = AutoTokenizer.from_pretrained(model, use_fast=True)
+        pipe = pipeline(task,
+                        model=model,
+                        tokenizer=tokenizer,
+                        torch_dtype=dtype,
+                        trust_remote_code=True,
+                        device=torch.device("cpu"),
+                        framework="pt")
+        #bs_output = pipe(query, **inf_kwargs)
+
+        pipe.model = deepspeed.init_inference(pipe.model, mp_size=self.world_size, replace_with_kernel_inject=False)
+        # Switch device to GPU so that input tensors are not on CPU
+        pipe.device = torch.device(get_accelerator().device_name(local_rank))
+        ds_output = pipe(query, **inf_kwargs)
+
+        #print(local_rank, "baseline", bs_output)
+        print(local_rank, "deepspeed", ds_output)
+        #assert assert_fn(bs_output, ds_output)
 
 
 @pytest.mark.seq_inference
