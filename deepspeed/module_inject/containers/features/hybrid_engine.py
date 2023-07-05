@@ -55,6 +55,29 @@ class HybridEngineContainer(ABC):
         """
         raise NotImplementedError("A set_lora_params() function must be defined for the relevant parameters.")
 
+    @abstractmethod
+    def get_lora_matched_pair(self):
+        """Get the pair of lora params and its matched model parameters."""
+        raise NotImplementedError("get_lora_matched_pair() must be defined for the relevant parameters.")
+
+    def fuse_lora(self):
+        """Fuse the LoRA parameters for the inference mode."""
+        for maybe_lora_param, param in self.get_lora_matched_pair():
+            if len(maybe_lora_param) == 3:
+                lora_right_weight, \
+                lora_left_weight, \
+                lora_scaling = maybe_lora_param
+                param.data += lora_scaling * torch.matmul(lora_left_weight.t(), lora_right_weight.t())
+
+    def unfuse_lora(self):
+        """Unfuse the LoRA parameters for the training mode."""
+        for maybe_lora_param, param in self.get_lora_matched_pair():
+            if len(maybe_lora_param) == 3:
+                lora_right_weight, \
+                lora_left_weight, \
+                lora_scaling = maybe_lora_param
+                param.data -= lora_scaling * torch.matmul(lora_left_weight.t(), lora_right_weight.t())
+
     def apply_tensor_parallelism(self, mp_replace, reversed_dim=False):
         """
         Add support for reversed dim in tensor parallelism. If necessary, override

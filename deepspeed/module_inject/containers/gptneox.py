@@ -34,6 +34,14 @@ class DS_GPTNEOXContainer(MetaTensorContainer, HybridMegatronContainer, BaseTran
 
         return self.module
 
+    def get_lora_matched_pair(self):
+        """
+        Necessary to implement for `HybridEngineContainer`
+        """
+        fc1_lora, fc2_lora, qkv_lora, out_lora = self.get_lora_params()
+        ret = [(fc1_lora, self._h4h_w), (fc2_lora, self._4hh_w), (qkv_lora, self.qkvw), (out_lora, self.dense_w)]
+        return ret
+
     def set_lora_params(self):
         """
         Necessary to implement for `HybridEngineContainer`

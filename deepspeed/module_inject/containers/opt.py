@@ -55,6 +55,12 @@ class DS_OPTContainer(MetaTensorContainer, HybridSplitQKVContainer, BaseTransfor
         self.vw = self.policy.client_module.self_attn.v_proj.weight
         self.vb = self.policy.client_module.self_attn.v_proj.bias
 
+    def get_lora_matched_pair(self):
+        fc1_lora, fc2_lora, q_lora, k_lora, v_lora, out_lora = self.get_lora_params()
+        ret = [(fc1_lora, self._h4h_w), (fc2_lora, self._4hh_w), (out_lora, self.dense_w), (q_lora, self.qw),
+               (k_lora, self.kw), (v_lora, self.vw)]
+        return ret
+
     def load_params(self, module, sd, weight_quantizer, mp_replace, prefix):
         param_names = (
             'self_attn.q_proj.weight', \

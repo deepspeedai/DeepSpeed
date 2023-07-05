@@ -2303,7 +2303,10 @@ class DeepSpeedEngine(Module):
                 expert_grads[key] = []
 
         for param_name, param in self.module.named_parameters():
-            if param.grad is None and param.requires_grad:
+            if not param.requires_grad:
+                continue
+
+            if param.grad is None:
                 # In cases where there is an imbalance of empty grads across
                 # ranks we must create empty grads, this will ensure that every
                 # rank is reducing the same size. In some cases it may make
