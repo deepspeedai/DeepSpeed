@@ -37,12 +37,10 @@ jobs:
         run: |
           git clone https://github.com/NVIDIA/apex.git
           cd apex
-          # Install 82ee367 specifically before pyproject.toml changes due to incomplete dependencies causing errors.
-          git checkout 82ee367
           CURRENT_VER=$(git rev-parse HEAD)
           INSTALLED_VER=$(cat /blob/apex/.venv_installed_version)
           if [[ "$CURRENT_VER" != "$INSTALLED_VER" ]]; then
-            pip install -v --disable-pip-version-check --no-cache-dir --global-option="--cpp_ext" --global-option="--cuda_ext" --target=/blob/apex/ --upgrade .
+            pip install -v --disable-pip-version-check --no-cache-dir --no-build-isolation --config-settings "--global-option=--cpp_ext" --config-settings "--global-option=--cuda_ext" --target=/blob/apex/ --upgrade .
             git rev-parse HEAD > /blob/apex/.venv_installed_version
           fi
           echo PYTHONPATH=$PYTHONPATH:/blob/apex/ >> $GITHUB_ENV
