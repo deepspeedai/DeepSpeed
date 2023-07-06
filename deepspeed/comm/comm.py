@@ -490,7 +490,7 @@ def all_reduce_coalesced(tensors,
                          prof=False,
                          log_name='all_reduce',
                          debug=get_caller_func()):
-    global cbd
+    global cdb
     return cdb.all_reduce_coalesced(tensors, op, group, async_op)
 
 
