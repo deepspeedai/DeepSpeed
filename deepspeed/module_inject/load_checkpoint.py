@@ -29,9 +29,13 @@ def load_model_with_checkpoint(r_module,
     error_msgs = []
 
     def prefix_check():
-        # if keys start with 'model.', don't skip level 0 prefix
+        # if keys start with 'model.' or 'transformer.', don't skip level 0 prefix
         for key in sd[0].keys():
+            # OPT models
             if re.match("^model[.]", key):
+                return False
+            # BLOOM models
+            if re.match("^transformer[.]", key):
                 return False
         return True
 
