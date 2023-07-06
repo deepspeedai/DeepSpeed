@@ -5,6 +5,8 @@ on:
     paths-ignore:
       - 'docs/**'
       - 'blogs/**'
+  merge_group:
+    branches: [ master ]
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
