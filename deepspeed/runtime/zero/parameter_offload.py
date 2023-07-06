@@ -250,7 +250,10 @@ class DeepSpeedZeRoOffload(object):
         self.__allgather_stream = get_accelerator().Stream() if overlap_comm else get_accelerator().default_stream()
 
         if not hasattr(module, "ds_inflight_param_registry"):
-            module.ds_inflight_param_registry = InflightParamRegistry()
+            module.ds_inflight_param_registry = dict()
+            # we need two registries, one for training and one for eval. They will be used when creating PartitionedParameterCoordinator
+            module.ds_inflight_param_registry[True] = InflightParamRegistry()
+            module.ds_inflight_param_registry[False] = InflightParamRegistry()
         self.__inflight_param_registry = module.ds_inflight_param_registry
 
         self.forward_hooks = []
@@ -279,7 +282,7 @@ class DeepSpeedZeRoOffload(object):
                 max_reuse_distance_in_numel=self._max_reuse_distance_in_numel,
                 max_available_parameters_in_numel=self._max_available_parameters_in_numel,
                 allgather_stream=self.__allgather_stream,
-                inflight_param_registry=self.__inflight_param_registry,
+                inflight_param_registry=self.__inflight_param_registry[training],
                 prefetch_nvme=self.offload_device == OffloadDeviceEnum.nvme,
                 timers=self.timers,
             )
