@@ -12,6 +12,12 @@ def get_caller_func(frame=3):
     return sys._getframe(frame).f_code.co_name
 
 
+def print_rank_0(message):
+    import deepspeed.comm as dist
+    if dist.get_rank() == 0:
+        print(message)
+
+
 # Helper function to pretty-print message sizes
 def convert_size(size_bytes):
     if size_bytes == 0:
@@ -38,7 +44,7 @@ def calc_bw_log(comm_op, size, duration):
         size *= n
         tput = (size / duration)
         busbw = (size / duration) * ((n - 1) / n)
-    elif comm_op == "all_reduce":
+    elif comm_op == "all_reduce" or comm_op == "all_reduce_coalesced":
         tput = (size * 2 / duration)
         busbw = (size / duration) * (2 * (n - 1) / n)
     elif comm_op == "send" or comm_op == "recv" or comm_op == "isend" or comm_op == "irecv" or comm_op == "broadcast" or comm_op == "reduce" or comm_op == "gather" or comm_op == "scatter" or comm_op == "barrier":

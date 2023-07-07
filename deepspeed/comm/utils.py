@@ -68,6 +68,9 @@ def get_tensor_position(func):
     # most colls
     if 'tensor' in sig_params:
         arg = 'tensor'
+    # all_reduce_coalesced coll
+    elif 'tensors' in sig_params:
+        arg = 'tensors'
     # reduce scatter coll
     elif 'input_list' in sig_params:
         arg = 'input_list'
@@ -87,6 +90,8 @@ def get_tensor_kwarg(func, kwargs):
 
     if 'tensor' in func_args:
         arg = func_args['tensor']
+    elif 'tensors' in func_args:
+        arg = func_args['tensors']
     elif 'input_list' in func_args:
         arg = func_args['input_list']
     elif 'input_tensor_list' in func_args:
