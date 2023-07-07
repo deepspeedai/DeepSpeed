@@ -8,12 +8,13 @@ import torch
 import pytest
 import random
 import copy
+import os
 from torch import nn
 from deepspeed import DeepSpeedTransformerLayer, DeepSpeedTransformerConfig
 from deepspeed.accelerator import get_accelerator
 from unit.modeling import BertConfig, BertLayerNorm, BertEncoder as BertEncoderPostln
 from unit.modelingpreln import BertEncoder as BertEncoderPreln
-from unit.common import DistributedTest
+from unit.common import DistributedTest, is_rocm_pytorch
 
 #if not deepspeed.ops.__installed_ops__['transformer']:
 #pytest.skip(
@@ -262,6 +263,9 @@ def run_backward(ds_config, seq_len, atol=1e-2, verbose=False):
                          ]) # yapf: disable
 class TestCUDABackward(DistributedTest):
     world_size = 1
+    if is_rocm_pytorch():
+        #This is to flush denorms in forward pass. Please refer to https://github.com/pytorch/pytorch/blob/main/docs/source/notes/numerical_accuracy.rst#reduced-precision-fp16-and-bf16-gemms-and-convolutions-on-amd-instinct-mi200-devices
+        os.environ['ROCBLAS_INTERNAL_FP16_ALT_IMPL'] = '1'
 
     def test_backward(self, batch_size, hidden_size, seq_len, heads, num_layers, is_preln, use_fp16, atol):
         # Only run fp16 test cases on devices with FP16 capability.

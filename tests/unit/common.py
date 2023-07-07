@@ -27,6 +27,10 @@ DEEPSPEED_UNIT_WORKER_TIMEOUT = 120
 DEEPSPEED_TEST_TIMEOUT = 600
 
 
+def is_rocm_pytorch():
+    return hasattr(torch.version, 'hip') and torch.version.hip is not None
+
+
 def get_xdist_worker_id():
     xdist_worker = os.environ.get('PYTEST_XDIST_WORKER', None)
     if xdist_worker is not None:
@@ -52,8 +56,7 @@ def set_accelerator_visible():
         # CUDA_VISIBLE_DEVICES is not set, discover it using accelerator specific command instead
         import subprocess
         if get_accelerator().device_name() == 'cuda':
-            is_rocm_pytorch = hasattr(torch.version, 'hip') and torch.version.hip is not None
-            if is_rocm_pytorch:
+            if is_rocm_pytorch():
                 rocm_smi = subprocess.check_output(['rocm-smi', '--showid'])
                 gpu_ids = filter(lambda s: 'GPU' in s, rocm_smi.decode('utf-8').strip().split('\n'))
                 num_accelerators = len(list(gpu_ids))
