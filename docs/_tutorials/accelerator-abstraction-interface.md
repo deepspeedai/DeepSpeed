@@ -4,21 +4,23 @@ tags: getting-started
 ---
 
 # Contents
-  * [Introduction](#introduction)
-  * [Write accelerator agnostic models](#write-accelerator-agnostic-models)
-    * [Port accelerator runtime calls](#port-accelerator-runtime-calls)
-    * [Port accelerator device name](#port-accelerator-device-name)
-    * [Tensor operations](#tensor-operations)
-    * [Communication backend](#communication-backend)
-  * [Run DeepSpeed model on different accelerators](#run-deepspeed-model-on-different-accelerators)
-  * [Implement new accelerator extension](#implement-new-accelerator-extension)
+- [Contents](#contents)
+- [Introduction](#introduction)
+- [Write accelerator agnostic models](#write-accelerator-agnostic-models)
+  - [Port accelerator runtime calls](#port-accelerator-runtime-calls)
+  - [Port accelerator device name](#port-accelerator-device-name)
+  - [Tensor operations](#tensor-operations)
+  - [Communication backend](#communication-backend)
+- [Run DeepSpeed model on different accelerators](#run-deepspeed-model-on-different-accelerators)
+- [Run DeepSpeed model on CPU](#run-deepspeed-model-on-cpu)
+- [Implement new accelerator extension](#implement-new-accelerator-extension)
 
 # Introduction
 The DeepSpeed Accelerator Abstraction allows user to run large language model seamlessly on various Deep Learning acceleration hardware with DeepSpeed.   It offers a set of accelerator runtime and accelerator op builder interface which can be implemented for different hardware.  This means user can write large language model code without hardware specific code.  With DeepSpeed Accelerator Abstraction, the same large language model can run on different hardware platform, without the need to rewrite model code.  This makes running large language model on different hardware easier.
 
 This document covers three topics related to DeepSpeed Accelerator Abstraction Interface:
 1. Write accelerator agnostic models using DeepSpeed Accelerator Abstraction Interface.
-2. Run DeepSpeed model on differehnt accelerators.
+2. Run DeepSpeed model on different accelerators.
 3. Implement new accelerator extension for DeepSpeed Accelerator Abstraction Interface.
 
 # Write accelerator agnostic models
@@ -47,7 +49,7 @@ For most `torch.cuda.<interface>(...)` call, we can literally replace `torch.cud
 ```
 torch.empty(weight_shape, dtype=dtype, device=get_accelerator().current_device_name())
 ```
-However, if we wish to get device index as a number, we should call `get_accelertor().current_device()`
+However, if we wish to get device index as a number, we should call `get_accelerator().current_device()`
 ```
 local_rank = get_accelerator().current_device()
 ```
@@ -56,11 +58,11 @@ local_rank = get_accelerator().current_device()
 ## Port accelerator device name
 For CUDA specific device name such as `'cuda'` or `'cuda:0'`, or `'cuda:1'`, we convert them to `get_accelerator().device_name()`, `get_accelerator().device_name(0)`, and `get_accelerator().device_name(1)`.
 
-A device name without index can be used if model need to do specific thing for certain accelerator.  We suggest to make as less as such usage only for situatio can not be resolve other way.
+A device name without index can be used if model need to do specific thing for certain accelerator.  We suggest to make as less as such usage only for situations can not be resolve other way.
 
 ## Tensor operations
 CUDA specific tensor operations needs to be converted according to the following rules:
-- When we convert a torch tensor to accelerator device such as `my_tensor.cuda()`, we use `my_tensor.to(get_accelerator().deivce_name())`
+- When we convert a torch tensor to accelerator device such as `my_tensor.cuda()`, we use `my_tensor.to(get_accelerator().device_name())`
 
 - When we check whether a torch tensor is on accelerator device such as `my_tensor.is_cuda`, we use `get_accelerator().on_accelerator(my_tensor)`
 
@@ -114,7 +116,7 @@ After environment is prepared, we can launch DeepSpeed inference with the follow
 deepspeed --bind_cores_to_rank <deepspeed-model-script>
 ```
 
-This command would launch number of workers equal to number of CPU sockets on the system.  Currently DeepSpeed support running inference model with AutoTP on top of CPU.  The argument `--bind_cores_to_rank` distribute CPU cores on the system evently among workers, to allow each worker running on a dedicated set of CPU cores.
+This command would launch number of workers equal to number of CPU sockets on the system.  Currently DeepSpeed support running inference model with AutoTP on top of CPU.  The argument `--bind_cores_to_rank` distribute CPU cores on the system evenly among workers, to allow each worker running on a dedicated set of CPU cores.
 
 On CPU system, there might be daemon process that periodically activate which would increase variance of each worker.  One practice is leave a couple of cores for daemon process using `--bind-core-list` argument:
 

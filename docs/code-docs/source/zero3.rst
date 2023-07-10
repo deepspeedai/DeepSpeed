@@ -57,7 +57,7 @@ ZeRO Configurations
 All the settings for DeepSpeed ZeRO are set with the `DeepSpeedZeroConfig`_.
 The dictionary provided under the ``zero_optimization`` entry of the main
 DeepSpeed configuration dict will be parsed and validated with this class.
-Sub-configurations for parameter offload and optimzer offload settings are
+Sub-configurations for parameter offload and optimizer offload settings are
 parsed by `DeepSpeedZeroOffloadParamConfig`_ and
 `DeepSpeedZeroOffloadOptimizerConfig`_.
 

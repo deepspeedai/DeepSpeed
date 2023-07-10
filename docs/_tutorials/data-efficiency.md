@@ -85,7 +85,7 @@ And the reference final result is:
 
 ```shell
 For run_cifar.sh:
-13 epoch at time 480.6546013355255s | researved_length 197
+13 epoch at time 480.6546013355255s | reserved_length 197
 iter 5474 | LR [0.0001]| val_acc 97.97000122070312 | layer_token 305784192
 ```
 
