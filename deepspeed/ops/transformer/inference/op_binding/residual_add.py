@@ -37,7 +37,7 @@ class ResidualAddOp(BaseOp):
                 attention_bias: Optional[torch.Tensor] = None,
                 final_bias: Optional[torch.Tensor] = None):
 
-        if self.residual_add_func != None:
+        if self.residual_add_func is not None:
             if final_bias is None:
                 residual = self._vector_add(residual, hidden_state, 1.0 / self.config.mp_size)
             else:

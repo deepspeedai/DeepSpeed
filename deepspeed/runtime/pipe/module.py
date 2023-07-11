@@ -159,7 +159,7 @@ class PipelineModule(nn.Module):
         self.global_rank = dist.get_rank(group=self.world_group)
         self.world_size = dist.get_world_size(group=self.world_group)
         self.local_rank = int(os.environ.get("LOCAL_RANK", None))
-        assert self.local_rank != None
+        assert self.local_rank is not None
 
         if topology:
             self._topo = topology

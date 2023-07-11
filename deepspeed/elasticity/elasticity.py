@@ -148,7 +148,7 @@ def _get_compatible_gpus_v02(micro_batches,
 
         for micro_batch in micro_batches:
             if final_batch_size // current_num_gpus % micro_batch == 0:
-                if candidate_microbatch == None:
+                if candidate_microbatch is None:
                     candidate_microbatch = micro_batch
                 if prefer_larger and candidate_microbatch < micro_batch:
                     candidate_microbatch = micro_batch

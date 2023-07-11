@@ -193,7 +193,7 @@ class DeepSpeedMoEInference(nn.Module):
             specialized_mode = False
             # InferenceSpecializedBuilder is not among DeepSpeed provided builder yet, so we infer by builder name string
             builder = get_accelerator().create_op_builder("InferenceSpecializedBuilder")
-            if builder != None and builder.is_compatible():
+            if builder is not None and builder.is_compatible():
                 inference_module = builder.load()
                 specialized_mode = True
             else:

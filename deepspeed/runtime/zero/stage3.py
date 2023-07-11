@@ -1892,7 +1892,7 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
 
         # warn user about caching allocator flushes
         memory_stats = get_accelerator().memory_stats()
-        alloc_retries = memory_stats["num_alloc_retries"] if memory_stats != None else 0
+        alloc_retries = memory_stats["num_alloc_retries"] if memory_stats is not None else 0
         if alloc_retries > self.n_caching_allocator_flushes:
             if dist.get_rank() == 0:
                 logger.warning(

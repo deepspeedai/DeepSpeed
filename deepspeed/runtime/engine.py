@@ -859,7 +859,7 @@ class DeepSpeedEngine(Module):
         elif self.bfloat16_enabled():
             model_dtype = torch.bfloat16
 
-        if self._config.grad_accum_dtype == None:
+        if self._config.grad_accum_dtype is None:
             if model_dtype == torch.bfloat16 and not self.zero_optimization():
                 grad_accum_dtype = torch.float32
             else:
@@ -968,7 +968,7 @@ class DeepSpeedEngine(Module):
             "variable, it is set by the deepspeed launcher, deepspeed.init_distributed, or the torch's launcher. If using a " \
             "different launcher please ensure LOCAL_RANK is set prior to initializing deepspeed."
 
-        if hasattr(args, 'local_rank') and args.local_rank != None:
+        if hasattr(args, 'local_rank') and args.local_rank is not None:
             assert isinstance(args.local_rank,
                               int), f"args.local_rank of {args.local_rank} is an unknown type {type(args.local_rank)}"
             if args.local_rank >= 0:

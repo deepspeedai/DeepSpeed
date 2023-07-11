@@ -461,12 +461,12 @@ def replace_transformer_layer(orig_layer_impl, model, checkpoint_dict, config, m
                 else:
                     class_name = prev_class_name + '.' + prev_name
                 checking_key = prefix + '.' + class_name + '.' + name + '.' if class_name != "" else prefix + '.' + name + '.'
-                if child.__class__ in [nn.Linear, nn.Embedding, nn.LayerNorm] and state_dict != None:
+                if child.__class__ in [nn.Linear, nn.Embedding, nn.LayerNorm] and state_dict is not None:
                     if any(checking_key in item for item in state_dict):
                         load(child, state_dict, checking_key, mp_group)
                     else:
                         continue
-                if len(child._buffers) != 0 and state_dict != None:
+                if len(child._buffers) != 0 and state_dict is not None:
                     load_buffer(child, state_dict, checking_key)
                 if child.__class__ in linear_policies:
                     setattr(r_module, name, linear_policies[child.__class__](child, prev_name + '.' + name,
@@ -507,7 +507,7 @@ def replace_transformer_layer(orig_layer_impl, model, checkpoint_dict, config, m
 
         return new_module
 
-    if checkpoint_dict != None and not config.replace_with_kernel_inject:
+    if checkpoint_dict is not None and not config.replace_with_kernel_inject:
         # AutoTP shard loading
         checkpoint = checkpoint_dict["checkpoints"]
         pbar = tqdm.tqdm(total=len(checkpoint), desc=f"Loading {len(checkpoint)} checkpoint shards")
@@ -745,7 +745,7 @@ def replace_module(model, orig_class, replace_fn, _replace_policy, checkpoint=No
         A modified ``model``.
     """
     sd = None
-    if checkpoint != None:
+    if checkpoint is not None:
         sd = torch.load(checkpoint, map_location='cpu')
     policy = {}
     if orig_class is not None:
@@ -764,7 +764,7 @@ def replace_module(model, orig_class, replace_fn, _replace_policy, checkpoint=No
         "You can find some samples here: https://github.com/microsoft/DeepSpeed/blob/master/deepspeed/module_inject/replace_policy.py"
 
     replaced_module, _ = _replace_module(model, policy, state_dict=sd)
-    if checkpoint != None:
+    if checkpoint is not None:
         embedding_weight = None
         for n, p in replaced_module.named_parameters():
             if "word_embeddings." in n or "embed_tokens." in n or "wte." in n:
@@ -833,7 +833,7 @@ def _replace_module(model, policies, prefix='', layer_id=0, level_id=0, state_di
             layer_id += 1
         else:
             checking_key = prefix + name + '.'
-            if child.__class__ in load_layers and state_dict != None:
+            if child.__class__ in load_layers and state_dict is not None:
                 if any(checking_key in item for item in state_dict):
                     load(
                         child,
@@ -842,7 +842,7 @@ def _replace_module(model, policies, prefix='', layer_id=0, level_id=0, state_di
                     )
                 else:
                     continue
-            if len(child._buffers) != 0 and state_dict != None:
+            if len(child._buffers) != 0 and state_dict is not None:
                 load_buffer(child, state_dict, checking_key)
             _, layer_id = _replace_module(child,
                                           policies,

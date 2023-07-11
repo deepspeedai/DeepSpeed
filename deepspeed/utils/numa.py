@@ -107,7 +107,7 @@ def get_numactl_cmd(bind_core_list, num_local_procs, local_rank):
                          "Unset KMP_AFFINITY before launching deepspeed.\n\n"
                          "\t$ unset KMP_AFFINITY\n"
                          "\t$ deepspeed <deepspeed command parameters>")
-    if bind_core_list != None:
+    if bind_core_list is not None:
         core_list = parse_range_list(bind_core_list)
         total_cores = len(core_list)
     else:

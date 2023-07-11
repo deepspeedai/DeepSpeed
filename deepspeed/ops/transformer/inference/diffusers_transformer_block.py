@@ -85,7 +85,7 @@ class DeepSpeedDiffusersTransformerBlock(nn.Module):
 
         # In v0.11.0 of diffusers, the kwarg was changed from 'context' to 'encoder_hidden_states'
         # This is so we can support older and newer versions of diffusers
-        if "encoder_hidden_states" in kwargs and kwargs["encoder_hidden_states"] != None:
+        if "encoder_hidden_states" in kwargs and kwargs["encoder_hidden_states"] is not None:
             context = kwargs["encoder_hidden_states"]
 
         out_norm_1 = self.transformer_cuda_module.layer_norm(hidden_states, self.norm1_g, self.norm1_b, self.norm1_eps)

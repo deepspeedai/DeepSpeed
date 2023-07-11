@@ -498,7 +498,7 @@ def main(args=None):
             deepspeed_launch.append(f"--min_elastic_nodes={args.min_elastic_nodes}")
         if args.bind_cores_to_rank:
             deepspeed_launch.append("--bind_cores_to_rank")
-        if args.bind_core_list != None:
+        if args.bind_core_list is not None:
             deepspeed_launch.append(f"--bind_core_list={args.bind_core_list}")
         cmd = deepspeed_launch + [args.user_script] + args.user_args
     else:
