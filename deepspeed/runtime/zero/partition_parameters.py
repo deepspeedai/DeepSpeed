@@ -761,15 +761,6 @@ class Init(InsertPostInitMethodToModuleSubClasses):
             See :meth:`deepspeed.init_distributed` for more information.
 
         .. note::
-            Can also be used as a decorator:
-
-            .. code-block:: python
-
-                @deepspeed.zero.Init()
-                def get_model():
-                    return MyLargeModel()
-
-        .. note::
             Only applicable to training with ZeRO-3.
 
         Examples
