@@ -1,0 +1,5 @@
+# .coveragerc to control coverage.py
+[run]
+parallel = True
+sigterm = True
+source = deepspeed

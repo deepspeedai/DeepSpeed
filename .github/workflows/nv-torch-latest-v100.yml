@@ -26,7 +26,7 @@ jobs:
 
       - name: Install pytorch
         run: |
-          pip install -U --cache-dir /blob/torch_cache torch torchvision --extra-index-url https://download.pytorch.org/whl/cu116
+          pip install -U --cache-dir $TORCH_CACHE torch torchvision --extra-index-url https://download.pytorch.org/whl/cu116
           python -c "import torch; print('torch:', torch.__version__, torch)"
           python -c "import torch; print('CUDA available:', torch.cuda.is_available())"
 
@@ -51,7 +51,12 @@ jobs:
       - name: Unit tests
         run: |
           unset TORCH_CUDA_ARCH_LIST # only jit compile for current arch
-          if [[ -d ./torch-extensions ]]; then rm -rf ./torch-extensions; fi
           cd tests
-          TORCH_EXTENSIONS_DIR=./torch-extensions pytest --forked -n 4 unit/ --torch_ver="2.0" --cuda_ver="11.7"
-          TORCH_EXTENSIONS_DIR=./torch-extensions pytest --forked -m 'sequential' unit/ --torch_ver="2.0" --cuda_ver="11.7"
+          coverage run --concurrency=multiprocessing -m pytest $PYTEST_OPTS --forked -n 4 unit/ --torch_ver="2.0" --cuda_ver="11.7"
+          coverage run --concurrency=multiprocessing -m pytest $PYTEST_OPTS --forked -m 'sequential' unit/ --torch_ver="2.0" --cuda_ver="11.7"
+
+      - name: Coverage report
+        run: |
+          cd tests
+          coverage combine
+          coverage report -m

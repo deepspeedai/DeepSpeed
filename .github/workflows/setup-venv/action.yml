@@ -18,6 +18,16 @@ runs:
         pip install wheel # required after pip>=23.1
         echo PATH=$PATH >> $GITHUB_ENV # Make it so venv is inherited for other steps
       shell: bash
+    - id: set-env-vars
+      run: |
+        echo TEST_DATA_DIR=/blob/ >> $GITHUB_ENV
+        echo TRANSFORMERS_CACHE=/blob/transformers_cache/ >> $GITHUB_ENV
+        echo TORCH_EXTENSIONS_DIR=./torch-extensions/ >> $GITHUB_ENV
+        echo TORCH_CACHE=/blob/torch_cache/ >> $GITHUB_ENV
+        echo HF_DATASETS_CACHE=/blob/datasets_cache/ >> $GITHUB_ENV
+        echo MEGATRON_CKPT_DIR=/blob/megatron_ckpt/ >> $GITHUB_ENV
+        echo PYTEST_OPTS="--color=yes --durations=0 --verbose -rF" >> $GITHUB_ENV
+      shell: bash
     - id: print-env
       run: |
         which python

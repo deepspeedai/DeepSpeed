@@ -26,7 +26,7 @@ jobs:
 
       - name: Install pytorch
         run: |
-          pip install -U --cache-dir /blob/torch_cache torch==1.13.1 torchvision --extra-index-url https://download.pytorch.org/whl/cu116
+          pip install -U --cache-dir $TORCH_CACHE torch==1.13.1 torchvision --extra-index-url https://download.pytorch.org/whl/cu116
           python -c "import torch; print('torch:', torch.__version__, torch)"
           python -c "import torch; print('CUDA available:', torch.cuda.is_available())"
 
@@ -57,6 +57,5 @@ jobs:
           cd Megatron-DeepSpeed
           pip install .
           unset TORCH_CUDA_ARCH_LIST # only jit compile for current arch
-          if [[ -d ./torch-extensions ]]; then rm -rf ./torch-extensions; fi
           cd tests
-          MEGATRON_CKPT_DIR=/blob/megatron_ckpt/ TORCH_EXTENSIONS_DIR=./torch-extensions pytest --color=yes --durations=0 --verbose ./
+          pytest $PYTEST_OPTS ./

@@ -42,6 +42,7 @@ class TestDataLoaderDropLast(DistributedTest):
                                                                 model=model,
                                                                 training_data=train_dataset,
                                                                 optimizer=optimizer)
+        training_dataloader.num_local_io_workers = 0  # We can't do nested mp.pool
         for n, batch in enumerate(training_dataloader):
             x = batch[0].to(get_accelerator().current_device_name())
             y = batch[1].to(get_accelerator().current_device_name())

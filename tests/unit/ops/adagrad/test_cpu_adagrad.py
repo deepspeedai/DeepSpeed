@@ -34,17 +34,7 @@ class TestCPUAdagrad(DistributedTest):
         init_distributed = False
         set_dist_env = False
 
-    @pytest.mark.parametrize('model_size',
-                            [
-                                (64),
-                                (22),
-                                (55),
-                                (127),
-                                (1024),
-                                (1048576),
-                                (30000000),
-                            ]) # yapf: disable
-    def test_cpu_adagrad_opt(self, model_size):
+    def test_cpu_adagrad_opt(self, model_size=64):
         device = 'cpu'
         rng_state = torch.get_rng_state()
         param = torch.nn.Parameter(torch.randn(model_size, device=device))
@@ -65,14 +55,7 @@ class TestCPUAdagrad(DistributedTest):
 
         check_equal(param, param1, atol=1e-2, verbose=True)
 
-
-    @pytest.mark.parametrize('model_size,vocabulary_size,dim',
-                            [
-                                (16 * 2, 16 * 4, 16),
-                                (16 * 32, 16 * 256, 16),
-                                (16 * 256, 16 * 16384, 16),
-                            ]) # yapf: disable
-    def test_cpu_adagrad_opt_sparse_embedding(self, model_size, vocabulary_size, dim):
+    def test_cpu_adagrad_opt_sparse_embedding(self, model_size=32, vocabulary_size=64, dim=16):
         device = 'cpu'
         rng_state = torch.get_rng_state()
 

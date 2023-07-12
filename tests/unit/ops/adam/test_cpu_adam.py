@@ -55,6 +55,7 @@ def _compare_optimizers(model_size, param1, optimizer1, param2, optimizer2):
                          ]) # yapf: disable
 class TestCPUAdam(DistributedTest):
     world_size = 1
+    reuse_dist_env = True
     requires_cuda_env = False
     if not get_accelerator().is_available():
         init_distributed = False

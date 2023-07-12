@@ -26,7 +26,7 @@ jobs:
 
       - name: Install pytorch
         run: |
-          pip install -U --cache-dir /blob/torch_cache torch torchvision --extra-index-url https://download.pytorch.org/whl/cu111
+          pip install -U --cache-dir $TORCH_CACHE torch torchvision --extra-index-url https://download.pytorch.org/whl/cu111
           python -c "import torch; print('torch:', torch.__version__, torch)"
           python -c "import torch; print('CUDA available:', torch.cuda.is_available())"
 
@@ -41,7 +41,7 @@ jobs:
 
       - name: HF Accelerate tests
         run: |
-          if [[ -d ./torch-extensions ]]; then rm -rf ./torch-extensions; fi
+          unset TORCH_CUDA_ARCH_LIST # only jit compile for current arch
           git clone https://github.com/huggingface/accelerate
           cd accelerate
           git rev-parse --short HEAD
@@ -52,4 +52,4 @@ jobs:
           # tmp fix: force newer datasets version
           #pip install "datasets>=2.0.0"
           pip list
-          HF_DATASETS_CACHE=/blob/datasets_cache/ TRANSFORMERS_CACHE=/blob/transformers_cache/ TORCH_EXTENSIONS_DIR=./torch-extensions pytest --color=yes --durations=0 --verbose tests/deepspeed
+          pytest $PYTEST_OPTS --color=yes --durations=0 --verbose tests/deepspeed

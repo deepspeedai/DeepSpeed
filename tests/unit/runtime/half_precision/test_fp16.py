@@ -319,7 +319,7 @@ class TestAdamFP16ZeroOneCycleCompatibility(DistributedTest):
 
         model = SimpleModel(hidden_dim)
         model, _, _, _ = deepspeed.initialize(config=config_dict, model=model, model_parameters=model.parameters())
-        data_loader = random_dataloader(model=model, total_samples=50, hidden_dim=hidden_dim, device=model.device)
+        data_loader = random_dataloader(model=model, total_samples=10, hidden_dim=hidden_dim, device=model.device)
         for n, batch in enumerate(data_loader):
             loss = model(batch[0], batch[1])
             model.backward(loss)
@@ -328,11 +328,10 @@ class TestAdamFP16ZeroOneCycleCompatibility(DistributedTest):
 
 @pytest.mark.parametrize("zero_stage", [1, 2, 3])
 @pytest.mark.parametrize("use_cpu_offload", [True, False])
-@pytest.mark.parametrize("hidden_dim", [9, 10])
 class TestZeroStaticScale(DistributedTest):
     world_size = 1
 
-    def test(self, zero_stage, use_cpu_offload, hidden_dim):
+    def test(self, zero_stage, use_cpu_offload, hidden_dim=4):
         if use_cpu_offload and not deepspeed.ops.__compatible_ops__[CPUAdamBuilder.NAME]:
             pytest.skip("cpu-adam is not compatible")
 

@@ -26,7 +26,7 @@ jobs:
 
       - name: Install pytorch
         run: |
-          pip install -U --cache-dir /blob/torch_cache torch torchvision --extra-index-url https://download.pytorch.org/whl/cu116
+          pip install -U --cache-dir $TORCH_CACHE torch torchvision --extra-index-url https://download.pytorch.org/whl/cu116
           python -c "import torch; print('torch:', torch.__version__, torch)"
           python -c "import torch; print('CUDA available:', torch.cuda.is_available())"
 
@@ -41,8 +41,8 @@ jobs:
 
       - name: PyTorch Lightning Tests
         run: |
-          if [[ -d ./torch-extensions ]]; then rm -rf ./torch-extensions; fi
+          unset TORCH_CUDA_ARCH_LIST # only jit compile for current arch
           pip install pytorch-lightning
           pip install "protobuf<4.21.0"
           cd tests
-          TORCH_EXTENSIONS_DIR=./torch-extensions pytest --color=yes --durations=0 --verbose lightning/
+          pytest $PYTEST_OPTS lightning/

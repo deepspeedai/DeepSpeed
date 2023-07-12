@@ -68,11 +68,15 @@ def run_fragmented_model(model, config_dict, hidden_dim, dtype):
         validate_full_tensors(model)
         model.step()
 
+    # Needed in ZeRO 3. Not doing so can give memory leak
+    model.destroy()
+
 
 @pytest.mark.parametrize('frozen_weights', [True, False])
 class TestTensorFragment(DistributedTest):
     # Need multiple gpus to test possible hanging
     world_size = 2
+    reuse_dist_env = True
 
     @pytest.mark.parametrize('zero_stage', [1, 2, 3])
     @pytest.mark.parametrize('offload_device', [OffloadDeviceEnum.none, OffloadDeviceEnum.cpu, OffloadDeviceEnum.nvme])

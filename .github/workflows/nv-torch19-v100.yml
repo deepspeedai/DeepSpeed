@@ -20,7 +20,7 @@ jobs:
 
       - name: Install pytorch
         run: |
-          pip install -U --cache-dir /blob/torch_cache torch==1.9.0+cu111 torchvision==0.10.0+cu111 -f https://download.pytorch.org/whl/torch_stable.html
+          pip install -U --cache-dir $TORCH_CACHE torch==1.9.0+cu111 torchvision==0.10.0+cu111 -f https://download.pytorch.org/whl/torch_stable.html
           python -c "import torch; print('torch:', torch.__version__, torch)"
           python -c "import torch; print('CUDA available:', torch.cuda.is_available())"
 
@@ -45,7 +45,6 @@ jobs:
       - name: Unit tests
         run: |
           unset TORCH_CUDA_ARCH_LIST # only jit compile for current arch
-          if [[ -d ./torch-extensions ]]; then rm -rf ./torch-extensions; fi
           cd tests
-          TORCH_EXTENSIONS_DIR=./torch-extensions pytest --forked -n 4  unit/ --torch_ver="1.9" --cuda_ver="11"
-          TORCH_EXTENSIONS_DIR=./torch-extensions pytest --forked -m 'sequential' unit/ --torch_ver="1.9" --cuda_ver="11"
+          pytest $PYTEST_OPTS --forked -n 4  unit/ --torch_ver="1.9" --cuda_ver="11"
+          pytest $PYTEST_OPTS --forked -m 'sequential' unit/ --torch_ver="1.9" --cuda_ver="11"

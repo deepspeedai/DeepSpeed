@@ -83,6 +83,7 @@ def _validate_handle_state(handle, single_submit, overlap_events):
 @pytest.mark.parametrize("overlap_events", [True, False])
 class TestRead(DistributedTest):
     world_size = 1
+    reuse_dist_env = True
     requires_cuda_env = False
     if not get_accelerator().is_available():
         init_distributed = False
@@ -148,6 +149,7 @@ class TestRead(DistributedTest):
 @pytest.mark.parametrize("overlap_events", [True, False])
 class TestWrite(DistributedTest):
     world_size = 1
+    reuse_dist_env = True
     requires_cuda_env = False
     if not get_accelerator().is_available():
         init_distributed = False
