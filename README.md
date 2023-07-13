@@ -84,6 +84,7 @@ DeepSpeed has been used to train many different large-scale models, below is a l
   * [Jurassic-1 (178B)](https://uploads-ssl.webflow.com/60fd4503684b466578c0d307/61138924626a6981ee09caf6_jurassic_tech_paper.pdf)
   * [BLOOM (176B)](https://huggingface.co/blog/bloom-megatron-deepspeed)
   * [GLM (130B)](https://github.com/THUDM/GLM-130B)
+  * [xTrimoPGLM (100B)](https://www.biorxiv.org/content/10.1101/2023.07.05.547496v2)
   * [YaLM (100B)](https://github.com/yandex/YaLM-100B)
   * [GPT-NeoX (20B)](https://github.com/EleutherAI/gpt-neox)
   * [AlexaTM (20B)](https://www.amazon.science/blog/20b-parameter-alexa-model-sets-new-marks-in-few-shot-learning)
