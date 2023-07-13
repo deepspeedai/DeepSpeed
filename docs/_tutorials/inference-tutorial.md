@@ -61,7 +61,7 @@ For the models trained using HuggingFace, the model checkpoint can be pre-loaded
 ```json
 "checkpoint.json":
 {
-  "type": "Megatron",
+    "type": "Megatron",
     "version": 0.0,
     "checkpoints": [
         "mp_rank_00/model_optim_rng.pt",
@@ -73,9 +73,9 @@ For models that are trained with DeepSpeed, the checkpoint `json` file only requ
 ```json
 "checkpoint.json":
 {
-  "type": "DeepSpeed",
-    "version": 0.3,
-    "checkpoint_path": "path_to_checkpoints",
+    "type": "ds_model",
+    "version": 0.0,
+    "checkpoints": "path_to_checkpoints",
 }
 ```
 
