@@ -51,7 +51,7 @@ To apply layer reduction for task-agnostic compression, we provide an example on
 
 Step 1: Obtain the latest version of the [Megatron-DeepSpeed](https://github.com/microsoft/Megatron-DeepSpeed).
 
-Step 2: Enter `Megatron-DeepSpeed/examples/compression` directory.
+Step 2: Enter `Megatron-DeepSpeed/examples_deepspeed/compression` directory.
 
 Step 3: Run the example bash script such as `ds_pretrain_gpt_125M_dense_cl_kd.sh`. The args related to the pre-training distillation are:
 
