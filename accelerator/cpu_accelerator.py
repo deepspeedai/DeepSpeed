@@ -40,7 +40,7 @@ class CPU_Accelerator(DeepSpeedAccelerator):
     def device_count(self):
         device_count = int(os.environ.get('LOCAL_SIZE', 0))
         if device_count > 0:
-            return os.environ.get('LOCAL_SIZE')
+            return device_count
         else:
             from deepspeed.utils.numa import get_numa_cores
             # Count NUMA node for number of cpu accelerators. On machine with HBM
