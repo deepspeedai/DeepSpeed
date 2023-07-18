@@ -195,7 +195,7 @@ class TestHybridEngineLoRA(DistributedTest):
         grad_norm_dict = dict()
         for name, param in model.named_parameters():
             if param.requires_grad is True:
-                grad_norm_dict[name] = torch.norm(safe_get_full_grad(param))
+                grad_norm_dict[name] = torch.linalg.norm(safe_get_full_grad(param))
 
         model.step()
         grad_norm = sum([ele.detach().cpu().numpy() for ele in grad_norm_dict.values()])
