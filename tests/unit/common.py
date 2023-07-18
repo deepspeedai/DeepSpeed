@@ -41,11 +41,24 @@ def get_xdist_worker_id():
     return None
 
 
-def get_master_port():
-    # Select a random open port
-    with socket.socket() as s:
-        s.bind(('', 0))
-        return str(s.getsockname()[1])
+def get_master_port(base_port=29500, port_range_size=1000):
+    xdist_worker_id = get_xdist_worker_id()
+    if xdist_worker_id is not None:
+        # Make xdist workers use different port ranges to avoid race conditions
+        base_port += port_range_size * xdist_worker_id
+
+    # Select first open port in range
+    port = base_port
+    max_port = base_port + port_range_size
+    sock = socket.socket()
+    while port < max_port:
+        try:
+            sock.bind(('', port))
+            sock.close()
+            return str(port)
+        except OSError:
+            port += 1
+    raise IOError('no free ports')
 
 
 def set_accelerator_visible():
