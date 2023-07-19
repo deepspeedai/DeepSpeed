@@ -127,6 +127,17 @@ class TestDistAllReduce(DistributedTest):
         assert torch.all(x == result)
 
 
+class TestDistInferenceAllReduce(DistributedTest):
+    world_size = 4
+
+    def test(self):
+        x = torch.ones(1, 3).to(get_accelerator().device_name()) * (dist.get_rank() + 1)
+        sum_of_ranks = (dist.get_world_size() * (dist.get_world_size() + 1)) // 2
+        result = torch.ones(1, 3).to(get_accelerator().device_name()) * sum_of_ranks
+        dist.inference_all_reduce(x)
+        assert torch.all(x == result)
+
+
 @pytest.mark.parametrize("dist_init_required", [True, False, None])
 class TestDistInit(DistributedTest):
     init_distributed = False

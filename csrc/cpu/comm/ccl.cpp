@@ -5,11 +5,258 @@
 
 #include <torch/extension.h>
 
+#include <fcntl.h>
+#include <immintrin.h>
+#include <math.h>
+#include <sys/mman.h>
+#include <sys/stat.h>
+#include <unistd.h>
+#include <atomic>
+#include <cstdlib>
+#include <iostream>
 #include <oneapi/ccl.hpp>
+
+// SHM building blocks
+struct SharedData {
+    const char* name;
+    int descriptor;
+    void* bytes;
+    size_t nbytes;
+};
+
+void shared_open(SharedData* data, const char* name, size_t nbytes)
+{
+    int d = shm_open(name, O_RDWR, S_IRUSR | S_IWUSR);
+    if (d != -1) {
+        void* bytes = mmap(NULL, nbytes, PROT_READ | PROT_WRITE, MAP_SHARED, d, 0);
+        data->name = name;
+        data->descriptor = d;
+        data->bytes = bytes;
+        data->nbytes = nbytes;
+    } else {
+        printf("shared_open %s failed\n", name);
+        data->descriptor = -1;
+    }
+}
+
+void shared_create(SharedData* data, const char* name, void* bytes, size_t nbytes)
+{
+    int d = shm_open(name, O_CREAT | O_RDWR, S_IRUSR | S_IWUSR);
+    if (d != -1) {
+        if (nbytes = write(d, bytes, nbytes)) { shared_open(data, name, nbytes); }
+    } else {
+        printf("shared_create %s failed\n", name);
+    }
+}
+
+void shared_close(SharedData* data)
+{
+    if (data->descriptor != -1) {
+        munmap(data->bytes, data->nbytes);
+        shm_unlink(data->name);
+    }
+}
+
+// SHM based allreduce helper functions
+#define MAX_BUF_SIZE 1048576
+#define SHM_BUFFER_NAME "deepspeed_allreduce_buffer"
+SharedData allreduce_buffer;
+struct allreduce_workspace {
+    int state;
+    char buffer[MAX_BUF_SIZE];
+};
+struct allreduce_workspace* workspace;
+
+void wait_buffer_state_until(int index, int state)
+{
+    volatile int* state_ptr = &(workspace[index].state);
+
+    while (*state_ptr != state)
+        ;
+}
+
+__m512 cvt_bf16_to_fp32(const __m256i src) __attribute__((target("avx512bw")));
+inline __m512 cvt_bf16_to_fp32(const __m256i src)
+{
+    auto y = _mm512_cvtepu16_epi32(src);
+    return _mm512_castsi512_ps(_mm512_bslli_epi128(y, 2));
+}
+
+inline __m256i cvt_fp32_to_bf16(const __m512 src) __attribute__((target("avx512bw")));
+inline __m256i cvt_fp32_to_bf16(const __m512 src)
+{
+    __m512i value = _mm512_castps_si512(src);
+    __m512i nan = _mm512_set1_epi32(0xffff);
+    auto mask_value = _mm512_cmp_ps_mask(src, src, _CMP_ORD_Q);
+    __m512i ones = _mm512_set1_epi32(0x1);
+    __m512i vec_bias = _mm512_set1_epi32(0x7fff);
+    // uint32_t lsb = (input >> 16) & 1;
+    auto t_value = _mm512_and_si512(_mm512_srli_epi32(value, 16), ones);
+    // uint32_t rounding_bias = 0x7fff + lsb;
+    t_value = _mm512_add_epi32(t_value, vec_bias);
+    // input += rounding_bias;
+    t_value = _mm512_add_epi32(t_value, value);
+    // input = input >> 16;
+    t_value = _mm512_srli_epi32(t_value, 16);
+    // Check NaN before converting back to bf16
+    t_value = _mm512_mask_blend_epi32(mask_value, nan, t_value);
+    return _mm512_cvtusepi32_epi16(t_value);
+}
+
+void reduce_2_bf16_buffers(int num_elements, void* in_out, void* in)
+    __attribute__((target("avx512bw")));
+
+void reduce_bf16_buffers(int num_elements, int num_buffers, struct allreduce_workspace* workspace)
+    __attribute__((target("avx512bw")));
+
+void reduce_2_fp32_buffers(int num_elements, void* in_out, void* in)
+    __attribute__((target("avx512bw")));
+
+void reduce_fp32_buffers(int num_elements, int num_buffers, struct allreduce_workspace* workspace)
+    __attribute__((target("avx512bw")));
+
+// N_REDUCE_LIMIT is the number of buffers that can be reduced together in one shot.
+// Compared with do N-1 2-reduces which needs 2*(N-1) read and N-1 write,
+// N-reduce only needs N read and 1 write, this saves 2/3 memory bandwidth.
+// When increase N_REDUCE_LIMIT to a bigger number, do the following steps
+// 1. Extend REPEAT_<X> macros list down below
+// 2. Extend switch cases which call "REPEAT(X, ...)" down below
+#define N_REDUCE_LIMIT 8
+
+void reduce_all_buffers(struct allreduce_workspace* workspace,
+                        int num_elements,
+                        c10::ScalarType scalar_type,
+                        int num_buffers)
+{
+    switch (scalar_type) {
+        case c10::ScalarType::BFloat16:
+            if (num_buffers > 2 && num_buffers <= N_REDUCE_LIMIT) {
+                reduce_bf16_buffers(num_elements, num_buffers, workspace);
+            } else {
+                for (int i = 1; i < num_buffers; i++) {
+                    reduce_2_bf16_buffers(num_elements, workspace[0].buffer, workspace[i].buffer);
+                }
+            }
+            break;
+        case c10::ScalarType::Float:
+            if (num_buffers > 2 && num_buffers <= N_REDUCE_LIMIT) {
+                reduce_fp32_buffers(num_elements, num_buffers, workspace);
+            } else {
+                for (int i = 1; i < num_buffers; i++) {
+                    reduce_2_fp32_buffers(num_elements, workspace[0].buffer, workspace[i].buffer);
+                }
+            }
+            break;
+        default: assert(!"Should not get here");
+    }
+}
+
+#define REPEAT(N, x) REPEAT_##N(x)
+#define REPEAT_1(x) x(1)
+#define REPEAT_2(x) \
+    REPEAT_1(x);    \
+    x(2)
+#define REPEAT_3(x) \
+    REPEAT_2(x);    \
+    x(3)
+#define REPEAT_4(x) \
+    REPEAT_3(x);    \
+    x(4)
+#define REPEAT_5(x) \
+    REPEAT_4(x);    \
+    x(5)
+#define REPEAT_6(x) \
+    REPEAT_5(x);    \
+    x(6)
+#define REPEAT_7(x) \
+    REPEAT_6(x);    \
+    x(7)
+
+#define CVT_ADD_BF16(x)                                                                \
+    do {                                                                               \
+        auto in##x##_val =                                                             \
+            cvt_bf16_to_fp32(_mm256_loadu_si256((__m256i*)(workspace[x].buffer + i))); \
+        inout_val = _mm512_add_ps(inout_val, in##x##_val);                             \
+    } while (0)
+
+// Reduce functions down below use vectorized algorithm, the number of bytes processed each
+// iteration depends on vector length.  256bit vector ==> 32 bytes, 512bit vector ==> 64 bytes
+// If you change implementation of reduce_2_bf16_buffers or reduce_2_fp32_buffers, check
+// whether this number needs to be changed
+#define VECTOR_LENGTH_IN_BYTES 32
+
+// num_elements must be divisible by 16 (caller check)
+void reduce_bf16_buffers(int num_elements, int num_buffers, struct allreduce_workspace* workspace)
+{
+    for (int i = 0; i < num_elements * 2; i += VECTOR_LENGTH_IN_BYTES) {
+        auto inout_val = cvt_bf16_to_fp32(_mm256_loadu_si256((__m256i*)(workspace[0].buffer + i)));
+        switch (num_buffers) {
+            case 8: REPEAT(7, CVT_ADD_BF16); break;
+            case 7: REPEAT(6, CVT_ADD_BF16); break;
+            case 6: REPEAT(5, CVT_ADD_BF16); break;
+            case 5: REPEAT(4, CVT_ADD_BF16); break;
+            case 4: REPEAT(3, CVT_ADD_BF16); break;
+            case 3: REPEAT(2, CVT_ADD_BF16); break;
+            default: assert(!"Should not get here.");
+        }
+        _mm256_storeu_si256((__m256i*)(workspace[0].buffer + i), cvt_fp32_to_bf16(inout_val));
+    }
+}
+
+void reduce_2_bf16_buffers(int num_elements, void* in_out, void* in1)
+{
+    for (int i = 0; i < num_elements * 2; i += VECTOR_LENGTH_IN_BYTES) {
+        auto inout_val = cvt_bf16_to_fp32(_mm256_loadu_si256((__m256i*)((char*)in_out + i)));
+        auto in1_val = cvt_bf16_to_fp32(_mm256_loadu_si256((__m256i*)((char*)in1 + i)));
+        inout_val = _mm512_add_ps(inout_val, in1_val);
+        _mm256_storeu_si256((__m256i*)((char*)in_out + i), cvt_fp32_to_bf16(inout_val));
+    }
+}
+
+#define CVT_ADD_F32(x)                                                         \
+    do {                                                                       \
+        auto in##x##_val = _mm256_loadu_ps((float*)(workspace[x].buffer + i)); \
+        inout_val = _mm256_add_ps(inout_val, in##x##_val);                     \
+    } while (0)
+
+// num_elements must be divisible by 16 (caller check)
+void reduce_fp32_buffers(int num_elements, int num_buffers, struct allreduce_workspace* workspace)
+{
+    for (int i = 0; i < num_elements * 4; i += VECTOR_LENGTH_IN_BYTES) {
+        auto inout_val = _mm256_loadu_ps((float*)(workspace[0].buffer + i));
+        switch (num_buffers) {
+            case 8: REPEAT(7, CVT_ADD_F32); break;
+            case 7: REPEAT(6, CVT_ADD_F32); break;
+            case 6: REPEAT(5, CVT_ADD_F32); break;
+            case 5: REPEAT(4, CVT_ADD_F32); break;
+            case 4: REPEAT(3, CVT_ADD_F32); break;
+            case 3: REPEAT(2, CVT_ADD_F32); break;
+            default: assert(!"Should not get here.");
+        }
+        _mm256_storeu_ps((float*)(workspace[0].buffer + i), inout_val);
+    }
+}
+
+void reduce_2_fp32_buffers(int num_elements, void* in_out, void* in1)
+{
+    for (int i = 0; i < num_elements * 4; i += VECTOR_LENGTH_IN_BYTES) {
+        auto inout_val = _mm256_loadu_ps((float*)((char*)in_out + i));
+        auto in1_val = _mm256_loadu_ps((float*)((char*)in1 + i));
+        inout_val = _mm256_add_ps(inout_val, in1_val);
+        _mm256_storeu_ps((float*)((char*)in_out + i), inout_val);
+    }
+}
+
+// Communicatiooon settings
+int world_rank = -1;
+int world_size = -1;
 
 std::set<int> _comm_ids;
 std::set<int> _colors;
 ccl::vector_class<ccl::communicator> _ccl_comms;
+
+ccl::communicator& _get_comm_from_group() { return _ccl_comms[0]; }
+ccl::communicator& _get_comm_from_group(py::object group) { return _ccl_comms[0]; }
 
 #define CCLCHECK(cmd) \
     do {              \
@@ -21,14 +268,23 @@ ccl::vector_class<ccl::communicator> _ccl_comms;
 
 bool is_initialized = 0;
 
-int world_rank = -1;
-int world_size = -1;
-
 ccl::shared_ptr_class<ccl::kvs> kvs;
+
+bool all_ranks_local_p = false;
 
 void initialize(int size, int rank, torch::Tensor& kvs_data)
 {
     if (is_initialized) return;
+
+    // Check whether all ranks is on the same physical machine.
+    // If true, we will use an SHM based low latency allreduce
+
+    auto ls_string = std::getenv("LOCAL_SIZE");
+    int ls = 0;
+    if (ls_string != NULL) { ls = std::stoi(std::getenv("LOCAL_SIZE")); }
+
+    if (size >= 1 && size == ls) { all_ranks_local_p = true; }
+
     world_size = size;
     world_rank = rank;
     is_initialized = 1;
@@ -41,6 +297,26 @@ void initialize(int size, int rank, torch::Tensor& kvs_data)
     }
 
     _ccl_comms.emplace_back(ccl::create_communicator(size, rank, kvs));
+
+    // create shared workspace for SHM based allreduce
+    if (all_ranks_local_p) {
+        if (rank == 0) {
+            workspace =
+                (struct allreduce_workspace*)malloc(size * sizeof(struct allreduce_workspace));
+            shared_create(&allreduce_buffer,
+                          SHM_BUFFER_NAME,
+                          workspace,
+                          size * sizeof(struct allreduce_workspace));
+            workspace = (struct allreduce_workspace*)allreduce_buffer.bytes;
+            for (int i = 0; i < size; i++) { workspace[i].state = 0; }
+        }
+        CCLCHECK(ccl::barrier(_get_comm_from_group()).wait());
+        if (rank != 0) {
+            shared_open(
+                &allreduce_buffer, SHM_BUFFER_NAME, size * sizeof(struct allreduce_workspace));
+        }
+        workspace = (struct allreduce_workspace*)allreduce_buffer.bytes;
+    }
 }
 
 /*
@@ -142,10 +418,6 @@ ccl::reduction get_ccl_reduce_op(py::object op, at::Tensor& input)
     return ccl_op;
 }
 
-ccl::communicator& _get_comm_from_group() { return _ccl_comms[0]; }
-
-ccl::communicator& _get_comm_from_group(py::object group) { return _ccl_comms[0]; }
-
 void broadcast(torch::Tensor& data, int src, py::object group, bool async_op)
 {
     CCLCHECK(ccl::broadcast(data.data_ptr(),
@@ -193,6 +465,71 @@ void all_reduce_caching(torch::Tensor& data,
                  .wait());
 }
 
+void inference_all_reduce(torch::Tensor& data, py::object op, py::object group, bool async_op)
+{
+    static py::object ReduceOp = py::module_::import("deepspeed.comm").attr("ReduceOp");
+    static auto ReduceOpSum = (int)py::int_(ReduceOp.attr("SUM").attr("value"));
+
+    assert(py::int_(op.attr("value")) == ReduceOpSum);
+
+    auto numel = data.numel();
+
+    int data_size = 0;
+    bool data_type_fallback = false;
+
+    switch (data.scalar_type()) {
+        case c10::ScalarType::BFloat16: data_size = numel * 2; break;
+        case c10::ScalarType::Float: data_size = numel * 4; break;
+        default: data_type_fallback = true;
+    }
+
+    if (data_size > MAX_BUF_SIZE || data_type_fallback ||
+        (data_size % VECTOR_LENGTH_IN_BYTES) != 0 || !all_ranks_local_p) {
+        // fallback to oneccl allreduce
+        CCLCHECK(ccl::allreduce(data.data_ptr(),
+                                data.data_ptr(),
+                                data.numel(),
+                                get_ccl_datatype(data.scalar_type()),
+                                get_ccl_reduce_op(op, data),
+                                _get_comm_from_group(group))
+                     .wait());
+        return;
+    }
+
+    auto data_ptr = data.data_ptr();
+
+    memcpy(workspace[world_rank].buffer, data_ptr, data_size);
+    std::atomic_thread_fence(std::memory_order_release);
+    workspace[world_rank].state = 1;
+
+    if (world_rank == 0) {
+        // compute allreduce result on rank 0
+        for (int i = 1; i < world_size; i++) {
+            // wait until the other rank copy the buffer
+            wait_buffer_state_until(i, 1);
+        }
+        reduce_all_buffers(workspace, numel, data.scalar_type(), world_size);
+        std::atomic_thread_fence(std::memory_order_release);
+        workspace[world_rank].state = 2;
+        memcpy(data_ptr, workspace[0].buffer, data_size);
+    }
+    if (world_rank != 0) {
+        wait_buffer_state_until(0, 2);
+        memcpy(data_ptr, workspace[0].buffer, data_size);
+        std::atomic_thread_fence(std::memory_order_release);
+        workspace[world_rank].state = 2;
+    }
+    if (world_rank == 0) {
+        for (int i = 1; i < world_size; i++) { wait_buffer_state_until(i, 2); }
+        std::atomic_thread_fence(std::memory_order_release);
+        workspace[world_rank].state = 0;
+    }
+    if (world_rank != 0) {
+        wait_buffer_state_until(0, 0);
+        workspace[world_rank].state = 0;
+    }
+}
+
 void barrier(py::object group, bool async_op)
 {
     CCLCHECK(ccl::barrier(_get_comm_from_group(group)).wait());
@@ -206,6 +543,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m)
     m.def("get_world_size", &get_world_size, "get world size");
     m.def("broadcast", &broadcast, "ccl broadcast");
     m.def("all_reduce", &all_reduce, "ccl all_reduce");
+    m.def("inference_all_reduce", &inference_all_reduce, "low latency all_reduce implementation");
     m.def("all_reduce_caching", &all_reduce_caching, "ccl all_reduce with caching");
     m.def("barrier", &barrier, "barrier");
 }

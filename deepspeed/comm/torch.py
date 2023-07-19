@@ -150,6 +150,10 @@ class TorchBackend(Backend):
         op = self._reduce_op(op)
         return torch.distributed.all_reduce(tensor=tensor, op=op, group=group, async_op=async_op)
 
+    def inference_all_reduce(self, tensor, op=torch.distributed.ReduceOp.SUM, group=None, async_op=False):
+        op = self._reduce_op(op)
+        return torch.distributed.all_reduce(tensor=tensor, op=op, group=group, async_op=async_op)
+
     def all_reduce_coalesced(self, tensors, op=torch.distributed.ReduceOp.SUM, group=None, async_op=False):
         """ proxy func to torch.distributed.all_reduce_coalesced,
         which is included in PyTorch 1.13 and above

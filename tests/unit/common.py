@@ -195,6 +195,9 @@ class DistributedExec(ABC):
                 os.environ['LOCAL_RANK'] = str(local_rank)
                 # NOTE: unit tests don't support multi-node so local_rank == global rank
                 os.environ['RANK'] = str(local_rank)
+                # In case of multiprocess launching LOCAL_SIZE should be same as WORLD_SIZE
+                # DeepSpeed single node launcher would also set LOCAL_SIZE accordingly
+                os.environ['LOCAL_SIZE'] = str(num_procs)
                 os.environ['WORLD_SIZE'] = str(num_procs)
 
             # turn off NCCL logging if set
