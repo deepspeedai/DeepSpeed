@@ -773,7 +773,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
             param_size = param.numel()
             param_id = self.get_param_id(param)
 
-            if (current_index >= start_index and current_index < end_index):
+            if start_index <= current_index < end_index:
                 set_key_value_list(self.param_to_partition_ids[i], param_id, partition_id)
                 increment_value(self.total_grads_in_partition[i], partition_id)
 
@@ -782,7 +782,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
                 self.grad_partition_insertion_offset[i][partition_id][param_id] = current_index - start_index
                 self.grad_start_offset[i][partition_id][param_id] = 0
 
-            elif start_index > current_index and start_index < (current_index + param_size):
+            elif current_index < start_index < (current_index + param_size):
                 assert (first_offset == 0
                         ), "This can happen either zero or only once as this must be the first tensor in the partition"
                 first_offset = start_index - current_index
@@ -1435,10 +1435,10 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
 
             tensor_size = tensor.numel()
 
-            if (current_index >= start_index and current_index < end_index):
+            if start_index <= current_index < end_index:
                 params_in_partition.append(tensor)
 
-            elif start_index > current_index and start_index < (current_index + tensor_size):
+            elif current_index < start_index < (current_index + tensor_size):
                 params_in_partition.append(tensor)
 
                 assert (first_offset == 0

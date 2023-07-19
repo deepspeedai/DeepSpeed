@@ -1668,7 +1668,7 @@ class Init(InsertPostInitMethodToModuleSubClasses):
             start = self.get_partition_rank() * partition_size
             end = start + partition_size
             #print_rank_0("REduce scatter was executed for param {param.ds_id}")
-            if start < param.ds_numel and end > param.ds_numel:
+            if start < param.ds_numel < end:
                 elements = param.ds_numel - start
                 param.grad.view(-1).narrow(0, start, elements).copy_(reduced_partition.narrow(0, 0, elements))
 

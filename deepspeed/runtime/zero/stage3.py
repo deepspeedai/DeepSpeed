@@ -1483,10 +1483,10 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
 
             tensor_size = tensor.numel()
 
-            if (current_index >= start_index and current_index < end_index):
+            if start_index <= current_index < end_index:
                 params_in_partition.append(tensor)
 
-            elif start_index > current_index and start_index < (current_index + tensor_size):
+            elif current_index < start_index < (current_index + tensor_size):
                 params_in_partition.append(tensor)
 
                 assert (first_offset == 0

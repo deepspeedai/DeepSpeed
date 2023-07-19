@@ -254,7 +254,7 @@ def trim_mean(data, trim_percent):
     Returns:
         float: Trimmed mean.
     """
-    assert trim_percent >= 0.0 and trim_percent <= 1.0
+    assert 0.0 <= trim_percent <= 1.0
     n = len(data)
     # Account for edge case of empty list
     if len(data) == 0:

@@ -44,7 +44,7 @@ def get_valid_gpus(batch_size, micro_batches, min_valid_gpus, max_valid_gpus):
         if batch_size % micro_batch == 0:
 
             max_gpus = batch_size // micro_batch
-            if max_gpus >= min_valid_gpus and max_gpus <= max_valid_gpus:
+            if min_valid_gpus <= max_gpus <= max_valid_gpus:
                 valid_gpus.append(max_gpus)
 
             # find all factors less than max_gpus / 2
