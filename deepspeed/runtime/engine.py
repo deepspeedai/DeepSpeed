@@ -3236,24 +3236,30 @@ class DeepSpeedEngine(Module):
         e.g. in `zero_to_fp32`. Each dict entry is a pair of param names, where the key is the name
         of the variable that isn't stored and the value is the actual param holding data.
         """
-        shared_ds_ids = {}
+        shared_index = {}
         shared_params_by_full_name = {}
+
+        is_zero3_model = (self.zero_optimization_partition_weights()
+                          and any(hasattr(param, "ds_id") for param in self.module.parameters()))
 
         def get_layer_state_dict(module, prefix=""):
             # handle params
             for name, param in module.named_parameters(recurse=False):
-                if param is None or not hasattr(param, "ds_id"):
+                if param is None or (is_zero3_model and not hasattr(param, "ds_id")):
                     continue
                 key = prefix + name
-                # can't rely on param.data_ptr() as it will be reused as weights gets
-                # gathered and reduced, but param.ds_id is unique across all zero weights
+
+                # When weights are manged by stage 3, we can't rely on param.data_ptr() as it will be reused
+                # as weights get gathered and reduced, but param.ds_id is unique across all zero weights
                 # (and shared params will have the same param.ds_id)
-                if param.ds_id in shared_ds_ids:
+                param_id = param.ds_id if is_zero3_model else param.data_ptr()
+
+                if param_id in shared_index:
                     # shared weights
-                    #print(f"`{key}` is shared with `{shared_ds_ids[param.ds_id]}`")
-                    shared_params_by_full_name[key] = shared_ds_ids[param.ds_id]
+                    #print(f"`{key}` is shared with `{shared_index[param_id]}`")
+                    shared_params_by_full_name[key] = shared_index[param_id]
                 else:
-                    shared_ds_ids[param.ds_id] = key
+                    shared_index[param_id] = key
 
             for name, child in module.named_children():
                 if child is not None:
