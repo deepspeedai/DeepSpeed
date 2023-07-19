@@ -100,6 +100,7 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
                  sub_group_size=1000000000000,
                  mpu=None,
                  clip_grad=0.0,
+                 gradient_accumulation_dtype=torch.float32,
                  communication_data_type=torch.float16,
                  postscale_gradients=True,
                  gradient_predivide_factor=1.0,
@@ -134,6 +135,7 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
         self.flatten = _flatten_dense_tensors
         self.unflatten = _unflatten_dense_tensors
         self.dtype = self.optimizer.param_groups[0]['params'][0].dtype
+        self.gradient_accumulation_dtype = gradient_accumulation_dtype
         self._global_grad_norm = 0.
 
         self.custom_loss_scaler = False
@@ -435,7 +437,7 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
         all_params = list(itertools.chain.from_iterable(self.fp16_groups))
 
         self.grad_partitions_flat_buffer: Tensor = torch.zeros(sum(p.partition_numel() for p in all_params),
-                                                               dtype=self.dtype,
+                                                               dtype=self.gradient_accumulation_dtype,
                                                                device=self.device)
         if self.offload_optimizer_pin_memory:
             self.grad_partitions_flat_buffer = get_accelerator().pin_memory(self.grad_partitions_flat_buffer)
@@ -1002,16 +1004,11 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
         #TODO: use a similar code path for both cpu_offload and non-cpu offload
         if not self.offload_optimizer:
             for i, sub_group in enumerate(self.fp16_groups):
+                #TODO: This is redundant
                 self.averaged_gradients[i] = [
                     self.__param_id_to_grad_partition[param.ds_id]
                     if param.requires_grad else torch.zeros_like(param.ds_tensor) for param in sub_group
                 ]
-                # self.averaged_gradients[i] = self.get_flat_partition(
-                #     self.fp16_groups[i],
-                #     0,
-                #     self.fp32_partitioned_groups_flat[i].numel(),
-                #     return_tensor_list=True)
-
         # this method gets called after every backward. need to increment
         # here because if it gets incremented in backward() the micro step
         # id will be off by one when we do the reduce and partition at the.
@@ -1284,12 +1281,12 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
                 # operations and so it can be used asynchronously
                 grad_buffer = grad_buffer.to(grad_partition.device, non_blocking=True)
             elif get_accelerator().on_accelerator(grad_buffer):
-                grad_buffer.add_(grad_partition)
+                grad_buffer.add_(grad_partition.to(self.gradient_accumulation_dtype).view(grad_buffer.shape))
             else:
                 # if dst is CPU, copy first to src device, do the addition
                 # there, then move back to dst. adding directly to cpu is very slow
                 cuda_grad_buffer = grad_buffer.to(grad_partition.device, non_blocking=True)
-                cuda_grad_buffer.add_(grad_partition)
+                cuda_grad_buffer.add_(grad_partition.to(self.gradient_accumulation_dtype).view(cuda_grad_buffer.shape))
                 grad_buffer.copy_(cuda_grad_buffer, non_blocking=True)
                 # ensure grad buffer is a CUDA buffer to speed up the next few
                 # operations and so it can be used asynchronously

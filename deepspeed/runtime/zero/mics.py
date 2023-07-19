@@ -377,6 +377,7 @@ class MiCS_Optimizer(DeepSpeedZeroOptimizer_Stage3):
                  sub_group_size=1000000000000,
                  mpu=None,
                  clip_grad=0,
+                 gradient_accumulation_dtype=torch.float16,
                  communication_data_type=torch.float16,
                  postscale_gradients=True,
                  gradient_predivide_factor=1,
@@ -390,8 +391,8 @@ class MiCS_Optimizer(DeepSpeedZeroOptimizer_Stage3):
                          max_reuse_distance, max_live_parameters, param_persistence_threshold,
                          model_persistence_threshold, dp_process_group, reduce_scatter, overlap_comm,
                          offload_optimizer_config, offload_param_config, sub_group_size, mpu, clip_grad,
-                         communication_data_type, postscale_gradients, gradient_predivide_factor,
-                         gradient_accumulation_steps, elastic_checkpoint, aio_config)
+                         gradient_accumulation_dtype, communication_data_type, postscale_gradients,
+                         gradient_predivide_factor, gradient_accumulation_steps, elastic_checkpoint, aio_config)
         first_param = next(module.parameters())
         # overload the dp_process_group and partition_count
         assert hasattr(first_param, "comm"), " ".join([
