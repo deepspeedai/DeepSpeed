@@ -36,14 +36,17 @@ jobs:
           git rev-parse --short HEAD
           pip install .
 
-      - name: Install apex
+      - name: Install (ROCm) apex
         run: |
           git clone https://github.com/ROCmSoftwarePlatform/apex.git
           cd apex
-          python setup.py install --cpp_ext --cuda_ext
-          # Previous install without cloning source doesn't work due to latest pip removing `--install-option`
-          # pip install -v --install-option="--cpp_ext" --install-option="--cuda_ext" 'git+https://github.com/ROCmSoftwarePlatform/apex.git'
-
+          CURRENT_VER=$(git rev-parse HEAD)
+          INSTALLED_VER=$(cat /blob/amd-apex/.venv_installed_version)
+          if [[ "$CURRENT_VER" != "$INSTALLED_VER" ]]; then
+            pip install -v --disable-pip-version-check --no-cache-dir --no-build-isolation --config-settings="--global-option=--cpp_ext" --config-settings="--global-option=--cuda_ext" --target=/blob/amd-apex/ --upgrade .
+            git rev-parse HEAD > /blob/amd-apex/.venv_installed_version
+          fi
+          echo PYTHONPATH=$PYTHONPATH:/blob/amd-apex/ >> $GITHUB_ENV
       # Runs a set of commands using the runners shell
       - name: Install deepspeed
         run: |
