@@ -1016,7 +1016,7 @@ class TestZero3InitForParentWeightInitialization(DistributedTest):
         )
 
 
-@pytest.mark.skip("not working")
+"""
 @pytest.mark.parametrize("param_persistence_threshold", [0, 10])
 @pytest.mark.parametrize("contiguous_gradients", [True, False])
 @pytest.mark.parametrize("offload_optimizer", [True, False])
@@ -1033,6 +1033,10 @@ class TestZero3InitForParentWeightInitialization(DistributedTest):
         EltwiseMultiplicationTestNetwork_List,
     ],
 )
+"""
+
+
+@pytest.mark.skip("not working")
 class TestZero3ParamPartitioningBaseBF16(DistributedTest):
     world_size = 2
 

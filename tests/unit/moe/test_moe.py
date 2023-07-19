@@ -6,6 +6,7 @@
 import torch
 import deepspeed
 import pytest
+import gc
 from unit.common import DistributedTest
 from unit.simple_model import SimplePRMoEModel, SimpleMoEModel, sequence_dataloader
 from deepspeed.moe.utils import split_params_into_different_moe_groups_for_optimizer, is_moe_param
@@ -19,7 +20,7 @@ class TestMoE(DistributedTest):
     world_size = 4
 
     def test(self, ep_size, zero_stage, use_residual):
-        if not required_torch_version():
+        if not required_torch_version(min_version=1.8):
             pytest.skip("DeepSpeed MoE tests need torch 1.8 or higher to run correctly")
 
         config_dict = {
@@ -102,6 +103,7 @@ class TestMoE(DistributedTest):
             loss = model(batch[0], batch[1])
             model.backward(loss)
             model.step()
+            gc.collect()  # Must do this or we get a memory leak in this test
 
 
 @pytest.mark.parametrize("ep_size, use_residual", [(2, True), (2, False)])
@@ -109,7 +111,7 @@ class TestPRMoE(DistributedTest):
     world_size = 4
 
     def test(self, ep_size, use_residual):
-        if not required_torch_version():
+        if not required_torch_version(min_version=1.8):
             pytest.skip("DeepSpeed MoE tests need torch 1.8 or higher to run correctly")
 
         config_dict = {"train_batch_size": 8, "steps_per_print": 1, "fp16": {"enabled": True}}

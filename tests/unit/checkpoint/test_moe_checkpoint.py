@@ -19,7 +19,7 @@ class TestMoECheckpoint(DistributedTest):
 
     @pytest.mark.parametrize("ep_size", [4])
     def test_checkpoint_moe(self, tmpdir, ep_size):
-        if not required_torch_version():
+        if not required_torch_version(min_version=1.8):
             pytest.skip("DeepSpeed MoE tests need torch 1.8 or higher to run correctly")
 
         config_dict = {"train_batch_size": 8, "steps_per_print": 1, "fp16": {"enabled": True}}
@@ -40,7 +40,7 @@ class TestMoECheckpoint(DistributedTest):
 
     @pytest.mark.parametrize("ep_size, load_optim_states", [(4, True), (4, False), (2, True), (2, False)])
     def test_checkpoint_moe_and_zero(self, tmpdir, ep_size, load_optim_states):
-        if not required_torch_version():
+        if not required_torch_version(min_version=1.8):
             pytest.skip("DeepSpeed MoE tests need torch 1.8 or higher to run correctly")
 
         config_dict = {

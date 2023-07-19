@@ -10,7 +10,7 @@ from deepspeed.accelerator import get_accelerator
 
 from unit.common import DistributedTest, DistributedFixture
 from unit.simple_model import *
-from unit.util import required_minimum_torch_version
+from unit.util import required_torch_version
 
 from unit.checkpoint.common import *
 
@@ -211,7 +211,7 @@ class TestZeROElasticCheckpoint(DistributedTest):
         # torch 1.2.* stores raw tensor id numbers in checkpoint state which leads to
         # false positive mismatches in checkpoint state comparisons.
         # Newer torch versions store tensor ids as 0, 1, 2, ...
-        expected_mismatch_keys = [] if required_minimum_torch_version(1, 4) else ['params']
+        expected_mismatch_keys = [] if required_torch_version(min_version=1.4) else ['params']
         models = [SimpleModel(hidden_dim) for _ in range(2)]
         model, _, _, _ = deepspeed.initialize(config=ds_config,
                                               model=models[0],

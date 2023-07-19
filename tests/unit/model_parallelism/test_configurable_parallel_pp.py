@@ -15,12 +15,10 @@ from unit.megatron_model import get_megatron_version
 from unit.megatron_model import MockGPT2ModelPipe as GPT2ModelPipe
 from deepspeed.utils import RepeatingLoader
 from deepspeed.accelerator import get_accelerator
-from unit.util import required_minimum_torch_version, required_maximum_torch_version
+from unit.util import required_torch_version
 
-pytestmark = pytest.mark.skipif(not required_minimum_torch_version(major_version=1, minor_version=5),
-                                reason='Megatron-LM package requires Pytorch version 1.5 or above')
-pytestmark = pytest.mark.skipif(not required_maximum_torch_version(major_version=1, minor_version=13),
-                                reason='Megatron-LM package requires Pytorch version 1.13 or below')
+pytestmark = pytest.mark.skipif(not required_torch_version(min_version=1.5, max_version=1.13),
+                                reason='Megatron-LM package requires Pytorch version >=1.5 and <=1.13')
 
 
 def get_deepspeed_model(model):

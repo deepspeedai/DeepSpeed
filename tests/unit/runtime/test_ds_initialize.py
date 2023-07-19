@@ -25,7 +25,7 @@ class TestNoOptim(DistributedTest):
     world_size = 1
 
     def test(self, zero_stage):
-        if zero_stage == 3 and not required_torch_version():
+        if zero_stage == 3 and not required_torch_version(min_version=1.8):
             pytest.skip("zero-3 param offload requires at least torch 1.8")
 
         ds_config = {

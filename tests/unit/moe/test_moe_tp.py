@@ -58,7 +58,7 @@ class TestMOETensorParallel(DistributedTest):
     def test(self, ep_size, tp_size, enable_expert_tp, use_residual):
         # TODO: replace this with a true parallel mlp in the future
         # and run convergence tests
-        if not required_torch_version():
+        if not required_torch_version(min_version=1.8):
             pytest.skip("DeepSpeed MoE tests need torch 1.8 or higher to run correctly")
 
         config_dict = {"train_batch_size": 8, "steps_per_print": 1, "fp16": {"enabled": True}}

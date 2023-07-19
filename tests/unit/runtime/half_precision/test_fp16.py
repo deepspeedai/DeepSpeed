@@ -160,7 +160,7 @@ class TestFP16OptimizerForMoE(DistributedTest):
     world_size = 2
 
     def test_unfused_gradnorm(self, monkeypatch):
-        if not required_torch_version():
+        if not required_torch_version(min_version=1.8):
             pytest.skip("DeepSpeed MoE tests need torch 1.8 or higher to run correctly")
 
         config_dict = {"train_batch_size": 2, "steps_per_print": 1, "fp16": {"enabled": True}}
@@ -188,7 +188,7 @@ class TestFP16OptimizerForMoE(DistributedTest):
             engine.step()
 
     def test_fused_gradnorm(self, monkeypatch):
-        if not required_torch_version():
+        if not required_torch_version(min_version=1.8):
             pytest.skip("DeepSpeed MoE tests need torch 1.8 or higher to run correctly")
 
         config_dict = {"train_batch_size": 2, "steps_per_print": 1, "fp16": {"enabled": True}}
@@ -218,7 +218,7 @@ class TestFP16OptimizerForMoE(DistributedTest):
 
     @pytest.mark.parametrize("fused_lamb_legacy", [(False), (True)])
     def test_lamb_gradnorm(self, monkeypatch, fused_lamb_legacy: bool):
-        if not required_torch_version():
+        if not required_torch_version(min_version=1.8):
             pytest.skip("DeepSpeed MoE tests need torch 1.8 or higher to run correctly")
 
         config_dict = {
