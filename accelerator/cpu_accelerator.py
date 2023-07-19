@@ -183,7 +183,10 @@ class CPU_Accelerator(DeepSpeedAccelerator):
         return True
 
     def is_fp16_supported(self):
-        return True
+        return False
+
+    def supported_dtypes(self):
+        return [torch.float, torch.bfloat16]
 
     # Tensor operations
 

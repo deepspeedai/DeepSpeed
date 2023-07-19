@@ -5,8 +5,12 @@
 
 import pytest
 import torch
-from deepspeed.ops import op_builder
+import deepspeed
+from deepspeed.ops.op_builder import QuantizerBuilder
 from deepspeed.accelerator import get_accelerator
+
+if not deepspeed.ops.__compatible_ops__[QuantizerBuilder.NAME]:
+    pytest.skip("Inference ops are not available on this system", allow_module_level=True)
 
 inference_module = None
 
@@ -14,7 +18,7 @@ inference_module = None
 def run_quantize_ds(activations, num_groups, q_bits, is_symmetric_quant):
     global inference_module
     if inference_module is None:
-        inference_module = op_builder.QuantizerBuilder().load()
+        inference_module = QuantizerBuilder().load()
 
     return inference_module.quantize(activations, num_groups, q_bits,
                                      inference_module.Symmetric if is_symmetric_quant else inference_module.Asymmetric)
@@ -23,7 +27,7 @@ def run_quantize_ds(activations, num_groups, q_bits, is_symmetric_quant):
 def run_dequantize_ds(activations, params, num_groups, q_bits, is_symmetric_quant):
     global inference_module
     if inference_module is None:
-        inference_module = op_builder.QuantizerBuilder().load()
+        inference_module = QuantizerBuilder().load()
     return inference_module.dequantize(
         activations,
         params,

@@ -156,6 +156,10 @@ class DeepSpeedAccelerator(ABC):
     def is_fp16_supported(self):
         ...
 
+    @abc.abstractmethod
+    def supported_dtypes(self):
+        ...
+
     # Misc
     @abc.abstractmethod
     def amp(self):

@@ -13,6 +13,10 @@ from transformers import AutoConfig, AutoModelForCausalLM
 import deepspeed.comm as dist
 from huggingface_hub import snapshot_download
 from transformers.utils import is_offline_mode
+from deepspeed.ops.op_builder import InferenceBuilder
+
+if not deepspeed.ops.__compatible_ops__[InferenceBuilder.NAME]:
+    pytest.skip("This op had not been implemented on this system.", allow_module_level=True)
 
 
 def check_dtype(model, expected_dtype):

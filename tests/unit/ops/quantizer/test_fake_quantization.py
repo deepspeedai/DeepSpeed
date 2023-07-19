@@ -5,8 +5,12 @@
 
 import torch
 import pytest
+import deepspeed
 from deepspeed.accelerator import get_accelerator
-from deepspeed.ops import op_builder
+from deepspeed.ops.op_builder import QuantizerBuilder
+
+if not deepspeed.ops.__compatible_ops__[QuantizerBuilder.NAME]:
+    pytest.skip("Inference ops are not available on this system", allow_module_level=True)
 
 quantizer_cuda_module = None
 
@@ -36,7 +40,7 @@ def run_quant_dequant(inputs, groups, bits):
     global quantizer_cuda_module
 
     if quantizer_cuda_module is None:
-        quantizer_cuda_module = op_builder.QuantizerBuilder().load()
+        quantizer_cuda_module = QuantizerBuilder().load()
     return quantizer_cuda_module.ds_quantize_fp16(inputs, groups, bits)
 
 

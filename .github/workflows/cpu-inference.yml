@@ -76,5 +76,4 @@ jobs:
           source oneCCL/build/_install/env/setvars.sh
           unset TORCH_CUDA_ARCH_LIST # only jit compile for current arch
           cd tests
-          TRANSFORMERS_CACHE=~/tmp/transformers_cache/ pytest $PYTEST_OPTS -m 'inference' unit/inference/test_inference_config.py
-          TRANSFORMERS_CACHE=~/tmp/transformers_cache/ pytest $PYTEST_OPTS -k TestDistAllReduce unit/comm/test_dist.py
+          TRANSFORMERS_CACHE=~/tmp/transformers_cache/ TORCH_EXTENSIONS_DIR=./torch-extensions pytest -m 'seq_inference' -m 'inference_ops' -m 'inference' unit/

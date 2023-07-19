@@ -9,6 +9,7 @@ import pytest
 import deepspeed
 from deepspeed.ops.op_builder import OpBuilder
 from unit.common import DistributedTest
+from deepspeed.accelerator import get_accelerator
 
 from transformers import (AutoConfig, AutoTokenizer, AutoModelForCausalLM)
 
@@ -28,7 +29,7 @@ class TestHybridEngineLlama(DistributedTest):
         tokens = tokenizer.batch_encode_plus(prompt, return_tensors="pt", padding=True)
         for t in tokens:
             if torch.is_tensor(tokens[t]):
-                tokens[t] = tokens[t].to(f'cuda:{local_rank}')
+                tokens[t] = tokens[t].to(f'{get_accelerator().device_name()}:{local_rank}')
         #output = model.generate(**tokens, do_sample=False, max_length=100)
         output = model.generate(tokens.input_ids, do_sample=False, max_length=100)
         outputs = tokenizer.batch_decode(output, skip_special_tokens=True)
@@ -42,7 +43,7 @@ class TestHybridEngineLlama(DistributedTest):
         # Make the model smaller so we can run it on a single GPU in CI
         _ = [model.model.layers.pop(-1) for _ in range(8)]
         model = model.half()
-        model = model.to(f'cuda:{local_rank}')
+        model = model.to(f'{get_accelerator().device_name()}:{local_rank}')
         return model
 
     def get_tokenizer(self, model_name):

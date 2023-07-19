@@ -20,6 +20,8 @@ from unit.common import DistributedTest, is_rocm_pytorch
 #pytest.skip(
 #    "transformer kernels are temporarily disabled because of unexplained failures",
 #    allow_module_level=True)
+if torch.half not in get_accelerator().supported_dtypes():
+    pytest.skip(f"fp16 not supported, valid dtype: {get_accelerator().supported_dtypes()}", allow_module_level=True)
 
 
 def check_equal(first, second, atol=1e-2, verbose=False):

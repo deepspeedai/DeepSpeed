@@ -5,8 +5,13 @@
 
 import pytest
 import torch
+import deepspeed
+from deepspeed.ops.op_builder import SpatialInferenceBuilder
 from deepspeed.ops.transformer.inference.bias_add import nhwc_bias_add
 from deepspeed.accelerator import get_accelerator
+
+if not deepspeed.ops.__compatible_ops__[SpatialInferenceBuilder.NAME]:
+    pytest.skip("Inference ops are not available on this system", allow_module_level=True)
 
 
 def allclose(x, y):

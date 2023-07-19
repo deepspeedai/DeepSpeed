@@ -147,6 +147,9 @@ class CUDA_Accelerator(DeepSpeedAccelerator):
         else:
             return False
 
+    def supported_dtypes(self):
+        return [torch.float, torch.half, torch.bfloat16]
+
     # Misc
     def amp(self):
         if hasattr(torch.cuda, 'amp'):

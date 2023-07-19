@@ -15,6 +15,9 @@ from deepspeed import DeepSpeedTransformerLayer, DeepSpeedTransformerConfig
 from deepspeed.accelerator import get_accelerator
 from unit.common import DistributedTest
 
+if torch.half not in get_accelerator().supported_dtypes():
+    pytest.skip(f"fp16 not supported, valid dtype: {get_accelerator().supported_dtypes()}", allow_module_level=True)
+
 
 def check_equal(first, second, atol=1e-2, verbose=False):
     if verbose:
