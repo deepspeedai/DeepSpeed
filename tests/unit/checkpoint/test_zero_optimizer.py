@@ -5,7 +5,7 @@
 
 import deepspeed
 from deepspeed.ops.op_builder import CPUAdamBuilder
-from deepspeed.checkpoint.utils import clone_tensors_for_torch_save
+from deepspeed.checkpoint.utils import clone_tensors_for_torch_save, get_model_ckpt_name_for_rank
 from deepspeed.accelerator import get_accelerator
 
 from unit.common import DistributedTest, DistributedFixture
@@ -471,6 +471,54 @@ class TestZeROCheckpointFrozenWeights(DistributedTest):
             models = [SimpleFrozenModel(hidden_dim, empty_grad=False) for _ in range(2)]
 
         checkpoint_correctness_verification(config_dict, models, hidden_dim, tmpdir, load_module_only=True)
+
+    @pytest.mark.parametrize('zero_stage', [1, 2])
+    def test_save_exclude_frozen_weights(self, tmpdir, zero_stage):
+        world_size = 1
+        config_dict = {
+            "train_micro_batch_size_per_gpu": 1,
+            "optimizer": {
+                "type": 'Adam'
+            },
+            "fp16": {
+                "enabled": True,
+                "initial_scale_power": 8
+            },
+            "zero_optimization": {
+                "stage": zero_stage,
+            }
+        }
+        hidden_dim = 10
+
+        model = SimpleFrozenModel(hidden_dim, empty_grad=False)
+
+        ds_engine, _, _, _ = deepspeed.initialize(model=model, model_parameters=model.parameters(), config=config_dict)
+
+        # Validate backwards-compatibility of including frozen parameters in checkpoint
+        all_ckpt_folder = os.path.join(tmpdir, 'all_params')
+        ds_engine.save_checkpoint(all_ckpt_folder)
+        all_params_ckpt_file = get_model_ckpt_name_for_rank(os.path.join(all_ckpt_folder, 'global_step0'), '00')
+        loaded_all_param_model = torch.load(all_params_ckpt_file)['module']
+        all_param_names = set([n for n, p in model.named_parameters()])
+        assert set(loaded_all_param_model.keys()) == all_param_names
+
+        # Validate exclusion of frozen parameters
+        trainable_ckpt_folder = os.path.join(tmpdir, 'no_frozen_params')
+        ds_engine.save_checkpoint(trainable_ckpt_folder, exclude_frozen_parameters=True)
+
+        trainable_ckpt_file = get_model_ckpt_name_for_rank(os.path.join(trainable_ckpt_folder, 'global_step0'), '00')
+
+        # Excluding frozen parameters should reduce checkpoint size
+        assert os.path.getsize(all_params_ckpt_file) > os.path.getsize(trainable_ckpt_file)
+
+        loaded_trainable_param_model = torch.load(trainable_ckpt_file)['module']
+        frozen_param_names = set([n for n, p in model.named_parameters() if not p.requires_grad])
+        loaded_trainable_param_names = set(loaded_trainable_param_model.keys())
+        overlap_names = set.intersection(loaded_trainable_param_names, frozen_param_names)
+        assert len(overlap_names) == 0
+
+        trainable_param_names = set([n for n, p in model.named_parameters() if p.requires_grad])
+        assert loaded_trainable_param_names == trainable_param_names
 
 
 class TestSaveTensorClone(DistributedTest):

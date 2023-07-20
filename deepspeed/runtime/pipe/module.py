@@ -20,6 +20,7 @@ from ..activation_checkpointing import checkpointing
 from .topology import PipeDataParallelTopology, PipelineParallelGrid
 from deepspeed.runtime.state_dict_factory import SDLoaderFactory
 from deepspeed.accelerator import get_accelerator
+from deepspeed.checkpoint.utils import clone_tensors_for_torch_save
 
 
 class PipelineError(Exception):
@@ -258,6 +259,20 @@ class PipelineModule(nn.Module):
         # of our FP16 optimizer
         for p in self.parameters():
             p.ds_pipe_replicated = False
+
+    def _get_frozen_parameter_names(self, layer):
+        """ Get names of frozen parameters in the layer.
+
+            Returns:
+                A list of frozen parameter names
+        """
+        if isinstance(layer, LayerSpec):
+            l = layer.build()
+            return [n for n, p in l.named_parameters() if not p.requires_grad]
+        elif isinstance(layer, nn.Module):
+            return [n for n, p in layer.named_parameters() if not p.requires_grad]
+
+        return []
 
     def _count_layer_params(self):
         """Count the trainable parameters in individual layers.
@@ -544,7 +559,7 @@ class PipelineModule(nn.Module):
         ckpt_files.sort()
         return ckpt_files
 
-    def save_state_dict(self, save_dir, checkpoint_engine):
+    def save_state_dict(self, save_dir, checkpoint_engine, exclude_frozen_params=False):
         # Processes having the same model parallel rank on different data parallel instances
         # have identical layer weights.  We can distribute the task of saving the layer weights
         # among the data parallel ranks.  For example, if a pipeline stage has 9 layers and
@@ -569,14 +584,12 @@ class PipelineModule(nn.Module):
             model_ckpt_path = self.ckpt_layer_path(save_dir, start + idx)
             if not hasattr(layer, 'state_dict'):
                 continue
-            # We pass cloned tensors to torch.save() to avoid checkpoint bloat which occurs because torch.save()
-            # saves the underlying storage rather than the slice of the storage corresponding to individual tensors.
-            # This is a problem in DeepSpeed because we often allocate tensors using slices of large flattened buffers.
-            # Tensor cloning helps to avoid this problem because the storage of cloned tensors are closer to the true size.
-            # It is expected that the garbage collector will reclaim the cloned tensor storage to avoid memory bloat.
-            # See https://pytorch.org/docs/stable/notes/serialization.html#preserve-storage-sharing
+
             orig_state_dict = layer.state_dict()
-            final_state_dict = type(orig_state_dict)({k: v.clone() for k, v in orig_state_dict.items()})
+            if exclude_frozen_params:
+                for n in self._get_frozen_parameter_names(layer):
+                    del orig_state_dict[n]
+            final_state_dict = clone_tensors_for_torch_save(orig_state_dict)
             checkpoint_engine.save(final_state_dict, model_ckpt_path)
 
     def load_state_dir(self, load_dir, checkpoint_engine, strict=True):

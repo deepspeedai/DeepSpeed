@@ -2439,8 +2439,15 @@ class DeepSpeedEngine(Module):
         dist.all_gather(tensor_list, value, group=dp_group)
         return tensor_list
 
-    def module_state_dict(self, destination=None, prefix="", keep_vars=False):
+    def module_state_dict(self, destination=None, prefix="", keep_vars=False, exclude_frozen_parameters=False):
         sd = self.module.state_dict(destination, prefix, keep_vars)
+
+        # Remove frozen parameter weights from state_dict if specified
+        if exclude_frozen_parameters:
+            for n, p in self.module.named_parameters():
+                if not p.requires_grad:
+                    del sd[n]
+
         if self.random_ltd_enabled():
             sd = remove_random_ltd_state_dict(sd)
         return sd
@@ -2896,7 +2903,7 @@ class DeepSpeedEngine(Module):
             elif not valid:
                 logger.warning(msg)
 
-    def save_checkpoint(self, save_dir, tag=None, client_state={}, save_latest=True):
+    def save_checkpoint(self, save_dir, tag=None, client_state={}, save_latest=True, exclude_frozen_parameters=False):
         """Save training checkpoint
 
         Arguments:
@@ -2905,6 +2912,7 @@ class DeepSpeedEngine(Module):
                 used if not provided. Tag name must be the same across all ranks.
             client_state: Optional. State dictionary used for saving required training states in the client code.
             save_latest: Optional. Save a file 'latest' pointing to the latest saved checkpoint.
+            exclude_frozen_parameters: Optional. Exclude frozen parameters from checkpointed state.
         Important: all processes must call this method and not just the process with rank 0. It is
         because each process needs to save its master weights and scheduler+optimizer states. This
         method will hang waiting to synchronize with other processes if it's called just for the
@@ -2937,7 +2945,10 @@ class DeepSpeedEngine(Module):
         if self.has_moe_layers:
             self.save_non_zero_checkpoint = False
             self._create_checkpoint_file(save_dir, tag, False)
-            self._save_moe_checkpoint(save_dir, tag, client_state=client_state)
+            self._save_moe_checkpoint(save_dir,
+                                      tag,
+                                      client_state=client_state,
+                                      exclude_frozen_parameters=exclude_frozen_parameters)
 
         # We distribute the task of saving layer checkpoint files among
         # data parallel instances, so all procs should call _save_checkpoint.
@@ -2945,7 +2956,10 @@ class DeepSpeedEngine(Module):
         # parallel rank 0 save the general model params.
         if not self.has_moe_layers:
             self._create_checkpoint_file(save_dir, tag, False)
-            self._save_checkpoint(save_dir, tag, client_state=client_state)
+            self._save_checkpoint(save_dir,
+                                  tag,
+                                  client_state=client_state,
+                                  exclude_frozen_parameters=exclude_frozen_parameters)
 
         if self.save_zero_checkpoint:
             self._create_zero_checkpoint_files(save_dir, tag)
@@ -2974,7 +2988,7 @@ class DeepSpeedEngine(Module):
 
         return full_state_dict
 
-    def _save_moe_checkpoint(self, save_dir, tag, client_state={}):
+    def _save_moe_checkpoint(self, save_dir, tag, client_state={}, exclude_frozen_parameters=False):
         save_path = self._get_ckpt_name(save_dir, tag)
         # A hack to save the checkpointing directory. Pipeline parallelism overrides
         # module_state_dict() and uses this path to save the model. module_state_dict()
@@ -3049,7 +3063,8 @@ class DeepSpeedEngine(Module):
         self.checkpoint_engine.save(optimizer_state, file_path)
 
         # get non-moe parameters
-        model_state_dict = self._get_non_moe_state_dict(self.module_state_dict())
+        model_state_dict = self._get_non_moe_state_dict(
+            self.module_state_dict(exclude_frozen_parameters=exclude_frozen_parameters))
 
         if expp_rank == 0:
             # TODO: update num experts info,.. in checkpoint
@@ -3106,20 +3121,20 @@ class DeepSpeedEngine(Module):
 
         return success
 
-    def _save_checkpoint(self, save_dir, tag, client_state={}):
+    def _save_checkpoint(self, save_dir, tag, client_state={}, exclude_frozen_parameters=False):
 
         save_path = self._get_ckpt_name(save_dir, tag)
 
         zero_optimizer_state = self.zero_optimization() or self.bfloat16_enabled()
 
-        save_frozen_param = self.zero_optimization_partition_gradients()
+        save_frozen_param = self.zero_optimization_partition_gradients() and not exclude_frozen_parameters
 
         # A hack to save the checkpointing directory. Pipeline parallelism overrides
         # module_state_dict() and uses this path to save the model. module_state_dict()
         # then instead just returns None.  The module_state_dict() implementation in
         # PipelineEngine expects the save path to be set in self._curr_ckpt_path.
         self._curr_ckpt_path = os.path.join(save_dir, tag)
-        module = self.module_state_dict()
+        module = self.module_state_dict(exclude_frozen_parameters=exclude_frozen_parameters)
         self._curr_ckpt_path = None
 
         state = dict(module=module,
