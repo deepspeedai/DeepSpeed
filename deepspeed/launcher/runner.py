@@ -33,7 +33,7 @@ from deepspeed.accelerator import get_accelerator
 DLTS_HOSTFILE = "/job/hostfile"
 EXPORT_ENVS = ['MLFLOW', 'NCCL', 'PYTHON', 'MV2', 'UCX']
 EXPORT_ENVS += NEBULA_EXPORT_ENVS
-DEEPSPEED_ENVIRONMENT_NAME = ".deepspeed_env"
+DEEPSPEED_ENVIRONMENT_NAME = os.getenv("DS_ENV_FILE", ".deepspeed_env")
 DEEPSPEED_ENVIRONMENT_PATHS = [os.path.expanduser("~"), '.']
 PDSH_MAX_FAN_OUT = 1024
 
@@ -178,16 +178,20 @@ def parse_args(args=None):
 
     parser.add_argument("user_script", type=str, help="User script to launch, followed by any required "
                         "arguments.")
+
     parser.add_argument('user_args', nargs=argparse.REMAINDER)
+
     parser.add_argument("--bind_cores_to_rank",
                         action="store_true",
                         help="Bind each rank to different cores of the host")
+
     parser.add_argument("--bind_core_list",
                         type=str,
                         default=None,
                         help="List of cores to bind to with comma separated list of "
                         "numbers and range. i.e. 1,3-5,7 => [1,3,4,5,7].  When not "
                         "specified, all cores on system would be used rank binding")
+
     return parser.parse_args(args=args)
 
 
@@ -540,8 +544,12 @@ def main(args=None):
                     runner.add_export(var, env[var])
 
         for environ_path in DEEPSPEED_ENVIRONMENT_PATHS:
-            environ_file = os.path.join(environ_path, DEEPSPEED_ENVIRONMENT_NAME)
+            environ_file = DEEPSPEED_ENVIRONMENT_NAME
+            # handle if users to enter path for `DS_ENV_FILE`
+            if not os.path.isfile(environ_file):
+                environ_file = os.path.join(environ_path, DEEPSPEED_ENVIRONMENT_NAME)
             if os.path.isfile(environ_file):
+                logger.info(f"deepspeed_env file = {environ_file}")
                 with open(environ_file, 'r') as fd:
                     for var in fd.readlines():
                         key, val = var.split('=', maxsplit=1)

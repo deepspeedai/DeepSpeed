@@ -235,7 +235,11 @@ propagate all NCCL and PYTHON related environment variables that are set. If
 you would like to propagate additional variables you can specify them in a
 dot-file named `.deepspeed_env` that contains a new-line separated list of
 `VAR=VAL` entries. The DeepSpeed launcher will look in the local path you are
-executing from and also in your home directory (`~/`).
+executing from and also in your home directory (`~/`). If you would like to
+override the default name of this file or path and name with your own, you
+can specify this with the environment variable, `DS_ENV_FILE`.  This is
+mostly useful if you are launching multiple jobs that all require different
+variables.
 
 As a concrete example, some clusters require special NCCL variables to set
 prior to training. The user can simply add these variables to a
