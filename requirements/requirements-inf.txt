@@ -3,4 +3,3 @@ lm-eval==0.3.0
 protobuf
 transformers
 transformers[sentencepiece]
-triton

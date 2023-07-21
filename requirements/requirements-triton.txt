@@ -1,1 +1,1 @@
-triton
+triton>=2.0.0

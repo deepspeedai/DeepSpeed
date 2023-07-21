@@ -12,6 +12,7 @@ runs:
       shell: bash
     - id: create-venv
       run: |
+        rm -rf ./unit-test-venv
         python -m venv unit-test-venv
         source ./unit-test-venv/bin/activate
         python -m pip install --upgrade pip

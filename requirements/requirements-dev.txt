@@ -14,5 +14,4 @@ sphinx-rtd-theme
 tensorboard
 torchvision
 transformers
-triton
 wandb

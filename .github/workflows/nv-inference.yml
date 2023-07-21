@@ -39,7 +39,7 @@ jobs:
 
       - name: Install deepspeed
         run: |
-          pip install .[dev,1bit,autotuning,inf]
+          pip install .[dev,1bit,autotuning,inf,triton]
           ds_report
 
       - name: Python environment
