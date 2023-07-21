@@ -7,10 +7,10 @@ import deepspeed
 from deepspeed.ops.op_builder import CPUAdamBuilder
 from deepspeed.checkpoint.utils import clone_tensors_for_torch_save, get_model_ckpt_name_for_rank
 from deepspeed.accelerator import get_accelerator
+from deepspeed.runtime.utils import required_torch_version
 
 from unit.common import DistributedTest, DistributedFixture
 from unit.simple_model import *
-from unit.util import required_torch_version
 
 from unit.checkpoint.common import *
 

@@ -4,10 +4,10 @@
 # DeepSpeed Team
 
 from deepspeed.moe.utils import split_params_into_different_moe_groups_for_optimizer
+from deepspeed.runtime.utils import required_torch_version
 
 from unit.common import DistributedTest
 from unit.simple_model import *
-from unit.util import required_torch_version
 
 from unit.checkpoint.common import checkpoint_correctness_verification
 

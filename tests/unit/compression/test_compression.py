@@ -14,8 +14,8 @@ from unit.modelingpreln import BertEncoder as BertEncoderPreln
 from deepspeed.compression.basic_layer import LinearLayer_Compress, ColumnParallelLinear_Compress, RowParallelLinear_Compress
 from deepspeed.compression.helper import convert_conv1d_to_linear
 from deepspeed.accelerator import get_accelerator
+from deepspeed.runtime.utils import required_torch_version
 from unit.common import DistributedTest
-from unit.util import required_torch_version
 
 pytestmark = pytest.mark.skipif(not required_torch_version(min_version=1.5),
                                 reason='Megatron-LM package requires Pytorch version 1.5 or above')

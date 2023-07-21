@@ -16,6 +16,7 @@ import gc
 from math import sqrt
 from math import floor
 from bisect import bisect_left
+from packaging import version as pkg_version
 
 import torch
 from deepspeed import comm as dist
@@ -973,3 +974,17 @@ def get_inactive_params(param_list):
     from deepspeed.runtime.zero.partition_parameters import ZeroParamStatus
     return [param for param in param_list if (hasattr(param, 'ds_id') and \
                             param.ds_status == ZeroParamStatus.NOT_AVAILABLE)]
+
+
+def required_torch_version(min_version=None, max_version=None):
+    assert min_version or max_version, "Must provide a min_version or max_version argument"
+
+    torch_version = pkg_version.parse(torch.__version__)
+
+    if min_version and pkg_version.parse(str(min_version)) > torch_version:
+        return False
+
+    if max_version and pkg_version.parse(str(max_version)) < torch_version:
+        return False
+
+    return True

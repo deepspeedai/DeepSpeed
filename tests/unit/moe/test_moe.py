@@ -10,7 +10,7 @@ import gc
 from unit.common import DistributedTest
 from unit.simple_model import SimplePRMoEModel, SimpleMoEModel, sequence_dataloader
 from deepspeed.moe.utils import split_params_into_different_moe_groups_for_optimizer, is_moe_param
-from unit.util import required_torch_version
+from deepspeed.runtime.utils import required_torch_version
 
 
 @pytest.mark.parametrize("ep_size", [2, 4])

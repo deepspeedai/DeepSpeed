@@ -11,13 +11,13 @@ from torch.optim.lr_scheduler import _LRScheduler, LambdaLR
 
 from unit.simple_model import SimpleModel, random_dataloader
 from unit.common import DistributedTest
-from unit.util import required_torch_version, bf16_required_version_check, required_amp_check
+from unit.util import bf16_required_version_check, required_amp_check
 
 import deepspeed
 from deepspeed.ops.adam import FusedAdam
 from deepspeed.runtime.lr_schedules import WARMUP_LR, WarmupLR
 from deepspeed.runtime.config import ADAM_OPTIMIZER
-from deepspeed.runtime.utils import see_memory_usage
+from deepspeed.runtime.utils import see_memory_usage, required_torch_version
 
 
 @pytest.mark.parametrize('zero_stage', [0, 3])
