@@ -3,13 +3,8 @@
 
 # DeepSpeed Team
 
+import torch
 from .abstract_accelerator import DeepSpeedAccelerator
-# During setup stage torch may not be installed, pass on no torch will
-# allow op builder related API to be executed.
-try:
-    import torch.npu
-except ImportError:
-    pass
 
 
 class NPU_Accelerator(DeepSpeedAccelerator):
@@ -209,32 +204,25 @@ class NPU_Accelerator(DeepSpeedAccelerator):
         except ImportError:
             return "deepspeed.ops.op_builder.npu"
 
-    # dict that holds class name <--> class type mapping i.e.
-    # 'AsyncIOBuilder': <class 'op_builder.async_io.AsyncIOBuilder'>
-    # this dict will be filled at init stage
-    class_dict = None
-
-    def _lazy_init_class_dict(self):
-        if self.class_dict != None:
-            return
-        else:
-            self.class_dict = {}
-
     # create an instance of op builder and return, name specified by class_name
     def create_op_builder(self, class_name):
-        self._lazy_init_class_dict()
-        if class_name in self.class_dict:
-            return self.class_dict[class_name]()
-        else:
-            return None
+        builder_class = self.get_op_builder(class_name)
+        if builder_class != None:
+            return builder_class()
+        return None
 
     # return an op builder class, name specified by class_name
     def get_op_builder(self, class_name):
-        self._lazy_init_class_dict()
-        if class_name in self.class_dict:
-            return self.class_dict[class_name]
-        else:
-            return None
+        try:
+            # is op_builder from deepspeed or a 3p version? this should only succeed if it's deepspeed
+            # if successful this also means we're doing a local install and not JIT compile path
+            from op_builder import __deepspeed__  # noqa: F401
+            from op_builder.npu import NotImplementedBuilder
+        except ImportError:
+            from deepspeed.ops.op_builder.npu import NotImplementedBuilder
+
+        # return a NPUNotImplementedBuilder to avoid get NoneType[Name] in unit tests
+        return NotImplementedBuilder
 
     def build_extension(self):
         from torch.utils.cpp_extension import BuildExtension
