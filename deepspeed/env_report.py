@@ -3,6 +3,7 @@
 
 # DeepSpeed Team
 
+import os
 import torch
 import deepspeed
 import subprocess
@@ -79,6 +80,35 @@ def nvcc_version():
     return ".".join(release)
 
 
+def get_shm_size():
+    try:
+        shm_stats = os.statvfs('/dev/shm')
+    except (OSError, FileNotFoundError, ValueError):
+        return "UNKNOWN", None
+
+    shm_size = shm_stats.f_frsize * shm_stats.f_blocks
+    shm_hbytes = human_readable_size(shm_size)
+    warn = []
+    if shm_size < 512 * 1024**2:
+        warn.append(
+            f" {YELLOW} [WARNING] /dev/shm size might be too small, if running in docker increase to at least --shm-size='1gb' {END}"
+        )
+        if get_accelerator().communication_backend_name() == "nccl":
+            warn.append(
+                f" {YELLOW} [WARNING] see more details about NCCL requirements: https://docs.nvidia.com/deeplearning/nccl/user-guide/docs/troubleshooting.html#sharing-data {END}"
+            )
+    return shm_hbytes, warn
+
+
+def human_readable_size(size):
+    units = ['B', 'KB', 'MB', 'GB', 'TB']
+    i = 0
+    while size >= 1024 and i < len(units) - 1:
+        size /= 1024
+        i += 1
+    return f'{size:.2f} {units[i]}'
+
+
 def debug_report():
     max_dots = 33
 
@@ -95,9 +125,17 @@ def debug_report():
     else:
         report.extend([("deepspeed wheel compiled w.", f"torch {torch_info['version']} ")])
 
+    report.append(("shared memory (/dev/shm) size", get_shm_size()))
+
     print("DeepSpeed general environment info:")
     for name, value in report:
+        warns = []
+        if isinstance(value, tuple):
+            value, warns = value
         print(name, "." * (max_dots - len(name)), value)
+        if warns:
+            for warn in warns:
+                print(warn)
 
 
 def parse_arguments():
