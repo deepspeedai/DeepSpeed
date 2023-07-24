@@ -980,11 +980,11 @@ def _reload_tensor_methods():
 
 
 def _rnn_flops(flops, rnn_module, w_ih, w_hh, input_size):
-    input_size, hidden_size = w_ih.shape
+    gates_size = w_ih.shape[0]
     # matrix matrix mult ih state and internal state
-    flops += 2 * input_size * hidden_size - hidden_size
+    flops += 2 * w_ih.shape[0] * w_ih.shape[1] - gates_size
     # matrix matrix mult hh state and internal state
-    flops += 2 * hidden_size * hidden_size - hidden_size
+    flops += 2 * w_hh.shape[0] * w_hh.shape[1] - gates_size
     if isinstance(rnn_module, (nn.RNN, nn.RNNCell)):
         # add both operations
         flops += rnn_module.hidden_size
