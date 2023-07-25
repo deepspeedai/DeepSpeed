@@ -223,7 +223,7 @@ class DeepSpeedHybridEngine(DeepSpeedEngine):
                 dist.all_gather_into_tensor(output, input_cont, group=self.mp_group)
 
                 if len(inputs) > 0:
-                    inputs = (output, )
+                    inputs = (output, *inputs[1:])
                 else:
                     kwargs['input_ids'] = output
 
