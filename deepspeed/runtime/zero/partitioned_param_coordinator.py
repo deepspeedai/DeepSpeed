@@ -296,12 +296,14 @@ class PartitionedParameterCoordinator:
 
                     self.__inflight_param_registry.pop(param).wait()
 
-                    event = get_accelerator().Event()
-                    event.record()
-                    self.__ongoing_fetch_events.append(event)
+                    if not get_accelerator().is_synchronized_device():
+                        event = get_accelerator().Event()
+                        event.record()
+                        self.__ongoing_fetch_events.append(event)
 
             assert param.ds_status == ZeroParamStatus.AVAILABLE, param.ds_summary()
-        get_accelerator().current_stream().wait_stream(self.__allgather_stream)
+        if not get_accelerator().is_synchronized_device():
+            get_accelerator().current_stream().wait_stream(self.__allgather_stream)
         self.__profiler.stop_event(wait_event_name, wait_numel)
 
         # kick off parameter prefetches for upcoming modules

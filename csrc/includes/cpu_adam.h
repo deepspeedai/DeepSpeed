@@ -9,6 +9,7 @@
                   // https://stackoverflow.com/questions/4913922/possible-problems-with-nominmax-on-visual-c
 
 #include <stdio.h>
+#include <torch/extension.h>
 #include <cassert>
 #include "simd.h"
 
@@ -250,3 +251,41 @@ void Adam_Optimizer::Step_AVX(size_t* rounded_size,
     *rounded_size = new_rounded_size;
 }
 #endif
+
+int create_adam_optimizer(int optimizer_id,
+                          float alpha = 1e-3,
+                          float betta1 = 0.9,
+                          float betta2 = 0.999,
+                          float eps = 1e-8,
+                          float weight_decay = 0,
+                          bool adamw_mode = true,
+                          bool should_log = false);
+
+int ds_adam_step(int optimizer_id,
+                 size_t step,
+                 float lr,
+                 float beta1,
+                 float beta2,
+                 float epsilon,
+                 float weight_decay,
+                 bool bias_correction,
+                 torch::Tensor& params,
+                 torch::Tensor& grads,
+                 torch::Tensor& exp_avg,
+                 torch::Tensor& exp_avg_sq);
+
+int ds_adam_step_plus_copy(int optimizer_id,
+                           size_t step,
+                           float lr,
+                           float beta1,
+                           float beta2,
+                           float epsilon,
+                           float weight_decay,
+                           bool bias_correction,
+                           torch::Tensor& params,
+                           torch::Tensor& grads,
+                           torch::Tensor& exp_avg,
+                           torch::Tensor& exp_avg_sq,
+                           torch::Tensor& gpu_params);
+
+int destroy_adam_optimizer(int optimizer_id);

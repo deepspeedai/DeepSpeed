@@ -247,7 +247,8 @@ class DeepSpeedZeRoOffload(object):
         self._prefetch_bucket_sz = int(prefetch_bucket_size)
         self._max_reuse_distance_in_numel = int(max_reuse_distance)
         self._max_available_parameters_in_numel = int(max_live_parameters)
-        self.__allgather_stream = get_accelerator().Stream() if overlap_comm else get_accelerator().default_stream()
+        self.__allgather_stream = None if get_accelerator().is_synchronized_device() else get_accelerator().Stream(
+        ) if overlap_comm else get_accelerator().default_stream()
 
         if not hasattr(module, "ds_inflight_param_registry"):
             module.ds_inflight_param_registry = dict()

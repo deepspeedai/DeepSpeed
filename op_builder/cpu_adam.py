@@ -19,9 +19,9 @@ class CPUAdamBuilder(TorchCPUOpBuilder):
 
     def sources(self):
         if self.build_for_cpu:
-            return ['csrc/adam/cpu_adam.cpp']
+            return ['csrc/adam/cpu_adam.cpp', 'csrc/adam/cpu_adam_impl.cpp']
 
-        return ['csrc/adam/cpu_adam.cpp', 'csrc/common/custom_cuda_kernel.cu']
+        return ['csrc/adam/cpu_adam.cpp', 'csrc/adam/cpu_adam_impl.cpp', 'csrc/common/custom_cuda_kernel.cu']
 
     def libraries_args(self):
         args = super().libraries_args()
