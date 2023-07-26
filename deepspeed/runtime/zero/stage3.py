@@ -31,6 +31,11 @@ from deepspeed.accelerator import get_accelerator
 # with gradient partitioning and without
 pg_correctness_test = False
 
+OPTIMIZER_SWAP_IN_STATE_TIMER = 'optimizer_swap_in_state'
+INIT_OPTIMIZER_TIMER = 'init_optimizer_state'
+OPTIMIZER_SWAP_OUT_STATE_TIMER = 'optimizer_swap_out_state'
+OPTIMIZER_STEP_TIMER = 'optimizer_step'
+
 
 def print_rank_0(message, debug=False, force=False):
     rank = dist.get_rank()
@@ -900,9 +905,8 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
         if self.swap_optimizer:
             self.optimizer_swapper.init_timers()
 
-        INIT_OPTIMIZER_TIMER = 'init_optimizer_state'
         timer_names.add(INIT_OPTIMIZER_TIMER)
-        self.start_timers([INIT_OPTIMIZER_TIMER])
+        self.timers(INIT_OPTIMIZER_TIMER).start()
 
         for i, group in enumerate(self.fp16_groups):
             swappable_optimizer_subgroup = self._swappable_optimizer_subgroup(i)
@@ -944,8 +948,8 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
         if is_adagrad:
             self.optimizer = torch.optim.Adagrad(self.fp32_partitioned_groups_flat, **self.optimizer.defaults)
 
-        self.stop_timers([INIT_OPTIMIZER_TIMER])
-        self.log_timers(timer_names)
+        self.timers(INIT_OPTIMIZER_TIMER).stop()
+        self.timers.log(timer_names)
 
         if self.swap_optimizer:
             self.optimizer_swapper.log_timers()
@@ -1635,26 +1639,6 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
     def reset_cpu_buffers(self):
         self.norm_for_param_grads = {}
 
-    def log_timers(self, timer_names):
-        if self.timers is None:
-            return
-
-        self.timers.log(names=list(timer_names))
-
-    def start_timers(self, timer_names):
-        if self.timers is None:
-            return
-
-        for name in timer_names:
-            self.timers(name).start()
-
-    def stop_timers(self, timer_names):
-        if self.timers is None:
-            return
-
-        for name in timer_names:
-            self.timers(name).stop()
-
     def _pre_step(self):
         self.micro_step_id = 0
 
@@ -1699,7 +1683,7 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
         self.averaged_gradients[sub_group_id] = None
 
     @instrument_w_nvtx
-    def _prepare_sub_group(self, sub_group_id, timer_names=set()):
+    def _prepare_sub_group(self, sub_group_id, timer_names):
         see_memory_usage(f'Before prepare optimizer sub group {sub_group_id}', force=False)
         if self._swappable_optimizer_subgroup(sub_group_id):
             self._optimizer_states_and_gradient_swap_in(sub_group_id, timer_names)
@@ -1707,26 +1691,25 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
             self._prepare_fp32_grad_for_sub_group(sub_group_id)
         see_memory_usage(f'After prepare optimizer sub group {sub_group_id}', force=False)
 
-    def _optimizer_states_and_gradient_swap_in(self, sub_group_id, timer_names=set()):
+    def _optimizer_states_and_gradient_swap_in(self, sub_group_id, timer_names):
         param_length = self.fp16_partitioned_groups_flat_numel[sub_group_id]
         fp32_param_id = id(self.fp32_partitioned_groups_flat[sub_group_id])
         assert self._swappable_optimizer_subgroup(sub_group_id), \
             f'Parameter {fp32_param_id} of numel={param_length} is not swappable'
 
-        OPTIMIZER_SWAP_IN_STATE = 'optimizer_swap_in_state'
         see_memory_usage(f'pre-step Before swapping in optimizer tensors {sub_group_id}', force=False)
-        self.start_timers([OPTIMIZER_SWAP_IN_STATE])
+        timer_names.add(OPTIMIZER_SWAP_IN_STATE_TIMER)
+        self.timers(OPTIMIZER_SWAP_IN_STATE_TIMER).start()
 
         self.optimizer_swapper.swap_in_optimizer_state(
             parameter=self.fp32_partitioned_groups_flat[sub_group_id],
             async_parameter=self.next_swappable_fp32_partitioned_groups[sub_group_id])
 
-        self.stop_timers([OPTIMIZER_SWAP_IN_STATE])
-        timer_names.add(OPTIMIZER_SWAP_IN_STATE)
+        self.timers(OPTIMIZER_SWAP_IN_STATE_TIMER).stop()
         see_memory_usage(f'pre-step After swapping in optimizer tensors {sub_group_id}', force=False)
 
     @instrument_w_nvtx
-    def _release_sub_group(self, sub_group_id, timer_names=set()):
+    def _release_sub_group(self, sub_group_id, timer_names):
         see_memory_usage(f'Before release optimizer sub group {sub_group_id}', force=False)
         # get rid of the fp32 gradients. Not needed anymore
         if not self.offload_optimizer:
@@ -1756,23 +1739,22 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
 
         return self.flatten(padded_tensor_list)
 
-    def _optimizer_states_and_gradient_swap_out(self, sub_group_id, timer_names=set()):
+    def _optimizer_states_and_gradient_swap_out(self, sub_group_id, timer_names):
         param_length = self.fp16_partitioned_groups_flat_numel[sub_group_id]
         fp32_param_id = id(self.fp32_partitioned_groups_flat[sub_group_id])
         assert self._swappable_optimizer_subgroup(sub_group_id), \
             f'Parameter {fp32_param_id} of numel={param_length} is not swappable'
 
-        OPTIMIZER_SWAP_OUT_STATE = 'optimizer_swap_out_state'
         see_memory_usage(f'post-step Before swapping out optimizer tensors {sub_group_id}', force=False)
-        self.start_timers([OPTIMIZER_SWAP_OUT_STATE])
+        timer_names.add(OPTIMIZER_SWAP_OUT_STATE_TIMER)
+        self.timers(OPTIMIZER_SWAP_OUT_STATE_TIMER).start()
 
         self.optimizer_swapper.swap_out_optimizer_state(
             parameter=self.fp32_partitioned_groups_flat[sub_group_id],
             async_swap=self.next_swappable_fp32_partitioned_groups[sub_group_id] is not None)
 
-        self.stop_timers([OPTIMIZER_SWAP_OUT_STATE])
+        self.timers(OPTIMIZER_SWAP_OUT_STATE_TIMER).stop()
         see_memory_usage(f'post-step After swapping out optimizer tensors {sub_group_id}', force=False)
-        timer_names.add(OPTIMIZER_SWAP_OUT_STATE)
 
         # get rid of the fp32 gradients. Not needed anymore
         self.fp32_partitioned_groups_flat[sub_group_id].grad = None
@@ -1811,7 +1793,7 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
         return self.overflow
 
     @instrument_w_nvtx
-    def _post_step(self, timer_names=set()):
+    def _post_step(self, timer_names):
         if self.offload_optimizer:
             self.reset_cpu_buffers()
 
@@ -1824,7 +1806,7 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
 
         self.invalidate_secondary_tensor()
 
-        self.log_timers(timer_names)
+        self.timers.log(timer_names)
 
         see_memory_usage('After zero_optimizer step', force=False)
         print_rank_0(f"------------------Finishing Step-----------------------")
@@ -1850,7 +1832,7 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
     def step(self, closure=None):
         """
             Not supporting closure.
-            """
+        """
         self._pre_step()
         self._partition_all_parameters()
 
@@ -1868,8 +1850,8 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
 
         timer_names = set()
 
-        timer_names.add('optimizer_step')
-        self.start_timers(['optimizer_step'])
+        timer_names.add(OPTIMIZER_STEP_TIMER)
+        self.timers(OPTIMIZER_STEP_TIMER).start()
 
         #update parameters one sub group at a time
         for sub_group_id, group in enumerate(self.fp16_groups):
@@ -1889,7 +1871,7 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
             #release memory or swap out optimizer states of fp32 parameters
             self._release_sub_group(sub_group_id, timer_names)
 
-        self.stop_timers(['optimizer_step'])
+        self.timers(OPTIMIZER_STEP_TIMER).stop()
 
         self._post_step(timer_names)
 

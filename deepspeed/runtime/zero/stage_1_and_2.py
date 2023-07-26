@@ -35,6 +35,11 @@ from deepspeed.checkpoint import enable_universal_checkpoint
 # with gradient partitioning and without
 pg_correctness_test = False
 
+OPTIMIZER_ALLGATHER_TIMER = 'optimizer_allgather'
+OPTIMIZER_GRADIENTS_TIMER = 'optimizer_gradients'
+OPTIMIZER_STEP_TIMER = 'optimizer_step'
+OPTIMIZER_TIMERS = [OPTIMIZER_ALLGATHER_TIMER, OPTIMIZER_GRADIENTS_TIMER, OPTIMIZER_STEP_TIMER]
+
 
 def input(msg):
     return
@@ -1631,26 +1636,6 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
         self.norm_for_param_grads = {}
         self.local_overflow = False
 
-    def log_timers(self, timer_names):
-        if self.timers is None:
-            return
-
-        self.timers.log(names=list(timer_names))
-
-    def start_timers(self, timer_names):
-        if self.timers is None:
-            return
-
-        for name in timer_names:
-            self.timers(name).start()
-
-    def stop_timers(self, timer_names):
-        if self.timers is None:
-            return
-
-        for name in timer_names:
-            self.timers(name).stop()
-
     def set_lr(self, lr):
         """Set the learning rate."""
         for param_group in self.optimizer.param_groups:
@@ -1710,10 +1695,6 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
 
         # First compute norm for all group so we know if there is overflow
         self.check_overflow()
-        OPTIMIZER_ALLGATHER = 'optimizer_allgather'
-        OPTIMIZER_GRADIENTS = 'optimizer_gradients'
-        OPTIMIZER_STEP = 'optimizer_step'
-        timer_names = [OPTIMIZER_ALLGATHER, OPTIMIZER_GRADIENTS, OPTIMIZER_STEP]
 
         prev_scale = self.loss_scale
         self._update_scale(self.overflow)
@@ -1727,8 +1708,9 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
 
             see_memory_usage('After overflow after clearing gradients')
 
-            self.start_timers(timer_names)
-            self.stop_timers(timer_names)
+            for timer in OPTIMIZER_TIMERS:
+                self.timers(timer).start()
+                self.timers(timer).stop()
             return
 
         # Step 1:- Calculate gradient norm using bit-16 grads
@@ -1739,14 +1721,14 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
 
         # Step 2:- run optimizer and upscaling simultaneously
         for i, group in enumerate(self.bit16_groups):
-            self.start_timers([OPTIMIZER_GRADIENTS])
+            self.timers(OPTIMIZER_GRADIENTS_TIMER).start()
             partition_id = dist.get_rank(group=self.real_dp_process_group[i])
             if self.cpu_offload:
                 single_grad_partition = self.single_partition_of_fp32_groups[i].grad
                 self.unscale_and_clip_grads([single_grad_partition], scaled_global_grad_norm)
 
-                self.stop_timers([OPTIMIZER_GRADIENTS])
-                self.start_timers([OPTIMIZER_STEP])
+                self.timers(OPTIMIZER_GRADIENTS_TIMER).stop()
+                self.timers(OPTIMIZER_STEP_TIMER).start()
                 self._optimizer_step(i)
 
                 # Disabled, this is not currently working
@@ -1759,7 +1741,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
                 fp32_partition = self.single_partition_of_fp32_groups[i]
                 bit16_partitions[partition_id].data.copy_(fp32_partition.data)
 
-                self.stop_timers([OPTIMIZER_STEP])
+                self.timers(OPTIMIZER_STEP_TIMER).stop()
             else:
                 # free gradients for all the parameters that are not updated by this process(ZeRO stage2)
                 self.free_grad_in_param_list(self.params_not_in_partition[i])
@@ -1785,10 +1767,10 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
 
                 self.unscale_and_clip_grads([single_grad_partition], scaled_global_grad_norm)
 
-                self.stop_timers([OPTIMIZER_GRADIENTS])
+                self.timers(OPTIMIZER_GRADIENTS_TIMER).stop()
 
                 # Step 3:- run the optimizer if no offloading
-                self.start_timers([OPTIMIZER_STEP])
+                self.timers(OPTIMIZER_STEP_TIMER).start()
                 self._optimizer_step(i)
                 # Step 4:- get rid of the fp32 gradients. Not needed anymore
                 self.single_partition_of_fp32_groups[i].grad = None
@@ -1796,13 +1778,13 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
                 bit16_partitions = self.parallel_partitioned_bit16_groups[i]
                 fp32_partition = self.single_partition_of_fp32_groups[i]
                 bit16_partitions[partition_id].data.copy_(fp32_partition.data)
-                self.stop_timers([OPTIMIZER_STEP])
+                self.timers(OPTIMIZER_STEP_TIMER).stop()
 
         see_memory_usage('After optimizer before all-gather')
         if self.cpu_offload:
             self.reset_cpu_buffers()
 
-        self.start_timers([OPTIMIZER_ALLGATHER])
+        self.timers(OPTIMIZER_ALLGATHER_TIMER).start()
         # Gather the updated weights from everyone.
         # Then all partitions of the model parameters are updated and ready for next round forward.
         all_gather_dp_groups(partitioned_param_groups=self.parallel_partitioned_bit16_groups,
@@ -1810,13 +1792,13 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
                              start_alignment_factor=self.nccl_start_alignment_factor,
                              allgather_bucket_size=self.allgather_bucket_size)
 
-        self.stop_timers([OPTIMIZER_ALLGATHER])
+        self.timers(OPTIMIZER_ALLGATHER_TIMER).stop()
 
         # TODO: we probably don't need this? just to be safe
         for i in range(len(self.bit16_groups)):
             self._update_model_bit16_weights(i)
 
-        self.log_timers(timer_names)
+        self.timers.log(OPTIMIZER_TIMERS)
         see_memory_usage('After zero_optimizer step')
 
         return

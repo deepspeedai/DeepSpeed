@@ -25,7 +25,7 @@ from torch import _C
 from deepspeed.runtime.config import DeepSpeedConfig
 from deepspeed.utils import logger
 from deepspeed.runtime.utils import copy_to_device, move_to_device, see_memory_usage, bwc_tensor_model_parallel_rank
-from deepspeed.utils.timer import SynchronizedWallClockTimer as Timers
+from deepspeed.utils.timer import SynchronizedWallClockTimer as Timers, FORWARD_GLOBAL_TIMER
 from deepspeed.accelerator import get_accelerator
 
 # DeepSpeed Checkpointing Enabled or Disabled
@@ -499,7 +499,7 @@ class CheckpointFunction(torch.autograd.Function):
             timers = Timers()
 
         if PROFILE_TIME:
-            timers('forward').start()
+            timers(FORWARD_GLOBAL_TIMER).start()
 
         ctx.run_function = run_function
         global num_layers
@@ -568,8 +568,8 @@ class CheckpointFunction(torch.autograd.Function):
             save_args_for_backward(*args)
 
         if PROFILE_TIME:
-            timers('forward').stop()
-            timers.log(['forward'])
+            timers(FORWARD_GLOBAL_TIMER).stop()
+            timers.log([FORWARD_GLOBAL_TIMER])
         if SYNCHRONIZE:
             get_accelerator().synchronize()
 

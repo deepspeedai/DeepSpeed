@@ -14,6 +14,7 @@ import numpy as np
 from deepspeed.accelerator import get_accelerator
 from deepspeed.utils import logger
 from deepspeed.moe.layer import MoE
+from deepspeed.utils.timer import FORWARD_GLOBAL_TIMER, BACKWARD_GLOBAL_TIMER, STEP_GLOBAL_TIMER
 
 Tensor = torch.Tensor
 
@@ -358,7 +359,7 @@ class FlopsProfiler(object):
 
         fwd_latency = self.get_total_duration()
         if self.ds_engine and self.ds_engine.wall_clock_breakdown():
-            fwd_latency = self.ds_engine.timers('forward').elapsed(False) / 1000.0
+            fwd_latency = self.ds_engine.timers(FORWARD_GLOBAL_TIMER).elapsed(False) / 1000.0
         print(line_fmt.format('fwd latency: ', duration_to_string(fwd_latency)))
         print(
             line_fmt.format('fwd FLOPS per GPU = fwd flops per GPU / fwd latency: ',
@@ -366,8 +367,8 @@ class FlopsProfiler(object):
 
         if self.ds_engine and self.ds_engine.wall_clock_breakdown():
             bwd_factor = 2 + self.recompute_fwd_factor
-            bwd_latency = self.ds_engine.timers('backward').elapsed(False) / 1000.0
-            step_latency = self.ds_engine.timers('step').elapsed(False) / 1000.0
+            bwd_latency = self.ds_engine.timers(BACKWARD_GLOBAL_TIMER).elapsed(False) / 1000.0
+            step_latency = self.ds_engine.timers(STEP_GLOBAL_TIMER).elapsed(False) / 1000.0
             print(line_fmt.format('bwd latency: ', duration_to_string(bwd_latency)))
             print(
                 line_fmt.format(f'bwd FLOPS per GPU = {bwd_factor:g} * fwd flops per GPU / bwd latency: ',

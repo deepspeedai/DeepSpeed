@@ -7,7 +7,17 @@ import time
 from numpy import mean
 from deepspeed.utils.logging import log_dist
 from deepspeed.accelerator import get_accelerator
-from deepspeed import comm as dist
+
+FORWARD_MICRO_TIMER = 'fwd_microstep'
+FORWARD_GLOBAL_TIMER = 'fwd'
+BACKWARD_MICRO_TIMER = 'bwd_microstep'
+BACKWARD_GLOBAL_TIMER = 'bwd'
+BACKWARD_INNER_MICRO_TIMER = 'bwd_inner_microstep'
+BACKWARD_INNER_GLOBAL_TIMER = 'bwd_inner'
+BACKWARD_REDUCE_MICRO_TIMER = 'bwd_allreduce_microstep'
+BACKWARD_REDUCE_GLOBAL_TIMER = 'bwd_allreduce'
+STEP_MICRO_TIMER = 'step_microstep'
+STEP_GLOBAL_TIMER = 'step'
 
 try:
     import psutil
@@ -131,7 +141,7 @@ class SynchronizedWallClockTimer:
     def log(self, names, normalizer=1.0, reset=True, memory_breakdown=False, ranks=None):
         """Log a group of timers."""
         assert normalizer > 0.0
-        string = f"rank={dist.get_rank()} time (ms)"
+        string = f"time (ms)"
         for name in names:
             if name in self.timers:
                 elapsed_time = (self.timers[name].elapsed(reset=reset) / normalizer)
@@ -148,6 +158,41 @@ class SynchronizedWallClockTimer:
                 elapsed_time = (self.timers[name].mean() * 1000.0 / normalizer)
                 means[name] = elapsed_time
         return means
+
+
+class NoopTimer:
+
+    class Timer:
+
+        def start(self):
+            ...
+
+        def reset(self):
+            ...
+
+        def stop(self, **kwargs):
+            ...
+
+        def elapsed(self, **kwargs):
+            return 0
+
+        def mean(self):
+            return 0
+
+    def __init__(self):
+        self.timer = self.Timer()
+
+    def __call__(self, name):
+        return self.timer
+
+    def get_timers(self):
+        return {}
+
+    def log(self, names, normalizer=1.0, reset=True, memory_breakdown=False, ranks=None):
+        ...
+
+    def get_mean(self, names, normalizer=1.0, reset=True):
+        ...
 
 
 class ThroughputTimer:
