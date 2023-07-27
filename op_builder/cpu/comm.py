@@ -25,6 +25,9 @@ class CCLCommBuilder(CPUOpBuilder):
         includes = ['csrc/cpu/includes']
         return includes
 
+    def cxx_args(self):
+        return ['-O2', '-fopenmp']
+
     def is_compatible(self, verbose=True):
         # TODO: add soft compatibility check for private binary release.
         #  a soft check, as in we know it can be trivially changed.
