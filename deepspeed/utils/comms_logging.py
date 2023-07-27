@@ -44,7 +44,7 @@ def calc_bw_log(comm_op, size, duration):
         size *= n
         tput = (size / duration)
         busbw = (size / duration) * ((n - 1) / n)
-    elif comm_op == "all_reduce" or comm_op == "all_reduce_coalesced":
+    elif comm_op == "all_reduce" or comm_op == "all_reduce_coalesced" or comm_op == "inference_all_reduce":
         tput = (size * 2 / duration)
         busbw = (size / duration) * (2 * (n - 1) / n)
     elif comm_op == "send" or comm_op == "recv" or comm_op == "isend" or comm_op == "irecv" or comm_op == "broadcast" or comm_op == "reduce" or comm_op == "gather" or comm_op == "scatter" or comm_op == "barrier":
