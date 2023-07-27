@@ -371,8 +371,22 @@ def replace_transformer_layer(orig_layer_impl, model, checkpoint_dict, config, m
         def _replace(child, name, conv_linear_layer):
             if getattr(child, "replaced", False) == True:
                 return
-            mp_replace = ReplaceWithTensorSlicing(mp_group=mp_group)
             weight_shape = child.weight.shape
+            if name == 'attn.Wqkv' and module._get_name() == 'MPTBlock':
+                # MPT block qkv weight's allocation is different from other models, it's [3,num_head,head_dim,hidden_size]
+                # instead of [num_head,3,head_dim,hidden_size]
+                new_weight = torch.empty((
+                    weight_shape[0] // mp_size,
+                    weight_shape[1],
+                ),
+                                         device=child.weight.device,
+                                         dtype=child.weight.dtype)
+                reversed_dim = True
+                mp_replace = ReplaceWithTensorSlicing(mp_group=mp_group, out_dim=0)
+                mp_replace.strided_copy(new_weight, child.weight.data, num_splits=3, int8=reversed_dim)
+                setattr(child, "replaced", True)
+                return LinearLayer(weight=new_weight.to(get_accelerator().current_device_name()), bias=None)
+            mp_replace = ReplaceWithTensorSlicing(mp_group=mp_group)
             if name in all_reduce_linears:
                 new_weight = torch.empty((
                     weight_shape[1] if conv_linear_layer else weight_shape[0],
@@ -461,7 +475,8 @@ def replace_transformer_layer(orig_layer_impl, model, checkpoint_dict, config, m
                 else:
                     class_name = prev_class_name + '.' + prev_name
                 checking_key = prefix + '.' + class_name + '.' + name + '.' if class_name != "" else prefix + '.' + name + '.'
-                if child.__class__ in [nn.Linear, nn.Embedding, nn.LayerNorm] and state_dict is not None:
+                if (child.__class__ in [nn.Linear, nn.Embedding, nn.LayerNorm]
+                        or child._get_name() in ["LPLayerNorm", "SharedEmbedding"]) and state_dict is not None:
                     if any(checking_key in item for item in state_dict):
                         load(child, state_dict, checking_key, mp_group)
                     else:
@@ -836,7 +851,8 @@ def _replace_module(model, policies, prefix='', layer_id=0, level_id=0, state_di
             layer_id += 1
         else:
             checking_key = prefix + name + '.'
-            if child.__class__ in load_layers and state_dict is not None:
+            if (child.__class__ in load_layers
+                    or child._get_name() in ["LPLayerNorm", "SharedEmbedding"]) and state_dict is not None:
                 if any(checking_key in item for item in state_dict):
                     load(
                         child,
