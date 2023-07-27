@@ -35,8 +35,9 @@ def check_dtype(model, expected_dtype):
     assert (found_dtype == expected_dtype), f"Expected transformer dtype {expected_dtype}, but found {found_dtype}"
 
 
-@pytest.fixture(
-    params=["bigscience/bloom-560m", "EleutherAI/gpt-j-6B", "EleutherAI/gpt-neo-125M", "facebook/opt-125m"])
+@pytest.fixture(params=[
+    "bigscience/bloom-560m", "EleutherAI/gpt-j-6B", "EleutherAI/gpt-neo-125M", "facebook/opt-350m", "facebook/opt-125m"
+])
 def model_name(request):
     return request.param
 

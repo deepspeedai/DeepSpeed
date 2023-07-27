@@ -780,17 +780,20 @@ from ..pipe import PipelineModule
 import re
 
 
-def skip_level_0_prefix(model, name):
+def skip_level_0_prefix(model, state_dict):
     model = str(model)
     key = re.search(r": (.*?)Model", model)
     if key is None:
         key = re.search(r": (.*?)Stack", model)
     if key is None:
         key = re.match(r"(.*?)Model", model)
-    if key is not None and key.group(1).lower() in "bloom":
-        # if keys start with 'model.', don't skip level 0 prefix
-        if not re.match("^model[.]", name):
-            return True
+    # if keys start with 'model.', don't skip level 0 prefix
+    if state_dict != None:
+        for item in state_dict.keys():
+            if re.match("^model[.]", item):
+                return False
+    if key is not None and key.group(1).lower() in ["bloom", "opt"]:
+        return True
     return False
 
 
@@ -846,7 +849,7 @@ def _replace_module(model, policies, prefix='', layer_id=0, level_id=0, state_di
                 load_buffer(child, state_dict, checking_key)
             _, layer_id = _replace_module(child,
                                           policies,
-                                          prefix if level_id == 0 and skip_level_0_prefix(model, name) else \
+                                          prefix if level_id == 0 and skip_level_0_prefix(model, state_dict) else \
                                           prefix + name + '.',
                                           layer_id=layer_id,
                                           level_id=level_id + 1,
