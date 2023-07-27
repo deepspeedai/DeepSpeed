@@ -32,7 +32,7 @@ class AutoTP():
         return mlist
 
     def supported(model):
-        unsupported = ['codegen', 'deberta', 'flaubert', 'fsmt', 'gpt2', 'led', 'longformer', 'xlm', 'xlnet']
+        unsupported = ['deberta', 'flaubert', 'fsmt', 'gpt2', 'led', 'longformer', 'xlm', 'xlnet']
         model = str(model)
         key = re.search(r": (.*?)Model", model)
         if key is None:

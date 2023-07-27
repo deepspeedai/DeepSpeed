@@ -15,16 +15,15 @@ from deepspeed.ops.transformer.inference.diffusers_2d_transformer import Diffuse
 from deepspeed.accelerator import get_accelerator
 from .replace_policy import HFGPT2LayerPolicy
 from .replace_policy import replace_policies, generic_policies
-
 from deepspeed import comm as dist
 from torch import nn
+from .fusedqkv_utils import require_tp_fused_qkvw, prepare_tp_fused_qkvw
 
 from .layers import LinearAllreduce, LinearLayer
 from .load_checkpoint import load_model_with_checkpoint
 import time
 
 from .utils import policy_to_ds_container
-
 import gc
 
 
@@ -396,6 +395,7 @@ def replace_transformer_layer(orig_layer_impl, model, checkpoint_dict, config, m
                                          dtype=child.weight.dtype)
                 if conv_linear_layer:
                     child.weight.data = child.weight.data.transpose(-1, -2).contiguous()
+
                 data = mp_replace.copy(new_weight, child.weight.data)
                 new_bias = torch.empty((weight_shape[0]), device=child.weight.device, dtype=child.weight.dtype)
                 if child.bias is not None:
@@ -412,13 +412,28 @@ def replace_transformer_layer(orig_layer_impl, model, checkpoint_dict, config, m
                                          dtype=child.weight.dtype)
                 if conv_linear_layer:
                     child.weight.data = child.weight.data.transpose(-1, -2).contiguous()
-                data = mp_replace.copy(new_weight, child.weight.data)
 
                 new_bias = torch.empty((weight_shape[0] // mp_size),
                                        device=child.weight.device,
                                        dtype=child.weight.dtype)
-                bias_data = None if child.bias is None else mp_replace.copy(new_bias, child.bias.data).to(
-                    get_accelerator().current_device_name())
+
+                if require_tp_fused_qkvw(name, mp_size):
+                    #for detecting fused type
+                    module_str = str(module).strip()
+                    #The copy is a regular copy, The shape of dst and src is the same
+                    data = mp_replace.copy(
+                        new_weight, prepare_tp_fused_qkvw(module_str, child.weight.data, mp_size,
+                                                          mp_replace.gpu_index))
+
+                    bias_data = None if child.bias is None else mp_replace.copy(
+                        new_bias, prepare_tp_fused_qkvw(module_str, child.bias.data, mp_size,
+                                                        mp_replace.gpu_index)).to(
+                                                            get_accelerator().current_device_name())
+                else:
+                    data = mp_replace.copy(new_weight, child.weight.data)
+                    bias_data = None if child.bias is None else mp_replace.copy(new_bias, child.bias.data).to(
+                        get_accelerator().current_device_name())
+
                 setattr(child, "replaced", True)
                 return LinearLayer(weight=data.to(get_accelerator().current_device_name()), bias=bias_data)
 
