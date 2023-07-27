@@ -257,7 +257,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
         # These are the parameters that will be updated by this process directly
         self.params_in_partition = []
 
-        # Offset from the first parameter in the the self.params_in_partition
+        # Offset from the first parameter in the self.params_in_partition
         # the parameter boundaries may not align with partition boundaries
         # so we need to keep track of the offset
         self.first_offset = []

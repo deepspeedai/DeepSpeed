@@ -52,7 +52,7 @@ class MetaTensorContainer(ABC):
         """
         Load all the transformer parameter from the checkpoint file (sd).
         In addition to the parameter names, we require two
-        more parameters to help read the the data correctly
+        more parameters to help read the data correctly
         from the checkpoint and split the qkv heads in the
         right order:
             1. `use_load_prefix` (Default: False): this specifies

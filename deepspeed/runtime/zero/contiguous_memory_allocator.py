@@ -78,7 +78,7 @@ class ContiguousMemoryAllocator(object):
         return ret_tensor
 
     #assigns the tensor data to the param data and keeps track of the assignment
-    #any change the the underlying buffer from defragmentation will cause a
+    #any change the underlying buffer from defragmentation will cause a
     #reassignment of the param data
     def assign_to_param(self, tensor, param, numel, shape):
         tensor_id = id(tensor)

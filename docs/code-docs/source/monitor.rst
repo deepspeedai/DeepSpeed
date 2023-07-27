@@ -15,7 +15,7 @@ overview of what DeepSpeed will log automatically.
     `Train/Eigenvalues/ModelBlockParam_{i}`,Eigen values per param block.,`eigenvalue` must be enabled.
     `Train/Samples/elapsed_time_ms_forward`,The global duration of the forward pass.,`flops_profiler.enabled` or `wall_clock_breakdown`.
     `Train/Samples/elapsed_time_ms_backward`,The global duration of the forward pass.,`flops_profiler.enabled` or `wall_clock_breakdown`.
-    `Train/Samples/elapsed_time_ms_backward_inner`,The backward time that does not include the the gradient reduction time. Only in cases where the gradient reduction is not overlapped, if it is overlapped then the inner time should be about the same as the entire backward time.,`flops_profiler.enabled` or `wall_clock_breakdown`.
+    `Train/Samples/elapsed_time_ms_backward_inner`,The backward time that does not include the gradient reduction time. Only in cases where the gradient reduction is not overlapped, if it is overlapped then the inner time should be about the same as the entire backward time.,`flops_profiler.enabled` or `wall_clock_breakdown`.
     `Train/Samples/elapsed_time_ms_backward_allreduce`,The global duration of the allreduce operation.,`flops_profiler.enabled` or `wall_clock_breakdown`.
     `Train/Samples/elapsed_time_ms_step`,The optimizer step time,`flops_profiler.enabled` or `wall_clock_breakdown`.
 

@@ -6,7 +6,7 @@ The DeepSpeed Autotuner mitigates this pain point and automatically discovers th
 The Autotuner uses model information, system information, and heuristics to efficiently tune system knobs that affect compute and memory efficiencies, such as ZeRO optimization stages, micro-batch sizes, and many other ZeRO optimization configurations.
 It not only reduces the time and resources users spend on tuning, but also can discover configurations better than hand-tuned methods.
 
-Please see the the `Autotuning tutorial <https://www.deepspeed.ai/tutorials/autotuning/>`_ for usage details.
+Please see the `Autotuning tutorial <https://www.deepspeed.ai/tutorials/autotuning/>`_ for usage details.
 
 Autotuner
 ---------------------------------------------------

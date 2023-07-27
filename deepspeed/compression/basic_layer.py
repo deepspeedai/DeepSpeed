@@ -618,7 +618,7 @@ class BNLayer_Compress(nn.BatchNorm2d):
 
 
 def _reduce(input_):
-    """All-reduce the the input tensor across model parallel group."""
+    """All-reduce the input tensor across model parallel group."""
     group = g_mpu.get_model_parallel_group()
 
     # Bypass the function if we are using only 1 GPU.
