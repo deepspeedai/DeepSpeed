@@ -1,3 +1,4 @@
+accelerate
 clang-format==16.0.2
 coverage
 docutils<0.18

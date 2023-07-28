@@ -38,7 +38,8 @@ ZeRO optimization should be enabled as:
     "zero_hpz_partition_size": 1,
     "zero_quantized_weights": [true|false],
     "zero_quantized_gradients": [true|false],
-    "memory_efficient_linear": [true|false]
+    "memory_efficient_linear": [true|false],
+    "override_module_apply": [true|false],
     }
 }
 """
@@ -269,9 +270,15 @@ class DeepSpeedZeroConfig(DeepSpeedConfigModel):
     mics_shard_size: int = Field(-1, new_param="mics_shard_size")
 
     mics_hierarchical_params_gather: bool = False
+
     memory_efficient_linear: bool = True
     """
     Use memory efficient linear implementation, for Stage 3.
+    """
+
+    override_module_apply: bool = True
+    """
+    Override nn.Module apply function, for Stage 3.
     """
 
     # Validators

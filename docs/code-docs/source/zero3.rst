@@ -309,6 +309,17 @@ DeepSpeed can automatically detect the following external parameter scenarios:
 .. autofunction:: deepspeed.zero.unregister_external_parameter
 
 
+.. `Module.apply <https://pytorch.org/docs/stable/generated/torch.nn.Module.html?highlight=module+apply#torch.nn.Module.apply>`_
+Overriding Module.apply
+===============================
+A convenient mechanism for customizing model initialization is `Module.apply <https://pytorch.org/docs/stable/generated/torch.nn.Module.html?highlight=module+apply#torch.nn.Module.apply>`_.
+With ZeRO stage 3, ``Module.apply`` implementations must account for parameter partitioning by ``zero.Init`` during model initialization. The default behavior of ZeRO stage 3 is to automatically
+handle this issue by overriding ``Module.apply`` to ensure that parameters are gathered before access by ``Module.apply``. The benefit of this approach is development convenience, since
+users are saved the burden of manual parameter coordination in ``Module.apply``. However, the downside is slow model initialization, since all the model parameters (e.g., billions) are gathered
+even though the common usage of ``Module.apply`` is to customize a few parameters. Developers can disable this default behavior by setting the ``override_module_apply`` configuration knob to ``False``,
+for faster model initialization at the cost of manually handling partitioned parameters in their ``Module.apply`` implementations.
+
+
 Memory-Centric Tiling
 ---------------------
 
