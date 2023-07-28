@@ -719,6 +719,13 @@ class DeepSpeedEngine(Module):
     def zero_optimization_partition_weights(self):
         return self.zero_optimization_stage() >= ZeroStageEnum.weights
 
+    def is_first_weights_partition_group(self):
+        ret = True if self.mics_shard_size() < 0 \
+            and self.zero_optimization_partition_weights() else False
+        if self.mics_shard_size() > 0 and self.global_rank < self.mics_shard_size():
+            ret = True
+        return ret
+
     def zero_contiguous_gradients(self):
         return self._config.zero_config.contiguous_gradients
 
@@ -898,7 +905,8 @@ class DeepSpeedEngine(Module):
         # only the first data parallel process needs to store the model checkpoint
         # if you want to use node local storage this must be done by rank 0 on each
         # node
-        self.save_non_zero_checkpoint = (rank == 0) or self.zero_optimization_partition_weights()
+        self.save_non_zero_checkpoint = (rank == 0) or (self.zero_optimization_partition_weights()
+                                                        and self.is_first_weights_partition_group())
 
         if self.zero_optimization() or self.bfloat16_enabled():
             param_rank = dist.get_rank(group=self.optimizer.dp_process_group)

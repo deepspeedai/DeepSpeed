@@ -64,3 +64,17 @@ class TestMiCSCheckpoint(DistributedTest):
     def test_load_module_only(self, tmpdir, shard_size):
         config_dict, hidden_dim, models = self._toy_model_config(shard_size)
         checkpoint_correctness_verification(config_dict, models, hidden_dim, tmpdir, load_module_only=True)
+
+    @pytest.mark.parametrize('shard_size', [1, 2, 4])
+    def test_save_checkpoint_on_first_partition_group(self, tmpdir, shard_size):
+        config_dict, _, models = self._toy_model_config(shard_size)
+        ds_engine, _, _, _ = deepspeed.initialize(config=config_dict,
+                                                  model=models[0],
+                                                  model_parameters=models[0].parameters(),
+                                                  optimizer=None)
+
+        ds_engine.save_checkpoint(tmpdir)
+        if ds_engine.global_rank < shard_size:
+            assert ds_engine.save_non_zero_checkpoint == True
+        else:
+            assert ds_engine.save_non_zero_checkpoint == False
