@@ -4,7 +4,6 @@
 # DeepSpeed Team
 
 import os
-from typing import Optional
 import torch
 import tqdm
 import deepspeed
@@ -13,115 +12,17 @@ from deepspeed.ops.transformer.inference.diffusers_attention import DeepSpeedDif
 from deepspeed.ops.transformer.inference.diffusers_transformer_block import DeepSpeedDiffusersTransformerBlock
 from deepspeed.ops.transformer.inference.diffusers_2d_transformer import Diffusers2DTransformerConfig
 from deepspeed.accelerator import get_accelerator
-from .replace_policy import HFGPT2LayerPolicy
 from .replace_policy import replace_policies, generic_policies
+from .auto_tp import AutoTP, ReplaceWithTensorSlicing, Loading
+
 from deepspeed import comm as dist
 from torch import nn
-from .fusedqkv_utils import require_tp_fused_qkvw, prepare_tp_fused_qkvw
 
-from .layers import LinearAllreduce, LinearLayer
 from .load_checkpoint import load_model_with_checkpoint
 import time
 
 from .utils import policy_to_ds_container
 import gc
-
-
-class ReplaceWithTensorSlicing:
-
-    def __init__(self, mp_group=None, mp_size=1, out_dim=1, in_dim=0):
-        if mp_group is not None:
-            self.gpu_index = dist.get_rank(group=mp_group)
-        else:
-            self.gpu_index = 0
-        self.out_dim = out_dim
-        self.in_dim = in_dim
-        self.mp_size = mp_size
-
-    def merge_assert(self, dim1, dim2):
-        assert dim1 > dim2, \
-            'Merging tensors is not allowed here! Please use deepspeed load_checkpoint\
-            for merging your checkpoints before replacing the transformer layer with\
-            inference-kernels'
-
-    def strided_copy(self,
-                     dst: Optional[torch.Tensor],
-                     src: Optional[torch.Tensor],
-                     num_splits: int,
-                     int8: bool = False,
-                     allocate_tensor: bool = False):
-        if src is None:
-            return src
-        src_shape = src.shape
-        dst_shape = dst.shape
-
-        outer_dim = 0 if int8 else -1
-
-        if allocate_tensor:
-            dst = torch.empty_like(dst)
-
-        src_split = torch.split(src.data, src.shape[outer_dim] // num_splits, dim=outer_dim)
-        if (len(src_shape) == 2 and len(dst_shape) == 2):
-            if src_shape[outer_dim] == dst_shape[self.out_dim]:
-                dst = dst.reshape(-1).data.copy_(src.data.reshape(-1)).reshape(src.shape)
-                dst = torch.nn.parameter.Parameter(dst, requires_grad=False)
-                if hasattr(src, 'scale'):
-                    dst.scale = src.scale
-                return dst
-            self.merge_assert(src_shape[outer_dim], dst_shape[self.out_dim])
-            qkv_size = dst_shape[self.out_dim] // num_splits
-            qkv_split = [torch.split(src_s, qkv_size, dim=outer_dim) for src_s in src_split]
-            weight_split = [
-                torch.cat([qkv_s[i] for qkv_s in qkv_split], axis=outer_dim) for i in range(len(qkv_split[0]))
-            ]
-            dst = dst.reshape(-1).data.copy_(weight_split[self.gpu_index].contiguous().reshape(-1)).reshape(
-                weight_split[self.gpu_index].shape)
-        else:
-            if src_shape[0] == dst_shape[0]:
-                return torch.nn.parameter.Parameter(src)
-            qkv_size = dst_shape[0] // num_splits
-            qkv_split = [torch.split(src_s, qkv_size, dim=0) for src_s in src_split]
-            bias_split = [torch.cat([qkv_s[i] for qkv_s in qkv_split], axis=0) for i in range(len(qkv_split[0]))]
-            dst.data.copy_(bias_split[self.gpu_index].contiguous())
-
-        dst = torch.nn.parameter.Parameter(dst, requires_grad=False)
-        if hasattr(src, 'scale'):
-            dst.scale = src.scale
-        return dst
-
-    def copy(self, dst, src, int8=False, allocate_tensor=False):
-        if src is None:
-            return src
-        assert not dst.data.is_meta  # the torch.Tensor.copy_ method used below will silently fail on meta tensors
-        if allocate_tensor:
-            dst = torch.empty_like(dst)
-        outer_dim = 0 if int8 else 1
-        inner_dim = 1 if int8 else 0
-        src_shape = src.shape
-        dst_shape = dst.shape
-        if (len(src_shape) == 2 and len(dst_shape) == 2):
-
-            if src_shape[inner_dim] == dst_shape[self.in_dim] and src_shape[outer_dim] == dst_shape[self.out_dim]:
-                dst = dst.reshape(-1).data.copy_(src.data.reshape(-1)).reshape(src.shape)
-            else:
-                if src_shape[inner_dim] != dst_shape[self.in_dim]:
-                    self.merge_assert(src_shape[inner_dim], dst_shape[self.in_dim])
-                    dst.data.copy_(src[:, self.gpu_index * dst_shape[self.in_dim]: (self.gpu_index + 1) * dst_shape[self.in_dim]] if inner_dim == 1 else \
-                                   src[self.gpu_index * dst_shape[self.in_dim]: (self.gpu_index + 1) * dst_shape[self.in_dim], :])
-                else:
-                    self.merge_assert(src_shape[outer_dim], dst_shape[self.out_dim])
-                    dst.data.copy_(src[:, self.gpu_index * dst_shape[self.out_dim]: (self.gpu_index + 1) * dst_shape[self.out_dim]] if outer_dim == 1 else \
-                                   src[self.gpu_index * dst_shape[self.out_dim]: (self.gpu_index + 1) * dst_shape[self.out_dim], :])
-        else:
-            if src_shape[0] == dst_shape[0]:
-                dst = src if src.dtype == dst.dtype else dst.data.copy_(src)
-            else:
-                dst.data.copy_(src[self.gpu_index * dst_shape[-1]:(self.gpu_index + 1) * dst_shape[-1]])
-        dst = torch.nn.parameter.Parameter(dst, requires_grad=False)
-        if hasattr(src, 'scale'):
-            dst.scale = src.scale
-
-        return dst
 
 
 def get_transformer_name(replaced_module):
@@ -364,159 +265,19 @@ def replace_transformer_layer(orig_layer_impl, model, checkpoint_dict, config, m
         return _container.module
 
     def replace_wo_policy(module, all_reduce_linears, prefix="", state_dict=None):
-        mp_size = config.tensor_parallel.tp_size
-        mp_group = config.tensor_parallel.tp_group
+        #mp_replace = ReplaceWithTensorSlicing(mp_group=config.tensor_parallel.tp_group)
 
-        def _replace(child, name, conv_linear_layer):
-            if getattr(child, "replaced", False) == True:
-                return
-            weight_shape = child.weight.shape
-            if name == 'attn.Wqkv' and module._get_name() == 'MPTBlock':
-                # MPT block qkv weight's allocation is different from other models, it's [3,num_head,head_dim,hidden_size]
-                # instead of [num_head,3,head_dim,hidden_size]
-                new_weight = torch.empty((
-                    weight_shape[0] // mp_size,
-                    weight_shape[1],
-                ),
-                                         device=child.weight.device,
-                                         dtype=child.weight.dtype)
-                reversed_dim = True
-                mp_replace = ReplaceWithTensorSlicing(mp_group=mp_group, out_dim=0)
-                mp_replace.strided_copy(new_weight, child.weight.data, num_splits=3, int8=reversed_dim)
-                setattr(child, "replaced", True)
-                return LinearLayer(weight=new_weight.to(get_accelerator().current_device_name()), bias=None)
-            mp_replace = ReplaceWithTensorSlicing(mp_group=mp_group)
-            if name in all_reduce_linears:
-                new_weight = torch.empty((
-                    weight_shape[1] if conv_linear_layer else weight_shape[0],
-                    (weight_shape[0] if conv_linear_layer else weight_shape[1]) // mp_size,
-                ),
-                                         device=child.weight.device,
-                                         dtype=child.weight.dtype)
-                if conv_linear_layer:
-                    child.weight.data = child.weight.data.transpose(-1, -2).contiguous()
+        # 1. Create AutoTP object
+        _autotp = AutoTP(module, all_reduce_linears, prefix, state_dict, linear_layer_setting, orig_layer_impl)
 
-                data = mp_replace.copy(new_weight, child.weight.data)
-                new_bias = torch.empty((weight_shape[0]), device=child.weight.device, dtype=child.weight.dtype)
-                if child.bias is not None:
-                    new_bias.data.copy_(child.bias.data)
-                setattr(child, "replaced", True)
-                return LinearAllreduce(data, child.bias if child.bias is None else \
-                            torch.nn.parameter.Parameter(new_bias.to(get_accelerator().current_device_name())), mp_group)
-            else:
-                new_weight = torch.empty((
-                    (weight_shape[1] if conv_linear_layer else weight_shape[0]) // mp_size,
-                    weight_shape[0] // mp_size if conv_linear_layer else weight_shape[1],
-                ),
-                                         device=child.weight.device,
-                                         dtype=child.weight.dtype)
-                if conv_linear_layer:
-                    child.weight.data = child.weight.data.transpose(-1, -2).contiguous()
+        # 2. Set the tensor parallelism config
+        _autotp.set_tensor_parallel_config(config.tensor_parallel.tp_size, config.tensor_parallel.tp_group)
 
-                new_bias = torch.empty((weight_shape[0] // mp_size),
-                                       device=child.weight.device,
-                                       dtype=child.weight.dtype)
+        # 3. Set linear policies
+        _autotp.update_linear_polciies()
 
-                if require_tp_fused_qkvw(name, mp_size):
-                    #for detecting fused type
-                    module_str = str(module).strip()
-                    #The copy is a regular copy, The shape of dst and src is the same
-                    data = mp_replace.copy(
-                        new_weight, prepare_tp_fused_qkvw(module_str, child.weight.data, mp_size,
-                                                          mp_replace.gpu_index))
-
-                    bias_data = None if child.bias is None else mp_replace.copy(
-                        new_bias, prepare_tp_fused_qkvw(module_str, child.bias.data, mp_size,
-                                                        mp_replace.gpu_index)).to(
-                                                            get_accelerator().current_device_name())
-                else:
-                    data = mp_replace.copy(new_weight, child.weight.data)
-                    bias_data = None if child.bias is None else mp_replace.copy(new_bias, child.bias.data).to(
-                        get_accelerator().current_device_name())
-
-                setattr(child, "replaced", True)
-                return LinearLayer(weight=data.to(get_accelerator().current_device_name()), bias=bias_data)
-
-        def _slice_embedding(child, name, conv_linear_layer):
-            if getattr(child, "replaced", False) == True:
-                return
-            mp_replace = ReplaceWithTensorSlicing(mp_group=mp_group)
-            new_weight = torch.empty((child.weight.shape[0], child.weight.shape[1] // mp_size),
-                                     device=child.weight.device,
-                                     dtype=child.weight.dtype)
-            data = mp_replace.copy(new_weight,
-                                   child.weight.ds_tensor.data if hasattr(child.weight, 'ds_tensor') else \
-                                   child.weight.data)
-            new_embedding = nn.Embedding(child.weight.shape[0], child.weight.shape[1] // mp_size)
-            new_embedding.weight.data.copy_(data)
-            setattr(child, "replaced", True)
-            return new_embedding
-
-        def update_mp_params(child):
-            if getattr(child, "replaced", False) == True:
-                return
-            for param in [
-                    "n_heads", "inner_dim", "num_heads", "num_kv", "num_attention_heads", "num_attn_heads",
-                    "all_head_size", "embed_dim", "hidden_size", "num_key_value_heads"
-            ]:
-                if hasattr(child, param):
-                    param_val = getattr(child, param)
-                    assert param_val % mp_size == 0, f"{param} ({param_val}) must be divisible by mp_size ({mp_size})"
-                    setattr(child, param, param_val // mp_size)
-            setattr(child, "replaced", True)
-
-        conv_linear_layer = False
-        if linear_layer_setting is not None:
-            linear_policies = {linear_layer_setting[0]: _replace}
-            if len(linear_layer_setting) == 2:
-                linear_policies.update({linear_layer_setting[1]: _slice_embedding})
-        else:
-            if orig_layer_impl is HFGPT2LayerPolicy._orig_layer_class:
-                try:
-                    import transformers
-                    conv_linear_layer = True
-                    linear_policies = {transformers.model_utils.Conv1D: _replace}
-                except ImportError:
-                    linear_policies = {nn.Linear: _replace}
-            else:
-                linear_policies = {nn.Linear: _replace, nn.Embedding: _slice_embedding}
-
-        def _replace_module(r_module, prev_name='', prev_class_name=''):
-            for name, child in r_module.named_children():
-                if prev_class_name == "":
-                    class_name = prev_name
-                elif prev_name == "":
-                    class_name = prev_class_name
-                else:
-                    class_name = prev_class_name + '.' + prev_name
-                checking_key = prefix + '.' + class_name + '.' + name + '.' if class_name != "" else prefix + '.' + name + '.'
-                if (child.__class__ in [nn.Linear, nn.Embedding, nn.LayerNorm]
-                        or child._get_name() in ["LPLayerNorm", "SharedEmbedding"]) and state_dict is not None:
-                    if any(checking_key in item for item in state_dict):
-                        load(child, state_dict, checking_key, mp_group)
-                    else:
-                        continue
-                if len(child._buffers) != 0 and state_dict is not None:
-                    load_buffer(child, state_dict, checking_key)
-                if child.__class__ in linear_policies:
-                    setattr(r_module, name, linear_policies[child.__class__](child, prev_name + '.' + name,
-                                                                             conv_linear_layer))
-                elif any(isinstance(child, lp) for lp in linear_policies):
-                    # Added for falcon model support
-                    # Note: isinstance will account for class inheritance, child.__class__ does not
-                    key = None
-                    for lp in linear_policies:
-                        if isinstance(child, lp):
-                            key = lp
-                            break
-                    assert key is not None
-                    setattr(r_module, name, linear_policies[key](child, prev_name + '.' + name, conv_linear_layer))
-                else:
-                    update_mp_params(child)
-                    _replace_module(child, name, class_name)
-            return r_module
-
-        return _replace_module(module)
+        # 4. Replace modules
+        return _autotp._replace_module(module)
 
     def replace_fn(child, _policy, layer_id=0, prefix="", state_dict=None):
         training = False  # todo: refactor this part to go in the config
@@ -827,16 +588,6 @@ def skip_level_0_prefix(model, state_dict):
     return False
 
 
-def load_buffer(module, state_dict, prefix):
-    for name in module._buffers.keys():
-        if module._buffers[name].data.is_meta:
-            module._buffers[name] = torch.nn.parameter.Parameter(
-                data=torch.empty_like(module._buffers[name].data, device="cpu"),
-                requires_grad=module._buffers[name].data.requires_grad)
-        if prefix + name in state_dict.keys():
-            module._buffers[name].data.copy_(state_dict[prefix + name])
-
-
 def _replace_module(model, policies, prefix='', layer_id=0, level_id=0, state_dict=None):
     """ Traverse model's children recursively and apply any transformations in ``policies``.
     Arguments:
@@ -869,7 +620,7 @@ def _replace_module(model, policies, prefix='', layer_id=0, level_id=0, state_di
             if (child.__class__ in load_layers
                     or child._get_name() in ["LPLayerNorm", "SharedEmbedding"]) and state_dict is not None:
                 if any(checking_key in item for item in state_dict):
-                    load(
+                    Loading.load(
                         child,
                         state_dict,
                         checking_key,
@@ -877,7 +628,7 @@ def _replace_module(model, policies, prefix='', layer_id=0, level_id=0, state_di
                 else:
                     continue
             if len(child._buffers) != 0 and state_dict is not None:
-                load_buffer(child, state_dict, checking_key)
+                Loading.load_buffer(child, state_dict, checking_key)
             _, layer_id = _replace_module(child,
                                           policies,
                                           prefix if level_id == 0 and skip_level_0_prefix(model, state_dict) else \
@@ -889,42 +640,3 @@ def _replace_module(model, policies, prefix='', layer_id=0, level_id=0, state_di
     # Add the reset_cache func to the model, so that it can be called in the beginning of text-generation.
     model.reset_cache = transformer_inference.DeepSpeedTransformerInference.reset_cache
     return model, layer_id
-
-
-def load(module, state_dict, prefix, mp_group=None):
-    mp_replace = ReplaceWithTensorSlicing(mp_group=mp_group)
-    if hasattr(module, 'weight'):
-        if module.weight.data.is_meta:
-            # meta tensor cannot be casted or copied to, so we need to replace it with a normal tensor here
-            module.weight = torch.nn.parameter.Parameter(data=torch.empty_like(module.weight.data, device="cpu"),
-                                                         requires_grad=module.weight.data.requires_grad)
-            if 'query_key_value' in prefix:
-                module.weight = mp_replace.strided_copy(module.weight.data,
-                                                        state_dict[prefix + 'weight'],
-                                                        num_splits=3)
-            else:
-                module.weight = mp_replace.copy(module.weight.data, state_dict[prefix + 'weight'])
-    else:
-        if hasattr(module, 'norm') and hasattr(module.norm, 'weight'):
-            if module.norm.weight.data.is_meta:
-                # meta tensor cannot be casted or copied to, so we need to replace it with a normal tensor here
-                module.norm.weight = torch.nn.parameter.Parameter(data=torch.empty_like(module.norm.weight.data,
-                                                                                        device="cpu"),
-                                                                  requires_grad=module.norm.weight.data.requires_grad)
-            module.norm.weight = mp_replace.copy(module.norm.weight.data, state_dict[prefix + 'weight'])
-
-    if prefix + 'bias' in state_dict.keys():
-        if hasattr(module, 'bias'):
-            if module.bias.data.is_meta:
-                # meta tensor cannot be casted or copied to, so we need to replace it with a normal tensor here
-                module.bias = torch.nn.parameter.Parameter(data=torch.empty_like(module.bias.data, device="cpu"),
-                                                           requires_grad=module.bias.data.requires_grad)
-            module.bias = mp_replace.copy(module.bias, state_dict[prefix + 'bias'])
-        else:
-            if hasattr(module, 'norm') and hasattr(module.norm, 'bias'):
-                if module.norm.bias.data.is_meta:
-                    # meta tensor cannot be casted or copied to, so we need to replace it with a normal tensor here
-                    module.norm.bias = torch.nn.parameter.Parameter(data=torch.empty_like(module.norm.bias.data,
-                                                                                          device="cpu"),
-                                                                    requires_grad=module.norm.bias.data.requires_grad)
-                module.norm.bias = mp_replace.copy(module.norm.bias, state_dict[prefix + 'bias'])
