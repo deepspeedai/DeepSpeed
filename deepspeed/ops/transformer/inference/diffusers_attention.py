@@ -52,7 +52,7 @@ class DeepSpeedDiffusersAttentionFunction(Function):
             return x.contiguous()
 
         def selfAttention_fp(input, context, input_mask):
-            if config.fp16 and input.dtype == torch.float32:
+            if config.dtype in [torch.half, torch.float16] and input.dtype == torch.float32:
                 input = input.half()
             head_size = input.shape[-1] // config.heads
             do_flash_attn = (head_size <= 128)

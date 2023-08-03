@@ -32,8 +32,6 @@ class DeepSpeedInferenceConfig(TransformerConfig):
             mp_size (optional): This argument is mainly used to create the parameters on the kernel side
                 using model-parallel architecture. If the client model already takes care of this, there is no
                 need to pass this argument.
-            fp16: Enable half-precision computation
-            bf16: Enable bf16 floating point computation
             pre_layer_norm: Select between Pre-LN or Post-LN transformer architecture
             stochastic_mode:  Enable for high performance, please note that this flag has some level of
                 non-determinism and can produce different results on different runs.  However, we have seen

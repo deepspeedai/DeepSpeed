@@ -32,5 +32,5 @@ class VAEPolicy(DSPolicy):
         return DSVAE(module, enable_cuda_graph=enable_cuda_graph)
 
     # NOTE (lekurile): Should we have a diffusers policy class?
-    def attention(self):
+    def attention(self, client_module):
         pass
