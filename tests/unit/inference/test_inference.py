@@ -478,12 +478,8 @@ class TestInjectionPolicy(DistributedTest):
 @pytest.mark.seq_inference
 @pytest.mark.parametrize(
     "model_w_task",
-    [
-        ("Helsinki-NLP/opus-mt-en-de", "translation"),
-    ],
-    ids=[
-        "marian",
-    ],
+    [("Helsinki-NLP/opus-mt-en-de", "translation"), ("Salesforce/codegen-350M-mono", "text-generation")],
+    ids=["marian", "codegen"],  #codegen has fusedqkv weight.
 )
 @pytest.mark.parametrize("dtype", [torch.float16], ids=["fp16"])
 class TestAutoTensorParallelism(DistributedTest):
