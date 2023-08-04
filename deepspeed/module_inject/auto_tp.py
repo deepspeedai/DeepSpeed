@@ -385,7 +385,7 @@ class AutoTP():
                 setattr(child, param, param_val // self.mp_size)
         setattr(child, "replaced", True)
 
-    def update_linear_polciies(self):
+    def update_linear_policies(self):
         self.conv_linear_layer = False
         if self.linear_layer_setting is not None:
             self.linear_policies = {self.linear_layer_setting[0]: self._replace}

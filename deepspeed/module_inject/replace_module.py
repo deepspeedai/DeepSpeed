@@ -273,7 +273,7 @@ def replace_transformer_layer(orig_layer_impl, model, checkpoint_dict, config, m
         _autotp.set_tensor_parallel_config(config.tensor_parallel.tp_size, config.tensor_parallel.tp_group)
 
         # 3. Set linear policies
-        _autotp.update_linear_polciies()
+        _autotp.update_linear_policies()
 
         # 4. Replace modules
         return _autotp._replace_module(module)
