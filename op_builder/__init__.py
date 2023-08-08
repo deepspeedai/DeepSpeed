@@ -15,7 +15,7 @@ __deepspeed__ = True
 
 # List of all available op builders from deepspeed op_builder
 try:
-    import deepspeed.ops.op_builder  # noqa: F401
+    import deepspeed.ops.op_builder  # noqa: F401 # type: ignore
     op_builder_dir = "deepspeed.ops.op_builder"
 except ImportError:
     op_builder_dir = "op_builder"

@@ -119,15 +119,15 @@ def timeme():
 def line_profileme():
     print("--------------- line_profier -----------------")
     print("py")
-    profile(py)()  # noqa: F821
+    profile(py)()  # noqa: F821 # type: ignore
     gc.collect()
     get_accelerator().empty_cache()
     print("cpp")
-    profile(cpp)()  # noqa: F821
+    profile(cpp)()  # noqa: F821 # type: ignore
     gc.collect()
     get_accelerator().empty_cache()
     print("apex")
-    profile(apex)()  # noqa: F821
+    profile(apex)()  # noqa: F821 # type: ignore
     gc.collect()
     get_accelerator().empty_cache()
 

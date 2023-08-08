@@ -13,7 +13,7 @@ from torch.optim.lr_scheduler import _LRScheduler
 from packaging import version as pkg_version
 
 try:
-    import triton  # noqa: F401
+    import triton  # noqa: F401 # type: ignore
     HAS_TRITON = True
 except ImportError:
     HAS_TRITON = False

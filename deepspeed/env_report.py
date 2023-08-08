@@ -59,7 +59,7 @@ def op_report(verbose=True):
 
 def ninja_installed():
     try:
-        import ninja  # noqa: F401
+        import ninja  # noqa: F401 # type: ignore
     except ImportError:
         return False
     return True

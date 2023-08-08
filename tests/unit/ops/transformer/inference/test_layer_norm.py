@@ -10,7 +10,7 @@ from deepspeed.accelerator import get_accelerator
 from deepspeed.ops.op_builder import InferenceBuilder
 from .inference_test_utils import allclose, get_dtypes
 try:
-    import triton  # noqa: F401
+    import triton  # noqa: F401 # type: ignore
     from deepspeed.ops.transformer.inference.triton import (
         layer_norm,
         layer_norm_residual,

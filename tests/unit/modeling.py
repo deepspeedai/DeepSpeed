@@ -819,21 +819,21 @@ class BertPreTrainedModel(nn.Module):
             archive_file = PRETRAINED_MODEL_ARCHIVE_MAP[pretrained_model_name_or_path]
         else:
             archive_file = pretrained_model_name_or_path
-        if resolved_archive_file == archive_file:  # noqa: F821
+        if resolved_archive_file == archive_file:  # noqa: F821 # type: ignore
             logger.info("loading archive file {}".format(archive_file))
         else:
-            logger.info("loading archive file {} from cache at {}".format(archive_file,
-                                                                          resolved_archive_file))  # noqa: F821
+            logger.info("loading archive file {} from cache at {}".format(
+                archive_file, resolved_archive_file))  # noqa: F821 # type: ignore
         tempdir = None
-        if os.path.isdir(resolved_archive_file) or from_tf:  # noqa: F821
-            serialization_dir = resolved_archive_file  # noqa: F821
+        if os.path.isdir(resolved_archive_file) or from_tf:  # noqa: F821 # type: ignore
+            serialization_dir = resolved_archive_file  # noqa: F821 # type: ignore
         else:
             # Extract archive to temp dir
             tempdir = tempfile.mkdtemp()
             logger.info("extracting archive file {} to temp dir {}".format(
-                resolved_archive_file,  # noqa: F821
+                resolved_archive_file,  # noqa: F821 # type: ignore
                 tempdir))
-            with tarfile.open(resolved_archive_file, 'r:gz') as archive:  # noqa: F821
+            with tarfile.open(resolved_archive_file, 'r:gz') as archive:  # noqa: F821 # type: ignore
                 archive.extractall(tempdir)
             serialization_dir = tempdir
         # Load config

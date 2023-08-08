@@ -199,7 +199,7 @@ class NPU_Accelerator(DeepSpeedAccelerator):
         try:
             # is op_builder from deepspeed or a 3p version? this should only succeed if it's deepspeed
             # if successful this also means we're doing a local install and not JIT compile path
-            from op_builder import __deepspeed__  # noqa: F401
+            from op_builder import __deepspeed__  # noqa: F401 # type: ignore
             return "op_builder.npu"
         except ImportError:
             return "deepspeed.ops.op_builder.npu"
@@ -216,7 +216,7 @@ class NPU_Accelerator(DeepSpeedAccelerator):
         try:
             # is op_builder from deepspeed or a 3p version? this should only succeed if it's deepspeed
             # if successful this also means we're doing a local install and not JIT compile path
-            from op_builder import __deepspeed__  # noqa: F401
+            from op_builder import __deepspeed__  # noqa: F401 # type: ignore
             from op_builder.npu import NotImplementedBuilder
         except ImportError:
             from deepspeed.ops.op_builder.npu import NotImplementedBuilder

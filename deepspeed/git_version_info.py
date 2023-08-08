@@ -5,7 +5,7 @@
 
 try:
     #  This is populated by setup.py
-    from .git_version_info_installed import *  # noqa: F401
+    from .git_version_info_installed import *  # noqa: F401 # type: ignore
 except ModuleNotFoundError:
     import os
     if os.path.isfile('version.txt'):

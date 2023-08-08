@@ -55,19 +55,19 @@ def get_accelerator():
         accelerator_name = os.environ["DS_ACCELERATOR"]
         if accelerator_name == "xpu":
             try:
-                from intel_extension_for_deepspeed import XPU_Accelerator  # noqa: F401
+                from intel_extension_for_deepspeed import XPU_Accelerator  # noqa: F401 # type: ignore
             except ImportError as e:
                 raise ValueError(
                     f"XPU_Accelerator requires intel_extension_for_deepspeed, which is not installed on this system.")
         elif accelerator_name == "cpu":
             try:
-                import intel_extension_for_pytorch  # noqa: F401
+                import intel_extension_for_pytorch  # noqa: F401 # type: ignore
             except ImportError as e:
                 raise ValueError(
                     f"CPU_Accelerator requires intel_extension_for_pytorch, which is not installed on this system.")
         elif accelerator_name == "npu":
             try:
-                import torch_npu  # noqa: F401
+                import torch_npu  # noqa: F401 # type: ignore
             except ImportError as e:
                 raise ValueError(f"NPU_Accelerator requires torch_npu, which is not installed on this system.")
             pass
@@ -100,21 +100,21 @@ def get_accelerator():
         #    between installation time and runtime.
 
         try:
-            from intel_extension_for_deepspeed import XPU_Accelerator  # noqa: F401,F811
+            from intel_extension_for_deepspeed import XPU_Accelerator  # noqa: F401,F811 # type: ignore
 
             accelerator_name = "xpu"
         except ImportError as e:
             pass
         if accelerator_name == None:
             try:
-                import intel_extension_for_pytorch  # noqa: F401,F811
+                import intel_extension_for_pytorch  # noqa: F401,F811 # type: ignore
 
                 accelerator_name = "cpu"
             except ImportError as e:
                 pass
         if accelerator_name == None:
             try:
-                import torch_npu  # noqa: F401,F811
+                import torch_npu  # noqa: F401,F811 # type: ignore
 
                 accelerator_name = "npu"
             except ImportError as e:

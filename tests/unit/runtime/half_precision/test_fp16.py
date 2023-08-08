@@ -15,7 +15,7 @@ from deepspeed.accelerator import get_accelerator
 from deepspeed.ops.op_builder import CPUAdamBuilder
 
 try:
-    from apex import amp  # noqa: F401
+    from apex import amp  # noqa: F401 # type: ignore
     _amp_available = True
 except ImportError:
     _amp_available = False
