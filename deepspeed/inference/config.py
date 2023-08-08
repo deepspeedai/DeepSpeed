@@ -202,7 +202,7 @@ class DeepSpeedInferenceConfig(DeepSpeedConfigModel):
     Path to deepspeed compatible checkpoint or path to JSON with load policy.
     """
 
-    base_dir: str = None
+    base_dir: str = ""
     """
     This shows the root directory under which all the checkpoint files exists.
     This can be passed through the json config too.
