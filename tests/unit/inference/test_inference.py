@@ -155,8 +155,8 @@ def inf_kwargs(model_w_task):
     if task == "text-generation":
         if model == "EleutherAI/gpt-j-6b":
             # This model on V100 is hitting memory problems that limit the number of output tokens
-            return {"do_sample": False, "max_length": 12}
-        return {"do_sample": False, "max_length": 20}
+            return {"do_sample": False, "temperature": 1.0, "max_length": 12}
+        return {"do_sample": False, "temperature": 1.0, "max_length": 20}
     else:
         return {}
 
