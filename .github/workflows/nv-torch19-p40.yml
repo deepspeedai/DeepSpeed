@@ -8,6 +8,10 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+permissions:
+    contents: read
+    issues: write
+
 jobs:
   unit-tests:
     runs-on: [self-hosted, nvidia, cu111, p40]
@@ -47,3 +51,12 @@ jobs:
           unset TORCH_CUDA_ARCH_LIST # only jit compile for current arch
           cd tests
           pytest $PYTEST_OPTS --forked -n 4 unit/ --torch_ver="1.9" --cuda_ver="11.1"
+
+      - name: Open GitHub issue if nightly CI fails
+        if: failure()
+        uses: JasonEtco/create-an-issue@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          filename: .github/ISSUE_TEMPLATE/ci_failure_report.md
+          update_existing: true
