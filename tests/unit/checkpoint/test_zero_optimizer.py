@@ -20,6 +20,29 @@ import pytest
 class TestZeROCheckpoint(DistributedTest):
     world_size = 2
 
+    @pytest.mark.parametrize('zero_stage', [3])
+    def test_pipeline_checkpoint_loading(self, tmpdir, zero_stage):
+        config_dict = {
+            "train_batch_size": 2,
+            "optimizer": {
+                "type": 'Adam'
+            },
+            "fp16": {
+                "enabled": True,
+                "initial_scale_power": 8
+            },
+            "zero_optimization": {
+                "stage": zero_stage,
+                "pipeline_loading_checkpoint": True,
+            }
+        }
+        hidden_dim = 10
+
+        with deepspeed.zero.Init():
+            models = [SimpleModel(hidden_dim, empty_grad=False) for _ in range(2)]
+
+        checkpoint_correctness_verification(config_dict, models, hidden_dim, tmpdir, load_module_only=True)
+
     @pytest.mark.parametrize('zero_stage, use_cpu_offload, adam_optimizer', [(1, False, 'Adam'), (2, False, 'Adam'),
                                                                              (2, True, 'deepspeed_adam'),
                                                                              (3, False, 'Adam'),

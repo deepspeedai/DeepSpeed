@@ -2338,7 +2338,8 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
                         state_dict_list,
                         load_optimizer_states=True,
                         load_from_fp32_weights=False,
-                        checkpoint_folder=None):
+                        checkpoint_folder=None,
+                        load_serial=None):
         r"""Loading a ZeRO checkpoint
         Arguments:
             state_dict_list: List of all saved ZeRO checkpoints, one for each saved partition.
@@ -2373,6 +2374,18 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
 
         self._rigid_load_state_dict(state_dict_list[dist.get_rank(group=self.dp_process_group)],
                                     load_optimizer_states=load_optimizer_states)
+
+        # when use loading checkpoint serial, after finish loading, we need to
+        # delete the temp state_dict_list variable to save memory, then trigger
+        # the next rank's loading
+        if load_serial != None:
+            load_serial += 1
+            rank = dist.get_rank(group=self.dp_process_group)
+            local_rank = dist.get_local_rank()
+            del state_dict_list[rank]
+            rank_end = dist.get_world_size() - 1
+            if local_rank != rank_end:
+                dist.send(tensor=load_serial, dst=rank + 1)
 
         if len(self.persistent_parameters) > 0:
             self.persistent_parameters[0].partition(self.persistent_parameters)

@@ -31,6 +31,12 @@ def test_zero_config_aliasfields():
     assert config.gather_16bit_weights_on_model_save == True
 
 
+def test_zero_config_pipeline_loading_checkpoint():
+    for stage in [0, 1, 2]:
+        config = DeepSpeedZeroConfig(**{"stage": stage})
+        assert config.pipeline_loading_checkpoint == False
+
+
 def test_zero_config_overlapcomm():
     for stage in [0, 1, 2]:
         config = DeepSpeedZeroConfig(**{"stage": stage})

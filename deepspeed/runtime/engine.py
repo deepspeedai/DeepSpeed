@@ -2793,6 +2793,16 @@ class DeepSpeedEngine(Module):
         return load_path, client_state
 
     def _load_zero_checkpoint(self, load_dir, tag, load_optimizer_states=True):
+
+        load_serial = None
+        # When use loading checkpoint serial, checkpoint loading start from local rank 0,
+        # all other local rank would be paused, waiting for its rank-1 peer ready and its notification.
+        if self._config.zero_config.pipeline_loading_checkpoint:
+            assert self.zero_optimization_stage(
+            ) == ZeroStageEnum.weights, "Only stage3 support for pipeline checkpoint loading"
+            load_serial = torch.zeros(1).to(self.device)
+            if dist.get_local_rank() != 0:
+                dist.recv(tensor=load_serial, src=dist.get_rank() - 1)
         if self.load_universal_checkpoint():
             zero_sd_list = None
             checkpoint_folder = f'{os.path.join(load_dir, tag)}'
@@ -2811,7 +2821,8 @@ class DeepSpeedEngine(Module):
         self.optimizer.load_state_dict(state_dict_list=zero_sd_list,
                                        load_optimizer_states=load_optimizer_states,
                                        load_from_fp32_weights=self.zero_load_from_fp32_weights(),
-                                       checkpoint_folder=checkpoint_folder)
+                                       checkpoint_folder=checkpoint_folder,
+                                       load_serial=load_serial)
 
         if self.load_universal_checkpoint():
             logger.info(f'loaded universal zero checkpoints from {checkpoint_folder} for rank {self.global_rank}')

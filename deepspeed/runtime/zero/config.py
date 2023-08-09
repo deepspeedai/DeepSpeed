@@ -275,6 +275,10 @@ class DeepSpeedZeroConfig(DeepSpeedConfigModel):
     """
     Use memory efficient linear implementation, for Stage 3.
     """
+    """
+    Whether force load checkpoint in pipeline mode, current only for Stage 3.
+    """
+    pipeline_loading_checkpoint: bool = False
 
     override_module_apply: bool = True
     """

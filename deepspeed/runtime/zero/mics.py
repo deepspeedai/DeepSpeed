@@ -465,7 +465,8 @@ class MiCS_Optimizer(DeepSpeedZeroOptimizer_Stage3):
                         state_dict_list,
                         load_optimizer_states=True,
                         load_from_fp32_weights=False,
-                        checkpoint_folder=None):
+                        checkpoint_folder=None,
+                        load_serial=None):
         r""" Loading the ZeRO-3/MiCS partitioned checkpoints
         Because the self.dp_process_group is replaced with the communicator for
         partition group we can call the load_state_dict logic from ZeRO-3.
