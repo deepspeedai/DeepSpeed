@@ -56,7 +56,8 @@ def all_to_all_quant_reduce(tensors: List[Tensor], groups: {}) -> List[Tensor]:
             all_to_all_single(local_output, intra_quant_int4, group=groups[f'local_{intra_idx}'])
             all_to_all_single(scale_output, intra_q_scales, group=groups[f'local_{intra_idx}'])
             global_input_tensor, global_scales = quantizer_module.quantized_reduction(
-                local_output, scale_output, intra_quant_group, inter_quant_group, 4, quantizer_module.Symmetric)
+                local_output, scale_output, intra_quant_group, inter_quant_group, 4, quantizer_module.Symmetric,
+                local_world_size)
             global_output = torch.empty_like(global_input_tensor)
             global_scale_output = torch.empty_like(global_scales)
             all_to_all_single(global_output, global_input_tensor, group=groups[f'global_{inter_idx}'])

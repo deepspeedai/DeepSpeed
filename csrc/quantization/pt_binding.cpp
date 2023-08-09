@@ -184,7 +184,8 @@ std::vector<at::Tensor> quantized_reduction(at::Tensor& input_vals,
                                             int in_groups,
                                             int out_groups,
                                             int num_bits,
-                                            quantize::Type quant_type)
+                                            quantize::Type quant_type,
+                                            int devices_per_node)
 {
     auto scales_options = at::TensorOptions()
                               .dtype(at::kFloat)
@@ -201,25 +202,24 @@ std::vector<at::Tensor> quantized_reduction(at::Tensor& input_vals,
                               .requires_grad(false);
 
     std::vector<long int> sz(input_vals.sizes().begin(), input_vals.sizes().end());
-    const int gpu_per_node = 16;                   // depend on machine in_groups/out_groups;
-    sz[sz.size() - 1] = sz.back() / gpu_per_node;  // num of GPU per nodes
-    const int elems_per_in_tensor = at::numel(input_vals) / gpu_per_node;
+    sz[sz.size() - 1] = sz.back() / devices_per_node;  // num of GPU per nodes
+    const int elems_per_in_tensor = at::numel(input_vals) / devices_per_node;
     auto output = torch::empty(sz, output_options);
 
-    const int elems_per_in_group = elems_per_in_tensor / (in_groups / gpu_per_node);
+    const int elems_per_in_group = elems_per_in_tensor / (in_groups / devices_per_node);
     const int elems_per_out_group = elems_per_in_tensor / out_groups;
 
     launch_dequant_reduce((int8_t*)output.data_ptr(),
                           (float*)scales.data_ptr(),
                           (const int8_t*)input_vals.data_ptr(),
                           (const float*)input_scales.data_ptr(),
-                          gpu_per_node,
+                          devices_per_node,
                           num_bits,
                           quant_type,
                           out_groups,
                           elems_per_out_group,
                           elems_per_in_tensor,
-                          in_groups / gpu_per_node,
+                          in_groups / devices_per_node,
                           elems_per_in_group,
                           at::cuda::getCurrentCUDAStream());
     return {output, scales};
