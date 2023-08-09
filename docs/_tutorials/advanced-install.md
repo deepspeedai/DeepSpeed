@@ -57,15 +57,19 @@ DS_BUILD_FUSED_LAMB=1 pip install deepspeed
 
 Available `DS_BUILD` options include:
 * `DS_BUILD_OPS` toggles all ops
+* `DS_BUILD_AIO` builds asynchronous (NVMe) I/O op
+* `DS_BUILD_CCL_COMM` builds the communication collective libs
 * `DS_BUILD_CPU_ADAM` builds the CPUAdam op
 * `DS_BUILD_FUSED_ADAM` builds the FusedAdam op (from [apex](https://github.com/NVIDIA/apex))
+* `DS_BUILD_CPU_ADAGRAD` builds the CPUAdagrad op
 * `DS_BUILD_FUSED_LAMB` builds the FusedLamb op
+* `DS_BUILD_QUANTIZER` builds the quantizer op
+* `DS_BUILD_RANDOM_LTD` builds the random ltd op
 * `DS_BUILD_SPARSE_ATTN` builds the sparse attention op
 * `DS_BUILD_TRANSFORMER` builds the transformer op
 * `DS_BUILD_TRANSFORMER_INFERENCE` builds the transformer-inference op
 * `DS_BUILD_STOCHASTIC_TRANSFORMER` builds the stochastic transformer op
 * `DS_BUILD_UTILS` builds various optimized utilities
-* `DS_BUILD_AIO` builds asynchronous (NVMe) I/O op
 
 To speed up the build-all process, you can parallelize the compilation process with:
 
