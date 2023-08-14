@@ -1336,10 +1336,11 @@ class TestZeroAdamOptimizerStepCount(DistributedTest):
                 assert all(step == step_counts[0] for step in step_counts)
 
 
+@pytest.mark.parametrize("zero_stage", [1, 2, 3])
 class TestZeroFrozenWeights(DistributedTest):
-    world_size = 1
+    world_size = 2
 
-    def test(self):
+    def test(self, zero_stage):
         config_dict = {
             "train_batch_size": 4,
             "steps_per_print": 1,
@@ -1353,7 +1354,7 @@ class TestZeroFrozenWeights(DistributedTest):
                 "enabled": True
             },
             "zero_optimization": {
-                "stage": 3
+                "stage": zero_stage
             },
         }
         hidden_dim = 10
@@ -1379,7 +1380,7 @@ class TestZeroFrozenWeights(DistributedTest):
                 val = (x, loss)
                 return val
 
-        with deepspeed.zero.Init(config_dict_or_path=config_dict):
+        with deepspeed.zero.Init(config_dict_or_path=config_dict, enabled=zero_stage == 3):
             model = MyModel(hidden_dim)
 
         model, _, _, _ = deepspeed.initialize(model=model, model_parameters=model.parameters(), config=config_dict)
