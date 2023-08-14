@@ -4,6 +4,7 @@
 # DeepSpeed Team
 
 import deepspeed
+from types import SimpleNamespace
 from deepspeed.ops.op_builder import CPUAdamBuilder
 from deepspeed.checkpoint.utils import clone_tensors_for_torch_save, get_model_ckpt_name_for_rank
 from deepspeed.accelerator import get_accelerator
@@ -576,3 +577,43 @@ class TestSaveTensorClone(DistributedTest):
         torch.save(clone_state_dict, clone_ckpt_file)
 
         compare_state_dicts(torch.load(ref_ckpt_file), torch.load(clone_ckpt_file))
+
+
+class TestZeRONonDistributed(DistributedTest):
+    world_size = 1
+    init_distributed = False
+
+    @pytest.mark.parametrize('zero_stage', [1, 2, 3])
+    def test_chmod_exception_handling(self, monkeypatch, zero_stage):
+
+        config_dict = {
+            "optimizer": {
+                "type": "AdamW"
+            },
+            "train_batch_size": 1,
+            "zero_optimization": {
+                "stage": zero_stage
+            }
+        }
+        args = SimpleNamespace(local_rank=0)
+        net = SimpleModel(hidden_dim=4)
+        engine, _, _, _ = deepspeed.initialize(args=args,
+                                               config=config_dict,
+                                               model=net,
+                                               model_parameters=net.parameters())
+
+        log_called = False
+
+        def mock_logger_info(message, *args, **kwargs):
+            nonlocal log_called
+            log_called = True
+
+        monkeypatch.setattr("deepspeed.utils.logger.info", mock_logger_info)
+        """
+            This is presented for use-cases like Azure Storage File Share (where permissions are not allowed)
+            We use a fake file for this test (file not existing would present a similar issue as not being able to chmod)
+        """
+        fake_recovery_script_dst = os.path.join("tmp", "zero_to_fp32.py")
+        engine._change_recovery_script_permissions(fake_recovery_script_dst)
+
+        assert log_called, "Expected deepspeed.utils.logger.info to be called."
