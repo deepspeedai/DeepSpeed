@@ -1452,7 +1452,7 @@ class DeepSpeedEngine(Module):
                 expert_data_parallel_group=self.expert_data_parallel_group if self.has_moe_layers else None,
                 reduce_scatter=self.zero_reduce_scatter(),
                 overlap_comm=overlap_comm,
-                cpu_offload=self.zero_cpu_offload(),
+                offload_optimizer_config=self.zero_offload_optimizer(),
                 mpu=self.mpu,
                 postscale_gradients=self.postscale_gradients(),
                 gradient_predivide_factor=self.gradient_predivide_factor(),
