@@ -578,6 +578,7 @@ def main(args=None):
 
     if args.launcher == PDSH_LAUNCHER and multi_node_exec:
         signal.signal(signal.SIGINT, sigkill_handler)
+        signal.signal(signal.SIGTERM, sigkill_handler)
 
     result.wait()
 
