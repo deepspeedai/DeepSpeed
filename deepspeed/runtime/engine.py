@@ -2034,7 +2034,7 @@ class DeepSpeedEngine(Module):
                     # XXX Hack to work with Megatron 2.0 and DeepSpeed pipelines.
                     # We don't currently have a way to specify lr_kwargs from
                     # pipe_engine.train_batch()
-                    self.lr_scheduler.step(increment=self.train_batch_size())
+                    self.lr_scheduler.step(self.train_batch_size())
 
         if report_progress and (self.global_steps + 1) % self.steps_per_print() == 0:
             self._report_progress(self.global_steps + 1)
