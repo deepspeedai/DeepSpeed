@@ -68,6 +68,8 @@ void shared_close(SharedData* data)
 }
 
 // SHM based allreduce helper functions
+// buffer that holds shm name
+#define NAME_BUF_SIZE 1000
 #define MAX_BUF_SIZE 1048576
 #define SHM_BUFFER_NAME "deepspeed_allreduce_buffer"
 SharedData allreduce_buffer;
@@ -320,22 +322,31 @@ void initialize(int size, int rank, torch::Tensor& kvs_data)
 
     _ccl_comms.emplace_back(ccl::create_communicator(size, rank, kvs));
 
+    auto addr_string = std::getenv("MASTER_ADDR");
+    if (addr_string == NULL) { addr_string = ""; }
+    auto port_string = std::getenv("MASTER_PORT");
+    if (port_string == NULL) { port_string = ""; }
+    char shm_name[NAME_BUF_SIZE];
+    snprintf(shm_name,
+             NAME_BUF_SIZE,
+             "%s_%d_%s_%s",
+             SHM_BUFFER_NAME,
+             getuid(),
+             addr_string,
+             port_string);
     // create shared workspace for SHM based allreduce
     if (all_ranks_local_p) {
         if (rank == 0) {
             workspace =
                 (struct allreduce_workspace*)malloc(size * sizeof(struct allreduce_workspace));
-            shared_create(&allreduce_buffer,
-                          SHM_BUFFER_NAME,
-                          workspace,
-                          size * sizeof(struct allreduce_workspace));
+            shared_create(
+                &allreduce_buffer, shm_name, workspace, size * sizeof(struct allreduce_workspace));
             workspace = (struct allreduce_workspace*)allreduce_buffer.bytes;
             for (int i = 0; i < size; i++) { workspace[i].state = coll_begin; }
         }
         CCLCHECK(ccl::barrier(_get_comm_from_group()).wait());
         if (rank != 0) {
-            shared_open(
-                &allreduce_buffer, SHM_BUFFER_NAME, size * sizeof(struct allreduce_workspace));
+            shared_open(&allreduce_buffer, shm_name, size * sizeof(struct allreduce_workspace));
         }
         workspace = (struct allreduce_workspace*)allreduce_buffer.bytes;
     }
