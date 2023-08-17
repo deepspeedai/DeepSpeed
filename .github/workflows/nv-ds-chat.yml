@@ -1,0 +1,53 @@
+name: nv-ds-chat
+
+on:
+  schedule:
+    - cron: "0 0 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  unit-tests:
+    runs-on: [self-hosted, nvidia, cu116, v100]
+
+    steps:
+      - uses: actions/checkout@v3
+
+      - id: setup-venv
+        uses: ./.github/workflows/setup-venv
+
+      - name: Install pytorch
+        run: |
+          pip3 install -U --cache-dir $TORCH_CACHE torch
+          python -c "import torch; print('torch:', torch.__version__, torch)"
+          python -c "import torch; print('CUDA available:', torch.cuda.is_available())"
+
+      - name: Install deepspeed
+        run: |
+          pip install .[dev]
+          ds_report
+
+      - name: Python environment
+        run: |
+          pip list
+
+      - name: DS-Chat unit tests
+        run: |
+          git clone https://github.com/microsoft/DeepSpeedExamples.git
+          cd DeepSpeedExamples/applications/DeepSpeed-Chat
+          pip install -r requirements.txt
+          unset TORCH_CUDA_ARCH_LIST # only jit compile for current arch
+          cd training/tests
+          pytest $PYTEST_OPTS ./
+
+      - name: Open GitHub issue if nightly CI fails
+        if: failure()
+        uses: JasonEtco/create-an-issue@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          filename: .github/ISSUE_TEMPLATE/ci_failure_report.md
+          update_existing: true

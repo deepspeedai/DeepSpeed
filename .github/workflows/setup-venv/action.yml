@@ -27,6 +27,7 @@ runs:
         echo TORCH_CACHE=/blob/torch_cache/ >> $GITHUB_ENV
         echo HF_DATASETS_CACHE=/blob/datasets_cache/ >> $GITHUB_ENV
         echo MEGATRON_CKPT_DIR=/blob/megatron_ckpt/ >> $GITHUB_ENV
+        echo CRITIC_CKPT_DIR=/blob/step2_opt_125m_ckpt/ >> $GITHUB_ENV
         echo PYTEST_OPTS="--color=yes --durations=0 --verbose -rF" >> $GITHUB_ENV
       shell: bash
     - id: print-env
