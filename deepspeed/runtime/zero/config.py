@@ -37,6 +37,7 @@ ZeRO optimization should be enabled as:
     "round_robin_gradients": [true|false],
     "zero_hpz_partition_size": 1,
     "zero_quantized_weights": [true|false],
+    "zero_quantized_nontrainable_weights": [true|false],
     "zero_quantized_gradients": [true|false],
     "memory_efficient_linear": [true|false],
     "override_module_apply": [true|false],
@@ -258,8 +259,15 @@ class DeepSpeedZeroConfig(DeepSpeedConfigModel):
     """
     zero_quantized_weights: bool = False
     """
-    Boolean indicating whether to quantized zero parameters (weights)
+    Boolean indicating whether to quantize zero parameters (weights)
     for efficient all_gather comm
+    """
+    zero_quantized_nontrainable_weights: bool = False
+    """
+    Boolean indicating whether to quantize non-trainable zero parameters (weights)
+    for efficient memory usage and communication. Different from zero_quantized_weights
+    that stores the weights in original precision and only perform quantization during communication,
+    this flag will store the weights in quantized precision. This is useful for LoRA training.
     """
     zero_quantized_gradients: bool = False
     """

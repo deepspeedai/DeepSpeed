@@ -156,7 +156,7 @@ class MiCS_Init(Init):
         # so that we can fallback later
         old_all_gather_coalesced = param.all_gather_coalesced
 
-        def _param_all_gather_coalesced(params, safe_mode=False, param_buffers=None):
+        def _param_all_gather_coalesced(params, param_buffers=None, **kwargs):
             """"""
             mics_comm_groups: MiCS_CommGroups = params[0].comm
             hierarchical_all_gather = has_hierarchical_all_gather_groups(mics_comm_groups)
@@ -165,7 +165,7 @@ class MiCS_Init(Init):
             elif dist.has_coalescing_manager():
                 return self._flat_all_gather_with_coalescing_manager(params, param_buffers)
             else:
-                return old_all_gather_coalesced(params, safe_mode)
+                return old_all_gather_coalesced(params, **kwargs)
 
         # change the all_gather_coalesced method
         param.all_gather_coalesced = _param_all_gather_coalesced
@@ -308,22 +308,6 @@ class MiCS_Offload(DeepSpeedZeRoOffload):
     """ Wrapper to change the behavior for parameter sharding
     """
 
-    def __init__(self,
-                 module,
-                 timers,
-                 ds_config,
-                 overlap_comm=True,
-                 prefetch_bucket_size=50000000,
-                 max_reuse_distance=1000000000,
-                 max_live_parameters=1000000000,
-                 param_persistence_threshold=100000,
-                 model_persistence_threshold=sys.maxsize,
-                 offload_param_config=None,
-                 mpu=None):
-        super().__init__(module, timers, ds_config, overlap_comm, prefetch_bucket_size, max_reuse_distance,
-                         max_live_parameters, param_persistence_threshold, model_persistence_threshold,
-                         offload_param_config, mpu)
-
     def _convert_to_zero_parameters(self, ds_config, module, mpu):
         """ overload the parent class function for convert the parameters
 
@@ -405,24 +389,10 @@ class MiCS_Optimizer(DeepSpeedZeroOptimizer_Stage3):
 
     def initialize_ds_offload(
         self,
-        module,
-        timers,
-        ds_config,
-        overlap_comm,
-        prefetch_bucket_size,
-        max_reuse_distance,
-        max_live_parameters,
-        param_persistence_threshold,
-        model_persistence_threshold,
-        offload_param_config,
-        mpu,
-        zpg=None,
-        zero_quantized_weights=False,
+        *args,
+        **kwargs,
     ):
-        assert not zero_quantized_weights and zpg is None, "MiCS is mutually exclusive with ZeRO++"
-        return MiCS_Offload(module, timers, ds_config, overlap_comm, prefetch_bucket_size, max_reuse_distance,
-                            max_live_parameters, param_persistence_threshold, model_persistence_threshold,
-                            offload_param_config, mpu)
+        return MiCS_Offload(*args, **kwargs)
 
     def partition_grads(self, params_to_release: List[Parameter], grad_partitions: List[Tensor]) -> None:
         grad_buffers = super().partition_grads(params_to_release, grad_partitions)

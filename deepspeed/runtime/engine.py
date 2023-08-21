@@ -827,6 +827,9 @@ class DeepSpeedEngine(Module):
     def zero_quantized_weights(self):
         return self._config.zero_config.zero_quantized_weights
 
+    def zero_quantized_nontrainable_weights(self):
+        return self._config.zero_config.zero_quantized_nontrainable_weights
+
     def zero_quantized_gradients(self):
         return self._config.zero_config.zero_quantized_gradients
 
@@ -1470,23 +1473,26 @@ class DeepSpeedEngine(Module):
             assert not self.has_moe_layers, "MoE not supported with Stage 3"
             if isinstance(optimizer, DummyOptim):
                 log_dist("Creating ZeRO Offload", ranks=[0])
-                zpg = groups._get_zero_param_intra_parallel_group()
-                if self.zero_hpz_partition_size() > 1 and zpg is None:
+                zero_param_parallel_group = groups._get_zero_param_intra_parallel_group()
+                if self.zero_hpz_partition_size() > 1 and zero_param_parallel_group is None:
                     self._set_zero_group_parallelism()
-                    zpg = groups._get_zero_param_intra_parallel_group()
-                optimizer = DeepSpeedZeRoOffload(self.module,
-                                                 timers=timers,
-                                                 ds_config=self.config,
-                                                 overlap_comm=self.zero_overlap_comm(),
-                                                 prefetch_bucket_size=self.zero_prefetch_bucket_size(),
-                                                 max_reuse_distance=self.zero_max_reuse_distance(),
-                                                 max_live_parameters=self.zero_max_live_parameters(),
-                                                 param_persistence_threshold=self.zero_param_persistence_threshold(),
-                                                 model_persistence_threshold=self.zero_model_persistence_threshold(),
-                                                 offload_param_config=self.zero_offload_param(),
-                                                 mpu=self.mpu,
-                                                 zero_param_parallel_group=zpg,
-                                                 zero_quantized_weights=self.zero_quantized_weights())
+                    zero_param_parallel_group = groups._get_zero_param_intra_parallel_group()
+                optimizer = DeepSpeedZeRoOffload(
+                    self.module,
+                    timers=timers,
+                    ds_config=self.config,
+                    overlap_comm=self.zero_overlap_comm(),
+                    prefetch_bucket_size=self.zero_prefetch_bucket_size(),
+                    max_reuse_distance=self.zero_max_reuse_distance(),
+                    max_live_parameters=self.zero_max_live_parameters(),
+                    param_persistence_threshold=self.zero_param_persistence_threshold(),
+                    model_persistence_threshold=self.zero_model_persistence_threshold(),
+                    offload_param_config=self.zero_offload_param(),
+                    mpu=self.mpu,
+                    zero_param_parallel_group=zero_param_parallel_group,
+                    zero_quantized_weights=self.zero_quantized_weights(),
+                    zero_quantized_nontrainable_weights=self.zero_quantized_nontrainable_weights(),
+                )
             else:
                 log_dist(
                     f'Creating fp16 ZeRO stage {zero_stage} optimizer,'
@@ -1529,7 +1535,9 @@ class DeepSpeedEngine(Module):
                     gradient_accumulation_dtype=gradient_accumulation_dtype,
                     communication_data_type=self.communication_data_type,
                     zero_hpz_partition_size=self.zero_hpz_partition_size(),
-                    zero_quantized_weights=self.zero_quantized_weights())
+                    zero_quantized_weights=self.zero_quantized_weights(),
+                    zero_quantized_nontrainable_weights=self.zero_quantized_nontrainable_weights(),
+                )
 
         else:
             raise NotImplementedError("ZeRO stage {} not implemented".format(zero_stage))
