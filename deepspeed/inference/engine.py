@@ -26,7 +26,7 @@ from ..module_inject.policy import TransformerPolicy
 from ..module_inject.auto_tp import AutoTP
 
 from ..module_inject.replace_policy import generic_policies
-from ..module_inject.auto_tp_model_utils import build_bloom_alibi_tensor, build_mpt_atten_bias_tensor
+from ..module_inject.auto_tp_model_utils import build_bloom_alibi_tensor, build_mpt_atten_bias_tensor, build_mpt_alibi_tensor
 
 DS_INFERENCE_ENABLED = False
 from torch import nn
@@ -187,6 +187,9 @@ class InferenceEngine(Module):
         if hasattr(self.module, 'transformer'):
             if hasattr(self.module.transformer, 'build_alibi_tensor'):
                 self.module.transformer.build_alibi_tensor = build_bloom_alibi_tensor
+            if hasattr(self.module.transformer, 'build_mpt_alibi_tensor'):
+                self.module.transformer.build_mpt_alibi_tensor_orig = self.module.transformer.build_mpt_alibi_tensor
+                self.module.transformer.__class__.build_mpt_alibi_tensor = build_mpt_alibi_tensor
 
     def build_attn_bias(self):
         if hasattr(self.module, 'transformer'):

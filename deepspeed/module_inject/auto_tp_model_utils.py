@@ -76,3 +76,18 @@ def build_mpt_atten_bias_tensor(self,
         offset = dist.get_rank() * num_heads_per_rank
         attn_bias = attn_bias[:, offset:num_heads_per_rank + offset, :, :]
     return attn_bias, attention_mask
+
+
+def build_mpt_alibi_tensor(self, num_heads, sequence_length, alibi_bias_max=8, device=None) -> torch.Tensor:
+    r"""
+    Link to paper: https://arxiv.org/abs/2108.12409 - Alibi tensor is not causal as the original paper mentions, it
+    relies on a translation invariance of softmax for quick implementation. This implementation has been copied from
+    the alibi implementation of MPT source code that led to slightly different results than the Bloom alibi:
+    https://huggingface.co/mosaicml/mpt-7b/blob/main/attention.py#L292
+    """
+    alibi = self.build_mpt_alibi_tensor_orig(num_heads, sequence_length, alibi_bias_max, device)
+    if dist.is_initialized():
+        num_heads_per_rank = int(num_heads / dist.get_world_size())
+        offset = dist.get_rank() * num_heads_per_rank
+        alibi = alibi[offset:num_heads_per_rank + offset, :, :]
+    return alibi

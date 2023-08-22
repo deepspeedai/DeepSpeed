@@ -296,21 +296,6 @@ class AutoTP():
         if getattr(child, "replaced", False) == True:
             return
         weight_shape = child.weight.shape
-        if name == 'attn.Wqkv' and self.module._get_name() == 'MPTBlock':
-            # MPT block qkv weight's allocation is different from other models, it's [3,num_head,head_dim,hidden_size]
-            # instead of [num_head,3,head_dim,hidden_size]
-            new_weight = torch.empty((
-                weight_shape[0] // self.mp_size,
-                weight_shape[1],
-            ),
-                                     device=child.weight.device,
-                                     dtype=child.weight.dtype)
-            reversed_dim = True
-            mp_replace = ReplaceWithTensorSlicing(mp_group=self.mp_group, out_dim=0)
-            # todo: can we remove new tensor allocation if we use strided copy?
-            mp_replace.strided_copy(new_weight, child.weight.data, num_splits=3, int8=reversed_dim)
-            setattr(child, "replaced", True)
-            return LinearLayer(weight=new_weight.to(get_accelerator().current_device_name()), bias=None)
         mp_replace = ReplaceWithTensorSlicing(mp_group=self.mp_group)
         if name in self.all_reduce_linears:
             # if conv_linear_layer [weight_shape[1], weight_shape[0] // mp_size]

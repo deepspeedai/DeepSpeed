@@ -16,7 +16,7 @@ def split_by_qkvlist_and_refuse(qkv_list, split_size, split_dim=0, cat_dim=0):
 
 
 def require_tp_fused_qkvw(name, mp_size):
-    fused_qkvw_name_list = ['qkv_proj', 'query_key_value']
+    fused_qkvw_name_list = ['qkv_proj', 'query_key_value', 'attn.Wqkv']
 
     if mp_size == 1:
         return False
@@ -33,6 +33,8 @@ def prepare_tp_fused_qkvw(module_str, src, mp_size, gpu_index):
         'CodeGenBlock': 'codegentype',
         'BloomBlock': 'bloomtype',
         'GLMBlock': 'glmtype',
+        "MPTBlock": 'glmtype',
+        "MptBlock": 'glmtype',
     }
 
     def _codegen_type_transpose(input, mp_size, codegen_mp_num=4):
