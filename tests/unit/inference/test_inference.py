@@ -383,6 +383,35 @@ class TestMPSize(DistributedTest):
         assert assert_fn(bs_output, ds_output)
 
 
+@pytest.mark.inference
+@pytest.mark.parametrize("model_w_task", [("gpt2", "text-generation")], ids=["gpt2"])
+class TestLowCpuMemUsage(DistributedTest):
+    world_size = 1
+
+    def test(
+        self,
+        model_w_task,
+        query,
+        inf_kwargs,
+        assert_fn,
+    ):
+        model, task = model_w_task
+        dtype = torch.float16
+        local_rank = int(os.getenv("LOCAL_RANK", "0"))
+
+        pipe = pipeline(task, model=model, model_kwargs={"low_cpu_mem_usage": True}, device=local_rank, framework="pt")
+        bs_output = pipe(query, **inf_kwargs)
+        pipe.model = deepspeed.init_inference(pipe.model,
+                                              mp_size=self.world_size,
+                                              dtype=dtype,
+                                              replace_method="auto",
+                                              replace_with_kernel_inject=True)
+
+        ds_output = pipe(query, **inf_kwargs)
+
+        assert assert_fn(bs_output, ds_output)
+
+
 @pytest.mark.seq_inference
 @pytest.mark.parametrize("model_w_task", [("tiiuae/falcon-7b", "text-generation")], ids=["falcon"])
 class TestAutoTP(DistributedTest):
