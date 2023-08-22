@@ -22,9 +22,6 @@ import pytest
 from _pytest.outcomes import Skipped
 from _pytest.fixtures import FixtureLookupError, FixtureFunctionMarker
 
-# Worker timeout *after* the first worker has completed.
-DEEPSPEED_UNIT_WORKER_TIMEOUT = 120
-
 # Worker timeout for tests that hang
 DEEPSPEED_TEST_TIMEOUT = 600
 
@@ -114,6 +111,7 @@ class DistributedExec(ABC):
     requires_cuda_env = True
     reuse_dist_env = False
     _pool_cache = {}
+    exec_timeout = DEEPSPEED_TEST_TIMEOUT
 
     @abstractmethod
     def run(self):
@@ -170,7 +168,7 @@ class DistributedExec(ABC):
         skip_msgs_async = pool.starmap_async(self._dist_run, args)
 
         try:
-            skip_msgs = skip_msgs_async.get(DEEPSPEED_TEST_TIMEOUT)
+            skip_msgs = skip_msgs_async.get(self.exec_timeout)
         except mp.TimeoutError:
             # Shortcut to exit pytest in the case of a hanged test. This
             # usually means an environment error and the rest of tests will
