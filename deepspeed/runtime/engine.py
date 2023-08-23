@@ -906,9 +906,7 @@ class DeepSpeedEngine(Module):
                 logger.error(f"No torch_nebula was found! Will fall back to torch.save. Details: {err}")
                 self.checkpoint_engine = TorchCheckpointEngine()
 
-        dp_rank = self.global_rank
-        if self.mpu:
-            dp_rank = self.mpu.get_data_parallel_rank()
+        dp_rank = groups._get_sequence_data_parallel_rank()
 
         rank = self.local_rank if self.use_node_local_storage() else dp_rank
 
@@ -1040,7 +1038,7 @@ class DeepSpeedEngine(Module):
                                    group=self.expert_data_parallel_group[p.group_name])
             else:
                 if torch.is_tensor(p) and is_replicated(p):
-                    dist.broadcast(p, groups._get_broadcast_src_rank(), group=self.data_parallel_group)
+                    dist.broadcast(p, groups._get_broadcast_src_rank(), group=self.seq_data_parallel_group)
 
     @staticmethod
     def __check_params(model: Module, dtype: torch.dtype) -> None:
@@ -1110,6 +1108,8 @@ class DeepSpeedEngine(Module):
             self.local_all_to_all_group = groups._get_local_all_to_all_group()
         self.data_parallel_group = groups._get_data_parallel_group()
         self.dp_world_size = groups._get_data_parallel_world_size()
+        self.seq_data_parallel_group = groups._get_sequence_data_parallel_group()
+        self.seq_dp_world_size = groups._get_sequence_data_parallel_world_size()
         self.mp_world_size = groups._get_model_parallel_world_size()
         self.expert_parallel_group = groups._get_expert_parallel_group_dict()
         self.expert_data_parallel_group = groups._get_expert_data_parallel_group_dict()
@@ -1406,7 +1406,7 @@ class DeepSpeedEngine(Module):
                                    mpu=self.mpu,
                                    clip_grad=clip_grad,
                                    allgather_bucket_size=self.zero_allgather_bucket_size(),
-                                   dp_process_group=self.data_parallel_group,
+                                   dp_process_group=self.seq_data_parallel_group,
                                    timers=timers)
 
         return optimizer
@@ -1457,7 +1457,7 @@ class DeepSpeedEngine(Module):
                 contiguous_gradients=contiguous_gradients,
                 reduce_bucket_size=self.zero_reduce_bucket_size(),
                 allgather_bucket_size=self.zero_allgather_bucket_size(),
-                dp_process_group=self.data_parallel_group,
+                dp_process_group=self.seq_data_parallel_group,
                 expert_parallel_group=self.expert_parallel_group if self.has_moe_layers else None,
                 expert_data_parallel_group=self.expert_data_parallel_group if self.has_moe_layers else None,
                 reduce_scatter=self.zero_reduce_scatter(),
@@ -1527,7 +1527,7 @@ class DeepSpeedEngine(Module):
                     max_live_parameters=self.zero_max_live_parameters(),
                     param_persistence_threshold=self.zero_param_persistence_threshold(),
                     model_persistence_threshold=self.zero_model_persistence_threshold(),
-                    dp_process_group=self.data_parallel_group,
+                    dp_process_group=self.seq_data_parallel_group,
                     all2all_process_group=self.local_all_to_all_group,
                     reduce_scatter=self.zero_reduce_scatter(),
                     overlap_comm=self.zero_overlap_comm(),
@@ -1569,7 +1569,7 @@ class DeepSpeedEngine(Module):
                                    max_live_parameters=self.zero_max_live_parameters(),
                                    param_persistence_threshold=self.zero_param_persistence_threshold(),
                                    model_persistence_threshold=self.zero_model_persistence_threshold(),
-                                   dp_process_group=self.data_parallel_group,
+                                   dp_process_group=self.seq_data_parallel_group,
                                    reduce_scatter=self.zero_reduce_scatter(),
                                    overlap_comm=self.zero_overlap_comm(),
                                    offload_optimizer_config=self.zero_offload_optimizer(),
@@ -2837,10 +2837,10 @@ class DeepSpeedEngine(Module):
             zero_sd_list = None
             checkpoint_folder = f'{os.path.join(load_dir, tag)}'
         else:
-            if load_optimizer_states and self.dp_world_size != self.loaded_checkpoint_dp_world_size:
+            if load_optimizer_states and self.seq_dp_world_size != self.loaded_checkpoint_dp_world_size:
                 raise ZeRORuntimeException("The checkpoint being loaded used a DP " \
                     f"world size of {self.loaded_checkpoint_dp_world_size} but the " \
-                    f"current world size is {self.dp_world_size}. Automatic adjustment " \
+                    f"current world size is {self.seq_dp_world_size}. Automatic adjustment " \
                     "of ZeRO's optimizer state partitioning with a new world size is not " \
                     "currently supported.")
             checkpoint_folder = None
@@ -3191,7 +3191,7 @@ class DeepSpeedEngine(Module):
                      skipped_steps=self.skipped_steps,
                      global_steps=self.global_steps,
                      global_samples=self.global_samples,
-                     dp_world_size=self.dp_world_size,
+                     dp_world_size=self.seq_dp_world_size,
                      mp_world_size=self.mp_world_size,
                      ds_config=self.config,
                      ds_version=version)

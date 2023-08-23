@@ -361,7 +361,7 @@ def _get_data_parallel_group():
 
 
 def _get_broadcast_src_rank():
-    return dist.get_global_rank(_get_data_parallel_group(), 0)
+    return dist.get_global_rank(_get_sequence_data_parallel_group(), 0)
 
 
 def _get_expert_broadcast_src_rank(group_name):
@@ -414,10 +414,55 @@ def _get_model_parallel_world_size():
 
 def _get_data_parallel_rank():
     """Return my rank for the data parallel group."""
-    global mpu
-    if mpu is not None:
-        return mpu.get_data_parallel_rank()
     return dist.get_rank(group=_get_data_parallel_group())
+
+
+def _get_sequence_parallel_world_size():
+    """Return world size for the model parallel group."""
+    global mpu
+    if mpu is not None and hasattr(mpu, 'get_sequence_parallel_world_size'):
+        return mpu.get_sequence_parallel_world_size()
+    return 1
+
+
+def _get_sequence_parallel_rank():
+    """Return my rank for the data parallel group."""
+    global mpu
+    if mpu is not None and hasattr(mpu, 'get_sequence_parallel_rank'):
+        return mpu.get_sequence_parallel_rank()
+    return 0
+
+
+def _get_sequence_parallel_group():
+    global mpu
+    if mpu is not None and hasattr(mpu, 'get_sequence_parallel_group'):
+        return mpu.get_sequence_parallel_group()
+    return None
+
+
+def _get_sequence_data_parallel_world_size():
+    """Return world size for the model parallel group."""
+    global mpu
+    if mpu is not None and hasattr(mpu, 'get_sequence_data_parallel_world_size'):
+        return mpu.get_sequence_data_parallel_world_size()
+    return _get_data_parallel_world_size()
+
+
+def _get_sequence_data_parallel_rank():
+    """Return my rank for the data parallel group."""
+    global mpu
+    if mpu is not None and hasattr(mpu, 'get_sequence_data_parallel_rank'):
+        return mpu.get_sequence_data_parallel_rank()
+    return _get_data_parallel_rank()
+
+
+def _get_sequence_data_parallel_group():
+    global mpu
+    # When sequence parallelism is enabled, the process group for zero sharding and
+    # gradient allreduce must be across both dimensions of data and sequence parallelism.
+    if mpu is not None and hasattr(mpu, 'get_sequence_data_parallel_group'):
+        return mpu.get_sequence_data_parallel_group()
+    return _get_data_parallel_group()
 
 
 def _get_expert_model_parallel_world_size():

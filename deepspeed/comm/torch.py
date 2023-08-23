@@ -273,6 +273,9 @@ class TorchBackend(Backend):
                                                    group=group,
                                                    async_op=async_op)
 
+    def all_to_all(self, output_tensor_list, input_tensor_list, group=None, async_op=False):
+        return torch.distributed.all_to_all(output_tensor_list, input_tensor_list, group=group, async_op=async_op)
+
     def send(self, tensor, dst, group=None, tag=0):
         return torch.distributed.send(tensor=tensor, dst=dst, group=group, tag=tag)
 
