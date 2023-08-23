@@ -181,6 +181,7 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
             max_live_parameters=max_live_parameters,
             param_persistence_threshold=param_persistence_threshold,
             model_persistence_threshold=model_persistence_threshold,
+            dp_process_group=dp_process_group,
             offload_param_config=offload_param_config,
             mpu=mpu,
             zero_param_parallel_group=zero_param_parallel_group,
@@ -217,7 +218,7 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
 
         self.reduce_scatter = reduce_scatter
 
-        self.dp_process_group = dp_process_group
+        self.dp_process_group = self.parameter_offload.dp_process_group
 
         self.all2all_process_group = all2all_process_group
 
@@ -386,6 +387,7 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
         max_live_parameters,
         param_persistence_threshold,
         model_persistence_threshold,
+        dp_process_group,
         offload_param_config,
         mpu,
         zero_param_parallel_group,
@@ -401,6 +403,7 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
                                     max_live_parameters=max_live_parameters,
                                     param_persistence_threshold=param_persistence_threshold,
                                     model_persistence_threshold=model_persistence_threshold,
+                                    dp_process_group=dp_process_group,
                                     offload_param_config=offload_param_config,
                                     mpu=mpu,
                                     zero_param_parallel_group=zero_param_parallel_group,

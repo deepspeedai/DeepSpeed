@@ -1282,7 +1282,7 @@ class PipelineEngine(DeepSpeedEngine):
                                     exclude_frozen_params=exclude_frozen_parameters)
         return None
 
-    def load_module_state_dict(self, checkpoint, strict=True, custom_load_fn=None):
+    def load_module_state_dict(self, checkpoint, strict=True, custom_load_fn=None, fetch_z3_params=False):
         """Override hack to instead use a directory path.
 
         This is important because pipeline models checkpoint by layer instead of rank.

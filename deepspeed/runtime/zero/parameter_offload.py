@@ -211,6 +211,7 @@ class DeepSpeedZeRoOffload(object):
         max_live_parameters=1000000000,
         param_persistence_threshold=100000,
         model_persistence_threshold=sys.maxsize,
+        dp_process_group=None,
         offload_param_config=None,
         mpu=None,
         zero_param_parallel_group=None,
@@ -225,6 +226,7 @@ class DeepSpeedZeRoOffload(object):
         self.module = module
         self.timers = timers
         self.dtype = list(module.parameters())[0].dtype
+        self.dp_process_group = dp_process_group
         self.offload_device = None
         self.offload_param_pin_memory = False
         self.zero_param_parallel_group = zero_param_parallel_group
