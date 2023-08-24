@@ -1059,7 +1059,7 @@ class PipelineEngine(DeepSpeedEngine):
         self.pipe_buffers['inputs'][buffer_id] = recvd
 
         if self.wall_clock_breakdown():
-            self.timers(PIPE_RECV_GRAD_TIMER).stop()
+            self.timers(PIPE_RECV_INPUT_TIMER).stop()
 
     def _exec_recv_grads(self, buffer_id):
         if self.wall_clock_breakdown():
