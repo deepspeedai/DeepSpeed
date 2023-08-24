@@ -187,7 +187,7 @@ and sequence parallel ranks. In other words, in DeepSpeed sequence
 parallelism, ZeRO partitions model states across both sequence and data
 parallel group and collects per rank partitions (allgather) when they
 are needed. Similarly, gradients are reduced across both data and
-sequence parallel ranks for parameter update. ZeRO allows support allows
+sequence parallel ranks for parameter update. ZeRO allows
 for huge memory savings in both sequence and data dimensions and enables
 scaling not just to large sequence lengths but also to large models.
 
@@ -198,7 +198,7 @@ a foundation model for many NLP tasks on up to 64 A100 GPUs with 40GB memory. Ou
 evaluations are four-fold: i) sequence length scalability, ii)
 throughput for dense attention and comparison with existing system, and
 iii) throughput with sparse attention and comparison with existing
-system, iv) convergence study of Deep sequence parallelism. We discuss
+system, iv) convergence study of DeepSpeed sequence parallelism. We discuss
 and present evaluations from each of these categories next.
 
 ### Sequence Length Scalability
@@ -207,7 +207,7 @@ The first set of experiments is strong scaling of sequence length up to
 1 million tokens on 1.2 billion parameter GPT model. Results of this
 evaluation are shown in Figures 2. DeepSpeed sequence parallelism
 allows increasing sequence length linearly with the
-number of GPUs and sequence length scales linearly relative to and
+number of GPUs and
 maintains similar computation throughput across different sequence
 length at appropriate GPU count.
 
@@ -285,7 +285,7 @@ for both DeepSpeed and Megatron-LM sequence parallelism. For DeepSpeed
 sequence parallelism, we evaluate convergence with different ZeRO
 stages. DeepSpeed sequence parallelism is a purely system optimization
 technique that enables training of long sequence Transformer model, thus
-there is no (negative) on quality of trained models, this assertion is
+there is no (negative) impact on quality of trained models, this assertion is
 validated through experiments and is shown in Figure 5.
 
 <div align="center">
@@ -327,7 +327,7 @@ We welcome contributions and collaboration as we together push forward
 on what is possible when long context window is no longer a limitation.
 DeepSpeed-Ulysses is part of the bigger DeepSpeed ecosystem of
 large-scale AI training and inference. For more details on all DeepSpeed
-technologies and innovations, please see visit our [website]((https://www.deepspeed.ai/)) and follow us
+technologies and innovations, please visit our [website]((https://www.deepspeed.ai/)) and follow us
 on X, formerly Twitter, ([English](https://twitter.com/MSFTDeepSpeed), [Japanese](https://twitter.com/MSFTDeepSpeedJP)) and [Chinese Zhihu](https://www.zhihu.com/people/deepspeed).
 
 We are open to collaborations with universities, research labs, and
