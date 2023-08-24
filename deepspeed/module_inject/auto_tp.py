@@ -114,6 +114,11 @@ class ReplaceWithTensorSlicing:
 
 class Loading():
 
+    def is_load_module(module):
+        load_layers = [nn.Linear, nn.Embedding, nn.LayerNorm]
+        load_layer_names = ["LPLayerNorm", "SharedEmbedding", "OPTLearnedPositionalEmbedding", "LlamaRMSNorm"]
+        return module.__class__ in load_layers or module._get_name() in load_layer_names
+
     def load_buffer(module, state_dict, prefix):
         for name in module._buffers.keys():
             if module._buffers[name].data.is_meta:
@@ -399,8 +404,7 @@ class AutoTP():
             else:
                 class_name = prev_class_name + '.' + prev_name
             checking_key = self.prefix + '.' + class_name + '.' + name + '.' if class_name != "" else self.prefix + '.' + name + '.'
-            if (child.__class__ in [nn.Linear, nn.Embedding, nn.LayerNorm]
-                    or child._get_name() in ["LPLayerNorm", "SharedEmbedding"]) and self.state_dict is not None:
+            if Loading.is_load_module(child) and self.state_dict is not None:
                 if any(checking_key in item for item in self.state_dict):
                     Loading.load(child, self.state_dict, checking_key, self.mp_group)
                 else:
