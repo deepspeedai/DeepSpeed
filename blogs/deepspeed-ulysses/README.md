@@ -149,7 +149,7 @@ match this analysis.
 
 ### Additional Highlights of DeepSpeed-Ulysses
 
-1)  An Attention Agnostic Solution
+***An Attention Agnostic Solution***
 
 DeepSpeed implementation of distributed attention module is general
 enough to support any attention: e.g., self-attention, cross-attention,
@@ -165,8 +165,7 @@ per head but just with fewer heads, thus attention computation can be
 replaced with any type of attention mechanisms, e.g., dense attention
 and various forms of sparse attention.
 
-2)  Training Bigger Models with Longer Sequences through ZeRO-3
-    Integration
+***Training Bigger Models with Longer Sequences through ZeRO-3 Integration***
 
 While DeepSpeed sequence parallelism reduces the activation memory when
 training with longer sequences, it does not impact the memory consumed
