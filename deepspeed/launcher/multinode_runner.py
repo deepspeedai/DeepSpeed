@@ -65,6 +65,8 @@ class PDSHRunner(MultiNodeRunner):
 
     def get_cmd(self, environment, active_resources):
         environment['PDSH_RCMD_TYPE'] = 'ssh'
+        if self.args.ssh_port is not None:  # only specify ssh port if it is specified
+            environment["PDSH_SSH_ARGS_APPEND"] = f" -p {self.args.ssh_port}"
 
         active_workers = ",".join(active_resources.keys())
         logger.info("Running on the following workers: %s" % active_workers)
@@ -101,7 +103,7 @@ class PDSHRunner(MultiNodeRunner):
         cmd_to_search = [i + "\\" for i in deepspeed_launch[2:6]]
 
         kill_command = pdsh_cmd_args + ["pkill -f ", " ".join(cmd_to_search)[:-2]]
-        return pdsh_cmd_args + deepspeed_launch + [self.user_script] + self.user_arguments, kill_command
+        return pdsh_cmd_args + deepspeed_launch + [self.user_script] + self.user_arguments, kill_command, environment
 
 
 class OpenMPIRunner(MultiNodeRunner):

@@ -22,7 +22,7 @@ def runner_info():
 def test_pdsh_runner(runner_info):
     env, resource_pool, world_info, args = runner_info
     runner = mnrunner.PDSHRunner(args, world_info)
-    cmd, kill_cmd = runner.get_cmd(env, resource_pool)
+    cmd, kill_cmd, env = runner.get_cmd(env, resource_pool)
     assert cmd[0] == 'pdsh'
     assert env['PDSH_RCMD_TYPE'] == 'ssh'
 
