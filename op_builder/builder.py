@@ -702,6 +702,8 @@ class TorchCPUOpBuilder(CUDAOpBuilder):
         if not self.build_for_cpu:
             if not self.is_rocm_pytorch():
                 CUDA_LIB64 = os.path.join(torch.utils.cpp_extension.CUDA_HOME, "lib64")
+                if not os.path.exists(CUDA_LIB64):
+                    CUDA_LIB64 = os.path.join(torch.utils.cpp_extension.CUDA_HOME, "lib")
             else:
                 CUDA_LIB64 = os.path.join(torch.utils.cpp_extension.ROCM_HOME, "lib")
 
