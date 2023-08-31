@@ -1,6 +1,6 @@
 <div align="center">
 
-# DeepSpeed-Chat: Llama/Llama-2 system support, new features, and training stability improvements
+# DeepSpeed-Chat: Llama/Llama-2 system support, efficiency boost, and training stability improvements
 
 </div>
 
