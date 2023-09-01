@@ -45,20 +45,29 @@ class tensor_fragment:
     def get_optim_state_keys(self):
         return list(self.optim_fragment.keys())
 
+    def get_hp_fragment(self, optim_state_key=None):
+        if optim_state_key is None:
+            return self.hp_fragment
+        return self.get_optim_state_fragment(optim_state_key)
+
 
 def get_full_hp_param(self, optim_state_key=None):
     reduce_buffer = torch.zeros_like(self, dtype=torch.float32).flatten()
     if self._hp_mapping is not None:
         lp_frag_address = self._hp_mapping.lp_fragment_address
         reduce_fragment = torch.narrow(reduce_buffer, 0, lp_frag_address.start, lp_frag_address.numel)
-        if optim_state_key is None:
-            hp_fragment = self._hp_mapping.hp_fragment
-        else:
-            hp_fragment = self._hp_mapping.get_optim_state_fragment(optim_state_key)
-
+        hp_fragment = self._hp_mapping.get_hp_fragment(optim_state_key)
         reduce_fragment.data.copy_(hp_fragment.data)
     dist.all_reduce(reduce_buffer, group=self._dp_group)
     return reduce_buffer.reshape_as(self)
+
+
+def set_full_hp_param(self, value, optim_state_key=None):
+    if self._hp_mapping is not None:
+        lp_frag_address = self._hp_mapping.lp_fragment_address
+        value_fragment = torch.narrow(value.flatten(), 0, lp_frag_address.start, lp_frag_address.numel)
+        hp_fragment = self._hp_mapping.get_hp_fragment(optim_state_key)
+        hp_fragment.data.copy_(value_fragment.data)
 
 
 def get_full_hp_grad(self):
@@ -105,11 +114,28 @@ def safe_get_full_fp32_param(param):
     return None
 
 
+def safe_set_full_fp32_param(param, value):
+    """Update the partitioned fp32 parameter of a low-precision (e.g., fp16) parameter.
+
+        Args:
+            param (``torch.nn.Parameter``): A model parameter
+            value (``torch.Tensor``): New value
+    """
+    # ZeRO stage 3 param
+    if hasattr(param, 'ds_id'):
+        param._z3_optimizer.set_full_hp_param(value, param)
+
+    # ZeRO stage 1, 2, and bf16_optimizer params
+    if hasattr(param, '_hp_mapping'):
+        param.set_full_hp_param(value)
+
+
 def safe_get_full_optimizer_state(param, optim_state_key):
     """Assemble and return the fp32 optimizer state of a low-precision (e.g., fp16) parameter.
 
         Args:
             param (``torch.nn.Parameter``): A model parameter
+            optim_state_key (``string``): Key value of optimizer state (e.g., `exp_avg` in Adam optimizer)
     """
     # ZeRO stage 3 param
     if hasattr(param, 'ds_id'):
@@ -119,6 +145,23 @@ def safe_get_full_optimizer_state(param, optim_state_key):
     if hasattr(param, '_hp_mapping'):
         return param.get_full_hp_param(optim_state_key)
     return None
+
+
+def safe_set_full_optimizer_state(param, value, optim_state_key):
+    """Update the partitioned fp32 optimizer state of a low-precision (e.g., fp16) parameter.
+
+        Args:
+            param (``torch.nn.Parameter``): A model parameter
+            value (``torch.Tensor``): New value
+            optim_state_key (``string``): Key value of optimizer state (e.g., `exp_avg` in Adam optimizer)
+    """
+    # ZeRO stage 3 param
+    if hasattr(param, 'ds_id'):
+        param._z3_optimizer.set_full_hp_param(value, param, optim_state_key)
+
+    # ZeRO stage 1, 2, and bf16_optimizer params
+    if hasattr(param, '_hp_mapping'):
+        param.set_full_hp_param(value, optim_state_key)
 
 
 # TODO: Figure out the correct return dtype
@@ -140,6 +183,9 @@ def safe_get_full_grad(param):
         return param.get_full_hp_grad()
 
     return None
+
+
+# TODO: Implement API for setting ZeRO partitioned gradients
 
 
 def get_hp_fragment_mapping(lp_param, lp_start, flat_hp_partition, gradient_dict, offload_gradient_dict, use_offload,

@@ -2101,16 +2101,17 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
 
         return grad_dict
 
-    def _fp32_state_allgather(self, param, fp32_state):
-        reduce_buffer = torch.zeros(self.partition_count * fp32_state.numel(),
+    def _fp32_state_allgather(self, param, fp32_state_partition):
+        reduce_buffer = torch.zeros(self.partition_count * fp32_state_partition.numel(),
                                     dtype=torch.float32,
                                     device=param.device).flatten()
         my_rank = dist.get_rank(group=self.dp_process_group)
         partitions = [
             reduce_buffer.narrow(0,
-                                 fp32_state.numel() * i, fp32_state.numel()) for i in range(self.partition_count)
+                                 fp32_state_partition.numel() * i, fp32_state_partition.numel())
+            for i in range(self.partition_count)
         ]
-        partitions[my_rank].data.copy_(fp32_state.data, non_blocking=False)
+        partitions[my_rank].data.copy_(fp32_state_partition.data, non_blocking=False)
 
         dist.all_gather(partitions, partitions[my_rank], group=self.dp_process_group)
 
@@ -2125,19 +2126,16 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
 
         if self.offload_optimizer:
             group_idx, dest_offset, num_elements = self.grad_position[self.get_param_id(param)]
-            fp32_grad = self.fp32_partitioned_groups_flat[group_idx].grad.narrow(0, dest_offset,
-                                                                                 num_elements).to(device=param.device)
+            fp32_grad = self.fp32_partitioned_groups_flat[group_idx].grad.narrow(0, dest_offset, num_elements)
         else:
             fp32_grad = self.__param_id_to_grad_partition[param.ds_id].float()
 
         return self._fp32_state_allgather(param, fp32_grad)
 
-    def get_full_hp_param(self, param, optim_state_key=None) -> Tensor:
-        if not param.requires_grad:
-            return None
-
+    def _get_fp32_opt_state_partition(self, param, optim_state_key=None):
         if not get_accelerator().is_synchronized_device():
             self.reduce_and_partition_stream.synchronize()
+
         group_idx, dest_offset, num_elements = self.grad_position[self.get_param_id(param)]
 
         if self._swappable_optimizer_subgroup(group_idx):
@@ -2145,15 +2143,40 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
 
         fp32_param = self.fp32_partitioned_groups_flat[group_idx]
         if optim_state_key is None:
-            fp32_opt_state = fp32_param.narrow(0, dest_offset, num_elements).to(device=param.device)
+            fp32_opt_state = fp32_param.narrow(0, dest_offset, num_elements)
         else:
-            fp32_opt_state = self.optimizer.state[fp32_param][optim_state_key].narrow(
-                0, dest_offset, num_elements).to(device=param.device)
+            fp32_opt_state = self.optimizer.state[fp32_param][optim_state_key].narrow(0, dest_offset, num_elements)
 
+        return fp32_opt_state, group_idx
+
+    def get_full_hp_param(self, param, optim_state_key=None) -> Tensor:
+        if not param.requires_grad:
+            return None
+
+        fp32_opt_state, group_idx = self._get_fp32_opt_state_partition(param, optim_state_key)
         hp_param = self._fp32_state_allgather(param, fp32_opt_state)
+
         if self._swappable_optimizer_subgroup(group_idx):
             self._optimizer_states_and_gradient_swap_out(group_idx)
+
         return hp_param
+
+    def set_full_hp_param(self, value, param, optim_state_key=None):
+        if not param.requires_grad:
+            return
+
+        assert value.numel(
+        ) == param.ds_numel, f" Number of elements do not match: {value.numel()} != {param.ds_numel}"
+
+        fp32_opt_state_partition, group_idx = self._get_fp32_opt_state_partition(param, optim_state_key)
+        my_rank = dist.get_rank(group=self.dp_process_group)
+        value_partition = value.flatten().narrow(0,
+                                                 fp32_opt_state_partition.numel() * my_rank,
+                                                 fp32_opt_state_partition.numel())
+        fp32_opt_state_partition.data.copy_(value_partition.data)
+
+        if self._swappable_optimizer_subgroup(group_idx):
+            self._optimizer_states_and_gradient_swap_out(group_idx)
 
     @instrument_w_nvtx
     def _partition_all_parameters(self):

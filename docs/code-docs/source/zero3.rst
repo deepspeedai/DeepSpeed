@@ -376,6 +376,35 @@ These routines can be used in a training loop as shown in the following snippet.
     optimizer.step()
 
 
+
+Modifying Partitioned States
+----------------------------
+
+Sometimes, a user may want to modify parameters or optimizer states outside of the regular training loop. This is currently difficult in ZeRO training because of partitioning. To overcome that, DeepSpeed provides the following two routines for modifying the fp32 master parameters and the fp32 optimizer states.
+
+.. autofunction:: deepspeed.utils.safe_set_full_fp32_param
+
+.. autofunction:: deepspeed.utils.safe_set_full_optimizer_state
+
+
+These routines can be used at any point after initialization of the DeepSpeed engine (i.e., ``deepspeed.initialize()``) as shown in the following snippet.
+
+.. code-block:: python
+
+    [...]
+    from deepspeed.utils import safe_set_full_fp32_param, safe_set_full_optimizer_state
+    # Here is an example to zero all the fp32 parameters and optimizer states.
+    for n, lp in model.named_parameters():
+        # Assume zero stage 1 or 2, since stage 3 requires a gather to assemble lp
+        zero_tensor = torch.zeros_like(lp)
+
+        hp = safe_set_full_fp32_param(lp, zero_tensor)
+        exp_avg = safe_get_full_optimizer_state(lp, zero_tensor, "exp_avg")
+        exp_avg_sq = safe_get_full_optimizer_state(lp, zero_tensor, "exp_avg_sq")
+
+    [...]
+
+
 GPU Memory Management
 ---------------------
 

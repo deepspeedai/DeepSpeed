@@ -5,6 +5,7 @@
 
 import types
 from deepspeed.utils import get_full_hp_param, get_full_hp_grad, get_hp_fragment_mapping
+from deepspeed.utils import set_full_hp_param
 
 
 def link_hp_params(lp_param_list, flat_hp_partition, gradient_dict, offload_gradient_dict, use_offload,
@@ -27,6 +28,7 @@ def _init_lp_to_hp_mapping(lp_param_list, partition_start, partition_size, dp_gr
         lp_param._dp_group = dp_group
         lp_param.get_full_hp_param = types.MethodType(get_full_hp_param, lp_param)
         lp_param.get_full_hp_grad = types.MethodType(get_full_hp_grad, lp_param)
+        lp_param.set_full_hp_param = types.MethodType(set_full_hp_param, lp_param)
 
         # lp_param overlaps with partition if both are true
         # 1) current_offset < partition_end,
