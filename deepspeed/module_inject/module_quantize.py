@@ -10,7 +10,7 @@ def quantize_transformer_layer(orig_layer_impl, model, megatron=False, preln=Fal
     """ Quantize bert-style transformer layers with DeepSpeed's transformer layer
     Arguments:
         orig_layer_impl (torch.nn.Module): the original transformer layer implementation to look for,
-            e.g., transformers.modeling_bert.BertLayer.
+            e.g., transformers.models.bert.modeling_bert.BertLayer or transformers.BertLayer
         model (torch.nn.Module): user's nn.module representing their model
 
         megatron (bool): megatron model-parallel implementation (this is supported for inference only)
