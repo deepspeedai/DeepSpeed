@@ -15,6 +15,7 @@ from deepspeed.runtime.zero.stage3 import DeepSpeedZeroOptimizer_Stage3
 from deepspeed.runtime.zero.partition_parameters import ZeroParamStatus
 
 from unit.simple_model import *
+from unittest.mock import MagicMock, patch
 
 
 def compare_deepspeed_states(saved_model, loaded_model):
@@ -209,11 +210,17 @@ def checkpoint_correctness_verification(config_dict,
     loaded_model = create_deepspeed_model(config_dict=config_dict, model=models[1], base_optimizer=base_optimizers[1])
     assert list(trained_model.parameters())[0].dtype == list(loaded_model.parameters())[0].dtype
 
-    loaded_model.load_checkpoint(save_folder,
-                                 tag=save_tag,
-                                 load_optimizer_states=load_optimizer_states,
-                                 load_lr_scheduler_states=load_lr_scheduler_states,
-                                 load_module_only=load_module_only)
+    context = patch.object(loaded_model, "_get_optimizer_ckpt_name",
+                           wraps=loaded_model._get_optimizer_ckpt_name) if not load_optimizer_states else MagicMock()
+    with context as optim_load_state_dict_mock:
+        loaded_model.load_checkpoint(save_folder,
+                                     tag=save_tag,
+                                     load_optimizer_states=load_optimizer_states,
+                                     load_lr_scheduler_states=load_lr_scheduler_states,
+                                     load_module_only=load_module_only)
+        if not load_optimizer_states:
+            # should not attempt to get the file name to load it
+            optim_load_state_dict_mock.assert_not_called()
 
     compare_model_states(trained_model,
                          loaded_model,
