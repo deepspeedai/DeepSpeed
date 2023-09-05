@@ -34,7 +34,6 @@ jobs:
         run: |
           git clone https://github.com/huggingface/transformers
           cd transformers
-          git checkout ccb92be
           git rev-parse --short HEAD
           pip install .
 
