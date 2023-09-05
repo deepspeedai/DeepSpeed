@@ -53,7 +53,7 @@ jobs:
           pytest $PYTEST_OPTS --forked -m 'nightly' unit/ --torch_ver="1.13" --cuda_ver="11.6"
 
       - name: Open GitHub issue if nightly CI fails
-        if: failure()
+        if: ${{ failure() && (github.event_name == 'schedule') }}
         uses: JasonEtco/create-an-issue@v2
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
