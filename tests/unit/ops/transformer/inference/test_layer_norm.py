@@ -8,7 +8,7 @@ import torch
 import pytest
 from deepspeed.accelerator import get_accelerator
 from deepspeed.ops.op_builder import InferenceBuilder
-from .inference_test_utils import allclose, get_dtypes
+from .inference_test_utils import allclose, get_dtypes, assert_almost_equal
 try:
     import triton  # noqa: F401 # type: ignore
     from deepspeed.ops.transformer.inference.triton import (
@@ -197,5 +197,4 @@ def test_triton_layer_norm(M, N, dtype, residual, input_bias, eps=1e-5, device='
     y_ref = torch.nn.functional.layer_norm(x + res + (x_bias if input_bias else 0), w_shape, weight, bias,
                                            eps).to(dtype)
     # compare
-    #print(f"y_tri={y_tri}, y_ref={y_ref}")
-    triton.testing.assert_almost_equal(y_tri, y_ref)
+    assert_almost_equal(y_tri, y_ref)

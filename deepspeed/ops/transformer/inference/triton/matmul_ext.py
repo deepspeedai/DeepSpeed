@@ -402,7 +402,7 @@ class Fp16Matmul(TritonMatmul):
                       activation=""):
         torch_output = __class__._ref_forward(A, B, ref_dtype=ref_dtype, bias=bias, activation=activation)
         triton_output = __class__.forward(A, B, use_triton=use_triton, bias=bias, activation=activation)
-        assert triton.testing.allclose(triton_output.cpu().type(torch_output.dtype), torch_output.cpu(), tol=tol)
+        assert torch.allclose(triton_output.cpu().type(torch_output.dtype), torch_output.cpu(), rtol=tol)
         print(f"{__class__.__name__}: PASSed the parity check")
         return triton_output, torch_output
 
