@@ -1501,23 +1501,22 @@ class Init(InsertPostInitMethodToModuleSubClasses):
             partition_size = tensor_size // self.dp_world_size
 
             secondary_partition_size = int(tensor_size // self.num_ranks_in_param_group)
-            if param.ds_secondary_tensor is None:
-                final_location = None
-                secondary_partitioned_tensor = torch.empty(secondary_partition_size,
-                                                           dtype=param.dtype,
-                                                           device=self.remote_device)
+            final_location = None
+            secondary_partitioned_tensor = torch.empty(secondary_partition_size,
+                                                       dtype=param.dtype,
+                                                       device=self.remote_device)
 
-                if self.pin_memory:
-                    secondary_partitioned_tensor = secondary_partitioned_tensor.pin_memory()
-                # quantize the tensor if it's not trainable
-                if not param.requires_grad and self.quantized_nontrainable_weights:
-                    secondary_partitioned_tensor, secondary_partitioned_tensor.ds_quant_scale = self.quantizer_module.quantize(
-                        secondary_partitioned_tensor)
-                secondary_partitioned_tensor.requires_grad = False
-                param.ds_secondary_tensor = secondary_partitioned_tensor
-                param.ds_secondary_tensor.ds_numel = secondary_partition_size
-                param.ds_secondary_tensor.status = PartitionedParamStatus.AVAILABLE
-                param.ds_secondary_tensor.final_location = final_location
+            if self.pin_memory:
+                secondary_partitioned_tensor = secondary_partitioned_tensor.pin_memory()
+            # quantize the tensor if it's not trainable
+            if not param.requires_grad and self.quantized_nontrainable_weights:
+                secondary_partitioned_tensor, secondary_partitioned_tensor.ds_quant_scale = self.quantizer_module.quantize(
+                    secondary_partitioned_tensor)
+            secondary_partitioned_tensor.requires_grad = False
+            param.ds_secondary_tensor = secondary_partitioned_tensor
+            param.ds_secondary_tensor.ds_numel = secondary_partition_size
+            param.ds_secondary_tensor.status = PartitionedParamStatus.AVAILABLE
+            param.ds_secondary_tensor.final_location = final_location
 
             #use rank in group for secondary tensor
             secondary_start = secondary_partition_size * self.rank_in_group
