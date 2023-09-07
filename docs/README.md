@@ -20,7 +20,7 @@ Add these lines to your `.bashrc` or equivalent to ensure you have permissions t
 export GEM_HOME="$HOME/gems"
 export PATH="$HOME/gems/bin:$PATH"
 ```
-Don't forget to `source ~/.bashrc` afterwards 😊.
+Don't forget to `source ~/.bashrc` afterward 😊.
 
 
 Now we can install Jekyll and [Bundler](https://bundler.io/):
@@ -35,7 +35,7 @@ We now need to install the required Ruby packages for the website.
 
 > Could not locate Gemfile
 
-**NOTE**: this step frequently hangs when connected to a VPN (including MSVPN). Simply disconnect for the package installation.
+**NOTE**: This step frequently hangs when connected to a VPN (including MSVPN). Simply disconnect for the package installation.
 
 
 ```
