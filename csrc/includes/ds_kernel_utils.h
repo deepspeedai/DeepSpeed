@@ -21,6 +21,7 @@ used throughout the codebase.
 constexpr int hw_warp_size = 64;
 #define HALF_PRECISION_AVAILABLE = 1
 #include <hip/hip_cooperative_groups.h>
+#include <hip/hip_fp16.h>
 
 #else  // !__HIP_PLATFORM_HCC__
 
@@ -37,6 +38,7 @@ constexpr int hw_warp_size = 32;
 #endif  // __CUDA_ARCH__ >= 800
 
 #include <cooperative_groups.h>
+#include <cuda_fp16.h>
 
 #endif  //__HIP_PLATFORM_HCC__
 
