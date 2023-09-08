@@ -340,7 +340,7 @@ class PipelineEngine(DeepSpeedEngine):
                 self.global_steps):
                 self.reset_activation_shape()
 
-        if data_iter:
+        if data_iter is not None:
             self.set_dataiterator(data_iter)
 
         self.module.train()
