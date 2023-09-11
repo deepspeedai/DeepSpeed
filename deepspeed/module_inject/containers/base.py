@@ -120,6 +120,10 @@ class BaseTransformerContainer(ABC):
             triton_autotune=self.config.triton_autotune)
 
         if self.use_triton and deepspeed.HAS_TRITON:
+            from .bert import DS_BERTContainer
+            if not isinstance(self, DS_BERTContainer):
+                raise NotImplementedError("Triton kernels are only for BERT-like models yet")
+
             if not self.config.triton_autotune:
                 from deepspeed.ops.transformer.inference.triton.matmul_ext import fp16_matmul
                 fp16_matmul.skip_autotune()
