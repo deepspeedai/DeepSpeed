@@ -30,6 +30,7 @@ from .zero.config import get_zero_config, ZeroStageEnum
 from .activation_checkpointing.config import DeepSpeedActivationCheckpointingConfig
 from ..comm.config import DeepSpeedCommsConfig
 from ..monitor.config import get_monitor_config
+from ..inference.config import WeightQuantConfig
 
 from deepspeed import comm as dist
 from deepspeed.runtime.config_utils import DeepSpeedConfigModel
@@ -877,6 +878,9 @@ class DeepSpeedConfig(object):
         self.dataloader_drop_last = get_dataloader_drop_last(param_dict)
 
         self.nebula_config = DeepSpeedNebulaConfig(param_dict)
+
+        self.weight_quantization_config = WeightQuantConfig(
+            **param_dict['weight_quantization']) if 'weight_quantization' in param_dict else None
 
     def _batch_assertion(self):
 

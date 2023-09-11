@@ -22,6 +22,7 @@ class QuantizerBuilder(CUDAOpBuilder):
             'csrc/quantization/pt_binding.cpp',
             'csrc/quantization/fake_quantizer.cu',
             'csrc/quantization/quantize.cu',
+            'csrc/quantization/quantize_int4.cu',
             'csrc/quantization/dequantize.cu',
             'csrc/quantization/swizzled_quantize.cu',
             'csrc/quantization/quant_reduce.cu',

@@ -90,3 +90,11 @@ void launch_sr_fake_quantize_kernel_asym(T* vals,
                                          int group_num,
                                          int num_bits,
                                          cudaStream_t stream);
+
+void launch_dequantize_int4_to_half_experimental(uint8_t* data_in,
+                                                 half* data_out,
+                                                 half* scale_buffer,
+                                                 half* min_val_buffer,
+                                                 int num_group,
+                                                 int group_size,
+                                                 cudaStream_t stream);

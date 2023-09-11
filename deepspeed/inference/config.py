@@ -100,6 +100,8 @@ class BaseQuantConfig(DeepSpeedConfigModel):
 
 class WeightQuantConfig(BaseQuantConfig):
     enabled = True
+    quantized_initialization: Dict = {}
+    post_init_quant: Dict = {}
 
 
 class ActivationQuantConfig(BaseQuantConfig):
