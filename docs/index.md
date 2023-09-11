@@ -19,7 +19,7 @@ title: "Latest News"
 
 * Train/Inference dense or sparse models with billions or trillions of parameters
 * Achieve excellent system throughput and efficiently scale to thousands of GPUs
-* Train/Inference on resource constrained GPU systems
+* Train/Inference on resource-constrained GPU systems
 * Achieve unprecedented low latency and high throughput for inference
 * Achieve extreme compression for an unparalleled inference latency and model size reduction with low costs
 
@@ -31,11 +31,11 @@ title: "Latest News"
 
 ## DeepSpeed-Training
 
-DeepSpeed offers a confluence of system innovations, that has made large scale DL training effective, and efficient, greatly improved ease of use, and redefined the DL training landscape in terms of scale that is possible. These innovations such as ZeRO, 3D-Parallelism, DeepSpeed-MoE, ZeRO-Infinity, etc fall under the DeepSpeed-Training pillar. Learn more: [DeepSpeed-Training](https://www.deepspeed.ai/training)
+DeepSpeed offers a confluence of system innovations, that has made large-scale DL training effective, and efficient, greatly improved ease of use, and redefined the DL training landscape in terms of scale that is possible. These innovations such as ZeRO, 3D-Parallelism, DeepSpeed-MoE, ZeRO-Infinity, etc fall under the DeepSpeed-Training pillar. Learn more: [DeepSpeed-Training](https://www.deepspeed.ai/training)
 
 ## DeepSpeed-Inference
 
-DeepSpeed brings together innovations in parallelism technology such as tensor, pipeline, expert and ZeRO-parallelism, and combines them with high performance custom inference kernels, communication optimizations and heterogeneous memory technologies to enable inference at an unprecedented scale, while achieving unparalleled latency, throughput and cost reduction. This systematic composition of system technologies for inference falls under the DeepSpeed-Inference. Learn more: [DeepSpeed-Inference](https://www.deepspeed.ai/inference)
+DeepSpeed brings together innovations in parallelism technology such as tensor, pipeline, expert and ZeRO-parallelism, and combines them with high-performance custom inference kernels, communication optimizations and heterogeneous memory technologies to enable inference at an unprecedented scale, while achieving unparalleled latency, throughput and cost reduction. This systematic composition of system technologies for inference falls under the DeepSpeed-Inference. Learn more: [DeepSpeed-Inference](https://www.deepspeed.ai/inference)
 
 ## DeepSpeed-Compression
 
@@ -45,7 +45,7 @@ To further increase the inference efficiency, DeepSpeed offers easy-to-use and f
 
 ## DeepSpeed Library
 
-   The [DeepSpeed](https://github.com/microsoft/deepspeed) library implements and packages the innovations and technologies in DeepSpeed Training, Inference and Compression Pillars into a single easy-to-use, open-sourced repository. It allows for easy composition of multitude of features within a single training, inference or compression pipeline. The DeepSpeed Library is heavily adopted by the DL community, and has been used to enable some of the most powerful models (see [DeepSpeed Adoption](#deepspeed-adoption)).
+   The [DeepSpeed](https://github.com/microsoft/deepspeed) library implements and packages the innovations and technologies in DeepSpeed Training, Inference and Compression Pillars into a single easy-to-use, open-sourced repository. It allows for an easy composition of a multitude of features within a single training, inference or compression pipeline. The DeepSpeed Library is heavily adopted by the DL community, and has been used to enable some of the most powerful models (see [DeepSpeed Adoption](#deepspeed-adoption)).
 
 ## Model Implementations for Inference (MII)
 
@@ -53,11 +53,11 @@ To further increase the inference efficiency, DeepSpeed offers easy-to-use and f
 
 ## DeepSpeed on Azure
 
-   DeepSpeed users are diverse and have access to different environments. We recommend to try DeepSpeed on Azure as it is the simplest and easiest method. The recommended method to try DeepSpeed on Azure is through AzureML [recipes](https://github.com/Azure/azureml-examples/tree/main/python-sdk/workflows/train/deepspeed). The job submission and data preparation scripts have been made available [here](https://github.com/microsoft/Megatron-DeepSpeed/tree/main/examples_deepspeed/azureml). For more details on how to use DeepSpeed on Azure, please follow the [Azure tutorial](https://www.deepspeed.ai/tutorials/azure/).
+   DeepSpeed users are diverse and have access to different environments. We recommend trying DeepSpeed on Azure as it is the simplest and easiest method. The recommended method to try DeepSpeed on Azure is through AzureML [recipes](https://github.com/Azure/azureml-examples/tree/main/python-sdk/workflows/train/deepspeed). The job submission and data preparation scripts have been made available [here](https://github.com/microsoft/Megatron-DeepSpeed/tree/main/examples_deepspeed/azureml). For more details on how to use DeepSpeed on Azure, please follow the [Azure tutorial](https://www.deepspeed.ai/tutorials/azure/).
 
 # DeepSpeed Adoption
 
-DeepSpeed has been used to train many different large-scale models, below is a list of several examples that we are aware of (if you'd like to include your model please submit a PR):
+DeepSpeed has been used to train many different large-scale models. Below is a list of several examples that we are aware of (if you'd like to include your model please submit a PR):
 
   * [Megatron-Turing NLG (530B)](https://www.microsoft.com/en-us/research/blog/using-deepspeed-and-megatron-to-train-megatron-turing-nlg-530b-the-worlds-largest-and-most-powerful-generative-language-model/)
   * [Jurassic-1 (178B)](https://uploads-ssl.webflow.com/60fd4503684b466578c0d307/61138924626a6981ee09caf6_jurassic_tech_paper.pdf)
