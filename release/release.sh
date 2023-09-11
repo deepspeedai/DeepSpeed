@@ -45,5 +45,4 @@ git tag v${version}
 git push origin v${version}
 
 echo "bumping up patch version"
-cd -
-python bump_patch_version.py
+python release/bump_patch_version.py --current_version ${version}
