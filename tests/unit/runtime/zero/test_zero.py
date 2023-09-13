@@ -1472,3 +1472,53 @@ class TestZeroPartitionCache(DistributedTest):
 
         model.empty_partition_cache()
         assert sum([p.numel() for p in model.parameters()]) == 0
+
+
+@pytest.mark.parametrize("use_client_optimizer", [True, False])
+@pytest.mark.parametrize("empty_weight_group", [True, False])
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16, torch.float32])
+class TestEmptyParameterGroup(DistributedTest):
+    world_size = 1
+
+    def test_empty_param_groups(self, dtype, use_client_optimizer, empty_weight_group):
+        model = SimpleModel(hidden_dim=4, nlayers=4)
+        param_groups = [
+            {
+                "params": [] if empty_weight_group else [l.weight for l in model.linears],
+                "weight_decay": 0.01,
+            },
+            {
+                "params": [l.bias for l in model.linears] if empty_weight_group else [],
+                "weight_decay": 0.0
+            },
+        ]
+
+        config_dict = {
+            "train_micro_batch_size_per_gpu": 1,
+            "steps_per_print": 1,
+            "zero_optimization": {
+                "stage": 3,
+                "stage3_param_persistence_threshold": 0,
+            },
+            "fp16": {
+                "enabled": dtype == torch.float16,
+            },
+            "bf16": {
+                "enabled": dtype == torch.bfloat16
+            }
+        }
+
+        if use_client_optimizer:
+            optimizer = deepspeed.ops.adam.FusedAdam(param_groups, lr=0.1)
+            model_parameters = model.parameters()
+        else:
+            config_dict["optimizer"] = {"type": "adamw"}
+            optimizer = None
+            model_parameters = param_groups
+
+        model, _, _, _ = deepspeed.initialize(
+            model=model,
+            model_parameters=model_parameters,
+            optimizer=optimizer,
+            config=config_dict,
+        )
