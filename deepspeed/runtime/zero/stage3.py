@@ -1116,7 +1116,7 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
         if not get_accelerator().is_synchronized_device():
             self.reduce_and_partition_stream.wait_stream(get_accelerator().default_stream())
 
-        if self.contiguous_gradients and self.elements_in_ipg_bucket + param.grad.numel() < self.reduce_bucket_size:
+        if self.contiguous_gradients and self.elements_in_ipg_bucket + param.grad.numel() <= self.reduce_bucket_size:
             # move the gradient to a contiguous buffer
             with get_accelerator().stream(self.reduce_and_partition_stream):
                 # move the parameter's gradient to the contiguous flat buffer
