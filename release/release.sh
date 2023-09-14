@@ -25,6 +25,13 @@ if [ "${version}" != `cat version.txt` ]; then
     exit 1
 fi
 
+echo "checking that the version is valid"
+python release/check_release_version.py --new_version ${version}
+if [ $? != 0 ]; then
+    echo 'please check the version number selected'
+    exit 1
+fi
+
 python -c "import twine"
 if [ $? != 0 ]; then
     echo 'please install twine via pip'
