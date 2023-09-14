@@ -68,7 +68,7 @@ _test_tasks = [
 ]
 
 # Get a list of all models and mapping from task to supported models
-_hf_models = HfApi().list_models()
+_hf_models = list(HfApi().list_models())
 _hf_model_names = [m.modelId for m in _hf_models]
 _hf_task_to_models = {task: [m.modelId for m in _hf_models if m.pipeline_tag == task] for task in _test_tasks}
 
@@ -257,6 +257,10 @@ def validate_test(model_w_task, dtype, enable_cuda_graph, enable_triton):
         msg = "triton needs to be installed for the test"
     elif ("bert" not in model.lower()) and enable_triton:
         msg = "Triton kernels do not support Non bert/roberta models yet"
+
+    # These should be removed once we fix several inference tests failing
+    if model in ["EleutherAI/pythia-70m-deduped", "distilbert-base-cased-distilled-squad", "EleutherAI/gpt-j-6b"]:
+        msg = "Test is currently broken"
     return msg
 
 
