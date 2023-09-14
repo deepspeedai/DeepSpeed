@@ -1906,6 +1906,27 @@ void ds_release_workspace() { InferenceContext::Instance().release_workspace(); 
 
 bool ds_retake_workspace() { return InferenceContext::Instance().retake_workspace(); }
 
+template <typename T>
+at::Tensor ds_dequantize(at::Tensor& weight, at::Tensor& qscale, int groups)
+{
+    auto options = at::TensorOptions()
+                       .dtype(torch::kFloat16)
+                       .layout(at::kStrided)
+                       .device(at::kCUDA)
+                       .requires_grad(false);
+    auto weight16 = at::empty({weight.size(0), weight.size(1)}, options);
+
+    launch_dequantize((T*)weight16.data_ptr(),
+                      (int8_t*)weight.data_ptr(),
+                      (float*)qscale.data_ptr(),
+                      weight.size(0),
+                      weight.size(1),
+                      groups,
+                      InferenceContext::Instance().GetCurrentStream());
+
+    return weight16;
+}
+
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m)
 {
     m.def("softmax_context_int8",
@@ -1973,7 +1994,10 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m)
           "DeepSpeed residual add with " #_name " (CUDA)");                                       \
     m.def("allocate_workspace_" #_name,                                                           \
           &allocate_workspace<_dtype>,                                                            \
-          "DeepSpeed memory allocation for GPT inference with " #_name " (CUDA)")
+          "DeepSpeed memory allocation for GPT inference with " #_name " (CUDA)");                \
+    m.def("dequantize_" #_name,                                                                   \
+          &ds_dequantize<_dtype>,                                                                 \
+          "DeepSpeed dequantize with " #_name " (CUDA)")
 
     DEF_OPS(fp32, float);
     DEF_OPS(fp16, __half);

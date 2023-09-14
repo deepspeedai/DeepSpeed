@@ -130,16 +130,16 @@ void launch_dequantize(T* output,
 {
     unsigned threads = 1024;
     hidden_dim /= 4;
-    unsigned hid_cnt = threads / hidden_dim;
     unsigned thd_cnt = (hidden_dim - 1) / threads + 1;
-    hid_cnt = hid_cnt > 0 ? hid_cnt : 1;
 
-    unsigned blocks = (output_size + hid_cnt * groups - 1) / (hid_cnt * groups);
+    assert(output_size % groups == 0);
+    unsigned blocks = output_size / groups;
+
     dim3 block_dims(threads);
     dim3 grid_dims(groups, blocks);
 
     dequantize_kernel<<<grid_dims, block_dims, 0, stream>>>(
-        output, input, qscale, hidden_dim, hid_cnt * hidden_dim, thd_cnt);
+        output, input, qscale, hidden_dim, hidden_dim, thd_cnt);
 }
 
 #define INSTANTIATE_DEQUANTIZE_NO_MERGE(T) \
