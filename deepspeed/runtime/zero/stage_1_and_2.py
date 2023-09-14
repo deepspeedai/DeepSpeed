@@ -389,13 +389,6 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
             self.params_not_in_partition.append(params_not_in_partition)
             self.first_offset.append(first_offset)
 
-        for rank in range(dist.get_world_size()):
-            if dist.get_rank() == rank:
-                print(
-                    f"Rank: {rank} partition count {self.partition_count} and sizes{[(p.numel(), self.is_moe_param_group[i] if hasattr(self, 'is_moe_param_group') else False) for i,p in enumerate(self.single_partition_of_fp32_groups)]} "
-                )
-                dist.barrier()
-
         self.reduce_bucket_size = int(reduce_bucket_size)
         self.allgather_bucket_size = int(allgather_bucket_size)
 
