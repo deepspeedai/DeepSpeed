@@ -366,6 +366,8 @@ class PipelineEngine(DeepSpeedEngine):
                       f'loss: {self.agg_train_loss:0.4f} '
                       f'iter time (s): {iter_time:0.3f} '
                       f'samples/sec: {tput:0.3f}')
+            else:
+                self.timers(TRAIN_BATCH_TIMER).elapsed(reset=True)
 
         # Monitoring
         if self.global_rank == 0 and self.monitor.enabled:
