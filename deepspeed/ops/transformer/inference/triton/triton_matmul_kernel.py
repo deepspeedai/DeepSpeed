@@ -12,11 +12,33 @@ AUTOTUNE_TOP_K = 10
 SKIP_AUTOTUNE = False
 
 
+def _triton_ops_matmul_early_config_prune(configs, named_args):
+    device = torch.cuda.current_device()  #ignore-cuda
+    capability = torch.cuda.get_device_capability()  #ignore-cuda
+    # BLOCK_M, BLOCK_N, BLOCK_K, SPLIT_K, num_warps, num_stages
+    dtsize = named_args['A'].element_size()
+    dtype = named_args['A'].dtype
+
+    # 1. make sure we have enough smem
+    pruned_configs = []
+    for config in configs:
+        kw = config.kwargs
+        BLOCK_M, BLOCK_N, BLOCK_K, num_stages = \
+            kw['BLOCK_M'], kw['BLOCK_N'], kw['BLOCK_K'], config.num_stages
+
+        max_shared_memory = triton.runtime.driver.utils.get_device_properties(device)["max_shared_mem"]
+        required_shared_memory = (BLOCK_M + BLOCK_N) * BLOCK_K * num_stages * dtsize
+        if required_shared_memory <= max_shared_memory:
+            pruned_configs.append(config)
+
+    return pruned_configs
+
+
 def _fp16_matmul_prune_config(configs, named_args, skip_autotune=SKIP_AUTOTUNE):
     if skip_autotune:
         configs = [configs[0]]
     else:
-        configs = triton.ops.matmul_perf_model.early_config_prune(configs, named_args)
+        configs = _triton_ops_matmul_early_config_prune(configs, named_args)
     return configs
 
 
@@ -199,8 +221,7 @@ def matmul_4d_prune_config(configs, named_args, skip_autotune=SKIP_AUTOTUNE):
             BLOCK_M, BLOCK_N, BLOCK_K, num_stages = \
                 kw['BLOCK_SIZE_M'], kw['BLOCK_SIZE_N'], kw['BLOCK_SIZE_K'], config.num_stages
 
-            triton.compiler.init_cuda_utils()
-            max_shared_memory = triton.compiler.cuda_utils.get_device_properties(device)["max_shared_mem"]
+            max_shared_memory = triton.runtime.driver.utils.get_device_properties(device)["max_shared_mem"]
             required_shared_memory = (BLOCK_M + BLOCK_N) * BLOCK_K * num_stages * dtsize
             if required_shared_memory <= max_shared_memory:
                 pruned_configs.append(config)
