@@ -301,11 +301,12 @@ def replace_transformer_layer(orig_layer_impl, model, checkpoint_dict, config, m
         checkpoint = checkpoint_dict["checkpoints"]
         pbar = tqdm.tqdm(total=len(checkpoint), desc=f"Loading {len(checkpoint)} checkpoint shards")
         for i in range(len(checkpoint)):
+            checkpoint_file = os.path.join(config.base_dir, checkpoint[i])
             replaced_module = replace_module(model=model,
                                              orig_class=orig_layer_impl,
                                              replace_fn=replace_fn,
                                              _replace_policy=config.injection_policy_tuple,
-                                             checkpoint=checkpoint[i])
+                                             checkpoint=checkpoint_file)
             pbar.update(1)
             gc.collect()
     else:
