@@ -159,6 +159,7 @@ class DeepSpeedSelfAttention(nn.Module):
                                                                        input_mask=input_mask,
                                                                        layer_past=layer_past,
                                                                        alibi=alibi)
+
         output = self.vector_matmul_func(input=context_layer, weight=self.attn_ow)
         inp_norm = qkv_out[-1]
 

@@ -84,5 +84,7 @@ class QKVGemmOp(BaseOp):
         else:
             output, norm = self.qkv_gemm_func(input, weight, q_scale, gamma, self.config.epsilon, q_int8,
                                               self.config.transposed_mode)
+            if add_bias:
+                output += bias
 
         return output, norm
