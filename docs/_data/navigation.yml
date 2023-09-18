@@ -17,6 +17,8 @@ lnav:
     url: /inference/
   - title: 'Compression'
     url: /compression/
+  - title: 'Science'
+    url: /deepspeed4science/
   - title: 'Getting Started'
     url: /getting-started/
   - title: 'ds_config'
@@ -67,6 +69,8 @@ lnav:
         url: /tutorials/curriculum-learning/
       - title: 'Data Efficiency'
         url: /tutorials/data-efficiency/
+      - title: 'DS4Sci_EvoformerAttention'
+        url: /tutorials/ds4sci_evoformerattention/
       - title: 'Flops Profiler'
         url: /tutorials/flops-profiler/
       - title: 'PyTorch Profiler'
