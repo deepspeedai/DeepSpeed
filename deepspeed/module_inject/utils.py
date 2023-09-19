@@ -18,6 +18,7 @@ def policy_to_ds_container(**kwargs):
     from .containers import MegatronLayerPolicy, DS_MegatronGPTContainer
     from .containers import HFDistilBertLayerPolicy, DS_DistilBERTContainer
     from .containers import LLAMALayerPolicy, DS_LLAMAContainer
+    from .containers import LLAMA2LayerPolicy, DS_LLAMA2Container
     from .containers import InternLMLayerPolicy, DS_InternLMContainer
 
     policy_to_container = {
@@ -31,7 +32,8 @@ def policy_to_ds_container(**kwargs):
         MegatronLayerPolicy: DS_MegatronGPTContainer,
         HFDistilBertLayerPolicy: DS_DistilBERTContainer,
         LLAMALayerPolicy: DS_LLAMAContainer,
-        InternLMLayerPolicy: DS_InternLMContainer,
+        LLAMA2LayerPolicy: DS_LLAMA2Container,
+        InternLMLayerPolicy: DS_InternLMContainer
     }
 
     container = None

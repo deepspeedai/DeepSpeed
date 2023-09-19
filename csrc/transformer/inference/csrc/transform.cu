@@ -26,6 +26,8 @@ __global__ void bias_add_transform_0213(float* output,
                                         int seq_length,
                                         unsigned seq_offset,
                                         int heads,
+                                        int head_stride,
+                                        int num_kv,
                                         int rotary_dim,
                                         bool rotate_half,
                                         bool rotate_every_two,
@@ -49,10 +51,10 @@ __global__ void bias_add_transform_0213(float* output,
     float4* output_vec =
         reinterpret_cast<float4*>(cnt == 0 ? output : (cnt == 1 ? k_cache : v_cache));
 
-    vals_vec += (d0 * d0_stride * (gridDim.z / head_ext));
-    vals_vec += (d1 * d1_stride * (gridDim.z / head_ext));
-    vals_vec += (cnt * d1_stride);
-    vals_vec += (d2 * d2_stride);
+    vals_vec += (d0 * (d1_stride + num_kv * 2 * d2_stride) * seq_length);
+    vals_vec += d1 * (d1_stride + num_kv * 2 * d2_stride);
+    vals_vec += (cnt == 0 ? 0 : d1_stride) + (cnt == 0 ? 0 : (cnt - 1) * num_kv * d2_stride);
+    vals_vec += ((cnt == 0 ? d2 : (d2 / head_stride)) * d2_stride);
 
     output_vec += (d1 * d2_stride);
     output_vec += (d0 * d0_out_stride);
@@ -92,6 +94,8 @@ __global__ void bias_add_transform_0213(T* output,  // q
                                         unsigned seq_offset,
                                         int all_tokens,
                                         int heads,
+                                        int head_stride,
+                                        int num_kv,
                                         int rotary_dim,
                                         bool rotate_half,
                                         bool rotate_every_two,
@@ -124,10 +128,10 @@ __global__ void bias_add_transform_0213(T* output,  // q
     float4* output_vec =
         reinterpret_cast<float4*>(cnt == 0 ? output : (cnt == 1 ? k_cache : v_cache));
 
-    vals_vec += (d0 * d0_stride * (gridDim.z / head_ext));
-    vals_vec += (d1 * d1_stride * (gridDim.z / head_ext));
-    vals_vec += (cnt * d1_stride);
-    vals_vec += (d2 * d2_stride);
+    vals_vec += (d0 * (d1_stride + num_kv * 2 * d2_stride) * seq_length);
+    vals_vec += (d1 * (d1_stride + num_kv * 2 * d2_stride));
+    vals_vec += (cnt == 0 ? 0 : d1_stride) + (cnt == 0 ? 0 : (cnt - 1) * num_kv * d2_stride);
+    vals_vec += ((cnt == 0 ? d2 : (d2 / head_stride)) * d2_stride);
 
     output_vec += (d1 * d2_stride);
     output_vec += (d0 * d0_out_stride);
@@ -171,6 +175,7 @@ void launch_bias_add_transform_0213<float>(float* output,
                                            int all_tokens,
                                            int hidden_dim,
                                            int heads,
+                                           int num_kv,
                                            int rotary_dim,
                                            bool rotate_half,
                                            bool rotate_every_two,
@@ -193,6 +198,8 @@ void launch_bias_add_transform_0213<float>(float* output,
                                                                 seq_length,
                                                                 seq_offset,
                                                                 heads,
+                                                                num_kv > 0 ? (heads / num_kv) : 1,
+                                                                num_kv > 0 ? num_kv : heads,
                                                                 rotary_dim >> 2,
                                                                 rotate_half,
                                                                 rotate_every_two,
@@ -212,6 +219,7 @@ void launch_bias_add_transform_0213(T* output,
                                     int all_tokens,
                                     int hidden_dim,
                                     int heads,
+                                    int num_kv,
                                     int rotary_dim,
                                     bool rotate_half,
                                     bool rotate_every_two,
@@ -233,6 +241,8 @@ void launch_bias_add_transform_0213(T* output,
                                                                 seq_offset,
                                                                 all_tokens,
                                                                 heads,
+                                                                num_kv > 0 ? (heads / num_kv) : 1,
+                                                                num_kv > 0 ? num_kv : heads,
                                                                 rotary_dim >> 3,
                                                                 rotate_half,
                                                                 rotate_every_two,
@@ -249,6 +259,7 @@ void launch_bias_add_transform_0213(T* output,
                                                     int,          \
                                                     int,          \
                                                     unsigned,     \
+                                                    int,          \
                                                     int,          \
                                                     int,          \
                                                     int,          \
