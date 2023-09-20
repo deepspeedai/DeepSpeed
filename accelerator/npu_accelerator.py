@@ -158,6 +158,9 @@ class NPU_Accelerator(DeepSpeedAccelerator):
     def communication_backend_name(self):
         return self._communication_backend_name
 
+    def is_triton_supported(self):
+        return False
+
     # Tensor operations
 
     @property

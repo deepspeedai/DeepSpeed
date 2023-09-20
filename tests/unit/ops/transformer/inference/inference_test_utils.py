@@ -52,3 +52,14 @@ def assert_almost_equal(x, y, decimal=2, err_msg=''):
             y = y.float()
         y = y.cpu().detach().numpy()
     npt.assert_array_almost_equal(x, y, err_msg=err_msg, decimal=decimal)
+
+
+def max_diff(a, b):
+    a = a.to(torch.float32).flatten()
+    b = b.to(torch.float32).flatten()
+    diff = torch.abs(a - b)
+    max_diff_indices = torch.argsort(diff)[-1]
+    print("Max difference indices:", max_diff_indices)
+    print("Max difference values:", diff[max_diff_indices])
+    print(f"{a[max_diff_indices]} vs {b[max_diff_indices]}")
+    return max_diff_indices

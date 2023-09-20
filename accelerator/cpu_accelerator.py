@@ -182,6 +182,9 @@ class CPU_Accelerator(DeepSpeedAccelerator):
     def communication_backend_name(self):
         return self._communication_backend_name
 
+    def is_triton_supported(self):
+        return False
+
     # Data types
     def is_bf16_supported(self):
         return True

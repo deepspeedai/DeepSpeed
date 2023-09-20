@@ -185,6 +185,10 @@ class DeepSpeedAccelerator(ABC):
     def communication_backend_name(self):
         ...
 
+    @abc.abstractmethod
+    def is_triton_supported(self):
+        ...
+
     # Tensor operations
     @property
     @abc.abstractmethod
