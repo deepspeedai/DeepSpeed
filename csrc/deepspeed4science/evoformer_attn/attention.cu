@@ -156,5 +156,5 @@ void attention_impl(torch::Tensor& q,
     auto lse_ptr = lse.size(0) == 0 ? nullptr : reinterpret_cast<float*>(lse.data_ptr<float>());
     cudaDeviceProp* prop = at::cuda::getCurrentDeviceProperties();
     DISPATCH_ARCHTAG(prop->major * 10 + prop->minor,
-                     DISPATCH_TYPES(q, ([&]() { CODE(scalar_t, torch_scalar_t); })));
+                     DISPATCH_TYPES(q, { CODE(scalar_t, torch_scalar_t); }));
 }

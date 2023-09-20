@@ -214,5 +214,5 @@ void attention_back_impl(torch::Tensor& go,
 {
     cudaDeviceProp* prop = at::cuda::getCurrentDeviceProperties();
     DISPATCH_ARCHTAG(prop->major * 10 + prop->minor,
-                     DISPATCH_TYPES(q, ([&]() { CODE(scalar_t, torch_scalar_t); })));
+                     DISPATCH_TYPES(q, { CODE(scalar_t, torch_scalar_t); }));
 }

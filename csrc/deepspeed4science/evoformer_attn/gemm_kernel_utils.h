@@ -57,15 +57,27 @@ struct CheckArch {
 
 #define DISPATCH_ARCHTAG(CC, func)                                                      \
     {                                                                                   \
-        if (CC >= 80) {                                                                 \
-            using ArchTag = cutlass::arch::Sm80;                                        \
-            func;                                                                       \
-        } else if (CC >= 75) {                                                          \
-            using ArchTag = cutlass::arch::Sm75;                                        \
-            func;                                                                       \
-        } else if (CC >= 70) {                                                          \
-            using ArchTag = cutlass::arch::Sm70;                                        \
-            func;                                                                       \
+        if constexpr (GPU_ARCH >= 80) {                                                 \
+            if (CC >= 80) {                                                             \
+                using ArchTag = cutlass::arch::Sm80;                                    \
+                func;                                                                   \
+            } else {                                                                    \
+                EVOFORMER_CHECK(false, "Compile flag error. Unexpected GPU");           \
+            }                                                                           \
+        } else if constexpr (GPU_ARCH >= 75) {                                          \
+            if (CC >= 75) {                                                             \
+                using ArchTag = cutlass::arch::Sm75;                                    \
+                func;                                                                   \
+            } else {                                                                    \
+                EVOFORMER_CHECK(false, "Compile flag error. Unexpected GPU");           \
+            }                                                                           \
+        } else if constexpr (GPU_ARCH >= 70) {                                          \
+            if (CC >= 70) {                                                             \
+                using ArchTag = cutlass::arch::Sm70;                                    \
+                func;                                                                   \
+            } else {                                                                    \
+                EVOFORMER_CHECK(false, "Compile flag error. Unexpected GPU");           \
+            }                                                                           \
         } else {                                                                        \
             EVOFORMER_CHECK(false, "Only GPUs with Tensor Core are supported for now"); \
         }                                                                               \
@@ -76,11 +88,11 @@ struct CheckArch {
         if (tensor.scalar_type() == at::ScalarType::Half) {                       \
             using scalar_t = cutlass::half_t;                                     \
             using torch_scalar_t = at::Half;                                      \
-            func();                                                               \
+            func;                                                                 \
         } else if (tensor.scalar_type() == at::ScalarType::BFloat16) {            \
             using scalar_t = cutlass::bfloat16_t;                                 \
             using torch_scalar_t = at::BFloat16;                                  \
-            func();                                                               \
+            func;                                                                 \
         } else {                                                                  \
             EVOFORMER_CHECK(false, "Only fp16 and bf16 supported at the moment"); \
         }                                                                         \

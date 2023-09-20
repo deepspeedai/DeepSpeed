@@ -98,7 +98,7 @@ struct AttentionBiasEpilogue {
     using ThreadMap = cutlass::transform::PitchLinearStripminedThreadMap<
         cutlass::layout::PitchLinearShape<Shape::kColumn, Shape::kRow>,
         kThreads,
-        128 / cutlass::sizeof_bits<scalar_t>::value>;
+        1>;
 
     using Broadcast1 = Broadcast1_<ThreadMap, Shape, scalar_t>;
     using Broadcast2 = Broadcast2_<ThreadMap, Shape, scalar_t>;

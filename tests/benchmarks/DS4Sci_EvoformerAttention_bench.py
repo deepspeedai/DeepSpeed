@@ -57,7 +57,6 @@ def attention_reference(
 
 dtype = torch.float16
 
-batch = 1
 N = 256
 heads = 4
 dim = 32
@@ -80,7 +79,7 @@ def benchmark():
     ours_bw = []
     baseline_fw = []
     baseline_bw = []
-    for batch_size in range(1, 17):
+    for batch in range(1, 17):
         Q = torch.randn(batch, N, seq_len, heads, dim, dtype=dtype, device="cuda", requires_grad=True)
         K = torch.randn(batch, N, seq_len, heads, dim, dtype=dtype, device="cuda", requires_grad=True)
         V = torch.randn(batch, N, seq_len, heads, dim, dtype=dtype, device="cuda", requires_grad=True)
