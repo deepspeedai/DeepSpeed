@@ -58,7 +58,7 @@ repos:
             # Do not check files that are automatically generated
             '--skip=docs/Gemfile.lock,tests/unit/gpt2-merges.txt,tests/unit/gpt2-vocab.json',
             '--ignore-regex=\\n',  # Do not count the 'n' in an escaped newline as part of a word
-            '--ignore-words-list=youn,unsupport',  # Word used in error messages that need rewording
+            '--ignore-words-list=youn,unsupport,noe',  # Word used in error messages that need rewording
             --check-filenames,
             --check-hidden
         ]

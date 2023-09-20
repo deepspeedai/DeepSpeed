@@ -13,11 +13,11 @@ In line with Microsoft's mission to solve humanity's most pressing challenges, t
 
 ## New Megatron-DeepSpeed for Large-Scale AI4Science Model Training
 
-We are proud to introduce [new Megatron-DeepSpeed](https://github.com/microsoft/Megatron-DeepSpeed), which is an updated framework for large-scale model training. We rebased and enabled DeepSpeed with the newest Megatron-LM for long sequence support and many other capabilities. With the new Megatron-DeepSpeed, users can now train their large AI4Science models like GenSLMS with much longer sequences via a synergetic combination of ZeRO-style data parallelism, tensor parallelism, sequence parallelism, pipeline parallelism, model state offloading, and several newly added memory optimization techniques such as attention mask offloading and position embedding partitoining.
+We are proud to introduce [new Megatron-DeepSpeed](https://github.com/microsoft/Megatron-DeepSpeed), which is an updated framework for large-scale model training. We rebased and enabled DeepSpeed with the newest Megatron-LM for long sequence support and many other capabilities. With the new Megatron-DeepSpeed, users can now train their large AI4Science models like GenSLMs with much longer sequences via a synergetic combination of ZeRO-style data parallelism, tensor parallelism, sequence parallelism, pipeline parallelism, model state offloading, and several newly added memory optimization techniques such as attention mask offloading and position embedding partitioning.
 
 ![new Megatron-DeepSpeed](/assets/images/new-megatron-ds.png){: .align-center}
 <p align="center">
-<em>The figure depicts system capability in terms of enabling long sequence lengths for training a 33B parameter GPT-like model using our new Megatron-DeepSpeed framework. The results show that the new Megatron-DeepSpeed enables 9x onger sequence lengths than NVIDIA's Megatron-LM without triggering out-of-memory error. </em>
+<em>The figure depicts system capability in terms of enabling long sequence lengths for training a 33B parameter GPT-like model using our new Megatron-DeepSpeed framework. The results show that the new Megatron-DeepSpeed enables 9x longer sequence lengths than NVIDIA's Megatron-LM without triggering out-of-memory error. </em>
 </p>
 
 To see how the new Megatron-DeepSpeed helps enabling new system capabilities, such as training models with massive sequences length, please read our [tutorial](https://github.com/microsoft/Megatron-DeepSpeed/tree/main/examples_deepspeed/deepspeed4science/megatron_long_seq_support).
