@@ -138,6 +138,9 @@ class MPS_Accelerator(DeepSpeedAccelerator):
     def is_fp16_supported(self):
         return False
 
+    def supported_dtypes(self):
+        return [torch.float]
+
     # Misc
     def amp(self):
         return
