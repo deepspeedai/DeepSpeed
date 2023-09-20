@@ -81,15 +81,15 @@ DeepSpeed4Science的旅程始于两个开创性的基于LLM的结构生物学研
 <img src="../media/Figure6-1.png" width="800px" alt="" />
 <img src="../media/Figure6-2.gif" width="800px" alt="" />
 
-*图6. 在训练过程中OpenFold对PDB链7B3A_A的预测。*
+*图6：在训练过程中OpenFold对PDB链7B3A_A的预测。*
 </div>
 
 [OpenFold](https://github.com/aqlaboratory/openfold)是DeepMind的[AlphaFold2](https://alphafold.com/)的开源社区再现，使其可以在新数据集上训练或微调AlphaFold2。研究人员已经使用它从头开始重新训练AlphaFold2，生成新的模型参数集，研究AlphaFold2的早期训练阶段（图6），并开发新的蛋白质折叠系统。
 
 <div align="center">
-<img src="../media/Figure7.jpg" width="800px" alt="" />
+<img src="../media/Figure7.jpg" width="600px" alt="" />
 
-*图7. 在OpenFold中，对多序列比对（MSA）Attention内核（包含偏差）变体的训练峰值内存需求。 (左) 使用在AlphaFold2中的EvoformerAttention的原始OpenFold实现。对于这些类型的蛋白质结构预测模型，在训练/推理中的内存爆炸问题是常见的。最先进的FlashAttention无法有效支持这样的Attention变体。 (右) DeepSpeed4Science的一种新解决方案DS4Sci_EvoformerAttention在不影响模型品质的条件下显著地减少了OpenFold的训练峰值内存需求（最多13倍）。*
+*图7：在OpenFold中，对多序列比对（MSA）Attention内核（包含偏差）变体的训练峰值内存需求。 (左) 使用在AlphaFold2中的EvoformerAttention的原始OpenFold实现。对于这些类型的蛋白质结构预测模型，在训练/推理中的内存爆炸问题是常见的。最先进的FlashAttention无法有效支持这样的Attention变体。 (右) DeepSpeed4Science的一种新解决方案DS4Sci_EvoformerAttention在不影响模型品质的条件下显著地减少了OpenFold的训练峰值内存需求（最多13倍）。*
 </div>
 
 尽管OpenFold有使用最先进的系统技术进行性能和内存优化，但从头开始训练AlphaFold2仍然在计算上很昂贵。目前阶段的模型参数很小，只有9300万个参数，但它包含了几个需要非常大的中间内存的特殊Attention变体。在标准AlphaFold2训练的“微调”阶段，只是这些变体中的其中一个在半精度下就生成了超过12GB的张量，使其峰值内存要求远远超过了相同大小的语言模型。即使使用像activation checkpointing和DeepSpeed ZeRO优化这样的技术，这种内存爆炸问题仍然严重限制了可训练模型的序列长度和MSA深度。此外，近似策略可能会显著影响模型的准确性和收敛性，同时仍然导致内存爆炸，如图7左侧（橙色）所示。
@@ -101,15 +101,15 @@ DeepSpeed4Science的旅程始于两个开创性的基于LLM的结构生物学研
 <div align="center">
 <img src="../media/Figure8.gif" width="800px" alt="" />
 
-*图8. GenSLMs：获2022年ACM 戈登贝尔奖的COVID基因组模型（基于GPT-NeoX的25B/33B模型）。它用于学习描述SARS-CoV-2基因组生物学意义的潜在空间。这个GIF展示了一个重要的蛋白质家族苹果酸脱氢酶（malate dehydrogenase）的根据重要特征（如序列长度和GC含量（核酸鸟嘌呤和胞嘧啶的含量与腺嘌呤和胸腺嘧啶的比率。它测量DNA链抵抗热的能力））着色的潜在空间的投影。*
+*图8：GenSLMs：获2022年ACM 戈登贝尔奖的COVID基因组模型（基于GPT-NeoX的25B/33B模型）。它用于学习描述SARS-CoV-2基因组生物学意义的潜在空间。这个GIF展示了一个重要的蛋白质家族苹果酸脱氢酶（malate dehydrogenase）的根据重要特征（如序列长度和GC含量（核酸鸟嘌呤和胞嘧啶的含量与腺嘌呤和胸腺嘧啶的比率。它测量DNA链抵抗热的能力））着色的潜在空间的投影。*
 </div>
 
 [GenSLMs](https://github.com/ramanathanlab/genslm)，一个来自阿贡国家实验室的[2022年ACM 戈登贝尔奖获奖](https://www.acm.org/media-center/2022/november/gordon-bell-special-prize-covid-research-2022)的基因组模型，可以通过大型语言模型（LLMs）的基因组数据训练来学习SARS-CoV-2（COVID-19）基因组的进化。它旨在改变如何识别和分类引发大流行的病毒（特别是SARS-CoV-2）的新变种。GenSLMs代表了第一批可以泛化到其他预测任务的基因组基础模型。对潜在空间的良好理解可以帮助GenSLMs处理超出仅仅是病毒序列的新领域，并扩展它们模拟细菌病原体甚至真核生物的能力（例如，理解功能、途径成员资格和进化关系等事物）。为了实现这一科学目标，GenSLMs和类似的模型需要非常长的序列支持用于训练和推理，这超出了像[FlashAttention](https://arxiv.org/abs/2307.08691)这样的通用LLM的长序列策略。通过DeepSpeed4Science的新设计，科学家现在可以构建和训练具有显著更长的上下文窗口的模型，允许他们探索以前无法访问的关系。
 
 <div align="center">
-<img src="../media/Figure9.png" width="800px" alt="" />
+<img src="../media/Figure9.png" width="1000px" alt="" />
 
-*图9. 由不同框架在不同规模下支持的两个GenSLMs模型的最大序列长度。使用NVIDIA DGX，每个节点有八个40G A100 GPU。*
+*图9：由不同框架在不同规模下支持的两个GenSLMs模型的最大序列长度。使用NVIDIA DGX，每个节点有八个40G A100 GPU。*
 </div>
 
 具体在系统层面，我们发布了包括[长序列支持和其他新优化](https://github.com/microsoft/Megatron-DeepSpeed/tree/main/examples_deepspeed/deepspeed4science/megatron_long_seq_support)的最新的[Megatron-DeepSpeed框架](https://github.com/microsoft/Megatron-DeepSpeed)。科学家现在可以通过我们新添加的内存优化技术（如注意力掩码异步处理和位置码分割）、张量并行、流水线并行、序列并行、基于ZeRO的数据并行和模型状态异步处理等技术的协同组合，用更长的序列训练他们的GenSLMs等大型科学模型。图9展示了我们的新版本使GenSLMs的25B和33B模型的最长序列长度分别比之前的Megatron-DeepSpeed版本增加了12倍和14倍。在支持的序列长度方面，这个新Megatron-DeepSpeed框架也显著地超过了NVIDIA的Megatron-LM（对于25B和33B模型分别高达9.8倍和9.1倍）。例如，阿贡实验室团队的GenSLMs 25B模型在64个GPU上的原始序列长度为42K，而现在可以用512K的核苷酸序列进行训练。这在不损失准确性的条件下大大提高了模型质量和科学发现的范围。对于那些更喜欢相对位置编码技术这样的算法策略的领域科学家，这个[新版本](https://deepspeed4science.ai/2023/09/18/model-showcase-genslms/)也进行了集成。
