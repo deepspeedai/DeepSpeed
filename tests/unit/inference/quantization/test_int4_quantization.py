@@ -20,8 +20,8 @@ from typing import Dict
 
 device = get_accelerator().device_name() if get_accelerator().is_available() else 'cpu'
 
-if not required_torch_version(min_version=1.10):
-    pytest.skip("torch.Tensor.bitwise_left_shift in INT4 quantizer needs torch 1.10 or above.",
+if not required_torch_version(min_version=1.11):
+    pytest.skip("torch.Tensor.bitwise_left_shift in INT4 quantizer needs torch 1.11 or above.",
                 allow_module_level=True)
 
 
