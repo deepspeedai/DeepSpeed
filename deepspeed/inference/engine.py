@@ -27,6 +27,8 @@ from ..module_inject.auto_tp import AutoTP
 
 from ..module_inject.replace_policy import generic_policies
 from ..module_inject.auto_tp_model_utils import build_bloom_alibi_tensor, build_mpt_atten_bias_tensor, build_mpt_alibi_tensor
+from ..ops.transformer.inference.ds_attention import DeepSpeedSelfAttention
+from ..model_implementations.transformers.ds_transformer import DeepSpeedTransformerInference
 
 DS_INFERENCE_ENABLED = False
 from torch import nn
@@ -49,6 +51,13 @@ class InferenceEngine(Module):
         DS_INFERENCE_ENABLED = True
 
         super().__init__()
+
+        # Have to import here because inference_module is a global, but python
+        # globals only work at the module level and will not be updated unless
+        # we import it each time we init a new inference engine.
+        from ..model_implementations.transformers.ds_transformer import inference_module
+        if inference_module is not None:
+            self.destroy()
 
         self.module = model
         self._config = config
@@ -173,6 +182,17 @@ class InferenceEngine(Module):
 
         # Check if local CUDA graphs can be created in replacement modules
         self.local_cuda_graph = self._local_cuda_graph_used(self.module)
+
+    def destroy(self):
+        # Have to import here because inference_module is a global, but python
+        # globals only work at the module level and will not be updated unless
+        # we import it each time we init a new inference engine.
+        from ..model_implementations.transformers.ds_transformer import inference_module
+        DeepSpeedTransformerInference.layer_id = 0
+        DeepSpeedSelfAttention.num_layers = 0
+        if inference_module is not None:
+            inference_module.release_workspace()
+            inference_module = None
 
     def profile_model_time(self, use_cuda_events=True):
         if not self.model_profile_enabled and not self._config.enable_cuda_graph:
