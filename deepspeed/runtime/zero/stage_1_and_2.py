@@ -26,8 +26,8 @@ from deepspeed.runtime.constants import PIPE_REPLICATED
 from deepspeed.accelerator import get_accelerator
 
 from deepspeed.checkpoint.constants import (DS_VERSION, GROUP_PADDINGS, PARTITION_COUNT,
-                                            SINGLE_PARTITION_OF_FP32_GROUPS, BASE_OPTIMIZER_STATE, CLIP_GRAD,
-                                            ZERO_STAGE, PARAM_SLICE_MAPPINGS)
+                                            SINGLE_PARTITION_OF_FP32_GROUPS, BASE_OPTIMIZER_STATE,
+                                            BASE_OPTIMIZER_STATE_STEP, CLIP_GRAD, ZERO_STAGE, PARAM_SLICE_MAPPINGS)
 from deepspeed.utils import link_hp_params
 from deepspeed.checkpoint import enable_universal_checkpoint
 
@@ -2044,6 +2044,12 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
 
         if self.elastic_checkpoint:
             state_dict[BASE_OPTIMIZER_STATE] = self._get_base_optimizer_state()
+
+            if "step" in self.optimizer.param_groups[0]:
+                # Assuming "step" is the only item that changes through training iterations
+                assert all(group["step"] == self.optimizer.param_groups[0]["step"]
+                           for group in self.optimizer.param_groups), "All param groups must have the same step value"
+                state_dict[BASE_OPTIMIZER_STATE_STEP] = self.optimizer.param_groups[0]["step"]
         else:
             state_dict[BASE_OPTIMIZER_STATE] = self.optimizer.state_dict()
 
@@ -2147,6 +2153,14 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
             base_optimizer_group_states.append(partition_states)
 
         self._restore_base_optimizer_state(base_optimizer_group_states)
+
+        # Restore step
+        if BASE_OPTIMIZER_STATE_STEP in all_state_dict[0]:
+            assert all(sd[BASE_OPTIMIZER_STATE_STEP] == all_state_dict[0][BASE_OPTIMIZER_STATE_STEP]
+                       for sd in all_state_dict), "State dicts of all partitions must have the same step value"
+            loaded_param_groups_step = all_state_dict[0][BASE_OPTIMIZER_STATE_STEP]
+            for param_group in self.optimizer.param_groups:
+                param_group['step'] = loaded_param_groups_step
 
     def load_state_dict(self,
                         state_dict_list,
