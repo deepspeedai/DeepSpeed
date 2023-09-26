@@ -897,7 +897,7 @@ class Init(InsertPostInitMethodToModuleSubClasses):
             self.quantized_weights = _ds_config.zero_config.zero_quantized_weights
         self.quantized_nontrainable_weights = zero_quantized_nontrainable_weights
         if _ds_config is not None and _ds_config.zero_config.zero_quantized_nontrainable_weights and not self.quantized_nontrainable_weights:
-            self.quantized_weights = _ds_config.zero_config.zero_quantized_nontrainable_weights
+            self.quantized_nontrainable_weights = _ds_config.zero_config.zero_quantized_nontrainable_weights
 
         self.module = module
         if (self.quantized_weights or self.quantized_nontrainable_weights):
