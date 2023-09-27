@@ -1476,7 +1476,10 @@ class Init(InsertPostInitMethodToModuleSubClasses):
             if start < param.ds_numel and end <= param.ds_numel:
                 src_tensor = one_dim_param.narrow(0, start, partition_size)
 
-                param.ds_tensor.copy_(src_tensor)
+                with torch.no_grad():
+                    # make sure param.ds_tensor requires_grad always be false,
+                    # otherwise, torch tracer will complain.
+                    param.ds_tensor.copy_(src_tensor)
 
                 #partitioned_tensor = src_tensor.clone().detach().to(self.remote_device)
 
@@ -1486,9 +1489,12 @@ class Init(InsertPostInitMethodToModuleSubClasses):
                 #                                  device=self.remote_device )
 
                 if start < param.ds_numel:
-                    elements_to_copy = param.ds_numel - start
-                    param.ds_tensor.narrow(0, 0,
-                                           elements_to_copy).copy_(one_dim_param.narrow(0, start, elements_to_copy))
+                    elems_to_copy = param.ds_numel - start
+                    with torch.no_grad():
+                        # make sure param.ds_tensor requires_grad always be false,
+                        # otherwise, torch tracer will complain.
+                        param.ds_tensor.narrow(0, 0,
+                                               elems_to_copy).copy_(one_dim_param.narrow(0, start, elems_to_copy))
 
             #print(f"Remote device {self.remote_device}")
 
