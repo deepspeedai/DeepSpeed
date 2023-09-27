@@ -29,7 +29,7 @@ DeepSpeed4Science的新系统技术可以用于很多推动科学边界的标志
 #### 科学基础模型（Scientific Foundation Model，SFM），微软研究院AI4Science
 
 <div align="center">
-<img src="../media/Figure2-1.jpg" width="800px" alt="" />
+<img src="../media/Figure2-1.png" width="800px" alt="" />
 <img src="../media/Figure2-2.gif" width="800px" alt="" />
 
 *图2：科学基础模型（Scientific Foundation Model，SFM）及其当前探索：Distributional Graphormer。*
@@ -47,7 +47,7 @@ DeepSpeed4Science的新系统技术可以用于很多推动科学边界的标志
 
 我们的气候正在发生变化，导致极端天气事件的频率增加。为了减轻负面影响，预测这些事件将发生的地方变得越来越重要。[ClimaX](https://www.microsoft.com/en-us/research/group/autonomous-systems-group-robotics/articles/introducing-climax-the-first-foundation-model-for-weather-and-climate/)是第一个设计用于执行各种天气和气候建模任务的基础模型。它可以吸收许多具有不同变量和分辨率的数据集以提高天气预报的准确性。DeepSpeed4Science正在为ClimaX创建新的系统支持和加速策略，以高效地预训练/微调更大的基础模型，同时处理非常大的高分辨率图像数据（例如，数十到数百PB）和长序列。
 
-#### AI驱动的第一性原理分子动力学（AI Powered Ab Initio Molecular Dynamics，AI<sup>2</sup>MD），微软研究院AI4Science
+#### 分子动力学和机器学习力场（Molecular Dynamics and Machine Learning Force Field），微软研究院AI4Science
 
 <div align="center">
 <img src="../media/Figure4.gif" width="800px" alt="" />
