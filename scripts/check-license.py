@@ -19,20 +19,24 @@ def err(s: str) -> None:
 
 
 COPYRIGHT = [
-    r"^\(\/\/\|#\) Copyright (c) Microsoft Corporation.$", r"^\(\/\/\|#\) SPDX-License-Identifier: Apache-2.0$",
-    r"^\(\/\/\|#\) DeepSpeed Team$"
+    (r"^# Copyright (c) Microsoft Corporation.$", r"^\/\/ Copyright (c) Microsoft Corporation.$"),
+    (r"^# SPDX-License-Identifier: Apache-2.0$", r"^\/\/ SPDX-License-Identifier: Apache-2.0$"),
+    (r"^# DeepSpeed Team$", r"^\/\/ DeepSpeed Team$"),
 ]
 
 success = True
 failures = []
 for f in sys.argv[1:]:
     for copyright_line in COPYRIGHT:
-        if not success:
-            break
-        res = subprocess.run(["git", "grep", "--quiet", "-e", copyright_line, f], capture_output=True)
+        cmd = ["git", "grep", "--quiet"]
+        for line in copyright_line:
+            cmd.extend(["-e", line])
+        cmd.append(f)
+        res = subprocess.run(cmd, capture_output=True)
         if res.returncode == 1:
             success = False
             failures.append(f)
+            break
         elif res.returncode == 2:
             err(f"Error invoking grep on {', '.join(sys.argv[1:])}:")
             err(res.stderr.decode("utf-8"))
