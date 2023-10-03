@@ -110,7 +110,7 @@ class FP16_UnfusedOptimizer(DeepSpeedOptimizer):
 
         self.initialize_optimizer_states()
 
-    def zero_grad(self, set_to_none=False):
+    def zero_grad(self, set_to_none=True):
         """
         Zero FP16 parameter grads.
         """

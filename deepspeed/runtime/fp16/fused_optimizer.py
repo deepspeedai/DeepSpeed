@@ -133,7 +133,7 @@ class FP16_Optimizer(DeepSpeedOptimizer):
 
         return
 
-    def zero_grad(self, set_to_none=False):
+    def zero_grad(self, set_to_none=True):
         """
         Zero FP16 parameter grads.
         """

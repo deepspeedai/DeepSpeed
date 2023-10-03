@@ -1519,7 +1519,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
 
         return params_in_partition, params_not_in_partition, first_offset
 
-    def zero_grad(self, set_to_none=False):
+    def zero_grad(self, set_to_none=True):
         """
         Zero FP16 parameter grads.
         """
