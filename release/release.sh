@@ -26,7 +26,7 @@ if [ "${version}" != `cat version.txt` ]; then
 fi
 
 echo "checking that the version is valid"
-python release/check_release_version.py --new_version ${version}
+python release/check_release_version.py --release_version ${version}
 if [ $? != 0 ]; then
     echo 'please check the version number selected'
     exit 1
