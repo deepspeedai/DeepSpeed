@@ -5,6 +5,7 @@ on:
     paths-ignore:
       - 'docs/**'
       - 'blogs/**'
+  workflow_dispatch:
   merge_group:
     branches: [ master ]
 
