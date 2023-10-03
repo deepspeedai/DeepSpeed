@@ -394,7 +394,6 @@ def get_grad_norm(parameters, norm_type=2, mpu=None):
     Arguments:
         parameters (Iterable[Tensor] or Tensor): an iterable of Tensors or a
             single Tensor that will have gradients normalized
-        max_norm (float or int): max norm of the gradients
         norm_type (float or int): type of the used p-norm. Can be ``'inf'`` for
             infinity norm.
 
@@ -491,12 +490,12 @@ def get_weight_norm(parameters, norm_type=2, mpu=None):
     Arguments:
         parameters (Iterable[Tensor] or Tensor): an iterable of Tensors or a
             single Tensor that will have gradients normalized
-        max_norm (float or int): max norm of the gradients
         norm_type (float or int): type of the used p-norm. Can be ``'inf'`` for
             infinity norm.
 
     Returns:
         Total norm of the parameters (viewed as a single vector).
+        -1 if the norm value is NaN or Inf.
     """
     if isinstance(parameters, torch.Tensor):
         parameters = [parameters]
