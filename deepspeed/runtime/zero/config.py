@@ -236,7 +236,7 @@ class DeepSpeedZeroConfig(DeepSpeedConfigModel):
     Unused parameters in modules may be unexpected in static networks, but
     could be normal in dynamic networks. This controls whether or not training
     should terminate with an error message when unused parameters are detected.
-    This is set to ``False`` by default, which means unused parameters are
+    This is set to ``True`` by default, which means unused parameters are
     ignored and training continues. Now is just used in stage 2.
     """
 
