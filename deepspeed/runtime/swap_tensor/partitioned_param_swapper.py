@@ -104,10 +104,11 @@ class AsyncPartitionedParameterSwapper(object):
 
         self.available_buffer_ids = [i for i in range(self.param_buffer_count)]
         self.reserved_buffer_ids = []
-        self.buffers = get_accelerator().pin_memory(
-            torch.empty(int(self.aligned_elements_per_buffer * self.param_buffer_count),
-                        dtype=self.dtype,
-                        requires_grad=False))
+        self.buffers = get_accelerator().pin_memory(torch.empty(int(self.aligned_elements_per_buffer *
+                                                                    self.param_buffer_count),
+                                                                dtype=self.dtype,
+                                                                requires_grad=False),
+                                                    align_bytes=0)
 
         self.aio_read_handle = self.aio_handle(self.aio_config[AIO_BLOCK_SIZE], self.aio_config[AIO_QUEUE_DEPTH],
                                                self.aio_config[AIO_SINGLE_SUBMIT], self.aio_config[AIO_OVERLAP_EVENTS],
@@ -313,7 +314,8 @@ class AsyncPartitionedParameterSwapper(object):
     def swap_into_buffer(self, param, dest_buffer):
         assert param.ds_tensor.status == PartitionedParamStatus.NOT_AVAILABLE, f"param {param.ds_id} is already available or inflight"
 
-        require_swap_buffer = not (dest_buffer.is_pinned() and self._is_io_aligned(dest_buffer.numel()))
+        require_swap_buffer = not (get_accelerator().is_pinned(dest_buffer)
+                                   and self._is_io_aligned(dest_buffer.numel()))
 
         if require_swap_buffer:
             assert len(self.available_buffer_ids) > 0, f"No buffer available to swap param {param.ds_id}."
@@ -378,8 +380,10 @@ class AsyncPartitionedParameterSwapper(object):
 
     def reserve_partitioned_swap_space(self, partition_num_elems):
         aligned_numel = sum([self._io_aligned_numel(numel) for numel in partition_num_elems])
-        self.partitioned_swap_buffer = get_accelerator().pin_memory(
-            torch.zeros(aligned_numel, device='cpu', dtype=self.dtype))
+        self.partitioned_swap_buffer = get_accelerator().pin_memory(torch.zeros(aligned_numel,
+                                                                                device='cpu',
+                                                                                dtype=self.dtype),
+                                                                    align_bytes=0)
         self.partitioned_swap_pool = SwapBufferPool([self.partitioned_swap_buffer])
 
     def swap_out_partitioned_params(self, dst_fp16_params, src_fp32_params):

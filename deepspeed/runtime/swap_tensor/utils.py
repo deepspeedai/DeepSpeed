@@ -96,7 +96,7 @@ class SwapBuffer(object):
 class SwapBufferPool(object):
 
     def __init__(self, buffers):
-        assert all([buf.is_pinned() for buf in buffers])
+        assert all([get_accelerator().is_pinned(buf) for buf in buffers])
         self.buffers = [SwapBuffer(buf) for buf in buffers]
         self.current_index = 0
 
@@ -184,7 +184,8 @@ class SwapBufferManager(object):
         self.count = count
         self.dtype = dtype
         self.all_buffers = [
-            get_accelerator().pin_memory(torch.zeros(num_elems, device='cpu', dtype=dtype)) for _ in range(count)
+            get_accelerator().pin_memory(torch.zeros(num_elems, device='cpu', dtype=dtype), align_bytes=0)
+            for _ in range(count)
         ]
         self.free_buffer_index = [i for i in range(count)]
         self.used_buffer_index = {}

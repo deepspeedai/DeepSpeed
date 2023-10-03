@@ -226,7 +226,11 @@ class DeepSpeedAccelerator(ABC):
         ...
 
     @abc.abstractmethod
-    def pin_memory(self, tensor):
+    def pin_memory(self, tensor, align_bytes=1):
+        ...
+
+    @abc.abstractmethod
+    def is_pinned(self, tensor):
         ...
 
     @abc.abstractmethod

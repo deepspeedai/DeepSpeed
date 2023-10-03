@@ -10,6 +10,7 @@ import torch
 from deepspeed import comm as dist
 from deepspeed.utils.logging import logger
 from deepspeed.runtime.swap_tensor.utils import swap_out_tensors, SwapBuffer
+from deepspeed.accelerator import get_accelerator
 
 INVALID_BUFFER_INDEX = -1
 ASYNC_SWAPPER_WAIT_TIMER = 'async_swap_gradient_wait'
@@ -37,7 +38,7 @@ class AsyncTensorSwapper(object):
 
     def add_buffers(self, buffer_list):
         assert len(self.all_buffers) == 0
-        assert all([buffer.is_pinned() for buffer in buffer_list])
+        assert all([get_accelerator().is_pinned(buffer) for buffer in buffer_list])
         dtype = buffer_list[0].dtype
         assert all([buffer.dtype == dtype for buffer in buffer_list])
 
