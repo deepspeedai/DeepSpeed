@@ -167,7 +167,7 @@ bash chat_scripts/run.sh # You need to change necessary variables, e.g, ckpt pat
 ```
 To support larger model inference, we have incorporated Hugging Face large model inference into our DeepSpeed-VisualChat API. Therefore, users can choose a different number of GPUs based on the GPU memory capacity and the model size.
 
-Please refer to [Landing Page](https://github.com/microsoft/DeepSpeedExamples/DeepSpeed-VisualChat) for details.
+Please refer to our [GitHub Landing Page](https://github.com/microsoft/DeepSpeedExamples/tree/master/applications/DeepSpeed-VisualChat) for more details.
 
 # 7. Release: Try DeepSpeed-VisualChat today!
 
