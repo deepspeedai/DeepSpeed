@@ -56,14 +56,14 @@ There are two common attention mechanisms used to connect the visual and textual
 
 <div align="center">
   <img src="../assets/images/attention.png" alt="Different attention mehanisms" width="1000"/>
-</div>
 
-*Figure 2: Different Attention Mechanisms: Examine the differing attention mechanisms using an input sentence "User: Please describe the image." coupled with three Image tokens (I-token1, I-token2, I-token3). On the left, we demonstrate standard causal attention, treating image tokens as text. In the middle, we present cross attention applied to images, while maintaining standard causal attention for text tokens. On the right, we illustrate our innovative multi-modal attention proposal where image tokens only perform self-attention, and text tokens attend to text/image tokens independently, highlighted with an orange mask. This mechanism is defined by: softmax($`QK^T \odot M_1`$)+ softmax($`QK^T \odot M_2`$) with Q and K as query and key, $`M_1`$=[M==1], and $`M_2`$=[M==2], with M $`\in`$ R<sup>10x10</sup> in this case.*
+  *Figure 2: Different Attention Mechanisms: Examine the differing attention mechanisms using an input sentence "User: Please describe the image." coupled with three Image tokens (I-token1, I-token2, I-token3). On the left, we demonstrate standard causal attention, treating image tokens as text. In the middle, we present cross attention applied to images, while maintaining standard causal attention for text tokens. On the right, we illustrate our innovative multi-modal attention proposal where image tokens only perform self-attention, and text tokens attend to text/image tokens independently, highlighted with an orange mask. This mechanism is defined by: softmax($`QK^T \odot M_1`$)+ softmax($`QK^T \odot M_2`$) with Q and K as query and key, $`M_1`$=[M==1], and $`M_2`$=[M==2], with M $`\in`$ R<sup>10x10</sup> in this case.*
+</div>
 
 
 <b>Causal Attention (CA)</b>: The CA-based method simply projects visual features (i.e., the features from the output of the final visual encoder layer) into textual features and combines them with the normal textual features after the textual embedding layer to feed into LLMs. The benefit of CA is that it's a natural extension of the original attention mechanism in LLMs, and as such, it doesn't introduce any extra modules or parameters. However, this approach raises some intuitive problems:
 
-* For a visual token, it attends to previous visual and textual tokens, even though visual tokens are already fully encoded in a bidirectional manner and do not need further attention from other visual tokens or the beginning of textual tokens.
+* For a visual token, it attends to previous visual and textual tokens, even though visual tokens are already fully encoded in a bidirectional manner and do not need further attention to other visual tokens or previous textual tokens.
 * For a textual token, the model needs to learn how to distribute its attention weights between its previous textual and image tokens. Due to these issues, we found that the data efficiency of CA in LVLMs is often problematic. To address this, LLaVA and QWen-VL require visual-language pretraining to fully align visual features with textual features.
 
 <b>Cross Attention (CrA)</b>: The alternative, cross attention (CrA), along with CA, exhibits better data efficiency but also comes with a few drawbacks:
