@@ -168,7 +168,7 @@ bash chat_scripts/run.sh # You need to change necessary variables, e.g, ckpt pat
 
 より大規模なモデル推論をサポートするために、我々はHugging Faceの大規模モデル推論をDeepSpeed-VisualChat APIに組み込みました。そのため、ユーザーはGPUメモリ容量とモデルサイズに基づいて、異なるGPU数を選択することができます。
 
-詳細は[ランディングページ](https://github.com/microsoft/DeepSpeedExamples/DeepSpeed-VisualChat)をご参照ください。
+詳細は[ランディングページ](https://github.com/microsoft/DeepSpeedExamples/tree/master/applications/DeepSpeed-VisualChat)をご参照ください。
 
 # 7. 早速使ってみましょう！
 
