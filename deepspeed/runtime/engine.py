@@ -37,7 +37,8 @@ from deepspeed.runtime.bf16_optimizer import BF16_Optimizer
 
 from deepspeed.runtime.config import DEEPSPEED_OPTIMIZERS, \
     ADAGRAD_OPTIMIZER, ADAM_OPTIMIZER, ADAMW_OPTIMIZER, LAMB_OPTIMIZER, ONEBIT_ADAM_OPTIMIZER, ONEBIT_LAMB_OPTIMIZER, \
-    TORCH_ADAM_PARAM, ADAM_W_MODE, ADAM_W_MODE_DEFAULT, ZERO_ONE_ADAM_OPTIMIZER, MUADAM_OPTIMIZER, MUADAMW_OPTIMIZER, MUSGD_OPTIMIZER
+    TORCH_ADAM_PARAM, ADAM_W_MODE, ADAM_W_MODE_DEFAULT, ZERO_ONE_ADAM_OPTIMIZER, MUADAM_OPTIMIZER, MUADAMW_OPTIMIZER, \
+    MUSGD_OPTIMIZER, LION_OPTIMIZER
 
 from deepspeed.runtime.dataloader import DeepSpeedDataLoader
 from deepspeed.runtime.constants import \
@@ -1296,6 +1297,13 @@ class DeepSpeedEngine(Module):
             optimizer = OnebitLamb(model_parameters, self, **optimizer_parameters)
             if not self.fp16_enabled():
                 logger.warning(f"Currently the convergence of 1-bit Lamb is only verified under FP16")
+        elif self.optimizer_name() == LION_OPTIMIZER:
+            if self.zero_use_cpu_optimizer():
+                from deepspeed.ops.lion import DeepSpeedCPULion
+                optimizer = DeepSpeedCPULion(model_parameters, **optimizer_parameters)
+            else:
+                from deepspeed.ops.lion import FusedLion
+                optimizer = FusedLion(model_parameters, **optimizer_parameters)
         elif self.optimizer_name() == MUADAM_OPTIMIZER:
             try:
                 from mup import MuAdam

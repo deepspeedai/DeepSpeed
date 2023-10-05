@@ -24,6 +24,10 @@
 #define SIMD_FMA(x, y, c) _mm512_fmadd_ps(x, y, c)
 #define SIMD_SQRT(x) _mm512_sqrt_ps(x)
 #define SIMD_DIV(x, y) _mm512_div_ps(x, y)
+#define SIMD_AND(x, y) _mm512_and_ps(x, y)
+#define SIMD_ANDNOT(x, y) _mm512_andnot_ps(x, y)
+#define SIMD_OR(x, y) _mm512_or_ps(x, y)
+#define SIMD_XOR(x, y) _mm512_xor_ps(x, y)
 #define SIMD_WIDTH 16
 
 #define SIMD_LOAD2(x, h) \
@@ -42,10 +46,14 @@
 #define SIMD_FMA(x, y, c) _mm256_fmadd_ps(x, y, c)
 #define SIMD_SQRT(x) _mm256_sqrt_ps(x)
 #define SIMD_DIV(x, y) _mm256_div_ps(x, y)
+#define SIMD_AND(x, y) _mm256_and_ps(x, y)
+#define SIMD_ANDNOT(x, y) _mm256_andnot_ps(x, y)
+#define SIMD_OR(x, y) _mm256_or_ps(x, y)
+#define SIMD_XOR(x, y) _mm256_xor_ps(x, y)
 #define SIMD_WIDTH 8
+
 #define SIMD_LOAD2(x, h) \
     ((h) ? _mm256_cvtph_ps(_mm_loadu_si128((const __m128i*)x)) : _mm256_loadu_ps(x))
-
 #define SIMD_STORE2(x, d, h)                                                                \
     ((h) ? _mm_store_ps(x, _mm_castsi128_ps(_mm256_cvtps_ph(d, _MM_FROUND_TO_NEAREST_INT))) \
          : _mm256_storeu_ps(x, d))
@@ -135,6 +143,56 @@ inline void simd_div(AVX_Data* dst, AVX_Data* src_a_l, AVX_Data* src_a_r)
 {
 #pragma unroll
     for (size_t i = 0; i < span; ++i) { dst[i].data = SIMD_DIV(src_a_l[i].data, src_a_r[i].data); }
+}
+template <int span>
+inline void simd_and(AVX_Data* dst, AVX_Data* src_a_l, AVX_Data src_a_r)
+{
+#pragma unroll
+    for (size_t i = 0; i < span; ++i) { dst[i].data = SIMD_AND(src_a_l[i].data, src_a_r.data); }
+}
+template <int span>
+inline void simd_and(AVX_Data* dst, AVX_Data* src_a_l, AVX_Data* src_a_r)
+{
+#pragma unroll
+    for (size_t i = 0; i < span; ++i) { dst[i].data = SIMD_AND(src_a_l[i].data, src_a_r[i].data); }
+}
+template <int span>
+inline void simd_andnot(AVX_Data* dst, AVX_Data* src_a_l, AVX_Data src_a_r)
+{
+#pragma unroll
+    for (size_t i = 0; i < span; ++i) { dst[i].data = SIMD_ANDNOT(src_a_l[i].data, src_a_r.data); }
+}
+template <int span>
+inline void simd_andnot(AVX_Data* dst, AVX_Data* src_a_l, AVX_Data* src_a_r)
+{
+#pragma unroll
+    for (size_t i = 0; i < span; ++i) {
+        dst[i].data = SIMD_ANDNOT(src_a_l[i].data, src_a_r[i].data);
+    }
+}
+template <int span>
+inline void simd_or(AVX_Data* dst, AVX_Data* src_a_l, AVX_Data src_a_r)
+{
+#pragma unroll
+    for (size_t i = 0; i < span; ++i) { dst[i].data = SIMD_OR(src_a_l[i].data, src_a_r.data); }
+}
+template <int span>
+inline void simd_or(AVX_Data* dst, AVX_Data* src_a_l, AVX_Data* src_a_r)
+{
+#pragma unroll
+    for (size_t i = 0; i < span; ++i) { dst[i].data = SIMD_OR(src_a_l[i].data, src_a_r[i].data); }
+}
+template <int span>
+inline void simd_xor(AVX_Data* dst, AVX_Data* src_a_l, AVX_Data src_a_r)
+{
+#pragma unroll
+    for (size_t i = 0; i < span; ++i) { dst[i].data = SIMD_XOR(src_a_l[i].data, src_a_r.data); }
+}
+template <int span>
+inline void simd_xor(AVX_Data* dst, AVX_Data* src_a_l, AVX_Data* src_a_r)
+{
+#pragma unroll
+    for (size_t i = 0; i < span; ++i) { dst[i].data = SIMD_XOR(src_a_l[i].data, src_a_r[i].data); }
 }
 
 #endif

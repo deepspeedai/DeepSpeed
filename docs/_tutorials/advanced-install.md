@@ -60,7 +60,9 @@ Available `DS_BUILD` options include:
 * `DS_BUILD_AIO` builds asynchronous (NVMe) I/O op
 * `DS_BUILD_CCL_COMM` builds the communication collective libs
 * `DS_BUILD_CPU_ADAM` builds the CPUAdam op
+* `DS_BUILD_CPU_LION` builds the CPULion op
 * `DS_BUILD_FUSED_ADAM` builds the FusedAdam op (from [apex](https://github.com/NVIDIA/apex))
+* `DS_BUILD_FUSED_LION` builds the FusedLion op
 * `DS_BUILD_CPU_ADAGRAD` builds the CPUAdagrad op
 * `DS_BUILD_FUSED_LAMB` builds the FusedLamb op
 * `DS_BUILD_QUANTIZER` builds the quantizer op
