@@ -296,6 +296,15 @@ def replace_transformer_layer(orig_layer_impl, model, checkpoint_dict, config, m
 
         return new_module
 
+    def set_lm_head(module):
+        embedding_weight = None
+        for n, p in module.named_parameters():
+            if "word_embeddings." in n or "embed_tokens." in n or "wte." in n:
+                embedding_weight = p
+        if embedding_weight is not None and hasattr(module, "lm_head") and hasattr(
+                module.lm_head, "weight") and module.lm_head.weight.is_meta:
+            module.lm_head.weight = embedding_weight
+
     if checkpoint_dict is not None and not config.replace_with_kernel_inject:
         # AutoTP shard loading
         checkpoint = checkpoint_dict["checkpoints"]
@@ -309,6 +318,7 @@ def replace_transformer_layer(orig_layer_impl, model, checkpoint_dict, config, m
                                              checkpoint=checkpoint_file)
             pbar.update(1)
             gc.collect()
+        set_lm_head(replaced_module)
     else:
         replaced_module = replace_module(model=model,
                                          orig_class=orig_layer_impl,
@@ -386,6 +396,7 @@ def replace_transformer_layer(orig_layer_impl, model, checkpoint_dict, config, m
                                                container=container_g)
                     sds = [None for _ in sds]
                     gc.collect()
+        set_lm_head(replaced_module)
         print(f"checkpoint loading time at rank {rank}: {time.time()-start_time} sec")
 
     if config.save_mp_checkpoint_path is not None:
@@ -554,14 +565,6 @@ def replace_module(model, orig_class, replace_fn, _replace_policy, checkpoint=No
         "You can find some samples here: https://github.com/microsoft/DeepSpeed/blob/master/deepspeed/module_inject/replace_policy.py"
 
     replaced_module, _ = _replace_module(model, policy, state_dict=sd)
-    if checkpoint is not None:
-        embedding_weight = None
-        for n, p in replaced_module.named_parameters():
-            if "word_embeddings." in n or "embed_tokens." in n or "wte." in n:
-                embedding_weight = p
-        if embedding_weight is not None and hasattr(replaced_module, "lm_head") and hasattr(
-                replaced_module.lm_head, "weight") and replaced_module.lm_head.weight.is_meta:
-            replaced_module.lm_head.weight = embedding_weight
     return replaced_module
 
 

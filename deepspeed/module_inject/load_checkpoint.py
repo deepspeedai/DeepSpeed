@@ -276,13 +276,6 @@ def load_model_with_checkpoint(r_module,
                     level + 1)
 
     load_module_recursive(r_module)
-    embedding_weight = None
-
-    for n, p in r_module.named_parameters():
-        if "word_embeddings." in n or "embed_tokens." in n or "wte." in n:
-            embedding_weight = p
-    if embedding_weight is not None and r_module.lm_head.weight.is_meta:
-        r_module.lm_head.weight = embedding_weight
 
     for sd_ in sd:
         del sd_
