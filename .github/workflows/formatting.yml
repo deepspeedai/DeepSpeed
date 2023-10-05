@@ -27,12 +27,13 @@ jobs:
           which python
           python --version
 
-      - name: Install deepspeed
+      - name: Install dependencies
         run: |
-          pip install .[dev,autotuning,triton]
-          ds_report
+          # Previously we would do pip install .[dev] but this is causing out of
+          # space errors start with torch 2.1.0 release
+          grep -E "clang-format|pre-commit" requirements/requirements-dev.txt | xargs pip install
 
       - name: Formatting checks
         run: |
-           pip show pre-commit clang-format
-           pre-commit run --all-files
+          pip show pre-commit clang-format
+          pre-commit run --all-files

@@ -27,7 +27,7 @@ jobs:
       - name: Install pytorch
         run: |
           # use the same pytorch version as transformers CI
-            pip install -U --cache-dir $TORCH_CACHE torch torchvision torchaudio --extra-index-url https://download.pytorch.org/whl/cu116
+          pip install -U --cache-dir $TORCH_CACHE torch==2.0.1+cu118 --index-url https://download.pytorch.org/whl/cu118
           python -c "import torch; print('torch:', torch.__version__, torch)"
           python -c "import torch; print('CUDA available:', torch.cuda.is_available())"
 

@@ -8,12 +8,15 @@
 
 import deepspeed
 
+from deepspeed.runtime.utils import required_torch_version
 from unit.common import DistributedTest
 from unit.simple_model import *
-
 from unit.checkpoint.common import *
 
 import pytest
+
+if not required_torch_version(max_version=2.0):
+    pytest.skip("Skipping until we resolve problems with torch 2.1", allow_module_level=True)
 
 
 class TestMiCSCheckpoint(DistributedTest):

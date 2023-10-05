@@ -17,23 +17,25 @@ DS_COMM_ALL_REDUCE_OFF = False
 DS_COMM_REDUCE_OFF = False
 
 
-def is_torch_two():
-    TORCH_MAJOR = int(torch.__version__.split('.')[0])
-    if TORCH_MAJOR >= 2:
+def is_torch_ver_eq_2_0():
+    TORCH_MAJOR, TORCH_MINOR = map(int, torch.__version__.split('.')[:2])
+    if TORCH_MAJOR == 2 and TORCH_MINOR == 0:
         return True
-    else:
-        return False
+    return False
+
+
+def is_torch_ver_ge_2_1():
+    TORCH_MAJOR, TORCH_MINOR = map(int, torch.__version__.split('.')[:2])
+    if TORCH_MAJOR >= 2 and TORCH_MINOR >= 1:
+        return True
+    return False
 
 
 def torch_ver_ge_1_13():
-    if is_torch_two():
+    TORCH_MAJOR, TORCH_MINOR = map(int, torch.__version__.split('.')[:2])
+    if TORCH_MAJOR >= 1 and TORCH_MINOR >= 13:
         return True
-    else:
-        TORCH_MAJOR = int(torch.__version__.split('.')[0])
-        assert TORCH_MAJOR == 1
-
-        TORCH_MINOR = int(torch.__version__.split('.')[1])
-        return TORCH_MINOR >= 13
+    return False
 
 
 def has_coalescing_manager():
@@ -45,9 +47,11 @@ def has_all_reduce_coalesced():
     return hasattr(torch.distributed, "all_reduce_coalesced") and torch_ver_ge_1_13()
 
 
-def get_coalescing_manager(group, device, reqs):
-    if is_torch_two():
+def get_coalescing_manager(group, device, reqs, async_op):
+    if is_torch_ver_eq_2_0():
         return torch.distributed.distributed_c10d._coalescing_manager(group, device=device, reqs=reqs)
+    elif is_torch_ver_ge_2_1():
+        return torch.distributed.distributed_c10d._coalescing_manager(group, device=device, async_ops=async_op)
     else:
         return torch.distributed.distributed_c10d._coalescing_manager(group, reqs)
 
@@ -234,7 +238,7 @@ class TorchBackend(Backend):
                                                                                  async_op=async_op)
         elif has_coalescing_manager():
             reqs = []
-            with get_coalescing_manager(group, input_tensors[0].device, reqs):
+            with get_coalescing_manager(group, input_tensors[0].device, reqs, async_op):
                 for output, input in zip(output_tensors, input_tensors):
                     handle = torch.distributed.distributed_c10d.all_gather_into_tensor(output,
                                                                                        input,
