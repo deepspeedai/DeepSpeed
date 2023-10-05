@@ -55,9 +55,9 @@ GPTやLLaMaのような大規模言語モデル（LLM）は、テキスト生成
 
 <div align="center">
   <img src="../assets/images/attention.png" alt="Different attention mehanisms" width="1000"/>
-</div>
 
-*図2: 異なるアテンションの機構: 「ユーザー：画像を説明してください」という入力文と3つの画像トークン（I-token1、I-token2、I-token3）と組み合わせて与えた場合の、それぞれのattention機構の構成を示しています。左側では、標準的なcausal attentionによって、画像トークンをテキストとして扱う様子を示しています。中央は、テキストトークンに対する標準的なcausal attentionを維持しながら、画像に適用されるcross attentionを使用する様子を示しています。右側では、画像トークンはself attentionのみを行い、テキストトークンはテキスト／画像トークンへのアテンションを独立に計算するという、新しいマルチモーダルのためのアテンションの提案を、オレンジ色のマスクで強調して示しています。この仕組みは、Q, Kをクエリとキーとしたとき、 softmax($`QK^T \odot M_1`$)+ softmax($`QK^T \odot M_2`$)として定義されます。M $`\in`$ R<sup>10x10</sup>としたとき、$`M_1`$=[M==1], and $`M_2`$=[M==2] です。*
+  *図2: 異なるアテンションの機構: 「ユーザー：画像を説明してください」という入力文と3つの画像トークン（I-token1、I-token2、I-token3）と組み合わせて与えた場合の、それぞれのattention機構の構成を示しています。左側では、標準的なcausal attentionによって、画像トークンをテキストとして扱う様子を示しています。中央は、テキストトークンに対する標準的なcausal attentionを維持しながら、画像に適用されるcross attentionを使用する様子を示しています。右側では、画像トークンはself attentionのみを行い、テキストトークンはテキスト／画像トークンへのアテンションを独立に計算するという、新しいマルチモーダルのためのアテンションの提案を、オレンジ色のマスクで強調して示しています。この仕組みは、Q, Kをクエリとキーとしたとき、 softmax($`QK^T \odot M_1`$)+ softmax($`QK^T \odot M_2`$)として定義されます。M $`\in`$ R<sup>10x10</sup>としたとき、$`M_1`$=[M==1], and $`M_2`$=[M==2] です。*
+</div>
 
 <b>Causal Attention（CA）</b>：CAに基づく方法は、視覚的特徴（最終的な視覚エンコーダ層の出力からの特徴）を単純にテキストの特徴量に投影し、テキスト埋め込み層以降の通常のテキストの特徴量と組み合わせてLLMに送り込むというものです。CAの利点は、LLMにおける本来のアテンション機構の自然な拡張であり、そのため余分なモジュールやパラメータを導入しないことです。しかし、このアプローチにはいくつかの直感的な問題があります：
 
@@ -86,6 +86,7 @@ MMCAの2つ目のポイントは、1つのモダリティに対するアテン�
 
 <div align="center">
   <img src="../assets/images/lake-chat.png" alt="Beautiful lake" width="600"/>
+
   *図4：DeepSpeed-VisualChatは、示された場面を美しい湖として正確に識別し、妥当な提案のセットを提示する。対照的に、ベースラインは画像を「ボート乗り場のあるドック」と誤認識している。*
 </div>
 
@@ -102,6 +103,7 @@ LLaVAモデルで使用されているllavaとllava_dialデータセット、お
 
 <div align="center">
   <img src="../assets/images/data-blending.png" alt="Friends" width="600"/>
+
   *図5: LLaVA-Otterデータブレンド後のデータサンプル。灰色のダイアログボックスはLLaVAデータセットから、オレンジ色のダイアログボックスはOtterデータセットからのもの*
 </div>
 
@@ -110,18 +112,21 @@ LLaVAモデルで使用されているllavaとllava_dialデータセット、お
 
 <div align="center">
   <img src="../assets/images/friends.png" alt="Friends" width="600"/>
+
   *図6: DeepSpeed-VisualChatは、画像内の人数を数え、最初の画像のテキストを読み取ることができます。また、複数画像を横断的に理解することも可能です。*
 </div>
 
 
 <div align="center">
   <img src="../assets/images/ceos.png" alt="CEO" width="600"/>
+
   *図7: DeepSpeed-VisualChatは有名人を認識し、その人物の業績と関連付けることができます*
 </div>
 
 
 <div align="center">
   <img src="../assets/images/zootopia.png" alt="Zootopia" width="600"/>
+
   *図8: DeepSpeed-VisualChatは、ストーリーを作ったり、映画を認識したりできます。*
 </div>
 
