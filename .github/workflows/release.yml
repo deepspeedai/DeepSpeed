@@ -1,0 +1,47 @@
+name: Build and publish DeepSpeed release
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+
+jobs:
+  deploy:
+    runs-on: ubuntu-20.04
+    environment: release-env
+
+    steps:
+    - uses: actions/checkout@v3
+      with:
+        ref: "master"
+    - name: Get release version from tag
+      run: |
+        echo "RELEASE_VERSION=${GITHUB_REF#refs/*/v}" >> $GITHUB_ENV
+    - name: Check release version
+      run: |
+        python release/check_release_version.py --release_version ${{ env.RELEASE_VERSION }}
+    - name: Build DeepSpeed
+      run: |
+        DS_BUILD_STRING=" " python setup.py sdist_wheel
+    - name: Publish to PyPI
+      uses: pypa/gh-action-pypi-publish@release/v1
+      with:
+        password: ${{ secrets.PYPI_API_TOKEN }}
+        repository-url: https://upload.pypi.org/legacy/
+    - name: Bump version
+      run: |
+        python release/bump_patch_version.py --current_version ${{ env.RELEASE_VERSION }}
+    - name: Create Pull Request
+      uses: peter-evans/create-pull-request@v4
+      with:
+        token: ${{ secrets.GH_PAT }}
+        add-paths: |
+          version.txt
+        body: |
+          **Auto-generated PR to update version.txt after a DeepSpeed release**
+          Released version - ${{ env.RELEASE_VERSION }}
+          Author           - @${{ github.actor }}
+        branch: AutoPR/${{ env.RELEASE_VERSION }}
+        assignees: ${{ github.actor }}
+        title: "Update version.txt after ${{ env.RELEASE_VERSION }} release"
+        author: ${{ github.actor }} <${{ github.actor }}@users.noreply.github.com>
