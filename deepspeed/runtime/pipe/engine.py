@@ -386,7 +386,7 @@ class PipelineEngine(DeepSpeedEngine):
         # TODO: should return precisely what loss returned and allow others to be queried?
         return self.agg_train_loss
 
-    def eval_batch(self, data_iter, return_logits=False, compute_loss=True, reduce_output='avg'):
+    def eval_batch(self, data_iter, return_logits=False, compute_loss=True, reduce_output='avg', bcast_loss=True):
         """Evaluate the pipeline on a batch of data from ``data_iter``. The
         engine will evaluate ``self.train_batch_size()`` total samples
         collectively across all workers.
@@ -449,7 +449,7 @@ class PipelineEngine(DeepSpeedEngine):
         if self.is_last_stage():
             eval_output = self._reduce_outputs(self.fwd_outputs, reduce=reduce_output)
 
-        if compute_loss:
+        if compute_loss and (bcast_loss or self.monitor.enabled):
             eval_output = self._bcast_pipe_scalar(eval_output)
 
         if self.global_rank == 0 and self.monitor.enabled:
