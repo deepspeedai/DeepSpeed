@@ -3287,7 +3287,7 @@ class DeepSpeedEngine(Module):
         # if we don't use it, we get parameters ordered incorrectly
         if hasattr(self.optimizer, "round_robin_bit16_groups"):
             bit16_groups = self.optimizer.round_robin_bit16_groups
-        elif self.bfloat16_enabled() and not self.zero_optimization():
+        elif self.bfloat16_enabled() and hasattr(self.optimizer, "bf16_groups"):
             bit16_groups = self.optimizer.bf16_groups
         else:
             bit16_groups = self.optimizer.bit16_groups if self.zero_optimization_stage(
