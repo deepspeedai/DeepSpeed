@@ -270,6 +270,8 @@ def gather_partitioned_activations(tensors, device=None):
         # don't need to do all_gather if model parallel is not enabled
         if mp_group is None or mp_size == 1:
             item = item.view(list(size.numpy()))
+            if device is not None:
+                item = item.to(device)
             inputs.append(item)
             continue
 
