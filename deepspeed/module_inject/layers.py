@@ -29,6 +29,36 @@ class LinearAllreduce(nn.Module):
         return output
 
 
+class LmHeadLinearAllreduce(nn.Module):
+
+    def __init__(
+        self,
+        weight,
+        rank,
+        world_size,
+        bias=None,
+        mp_group=None,
+    ):
+        super(LmHeadLinearAllreduce, self).__init__()
+        self.weight = weight
+        self.bias = bias
+        self.mp_group = mp_group
+        self.rank = rank
+        self.world_size = world_size
+
+    def forward(self, input):
+        assert input.shape[
+            -1] % self.world_size == 0, 'Please ensure that self.world_size is divisible by input.shape[-1]'
+        input_shard = input.shape[-1] // self.world_size
+        output = torch.matmul(input[:, :, self.rank * input_shard:(self.rank + 1) * input_shard],
+                              self.weight.transpose(-1, -2))
+        if self.mp_group is not None:
+            dist.inference_all_reduce(output, group=self.mp_group)
+        if self.bias is not None:
+            output += self.bias
+        return output
+
+
 class LinearLayer(nn.Module):
 
     def __init__(self, weight_shape=None, dtype=torch.half, weight=None, bias=None):
