@@ -21,6 +21,7 @@ jobs:
         echo "RELEASE_VERSION=${GITHUB_REF#refs/*/v}" >> $GITHUB_ENV
     - name: Check release version
       run: |
+        pip install packaging
         python release/check_release_version.py --release_version ${{ env.RELEASE_VERSION }}
     - name: Build DeepSpeed
       run: |
