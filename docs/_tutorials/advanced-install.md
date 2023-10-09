@@ -61,6 +61,7 @@ Available `DS_BUILD` options include:
 * `DS_BUILD_CCL_COMM` builds the communication collective libs
 * `DS_BUILD_CPU_ADAM` builds the CPUAdam op
 * `DS_BUILD_CPU_LION` builds the CPULion op
+* `DS_BUILD_EVOFORMER_ATTN` builds the EvoformerAttn op (from [Alphafold](https://www.deepspeed.ai/tutorials/ds4sci_evoformerattention/))
 * `DS_BUILD_FUSED_ADAM` builds the FusedAdam op (from [apex](https://github.com/NVIDIA/apex))
 * `DS_BUILD_FUSED_LION` builds the FusedLion op
 * `DS_BUILD_CPU_ADAGRAD` builds the CPUAdagrad op
@@ -71,7 +72,6 @@ Available `DS_BUILD` options include:
 * `DS_BUILD_TRANSFORMER` builds the transformer op
 * `DS_BUILD_TRANSFORMER_INFERENCE` builds the transformer-inference op
 * `DS_BUILD_STOCHASTIC_TRANSFORMER` builds the stochastic transformer op
-* `DS_BUILD_UTILS` builds various optimized utilities
 
 To speed up the build-all process, you can parallelize the compilation process with:
 
