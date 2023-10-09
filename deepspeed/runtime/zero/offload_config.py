@@ -3,9 +3,9 @@
 
 # DeepSpeed Team
 
-from pydantic import Field, validator
 from enum import Enum
 from pathlib import Path
+from deepspeed.pydantic_v1 import Field, validator
 from deepspeed.runtime.config_utils import DeepSpeedConfigModel, pp_int
 
 

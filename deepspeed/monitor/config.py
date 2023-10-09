@@ -3,7 +3,7 @@
 
 # DeepSpeed Team
 
-from pydantic import root_validator
+from deepspeed.pydantic_v1 import root_validator
 from deepspeed.runtime.config_utils import DeepSpeedConfigModel
 
 

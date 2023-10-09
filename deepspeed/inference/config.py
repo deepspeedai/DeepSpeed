@@ -5,10 +5,9 @@
 
 import torch
 import deepspeed
+from deepspeed.pydantic_v1 import Field, validator
 from deepspeed.runtime.config_utils import DeepSpeedConfigModel
 from deepspeed.runtime.zero.config import DeepSpeedZeroConfig
-from pydantic import Field
-from pydantic import validator
 from typing import Dict, Union
 from enum import Enum
 

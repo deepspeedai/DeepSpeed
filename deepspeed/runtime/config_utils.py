@@ -9,7 +9,7 @@ import json
 import collections
 import collections.abc
 from functools import reduce
-from pydantic import BaseModel
+from deepspeed.pydantic_v1 import BaseModel
 from deepspeed.utils import logger
 
 

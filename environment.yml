@@ -18,4 +18,4 @@ dependencies:
   - certifi
   - openssl
   - python=3.10
-  - pydantic<2.0.0
+  - pydantic
