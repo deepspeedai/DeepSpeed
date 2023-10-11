@@ -12,6 +12,17 @@
 *图1：DeepSpeed4Science方法概述：专为加速科学发现和应对其复杂性而量身定制的AI系统技术开发。*
 </div>
 
+如需引用 DeepSpeed4Science，请引用我们的[white paper](https://arxiv.org/abs/2310.04610):
+
+```
+@article{song2023deepspeed4science,
+  title={DeepSpeed4Science Initiative: Enabling Large-Scale Scientific Discovery through Sophisticated AI System Technologies},
+  author={Song, Shuaiwen Leon and Kruft, Bonnie and Zhang, Minjia and Li, Conglong and Chen, Shiyang and Zhang, Chengming and Tanaka, Masahiro and Wu, Xiaoxia and Rasley, Jeff and Awan, Ammar Ahmad and others},
+  journal={arXiv preprint arXiv:2310.04610},
+  year={2023}
+}
+```
+
 ## 简介
 
 在接下来的十年中，深度学习可能会彻底改变自然科学，增强我们对自然现象进行建模和预测的能力。这可能预示着科学探索的新时代，为从药物开发到可再生能源的各个领域带来重大进展。为了响应这一机会以及微软“予力全球每一人、每一组织，成就不凡”的使命，[微软DeepSpeed团队](https://www.deepspeed.ai/)启动了一个名为[DeepSpeed4Science](https://deepspeed4science.ai/)的新计划，旨在通过AI系统技术创新帮助领域专家解锁当今最大的科学之谜。
