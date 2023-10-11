@@ -53,12 +53,11 @@ def quantization_test_helper(pre_quant_type: torch.dtype, num_bits: int):
     assert mean_diff < 0.15 and max_diff < 0.5, f'Numeric error exceed threshold, mean diff {mean_diff} (threshold 0.15), max diff {max_diff} (threshold 0.5)'
 
 
-def zero3_post_init_quantization_test_helper(cpu_offload: bool, nvme_offload: bool):
+def zero3_post_init_quantization_test_helper(cpu_offload: bool, nvme_offload: bool, bits: int):
     import deepspeed
     from transformers.deepspeed import HfDeepSpeedConfig
 
-    def get_zero3_ds_config(hf_config: OPTConfig, cpu_offload: bool, nvme_offload: bool) -> Dict:
-        bits = 4
+    def get_zero3_ds_config(hf_config: OPTConfig, cpu_offload: bool, nvme_offload: bool, bits: int) -> Dict:
         GB = 1 << 30
 
         ds_config = {
@@ -143,7 +142,7 @@ def zero3_post_init_quantization_test_helper(cpu_offload: bool, nvme_offload: bo
         return ds_config
 
     hf_config = AutoConfig.from_pretrained('facebook/opt-125m')
-    ds_config = get_zero3_ds_config(hf_config=hf_config, cpu_offload=cpu_offload, nvme_offload=nvme_offload)
+    ds_config = get_zero3_ds_config(hf_config=hf_config, cpu_offload=cpu_offload, nvme_offload=nvme_offload, bits=bits)
 
     input_ids = torch.ones(1, 16, dtype=torch.int32, device=device)
     attention_mask = torch.ones(1, 16, dtype=torch.float32, device=device)
@@ -171,12 +170,11 @@ def zero3_post_init_quantization_test_helper(cpu_offload: bool, nvme_offload: bo
     assert mean_diff < 0.4, f'Numeric error exceed threshold, relative error {mean_diff} (threshold 0.4)'
 
 
-def zero3_quantized_initialization_test_helper(cpu_offload: bool, nvme_offload: bool):
+def zero3_quantized_initialization_test_helper(cpu_offload: bool, nvme_offload: bool, bits: int):
     import deepspeed
     from transformers.deepspeed import HfDeepSpeedConfig
 
-    def get_zero3_ds_config(hf_config: OPTConfig, cpu_offload: bool, nvme_offload: bool) -> Dict:
-        bits = 4
+    def get_zero3_ds_config(hf_config: OPTConfig, cpu_offload: bool, nvme_offload: bool, bits: int) -> Dict:
         GB = 1 << 30
 
         ds_config = {
@@ -223,7 +221,7 @@ def zero3_quantized_initialization_test_helper(cpu_offload: bool, nvme_offload: 
         return ds_config
 
     hf_config = AutoConfig.from_pretrained('facebook/opt-125m')
-    ds_config = get_zero3_ds_config(hf_config=hf_config, cpu_offload=cpu_offload, nvme_offload=nvme_offload)
+    ds_config = get_zero3_ds_config(hf_config=hf_config, cpu_offload=cpu_offload, nvme_offload=nvme_offload, bits=bits)
 
     input_ids = torch.ones(1, 16, dtype=torch.int32, device=device)
     attention_mask = torch.ones(1, 16, dtype=torch.float32, device=device)
@@ -249,16 +247,26 @@ def zero3_quantized_initialization_test_helper(cpu_offload: bool, nvme_offload: 
     assert mean_diff < 0.4, f'Numeric error exceed threshold, relative error {mean_diff} (threshold 0.4)'
 
 
-class TestQuantizedInt4(DistributedTest):
+@pytest.fixture(params=[4, 8], ids=["4bits", "8bits"])
+def quantization_bits(request):
+    return request.param
 
-    def test_model_quantization(self):
+
+@pytest.fixture(params=[0, 1], ids=["0", "1"])
+def group_dim(request):
+    return request.param
+
+
+class TestQuantizedInt(DistributedTest):
+
+    def test_model_quantization(self, quantization_bits):
         reset_random()
 
         config = AutoConfig.from_pretrained('facebook/opt-125m')
 
         with torch.no_grad():
             model = OPTDecoderLayer(config).half().to(device)
-            bits = 4
+            bits = quantization_bits
 
             ds_config = {
                 'weight_quantization': {
@@ -307,7 +315,7 @@ class TestQuantizedInt4(DistributedTest):
             assert type(model.self_attn.out_proj) is QuantizedLinear
 
     @pytest.mark.skipif(device == 'cpu', reason='CPU does support FP16 GEMM')
-    def test_quantized_linear(self):
+    def test_quantized_linear(self, quantization_bits, group_dim):
         reset_random()
 
         layers = []
@@ -326,9 +334,9 @@ class TestQuantizedInt4(DistributedTest):
                 'weight_quantization': {
                     'post_init_quant': {
                         'layer': {
-                            'num_bits': 4,
+                            'num_bits': quantization_bits,
                             'group_size': 64,
-                            'group_dim': 0,
+                            'group_dim': group_dim,
                             'symmetric': False
                         }
                     }
@@ -368,31 +376,31 @@ class TestQuantizedInt4(DistributedTest):
         quantization_test_helper(torch.float16, 8)
 
     @pytest.mark.skipif(device == 'cpu', reason='CPU does support FP16 GEMM')
-    def test_zero3_int4_post_init_quant(self):
+    def test_zero3_int4_post_init_quant(self, quantization_bits):
         reset_random()
-        zero3_post_init_quantization_test_helper(cpu_offload=False, nvme_offload=False)
+        zero3_post_init_quantization_test_helper(cpu_offload=False, nvme_offload=False, bits=quantization_bits)
 
     @pytest.mark.skipif(device == 'cpu', reason='CPU does support FP16 GEMM')
-    def test_zero3_int4_post_init_quant_cpu_offload(self):
+    def test_zero3_int4_post_init_quant_cpu_offload(self, quantization_bits):
         reset_random()
-        zero3_post_init_quantization_test_helper(cpu_offload=True, nvme_offload=False)
+        zero3_post_init_quantization_test_helper(cpu_offload=True, nvme_offload=False, bits=quantization_bits)
 
     @pytest.mark.skipif(device == 'cpu', reason='CPU does support FP16 GEMM')
     def test_zero3_int4_post_init_quant_nvme_offload(self):
         reset_random()
-        zero3_post_init_quantization_test_helper(cpu_offload=False, nvme_offload=True)
+        zero3_post_init_quantization_test_helper(cpu_offload=False, nvme_offload=True, bits=4)
 
     @pytest.mark.skipif(device == 'cpu', reason='CPU does support FP16 GEMM')
-    def test_zero3_int4_quantized_initialization(self):
+    def test_zero3_int4_quantized_initialization(self, quantization_bits):
         reset_random()
-        zero3_quantized_initialization_test_helper(cpu_offload=False, nvme_offload=False)
+        zero3_quantized_initialization_test_helper(cpu_offload=False, nvme_offload=False, bits=quantization_bits)
 
     @pytest.mark.skipif(device == 'cpu', reason='CPU does support FP16 GEMM')
-    def test_zero3_int4_quantized_initialization_cpu_offload(self):
+    def test_zero3_int4_quantized_initialization_cpu_offload(self, quantization_bits):
         reset_random()
-        zero3_quantized_initialization_test_helper(cpu_offload=True, nvme_offload=False)
+        zero3_quantized_initialization_test_helper(cpu_offload=True, nvme_offload=False, bits=quantization_bits)
 
     @pytest.mark.skipif(device == 'cpu', reason='CPU does support FP16 GEMM')
     def test_zero3_int4_quantized_initialization_nvme_offload(self):
         reset_random()
-        zero3_quantized_initialization_test_helper(cpu_offload=False, nvme_offload=True)
+        zero3_quantized_initialization_test_helper(cpu_offload=False, nvme_offload=True, bits=4)

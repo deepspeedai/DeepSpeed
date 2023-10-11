@@ -156,6 +156,26 @@ at::Tensor dequantize_int4_to_half_experimental(at::Tensor& data_in,
     return output;
 }
 
+at::Tensor dequantize_int8_to_half_experimental(at::Tensor& data_in,
+                                                at::Tensor& scale_buffer,
+                                                at::Tensor& min_val_buffer,
+                                                int num_group,
+                                                int group_size)
+{
+    auto output_options = at::TensorOptions().dtype(at::kHalf).device(at::kCUDA);
+    auto output = torch::empty({num_group, group_size}, output_options);
+
+    launch_dequantize_int8_to_half_experimental((uint8_t*)data_in.data_ptr(),
+                                                (half*)output.data_ptr(),
+                                                (half*)scale_buffer.data_ptr(),
+                                                (half*)min_val_buffer.data_ptr(),
+                                                num_group,
+                                                group_size,
+                                                at::cuda::getCurrentCUDAStream());
+
+    return output;
+}
+
 std::vector<at::Tensor> ds_swizzle_quant(at::Tensor& input_vals,
                                          int groups,
                                          int num_bits,
@@ -270,6 +290,9 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m)
     m.def("dequantize_int4_to_half_experimental",
           &dequantize_int4_to_half_experimental,
           "Dequantize int4 to half (experimental)");
+    m.def("dequantize_int8_to_half_experimental",
+          &dequantize_int8_to_half_experimental,
+          "Dequantize int8 to half (experimental)");
     m.def("swizzle_quant", &ds_swizzle_quant);
     m.def("quantized_reduction", &quantized_reduction);
 }

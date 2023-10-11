@@ -228,3 +228,54 @@ void launch_dequantize_int4_to_half_experimental(uint8_t* data_in,
     dequantize_int4_to_half<<<num_block, 256, 0, stream>>>(
         data_in, data_out, scale_buffer, min_val_buffer, num_group, group_size);
 }
+
+template <int N>
+__device__ __forceinline__ AlignedArray<half, N> int8_to_half(const AlignedArray<uint8_t, N>& data)
+{
+    AlignedArray<half, N> ret;
+
+#pragma unroll
+    for (int idx = 0; idx < N; idx += 1) { ret[idx] = half(int(data[idx])); }
+
+    return ret;
+}
+
+__global__ void dequantize_int8_to_half(uint8_t* data_in,
+                                        half* data_out,
+                                        half* scale_buffer,
+                                        half* min_val_buffer,
+                                        int num_group,
+                                        int group_size)
+{
+    using AccessType = AlignedArray<uint8_t, 8>;
+    using AccessTypeOut = AlignedArray<half, 8>;
+
+    for (int idx = threadIdx.x + blockIdx.x * blockDim.x; idx < num_group * group_size / 8;
+         idx += blockDim.x * gridDim.x) {
+        int id_group = idx / (group_size / 8);
+        AccessType value = reinterpret_cast<AccessType*>(data_in)[idx];
+        half scale = scale_buffer[id_group];
+        half min_value = min_val_buffer[id_group];
+
+        AccessTypeOut output = int8_to_half(value);
+        output = divide<half, 8>()(output, scale);
+        output = plus<half, 8>()(output, min_value);
+
+        reinterpret_cast<AccessTypeOut*>(data_out)[idx] = output;
+    }
+}
+
+void launch_dequantize_int8_to_half_experimental(uint8_t* data_in,
+                                                 half* data_out,
+                                                 half* scale_buffer,
+                                                 half* min_val_buffer,
+                                                 int num_group,
+                                                 int group_size,
+                                                 cudaStream_t stream)
+{
+    int num_warp = num_group / 4;
+    int num_block = num_warp / 8;  // 256 trd / block
+
+    dequantize_int8_to_half<<<num_block, 256, 0, stream>>>(
+        data_in, data_out, scale_buffer, min_val_buffer, num_group, group_size);
+}

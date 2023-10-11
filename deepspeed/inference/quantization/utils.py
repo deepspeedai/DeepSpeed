@@ -105,20 +105,24 @@ class DeQuantizer:
     def dequantize(self, tensor: Tensor, quant_scale: Tensor, quant_min: Tensor) -> Tensor:
         # Use customized CUDA quantization kernel if possible.
         if self.config['group_size'] % 8 == 0 and \
-                self.config['num_bits'] == 4 and \
+                (self.config['num_bits'] == 4 or self.config['num_bits'] == 8) and \
                 self.config['group_dim'] == len(tensor.shape) - 1 and \
                     self.dtype == torch.float16 and device == 'cuda':
 
             last_dimension_size = self.config['group_size']
             if self.config['num_bits'] == 4:
                 last_dimension_size = last_dimension_size // 2
-            quantized_tensor = get_quantizer_cuda_module().dequantize_int4_to_half_experimental(
-                tensor.reshape(-1, last_dimension_size), quant_scale, quant_min,
-                tensor.numel() // last_dimension_size, self.config['group_size'])
-
-            shape = list(tensor.shape)
-            if self.config['num_bits'] == 4:
+                quantized_tensor = get_quantizer_cuda_module().dequantize_int4_to_half_experimental(
+                    tensor.reshape(-1, last_dimension_size), quant_scale, quant_min,
+                    tensor.numel() // last_dimension_size, self.config['group_size'])
+                shape = list(tensor.shape)
                 shape[-1] = shape[-1] * 2
+            elif self.config['num_bits'] == 8:
+                # last_dimension_size = last_dimension_size // 2
+                quantized_tensor = get_quantizer_cuda_module().dequantize_int8_to_half_experimental(
+                    tensor.reshape(-1, last_dimension_size), quant_scale, quant_min,
+                    tensor.numel() // last_dimension_size, self.config['group_size'])
+                shape = list(tensor.shape)
 
             return quantized_tensor.reshape(shape)
 

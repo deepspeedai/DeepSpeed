@@ -98,3 +98,11 @@ void launch_dequantize_int4_to_half_experimental(uint8_t* data_in,
                                                  int num_group,
                                                  int group_size,
                                                  cudaStream_t stream);
+
+void launch_dequantize_int8_to_half_experimental(uint8_t* data_in,
+                                                 half* data_out,
+                                                 half* scale_buffer,
+                                                 half* min_val_buffer,
+                                                 int num_group,
+                                                 int group_size,
+                                                 cudaStream_t stream);
