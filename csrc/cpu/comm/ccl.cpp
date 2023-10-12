@@ -277,10 +277,20 @@ int world_size = -1;
 
 std::set<int> _comm_ids;
 std::set<int> _colors;
-ccl::vector_class<ccl::communicator> _ccl_comms;
+std::vector<ccl::communicator> _ccl_comms;
+ccl::shared_ptr_class<ccl::kvs> sub_kvs;
+std::map<std::vector<int>, int> group_to_comm_id;
 
 ccl::communicator& _get_comm_from_group() { return _ccl_comms[0]; }
 ccl::communicator& _get_comm_from_group(py::object group) { return _ccl_comms[0]; }
+ccl::communicator& _get_comm_from_group(std::vector<int> ranks)
+{
+    if (group_to_comm_id.find(ranks) != group_to_comm_id.end()) {
+        auto id = group_to_comm_id.find(ranks);
+        return _ccl_comms[id->second];
+    }
+    return _ccl_comms[0];
+}
 
 #define CCLCHECK(cmd) \
     do {              \
@@ -394,12 +404,29 @@ int next_unique_val(std::set<int> s)
     }
 }
 
-py::object new_group(std::vector<int> ranks)
+std::vector<uint8_t> get_sub_kvs_addr(bool first)
 {
-    int comm_id = next_unique_val(_comm_ids);
-    int color = next_unique_val(_colors);
-    std::cout << "RANK: " << get_rank() << " COMM_ID: " << comm_id << " COLOR: " << color
-              << std::endl;
+    if (first) {
+        sub_kvs = ccl::create_main_kvs();
+        ccl::kvs::address_type main_addr = sub_kvs->get_address();
+        auto ccl_kvs_addr = std::vector<uint8_t>(main_addr.begin(), main_addr.end());
+        return ccl_kvs_addr;
+    } else {
+        ccl::kvs::address_type main_addr;
+        auto ccl_kvs_addr = std::vector<uint8_t>(main_addr.begin(), main_addr.end());
+        return ccl_kvs_addr;
+    }
+}
+
+void initialize_sub_comm(int size, int rank, torch::Tensor& kvs_data, std::vector<int> ranks)
+{
+    ccl::kvs::address_type main_addr;
+    if (rank != 0) {
+        memcpy(main_addr.data(), kvs_data.data_ptr(), main_addr.size());
+        sub_kvs = ccl::create_kvs(main_addr);
+    }
+    _ccl_comms.push_back(ccl::create_communicator(size, rank, sub_kvs));
+    group_to_comm_id[ranks] = _ccl_comms.size() - 1;
 }
 
 ccl::datatype get_ccl_datatype(c10::ScalarType type)
@@ -452,7 +479,7 @@ ccl::reduction get_ccl_reduce_op(py::object op, at::Tensor& input)
     return ccl_op;
 }
 
-void broadcast(torch::Tensor& data, int src, py::object group, bool async_op)
+void broadcast(torch::Tensor& data, int src, std::vector<int> group, bool async_op)
 {
     CCLCHECK(ccl::broadcast(data.data_ptr(),
                             data.numel(),
@@ -463,7 +490,7 @@ void broadcast(torch::Tensor& data, int src, py::object group, bool async_op)
 }
 
 // TODO: implement torch's async_op behavior, document it.
-void all_reduce(torch::Tensor& data, py::object op, py::object group, bool async_op)
+void all_reduce(torch::Tensor& data, py::object op, std::vector<int> group, bool async_op)
 {
     CCLCHECK(ccl::allreduce(data.data_ptr(),
                             data.data_ptr(),
@@ -477,7 +504,7 @@ void all_reduce(torch::Tensor& data, py::object op, py::object group, bool async
 void all_reduce_caching(torch::Tensor& data,
                         py::object op,
                         std::string match_id,
-                        py::object group,
+                        std::vector<int> group,
                         bool async_op)
 {
     ccl::allreduce_attr attr = ccl::default_allreduce_attr;
@@ -510,7 +537,7 @@ static void parallel_memcpy(void* to, void* from, size_t n_bytes)
     }
 }
 
-void inference_all_reduce(torch::Tensor& data, py::object op, py::object group, bool async_op)
+void inference_all_reduce(torch::Tensor& data, py::object op, std::vector<int> group, bool async_op)
 {
     static py::object ReduceOp = py::module_::import("deepspeed.comm").attr("ReduceOp");
     static auto ReduceOpSum = (int)py::int_(ReduceOp.attr("SUM").attr("value"));
@@ -583,9 +610,16 @@ void inference_all_reduce(torch::Tensor& data, py::object op, py::object group, 
     }
 }
 
-void barrier(py::object group, bool async_op)
+void barrier(std::vector<int> group, bool async_op)
 {
     CCLCHECK(ccl::barrier(_get_comm_from_group(group)).wait());
+}
+
+std::vector<std::string> get_available_coll()
+{
+    std::vector<std::string> colls{
+        "broadcast", "all_reduce", "inference_all_reduce", "all_reduce_caching", "barrier"};
+    return colls;
 }
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m)
@@ -599,4 +633,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m)
     m.def("inference_all_reduce", &inference_all_reduce, "low latency all_reduce implementation");
     m.def("all_reduce_caching", &all_reduce_caching, "ccl all_reduce with caching");
     m.def("barrier", &barrier, "barrier");
+    m.def("initialize_sub_comm", &initialize_sub_comm, "initialize_sub_comm");
+    m.def("get_sub_kvs_addr", &get_sub_kvs_addr, "get_sub_kvs_addr");
+    m.def("get_available_coll", &get_available_coll, "get_available_coll");
 }
