@@ -5,5 +5,6 @@ packaging>=20.0
 psutil
 py-cpuinfo
 pydantic
+pynvml
 torch
 tqdm

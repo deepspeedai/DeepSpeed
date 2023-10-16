@@ -127,6 +127,9 @@ class NPU_Accelerator(DeepSpeedAccelerator):
     def total_memory(self, device_index=None):
         return torch.npu.get_device_properties(device_index).total_memory
 
+    def available_memory(self, device_index=None):
+        return self.total_memory(device_index) - self.memory_allocated(device_index)
+
     # Data types
     def is_bf16_supported(self):
         return torch.npu.is_bf16_supported()

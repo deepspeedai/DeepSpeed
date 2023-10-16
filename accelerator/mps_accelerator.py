@@ -131,6 +131,9 @@ class MPS_Accelerator(DeepSpeedAccelerator):
     def total_memory(self, device_index=None):
         return
 
+    def available_memory(self, device_index=None):
+        return
+
     # Data types
     def is_bf16_supported(self):
         return False

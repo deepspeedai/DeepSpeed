@@ -159,6 +159,9 @@ class CPU_Accelerator(DeepSpeedAccelerator):
     def total_memory(self, device_index=None):
         return psutil.virtual_memory().total
 
+    def available_memory(self, device_index=None):
+        return psutil.virtual_memory().available
+
     # Misc
     def amp(self):
         return torch.cpu.amp

@@ -147,6 +147,10 @@ class DeepSpeedAccelerator(ABC):
     def total_memory(self, device_index=None):
         ...
 
+    @abc.abstractmethod
+    def available_memory(self, device_index=None):
+        ...
+
     # Data types
     @abc.abstractmethod
     def is_bf16_supported(self):
