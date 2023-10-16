@@ -10,6 +10,17 @@
 
 </div>
 
+To cite DeepSpeed-Ulysses, please cite our [arxiv report](https://arxiv.org/abs/2309.14327):
+
+```
+@article{jacobs2023deepspeed,
+      title={DeepSpeed Ulysses: System Optimizations for Enabling Training of Extreme Long Sequence Transformer Models},
+      author={Sam Ade Jacobs and Masahiro Tanaka and Chengming Zhang and Minjia Zhang and Shuaiwen Leon Song and Samyam Rajbhandari and Yuxiong He},
+      journal={arXiv preprint arXiv:2309.14509},
+      year={2023},
+}
+```
+
 ## Introduction
 
 Training large models with long sequences is becoming very important
@@ -193,7 +204,7 @@ scaling not just to large sequence lengths but also to large models.
 
 ## Evaluation
 
-We evaluate DeepSpeed-Ulysses on GPT,
+We evaluate DeepSpeed-Ulysses (Ulysses) on GPT,
 a foundation model for many NLP tasks on up to 64 A100 GPUs with 40GB memory. Our
 evaluations are four-fold: i) sequence length scalability, ii)
 throughput for dense attention and comparison with existing system, and
@@ -212,7 +223,7 @@ maintains similar computation throughput across different sequence
 length at appropriate GPU count.
 
 <div align="center">
-<img src="./media/fig2Ulysses.png" style="width:5in;height:4in" />
+<img src="./media/dense1B1Mscale.png" style="width:5in;height:4in" />
 
 *Figure 2: DeepSpeed sequence parallelism strong scalability evaluation
 at different sequence length and GPU count.*
@@ -220,66 +231,89 @@ at different sequence length and GPU count.*
 
 ### Dense Attention Evaluation
 
-Next, we evaluate DeepSpeed sequence parallelism on 30 billion parameter
-dense attention model and benchmark against Megatron sequence
-parallelism on 64 A100 GPUs. The results of these evaluations are shown
-in Figures 3.
+Next, we evaluate Ulysses on 7 billion (7B) and 30 billion (30B) parameter
+GPT dense attention models and compare against Megatron-LM's sequence
+parallelism (Megatron LM) and Colosal AI sequence parallelism (ColAI-SP) on
+32 and 64 A100 GPUs respectively. The results of these evaluations are shown
+in Figures 3 and 4.
 
-We compare DeepSpeed sequence parallelism with Megatron-LM for a 30B
-model running various sequence lengths. For our evaluation we chose the
-sequence parallelism degree and global batch size that produced the best
-performance (measured as throughput or TFLOPs) for both DeepSpeed
-sequence parallelism and Megatron-LM, this we call optimal (batch
-size-sequence length) configurations. For DeepSpeed sequence
-parallelism, we always use a ZeRO parallelism degree of 64.
+We compare Ulysses with Megatron-LM and ColAI-SP for 7B and 30B models
+running various sequence lengths. We chose the sequence parallelism
+degree and micro-batch size that produced the best performance
+(measured as TFLOPs) for the three methods, this we call optimal
+(batch size-sequence length) configurations. For Ulysses, we always
+use a ZeRO-3 parallelism degrees of 32 and 64 for 7B and 30B models
+respectively.
 
-Figure 3 shows that DeepSpeed sequence parallelism consistently
-outperforms Megatron-LM for the sequence length that can be run with
-both. In addition, DeepSpeed sequence parallelism can run longer
-sequence than Megatron-LM. DeepSpeed sequence parallelism performance
-advantages are two folds: (1) DeepSpeed sequence parallelism in
-combination with ZeRO-3 fits more sample than Megatron-LM because of
-memory optimization leading to higher throughput (2) DeepSpeed sequence
-parallelism benefits from efficient all-to-all communication relative to
-*all-gather* communication as applied in Megatron-LM sequence
-parallelism.
+
+Figures 3 and 4 show that Ulysses consistently outperforms Megatron-LM
+and ColAI-SP for the sequence length that can be run with them. In addition,
+Ulysses can run longer sequence than the two existing methods. Ulysses
+performance advantages are two folds: (1) Ulysses in combination with ZeRO-3
+parameter sharding across both data and sequence parallel groups fits more
+samples than Megatron-LM and ColAI-SP because of the memory optimization
+leading to higher throughput (2) Ulysses benefits from efficient *all-to-all*
+communication relative to *all-gather* *reduce-scatter* and *ring-style* P2P
+communication as applied in Megatron-LM and ColAI-SP sequence parallelism.
+However, for dense attention at long sequence length, the throughput is
+primarily determined by local attention computation due to quadratic
+computation complexity of attention, therefore performance gap between Ulysses
+and the two existing methods closes for sequence length that can be run with them.
 
 <div align="center">
-<img src="./media/fig3Ulysses.png" style="width:5in;height:4in" />
+<img src="./media/dense7B.png" style="width:5in;height:4in" />
 
-*Figure 3: Evaluation of DeepSpeed and Megatron LM sequence parallelism on 30B
-parameter model with dense attention.*
+*Figure 3: Evaluation of Ulysses vs Megatron LM vs ColAI-SP on GPT-7B parameter
+ model with dense attention (32 GPUs).*
+</div>
+
+<div align="center">
+<img src="./media/dense30B.png" style="width:5in;height:4in" />
+
+*Figure 4:  Evaluation of Ulysses vs Megatron LM vs ColAI-SP on GPT-30B parameter
+ model with dense attention (64 GPUs).*
 </div>
 
 ### Sparse Attention Evaluation
 
-Similarly, we evaluate DeepSpeed sequence parallelism on 30 billion
-parameter sparse attention model and benchmark against Megatron sequence
-parallelism. Results of our evaluation are shown in Figure 4. We observe
-similar trends with sparse attention as dense attention experiments. We
-observe more than 2X throughput performance of DeepSpeed sequence
-parallelism compared to Megatron-LM. For memory saving, DeepSpeed
-sequence parallelism leveraging ZeRO-3 scales to 4X longer sequence
-lengths than Megatron-LM.
+Similarly, we evaluate Ulysses on 7 billion and 30 billion parameter sparse
+attention models and benchmark against Megatron-LM sequence parallelism.
+There is no public implementation of block sparse attention for ColAI-SP,
+therefore, evaluation of sparse attention is in comparison with Megatron-LM.
+Results of our evaluation are shown in Figures 5 and 6. We observe similar
+trends with sparse attention as dense attention experiments. We observe more
+than 2x throughput performance of Ulysses compared to Megatron-LM. For memory
+saving, Ulysses leveraging ZeRO-3 scales to 4x longer sequence lengths
+than Megatron-LM.
 
-DeepSpeed sequence parallelism outperforms Megatron-LM for sequence
-length that can be run with both. In fact, the current DeepSpeed
-throughput is bottlenecked by the local sparse attention implementation,
-and as a result DeepSpeed throughput decreases as the sequence length
-increases. We expect this gap in performance between DeepSpeed and
-Megatron to increase further for larger sequence lengths as we improve
-the performance of the local sparse attention implementation in future.
+Ulysses outperforms Megatron-LM for sequence length that can be run with both.
+In fact, the current Ulysses throughput is bottle-necked by the local sparse
+attention implementation, and as a result Ulysses throughput decreases as
+the sequence length increases. We expect this gap in performance between our
+method and Megatron-LM to increase further for larger sequence lengths as we
+improve the performance of the local sparse attention implementation in future.
+A noteworthy observation is that the decreasing performance gap between Ulysses
+and Megatron-LM observed in dense attention evaluation is less pronounced in
+sparse attention evaluation, because the attention computation in sparse attention
+is less dominant compared to dense attention.
 
 <div align="center">
-<img src="./media/fig4Ulysses.png" style="width:5in;height:4in" />
+<img src="./media/sparse7B.png" style="width:5in;height:4in" />
 
-*Figure 4: Evaluation of DeepSpeed and Megatron LM sequence parallelism on 30B
-parameter model with block sparse attention.*
+*Figure 5: Evaluation of Ulysses and Megatron LM sequence parallelism on GPT-7B
+parameter model with block sparse attention (32 GPUs).*
+</div>
+
+<div align="center">
+<img src="./media/sparse30B.png" style="width:5in;height:4in" />
+
+*Figure 6: Evaluation of Ulysses and Megatron LM sequence parallelism on GPT-30B
+parameter model with block sparse attention (64 GPUs).*
 </div>
 
 ### Convergence Study
 
-Lastly, Figure 5 shows convergence of a 1.3 billion GPT model at 32K
+Lastly, Figure 7 shows convergence of a 1.3 billion GPT model at 32K
 sequence length on 8 A100 GPUs with sequence parallelism degree set at 4
 for both DeepSpeed and Megatron-LM sequence parallelism. For DeepSpeed
 sequence parallelism, we evaluate convergence with different ZeRO
@@ -289,9 +323,9 @@ there is no (negative) impact on quality of trained models, this assertion is
 validated through experiments and is shown in Figure 5.
 
 <div align="center">
-<img src="./media/convg.png" width="500px" />
+<img src="./media/convgZ.png" width="500px" />
 
-*Figure 5: Convergence evaluation of DeepSpeed sequence parallelism with different
+*Figure 7: Convergence evaluation of DeepSpeed sequence parallelism with different
 ZeRO memory optimization stages.*
 </div>
 
