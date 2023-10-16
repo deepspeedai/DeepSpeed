@@ -10,7 +10,7 @@
 
 </div>
 
-To cite DeepSpeed-Ulysses, please cite our [arxiv report](https://arxiv.org/abs/2309.14327):
+To cite DeepSpeed-Ulysses, please cite our [arxiv report](https://arxiv.org/abs/2309.14509):
 
 ```
 @article{jacobs2023deepspeed,
