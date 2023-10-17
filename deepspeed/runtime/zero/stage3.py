@@ -1065,19 +1065,19 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
                     param.all_gather()
 
                     #print(f"After all gather {param.device}, {param.shape}")
-                    def wrapper(param, i):
+                    def wrapper(param):
                         param_tmp = param.expand_as(param)
                         grad_acc = param_tmp.grad_fn.next_functions[0][0]
 
                         @instrument_w_nvtx
                         def reduce_partition_and_remove_grads(*notneeded):
-                            self.reduce_ready_partitions_and_remove_grads(param, i)
+                            self.reduce_ready_partitions_and_remove_grads(param)
 
                         grad_acc.register_hook(reduce_partition_and_remove_grads)
                         self.grad_accs.append(grad_acc)
 
                     #print(f"param grad fn {param.expand_as(param).grad_fn}")
-                    wrapper(param, i)
+                    wrapper(param)
 
                     # Partition the parameter after creating the hook
                     param.partition()
@@ -1095,7 +1095,7 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
             force=False)
 
     ###############Independent Partition Gradient ########################
-    def reduce_independent_p_g_buckets_and_remove_grads(self, param, i):
+    def reduce_independent_p_g_buckets_and_remove_grads(self, param):
         #print_rank_0(f"Inside reduce ipg buckets. {debug_param2name_id_shape(param)}, ipg elements {self.elements_in_ipg_bucket}, reduce bucket size {self.reduce_bucket_size}", force=True)
 
         # Because the ipg bucket is initialized with a random place holder tensor, we must
@@ -1361,9 +1361,9 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
                                                           gradient_tensors=offload_fp32_gradients[i])
         return buffers
 
-    def reduce_ready_partitions_and_remove_grads(self, param, i):
+    def reduce_ready_partitions_and_remove_grads(self, param):
         #print_rank_0(f"Backward {debug_param2name_id_shape(param)}", force=True)
-        self.reduce_independent_p_g_buckets_and_remove_grads(param, i)
+        self.reduce_independent_p_g_buckets_and_remove_grads(param)
 
     def zero_reduced_gradients(self, partition_id, i):
 
