@@ -170,7 +170,7 @@ class CCLBackend(TorchBackend):
             while True:
                 results.append(super(CCLBackend, self).get_global_rank(group, rank))
                 rank += 1
-        except RuntimeError:
+        except ValueError:
             pass
         if tuple(results) not in self.groups:
             self._new_group(results, group)
