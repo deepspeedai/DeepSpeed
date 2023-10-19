@@ -279,6 +279,9 @@ class IMPIRunner(MultiNodeRunner):
         export_cmd += ['-genv', 'WORLD_SIZE', str(total_process_count)]
         export_cmd += ['-genv', 'LOCAL_SIZE', str(process_per_node)]
 
+        # turn off IMPI core binding, use deepspeed's own core binding
+        export_cmd += ['-genv', 'I_MPI_PIN', '0']
+
         export_cmd += ['-hosts']
         hosts = ""
         for i, host in enumerate(self.resource_pool.keys()):
