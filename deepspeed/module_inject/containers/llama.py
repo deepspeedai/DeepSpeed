@@ -34,6 +34,7 @@ class DS_LLAMAContainer(MetaTensorContainer, HybridGatedMLPContainer, HybridSpli
         _config.rotate_half = True
         _config.rotate_every_two = False
         _config.rotary_dim = self.hidden_size // self.num_attention_heads
+        _config.rope_theta = self.policy.client_module.self_attn.rope_theta
         self.module = DeepSpeedGPTInference(_config, mp_group=self.mp_group)
 
         return self.module

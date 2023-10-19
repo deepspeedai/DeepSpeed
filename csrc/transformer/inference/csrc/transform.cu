@@ -32,7 +32,8 @@ __global__ void bias_add_transform_0213(float* output,
                                         bool rotate_half,
                                         bool rotate_every_two,
                                         int head_ext,
-                                        int max_out_tokens)
+                                        int max_out_tokens,
+                                        float rope_theta)
 {
     int d0_stride = hidden_dim * seq_length;
     int d1_stride = hidden_dim;
@@ -70,7 +71,7 @@ __global__ void bias_add_transform_0213(float* output,
 #pragma unroll
             for (int o = 0; o < 2; o++) {
                 float inv_freq = (float)(((d3 << 1) + o) * 2) / (float)(rotary_dim << 2);
-                inv_freq = 1.0 / powf(10000.0, inv_freq) * (float)seq_id;
+                inv_freq = 1.0 / powf(rope_theta, inv_freq) * (float)seq_id;
                 q_f[o].x = (-1.0 * q_f[o].y * sinf(inv_freq) + q_f[o].x * cosf(inv_freq));
                 q_f[o].y = (q_f[o].x * sinf(inv_freq) + q_f[o].y * cosf(inv_freq));
             }
@@ -100,7 +101,8 @@ __global__ void bias_add_transform_0213(T* output,  // q
                                         bool rotate_half,
                                         bool rotate_every_two,
                                         int head_ext,
-                                        int max_out_tokens)
+                                        int max_out_tokens,
+                                        float rope_theta)
 {
     using T2 =
         typename std::conditional<std::is_same<T, __half>::value, __half2, __nv_bfloat162>::type;
@@ -147,7 +149,7 @@ __global__ void bias_add_transform_0213(T* output,  // q
 #pragma unroll
             for (int o = 0; o < 4; o++) {
                 float inv_freq = (float)(((d3 << 2) + o) * 2) / (float)(rotary_dim << 3);
-                inv_freq = 1.0 / powf(10000.0, inv_freq) * (float)seq_id;
+                inv_freq = 1.0 / powf(rope_theta, inv_freq) * (float)seq_id;
                 float q_data[2];
                 q_data[0] = conversion::to<float>(q_h[o].x);
                 q_data[1] = conversion::to<float>(q_h[o].y);
@@ -181,7 +183,8 @@ void launch_bias_add_transform_0213<float>(float* output,
                                            bool rotate_every_two,
                                            cudaStream_t stream,
                                            int trans_count,
-                                           int max_out_tokens)
+                                           int max_out_tokens,
+                                           float rope_theta)
 {
     hidden_dim >>= 2;
     int head_ext = (hidden_dim - 1) / MAX_THREADS + 1;
@@ -204,7 +207,8 @@ void launch_bias_add_transform_0213<float>(float* output,
                                                                 rotate_half,
                                                                 rotate_every_two,
                                                                 head_ext,
-                                                                max_out_tokens);
+                                                                max_out_tokens,
+                                                                rope_theta);
 }
 
 template <typename T>
@@ -225,7 +229,8 @@ void launch_bias_add_transform_0213(T* output,
                                     bool rotate_every_two,
                                     cudaStream_t stream,
                                     int trans_count,
-                                    int max_out_tokens)
+                                    int max_out_tokens,
+                                    float rope_theta)
 {
     hidden_dim >>= 3;
     int head_ext = 1;  // (hidden_dim - 1) / MAX_THREADS + 1;
@@ -247,7 +252,8 @@ void launch_bias_add_transform_0213(T* output,
                                                                 rotate_half,
                                                                 rotate_every_two,
                                                                 head_ext,
-                                                                max_out_tokens);
+                                                                max_out_tokens,
+                                                                rope_theta);
 }
 
 #define INSTANTIATE_LAUNCH_BIAS_ADD_TRANSFORM_0213(T)             \
@@ -268,7 +274,8 @@ void launch_bias_add_transform_0213(T* output,
                                                     bool,         \
                                                     cudaStream_t, \
                                                     int,          \
-                                                    int)
+                                                    int,          \
+                                                    float)
 
 #ifdef BF16_AVAILABLE
 INSTANTIATE_LAUNCH_BIAS_ADD_TRANSFORM_0213(__nv_bfloat16);

@@ -168,6 +168,7 @@ void launch_apply_rotary_pos_emb(T* mixed_query,
                                  unsigned offset,
                                  unsigned num_heads,
                                  unsigned batch,
+                                 float rope_theta,
                                  cudaStream_t stream,
                                  int max_out_tokens);
 
@@ -207,7 +208,8 @@ void launch_bias_add_transform_0213(T* outputs,
                                     bool rotate_every_two,
                                     cudaStream_t stream,
                                     int trans_count,
-                                    int max_out_tokens);
+                                    int max_out_tokens,
+                                    float rope_theta);
 template <typename T>
 void pad_data(T* padded_output,
               T* output,
