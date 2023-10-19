@@ -145,7 +145,7 @@ BertTransformerLayer<T>::~BertTransformerLayer()
 template <typename T>
 void BertTransformerLayer<T>::Initialize()
 {
-#ifndef __HIP_PLATFORM_HCC__
+#ifndef __HIP_PLATFORM_AMD__
     if (std::is_same<T, __half>::value) cublasSetMathMode(_cublasHandle, CUBLAS_TENSOR_OP_MATH);
 #endif
 }

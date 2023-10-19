@@ -9,7 +9,7 @@
 #define HALF_PRECISION_AVAILABLE = 1
 #endif
 
-#ifdef __HIP_PLATFORM_HCC__
+#ifdef __HIP_PLATFORM_AMD__
 #include <hip/hip_cooperative_groups.h>
 #else
 #include <cooperative_groups.h>

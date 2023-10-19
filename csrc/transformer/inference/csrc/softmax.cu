@@ -7,7 +7,7 @@
 #include "conversion_utils.h"
 #include "inference_cuda_layers.h"
 
-#ifndef __HIP_PLATFORM_HCC__
+#ifndef __HIP_PLATFORM_AMD__
 #include <cuda_profiler_api.h>
 #endif
 #include <cstdio>

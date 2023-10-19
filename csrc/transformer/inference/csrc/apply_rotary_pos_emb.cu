@@ -4,7 +4,7 @@
 // DeepSpeed Team
 
 #include "conversion_utils.h"
-#ifdef __HIP_PLATFORM_HCC__
+#ifdef __HIP_PLATFORM_AMD__
 #include "hip/hip_cooperative_groups.h"
 #else
 #include "cooperative_groups.h"
@@ -13,7 +13,7 @@
 #include "inference_cuda_layers.h"
 #include "memory_access_utils.h"
 
-#ifndef __HIP_PLATFORM_HCC__
+#ifndef __HIP_PLATFORM_AMD__
 #include <cuda_profiler_api.h>
 #endif
 
@@ -99,7 +99,7 @@ __global__ void apply_rotary_pos_half(T* mixed_query,
                                                                                   rope_theta,  \
                                                                                   max_out_tokens);
 
-#ifdef __HIP_PLATFORM_HCC__
+#ifdef __HIP_PLATFORM_AMD__
 #define LAUNCH_FOR_ALIGNMENT(ALIGNMENT)         \
     if (threads_per_head == 4) {                \
         LAUNCH_ROT_POS_EMB_HALF(4, ALIGNMENT);  \

@@ -15,7 +15,7 @@ constexpr int granularity = 16;
 constexpr int mem_vals = granularity / sizeof(int32_t);
 constexpr int max_buffer_size = (threads + 1) * mem_vals;
 
-#ifdef __HIP_PLATFORM_HCC__
+#ifdef __HIP_PLATFORM_AMD__
 constexpr int warp_size = 64;
 #else
 constexpr int warp_size = 32;

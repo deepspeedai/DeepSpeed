@@ -3,7 +3,7 @@
 
 // DeepSpeed Team
 
-#ifndef __HIP_PLATFORM_HCC__
+#ifndef __HIP_PLATFORM_AMD__
 #include <cuda_profiler_api.h>
 #endif
 #include "conversion_utils.h"

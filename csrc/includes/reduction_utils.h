@@ -280,7 +280,7 @@ DS_D_INLINE __half init<ROpType::Max>()
 template <>
 DS_D_INLINE __half2 init<ROpType::Add>()
 {
-#ifdef __HIP_PLATFORM_HCC__
+#ifdef __HIP_PLATFORM_AMD__
     return __half2{_Float16_2{0x0000, 0x0000}};
 #else
     constexpr __half2_raw zero = {0x0000, 0x0000};
@@ -291,7 +291,7 @@ DS_D_INLINE __half2 init<ROpType::Add>()
 template <>
 DS_D_INLINE __half2 init<ROpType::Min>()
 {
-#ifdef __HIP_PLATFORM_HCC__
+#ifdef __HIP_PLATFORM_AMD__
     return __half2{_Float16_2{0x7C00, 0x7C00}};
 #else
     constexpr __half2_raw inf = {0x7C00, 0x7C00};
@@ -302,7 +302,7 @@ DS_D_INLINE __half2 init<ROpType::Min>()
 template <>
 DS_D_INLINE __half2 init<ROpType::Max>()
 {
-#ifdef __HIP_PLATFORM_HCC__
+#ifdef __HIP_PLATFORM_AMD__
     return __half2{_Float16_2{0xFC00, 0xFC00}};
 #else
     constexpr __half2_raw neg_inf = {0xFC00, 0xFC00};
@@ -414,7 +414,7 @@ DS_D_INLINE void _block(cg::thread_block& tb,
     // Unused when `partition_size == 1` or total_warps == 1
     __shared__ float reduce_buffer[max_warps * elems];
 
-#ifdef __HIP_PLATFORM_HCC__
+#ifdef __HIP_PLATFORM_AMD__
     const int total_threads = blockDim.x * blockDim.y * blockDim.z;
     const int running_warps = total_threads / hw_warp_size;
 #else

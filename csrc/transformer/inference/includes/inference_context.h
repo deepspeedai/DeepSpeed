@@ -70,7 +70,7 @@ public:
             std::cerr << message << std::endl;
             throw std::runtime_error(message);
         }
-#ifndef __HIP_PLATFORM_HCC__
+#ifndef __HIP_PLATFORM_AMD__
         cublasSetMathMode(_cublasHandle, CUBLAS_TENSOR_OP_MATH);
 #endif
         cudaEventCreate(&_comp1_event);
