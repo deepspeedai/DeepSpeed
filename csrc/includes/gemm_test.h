@@ -9,6 +9,9 @@
 #ifndef __HIP_PLATFORM_HCC__
 #include <cuda_profiler_api.h>
 #endif
+#ifdef __HIP_PLATFORM_HCC__
+#include <rocblas/rocblas.h>
+#endif
 #include <array>
 #include <cstdio>
 #include <cstdlib>
