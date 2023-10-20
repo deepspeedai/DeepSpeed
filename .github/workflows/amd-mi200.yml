@@ -45,6 +45,7 @@ jobs:
         run: |
           git clone https://github.com/ROCmSoftwarePlatform/apex.git
           cd apex
+          git checkout torch_2.1_higher
           CURRENT_VER=$(git rev-parse HEAD)
           INSTALLED_VER=$(cat /blob/amd-apex/.venv_installed_version)
           if [[ "$CURRENT_VER" != "$INSTALLED_VER" ]]; then

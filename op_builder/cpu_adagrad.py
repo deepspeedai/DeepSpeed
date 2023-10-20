@@ -39,9 +39,5 @@ class CPUAdagradBuilder(TorchCPUOpBuilder):
         elif not self.is_rocm_pytorch():
             CUDA_INCLUDE = [os.path.join(torch.utils.cpp_extension.CUDA_HOME, "include")]
         else:
-            CUDA_INCLUDE = [
-                os.path.join(torch.utils.cpp_extension.ROCM_HOME, "include"),
-                os.path.join(torch.utils.cpp_extension.ROCM_HOME, "include", "rocrand"),
-                os.path.join(torch.utils.cpp_extension.ROCM_HOME, "include", "hiprand"),
-            ]
+            CUDA_INCLUDE = []
         return ['csrc/includes'] + CUDA_INCLUDE
