@@ -13,6 +13,9 @@
 #ifndef __HIP_PLATFORM_AMD__
 #include <mma.h>
 #endif
+#ifdef __HIP_PLATFORM_AMD__
+#include <rocblas/rocblas.h>
+#endif
 #include <stdio.h>
 
 int cublas_gemm_ex(cublasHandle_t handle,
