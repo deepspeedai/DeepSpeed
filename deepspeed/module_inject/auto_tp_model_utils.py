@@ -6,6 +6,7 @@
 from deepspeed import comm as dist
 import torch
 from typing import Optional
+from deepspeed.module_inject.tp_shard import get_shard_size, get_shard_size_list
 
 
 def build_bloom_alibi_tensor(attention_mask: torch.Tensor, num_heads: int, dtype: torch.dtype) -> torch.Tensor:
@@ -51,8 +52,8 @@ def build_bloom_alibi_tensor(attention_mask: torch.Tensor, num_heads: int, dtype
     arange_tensor = ((attention_mask.cumsum(dim=-1) - 1) * attention_mask)[:, None, :]
     alibi = slopes[..., None] * arange_tensor
     if dist.is_initialized():
-        num_heads_per_rank = int(num_heads / dist.get_world_size())
-        offset = dist.get_rank() * num_heads_per_rank
+        num_heads_per_rank = get_shard_size(num_heads, dist.get_world_size())
+        offset = sum(get_shard_size_list(num_heads, dist.get_world_size())[0:dist.get_rank()])
         alibi = alibi.view(batch_size, num_heads, 1, seq_length)
         alibi = alibi[:, offset:num_heads_per_rank + offset, :, :]
         return alibi.reshape(batch_size * num_heads_per_rank, 1, seq_length).to(dtype)
@@ -72,8 +73,8 @@ def build_mpt_atten_bias_tensor(self,
                                                        prefix_mask=prefix_mask,
                                                        sequence_id=sequence_id)
     if dist.is_initialized():
-        num_heads_per_rank = int(self.config.n_heads / dist.get_world_size())
-        offset = dist.get_rank() * num_heads_per_rank
+        num_heads_per_rank = get_shard_size(self.config.n_heads, dist.get_world_size())
+        offset = sum(get_shard_size_list(self.config.n_heads, dist.get_world_size())[0:dist.get_rank()])
         attn_bias = attn_bias[:, offset:num_heads_per_rank + offset, :, :]
     return attn_bias, attention_mask
 

@@ -558,6 +558,38 @@ class TestAutoTensorParallelism(DistributedTest):
         print(local_rank, "deepspeed", ds_output)
         assert assert_fn(bs_output, ds_output)
 
+    @pytest.mark.world_size(3)
+    def test_odd_world_size(
+        self,
+        model_w_task,
+        query,
+        inf_kwargs,
+        assert_fn,
+        dtype,
+    ):
+        invalid_test_msg = validate_test(model_w_task, dtype, enable_cuda_graph=False, enable_triton=False)
+        if invalid_test_msg:
+            pytest.skip(invalid_test_msg)
+
+        model, task = model_w_task
+        if model == "Salesforce/codegen-350M-mono":
+            pytest.skip("codegen does not supported by odd world_size")
+        local_rank = int(os.getenv("LOCAL_RANK", "0"))
+        world_size = int(os.getenv("WORLD_SIZE", "3"))
+
+        pipe = pipeline(task,
+                        model=model,
+                        device=torch.device(get_accelerator().device_name(local_rank)),
+                        framework="pt")
+        bs_output = pipe(query, **inf_kwargs)
+
+        pipe.model = deepspeed.init_inference(pipe.model, mp_size=world_size, dtype=dtype)
+        ds_output = pipe(query, **inf_kwargs)
+
+        print(local_rank, "baseline", bs_output)
+        print(local_rank, "deepspeed", ds_output)
+        assert assert_fn(bs_output, ds_output)
+
 
 @pytest.mark.nightly
 @pytest.mark.parametrize(

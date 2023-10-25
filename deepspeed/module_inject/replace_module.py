@@ -16,6 +16,7 @@ from .replace_policy import replace_policies, generic_policies
 from .auto_tp import AutoTP, ReplaceWithTensorSlicing, Loading
 
 from deepspeed import comm as dist
+from deepspeed.module_inject.tp_shard import set_num_kv_heads
 
 from .load_checkpoint import load_model_with_checkpoint
 import time
@@ -271,10 +272,16 @@ def replace_transformer_layer(orig_layer_impl, model, checkpoint_dict, config, m
         # 2. Set the tensor parallelism config
         _autotp.set_tensor_parallel_config(config.tensor_parallel.tp_size, config.tensor_parallel.tp_group)
 
-        # 3. Set linear policies
+        # 3. Try to get num_key_heads from model_config.num_key_value_heads
+        num_kv_heads = _autotp.get_model_num_kv_heads(model_config)
+
+        # 4. When we have num_kv_heads defined, uneven division is possible, otherwise enforce even division
+        set_num_kv_heads(num_kv_heads)
+
+        # 5. Set linear policies
         _autotp.update_linear_policies()
 
-        # 4. Replace modules
+        # 6. Replace modules
         if "lm_head" in all_reduce_linears or "embed_out" in all_reduce_linears:
             return _autotp._replace_last_linear_module(module)
         return _autotp._replace_module(module)

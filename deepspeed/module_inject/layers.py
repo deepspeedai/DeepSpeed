@@ -10,6 +10,7 @@ from torch.nn import functional as F
 
 from torch.nn.parameter import Parameter
 from deepspeed.accelerator import get_accelerator
+from deepspeed.module_inject.tp_shard import get_shard_size, get_shard_size_list
 
 
 class LinearAllreduce(nn.Module):
@@ -47,10 +48,9 @@ class LmHeadLinearAllreduce(nn.Module):
         self.world_size = world_size
 
     def forward(self, input):
-        assert input.shape[
-            -1] % self.world_size == 0, 'Please ensure that self.world_size is divisible by input.shape[-1]'
-        input_shard = input.shape[-1] // self.world_size
-        output = torch.matmul(input[:, :, self.rank * input_shard:(self.rank + 1) * input_shard],
+        input_shard_size = get_shard_size(input.shape[-1], self.world_size)
+        input_shard_offset = sum(get_shard_size_list(input.shape[-1], self.world_size)[0:self.rank])
+        output = torch.matmul(input[:, :, input_shard_offset:input_shard_offset + input_shard_size],
                               self.weight.transpose(-1, -2))
         if self.mp_group is not None:
             dist.inference_all_reduce(output, group=self.mp_group)
