@@ -24,7 +24,7 @@ from deepspeed.ops.adam import DeepSpeedCPUAdam
 from deepspeed.runtime.swap_tensor.partitioned_param_swapper import PartitionedParamStatus
 from deepspeed.runtime.swap_tensor.partitioned_optimizer_swapper import PartitionedOptimizerSwapper
 from deepspeed.runtime.swap_tensor.pipelined_optimizer_swapper import PipelinedOptimizerSwapper
-from deepspeed.checkpoint.constants import OPTIMIZER_STATE_DICT, FP32_FLAT_GROUPS, PARTITION_COUNT, ZERO_STAGE
+from deepspeed.checkpoint.constants import OPTIMIZER_STATE_DICT, FP32_FLAT_GROUPS, PARTITION_COUNT, ZERO_STAGE, LOSS_SCALER
 from deepspeed.accelerator import get_accelerator
 
 # Toggle this to true to enable correctness test
@@ -2287,7 +2287,7 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
     def _rigid_state_dict(self):
         state_dict = {}
         state_dict[ZERO_STAGE] = ZeroStageEnum.weights
-        state_dict['loss_scaler'] = self.loss_scaler
+        state_dict[LOSS_SCALER] = self.loss_scaler
         state_dict['dynamic_loss_scale'] = self.dynamic_loss_scale
         state_dict['overflow'] = self.overflow
         state_dict[PARTITION_COUNT] = self.partition_count
@@ -2391,7 +2391,7 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
 
     def _rigid_load_state_dict(self, state_dict, load_optimizer_states=True):
         # I think it should actually be ok to reload the optimizer before the model.
-        self.loss_scaler = state_dict['loss_scaler']
+        self.loss_scaler = state_dict[LOSS_SCALER]
         self.dynamic_loss_scale = state_dict['dynamic_loss_scale']
         self.overflow = state_dict['overflow']
 

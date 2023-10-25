@@ -25,7 +25,7 @@ from deepspeed.git_version_info import version
 from deepspeed.runtime.constants import PIPE_REPLICATED
 from deepspeed.accelerator import get_accelerator
 
-from deepspeed.checkpoint.constants import (DS_VERSION, GROUP_PADDINGS, PARTITION_COUNT,
+from deepspeed.checkpoint.constants import (DS_VERSION, GROUP_PADDINGS, PARTITION_COUNT, LOSS_SCALER,
                                             SINGLE_PARTITION_OF_FP32_GROUPS, BASE_OPTIMIZER_STATE,
                                             BASE_OPTIMIZER_STATE_STEP, CLIP_GRAD, ZERO_STAGE, PARAM_SLICE_MAPPINGS)
 from deepspeed.utils import link_hp_params
@@ -1301,7 +1301,6 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
                     Multiple gradient reduction is currently not supported"
 
                 self.params_already_reduced[param_id] = True
-
                 if self.partition_gradients:
                     if not self.is_param_in_current_partition[param_id]:
                         if self.overlap_comm and self.contiguous_gradients is False:
@@ -2037,7 +2036,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
             torch.save(checkpoint, "saved.pth")
         """
         state_dict = {}
-        state_dict['loss_scaler'] = self.loss_scaler
+        state_dict[LOSS_SCALER] = self.loss_scaler
         state_dict['dynamic_loss_scale'] = self.dynamic_loss_scale
         state_dict['overflow'] = self.overflow
         state_dict[CLIP_GRAD] = self.clip_grad
@@ -2183,15 +2182,38 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
 
     def _load_hp_checkpoint_state(self, checkpoint_dir):
         checkpoint_dir = os.path.join(checkpoint_dir, "zero")
+        optim_state_path = os.path.join(checkpoint_dir, "optimizer_state.pt")
+        assert os.path.isfile(
+            optim_state_path), f'{optim_state_path} containing optimizer global state is missing! Cannot proceed.'
+        optim_sd = torch.load(optim_state_path)
+        self._load_global_state(optim_sd)
+
         tp_rank = bwc_tensor_model_parallel_rank(mpu=self.mpu)
         tp_world_size = self.mpu.get_slice_parallel_world_size()
-
         for i, _ in enumerate(self.optimizer.param_groups):
             for lp in self.bit16_groups[i]:
                 if lp._hp_mapping is not None:
                     #print(f"Loading {self.param_names[lp]} {tp_rank=} {tp_world_size=}")
                     lp.load_hp_checkpoint_state(os.path.join(checkpoint_dir, self.param_names[lp]), tp_rank,
                                                 tp_world_size)
+
+    def _load_global_state(self, sd):
+        self.loss_scaler = sd.get(LOSS_SCALER, self.loss_scaler)
+        self.dynamic_loss_scale = sd.get('dynamic_loss_scale', self.dynamic_loss_scale)
+        self.overflow = sd.get('overflow', self.overflow)
+        self.clip_grad = sd.get(CLIP_GRAD, self.clip_grad)
+
+        ckpt_version = sd.get(DS_VERSION, False)
+        assert ckpt_version, f"Empty ds_version in checkpoint, not clear how to proceed"
+        ckpt_version = pkg_version.parse(ckpt_version)
+
+        # zero stage 1 mode
+        if not self.partition_gradients:
+            required_version = pkg_version.parse("0.3.17")
+            error_str = f"ZeRO stage 1 changed in {required_version} and is not backwards compatible " \
+                "with older stage 1 checkpoints. If you'd like to load an old ZeRO-1 checkpoint " \
+                "please use an older version of DeepSpeed (<= 0.5.8) and set 'legacy_stage1': true in your zero config json."
+            assert required_version <= ckpt_version, f"Old version: {ckpt_version} {error_str}"
 
     def _load_legacy_checkpoint(self, state_dict_list, load_optimizer_states=True, load_from_fp32_weights=False):
         r"""Loading ZeRO checkpoint
@@ -2223,22 +2245,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
         # I think it should actually be ok to reload the optimizer before the model.
         dp_rank = dist.get_rank(group=self.dp_process_group)
         current_rank_sd = state_dict_list[dp_rank]
-        self.loss_scaler = current_rank_sd.get('loss_scaler', self.loss_scaler)
-        self.dynamic_loss_scale = current_rank_sd.get('dynamic_loss_scale', self.dynamic_loss_scale)
-        self.overflow = current_rank_sd.get('overflow', self.overflow)
-        self.clip_grad = current_rank_sd.get(CLIP_GRAD, self.clip_grad)
-
-        ckpt_version = current_rank_sd.get(DS_VERSION, False)
-        assert ckpt_version, f"Empty ds_version in checkpoint, not clear how to proceed"
-        ckpt_version = pkg_version.parse(ckpt_version)
-
-        # zero stage 1 mode
-        if not self.partition_gradients:
-            required_version = pkg_version.parse("0.3.17")
-            error_str = f"ZeRO stage 1 changed in {required_version} and is not backwards compatible " \
-                "with older stage 1 checkpoints. If you'd like to load an old ZeRO-1 checkpoint " \
-                "please use an older version of DeepSpeed (<= 0.5.8) and set 'legacy_stage1': true in your zero config json."
-            assert required_version <= ckpt_version, f"Old version: {ckpt_version} {error_str}"
+        self._load_global_state(current_rank_sd)
 
         ckpt_is_rigid = isinstance(current_rank_sd[BASE_OPTIMIZER_STATE], dict)
 

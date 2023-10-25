@@ -11,6 +11,7 @@ from deepspeed import comm as dist
 from deepspeed.utils import logger
 from deepspeed.utils.timer import ThroughputTimer
 from deepspeed.accelerator import get_accelerator
+from deepspeed.runtime.bf16_optimizer import BF16_Optimizer
 
 from ..engine import DeepSpeedEngine, MEMORY_OPT_ALLREDUCE_SIZE
 from deepspeed.utils.timer import FORWARD_MICRO_TIMER, FORWARD_GLOBAL_TIMER, BACKWARD_MICRO_TIMER, \
@@ -75,6 +76,8 @@ class PipelineEngine(DeepSpeedEngine):
         self.has_bool_tensors = has_bool_tensors
         self.eval_return_logits = False
         self.outputs = None
+        # BF16 Optimizer is hardcoded for fp32 gradient accumulation
+        self.using_bf16_optimizer = type(self.optimizer) == BF16_Optimizer
 
         # used to disable the pipeline all-reduce when used with 1-bit Adam/1-bit LAMB
         self.pipeline_enable_backward_allreduce = True
@@ -257,13 +260,13 @@ class PipelineEngine(DeepSpeedEngine):
 
         weight_group_list = self.module.get_tied_weights_and_groups()
         for weight, group in weight_group_list:
-            grad = weight._hp_grad if self.bfloat16_enabled() else weight.grad
+            grad = weight._hp_grad if self.using_bf16_optimizer else weight.grad
             dist.all_reduce(grad, group=group)
 
     def _exec_reduce_grads(self):
         self._force_grad_boundary = True
         if self.pipeline_enable_backward_allreduce:
-            if self.bfloat16_enabled():
+            if self.using_bf16_optimizer:
                 # PP+BF16 work for ZeRO Stage 1
                 self._bf16_reduce_grads()
             else:
@@ -745,7 +748,7 @@ class PipelineEngine(DeepSpeedEngine):
             part_grad = None
             #print(f'RANK={self.global_rank} BEFORE-BWD restored grad={self.grad_layer[0].size()} {self.grad_layer[1].size()}')
 
-        if self.bfloat16_enabled() and not self.is_last_stage():
+        if self.using_bf16_optimizer and not self.is_last_stage():
             # manually call because we don't call optimizer.backward()
             self.optimizer.clear_lp_grads()
 
@@ -757,7 +760,7 @@ class PipelineEngine(DeepSpeedEngine):
         else:
             torch.autograd.backward(tensors=(outputs, ), grad_tensors=(grad_tensors, ))
 
-        if self.bfloat16_enabled() and not self.is_last_stage():
+        if self.using_bf16_optimizer and not self.is_last_stage():
             # manually call because we don't call optimizer.backward()
             self.optimizer.update_hp_grads(clear_lp_grads=False)
 

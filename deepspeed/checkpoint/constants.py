@@ -21,6 +21,7 @@ PARTITION_COUNT = 'partition_count'
 ZERO_STAGE = 'zero_stage'
 CLIP_GRAD = 'clip_grad'
 FP32_WEIGHT_KEY = "fp32"
+LOSS_SCALER = 'loss_scaler'
 
 #########################################
 # Module checkpoint keys
@@ -69,3 +70,4 @@ VOCABULARY_PARAMETER_PATTERNS = 'vocabulary_parameter_patterns'
 PIPELINE_REPLICATED_PARAMETER_PATTERNS = 'pipeline_replicated_parameter_patterns'
 PARAMETER_TO_AVERAGE_PATTERNS = 'parameter_to_average_patterns'
 PARAMETER_WITH_ROW_PARALLELISM_PATTERNS = 'parameter_with_row_parallelism_patterns'
+TP_REPLICATED_PARAMETER_PATTERNS = 'tp_replicated_parameter_patterns'
