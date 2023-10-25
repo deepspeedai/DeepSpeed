@@ -219,6 +219,7 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
         self.reduce_scatter = reduce_scatter
 
         self.dp_process_group = self.parameter_offload.dp_process_group
+        self.sequence_parallel_size = groups._get_sequence_parallel_world_size()
 
         self.all2all_process_group = all2all_process_group
 
@@ -1177,7 +1178,7 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
 
         world_sz = dist.get_world_size(self.dp_process_group)
         rank = dist.get_rank(self.dp_process_group)
-        buffer_to_reduce.div_(world_sz)
+        buffer_to_reduce.div_(world_sz / float(self.sequence_parallel_size))
 
         dist.all_reduce(buffer_to_reduce, group=self.dp_process_group)
 
@@ -1476,7 +1477,7 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
         if communication_data_type != tensor.dtype:
             tensor_to_allreduce = tensor.to(communication_data_type)
 
-        tensor_to_allreduce.div_(dist.get_world_size(group=self.dp_process_group))
+        tensor_to_allreduce.div_(dist.get_world_size(group=self.dp_process_group) / float(self.sequence_parallel_size))
 
         if rank is None:
             #    "All Reducing"

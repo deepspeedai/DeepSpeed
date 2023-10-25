@@ -31,6 +31,7 @@ from deepspeed.checkpoint.constants import (DS_VERSION, GROUP_PADDINGS, PARTITIO
 from deepspeed.utils import link_hp_params
 from deepspeed.checkpoint import enable_universal_checkpoint
 
+from deepspeed.utils import groups
 # Toggle this to true to enable correctness test
 # with gradient partitioning and without
 pg_correctness_test = False
@@ -182,7 +183,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
         self.device = get_accelerator().current_device_name() if not self.cpu_offload else 'cpu'
 
         self.dp_process_group = dp_process_group
-
+        self.sequence_parallel_size = groups._get_sequence_parallel_world_size()
         #expert parallel group
         self.ep_process_group = expert_parallel_group
 
@@ -941,9 +942,10 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
             dist.all_reduce(tensor_to_allreduce, group=self.dp_process_group)
 
             if self.gradient_predivide_factor != dp_world_size:
-                tensor_to_allreduce.mul_(self.gradient_predivide_factor / dp_world_size)
+                tensor_to_allreduce.mul_(self.gradient_predivide_factor /
+                                         (dp_world_size / float(self.sequence_parallel_size)))
         else:
-            tensor_to_allreduce.div_(dp_world_size)
+            tensor_to_allreduce.div_(dp_world_size / float(self.sequence_parallel_size))
             dist.all_reduce(tensor_to_allreduce, group=self.dp_process_group)
 
         if self.communication_data_type != tensor.dtype and tensor is not tensor_to_allreduce:
@@ -985,7 +987,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
                 if self.ipg_bucket_has_moe_params:
                     process_group = self.expert_dp_process_group[param.group_name] if is_moe_param(
                         param) else self.dp_process_group
-                    grad_reduc.data.div_(dist.get_world_size(group=process_group))
+                    grad_reduc.data.div_(dist.get_world_size(group=process_group) / float(self.sequence_parallel_size))
 
                 partition_ids = self.param_to_partition_ids[i][param_id]
                 assert all([p_id < dist.get_world_size(group=process_group) for p_id in partition_ids
@@ -1025,7 +1027,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
                     prev_id, prev_process_group = partition_id, process_group
 
             if not self.ipg_bucket_has_moe_params:
-                tensor.div_(dist.get_world_size(group=self.dp_process_group))
+                tensor.div_(dist.get_world_size(group=self.dp_process_group) / float(self.sequence_parallel_size))
 
             tensor_to_reduce = tensor
             if self.communication_data_type != tensor.dtype:
@@ -1395,7 +1397,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
 
         tensor_to_allreduce = tensor
 
-        if pg_correctness_test:
+        if pg_correctness_test or self.sequence_parallel_size > 1:
             communication_data_type = torch.float32
         else:
             communication_data_type = self.communication_data_type
@@ -1403,7 +1405,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
         if communication_data_type != tensor.dtype:
             tensor_to_allreduce = tensor.to(communication_data_type)
 
-        tensor_to_allreduce.div_(dist.get_world_size(group=self.dp_process_group))
+        tensor_to_allreduce.div_(dist.get_world_size(group=self.dp_process_group) / float(self.sequence_parallel_size))
 
         if rank is None:
             #    "All Reducing"

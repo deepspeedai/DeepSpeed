@@ -223,6 +223,19 @@ Communication data type should be set as:
 COMMUNICATION_DATA_TYPE = "communication_data_type"
 COMMUNICATION_DATA_TYPE_DEFAULT = None
 
+###########################################################
+# Gradient communication data type for sequence parallelism
+###########################################################
+# Supported types: ['fp16', 'bf16','fp32']
+# Default value is fp32
+# Users can configure in ds_config.json as below example:
+SEQ_PARALLEL_COMMUNICATION_DATA_TYPE_FORMAT = '''
+Optional comm data type for seq paralleism should be set as:
+"seq_parallel_communication_data_type": "fp32"
+'''
+SEQ_PARALLEL_COMMUNICATION_DATA_TYPE = "seq_parallel_comm_data_type"
+SEQ_PARALLEL_COMMUNICATION_DATA_TYPE_DEFAULT = "fp32"
+
 #########################################
 # Scale/predivide gradients before allreduce
 #########################################
