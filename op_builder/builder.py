@@ -486,6 +486,9 @@ class OpBuilder(ABC):
                 cxx_args.append("-DBF16_AVAILABLE")
                 nvcc_args.append("-DBF16_AVAILABLE")
 
+        if self.is_rocm_pytorch():
+            cxx_args.append("-D__HIP_PLATFORM_AMD__=1")
+
         op_module = load(name=self.name,
                          sources=self.strip_empty_entries(sources),
                          extra_include_paths=self.strip_empty_entries(extra_include_paths),
