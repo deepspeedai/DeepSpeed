@@ -27,7 +27,7 @@ class EvoformerAttnBuilder(CUDAOpBuilder):
 
     def sources(self):
         src_dir = 'csrc/deepspeed4science/evoformer_attn'
-        return [f'{src_dir}/attention.cpp', f'{src_dir}/attention_back.cu', f'{src_dir}/attention.cu']
+        return [f'{src_dir}/attention.cpp', f'{src_dir}/attention_back.cu', f'{src_dir}/attention_cu.cu']
 
     def nvcc_args(self):
         args = super().nvcc_args()
