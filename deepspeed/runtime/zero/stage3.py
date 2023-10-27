@@ -1844,7 +1844,8 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
     def _overflow_check_and_loss_scale_update(self):
 
         # First compute norm for all group so we know if there is overflow
-        self.check_overflow()
+        if self.dtype == torch.float16:
+            self.check_overflow()
 
         #loss scaling related computation
         prev_scale = self.loss_scale
