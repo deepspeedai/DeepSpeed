@@ -1,13 +1,7 @@
 name: cpu-inference
 
 on:
-  pull_request:
-    paths-ignore:
-      - 'docs/**'
-      - 'blogs/**'
   workflow_dispatch:
-  merge_group:
-    branches: [ master ]
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
