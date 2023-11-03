@@ -19,6 +19,8 @@ def err(s: str) -> None:
     print(s, file=sys.stderr)
 
 
+print(*sys.argv[1:])
+
 # There are many ways we could search for the string "torch.cuda", but `git
 # grep --no-index` is nice because
 #  - it's very fast (as compared to iterating over the file in Python)

@@ -49,6 +49,7 @@ repos:
         entry: ./scripts/check-license.py
         language: python
         files: \.(py|c|cpp|cu|cc|h|hpp|cuh|hip|tr)$
+        exclude: ^(deepspeed/inference/v2/kernels/ragged_ops/blocked_flash|deepspeed/inference/v2/kernels/cutlass_ops/grouped_gemm)
 
 -   repo: https://github.com/codespell-project/codespell
     rev: v2.1.0

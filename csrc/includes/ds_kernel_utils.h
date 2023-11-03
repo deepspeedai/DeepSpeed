@@ -11,6 +11,11 @@ used throughout the codebase.
 #pragma once
 
 #include <cuda.h>
+#include <cuda_fp16.h>
+
+#ifdef BF16_AVAILABLE
+#include <cuda_bf16.h>
+#endif
 
 #define DS_HD_INLINE __host__ __device__ __forceinline__
 #define DS_D_INLINE __device__ __forceinline__

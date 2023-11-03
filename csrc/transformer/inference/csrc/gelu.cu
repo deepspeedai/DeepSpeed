@@ -18,8 +18,8 @@ using __nv_bfloat162 = __half2;
 
 inline __device__ float gelu(const float x)
 {
-    const float sqrt_param = 0.79788456080286535587989211986876f;
-    const float mul_param = 0.044715;
+    constexpr float sqrt_param = 0.79788456080286535587989211986876f;
+    constexpr float mul_param = 0.044715;
     return x * 0.5f * (1.0f + tanhf(sqrt_param * (x + mul_param * x * x * x)));
 }
 
