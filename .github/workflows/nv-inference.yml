@@ -34,6 +34,7 @@ jobs:
         run: |
           git clone https://github.com/huggingface/transformers
           cd transformers
+          git checkout f370bebdc
           git rev-parse --short HEAD
           pip install .
 
