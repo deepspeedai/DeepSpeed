@@ -145,7 +145,7 @@ In this experiment, DeepSpeed-FastGen outperforms vLLM in both throughput and la
 </div><br>
 
 <div align="center">
-  <img src="assets/images/throughput_latency_13B.png" alt="" width="850"/><br>
+  <img src="assets/images/throughput_latency_13B_no_arrow.png" alt="" width="850"/><br>
 
   *Figure 3: Throughput and latency of text generation using Llama 2 13B (A100-80GB GPU, no tensor parallelism). A normal distribution was applied to prompt and generation lengths with averages of 1200/2600 and 60/128, respectively, and a 30% variance*
 </div>
