@@ -576,6 +576,7 @@ Note that if the value of "device" is not specified or not supported, an asserti
     "device": "[cpu|nvme]",
     "nvme_path": "/local_nvme",
     "pin_memory": [true|false],
+    "ratio": 0.3,
     "buffer_count": 4,
     "fast_init": false
   }
@@ -597,6 +598,12 @@ Note that if the value of "device" is not specified or not supported, an asserti
 | Description                                                                                          | Default |
 | ---------------------------------------------------------------------------------------------------- | ------- |
 | Offload to page-locked CPU memory. This could boost throughput at the cost of extra memory overhead. | `false` |
+
+***ratio***: [float]
+
+| Description                                                         | Default |
+| ------------------------------------------------------------------- | ------- |
+| the ratio of parameters updating (i.e. optimizer step) on CPU side. | 1       |
 
 ***buffer_count***: [integer]
 

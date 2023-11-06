@@ -700,6 +700,9 @@ class DeepSpeedEngine(Module):
             return self._config.zero_config.offload_optimizer.device == OffloadDeviceEnum.cpu
         return False
 
+    def zero_partial_offload(self):
+        return getattr(self._config.zero_config.offload_optimizer, "ratio", 1.0)
+
     def zero_sub_group_size(self):
         return self._config.zero_config.sub_group_size
 
@@ -1565,6 +1568,7 @@ class DeepSpeedEngine(Module):
                     offload_optimizer_config=self.zero_offload_optimizer(),
                     offload_param_config=self.zero_offload_param(),
                     sub_group_size=self.zero_sub_group_size(),
+                    offload_ratio=self.zero_partial_offload(),
                     mpu=self.mpu,
                     postscale_gradients=self.postscale_gradients(),
                     gradient_predivide_factor=self.gradient_predivide_factor(),
