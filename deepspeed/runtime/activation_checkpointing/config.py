@@ -17,7 +17,7 @@ Activation Checkpointing should be configured as:
     "partitioned_activations": [true|false],
     "number_checkpoints": 100,
     "contiguous_memory_optimization": [true|false],
-    "cpu_checkpointing": [true|false]
+    "cpu_checkpointing": [true|false],
     "profile": [true|false],
     "synchronize_checkpoint_boundary": [true|false],
     }
