@@ -164,8 +164,8 @@ When vLLM preempts the ongoing generation of previous requests, the generation l
 
 ### D. Token Level Timing Analysis
 
-Figure 5 displays the P50, P90, and P95 latencies of the generation processes. Both vLLM and DeepSpeed-FlexGen exhibit similar P50 latencies, but vLLM demonstrates significantly higher latencies for P90 and P95.
-Regarding the P95 latencies, DeepSpeed-FlexGen achieved a reduction of 3.7 times.
+Figure 5 displays the P50, P90, and P95 latencies of the generation processes. Both vLLM and DeepSpeed-FastGen exhibit similar P50 latencies, but vLLM demonstrates significantly higher latencies for P90 and P95.
+Regarding the P95 latencies, DeepSpeed-FastGen achieved a reduction of 3.7 times.
 
 This discrepancy is due to a noticeable spike in vLLM's generation latency when it preempts the ongoing generation to process new prompts.
 In contrast, DeepSpeed-FastGen typically processes the prompt and generation for previous requests concurrently, leading to much more consistent generation latency.

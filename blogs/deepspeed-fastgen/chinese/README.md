@@ -164,7 +164,7 @@ DeepSpeed-FastGen 利用分块 KV 缓存和动态分割融合连续批处理，�
 
 ### D. 令牌级时间分析
 
-图 5 显示了生成过程的 P50、P90 和 P95 延迟。vLLM 和 DeepSpeed-FlexGen 展示了类似的 P50 延迟，但 vLLM 的 P90 和 P95 延迟显著更高。
+图 5 显示了生成过程的 P50、P90 和 P95 延迟。vLLM 和 DeepSpeed-FastGen 展示了类似的 P50 延迟，但 vLLM 的 P90 和 P95 延迟显著更高。
 
 这种差异是由于 vLLM 在抢占正在进行的生成以处理新提示时，生成延迟出现显著增加所导致的。
 相比之下，DeepSpeed-FastGen 通常会同时处理之前请求的提示和生成，导致生成延迟更加一致。
