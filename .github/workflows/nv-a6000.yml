@@ -2,9 +2,9 @@ name: nv-a6000
 
 on:
   pull_request:
-    paths-ignore:
-      - 'docs/**'
-      - 'blogs/**'
+    paths:
+      - "deepspeed/inference/v2/**"
+      - "tests/unit/inference/v2/**"
   workflow_dispatch:
 
 concurrency:

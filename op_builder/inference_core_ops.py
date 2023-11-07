@@ -83,10 +83,10 @@ class InferenceCoreBuilder(CUDAOpBuilder):
             'inference/v2/kernels/core_ops/cuda_layer_norm',
             'inference/v2/kernels/core_ops/cuda_rms_norm',
             'inference/v2/kernels/core_ops/gated_activations',
+            'inference/v2/kernels/includes',
         ]
 
         prefix = self.get_prefix()
         sources = [os.path.join(prefix, src) for src in sources]
 
-        sources.append('csrc/includes')
         return sources

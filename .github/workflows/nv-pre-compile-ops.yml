@@ -7,6 +7,7 @@ on:
     paths-ignore:
       - 'docs/**'
       - 'blogs/**'
+      - 'deepspeed/inference/v2/**'
   merge_group:
     branches: [ master ]
   schedule:

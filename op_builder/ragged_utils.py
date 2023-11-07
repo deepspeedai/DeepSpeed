@@ -70,8 +70,8 @@ class RaggedUtilsBuilder(CUDAOpBuilder):
         return []
 
     def include_paths(self):
-        include_dir = "inference/v2/ragged/includes"
+        include_dirs = ['inference/v2/ragged/includes', 'inference/v2/kernels/includes']
         prefix = self.get_prefix()
-        include_dir = os.path.join(prefix, include_dir)
+        includes = [os.path.join(prefix, include_dir) for include_dir in include_dirs]
 
-        return ['csrc/includes', include_dir]
+        return includes

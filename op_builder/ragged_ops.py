@@ -96,6 +96,7 @@ class RaggedOpsBuilder(CUDAOpBuilder):
 
     def include_paths(self):
         sources = [
+            'inference/v2/kernels/includes',
             'inference/v2/kernels/ragged_ops',
             'inference/v2/kernels/ragged_ops/atom_builder',
             'inference/v2/kernels/ragged_ops/blocked_flash',
@@ -110,7 +111,4 @@ class RaggedOpsBuilder(CUDAOpBuilder):
 
         prefix = self.get_prefix()
         sources = [os.path.join(prefix, src) for src in sources]
-
-        sources.append('csrc/includes')
-
         return sources

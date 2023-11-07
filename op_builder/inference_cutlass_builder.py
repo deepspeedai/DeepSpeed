@@ -81,6 +81,7 @@ class InferenceCutlassBuilder(CUDAOpBuilder):
 
     def include_paths(self):
         sources = [
+            'inference/v2/kernels/includes',
             'inference/v2/kernels/cutlass_ops/mixed_gemm',
             'inference/v2/kernels/cutlass_ops/moe_gemm',
             'inference/v2/kernels/cutlass_ops/shared_resources/',
@@ -88,5 +89,4 @@ class InferenceCutlassBuilder(CUDAOpBuilder):
 
         prefix = self.get_prefix()
         sources = [os.path.join(prefix, src) for src in sources]
-        sources.append('csrc/includes')
         return sources
