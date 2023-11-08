@@ -11,6 +11,7 @@ from enum import Enum
 import functools
 import itertools
 from typing import List
+from collections import defaultdict
 import logging
 import torch
 from torch import Tensor
@@ -22,7 +23,7 @@ from .linear import zero3_linear_wrap
 
 from deepspeed.utils import groups
 import deepspeed
-from ..utils import get_only_unique_item, see_memory_usage
+from ..utils import see_memory_usage
 from deepspeed.runtime.zero.config import DeepSpeedZeroConfig
 from deepspeed.runtime.zero.utils import assert_ints_same_as_other_ranks
 from deepspeed.runtime.zero.offload_config import OffloadDeviceEnum
@@ -656,6 +657,16 @@ class AllGatherCoalescedHandle:
         self.complete = True
 
 
+class MultipleAllGatherHandles:
+
+    def __init__(self, handles: List[AllGatherCoalescedHandle]):
+        self.handles = handles
+
+    def wait(self) -> None:
+        for handle in self.handles:
+            handle.wait()
+
+
 class QuantizationInfo:
     # a placeholder object to store all quant related vars used in handles
     def __init__(self) -> None:
@@ -1050,6 +1061,42 @@ class Init(InsertPostInitMethodToModuleSubClasses):
                 param_list = [cls]
             return self._all_gather(param_list, async_op=async_op, hierarchy=hierarchy)
 
+        def _all_gather_dtype(dtype, params, forward, world_size, rank_in_group, ds_process_group):
+            partition_sz = sum(p.ds_tensor.ds_numel for p in params)
+
+            if params[0].ds_secondary_tensor is not None and not forward:
+                partition_sz = sum(p.ds_tensor.ds_numel * p.ds_secondary_tensor_num_of_groups for p in params)
+
+            flat_tensor = torch.empty(partition_sz * world_size,
+                                      dtype=dtype,
+                                      device=get_accelerator().current_device_name(),
+                                      requires_grad=False)
+
+            partitions: List[Parameter] = []
+            for i in range(world_size):
+                partitions.append(flat_tensor.narrow(0, partition_sz * i, partition_sz))
+
+            if params[0].ds_secondary_tensor is not None and not forward:
+                use_secondary_tensor = True
+                instrument_w_nvtx(
+                    torch.cat)([p.ds_secondary_tensor.to(get_accelerator().current_device_name()) for p in params],
+                               out=partitions[rank_in_group])
+            else:
+                use_secondary_tensor = False
+                instrument_w_nvtx(torch.cat)([p.ds_tensor.to(get_accelerator().current_device_name()) for p in params],
+                                             out=partitions[rank_in_group])
+            handle = _dist_allgather_fn(partitions[rank_in_group], flat_tensor, ds_process_group)
+            #Fix get_partition_dp_group(params[0]))
+
+            return AllGatherCoalescedHandle(
+                allgather_handle=handle,
+                params=params,
+                partitions=partitions,
+                world_size=world_size,
+                use_secondary_tensor=use_secondary_tensor,
+                forward=forward,
+            )
+
         @instrument_w_nvtx
         def all_gather_coalesced(params: Iterable[Parameter],
                                  forward: bool = True,
@@ -1146,42 +1193,28 @@ class Init(InsertPostInitMethodToModuleSubClasses):
                     return AllGatherHandle(handle, param, quantization=quant_info)
 
             else:
-                partition_sz = sum(p.ds_tensor.ds_numel for p in params)
-
-                if params[0].ds_secondary_tensor is not None and not forward:
-                    partition_sz = sum(p.ds_tensor.ds_numel * p.ds_secondary_tensor_num_of_groups for p in params)
-
-                flat_tensor = torch.empty(partition_sz * world_size,
-                                          dtype=get_only_unique_item(p.ds_tensor.dtype
-                                                                     for p in params) if not quantize else torch.int8,
-                                          device=get_accelerator().current_device_name(),
-                                          requires_grad=False)
                 if not quantize:
-                    partitions: List[Parameter] = []
-                    for i in range(world_size):
-                        partitions.append(flat_tensor.narrow(0, partition_sz * i, partition_sz))
+                    dtype_params = defaultdict(list)
+                    for p in params:
+                        dtype_params[p.ds_tensor.dtype].append(p)
+                    handles = []
+                    for dtype, params in dtype_params.items():
+                        handles.append(
+                            _all_gather_dtype(dtype, params, forward, world_size, rank_in_group, ds_process_group))
+
+                    return MultipleAllGatherHandles(handles)
+
+                else:
+                    partition_sz = sum(p.ds_tensor.ds_numel for p in params)
 
                     if params[0].ds_secondary_tensor is not None and not forward:
-                        use_secondary_tensor = True
-                        instrument_w_nvtx(torch.cat)(
-                            [p.ds_secondary_tensor.to(get_accelerator().current_device_name()) for p in params],
-                            out=partitions[rank_in_group])
-                    else:
-                        instrument_w_nvtx(
-                            torch.cat)([p.ds_tensor.to(get_accelerator().current_device_name()) for p in params],
-                                       out=partitions[rank_in_group])
-                    handle = _dist_allgather_fn(partitions[rank_in_group], flat_tensor, ds_process_group)
-                    #Fix get_partition_dp_group(params[0]))
+                        partition_sz = sum(p.ds_tensor.ds_numel * p.ds_secondary_tensor_num_of_groups for p in params)
 
-                    return AllGatherCoalescedHandle(
-                        allgather_handle=handle,
-                        params=params,
-                        partitions=partitions,
-                        world_size=world_size,
-                        use_secondary_tensor=use_secondary_tensor,
-                        forward=forward,
-                    )
-                else:
+                    flat_tensor = torch.empty(partition_sz * world_size,
+                                              dtype=torch.int8,
+                                              device=get_accelerator().current_device_name(),
+                                              requires_grad=False)
+
                     if params[0].ds_secondary_tensor is not None and not forward:
                         use_secondary_tensor = True
                         if hasattr(params[0].ds_secondary_tensor, "ds_quant_scale"):
