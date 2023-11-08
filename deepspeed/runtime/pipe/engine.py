@@ -132,8 +132,12 @@ class PipelineEngine(DeepSpeedEngine):
 
         # Partition input/output buffers
         # XXX temporarily disable while I revert some partition hacks.
-        self.is_pipe_partitioned = self.is_model_parallel
-        self.is_grad_partitioned = self.is_model_parallel
+        assert isinstance(self._config.pipeline['pipe_partitioned'], bool)
+        assert isinstance(self._config.pipeline['grad_partitioned'], bool)
+        self.is_pipe_partitioned = self.is_model_parallel and self._config.pipeline['pipe_partitioned']
+        self.is_grad_partitioned = self.is_model_parallel and self._config.pipeline['grad_partitioned']
+        logger.info(f'is_pipe_partitioned= {self.is_pipe_partitioned}',
+                    f'is_grad_partitioned= {self.is_grad_partitioned}')
 
         model_parameters = filter(lambda p: p.requires_grad, self.module.parameters())
         num_params = sum([p.numel() for p in model_parameters])

@@ -449,6 +449,8 @@ def get_pipeline_config(param_dict):
         "partition": "best",
         "seed_layers": False,
         "activation_checkpoint_interval": 0,
+        "pipe_partitioned": True,
+        "grad_partitioned": True,
     }
     config = default_pipeline
     for key, val in param_dict.get("pipeline", {}).items():
