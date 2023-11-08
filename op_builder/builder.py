@@ -616,6 +616,9 @@ class CUDAOpBuilder(OpBuilder):
         if not self.build_for_cpu and self.enable_bf16:
             compile_args['cxx'].append("-DBF16_AVAILABLE")
 
+        if self.is_rocm_pytorch():
+            compile_args['cxx'].append("-D__HIP_PLATFORM_AMD__=1")
+
         cuda_ext = ExtensionBuilder(name=self.absolute_name(),
                                     sources=self.strip_empty_entries(self.sources()),
                                     include_dirs=self.strip_empty_entries(self.include_paths()),
