@@ -36,7 +36,7 @@ class DeepSpeedDiffusersAttentionFunction(Function):
     @staticmethod
     def forward(ctx, input, context, input_mask, config, attn_qkvw, attn_qw, attn_kw, attn_vw, attn_qkvb,
                 num_attention_heads_per_partition, norm_factor, hidden_size_per_partition, attn_ow, attn_ob,
-                do_out_bias, score_context_func, linear_func, triton_flash_attn_kernel):
+                do_out_bias, score_context_func, linear_func, triton_flash_attn_kernel, rope_theta):
 
         def _transpose_for_context(x):
             x = x.permute(0, 2, 1, 3)
@@ -59,7 +59,7 @@ class DeepSpeedDiffusersAttentionFunction(Function):
             scale = (1 / norm_factor) * (1 / norm_factor)
             if do_flash_attn and context is None:
                 qkv_out = linear_func(input, attn_qkvw, attn_qkvb if attn_qkvb is not None else attn_qkvw, attn_qkvb
-                                      is not None, do_flash_attn, config.heads, False)
+                                      is not None, do_flash_attn, config.heads, False, rope_theta)
 
                 context_layer = triton_flash_attn_kernel(qkv_out[0], qkv_out[1], qkv_out[2], scale,
                                                          input.shape[-2] % 128 == 0)
@@ -81,7 +81,7 @@ class DeepSpeedDiffusersAttentionFunction(Function):
                 attention_scores = (torch.matmul(query, key.transpose(-1, -2)) * scale).softmax(dim=-1)
                 context_layer = _transpose_for_context(torch.matmul(attention_scores, value))
 
-            output = linear_func(context_layer, attn_ow, attn_ob, do_out_bias, False, config.heads, False)
+            output = linear_func(context_layer, attn_ow, attn_ob, do_out_bias, False, config.heads, False, rope_theta)
             return output
 
         output = selfAttention_fp(input, context, input_mask)
@@ -191,6 +191,6 @@ class DeepSpeedDiffusersAttention(nn.Module):
                                                            self.num_attention_heads_per_partition, self.norm_factor,
                                                            self.hidden_size_per_partition, self.attn_ow, self.attn_ob,
                                                            self.do_out_bias, self.score_context_func, self.linear_func,
-                                                           self.triton_flash_attn_kernel)
+                                                           self.triton_flash_attn_kernel, self.config.rope_theta)
 
         return output
