@@ -2492,7 +2492,7 @@ class DeepSpeedEngine(Module):
         # Remove frozen parameter weights from state_dict if specified
         if exclude_frozen_parameters:
             for n, p in self.module.named_parameters():
-                if not p.requires_grad:
+                if not p.requires_grad and n in sd:
                     del sd[n]
 
         if self.random_ltd_enabled():

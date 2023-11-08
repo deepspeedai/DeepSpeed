@@ -544,6 +544,47 @@ class TestZeROCheckpointFrozenWeights(DistributedTest):
         trainable_param_names = set([n for n, p in model.named_parameters() if p.requires_grad])
         assert loaded_trainable_param_names == trainable_param_names
 
+    @pytest.mark.parametrize('zero_stage', [1, 2])
+    def test_save_exclude_custom_frozen_weights(self, tmpdir, zero_stage):
+        world_size = 1
+        config_dict = {
+            "train_micro_batch_size_per_gpu": 1,
+            "optimizer": {
+                "type": 'Adam'
+            },
+            "fp16": {
+                "enabled": True,
+                "initial_scale_power": 8
+            },
+            "zero_optimization": {
+                "stage": zero_stage,
+            }
+        }
+        hidden_dim = 10
+
+        model = SimpleFrozenModel(hidden_dim, empty_grad=False)
+
+        ds_engine, _, _, _ = deepspeed.initialize(model=model, model_parameters=model.parameters(), config=config_dict)
+
+        # Validate custom state_dict model
+        state_dict_bk = model.state_dict
+        model.state_dict = model.custom_state_dict
+        custom_state_dict_ckpt_folder = os.path.join(tmpdir, 'custom_state_dict')
+        ds_engine.save_checkpoint(custom_state_dict_ckpt_folder, exclude_frozen_parameters=True)
+
+        custom_state_dict_ckpt_file = get_model_ckpt_name_for_rank(
+            os.path.join(custom_state_dict_ckpt_folder, 'global_step0'), '00')
+        loaded_custom_state_dict_param_model = torch.load(custom_state_dict_ckpt_file)['module']
+        loaded_custom_state_dict_param_names = set(loaded_custom_state_dict_param_model.keys())
+
+        custom_state_dict_param_names = set([k for k, v in model.state_dict().items()])
+        trainable_param_names = set([n for n, p in model.named_parameters() if p.requires_grad])
+        overlap_names = set.intersection(custom_state_dict_param_names, trainable_param_names)
+
+        assert loaded_custom_state_dict_param_names == overlap_names
+
+        model.state_dict = state_dict_bk
+
 
 class TestSaveTensorClone(DistributedTest):
     world_size = 1

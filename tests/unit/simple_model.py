@@ -7,6 +7,7 @@ import os
 import json
 import argparse
 import torch
+from collections import OrderedDict
 
 from deepspeed.pipe import PipelineModule, LayerSpec
 from deepspeed.moe.layer import MoE
@@ -46,6 +47,14 @@ class SimpleFrozenModel(torch.nn.Module):
         # Freeze first layer
         self.linears[0].weight.requires_grad = False
         self.linears[0].bias.requires_grad = False
+
+    def custom_state_dict(self, *args, **kwargs):
+        state_dict = super(SimpleFrozenModel, self).state_dict(*args, **kwargs)
+        custom = OrderedDict()
+        for k, v in state_dict.items():
+            if 'linears.0.weight' not in k:
+                custom[k] = v
+        return custom
 
     def forward(self, x, y):
         if len(self.linears) == 1:
