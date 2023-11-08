@@ -54,5 +54,5 @@ jobs:
           cd DeepSpeed-MII
           pip install .[dev]
           unset TORCH_CUDA_ARCH_LIST # only jit compile for current arch
-          cd tests
+          cd tests/legacy
           pytest $PYTEST_OPTS --forked -m "deepspeed" ./
