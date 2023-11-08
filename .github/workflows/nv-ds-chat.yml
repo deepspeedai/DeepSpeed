@@ -36,11 +36,7 @@ jobs:
           pip install .[dev]
           ds_report
 
-      - name: Python environment
-        run: |
-          pip list
-
-      - name: DS-Chat unit tests
+      - name: Install deepspeed-chat
         run: |
           BRANCH="master"
           if [[ ! -z "${{ github.event.inputs.dse_branch }}" ]]; then
@@ -50,8 +46,17 @@ jobs:
           git clone -b $BRANCH https://github.com/microsoft/DeepSpeedExamples.git
           cd DeepSpeedExamples/applications/DeepSpeed-Chat
           pip install -r requirements.txt
+          pip install -e .
+
+      - name: Python environment
+        run: |
+          pip list
+
+      - name: DS-Chat unit tests
+        run: |
+          cd DeepSpeedExamples/applications/DeepSpeed-Chat
           unset TORCH_CUDA_ARCH_LIST # only jit compile for current arch
-          cd training/tests
+          cd tests
           pytest $PYTEST_OPTS ./
 
       - name: Open GitHub issue if nightly CI fails
