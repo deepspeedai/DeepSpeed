@@ -1,31 +1,40 @@
+# Ignore Python compiled files
 *.pyc
-.idea/
-*~
-*.swp
+
+# Ignore IDE-specific files and directories
+.idea/         # JetBrains IDE settings
+.vscode/       # Visual Studio Code settings
+.theia/        # Theia IDE settings
+
+# Ignore temporary and backup files
+*~             # General backup files
+*.swp          # Vim swap files
+
+# Ignore log files
 *.log
+
+# Ignore a specific generated file
 deepspeed/git_version_info_installed.py
+
+# Ignore Python bytecode cache
 __pycache__
 
 # Build + installation data
-build/
-dist/
-*.so
-deepspeed.egg-info/
-build.txt
+build/                  # Build artifacts
+dist/                   # Distribution files
+*.so                    # Compiled shared objects
+deepspeed.egg-info/     # Deepspeed package info
+build.txt               # Build information
 
-# Website
-docs/_site/
-docs/build
+# Website generated files
+docs/_site/             # Jekyll generated site
+docs/build              # Generated documentation
 docs/code-docs/source/_build
 docs/code-docs/_build
 docs/code-docs/build
-.sass-cache/
-.jekyll-cache/
+.sass-cache/            # SASS cache
+.jekyll-cache/          # Jekyll cache
 .jekyll-metadata
 
 # Testing data
-tests/unit/saved_checkpoint/
-
-# Dev/IDE data
-.vscode
-.theia
+tests/unit/saved_checkpoint/  # Saved checkpoints for testing
