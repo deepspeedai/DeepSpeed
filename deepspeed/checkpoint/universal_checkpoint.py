@@ -6,7 +6,7 @@
 import os
 import torch
 import types
-from .constants import (FP32_WEIGHT_KEY, PARAM, VOCAB_DIVISIBILITY_PADDING_TENSOR, CAT_DIM)
+from .constants import (FP32_WEIGHT_KEY, PARAM, VOCAB_TENSOR, CAT_DIM)
 
 
 def load_hp_checkpoint_state(self, folder, tp_rank, tp_world_size):
@@ -43,21 +43,16 @@ def load_hp_checkpoint_state(self, folder, tp_rank, tp_world_size):
         # the converter to universal currently strips the original padding completely so the saved
         # weight is padding-free and we just need to add new padding depending on the target TP
         # degree
-        vocab_divisibility_padding_tensor = ckpt_dict.get(VOCAB_DIVISIBILITY_PADDING_TENSOR, None)
-        if vocab_divisibility_padding_tensor is not None:
+        is_vocab_tensor = ckpt_dict.get(VOCAB_TENSOR, False)
+        if is_vocab_tensor:
             # In the absence of data passed from the user wrt new padded vocab specific to tp degree
             # we can again derive that data by reverse engineering the target shapes like so:
             padded_target_vocab_size = self.shape[0] * tp_world_size
+            assert padded_target_vocab_size >= full_hp_param.shape[0], \
+                f'Vocab tensor padded size {padded_target_vocab_size} < loaded universal size {full_hp_param.shape[0]}'
             if padded_target_vocab_size > full_hp_param.shape[0]:
-                # Need to expand
                 padding_size = padded_target_vocab_size - full_hp_param.shape[0]
-                # Implement the following concat in efficient way using pad
-                #full_hp_param = torch.cat((full_hp_param, padding_tensor), 0)
                 full_hp_param = torch.nn.functional.pad(full_hp_param, (0, 0, 0, padding_size), "constant", 0)
-                full_hp_param[:-padding_size, :] = vocab_divisibility_padding_tensor
-            else:
-                # Need to shrink or keep the same
-                full_hp_param = full_hp_param[:padded_target_vocab_size, :]
 
         full_param_numel = full_hp_param.numel()
         tp_slice_numel = self.numel()

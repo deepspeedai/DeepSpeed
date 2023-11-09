@@ -57,7 +57,7 @@ UNIVERSAL_CHECKPOINT_VERSION_KEY = 'universal_checkpoint_version'
 UNIVERSAL_CHECKPOINT_VERSION_VALUE = 0.2
 
 # Vocabulary padding
-VOCAB_DIVISIBILITY_PADDING_TENSOR = 'vocab_divisibility_padding_tensor'
+VOCAB_TENSOR = 'vocab_tensor'
 PADDED_VOCAB_SIZE = 'padded_vocab_size'
 ORIGINAL_VOCAB_SIZE = 'original_vocab_size'
 

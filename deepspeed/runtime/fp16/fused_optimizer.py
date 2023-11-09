@@ -107,7 +107,6 @@ class FP16_Optimizer(DeepSpeedOptimizer):
 
         self.clip_grad = clip_grad
         self.norm_type = 2
-        self.step_count = 0
 
         if required_torch_version(max_version=0.4):
             self.clip_grad_norm = torch.nn.utils.clip_grad_norm
@@ -288,8 +287,6 @@ class FP16_Optimizer(DeepSpeedOptimizer):
         self.timers(UPDATE_FP16_TIMER).stop()
 
         self.timers.log(STEP_TIMERS)
-
-        self.step_count += 1
 
         return self.overflow
 

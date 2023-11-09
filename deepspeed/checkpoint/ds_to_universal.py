@@ -26,8 +26,7 @@ from deepspeed.checkpoint import (
     PARAM_SHAPES,
     PARAM,
     CAT_DIM,
-    VOCAB_DIVISIBILITY_PADDING_TENSOR,
-    ORIGINAL_VOCAB_SIZE,
+    VOCAB_TENSOR,
     UNIVERSAL_CHECKPOINT_INFO,
     VOCABULARY_PARAMETER_PATTERNS,
     PIPELINE_REPLICATED_PARAMETER_PATTERNS,
@@ -55,6 +54,10 @@ def parse_arguments():
     parser.add_argument('--keep_temp_folder',
                         action='store_true',
                         help='Preserve temporary folder of intermediate checkpoint slice files. Useful for debugging.')
+    parser.add_argument('--no_strict',
+                        dest='strict',
+                        action='store_false',
+                        help='Do not perform validity checks on converted checkpoint.')
     args = parser.parse_args()
     print(f'args = {args}')
     return args
@@ -149,15 +152,8 @@ def _merge_zero_shards(param_base_path, state, tp_degree, slice_shape):
     return slices
 
 
-def _get_vocab_divisibility_padding_tensor(universal_checkpoint_info, padded_vocab_tensor):
-    original_vocab_size = universal_checkpoint_info.get(ORIGINAL_VOCAB_SIZE)
-    if padded_vocab_tensor.shape[0] > original_vocab_size:
-        return padded_vocab_tensor[-1]
-    else:
-        return torch.zeros(padded_vocab_tensor.shape[1])
-
-
 def merge_tp_slices(ds_checkpoint, dir, slice_dir, tp_degree, name_and_shape):
+
     name, shape = name_and_shape
     slice_base_path = os.path.join(slice_dir, name)
     param_base_path = os.path.join(dir, name)
@@ -167,6 +163,18 @@ def merge_tp_slices(ds_checkpoint, dir, slice_dir, tp_degree, name_and_shape):
     parameters_to_average = universal_checkpoint_info.get(PARAMETER_TO_AVERAGE_PATTERNS, [])
     parameters_with_row_parallelism = universal_checkpoint_info.get(PARAMETER_WITH_ROW_PARALLELISM_PATTERNS, [])
     vocabulary_parameters = universal_checkpoint_info.get(VOCABULARY_PARAMETER_PATTERNS, [])
+    unmatched_patterns = set(replicated_parameters + parameters_to_average + parameters_with_row_parallelism +
+                             vocabulary_parameters)
+
+    def get_matched_pattern(patterns_, name_):
+        matched_ = [pattern_ for pattern_ in patterns_ if re.match(pattern_, name_)]
+        assert len(matched_) <= 1, f'Got more than one matching patterns={matched_} for {name_}'
+        if matched_:
+            pattern_ = matched_[0]
+            unmatched_patterns.discard(pattern_)
+            return pattern_
+        return None
+
     for state in ("fp32", "exp_avg", "exp_avg_sq"):
         slices = _merge_zero_shards(slice_base_path, state, tp_degree, shape)
         final_path = os.path.join(param_base_path, f"{state}.pt")
@@ -174,31 +182,33 @@ def merge_tp_slices(ds_checkpoint, dir, slice_dir, tp_degree, name_and_shape):
         #print(f"Expected shape: {shape}")
         #print(f"Fragment sizes:", list(frag.shape for frag in slices))
         ckpt_dict = {}
-        if any(re.match(pattern, name) for pattern in replicated_parameters):
+        if get_matched_pattern(replicated_parameters, name):
             if len(slices) > 1:
                 assert all([slices[0].equal(other_slice) for other_slice in slices[1:]])
             param = slices[0]
             # print(f'replicate {name} using first slice')
-        elif any(re.match(pattern, name) for pattern in parameters_to_average):
+        elif get_matched_pattern(parameters_to_average, name):
             param = sum(slices) / len(slices)
             # print(f'merge {name} using average')
         else:
-            cat_dim = 1 if any(re.match(pattern, name) for pattern in parameters_with_row_parallelism) else 0
+            cat_dim = 1 if get_matched_pattern(parameters_with_row_parallelism, name) else 0
             # print(f"merge {name} with CAT DIM: {cat_dim}")
             param = torch.cat(slices, dim=cat_dim)
             ckpt_dict[CAT_DIM] = cat_dim
 
-        if any(re.match(pattern, name) for pattern in vocabulary_parameters):
+        if get_matched_pattern(vocabulary_parameters, name):
             #print(f"Before {param.shape=}")
             # strip padding
-            #param = _strip_vocab_padding(ds_checkpoint, param)
-            ckpt_dict[VOCAB_DIVISIBILITY_PADDING_TENSOR] = _get_vocab_divisibility_padding_tensor(
-                universal_checkpoint_info, param)
+            original_vocab_size = universal_checkpoint_info['original_vocab_size']
+            param = param[:original_vocab_size, :]
+            ckpt_dict[VOCAB_TENSOR] = True
             #print(f"After {param.shape=}")
 
         #print(f"Final shape: {param.shape}")
         ckpt_dict[PARAM] = param
         _save_checkpoint(final_path, ckpt_dict)
+
+    return unmatched_patterns
 
 
 def _get_chunks(l, n):
@@ -208,10 +218,13 @@ def _get_chunks(l, n):
 
 def _do_parallel_work(do_work, work_chunks, num_workers):
     pool = multiprocessing.Pool(num_workers)
+    results = []
     for batch in tqdm.tqdm(work_chunks):
-        pool.map(do_work, batch)
+        res = pool.map(do_work, batch)
+        results.extend(res)
     pool.close()
     pool.join()
+    return results
 
 
 def _extract_zero_shard_files(args, ds_checkpoint, temp_dir):
@@ -232,7 +245,16 @@ def _merge_tp_slice_files(args, ds_checkpoint, slice_shapes, temp_dir):
     #pprint(work_chunks)
     zero_output_folder = os.path.join(args.output_folder, "zero")
     do_work = partial(merge_tp_slices, ds_checkpoint, zero_output_folder, temp_dir, ds_checkpoint.tp_degree)
-    _do_parallel_work(do_work, work_chunks, args.num_merge_workers)
+    unmatched_patterns_lists = _do_parallel_work(do_work, work_chunks, args.num_merge_workers)
+
+    # verify that all patterns were used
+    # if a pattern was not used by any of the workers, then it was not used at all -> assert/alert
+    sets = [set(lst) for lst in unmatched_patterns_lists]
+    unmatched_patterns = list(set.intersection(*sets))
+    if args.strict:
+        assert not unmatched_patterns, f'Unused patterns={unmatched_patterns} while merging tp slices'
+    elif unmatched_patterns:
+        print(f'Warning: Unused patterns={unmatched_patterns} while merging tp slices')
 
 
 def _save_optimizer_state(args, ds_checkpoint):
