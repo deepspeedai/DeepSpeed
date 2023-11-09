@@ -30,7 +30,7 @@ def _attention(Q, K, V, bias1, bias2):
     return O, lse
 
 
-def attention_bwd(dO, Q, K, V, O, lse, bias1, bias2):
+def attention_bwd(dO, Q, K, V, O, lse, bias1, bias2, bias1_grad, bias2_grad):
     assert max(Q.shape[-1], V.shape[-1]) <= 64, "Hidden size is too large. Need to change kMax to a larger value"
     dQ = torch.empty_like(Q, dtype=Q.dtype)
     dK = torch.empty_like(K, dtype=K.dtype)
@@ -44,8 +44,14 @@ def attention_bwd(dO, Q, K, V, O, lse, bias1, bias2):
     if kernel_ is None:
         kernel_ = EvoformerAttnBuilder().load()
     delta = torch.empty_like(lse)
-    dB1 = torch.zeros_like(bias1, dtype=torch.float32)
-    dB2 = torch.zeros_like(bias2, dtype=torch.float32)
+    if bias1_grad:
+        dB1 = torch.zeros_like(bias1, dtype=torch.float32)
+    else:
+        dB1 = torch.tensor([], dtype=torch.float32, device=bias1.device)
+    if bias2_grad:
+        dB2 = torch.zeros_like(bias2, dtype=torch.float32)
+    else:
+        dB2 = torch.tensor([], dtype=torch.float32, device=bias2.device)
     kernel_.attention_bwd(dO, Q, K, V, O, lse, delta, bias1, bias2, dQ, dK, dV, dB1, dB2)
     return dQ, dK, dV, dB1.to(dO.dtype), dB2.to(dO.dtype)
 
@@ -69,10 +75,12 @@ class EvoformerFusedAttention(torch.autograd.Function):
     @staticmethod
     def backward(ctx, grad_output):
         q, k, v, o, lse, bias1, bias2 = ctx.saved_tensors
-        dQ, dK, dV, dB1, dB2 = attention_bwd(grad_output, q, k, v, o, lse, bias1, bias2)
-        if bias1.numel() == 0:
+        is_b1_grad = bias1.numel() != 0 and ctx.needs_input_grad[3]
+        is_b2_grad = bias2.numel() != 0 and ctx.needs_input_grad[4]
+        dQ, dK, dV, dB1, dB2 = attention_bwd(grad_output, q, k, v, o, lse, bias1, bias2, is_b1_grad, is_b2_grad)
+        if not is_b1_grad:
             dB1 = None
-        if bias2.numel() == 0:
+        if not is_b2_grad:
             dB2 = None
         return dQ, dK, dV, dB1, dB2
 
@@ -90,13 +98,9 @@ def DS4Sci_EvoformerAttention(Q, K, V, biases):
     bias_2_shape = lambda x: (x.shape[0], 1, x.shape[3], x.shape[2], x.shape[2])
 
     if biases[0] is not None:
-        assert biases[0].shape == bias_1_shape(Q)
-    else:
-        biases[0] = Q.new_zeros(bias_1_shape(Q))
+        assert biases[0].shape == bias_1_shape(Q), "bias1 shape is incorrect"
 
     if biases[1] is not None:
-        assert biases[1].shape == bias_2_shape(Q)
-    else:
-        biases[1] = Q.new_zeros(bias_2_shape(Q))
+        assert biases[1].shape == bias_2_shape(Q), "bias2 shape is incorrect"
 
     return EvoformerFusedAttention.apply(Q, K, V, biases[0], biases[1])

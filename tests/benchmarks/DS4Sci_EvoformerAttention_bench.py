@@ -3,7 +3,7 @@
 
 # DeepSpeed Team
 """
-This script is to test the correctness of the DS4Sci_EvoformerAttention op.
+This script is to test the performance of the DS4Sci_EvoformerAttention op.
 To run the script,
 1. Clone the CUTLASS repo. E.g. git clone https://github.com/NVIDIA/cutlass.git
 2. Specify the CUTLASS_PATH environment variable. E.g. export CUTLASS_PATH=$(pwd)/cutlass
@@ -83,7 +83,7 @@ def benchmark():
         Q = torch.randn(batch, N, seq_len, heads, dim, dtype=dtype, device="cuda", requires_grad=True)
         K = torch.randn(batch, N, seq_len, heads, dim, dtype=dtype, device="cuda", requires_grad=True)
         V = torch.randn(batch, N, seq_len, heads, dim, dtype=dtype, device="cuda", requires_grad=True)
-        bias1 = torch.randn(batch, N, 1, 1, seq_len, dtype=dtype, device="cuda", requires_grad=True)
+        bias1 = torch.randn(batch, N, 1, 1, seq_len, dtype=dtype, device="cuda", requires_grad=False)
         bias2 = torch.randn(batch, 1, heads, seq_len, seq_len, dtype=dtype, device="cuda", requires_grad=True)
         # warm up
         DS4Sci_EvoformerAttention(Q, K, V, [bias1, bias2])
