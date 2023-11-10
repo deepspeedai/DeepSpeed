@@ -30,7 +30,7 @@ class DSVAE(CUDAGraph, torch.nn.Module):
         self._decoder_cuda_graph.replay()
         return self.static_decoder_output
 
-    def _decode(self, x, return_dict=True):
+    def _decode(self, x, return_dict=True, generator=None):
         return self.vae.decode(x, return_dict=return_dict)
 
     def _create_cuda_graph_decoder(self, *inputs, **kwargs):
