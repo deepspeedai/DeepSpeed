@@ -20,6 +20,8 @@ try:
 except ImportError as e:
     dsa2 = None
 
+SUPPORTED_ACCELERATOR_LIST = ['cuda', 'cpu', 'xpu', 'npu', 'mps']
+
 ds_accelerator = None
 
 
@@ -34,12 +36,16 @@ def _validate_accelerator(accel_obj):
     # accelerator.abstractor_accelerator
     # or deepspeed.accelerator.abstract_accelerator, consider accel_obj
     # is a conforming object
-    if not ((dsa1 != None and isinstance(accel_obj, dsa1)) or (dsa2 != None and isinstance(accel_obj, dsa2))):
+    if not ((dsa1 is not None and isinstance(accel_obj, dsa1)) or (dsa2 is not None and isinstance(accel_obj, dsa2))):
         raise AssertionError(f"{accel_obj.__class__.__name__} accelerator is not subclass of DeepSpeedAccelerator")
 
     # TODO: turn off is_available test since this breaks tests
     # assert accel_obj.is_available(), \
     #    f'{accel_obj.__class__.__name__} accelerator fails is_available() test'
+
+
+def is_current_accelerator_supported():
+    return get_accelerator() in SUPPORTED_ACCELERATOR_LIST
 
 
 def get_accelerator():
@@ -50,7 +56,6 @@ def get_accelerator():
     accelerator_name = None
     ds_set_method = None
     # 1. Detect whether there is override of DeepSpeed accelerators from environment variable.
-    DS_ACCELERATOR_LIST = ['cuda', 'cpu', 'xpu', 'npu', 'mps']
     if "DS_ACCELERATOR" in os.environ.keys():
         accelerator_name = os.environ["DS_ACCELERATOR"]
         if accelerator_name == "xpu":
@@ -79,15 +84,13 @@ def get_accelerator():
                 torch.mps.current_allocated_memory()
             except (RuntimeError, ImportError) as e:
                 raise ValueError(f"MPS_Accelerator requires torch.mps, which is not installed on this system.")
-        elif accelerator_name == "cuda":
-            pass
-        else:
-            raise ValueError(
-                f'DS_ACCELERATOR must be one of {DS_ACCELERATOR_LIST}.  Value "{accelerator_name}" is not supported')
+        elif is_current_accelerator_supported():
+            raise ValueError(f'DS_ACCELERATOR must be one of {SUPPORTED_ACCELERATOR_LIST}. '
+                             f'Value "{accelerator_name}" is not supported')
         ds_set_method = "override"
 
     # 2. If no override, detect which accelerator to use automatically
-    if accelerator_name == None:
+    if accelerator_name is None:
         # We need a way to choose among different accelerator types.
         # Currently we detect which accelerator extension is installed
         # in the environment and use it if the installing answer is True.
@@ -105,21 +108,21 @@ def get_accelerator():
             accelerator_name = "xpu"
         except ImportError as e:
             pass
-        if accelerator_name == None:
+        if accelerator_name is None:
             try:
                 import intel_extension_for_pytorch  # noqa: F401,F811 # type: ignore
 
                 accelerator_name = "cpu"
             except ImportError as e:
                 pass
-        if accelerator_name == None:
+        if accelerator_name is None:
             try:
                 import torch_npu  # noqa: F401,F811 # type: ignore
 
                 accelerator_name = "npu"
             except ImportError as e:
                 pass
-        if accelerator_name == None:
+        if accelerator_name is None:
             try:
                 import torch.mps
 
@@ -128,7 +131,7 @@ def get_accelerator():
                 accelerator_name = "mps"
             except (RuntimeError, ImportError) as e:
                 pass
-        if accelerator_name == None:
+        if accelerator_name is None:
             accelerator_name = "cuda"
 
         ds_set_method = "auto detect"

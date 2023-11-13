@@ -111,7 +111,8 @@ def cifar_trainset(fp16=False):
 
 
 def train_cifar(model, config, num_steps=400, average_dp_losses=True, fp16=True, seed=123):
-    with get_accelerator().random().fork_rng(devices=[get_accelerator().current_device_name()]):
+    with get_accelerator().random().fork_rng(devices=[get_accelerator().current_device_name()],
+                                             device_type=get_accelerator().device_name()):
         ds_utils.set_random_seed(seed)
 
         # disable dropout

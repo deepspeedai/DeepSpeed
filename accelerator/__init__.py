@@ -4,4 +4,4 @@
 # DeepSpeed Team
 
 from .abstract_accelerator import DeepSpeedAccelerator
-from .real_accelerator import get_accelerator, set_accelerator
+from .real_accelerator import get_accelerator, set_accelerator, is_current_accelerator_supported
