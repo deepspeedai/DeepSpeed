@@ -1,0 +1,70 @@
+name: nv-sd
+
+on:
+  schedule:
+    - cron: "0 0 * * 0"
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - "deepspeed/ops/transformer/inference/diffusers_**"
+      - "tests/unit/inference/test_stable_diffusion.py"
+      - "deepspeed/model_implementations/diffusers/unet.py"
+      - "deepspeed/model_implementations/diffusers/vae.py"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  sd-tests:
+    runs-on: [self-hosted, nvidia, a6000]
+    container:
+      image: nvcr.io/nvidia/pytorch:23.03-py3
+      ports:
+        - 80
+      options: --gpus all --shm-size "8G"
+
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Check container state
+        run: |
+          ldd --version
+          nvcc --version
+          nvidia-smi
+          python -c "import torch; print('torch:', torch.__version__, torch)"
+          python -c "import torch; print('CUDA available:', torch.cuda.is_available())"
+      - name: Install transformers
+        run: |
+          git clone https://github.com/huggingface/transformers
+          cd transformers
+          git rev-parse --short HEAD
+          python -m pip install .
+      - name: Install deepspeed
+        run: |
+          pip install image-similarity-measures
+          python -m pip install opencv-python==4.6.* --force-reinstall
+          python -m pip install docutils==0.18.1 jinja2==3.0 urllib3==1.26.11 ninja
+          python -m pip install .[dev,1bit,autotuning,sd]
+          ds_report
+      - name: Python environment
+        run: |
+          python -m pip list
+      - name: Unit tests
+        run: |
+          unset TORCH_CUDA_ARCH_LIST # only jit compile for current arch
+          cd tests
+          python -m pytest --color=yes --durations=0 --verbose -rF -m 'stable_diffusion' -k "TestStableDiffusion" unit/ --torch_ver="2.0" --cuda_ver="12"
+
+      - name: Open GitHub issue if weekly CI fails
+        if: ${{ failure() && (github.event_name == 'schedule') }}
+        uses: JasonEtco/create-an-issue@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          filename: .github/ISSUE_TEMPLATE/ci_failure_report.md
+          update_existing: true
