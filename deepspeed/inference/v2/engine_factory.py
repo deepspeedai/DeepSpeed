@@ -5,6 +5,7 @@
 
 import logging
 from typing import Any
+from packaging import version
 
 from .engine_v2 import InferenceEngineV2
 from .config_v2 import RaggedInferenceEngineConfig
@@ -39,6 +40,10 @@ def build_hf_engine(path: str,
         policy = Llama2Policy(checkpoint_engine, model_config)
     elif model_config.model_type == "mistral":
         from .model_implementations.mistral.policy import MistralPolicy
+        # Ensure we're using the correct version of transformers for mistral
+        import transformers
+        assert version.parse(transformers.__version__) >= version.parse("4.34.0"), \
+            f"Mistral requires transformers >= 4.34.0, you have version {transformers.__version__}"
         policy = MistralPolicy(checkpoint_engine, model_config)
     else:
         raise ValueError(f"Unsupported model type {model_config.model_type}")
