@@ -180,7 +180,7 @@ class DSInferenceModelBase(torch.nn.Module, ABC):
 
     @abstractmethod
     def get_kv_requirements(self, sequence: DSSequenceDescriptor, max_new_tokens: int,
-                            max_new_blocks: int) -> Tuple[int, int]:
+                            max_new_blocks: Tuple[int, ...]) -> Tuple[int, torch.Tensor]:
         """
         Given a sequence and the number of new tokens in the sequence, determine the
         number of new KV blocks needed to support the sequence. This method is
@@ -193,9 +193,9 @@ class DSInferenceModelBase(torch.nn.Module, ABC):
             max_new_blocks (int): Maximum number of blocks to hypothetically allocate.
 
         Returns:
-            Tuple[int, int]: The tuple of number of tokens scheduled and number
-                of blocks allocated. In general, only one of these numbers will match the
-                corresponding input argument, but this is not guaranteed.
+            Tuple[int, torch.Tensor]: The tuple of number of tokens scheduled and number
+                of blocks allocated (per KV cache). In general, only one of these numbers will
+                match the corresponding input argument, but this is not guaranteed.
         """
         raise NotImplementedError()
 
@@ -212,9 +212,10 @@ class DSInferenceModelBase(torch.nn.Module, ABC):
         raise NotImplementedError()
 
     @abstractmethod
-    def kv_cache_config(self) -> KVCacheConfig:
+    def kv_cache_config(self) -> Tuple[KVCacheConfig, ...]:
         """
-        Return the KV-cache configuration for this model.
+        Return the KV-cache configuration for this model. This should be a tuple of one or more
+        KVCacheConfig objects (one for each distinct cache group).
         """
         raise NotImplementedError()
 
@@ -226,7 +227,7 @@ class DSInferenceModelBase(torch.nn.Module, ABC):
         """
         ...
 
-    def maybe_free_kv(self, sequence: DSSequenceDescriptor):
+    def maybe_free_kv(self, sequence: DSSequenceDescriptor) -> None:
         """
         After completing a forward pass, determine whether or not the there are any KV blocks
         that maybe freed since they are no longer in use.

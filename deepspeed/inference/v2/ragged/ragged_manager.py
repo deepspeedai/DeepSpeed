@@ -28,7 +28,7 @@ class DSStateManager:
     should come from the engine config.
     """
 
-    _kv_config: KVCacheConfig
+    _kv_configs: Tuple[KVCacheConfig]
     """
     Config for the KV cache. See KVCacheConfig for more details. These arguments should derive
     from the model implementation.
@@ -49,13 +49,12 @@ class DSStateManager:
 
     # Allocator for tracking sequences.
     _tracking_allocator: BlockedAllocator
-    _all_block_ids: torch.Tensor
-    _all_block_ids_shadow: torch.Tensor
+    _all_block_ids: Tuple[torch.Tensor, ...]
+    _all_block_ids_shadow: Tuple[torch.Tensor, ...]
 
-    # TODO(cmikeh2): This interface both needs to be more flexible and more concrete.
     def __init__(self,
                  config: DSStateManagerConfig,
-                 kv_config: KVCacheConfig,
+                 kv_configs: Tuple[KVCacheConfig, ...],
                  base_mp_group: Optional[Any] = None) -> None:
         """
         The key
@@ -64,7 +63,7 @@ class DSStateManager:
             block_size (int): The number of tokens to allocate in each block.
         """
         self._config = config
-        self._kv_config = kv_config
+        self._kv_configs = kv_configs
 
         # Load our helpers for host allocation.
         self._ragged_utils = RaggedUtilsBuilder().load()
@@ -72,48 +71,41 @@ class DSStateManager:
         # Initialize the allocator for tracking sequences (so this doesn't need to be ad-hoc).
         self._tracking_allocator = BlockedAllocator(self._config.max_tracked_sequences)
 
-        # Storage to back tracking the KV cache allocation.
-        ids_shape = (
-            self._config.max_tracked_sequences,
-            self._kv_config.num_allocation_groups,
-            self._kv_config.max_blocks_per_allocation_group,
-        )
-        self._all_block_ids = torch.zeros(ids_shape, dtype=torch.int32, device=get_accelerator().current_device())
-        self._all_block_ids_shadow = self._ragged_utils.allocate_fast_host_buffer(self._all_block_ids)
+        all_block_ids = []
+        all_block_ids_shadow = []
+
+        for cache_config in self._kv_configs:
+            # Storage to back tracking the KV cache allocation.
+            ids_shape = (
+                self._config.max_tracked_sequences,
+                cache_config.num_allocation_groups,
+                cache_config.max_blocks_per_allocation_group,
+            )
+
+            all_block_ids.append(torch.zeros(ids_shape, dtype=torch.int32, device=get_accelerator().current_device()))
+            all_block_ids_shadow.append(self._ragged_utils.allocate_fast_host_buffer(all_block_ids[-1]))
+
+        self._all_block_ids = tuple(all_block_ids)
+        self._all_block_ids_shadow = tuple(all_block_ids_shadow)
 
         # Initialize the sequence container.
         self._seqs = {}
 
         # Finally initialize the KV cache.
-        self._kv_cache = BlockedKVCache(self._kv_config,
+        self._kv_cache = BlockedKVCache(self._kv_configs,
                                         self._config.memory_config,
                                         mp_group=base_mp_group,
                                         offload=self._config.offload)
 
-    def get_cache(self, cache_id: int) -> torch.Tensor:
+    def get_cache(self, cache_id: int, cache_group: int = 0) -> torch.Tensor:
         """
-        Return the Tensor associated with the given cache id.
-        """
-        return self._kv_cache.get_cache(cache_id)
+        Return the Tensor associated with the given cache id in the specified cache group.
 
-    def query(self, uid: Optional[int] = None) -> Tuple[int, int, Optional[int]]:
+        Arguments:
+            cache_group (str): The KV cache group.
+            cache_id (int): The cache id within that group.
         """
-        Query the state of the KV cache for occupancy.
-
-        Parameters:
-            seq_id (Optional[int]): The sequence id to query. If None, the last
-                return value will be None.
-
-        Returns:
-            Tuple[int, int, Optional[Tuple[int, int]]: A tuple of the block size, the number of
-                free blocks, and the number of cached tokens for the given sequence.
-        """
-        if uid is not None:
-            cached_toks = self._seqs[uid].cached_tokens
-            free_toks = cached_toks % self._block_size
-            return (self._block_size, self._kv_cache.free_blocks, free_toks)
-        else:
-            return (self._block_size, self._kv_cache.free_blocks, None)
+        return self._kv_cache.get_cache(cache_id, cache_group=cache_group)
 
     def flush_sequence(self, uid: int) -> None:
         """
@@ -124,7 +116,9 @@ class DSStateManager:
             return
 
         seq = self._seqs[uid]
-        self._kv_cache.free(seq.all_block_ids)
+        for i in range(self.n_kv_caches):
+            self._kv_cache.free(seq.all_block_ids(cache_group=i), cache_group=i)
+
         self._tracking_allocator.free(seq.tracking_id)
         del self._seqs[uid]
 
@@ -163,12 +157,15 @@ class DSStateManager:
             raise RuntimeError(
                 f"Unable to create tracking slot for sequence {uid} since the metadata buffers are full.")
 
-        seq_block_ids = self._all_block_ids[tracking_slot]
-        seq_block_ids_shadow = self._all_block_ids_shadow[tracking_slot]
+        seq_block_ids = tuple(all_block_ids[tracking_slot] for all_block_ids in self._all_block_ids)
+        seq_block_ids_shadow = tuple(all_block_ids_shadow[tracking_slot]
+                                     for all_block_ids_shadow in self._all_block_ids_shadow)
+
         self._seqs[uid] = DSSequenceDescriptor(tracking_slot,
                                                seq_block_ids,
                                                seq_block_ids_shadow,
                                                max_context=self._config.max_context)
+        # TODO(cmikeh2): Debug call here might be unnecessary and is potentially on critical path.
         logger.debug(f"Created sequence {uid} with tracking slot {tracking_slot}.")
         return self._seqs[uid]
 
@@ -194,11 +191,18 @@ class DSStateManager:
         return self._kv_config.block_size
 
     @property
-    def free_blocks(self) -> int:
+    def n_kv_cache_groups(self) -> int:
+        """
+        Return the number of KV caches.
+        """
+        return self._kv_cache.num_caches
+
+    @property
+    def free_blocks(self) -> torch.Tensor:
         """
         Return the number of free blocks in the KV cache.
         """
         return self._kv_cache.free_blocks
 
-    def allocate_blocks(self, n_blocks: int) -> torch.Tensor:
-        return self._kv_cache.reserve(n_blocks)
+    def allocate_blocks(self, n_blocks: int, cache_group: int = 0) -> torch.Tensor:
+        return self._kv_cache.reserve(n_blocks, cache_group=cache_group)

@@ -12,7 +12,26 @@ from deepspeed.runtime.config_utils import DeepSpeedConfigModel
 from ..inference_utils import DtypeEnum
 
 
+class KVCacheType(Enum):
+
+    DENSE = "dense"
+    """
+    Dense KV-cache. This is the default type.
+    """
+
+    LOCAL = "local"
+    """
+    KV-cache that attends to only a local (trailing) window of tokens.
+    """
+
+
 class KVCacheConfig(DeepSpeedConfigModel):
+
+    type: KVCacheType = KVCacheType.DENSE
+    """
+    Type of KV-cache to use. This may inform the allocator of the expected access/retention pattern
+    to enable more efficient memory management.
+    """
 
     block_size: int = 128
     """

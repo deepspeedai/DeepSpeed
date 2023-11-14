@@ -135,7 +135,7 @@ def build_batch_and_manager(
                                   memory_config=memory_config)
 
     batch = RaggedBatchWrapper(config)
-    state_manager = DSStateManager(config, kv_config)
+    state_manager = DSStateManager(config, (kv_config, ))
 
     # At the beginning of operation, the design of the allocator is such that it will return
     # linear blocks of memory. The following will "warm up" the allocator so that we can be
@@ -146,7 +146,7 @@ def build_batch_and_manager(
 
         if decision == 0:
             blocks_to_allocate = random.randint(0, total_kv_blocks)
-            if blocks_to_allocate <= state_manager.free_blocks and blocks_to_allocate > 0:
+            if blocks_to_allocate <= state_manager.free_blocks[0] and blocks_to_allocate > 0:
                 all_allocs.append(state_manager.allocate_blocks(blocks_to_allocate))
         else:
             if len(all_allocs) > 0:
@@ -158,7 +158,7 @@ def build_batch_and_manager(
     for alloc in all_allocs:
         state_manager._kv_cache.free(alloc)
 
-    assert state_manager.free_blocks == total_kv_blocks
+    assert state_manager.free_blocks[0] == total_kv_blocks
 
     batch.clear()
     seq_descs = []

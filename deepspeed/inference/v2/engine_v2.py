@@ -45,13 +45,20 @@ class InferenceEngineV2:
     """
 
     @property
-    def free_blocks(self) -> int:
+    def free_blocks(self) -> torch.Tensor:
         """
-        Number of free KV blocks.
+        Number of free KV blocks. This is a tensor of shape [n_kv_cache_groups] where each
+        element is the number of free blocks in the corresponding KV cache group.
         """
         return self._state_manager.free_blocks
 
     @property
+    def n_kv_cache_groups(self) -> int:
+        """
+        Number of KV cache groups.
+        """
+        return self._state_manager.n_kv_cache_groups
+
     def model(self) -> DSInferenceModelBase:
         """
         The model implementation.
@@ -143,7 +150,7 @@ class InferenceEngineV2:
 
         return logits
 
-    def query(self, uid: int, max_request_tokens: int, max_request_blocks) -> Tuple[int, int]:
+    def query(self, uid: int, max_request_tokens: int, max_request_blocks) -> Tuple[int, torch.Tensor]:
         """
         Determine the number of tokens and KV blocks to reserve for a given request. Given a UID
         (this UID may not be recognized by the model yet), this will return the number of tokens

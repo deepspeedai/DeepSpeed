@@ -324,7 +324,7 @@ class DSTransformerModelBase(DSInferenceModelBase):
         self.attn = heuristics.instantiate_attention(attn_config, self._engine_config)
 
     def get_kv_requirements(self, sequence: DSSequenceDescriptor, max_new_tokens: int,
-                            max_new_blocks: int) -> Tuple[int, int]:
+                            max_new_blocks: int) -> Tuple[int, torch.Tensor]:
         """
         See ``DSInferenceModelBase.get_kv_requirements`` for documentation.
 
@@ -341,7 +341,7 @@ class DSTransformerModelBase(DSInferenceModelBase):
         token_capacity = (max_new_blocks +
                           sequence.cur_allocated_blocks) * self.attn.kv_block_size - sequence.seen_tokens
 
-        return token_capacity, max_new_blocks
+        return token_capacity, torch.tensor([max_new_blocks])
 
     def maybe_allocate_kv(self, sequence: DSSequenceDescriptor, n_new_tokens: int) -> None:
         """
@@ -356,7 +356,7 @@ class DSTransformerModelBase(DSInferenceModelBase):
             new_blocks = self.state_manager.allocate_blocks(n_needed_blocks)
             sequence.extend_kv_cache(new_blocks)
 
-    def kv_cache_config(self) -> KVCacheConfig:
+    def kv_cache_config(self) -> Tuple[KVCacheConfig, ...]:
         """
         See ``DSInferenceModelBase.kv_cache_config`` for documentation.
 
@@ -370,7 +370,7 @@ class DSTransformerModelBase(DSInferenceModelBase):
                                                   cache_shape=cache_shape,
                                                   cache_dtype=self.activation_dtype,
                                                   max_blocks_per_allocation_group=max_blocks)
-        return self._kv_cache_config
+        return (self._kv_cache_config, )
 
     def prepare_batch(self, wrapped_batch: RaggedBatchWrapper) -> None:
         """
