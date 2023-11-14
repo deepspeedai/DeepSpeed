@@ -12,6 +12,7 @@ from ...interfaces import DSPreNormBase, DSPreNormRegistry
 from ...configs import DSNormConfig, NormTypeEnum
 from ....kernels.core_ops import CUDARMSNorm, CUDARMSPreNorm
 from ....allocator import empty_from
+from ....inference_parameter import InferenceParameter
 
 
 @DSPreNormRegistry.register_module
@@ -50,8 +51,9 @@ class DSPreRMSCUDAModule(DSPreNormBase):
                                             dtype=config.output_dtype,
                                             device=get_accelerator().current_device())
 
-    def transform_param(self, param: torch.Tensor) -> torch.Tensor:
-        return param.to(self._config.input_dtype)
+    def transform_param(self, param: torch.Tensor) -> InferenceParameter:
+        param = param.to(self._config.input_dtype)
+        return InferenceParameter.initialize(param)
 
     def forward(self,
                 residual: torch.Tensor,

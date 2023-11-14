@@ -12,6 +12,7 @@ from deepspeed.runtime.config_utils import DeepSpeedConfigModel
 from ..ds_module import DSModuleBase
 from ..configs.norm_config import DSNormConfig
 from ..module_registry import DSModuleRegistryBase
+from ...inference_parameter import InferenceParameter
 
 
 class DSPreNormBase(DSModuleBase):
@@ -38,7 +39,7 @@ class DSPreNormBase(DSModuleBase):
         super().__init__(config, implementation_config)
 
     @abstractmethod
-    def transform_param(self, param: torch.Tensor) -> torch.Tensor:
+    def transform_param(self, param: torch.Tensor) -> InferenceParameter:
         """
         Transform a gamma/beta parameter. It is assumed that both transformations are
         the same.

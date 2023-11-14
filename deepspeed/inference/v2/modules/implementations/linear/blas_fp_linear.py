@@ -18,6 +18,7 @@ from ....kernels.core_ops import (
 
 from ...interfaces import DSLinearBase, DSLinearRegistry
 from ...configs import DSLinearConfig
+from ....inference_parameter import InferenceParameter
 
 
 @DSLinearRegistry.register_module
@@ -70,14 +71,15 @@ class BlasFPLinear(DSLinearBase):
                                    dtype=config.output_dtype,
                                    device=get_accelerator().current_device())
 
-    def transform_param(self, param: torch.Tensor) -> torch.Tensor:
+    def transform_param(self, param: torch.Tensor) -> InferenceParameter:
         """
         Converts param to same data type as input and output.
 
         Parameters:
             param (torch.Tensor): Weight or bias tensor.
         """
-        return param.to(self._config.input_dtype)
+        param = param.to(self._config.output_dtype)
+        return InferenceParameter.initialize(param)
 
     def forward(self, hidden_states: torch.Tensor, w: torch.Tensor, b: Optional[torch.Tensor] = None) -> torch.Tensor:
 

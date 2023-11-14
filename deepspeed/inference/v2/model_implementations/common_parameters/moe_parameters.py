@@ -5,7 +5,6 @@
 
 import torch
 
-from ...allocator import on_device
 from ...model_implementations.parameter_base import ParameterBase, ParamList
 """
 Moe Parameters
@@ -24,7 +23,6 @@ class MoEGatingWeightParameter(ParameterBase):
     Projection matrix from the input activations to the gate logits.
     """
 
-    @on_device
     def finalize(self) -> torch.Tensor:
         return self.inference_model.transform_moe_gate_param(self.params)
 

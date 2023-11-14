@@ -3,14 +3,26 @@
 
 # DeepSpeed Team
 
-from abc import ABC, abstractmethod
-from typing import Any, Iterable, List, Union
+import json
+from abc import ABC, ABCMeta, abstractmethod
+from typing import Any, Iterable, List, Optional, Union
+
+import torch
 
 from ..config_v2 import RaggedInferenceEngineConfig
 from ..checkpoint import CheckpointEngineBase
 from ..logging import inference_logger
 from .layer_container_base import LayerContainer
 from .inference_model_base import DSInferenceModelBase
+from .flat_model_helpers import (
+    flatten_inference_model,
+    make_param_filename,
+    make_metadata_filename,
+    ModelMetadata,
+    restore_inference_model,
+)
+
+POLICIES = {}
 
 
 class ContainerMap:
@@ -80,15 +92,49 @@ class ContainerMap:
                     f"Transformer container at index {layer_idx} not fully initialized after checkpoint load.")
 
 
-class InferenceV2Policy(ABC):
+class PolicyMeta(ABCMeta):
+
+    def __new__(cls, name, bases, dct):
+        new_obj = super().__new__(cls, name, bases, dct)
+        if name != "InferenceV2Policy":
+            POLICIES[name] = new_obj
+        return new_obj
+
+
+class InferenceV2Policy(ABC, metaclass=PolicyMeta):
     """
     The InferenceV2Policy is the base class for all inference policies. An inference policy
     is responsible for instantiating the inference model and mapping the parameters from the
     checkpoint engine to the model itself.
     """
 
-    def __init__(self, checkpoint_engine: CheckpointEngineBase, model_config: Any) -> None:
+    def __init__(
+        self,
+        model_config: Any,
+        checkpoint_engine: Optional[CheckpointEngineBase] = None,
+        inf_checkpoint_path: Optional[str] = None,
+    ) -> None:
+        """
+        Create the Policy with sufficient context to build the model. There are two supported
+        model creation mechanisms.
+
+        The first is the generalized ``checkpoint_engine`` which
+        will iterate over the parameters of the model and provide them to the policy. These in
+        turn will be sharded/transformed by the model implementation.
+
+        The second is used to re-create a previously serialized DeepSpeed inference model. These
+        checkpoints should not be used across different model backend configurations.
+
+        TODO(cmikeh2): Enforce this in code
+        """
+        if checkpoint_engine is None and inf_checkpoint_path is None:
+            raise ValueError("Either checkpoint_engine or ds_checkpoint_path must be provided.")
+
+        if checkpoint_engine is not None and inf_checkpoint_path is not None:
+            raise ValueError("Only one of checkpoint_engine or ds_checkpoint_path can be provided.")
+
         self._checkpoint_engine = checkpoint_engine
+        self._inf_checkpoint_path = inf_checkpoint_path
         self._model_config = model_config
 
     def build_model(self, engine_config: RaggedInferenceEngineConfig, mp_group: Any) -> DSInferenceModelBase:
@@ -147,9 +193,28 @@ class InferenceV2Policy(ABC):
         """
 
         container_map = self.build_container_map()
-        for name, parameter in self._checkpoint_engine.parameters():
-            container_map.map_param(name, parameter)
+
+        if self._checkpoint_engine is not None:
+            for name, parameter in self._checkpoint_engine.parameters():
+                container_map.map_param(name, parameter)
+
+            buffer, metadata = flatten_inference_model(container_map.transformer_params,
+                                                       container_map.non_transformer_params, self.__class__.__name__)
+        else:
+
+            buffer_path = make_param_filename(self._inf_checkpoint_path, self.model.tp_rank, self.model.tp_size)
+            metadata_path = make_metadata_filename(self._inf_checkpoint_path, self.model.tp_rank, self.model.tp_size)
+
+            buffer = torch.load(buffer_path)
+            metadata = json.load(open(metadata_path, "r"))
+            metadata = ModelMetadata.parse_raw(metadata)
+
+            restore_inference_model(buffer, metadata, container_map.transformer_params,
+                                    container_map.non_transformer_params)
+
         container_map.validate()
 
         self.model.set_parameters(transformer=container_map.transformer_params,
-                                  non_transformer=container_map.non_transformer_params)
+                                  non_transformer=container_map.non_transformer_params,
+                                  flattened_param_buffer=buffer,
+                                  flattened_param_metadata=metadata)

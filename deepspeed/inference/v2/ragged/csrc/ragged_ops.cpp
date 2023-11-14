@@ -37,9 +37,40 @@ torch::Tensor allocate_fast_host_buffer(torch::Tensor device_mirror)
     return buffer;
 }
 
+torch::Tensor allocate_view_on(torch::Tensor& tensor, torch::Tensor& buffer, int64_t offset)
+{
+    int8_t* data = reinterpret_cast<int8_t*>(buffer.data_ptr());
+
+    auto options = tensor.options().device(buffer.device());
+
+    return at::from_blob(data + offset, tensor.sizes(), tensor.strides(), options);
+}
+
+torch::Tensor allocate_view_like(py::tuple shape,
+                                 py::tuple strides,
+                                 torch::Tensor& dummy_tensor,
+                                 torch::Tensor& buffer,
+                                 int64_t offset)
+{
+    int8_t* data = reinterpret_cast<int8_t*>(buffer.data_ptr());
+
+    auto options = torch::TensorOptions().device(buffer.device()).dtype(dummy_tensor.dtype());
+
+    return at::from_blob(data + offset,
+                         shape.cast<std::vector<int64_t>>(),
+                         strides.cast<std::vector<int64_t>>(),
+                         options);
+}
+
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m)
 {
     m.def("allocate_fast_host_buffer",
           &allocate_fast_host_buffer,
           "Allocate a host mirror of an accelerator Tensor.");
+    m.def("allocate_view_on",
+          &allocate_view_on,
+          "Allocate a view on a Tensor on the same device as the input Tensor.");
+    m.def("allocate_view_like",
+          &allocate_view_like,
+          "Allocate a view on a Tensor on the same device as the input Tensor.");
 }

@@ -12,10 +12,8 @@ import torch
 # Currently have dependency loops for the type hints.
 InferenceModel = Type["InferenceModel"]
 LayerContainer = Type["LayerContainer"]
-ParametrizedList = Type["ParametrizedList"]
 
 MAPPING_KEY = "PARAM_MAPPING"
-PLIST_HELPERS = "_ds_plist_strip_vals"
 
 
 def make_param_getter(clsname, param):

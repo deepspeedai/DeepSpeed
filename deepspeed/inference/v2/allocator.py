@@ -26,7 +26,7 @@ def on_device(method) -> torch.Tensor:
     def wrapped(self, *args, **kwargs):
         tensor = method(self, *args, **kwargs)
         if isinstance(tensor, torch.Tensor):
-            return tensor.to(get_accelerator().current_device()).contiguous()
+            return tensor.to(get_accelerator().current_device())
         return tensor
 
     return wrapped

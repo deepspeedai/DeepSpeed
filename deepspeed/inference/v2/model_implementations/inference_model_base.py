@@ -8,11 +8,22 @@ from typing import Iterable, Optional, Tuple, Type
 
 import torch
 
+import deepspeed.comm as dist
 from ..ragged import DSStateManager, RaggedBatchWrapper
 from ..ragged.manager_configs import KVCacheConfig
 from ..ragged import DSSequenceDescriptor
 from ..model_implementations.layer_container_base import LayerContainer
 from ..config_v2 import RaggedInferenceEngineConfig
+from .flat_model_helpers import ModelMetadata
+
+try:
+    from functools import cached_property
+except ImportError:
+
+    def cached_property(func):
+        return property(func)
+
+
 """
 This abstract class defines the interfaces that a model implementation should implement
 in order to include anything that may be called by the engine. Most models should be able
@@ -92,13 +103,25 @@ class DSInferenceModelBase(torch.nn.Module, ABC):
         # Set to None until the Policy sets the model parameters
         self._non_transformer = None
         self._transformer = None
+        self._flattened_param_buffer = None
+        self._flattened_param_metadata = None
 
-    def set_parameters(self, transformer: Iterable[LayerContainer], non_transformer: LayerContainer):
+    @property
+    def config(self) -> DSModelImplementationConfig:
+        """
+        The model config.
+        """
+        return self._config
+
+    def set_parameters(self, transformer: Iterable[LayerContainer], non_transformer: LayerContainer,
+                       flattened_param_buffer: torch.Tensor, flattened_param_metadata: ModelMetadata):
         """
         Set the model parameters for the embedding, transformer, and unembedding containers.
         """
         self._transformer = transformer
         self._non_transformer = non_transformer
+        self._flattened_param_buffer = flattened_param_buffer
+        self._flattened_param_metadata = flattened_param_metadata
 
     def set_state_manager(self, state_manager: DSStateManager):
         """
@@ -106,6 +129,54 @@ class DSInferenceModelBase(torch.nn.Module, ABC):
         the model is fully initialized.
         """
         self.state_manager = state_manager
+
+    @cached_property
+    def tp_rank(self) -> int:
+        """
+        The rank of the current process.
+
+        # TODO(cmikeh2): Kind of a hack right now, but this is too verbose to use at
+        the frequency we need.
+        """
+        return dist.get_rank(group=self._base_mp_group)
+
+    @cached_property
+    def tp_size(self) -> int:
+        """
+        The total number of processes.
+
+        # TODO(cmikeh2): Kind of a hack right now, but this is too verbose to use at
+        the frequency we need.
+        """
+        return dist.get_world_size(group=self._base_mp_group)
+
+    @property
+    def model_config(self):
+        """
+        The model config.
+        """
+        return self._config
+
+    @property
+    def engine_config(self):
+        """
+        The engine config.
+        """
+        return self._engine_config
+
+    @property
+    def flattened_params(self) -> Optional[torch.Tensor]:
+        """
+        The flattened parameter buffer.
+        """
+        return self._flattened_param_buffer
+
+    @property
+    def flattened_param_metadata(self) -> Optional[ModelMetadata]:
+        """
+        The flattened parameter metadata.
+        """
+        return self._flattened_param_metadata
 
     @abstractmethod
     def get_kv_requirements(self, sequence: DSSequenceDescriptor, max_new_tokens: int,

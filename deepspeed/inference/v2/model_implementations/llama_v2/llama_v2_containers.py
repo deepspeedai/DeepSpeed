@@ -49,7 +49,6 @@ class Llama2TransformerContainer(LayerContainer):
     mlp_2_w: MLP2Parameter
     attn_norm_gamma: NormParameter
     mlp_norm_gamma: NormParameter
-    #rotary_emb: InvFreqParameter
 
     PARAM_MAPPING = {
         "self_attn.q_proj.weight": "qkv_w.q_params",
@@ -61,7 +60,6 @@ class Llama2TransformerContainer(LayerContainer):
         "mlp.down_proj.weight": "mlp_2_w.params",
         "input_layernorm.weight": "attn_norm_gamma.params",
         "post_attention_layernorm.weight": "mlp_norm_gamma.params",
-        #"self_attn.rotary_emb.inv_freq": "rotary_emb.params",
     }
 
 

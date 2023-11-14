@@ -111,6 +111,5 @@ class GQAMegatronQKVParameter(ParameterBase):
         head_size = self.inference_model.head_size
         n_q_heads = self.inference_model.n_heads_q
         n_kv_heads = self.inference_model.n_heads_kv
-
         transposed_param = transform_gqa_megatron(self.params, head_size, n_q_heads, n_kv_heads)
         return self.inference_model.transform_qkv_param(transposed_param)

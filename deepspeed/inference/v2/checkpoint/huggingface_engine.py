@@ -90,6 +90,8 @@ class HuggingFaceCheckpointEngine(CheckpointEngineBase):
                 param = checkpoint_sd[param_name]
                 yield param_name, param
 
+            del checkpoint_sd
+
 
 if __name__ == "__main__":
     # To test, add your auth_token here and run `python huggingface_engine.py`

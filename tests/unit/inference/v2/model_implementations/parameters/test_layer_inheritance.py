@@ -6,9 +6,10 @@
 import pytest
 import torch
 
+from deepspeed.inference.v2.inference_parameter import InferenceParameter
 from deepspeed.inference.v2.model_implementations.layer_container_base import LayerContainer
 
-from .utils import validate_device, SimpleParam, DummyInferenceModel
+from .utils import SimpleParam, DummyInferenceModel
 
 
 class ParentLayer(LayerContainer):
@@ -42,9 +43,6 @@ def test_layer_inheritance():
 
     multi_param_layer.param_2.param = torch.full((16, 16), 2.0)
 
-    assert multi_param_layer.is_initialized is True
-    assert isinstance(multi_param_layer.param_1, torch.Tensor)
-    assert isinstance(multi_param_layer.param_2, torch.Tensor)
-
-    validate_device(multi_param_layer.param_1)
-    validate_device(multi_param_layer.param_2)
+    assert multi_param_layer.is_populated is True
+    assert isinstance(multi_param_layer.param_1, InferenceParameter)
+    assert isinstance(multi_param_layer.param_2, InferenceParameter)

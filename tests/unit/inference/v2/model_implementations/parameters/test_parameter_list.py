@@ -6,10 +6,11 @@
 import pytest
 import torch
 
+from deepspeed.inference.v2.allocator import on_device
+from deepspeed.inference.v2.inference_parameter import InferenceParameter
 from deepspeed.inference.v2.model_implementations.parameter_base import ParameterBase, ParamList
 from deepspeed.inference.v2.model_implementations.layer_container_base import LayerContainer
 from deepspeed.inference.v2.model_implementations.common_parameters import *
-from deepspeed.inference.v2.allocator import on_device
 
 from .utils import validate_device
 
@@ -30,7 +31,7 @@ class DummyInferenceModel:
 
     @on_device
     def transform_moe_mlp_1_param(self, param: torch.Tensor) -> torch.Tensor:
-        return param
+        return InferenceParameter.initialize(param)
 
 
 @pytest.mark.inference_v2

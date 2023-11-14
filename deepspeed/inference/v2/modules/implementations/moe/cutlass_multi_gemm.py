@@ -21,6 +21,7 @@ from ....ragged import RaggedBatchWrapper
 from ...interfaces import DSMoEBase, DSMoERegistry
 from ...configs import DSMoEConfig
 from ....kernels.cutlass_ops import MoEGEMM
+from ....inference_parameter import InferenceParameter
 
 
 @DSMoERegistry.register_module
@@ -111,13 +112,14 @@ class DSMultiGemmMoE(DSMoEBase):
                                    dtype=self._config.output_dtype,
                                    device=get_accelerator().current_device())
 
-    def transform_gate_param(self, param: torch.Tensor) -> torch.Tensor:
+    def transform_gate_param(self, param: torch.Tensor) -> InferenceParameter:
         """
         Ensures gate param is going to match the activation data type.
         """
-        return param.to(self._config.input_dtype)
+        param = param.to(self._config.input_dtype)
+        return InferenceParameter.initialize(param)
 
-    def transform_moe_mlp_1_param(self, param: torch.Tensor) -> torch.Tensor:
+    def transform_moe_mlp_1_param(self, param: torch.Tensor) -> InferenceParameter:
         """
         Converts param to same data type as input and output.
 
@@ -127,11 +129,10 @@ class DSMultiGemmMoE(DSMoEBase):
         param = param.to(self._config.input_dtype)
 
         if len(param.shape) == 3:
-            return param.permute(0, 2, 1).contiguous()
-        else:
-            return param
+            param = param.permute(0, 2, 1).contiguous()
+        return InferenceParameter.initialize(param)
 
-    def transform_moe_mlp_2_param(self, param: torch.Tensor) -> torch.Tensor:
+    def transform_moe_mlp_2_param(self, param: torch.Tensor) -> InferenceParameter:
         """
         Converts param to same data type as input and output.
 
@@ -141,9 +142,8 @@ class DSMultiGemmMoE(DSMoEBase):
         param = param.to(self._config.input_dtype)
 
         if len(param.shape) == 3:
-            return param.permute(0, 2, 1).contiguous()
-        else:
-            return param
+            param = param.permute(0, 2, 1).contiguous()
+        return InferenceParameter.initialize(param)
 
     @property
     def output(self) -> torch.Tensor:
