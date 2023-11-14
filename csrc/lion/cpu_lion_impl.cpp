@@ -54,6 +54,8 @@ void Lion_Optimizer::Step_1(float* _params,
             size_t offset = copy_size + t;
 #if defined(__ENABLE_CUDA__)
             if ((t / TILE) >= 2) { cudaStreamSynchronize(_streams[_buf_index]); }
+#elif defined(__ENABLE_CANN__)
+            if ((t / TILE) >= 2) { aclrtSynchronizeStream(_streams[_buf_index].stream()); }
 #endif
 #pragma omp parallel for
             for (size_t k = t; k < offset; k++) {
@@ -72,7 +74,7 @@ void Lion_Optimizer::Step_1(float* _params,
                 }
                 momentum = momentum * _betta2;
                 momentum = grad * betta2_minus1 + momentum;
-#if defined(__ENABLE_CUDA__)
+#if defined(__ENABLE_CUDA__) or defined(__ENABLE_CANN__)
                 if (dev_params) _doubled_buffer[_buf_index][k - t] = param;
 #endif
                 if (half_precision)
@@ -85,6 +87,17 @@ void Lion_Optimizer::Step_1(float* _params,
             if (dev_params) {
                 launch_param_update(
                     _doubled_buffer[_buf_index], dev_params + t, (copy_size), _streams[_buf_index]);
+
+                _buf_index = !_buf_index;
+            }
+#elif defined(__ENABLE_CANN__)
+            if (dev_params) {
+                size_t memcpy_size = copy_size * sizeof(_doubled_buffer[_buf_index][0]);
+                aclrtMemcpy(dev_params + t,
+                            memcpy_size,
+                            _doubled_buffer[_buf_index],
+                            memcpy_size,
+                            aclrtMemcpyKind::ACL_MEMCPY_HOST_TO_DEVICE);
 
                 _buf_index = !_buf_index;
             }
@@ -201,7 +214,7 @@ int ds_lion_step(int optimizer_id,
                 nullptr,
                 (params.options().dtype() == at::kHalf));
 
-#if defined(__ENABLE_CUDA__)
+#if defined(__ENABLE_CUDA__) or defined(__ENABLE_CANN__)
     opt->SynchronizeStreams();
 #endif
     return 0;
@@ -218,7 +231,7 @@ int ds_lion_step_plus_copy(int optimizer_id,
                            torch::Tensor& exp_avg,
                            torch::Tensor& gpu_params)
 {
-#if defined(__ENABLE_CUDA__)
+#if defined(__ENABLE_CUDA__) or defined(__ENABLE_CANN__)
     auto params_c = params.contiguous();
     auto gpu_params_c = gpu_params.contiguous();
     auto exp_avg_c = exp_avg.contiguous();

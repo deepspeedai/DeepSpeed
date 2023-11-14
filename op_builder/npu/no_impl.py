@@ -22,3 +22,12 @@ class NotImplementedBuilder(NPUOpBuilder):
 
     def sources(self):
         return []
+
+    def cxx_args(self):
+        return []
+
+    def extra_ldflags(self):
+        return []
+
+    def include_paths(self):
+        return []

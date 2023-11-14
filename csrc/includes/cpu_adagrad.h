@@ -18,6 +18,10 @@
 #include "cuda.h"
 #include "custom_cuda_layers.h"
 typedef __half ds_half_precision_t;
+#elif defined(__ENABLE_CANN__)
+#include "acl/acl.h"
+#include "torch_npu/csrc/core/npu/NPUStream.h"
+typedef c10::Half ds_half_precision_t;
 #else
 typedef unsigned short ds_half_precision_t;
 #endif
@@ -42,6 +46,11 @@ public:
         _streams[0] = TrainingContext::Instance().GetCurrentStream();
         _streams[1] = TrainingContext::Instance().GetNewStream();
         _buf_index = false;
+#elif defined(__ENABLE_CANN__)
+        aclrtMallocHost((void**)_doubled_buffer, TILE * sizeof(float));
+        aclrtMallocHost((void**)(_doubled_buffer + 1), TILE * sizeof(float));
+
+        _buf_index = false;
 #endif
     }
     ~Adagrad_Optimizer()
@@ -49,6 +58,9 @@ public:
 #if defined(__ENABLE_CUDA__)
         cudaFreeHost(_doubled_buffer[0]);
         cudaFreeHost(_doubled_buffer[1]);
+#elif defined(__ENABLE_CANN__)
+        aclrtFreeHost(_doubled_buffer[0]);
+        aclrtFreeHost(_doubled_buffer[1]);
 #endif
     }
 #if defined(__AVX512__) or defined(__AVX256__)
@@ -68,6 +80,11 @@ public:
     inline void SynchronizeStreams()
     {
         for (int i = 0; i < 2; i++) cudaStreamSynchronize(_streams[i]);
+    }
+#elif defined(__ENABLE_CANN__)
+    inline void SynchronizeStreams()
+    {
+        for (int i = 0; i < 2; i++) aclrtSynchronizeStream(_streams[i].stream());
     }
 #endif
     inline void IncrementStep(size_t step)
@@ -95,6 +112,11 @@ private:
     bool _buf_index;
     float* _doubled_buffer[2];
     cudaStream_t _streams[2];
+#elif defined(__ENABLE_CANN__)
+    float* _doubled_buffer[2];
+    c10_npu::NPUStream _streams[2] = {c10_npu::getCurrentNPUStream(),
+                                      c10_npu::getNPUStreamFromPool()};
+    bool _buf_index;
 #endif
 };
 
@@ -125,6 +147,8 @@ void Adagrad_Optimizer::Step_AVX(size_t* rounded_size,
         size_t offset = copy_size + t;
 #if defined(__ENABLE_CUDA__)
         if ((t / TILE) >= 2) { cudaStreamSynchronize(_streams[_buf_index]); }
+#elif defined(__ENABLE_CANN__)
+        if ((t / TILE) >= 2) { aclrtSynchronizeStream(_streams[_buf_index].stream()); }
 #endif
 #pragma omp parallel for
         for (size_t i = t; i < offset; i += SIMD_WIDTH * span) {
@@ -149,7 +173,7 @@ void Adagrad_Optimizer::Step_AVX(size_t* rounded_size,
             simd_fma<span>(param_4, grad_4, step_size_4, param_4);
 
             simd_store<span>(_params + i, param_4, half_precision);
-#if defined(__ENABLE_CUDA__)
+#if defined(__ENABLE_CUDA__) or defined(__ENABLE_CANN__)
             if (dev_params) {
                 simd_store<span>(_doubled_buffer[_buf_index] + (i - t), param_4, half_precision);
             }
@@ -167,6 +191,17 @@ void Adagrad_Optimizer::Step_AVX(size_t* rounded_size,
 
             _buf_index = !_buf_index;
         }
+#elif defined(__ENABLE_CANN__)
+        if (dev_params) {
+            size_t memcpy_size = copy_size * sizeof(_doubled_buffer[_buf_index][0]);
+            if (half_precision) memoryCopySize /= 2;
+            aclrtMemcpy(dev_params + t,
+                        memcpy_size,
+                        _doubled_buffer[_buf_index],
+                        memcpy_size,
+                        aclrtMemcpyKind::ACL_MEMCPY_HOST_TO_DEVICE);
+
+            _buf_index = !_buf_index;
 #endif
     }
     *rounded_size = new_rounded_size;

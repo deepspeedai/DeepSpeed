@@ -61,6 +61,8 @@ void Adam_Optimizer::Step_1(float* _params,
             size_t offset = copy_size + t;
 #if defined(__ENABLE_CUDA__)
             if ((t / TILE) >= 2) { cudaStreamSynchronize(_streams[_buf_index]); }
+#elif defined(__ENABLE_CANN__)
+            if ((t / TILE) >= 2) { aclrtSynchronizeStream(_streams[_buf_index].stream()); }
 #endif
 #pragma omp parallel for
             for (size_t k = t; k < offset; k++) {
@@ -81,7 +83,7 @@ void Adam_Optimizer::Step_1(float* _params,
                 grad = momentum / grad;
                 if (_weight_decay > 0 && _adamw_mode) { param += w_decay * param; }
                 param = grad * step_size + param;
-#if defined(__ENABLE_CUDA__)
+#if defined(__ENABLE_CUDA__) or defined(__ENABLE_CANN__)
                 if (dev_params) _doubled_buffer[_buf_index][k - t] = param;
 #endif
                 if (half_precision)
@@ -95,6 +97,17 @@ void Adam_Optimizer::Step_1(float* _params,
             if (dev_params) {
                 launch_param_update(
                     _doubled_buffer[_buf_index], dev_params + t, (copy_size), _streams[_buf_index]);
+
+                _buf_index = !_buf_index;
+            }
+#elif defined(__ENABLE_CANN__)
+            if (dev_params) {
+                size_t memcpy_size = copy_size * sizeof(_doubled_buffer[_buf_index][0]);
+                aclrtMemcpy(dev_params + t,
+                            memcpy_size,
+                            _doubled_buffer[_buf_index],
+                            memcpy_size,
+                            aclrtMemcpyKind::ACL_MEMCPY_HOST_TO_DEVICE);
 
                 _buf_index = !_buf_index;
             }
@@ -239,7 +252,7 @@ int ds_adam_step(int optimizer_id,
                 nullptr,
                 (params.options().dtype() == at::kHalf));
 
-#if defined(__ENABLE_CUDA__)
+#if defined(__ENABLE_CUDA__) or defined(__ENABLE_CANN__)
     opt->SynchronizeStreams();
 #endif
     return 0;
@@ -257,18 +270,18 @@ int ds_adam_step_plus_copy(int optimizer_id,
                            torch::Tensor& grads,
                            torch::Tensor& exp_avg,
                            torch::Tensor& exp_avg_sq,
-                           torch::Tensor& gpu_params)
+                           torch::Tensor& device_params)
 {
-#if defined(__ENABLE_CUDA__)
+#if defined(__ENABLE_CUDA__) or defined(__ENABLE_CANN__)
     auto params_c = params.contiguous();
-    auto gpu_params_c = gpu_params.contiguous();
+    auto device_params_c = device_params.contiguous();
     auto exp_avg_c = exp_avg.contiguous();
     auto exp_avg_sq_c = exp_avg_sq.contiguous();
     auto grads_c = grads.contiguous();
 
     float* params_ptr = (float*)params_c.data_ptr();
     float* grads_ptr = (float*)grads_c.data_ptr();
-    ds_half_precision_t* gpu_params_ptr = (ds_half_precision_t*)gpu_params_c.data_ptr();
+    ds_half_precision_t* device_params_ptr = (ds_half_precision_t*)device_params_c.data_ptr();
     float* exp_avg_ptr = (float*)exp_avg_c.data_ptr();
     float* exp_avg_sq_ptr = (float*)exp_avg_sq_c.data_ptr();
 
@@ -281,7 +294,7 @@ int ds_adam_step_plus_copy(int optimizer_id,
                 exp_avg_ptr,
                 exp_avg_sq_ptr,
                 params_c.numel(),
-                gpu_params_ptr,
+                device_params_ptr,
                 (params.options().dtype() == at::kHalf));
 
     opt->SynchronizeStreams();

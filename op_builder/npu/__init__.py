@@ -4,6 +4,8 @@
 # DeepSpeed Team
 '''Copyright The Microsoft DeepSpeed Team'''
 
-# NPU related operators will be added in the future.
 from .fused_adam import FusedAdamBuilder
 from .no_impl import NotImplementedBuilder
+from .cpu_adam import CPUAdamBuilder
+from .cpu_adagrad import CPUAdagradBuilder
+from .cpu_lion import CPULionBuilder
