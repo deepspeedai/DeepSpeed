@@ -390,7 +390,7 @@ def main(args=None):
     args = parse_args(args)
 
     # For when argparse interprets remaining args as a single string
-    args.user_args = shlex.split(" ".join(list(map(lambda x: x if x.startswith("-") else f"'{x}'", args.user_args))))
+    args.user_args = shlex.split(" ".join(list(map(lambda x: x if x.startswith("-") else f'"{x}"', args.user_args))))
 
     if args.elastic_training:
         assert args.master_addr != "", "Master Addr is required when elastic training is enabled"
