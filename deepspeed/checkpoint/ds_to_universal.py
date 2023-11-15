@@ -26,6 +26,7 @@ from deepspeed.checkpoint import (
     PARAM_SHAPES,
     PARAM,
     CAT_DIM,
+    PARAM_N_SUB_PARAMS,
     VOCAB_TENSOR,
     UNIVERSAL_CHECKPOINT_INFO,
     VOCABULARY_PARAMETER_PATTERNS,
@@ -33,6 +34,7 @@ from deepspeed.checkpoint import (
     TP_REPLICATED_PARAMETER_PATTERNS,
     PARAMETER_TO_AVERAGE_PATTERNS,
     PARAMETER_WITH_ROW_PARALLELISM_PATTERNS,
+    PARAMETER_WITH_2_SUB_PARAMS_CAT_DIM_0,
 )
 
 
@@ -148,7 +150,6 @@ def _merge_zero_shards(param_base_path, state, tp_degree, slice_shape):
         shards = [torch.load(p) for p in paths]
         slice = torch.cat(shards, dim=0).reshape(slice_shape)
         slices.append(slice)
-
     return slices
 
 
@@ -163,8 +164,9 @@ def merge_tp_slices(ds_checkpoint, dir, slice_dir, tp_degree, name_and_shape):
     parameters_to_average = universal_checkpoint_info.get(PARAMETER_TO_AVERAGE_PATTERNS, [])
     parameters_with_row_parallelism = universal_checkpoint_info.get(PARAMETER_WITH_ROW_PARALLELISM_PATTERNS, [])
     vocabulary_parameters = universal_checkpoint_info.get(VOCABULARY_PARAMETER_PATTERNS, [])
+    parameters_with_2_sub_params_cat_dim_0 = universal_checkpoint_info.get(PARAMETER_WITH_2_SUB_PARAMS_CAT_DIM_0, [])
     unmatched_patterns = set(replicated_parameters + parameters_to_average + parameters_with_row_parallelism +
-                             vocabulary_parameters)
+                             vocabulary_parameters + parameters_with_2_sub_params_cat_dim_0)
 
     def get_matched_pattern(patterns_, name_):
         matched_ = [pattern_ for pattern_ in patterns_ if re.match(pattern_, name_)]
@@ -190,6 +192,14 @@ def merge_tp_slices(ds_checkpoint, dir, slice_dir, tp_degree, name_and_shape):
         elif get_matched_pattern(parameters_to_average, name):
             param = sum(slices) / len(slices)
             # print(f'merge {name} using average')
+        elif get_matched_pattern(parameters_with_2_sub_params_cat_dim_0, name):
+            cat_dim = 0
+            chunked_slices = [torch.chunk(s, 2, dim=cat_dim) for s in slices]
+            merged_chunks_0 = torch.cat([s[0] for s in chunked_slices], dim=cat_dim)
+            merged_chunks_1 = torch.cat([s[1] for s in chunked_slices], dim=cat_dim)
+            param = torch.cat([merged_chunks_0, merged_chunks_1], dim=cat_dim)
+            ckpt_dict[CAT_DIM] = cat_dim
+            ckpt_dict[PARAM_N_SUB_PARAMS] = 2
         else:
             cat_dim = 1 if get_matched_pattern(parameters_with_row_parallelism, name) else 0
             # print(f"merge {name} with CAT DIM: {cat_dim}")

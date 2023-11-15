@@ -6,7 +6,7 @@
 import os
 import torch
 import types
-from .constants import (FP32_WEIGHT_KEY, PARAM, VOCAB_TENSOR, CAT_DIM)
+from .constants import (FP32_WEIGHT_KEY, PARAM, VOCAB_TENSOR, CAT_DIM, PARAM_N_SUB_PARAMS)
 
 
 def load_hp_checkpoint_state(self, folder, tp_rank, tp_world_size):
@@ -68,10 +68,18 @@ def load_hp_checkpoint_state(self, folder, tp_rank, tp_world_size):
         #        print(f"{dst_tensor.shape=} {dst_tensor.numel()=}{folder=}")
 
         # since when we do many to 1 on tp we cat sometimes on dim=0 and other times on dim=1 we have to do exactly the same in reverse
+        # special case is when a single parameter is effectively a container for multiple sub parameters
+        # (more details at PARAM_N_SUB_PARAMS definition)
         chunk_dim = ckpt_dict.get(CAT_DIM, 0)
+        n_sub_params = ckpt_dict.get(PARAM_N_SUB_PARAMS, 1)
+        if n_sub_params > 1:
+            sub_params = full_hp_param.chunk(n_sub_params, dim=chunk_dim)
+            sub_params_tp_slice = [p.chunk(tp_world_size, dim=chunk_dim)[tp_rank] for p in sub_params]
+            tp_hp_slice = torch.cat(sub_params_tp_slice, dim=chunk_dim)
+        else:
+            # this performs the opposite of cat when merging TP slices
+            tp_hp_slice = full_hp_param.chunk(tp_world_size, chunk_dim)[tp_rank]
 
-        # this performs the opposite of cat when merging TP slices
-        tp_hp_slice = full_hp_param.chunk(tp_world_size, chunk_dim)[tp_rank]
         tp_hp_slice = tp_hp_slice.flatten()
 
         lp_frag_address = hp_mapping.lp_fragment_address
