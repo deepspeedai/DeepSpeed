@@ -16,6 +16,13 @@ from ..inference_parameter import InferenceParameter, STR_TO_DTYPE
 from ..inference_utils import elem_size
 
 
+def pad_to_aligned_offset(offset: int, alignment: int = 256) -> int:
+    """
+    Pad the provided offset to a well-aligned value.
+    """
+    return ((offset + alignment - 1) // alignment) * alignment
+
+
 class TensorMetadata(DeepSpeedConfigModel):
     """
     A class to represent a tensor specification.
@@ -149,7 +156,7 @@ def flatten_inference_model(
                                                        strides=param.stride(),
                                                        offset=cur_offset)
 
-            cur_offset += elem_size(param.dtype) * param.numel()
+            cur_offset += pad_to_aligned_offset(elem_size(param.dtype) * param.numel())
 
             for t_name, tensor in param.aux_attrs.items():
                 param_metadata.aux_params[t_name] = TensorMetadata(dtype=str(tensor.dtype),
@@ -157,7 +164,7 @@ def flatten_inference_model(
                                                                    strides=tensor.stride(),
                                                                    offset=cur_offset)
 
-                cur_offset += elem_size(param.dtype) * param.numel()
+                cur_offset += pad_to_aligned_offset(elem_size(param.dtype) * param.numel())
 
             layer_metadata.params[p_name] = param_metadata
 
