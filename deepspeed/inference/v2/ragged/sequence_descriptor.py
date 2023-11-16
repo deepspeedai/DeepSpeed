@@ -195,7 +195,7 @@ class DSSequenceDescriptor(BaseSequenceDescriptor):
         """
         return self._kv_cache_ids[cache_group].data_ptr()
 
-    @property
+    #TODO: this was previously a property but causing issues with PR-4668 need to consult w. Connor
     def all_block_ids(self, cache_group: int = 0) -> torch.Tensor:
         """
         Return the Tensor containing all block IDs for this sequence in the specified cache group.
