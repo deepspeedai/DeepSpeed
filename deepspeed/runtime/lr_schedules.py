@@ -812,7 +812,7 @@ class WarmupCosineLR(object):
         self.warmup_type = warmup_type
         self.warmup_min_ratio = warmup_min_ratio
         self.warmup_num_steps = max(2, warmup_num_steps)
-        self.inverse_log_warm_up = 1.0 / math.log(warmup_num_steps)
+        self.inverse_log_warm_up = 1.0 / math.log(self.warmup_num_steps)
 
         if self.total_num_steps < self.warmup_num_steps:
             logger.warning('total_num_steps {} is less than warmup_num_steps {}'.format(
@@ -856,6 +856,12 @@ class WarmupCosineLR(object):
             return [0.0]
         lr_ratio = self.get_lr_ratio()
         return [org_lr * lr_ratio for org_lr in self.org_lrs]
+
+    def get_last_lr(self):
+        """ Return last computed learning rate by current scheduler.
+        """
+        assert getattr(self, '_last_lr', None) is not None, "need to call step() first"
+        return self._last_lr
 
     def state_dict(self):
         return {'last_batch_iteration': self.last_batch_iteration}
