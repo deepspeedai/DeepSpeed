@@ -2238,6 +2238,46 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
         if self._swappable_optimizer_subgroup(group_idx):
             self._optimizer_states_and_gradient_swap_out(group_idx)
 
+    ### Local API START ###
+
+    def get_local_fp32_param(self, param, optim_state_key=None) -> Tensor:
+        if not param.requires_grad:
+            return None
+        fp32_opt_state, group_idx = self._get_fp32_opt_state_partition(param, optim_state_key)
+        return fp32_opt_state
+
+    def get_local_fp32_grad_for_param(self, param) -> Tensor:
+        if not param.requires_grad:
+            return None
+
+        if not get_accelerator().is_synchronized_device():
+            self.reduce_and_partition_stream.synchronize()
+
+        if self.offload_optimizer:
+            group_idx, dest_offset, num_elements = self.grad_position[self.get_param_id(param)]
+            fp32_grad = self.fp32_partitioned_groups_flat[group_idx].grad.narrow(0, dest_offset, num_elements)
+        else:
+            fp32_grad = self.__param_id_to_grad_partition[param.ds_id].float()
+        return fp32_grad
+
+    def set_local_hp_param(self, value, param, optim_state_key=None):
+        if not param.requires_grad:
+            return
+
+        assert hasattr(param, "ds_tensor"), f" The parameter does not contain the partitioned copy of the tensor."
+        assert value.numel() == param.ds_tensor.numel(
+        ), f" Number of elements do not match: {value.numel()} != {param.ds_tensor.ds_numel}"
+
+        fp32_opt_state_partition, group_idx = self._get_fp32_opt_state_partition(param, optim_state_key)
+        value_partition = value.flatten()
+        fp32_opt_state_partition.data.copy_(value_partition.data)
+
+        if self._swappable_optimizer_subgroup(group_idx):
+            self._optimizer_states_and_gradient_swap_out(group_idx)
+        logger.info(f"[set_local_hp_param][update the params' value successfully]")
+
+    ### Local API END ###
+
     @instrument_w_nvtx
     def _partition_all_parameters(self):
         self.parameter_offload.partition_all_parameters()

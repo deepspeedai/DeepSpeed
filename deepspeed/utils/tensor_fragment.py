@@ -185,6 +185,72 @@ def safe_get_full_grad(param):
     return None
 
 
+### Local API  START ###
+def safe_get_local_grad(param):
+    """Get the fp32 gradient of a partitioned parameter.
+        Args:
+            param (``torch.nn.Parameter``): A model parameter
+    """
+    if param.grad is not None:
+        return param.grad
+
+    # ZeRO stage 3 param
+    if hasattr(param, 'ds_id'):
+        return param._z3_optimizer.get_local_fp32_grad_for_param(param)
+
+    return None
+
+
+def safe_get_local_fp32_param(param):
+    """Get the fp32 partitioned parameter.
+        Args:
+            param (``torch.nn.Parameter``): A model parameter
+    """
+    # ZeRO stage 3 param
+    if hasattr(param, 'ds_id'):
+        return param._z3_optimizer.get_local_fp32_param(param)
+
+    return None
+
+
+def safe_get_local_optimizer_state(param, optim_state_key):
+    """Get the fp32 optimizer state of a partitioned parameter.
+        Args:
+            param (``torch.nn.Parameter``): A model parameter
+            optim_state_key (``string``): Key value of optimizer state (e.g., `exp_avg` in Adam optimizer)
+    """
+    # ZeRO stage 3 param
+    if hasattr(param, 'ds_id'):
+        return param._z3_optimizer.get_local_fp32_param(param, optim_state_key)
+
+    return None
+
+
+def safe_set_local_optimizer_state(param, value, optim_state_key):
+    """Update the fp32 optimizer state of a partitioned parameter.
+        Args:
+            param (``torch.nn.Parameter``): A model parameter
+            value (``torch.Tensor``): New value
+            optim_state_key (``string``): Key value of optimizer state (e.g., `exp_avg` in Adam optimizer)
+    """
+    # ZeRO stage 3 param
+    if hasattr(param, 'ds_id'):
+        param._z3_optimizer.set_local_hp_param(value, param, optim_state_key)
+
+
+def safe_set_local_fp32_param(param, value):
+    """Update the partitioned fp32 parameter.
+        Args:
+            param (``torch.nn.Parameter``): A model parameter
+            value (``torch.Tensor``): New value
+    """
+    # ZeRO stage 3 param
+    if hasattr(param, 'ds_id'):
+        param._z3_optimizer.set_local_hp_param(value, param)
+
+
+### Local API  END ###
+
 # TODO: Implement API for setting ZeRO partitioned gradients
 
 

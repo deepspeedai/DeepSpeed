@@ -14,6 +14,8 @@ from .tensor_fragment import tensor_fragment, get_full_hp_param, get_hp_fragment
 from .tensor_fragment import safe_get_full_fp32_param, safe_get_full_grad, safe_get_full_optimizer_state
 from .tensor_fragment import set_full_hp_param
 from .tensor_fragment import safe_set_full_fp32_param, safe_set_full_optimizer_state
+from .tensor_fragment import safe_get_local_fp32_param, safe_get_local_grad, safe_get_local_optimizer_state
+from .tensor_fragment import safe_set_local_fp32_param, safe_set_local_optimizer_state
 from .mixed_precision_linkage import link_hp_params
 from deepspeed.runtime.dataloader import RepeatingLoader
 from .numa import get_numactl_cmd

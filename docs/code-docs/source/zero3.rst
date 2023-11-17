@@ -341,9 +341,9 @@ parallelism to fit them in limited GPU memory.
 Debugging
 ---------
 
-Debugging ZeRO training is complicated by the partitioning of parameters, gradients, and optimizer states. None of these 3 groups of tensors (model states) can be normally accessed because of that. To overcome that DeepSpeed provides the following routines for accessing individual model states in their unpartitioned form.
+Debugging ZeRO training is complicated by the partitioning of parameters, gradients, and optimizer states. None of these 3 groups of tensors (model states) can be normally accessed because of that. To overcome that DeepSpeed provides the following routines for accessing individual model states in both their partitioned (local) and unpartitioned (full) forms.
 
-Important: Please note that these utilities must be called by all processes participating in the training, even if you decide to do something with the result only in the main process. If all processes don't participate these utilities will hang waiting for all processes to send their contribution.
+Important: Please note that, to access the unpartitioned (full) form, these utilities must be called by all processes participating in the training, even if you decide to do something with the result only in the main process. If all processes don't participate these utilities will hang waiting for all processes to send their contribution.
 
 Additionally, you must be aware that these routines return correct data only in specific phases of the training. So for examples the gradients are valid after ``backward`` and before ``step``. The optimizer states are updated after ``step``. Same goes for fp32 master weights.
 
@@ -352,6 +352,12 @@ Additionally, you must be aware that these routines return correct data only in 
 .. autofunction:: deepspeed.utils.safe_get_full_grad
 
 .. autofunction:: deepspeed.utils.safe_get_full_optimizer_state
+
+.. autofunction:: deepspeed.utils.safe_get_local_fp32_param
+
+.. autofunction:: deepspeed.utils.safe_get_local_grad
+
+.. autofunction:: deepspeed.utils.safe_get_local_optimizer_state
 
 
 These routines can be used in a training loop as shown in the following snippet.
@@ -362,15 +368,25 @@ These routines can be used in a training loop as shown in the following snippet.
     [...]
     from deepspeed.utils import safe_get_full_fp32_param, safe_get_full_grad, safe_get_full_optimizer_state
     for n, lp in model.named_parameters():
-        # 1. gradient lookup
+        # 1. Access the full states
+        # 1) gradient lookup
         # For zero1 and zero2, gradient lookup must be called after `backward` and before `step`
         # For zero3, gradient lookup must be called after `backward`
         hp_grad = safe_get_full_grad(lp)
 
-        # 2. fp32 and optim states can probably be called anywhere in the training loop, but will be updated after `step`
+
+        # 2) fp32 and optim states can probably be called anywhere in the training loop, but will be updated after `step`
         hp = safe_get_full_fp32_param(lp)
         exp_avg = safe_get_full_optimizer_state(lp, "exp_avg")
         exp_avg_sq = safe_get_full_optimizer_state(lp, "exp_avg_sq")
+
+        # 2. Access the local states (zero3)
+        # For zero3, all of the parameters, gradients, and optimizer states are partitioned,
+        # and each process can access its corresponding local state.
+        local_hp = safe_get_local_fp32_param(lp)
+        local_hp_grad = safe_get_local_grad(lp)
+        local_exp_avg = safe_get_local_optimizer_state(lp, "exp_avg")
+        local_exp_avg_sq = safe_get_local_optimizer_state(lp, "exp_avg_sq")
 
     [...]
     optimizer.step()
@@ -380,12 +396,15 @@ These routines can be used in a training loop as shown in the following snippet.
 Modifying Partitioned States
 ----------------------------
 
-Sometimes, a user may want to modify parameters or optimizer states outside of the regular training loop. This is currently difficult in ZeRO training because of partitioning. To overcome that, DeepSpeed provides the following two routines for modifying the fp32 master parameters and the fp32 optimizer states.
+Sometimes, a user may want to modify parameters or optimizer states outside of the regular training loop. This is currently difficult in ZeRO training because of partitioning. To overcome that, DeepSpeed provides the following routines for modifying the fp32 master parameters and the fp32 optimizer states.
 
 .. autofunction:: deepspeed.utils.safe_set_full_fp32_param
 
 .. autofunction:: deepspeed.utils.safe_set_full_optimizer_state
 
+.. autofunction:: deepspeed.utils.safe_set_local_fp32_param
+
+.. autofunction:: deepspeed.utils.safe_set_local_optimizer_state
 
 These routines can be used at any point after initialization of the DeepSpeed engine (i.e., ``deepspeed.initialize()``) as shown in the following snippet.
 
@@ -393,14 +412,22 @@ These routines can be used at any point after initialization of the DeepSpeed en
 
     [...]
     from deepspeed.utils import safe_set_full_fp32_param, safe_set_full_optimizer_state
+    from deepspeed.utils import safe_set_local_fp32_param, safe_set_local_optimizer_state
     # Here is an example to zero all the fp32 parameters and optimizer states.
     for n, lp in model.named_parameters():
-        # Assume zero stage 1 or 2, since stage 3 requires a gather to assemble lp
+        # 1. For zero stage 1 or 2, set the full fp32 and their full optim states
         zero_tensor = torch.zeros_like(lp)
 
-        hp = safe_set_full_fp32_param(lp, zero_tensor)
-        exp_avg = safe_get_full_optimizer_state(lp, zero_tensor, "exp_avg")
-        exp_avg_sq = safe_get_full_optimizer_state(lp, zero_tensor, "exp_avg_sq")
+        safe_set_full_fp32_param(lp, zero_tensor)
+        safe_get_full_optimizer_state(lp, zero_tensor, "exp_avg")
+        safe_get_full_optimizer_state(lp, zero_tensor, "exp_avg_sq")
+
+        # 2. For zero stage 3, each process sets its local fp32 parameters and their local optimizer states individually
+        zero_tensor_local = torch.zeros_like(lp.ds_tensor.shape)
+
+        safe_set_local_fp32_param(lp, zero_tensor_local)
+        safe_set_local_optimizer_state(lp, zero_tensor_local, "exp_avg")
+        safe_set_local_optimizer_state(lp, zero_tensor_local, "exp_avg_sq")
 
     [...]
 
