@@ -3,6 +3,7 @@
 
 # DeepSpeed Team
 
+import re
 from typing import Type
 
 import torch
@@ -277,6 +278,30 @@ class LayerContainer(metaclass=LayerMetaclass):
             dep_name (str): The name of the dependency to set.
             dep_value (torch.Tensor): The value to set the dependency to.
         """
+
+        def get_dep_name_target(dep_name: str) -> str:
+            """
+            Helper method for getting the target name for a dependency from the
+            mapping params. Tries to match exact string first, then looks for
+            wildcards and attempts regex matching. Will return empty string if
+            no match found.
+            """
+            if dep_name in self.mapping_params:
+                # If we have an exact match, it's a direct mapping and we can
+                # immediately set the value.
+                return self.mapping_params[dep_name]
+
+            matched_targets = []
+            for key, target in self.mapping_params.items():
+                regex_key = key.replace("*", ".*")
+                if re.match(regex_key, dep_name):
+                    matched_targets.append(target)
+            if len(matched_targets) > 1:
+                raise ValueError(f"Multiple targets matched for dependency {dep_name}: {matched_targets}")
+            if matched_targets:
+                return matched_targets[0]
+            return ""
+
         if dep_name in self.mapping_params:
             # If we have an exact match, it's a direct mapping and we can immediately set
             # the value.
@@ -309,6 +334,22 @@ class LayerContainer(metaclass=LayerMetaclass):
                     target_dependency = getattr(target_param, target_dependency_name)
                     target_dependency[target_idx] = dep_value
                 return
+
+        # TODO: Refactor this with the help of cmikeh2
+        # We should be able to combine this with the wildcard matching above.
+        target = get_dep_name_target(dep_name)
+        if target:
+            # Convert single targets to a list for consistency
+            if isinstance(target, str):
+                target = [target]
+
+            for target_name in target:
+                # Double setting doesn't set the attribute correctly, so we do a getattr then setattr
+                target_param_name, target_dependency_name = target_name.split(".")
+                target_param = getattr(self, target_param_name)
+                setattr(target_param, target_dependency_name, dep_value)
+            return
+
         raise ValueError(
             "Could not find a mapping for dependency \"{}\". Check that it is included in the ``MAPPING_PARAMS``. See docstring for more on ``MAPPING_PARAMS``"
             .format(dep_name))

@@ -21,10 +21,10 @@ class OPTPolicy(InferenceV2Policy):
 
         transformer_containers = [OPTTransformerContainer(self.model) for _ in range(self.model.num_layers)]
 
-        map.set_transformer_params(['model.decoder.layers'], transformer_containers)
+        map.set_transformer_params(['model.decoder.layers', 'decoder.layers'], transformer_containers)
 
         map.set_non_transformer_params(OPTNonTransformerContainer(self.model))
 
-        map.set_unmapped_params([])
+        map.set_unmapped_params(['lm_head.weight'])
 
         return map

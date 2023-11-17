@@ -87,9 +87,8 @@ class OPTNonTransformerContainer(LayerContainer):
     final_norm_b: NormParameter
 
     PARAM_MAPPING = {
-        "model.decoder.embed_tokens.weight": "word_emb.params",
-        "model.decoder.embed_positions.weight": "word_emb_pos.params",
-        "model.decoder.final_layer_norm.weight": "final_norm_w.params",
-        "model.decoder.final_layer_norm.bias": "final_norm_b.params",
-        "lm_head.weight": "word_unembed.params",
+        "*decoder.embed_tokens.weight": ["word_emb.params", "word_unembed.params"],
+        "*decoder.embed_positions.weight": "word_emb_pos.params",
+        "*decoder.final_layer_norm.weight": "final_norm_w.params",
+        "*decoder.final_layer_norm.bias": "final_norm_b.params",
     }
