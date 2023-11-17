@@ -1376,8 +1376,6 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
             # offload the gradient partition if applicable
             if self.offload_optimizer:
                 i, dest_offset, _ = self.grad_position[self.get_param_id(param)]
-                offload_fp32_gradients = {}
-                offload_fp32_offsets = {}
 
                 if self.is_gradient_accumulation_boundary:
                     self.norm_for_param_grads[self.get_param_id(param)] = self._constant_buffered_norm2(grad_buffer)
