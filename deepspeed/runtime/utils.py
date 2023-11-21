@@ -937,6 +937,15 @@ def align_dense_tensors(tensor_list, alignment):
     return padded_tensor_list
 
 
+def all_gather_all_partitions(global_flatten_group, partitioned_param_groups, dp_process_group):
+    for group_id, partitioned_params in enumerate(partitioned_param_groups):
+        # Sequential AllGather Best of both worlds
+        partition_id = dist.get_rank(group=dp_process_group[group_id])
+        dp_world_size = dist.get_world_size(group=dp_process_group[group_id])
+        dist.all_gather_into_tensor(global_flatten_group[group_id], partitioned_params[partition_id],
+                                    dp_process_group[group_id])
+
+
 def all_gather_dp_groups(partitioned_param_groups, dp_process_group, start_alignment_factor, allgather_bucket_size):
     for group_id, partitioned_params in enumerate(partitioned_param_groups):
         # Sequential AllGather Best of both worlds

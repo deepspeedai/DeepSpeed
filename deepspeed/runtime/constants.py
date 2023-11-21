@@ -433,3 +433,9 @@ PIPE_REPLICATED = 'ds_pipe_replicated'
 #########################################
 DATA_PARALLEL_GROUP = "data_parallel_group"
 GLOBAL_RANK = "global_rank"
+
+#########################################
+# EXPERT-DATA PARALLELISM TOPO Config
+#########################################
+USE_DATA_BEFORE_EXPERT_PARALLEL = "use_data_before_expert_parallelism"
+USE_DATA_BEFORE_EXPERT_PARALLEL_DEFAULT = False
