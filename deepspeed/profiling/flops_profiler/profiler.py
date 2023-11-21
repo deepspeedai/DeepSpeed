@@ -1139,7 +1139,7 @@ def get_module_duration(module):
     duration = module.__duration__
     if duration == 0:  # e.g. ModuleList
         for m in module.children():
-            duration += m.__duration__
+            duration += get_module_duration(m)
     return duration
 
 
