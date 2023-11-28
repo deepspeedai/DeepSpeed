@@ -1,40 +1,55 @@
-# Ignore Python compiled files
+## Ignore Python compiled files
 *.pyc
 
-# Ignore IDE-specific files and directories
-.idea/         # JetBrains IDE settings
-.vscode/       # Visual Studio Code settings
-.theia/        # Theia IDE settings
+## Ignore IDE-specific files and directories
+# JetBrains IDE settings
+.idea/
+# Visual Studio Code settings
+.vscode/
+# Theia IDE settings
+.theia/
 
-# Ignore temporary and backup files
-*~             # General backup files
-*.swp          # Vim swap files
+## Ignore temporary and backup files
+# General backup files
+*~
+# Vim swap files
+*.swp
 
-# Ignore log files
+## Ignore log files
 *.log
 
-# Ignore a specific generated file
+## Ignore a specific generated file
 deepspeed/git_version_info_installed.py
 
-# Ignore Python bytecode cache
+## Ignore Python bytecode cache
 __pycache__
 
-# Build + installation data
-build/                  # Build artifacts
-dist/                   # Distribution files
-*.so                    # Compiled shared objects
-deepspeed.egg-info/     # Deepspeed package info
-build.txt               # Build information
+## Build + installation data
+# Build artifacts
+build/
+# Distribution files
+dist/
+# Compiled shared objects
+*.so
+# Deepspeed package info
+deepspeed.egg-info/
+# Build information
+build.txt
 
-# Website generated files
-docs/_site/             # Jekyll generated site
-docs/build              # Generated documentation
+## Website generated files
+# Jekyll generated site
+docs/_site/
+# Generated documentation
+docs/build
 docs/code-docs/source/_build
 docs/code-docs/_build
 docs/code-docs/build
-.sass-cache/            # SASS cache
-.jekyll-cache/          # Jekyll cache
+# SASS cache
+.sass-cache/
+# Jekyll cache
+.jekyll-cache/
 .jekyll-metadata
 
-# Testing data
-tests/unit/saved_checkpoint/  # Saved checkpoints for testing
+## Testing data
+# Saved checkpoints for testing
+tests/unit/saved_checkpoint/
