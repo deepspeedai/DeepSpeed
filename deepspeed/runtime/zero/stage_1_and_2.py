@@ -13,8 +13,7 @@ from torch._utils import _flatten_dense_tensors, _unflatten_dense_tensors
 from deepspeed.runtime import ZeROOptimizer
 from deepspeed.runtime.fp16.loss_scaler import CreateLossScaler
 from deepspeed.runtime.utils import (bwc_tensor_model_parallel_rank, get_global_norm, empty_cache, see_memory_usage,
-                                     inf, is_model_parallel_parameter, align_dense_tensors, all_gather_dp_groups,
-                                     all_gather_all_partitions)
+                                     inf, is_model_parallel_parameter, align_dense_tensors, all_gather_dp_groups)
 
 from deepspeed.runtime.zero.config import ZeroStageEnum
 from deepspeed.runtime.zero.offload_config import OffloadDeviceEnum
@@ -1866,16 +1865,11 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
         self.timers(OPTIMIZER_ALLGATHER_TIMER).start()
         # Gather the updated weights from everyone.
         # Then all partitions of the model parameters are updated and ready for next round forward.
-        if dist.has_all_gather_into_tensor():
-            all_gather_all_partitions(global_flatten_group=self.bit16_groups_flat,
-                                      partitioned_param_groups=self.parallel_partitioned_bit16_groups,
-                                      dp_process_group=self.real_dp_process_group)
-        else:
-            all_gather_dp_groups(partitioned_param_groups=self.parallel_partitioned_bit16_groups,
-                                 dp_process_group=self.real_dp_process_group,
-                                 start_alignment_factor=self.nccl_start_alignment_factor,
-                                 allgather_bucket_size=self.allgather_bucket_size)
-
+        all_gather_dp_groups(groups_flat=self.bit16_groups_flat,
+                             partitioned_param_groups=self.parallel_partitioned_bit16_groups,
+                             dp_process_group=self.real_dp_process_group,
+                             start_alignment_factor=self.nccl_start_alignment_factor,
+                             allgather_bucket_size=self.allgather_bucket_size)
         self.timers(OPTIMIZER_ALLGATHER_TIMER).stop()
 
         # TODO: we probably don't need this? just to be safe
@@ -1896,16 +1890,11 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
             # print_rank_0(f'update_lp_params {i=} {partition_id=}', force=True)
             # if i == 0:
             #     print_rank_0(f'{fp32_partition[:10]=}', force=True)
-
-        if dist.has_all_gather_into_tensor():
-            all_gather_all_partitions(global_flatten_group=self.bit16_groups_flat,
-                                      partitioned_param_groups=self.parallel_partitioned_bit16_groups,
-                                      dp_process_group=self.real_dp_process_group)
-        else:
-            all_gather_dp_groups(partitioned_param_groups=self.parallel_partitioned_bit16_groups,
-                                 dp_process_group=self.real_dp_process_group,
-                                 start_alignment_factor=self.nccl_start_alignment_factor,
-                                 allgather_bucket_size=self.allgather_bucket_size)
+        all_gather_dp_groups(groups_flat=self.bit16_groups_flat,
+                             partitioned_param_groups=self.parallel_partitioned_bit16_groups,
+                             dp_process_group=self.real_dp_process_group,
+                             start_alignment_factor=self.nccl_start_alignment_factor,
+                             allgather_bucket_size=self.allgather_bucket_size)
 
     def _average_expert_grad_norms(self, norm_groups):
         for i, norm in enumerate(norm_groups):

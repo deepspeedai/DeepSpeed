@@ -320,7 +320,8 @@ class BF16_Optimizer(ZeROOptimizer):
             # if i == 0:
             #     print_rank_0(f'{fp32_partition[:10]=}', force=True)
 
-        all_gather_dp_groups(partitioned_param_groups=self.bf16_partitioned_groups,
+        all_gather_dp_groups(groups_flat=self.bf16_groups_flat,
+                             partitioned_param_groups=self.bf16_partitioned_groups,
                              dp_process_group=self.real_dp_process_group,
                              start_alignment_factor=self.nccl_start_alignment_factor,
                              allgather_bucket_size=self.allgather_bucket_size)

@@ -2162,17 +2162,11 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
     def _fp32_state_allgather(self, param, fp32_state_partition):
         reduce_buffer = torch.zeros(self.partition_count * fp32_state_partition.numel(),
                                     dtype=torch.float32,
-                                    device=param.device).flatten()
+                                    device=param.device)
         my_rank = dist.get_rank(group=self.dp_process_group)
-        partitions = [
-            reduce_buffer.narrow(0,
-                                 fp32_state_partition.numel() * i, fp32_state_partition.numel())
-            for i in range(self.partition_count)
-        ]
-        partitions[my_rank].data.copy_(fp32_state_partition.data, non_blocking=False)
-
-        dist.all_gather(partitions, partitions[my_rank], group=self.dp_process_group)
-
+        partition = reduce_buffer.narrow(0, fp32_state_partition.numel() * my_rank, fp32_state_partition.numel())
+        partition.data.copy_(fp32_state_partition.data, non_blocking=False)
+        dist.all_gather_into_tensor(reduce_buffer, partition, group=self.dp_process_group)
         return reduce_buffer.narrow(0, 0, param.ds_numel).view(param.ds_shape)
 
     def get_fp32_grad_for_param(self, param) -> Tensor:

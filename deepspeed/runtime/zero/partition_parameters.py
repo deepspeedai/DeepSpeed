@@ -1815,10 +1815,10 @@ class Init(InsertPostInitMethodToModuleSubClasses):
 
                         offset += param_scale_numel
 
-        dist.all_gather(partitions,
-                        partitions[self.get_partition_rank()],
-                        group=self.get_partition_dp_group(param),
-                        async_op=False)
+        dist.all_gather_into_tensor(flat_tensor,
+                                    partitions[self.get_partition_rank()],
+                                    group=self.get_partition_dp_group(param),
+                                    async_op=False)
         if hasattr(param_list[0], 'ds_quant_scale'):
             dist.all_gather(flat_scale_tensor,
                             param_list[0].ds_quant_scale,

@@ -289,13 +289,9 @@ def gather_partitioned_activations(tensors, device=None):
             flat_tensor = torch.zeros([tensor_size], dtype=item.dtype, device=device)
         else:
             flat_tensor = torch.zeros([tensor_size], dtype=item.dtype, device=item.device)
-        partitions = []
-        for i in range(mp_size):
-            part_i = flat_tensor.narrow(0, partition_size * i, partition_size)
-            if i == mp_rank:
-                part_i.copy_(item)
-            partitions.append(part_i)
-        dist.all_gather(partitions, partitions[mp_rank], group=mp_group)
+        part = flat_tensor.narrow(0, partition_size * mp_rank, partition_size)
+        part.copy_(item)
+        dist.all_gather_into_tensor(flat_tensor, part, group=mp_group)
         input_tensor = flat_tensor.view(list(size.numpy()))
         item.data = input_tensor.data
 
