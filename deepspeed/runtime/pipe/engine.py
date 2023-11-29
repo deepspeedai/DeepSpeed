@@ -136,7 +136,7 @@ class PipelineEngine(DeepSpeedEngine):
         assert isinstance(self._config.pipeline['grad_partitioned'], bool)
         self.is_pipe_partitioned = self.is_model_parallel and self._config.pipeline['pipe_partitioned']
         self.is_grad_partitioned = self.is_model_parallel and self._config.pipeline['grad_partitioned']
-        logger.info(f'is_pipe_partitioned= {self.is_pipe_partitioned}',
+        logger.info(f'is_pipe_partitioned= {self.is_pipe_partitioned} '
                     f'is_grad_partitioned= {self.is_grad_partitioned}')
 
         model_parameters = filter(lambda p: p.requires_grad, self.module.parameters())
