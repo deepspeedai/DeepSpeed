@@ -359,6 +359,7 @@ class MiCS_Optimizer(DeepSpeedZeroOptimizer_Stage3):
                  offload_optimizer_config=None,
                  offload_param_config=None,
                  sub_group_size=1000000000000,
+                 offload_ratio=0.0,
                  mpu=None,
                  clip_grad=0,
                  gradient_accumulation_dtype=torch.float16,
@@ -374,7 +375,7 @@ class MiCS_Optimizer(DeepSpeedZeroOptimizer_Stage3):
                          dynamic_loss_args, verbose, contiguous_gradients, reduce_bucket_size, prefetch_bucket_size,
                          max_reuse_distance, max_live_parameters, param_persistence_threshold,
                          model_persistence_threshold, dp_process_group, reduce_scatter, overlap_comm,
-                         offload_optimizer_config, offload_param_config, sub_group_size, mpu, clip_grad,
+                         offload_optimizer_config, offload_param_config, sub_group_size, offload_ratio, mpu, clip_grad,
                          gradient_accumulation_dtype, communication_data_type, postscale_gradients,
                          gradient_predivide_factor, gradient_accumulation_steps, elastic_checkpoint, aio_config)
         first_param = next(module.parameters())
