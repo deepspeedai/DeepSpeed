@@ -68,7 +68,8 @@ class DSUNet(CUDAGraph, torch.nn.Module):
                  encoder_hidden_states,
                  return_dict=True,
                  cross_attention_kwargs=None,
-                 timestep_cond=None):
+                 timestep_cond=None,
+                 added_cond_kwargs=None):
         if cross_attention_kwargs:
             return self.unet(sample,
                              timestamp,
