@@ -474,8 +474,8 @@ class OpBuilder(ABC):
         from torch.utils.cpp_extension import load
 
         start_build = time.time()
-        sources = [self.deepspeed_src_path(path) for path in self.sources()]
-        extra_include_paths = [self.deepspeed_src_path(path) for path in self.include_paths()]
+        sources = [os.path.abspath(self.deepspeed_src_path(path)) for path in self.sources()]
+        extra_include_paths = [os.path.abspath(self.deepspeed_src_path(path)) for path in self.include_paths()]
 
         # Torch will try and apply whatever CCs are in the arch list at compile time,
         # we have already set the intended targets ourselves we know that will be
