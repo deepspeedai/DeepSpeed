@@ -5,6 +5,7 @@ on:
     paths:
       - "deepspeed/inference/v2/**"
       - "tests/unit/inference/v2/**"
+      - ".github/workflows/nv-a6000.yml"
   workflow_dispatch:
 
 concurrency:

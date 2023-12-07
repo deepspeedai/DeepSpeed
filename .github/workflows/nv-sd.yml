@@ -10,6 +10,7 @@ on:
       - "tests/unit/inference/test_stable_diffusion.py"
       - "deepspeed/model_implementations/diffusers/unet.py"
       - "deepspeed/model_implementations/diffusers/vae.py"
+      - ".github/workflows/nv-sd.yml"
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
