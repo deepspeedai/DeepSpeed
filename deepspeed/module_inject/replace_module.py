@@ -597,7 +597,7 @@ def skip_level_0_prefix(model, state_dict):
     if key is None:
         key = re.match(r"(.*?)Model", model)
     # if keys start with 'model.', don't skip level 0 prefix
-    if state_dict != None:
+    if state_dict is not None:
         for item in state_dict.keys():
             if re.match("^model[.]", item):
                 return False

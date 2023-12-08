@@ -30,7 +30,7 @@ class NPU_Accelerator(DeepSpeedAccelerator):
 
     # Device APIs
     def device_name(self, device_index=None):
-        if device_index == None:
+        if device_index is None:
             return 'npu'
         return 'npu:{}'.format(device_index)
 

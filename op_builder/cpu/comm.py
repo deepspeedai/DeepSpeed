@@ -35,7 +35,7 @@ class CCLCommBuilder(CPUOpBuilder):
 
     def extra_ldflags(self):
         ccl_root_path = os.environ.get("CCL_ROOT")
-        if ccl_root_path == None:
+        if ccl_root_path is None:
             raise ValueError(
                 "Didn't find CCL_ROOT, install oneCCL from https://github.com/oneapi-src/oneCCL and source its environment variable"
             )

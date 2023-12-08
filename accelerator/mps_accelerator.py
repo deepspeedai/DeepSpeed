@@ -26,7 +26,7 @@ class MPS_Accelerator(DeepSpeedAccelerator):
 
     # Device APIs
     def device_name(self, device_index=None):
-        if device_index == None:
+        if device_index is None:
             return "mps"
         return "mps:{}".format(device_index)
 
@@ -221,7 +221,7 @@ class MPS_Accelerator(DeepSpeedAccelerator):
     # create an instance of op builder, specified by class_name
     def create_op_builder(self, op_name):
         builder_class = self.get_op_builder(op_name)
-        if builder_class != None:
+        if builder_class is not None:
             return builder_class()
         return None
 

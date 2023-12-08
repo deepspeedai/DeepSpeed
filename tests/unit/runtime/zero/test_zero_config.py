@@ -48,12 +48,12 @@ def test_zero_config_overlapcomm():
 
 def test_zero_config_offload_configs():
     config = DeepSpeedZeroConfig()
-    assert config.offload_param == None
-    assert config.offload_optimizer == None
+    assert config.offload_param is None
+    assert config.offload_optimizer is None
 
     config = DeepSpeedZeroConfig(**{"offload_param": None, "offload_optimizer": None})
-    assert config.offload_param == None
-    assert config.offload_optimizer == None
+    assert config.offload_param is None
+    assert config.offload_optimizer is None
 
     config = DeepSpeedZeroConfig(**{"offload_param": {}, "offload_optimizer": {}})
     assert isinstance(config.offload_param, DeepSpeedZeroOffloadParamConfig)

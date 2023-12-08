@@ -44,7 +44,7 @@ class CUDA_Accelerator(DeepSpeedAccelerator):
 
     # Device APIs
     def device_name(self, device_index=None):
-        if device_index == None:
+        if device_index is None:
             return 'cuda'
         return 'cuda:{}'.format(device_index)
 
@@ -280,7 +280,7 @@ class CUDA_Accelerator(DeepSpeedAccelerator):
     class_dict = None
 
     def _lazy_init_class_dict(self):
-        if self.class_dict != None:
+        if self.class_dict is not None:
             return
         else:
             self.class_dict = {}

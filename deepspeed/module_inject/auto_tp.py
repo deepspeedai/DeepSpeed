@@ -451,7 +451,7 @@ class AutoTP():
         for name in kv_head_names:
             if hasattr(config, name):
                 num_kv_heads = getattr(config, name)
-                if num_kv_heads != None:
+                if num_kv_heads is not None:
                     break
         return num_kv_heads
 

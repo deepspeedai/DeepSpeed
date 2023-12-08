@@ -28,7 +28,7 @@ def require_tp_fused_qkvw(name, mp_size):
 
 
 def prepare_tp_fused_qkvw(module_str, src, mp_size, gpu_index):
-    if src == None:
+    if src is None:
         return
     fused_type_dict = {
         'CodeGenBlock': 'codegentype',

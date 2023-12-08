@@ -45,7 +45,7 @@ def _validate_accelerator(accel_obj):
 
 
 def is_current_accelerator_supported():
-    return get_accelerator() in SUPPORTED_ACCELERATOR_LIST
+    return get_accelerator().device_name() in SUPPORTED_ACCELERATOR_LIST
 
 
 def get_accelerator():

@@ -40,7 +40,7 @@ def test_no_ds_arguments():
     assert args.deepspeed == False
 
     assert hasattr(args, 'deepspeed_config')
-    assert args.deepspeed_config == None
+    assert args.deepspeed_config is None
 
 
 def test_no_ds_enable_argument():
@@ -74,7 +74,7 @@ def test_no_ds_config_argument():
     assert args.deepspeed == True
 
     assert hasattr(args, 'deepspeed_config')
-    assert args.deepspeed_config == None
+    assert args.deepspeed_config is None
 
 
 def test_no_ds_parser():
