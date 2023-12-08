@@ -385,14 +385,20 @@ class DeepSpeedHybridEngine(DeepSpeedEngine):
             self._total_latency = self._total_latency + latency
             self._iters = self._iters + 1
             if not dist.is_initialized() or dist.get_rank() == 0:
+                if self._total_batch_size is not None:
+                    cur_samples_p_sec = f'|CurSamplesPerSec={(1 / latency * self._total_batch_size):.2f} '
+                    avg_samples_p_sec = f'|AvgSamplesPerSec={(1 / (self._total_latency / self._iters) * self._total_batch_size):.2f}'
+                else:
+                    cur_samples_p_sec = ''
+                    avg_samples_p_sec = ''
                 others = latency - (self._generate_latency + self._training_latency)
                 print(f'|E2E latency={(latency):.2f}s ' + \
                       f'|Gather latency={self._gather_latency:.2f}s ({(self._gather_latency / latency * 100):.2f}%) '
                       f'|Generate time={(self._generate_latency):.2f}s ({(self._generate_latency / latency * 100):.2f}%) ' + \
                       f'|Training time={(self._training_latency):.2f}s ({(self._training_latency / latency * 100):.2f}%) ' + \
-                      f'|Others={others:.2f} ({(others / latency * 100):.2f}%)'
-                      f'|CurSamplesPerSec={(1 / latency * self._total_batch_size):.2f} ' + \
-                      f'|AvgSamplesPerSec={(1 / (self._total_latency / self._iters) * self._total_batch_size):.2f}')
+                      f'|Others={others:.2f} ({(others / latency * 100):.2f}%)' + \
+                      cur_samples_p_sec + \
+                      avg_samples_p_sec)
             self._t_start = time.time()
         self._training_latency = 0
         super().eval()
