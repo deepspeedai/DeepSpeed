@@ -12,3 +12,4 @@ from .sharding import *
 from .llama_v2 import *
 from .opt import *
 from .mistral import *
+from .falcon import *
