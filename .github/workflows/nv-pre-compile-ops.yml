@@ -8,7 +8,7 @@ on:
       - 'docs/**'
       - 'blogs/**'
       - 'deepspeed/inference/v2/**'
-      - "tests/unit/inference/v2/**"
+      - 'tests/unit/inference/v2/**'
   merge_group:
     branches: [ master ]
   schedule:
@@ -19,7 +19,7 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  build-ops:
+  unit-tests:
     runs-on: ubuntu-20.04
     container:
       image: deepspeed/gh-builder:ubuntu1804-py38-torch1131-cu116
