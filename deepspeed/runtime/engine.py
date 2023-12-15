@@ -232,9 +232,6 @@ class DeepSpeedEngine(Module):
         # for debug purposes - can then debug print: debug_get_module_name(module)
         debug_extract_module_and_param_names(model)
 
-        # needed for zero_to_fp32 weights reconstruction to remap nameless data to state_dict
-        self.param_names = {param: name for name, param in model.named_parameters()}
-
         self._do_args_sanity_check(args)
         self._configure_with_arguments(args, mpu)
         self._do_sanity_check()
@@ -260,6 +257,9 @@ class DeepSpeedEngine(Module):
 
         # Configure distributed model
         self._configure_distributed_model(model)
+
+        # needed for zero_to_fp32 weights reconstruction to remap nameless data to state_dict
+        self.param_names = {param: name for name, param in model.named_parameters()}
 
         self._get_model_parameters()
 
