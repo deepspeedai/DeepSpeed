@@ -2258,7 +2258,9 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
         self._load_global_state(optim_sd)
 
         tp_rank = bwc_tensor_model_parallel_rank(mpu=self.mpu)
-        tp_world_size = self.mpu.get_slice_parallel_world_size()
+        tp_world_size = self.mpu.get_slice_parallel_world_size() if hasattr(self.mpu, "get_slice_parallel_world_size") \
+                else self.mpu.get_tensor_model_parallel_world_size()
+
         for i, _ in enumerate(self.optimizer.param_groups):
             for lp in self.bit16_groups[i]:
                 if lp._hp_mapping is not None:

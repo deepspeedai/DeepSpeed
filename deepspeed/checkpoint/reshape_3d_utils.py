@@ -81,7 +81,7 @@ def get_model_3d_descriptor(dir):
     else:
         tp_degree = len(get_files_with_prefix(file_list, MODEL_FILE_PREFIX))
         dp_degree = max(1, len(zero_file_list) // tp_degree)
-        pp_degree = 0
+        pp_degree = 1
 
     return model_3d_desc(pp_degree, tp_degree, dp_degree)
 

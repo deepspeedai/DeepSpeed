@@ -15,7 +15,7 @@ import re
 import shutil
 import torch
 import tqdm
-# from pprint import pprint
+#from pprint import pprint
 
 from deepspeed.checkpoint import DeepSpeedCheckpoint
 from deepspeed.checkpoint import (
@@ -241,9 +241,9 @@ def _extract_zero_shard_files(args, ds_checkpoint, temp_dir):
     _3d_range_list = list(
         itertools.product(range(ds_checkpoint.pp_degree), range(ds_checkpoint.tp_degree),
                           range(ds_checkpoint.dp_degree)))
-    # pprint(f'{_3d_range_list=}')
+    #pprint(f'{_3d_range_list=}')
     work_chunks = list(_get_chunks(_3d_range_list, args.num_extract_workers))
-    # pprint(f'{work_chunks=}')
+    #pprint(f'{work_chunks=}')
 
     # extract_zero_shards(temp_dir, ds_checkpoint, _3d_range_list[0])
     do_work = partial(extract_zero_shards, temp_dir, ds_checkpoint)
@@ -309,7 +309,7 @@ def main():
     print('*** 1. Extracting ZeRO fragments')
     _extract_zero_shard_files(args, ds_checkpoint, temp_dir)
 
-    print('*** 2. Merging slices')
+    print('*** 2. Merging slices .....')
     _merge_tp_slice_files(args, ds_checkpoint, slice_shapes, temp_dir)
 
     print('*** 3. Saving common optimizer states')

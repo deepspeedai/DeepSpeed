@@ -34,7 +34,10 @@ class DeepSpeedCheckpoint(object):
 
     def __init__(self, dir, tp_degree=None, pp_degree=None, dp_degree=None):
         self.dir = dir
-        self._validate_folder(dir)
+
+        pipeline_parallel = len(get_files_with_prefix(get_files(dir), LAYER_FILE_PREFIX)) > 0
+
+        self._validate_folder(dir, pipeline_parallel)
 
         self.zero_checkpoint = ZeROCheckpoint(dir)
 
@@ -193,7 +196,10 @@ class DeepSpeedCheckpoint(object):
         return self.tp_to_final_norm_map[tp_index]
 
     def _build_tp_other_layer_map(self, layer_index: int):
-        assert layer_index < len(self.layer_files)
+        data_map = {}
+        if len(self.layer_files) < 1:
+            return data_map
+        assert layer_index <= len(self.layer_files)
         layer_files = get_files_with_prefix(self.layer_files, self.layer_keys[layer_index])
         layer_file_partitions = partition_data(layer_files, self.tp_degree)
         data_map = {i: flist for i, flist in enumerate(layer_file_partitions)}
@@ -207,9 +213,13 @@ class DeepSpeedCheckpoint(object):
 
     def _build_pp_transformer_map(self):
         data_map = {}
-        transformer_layers = self.layer_keys[1:-1]
-        layers_per_pp = len(transformer_layers) // self.pp_degree
-        data_map = {i: transformer_layers[i * layers_per_pp:(i + 1) * layers_per_pp] for i in range(0, self.pp_degree)}
+        if self.pp_degree > 0:
+            transformer_layers = self.layer_keys[1:-1]
+            layers_per_pp = len(transformer_layers) // self.pp_degree
+            data_map = {
+                i: transformer_layers[i * layers_per_pp:(i + 1) * layers_per_pp]
+                for i in range(0, self.pp_degree)
+            }
         return data_map
 
     def _dump_mapping(self, data_map, map_tag=None):
@@ -222,9 +232,9 @@ class DeepSpeedCheckpoint(object):
         transformer_layer_keys = self.layer_keys[1:-1]
         file_map = {}
         # XXX: this is not guaranteed
-        layers_per_pp = len(transformer_layer_keys) // self.pp_degree
-        if layers_per_pp == 0:
-            layers_per_pp = 1
+        layers_per_pp = 1
+        if self.pp_degree > 0:
+            layers_per_pp = len(transformer_layer_keys) // self.pp_degree
         #print(f"{transformer_layer_keys} {layers_per_pp}")
         for key_index, layer_key in enumerate(transformer_layer_keys):
             pp_index = key_index // layers_per_pp
@@ -240,8 +250,8 @@ class DeepSpeedCheckpoint(object):
 
     def _sanity_check(self):
         assert len(self.mp_rank_files) % self.tp_degree == 0
-        assert len(self.layer_keys) > 2
         assert self.zero_checkpoint.num_files % (self.pp_degree * self.tp_degree) == 0
+        assert self.zero_checkpoint.num_files % (self.tp_degree) == 0
         # XXX: fix me - isn't always the case
         # only true with  --pp-partition-method 'type:transformer|embedding' \
         # assert (len(self.layer_keys) - 2) % self.pp_degree == 0
@@ -270,12 +280,14 @@ class DeepSpeedCheckpoint(object):
 
         return merged_sd
 
-    def _validate_folder(self, dir):
+    def _validate_folder(self, dir, pipeline_parallel):
         basic_folder_validation(dir)
 
         file_list = get_files(dir)
-
-        for file_prefix in [MODEL_FILE_PREFIX, LAYER_FILE_PREFIX, f'{LAYER_FILE_PREFIX}01']:
+        file_prefix_list = [MODEL_FILE_PREFIX]
+        if pipeline_parallel:
+            file_prefix_list.extend([LAYER_FILE_PREFIX, f'{LAYER_FILE_PREFIX}01'])
+        for file_prefix in file_prefix_list:
             ckpt_files = get_files_with_prefix(file_list, file_prefix)
             assert len(
                 ckpt_files
