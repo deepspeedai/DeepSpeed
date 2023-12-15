@@ -16,7 +16,7 @@ concurrency:
 jobs:
 
   # formatting and basic install on cpu-only machine
-  formatting:
+  unit-tests:
     runs-on: ubuntu-20.04
 
     steps:
