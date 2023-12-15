@@ -55,7 +55,7 @@ def quantization_test_helper(pre_quant_type: torch.dtype, num_bits: int):
 
 def zero3_post_init_quantization_test_helper(cpu_offload: bool, nvme_offload: bool, bits: int):
     import deepspeed
-    from transformers.deepspeed import HfDeepSpeedConfig
+    from transformers.integrations.deepspeed import HfDeepSpeedConfig
 
     def get_zero3_ds_config(hf_config: OPTConfig, cpu_offload: bool, nvme_offload: bool, bits: int) -> Dict:
         GB = 1 << 30
@@ -172,7 +172,7 @@ def zero3_post_init_quantization_test_helper(cpu_offload: bool, nvme_offload: bo
 
 def zero3_quantized_initialization_test_helper(cpu_offload: bool, nvme_offload: bool, bits: int):
     import deepspeed
-    from transformers.deepspeed import HfDeepSpeedConfig
+    from transformers.integrations.deepspeed import HfDeepSpeedConfig
 
     def get_zero3_ds_config(hf_config: OPTConfig, cpu_offload: bool, nvme_offload: bool, bits: int) -> Dict:
         GB = 1 << 30
