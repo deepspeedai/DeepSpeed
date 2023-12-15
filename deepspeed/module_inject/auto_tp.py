@@ -121,7 +121,9 @@ class Loading():
 
     def is_load_module(module):
         load_layers = [nn.Linear, nn.Embedding, nn.LayerNorm]
-        load_layer_names = ["LPLayerNorm", "SharedEmbedding", "OPTLearnedPositionalEmbedding", "LlamaRMSNorm"]
+        load_layer_names = [
+            "LPLayerNorm", "SharedEmbedding", "OPTLearnedPositionalEmbedding", "LlamaRMSNorm", "FalconLinear"
+        ]
         return module.__class__ in load_layers or module._get_name() in load_layer_names
 
     def load_buffer(module, state_dict, prefix):
