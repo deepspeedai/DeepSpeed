@@ -443,7 +443,11 @@ def main(args=None):
     if not args.master_addr:
         assert multi_node_exec
         first_host = list(active_resources.keys())[0]
-        hostname_cmd = [f"ssh {first_host} hostname -I"]
+        ssh_check_cmd = "ssh "
+        if args.ssh_port is not None:
+            ssh_check_cmd += f" -p {args.ssh_port}"
+        ssh_check_cmd += f" {first_host} hostname -I"
+        hostname_cmd = [ssh_check_cmd]
         try:
             result = subprocess.check_output(hostname_cmd, shell=True)
         except subprocess.CalledProcessError as err:
