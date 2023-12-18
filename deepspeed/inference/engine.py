@@ -26,7 +26,7 @@ from ..module_inject.policy import TransformerPolicy
 from ..module_inject.auto_tp import AutoTP
 
 from ..module_inject.replace_policy import generic_policies
-from ..module_inject.auto_tp_model_utils import build_bloom_alibi_tensor, build_mpt_atten_bias_tensor, build_mpt_alibi_tensor
+from ..module_inject.auto_tp_model_utils import build_bloom_alibi_tensor, build_mpt_atten_bias_tensor, build_mpt_alibi_tensor, get_alibi_mask
 from ..ops.transformer.inference.ds_attention import DeepSpeedSelfAttention
 from ..model_implementations.transformers.ds_transformer import DeepSpeedTransformerInference
 
@@ -220,6 +220,10 @@ class InferenceEngine(Module):
             if hasattr(self.module.transformer, 'build_mpt_alibi_tensor'):
                 self.module.transformer.build_mpt_alibi_tensor_orig = self.module.transformer.build_mpt_alibi_tensor
                 self.module.transformer.__class__.build_mpt_alibi_tensor = build_mpt_alibi_tensor
+        if hasattr(self.module, 'model'):
+            if hasattr(self.module.model, 'get_alibi_mask'):
+                self.module.model.get_alibi_mask_orig = self.module.model.get_alibi_mask
+                self.module.model.__class__.get_alibi_mask = get_alibi_mask
 
     def build_attn_bias(self):
         if hasattr(self.module, 'transformer'):
