@@ -71,6 +71,9 @@ class InferenceEngine(Module):
         if hasattr(self.module, "config"):
             TransformerPolicy.hf_model_config = self.module.config
 
+        if config.dtype == torch.half and not get_accelerator().is_fp16_supported():
+            raise ValueError("Type fp16 is not supported.")
+
         # todo: keep this self.injection_dict because we don't use to change config.injection_policy API
         # todo: this will get changed when Molly's PR on auto injection dict is merged
         self.injection_dict = config.injection_policy
