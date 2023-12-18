@@ -10,8 +10,8 @@ We recommend that you read the tutorials on [Getting Started](/getting-started/)
 
 ## Three Components of ZeRO++
 ZeRO++ consists of three key designs, namely quantized weights (*qwZ*), hiearchical partitioning ZeRO (*hpZ*), and quantized gradients (*qgZ*):
- - *qwZ* applies block-based quantization to reduce ZeRO parameter all-gather communication volume by half from FP16 to INT8)
- - *hpZ* eliminates inter-node backward parameter all-gather communication through data remapping and recomputation
+ - *qwZ* applies block-based quantization to reduce ZeRO parameter all-gather communication volume by half from FP16 to INT8.
+ - *hpZ* eliminates inter-node backward parameter all-gather communication through data remapping and recomputation.
  - *qgZ* replaces gradients allreduce collective with a new communication efficient all-to-all based quantized gradient averaging.
 
 Collectively, the three optimization reduces communication volume by 4x compared to ZeRO baseline. Each of the three components can be enabled independent of each other and collectively as a group as described in the next section.
@@ -24,9 +24,9 @@ For this tutorial, we will configure a 18 billion parameter GPT-2 model using th
 ## Training a 18B parameter GPT-2 with ZeRO++
 There are no change needed to the user code. However, since ZeRO++ extends ZeRO Stage 3 (ZeRO-3), appropriate flags need to be added to activate each or all of the three ZeRO++ communication collective optimizations. The three flags and their meanings and defaults and preferred values:
 
- - zero_quantized_weights: Boolean indicating whether to use quantized zero weights (*qwZ*), default is false
- - zero_hpz_partition_size: number of ranks in *hpZ* (secondary partition) group, default is 1 meaning no hpZ, ideal is number of ranks (gpus) per node
- - zero_quantized_gradients: Boolean indicating whether to use quantized zero gradients (*qgZ*), default is false
+ - zero_quantized_weights: Boolean indicating whether to use quantized zero weights (*qwZ*), default is false.
+ - zero_hpz_partition_size: number of ranks in *hpZ* (secondary partition) group, default is 1 meaning no hpZ, ideal is number of ranks (gpus) per node.
+ - zero_quantized_gradients: Boolean indicating whether to use quantized zero gradients (*qgZ*), default is false.
 
 
 ### DeepSpeed Configuration Changes
