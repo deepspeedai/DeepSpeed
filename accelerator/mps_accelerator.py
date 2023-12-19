@@ -235,3 +235,6 @@ class MPS_Accelerator(DeepSpeedAccelerator):
         from torch.utils.cpp_extension import BuildExtension
 
         return BuildExtension
+
+    def export_envs(self):
+        return []
