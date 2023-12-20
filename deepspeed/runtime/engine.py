@@ -3212,7 +3212,6 @@ class DeepSpeedEngine(Module):
             state.update(client_state)
             logger.info(f'Saving model checkpoint: {save_path}')
             self.checkpoint_engine.save(state, save_path)
-        self._curr_save_path = None
 
     def _create_checkpoint_file(self, save_dir, tag, zero_checkpoint):
         name_function = (self._get_zero_ckpt_name if zero_checkpoint else self._get_ckpt_name)
