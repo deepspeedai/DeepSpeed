@@ -193,6 +193,19 @@ class DeepSpeedAccelerator(ABC):
     def is_triton_supported(self):
         ...
 
+    # Graph operations
+    @abc.abstractmethod
+    def create_graph(self):
+        ...
+
+    @abc.abstractmethod
+    def capture_to_graph(self, graph, pool=None, stream=None):
+        ...
+
+    @abc.abstractmethod
+    def replay_graph(self, graph):
+        ...
+
     # Tensor operations
     @property
     @abc.abstractmethod

@@ -770,6 +770,9 @@ class DeepSpeedEngine(Module):
     def zero_ignore_unused_parameters(self):
         return self._config.zero_config.ignore_unused_parameters
 
+    def graph_harvesting(self):
+        return self._config.graph_harvesting
+
     def fp16_enabled(self):
         return self._config.fp16_enabled
 
@@ -1451,7 +1454,8 @@ class DeepSpeedEngine(Module):
                                    allgather_bucket_size=self.zero_allgather_bucket_size(),
                                    dp_process_group=self.seq_data_parallel_group,
                                    timers=timers,
-                                   grad_acc_dtype=self.get_data_types()[1])
+                                   grad_acc_dtype=self.get_data_types()[1],
+                                   graph_harvesting=self.graph_harvesting())
 
         return optimizer
 

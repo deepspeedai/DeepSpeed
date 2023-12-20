@@ -198,8 +198,18 @@ class CPU_Accelerator(DeepSpeedAccelerator):
     def supported_dtypes(self):
         return [torch.float, torch.bfloat16]
 
-    # Tensor operations
+    # Graph operations
+    def create_graph(self):
+        return None
 
+    def capture_to_graph(self, graph, pool=None, stream=None):
+        from deepspeed.runtime.utils import noop_context
+        return noop_context()
+
+    def replay_graph(self, graph):
+        return
+
+    # Tensor operations
     @property
     def BFloat16Tensor(self):
         return torch.BFloat16Tensor

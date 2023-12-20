@@ -47,6 +47,27 @@ class DummyOptim():
         self.param_groups.append({'params': params})
 
 
+graph_cache = {}
+
+
+def graph_process(replay_first_step, func, *args, **kwargs):
+    # `func` should only contain operations on the GPU
+    # Please ensure that the memory address of the data required by 'func' remains constant
+    if func.__name__ not in graph_cache:
+        cuda_stream = get_accelerator().Stream()
+        cuda_stream.wait_stream(get_accelerator().current_stream())
+        with get_accelerator().stream(cuda_stream):
+            func(*args, **kwargs)
+        get_accelerator().current_stream().wait_stream(cuda_stream)
+        graph_cache[func.__name__] = get_accelerator().create_graph()
+        with get_accelerator().capture_to_graph(graph_cache[func.__name__]):
+            func(*args, **kwargs)
+        if replay_first_step:
+            get_accelerator().replay_graph(graph_cache[func.__name__])
+    else:
+        get_accelerator().replay_graph(graph_cache[func.__name__])
+
+
 def noop_decorator(func):
     return func
 
@@ -831,7 +852,7 @@ def clip_gradients(parameters, max_norm=1.0, global_grad_norm=None, mpu=None, ep
     return global_grad_norm
 
 
-def get_global_norm_of_tensors(input_tensors, norm_type=2, mpu=None):
+def get_global_norm_of_tensors(input_tensors, norm_type=2, mpu=None, use_graph=False):
     """Get norm of an iterable of tensors.
 
     This is adapted from torch.nn.utils.clip_grad.clip_grad_norm_ and
@@ -845,7 +866,6 @@ def get_global_norm_of_tensors(input_tensors, norm_type=2, mpu=None):
     Returns:
         Total norm of the tensors (viewed as a single vector).
     """
-
     assert isinstance(input_tensors, Iterable), f'expected Iterable type not {type(input_tensors)}'
     assert all([torch.is_tensor(t) for t in input_tensors]), f'expected list of only tensors'
 
@@ -857,8 +877,24 @@ def get_global_norm_of_tensors(input_tensors, norm_type=2, mpu=None):
             dist.all_reduce(total_norm_cuda, op=dist.ReduceOp.MAX, group=mpu.get_model_parallel_group())
             total_norm = total_norm_cuda[0].item()
     else:
-        total_norm = sum([t.data.float().norm(norm_type).item()**norm_type for t in input_tensors])
-        total_norm_cuda = get_accelerator().FloatTensor([float(total_norm)])
+        if use_graph:
+            if 'norm_tensors_compute_buffer' not in graph_cache:
+                graph_cache['norm_tensors_compute_buffer'] = [t.data.float().norm(norm_type) for t in input_tensors]
+            compute_buffer = graph_cache['norm_tensors_compute_buffer']
+
+            def _norm_tensors(tensor_list, _compute_buffer, _norm_type):
+                for i, t in enumerate(tensor_list):
+                    _compute_buffer[i].data.copy_(t.data.float().norm(_norm_type)**_norm_type)
+                    if i != 0:
+                        _compute_buffer[0].data.add_(_compute_buffer[i].data)
+
+            graph_process(False, _norm_tensors, input_tensors, compute_buffer, norm_type)
+
+            total_norm = compute_buffer[0]
+        else:
+            total_norm = sum([t.data.float().norm(norm_type).item()**norm_type for t in input_tensors])
+
+        total_norm_cuda = get_accelerator().FloatTensor([float(total_norm)]).detach()
         if mpu is not None:
             dist.all_reduce(total_norm_cuda, op=dist.ReduceOp.SUM, group=mpu.get_model_parallel_group())
         total_norm = total_norm_cuda[0].item()**(1. / norm_type)
@@ -869,7 +905,7 @@ def get_global_norm_of_tensors(input_tensors, norm_type=2, mpu=None):
     return total_norm
 
 
-def clip_tensors_by_global_norm(input_tensors, max_norm=1.0, global_norm=None, mpu=None, eps=1e-6):
+def clip_tensors_by_global_norm(input_tensors, max_norm=1.0, global_norm=None, mpu=None, eps=1e-6, use_graph=False):
     """Clip list of tensors by global norm.
     Args:
         input_tensors: List of tensors to be clipped
@@ -880,14 +916,26 @@ def clip_tensors_by_global_norm(input_tensors, max_norm=1.0, global_norm=None, m
         float: the global norm
     """
     if global_norm is None:
-        global_norm = get_global_norm_of_tensors(input_tensors, mpu=mpu)
-
+        global_norm = get_global_norm_of_tensors(input_tensors, mpu=mpu, use_graph=use_graph)
     clip_coef = max_norm / (global_norm + eps)
-
     if clip_coef < 1:
-        for t in input_tensors:
-            t.detach().mul_(clip_coef)
+        if use_graph:
 
+            def clip_tensors(_tensor_list, _clip_coef_tensor):
+                for t in _tensor_list:
+                    t.detach().mul_(_clip_coef_tensor)
+
+            if 'clip_coef_tensor' not in graph_cache:
+                # Alloc memory
+                graph_cache['clip_coef_tensor'] = torch.tensor(clip_coef,
+                                                               dtype=torch.float32).to(get_accelerator().device_name())
+            clip_coef_tensor = graph_cache['clip_coef_tensor']
+            clip_coef_tensor.copy_(torch.tensor(clip_coef, dtype=torch.float32))
+            graph_process(False, clip_tensors, input_tensors, clip_coef_tensor)
+
+        else:
+            for t in input_tensors:
+                t.detach().mul_(clip_coef)
     return global_norm
 
 

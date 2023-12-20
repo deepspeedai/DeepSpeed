@@ -16,7 +16,7 @@ from packaging import version as pkg_version
 from deepspeed.git_version_info import version
 from deepspeed.runtime.utils import (get_global_norm_of_tensors, clip_tensors_by_global_norm, DummyOptim,
                                      align_dense_tensors, all_gather_dp_groups, bwc_tensor_model_parallel_rank,
-                                     is_model_parallel_parameter, see_memory_usage)
+                                     is_model_parallel_parameter, see_memory_usage, graph_process)
 
 from deepspeed.utils import link_hp_params, fragment_address
 from deepspeed.checkpoint import enable_universal_checkpoint
@@ -38,7 +38,8 @@ class BF16_Optimizer(ZeROOptimizer):
                  allgather_bucket_size=5000000000,
                  dp_process_group=None,
                  timers=None,
-                 grad_acc_dtype=None):
+                 grad_acc_dtype=None,
+                 graph_harvesting=False):
         super().__init__()
         see_memory_usage('begin bf16_optimizer', force=True)
         self.timers = timers
@@ -81,7 +82,7 @@ class BF16_Optimizer(ZeROOptimizer):
         self.fp32_groups_has_gradients = []
 
         self.group_paddings = []
-
+        self.graph_harvesting = graph_harvesting
         if self.using_real_optimizer:
             self._setup_for_real_optimizer()
 
@@ -248,7 +249,8 @@ class BF16_Optimizer(ZeROOptimizer):
 
         all_groups_norm = get_global_norm_of_tensors(input_tensors=self.get_grads_for_norm(),
                                                      mpu=self.mpu,
-                                                     norm_type=self.norm_type)
+                                                     norm_type=self.norm_type,
+                                                     use_graph=self.graph_harvesting)
         self._global_grad_norm = all_groups_norm
 
         assert all_groups_norm > 0.
@@ -256,7 +258,8 @@ class BF16_Optimizer(ZeROOptimizer):
             clip_tensors_by_global_norm(input_tensors=self.get_grads_for_norm(for_clipping=True),
                                         max_norm=self.clip_grad,
                                         global_norm=all_groups_norm,
-                                        mpu=self.mpu)
+                                        mpu=self.mpu,
+                                        use_graph=self.graph_harvesting)
 
         self.optimizer.step()
 
@@ -281,22 +284,32 @@ class BF16_Optimizer(ZeROOptimizer):
 
     @torch.no_grad()
     def update_hp_grads(self, clear_lp_grads=False):
+
+        def _update_hp_grads_func(clear_lp_grads=False):
+            for i, group in enumerate(self.bf16_groups):
+                for j, lp in enumerate(group):
+                    if lp.grad is None:
+                        continue
+                    hp_grad = self.fp32_groups_gradients[i][j]
+                    assert hp_grad is not None, \
+                        f'high precision param has no gradient, lp param_id = {id(lp)} group_info = [{i}][{j}]'
+                    hp_grad.data.add_(lp.grad.data.to(hp_grad.dtype).view(hp_grad.shape))
+                    lp._hp_grad = hp_grad
+                    self.fp32_groups_has_gradients[i][j] = True
+                    # clear gradients
+                    if clear_lp_grads:
+                        lp.grad._zero()
+
+        if self.graph_harvesting:
+            graph_process(False, _update_hp_grads_func, clear_lp_grads)
+        else:
+            _update_hp_grads_func(clear_lp_grads)
+        #cpu op
         for i, group in enumerate(self.bf16_groups):
             for j, lp in enumerate(group):
                 if lp.grad is None:
                     continue
-
-                hp_grad = self.fp32_groups_gradients[i][j]
-                assert hp_grad is not None, \
-                    f'high precision param has no gradient, lp param_id = {id(lp)} group_info = [{i}][{j}]'
-
-                hp_grad.data.add_(lp.grad.data.to(hp_grad.dtype).view(hp_grad.shape))
-                lp._hp_grad = hp_grad
                 self.fp32_groups_has_gradients[i][j] = True
-
-                # clear gradients
-                if clear_lp_grads:
-                    lp.grad = None
 
     @torch.no_grad()
     def get_grads_for_reduction(self):
@@ -348,7 +361,9 @@ class BF16_Optimizer(ZeROOptimizer):
     def clear_lp_grads(self):
         for group in self.bf16_groups:
             for param in group:
-                param.grad = None
+                if param.grad is not None:
+                    # Using zero_() fixed memory address for graph replay
+                    param.grad.zero_()
 
     def state_dict(self):
         state_dict = {}
