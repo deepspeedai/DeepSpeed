@@ -3,6 +3,7 @@ name: nv-a6000
 on:
   pull_request:
     paths:
+      - 'accelerator/cuda_accelerator.py'
       - 'deepspeed/inference/v2/**'
       - 'tests/unit/inference/v2/**'
       - '.github/workflows/nv-a6000.yml'
