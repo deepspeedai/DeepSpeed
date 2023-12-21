@@ -10,4 +10,4 @@ from .linear_blocked_kv_rotary import *
 from .logits_gather import *
 from .moe_gather import *
 from .moe_scatter import *
-from .top_1_gating import *
+from .top_k_gating import *

@@ -6,9 +6,9 @@
 from typing import Any
 
 from ...config_v2 import RaggedInferenceEngineConfig
-from ...model_implementations.inference_policy_base import ContainerMap, InferenceV2Policy
-from ...model_implementations.opt.container import OPTNonTransformerContainer, OPTTransformerContainer
-from ...model_implementations.opt.model import OPTInferenceModel
+from ..inference_policy_base import ContainerMap, InferenceV2Policy
+from .container import OPTNonTransformerContainer, OPTTransformerContainer
+from .model import OPTInferenceModel
 
 
 class OPTPolicy(InferenceV2Policy):

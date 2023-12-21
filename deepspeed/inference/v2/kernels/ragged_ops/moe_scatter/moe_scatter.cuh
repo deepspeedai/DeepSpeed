@@ -19,4 +19,5 @@ void launch_moe_scatter(T* moe_input,
                         const int32_t n_channels,
                         const int32_t n_tokens,
                         const int32_t n_experts,
+                        const int32_t n_top_k,
                         cudaStream_t stream);

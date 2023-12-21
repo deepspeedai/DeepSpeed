@@ -6,9 +6,9 @@
 from typing import Any
 
 from ...config_v2 import RaggedInferenceEngineConfig
-from ...model_implementations.inference_policy_base import ContainerMap, InferenceV2Policy
-from ...model_implementations.llama_v2.llama_v2_containers import Llama2NonTransformerContainer, Llama2TransformerContainer
-from ...model_implementations.llama_v2.llama_v2_model import Llama2InferenceModel
+from ..inference_policy_base import ContainerMap, InferenceV2Policy
+from .container import Llama2NonTransformerContainer, Llama2TransformerContainer
+from .model import Llama2InferenceModel
 
 
 class Llama2Policy(InferenceV2Policy):

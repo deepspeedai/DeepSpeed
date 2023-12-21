@@ -10,26 +10,32 @@ import torch
 import deepspeed.comm as dist
 
 from ...allocator import empty_from
+from ...config_v2 import RaggedInferenceEngineConfig
 from ...inference_utils import ActivationType, DtypeEnum
 from ...model_implementations import *
 from ...modules.configs import *
 from ...modules.interfaces import *
+from ...modules import heuristics
 from ...ragged import RaggedBatchWrapper
+from ..inference_model_base import (
+    DSModelImplementationConfig,
+    MPType,
+)
 
-from .llama_v2_containers import Llama2NonTransformerContainer, Llama2TransformerContainer
+from .container import MixtralNonTransformerContainer, MixtralTransformerContainer
 
 
-class Llama2InferenceModel(DSTransformerModelBase):
+class MixtralInferenceModel(DSMoETransformerModelBase):
     """
-    Inference model implementation for ragged batching for Llama-2 models.
+    Inference model implementation for Mixtral models.
     """
 
-    _non_transformer: Optional[Llama2NonTransformerContainer]
+    _non_transformer: Optional[MixtralNonTransformerContainer]
     """
     Embed + unembed container. Specializing the type annotation.
     """
 
-    _transformer: Optional[Iterable[Llama2TransformerContainer]]
+    _transformer: Optional[Iterable[MixtralTransformerContainer]]
     """
     Per-layer transformer container. Specializing the type annotation.
     """
@@ -39,7 +45,7 @@ class Llama2InferenceModel(DSTransformerModelBase):
 
     @property
     def max_sequence_length(self) -> int:
-        return self._config.max_seq_length
+        return self._config.max_position_embeddings
 
     """
     Properties ineherited from `DSTransformerModelBase`
@@ -85,7 +91,6 @@ class Llama2InferenceModel(DSTransformerModelBase):
     @property
     def mlp_activation_fn(self) -> ActivationType:
         activation = self._config.hidden_act.lower()
-        # llama model family is special and is always gated so force gated versions of relu, gelu, silu
         if activation == "gelu":
             return ActivationType.GEGLU
         elif activation == "relu":
@@ -106,8 +111,76 @@ class Llama2InferenceModel(DSTransformerModelBase):
         return PositionalEmbeddingType.rotate_half
 
     """
-    Forward implementations
+    Inherited from `DSMoETransformerModelBase`
     """
+
+    @property
+    def n_experts(self) -> int:
+        return self._config.num_local_experts
+
+    @property
+    def n_top_k(self) -> int:
+        return self._config.num_experts_per_tok
+
+    @property
+    def normalize_expert_scores(self) -> bool:
+        return True
+
+    """
+    Model implementation
+    """
+
+    def __init__(self, config: DSModelImplementationConfig, engine_config: RaggedInferenceEngineConfig,
+                 base_mp_group: MPType) -> None:
+        """
+        Base implementation for initialization. By default, this will initialize
+        the traditional components of a transformer model:
+            - Embedding
+            - QKV projection
+            - Self attention
+            - Attention output projection
+            - Feed forward network
+            - Normalization
+            - Unembedding
+
+        Arguments:
+            config (DSModelImplementationConfig): Model-specific configuration. No assumptions
+                should be made about this config that are not closely tied to the specific
+                model implementation.
+            engine_config (RaggedInferenceEngineConfig): Engine configuration.
+            base_mp_group (MPType): Base communication group for Tensor-parallel inference.
+        """
+        super().__init__(config, engine_config, base_mp_group)
+
+        self.make_norm_layer()
+        self.make_qkv_layer()
+        self.make_attn_layer()
+        self.make_attn_out_layer()
+        self.make_moe_layer()
+        self.make_embedding_layer()
+        self.make_unembedding_layer()
+        self._kv_cache_config = None
+
+    def make_attn_layer(self) -> None:
+        """
+        Builds the attention layer for the model. This sets the `self.attn` attribute.
+        """
+        softmax_scale = 1.0 / (self.head_size**0.5)
+
+        rotary_config = RotateHalfConfig(theta_base=self._config.rope_theta)
+
+        attn_config = DSSelfAttentionConfig(max_tokens=self._engine_config.state_manager.max_ragged_batch_size,
+                                            n_heads_q=self.n_heads_q_local,
+                                            n_heads_kv=self.n_heads_kv_local,
+                                            head_size=self.head_size,
+                                            max_sequences=self._engine_config.state_manager.max_ragged_sequence_count,
+                                            scale_factor=softmax_scale,
+                                            input_dtype=self.activation_dtype,
+                                            output_dtype=self.activation_dtype,
+                                            positional_embedding_type=self.positional_embedding_type,
+                                            positional_embedding_config=rotary_config)
+
+        self.attn = heuristics.instantiate_attention(attn_config, self._engine_config)
 
     def _forward_embed(self, ragged_batch: RaggedBatchWrapper) -> torch.Tensor:
         """
@@ -126,8 +199,8 @@ class Llama2InferenceModel(DSTransformerModelBase):
 
         return embed
 
-    def _forward_transformer_layer(self, layer_idx: int, residual: torch.Tensor, hidden_states: torch.Tensor,
-                                   ragged_batch_info: RaggedBatchWrapper) -> Tuple[torch.Tensor, torch.Tensor]:
+    def _forward_transformer(self, layer_idx: int, residual: torch.Tensor, hidden_states: torch.Tensor,
+                             ragged_batch_info: RaggedBatchWrapper) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         Executes one (slightly offset) layer of the transformer. This implementation does a peak-ahead
         optimization to fuse the layer norm of the next layer into the current layer.
@@ -144,26 +217,24 @@ class Llama2InferenceModel(DSTransformerModelBase):
         cur_params = self._transformer[layer_idx]
         kv_cache = self.state_manager.get_cache(layer_idx)
 
-        hidden_states = self.qkv(hidden_states, cur_params.qkv_w, b=None)
-        hidden_states = self.attn(hidden_states, kv_cache,
-                                  ragged_batch_info)  #, inv_freqs=None) #cur_params.rotary_emb)
-        hidden_states = self.attn_out(hidden_states, cur_params.attn_out_w, b=None)
+        hidden_states = self.qkv(hidden_states, cur_params.qkv_w)
+        hidden_states = self.attn(hidden_states, kv_cache, ragged_batch_info)
+        hidden_states = self.attn_out(hidden_states, cur_params.attn_out_w)
 
         if self.tp_size > 1:
             dist.all_reduce(hidden_states, group=self._base_mp_group)
 
-        residual, hidden_states = self.norm(residual, hidden_states, cur_params.mlp_norm_gamma, beta=None)
+        residual, hidden_states = self.norm(residual, hidden_states, cur_params.mlp_norm_gamma)
 
-        # Should be configurable in the future
-        hidden_states = self.mlp_1(hidden_states, cur_params.mlp_1_w, b=None)
-        hidden_states = self.mlp_2(hidden_states, cur_params.mlp_2_w, b=None)
+        hidden_states = self.moe(hidden_states, ragged_batch_info, cur_params.moe_gate, cur_params.moe_mlp_1,
+                                 cur_params.moe_mlp_2)
 
         if self.tp_size > 1:
             dist.all_reduce(hidden_states, group=self._base_mp_group)
 
         if layer_idx != self.num_layers - 1:
             next_params = self._transformer[layer_idx + 1]
-            residual, hidden_states = self.norm(residual, hidden_states, next_params.attn_norm_gamma, beta=None)
+            residual, hidden_states = self.norm(residual, hidden_states, next_params.attn_norm_gamma)
         else:
             # On last layer, we just need to perform the residual add. Adding into the residual
             # here is safe.
@@ -198,7 +269,6 @@ class Llama2InferenceModel(DSTransformerModelBase):
         residual, hidden_states = self.norm(residual, None, self._transformer[0].attn_norm_gamma, beta=None)
 
         for layer_idx in range(self.num_layers):
-            residual, hidden_states = self._forward_transformer_layer(layer_idx, residual, hidden_states,
-                                                                      wrapped_batch)
+            residual, hidden_states = self._forward_transformer(layer_idx, residual, hidden_states, wrapped_batch)
 
         return self._forward_unembed(residual, wrapped_batch)

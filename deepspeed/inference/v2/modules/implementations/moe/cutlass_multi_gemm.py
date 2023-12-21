@@ -9,12 +9,12 @@ import torch
 
 from deepspeed.accelerator import get_accelerator
 from ....allocator import empty_from
-from ....inference_utils import ActivationType
-from ....kernels.core_ops import BlasLibLinear
+from ....inference_utils import ActivationType, is_gated
+from ....kernels.core_ops import BlasLibLinear, CUDAGatedActivation
 from ....kernels.ragged_ops import (
     MoEGather,
     MoEScatter,
-    RaggedTop1Gating,
+    RaggedTopKGating,
 )
 from ....ragged import RaggedBatchWrapper
 
@@ -42,11 +42,7 @@ class DSMultiGemmMoE(DSMoEBase):
         if config.input_dtype != torch.float16 and config.input_dtype != torch.bfloat16:
             return False
 
-        if config.top_k != 1:
-            return False
-
-        if config.activation in [ActivationType.GEGLU, ActivationType.ReGLU, ActivationType.SiGLU]:
-            # Currently not supporting gated activations in MoE
+        if config.top_k != 1 and config.top_k != 2:
             return False
 
         return True
@@ -57,15 +53,24 @@ class DSMultiGemmMoE(DSMoEBase):
         # Convenience variables for frequently accessed items.
         self.max_tokens = self._config.max_tokens
         self.n_experts = self._config.n_experts
+        self.n_top_k = self._config.top_k
         self.intermediate_dim = self._config.intermediate_features
 
-        self._mlp_1 = MoEGEMM(fp_dtype=implementation_config['weight_dtype'], act_fn=config.activation)
+        moe_op_act_fn = ActivationType.IDENTITY if is_gated(self._config.activation) else self._config.activation
+
+        self._mlp_1 = MoEGEMM(fp_dtype=implementation_config['weight_dtype'], act_fn=moe_op_act_fn)
         self._mlp_2 = MoEGEMM(fp_dtype=implementation_config['weight_dtype'], act_fn=ActivationType.IDENTITY)
 
+        if is_gated(self._config.activation):
+            self._activation = CUDAGatedActivation(self._config.model_dim, self._config.input_dtype,
+                                                   self._config.activation)
+        else:
+            self._activation = None
+
         self._gate_proj = BlasLibLinear(self._config.input_dtype)
-        self._top_1_gate = RaggedTop1Gating(config.input_dtype)
+        self._top_1_gate = RaggedTopKGating(config.input_dtype)
         self._moe_scatter = MoEScatter(config.input_dtype, config.model_dim)
-        self._moe_gather = MoEGather(config.input_dtype, config.model_dim)
+        self._moe_gather = MoEGather(config.input_dtype, config.model_dim, config.normalize_scores)
 
         self._create_buffers()
 
@@ -78,32 +83,38 @@ class DSMultiGemmMoE(DSMoEBase):
         self._expert_counts = torch.empty((self.n_experts, ),
                                           dtype=torch.int32,
                                           device=get_accelerator().current_device())
-        self._scores = torch.empty((self._config.max_tokens, ),
+        self._scores = torch.empty((self._config.max_tokens, self.n_top_k),
                                    dtype=torch.float32,
                                    device=get_accelerator().current_device())
-        self._assignments = torch.empty((self._config.max_tokens, ),
+        self._assignments = torch.empty((self._config.max_tokens, self.n_top_k),
                                         dtype=torch.int32,
                                         device=get_accelerator().current_device())
-        self._offsets = torch.empty((self._config.max_tokens, ),
+        self._offsets = torch.empty((self._config.max_tokens, self.n_top_k),
                                     dtype=torch.int32,
                                     device=get_accelerator().current_device())
 
         # Scatter buffers
-        self._moe_input = torch.empty((self._config.max_tokens, self._config.model_dim),
+        self._moe_input = torch.empty((self._config.max_tokens * self.n_top_k, self._config.model_dim),
                                       dtype=self._config.input_dtype,
                                       device=get_accelerator().current_device())
         self._expert_cumsum = torch.empty((self._config.n_experts, ),
                                           dtype=torch.int64,
                                           device=get_accelerator().current_device())
-        self._mapped_slots = torch.empty((self._config.max_tokens, ),
+        self._mapped_slots = torch.empty((self._config.max_tokens, self.n_top_k),
                                          dtype=torch.int32,
                                          device=get_accelerator().current_device())
 
         # GEMM Buffers
-        self._intermediate = torch.empty((self._config.max_tokens, self._config.intermediate_features),
+        self._intermediate = torch.empty((self._config.max_tokens * self.n_top_k, self._config.intermediate_features),
                                          dtype=self._config.output_dtype,
                                          device=get_accelerator().current_device())
-        self._output_unordered = torch.empty((self._config.max_tokens, self._config.model_dim),
+        if self._activation is not None:
+            self._gated_intermediate = torch.empty(
+                (self._config.max_tokens * self.n_top_k, self._config.intermediate_features * 2),
+                dtype=self._config.output_dtype,
+                device=get_accelerator().current_device())
+
+        self._output_unordered = torch.empty((self._config.max_tokens * self.n_top_k, self._config.model_dim),
                                              dtype=self._config.output_dtype,
                                              device=get_accelerator().current_device())
 
@@ -167,11 +178,11 @@ class DSMultiGemmMoE(DSMoEBase):
 
         # Get views on the buffers for gating
         logits = empty_from(self._logits, (hidden_states.shape[0], self._logits.shape[-1]))
-        scores = empty_from(self._scores, (hidden_states.shape[0], ))
-        assignments = empty_from(self._assignments, (hidden_states.shape[0], ))
-        offsets = empty_from(self._offsets, (hidden_states.shape[0], ))
-        mapped_slots = empty_from(self._mapped_slots, (hidden_states.shape[0], ))
-        moe_input = empty_from(self._moe_input, (hidden_states.shape[0], self._moe_input.shape[-1]))
+        scores = empty_from(self._scores, (hidden_states.shape[0], self.n_top_k))
+        assignments = empty_from(self._assignments, (hidden_states.shape[0], self.n_top_k))
+        offsets = empty_from(self._offsets, (hidden_states.shape[0], self.n_top_k))
+        mapped_slots = empty_from(self._mapped_slots, (hidden_states.shape[0], self.n_top_k))
+        moe_input = empty_from(self._moe_input, (hidden_states.shape[0] * self.n_top_k, self._moe_input.shape[-1]))
 
         self._gate_proj(logits, hidden_states, gate_w)
         self._expert_counts.zero_()
@@ -200,18 +211,31 @@ class DSMultiGemmMoE(DSMoEBase):
         moe_input, expert_cumsum, scores, mapped_slots = self._gate(hidden_states, batch_metadata, gate_w)
 
         # Get views on the buffers for GEMM
-        intermediate = empty_from(self._intermediate, (hidden_states.shape[0], self._intermediate.shape[-1]))
+        intermediate = empty_from(self._intermediate,
+                                  (hidden_states.shape[0] * self.n_top_k, self._intermediate.shape[-1]))
         output_unordered = empty_from(self._output_unordered,
-                                      (hidden_states.shape[0], self._output_unordered.shape[-1]))
+                                      (hidden_states.shape[0] * self.n_top_k, self._output_unordered.shape[-1]))
         output = empty_from(self._output, (hidden_states.shape[0], self._output.shape[-1]))
 
-        self._mlp_1(
-            intermediate,
-            moe_input,
-            mlp_1_w,
-            expert_cumsum,
-            mlp_1_b,
-        )
+        if self._activation is not None:
+            gated_intermediate = empty_from(
+                self._gated_intermediate, (hidden_states.shape[0] * self.n_top_k, self._gated_intermediate.shape[-1]))
+            self._mlp_1(
+                gated_intermediate,
+                moe_input,
+                mlp_1_w,
+                expert_cumsum,
+                mlp_1_b,
+            )
+            self._activation(intermediate, gated_intermediate)
+        else:
+            self._mlp_1(
+                intermediate,
+                moe_input,
+                mlp_1_w,
+                expert_cumsum,
+                mlp_1_b,
+            )
 
         self._mlp_2(
             output_unordered,

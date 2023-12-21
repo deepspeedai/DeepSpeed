@@ -48,3 +48,9 @@ class DSMoEConfig(DSModuleConfig):
     """
     Activation function of the first MLP1
     """
+
+    normalize_scores: bool = False
+    """
+    Whether normalization is applied to the selected scores. If true, the module
+    should rescale the scores such that their sum is 1.0.
+    """

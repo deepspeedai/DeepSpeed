@@ -11,31 +11,30 @@ import deepspeed.comm as dist
 
 from ...allocator import empty_from
 from ...inference_utils import ActivationType, DtypeEnum
-from ...model_implementations import *
+from .. import *
 from ...modules.configs import *
 from ...modules.interfaces import *
-from ...modules import heuristics
 from ...ragged import RaggedBatchWrapper
 
-from .container import MistralNonTransformerContainer, MistralTransformerContainer
+from .container import FalconNonTransformerContainer, FalconTransformerContainer
 
 
-class MistralInferenceModel(DSTransformerModelBase):
+class FalconInferenceModel(DSTransformerModelBase):
     """
-    Inference model implementation for ragged batching for Mistral models.
+    Inference model implementation for ragged batching for Llama-2 models.
     """
 
-    _non_transformer: Optional[MistralNonTransformerContainer]
+    _non_transformer: Optional[FalconNonTransformerContainer]
     """
     Embed + unembed container. Specializing the type annotation.
     """
 
-    _transformer: Optional[Iterable[MistralTransformerContainer]]
+    _transformer: Optional[Iterable[FalconTransformerContainer]]
     """
     Per-layer transformer container. Specializing the type annotation.
     """
     """
-    Properties ineherited from `DSInferenceModelBase`
+    Properties inherited from `DSInferenceModelBase`
     """
 
     @property
@@ -43,7 +42,7 @@ class MistralInferenceModel(DSTransformerModelBase):
         return self._config.max_seq_length
 
     """
-    Properties ineherited from `DSTransformerModelBase`
+    Properties inherited from `DSTransformerModelBase`
     """
 
     @property
@@ -68,11 +67,12 @@ class MistralInferenceModel(DSTransformerModelBase):
 
     @property
     def intermediate_dim(self) -> int:
-        return self._config.intermediate_size
+        return 4 * self._config.hidden_size
 
     @property
     def n_heads_kv(self) -> int:
-        return self._config.num_key_value_heads
+        return self._config.num_kv_heads if (self._config.new_decoder_architecture
+                                             or not self._config.multi_query) else 1
 
     @property
     def activation_dtype(self) -> DtypeEnum:
@@ -85,46 +85,15 @@ class MistralInferenceModel(DSTransformerModelBase):
 
     @property
     def mlp_activation_fn(self) -> ActivationType:
-        activation = self._config.hidden_act.lower()
-        if activation == "gelu":
-            return ActivationType.GEGLU
-        elif activation == "relu":
-            return ActivationType.ReGLU
-        elif activation == "gegelu":
-            return ActivationType.GEGLU
-        elif activation == "silu":
-            return ActivationType.SiGLU
-        else:
-            raise NotImplementedError(f"Activation {activation} not supported")
+        return ActivationType.GELU
 
     @property
     def norm_type(self) -> NormTypeEnum:
-        return NormTypeEnum.RMSNorm
+        return NormTypeEnum.LayerNorm
 
     @property
     def positional_embedding_type(self) -> PositionalEmbeddingType:
         return PositionalEmbeddingType.rotate_half
-
-    def make_attn_layer(self) -> None:
-        """
-        Builds the attention layer for the model. This sets the `self.attn` attribute.
-        """
-        softmax_scale = 1.0 / (self.head_size**0.5)
-
-        rotary_config = RotateHalfConfig(theta_base=self._config.rope_theta)
-
-        attn_config = DSSelfAttentionConfig(max_tokens=self._engine_config.state_manager.max_ragged_batch_size,
-                                            n_heads_q=self.n_heads_q_local,
-                                            n_heads_kv=self.n_heads_kv_local,
-                                            head_size=self.head_size,
-                                            max_sequences=self._engine_config.state_manager.max_ragged_sequence_count,
-                                            scale_factor=softmax_scale,
-                                            input_dtype=self.activation_dtype,
-                                            output_dtype=self.activation_dtype,
-                                            positional_embedding_type=self.positional_embedding_type,
-                                            positional_embedding_config=rotary_config)
-
-        self.attn = heuristics.instantiate_attention(attn_config, self._engine_config)
 
     """
     Forward implementations
@@ -147,8 +116,8 @@ class MistralInferenceModel(DSTransformerModelBase):
 
         return embed
 
-    def _forward_transformer(self, layer_idx: int, residual: torch.Tensor, hidden_states: torch.Tensor,
-                             ragged_batch_info: RaggedBatchWrapper) -> Tuple[torch.Tensor, torch.Tensor]:
+    def _forward_transformer_layer(self, layer_idx: int, residual: torch.Tensor, hidden_states: torch.Tensor,
+                                   ragged_batch_info: RaggedBatchWrapper) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         Executes one (slightly offset) layer of the transformer. This implementation does a peak-ahead
         optimization to fuse the layer norm of the next layer into the current layer.
@@ -160,44 +129,55 @@ class MistralInferenceModel(DSTransformerModelBase):
                 hidden states after pre normalization.
             ragged_batch_info (RaggedBatchWrapper): The batch metadata.
         """
-        # TODO(cmikeh2): Distribute ragged_batch_info to all modules
+        assert self.config.parallel_attn, "Only parallel attention implementation is supported"
 
         cur_params = self._transformer[layer_idx]
         kv_cache = self.state_manager.get_cache(layer_idx)
 
-        hidden_states = self.qkv(hidden_states, cur_params.qkv_w, b=None)
-        hidden_states = self.attn(hidden_states, kv_cache, ragged_batch_info)
-        hidden_states = self.attn_out(hidden_states, cur_params.attn_out_w, b=None)
+        attn_ln_out = hidden_states
+        attn_hidden_state = self.qkv(attn_ln_out, cur_params.qkv_w, b=None)
+        attn_hidden_state = self.attn(attn_hidden_state, kv_cache, ragged_batch_info)
+        attention_output = self.attn_out(attn_hidden_state, cur_params.attn_out_w, b=None)
+
+        if self.config.new_decoder_architecture:
+            residual, mlp_ln_out = self.norm(residual,
+                                             None,
+                                             gamma=cur_params.ln_mlp_gamma,
+                                             beta=cur_params.ln_mlp_beta)
+        else:
+            mlp_ln_out = hidden_states
+
+        mlp_hidden_state = self.mlp_1(mlp_ln_out, cur_params.mlp_1_w, b=None)
+        mlp_output = self.mlp_2(mlp_hidden_state, cur_params.mlp_2_w, b=None)
+
+        mlp_output.add_(attention_output)
 
         if self.tp_size > 1:
-            dist.all_reduce(hidden_states, group=self._base_mp_group)
-
-        residual, hidden_states = self.norm(residual, hidden_states, cur_params.mlp_norm_gamma, beta=None)
-
-        # Should be configurable in the future
-        hidden_states = self.mlp_1(hidden_states, cur_params.mlp_1_w, b=None)
-        hidden_states = self.mlp_2(hidden_states, cur_params.mlp_2_w, b=None)
-
-        if self.tp_size > 1:
-            dist.all_reduce(hidden_states, group=self._base_mp_group)
+            dist.all_reduce(mlp_output, group=self._base_mp_group)
 
         if layer_idx != self.num_layers - 1:
             next_params = self._transformer[layer_idx + 1]
-            residual, hidden_states = self.norm(residual, hidden_states, next_params.attn_norm_gamma, beta=None)
+            residual, mlp_output = self.norm(residual,
+                                             mlp_output,
+                                             next_params.ln_attn_gamma,
+                                             beta=next_params.ln_attn_beta)
         else:
             # On last layer, we just need to perform the residual add. Adding into the residual
             # here is safe.
-            residual.add_(hidden_states)
+            residual.add_(mlp_output)
 
-        return residual, hidden_states
+        return residual, mlp_output
 
     def _forward_unembed(self, hidden_states: torch.Tensor, ragged_batch_info: RaggedBatchWrapper) -> torch.Tensor:
         """
         Performs unembedding of the hidden states to logits. This will only sample the final
         token of each sequence.
         """
-        logits = self.unembed(hidden_states, self._non_transformer.word_unembed, ragged_batch_info,
-                              self._non_transformer.final_norm)
+        logits = self.unembed(hidden_states,
+                              self._non_transformer.word_unembed,
+                              ragged_batch_info,
+                              gamma=self._non_transformer.final_norm_gamma,
+                              beta=self._non_transformer.final_norm_beta)
 
         if self.tp_size > 1:
             comm_buffer = empty_from(self._comm_logits, (self.tp_size, logits.shape[0], logits.shape[1]))
@@ -212,12 +192,15 @@ class MistralInferenceModel(DSTransformerModelBase):
             return logits
 
     def forward(self, wrapped_batch: RaggedBatchWrapper) -> torch.Tensor:
-
         residual = self._forward_embed(wrapped_batch)
 
-        residual, hidden_states = self.norm(residual, None, self._transformer[0].attn_norm_gamma, beta=None)
+        residual, hidden_states = self.norm(residual,
+                                            None,
+                                            gamma=self._transformer[0].ln_attn_gamma,
+                                            beta=self._transformer[0].ln_attn_beta)
 
         for layer_idx in range(self.num_layers):
-            residual, hidden_states = self._forward_transformer(layer_idx, residual, hidden_states, wrapped_batch)
+            residual, hidden_states = self._forward_transformer_layer(layer_idx, residual, hidden_states,
+                                                                      wrapped_batch)
 
         return self._forward_unembed(residual, wrapped_batch)

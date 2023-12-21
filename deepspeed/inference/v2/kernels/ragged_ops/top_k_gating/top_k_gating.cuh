@@ -13,7 +13,7 @@ constexpr int unassigned = -1;
 }  // namespace gating
 
 template <typename T>
-void launch_top_1_gating(int32_t* expert_counts,
+void launch_top_k_gating(int32_t* expert_counts,
                          float* scores,
                          int32_t* assignments,
                          int32_t* offsets,
@@ -21,4 +21,5 @@ void launch_top_1_gating(int32_t* expert_counts,
                          const RaggedBatchDescriptor* batch_metadata,
                          const int32_t n_tokens,
                          const int32_t n_experts,
+                         const int32_t n_top_k,
                          cudaStream_t stream);

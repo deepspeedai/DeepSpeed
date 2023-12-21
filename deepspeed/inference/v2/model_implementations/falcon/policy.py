@@ -6,10 +6,10 @@
 from typing import Any
 
 from ...config_v2 import RaggedInferenceEngineConfig
-from ...model_implementations.inference_policy_base import ContainerMap, InferenceV2Policy
-from ...model_implementations.falcon.falcon_containers import FalconNonTransformerContainer, FalconTransformerContainer
-from ...model_implementations.falcon.falcon_containers import FalconNewArchTransformerContainer
-from ...model_implementations.falcon.falcon_model import FalconInferenceModel
+from ..inference_policy_base import ContainerMap, InferenceV2Policy
+from .container import FalconNonTransformerContainer, FalconTransformerContainer
+from .container import FalconNewArchTransformerContainer
+from .model import FalconInferenceModel
 
 
 class FalconPolicy(InferenceV2Policy):

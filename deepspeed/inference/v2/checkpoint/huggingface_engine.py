@@ -61,7 +61,7 @@ class HuggingFaceCheckpointEngine(CheckpointEngineBase):
             # We need to download the checkpoint files from HF
             if model_has_safetensors(self.model_name_or_path):
                 # Prioritize downloading safetensors if they are available
-                allow_patterns = ["*.safetensors", "*.json", "*.pt"]
+                allow_patterns = ["*.safetensors", "*.json"]
             else:
                 # Fallback to bin files when safetensors are not present
                 allow_patterns = ["*.bin", "*.json", "*.pt"]

@@ -18,7 +18,7 @@ class MoEGather(DSKernelBase):
 
     supported_dtypes = [DtypeEnum.fp16, DtypeEnum.bf16]
 
-    def __init__(self, dtype: DtypeEnum, channels: int) -> None:
+    def __init__(self, dtype: DtypeEnum, channels: int, normalize_scores: bool = False) -> None:
 
         if not isinstance(dtype, DtypeEnum):
             dtype = DtypeEnum(dtype)
@@ -31,6 +31,7 @@ class MoEGather(DSKernelBase):
 
         inf_module = RaggedOpsBuilder().load()
         self.kernel = inf_module.moe_gather
+        self.normalize_scores = normalize_scores
 
     def __call__(self, layer_output: torch.Tensor, moe_output: torch.Tensor, scores: torch.Tensor,
                  mapped_slots: torch.Tensor, expert_counts: torch.Tensor) -> torch.Tensor:
@@ -40,13 +41,13 @@ class MoEGather(DSKernelBase):
 
         Arguments:
             layer_output (torch.Tensor): The output of the layer of shape [n_tokens, hidden_size]. This has been scaled appropriately.
-            moe_output (torch.Tensor): The output of the MoE of shape [n_tokens, hidden_size].
+            moe_output (torch.Tensor): The output of the MoE of shape [n_tokens * n_top_k, hidden_size].
             scores (torch.Tensor): The gating scores of shape [n_tokens].
-            mapped_slots (torch.Tensor): The index of the token in the expert's input of shape [n_tokens]. The index of token ``i`` in layer_output is ``mapped_slots[i]``.
+            mapped_slots (torch.Tensor): The index of the token in the expert's input of shape [n_tokens, n_top_k]. The indices of token ``i`` in layer_output is ``mapped_slots[i]``.
             expert_counts (torch.Tensor): The number of tokens assigned to each expert of shape [n_experts]. This is passed to fuse the clearing of this data structure into the gather.
 
         Returns:
             layer_output
         """
-        self.kernel(layer_output, moe_output, scores, mapped_slots, expert_counts)
+        self.kernel(layer_output, moe_output, scores, mapped_slots, expert_counts, self.normalize_scores)
         return layer_output

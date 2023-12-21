@@ -13,7 +13,7 @@ from ....ragged import RaggedBatchWrapper
 from deepspeed.ops.op_builder import RaggedOpsBuilder
 
 
-class RaggedTop1Gating(DSKernelBase):
+class RaggedTopKGating(DSKernelBase):
     """
     CUDA implementation of top-1 gating. This will perform a softmax on the logits,
     and return the scale as well as its idx within that expert's allocation.
@@ -26,28 +26,28 @@ class RaggedTop1Gating(DSKernelBase):
         if not isinstance(logit_dtype, DtypeEnum):
             logit_dtype = DtypeEnum(logit_dtype)
 
-        if logit_dtype not in RaggedTop1Gating.supported_logit_dtypes:
+        if logit_dtype not in RaggedTopKGating.supported_logit_dtypes:
             raise RuntimeError(f"Unsupported logit dtype {logit_dtype}")
 
         inf_module = RaggedOpsBuilder().load()
-        self.kernel = inf_module.top_1_gating
+        self.kernel = inf_module.top_k_gating
 
     def __call__(self, expert_counts: torch.Tensor, scores: torch.Tensor, assignments: torch.Tensor,
                  offsets: torch.Tensor, logits: torch.Tensor,
                  batch: RaggedBatchWrapper) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """
-        Perform the ragged top_1_gating.
+        Perform the ragged top_k_gating.
 
         Arguments:
             expert_counts (torch.Tensor): Tensor of 0s of shape [n_experts] to be filled with
                 number of tokens assigned to each expert. This must be filled with 0s else
                 the copy kernel will buffer overflow. In order to minimize the zero-fill cost,
                 it is recommended to write to 0 during the MoE output remapping.
-            scores (torch.Tensor): Preallocated output of shape [n_tokens] to place expert scaling
+            scores (torch.Tensor): Preallocated output of shape [n_tokens, n_top_k] to place expert scaling
                 value.
-            expert_assignment (torch.Tensor): Preallocated output of shape [n_tokens] to place
+            expert_assignment (torch.Tensor): Preallocated output of shape [n_tokens, n_top_k] to place
                 which expert a token has been assigned to.
-            expert_offset (torch.Tensor): Preallocated output of shape [n_tokens] to place which
+            expert_offset (torch.Tensor): Preallocated output of shape [n_tokens, n_top_k] to place which
                 offset within an experts group a token is.
             logits (torch.Tensor): Raw logits of gating function.
             batch (RaggedBatchWrapper): Batch information for ragged tensor.

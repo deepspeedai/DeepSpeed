@@ -212,3 +212,117 @@ def test_in_out_channels(in_channels: int, out_channels: int) -> None:
                                 dtype=DtypeEnum.fp16,
                                 activation_type=ActivationType.IDENTITY,
                                 use_bias=True)
+
+
+def _mixtral_moe_baseline(hidden_states: torch.Tensor,
+                          gate_weight: torch.Tensor,
+                          mlp_w1: torch.Tensor,
+                          mlp_w2: torch.Tensor,
+                          mlp_w3: torch.Tensor,
+                          force_float: bool = False) -> torch.Tensor:
+    """
+    Baseline implementation for mixtral MoE module.
+
+    Based on transformers implementation: https://github.com/huggingface/transformers/blob/main/src/transformers/models/mixtral/modeling_mixtral.py
+    """
+    output_dtype = hidden_states.dtype
+    if force_float:
+        hidden_states = hidden_states.float()
+        gate_weight = gate_weight.float()
+        mlp_w1 = mlp_w1.float()
+        mlp_w2 = mlp_w2.float()
+        mlp_w3 = mlp_w3.float()
+
+    router_logits = torch.nn.functional.linear(hidden_states, gate_weight)
+    routing_weights = torch.nn.functional.softmax(router_logits, dim=-1, dtype=torch.float)
+    routing_weights, selected_experts = routing_weights.topk(k=2, dim=-1)
+    routing_weights /= routing_weights.sum(dim=-1, keepdim=True)
+
+    # NOTE(cmikeh2): This is a difference implementation, ours will preserve the original scale
+    # as float32 and perform in-kernel fused FP16->FP32->FP16 conversion.
+    routing_weights = routing_weights.to(hidden_states.dtype)
+
+    final_hidden_states = torch.zeros_like(hidden_states)
+
+    expert_mask = torch.nn.functional.one_hot(selected_experts, num_classes=gate_weight.shape[0]).permute(2, 1, 0)
+    get_accelerator().synchronize()
+
+    for expert_idx in range(gate_weight.shape[0]):
+        exp_mlp_w1 = mlp_w1[expert_idx]
+        exp_mlp_w2 = mlp_w2[expert_idx]
+        exp_mlp_w3 = mlp_w3[expert_idx]
+
+        idx, top_x = torch.where(expert_mask[expert_idx])
+
+        if top_x.shape[0] == 0:
+            continue
+
+        top_x_list = top_x.tolist()
+        idx_list = idx.tolist()
+
+        current_state = hidden_states[top_x_list]
+
+        linear = torch.nn.functional.linear
+        intermediate = torch.nn.functional.silu(linear(current_state, exp_mlp_w1)) * linear(current_state, exp_mlp_w3)
+        output = linear(intermediate, exp_mlp_w2) * routing_weights[top_x_list, idx_list].unsqueeze(-1)
+        final_hidden_states.index_add_(0, top_x, output.to(final_hidden_states.dtype))
+
+    return final_hidden_states.to(output_dtype)
+
+
+@pytest.mark.inference_v2_ops
+def test_mixtral_moe_config():
+
+    experts = 8
+    n_top_k = 2
+    in_channels = 4096
+    intermediate_dim = 2048
+    dtype = DtypeEnum.bf16
+
+    # Parameters
+    gate_weight = torch.randn(
+        (experts, in_channels), dtype=dtype.value, device=get_accelerator().current_device()) * .1
+
+    mlp_w1 = torch.randn(
+        (experts, intermediate_dim, in_channels), dtype=dtype.value, device=get_accelerator().current_device()) * .1
+    mlp_w3 = torch.randn(
+        (experts, intermediate_dim, in_channels), dtype=dtype.value, device=get_accelerator().current_device()) * .1
+    mlp_w2 = torch.randn(
+        (experts, in_channels, intermediate_dim), dtype=dtype.value, device=get_accelerator().current_device()) * .1
+
+    n_tokens = 256
+    hidden_states = torch.randn(
+        (n_tokens, in_channels), dtype=dtype.value, device=get_accelerator().current_device()) * .1
+
+    baseline = _mixtral_moe_baseline(hidden_states, gate_weight, mlp_w1, mlp_w2, mlp_w3)
+
+    mlp_w13_fused = torch.cat([mlp_w1, mlp_w3], dim=-1).reshape(experts, 2 * intermediate_dim, in_channels)
+
+    config = DSMoEConfig(max_tokens=4096,
+                         model_dim=in_channels,
+                         intermediate_features=intermediate_dim,
+                         n_experts=experts,
+                         activation=ActivationType.SiGLU,
+                         input_dtype=dtype,
+                         output_dtype=dtype,
+                         top_k=n_top_k,
+                         normalize_scores=True)
+
+    implementation_config = {"weight_dtype": DtypeEnum(dtype)}
+
+    bundle = ConfigBundle(name='cutlass_multi_gemm_moe', config=config, implementation_config=implementation_config)
+    moe_module = DSMoERegistry.instantiate_config(bundle)
+
+    batch = build_simple_batch([n_tokens])
+
+    gate_ds = moe_module.transform_gate_param(gate_weight)
+    mlp_w1_ds = moe_module.transform_moe_mlp_1_param(mlp_w13_fused)
+    mlp_w2_ds = moe_module.transform_moe_mlp_2_param(mlp_w2)
+
+    output = moe_module(hidden_states, batch, gate_ds, mlp_w1_ds, mlp_w2_ds)
+
+    # NOTE(cmikeh2): These are higher than the other tests for reasons that aren't quite
+    # clear to me. My best guess is that the SiGLU activation is causing larger numerical
+    # divergence. The thresholds chosen here is based on the observed error between the
+    # float and bfloat16 reference implementations.
+    assert allclose(output, baseline.to(dtype.value), tolerances=(5e-2, 5e-2))

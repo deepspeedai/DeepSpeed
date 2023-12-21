@@ -521,11 +521,25 @@ class DSTransformerModelBase(DSInferenceModelBase):
 class DSMoETransformerModelBase(DSTransformerModelBase):
 
     @property
-    def num_experts(self) -> int:
+    def n_experts(self) -> int:
         """
         Return the number of experts in the model.
         """
         raise NotImplementedError("Attempted to access an unimplemented number of experts")
+
+    @property
+    def n_top_k(self) -> int:
+        """
+        Number of experts per token.
+        """
+        raise NotImplementedError("Attempted to access an unimplemented number of experts per token")
+
+    @property
+    def normalize_expert_scores(self) -> bool:
+        """
+        Whether to normalize expert scores. If true, sum(expert_scores) = 1.
+        """
+        raise NotImplementedError("Attempted to access an unimplemented normalization flag")
 
     def make_moe_layer(self) -> None:
         """
@@ -538,9 +552,11 @@ class DSMoETransformerModelBase(DSTransformerModelBase):
             model_dim=self.model_dim,
             intermediate_features=sharded_dim,
             activation=self.mlp_activation_fn,
-            n_experts=self.num_experts,
+            n_experts=self.n_experts,
+            top_k=self.n_top_k,
             input_dtype=self.activation_dtype,
             output_dtype=self.activation_dtype,
+            normalize_scores=self.normalize_expert_scores,
         )
 
         self.moe = heuristics.instantiate_moe(moe_config, self._engine_config)

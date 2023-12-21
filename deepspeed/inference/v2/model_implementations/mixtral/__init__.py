@@ -3,4 +3,4 @@
 
 # DeepSpeed Team
 
-from .top_1_gating import RaggedTop1Gating
+from .policy import MixtralPolicy

@@ -3,4 +3,4 @@
 
 # DeepSpeed Team
 
-from .policy import FalconPolicy
+from .top_k_gating import RaggedTopKGating

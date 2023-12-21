@@ -33,7 +33,7 @@ class UnfusedMoEMLP1Parameter(ParameterBase):
     and need to be joined into a single group.
     """
 
-    experts: ParamList("num_experts")  # noqa: F821
+    experts: ParamList("n_experts")  # noqa: F821
 
     def finalize(self) -> torch.Tensor:
         stacked_experts = torch.stack([p for p in self.experts], dim=0)
@@ -46,7 +46,7 @@ class UnfusedMoEMLP2Parameter(ParameterBase):
     and need to be joined into a single group.
     """
 
-    experts: ParamList("num_experts")  # noqa: F821
+    experts: ParamList("n_experts")  # noqa: F821
 
     def finalize(self) -> torch.Tensor:
         stacked_experts = torch.stack([p for p in self.experts], dim=0)
@@ -57,13 +57,22 @@ class UnfusedMoEGatedMLPParameter(ParameterBase):
     """
     MoE Parameter for a gated activation function in which the gating matrix is not
     fused in the same parameter as the non-gating matrix.
+
+    This is a stacked version of the ``GatedMLPParameter``. Please see that class for more
+    documentation on the layout of the parameters.
     """
 
-    gating_experts: ParamList("num_experts")  # noqa: F821
+    gating_experts: ParamList("n_experts")  # noqa: F821
 
-    up_experts: ParamList("num_experts")  # noqa: F821
+    up_experts: ParamList("n_experts")  # noqa: F821
 
     def finalize(self) -> torch.Tensor:
-        fused_params = [torch.cat([gate, weight], dim=0) for gate, weight in zip(self.gating_experts, self.up_experts)]
-        stacked_params = torch.stack(fused_params, dim=0)
-        return self.inference_model.transform_moe_mlp_2_param(stacked_params)
+        transposed_experts = []
+        for gate, up in zip(self.gating_experts, self.up_experts):
+            assert gate.shape[0] == up.shape[0], "Gated MLP parameters must have the same number of neurons."
+            total_neurons = gate.shape[0] + up.shape[0]
+            fused_expert = torch.cat([gate, up], dim=-1).reshape(total_neurons, -1)
+            transposed_experts.append(fused_expert)
+
+        stacked_experts = torch.stack(transposed_experts, dim=0)
+        return self.inference_model.transform_moe_mlp_1_param(stacked_experts)

@@ -17,4 +17,6 @@ void launch_moe_gather(T* layer_output,
                        const int32_t n_channels,
                        const int32_t n_experts,
                        const int32_t n_tokens,
+                       const int32_t n_top_k,
+                       const bool normalize_scales,
                        cudaStream_t stream);

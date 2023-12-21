@@ -12,7 +12,7 @@
 #include "logits_gather.h"
 #include "moe_gather.h"
 #include "moe_scatter.h"
-#include "top_1_gating.h"
+#include "top_k_gating.h"
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m)
 {
@@ -43,6 +43,6 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m)
     // moe_scatter.h
     m.def("moe_scatter", &moe_scatter, "MoE scatter for top-1-gating.");
 
-    // top_1_gating.h
-    m.def("top_1_gating", &top_1_gating, "Top-1 gating for MoE with ragged batch awareness.");
+    // top_k_gating.h
+    m.def("top_k_gating", &top_k_gating, "Top-1 gating for MoE with ragged batch awareness.");
 }

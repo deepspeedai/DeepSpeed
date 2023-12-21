@@ -131,8 +131,7 @@ class OPTInferenceModel(DSTransformerModelBase):
         kv_cache = self.state_manager.get_cache(layer_idx)
 
         hidden_states = self.qkv(hidden_states, cur_params.qkv_w, b=cur_params.qkv_b)
-        hidden_states = self.attn(hidden_states, kv_cache,
-                                  ragged_batch_info)  #, inv_freqs=None) #cur_params.rotary_emb)
+        hidden_states = self.attn(hidden_states, kv_cache, ragged_batch_info)
         hidden_states = self.attn_out(hidden_states, cur_params.attn_out_w, b=cur_params.attn_out_b)
 
         if self.tp_size > 1:

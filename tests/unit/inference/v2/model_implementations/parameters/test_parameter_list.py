@@ -26,7 +26,7 @@ class DummyInferenceModel:
         self._num_experts = experts_per_rank
 
     @property
-    def num_experts(self) -> int:
+    def n_experts(self) -> int:
         return self._num_experts
 
     @on_device

@@ -27,6 +27,7 @@ __global__ void kv_rotary_pos_kernel(T* kv_cache,
                                      T* k,
                                      T* v,
                                      const T* inv_freq,
+                                     const float theta_base,
                                      const BatchWrapperCPP batch_desc,
                                      const int qkv_stride,
                                      const int kv_cache_stride,
@@ -114,7 +115,7 @@ __global__ void kv_rotary_pos_kernel(T* kv_cache,
                     // Conversion to T and back means that both branches of this if statement
                     // will produce the same results if using the same algo for producing the
                     // freqs.
-                    T trunc_freq = conversion::to<T>(1.0 / powf(10000.0, inv_freq_flt));
+                    T trunc_freq = conversion::to<T>(1.0 / powf(theta_base, inv_freq_flt));
                     inv_freq_flt = conversion::to<float>(trunc_freq) * (float)global_token_idx;
                 }
 
@@ -158,7 +159,7 @@ __global__ void kv_rotary_pos_kernel(T* kv_cache,
                 } else {
                     inv_freq_flt =
                         (float)((head_neuron_idx % half_head_size) * 2) / (float)headSize;
-                    inv_freq_flt = 1.0 / powf(10000.0, inv_freq_flt) * (float)global_token_idx;
+                    inv_freq_flt = 1.0 / powf(theta_base, inv_freq_flt) * (float)global_token_idx;
                 }
 
                 float rotary_sign = (head_neuron_idx >= half_head_size) ? -1.0f : 1.0f;
@@ -186,6 +187,7 @@ __global__ void kv_rotary_pos_kernel(T* kv_cache,
                                          k,               \
                                          v,               \
                                          inv_freq,        \
+                                         theta_base,      \
                                          batch_desc,      \
                                          qkv_stride,      \
                                          kv_cache_stride, \
@@ -198,6 +200,7 @@ void launch_kv_rotary_kernel(T* kv_cache,
                              T* k,
                              T* v,
                              T* inv_freq,
+                             const float theta_base,
                              const BatchWrapperCPP batch_desc,
                              const int qkv_stride,
                              const int kv_cache_stride,
@@ -245,6 +248,7 @@ void launch_kv_rotary_kernel(T* kv_cache,
                                                 TYPE * k,                         \
                                                 TYPE * v,                         \
                                                 TYPE * inv_freq,                  \
+                                                const float theta_base,           \
                                                 const BatchWrapperCPP batch_desc, \
                                                 const int qkv_stride,             \
                                                 const int kv_cache_stride,        \
@@ -262,10 +266,20 @@ INSTANTIATE_KV_ROTARY_KERNEL(__half)
 INSTANTIATE_KV_ROTARY_KERNEL(__nv_bfloat16)
 #endif
 
-#define DISPATCH_KV_COPY_IMPL(Q_RATIO, HEAD_SIZE)                                       \
-    if (q_ratio == Q_RATIO && head_size == HEAD_SIZE)                                   \
-        kv_rotary_pos_kernel<T, Q_RATIO, HEAD_SIZE, false><<<grid, block, 0, stream>>>( \
-            kv_cache, q, k, v, nullptr, batch_desc, qkv_stride, kv_cache_stride, v_offset, 0);
+#define DISPATCH_KV_COPY_IMPL(Q_RATIO, HEAD_SIZE)          \
+    if (q_ratio == Q_RATIO && head_size == HEAD_SIZE)      \
+        kv_rotary_pos_kernel<T, Q_RATIO, HEAD_SIZE, false> \
+            <<<grid, block, 0, stream>>>(kv_cache,         \
+                                         q,                \
+                                         k,                \
+                                         v,                \
+                                         nullptr,          \
+                                         0.f,              \
+                                         batch_desc,       \
+                                         qkv_stride,       \
+                                         kv_cache_stride,  \
+                                         v_offset,         \
+                                         0);
 
 template <typename T>
 void launch_kv_copy_kernel(T* kv_cache,

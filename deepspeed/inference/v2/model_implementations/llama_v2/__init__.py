@@ -3,4 +3,4 @@
 
 # DeepSpeed Team
 
-from .llama_v2_policy import Llama2Policy
+from .policy import Llama2Policy

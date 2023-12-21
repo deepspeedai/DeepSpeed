@@ -21,7 +21,12 @@ class BlockedRotaryEmbeddings(DSKernelBase):
     supported_head_sizes = [64, 128]
     supported_q_ratios = [1, 2, 4, 5, 8, 16, 29, 35, 36, 71]
 
-    def __init__(self, head_size: int, n_q_heads: int, n_kv_heads: int, dtype: torch.dtype) -> None:
+    def __init__(self,
+                 head_size: int,
+                 n_q_heads: int,
+                 n_kv_heads: int,
+                 dtype: torch.dtype,
+                 theta_base: float = 10000.0) -> None:
         """
         Args:
             head_size: The size of the attention head.
@@ -51,6 +56,7 @@ class BlockedRotaryEmbeddings(DSKernelBase):
         self.head_size = head_size
         self.n_q_heads = n_q_heads
         self.n_kv_heads = n_kv_heads
+        self.theta_base = theta_base
 
     def __call__(self, kv_cache: torch.Tensor, qkv: torch.Tensor, ragged_batch: RaggedBatchWrapper) -> None:
         """
@@ -66,5 +72,5 @@ class BlockedRotaryEmbeddings(DSKernelBase):
         k = qkv[:, self.head_size * self.n_q_heads:self.head_size * (self.n_q_heads + self.n_kv_heads)]
         v = qkv[:, self.head_size * (self.n_q_heads + self.n_kv_heads):]
 
-        self.kernel(kv_cache, q, k, v, ragged_batch.batch_metadata_buffer(), ragged_batch.inflight_seq_descriptors(),
-                    ragged_batch.tokens_to_seq(), ragged_batch.kv_ptrs())
+        self.kernel(kv_cache, q, k, v, self.theta_base, ragged_batch.batch_metadata_buffer(),
+                    ragged_batch.inflight_seq_descriptors(), ragged_batch.tokens_to_seq(), ragged_batch.kv_ptrs())

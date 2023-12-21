@@ -5,8 +5,8 @@
 
 # Create a container object to save model-specific tensors using the policy file above.
 
-from ...model_implementations.common_parameters import *
-from ...model_implementations.layer_container_base import LayerContainer
+from ..common_parameters import *
+from ..layer_container_base import LayerContainer
 '''
  # HF OPT model looks like this:
 
