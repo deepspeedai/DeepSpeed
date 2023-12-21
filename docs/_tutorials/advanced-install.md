@@ -27,7 +27,7 @@ ds_report
 
 ## Pre-install DeepSpeed Ops
 
-**Note:** [PyTorch](https://pytorch.org/) must be installed _before_ pre-compiling any DeepSpeed c++/cuda ops. However, this is not required if using the default mode of JIT compilation of ops.
+**Note:** [PyTorch](https://pytorch.org/) must be installed _before_ pre-compiling any DeepSpeed C++/CUDA ops. However, this is not required if using the default mode of JIT compilation of ops.
 {: .notice--info}
 
 Sometimes we have found it useful to pre-install either some or all DeepSpeed
@@ -56,22 +56,22 @@ DS_BUILD_FUSED_LAMB=1 pip install deepspeed
 ```
 
 Available `DS_BUILD` options include:
-* `DS_BUILD_OPS` toggles all ops
-* `DS_BUILD_AIO` builds asynchronous (NVMe) I/O op
-* `DS_BUILD_CCL_COMM` builds the communication collective libs
-* `DS_BUILD_CPU_ADAM` builds the CPUAdam op
-* `DS_BUILD_CPU_LION` builds the CPULion op
-* `DS_BUILD_EVOFORMER_ATTN` builds the EvoformerAttn op (from [Alphafold](https://www.deepspeed.ai/tutorials/ds4sci_evoformerattention/))
-* `DS_BUILD_FUSED_ADAM` builds the FusedAdam op (from [apex](https://github.com/NVIDIA/apex))
-* `DS_BUILD_FUSED_LION` builds the FusedLion op
-* `DS_BUILD_CPU_ADAGRAD` builds the CPUAdagrad op
-* `DS_BUILD_FUSED_LAMB` builds the FusedLamb op
-* `DS_BUILD_QUANTIZER` builds the quantizer op
-* `DS_BUILD_RANDOM_LTD` builds the random ltd op
-* `DS_BUILD_SPARSE_ATTN` builds the sparse attention op
-* `DS_BUILD_TRANSFORMER` builds the transformer op
-* `DS_BUILD_TRANSFORMER_INFERENCE` builds the transformer-inference op
-* `DS_BUILD_STOCHASTIC_TRANSFORMER` builds the stochastic transformer op
+* `DS_BUILD_OPS` toggles all ops.
+* `DS_BUILD_AIO` builds asynchronous (NVMe) I/O op.
+* `DS_BUILD_CCL_COMM` builds the communication collective libs.
+* `DS_BUILD_CPU_ADAM` builds the CPUAdam op.
+* `DS_BUILD_CPU_LION` builds the CPULion op.
+* `DS_BUILD_EVOFORMER_ATTN` builds the EvoformerAttn op (from [Alphafold](https://www.deepspeed.ai/tutorials/ds4sci_evoformerattention/)).
+* `DS_BUILD_FUSED_ADAM` builds the FusedAdam op (from [apex](https://github.com/NVIDIA/apex)).
+* `DS_BUILD_FUSED_LION` builds the FusedLion op.
+* `DS_BUILD_CPU_ADAGRAD` builds the CPUAdagrad op.
+* `DS_BUILD_FUSED_LAMB` builds the FusedLamb op.
+* `DS_BUILD_QUANTIZER` builds the quantizer op.
+* `DS_BUILD_RANDOM_LTD` builds the random ltd op.
+* `DS_BUILD_SPARSE_ATTN` builds the sparse attention op.
+* `DS_BUILD_TRANSFORMER` builds the transformer op.
+* `DS_BUILD_TRANSFORMER_INFERENCE` builds the transformer-inference op.
+* `DS_BUILD_STOCHASTIC_TRANSFORMER` builds the stochastic transformer op.
 
 To speed up the build-all process, you can parallelize the compilation process with:
 
@@ -81,7 +81,7 @@ DS_BUILD_OPS=1 pip install deepspeed --global-option="build_ext" --global-option
 
 This should complete the full build 2-3 times faster. You can adjust `-j` to specify how many cpu-cores are to be used during the build. In the example it is set to 8 cores.
 
-You can also build a binary wheel and install it on multiple machines that have the same type of GPUs and the same software environment (CUDA toolkit, pytorch, python, etc.)
+You can also build a binary wheel and install it on multiple machines that have the same type of GPUs and the same software environment (CUDA toolkit, PyTorch, Python, etc.)
 
 ```bash
 DS_BUILD_OPS=1 python setup.py build_ext -j8 bdist_wheel
@@ -107,7 +107,7 @@ pip install .
 For installs spanning multiple nodes we find it useful to install DeepSpeed
 using the
 [install.sh](https://github.com/microsoft/DeepSpeed/blob/master/install.sh)
-script in the repo. This will build a python wheel locally and copy it to all
+script in the repo. This will build a Python wheel locally and copy it to all
 the nodes listed in your hostfile (either given via `--hostfile`, or defaults to
 `/job/hostfile`).
 
@@ -118,7 +118,7 @@ extensions will be loaded form that directory.
 
 If you use multiple virtual environments this could be a problem, since by default there is only one
 `torch_extensions` directory, but different virtual environments may use different setups (e.g., different
-python or cuda versions) and then the loading of a CUDA extension built by another environment will
+Python or CUDA versions) and then the loading of a CUDA extension built by another environment will
 fail. Therefore, if you need to you can override the default location with the help of the
  `TORCH_EXTENSIONS_DIR` environment variable. So in each virtual environment you can point it to a
  unique directory and DeepSpeed will use it to save and load CUDA extensions.
@@ -146,9 +146,9 @@ If you're getting the following error:
 ```
 RuntimeError: CUDA error: no kernel image is available for execution on the device
 ```
-when running deepspeed, that means that the cuda extensions weren't built for the card you're trying to use it for.
+when running deepspeed, that means that the CUDA extensions weren't built for the card you're trying to use it for.
 
-When building from source deepspeed will try to support a wide range of architectures, but under jit-mode it'll only
+When building from source DeepSpeed will try to support a wide range of architectures, but under jit-mode it'll only
 support the architectures visible at the time of building.
 
 You can build specifically for a desired range of architectures by setting a `TORCH_CUDA_ARCH_LIST` env variable:
@@ -159,9 +159,9 @@ TORCH_CUDA_ARCH_LIST="6.1;7.5;8.6" pip install ...
 
 It will also make the build faster when you only build for a few architectures.
 
-This is also recommended to ensure your exact architecture is used. Due to a variety of technical reasons, a distributed pytorch binary isn't built to fully support all architectures, skipping binary compatible ones, at a potential cost of underutilizing your full card's compute capabilities. To see which architectures get included during the deepspeed build from source - save the log and grep for `-gencode` arguments.
+This is also recommended to ensure your exact architecture is used. Due to a variety of technical reasons, a distributed PyTorch binary isn't built to fully support all architectures, skipping binary compatible ones, at a potential cost of underutilizing your full card's compute capabilities. To see which architectures get included during the DeepSpeed build from source - save the log and grep for `-gencode` arguments.
 
-The full list of nvidia GPUs and their compute capabilities can be found [here](https://developer.nvidia.com/cuda-gpus).
+The full list of Nvidia GPUs and their compute capabilities can be found [here](https://developer.nvidia.com/cuda-gpus).
 
 ## CUDA version mismatch
 
@@ -171,7 +171,7 @@ If you're getting the following error:
 Exception: >- DeepSpeed Op Builder: Installed CUDA version {VERSION} does not match the version torch was compiled with {VERSION}, unable to compile cuda/cpp extensions without a matching cuda version.
 ```
 You have a misaligned version of CUDA installed compared to the version of CUDA
-used to compile torch. A mismatch in the major version is likely to result in
+used to compile Torch. A mismatch in the major version is likely to result in
 errors or unexpected behavior.
 
 The easiest fix for this error is changing the CUDA version installed (check
