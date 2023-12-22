@@ -595,7 +595,7 @@ def get_all_ranks_from_group(group=None):
         while True:
             group_ranks.append(cdb.get_global_rank(group, rank))
             rank += 1
-    except RuntimeError:
+    except (RuntimeError, ValueError):
         pass
     return group_ranks
 
