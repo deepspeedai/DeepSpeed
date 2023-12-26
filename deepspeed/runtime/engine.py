@@ -1017,6 +1017,9 @@ class DeepSpeedEngine(Module):
 
     # Validate configuration based on command line arguments
     def _do_sanity_check(self):
+        if self.fp16_enabled() and not get_accelerator().is_fp16_supported():
+            raise ValueError("Type fp16 is not supported.")
+
         expected_optim_types = self._supported_optims()
         expected_optim_types += [type(None), Callable]
         assert isinstance(self.client_optimizer, tuple(expected_optim_types)), \
