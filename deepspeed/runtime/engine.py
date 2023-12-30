@@ -69,7 +69,7 @@ from deepspeed.utils.timer import NoopTimer, ThroughputTimer, SynchronizedWallCl
     STEP_MICRO_TIMER, \
     FORWARD_GLOBAL_TIMER, BACKWARD_GLOBAL_TIMER, BACKWARD_INNER_GLOBAL_TIMER, BACKWARD_REDUCE_GLOBAL_TIMER, \
     STEP_GLOBAL_TIMER
-from deepspeed.utils.debug import debug_extract_module_and_param_names
+from deepspeed.utils.debug import debug_extract_module_and_param_names, debug_clear_module_and_param_names
 from deepspeed.monitor.monitor import MonitorMaster
 from deepspeed.runtime.progressive_layer_drop import ProgressiveLayerDrop
 from deepspeed.runtime.utils import clip_grad_norm_
@@ -362,6 +362,7 @@ class DeepSpeedEngine(Module):
     def destroy(self):
         if self.optimizer is not None and hasattr(self.optimizer, 'destroy'):
             self.optimizer.destroy()
+        debug_clear_module_and_param_names()
 
     def _get_model_parameters(self):
         if self.autotuning_profile_model_info():

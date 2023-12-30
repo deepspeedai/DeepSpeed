@@ -377,6 +377,7 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
 
         #creates backward hooks for gradient partitioning
         ###Calls all gather param
+        self._grad_acc_hooks = []
         self.create_reduce_and_remove_grad_hooks()
 
         #exit(0)
@@ -397,6 +398,9 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
 
     def destroy(self):
         self.parameter_offload.destroy()
+        for hook in self._grad_acc_hooks:
+            hook.remove()
+        print_rank_0("Removed grad acc hooks", force=False)
         del self.__ipg_bucket_flat_buffer
 
     def initialize_ds_offload(
@@ -1118,7 +1122,7 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
                         def reduce_partition_and_remove_grads(*notneeded):
                             self.reduce_ready_partitions_and_remove_grads(param)
 
-                        grad_acc.register_hook(reduce_partition_and_remove_grads)
+                        self._grad_acc_hooks.append(grad_acc.register_hook(reduce_partition_and_remove_grads))
                         self.grad_accs.append(grad_acc)
 
                     #print(f"param grad fn {param.expand_as(param).grad_fn}")
