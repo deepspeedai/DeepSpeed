@@ -194,7 +194,7 @@ void Adagrad_Optimizer::Step_AVX(size_t* rounded_size,
 #elif defined(__ENABLE_CANN__)
         if (dev_params) {
             size_t memcpy_size = copy_size * sizeof(_doubled_buffer[_buf_index][0]);
-            if (half_precision) memoryCopySize /= 2;
+            if (half_precision) memcpy_size /= 2;
             aclrtMemcpy(dev_params + t,
                         memcpy_size,
                         _doubled_buffer[_buf_index],
@@ -202,6 +202,7 @@ void Adagrad_Optimizer::Step_AVX(size_t* rounded_size,
                         aclrtMemcpyKind::ACL_MEMCPY_HOST_TO_DEVICE);
 
             _buf_index = !_buf_index;
+        }
 #endif
     }
     *rounded_size = new_rounded_size;
