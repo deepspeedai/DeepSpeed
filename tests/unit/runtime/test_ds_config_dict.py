@@ -90,7 +90,7 @@ class TestBatchConfig(DistributedTest):
 
     def test(self, num_ranks, batch, micro_batch, gas, success):
         assert dist.get_world_size() == num_ranks, \
-        'The test assumes a world size of f{num_ranks}'
+        f'The test assumes a world size of {num_ranks}'
 
         ds_batch_config = get_test_path('ds_batch_config.json')
         ds_config = DeepSpeedConfig(ds_batch_config)
