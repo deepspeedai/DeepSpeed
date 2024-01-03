@@ -402,7 +402,13 @@ class PipelineEngine(DeepSpeedEngine):
         # TODO: should return precisely what loss returned and allow others to be queried?
         return self.agg_train_loss
 
-    def eval_batch(self, data_iter, return_logits=False, compute_loss=True, reduce_output='avg', bcast_loss=True):
+    def eval_batch(self,
+                   data_iter,
+                   return_logits=False,
+                   compute_loss=True,
+                   reduce_output='avg',
+                   bcast_loss=True,
+                   num_micro_batches=None):
         """Evaluate the pipeline on a batch of data from ``data_iter``. The
         engine will evaluate ``self.train_batch_size()`` total samples
         collectively across all workers.
@@ -451,6 +457,9 @@ class PipelineEngine(DeepSpeedEngine):
         train_iterator = self.data_iterator
         self.set_dataiterator(data_iter)
 
+        # set the number micro batches in case the user chose value than training
+        micro_batches = self.micro_batches if num_micro_batches is None else num_micro_batches
+
         # Do the work
         sched = schedule.InferenceSchedule(micro_batches=self.micro_batches,
                                            stages=self.num_stages,
@@ -463,7 +472,7 @@ class PipelineEngine(DeepSpeedEngine):
             self._exec_schedule(sched)
 
         if self.is_last_stage():
-            eval_output = self._reduce_outputs(self.fwd_outputs, reduce=reduce_output)
+            eval_output = self._reduce_outputs(self.fwd_outputs, reduce=reduce_output, micro_batches=micro_batches)
 
         if compute_loss and (bcast_loss or self.monitor.enabled):
             eval_output = self._bcast_pipe_scalar(eval_output)
@@ -505,7 +514,7 @@ class PipelineEngine(DeepSpeedEngine):
         """True if this process is in the last stage in the pipeline."""
         return self.stage_id == self.num_stages - 1
 
-    def _reduce_outputs(self, outputs, reduce='avg', reduce_dp=True):
+    def _reduce_outputs(self, outputs, reduce='avg', reduce_dp=True, micro_batches=None):
         if reduce is None:
             return outputs
 
@@ -520,7 +529,7 @@ class PipelineEngine(DeepSpeedEngine):
                     reduced[idx] += out
 
             # Average over the microbatches
-            reduced = self._scale_loss_by_gas(reduced)
+            reduced = self._scale_loss_by_gas(reduced, eval_micro_batches=micro_batches)
 
             # Average over DP groups
             if reduce_dp and self.is_data_parallel:
