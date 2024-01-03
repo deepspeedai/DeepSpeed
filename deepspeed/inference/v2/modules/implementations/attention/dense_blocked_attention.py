@@ -86,13 +86,18 @@ class DSDenseBlockedAttention(DSSelfAttentionBase):
             self._kv_copy = LinearBlockedKVCopy(self._config.head_size, self._config.n_heads_q,
                                                 self._config.n_heads_kv, self._config.input_dtype)
         elif embed_type == PositionalEmbeddingType.rotate_half:
-            if config.positional_embedding_config.use_trained_freqs:
+            rotary_config = config.positional_embedding_config
+            if rotary_config.use_trained_freqs:
+                # Theta and rotary dim are effectively embedded into either the values (theta) or the shape (rotary_dim)
+                # of the trained_freqs tensor.
                 self._kv_copy = BlockedTrainedRotaryEmbeddings(self._config.head_size, self._config.n_heads_q,
                                                                self._config.n_heads_kv, self._config.input_dtype)
             else:
-                theta_base = config.positional_embedding_config.theta_base
+                theta_base = rotary_config.theta_base
+                rotary_dim = rotary_config.rotate_dim if rotary_config.rotate_dim is not None else self._config.head_size
                 self._kv_copy = BlockedRotaryEmbeddings(self._config.head_size, self._config.n_heads_q,
-                                                        self._config.n_heads_kv, self._config.input_dtype, theta_base)
+                                                        self._config.n_heads_kv, self._config.input_dtype, rotary_dim,
+                                                        theta_base)
 
         self._softmax_scale = self._config.scale_factor
 

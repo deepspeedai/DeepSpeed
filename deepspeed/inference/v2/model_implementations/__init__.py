@@ -14,3 +14,4 @@ from .opt import *
 from .mistral import *
 from .mixtral import *
 from .falcon import *
+from .phi import *

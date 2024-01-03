@@ -13,6 +13,7 @@
                                         (C_TYPE*)k.data_ptr(),             \
                                         (C_TYPE*)v.data_ptr(),             \
                                         (C_TYPE*)inv_freq_ptr,             \
+                                        rotary_dim,                        \
                                         theta_base,                        \
                                         batch_wrapper,                     \
                                         qkv_stride,                        \
@@ -53,6 +54,7 @@ void kv_trained_rotary_embeddings(torch::Tensor& kv_cache,
     TORCH_CHECK(n_tokens == v.size(0));
 
     const float theta_base = 0.f;
+    const int32_t rotary_dim = inv_freq.size(0) * 2;
 
     // Dimensions
     const int32_t block_size = kv_cache.size(1);
@@ -94,6 +96,7 @@ void kv_rotary_embeddings(torch::Tensor& kv_cache,
                           torch::Tensor& q,
                           torch::Tensor& k,
                           torch::Tensor& v,
+                          const int32_t rotary_dim,
                           const float theta_base,
                           torch::Tensor& batch_metadata,
                           torch::Tensor& seq_metadata,

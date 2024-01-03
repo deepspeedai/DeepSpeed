@@ -39,6 +39,14 @@ class RotateHalfConfig(DeepSpeedConfigModel):
     Base for theta. This will only be used if `use_trained_freqs` is False.
     """
 
+    rotate_dim: Optional[int] = None
+    """
+    How many neurons to rotate. If None, then all neurons will be rotated. Many external configs
+    will set this number to half the head dimension and then internally multiply by 2. To make it
+    more clear to understand what is happening (rotate_dim < head_dim -> then only partial rotation),
+    we do not do this multiplication internally.
+    """
+
 
 class MaskingType(Enum):
 

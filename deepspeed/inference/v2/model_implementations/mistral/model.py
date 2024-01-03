@@ -196,8 +196,10 @@ class MistralInferenceModel(DSTransformerModelBase):
         Performs unembedding of the hidden states to logits. This will only sample the final
         token of each sequence.
         """
-        logits = self.unembed(hidden_states, self._non_transformer.word_unembed, ragged_batch_info,
-                              self._non_transformer.final_norm)
+        logits = self.unembed(hidden_states,
+                              self._non_transformer.word_unembed,
+                              ragged_batch_info,
+                              gamma=self._non_transformer.final_norm)
 
         if self.tp_size > 1:
             comm_buffer = empty_from(self._comm_logits, (self.tp_size, logits.shape[0], logits.shape[1]))

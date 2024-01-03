@@ -163,8 +163,11 @@ class OPTInferenceModel(DSTransformerModelBase):
         return residual, hidden_states
 
     def _forward_unembed(self, hidden_states: torch.Tensor, ragged_batch_info: RaggedBatchWrapper) -> torch.Tensor:
-        logits = self.unembed(hidden_states, self._non_transformer.word_unembed, ragged_batch_info,
-                              self._non_transformer.final_norm_w, self._non_transformer.final_norm_b)
+        logits = self.unembed(hidden_states,
+                              self._non_transformer.word_unembed,
+                              ragged_batch_info,
+                              gamma=self._non_transformer.final_norm_w,
+                              beta=self._non_transformer.final_norm_b)
 
         if self.tp_size > 1:
             comm_buffer = empty_from(self._comm_logits, (self.tp_size, logits.shape[0], logits.shape[1]))
