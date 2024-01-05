@@ -461,7 +461,7 @@ class AutoTP():
 
     def get_model_num_kv_heads(self, config):
         num_kv_heads = None
-        kv_head_names = ['num_key_value_heads', 'num_attention_heads', 'n_heads']
+        kv_head_names = ['num_kv_heads', 'num_key_value_heads', 'num_attention_heads', 'n_heads']
         for name in kv_head_names:
             if hasattr(config, name):
                 num_kv_heads = getattr(config, name)
