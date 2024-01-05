@@ -4,7 +4,7 @@
 # DeepSpeed Team
 import torch
 from deepspeed.utils.logging import warning_once
-from deepspeed.module_inject.tp_shard import get_shard_size, get_shard_size_list, get_num_kv_heads
+from deepspeed.module_inject.tp_shard import get_shard_size, get_shard_size_list, get_num_kv_heads, get_n_embd
 import re
 
 
@@ -17,7 +17,7 @@ def split_by_qkvlist_and_refuse(qkv_list, split_size, split_dim=0, cat_dim=0):
 
 
 def require_tp_fused_qkvw(name, mp_size):
-    fused_qkvw_name_list = ['qkv_proj', 'query_key_value', 'attn.Wqkv', 'self_attn.W_pack']
+    fused_qkvw_name_list = ['qkv_proj', 'query_key_value', 'attn.Wqkv', 'self_attn.W_pack', 'c_attn']
 
     if mp_size == 1:
         return False
@@ -38,6 +38,7 @@ def prepare_tp_fused_qkvw(module_str, src, mp_size, gpu_index):
         "MptBlock": 'glmtype',
         "BaichuanLayer": 'glmtype',
         "DecoderLayer": 'glmtype',
+        "GPTBigCodeBlock": 'bigcodetype'
     }
 
     def _codegen_type_transpose(input, mp_size, codegen_mp_num=4):
@@ -74,6 +75,14 @@ def prepare_tp_fused_qkvw(module_str, src, mp_size, gpu_index):
         split_fusedqkv = input.split(get_shard_size_list(shape[0], mp_size), dim=0)
         return split_fusedqkv[gpu_index]
 
+    def _bigcode_type_transpose(input, mp_size):
+        n_embd = get_n_embd()
+        q = input[:n_embd]
+        kv = input[n_embd:]
+        shape = q.shape
+        split_q = q.split(get_shard_size_list(shape[0], mp_size), dim=0)
+        return torch.cat((split_q[gpu_index], kv), dim=0)
+
     def _transpose_fused_qkvw(src, mp_size, fused_qkv_type=None):
 
         # suppose num_heads=n, q(n)_w means the n-th q head linear weight, the weight format are as following
@@ -87,6 +96,8 @@ def prepare_tp_fused_qkvw(module_str, src, mp_size, gpu_index):
             return _codegen_type_transpose(src, mp_size)
         elif fused_qkv_type == 'glmtype':
             return _glm_type_transpose(src, mp_size)
+        elif fused_qkv_type == 'bigcodetype':
+            return _bigcode_type_transpose(src, mp_size)
 
         raise ValueError("unknown fused_qkv_type")
 

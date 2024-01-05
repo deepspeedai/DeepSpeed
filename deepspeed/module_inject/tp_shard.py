@@ -12,6 +12,11 @@ def set_num_kv_heads(num):
     num_kv_heads = num
 
 
+def set_n_embd(num):
+    global n_embd
+    n_embd = num
+
+
 def get_num_kv_heads():
     global num_kv_heads
     return num_kv_heads
@@ -30,6 +35,11 @@ def get_shard_size(total_size, mp_size, rank=None):
             return total_size // mp_size
         else:
             assert False, f"Number of attention heads ({total_size}) must be divisible by mp_size ({mp_size})"
+
+
+def get_n_embd():
+    global n_embd
+    return n_embd
 
 
 def get_shard_size_list(total_size, mp_size):

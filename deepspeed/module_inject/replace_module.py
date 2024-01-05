@@ -16,7 +16,7 @@ from .replace_policy import replace_policies, generic_policies
 from .auto_tp import AutoTP, ReplaceWithTensorSlicing, Loading
 
 from deepspeed import comm as dist
-from deepspeed.module_inject.tp_shard import set_num_kv_heads
+from deepspeed.module_inject.tp_shard import set_num_kv_heads, set_n_embd
 
 from .load_checkpoint import load_model_with_checkpoint
 import time
@@ -277,6 +277,18 @@ def replace_transformer_layer(orig_layer_impl, model, checkpoint_dict, config, m
 
         # 4. When we have num_kv_heads defined, uneven division is possible, otherwise enforce even division
         set_num_kv_heads(num_kv_heads)
+
+        # 4.1 Get n_embd
+        n_embd = None
+        multi_query_n_embd_names = ['n_embd']
+        for name in multi_query_n_embd_names:
+            if hasattr(model_config, name):
+                n_embd = getattr(model_config, name)
+            if n_embd != None:
+                break
+
+        # 4.2 set n_embd
+        set_n_embd(n_embd)
 
         # 5. Set linear policies
         _autotp.update_linear_policies()
