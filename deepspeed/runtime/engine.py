@@ -1490,13 +1490,6 @@ class DeepSpeedEngine(Module):
             assert not isinstance(optimizer, DummyOptim), "zero stage {} requires an optimizer".format(zero_stage)
 
             log_dist(f'Creating {model_dtype} ZeRO stage {zero_stage} optimizer', ranks=[0])
-            # Overlap and contiguous grads are meaningless in stage 1 and are ignored
-            if zero_stage == ZeroStageEnum.optimizer_states:
-                overlap_comm = False
-                round_robin_gradients = False
-                # Non-MoE requires contiguous grads to be disabled w. stage 1
-                if not self.has_moe_layers:
-                    contiguous_gradients = False
 
             if isinstance(self.module, PipelineModule):
                 if overlap_comm:
