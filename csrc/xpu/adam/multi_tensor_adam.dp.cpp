@@ -10,14 +10,12 @@ This file is adapted from fused adam in NVIDIA/apex, commit a109f85
 
 #include <ATen/ATen.h>
 #include <ATen/AccumulateType.h>
-#include <ATen/cuda/CUDAContext.h>
-#include <ATen/cuda/Exceptions.h>
-// Another possibility:
-// #include <torch/all.h>
+#include <sycl/sycl.hpp>
 
 #include <assert.h>
 
-#include "multi_tensor_apply.cuh"
+#include <cmath>
+#include "multi_tensor_apply.dp.hpp"
 #include "type_shim.h"
 
 #define BLOCK_SIZE 512
@@ -32,28 +30,22 @@ using MATH_T = float;
 
 template <typename T>
 struct AdamFunctor {
-    __device__ __forceinline__ void operator()(int chunk_size,
-                                               volatile int* noop_gmem,
-                                               TensorListMetadata<4>& tl,
-                                               const float beta1,
-                                               const float beta2,
-                                               const float beta1_correction,
-                                               const float beta2_correction,
-                                               const float epsilon,
-                                               const float lr,
-                                               adamMode_t mode,
-                                               const float decay)
+    __inline__ __attribute__((always_inline)) void operator()(int chunk_size,
+                                                              volatile int* noop_gmem,
+                                                              TensorListMetadata<4>& tl,
+                                                              const float beta1,
+                                                              const float beta2,
+                                                              const float beta1_correction,
+                                                              const float beta2_correction,
+                                                              const float epsilon,
+                                                              const float lr,
+                                                              adamMode_t mode,
+                                                              const float decay)
     {
-        // I'd like this kernel to propagate infs/nans.
-        // if(*noop_gmem == 1)
-        //   return;
+        auto item_ct1 = sycl::ext::oneapi::experimental::this_nd_item<3>();
+        int tensor_loc = tl.block_to_tensor[item_ct1.get_group(2)];
 
-        int tensor_loc = tl.block_to_tensor[blockIdx.x];
-
-        // potentially use to pass in list of scalar
-        // int tensor_num = tl.start_tensor_this_launch + tensor_loc;
-
-        int chunk_idx = tl.block_to_chunk[blockIdx.x];
+        int chunk_idx = tl.block_to_chunk[item_ct1.get_group(2)];
         int n = tl.sizes[tensor_loc];
 
         T* g = (T*)tl.addresses[0][tensor_loc];
@@ -71,14 +63,15 @@ struct AdamFunctor {
         n -= chunk_idx * chunk_size;
 
         // see note in multi_tensor_scale_kernel.cu
-        for (int i_start = 0; i_start < n && i_start < chunk_size; i_start += blockDim.x * ILP) {
+        for (int i_start = 0; i_start < n && i_start < chunk_size;
+             i_start += item_ct1.get_local_range(2) * ILP) {
             MATH_T r_g[ILP];
             MATH_T r_p[ILP];
             MATH_T r_m[ILP];
             MATH_T r_v[ILP];
 #pragma unroll
             for (int ii = 0; ii < ILP; ii++) {
-                int i = i_start + threadIdx.x + ii * blockDim.x;
+                int i = i_start + item_ct1.get_local_id(2) + ii * item_ct1.get_local_range(2);
                 if (i < n && i < chunk_size) {
                     r_g[ii] = g[i];
                     r_p[ii] = p[i];
@@ -99,7 +92,7 @@ struct AdamFunctor {
                     r_v[ii] = beta2 * r_v[ii] + (1 - beta2) * r_g[ii] * r_g[ii];
                     MATH_T next_m_unbiased = r_m[ii] / beta1_correction;
                     MATH_T next_v_unbiased = r_v[ii] / beta2_correction;
-                    MATH_T denom = sqrtf(next_v_unbiased) + epsilon;
+                    MATH_T denom = sycl::sqrt(next_v_unbiased) + epsilon;
                     MATH_T update = next_m_unbiased / denom;
                     r_p[ii] = r_p[ii] - (lr * update);
                 } else {  // weight decay
@@ -107,14 +100,14 @@ struct AdamFunctor {
                     r_v[ii] = beta2 * r_v[ii] + (1 - beta2) * r_g[ii] * r_g[ii];
                     MATH_T next_m_unbiased = r_m[ii] / beta1_correction;
                     MATH_T next_v_unbiased = r_v[ii] / beta2_correction;
-                    MATH_T denom = sqrtf(next_v_unbiased) + epsilon;
+                    MATH_T denom = sycl::sqrt(next_v_unbiased) + epsilon;
                     MATH_T update = (next_m_unbiased / denom) + (decay * r_p[ii]);
                     r_p[ii] = r_p[ii] - (lr * update);
                 }
             }
 #pragma unroll
             for (int ii = 0; ii < ILP; ii++) {
-                int i = i_start + threadIdx.x + ii * blockDim.x;
+                int i = i_start + item_ct1.get_local_id(2) + ii * item_ct1.get_local_range(2);
                 if (i < n && i < chunk_size) {
                     p[i] = r_p[ii];
                     m[i] = r_m[ii];
@@ -163,6 +156,4 @@ void multi_tensor_adam_cuda(int chunk_size,
                                                          lr,
                                                          (adamMode_t)mode,
                                                          weight_decay);)
-
-    AT_CUDA_CHECK(cudaGetLastError());
 }
