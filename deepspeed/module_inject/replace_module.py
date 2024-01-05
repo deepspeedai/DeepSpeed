@@ -566,7 +566,12 @@ def replace_module(model, orig_class, replace_fn, _replace_policy, checkpoint=No
     """
     sd = None
     if checkpoint is not None:
-        sd = torch.load(checkpoint, map_location='cpu')
+        if checkpoint.endswith(".safetensors"):
+            from safetensors.torch import load_file
+            sd = load_file(checkpoint)
+        else:
+            sd = torch.load(checkpoint, map_location='cpu')
+
     policy = {}
     if orig_class is not None:
         policy.update({orig_class: (replace_fn, _replace_policy)})
