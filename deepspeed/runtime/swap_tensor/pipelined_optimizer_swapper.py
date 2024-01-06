@@ -28,7 +28,7 @@ class OptimizerSwapOp(object):
         self.num_ops = num_ops
 
     def is_parameter(self, parameter):
-        return id(parameter) == self.param_info.param_id
+        return OptimizerSwapper.parameter_id(parameter) == self.param_info.param_id
 
     def wait(self):
         assert self.wait_required
