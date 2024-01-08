@@ -41,7 +41,14 @@ class MiCS_AllGatherCoalescedHandle(AllGatherCoalescedHandle):
         """
         """
         # let the current stream to op
-        instrument_w_nvtx(self.allgather_handle.wait)()
+        try:
+            instrument_w_nvtx(self.allgather_handle.wait)()
+        except RuntimeError as e:
+            log_dist(
+                f"WARNING: Runtime Error while waiting the collective all-gather, possibly due to the _IllegalWork",
+                ranks=[0])
+            log_dist(f"Error message: {e}", ranks=[0])
+
         if self.complete:
             return
 

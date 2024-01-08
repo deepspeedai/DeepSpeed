@@ -81,6 +81,29 @@ class TestZeroGatheredParametersFree(DistributedTest):
         assert model.l1.weight.numel() == 0, "outside of GatheredParameters the param should go back to be 0-sized"
 
 
+class TestMiCSGatheredParametersFree(DistributedTest):
+    world_size = 1
+
+    def test(self):
+        config_dict = {"train_batch_size": 1, "zero_optimization": {"stage": 3, "mics_shard_size": 1}}
+        hidden_dim = 10
+
+        class MyModel(torch.nn.Module):
+
+            def __init__(self, hidden_dim):
+                super(MyModel, self).__init__()
+                self.l1 = torch.nn.Linear(hidden_dim, hidden_dim)
+
+        with deepspeed.zero.MiCS_Init(config_dict_or_path=config_dict):
+            model = MyModel(hidden_dim)
+
+        with deepspeed.zero.GatheredParameters(list(model.parameters())):
+            assert model.l1.weight.numel() != 0, "GatheredParameters should give a non-0-sized tensor"
+
+        # on exit from `GatheredParameters` the gathered params should be freed and not leak memory
+        assert model.l1.weight.numel() == 0, "outside of GatheredParameters the param should go back to be 0-sized"
+
+
 class TestSerialContext(DistributedTest):
     world_size = 1
     init_distributed = False

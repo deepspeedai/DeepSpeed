@@ -85,11 +85,16 @@ class TestZeroUnbalancedGradients(DistributedTest):
 
 
 # testing the fix https://github.com/microsoft/DeepSpeed/pull/1227
+@pytest.mark.parametrize("mics_enabled", [True, False])
 class TestZero3RepeatForwardLoop(DistributedTest):
     world_size = 1
 
-    def test(self, zero_stage=3):
+    def test(self, mics_enabled, zero_stage=3):
         # force all params to be partitioned by forcing threshold=0
+        mics_shard_size = -1
+        if mics_enabled:
+            mics_shard_size = self.world_size
+
         config_dict = {
             "train_micro_batch_size_per_gpu": 2,
             "gradient_accumulation_steps": 2,
@@ -97,6 +102,7 @@ class TestZero3RepeatForwardLoop(DistributedTest):
             "zero_optimization": {
                 "stage": zero_stage,
                 "stage3_param_persistence_threshold": 0,
+                "mics_shard_size": mics_shard_size,
             },
             "optimizer": {
                 "type": "Adam",
