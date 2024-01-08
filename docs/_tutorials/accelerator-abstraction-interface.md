@@ -96,7 +96,7 @@ To run DeepSpeed model on CPU, use the following steps to prepare environment:
 
 ```
 python -m pip install intel_extension_for_pytorch
-python -m pip install oneccl_bind_pt==2.0 -f https://developer.intel.com/ipex-whl-stable-cpu
+python -m pip install oneccl_bind_pt -f https://developer.intel.com/ipex-whl-stable-cpu
 git clone https://github.com/oneapi-src/oneCCL
 cd oneCCL
 mkdir build

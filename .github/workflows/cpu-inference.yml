@@ -1,7 +1,14 @@
 name: cpu-inference
 
 on:
+  pull_request:
+    paths-ignore:
+      - 'docs/**'
+      - 'blogs/**'
   workflow_dispatch:
+  merge_group:
+    branches: [ master ]
+
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -9,13 +16,27 @@ concurrency:
 
 jobs:
   unit-tests:
-    runs-on: ubuntu-20.04
+    runs-on: [self-hosted, cpu]
 
     steps:
       - uses: actions/checkout@v3
 
       - id: setup-venv
         uses: ./.github/workflows/setup-venv
+
+      - name: Install gcc-9
+        run: |
+          sudo add-apt-repository -u ppa:ubuntu-toolchain-r/test
+          sudo apt install -y gcc-9 g++-9
+          # set gcc-9 and g++9 to default
+          sudo update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-9 99
+          sudo update-alternatives --install /usr/bin/g++ g++ /usr/bin/g++-9 99
+
+      - name: Check gcc version
+        run: |
+          # Get gcc version
+          gcc --version
+          g++ --version
 
       - name: Detect instruction sets on instance
         run: |
@@ -33,8 +54,16 @@ jobs:
 
       - name: Install oneCCL Bindings for PyTorch
         run: |
+          pip install torch
           python -m pip install intel_extension_for_pytorch
-          python -m pip install oneccl_bind_pt==2.0 -f https://developer.intel.com/ipex-whl-stable-cpu
+          # the curl line is for troubleshooting
+          curl -L https://pytorch-extension.intel.com/release-whl/stable/cpu/us/
+          python -m pip install oneccl_bind_pt --extra-index-url https://pytorch-extension.intel.com/release-whl/stable/cpu/us/
+          pip install py-cpuinfo
+          # check installed version
+          pip list |grep \\\<torch\\\>
+          pip list |grep intel-extension-for-pytorch
+          pip list |grep oneccl-bind-pt
 
       - name: Install oneCCL
         run: |
@@ -62,14 +91,22 @@ jobs:
           pip install .[dev,1bit,autotuning,inf]
           ds_report
 
-      - name: Python environment
+      - name: Python environment check
         run: |
           pip list
+          source oneCCL/build/_install/env/setvars.sh
+          export LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libstdc++.so.6
+          # check whether the environment is properly setup
+          python -c "import torch;import intel_extension_for_pytorch as ipex;import oneccl_bindings_for_pytorch;print('done')"
+          python -c "import deepspeed;from deepspeed.accelerator import get_accelerator;print(get_accelerator().device_name());print(get_accelerator().is_available())"
 
       - name: Unit tests
         run: |
+          # prep oneCCL for CCLBackend comm ops building
           source oneCCL/build/_install/env/setvars.sh
+          export LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libstdc++.so.6
           unset TORCH_CUDA_ARCH_LIST # only jit compile for current arch
-          cd tests
-          TRANSFORMERS_CACHE=~/tmp/transformers_cache/ TORCH_EXTENSIONS_DIR=./torch-extensions pytest -m 'seq_inference' unit/
-          TRANSFORMERS_CACHE=~/tmp/transformers_cache/ TORCH_EXTENSIONS_DIR=./torch-extensions pytest -m 'inference_ops' -m 'inference' unit/
+          cd  tests
+          # LOCAL_SIZE=2 enforce CPU to report 2 devices, this helps run the test on github default runner
+          LOCAL_SIZE=2 COLUMNS=240 TRANSFORMERS_CACHE=~/tmp/transformers_cache/ TORCH_EXTENSIONS_DIR=./torch-extensions pytest -m 'seq_inference' unit/
+          LOCAL_SIZE=2 COLUMNS=240 TRANSFORMERS_CACHE=~/tmp/transformers_cache/ TORCH_EXTENSIONS_DIR=./torch-extensions pytest -m 'inference_ops' -m 'inference' unit/

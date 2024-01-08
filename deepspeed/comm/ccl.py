@@ -61,7 +61,8 @@ class CCLBackend(TorchBackend):
 
     def run_collective(self, name, **kwargs):
         if name in self.available_coll:
-            kwargs['group'] = self.get_all_ranks_from_group(kwargs['group'])
+            if 'group' in kwargs:
+                kwargs['group'] = self.get_all_ranks_from_group(kwargs['group'])
             if 'dst' in kwargs:
                 kwargs['dst'] = kwargs['group'].index(kwargs['dst'])
             if 'src' in kwargs:
@@ -71,23 +72,38 @@ class CCLBackend(TorchBackend):
             return CCLHandler(self.ccl_comm_op)
         else:
             func = "super(CCLBackend, self)." + name
-            return eval(func)(*(kwargs.values()))
+            eval(func)(*(kwargs.values()))
+            return CCLHandler(self.ccl_comm_op)
 
     def all_reduce(self, tensor, op=ReduceOp.SUM, group=None, async_op=False):
         use_caching = False
         if use_caching:
             match_id = f"{tensor.size()}-{op}"
-            return self.run_collective(name="all_reduce_caching",
-                                       tensor=tensor,
-                                       op=op,
-                                       match_id=match_id,
-                                       group=group,
-                                       async_op=async_op)
+            name = "all_reduce_caching"
+            if name in self.available_coll:
+                group = self.get_all_ranks_from_group(group)
+                return self.ccl_comm_op.all_reduce_caching(tensor, op, match_id, group, async_op)
+            else:
+                return self.run_collective(name=name,
+                                           tensor=tensor,
+                                           op=op,
+                                           match_id=match_id,
+                                           group=group,
+                                           async_op=async_op)
         else:
-            return self.run_collective(name="all_reduce", tensor=tensor, op=op, group=group, async_op=async_op)
+            name = "all_reduce"
+            if name in self.available_coll:
+                group = self.get_all_ranks_from_group(group)
+                return self.ccl_comm_op.all_reduce(tensor, op, group, async_op)
+            else:
+                return self.run_collective(name=name, tensor=tensor, op=op, group=group, async_op=async_op)
 
     def inference_all_reduce(self, tensor, op=ReduceOp.SUM, group=None, async_op=False):
-        return self.run_collective(name="inference_all_reduce", tensor=tensor, op=op, group=group, async_op=async_op)
+        name = "inference_all_reduce"
+        if name in self.available_coll:
+            return self.ccl_comm_op.inference_all_reduce(tensor, op, async_op)
+        else:
+            return self.run_collective(name=name, tensor=tensor, op=op, group=None, async_op=async_op)
 
     def broadcast(self, tensor, src, group=None, async_op=False):
         return self.run_collective(name="broadcast", tensor=tensor, src=src, group=group, async_op=async_op)
@@ -120,11 +136,11 @@ class CCLBackend(TorchBackend):
                                    input_split_sizes=input_split_sizes,
                                    group=group)
 
-    def send(self, tensor, dst, group=None, async_op=False):
-        return self.run_collective(name="send", tensor=tensor, dst=dst, group=group, async_op=async_op)
+    def send(self, tensor, dst, group=None, tag=0):
+        return self.run_collective(name="send", tensor=tensor, dst=dst, group=group, tag=tag)
 
-    def recv(self, tensor, src, group=None, async_op=False):
-        return self.run_collective(name="recv", tensor=tensor, src=src, group=group, async_op=async_op)
+    def recv(self, tensor, src, group=None, tag=0):
+        return self.run_collective(name="recv", tensor=tensor, src=src, group=group, tag=tag)
 
     def gather(self, tensor, gather_list, dst, group=None, async_op=False):
         return self.run_collective(name="gather", tensor=tensor, gather_list=gather_list, dst=dst, group=group)
@@ -170,7 +186,7 @@ class CCLBackend(TorchBackend):
             while True:
                 results.append(super(CCLBackend, self).get_global_rank(group, rank))
                 rank += 1
-        except ValueError:
+        except (ValueError, RuntimeError):
             pass
         if tuple(results) not in self.groups:
             self._new_group(results, group)

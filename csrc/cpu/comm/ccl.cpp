@@ -537,7 +537,7 @@ static void parallel_memcpy(void* to, void* from, size_t n_bytes)
     }
 }
 
-void inference_all_reduce(torch::Tensor& data, py::object op, std::vector<int> group, bool async_op)
+void inference_all_reduce(torch::Tensor& data, py::object op, bool async_op)
 {
     static py::object ReduceOp = py::module_::import("deepspeed.comm").attr("ReduceOp");
     static auto ReduceOpSum = (int)py::int_(ReduceOp.attr("SUM").attr("value"));
@@ -562,7 +562,7 @@ void inference_all_reduce(torch::Tensor& data, py::object op, std::vector<int> g
                                 data.numel(),
                                 get_ccl_datatype(data.scalar_type()),
                                 get_ccl_reduce_op(op, data),
-                                _get_comm_from_group(group))
+                                _get_comm_from_group())
                      .wait());
         return;
     }
