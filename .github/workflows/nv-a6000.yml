@@ -13,10 +13,6 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
-permissions:
-  contents: read
-  issues: write
-
 jobs:
   unit-tests:
     runs-on: [self-hosted, nvidia, a6000]
