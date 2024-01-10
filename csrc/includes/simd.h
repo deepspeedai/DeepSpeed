@@ -53,7 +53,7 @@
 #define SIMD_WIDTH 8
 
 #define SIMD_LOAD2(x, h) \
-    ((h) ? _mm256_cvtph_ps(_mm_loadu_si128((const __m128i*)x)) : _mm256_loadu_ps(x))
+    ((h) ? _mm256_cvtph_ps(_mm_loadu_si128((const __m128i*)(x))) : _mm256_loadu_ps(x))
 #define SIMD_STORE2(x, d, h)                                                                \
     ((h) ? _mm_store_ps(x, _mm_castsi128_ps(_mm256_cvtps_ph(d, _MM_FROUND_TO_NEAREST_INT))) \
          : _mm256_storeu_ps(x, d))
@@ -80,7 +80,7 @@ inline void simd_store(float* dst, AVX_Data* src, bool half_precision)
 template <int span>
 inline void simd_load(AVX_Data* dst, float* src, bool half_precision)
 {
-    size_t width = (half_precision ? 1 : SIMD_WIDTH);
+    size_t width = (half_precision ? SIMD_WIDTH / 2 : SIMD_WIDTH);
 #pragma unroll
     for (size_t i = 0; i < span; ++i) { dst[i].data = SIMD_LOAD2(src + width * i, half_precision); }
 }
