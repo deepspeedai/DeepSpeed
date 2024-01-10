@@ -14,7 +14,6 @@ from ...inference_utils import ActivationType, DtypeEnum
 from .. import *
 from ...modules.configs import *
 from ...modules.interfaces import *
-from ...modules import heuristics
 from ...ragged import RaggedBatchWrapper
 
 from .container import Llama2NonTransformerContainer, Llama2TransformerContainer
@@ -106,26 +105,9 @@ class Llama2InferenceModel(DSTransformerModelBase):
     def positional_embedding_type(self) -> PositionalEmbeddingType:
         return PositionalEmbeddingType.rotate_half
 
-    def make_attn_layer(self) -> None:
-        """
-        Builds the attention layer for the model. This sets the `self.attn` attribute.
-        """
-        softmax_scale = 1.0 / (self.head_size**0.5)
-
-        rotary_config = RotateHalfConfig(theta_base=self._config.rope_theta)
-
-        attn_config = DSSelfAttentionConfig(max_tokens=self._engine_config.state_manager.max_ragged_batch_size,
-                                            n_heads_q=self.n_heads_q_local,
-                                            n_heads_kv=self.n_heads_kv_local,
-                                            head_size=self.head_size,
-                                            max_sequences=self._engine_config.state_manager.max_ragged_sequence_count,
-                                            scale_factor=softmax_scale,
-                                            input_dtype=self.activation_dtype,
-                                            output_dtype=self.activation_dtype,
-                                            positional_embedding_type=self.positional_embedding_type,
-                                            positional_embedding_config=rotary_config)
-
-        self.attn = heuristics.instantiate_attention(attn_config, self._engine_config)
+    @property
+    def positional_embedding_config(self) -> Optional[RotateHalfConfig]:
+        return RotateHalfConfig(theta_base=self._config.rope_theta)
 
     """
     Forward implementations

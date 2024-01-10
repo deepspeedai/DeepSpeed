@@ -10,17 +10,11 @@ import torch
 import deepspeed.comm as dist
 
 from ...allocator import empty_from
-from ...config_v2 import RaggedInferenceEngineConfig
 from ...inference_utils import ActivationType, DtypeEnum
 from .. import *
 from ...modules.configs import *
 from ...modules.interfaces import *
-from ...modules import heuristics
 from ...ragged import RaggedBatchWrapper
-from ..inference_model_base import (
-    DSModelImplementationConfig,
-    MPType,
-)
 
 from .containers import PhiNonTransformerContainer, PhiTransformerContainer
 
@@ -101,60 +95,9 @@ class PhiInferenceModel(DSTransformerModelBase):
     def positional_embedding_type(self) -> PositionalEmbeddingType:
         return PositionalEmbeddingType.rotate_half
 
-    """
-    Model implementation
-    """
-
-    def __init__(self, config: DSModelImplementationConfig, engine_config: RaggedInferenceEngineConfig,
-                 base_mp_group: MPType) -> None:
-        """
-        Base implementation for initialization. By default, this will initialize
-        the traditional components of a transformer model:
-            - Embedding
-            - QKV projection
-            - Self attention
-            - Attention output projection
-            - Feed forward network
-            - Normalization
-            - Unembedding
-
-        Arguments:
-            config (DSModelImplementationConfig): Model-specific configuration. No assumptions
-                should be made about this config that are not closely tied to the specific
-                model implementation.
-            engine_config (RaggedInferenceEngineConfig): Engine configuration.
-            base_mp_group (MPType): Base communication group for Tensor-parallel inference.
-        """
-        super().__init__(config, engine_config, base_mp_group)
-
-        self.make_norm_layer()
-        self.make_qkv_layer()
-        self.make_attn_layer()
-        self.make_attn_out_layer()
-        self.make_embedding_layer()
-        self.make_unembedding_layer()
-        self._kv_cache_config = None
-
-    def make_attn_layer(self) -> None:
-        """
-        Builds the attention layer for the model. This sets the `self.attn` attribute.
-        """
-        softmax_scale = 1.0 / (self.head_size**0.5)
-
-        rotary_config = RotateHalfConfig(rotate_dim=self._config.rotary_dim)
-
-        attn_config = DSSelfAttentionConfig(max_tokens=self._engine_config.state_manager.max_ragged_batch_size,
-                                            n_heads_q=self.n_heads_q_local,
-                                            n_heads_kv=self.n_heads_kv_local,
-                                            head_size=self.head_size,
-                                            max_sequences=self._engine_config.state_manager.max_ragged_sequence_count,
-                                            scale_factor=softmax_scale,
-                                            input_dtype=self.activation_dtype,
-                                            output_dtype=self.activation_dtype,
-                                            positional_embedding_type=self.positional_embedding_type,
-                                            positional_embedding_config=rotary_config)
-
-        self.attn = heuristics.instantiate_attention(attn_config, self._engine_config)
+    @property
+    def positional_embedding_config(self) -> Optional[RotateHalfConfig]:
+        return RotateHalfConfig(rotate_dim=self._config.rotary_dim)
 
     """
     Forward implementations

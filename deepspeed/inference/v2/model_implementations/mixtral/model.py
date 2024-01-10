@@ -15,7 +15,6 @@ from ...inference_utils import ActivationType, DtypeEnum
 from ...model_implementations import *
 from ...modules.configs import *
 from ...modules.interfaces import *
-from ...modules import heuristics
 from ...ragged import RaggedBatchWrapper
 from ..inference_model_base import (
     DSModelImplementationConfig,
@@ -110,6 +109,13 @@ class MixtralInferenceModel(DSMoETransformerModelBase):
     def positional_embedding_type(self) -> PositionalEmbeddingType:
         return PositionalEmbeddingType.rotate_half
 
+    @property
+    def positional_embedding_config(self) -> Optional[RotateHalfConfig]:
+        """
+        The positional embedding configuration for the model.
+        """
+        return RotateHalfConfig(theta_base=self._config.rope_theta)
+
     """
     Inherited from `DSMoETransformerModelBase`
     """
@@ -160,27 +166,6 @@ class MixtralInferenceModel(DSMoETransformerModelBase):
         self.make_embedding_layer()
         self.make_unembedding_layer()
         self._kv_cache_config = None
-
-    def make_attn_layer(self) -> None:
-        """
-        Builds the attention layer for the model. This sets the `self.attn` attribute.
-        """
-        softmax_scale = 1.0 / (self.head_size**0.5)
-
-        rotary_config = RotateHalfConfig(theta_base=self._config.rope_theta)
-
-        attn_config = DSSelfAttentionConfig(max_tokens=self._engine_config.state_manager.max_ragged_batch_size,
-                                            n_heads_q=self.n_heads_q_local,
-                                            n_heads_kv=self.n_heads_kv_local,
-                                            head_size=self.head_size,
-                                            max_sequences=self._engine_config.state_manager.max_ragged_sequence_count,
-                                            scale_factor=softmax_scale,
-                                            input_dtype=self.activation_dtype,
-                                            output_dtype=self.activation_dtype,
-                                            positional_embedding_type=self.positional_embedding_type,
-                                            positional_embedding_config=rotary_config)
-
-        self.attn = heuristics.instantiate_attention(attn_config, self._engine_config)
 
     def _forward_embed(self, ragged_batch: RaggedBatchWrapper) -> torch.Tensor:
         """

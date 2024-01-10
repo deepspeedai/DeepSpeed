@@ -87,6 +87,8 @@ class DSDenseBlockedAttention(DSSelfAttentionBase):
                                                 self._config.n_heads_kv, self._config.input_dtype)
         elif embed_type == PositionalEmbeddingType.rotate_half:
             rotary_config = config.positional_embedding_config
+            assert rotary_config is not None, "Rotary config must be provided if using rotate_half as Positional Embedding Type."
+
             if rotary_config.use_trained_freqs:
                 # Theta and rotary dim are effectively embedded into either the values (theta) or the shape (rotary_dim)
                 # of the trained_freqs tensor.

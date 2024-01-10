@@ -22,6 +22,7 @@ from ..modules.configs import (
     DSUnembedConfig,
     NormTypeEnum,
     PositionalEmbeddingType,
+    RotateHalfConfig,
 )
 from ..modules import heuristics
 from ..ragged import (
@@ -149,6 +150,14 @@ class DSTransformerModelBase(DSInferenceModelBase):
     def norm_type(self) -> NormTypeEnum:
         """
         The type of normalization used in the model.
+        """
+        ...
+
+    @property
+    @abstractmethod
+    def positional_embedding_config(self) -> Optional[RotateHalfConfig]:
+        """
+        The positional embedding configuration for the model.
         """
         ...
 
@@ -319,7 +328,8 @@ class DSTransformerModelBase(DSInferenceModelBase):
                                             scale_factor=softmax_scale,
                                             input_dtype=self.activation_dtype,
                                             output_dtype=self.activation_dtype,
-                                            positional_embedding_type=self.positional_embedding_type)
+                                            positional_embedding_type=self.positional_embedding_type,
+                                            positional_embedding_config=self.positional_embedding_config)
 
         self.attn = heuristics.instantiate_attention(attn_config, self._engine_config)
 

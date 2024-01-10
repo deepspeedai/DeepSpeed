@@ -95,6 +95,13 @@ class FalconInferenceModel(DSTransformerModelBase):
     def positional_embedding_type(self) -> PositionalEmbeddingType:
         return PositionalEmbeddingType.rotate_half
 
+    @property
+    def positional_embedding_config(self) -> RotateHalfConfig:
+        """
+        The positional embedding configuration for the model.
+        """
+        return RotateHalfConfig()
+
     """
     Forward implementations
     """
