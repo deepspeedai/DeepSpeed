@@ -22,13 +22,13 @@ class HuggingFaceCheckpointEngine(CheckpointEngineBase):
         self.model_name_or_path = model_name_or_path
         self.auth_token = auth_token
         self.model_config = AutoConfig.from_pretrained(self.model_name_or_path)
-        self.generation_config = GenerationConfig.from_pretrained(self.model_name_or_path)
         # Define this property here so we can use it in the model implementation
         if not hasattr(self.model_config, "max_seq_length"):
-            self.model_config.max_seq_length = self.model_config.max_position_embeddings
-        else:
-            self.model_config.max_seq_length = self.generation_config.max_length
-
+            if hasattr(self.model_config, "max_position_embeddings"):
+                self.model_config.max_seq_length = self.model_config.max_position_embeddings
+            else:
+                generation_config = GenerationConfig.from_pretrained(self.model_name_or_path)
+                self.model_config.max_seq_length = generation_config.max_length
         self._local_checkpoint_dir = None
         self._all_ckpt_paths = self._fetch_checkpoint_files()
 
