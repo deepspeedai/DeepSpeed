@@ -277,11 +277,13 @@ class AutoTP():
         module_list = AutoTP.get_module_list(model)
         assert AutoTP.supported(model), "AutoTP not supported for model. Please use kernel injection since container policy for model exists." \
         if AutoTP.kernel_supported(module_list) else "AutoTP not supported for model. Please provide policy."
+        norm_layer_name_list = ['LayerNorm', 'layer_norm', 'ln_1', 'ln_2']
+        #ln_1 , ln_2 for Qwen
         for module in module_list:
             for key, submodule in module._modules.items():
                 if isinstance(submodule, nn.Linear):
                     layer_list = layer_list + ["." + key]
-                elif isinstance(submodule, nn.LayerNorm) or key == 'LayerNorm' or key == 'layer_norm':
+                elif isinstance(submodule, nn.LayerNorm) or key in norm_layer_name_list:
                     layer_list = layer_list + ["ln"]
                 else:
                     layer_list = layer_list + AutoTP.get_layers(key, submodule)
@@ -348,15 +350,14 @@ class AutoTP():
                 child.weight.data = child.weight.data.transpose(-1, -2).contiguous()
 
             if require_tp_fused_qkvw(name, self.mp_size):
-                #for detecting fused type
-                module_str = str(self.module).strip()
+                #Check and handle fused qkv for TP
                 #The copy is a regular copy, The shape of dst and src is the same
                 data_dc = move(
-                    prepare_tp_fused_qkvw(module_str, child.weight.data, self.mp_size, mp_replace.gpu_index),
+                    prepare_tp_fused_qkvw(self.module, child.weight.data, self.mp_size, mp_replace.gpu_index),
                     get_accelerator().current_device_name())
 
                 bias_data_dc = None if child.bias is None else move(
-                    prepare_tp_fused_qkvw(module_str, child.bias.data, self.mp_size, mp_replace.gpu_index),
+                    prepare_tp_fused_qkvw(self.module, child.bias.data, self.mp_size, mp_replace.gpu_index),
                     get_accelerator().current_device_name())
             else:
                 data = child.weight.data.split(get_shard_size_list(weight_shape[0], self.mp_size),
