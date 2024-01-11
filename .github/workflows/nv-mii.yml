@@ -2,9 +2,13 @@ name: nv-mii
 
 on:
   pull_request:
-    paths-ignore:
-      - 'docs/**'
-      - 'blogs/**'
+    paths:
+      - '.github/workflows/nv-mii.yml'
+      - 'requirements/**'
+      - 'setup.py'
+      - 'deepspeed/__init__.py'
+      - 'deepspeed/inference/**'
+      - '!deepspeed/inference/v2/**' # exclude v2 dir
   merge_group:
     branches: [ master ]
   schedule:
