@@ -328,7 +328,7 @@ class AutoTP():
             if self.conv_linear_layer:
                 child.weight.data = child.weight.data.transpose(-1, -2).contiguous()
             data = child.weight.data.split(get_shard_size_list(
-                weight_shape[0] if self.conv_linear_layer else weight_shape[1], self.mp_size),
+                weight_shape[0] if self.conv_linear_layer else weight_shape[1], self.mp_size, name),
                                            dim=1)
             data_dc = move(data[mp_replace.gpu_index], get_accelerator().current_device_name()).detach()
             del data
@@ -360,14 +360,14 @@ class AutoTP():
                     prepare_tp_fused_qkvw(self.module, child.bias.data, self.mp_size, mp_replace.gpu_index),
                     get_accelerator().current_device_name())
             else:
-                data = child.weight.data.split(get_shard_size_list(weight_shape[0], self.mp_size),
+                data = child.weight.data.split(get_shard_size_list(weight_shape[0], self.mp_size, name),
                                                dim=1 if self.conv_linear_layer else 0)
                 data_dc = move(data[mp_replace.gpu_index], get_accelerator().current_device_name()).detach()
                 del data
 
                 if child.bias is not None:
                     bias_data = child.bias.data.split(get_shard_size_list(
-                        weight_shape[1] if self.conv_linear_layer else weight_shape[0], self.mp_size),
+                        weight_shape[1] if self.conv_linear_layer else weight_shape[0], self.mp_size, name),
                                                       dim=0)
                     bias_data = move(bias_data[mp_replace.gpu_index], get_accelerator().current_device_name())
                     bias_data_dc = torch.nn.parameter.Parameter(bias_data, requires_grad=False)
@@ -386,11 +386,11 @@ class AutoTP():
         if hasattr(child.weight, 'ds_tensor'):
             data = child.weight.ds_tensor.data.split(get_shard_size_list(child.weight.shape[1], self.mp_size), dim=1)
         else:
-            data = child.weight.data.split(get_shard_size_list(child.weight.shape[1], self.mp_size), dim=1)
+            data = child.weight.data.split(get_shard_size_list(child.weight.shape[1], self.mp_size, name), dim=1)
         data = data[mp_replace.gpu_index].to(get_accelerator().current_device_name())
         data = torch.nn.parameter.Parameter(data, requires_grad=False)
 
-        new_embedding = nn.Embedding(child.weight.shape[0], get_shard_size(child.weight.shape[1], self.mp_size))
+        new_embedding = nn.Embedding(child.weight.shape[0], get_shard_size(child.weight.shape[1], self.mp_size, name))
         new_embedding.weight.data.copy_(data)
         setattr(child, "replaced", True)
         return new_embedding
