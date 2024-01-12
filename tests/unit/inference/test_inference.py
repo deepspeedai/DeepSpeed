@@ -105,6 +105,7 @@ def _hf_model_list() -> List[ModelInfo]:
         model_data["cache_time"] = current_time
 
         # Save the updated cache
+        os.makedirs(cache_dir, exist_ok=True)
         with open(cache_file_path, 'wb') as f:
             pickle.dump(model_data, f)
 
