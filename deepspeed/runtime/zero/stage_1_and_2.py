@@ -1461,7 +1461,6 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
 
     ######################Reduction Related Methods##############################
     def allreduce_bucket(self, bucket, rank=None, log=None, divide=True, process_group=None):
-        rank = None
         tensor = self.flatten(bucket)
 
         process_group = self.dp_process_group if process_group is None else process_group
