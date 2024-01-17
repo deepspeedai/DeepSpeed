@@ -98,7 +98,7 @@ def get_accelerator():
             except ImportError as e:
                 raise ValueError(
                     f"HPU_Accelerator requires habana_frameworks.torch.hpu, which is not installed on this system.")
-        elif is_current_accelerator_supported():
+        elif accelerator_name not in SUPPORTED_ACCELERATOR_LIST:
             raise ValueError(f'DS_ACCELERATOR must be one of {SUPPORTED_ACCELERATOR_LIST}. '
                              f'Value "{accelerator_name}" is not supported')
         ds_set_method = "override"
