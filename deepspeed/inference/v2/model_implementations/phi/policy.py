@@ -22,7 +22,7 @@ class PhiPolicy(InferenceV2Policy):
         trans_container_cls = PhiTransformerContainer
         transformer_containers = [trans_container_cls(self.model) for _ in range(self.model.num_layers)]
 
-        map.set_transformer_params(['transformer.h'], transformer_containers)
+        map.set_transformer_params(['model.layers'], transformer_containers)
 
         map.set_non_transformer_params(PhiNonTransformerContainer(self.model))
 

@@ -116,7 +116,7 @@ def build_hf_engine(path: str,
             policy = MixtralPolicy(model_config, checkpoint_engine=checkpoint_engine)
         elif model_config.model_type == "falcon":
             policy = FalconPolicy(model_config, checkpoint_engine=checkpoint_engine)
-        elif model_config.model_type == "phi-msft":
+        elif model_config.model_type == "phi":
             policy = PhiPolicy(model_config, checkpoint_engine=checkpoint_engine)
         elif model_config.model_type == "qwen":
             policy = QwenPolicy(model_config, checkpoint_engine=checkpoint_engine)

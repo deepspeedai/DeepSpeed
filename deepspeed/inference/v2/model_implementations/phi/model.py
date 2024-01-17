@@ -47,11 +47,11 @@ class PhiInferenceModel(DSTransformerModelBase):
 
     @property
     def num_layers(self) -> int:
-        return self._config.n_layer
+        return self._config.num_hidden_layers
 
     @property
     def model_dim(self) -> int:
-        return self._config.n_embd
+        return self._config.hidden_size
 
     @property
     def vocab_size(self) -> int:
@@ -63,16 +63,15 @@ class PhiInferenceModel(DSTransformerModelBase):
 
     @property
     def n_heads(self) -> int:
-        return self._config.n_head
+        return self._config.num_attention_heads
 
     @property
     def intermediate_dim(self) -> int:
-        n_inner = getattr(self._config, "n_inner", None)
-        return n_inner if n_inner is not None else 4 * self.model_dim
+        return self._config.intermediate_size
 
     @property
     def n_heads_kv(self) -> int:
-        return getattr(self._config, "n_head_kv", None) or self.n_heads
+        return self._config.num_key_value_heads
 
     @property
     def activation_dtype(self) -> DtypeEnum:
@@ -97,7 +96,8 @@ class PhiInferenceModel(DSTransformerModelBase):
 
     @property
     def positional_embedding_config(self) -> Optional[RotateHalfConfig]:
-        return RotateHalfConfig(rotate_dim=self._config.rotary_dim)
+        rotary_dim = int(self._config.partial_rotary_factor * self.head_size)
+        return RotateHalfConfig(rotate_dim=rotary_dim, theta_base=self._config.rope_theta)
 
     """
     Forward implementations
