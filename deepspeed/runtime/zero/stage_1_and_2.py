@@ -232,7 +232,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
             f"Currently only supported using ZeRO-Offload with DeepSpeedCPUAdam. But current setting is ZeRO-Offload:{self.cpu_offload} and optimizer type {type(self.optimizer)}." \
             f"Either disable fp16_master_weights_and_gradients or enable {self.zero_stage_string} Offload with DeepSpeedCPUAdam."
 
-        if self.reduce_scatter:
+        if self.reduce_scatter and self.partition_gradients:
             valid_reduce_scatter_dtypes = (torch.float16, torch.bfloat16, torch.float32)
             assert self.communication_data_type in valid_reduce_scatter_dtypes, f"{self.zero_stage_string} supports {valid_reduce_scatter_dtypes} communication_data_type with reduce scatter enabled. Got: '{self.communication_data_type}'"
             assert self.gradient_predivide_factor == 1.0, f"gradient_predivide_factor != 1.0 is not yet supported with {self.zero_stage_string} with reduce scatter enabled"
