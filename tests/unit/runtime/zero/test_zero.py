@@ -14,6 +14,7 @@ from torch.nn import Linear, Module
 from torch.nn.modules.container import ModuleList
 from torch.nn.modules.loss import L1Loss
 from torch.nn.parameter import Parameter
+from torch.nn.utils import skip_init
 
 from unit.common import DistributedTest
 from unit.simple_model import SimpleModel, random_dataloader
@@ -1191,6 +1192,82 @@ class TestZero3ParamPartitioningBaseBF16(DistributedTest):
         # doesn't throw
         ds_engine.optimizer.step()
         _assert_partition_status(ds_engine, {ZeroParamStatus.NOT_AVAILABLE})
+
+
+class TestParamPartitioningSkipInit(DistributedTest):
+    world_size = 2
+
+    def test(self):
+        config_dict = {
+            "train_batch_size": 4,
+            "steps_per_print": 1,
+            "optimizer": {
+                "type": "Adam",
+                "params": {
+                    "lr": 1e-4
+                }
+            },
+            "fp16": {
+                "enabled": True
+            },
+            "zero_optimization": {
+                "stage": 3
+            },
+        }
+        hidden_dim = 10
+
+        class SubModel(torch.nn.Module):
+
+            def __init__(self, input_size, output_size, dropout_prob=0.5, device=None):
+                super(SubModel, self).__init__()
+                self.linear = torch.nn.Linear(input_size, output_size, device=device)
+                self.dropout = torch.nn.Dropout(dropout_prob)
+                self.module_list = torch.nn.ModuleList([torch.nn.Linear(input_size, output_size, device=device)])
+
+            def forward(self, x):
+                x = self.linear(x)
+                x = self.dropout(x)
+                x = self.module_list[0](x)
+                return x
+
+        class MyModel(torch.nn.Module):
+
+            def __init__(self, hidden_dim):
+                super(MyModel, self).__init__()
+                self.l1 = skip_init(Linear, hidden_dim, hidden_dim)
+                self.l2 = skip_init(SubModel, hidden_dim, hidden_dim)
+                self.l3 = torch.nn.Linear(hidden_dim, hidden_dim)
+                self.cel = torch.nn.CrossEntropyLoss()
+                self.l4 = skip_init(SubModel, hidden_dim, hidden_dim)
+
+            def forward(self, x, y):
+                x = self.l1(x)
+                x = self.l2(x)
+                x = self.l3(x)
+                x = self.l4(x)
+                loss = self.cel(x, y)
+                val = [x, loss]
+                return val
+
+        with deepspeed.zero.Init(config=config_dict):
+            model = MyModel(hidden_dim)
+        world_size = dist.get_world_size()
+        ds_tensor_numel = math.ceil(hidden_dim * hidden_dim / world_size)
+        assert model.l1.weight.ds_tensor.numel() == ds_tensor_numel
+        assert model.l2.linear.weight.ds_tensor.numel() == ds_tensor_numel
+        assert model.l2.module_list[0].weight.ds_tensor.numel() == ds_tensor_numel
+        assert model.l3.weight.ds_tensor.numel() == ds_tensor_numel
+        assert model.l4.linear.weight.ds_tensor.numel() == ds_tensor_numel
+        assert model.l4.module_list[0].weight.ds_tensor.numel() == ds_tensor_numel
+
+        model, _, _, _ = deepspeed.initialize(model=model, model_parameters=model.parameters(), config=config_dict)
+        data_loader = random_dataloader(model=model, total_samples=50, hidden_dim=hidden_dim, device=model.device)
+        dist.barrier()
+        for n, batch in enumerate(data_loader):
+            loss = model(batch[0], batch[1])
+            loss = loss[1]
+            model.backward(loss)
+            model.step()
 
 
 class TestZeroOffloadStage1(DistributedTest):
