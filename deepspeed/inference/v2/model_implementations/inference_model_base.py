@@ -200,6 +200,10 @@ class DSInferenceModelBase(torch.nn.Module, ABC):
         raise NotImplementedError()
 
     @abstractmethod
+    def get_remaining_block_capacity(self, sequence: DSSequenceDescriptor) -> int:
+        raise NotImplementedError()
+
+    @abstractmethod
     def maybe_allocate_kv(self, sequence: DSSequenceDescriptor, n_new_tokens: int) -> None:
         """
         Given a sequence and the number of new tokens in the sequence, determine

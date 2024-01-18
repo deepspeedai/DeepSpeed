@@ -104,7 +104,10 @@ class InferenceEngineV2:
         ranks = list(range(self._config.tensor_parallel.tp_size))
         return dist.new_group(ranks=ranks)
 
-    def put(self, batch_uids: Iterable[int], batch_tokens: Iterable[torch.Tensor]) -> torch.Tensor:
+    def put(self,
+            batch_uids: Iterable[int],
+            batch_tokens: Iterable[torch.Tensor],
+            do_checks: bool = True) -> torch.Tensor:
         """
         Put a ragged batch onto the inference engine. This will perform one forward and return
         a Tensor of the shape [len(batch_uids), *output_shape]. Logits for the non-final tokens
@@ -113,12 +116,14 @@ class InferenceEngineV2:
         Arguments:
             batch_uids: Iterable of uids for the batch on the host
             batch_tokens: Iterable of token tensors for the batch on the host
+            do_checks: Check schedulability when it is set to True. You can skip this check for better performance when it has already been completed.
         """
 
-        token_lens = [len(tokens) for tokens in batch_tokens]
-        schedule_check = self.can_schedule(batch_uids, token_lens)
-        if schedule_check != SchedulingResult.Success:
-            raise SchedulingError(schedule_check)
+        if do_checks:
+            token_lens = [len(tokens) for tokens in batch_tokens]
+            schedule_check = self.can_schedule(batch_uids, token_lens)
+            if schedule_check != SchedulingResult.Success:
+                raise SchedulingError(schedule_check)
 
         self._batch.clear()
         for uid, tokens in zip(batch_uids, batch_tokens):
@@ -128,7 +133,7 @@ class InferenceEngineV2:
             host_seq_desc.pre_forward(tokens.numel())
 
             # We can disable checks since we already validated schedulability.
-            self._batch.insert_sequence(host_seq_desc, tokens, do_checks=False)
+            self._batch.insert_sequence(host_seq_desc, tokens, do_checks=do_checks)
 
         # Send all metadata to the device
         self._batch.finalize()
@@ -224,6 +229,15 @@ class InferenceEngineV2:
             return SchedulingResult.BatchTokenLimitExceeded
 
         return SchedulingResult.Success
+
+    def get_remaining_block_capacity(self, uid: int) -> int:
+        """
+        Get the remaining capacity of the last block already allocated.
+        """
+        seq_desc = self._state_manager.get_sequence(uid)
+        if seq_desc is None:
+            return 0
+        return self._model.get_remaining_block_capacity(seq_desc)
 
     def flush(self, uid: int) -> None:
         """
