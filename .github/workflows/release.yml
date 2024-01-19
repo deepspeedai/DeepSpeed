@@ -16,6 +16,9 @@ jobs:
         ref: "master"
     - id: setup-venv
       uses: ./.github/workflows/setup-venv
+    - name: Install torch
+      run: |
+        pip install torch
     - name: Get release version from tag
       run: |
         echo "RELEASE_VERSION=${GITHUB_REF#refs/*/v}" >> $GITHUB_ENV
