@@ -9,6 +9,7 @@ from collections import UserDict
 from typing import Deque, Set
 
 from deepspeed import comm as dist
+from deepspeed.utils import z3_leaf_module
 from deepspeed.utils.logging import logger
 from deepspeed.runtime.zero.offload_config import OffloadDeviceEnum
 from deepspeed.runtime.zero.partition_parameters import *
@@ -188,7 +189,7 @@ class PartitionedParameterCoordinator:
             raise RuntimeError(f"attempted to record trace when status = {self.__trace_mode}")
 
         step_id = self.__step_id_module_fetched_for[sub_module.id].popleft()
-        for param in sorted(set(iter_params(sub_module)), key=lambda p: p.ds_id):
+        for param in sorted(set(iter_params(sub_module, recurse=z3_leaf_module(sub_module))), key=lambda p: p.ds_id):
             self.__param_order.append(__class__.__ParamInTrace(param=param, step_id_last_used_at=step_id))
 
     def construct_parameter_trace_from_module_trace(self):
@@ -261,14 +262,14 @@ class PartitionedParameterCoordinator:
         """
         if logger.isEnabledFor(logging.DEBUG):
             debug_rank0(
-                f"{self.__step_id}: M{current_submodule.id}({type(current_submodule).__name__}) P{[p.ds_id for p in iter_params(current_submodule)]} "
+                f"{self.__step_id}: M{current_submodule.id}({type(current_submodule).__name__}) P{[p.ds_id for p in iter_params(current_submodule, recurse=z3_leaf_module(current_submodule))]} "
                 + str({
                     "avail": f"{self.__n_available_params:.1e}",
                     "queue_sz": f"{len(self.__param_queue or [])}",
                     "inflight": [p.ds_id for p in self.__inflight_param_registry],
                 }))
 
-        params_to_fetch = frozenset(iter_params(current_submodule))
+        params_to_fetch = frozenset(iter_params(current_submodule, recurse=z3_leaf_module(current_submodule)))
         fetch_numel = sum(
             [p.partition_numel() for p in params_to_fetch if p.ds_status == ZeroParamStatus.NOT_AVAILABLE])
         if fetch_numel > 0:
@@ -390,8 +391,8 @@ class PartitionedParameterCoordinator:
         """release the parameters of a sub module, assuming they meet conditions to
         be released."""
         params_to_release = (self.__params_to_release(submodule, self.__step_id) if self.is_complete_trace() else set(
-            p.ds_id for p in iter_params(submodule)))
-        for param in iter_params(submodule):
+            p.ds_id for p in iter_params(submodule, recurse=z3_leaf_module(submodule))))
+        for param in iter_params(submodule, recurse=z3_leaf_module(submodule)):
             param.ds_active_sub_modules.discard(submodule.id)
             if param.ds_id in params_to_release and not param.is_external_param:
                 self.__release_param(param, backward)
@@ -473,7 +474,9 @@ class PartitionedParameterCoordinator:
         if not self.is_complete_trace():
             raise RuntimeError("expected trace to be complete")
 
-        params_to_release = set(p.ds_id for p in iter_params(submodule_to_release) if not p.ds_persist)
+        params_to_release = set(
+            p.ds_id for p in iter_params(submodule_to_release, recurse=z3_leaf_module(submodule_to_release))
+            if not p.ds_persist)
 
         # Problem: When prefetcher scans the param trace, it skips AVAILABLE params.
         # This creates issues if those params are released before the skipped uses:
@@ -482,7 +485,7 @@ class PartitionedParameterCoordinator:
         # diverges from the trace.
         # Solution: Don't release params whose reuse was skipped by prefetch. This is
         # possible because we detect such skips during prefetch and mark those params.
-        for param in iter_params(submodule_to_release):
+        for param in iter_params(submodule_to_release, recurse=z3_leaf_module(submodule_to_release)):
             if self.__most_recent_step_id_param_fetched_for[param] > step_id:
                 params_to_release.discard(param.ds_id)
 
@@ -493,7 +496,7 @@ class PartitionedParameterCoordinator:
         for module in self.__submodule_order[step_id:]:
             if params_traversed >= self.__max_reuse_dist_in_numel:
                 break
-            for param in iter_params(module):
+            for param in iter_params(module, recurse=z3_leaf_module(submodule_to_release)):
                 params_to_release.discard(param.ds_id)
                 params_traversed += param.ds_numel
 
