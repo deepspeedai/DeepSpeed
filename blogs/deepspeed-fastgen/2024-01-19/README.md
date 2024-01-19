@@ -29,7 +29,7 @@ Today, we are happy to share that we are improving DeepSpeed-FastGen along three
 
 - **Performance Optimizations**
 
-  We drastically reduced the scheduling overhead of Dynamic SplitFuse and increased the efficiency of token sampling. As a result, we see higher throughput and lower latency, particularly when handling concurrent requests from many clients. We demonstrate the performance optimizations with benchmarks and evaluation of DeepSpeed-FastGen against vLLM for the newly added model families. The benchmark results can be seen in [Performance Evaluation](#performance-evaluation) and the benchmark code is available at [DeepSpeedExamples](https://github.com/microsoft/DeepSpeedExamples/tree/master/benchmarks/inference/mii).
+  We drastically reduced the scheduling overhead of Dynamic SplitFuse and increased the efficiency of token sampling. As a result, we see higher throughput and lower latency, particularly when handling concurrent requests from many clients. We demonstrate the performance optimizations with benchmarks and evaluation of DeepSpeed-FastGen against vLLM for the newly added model families. The benchmark results can be seen in [Performance Evaluation](#performance-optimizations) and the benchmark code is available at [DeepSpeedExamples](https://github.com/microsoft/DeepSpeedExamples/tree/master/benchmarks/inference/mii).
 
 - **Feature Enhancements**
 
