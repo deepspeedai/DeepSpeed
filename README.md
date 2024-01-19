@@ -28,7 +28,7 @@
  <summary>More news</summary>
  <ul>
   <li>[2023/08] <a href="https://github.com/microsoft/DeepSpeedExamples/blob/master/inference/huggingface/zero_inference/README.md">DeepSpeed ZeRO-Inference: 20x faster inference through weight quantization and KV cache offloading</a></li>
-  
+
   <li>[2023/08] <a href="https://github.com/microsoft/DeepSpeed/tree/master/blogs/deepspeed-chat/ds-chat-release-8-31/README.md">DeepSpeed-Chat: Llama/Llama-2 system support, efficiency boost, and training stability improvements</a></li>
 
   <li>[2023/08] <a href="https://github.com/microsoft/DeepSpeed/tree/master/blogs/deepspeed-ulysses">DeepSpeed Ulysses: System Optimizations for Enabling Training of Extreme Long Sequence Transformer Models</a> [<a href="https://github.com/microsoft/DeepSpeed/blob/master/blogs/deepspeed-ulysses/chinese/README.md">中文</a>] [<a href="https://github.com/microsoft/DeepSpeed/blob/master/blogs/deepspeed-ulysses/japanese/README.md">日本語</a>]</li>
