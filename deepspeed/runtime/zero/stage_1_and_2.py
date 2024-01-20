@@ -1109,14 +1109,14 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
                 if self.use_multi_rank_bucket_allreduce:
                     self.allreduce_and_scatter(buckets[bucket_key],
                                                numel_per_bucket=self.reduce_bucket_size,
-                                               divide=self.ipg_bucket_has_moe_params,
+                                               divide=False,
                                                process_group=bucket_key)
                 else:
                     dst, process_group = bucket_key
                     self.allreduce_no_retain(buckets[bucket_key],
                                              numel_per_bucket=self.reduce_bucket_size,
                                              rank=dst,
-                                             divide=self.ipg_bucket_has_moe_params,
+                                             divide=False,
                                              process_group=process_group)
 
     ##############################################################################
