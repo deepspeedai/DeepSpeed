@@ -11,9 +11,9 @@ try:
     # is op_builder from deepspeed or a 3p version? this should only succeed if it's deepspeed
     # if successful this also means we're doing a local install and not JIT compile path
     from op_builder import __deepspeed__  # noqa: F401 # type: ignore
-    from op_builder.builder import OpBuilder, TORCH_MAJOR, TORCH_MINOR
+    from op_builder.builder import OpBuilder
 except ImportError:
-    from deepspeed.ops.op_builder.builder import OpBuilder, TORCH_MAJOR, TORCH_MINOR
+    from deepspeed.ops.op_builder.builder import OpBuilder
 
 
 class SYCLOpBuilder(OpBuilder):
@@ -35,6 +35,10 @@ class SYCLOpBuilder(OpBuilder):
         return dpcpp_ext
 
     def version_dependent_macros(self):
+        try:
+            from op_builder.builder import TORCH_MAJOR, TORCH_MINOR
+        except ImportError:
+            from deepspeed.ops.op_builder.builder import TORCH_MAJOR, TORCH_MINOR
         # Fix from apex that might be relevant for us as well, related to https://github.com/NVIDIA/apex/issues/456
         version_ge_1_1 = []
         if (TORCH_MAJOR > 1) or (TORCH_MAJOR == 1 and TORCH_MINOR > 0):

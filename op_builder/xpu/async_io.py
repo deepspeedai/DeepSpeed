@@ -5,7 +5,6 @@
 
 import distutils.spawn
 import subprocess
-import torch
 
 from .builder import OpBuilder
 
@@ -33,6 +32,7 @@ class AsyncIOBuilder(OpBuilder):
         return ['csrc/aio/py_lib', 'csrc/aio/common']
 
     def cxx_args(self):
+        import torch
         # -O0 for improved debugging, since performance is bound by I/O
         CPU_ARCH = self.cpu_arch()
         SIMD_WIDTH = self.simd_width()
