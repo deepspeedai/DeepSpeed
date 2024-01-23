@@ -3,6 +3,7 @@
 
 // DeepSpeed Team
 
+#include <cassert>
 #include "blocked_kv_rotary.cuh"
 #include "conversion_utils.h"
 #include "ds_kernel_utils.h"

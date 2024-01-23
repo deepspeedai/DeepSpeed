@@ -100,6 +100,10 @@ class QwenInferenceModel(DSTransformerModelBase):
     def positional_embedding_type(self) -> PositionalEmbeddingType:
         return PositionalEmbeddingType.rotate_half
 
+    @property
+    def positional_embedding_config(self) -> Optional[RotateHalfConfig]:
+        return RotateHalfConfig(theta_base=self._config.rotary_emb_base)
+
     def make_norm_layer(self) -> None:
         """
         Instantiates the normalization layer for the model. This sets the `self.norm` attribute.
@@ -118,27 +122,6 @@ class QwenInferenceModel(DSTransformerModelBase):
         )
 
         self.norm = heuristics.instantiate_pre_norm(norm_config, self._engine_config)
-
-    def make_attn_layer(self) -> None:
-        """
-        Builds the attention layer for the model. This sets the `self.attn` attribute.
-        """
-        softmax_scale = 1.0 / (self.head_size**0.5)
-
-        rotary_config = RotateHalfConfig(theta_base=self._config.rotary_emb_base)
-
-        attn_config = DSSelfAttentionConfig(max_tokens=self._engine_config.state_manager.max_ragged_batch_size,
-                                            n_heads_q=self.n_heads_q_local,
-                                            n_heads_kv=self.n_heads_kv_local,
-                                            head_size=self.head_size,
-                                            max_sequences=self._engine_config.state_manager.max_ragged_sequence_count,
-                                            scale_factor=softmax_scale,
-                                            input_dtype=self.activation_dtype,
-                                            output_dtype=self.activation_dtype,
-                                            positional_embedding_type=self.positional_embedding_type,
-                                            positional_embedding_config=rotary_config)
-
-        self.attn = heuristics.instantiate_attention(attn_config, self._engine_config)
 
     """
     Forward implementations
@@ -210,8 +193,10 @@ class QwenInferenceModel(DSTransformerModelBase):
         Performs unembedding of the hidden states to logits. This will only sample the final
         token of each sequence.
         """
-        logits = self.unembed(hidden_states, self._non_transformer.word_unembed, ragged_batch_info,
-                              self._non_transformer.final_norm)
+        logits = self.unembed(hidden_states,
+                              self._non_transformer.word_unembed,
+                              ragged_batch_info,
+                              gamma=self._non_transformer.final_norm)
 
         if self.tp_size > 1:
             comm_buffer = empty_from(self._comm_logits, (self.tp_size, logits.shape[0], logits.shape[1]))
