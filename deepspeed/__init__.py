@@ -234,12 +234,6 @@ def _add_core_arguments(parser):
                        type=str,
                        help='Deprecated DeepSpeed json configuration file.')
 
-    group.add_argument('--deepspeed_mpi',
-                       default=False,
-                       action='store_true',
-                       help="Run via MPI, this will attempt to discover the necessary variables to initialize torch "
-                       "distributed from the MPI environment")
-
     return parser
 
 
