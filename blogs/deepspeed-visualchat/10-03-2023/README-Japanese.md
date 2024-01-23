@@ -54,7 +54,7 @@ GPTやLLaMaのような大規模言語モデル（LLM）は、テキスト生成
 
 
 <div align="center">
-  <img src="../assets/images/attention.png" alt="Different attention mehanisms" width="1000"/>
+  <img src="../assets/images/attention.png" alt="Different attention mechanisms" width="1000"/>
 
   *図2: 異なるアテンションの機構: 「ユーザー：画像を説明してください」という入力文と3つの画像トークン（I-token1、I-token2、I-token3）と組み合わせて与えた場合の、それぞれのattention機構の構成を示しています。左側では、標準的なcausal attentionによって、画像トークンをテキストとして扱う様子を示しています。中央は、テキストトークンに対する標準的なcausal attentionを維持しながら、画像に適用されるcross attentionを使用する様子を示しています。右側では、画像トークンはself attentionのみを行い、テキストトークンはテキスト／画像トークンへのアテンションを独立に計算するという、新しいマルチモーダルのためのアテンションの提案を、オレンジ色のマスクで強調して示しています。この仕組みは、Q, Kをクエリとキーとしたとき、 softmax($`QK^T \odot M_1`$)+ softmax($`QK^T \odot M_2`$)として定義されます。M $`\in`$ R<sup>10x10</sup>としたとき、$`M_1`$=[M==1], and $`M_2`$=[M==2] です。*
 </div>

@@ -32,7 +32,7 @@ that process speech, images and waveforms concurrently require long
 context reasoning over high dimensional inputs with extremely large
 sequences. Similarly, chapter and book level summarization (estimated at
 tens and hundreds of thousands of words) are of great importance in
-conversational AI and abstractive summarization tasks.
+conversational AI and abstract summarization tasks.
 
 Long sequence length is equally critical for AI for science opening
 doors for better understanding of structure biology, health care,

@@ -55,7 +55,7 @@ The model architecture of DeepSpeed-VisualChat, as depicted in *Figure 1*, is co
 There are two common attention mechanisms used to connect the visual and textual components in a multi-modal model: causal attention, as used in MiniGPT and QWen-VL, and cross attention, as used in Otter and Flamingo.
 
 <div align="center">
-  <img src="../assets/images/attention.png" alt="Different attention mehanisms" width="1000"/>
+  <img src="../assets/images/attention.png" alt="Different attention mechanisms" width="1000"/>
 
   *Figure 2: Different Attention Mechanisms: Examine the differing attention mechanisms using an input sentence "User: Please describe the image." coupled with three Image tokens (I-token1, I-token2, I-token3). On the left, we demonstrate standard causal attention, treating image tokens as text. In the middle, we present cross attention applied to images, while maintaining standard causal attention for text tokens. On the right, we illustrate our innovative multi-modal attention proposal where image tokens only perform self-attention, and text tokens attend to text/image tokens independently, highlighted with an orange mask. This mechanism is defined by: softmax($`QK^T \odot M_1`$)+ softmax($`QK^T \odot M_2`$) with Q and K as query and key, $`M_1`$=[M==1], and $`M_2`$=[M==2], with M $`\in`$ R<sup>10x10</sup> in this case.*
 </div>
