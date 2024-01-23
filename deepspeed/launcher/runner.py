@@ -552,10 +552,7 @@ def main(args=None):
                     runner.add_export(var, env[var])
 
         for environ_path in DEEPSPEED_ENVIRONMENT_PATHS:
-            environ_file = DEEPSPEED_ENVIRONMENT_NAME
-            # handle if users to enter path for `DS_ENV_FILE`
-            if not os.path.isfile(environ_file):
-                environ_file = os.path.join(environ_path, DEEPSPEED_ENVIRONMENT_NAME)
+            environ_file = os.path.join(environ_path, DEEPSPEED_ENVIRONMENT_NAME)
             if os.path.isfile(environ_file):
                 logger.info(f"deepspeed_env file = {environ_file}")
                 with open(environ_file, 'r') as fd:
