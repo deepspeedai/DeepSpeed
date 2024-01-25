@@ -1,6 +1,7 @@
 name: nv-torch-nightly-v100
 
 on:
+  workflow_dispatch:
   schedule:
     - cron: "0 0 * * *"
 

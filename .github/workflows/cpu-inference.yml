@@ -1,6 +1,7 @@
 name: cpu-inference
 
 on:
+  workflow_dispatch:
   pull_request:
     paths:
       - '.github/workflows/cpu-inference.yml'
@@ -10,7 +11,6 @@ on:
       - '!deepspeed/inference/v2/**' # exclude v2 dir
       - 'tests/unit/inference/**'
       - '!tests/unit/inference/v2/**' # exclude v2 tests dir
-  workflow_dispatch:
   merge_group:
     branches: [ master ]
   schedule:

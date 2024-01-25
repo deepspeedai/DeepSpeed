@@ -1,6 +1,7 @@
 name: nv-accelerate-v100
 
 on:
+  workflow_dispatch:
   pull_request:
     paths-ignore:
       - 'docs/**'

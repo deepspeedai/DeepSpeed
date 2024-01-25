@@ -1,6 +1,7 @@
 name: nv-pre-compile-ops
 
 on:
+  workflow_dispatch:
   pull_request:
     branches:
       '**'

@@ -1,6 +1,7 @@
 name: nv-mii
 
 on:
+  workflow_dispatch:
   pull_request:
     paths:
       - '.github/workflows/nv-mii.yml'
