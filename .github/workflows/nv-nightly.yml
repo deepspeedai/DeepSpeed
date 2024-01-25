@@ -1,6 +1,7 @@
 name: nv-nightly
 
 on:
+  workflow_dispatch:
   schedule:
     - cron: "0 0 * * *"
 
