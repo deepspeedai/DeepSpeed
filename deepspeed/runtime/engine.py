@@ -3476,7 +3476,7 @@ class DeepSpeedEngine(Module):
         ckpt_type = 'zero' if self.zero_optimization() else 'bf16_zero'
         logger.info(f'{ckpt_type} checkpoint saved {zero_checkpoint_name}')
 
-    def _zero3_consolidated_16bit_state_dict(self):
+    def _zero3_consolidated_16bit_state_dict(self, exclude_frozen_parameters=False):
         """
         Get a full non-partitioned state_dict with fp16 weights on cpu.
         Important: this function must be called on all ranks and not just rank 0.
@@ -3502,7 +3502,7 @@ class DeepSpeedEngine(Module):
                 if dist.get_rank() == 0:
                     # handle params
                     for name, param in module.named_parameters(recurse=False):
-                        if param is None:
+                        if param is None or (exclude_frozen_parameters and not param.requires_grad):
                             continue
                         key = prefix + name
                         # can't rely on param.data_ptr() as it will be reused as weights gets
@@ -3545,7 +3545,7 @@ class DeepSpeedEngine(Module):
         compatibility"""
         return self.save_16bit_model(save_dir, save_filename)
 
-    def save_16bit_model(self, save_dir, save_filename="pytorch_model.bin"):
+    def save_16bit_model(self, save_dir, save_filename="pytorch_model.bin", exclude_frozen_parameters=False):
         """
         Save 16bit model weights
 
@@ -3554,6 +3554,7 @@ class DeepSpeedEngine(Module):
         Arguments:
             save_dir: Required. Directory for saving the model
             save_filename: Optional. Filename to save to. Defaults to ``pytorch_model.bin``
+            exclude_frozen_parameters: Optional. Exclude frozen parameters from checkpointed state.
 
         Returns:
             ``True`` when a model has been saved, ``False`` otherwise. It will not be saved if
@@ -3570,14 +3571,15 @@ class DeepSpeedEngine(Module):
         if self.zero_optimization_partition_weights():
             if self.zero_gather_16bit_weights_on_model_save():
                 # consolidation is expensive in time and memory and therefore isn't a default
-                state_dict = self._zero3_consolidated_16bit_state_dict()
+                state_dict = self._zero3_consolidated_16bit_state_dict(
+                    exclude_frozen_parameters=exclude_frozen_parameters)
             else:
                 # the model will be bogus if not consolidated so don't confuse the user by saving it
                 logger.info(
                     f"Did not save the model {path} because `stage3_gather_16bit_weights_on_model_save` is False")
                 return False
         else:
-            state_dict = self.module.state_dict()
+            state_dict = self.module_state_dict(exclude_frozen_parameters=exclude_frozen_parameters)
 
         tag = f"global_step{self.global_steps}"
         tag = str(tag)
