@@ -38,6 +38,10 @@ jobs:
           git rev-parse --short HEAD
           pip install .
 
+      - name: Install datasets
+        run: |
+          pip install datasets
+
       - name: Install deepspeed
         run: |
           pip install .[dev,1bit,autotuning,inf]
