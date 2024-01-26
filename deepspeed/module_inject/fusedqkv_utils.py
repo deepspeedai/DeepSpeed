@@ -5,7 +5,6 @@
 import torch
 from deepspeed.utils.logging import warning_once
 from deepspeed.module_inject.tp_shard import get_shard_size, get_shard_size_list, get_num_kv_heads, get_n_embd
-import re
 
 
 def split_by_qkvlist_and_refuse(qkv_list, split_size, split_dim=0, cat_dim=0):
@@ -39,10 +38,10 @@ def prepare_tp_fused_qkvw(module, src, mp_size, gpu_index):
         "MPTBlock": 'glmtype',
         "MptBlock": 'glmtype',
         "BaichuanLayer": 'glmtype',
-        "DecoderLayer": 'glmtype',
         "QWenBlock": 'qwentype',
         "FalconDecoderLayer": 'bloomtype',
         "GPTBigCodeBlock": 'bigcodetype',
+        "DecoderLayer": 'glmtype',
     }
 
     def _codegen_type_transpose(input, mp_size, codegen_mp_num=4):
@@ -114,9 +113,13 @@ def prepare_tp_fused_qkvw(module, src, mp_size, gpu_index):
 
         raise ValueError("unknown fused_qkv_type")
 
-    for module_name, fused_type in fused_type_dict.items():
-        if re.search(module_name, module_str):
-            return _transpose_fused_qkvw(src, mp_size, fused_type, module)
+    module_name_matches = [k for k in fused_type_dict.keys() if module_str in k]
+    if module_name_matches:
+        # There can be overlap with matches (e.g., "DecoderLayer" and "FalconDecoderLayer").
+        # We take the longest matching module_name
+        module_name = max(module_name_matches, key=len)
+        fused_type = fused_type_dict[module_name]
+        return _transpose_fused_qkvw(src, mp_size, fused_type, module)
     warning_once(f"Unrecognized fusedkqv weight type, default to using bloom type,"
                  f"please check in prepare_tp_fused_qkvw() to avoid potential calculation errors")
     return _bloom_type_transpose(src, mp_size)
