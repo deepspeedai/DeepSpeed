@@ -1197,7 +1197,7 @@ class Init(InsertPostInitMethodToModuleSubClasses):
 
             if len(params) == 1:
                 # have an opportunity to avoid some intermediate memory allocations
-                param, = params
+                param = params[0]
                 buffer_size = math.ceil(param.ds_numel / world_size) * world_size
                 if use_secondary_tensor:
                     buffer_size = param.ds_secondary_tensor.shape[0] * world_size  #make sure out is appropriately sized
