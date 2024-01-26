@@ -249,7 +249,8 @@ def main():
                 process = subprocess.Popen(cmd, env=current_env, stdout=log_fd, stderr=log_fd)
             else:
                 process = subprocess.Popen(cmd, env=current_env)
-
+            # logs the command from processes
+            logger.info(f"process {process.pid} spawned with command: {cmd}")
             processes.append(process)
     else:
         from ..elasticity import DSElasticAgent

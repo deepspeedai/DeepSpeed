@@ -508,7 +508,7 @@ def _create_zero_param_parallel_group(group_size):
 
         Example - ZP + D parallel
         world_size = 16
-        zero_hpz_partition_size = 2 # number of ranks with with replicated params (dual partitioning)
+        zero_hpz_partition_size = 2 # number of ranks with replicated params (dual partitioning)
         zero_param_intra_parallel_group = [0, 1], [2,3], [4,5], [6,7], [8,9] - segmented (subgroup) with rep partition
         data_parallel_group = [0,1,...,15] - all reduce is on ZeRO model
     """
