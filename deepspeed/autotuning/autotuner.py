@@ -683,6 +683,7 @@ class Autotuner:
         exp_config[DS_CONFIG] = ds_config
         exp_config['num_gpus'] = self.exp_num_gpus
         exp_config['num_nodes'] = self.exp_num_nodes
+        exp_config['hostfile'] = self.args.hostfile
         exp_path = os.path.join(self.exps_dir, f'{exp_name}.json')
 
         with open(exp_path, 'w', buffering=BUFSIZE) as fd:
@@ -761,6 +762,7 @@ class Autotuner:
             exp_config[DS_CONFIG] = ds_config
             exp_config['num_gpus'] = self.exp_num_gpus
             exp_config['num_nodes'] = self.exp_num_nodes
+            exp_config['hostfile'] = self.args.hostfile
             exp_path = os.path.join(self.exps_dir, f'{exp_name}.json')
 
             with open(exp_path, 'w', buffering=BUFSIZE) as fd:
@@ -1055,6 +1057,7 @@ class Autotuner:
         exp_config[DS_CONFIG] = ds_config
         exp_config['num_gpus'] = self.exp_num_gpus
         exp_config['num_nodes'] = self.exp_num_nodes
+        exp_config['hostfile'] = self.args.hostfile
         exp_path = os.path.join(self.exps_dir, f'{exp_name}.json')
 
         logger.debug(f'run_ds_config exp_name = {exp_name}')

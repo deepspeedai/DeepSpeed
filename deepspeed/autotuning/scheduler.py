@@ -316,7 +316,10 @@ def run_experiment(exp: dict, reservations, user_script, user_args):
         include_str += f"{reservation.node.host}:{slots}@"
     include_str = include_str[:-1]
     master_port = exp["master_port"]
+    hostfile = exp["hostfile"]
     exp["launcher_args"] = [
+        "--hostfile",
+        f"{hostfile}",
         "--include",
         f"{include_str}",
         "--master_port",
