@@ -60,6 +60,8 @@ def env_mapping(env, rank_name_list=None, local_rank_name_list=None):
                 rank = env.get(rank_name)
             elif rank != env.get(rank_name):
                 raise EnvironmentError(f"rank number doesn't match!")
+    if rank == None:
+        raise EnvironmentError(f"rank number is not in current env!")
     env['RANK'] = rank
 
     local_rank = None
@@ -69,6 +71,8 @@ def env_mapping(env, rank_name_list=None, local_rank_name_list=None):
                 local_rank = env.get(local_rank_name)
             elif local_rank != env.get(local_rank_name):
                 raise EnvironmentError(f"local_rank number doesn't match!")
+    if local_rank == None:
+        raise EnvironmentError(f"rank number is not in current env!")
     env['LOCAL_RANK'] = local_rank
 
     return env
@@ -81,7 +85,7 @@ def main(args=None):
 
     args.launcher = args.launcher.lower()
     if args.launcher == MPICH_LAUNCHER:
-        rank_name_list = ["PMIX_RANK"] + ["PMIX_RANK"]
+        rank_name_list = ["PMIX_RANK"] + ["PMI_RANK"]
         local_rank_name_list = ["PALS_LOCAL_RANKID"] + ["MPI_LOCALRANKID"]
         env = env_mapping(env, rank_name_list=rank_name_list, local_rank_name_list=local_rank_name_list)
     else:
