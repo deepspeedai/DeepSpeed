@@ -174,13 +174,13 @@ class HPU_Accelerator(DeepSpeedAccelerator):
 
     # Graph operations
     def create_graph(self):
-        return None
+        return self.hpu.HPUGraph()
 
     def capture_to_graph(self, graph, pool=None, stream=None):
-        from deepspeed.runtime.utils import noop_context
-        return noop_context()
+        return self.hpu.graph(graph, stream=stream)
 
     def replay_graph(self, graph):
+        graph.replay()
         return
 
     # Tensor operations
