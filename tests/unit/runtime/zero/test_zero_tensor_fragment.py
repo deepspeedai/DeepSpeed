@@ -155,7 +155,7 @@ class TestTensorFragmentGet(DistributedTest):
         if frozen_weights:
             pytest.skip("TODO: Frozen weights not currently supported by BF16 Optimizer")
 
-        if not bf16_required_version_check(accelerator_check=False):
+        if not bf16_required_version_check():
             pytest.skip(
                 " DeepSpeed BFloat16 tests need torch >= 1.10, NCCL >= 2.10.3, CUDA > =11.0 and HW support for BFloat16 to run correctly"
             )

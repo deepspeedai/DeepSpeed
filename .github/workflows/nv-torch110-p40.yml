@@ -51,7 +51,7 @@ jobs:
         run: |
           unset TORCH_CUDA_ARCH_LIST # only jit compile for current arch
           cd tests
-          pytest $PYTEST_OPTS --forked -n 4 unit/ --torch_ver="1.10" --cuda_ver="11.1"
+          DS_ALLOW_DEPRECATED_FP16=1 pytest $PYTEST_OPTS --forked -n 4 unit/ --torch_ver="1.10" --cuda_ver="11.1"
 
       - name: Open GitHub issue if nightly CI fails
         if: ${{ failure() && (github.event_name == 'schedule') }}

@@ -39,7 +39,7 @@ def bf16_required_version_check(accelerator_check=True):
 
     # Sometimes bf16 tests are runnable even if not natively supported by accelerator
     if accelerator_check:
-        accelerator_pass = torch_info['bf16_support']
+        accelerator_pass = get_accelerator().is_bf16_supported()
     else:
         accelerator_pass = True
 
