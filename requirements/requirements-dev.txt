@@ -1,6 +1,5 @@
 accelerate
 clang-format==16.0.2
-coverage
 deepspeed-kernels ; sys_platform == 'linux'
 docutils<0.18
 future

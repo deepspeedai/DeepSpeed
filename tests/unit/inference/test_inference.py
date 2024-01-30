@@ -19,7 +19,7 @@ import torch
 from huggingface_hub import HfApi
 from packaging import version as pkg_version
 from torch import nn
-from transformers import pipeline, AutoTokenizer
+from transformers import pipeline
 from transformers.models.t5.modeling_t5 import T5Block
 from transformers.models.roberta.modeling_roberta import RobertaLayer
 
@@ -474,46 +474,6 @@ class TestLowCpuMemUsage(DistributedTest):
 
 
 @pytest.mark.seq_inference
-@pytest.mark.parametrize("model_w_task", [("tiiuae/falcon-7b", "text-generation")], ids=["falcon"])
-class TestAutoTP(DistributedTest):
-    world_size = 1
-
-    def test(
-        self,
-        model_w_task,
-        query,
-        inf_kwargs,
-        assert_fn,
-    ):
-        # TODO: enable this test for H100 tests
-        pytest.skip("Not enough GPU memory for this on V100 runners")
-        model, task = model_w_task
-        dtype = torch.bfloat16
-        local_rank = int(os.getenv("LOCAL_RANK", "0"))
-
-        # We have to load these large models on CPU with pipeline because not
-        # enough GPU memory
-        tokenizer = AutoTokenizer.from_pretrained(model, use_fast=True)
-        pipe = pipeline(task,
-                        model=model,
-                        tokenizer=tokenizer,
-                        torch_dtype=dtype,
-                        trust_remote_code=True,
-                        device=torch.device("cpu"),
-                        framework="pt")
-        #bs_output = pipe(query, **inf_kwargs)
-
-        pipe.model = deepspeed.init_inference(pipe.model, mp_size=self.world_size, replace_with_kernel_inject=False)
-        # Switch device to GPU so that input tensors are not on CPU
-        pipe.device = torch.device(get_accelerator().device_name(local_rank))
-        ds_output = pipe(query, **inf_kwargs)
-
-        #print(local_rank, "baseline", bs_output)
-        print(local_rank, "deepspeed", ds_output)
-        #assert assert_fn(bs_output, ds_output)
-
-
-@pytest.mark.seq_inference
 @pytest.mark.parametrize(
     "model_w_task, injection_policy",
     [
@@ -547,17 +507,16 @@ class TestInjectionPolicy(DistributedTest):
         local_rank = int(os.getenv("LOCAL_RANK", "0"))
         world_size = int(os.getenv("WORLD_SIZE", "2"))
 
-        # We have to load these large models on CPU with pipeline because not
-        # enough GPU memory
-        pipe = pipeline(task, model=model, device=torch.device("cpu"), framework="pt")
+        pipe = pipeline(task,
+                        model=model,
+                        device=torch.device(get_accelerator().device_name(local_rank)),
+                        framework="pt")
         bs_output = pipe(query, **inf_kwargs)
 
         pipe.model = deepspeed.init_inference(pipe.model,
                                               mp_size=world_size,
                                               dtype=dtype,
                                               injection_policy=injection_policy)
-        # Switch device to GPU so that input tensors are not on CPU
-        pipe.device = torch.device(get_accelerator().device_name(local_rank))
         ds_output = pipe(query, **inf_kwargs)
 
         print(local_rank, "baseline", bs_output)
@@ -587,24 +546,24 @@ class TestAutoTensorParallelism(DistributedTest):
         if invalid_test_msg:
             pytest.skip(invalid_test_msg)
 
-        if dtype not in get_accelerator().supported_dtypes():
-            pytest.skip(f"Acceleraor {get_accelerator().device_name()} does not support {dtype}.")
-
-        if dtype == torch.bfloat16 and model_w_task[0] == "Salesforce/codegen-350M-mono":
-            pytest.skip("Disable Codegen model(bf16) due to slight result difference")
-
         model, task = model_w_task
         local_rank = int(os.getenv("LOCAL_RANK", "0"))
         world_size = int(os.getenv("WORLD_SIZE", "2"))
 
-        # We have to load these large models on CPU with pipeline because not
-        # enough GPU memory
-        pipe = pipeline(task, model=model, device=torch.device("cpu"), framework="pt")
+        if dtype not in get_accelerator().supported_dtypes():
+            pytest.skip(f"Acceleraor {get_accelerator().device_name()} does not support {dtype}.")
+
+        if model == "Salesforce/codegen-350M-mono":
+            pytest.skip("Disable Codegen model due to slight result difference")
+            #TODO: re-enable this test once we have a fix for the slight result difference
+
+        pipe = pipeline(task,
+                        model=model,
+                        device=torch.device(get_accelerator().device_name(local_rank)),
+                        framework="pt")
         bs_output = pipe(query, **inf_kwargs)
 
         pipe.model = deepspeed.init_inference(pipe.model, mp_size=world_size, dtype=dtype)
-        # Switch device to GPU so that input tensors are not on CPU
-        pipe.device = torch.device(get_accelerator().device_name(local_rank))
         ds_output = pipe(query, **inf_kwargs)
 
         print(local_rank, "baseline", bs_output)

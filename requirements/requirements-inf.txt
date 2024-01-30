@@ -2,5 +2,5 @@ google
 lm-eval==0.3.0
 protobuf
 safetensors
+sentencepiece
 transformers>=4.32.1
-transformers[sentencepiece]

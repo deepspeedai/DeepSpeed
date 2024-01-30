@@ -55,11 +55,5 @@ jobs:
         run: |
           unset TORCH_CUDA_ARCH_LIST # only jit compile for current arch
           cd tests
-          coverage run --concurrency=multiprocessing -m pytest $PYTEST_OPTS --forked -n 4 unit/ --torch_ver="2.1" --cuda_ver="11.8"
-          coverage run --concurrency=multiprocessing -m pytest $PYTEST_OPTS --forked -m 'sequential' unit/ --torch_ver="2.1" --cuda_ver="11.8"
-
-      - name: Coverage report
-        run: |
-          cd tests
-          coverage combine
-          coverage report -m
+          pytest $PYTEST_OPTS --forked -n 4 unit/ --torch_ver="2.1" --cuda_ver="11.8"
+          pytest $PYTEST_OPTS --forked -m 'sequential' unit/ --torch_ver="2.1" --cuda_ver="11.8"
