@@ -100,7 +100,7 @@ def main(args=None):
 
     logger.info(f"launcher_helper cmd = {' '.join(cmd)}")
 
-    result = subprocess.Popen(cmd, env=env)
+    result = subprocess.Popen(cmd, env=env, close_fds=False)
     result.wait()
 
 
