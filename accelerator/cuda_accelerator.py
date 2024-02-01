@@ -180,9 +180,13 @@ class CUDA_Accelerator(DeepSpeedAccelerator):
 
     # Data types
     def is_bf16_supported(self):
+        if not torch.cuda.is_available():
+            return True
         return torch.cuda.is_bf16_supported()
 
     def is_fp16_supported(self):
+        if not torch.cuda.is_available():
+            return True
         # See https://docs.nvidia.com/deeplearning/tensorrt/support-matrix/index.html#hardware-precision-matrix
         # FP16 on compute capability 6.x is deprecated
         allow_deprecated_fp16 = os.environ.get('DS_ALLOW_DEPRECATED_FP16', '0') == '1'
