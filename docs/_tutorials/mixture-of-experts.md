@@ -124,7 +124,6 @@ def create_moe_param_groups(model):
 The above param groups can then be fed to the ZeRO stage-2 optimizer as follows.
 
 ```python
-
 net = Net()
 
 parameters = create_moe_param_groups(net)
