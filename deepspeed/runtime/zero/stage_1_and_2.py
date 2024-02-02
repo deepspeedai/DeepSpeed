@@ -12,8 +12,8 @@ from torch._utils import _flatten_dense_tensors, _unflatten_dense_tensors
 
 from deepspeed.runtime import ZeROOptimizer
 from deepspeed.runtime.fp16.loss_scaler import CreateLossScaler
-from deepspeed.runtime.utils import (bwc_tensor_model_parallel_rank, get_global_norm, empty_cache, see_memory_usage,
-                                     inf, is_model_parallel_parameter, align_dense_tensors, all_gather_dp_groups)
+from deepspeed.runtime.utils import (bwc_tensor_model_parallel_rank, empty_cache, see_memory_usage, inf,
+                                     is_model_parallel_parameter, align_dense_tensors, all_gather_dp_groups)
 
 from deepspeed.runtime.zero.config import ZeroStageEnum
 from deepspeed.runtime.zero.offload_config import OffloadDeviceEnum
@@ -1650,16 +1650,16 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
             Total norm of the parameters (viewed as a single vector).
         """
         norm_type = float(norm_type)
+        all_norms = []
         if norm_type == inf:
-            total_norm = max(g.data.abs().max() for g in gradients)
-            total_norm_cuda = get_accelerator().FloatTensor([float(total_norm)])
-            dist.all_reduce(total_norm_cuda, op=dist.ReduceOp.MAX, group=self.dp_process_group)
+            for g in gradients:
+                all_norms.append(g.data.abs().max().float())
+            total_norm = torch.stack(all_norms).max()
+            dist.all_reduce(total_norm, op=dist.ReduceOp.MAX, group=self.dp_process_group)
 
             # Take max across all GPUs.
-            self._model_parallel_all_reduce(tensor=total_norm_cuda, op=dist.ReduceOp.MAX)
-            total_norm = total_norm_cuda[0].item()
+            self._model_parallel_all_reduce(tensor=total_norm, op=dist.ReduceOp.MAX)
         else:
-            total_norm = 0.0
             # if dist.get_rank() == 0:
             #    logger.info(f"Total Norm beginning {total_norm}")
             for g, p in zip(gradients, params):
@@ -1667,19 +1667,25 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
                 if hasattr(p, PIPE_REPLICATED) and p.ds_pipe_replicated:
                     continue
                 if is_model_parallel_parameter(p) or (self.model_parallel_rank == 0):
-                    param_norm = g.data.double().norm(2)
-                    total_norm += param_norm.item()**2
-            # Sum across all model parallel GPUs.
-            total_norm_cuda = get_accelerator().FloatTensor([float(total_norm)])
-            dist.all_reduce(total_norm_cuda, op=dist.ReduceOp.SUM, group=self.dp_process_group)
+                    all_norms.append(
+                        torch.norm(g.data.double().detach(), norm_type).to(get_accelerator().current_device_name()))
+            if len(all_norms) > 0:
+                total_norm = torch.stack(all_norms).square().sum().float()
+            else:
+                total_norm = torch.FloatTensor([0.0]).to(self.device)
+            # Sum across all model parallel Device.
+            dist.all_reduce(total_norm, op=dist.ReduceOp.SUM, group=self.dp_process_group)
 
-            self._model_parallel_all_reduce(tensor=total_norm_cuda, op=dist.ReduceOp.SUM)
+            self._model_parallel_all_reduce(tensor=total_norm, op=dist.ReduceOp.SUM)
 
-            total_norm = total_norm_cuda[0].item()**(1. / norm_type)
+            total_norm = total_norm.pow(1. / norm_type)
 
-        if total_norm == float('inf') or total_norm == -float('inf') or total_norm != total_norm:
-            total_norm = -1
+        norm_is_inf = total_norm.isinf()
+        norm_is_nan = total_norm.isnan()
+        inf_or_nan = norm_is_nan.logical_or(norm_is_inf)
 
+        err = torch.tensor(-1.0, device=self.device, dtype=torch.float)
+        total_norm = inf_or_nan * err + inf_or_nan.logical_not() * total_norm
         return total_norm
 
     # creates a flat fused tensor from the tensor list starting at the first_offset
@@ -1753,18 +1759,20 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
         assert norm_type == 2, "only L2 norm supported"
         norm_groups = []
         for i, group in enumerate(self.bit16_groups):
-            partition_id = dist.get_rank(group=self.real_dp_process_group[i])
             if self.cpu_offload:
-                norm_groups.append(self.complete_grad_norm_calculation_for_cpu_offload(self.params_in_partition[i]))
-                single_grad_partition = self.single_partition_of_fp32_groups[i].grad
+                # complete complete_grad_norm_calculation_for_cpu_offload return python float, moving back to
+                # torch.tensor as else statement returns tensor as well
+                norm = torch.tensor(self.complete_grad_norm_calculation_for_cpu_offload(self.params_in_partition[i]),
+                                    device=self.device)
+                norm_groups.append(norm)
             else:
                 norm_groups.append(self.get_grad_norm_direct(self.averaged_gradients[i], self.params_in_partition[i]))
 
         if self.has_moe_layers:
             self._average_expert_grad_norms(norm_groups)
 
-        # note that the get_global_norm function only supports l2 norm
-        return get_global_norm(norm_list=norm_groups)
+        # calculating L2 norm
+        return torch.norm(torch.stack(norm_groups), p=norm_type)
 
     def get_bit16_param_group(self, group_no):
         bit16_partitions = self.parallel_partitioned_bit16_groups[group_no]
@@ -1920,12 +1928,9 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
     def _average_expert_grad_norms(self, norm_groups):
         for i, norm in enumerate(norm_groups):
             if self.is_moe_param_group[i]:
-                scaled_norm = norm * 1.0 / float(dist.get_world_size(group=self.real_dp_process_group[i]))
-                scaled_norm_tensor = torch.tensor(scaled_norm,
-                                                  device=get_accelerator().device_name(),
-                                                  dtype=torch.float)
+                scaled_norm_tensor = norm * 1.0 / dist.get_world_size(group=self.real_dp_process_group[i])
                 dist.all_reduce(scaled_norm_tensor, group=self.real_dp_process_group[i])
-                norm_groups[i] = scaled_norm_tensor.item()
+                norm_groups[i] = scaled_norm_tensor
 
     def unscale_and_clip_grads(self, grad_groups_flat, total_norm):
         # compute combined scale factor for this group
