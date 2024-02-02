@@ -20,6 +20,7 @@ from deepspeed.runtime.zero.partition_parameters import *
 from deepspeed.runtime.zero.config import ZeroStageEnum
 from deepspeed.runtime.zero.offload_config import OffloadDeviceEnum
 from deepspeed.runtime.zero.parameter_offload import DeepSpeedZeRoOffload
+from deepspeed.runtime.zero.utils import apply_to_tensors_only
 from deepspeed.ops.adam import DeepSpeedCPUAdam, FusedAdam
 from deepspeed.runtime.swap_tensor.partitioned_param_swapper import PartitionedParamStatus
 from deepspeed.runtime.swap_tensor.optimizer_utils import OptimizerSwapper
@@ -27,6 +28,7 @@ from deepspeed.runtime.swap_tensor.partitioned_optimizer_swapper import Partitio
 from deepspeed.runtime.swap_tensor.pipelined_optimizer_swapper import PipelinedOptimizerSwapper
 from deepspeed.checkpoint.constants import OPTIMIZER_STATE_DICT, FP32_FLAT_GROUPS, PARTITION_COUNT, ZERO_STAGE, LOSS_SCALER
 from deepspeed.accelerator import get_accelerator
+from deepspeed.utils import z3_leaf_parameter
 
 # Toggle this to true to enable correctness test
 # with gradient partitioning and without
@@ -377,6 +379,7 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
         #creates backward hooks for gradient partitioning
         ###Calls all gather param
         self._grad_acc_hooks = []
+        self._leaf_module_hooks = []
         self.create_reduce_and_remove_grad_hooks()
 
         #exit(0)
@@ -398,6 +401,8 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
     def destroy(self):
         self.parameter_offload.destroy()
         for hook in self._grad_acc_hooks:
+            hook.remove()
+        for hook in self._leaf_module_hooks:
             hook.remove()
         print_rank_0("Removed grad acc hooks", force=False)
         del self.__ipg_bucket_flat_buffer
@@ -1110,6 +1115,7 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
     def create_reduce_and_remove_grad_hooks(self):
         print_rank_0(f'[Begin] Create gradient reduction hooks')
         self.grad_accs = []
+        self.leaf_parameters = defaultdict(list)
         for i, param_group in enumerate(self.fp16_groups):
             for param in param_group:
                 if param.requires_grad:
@@ -1132,10 +1138,52 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
                         self.grad_accs.append(grad_acc)
 
                     #print(f"param grad fn {param.expand_as(param).grad_fn}")
-                    wrapper(param)
+                    if z3_leaf_parameter(param):
+                        self.leaf_parameters[param.ds_z3_leaf_module].append(param)
+                    else:
+                        wrapper(param)
 
                     # Partition the parameter after creating the hook
                     param.partition()
+
+        # We delay reduce-scatter for all gradients in the leaf modules until the backward pass of the leaf module is done
+        for leaf_module, leaf_parameters in self.leaf_parameters.items():
+
+            def wrapper(params):
+
+                def forward_pre_hook(module, input):
+                    """Pre-forward hook to set backward hook on input tensors to the leaf module"""
+                    module._leaf_module_inputs_remaining = 0
+
+                    @instrument_w_nvtx
+                    def reduce_leaf_module_grads(grad):
+                        module._leaf_module_inputs_remaining -= 1
+                        # Make sure everything is done in the leaf module
+                        if module._leaf_module_inputs_remaining == 0:
+                            for param in params:
+                                if param.grad is None:
+                                    param.grad = torch.zeros_like(param)
+                                self.reduce_ready_partitions_and_remove_grads(param)
+
+                    def set_module_bwd_hook(tensor):
+                        if tensor.requires_grad:
+                            module._leaf_module_inputs_remaining += 1
+                            tensor.register_hook(reduce_leaf_module_grads)
+                        return tensor
+
+                    output = apply_to_tensors_only(set_module_bwd_hook, input)
+
+                    if module._leaf_module_inputs_remaining == 0:
+                        raise RuntimeError(
+                            "A module cannot be set as a leaf module when it does not have any input tensors that require gradients"
+                        )
+
+                    return output
+
+                return forward_pre_hook
+
+            self._leaf_module_hooks.append(leaf_module.register_forward_pre_hook(wrapper(leaf_parameters)))
+
         print_rank_0(f'[End] Create gradient reduction hooks')
 
     def get_param_id(self, param):

@@ -87,3 +87,65 @@ def assert_ints_same_as_other_ranks(ints: List[int]) -> None:
     if ints != rank0_ints:
         raise RuntimeError(f"disagreement between rank0 and rank{dist.get_rank()}: "
                            f"rank0: {rank0_ints}, rank{dist.get_rank()}: {ints}")
+
+
+def is_builtin_type(obj):
+    # https://stackoverflow.com/a/17795199
+    return obj.__class__.__module__ == '__builtin__' or obj.__class__.__module__ == "builtins"
+
+
+def isinstance_namedtuple(obj: object) -> bool:
+    """
+    Is this an instance of namedtuple/NamedTuple?
+    From: https://stackoverflow.com/a/62692640
+
+    Args:
+        obj (object): An object.
+
+    Returns:
+        bool: True if namedtuple/NamedTuple else False.
+    """
+    return isinstance(obj, tuple) and hasattr(obj, '_asdict') and hasattr(obj, '_fields')
+
+
+def apply_to_tensors_only(function, value, warning_msg_fn=None):
+    """
+    Apply `function` to every Tensor in `value`.
+
+    Args:
+        module (torch.nn.Module):  A torch module
+        functional (Type[torch.autograd.Function]): The function class to apply.
+        backward_function (Callable[[torch.nn.Module], None]): A backward_function to pass to
+            `functional.apply`.
+        outputs (Any): The output of `module`.
+
+    Returns:
+        Any: The output of `module`.
+    """
+    if isinstance(value, (tuple, list)):
+        touched_outputs = []
+        for elem in value:
+            touched_output = apply_to_tensors_only(function, elem)
+            touched_outputs.append(touched_output)
+
+        if isinstance_namedtuple(value):
+            # namedtuples require a slightly different syntax.
+            return value.__class__(*touched_outputs)
+
+        return value.__class__(touched_outputs)
+    elif isinstance(value, dict):
+        # apply inplace to avoid recreating dict inherited objects
+        for key in value.keys():
+            value[key] = apply_to_tensors_only(function, value[key])
+        return value
+
+    elif isinstance(value, torch.Tensor):
+        # this also applies to torch.Tensor's subclasses like torch.nn.parameter.Parameter
+        return function(value)
+    else:
+        if not is_builtin_type(value):
+            global warned
+            if warning_msg_fn and not warned and dist.get_rank() == 0:
+                logger.warning(warning_msg_fn(value))
+                warned = True
+        return value
