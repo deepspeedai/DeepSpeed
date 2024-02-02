@@ -614,7 +614,7 @@ def init_distributed(dist_backend=None,
     ''' Initialize dist backend, potentially performing MPI discovery if needed
 
     Arguments:
-        dist_backend: Optional (str). torch distributed backend, e.g., nccl, mpi, gloo
+        dist_backend: Optional (str). torch distributed backend, e.g., nccl, mpi, gloo, hccl
         auto_mpi_discovery Optional (bool). if distributed environment variables are not set, attempt to discover them from MPI
         distributed_port: Optional (int). torch distributed backend port
         verbose: Optional (bool). verbose logging
