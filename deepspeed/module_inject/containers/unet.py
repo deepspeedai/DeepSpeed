@@ -17,6 +17,8 @@ class UNetPolicy(DSPolicy):
         try:
             import diffusers
             self._orig_layer_class = diffusers.models.unet_2d_condition.UNet2DConditionModel
+        except AttributeError:
+            self._orig_layer_class = diffusers.models.unets.unet_2d_condition.UNet2DConditionModel
         except ImportError:
             self._orig_layer_class = None
 
