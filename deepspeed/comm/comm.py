@@ -160,7 +160,7 @@ def init_deepspeed_backend(ds_backend, timeout, init_method):
         ccl_backend = CCLBackend(rank=rank, world_size=size, timeout=timeout, init_method=init_method)
         utils.logger.info(f"Initialize {ds_backend} backend")
     elif ds_backend == HCCL_BACKEND:
-        utils.logger.warn("HCCL backend in DeepSpeed not yet implemented")
+        utils.logger.debug("HCCL backend in DeepSpeed not yet implemented")
     else:
         utils.logger.debug(f"DeepSpeed does not support {ds_backend} backend")
 
