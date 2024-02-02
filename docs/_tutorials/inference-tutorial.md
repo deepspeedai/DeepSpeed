@@ -27,7 +27,7 @@ import deepspeed
 
 # Initialize the DeepSpeed-Inference engine
 ds_engine = deepspeed.init_inference(model,
-                                 mp_size=2,
+                                 tensor_parallel={"tp_size": 2},
                                  dtype=torch.half,
                                  checkpoint=None if args.pre_load_checkpoint else args.checkpoint_json,
                                  replace_with_kernel_inject=True)
@@ -49,7 +49,7 @@ pipe = pipeline("text2text-generation", model="google/t5-v1_1-small", device=loc
 # Initialize the DeepSpeed-Inference engine
 pipe.model = deepspeed.init_inference(
     pipe.model,
-    mp_size=world_size,
+    tensor_parallel={"tp_size": world_size},
     dtype=torch.float,
     injection_policy={T5Block: ('SelfAttention.o', 'EncDecAttention.o', 'DenseReluDense.wo')}
 )
@@ -110,7 +110,7 @@ generator = pipeline('text-generation', model='EleutherAI/gpt-neo-2.7B',
 
 
 generator.model = deepspeed.init_inference(generator.model,
-                                           mp_size=world_size,
+                                           tensor_parallel={"tp_size": world_size},
                                            dtype=torch.float,
                                            replace_with_kernel_inject=True)
 
