@@ -1149,7 +1149,7 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
         # We delay reduce-scatter for all gradients in the leaf modules until the backward pass of the leaf module is done
         for leaf_module, leaf_parameters in self.leaf_parameters.items():
 
-            def wrapper(params):
+            def wrapper_pre_hook(params):
 
                 def forward_pre_hook(module, input):
                     """Pre-forward hook to set backward hook on input tensors to the leaf module"""
@@ -1173,16 +1173,32 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
 
                     output = apply_to_tensors_only(set_module_bwd_hook, input)
 
-                    if module._leaf_module_inputs_remaining == 0:
-                        raise RuntimeError(
-                            "A module cannot be set as a leaf module when it does not have any input tensors that require gradients"
-                        )
-
                     return output
 
                 return forward_pre_hook
 
-            self._leaf_module_hooks.append(leaf_module.register_forward_pre_hook(wrapper(leaf_parameters)))
+            def wrapper_post_hook():
+
+                def forward_post_hook(module, input, output):
+                    """Pre-forward hook to set backward hook on input tensors to the leaf module"""
+                    module._leaf_output_required_grad_num = 0
+
+                    def increment_rg_count_bwd_hook(tensor):
+                        if tensor.requires_grad:
+                            module._leaf_output_required_grad_num += 1
+                        return tensor
+
+                    apply_to_tensors_only(increment_rg_count_bwd_hook, output)
+
+                    if module._leaf_module_inputs_remaining == 0 and module._leaf_output_required_grad_num > 0:
+                        raise RuntimeError(
+                            "A module cannot be set as a leaf module when it does not have any input tensors that require gradients and has output tensors that require gradients. This is because the gradient reduction hook will not be called in this case."
+                        )
+
+                return forward_post_hook
+
+            self._leaf_module_hooks.append(leaf_module.register_forward_pre_hook(wrapper_pre_hook(leaf_parameters)))
+            self._leaf_module_hooks.append(leaf_module.register_forward_hook(wrapper_post_hook()))
 
         print_rank_0(f'[End] Create gradient reduction hooks')
 
