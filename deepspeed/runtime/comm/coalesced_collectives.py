@@ -17,6 +17,7 @@ from torch.distributed import ProcessGroup, all_to_all_single
 from deepspeed.accelerator import get_accelerator
 from deepspeed.utils import instrument_w_nvtx
 from deepspeed.ops import op_builder
+from deepspeed.utils import logger
 
 
 def _torch_reduce_scatter_fn(input_tensor: Tensor, output_tensor: Tensor, group=None, async_op=False, prof=False):
@@ -41,9 +42,15 @@ def all_to_all_quant_reduce(tensors: List[Tensor], groups: {}) -> List[Tensor]:
     output_lst: List[Tensor] = [None] * len(tensors)
     for idx, tensor in enumerate(tensors):
         if tensor.dim() == 1:
-            intra_quant_group = global_world_size
             output_lst[idx] = reduce_scatter_coalesced([tensor])[0]
-            continue
+        elif tensor.numel() % (2 * global_world_size) != 0:
+            # Due to the constraint of 2-stage all-to-all, the input tensor must be divisible by 2 * global_world_size
+            # Otherwise, all-to-all cannot be performed because of shape mismatch.
+            # See more at https://github.com/microsoft/DeepSpeed/pull/5056
+            logger.warning(
+                f"qgZ falls back to reduce_scatter because tensor size = {tensor.numel()} is not divisible by (2 * global_world_size) = {2 * global_world_size}. Please consider allocating a new world to enable qgZ"
+            )
+            output_lst[idx] = reduce_scatter_coalesced([tensor])[0]
         else:
             intra_quant_group = max(tensor.shape[0], tensor.shape[1], global_world_size)
 
@@ -64,6 +71,8 @@ def all_to_all_quant_reduce(tensors: List[Tensor], groups: {}) -> List[Tensor]:
             all_to_all_single(global_scale_output, global_scales, group=groups[f'global_{inter_idx}'])
             final_output = quantizer_module.dequantize(global_output, global_scale_output, global_scale_output.numel(),
                                                        4, quantizer_module.Symmetric)
+            assert final_output.numel(
+            ) % num_nodes == 0, f"final_output.numel()={final_output.numel()} is not divisible by num_nodes={num_nodes}"
             output_lst[idx] = (sum(list(final_output.chunk(num_nodes))) / num_nodes).view(-1)
     return output_lst
 
