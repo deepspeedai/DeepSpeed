@@ -3,6 +3,7 @@
 
 # DeepSpeed Team
 
+from collections import defaultdict
 from typing import Any, Dict, List, Set, Tuple, Union, cast
 
 import torch
@@ -68,10 +69,9 @@ def split_params_grads_into_shared_and_expert_params(
     return shared_grads, expert_grads
 
 
-def split_params_into_different_moe_groups_for_optimizer(param_groups: Union[Dict[str, Any], Tuple[Dict[str, Any],
-                                                                                                   ...],
-                                                                             List[Dict[str, Any]]],
-                                                         max_group_size: int = 178956971) -> List[Dict[str, Any]]:
+def split_params_into_different_moe_groups_for_optimizer(
+        param_groups: Union[Dict[str, Any], Tuple[Dict[str, Any], ...], List[Dict[str, Any]]],
+        max_group_size: Union[int, float] = 178956971) -> List[Dict[str, Any]]:
     """Split parameters into different MoE groups for optimizer
 
     Args:
@@ -97,18 +97,15 @@ def split_params_into_different_moe_groups_for_optimizer(param_groups: Union[Dic
                 data_parallel_group_names.add(param.group_name)
 
     # Create the param MoE groups, leave param assign to next step
-    group_moe: Dict[str, Dict[str, Dict[str, Any]]] = {}
+    group_moe: Dict[str, Dict[str, Dict[str, Any]]] = defaultdict(lambda: defaultdict(dict))
     for param_group in param_groups:
-        group_moe[param_group['name']] = {}
         for key in data_parallel_group_names:
-            group_moe[param_group['name']][key] = {}
-            group_moe[param_group['name']][key]['name'] = key
-            group_moe[param_group['name']][key]['moe'] = True
-
-            for ori_key in param_group.keys():
-                if ori_key != 'name':
-                    group_moe[param_group['name']][key][ori_key] = ([]
-                                                                    if ori_key == 'params' else param_group[ori_key])
+            group_moe[param_group['name']][key] = {
+                **param_group,
+                'name': key,
+                'moe': True,
+                'params': [],
+            }
 
     # Assign param
     for param_group in param_groups:
@@ -142,9 +139,7 @@ def split_params_into_different_moe_groups_for_optimizer(param_groups: Union[Dic
                     all_groups.append(cur_group)
 
                 for group in all_groups:
-                    new_dict = dict(param_group)
-                    new_dict['params'] = group
-                    param_groups.append(new_dict)
+                    param_groups.append({**param_group, 'params': group})
     else:
         for moe_group in group_moe.values():
             for param_group in moe_group.values():

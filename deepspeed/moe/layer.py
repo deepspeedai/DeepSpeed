@@ -3,22 +3,23 @@
 
 # DeepSpeed Team
 
+from typing import Optional, Tuple
+
 import torch
+from torch import nn
+from torch.nn import functional as F
 
-from deepspeed.utils import log_dist
-
-from deepspeed.utils import groups
-from .sharded_moe import MOELayer, TopKGate
+from deepspeed.utils import groups, log_dist
 from .experts import Experts
-import typing
+from .sharded_moe import MOELayer, TopKGate
 
 
-class MoE(torch.nn.Module):
+class MoE(nn.Module):
     """Initialize an MoE layer.
 
     Arguments:
         hidden_size (int): the hidden dimension of the model, importantly this is also the input and output dimension.
-        expert (torch.nn.Module): the torch module that defines the expert (e.g., MLP, torch.linear).
+        expert (nn.Module): the torch module that defines the expert (e.g., MLP, torch.linear).
         num_experts (int, optional): default=1, the total number of experts per layer.
         ep_size (int, optional): default=1, number of ranks in the expert parallel world or group.
         k (int, optional): default=1, top-k gating value, only supports k=1 or k=2.
@@ -34,20 +35,20 @@ class MoE(torch.nn.Module):
     """
 
     def __init__(self,
-                 hidden_size,
-                 expert,
-                 num_experts=1,
-                 ep_size=1,
-                 k=1,
-                 capacity_factor=1.,
-                 eval_capacity_factor=1.,
-                 min_capacity=4,
-                 use_residual=False,
-                 noisy_gate_policy: typing.Optional[str] = None,
+                 hidden_size: int,
+                 expert: nn.Module,
+                 num_experts: int = 1,
+                 ep_size: int = 1,
+                 k: int = 1,
+                 capacity_factor: float = 1.0,
+                 eval_capacity_factor: float = 1.0,
+                 min_capacity: int = 4,
+                 use_residual: bool = False,
+                 noisy_gate_policy: Optional[str] = None,
                  drop_tokens: bool = True,
-                 use_rts=True,
+                 use_rts: bool = True,
                  use_tutel: bool = False,
-                 enable_expert_tensor_parallelism: bool = False):
+                 enable_expert_tensor_parallelism: bool = False) -> None:
 
         super(MoE, self).__init__()
 
@@ -77,12 +78,12 @@ class MoE(torch.nn.Module):
         if self.use_residual:
             self.mlp = expert
             # coefficient is used for weighted sum of the output of expert and mlp
-            self.coefficient = torch.nn.Linear(hidden_size, 2)
+            self.coefficient = nn.Linear(hidden_size, 2)
 
-    def set_deepspeed_parallelism(self, use_data_before_expert_parallel_=False):
+    def set_deepspeed_parallelism(self, use_data_before_expert_parallel_: bool = False) -> None:
         self._create_process_groups(use_data_before_expert_parallel_=use_data_before_expert_parallel_)
 
-    def _create_process_groups(self, use_data_before_expert_parallel_=False):
+    def _create_process_groups(self, use_data_before_expert_parallel_: bool = False) -> None:
         # Create process group for a layer if needed
         if self.expert_group_name not in groups._get_expert_parallel_group_dict():
             print(f"No existing process group found, creating a new group named: {self.expert_group_name}")
@@ -98,7 +99,9 @@ class MoE(torch.nn.Module):
         # Set the group handle for the MOELayer (deepspeed_moe) object
         self.deepspeed_moe._set_ep_group(groups._get_expert_parallel_group(self.expert_group_name))
 
-    def forward(self, hidden_states, used_token=None):
+    def forward(self,
+                hidden_states: torch.Tensor,
+                used_token: Optional[torch.Tensor] = None) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """ MoE forward
 
         Arguments:
@@ -112,15 +115,15 @@ class MoE(torch.nn.Module):
 
             * l_aux (Tensor): gate loss value
 
-            * exp_counts (int): expert count
+            * exp_counts (Tensor): expert count
         """
         output = self.deepspeed_moe(hidden_states, used_token)
         if self.use_residual:
             # Residual MoE
             output_mlp = self.mlp(hidden_states)
-            if type(output_mlp) is tuple:
+            if isinstance(output_mlp, tuple):
                 output_mlp = output_mlp[0]  # Ignore the bias term for now
             coef = self.coefficient(hidden_states)
-            coef = torch.nn.functional.softmax(coef, dim=-1)
+            coef = F.softmax(coef, dim=-1)
             output = output * coef[..., 0:1] + output_mlp * coef[..., 1:]
         return output, self.deepspeed_moe.l_aux, self.deepspeed_moe.exp_counts
