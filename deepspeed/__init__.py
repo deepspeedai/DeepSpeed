@@ -39,6 +39,7 @@ from .comm.comm import init_distributed
 
 from .runtime import zero
 from .runtime import DeepSpeedOptimizer, ZeROOptimizer
+from .runtime.compiler import is_compile_supported
 
 from .pipe import PipelineModule
 

@@ -108,19 +108,22 @@ def isinstance_namedtuple(obj: object) -> bool:
     return isinstance(obj, tuple) and hasattr(obj, '_asdict') and hasattr(obj, '_fields')
 
 
+def is_zero_param(parameter):
+    if not torch.is_tensor(parameter):
+        return False
+    return hasattr(parameter, 'ds_id')
+
+
 def apply_to_tensors_only(function, value, warning_msg_fn=None):
     """
     Apply `function` to every Tensor in `value`.
 
     Args:
-        module (torch.nn.Module):  A torch module
-        functional (Type[torch.autograd.Function]): The function class to apply.
-        backward_function (Callable[[torch.nn.Module], None]): A backward_function to pass to
-            `functional.apply`.
-        outputs (Any): The output of `module`.
+        functional: The function class to apply.
+        value (Any): Target object to apply `function` to.
 
     Returns:
-        Any: The output of `module`.
+        Any: Output of `function`.
     """
     if isinstance(value, (tuple, list)):
         touched_outputs = []
@@ -141,7 +144,13 @@ def apply_to_tensors_only(function, value, warning_msg_fn=None):
 
     elif isinstance(value, torch.Tensor):
         # this also applies to torch.Tensor's subclasses like torch.nn.parameter.Parameter
-        return function(value)
+        touched_output = function(value)
+
+        # restore zero param attributes if those get stripped by `backward_function`
+        if not is_zero_param(touched_output) and is_zero_param(value):
+            touched_output.ds_param_alias = value
+
+        return touched_output
     else:
         if not is_builtin_type(value):
             global warned
