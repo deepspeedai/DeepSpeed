@@ -147,7 +147,7 @@ class HPU_Accelerator(DeepSpeedAccelerator):
     def supported_dtypes(self):
         supported_dtypes = [torch.float, torch.bfloat16]
         if self.is_fp16_supported():
-            supported_dtypes.append(torch.bfloat16)
+            supported_dtypes.append(torch.half)
         return supported_dtypes
 
     # Misc
