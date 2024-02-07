@@ -198,7 +198,7 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
 
         # backup fused_adam optimizer init
         if self.offload_optimizer and self.partial_offload != 1.0:
-            backup_gpu_tensor = torch.randn(1, device='cuda').to(self.dtype)
+            backup_gpu_tensor = torch.randn(1, device=get_accelerator().device_name()).to(self.dtype)
             backup_gpu_param = torch.nn.Parameter(backup_gpu_tensor)
             assert type(init_optimizer) == DeepSpeedCPUAdam, 'Hybrid Optimizer Only Supports DeepSpeedCPUAdam'
             self.backup_optimizer = FusedAdam([backup_gpu_param],
