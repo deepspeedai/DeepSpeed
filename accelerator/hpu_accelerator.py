@@ -30,6 +30,15 @@ class HPU_Accelerator(DeepSpeedAccelerator):
     def is_synchronized_device(self):
         return False
 
+    def use_host_timers(self):
+        return False
+
+    def resolves_data_dependency(self):
+        return True
+
+    def handles_memory_backpressure(self):
+        return True
+
     def device_name(self, device_index=None):
         if device_index is None:
             return 'hpu'

@@ -17,6 +17,18 @@ class DeepSpeedAccelerator(ABC):
     def is_synchronized_device(self):
         ...
 
+    @abc.abstractmethod
+    def use_host_timers(self):
+        ...
+
+    @abc.abstractmethod
+    def resolves_data_dependency(self):
+        ...
+
+    @abc.abstractmethod
+    def handles_memory_backpressure(self):
+        ...
+
     # Device APIs
     @abc.abstractmethod
     def device_name(self, device_index):

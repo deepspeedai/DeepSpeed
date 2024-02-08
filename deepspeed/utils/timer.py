@@ -50,7 +50,7 @@ class SynchronizedWallClockTimer:
             self.name_ = name
             self.started_ = False
             self.event_timers = []
-            self.use_host_timer = get_accelerator().is_synchronized_device()
+            self.use_host_timer = get_accelerator().use_host_timers()
             self.start_event = None
             self.elapsed_records = None
             self.start_time = 0.0

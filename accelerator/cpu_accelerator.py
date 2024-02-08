@@ -21,6 +21,15 @@ class CPU_Accelerator(DeepSpeedAccelerator):
     def is_synchronized_device(self):
         return True
 
+    def use_host_timers(self):
+        return self.is_synchronized_device()
+
+    def resolves_data_dependency(self):
+        return self.is_synchronized_device()
+
+    def handles_memory_backpressure(self):
+        return self.is_synchronized_device()
+
     # Device APIs
     def device_name(self, device_index=None):
         return 'cpu'
