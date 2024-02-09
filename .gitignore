@@ -53,3 +53,10 @@ docs/code-docs/build
 ## Testing data
 # Saved checkpoints for testing
 tests/unit/saved_checkpoint/
+
+# HIP files created during AMD compilation
+*_hip.cpp
+*_hip.h
+*.hip
+*.cuh
+*hip_layers.h
