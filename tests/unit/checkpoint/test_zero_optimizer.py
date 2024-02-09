@@ -246,7 +246,8 @@ class TestZeROElasticCheckpoint(DistributedTest):
             model.backward(loss)
             model.step()
         if load_optim:
-            torch.save(model.optimizer.optimizer.state_dict(), os.path.join(tmpdir, 'opt-state-dict'))
+            opt_state_dict_file = f'opt-state-dict_rank{dist.get_rank()}'
+            torch.save(model.optimizer.optimizer.state_dict(), os.path.join(tmpdir, opt_state_dict_file))
         model.save_checkpoint(tmpdir)
 
         ds_config["zero_optimization"]["elastic_checkpoint"] = elastic_load
@@ -256,10 +257,9 @@ class TestZeROElasticCheckpoint(DistributedTest):
         model.load_checkpoint(tmpdir, load_optimizer_states=load_optim)
 
         if load_optim:
-            saved_sd = torch.load(os.path.join(tmpdir, 'opt-state-dict'))
+            saved_sd = torch.load(os.path.join(tmpdir, opt_state_dict_file))
             curr_sd = model.optimizer.optimizer.state_dict()
-            for curr_param_group, saved_param_group in zip(curr_sd['param_groups'], saved_sd['param_groups']):
-                compare_state_dicts(curr_param_group, saved_param_group, expected_mismatch_keys)
+            compare_opt_state_dicts(curr_sd, saved_sd, expected_mismatch_keys)
 
         data_loader = random_dataloader(model=model, total_samples=8, hidden_dim=hidden_dim, device=model.device)
         for n, batch in enumerate(data_loader):
