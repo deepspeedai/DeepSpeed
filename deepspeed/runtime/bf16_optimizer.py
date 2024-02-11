@@ -18,7 +18,7 @@ from deepspeed.runtime.utils import (get_global_norm_of_tensors, clip_tensors_by
                                      align_dense_tensors, all_gather_dp_groups, bwc_tensor_model_parallel_rank,
                                      is_model_parallel_parameter, see_memory_usage, graph_process)
 
-from deepspeed.utils import link_hp_params, fragment_address
+from deepspeed.utils import link_hp_params, lazy_init_hp_params_optimizer_state, fragment_address
 from deepspeed.checkpoint import enable_universal_checkpoint
 from deepspeed.checkpoint.constants import (DS_VERSION, PARTITION_COUNT, BASE_OPTIMIZER_STATE,
                                             SINGLE_PARTITION_OF_FP32_GROUPS, CLIP_GRAD, GROUP_PADDINGS,
@@ -165,6 +165,7 @@ class BF16_Optimizer(ZeROOptimizer):
 
         # Need optimizer states initialized before linking lp to optimizer state
         self._link_all_hp_params()
+        self._hp_optimizer_states_linked = False
         self._enable_universal_checkpoint()
         self._param_slice_mappings = self._create_param_mapping()
 
@@ -199,8 +200,14 @@ class BF16_Optimizer(ZeROOptimizer):
                            param_group_index=i,
                            partition_start=partition_id * partition_size,
                            partition_size=partition_size,
-                           partition_optimizer_state=self.optimizer.state[flat_hp_partition],
                            dp_group=self.real_dp_process_group[i])
+
+    def _lazy_init_hp_params_optimizer_state(self):
+        if not self._hp_optimizer_states_linked:
+            for i, _ in enumerate(self.optimizer.param_groups):
+                lazy_init_hp_params_optimizer_state(self.bf16_groups[i], self.fp32_groups_flat_partition[i],
+                                                    self.optimizer.state)
+            self._hp_optimizer_states_linked = True
 
     def initialize_optimizer_states(self):
         """Take an optimizer step with zero-valued gradients to allocate internal
@@ -214,8 +221,6 @@ class BF16_Optimizer(ZeROOptimizer):
             # In case of grad acc dtype different than FP32, need to cast to high precision.
             param_partition.grad = grad_partition.to(
                 param_partition.dtype) if grad_partition.dtype != param_partition.dtype else grad_partition
-
-        self.optimizer.step()
 
         if self.grad_acc_dtype is not torch.float32:
             for param_partition in self.fp32_groups_flat_partition:
@@ -262,6 +267,9 @@ class BF16_Optimizer(ZeROOptimizer):
                                         use_graph=self.graph_harvesting)
 
         self.optimizer.step()
+
+        # We need to link optimizer state after the first step() call
+        self._lazy_init_hp_params_optimizer_state()
 
         self.update_lp_params()
 

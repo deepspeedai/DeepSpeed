@@ -21,11 +21,11 @@ class tensor_fragment:
     lp_fragment_address: fragment_address
     hp_fragment: torch.Tensor
     hp_fragment_address: fragment_address
-    optim_fragment: Dict
     gradient_dict: Dict
     offload_gradient_dict: Dict
     use_offload: bool
     param_group_index: int
+    optim_fragment: Dict = None
 
     def update_hp(self):
         self.hp_fragment.data.copy_(self.lp_fragment.data)
@@ -38,6 +38,13 @@ class tensor_fragment:
             return self.optim_fragment[key]
         else:
             raise ValueError(f'{key} not found in optimizer state fragment')
+
+    def set_optim_state_fragment(self, flat_hp_partition, optim_fragment):
+        self.optim_fragment = {
+            key: value.narrow(0, self.hp_fragment_address.start, self.hp_fragment_address.numel)
+            for key, value in optim_fragment.items()
+            if torch.is_tensor(value) and value.shape == flat_hp_partition.shape
+        }
 
     def get_hp_fragment_address(self):
         return self.hp_fragment_address
@@ -255,7 +262,7 @@ def safe_set_local_fp32_param(param, value):
 
 
 def get_hp_fragment_mapping(lp_param, lp_start, flat_hp_partition, gradient_dict, offload_gradient_dict, use_offload,
-                            param_group_index, partition_start, partition_size, optimizer_state_dict):
+                            param_group_index, partition_start, partition_size):
     lp_end = lp_param.numel() + lp_start
     hp_start = partition_start
     hp_end = partition_start + partition_size
@@ -268,11 +275,6 @@ def get_hp_fragment_mapping(lp_param, lp_start, flat_hp_partition, gradient_dict
     fragment_numel = fragment_end - fragment_start
     hp_frag_address = fragment_address(start=fragment_start - hp_start, numel=fragment_numel)
     hp_fragment_tensor = flat_hp_partition.narrow(0, hp_frag_address.start, hp_frag_address.numel)
-    optim_fragment = {
-        key: value.narrow(0, hp_frag_address.start, hp_frag_address.numel)
-        for key, value in optimizer_state_dict.items()
-        if torch.is_tensor(value) and value.shape == flat_hp_partition.shape
-    }
 
     lp_frag_address = fragment_address(start=fragment_start - lp_start, numel=fragment_numel)
     lp_fragment_tensor = lp_param.flatten().narrow(0, lp_frag_address.start, lp_frag_address.numel)
@@ -281,7 +283,6 @@ def get_hp_fragment_mapping(lp_param, lp_start, flat_hp_partition, gradient_dict
                            lp_fragment_address=lp_frag_address,
                            hp_fragment=hp_fragment_tensor,
                            hp_fragment_address=hp_frag_address,
-                           optim_fragment=optim_fragment,
                            gradient_dict=gradient_dict,
                            offload_gradient_dict=offload_gradient_dict,
                            use_offload=use_offload,
