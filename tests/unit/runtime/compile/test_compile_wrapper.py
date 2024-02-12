@@ -8,8 +8,12 @@ import torch
 
 import deepspeed
 from deepspeed.accelerator import get_accelerator
+from deepspeed.runtime.utils import required_torch_version
 
 from unit.common import DistributedTest
+
+pytestmark = pytest.mark.skipif(not required_torch_version(min_version=2.1),
+                                reason="Compile tests requires Pytorch version 2.1 or above")
 
 
 @pytest.fixture
