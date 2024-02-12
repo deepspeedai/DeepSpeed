@@ -136,15 +136,12 @@ class DataAnalyzer(object):
             f"on data subset {start_idx} to {end_idx}")
         thread_dataset = Subset(self.dataset, list(range(start_idx, end_idx)))
         sampler = BatchSampler(SequentialSampler(thread_dataset), batch_size=self.batch_size, drop_last=False)
-        if self.collate_fn is None:
-            iterator = iter(DataLoader(thread_dataset, batch_sampler=sampler, num_workers=0, pin_memory=False))
-        else:
-            iterator = iter(
-                DataLoader(thread_dataset,
-                           batch_sampler=sampler,
-                           num_workers=0,
-                           collate_fn=self.collate_fn,
-                           pin_memory=False))
+        iterator = iter(
+            DataLoader(thread_dataset,
+                       batch_sampler=sampler,
+                       num_workers=0,
+                       collate_fn=self.collate_fn,
+                       pin_memory=False))
         if self.custom_map_init is None:
             metric_results = self.init_metric_results(thread_id, self.metric_names, self.metric_types,
                                                       self.metric_dtypes, self.save_path, self.worker_id)
