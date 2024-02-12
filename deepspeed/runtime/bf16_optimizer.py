@@ -39,7 +39,8 @@ class BF16_Optimizer(ZeROOptimizer):
                  dp_process_group=None,
                  timers=None,
                  grad_acc_dtype=None,
-                 graph_harvesting=False):
+                 graph_harvesting=False,
+                 immediate_grad_update=False):
         super().__init__()
         see_memory_usage('begin bf16_optimizer', force=True)
         self.timers = timers
@@ -50,6 +51,7 @@ class BF16_Optimizer(ZeROOptimizer):
         assert grad_acc_dtype in [torch.float32, torch.bfloat16
                                   ], f"BF16Optimizer: Unsupported gradient accumulation data type: {grad_acc_dtype}"
         self.grad_acc_dtype = grad_acc_dtype
+        self.immediate_grad_update = immediate_grad_update
 
         self.clip_grad = clip_grad
         self.norm_type = norm_type
@@ -162,6 +164,9 @@ class BF16_Optimizer(ZeROOptimizer):
         see_memory_usage('before initialize_optimizer', force=True)
         self.initialize_optimizer_states()
         see_memory_usage('end initialize_optimizer', force=True)
+
+        if self.immediate_grad_update:
+            self.create_grad_acc_hooks()
 
         # Need optimizer states initialized before linking lp to optimizer state
         self._link_all_hp_params()
@@ -291,27 +296,37 @@ class BF16_Optimizer(ZeROOptimizer):
             self.update_hp_grads(clear_lp_grads=clear_lp_grads)
 
     @torch.no_grad()
-    def update_hp_grads(self, clear_lp_grads=False):
+    def _update_hp_grad(self, lp, group_idx, param_idx, clear_lp_grads):
+        if lp.grad is None:
+            return
 
-        def _update_hp_grads_func(clear_lp_grads=False):
-            for i, group in enumerate(self.bf16_groups):
-                for j, lp in enumerate(group):
-                    if lp.grad is None:
-                        continue
-                    hp_grad = self.fp32_groups_gradients[i][j]
-                    assert hp_grad is not None, \
-                        f'high precision param has no gradient, lp param_id = {id(lp)} group_info = [{i}][{j}]'
-                    hp_grad.data.add_(lp.grad.data.to(hp_grad.dtype).view(hp_grad.shape))
-                    lp._hp_grad = hp_grad
-                    self.fp32_groups_has_gradients[i][j] = True
-                    # clear gradients
-                    if clear_lp_grads:
-                        lp.grad._zero()
+        hp_grad = self.fp32_groups_gradients[group_idx][param_idx]
+        assert hp_grad is not None, \
+            f'high precision param has no gradient, lp param_id = {id(lp)} group_info = [{group_idx}][{param_idx}]'
+
+        hp_grad.data.add_(lp.grad.data.to(hp_grad.dtype).view(hp_grad.shape))
+        lp._hp_grad = hp_grad
+        self.fp32_groups_has_gradients[group_idx][param_idx] = True
+
+        # clear gradients
+        if clear_lp_grads:
+            lp.grad._zero()
+
+    @torch.no_grad()
+    def _update_hp_grads_func(self, clear_lp_grads=False):
+        for i, group in enumerate(self.bf16_groups):
+            for j, lp in enumerate(group):
+                self._update_hp_grad(lp, i, j, clear_lp_grads)
+
+    @torch.no_grad()
+    def update_hp_grads(self, clear_lp_grads=False):
+        if self.immediate_grad_update:
+            return
 
         if self.graph_harvesting:
-            graph_process(False, _update_hp_grads_func, clear_lp_grads)
+            graph_process(False, self._update_hp_grads_func, clear_lp_grads)
         else:
-            _update_hp_grads_func(clear_lp_grads)
+            self._update_hp_grads_func(clear_lp_grads)
         #cpu op
         for i, group in enumerate(self.bf16_groups):
             for j, lp in enumerate(group):
@@ -448,6 +463,28 @@ class BF16_Optimizer(ZeROOptimizer):
                     #print(f"Loading {self.param_names[lp]} {tp_rank=} {tp_world_size=}")
                     lp.load_hp_checkpoint_state(os.path.join(checkpoint_dir, self.param_names[lp]), tp_rank,
                                                 tp_world_size)
+
+    def accumulate_hp_grads_and_remove_lp(self, lp_param, group_idx, param_idx):
+        assert self.immediate_grad_update
+        self._update_hp_grad(lp_param, group_idx, param_idx, clear_lp_grads=False)
+
+    def create_grad_acc_hooks(self):
+        self.grad_accs = []
+        for i, param_group in enumerate(self.bf16_groups):
+            for j, param in enumerate(param_group):
+                if param.requires_grad:
+
+                    def wrapper(param, i, j):
+                        param_tmp = param.expand_as(param)
+                        grad_acc = param_tmp.grad_fn.next_functions[0][0]
+
+                        def accumulate_hp_grads_and_remove_lp(*notneeded):
+                            self.accumulate_hp_grads_and_remove_lp(param, i, j)
+
+                        grad_acc.register_hook(accumulate_hp_grads_and_remove_lp)
+                        self.grad_accs.append(grad_acc)
+
+                    wrapper(param, i, j)
 
 
 def _get_padded_tensor(src_tensor, size):
