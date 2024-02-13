@@ -92,7 +92,7 @@ class DataAnalyzer(object):
                 metric_dtypes[m_idx], metric_functions[m_idx], metric_results[m_idx]
             metric_values = metric_function(data)
             assert metric_values.numpy().dtype == metric_dtype, \
-                f"dtype {type(m_value)} returned by metric_function {metric_function} is not consistent with the metric_dtype {metric_dtype}"
+                f"dtype {metric_values.numpy().dtype} returned by metric_function {metric_function} is not consistent with the metric_dtype {metric_dtype}"
             if metric_type == 'single_value_per_sample':
                 for row in range(metric_values.size()[0]):
                     sample_idx = batch_start_idx + row  # sample idx following dataset iteration order
@@ -163,7 +163,8 @@ class DataAnalyzer(object):
                 data = next(iterator)
                 batch_start_idx = start_idx + processed_sample
                 if self.custom_map_update is None:
-                    self.update_metric_results(data, self.metric_types, self.metric_dtypes, self.metric_functions, metric_results)
+                    self.update_metric_results(data, self.metric_types, self.metric_dtypes, self.metric_functions,
+                                               metric_results)
                 else:
                     self.custom_map_update(data, self.metric_types, self.metric_dtypes, self.metric_functions,
                                            metric_results, batch_start_idx)
