@@ -126,6 +126,10 @@ BFLOAT16_OLD = "bfloat16"  # keeping for backwards compatibility
 BFLOAT16_ENABLED = "enabled"
 BFLOAT16_ENABLED_DEFAULT = False
 
+# BFLOAT16 optimizer immediate gradient update
+BFLOAT16_IMMEDIATE_GRAD_UPDATE = "immediate_grad_update"
+BFLOAT16_IMMEDIATE_GRAD_UPDATE_DEFAULT = False
+
 #########################################
 # FP16 support
 #########################################

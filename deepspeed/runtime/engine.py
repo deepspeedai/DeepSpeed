@@ -1065,17 +1065,16 @@ class DeepSpeedEngine(Module):
                 return False
             return True
 
-        with torch.no_grad():
-            for p in self.module.parameters():
-                # Broadcast the model for different parameters
-                if is_moe_param(p):
-                    if torch.is_tensor(p) and is_replicated(p):
-                        dist.broadcast(p,
-                                       groups._get_expert_broadcast_src_rank(p.group_name),
-                                       group=self.expert_data_parallel_group[p.group_name])
-                else:
-                    if torch.is_tensor(p) and is_replicated(p):
-                        dist.broadcast(p, groups._get_broadcast_src_rank(), group=self.seq_data_parallel_group)
+        for p in self.module.parameters():
+            # Broadcast the model for different parameters
+            if is_moe_param(p):
+                if torch.is_tensor(p) and is_replicated(p):
+                    dist.broadcast(p.data,
+                                   groups._get_expert_broadcast_src_rank(p.group_name),
+                                   group=self.expert_data_parallel_group[p.group_name])
+            else:
+                if torch.is_tensor(p) and is_replicated(p):
+                    dist.broadcast(p.data, groups._get_broadcast_src_rank(), group=self.seq_data_parallel_group)
 
     @staticmethod
     def __check_params(model: Module, dtype: torch.dtype) -> None:
@@ -1478,7 +1477,8 @@ class DeepSpeedEngine(Module):
                                    dp_process_group=self.seq_data_parallel_group,
                                    timers=timers,
                                    grad_acc_dtype=self.get_data_types()[1],
-                                   graph_harvesting=self.graph_harvesting())
+                                   graph_harvesting=self.graph_harvesting(),
+                                   immediate_grad_update=self._config.bfloat16_immediate_grad_update)
 
         return optimizer
 
