@@ -446,15 +446,19 @@ class DistributedDataAnalyzer(object):
         dataloader = DataLoader(dataset=worker_dataset, batch_sampler=sampler,
                                 num_workers=0, collate_fn=collate_fn, pin_memory=False)
 
-        # iterate dataloader and store metric results
+        # set initial results list
         sample_idx = start_idx
-        metric_results = [ []*len(metric_names) ]
+        if metric_type not in ['single_value_per_sample', 'accumulate_value_over_samples']:
+            raise ValueError(f"metric_type {metric_type} not implemented.")
+        init_result = [] if metric_type == 'single_value_per_sample' else None
+        metric_results = [init_result] * len(metric_names)
+
+        # iterate dataloader and store metric results
         for data in dataloader:
             for m_idx in range(len(metric_types)):
                 metric_type, metric_dtype, metric_function, metric_result = \
                     metric_types[m_idx], metric_dtypes[m_idx], metric_functions[m_idx], metric_results[m_idx]
                 metric_values = metric_function(data)
-                assert metric_type == 'single_value_per_sample', f"{metric_type} not implemented."
                 assert torch.is_tensor(metric_values) or isinstance(metric_values, np.ndarray), \
                     "metric_function must return a tensor or array"
                 assert metric_values.dtype == metric_dtype, \
@@ -462,11 +466,17 @@ class DistributedDataAnalyzer(object):
                 if isinstance(metric_values, np.ndarray):
                     metric_values = torch.from_numpy(metric_values)
 
-                for row in range(metric_values.size()[0]):
-                    val = metric_values[row].item()
-                    metric_result.append((sample_idx, val))
-                    sample_idx+=1
-                    
+                if metric_type == 'single_value_per_sample':
+                    for row in range(metric_values.size()[0]):
+                        value = metric_values[row].item()
+                        metric_result.append((sample_idx, value))
+                        sample_idx+=1
+                elif metric_type == 'accumulate_value_over_samples':
+                    if metric_result is None:
+                        metric_result = metric_values
+                    else:
+                        metric_result.add_(metric_values)
+
         # compute dtype for sample ids
         total_num_samples = len(dataset)
         sample_idx_dtype = find_fit_int_dtype(0, total_num_samples - 1)
@@ -478,33 +488,42 @@ class DistributedDataAnalyzer(object):
 
             metric_result = metric_results[m_idx]
             metric_name, metric_type = metric_names[m_idx], metric_types[m_idx]
-            assert metric_type == 'single_value_per_sample', f"{metric_type} not implemented."
             metric_save_path = f"{save_path}/{metric_name}/"
 
-            # get unique values across all ranks and compute the values dtype based on min/max
-            ids, values = metric_result[:,0], metric_result[:,1]
-            value_min, value_max = DistributedDataAnalyzer.dist_min_max(values, comm_group) 
-            metric_value_dtype = find_fit_int_dtype(value_min, value_max)
+            if metric_type == 'single_value_per_sample':
 
-            # sample_to_metric iterated metric_results and stored all metric values in same order
-            sample_to_metric_fname = f"{metric_save_path}/{metric_name}_sample_to_metric"
-            DistributedDataAnalyzer.dist_sequential_write([ids], sample_to_metric_fname, metric_value_dtype)
+                # get unique values across all ranks and compute the values dtype based on min/max
+                ids, values = metric_result[:,0], metric_result[:,1]
+                value_min, value_max = DistributedDataAnalyzer.dist_min_max(values, comm_group)
+                metric_value_dtype = find_fit_int_dtype(value_min, value_max)
 
-            # index_to_metric outputs a list of unique values (read from an value-ordered set)
-            # index_to_sample outputs the list of all sample ids for each unique value
-            index_to_metric_fname = f"{metric_save_path}/{metric_name}_index_to_metric"
-            index_to_sample_fname = f"{metric_save_path}/{metric_name}_index_to_sample"
-            metric_result = metric_result[:,[1,0]] # swap columns
-            metric_result = dist_sample_sort(metric_result, comm_group)
-            unique_vals, sample_counts = torch.unique(metric_result[:,0], return_counts=True)
+                # sample_to_metric iterated metric_results and stored all metric values in same order
+                sample_to_metric_fname = f"{metric_save_path}/{metric_name}_sample_to_metric"
+                DistributedDataAnalyzer.dist_sequential_write([ids], sample_to_metric_fname, metric_value_dtype)
 
-            values_buffer, samples_buffer, samples_it = [], [], 0
-            for unique_v, count in zip(unique_vals, sample_counts):
-                values_buffer.append(unique_v.unsqueeze(0), dtype=torch.long)
-                samples_buffer.append(ids[samples_it:samples_it+count], dtype=type.long)
-                samples_it += count
-            DistributedDataAnalyzer.dist_sequential_write(values_buffer, index_to_metric_fname, metric_value_dtype)
-            DistributedDataAnalyzer.dist_sequential_write(samples_buffer, index_to_sample_fname, sample_idx_dtype)
+                # index_to_metric outputs a list of unique values (read from an value-ordered set)
+                # index_to_sample outputs the list of all sample ids for each unique value
+                index_to_metric_fname = f"{metric_save_path}/{metric_name}_index_to_metric"
+                index_to_sample_fname = f"{metric_save_path}/{metric_name}_index_to_sample"
+                metric_result = metric_result[:,[1,0]] # swap columns
+                metric_result = DistributedDataAnalyzer.dist_sample_sort(metric_result, comm_group)
+                unique_vals, sample_counts = torch.unique(metric_result[:,0], return_counts=True)
+
+                values_buffer, samples_buffer, samples_it = [], [], 0
+                for unique_v, count in zip(unique_vals, sample_counts):
+                    values_buffer.append(unique_v.unsqueeze(0), dtype=torch.long)
+                    samples_buffer.append(ids[samples_it:samples_it+count], dtype=type.long)
+                    samples_it += count
+                DistributedDataAnalyzer.dist_sequential_write(values_buffer, index_to_metric_fname, metric_value_dtype)
+                DistributedDataAnalyzer.dist_sequential_write(samples_buffer, index_to_sample_fname, sample_idx_dtype)
+            elif metric_type == 'accumulate_value_over_samples':
+                metric_value_fname = f"{metric_save_path}/{metric_name}_metric_value"
+                # gather the sum of all values across all ranks and write to file
+                dist.all_reduce(metric_result, op=dist.reduce_op.SUM, group=comm_group)
+                if worker_id == 0:
+                    builder = create_mmap_dataset_builder(metric_value_fname, metric_value_dtype)
+                    builder.add_item(metric_result)
+                    close_mmap_dataset_builder(builder, metric_value_fname)
 
 
     @staticmethod
@@ -513,7 +532,7 @@ class DistributedDataAnalyzer(object):
         num_workers, worker_id = comm_group.size(), comm_group.rank()
         builder = create_mmap_dataset_builder(fname, dtype)
         assert isinstance(tensor_list, list), "tensor_list must be a list"
-        for rank in range(num_workers): 
+        for rank in range(num_workers):
             if rank == worker_id:
                 for tensor in tensor_list:
                     assert torch.is_tensor(tensor) and tensor.size()==1, "must be 1D tensor"
@@ -528,7 +547,7 @@ class DistributedDataAnalyzer(object):
         assert len(tensor.size()) == 1, "tensor must be single-dimensional"
         value_min, value_max = tensor.min(), tensor.max()
         dist.all_reduce(value_min, op=dist.reduce_op.MIN, group=comm_group)
-        dist.all_reduce(value_max, op=dist.reduce_op.MAX, group=comm_group) 
+        dist.all_reduce(value_max, op=dist.reduce_op.MAX, group=comm_group)
         return value_min.item(), value_max.item()
 
 
@@ -556,7 +575,7 @@ class DistributedDataAnalyzer(object):
         all_samples = all_samples.sort()[0]
         idx = torch.round(torch.linspace(0, len(all_samples) - 1, world_size + 1)).to(int)
         ranges = all_samples[idx] # range of each rank r as ranges[r] <= x < ranges[r+1]
-        ranges[-1] = +torch.inf #upper limit of last rank. 
+        ranges[-1] = +torch.inf #upper limit of last rank.
 
         # 4 - collect elements to send to each rank, based on the rank ranges
         send = []
@@ -573,8 +592,9 @@ class DistributedDataAnalyzer(object):
         send = torch.cat(send, dim=0).flatten().to(device)
         recv = torch.zeros( sum(recv_count), dtype=send.dtype).to(device)
         dist.all_to_all_single(recv, send, recv_count, send_count, group=comm_group)
-        
+
         # 7. the received tensor is the 1D disjoint subset of the distributed tensor
         return recv.view(-1, dims)
+
 
 
