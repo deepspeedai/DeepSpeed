@@ -168,7 +168,7 @@ class DistributedExec(ABC):
             # Shortcut to exit pytest in the case of a hanged test. This
             # usually means an environment error and the rest of tests will
             # hang (causing super long unit test runtimes)
-            pytest.exit("Test hanged, exiting", returncode=0)
+            pytest.exit("Test hanged, exiting", returncode=1)
 
         # Tear down distributed environment and close process pools
         self._close_pool(pool, num_procs)
@@ -204,7 +204,7 @@ class DistributedExec(ABC):
         if not any_done:
             for p in processes:
                 p.terminate()
-            pytest.exit("Test hanged, exiting", returncode=0)
+            pytest.exit("Test hanged, exiting", returncode=1)
 
         # Wait for all other processes to complete
         for p in processes:
