@@ -96,6 +96,19 @@ def compare_state_dicts(state0, state1, expected_mismatch_keys=[]):
             assert s0 == s1, f'failures with keys = {k0}, {k1}, values = {type(s0[0])} and {type(s1[0])}'
 
 
+def compare_opt_state_dicts(state0, state1, expected_mismatch_keys=[]):
+    for param_group0, saved_param_group1 in zip(state0['param_groups'], state1['param_groups']):
+        compare_state_dicts(param_group0, saved_param_group1, expected_mismatch_keys)
+
+    assert "state" in state0
+    assert "state" in state1
+    assert len([state0["state"].keys()]) == len([state1["state"].keys()])
+
+    for (k0, s0), (k1, s1) in zip(state0["state"].items(), state1["state"].items()):
+        assert k0 == k1, f'failure due to key mismatch {k0} != {k1}'
+        compare_state_dicts(s0, s1, expected_mismatch_keys)
+
+
 def compare_optimizer_states(saved_model, loaded_model, hidden_dim, fp16=True):
     saved_optimizer = saved_model.optimizer.optimizer if fp16 else saved_model.optimizer
     loaded_optimizer = loaded_model.optimizer.optimizer if fp16 else loaded_model.optimizer

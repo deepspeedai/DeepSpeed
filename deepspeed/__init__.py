@@ -12,10 +12,14 @@ from torch.optim import Optimizer
 from torch.optim.lr_scheduler import _LRScheduler
 from packaging import version as pkg_version
 
-try:
-    import triton  # noqa: F401 # type: ignore
-    HAS_TRITON = True
-except ImportError:
+# Skip Triton import for AMD due to pytorch-triton-rocm module breaking device API in DeepSpeed
+if not (hasattr(torch.version, 'hip') and torch.version.hip is not None):
+    try:
+        import triton  # noqa: F401 # type: ignore
+        HAS_TRITON = True
+    except ImportError:
+        HAS_TRITON = False
+else:
     HAS_TRITON = False
 
 from . import ops

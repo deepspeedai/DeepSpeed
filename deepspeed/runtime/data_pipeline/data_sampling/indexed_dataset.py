@@ -609,6 +609,8 @@ class MMapIndexedDatasetBuilder(object):
         # Concatenate data
         with open(data_file_path(another_file), 'rb') as f:
             shutil.copyfileobj(f, self._data_file)
+        self._data_file.flush()
+        assert os.stat(self._data_file.name).st_size != 0, f"Zero-sized file: {self._data_file.name}"
 
     def finalize(self, index_file):
         self._data_file.close()

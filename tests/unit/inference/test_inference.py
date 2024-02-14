@@ -36,16 +36,16 @@ if rocm_version != (0, 0):
     pytest.skip("skip inference tests on rocm for now", allow_module_level=True)
 
 _bert_models = [
-    "bert-base-cased",
-    "bert-base-uncased",
-    "bert-large-cased",
-    "bert-large-uncased",
-    "bert-base-multilingual-cased",
-    "bert-base-multilingual-uncased",
+    "google-bert/bert-base-cased",
+    "google-bert/bert-base-uncased",
+    "google-bert/bert-large-cased",
+    "google-bert/bert-large-uncased",
+    "google-bert/bert-base-multilingual-cased",
+    "google-bert/bert-base-multilingual-uncased",
     "deepset/minilm-uncased-squad2",
     "cross-encoder/ms-marco-MiniLM-L-12-v2",
     "dslim/bert-base-NER",
-    "bert-large-uncased-whole-word-masking-finetuned-squad",
+    "google-bert/bert-large-uncased-whole-word-masking-finetuned-squad",
     "distilbert/distilbert-base-cased-distilled-squad",
 ]
 _roberta_models = [

@@ -85,12 +85,14 @@ class DataAnalyzer(object):
                 metric_results.append({"metric_value": metric_value, "metric_value_fname": metric_value_fname})
         return metric_results
 
-    def update_metric_results(self, data, metric_types, metric_functions, metric_results):
+    def update_metric_results(self, data, metric_types, metric_dtypes, metric_functions, metric_results):
         for m_idx in range(len(metric_types)):
-            metric_type, metric_function, metric_result = metric_types[m_idx], \
-                metric_functions[m_idx], metric_results[m_idx]
+            metric_type, metric_dtype, metric_function, metric_result = metric_types[m_idx], \
+                metric_dtypes[m_idx], metric_functions[m_idx], metric_results[m_idx]
+            metric_values = metric_function(data)
+            assert metric_values.numpy().dtype == metric_dtype, \
+                f"dtype {metric_values.numpy().dtype} returned by metric_function {metric_function} is not consistent with the metric_dtype {metric_dtype}"
             if metric_type == 'single_value_per_sample':
-                metric_values = metric_function(data)
                 for row in range(metric_values.size()[0]):
                     value = metric_values[row].item()
                     metric_result["sample_to_metric_builder"].add_item(value)
@@ -104,7 +106,6 @@ class DataAnalyzer(object):
                             writer.writerows([metric_result["metric_to_sample_dict"][m_value]])
                         metric_result["metric_to_sample_dict"][m_value] = []
             elif metric_type == 'accumulate_value_over_samples':
-                metric_values = metric_function(data)
                 if metric_result["metric_value"] is None:
                     metric_result["metric_value"] = metric_values
                 else:
@@ -138,15 +139,12 @@ class DataAnalyzer(object):
             f"on data subset {start_idx} to {end_idx}")
         thread_dataset = Subset(self.dataset, list(range(start_idx, end_idx)))
         sampler = BatchSampler(SequentialSampler(thread_dataset), batch_size=self.batch_size, drop_last=False)
-        if self.collate_fn is None:
-            iterator = iter(DataLoader(thread_dataset, batch_sampler=sampler, num_workers=0, pin_memory=False))
-        else:
-            iterator = iter(
-                DataLoader(thread_dataset,
-                           batch_sampler=sampler,
-                           num_workers=0,
-                           collate_fn=self.collate_fn,
-                           pin_memory=False))
+        iterator = iter(
+            DataLoader(thread_dataset,
+                       batch_sampler=sampler,
+                       num_workers=0,
+                       collate_fn=self.collate_fn,
+                       pin_memory=False))
         if self.custom_map_init is None:
             metric_results = self.init_metric_results(thread_id, self.metric_names, self.metric_types,
                                                       self.metric_dtypes, self.save_path, self.worker_id)
@@ -160,7 +158,8 @@ class DataAnalyzer(object):
             try:
                 data = next(iterator)
                 if self.custom_map_update is None:
-                    self.update_metric_results(data, self.metric_types, self.metric_functions, metric_results)
+                    self.update_metric_results(data, self.metric_types, self.metric_dtypes, self.metric_functions,
+                                               metric_results)
                 else:
                     self.custom_map_update(data, self.metric_types, self.metric_functions, metric_results)
                 processed_sample += self.batch_size

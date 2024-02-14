@@ -1370,6 +1370,11 @@ class TestZeroAdamOptimizerStepCount(DistributedTest):
     world_size = 1
 
     def test(self, zero_stage):
+        # We verify trhee conditions:
+        # 1. global_steps starts at 0
+        # 2. All subgroups have the same step count
+        # 3. The global step count is the same as the step count of the first subgroup
+
         # force all params to be partitioned by forcing threshold=0
         config_dict = {
             "train_micro_batch_size_per_gpu": 2,
@@ -1399,24 +1404,31 @@ class TestZeroAdamOptimizerStepCount(DistributedTest):
                                                       model_parameters=model.parameters())
         data_loader = random_dataloader(model=model, total_samples=16, hidden_dim=hidden_dim, device=model.device)
 
-        for i, batch in enumerate(data_loader):
+        assert model.global_steps == 0
+
+        for batch in data_loader:
             loss = model(batch[0], batch[1])
             model.backward(loss)
+
+            is_gradient_accumulation_boundary = model.is_gradient_accumulation_boundary()
             model.step()
 
-            step_counts = []
-            if zero_stage == 3:
-                for sub_group_id, _ in enumerate(optimizer.fp16_groups):
-                    fp32_param = optimizer.fp32_partitioned_groups_flat[sub_group_id]
-                    state = optimizer.optimizer.state[fp32_param]
-                    step_counts.append(state["step"])
-                assert all(step == step_counts[0] for step in step_counts)
-            elif zero_stage == 1 or zero_stage == 2:
-                for param_group in optimizer.optimizer.param_groups:
-                    for param in param_group["params"]:
-                        state = optimizer.optimizer.state[param]
+            if is_gradient_accumulation_boundary:
+                step_counts = []
+
+                if zero_stage == 3:
+                    for sub_group_id, _ in enumerate(optimizer.fp16_groups):
+                        fp32_param = optimizer.fp32_partitioned_groups_flat[sub_group_id]
+                        state = optimizer.optimizer.state[fp32_param]
                         step_counts.append(state["step"])
+                elif zero_stage == 1 or zero_stage == 2:
+                    for param_group in optimizer.optimizer.param_groups:
+                        for param in param_group["params"]:
+                            state = optimizer.optimizer.state[param]
+                            step_counts.append(state["step"])
+
                 assert all(step == step_counts[0] for step in step_counts)
+                assert model.global_steps == step_counts[0]
 
 
 @pytest.mark.parametrize("zero_stage", [1, 2, 3])
