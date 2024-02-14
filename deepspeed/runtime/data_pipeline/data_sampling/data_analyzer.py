@@ -94,9 +94,9 @@ class DataAnalyzer(object):
             if metric_type == 'single_value_per_sample':
                 metric_values = metric_function(data)
                 for row in range(metric_values.size()[0]):
-                    value = metric_values[row].item()
-                    metric_result["sample_to_metric_builder"].add_item(value)
-                    metric_result["metric_to_sample_dict"][value].append(data['index'][row][0].item())
+                    metric_result["sample_to_metric_builder"].add_item(metric_values[row].reshape(-1))
+                    metric_result["metric_to_sample_dict"][metric_values[row].item()].append(
+                        data['index'][row][0].item())
                 for m_value in metric_result["metric_to_sample_dict"]:
                     if len(metric_result["metric_to_sample_dict"][m_value]) > 100:
                         metric_fname = metric_result["metric_to_sample_fname"]
