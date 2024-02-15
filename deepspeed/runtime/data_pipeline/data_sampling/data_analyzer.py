@@ -424,7 +424,43 @@ class DataAnalyzer(object):
 
 
 
-   def run_map_reduce(self):
+
+class DistributedDataAnalyzer(object):
+
+    def __init__(self,
+            dataset,
+            num_workers=1,
+            worker_id=0,
+            batch_size=1,
+            metric_names=[],
+            metric_functions=[],
+            metric_types=[],
+            save_path="./",
+            collate_fn=None,
+            device='cuda',
+            comm_group=None,
+        ) -> None:
+        self.dataset = dataset
+        self.comm_group = comm_group
+        self.batch_size = batch_size
+        self.metric_names = metric_names
+        self.metric_functions = metric_functions
+        self.metric_types = metric_types
+        self.save_path = save_path
+        self.collate_fn = collate_fn
+        self.device = device
+
+        # comm_group and num_workers/worker_id are mutually exclusive
+        self.comm_group = comm_group
+        if comm_group is not None:
+            self.num_workers = comm_group.size()
+            self.worker_id = comm_group.rank()
+        else:
+            self.num_workers = num_workers
+            self.worker_id = worker_id
+
+
+    def run_map_reduce(self):
 
         # setup individual dataloaders
         worker_splits, _ = split_dataset(self.dataset, self.num_workers, self.worker_id, num_threads=1)
@@ -506,7 +542,7 @@ class DataAnalyzer(object):
                     samples_buffer += ids[samples_it:samples_it+count.item()].tolist()
                     samples_it += count
                 # values_buffer = torch.tensor(values_buffer)
-                samples_buffer = torch.tensor(samples_buffer)
+                samples_buffer = torch.tensor(samples_buffer, device=self.device)
                 self.file_write_ordered(samples_buffer, index_to_sample_fname, torch.long)
             elif metric_type == 'accumulate_value_over_samples':
                 metric_value_fname = f"{metric_save_path}/{metric_name}_metric_value"
@@ -518,7 +554,7 @@ class DataAnalyzer(object):
                     close_mmap_dataset_builder(builder, metric_value_fname)
 
 
-    def file_write_ordered(self, tensor, fname, numpy_dtype, sequential_comm=False):
+    def file_write_ordered(self, tensor, fname, numpy_dtype, sequential_comm=True):
         """ save a distributed tensor to a single file, iteratively, ordered by rank """
         assert tensor.dim() == 1, "tensor must be serialized (1D)"
 
@@ -543,9 +579,9 @@ class DataAnalyzer(object):
                 if src == self.worker_id:
                     dist.send(tensor, 0, group=self.comm_group) # send tensor
                 elif self.worker_id == 0:
-                    tensor = torch.zeros(sizes[src].item(), dtype=tensor.dtype, device=tensor.device)
-                    dist.recv(tensor, src=src, group=self.comm_group)
-                    builder.add_item(tensor.cpu()) # writes received tensor
+                    recv = torch.zeros(sizes[src].item(), dtype=tensor.dtype, device=tensor.device)
+                    dist.recv(recv, src=src, group=self.comm_group)
+                    builder.add_item(recv.cpu()) # writes received tensor
 
         else:  # all to all communication of serialized tensor (faster but requires more memory)
             tensors = torch.zeros(sum(sizes).item(), dtype=tensor.dtype, device=tensor.device)
