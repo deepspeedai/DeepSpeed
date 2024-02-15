@@ -419,42 +419,7 @@ class DataAnalyzer(object):
 
 
 
-class DistributedDataAnalyzer(object):
-
-    def __init__(self,
-            dataset,
-            num_workers=1,
-            worker_id=0,
-            batch_size=1,
-            metric_names=[],
-            metric_functions=[],
-            metric_types=[],
-            save_path="./",
-            collate_fn=None,
-            device='cuda',
-            comm_group=None,
-        ) -> None:
-        self.dataset = dataset
-        self.comm_group = comm_group
-        self.batch_size = batch_size
-        self.metric_names = metric_names
-        self.metric_functions = metric_functions
-        self.metric_types = metric_types
-        self.save_path = save_path
-        self.collate_fn = collate_fn
-        self.device = device
-
-        # comm_group and num_workers/worker_id are mutually exclusive
-        self.comm_group = comm_group
-        if comm_group is not None:
-            self.num_workers = comm_group.size()
-            self.worker_id = comm_group.rank()
-        else:
-            self.num_workers = num_workers
-            self.worker_id = worker_id
-
-
-    def run_map_reduce(self):
+   def run_map_reduce(self):
 
         # setup individual dataloaders
         worker_splits, _ = split_dataset(self.dataset, self.num_workers, self.worker_id, num_threads=1)
@@ -532,17 +497,17 @@ class DistributedDataAnalyzer(object):
                 index_to_sample_fname = f"{metric_save_path}/{metric_name}_index_to_sample"
                 samples_buffer, samples_it = [], 0
                 for unique_v, count in zip(unique_vals, sample_counts):
-                    values_buffer.append(unique_v)
-                    samples_buffer += ids[samples_it:samples_it+count]
+                    # values_buffer.append(unique_v.item())
+                    samples_buffer += ids[samples_it:samples_it+count.item()].tolist()
                     samples_it += count
-                values_buffer = torch.cat(values_buffer, dim=0)
-                samples_buffer = torch.cat(samples_buffer, dim=0)
+                # values_buffer = torch.tensor(values_buffer)
+                samples_buffer = torch.tensor(samples_buffer)
                 self.file_write_ordered(samples_buffer, index_to_sample_fname, torch.long)
             elif metric_type == 'accumulate_value_over_samples':
                 metric_value_fname = f"{metric_save_path}/{metric_name}_metric_value"
                 # gather the sum of all values across all ranks and write to file
-                dist.all_reduce(metric_values, op=dist.ReduceOp.SUM, group=comm_group)
-                if worker_id == 0:
+                dist.all_reduce(metric_values, op=dist.ReduceOp.SUM, group=self.comm_group)
+                if self.worker_id == 0:
                     builder = create_mmap_dataset_builder(metric_value_fname, metric_value_dtype)
                     builder.add_item(metric_values)
                     close_mmap_dataset_builder(builder, metric_value_fname)
@@ -554,32 +519,34 @@ class DistributedDataAnalyzer(object):
 
         # gather the sizes of all tensors to be received in rank 0.
         size = torch.tensor(len(tensor), dtype=torch.int64, device=self.device)
-        size_list = [torch.zeros(1, dtype=torch.int64, device=self.device)] * self.num_workers
-        dist.all_gather(size_list, size, group=self.comm_group)
-        assert size_list[self.worker_id]==size, "all_gather did not return the same sizes" #sanity check
+        sizes = torch.zeros(self.num_workers, dtype=torch.int64, device=self.device)
+        dist.all_gather_into_tensor(sizes, size, group=self.comm_group)
+        assert sizes[self.worker_id]==size, "all_gather did not return the same sizes" #sanity check
 
         # rank 0 creates the file
         if self.worker_id == 0:
             os.makedirs(os.path.dirname(fname), exist_ok=True)
             builder = create_mmap_dataset_builder(fname, numpy_dtype)
 
-        if sequential_comm:  # send, receive and write all tensors sequentially
+        if sequential_comm:  # send, receive and write all tensors sequentially (slow, memory safe)
+
             if self.worker_id == 0:
-                builder.add_item(tensor.cpu()) #rank 0 writes its local tensor
-                for src in range(1, self.num_workers):
-                    tensor = torch.zeros(size_list[src].item(), dtype=tensor.dtype, device=tensor.device)
-                    dist.recv(tensor, src=src, group=self.comm_group) # receive tensor
+                builder.add_item(tensor.cpu()) # write rank 0's tensor
+
+            for src in range(1, self.num_workers):
+                dist.barrier()
+                if src == self.worker_id:
+                    dist.send(tensor, 0, group=self.comm_group) # send tensor
+                elif self.worker_id == 0:
+                    tensor = torch.zeros(sizes[src].item(), dtype=tensor.dtype, device=tensor.device)
+                    dist.recv(tensor, src=src, group=self.comm_group)
                     builder.add_item(tensor.cpu()) # writes received tensor
-            else:
-                dist.send(tensor, 0, group=self.comm_group) # send tensor
-        else: # collective gather followed by a single write of all tensors in rank 0
+
+        else:  # all to all communication of serialized tensor (faster but requires more memory)
+            tensors = torch.zeros(sum(sizes).item(), dtype=tensor.dtype, device=tensor.device)
+            dist.all_gather_into_tensor(sizes, size, group=self.comm_group)
             if self.worker_id == 0:
-                tensor_list = [torch.zeros(size_list[src].item(), dtype=tensor.dtype, device=tensor.device) for src in range(self.num_workers)]
-                dist.gather(tensor, tensor_list, dst=0, group=self.comm_group)
-                tensor_list = torch.cat(tensor_list, dim=0)
-                builder.add_item(tensor_list.cpu())
-            else:
-                dist.gather(tensor, None, dst=0, group=self.comm_group)
+                builder.add_item(tensors.cpu())
 
         # rank 0 closes the file
         if self.worker_id == 0:
