@@ -15,8 +15,7 @@ from torch.utils.data import BatchSampler, SequentialSampler, DataLoader, Subset
 
 import deepspeed.comm as dist
 from deepspeed.utils import logger
-import deepspeed.comm as dist
-from .indexed_dataset import MMapIndexedDataset
+from .indexed_dataset import MMapIndexedDataset, valid_dtypes
 from .utils import split_dataset, split_index, create_mmap_dataset_builder, close_mmap_dataset_builder, find_fit_int_dtype
 
 
@@ -89,8 +88,17 @@ class DataAnalyzer(object):
 
     def update_metric_results(self, data, metric_types, metric_functions, metric_results):
         for m_idx in range(len(metric_types)):
-            metric_type, metric_function, metric_result = metric_types[m_idx], \
-                metric_functions[m_idx], metric_results[m_idx]
+            metric_type, metric_dtype, metric_function, metric_result = metric_types[m_idx], \
+                metric_dtypes[m_idx], metric_functions[m_idx], metric_results[m_idx]
+            metric_values = metric_function(data)
+
+            assert torch.is_tensor(metric_values) or isinstance(metric_values, np.ndarray), \
+                    "metric_function must return a tensor or array"
+            assert metric_values.dtype == metric_dtype, \
+                    f"metric_function result dtype {metric_values.dtype} does not match metric_dtype {metric_dtype}"
+            if isinstance(metric_values, np.ndarray):
+                metric_values = torch.from_numpy(metric_values)
+
             if metric_type == 'single_value_per_sample':
                 metric_values = metric_function(data)
                 for row in range(metric_values.size()[0]):
@@ -162,8 +170,8 @@ class DataAnalyzer(object):
                     self.update_metric_results(data, self.metric_types, self.metric_functions, metric_results)
                 else:
                     self.custom_map_update(data, self.metric_types, self.metric_dtypes, self.metric_functions,
-                                           metric_results, batch_start_idx)
-                processed_sample += len(data)
+                                           metric_results)
+                processed_sample += self.batch_size
                 duration = (time.time() - start) / 3600.0
                 remain_duration = duration * total_sample / processed_sample - duration
                 logger.info(
