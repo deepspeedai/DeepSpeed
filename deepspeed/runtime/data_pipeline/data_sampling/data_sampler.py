@@ -119,9 +119,15 @@ class DeepSpeedDataSampler(object):
             if metric in schedule_func_dict:
                 self.curriculum_schedulers[metric].set_custom_get_difficulty(schedule_func_dict[metric])
 
-    def get_start_end_idx(self):
-        start_idx = self.data_parallel_rank * self.micro_batch_size
-        end_idx = start_idx + self.micro_batch_size
+    def get_start_end_idx(self, batch_len=None):
+        """
+        given the length of a minibatch (defaults to micro-batch size * data_parallel_size),
+        return the start and end indices of the current data parallel rank
+        """
+        batch_len = batch_len or self.micro_batch_times_data_parallel_size
+        start_idx_fn = lambda r: round(r * batch_len / self.data_parallel_group.size())
+        start_idx = start_idx_fn(self.data_parallel_rank)
+        end_idx = start_idx_fn(self.data_parallel_rank + 1)
         return start_idx, end_idx
 
     def get_sample_based_on_metric_value(self, metric, value_start, value_end):
@@ -302,7 +308,7 @@ class DeepSpeedDataSampler(object):
             self.batch = self.batch[self.micro_batch_times_data_parallel_size:]
             if len(current_batch) == self.micro_batch_times_data_parallel_size or \
                 (len(current_batch) > 0 and not self.drop_last):
-                start_idx, end_idx = self.get_start_end_idx()
+                start_idx, end_idx = self.get_start_end_idx(len(current_batch))
                 yield current_batch[start_idx:end_idx]
                 self.consumed_samples += len(current_batch)
                 current_batch = []
