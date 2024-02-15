@@ -37,7 +37,8 @@ class DataAnalyzer(object):
                  custom_map_init=None,
                  custom_map_update=None,
                  custom_map_finalize=None,
-                 custom_reduce=None):
+                 custom_reduce=None,
+                 comm_group=None):
         super().__init__()
         self.dataset = dataset
         self.num_workers = num_workers
@@ -56,6 +57,7 @@ class DataAnalyzer(object):
         self.custom_map_update = custom_map_update
         self.custom_map_finalize = custom_map_finalize
         self.custom_reduce = custom_reduce
+        self.comm_group = comm_group
 
     def init_metric_results(self, thread_id, metric_names, metric_types, metric_dtypes, save_path, worker_id):
         metric_results = []
@@ -195,6 +197,7 @@ class DataAnalyzer(object):
         else:
             assert self.num_threads == 1
             self.run_map_helper(0)
+        dist.barrier(group=self.comm_group)
 
     def get_metric_value_percentiles(self, metric_name, num_sample_per_value, total_num_samples):
         logger.info(f"Checking the value percentiles of metric {metric_name}...")
@@ -409,12 +412,14 @@ class DataAnalyzer(object):
                 close_mmap_dataset_builder(metric_value_builder, metric_value_fname)
 
     def run_reduce(self):
-        if self.custom_reduce is None:
+        if self.worker_id == 0: # only one node does merging of files
+          if self.custom_reduce is None:
             self.merge_map_results(self.dataset, self.metric_names, self.metric_types, self.save_path,
                                    self.num_workers, self.num_threads, self.num_threads_reduce)
-        else:
+          else:
             self.custom_reduce(self.dataset, self.metric_names, self.metric_types, self.save_path, self.num_workers,
                                self.num_threads, self.num_threads_reduce)
+        dist.barrier(group=self.comm_group)
 
 
 
