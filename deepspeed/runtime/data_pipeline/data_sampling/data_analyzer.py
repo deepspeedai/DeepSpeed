@@ -36,7 +36,8 @@ class DataAnalyzer(object):
                  custom_map_init=None,
                  custom_map_update=None,
                  custom_map_finalize=None,
-                 custom_reduce=None):
+                 custom_reduce=None,
+                 sample_indices=None):
         super().__init__()
         self.dataset = dataset
         self.num_workers = num_workers
@@ -55,6 +56,7 @@ class DataAnalyzer(object):
         self.custom_map_update = custom_map_update
         self.custom_map_finalize = custom_map_finalize
         self.custom_reduce = custom_reduce
+        self.sample_indices = sample_indices
 
     def init_metric_results(self, thread_id, metric_names, metric_types, metric_dtypes, save_path, worker_id):
         metric_results = []
@@ -82,7 +84,13 @@ class DataAnalyzer(object):
                 metric_results.append({"metric_value": metric_value, "metric_value_fname": metric_value_fname})
         return metric_results
 
-    def update_metric_results(self, data, metric_types, metric_dtypes, metric_functions, metric_results):
+    def update_metric_results(self,
+                              data,
+                              metric_types,
+                              metric_dtypes,
+                              metric_functions,
+                              metric_results,
+                              batch_start_idx=0):
         for m_idx in range(len(metric_types)):
             metric_type, metric_dtype, metric_function, metric_result = metric_types[m_idx], \
                 metric_dtypes[m_idx], metric_functions[m_idx], metric_results[m_idx]
@@ -97,9 +105,13 @@ class DataAnalyzer(object):
 
             if metric_type == 'single_value_per_sample':
                 for row in range(metric_values.size()[0]):
+                    sample_idx = batch_start_idx + row  # sample idx following dataset iteration order
+                    if 'index' in data:  # Megatron use case, sample idx provided in 'index' field
+                        sample_idx = data['index'][row][0].item()
+                    elif self.sample_indices is not None:  # user defined shuffling of indices
+                        sample_idx = self.sample_indices[sample_idx]
                     metric_result["sample_to_metric_builder"].add_item(metric_values[row].reshape(-1))
-                    metric_result["metric_to_sample_dict"][metric_values[row].item()].append(
-                        data['index'][row][0].item())
+                    metric_result["metric_to_sample_dict"][metric_values[row].item()].append(sample_idx)
                 for m_value in metric_result["metric_to_sample_dict"]:
                     if len(metric_result["metric_to_sample_dict"][m_value]) > 100:
                         metric_fname = metric_result["metric_to_sample_fname"]
@@ -159,12 +171,13 @@ class DataAnalyzer(object):
         while True:
             try:
                 data = next(iterator)
+                batch_start_idx = start_idx + processed_sample
                 if self.custom_map_update is None:
                     self.update_metric_results(data, self.metric_types, self.metric_dtypes, self.metric_functions,
-                                               metric_results)
+                                               metric_results, batch_start_idx)
                 else:
                     self.custom_map_update(data, self.metric_types, self.metric_dtypes, self.metric_functions,
-                                           metric_results)
+                                           metric_results, batch_start_idx)
                 processed_sample += self.batch_size
                 duration = (time.time() - start) / 3600.0
                 remain_duration = duration * total_sample / processed_sample - duration
