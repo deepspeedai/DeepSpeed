@@ -281,12 +281,17 @@ class DeepSpeedDataSampler(object):
                 for cidx in range(len(samples_per_cluster)):
                     batch += self.get_sample_from_cluster(cidx, samples_per_cluster[cidx])
                 self.np_rng.shuffle(batch)
+
+                # broadcast tensor must have same shape across participants. So we fill batch with -1s when not full
+                assert len(batch) <= self.global_batch_size
+                batch += [-1] * (self.global_batch_size - len(batch))
                 batch = torch.tensor(batch, device=get_accelerator().current_device_name(), dtype=torch.long).view(-1)
             else:
                 batch = torch.empty(self.global_batch_size,
                                     device=get_accelerator().current_device_name(),
                                     dtype=torch.long)
             dist.broadcast(batch, 0, group=self.data_parallel_group)
+            batch = batch[batch != -1]  # remove trailing -1s used to fill incomplete batch tensor
             self.batch = batch.tolist()
 
     def __iter__(self):
