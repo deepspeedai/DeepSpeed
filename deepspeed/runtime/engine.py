@@ -230,7 +230,7 @@ class DeepSpeedEngine(Module):
 
         self._is_gradient_accumulation_boundary = None
         self.scale_wrt_gas = None
-        self.losses = 0.0
+        self.losses = None
 
         # for debug purposes - can then debug print: debug_get_module_name(module)
         debug_extract_module_and_param_names(model)
@@ -1951,13 +1951,14 @@ class DeepSpeedEngine(Module):
             loss = self._scale_loss_by_gas(loss.float())
 
         # Log training loss
-        self.losses += loss.mean().item()
+        mean_loss = loss.mean().detach()
+        self.losses = mean_loss if self.losses is None else self.losses + mean_loss
         if self.monitor.enabled:
             if self.is_gradient_accumulation_boundary():
                 if self.global_rank == 0:
                     self.summary_events = [(
                         f"Train/Samples/train_loss",
-                        self.losses,
+                        self.losses.item(),
                         self.global_samples,
                     )]
                     self.monitor.write_events(self.summary_events)
@@ -2123,7 +2124,7 @@ class DeepSpeedEngine(Module):
         if report_progress and (self.global_steps + 1) % self.steps_per_print() == 0:
             self._report_progress(self.global_steps + 1)
 
-        self.losses = 0.0
+        self.losses = None
         self.global_steps += 1
         self.global_samples += self.train_batch_size()
 

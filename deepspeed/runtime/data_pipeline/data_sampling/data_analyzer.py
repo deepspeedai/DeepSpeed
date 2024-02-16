@@ -14,7 +14,7 @@ from torch.utils.data import BatchSampler, SequentialSampler, DataLoader, Subset
 
 from deepspeed.utils import logger
 import deepspeed.comm as dist
-from .indexed_dataset import MMapIndexedDataset
+from .indexed_dataset import MMapIndexedDataset, valid_dtypes
 from .utils import split_dataset, split_index, create_mmap_dataset_builder, close_mmap_dataset_builder, find_fit_int_dtype
 
 
@@ -38,7 +38,7 @@ class DataAnalyzer(object):
                  custom_map_update=None,
                  custom_map_finalize=None,
                  custom_reduce=None,
-                 comm_group=None):
+                 sample_indices=None):
         super().__init__()
         self.dataset = dataset
         self.num_workers = num_workers
@@ -57,16 +57,14 @@ class DataAnalyzer(object):
         self.custom_map_update = custom_map_update
         self.custom_map_finalize = custom_map_finalize
         self.custom_reduce = custom_reduce
-        self.comm_group = comm_group
+        self.sample_indices = sample_indices
 
     def init_metric_results(self, thread_id, metric_names, metric_types, metric_dtypes, save_path, worker_id):
         metric_results = []
         for m_idx in range(len(metric_names)):
             metric_name, metric_type, metric_dtype = metric_names[m_idx], \
                 metric_types[m_idx], metric_dtypes[m_idx]
-            assert metric_dtype not in [
-                np.float64, np.double
-            ], "Currently floating point metric values are not supported. Please change your metric into integer values (and potentially multiply a larger coefficient to keep the precision)."
+            assert metric_dtype in valid_dtypes, f"metric_dtype {metric_dtype} not supported. Supported dtypes {valid_dtypes}"
             metric_save_path = f"{save_path}/{metric_name}/worker{worker_id}_thread{thread_id}/"
             os.makedirs(metric_save_path, exist_ok=True)
             if metric_type == 'single_value_per_sample':
@@ -87,18 +85,34 @@ class DataAnalyzer(object):
                 metric_results.append({"metric_value": metric_value, "metric_value_fname": metric_value_fname})
         return metric_results
 
-    def update_metric_results(self, data, metric_types, metric_dtypes, metric_functions, metric_results):
+    def update_metric_results(self,
+                              data,
+                              metric_types,
+                              metric_dtypes,
+                              metric_functions,
+                              metric_results,
+                              batch_start_idx=0):
         for m_idx in range(len(metric_types)):
             metric_type, metric_dtype, metric_function, metric_result = metric_types[m_idx], \
                 metric_dtypes[m_idx], metric_functions[m_idx], metric_results[m_idx]
             metric_values = metric_function(data)
-            assert metric_values.numpy().dtype == metric_dtype, \
-                f"dtype {metric_values.numpy().dtype} returned by metric_function {metric_function} is not consistent with the metric_dtype {metric_dtype}"
+
+            assert torch.is_tensor(metric_values) or isinstance(metric_values, np.ndarray), \
+                    "metric_function must return a tensor or array"
+            assert metric_values.dtype == metric_dtype, \
+                    f"metric_function result dtype {metric_values.dtype} does not match metric_dtype {metric_dtype}"
+            if isinstance(metric_values, np.ndarray):
+                metric_values = torch.from_numpy(metric_values)
+
             if metric_type == 'single_value_per_sample':
                 for row in range(metric_values.size()[0]):
+                    sample_idx = batch_start_idx + row  # sample idx following dataset iteration order
+                    if 'index' in data:  # Megatron use case, sample idx provided in 'index' field
+                        sample_idx = data['index'][row][0].item()
+                    elif self.sample_indices is not None:  # user defined shuffling of indices
+                        sample_idx = self.sample_indices[sample_idx]
                     metric_result["sample_to_metric_builder"].add_item(metric_values[row].reshape(-1))
-                    metric_result["metric_to_sample_dict"][metric_values[row].item()].append(
-                        data['index'][row][0].item())
+                    metric_result["metric_to_sample_dict"][metric_values[row].item()].append(sample_idx)
                 for m_value in metric_result["metric_to_sample_dict"]:
                     if len(metric_result["metric_to_sample_dict"][m_value]) > 100:
                         metric_fname = metric_result["metric_to_sample_fname"]
@@ -158,11 +172,13 @@ class DataAnalyzer(object):
         while True:
             try:
                 data = next(iterator)
+                batch_start_idx = start_idx + processed_sample
                 if self.custom_map_update is None:
                     self.update_metric_results(data, self.metric_types, self.metric_dtypes, self.metric_functions,
-                                               metric_results)
+                                               metric_results, batch_start_idx)
                 else:
-                    self.custom_map_update(data, self.metric_types, self.metric_functions, metric_results)
+                    self.custom_map_update(data, self.metric_types, self.metric_dtypes, self.metric_functions,
+                                           metric_results, batch_start_idx)
                 processed_sample += self.batch_size
                 duration = (time.time() - start) / 3600.0
                 remain_duration = duration * total_sample / processed_sample - duration
