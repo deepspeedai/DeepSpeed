@@ -445,6 +445,7 @@ class DataAnalyzer(object):
 
 
 
+
 class DistributedDataAnalyzer(object):
 
     def __init__(self,
@@ -545,32 +546,32 @@ class DistributedDataAnalyzer(object):
             metric_save_path = f"{self.save_path}/{metric_name}/"
             if metric_type == 'single_value_per_sample':
 
+                # get unique values across all ranks and compute the values dtype based on min/max
+                # value_min, value_max = DistributedDataAnalyzer.dist_min_max(values, self.comm_group)
+                # metric_value_dtype = find_fit_int_dtype(value_min, value_max)
 
                 # sample_to_metric maps sample ids to metric values, as a list of metric values
                 sample_to_metric_fname = f"{metric_save_path}/{metric_name}_sample_to_metric"
                 values = [torch.tensor([x]) for x in metric_values[:,0]]
                 self.file_write_ordered(values, sample_to_metric_fname, torch.long)
 
-                # index_to_metric and index_to_sample serialize a dicitonary from metric to samples
-                # index_to_metric stores a key per row, index_to_sample stores the values per row
-
                 # distributed sorting by values, gives an ordered disjoint subset of keys on nodes
                 metric_values = DistributedDataAnalyzer.dist_sample_sort(metric_values, self.comm_group, self.num_workers)
-                metric_to_sample_dict = {}
-                for value, sample in metric_values:
-                    if value.item() not in metric_to_sample_dict:
-                        metric_to_sample_dict[value.item()] = []
-                    metric_to_sample_dict[value.item()].append(sample.item())
-                values = [torch.tensor([x]) for x in metric_to_sample_dict.keys()]
-                samples = [torch.tensor(metric_to_sample_dict[x]) for x in metric_to_sample_dict.keys()]
+                metric_to_samples_dict = {}
+                if len(metric_values)>0:
+                    for value, sample in metric_values:
+                        if value.item() not in metric_to_samples_dict:
+                            metric_to_samples_dict[value.item()] = []
+                        metric_to_samples_dict[value.item()].append(sample.item())
+
+                # index_to_metric and index_to_sample serialize a dicitonary from metric to samples
+                # index_to_metric stores a key per row, index_to_sample stores the values per row
+                values = [torch.tensor([x]) for x in metric_to_samples_dict.keys()]
+                samples = [torch.tensor(metric_to_samples_dict[x]) for x in metric_to_samples_dict.keys()]
                 index_to_metric_fname = f"{metric_save_path}/{metric_name}_index_to_metric" #dict keys
                 index_to_sample_fname = f"{metric_save_path}/{metric_name}_index_to_sample" #dict values
                 self.file_write_ordered(values, index_to_metric_fname, torch.long)
                 self.file_write_ordered(samples, index_to_sample_fname, torch.long)
-
-                # get unique values across all ranks and compute the values dtype based on min/max
-                # value_min, value_max = DistributedDataAnalyzer.dist_min_max(values, self.comm_group)
-                # metric_value_dtype = find_fit_int_dtype(value_min, value_max)
 
             elif metric_type == 'accumulate_value_over_samples':
                 metric_value_fname = f"{metric_save_path}/{metric_name}_metric_value"
@@ -610,7 +611,6 @@ class DistributedDataAnalyzer(object):
         # 4. gather on rank 0 of the total size (sum of all row lengths) to be received
         size = torch.tensor(sum(row_len).item(), **tkwargs)
         sizes = torch.zeros(self.num_workers, **tkwargs)
-        print("XXX", self.worker_id)
         dist.all_gather_into_tensor(sizes, size, group=self.comm_group)
         assert sizes[self.worker_id]==size, "all_gather did not return the same sizes" #sanity check
 
@@ -622,7 +622,10 @@ class DistributedDataAnalyzer(object):
                 recv_buffer = recv_buffer[row_len:]
 
         # 5. rank 0 receives all tensors sequentially and writes them to the file
-        buffer = torch.cat(tensor_list, dim=0).to(self.device) #serialize list into buffer
+        if len(tensor_list) == 0:
+            buffer = torch.tensor([], **tkwargs) #create zero-size buffer
+        else:
+            buffer = torch.cat(tensor_list, dim=0).to(self.device) #serialize list into buffer
         if self.worker_id == 0:
             os.makedirs(os.path.dirname(fname), exist_ok=True)
             builder = create_mmap_dataset_builder(fname, numpy_dtype)
@@ -695,5 +698,4 @@ class DistributedDataAnalyzer(object):
 
         # 7. the received tensor is the 1D disjoint subset of the distributed tensor
         return recv.view(-1, dims)
-
 
