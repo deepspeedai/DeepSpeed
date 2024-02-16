@@ -110,7 +110,7 @@ class DataAnalyzer(object):
                 metric_values = metric_function(data)
                 for row in range(metric_values.size()[0]):
                     sample_idx = batch_start_idx + row  # sample idx following dataset iteration order
-                    if 'index' in data:  # Megatron use case, sample idx provided in 'index' field
+                    if isinstance(data, dict) and 'index' in data:  # Megatron use case, idx provided in 'index' field
                         sample_idx = data['index'][row][0].item()
                     elif self.sample_indices is not None:  # user defined shuffling of indices
                         sample_idx = self.sample_indices[sample_idx]
