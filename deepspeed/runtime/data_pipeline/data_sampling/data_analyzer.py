@@ -442,8 +442,7 @@ class DataAnalyzer(object):
             self.run_reduce()
         # wait for the reduce, where rank 0 merges all (partial) files. Dataset can then be used by all nodes.
         dist.barrier(group=comm_group)
-
-
+        
 
 
 class DistributedDataAnalyzer(object):
