@@ -412,34 +412,32 @@ class DataAnalyzer(object):
                 close_mmap_dataset_builder(metric_value_builder, metric_value_fname)
 
     def run_reduce(self):
-        if self.worker_id == 0: # only one node does merging of files
-          if self.custom_reduce is None:
-            self.merge_map_results(self.dataset, self.metric_names, self.metric_types, self.save_path,
+        if self.worker_id == 0:  # only one node does merging of files
+            if self.custom_reduce is None:
+                self.merge_map_results(self.dataset, self.metric_names, self.metric_types, self.save_path,
+                                       self.num_workers, self.num_threads, self.num_threads_reduce)
+            else:
+                self.custom_reduce(self.dataset, self.metric_names, self.metric_types, self.save_path,
                                    self.num_workers, self.num_threads, self.num_threads_reduce)
-          else:
-            self.custom_reduce(self.dataset, self.metric_names, self.metric_types, self.save_path, self.num_workers,
-                               self.num_threads, self.num_threads_reduce)
         dist.barrier(group=self.comm_group)
-
-
-
 
 
 class DistributedDataAnalyzer(object):
 
-    def __init__(self,
-            dataset,
-            num_workers=1,
-            worker_id=0,
-            batch_size=1,
-            metric_names=[],
-            metric_functions=[],
-            metric_types=[],
-            save_path="./",
-            collate_fn=None,
-            device='cuda',
-            comm_group=None,
-        ) -> None:
+    def __init__(
+        self,
+        dataset,
+        num_workers=1,
+        worker_id=0,
+        batch_size=1,
+        metric_names=[],
+        metric_functions=[],
+        metric_types=[],
+        save_path="./",
+        collate_fn=None,
+        device='cuda',
+        comm_group=None,
+    ) -> None:
         self.dataset = dataset
         self.comm_group = comm_group
         self.batch_size = batch_size
@@ -459,7 +457,6 @@ class DistributedDataAnalyzer(object):
             self.num_workers = num_workers
             self.worker_id = worker_id
 
-
     def run_map_reduce(self):
 
         # setup individual dataloaders
@@ -468,15 +465,18 @@ class DistributedDataAnalyzer(object):
         logger.info(f"worker {self.worker_id}: start working on data subset {start_idx} to {end_idx}")
         worker_dataset = Subset(self.dataset, list(range(start_idx, end_idx)))
         sampler = BatchSampler(SequentialSampler(worker_dataset), batch_size=self.batch_size, drop_last=False)
-        dataloader = DataLoader(dataset=worker_dataset, batch_sampler=sampler,
-                                num_workers=0, collate_fn=self.collate_fn, pin_memory=False)
+        dataloader = DataLoader(dataset=worker_dataset,
+                                batch_sampler=sampler,
+                                num_workers=0,
+                                collate_fn=self.collate_fn,
+                                pin_memory=False)
 
         # set initial results list
         metric_results = []
         for metric_type in self.metric_types:
             assert metric_type in ['single_value_per_sample', 'accumulate_value_over_samples'], \
                 f"metric_type {metric_type} not implemented."
-            metric_results.append( [] if metric_type == 'single_value_per_sample' else None )
+            metric_results.append([] if metric_type == 'single_value_per_sample' else None)
 
         # iterate dataloader and store metric results
         sample_idx = start_idx
@@ -497,7 +497,7 @@ class DistributedDataAnalyzer(object):
                     for row in range(metric_values.size()[0]):
                         value = metric_values[row].item()
                         metric_result.append((sample_idx, value))
-                        sample_idx+=1
+                        sample_idx += 1
                 elif metric_type == 'accumulate_value_over_samples':
                     if metric_result is None:
                         metric_result = metric_values
@@ -510,7 +510,7 @@ class DistributedDataAnalyzer(object):
         logger.info(f"Total number of data samples: {total_num_samples}.")
         logger.info(f"Will use {sample_idx_dtype} to store the sample indexes.")
 
-        metric_results = [ torch.tensor(m).to(self.device) for m in metric_results ]
+        metric_results = [torch.tensor(m).to(self.device) for m in metric_results]
         for m_idx in range(len(self.metric_names)):
 
             metric_values, metric_name, metric_type = \
@@ -519,7 +519,7 @@ class DistributedDataAnalyzer(object):
             if metric_type == 'single_value_per_sample':
 
                 # get unique values across all ranks and compute the values dtype based on min/max
-                ids, values = metric_values[:,0], metric_values[:,1]
+                ids, values = metric_values[:, 0], metric_values[:, 1]
                 value_min, value_max = DistributedDataAnalyzer.dist_min_max(values, self.comm_group)
                 metric_value_dtype = find_fit_int_dtype(value_min, value_max)
 
@@ -530,16 +530,17 @@ class DistributedDataAnalyzer(object):
                 # index_to_metric outputs a list of unique values (read from an value-ordered set)
                 # index_to_sample outputs the list of all sample ids for each unique value
                 index_to_metric_fname = f"{metric_save_path}/{metric_name}_index_to_metric"
-                metric_values = metric_values[:,[1,0]] # swap columns
-                metric_values = DistributedDataAnalyzer.dist_sample_sort(metric_values, self.comm_group, self.num_workers)
-                unique_vals, sample_counts = torch.unique(metric_values[:,0], return_counts=True)
+                metric_values = metric_values[:, [1, 0]]  # swap columns
+                metric_values = DistributedDataAnalyzer.dist_sample_sort(metric_values, self.comm_group,
+                                                                         self.num_workers)
+                unique_vals, sample_counts = torch.unique(metric_values[:, 0], return_counts=True)
                 self.file_write_ordered(unique_vals, index_to_metric_fname, torch.long)
 
                 index_to_sample_fname = f"{metric_save_path}/{metric_name}_index_to_sample"
                 samples_buffer, samples_it = [], 0
                 for unique_v, count in zip(unique_vals, sample_counts):
                     # values_buffer.append(unique_v.item())
-                    samples_buffer += ids[samples_it:samples_it+count.item()].tolist()
+                    samples_buffer += ids[samples_it:samples_it + count.item()].tolist()
                     samples_it += count
                 # values_buffer = torch.tensor(values_buffer)
                 samples_buffer = torch.tensor(samples_buffer, device=self.device)
@@ -553,7 +554,6 @@ class DistributedDataAnalyzer(object):
                     builder.add_item(metric_values)
                     close_mmap_dataset_builder(builder, metric_value_fname)
 
-
     def file_write_ordered(self, tensor, fname, numpy_dtype, sequential_comm=True):
         """ save a distributed tensor to a single file, iteratively, ordered by rank """
         assert tensor.dim() == 1, "tensor must be serialized (1D)"
@@ -562,7 +562,7 @@ class DistributedDataAnalyzer(object):
         size = torch.tensor(len(tensor), dtype=torch.int64, device=self.device)
         sizes = torch.zeros(self.num_workers, dtype=torch.int64, device=self.device)
         dist.all_gather_into_tensor(sizes, size, group=self.comm_group)
-        assert sizes[self.worker_id]==size, "all_gather did not return the same sizes" #sanity check
+        assert sizes[self.worker_id] == size, "all_gather did not return the same sizes"  #sanity check
 
         # rank 0 creates the file
         if self.worker_id == 0:
@@ -572,16 +572,16 @@ class DistributedDataAnalyzer(object):
         if sequential_comm:  # send, receive and write all tensors sequentially (slow, memory safe)
 
             if self.worker_id == 0:
-                builder.add_item(tensor.cpu()) # write rank 0's tensor
+                builder.add_item(tensor.cpu())  # write rank 0's tensor
 
             for src in range(1, self.num_workers):
                 dist.barrier()
                 if src == self.worker_id:
-                    dist.send(tensor, 0, group=self.comm_group) # send tensor
+                    dist.send(tensor, 0, group=self.comm_group)  # send tensor
                 elif self.worker_id == 0:
                     recv = torch.zeros(sizes[src].item(), dtype=tensor.dtype, device=tensor.device)
                     dist.recv(recv, src=src, group=self.comm_group)
-                    builder.add_item(recv.cpu()) # writes received tensor
+                    builder.add_item(recv.cpu())  # writes received tensor
 
         else:  # all to all communication of serialized tensor (faster but requires more memory)
             tensors = torch.zeros(sum(sizes).item(), dtype=tensor.dtype, device=tensor.device)
@@ -591,9 +591,8 @@ class DistributedDataAnalyzer(object):
 
         # rank 0 closes the file
         if self.worker_id == 0:
-            close_mmap_dataset_builder(builder, fname) # close file
+            close_mmap_dataset_builder(builder, fname)  # close file
         dist.barrier(self.comm_group)
-
 
     @staticmethod
     def dist_min_max(tensor, comm_group):
@@ -604,7 +603,6 @@ class DistributedDataAnalyzer(object):
         dist.reduce(value_max, 0, op=dist.ReduceOp.MAX, group=comm_group)
         return value_min.item(), value_max.item()
 
-
     @staticmethod
     def dist_sample_sort(tensor, comm_group, num_workers, n_samples=100):
         """ perform a distributed random sort of a tensor, and returns the sorted partial tensor"""
@@ -614,8 +612,8 @@ class DistributedDataAnalyzer(object):
         tensor = torch.sort(tensor, dim=0)[0]
 
         # 2 - collect few samples per rank
-        idx = torch.round(torch.linspace(0, len(tensor) - 1, n_samples+1)).to(int)
-        samples = tensor[idx[:-1]][:,0].contiguous().to(device) #only first column, all but last row
+        idx = torch.round(torch.linspace(0, len(tensor) - 1, n_samples + 1)).to(int)
+        samples = tensor[idx[:-1]][:, 0].contiguous().to(device)  #only first column, all but last row
 
         # 2 - Allgather samples
         all_samples = [torch.zeros(n_samples, dtype=samples.dtype, device=device)] * num_workers
@@ -625,26 +623,24 @@ class DistributedDataAnalyzer(object):
         # 3 - Sort all samples and collect the ranges of each rank as equidistant
         all_samples = all_samples.sort()[0]
         idx = torch.round(torch.linspace(0, len(all_samples) - 1, num_workers + 1)).to(int)
-        ranges = all_samples[idx] # range of each rank r as ranges[r] <= x < ranges[r+1]
+        ranges = all_samples[idx]  # range of each rank r as ranges[r] <= x < ranges[r+1]
         ranges[-1] += 1  # increase upper limit of last rank so that x < ranges[r+1].
 
         # 4 - collect elements to send to each rank, based on the rank ranges
         send = []
         for rank in range(num_workers):
-            mask = (tensor[:,0] >= ranges[rank]) & (tensor[:,0] < ranges[rank+1])
+            mask = (tensor[:, 0] >= ranges[rank]) & (tensor[:, 0] < ranges[rank + 1])
             send.append(tensor[mask])
 
         # 5. all to all to communicate the sizes to be sent/recv
-        send_count = [ torch.tensor([len(tensor)*dims], dtype=torch.int64, device=device) for tensor in send]
+        send_count = [torch.tensor([len(tensor) * dims], dtype=torch.int64, device=device) for tensor in send]
         recv_count = list(torch.zeros([num_workers], dtype=torch.int64, device=device).chunk(num_workers))
         dist.all_to_all(recv_count, send_count, group=comm_group)
 
         # 6. all to all to communicate the elements to be sent/recv as a single tensor
         send = torch.cat(send, dim=0).flatten().to(device)
-        recv = torch.zeros( sum(recv_count), dtype=send.dtype).to(device)
+        recv = torch.zeros(sum(recv_count), dtype=send.dtype).to(device)
         dist.all_to_all_single(recv, send, recv_count, send_count, group=comm_group)
 
         # 7. the received tensor is the 1D disjoint subset of the distributed tensor
         return recv.view(-1, dims)
-
-
