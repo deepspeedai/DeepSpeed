@@ -1970,24 +1970,26 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
         self.overflow = self.has_overflow(partition_gradients)
 
     # `params` is a list / generator of torch.Variable
-    def has_overflow_serial(self, params, is_grad_list=False):
+    def has_overflow_serial(self, params):
+        invalid_grad_count = torch.zeros([1], dtype=torch.float, device=get_accelerator().current_device_name())
         for p in params:
-            if p.grad is not None and self._has_inf_or_nan(p.grad.data):
-                return True
-
-        return False
+            if p.grad is not None:
+                invalid_grad_count += self._has_inf_or_nan(p.grad)
+        return invalid_grad_count.bool()
 
     def has_overflow_partitioned_grads_serial(self):
+        invalid_grad_count = torch.zeros([1], dtype=torch.float, device=get_accelerator().current_device_name())
         for i in range(len(self.bit16_groups)):
             for j, grad in enumerate(self.averaged_gradients[i]):
-                if grad is not None and self._has_inf_or_nan(grad.data, j):
-                    return True
-        return False
+                if grad is not None:
+                    invalid_grad_count += self._has_inf_or_nan(grad)
+        return invalid_grad_count.bool()
 
     def has_overflow(self, partition_gradients=True):
         if partition_gradients:
             overflow = self.local_overflow if self.cpu_offload else self.has_overflow_partitioned_grads_serial()
-            overflow_gpu = get_accelerator().ByteTensor([overflow])
+            overflow_gpu = get_accelerator().ByteTensor([overflow]) if self.cpu_offload else overflow.byte().to(
+                get_accelerator().current_device_name())
             '''This will capture overflow across all data parallel and expert parallel process
             Since expert parallel process are a subset of data parallel process'''
             dist.all_reduce(overflow_gpu, op=dist.ReduceOp.MAX, group=self.dp_process_group)
@@ -1997,9 +1999,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
             for group in self.bit16_groups:
                 for param in group:
                     params.append(param)
-
-            overflow = self.has_overflow_serial(params, is_grad_list=partition_gradients)
-            overflow_gpu = get_accelerator().ByteTensor([overflow])
+            overflow_gpu = self.has_overflow_serial(params).byte().to(get_accelerator().current_device_name())
 
         # Since each model parallel GPU carries only part of the model,
         # make sure overflow flag is synced across all the model parallel GPUs
@@ -2011,24 +2011,11 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
     # `x` is a torch.Tensor
     @staticmethod
     def _has_inf_or_nan(x, j=None):
-        try:
-            # if x is half, the .float() incurs an additional deep copy, but it's necessary if
-            # Pytorch's .sum() creates a one-element tensor of the same type as x
-            # (which is true for some recent version of pytorch).
-            cpu_sum = float(x.float().sum())
-            # More efficient version that can be used if .sum() returns a Python scalar
-            # cpu_sum = float(x.sum())
-        except RuntimeError as instance:
-            # We want to check if inst is actually an overflow exception.
-            # RuntimeError could come from a different error.
-            # If so, we still want the exception to propagate.
-            if "value cannot be converted" not in instance.args[0]:
-                raise
-            return True
-        else:
-            if cpu_sum == float('inf') or cpu_sum == -float('inf') or cpu_sum != cpu_sum:
-                return True
-            return False
+        float_x = x.float()
+        nan = float_x.isnan()
+        inf = float_x.isinf()
+        inf_or_nan = nan.logical_or(inf)
+        return inf_or_nan.float().max()
 
     def backward(self, loss, retain_graph=False):
         """
