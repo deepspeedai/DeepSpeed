@@ -15,6 +15,7 @@ from torch.utils.data import BatchSampler, SequentialSampler, DataLoader, Subset
 
 import deepspeed.comm as dist
 from deepspeed.utils import logger
+import deepspeed.comm as dist
 from .indexed_dataset import MMapIndexedDataset, valid_dtypes
 from .utils import split_dataset, split_index, create_mmap_dataset_builder, close_mmap_dataset_builder, find_fit_int_dtype
 
@@ -480,193 +481,14 @@ class DistributedDataAnalyzer(object):
             self.num_workers = comm_group.size()
             self.worker_id = comm_group.rank()
         else:
-            self.num_workers = num_workers
-            self.worker_id = worker_id
+            self.custom_reduce(self.dataset, self.metric_names, self.metric_types, self.save_path, self.num_workers,
+                               self.num_threads, self.num_threads_reduce)
 
-    def run_map_reduce(self):
-
-        # setup individual dataloaders
-        worker_splits, _ = split_dataset(self.dataset, self.num_workers, self.worker_id, num_threads=1)
-        start_idx, end_idx = worker_splits[self.worker_id]
-        logger.info(f"worker {self.worker_id}: start working on data subset {start_idx} to {end_idx}")
-        worker_dataset = Subset(self.dataset, list(range(start_idx, end_idx)))
-        sampler = BatchSampler(SequentialSampler(worker_dataset), batch_size=self.batch_size, drop_last=False)
-        dataloader = DataLoader(dataset=worker_dataset,
-                                batch_sampler=sampler,
-                                num_workers=0,
-                                collate_fn=self.collate_fn,
-                                pin_memory=False)
-
-        # set initial results list
-        metric_results = []
-        for metric_type in self.metric_types:
-            assert metric_type in ['single_value_per_sample', 'accumulate_value_over_samples'], \
-                f"metric_type {metric_type} not implemented."
-            metric_results.append([] if metric_type == 'single_value_per_sample' else None)
-
-        # iterate dataloader and store metric results
-        sample_idx = start_idx
-        valid_int_dtypes = (torch.uint8, torch.int16, torch.int32, torch.int64, np.uint8, np.int16, np.int32, np.int64)
-        for data in dataloader:
-            for m_idx in range(len(self.metric_types)):
-                metric_type, metric_function, metric_result = \
-                    self.metric_types[m_idx], self.metric_functions[m_idx], metric_results[m_idx]
-                metric_values = metric_function(data)
-                assert torch.is_tensor(metric_values) or isinstance(metric_values, np.ndarray), \
-                    "metric_function must return a tensor or array"
-                if isinstance(metric_values, np.ndarray):
-                    metric_values = torch.from_numpy(metric_values)
-                assert metric_values.dtype in valid_int_dtypes, \
-                    f"metric_function result dtype {metric_values.dtype} not supported. Supported dtypes {valid_int_dtypes}"
-
-                if metric_type == 'single_value_per_sample':
-                    for row in range(metric_values.size()[0]):
-                        value = metric_values[row].item()
-                        metric_result.append((sample_idx, value))
-                        sample_idx += 1
-                elif metric_type == 'accumulate_value_over_samples':
-                    if metric_result is None:
-                        metric_result = metric_values
-                    else:
-                        metric_result.add_(metric_values)
-
-        # compute dtype for sample ids
-        total_num_samples = len(self.dataset)
-        sample_idx_dtype = find_fit_int_dtype(0, total_num_samples - 1)
-        logger.info(f"Total number of data samples: {total_num_samples}.")
-        logger.info(f"Will use {sample_idx_dtype} to store the sample indexes.")
-
-        metric_results = [torch.tensor(m).to(self.device) for m in metric_results]
-        for m_idx in range(len(self.metric_names)):
-
-            metric_values, metric_name, metric_type = \
-                metric_results[m_idx], self.metric_names[m_idx], self.metric_types[m_idx]
-            metric_save_path = f"{self.save_path}/{metric_name}/"
-            if metric_type == 'single_value_per_sample':
-
-                # get unique values across all ranks and compute the values dtype based on min/max
-                ids, values = metric_values[:, 0], metric_values[:, 1]
-                value_min, value_max = DistributedDataAnalyzer.dist_min_max(values, self.comm_group)
-                metric_value_dtype = find_fit_int_dtype(value_min, value_max)
-
-                # sample_to_metric iterated metric_results and stored all metric values in same order
-                sample_to_metric_fname = f"{metric_save_path}/{metric_name}_sample_to_metric"
-                self.file_write_ordered(ids, sample_to_metric_fname, metric_value_dtype)
-
-                # index_to_metric outputs a list of unique values (read from an value-ordered set)
-                # index_to_sample outputs the list of all sample ids for each unique value
-                index_to_metric_fname = f"{metric_save_path}/{metric_name}_index_to_metric"
-                metric_values = metric_values[:, [1, 0]]  # swap columns
-                metric_values = DistributedDataAnalyzer.dist_sample_sort(metric_values, self.comm_group,
-                                                                         self.num_workers)
-                unique_vals, sample_counts = torch.unique(metric_values[:, 0], return_counts=True)
-                self.file_write_ordered(unique_vals, index_to_metric_fname, torch.long)
-
-                index_to_sample_fname = f"{metric_save_path}/{metric_name}_index_to_sample"
-                samples_buffer, samples_it = [], 0
-                for unique_v, count in zip(unique_vals, sample_counts):
-                    # values_buffer.append(unique_v.item())
-                    samples_buffer += ids[samples_it:samples_it + count.item()].tolist()
-                    samples_it += count
-                # values_buffer = torch.tensor(values_buffer)
-                samples_buffer = torch.tensor(samples_buffer, device=self.device)
-                self.file_write_ordered(samples_buffer, index_to_sample_fname, torch.long)
-            elif metric_type == 'accumulate_value_over_samples':
-                metric_value_fname = f"{metric_save_path}/{metric_name}_metric_value"
-                # gather the sum of all values across all ranks and write to file
-                dist.all_reduce(metric_values, op=dist.ReduceOp.SUM, group=self.comm_group)
-                if self.worker_id == 0:
-                    builder = create_mmap_dataset_builder(metric_value_fname, metric_value_dtype)
-                    builder.add_item(metric_values)
-                    close_mmap_dataset_builder(builder, metric_value_fname)
-
-    def file_write_ordered(self, tensor, fname, numpy_dtype, sequential_comm=True):
-        """ save a distributed tensor to a single file, iteratively, ordered by rank """
-        assert tensor.dim() == 1, "tensor must be serialized (1D)"
-
-        # gather the sizes of all tensors to be received in rank 0.
-        size = torch.tensor(len(tensor), dtype=torch.int64, device=self.device)
-        sizes = torch.zeros(self.num_workers, dtype=torch.int64, device=self.device)
-        dist.all_gather_into_tensor(sizes, size, group=self.comm_group)
-        assert sizes[self.worker_id] == size, "all_gather did not return the same sizes"  #sanity check
-
-        # rank 0 creates the file
+    def run_map_reduce(self, comm_group=None):
+        self.run_map()
+        # wait for the mapping operation, where all nodes outputs their own (partial) result files
+        dist.barrier(group=comm_group)
         if self.worker_id == 0:
-            os.makedirs(os.path.dirname(fname), exist_ok=True)
-            builder = create_mmap_dataset_builder(fname, numpy_dtype)
-
-        if sequential_comm:  # send, receive and write all tensors sequentially (slow, memory safe)
-
-            if self.worker_id == 0:
-                builder.add_item(tensor.cpu())  # write rank 0's tensor
-
-            for src in range(1, self.num_workers):
-                dist.barrier()
-                if src == self.worker_id:
-                    dist.send(tensor, 0, group=self.comm_group)  # send tensor
-                elif self.worker_id == 0:
-                    recv = torch.zeros(sizes[src].item(), dtype=tensor.dtype, device=tensor.device)
-                    dist.recv(recv, src=src, group=self.comm_group)
-                    builder.add_item(recv.cpu())  # writes received tensor
-
-        else:  # all to all communication of serialized tensor (faster but requires more memory)
-            tensors = torch.zeros(sum(sizes).item(), dtype=tensor.dtype, device=tensor.device)
-            dist.all_gather_into_tensor(sizes, size, group=self.comm_group)
-            if self.worker_id == 0:
-                builder.add_item(tensors.cpu())
-
-        # rank 0 closes the file
-        if self.worker_id == 0:
-            close_mmap_dataset_builder(builder, fname)  # close file
-        dist.barrier(self.comm_group)
-
-    @staticmethod
-    def dist_min_max(tensor, comm_group):
-        """ given a distributed tensor, return the min/max values across all ranks"""
-
-        value_min, value_max = tensor.min(), tensor.max()
-        dist.reduce(value_min, 0, op=dist.ReduceOp.MIN, group=comm_group)
-        dist.reduce(value_max, 0, op=dist.ReduceOp.MAX, group=comm_group)
-        return value_min.item(), value_max.item()
-
-    @staticmethod
-    def dist_sample_sort(tensor, comm_group, num_workers, n_samples=100):
-        """ perform a distributed random sort of a tensor, and returns the sorted partial tensor"""
-        device, dims = tensor.device, tensor.size()[1]
-
-        # 1 - Sort locally
-        tensor = torch.sort(tensor, dim=0)[0]
-
-        # 2 - collect few samples per rank
-        idx = torch.round(torch.linspace(0, len(tensor) - 1, n_samples + 1)).to(int)
-        samples = tensor[idx[:-1]][:, 0].contiguous().to(device)  #only first column, all but last row
-
-        # 2 - Allgather samples
-        all_samples = [torch.zeros(n_samples, dtype=samples.dtype, device=device)] * num_workers
-        dist.all_gather(all_samples, samples, group=comm_group)
-        all_samples = torch.cat(all_samples, dim=0).to(device)
-
-        # 3 - Sort all samples and collect the ranges of each rank as equidistant
-        all_samples = all_samples.sort()[0]
-        idx = torch.round(torch.linspace(0, len(all_samples) - 1, num_workers + 1)).to(int)
-        ranges = all_samples[idx]  # range of each rank r as ranges[r] <= x < ranges[r+1]
-        ranges[-1] += 1  # increase upper limit of last rank so that x < ranges[r+1].
-
-        # 4 - collect elements to send to each rank, based on the rank ranges
-        send = []
-        for rank in range(num_workers):
-            mask = (tensor[:, 0] >= ranges[rank]) & (tensor[:, 0] < ranges[rank + 1])
-            send.append(tensor[mask])
-
-        # 5. all to all to communicate the sizes to be sent/recv
-        send_count = [torch.tensor([len(tensor) * dims], dtype=torch.int64, device=device) for tensor in send]
-        recv_count = list(torch.zeros([num_workers], dtype=torch.int64, device=device).chunk(num_workers))
-        dist.all_to_all(recv_count, send_count, group=comm_group)
-
-        # 6. all to all to communicate the elements to be sent/recv as a single tensor
-        send = torch.cat(send, dim=0).flatten().to(device)
-        recv = torch.zeros(sum(recv_count), dtype=send.dtype).to(device)
-        dist.all_to_all_single(recv, send, recv_count, send_count, group=comm_group)
-
-        # 7. the received tensor is the 1D disjoint subset of the distributed tensor
-        return recv.view(-1, dims)
+            self.run_reduce()
+        # wait for the reduce, where rank 0 merges all (partial) files. Dataset can then be used by all nodes.
+        dist.barrier(group=comm_group)
