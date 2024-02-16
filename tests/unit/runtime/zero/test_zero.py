@@ -1604,7 +1604,7 @@ class TestEmptyParameterGroup(DistributedTest):
         }
 
         if use_client_optimizer:
-            optimizer = deepspeed.ops.adam.FusedAdam(param_groups, lr=0.1)
+            optimizer = torch.optim.AdamW(param_groups, lr=0.1)
             model_parameters = model.parameters()
         else:
             config_dict["optimizer"] = {"type": "adamw"}
