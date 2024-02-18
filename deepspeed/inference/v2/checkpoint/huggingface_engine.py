@@ -40,16 +40,13 @@ class HuggingFaceCheckpointEngine(CheckpointEngineBase):
         # currently coming from the ckpt engine init but maybe a catch all kwargs for other
         # snapshot download parameters would be more flexible.
 
-        # NOTE(jeff): allow_patterns here are explicitly not using safetensors or other
-        # checkpoint files that may be present. Example of all files in the llama-2-7b
-        # repo here: https://huggingface.co/meta-llama/Llama-2-7b-hf/tree/main
-        from huggingface_hub import snapshot_download, list_files_info
+        from huggingface_hub import snapshot_download, list_repo_tree
 
         def model_has_safetensors(model_name_or_path: str) -> bool:
             if os.path.isdir(model_name_or_path):
                 file_list = os.listdir(model_name_or_path)
             else:
-                file_list = [rf.rfilename for rf in list_files_info(model_name_or_path)]
+                file_list = [rf.path for rf in list_repo_tree(model_name_or_path)]
             for f in file_list:
                 if f.endswith(".safetensors"):
                     return True
