@@ -756,24 +756,8 @@ class Dist:
         return recv
 
 
-def text_both_data_analyzers(dataset=None):
+def test_compare_both_data_analyzers(dataset):
     """ given a dataset, compare file and memory based data analyser"""
-
-    if dataset is None:
-
-        class TestDataset(torch.utils.data.Dataset):
-
-            def __init__(self, size=20):
-                self.values = [1001 + x % 6 for x in range(size)]
-                self.size = size
-
-            def __len__(self):
-                return self.size
-
-            def __getitem__(self, idx):
-                return self.values[idx]
-
-        dataset = TestDataset()
 
     id = lambda t: torch.tensor(t).to(torch.int64)  # identity
     batch_sum = lambda t: id(t).sum()  #sum batch
@@ -823,3 +807,18 @@ def text_both_data_analyzers(dataset=None):
                     print(f"files {path} are not identical.")
 
 
+if __name__ == "__main__":
+
+    class TestDataset(torch.utils.data.Dataset):
+
+        def __init__(self, size=20):
+            self.values = [1001 + x % 6 for x in range(size)]
+            self.size = size
+
+        def __len__(self):
+            return self.size
+
+        def __getitem__(self, idx):
+            return self.values[idx]
+
+    test_compare_both_data_analyzers(TestDataset())
