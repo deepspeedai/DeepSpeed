@@ -674,7 +674,7 @@ class Dist:
 
     @staticmethod
     def gather_v(tensor, dst, comm_group, num_workers, worker_id):
-        """ MPI_Alltoallv. gather tensors of variable sizes in a single rank """
+        """ Same as MPI_Gatherv. Gathers tensors of variable sizes in a single rank """
 
         # gather the number of rows to be sent/recv
         size = torch.tensor([len(tensor)], dtype=torch.int64, device=tensor.device)
