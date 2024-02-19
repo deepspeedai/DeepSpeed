@@ -179,7 +179,7 @@ class DataAnalyzer(object):
                 else:
                     self.custom_map_update(data, self.metric_types, self.metric_dtypes, self.metric_functions,
                                            metric_results, batch_start_idx)
-                processed_sample += self.batch_size
+                processed_sample += len(data)
                 duration = (time.time() - start) / 3600.0
                 remain_duration = duration * total_sample / processed_sample - duration
                 logger.info(
@@ -536,8 +536,7 @@ class DistributedDataAnalyzer(object):
                     for row in range(metric_values.size()[0]):
                         value = metric_values[row].item()
                         sample_idx = batch_start_idx + row  # sample idx following dataset iteration order
-                        if isinstance(data,
-                                      dict) and 'index' in data:  # Megatron use case, idx provided in 'index' field
+                        if isinstance(data, dict) and 'index' in data:  # Megatron use case
                             sample_idx = data['index'][row][0].item()
                         elif self.sample_indices is not None:  # user defined shuffling of indices
                             sample_idx = self.sample_indices[sample_idx]
@@ -547,7 +546,7 @@ class DistributedDataAnalyzer(object):
                         metric_results[m_idx] = metric_values
                     else:
                         metric_results[m_idx].add_(metric_values)
-            batch_start_idx += self.batch_size
+            batch_start_idx += len(data)
 
         # compute dtype for sample ids
         total_num_samples = len(self.dataset)
@@ -716,8 +715,8 @@ class Dist:
         tensor = torch.tensor(sorted(tensor.tolist()), dtype=tensor.dtype, device=tensor.device)
 
         # 2 - collect few samples per rank
-        idx = torch.round(torch.linspace(0, len(tensor) - 1, n_samples + 1)).to(int)
-        samples = tensor[idx[:-1]][:, 0].contiguous().to(device)  #only first column, all but last row
+        idx = torch.round(torch.linspace(0, len(tensor) - 1, n_samples)).to(int)
+        samples = tensor[idx][:, 0].contiguous().to(device)  #only first column, all but last row
 
         # 2 - Allgather samples
         all_samples = [torch.zeros(n_samples, dtype=samples.dtype, device=device) for _ in range(num_workers)]
