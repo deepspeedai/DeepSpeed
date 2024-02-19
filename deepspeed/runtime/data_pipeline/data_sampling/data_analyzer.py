@@ -763,6 +763,8 @@ def test_compare_both_data_analyzers(dataset):
     kwargs = dict(
         dataset=dataset,
         batch_size=3,
+        worker_id=int(os.environ['RANK']),
+        num_workers=int(os.environ['WORLD_SIZE']),
         metric_names=["mod", "batch_sum"],
         metric_functions=[id, batch_sum],
         metric_types=['single_value_per_sample', 'accumulate_value_over_samples'],
@@ -770,8 +772,6 @@ def test_compare_both_data_analyzers(dataset):
 
     dda = DistributedDataAnalyzer(
         save_path="./output_dist",
-        worker_id=int(os.environ['RANK']),
-        num_workers=int(os.environ['WORLD_SIZE']),
         device=f"cuda:{int(os.environ['LOCAL_RANK'])}",
         **kwargs,
     )
