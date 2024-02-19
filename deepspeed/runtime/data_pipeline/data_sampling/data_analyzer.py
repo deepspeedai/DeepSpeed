@@ -413,7 +413,7 @@ class DataAnalyzer(object):
     @staticmethod
     def output_index_to_sample_percentile(index_to_sample_fname, index_to_metric_fname, metric_name, metric_save_path,
                                           total_num_samples, sample_idx_dtype):
-        """ read index_to_metric and index_to_sample files and write distribution to percentage_merged_file """
+        """ read index_to_metric and index_to_sample files and write distribution to index_to_sample_percentage_merged """
         num_sample_per_value = {}
         index_to_sample = MMapIndexedDataset(index_to_sample_fname, skip_warmup=True)
         index_to_metric = MMapIndexedDataset(index_to_metric_fname, skip_warmup=True)
