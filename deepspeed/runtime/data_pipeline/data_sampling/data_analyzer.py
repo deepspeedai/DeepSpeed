@@ -14,8 +14,8 @@ from torch.utils.data import BatchSampler, SequentialSampler, DataLoader, Subset
 
 from deepspeed.utils import logger, groups
 import deepspeed.comm as dist
-from .indexed_dataset import MMapIndexedDataset, valid_dtypes
-from .utils import split_dataset, split_index, create_mmap_dataset_builder, close_mmap_dataset_builder, find_fit_int_dtype
+from deepspeed.runtime.data_pipeline.data_sampling.indexed_dataset import MMapIndexedDataset, valid_dtypes
+from deepspeed.runtime.data_pipeline.data_sampling.utils import split_dataset, split_index, create_mmap_dataset_builder, close_mmap_dataset_builder, find_fit_int_dtype
 
 
 class DataAnalyzer(object):
@@ -792,9 +792,10 @@ def test_compare_both_data_analyzers(dataset):
         print("DataAnalyzer runtime: %s seconds " % (time.time() - start_time))
 
     output_paths = [
-        "batch_sum/batch_sum_metric_value.bin", "batch_sum/batch_sum_metric_value.idx", "mod/mod_index_to_metric.bin",
-        "mod/mod_index_to_metric.idx", "mod/mod_index_to_sample.bin", "mod/mod_index_to_sample.idx",
-        "mod/mod_index_to_sample_percentile_merged.bin", "mod/mod_index_to_sample_percentile_merged.idx",
+        "batch_sum/batch_sum_metric_value.bin", "batch_sum/batch_sum_metric_value.idx", \
+        "mod/mod_index_to_metric.bin", "mod/mod_index_to_metric.idx", \
+        "mod/mod_index_to_sample.bin", "mod/mod_index_to_sample.idx", \
+        "mod/mod_index_to_sample_percentile_merged.bin", "mod/mod_index_to_sample_percentile_merged.idx", \
         "mod/mod_sample_to_metric.bin", "mod/mod_sample_to_metric.idx"
     ]
 
