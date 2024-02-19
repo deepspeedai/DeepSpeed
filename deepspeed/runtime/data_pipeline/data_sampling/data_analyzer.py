@@ -442,10 +442,6 @@ class DataAnalyzer(object):
                                self.num_threads, self.num_threads_reduce)
 
     def run_map_reduce(self, comm_group=None):
-
-        if not dist.is_initialized():
-            dist.init_distributed()
-
         self.run_map()
         # wait for the mapping operation, where all nodes outputs their own (partial) result files
         dist.barrier(group=comm_group)
