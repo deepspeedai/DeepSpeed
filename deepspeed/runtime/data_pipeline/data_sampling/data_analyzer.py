@@ -96,6 +96,7 @@ class DataAnalyzer(object):
             metric_type, metric_dtype, metric_function, metric_result = metric_types[m_idx], \
                 metric_dtypes[m_idx], metric_functions[m_idx], metric_results[m_idx]
             metric_values = metric_function(data)
+
             assert torch.is_tensor(metric_values) or isinstance(metric_values, np.ndarray), \
                 "metric_function must return a tensor or array"
             assert metric_values.dtype == metric_dtype, \
@@ -389,7 +390,6 @@ class DataAnalyzer(object):
                     index_to_sample_fname, index_to_metric_fname, metric_name, metric_save_path, total_num_samples,
                     sample_idx_dtype)
                 self.get_metric_value_percentiles(metric_name, num_sample_per_value, total_num_samples)
-
             elif metric_type == 'accumulate_value_over_samples':
                 metric_save_path = f"{save_path}/{metric_name}/"
                 metric_value = None
