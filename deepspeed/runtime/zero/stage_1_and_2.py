@@ -1686,7 +1686,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
             if len(all_norms) > 0:
                 total_norm = torch.stack(all_norms).square().sum().float()
             else:
-                total_norm = torch.FloatTensor([0.0]).to(self.device)
+                total_norm = torch.tensor(0.0, dtype=torch.float32).to(self.device)
             # Sum across all model parallel Device.
             dist.all_reduce(total_norm, op=dist.ReduceOp.SUM, group=self.dp_process_group)
 
