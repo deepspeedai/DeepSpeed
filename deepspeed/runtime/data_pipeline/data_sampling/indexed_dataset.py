@@ -98,7 +98,7 @@ def write_longs(f, a):
     f.write(np.array(a, dtype=np.int64))
 
 
-# valid metric_dtypes as numpy and torch types
+# valid dtypes for metric_values and their corresponding numpy/torch types
 dtypes = {
     1: (np.uint8, torch.uint8),
     2: (np.int8, torch.int8),
@@ -586,9 +586,9 @@ class MMapIndexedDatasetBuilder(object):
         self._data_file.write(np_array.tobytes(order='C'))
         self._sizes.append(np_array.size)
 
-    def add_items(self, arr_list):
-        """ write a list of arrays to the file and update their sizes in the index"""
-        np_arrays = [arr.astype(self._dtype) for arr in arr_list]
+    def add_items(self, tensor_list):
+        """ write a list of tensors to the file and update their sizes in the index"""
+        np_arrays = [np.array(t.numpy(), dtype=self._dtype) for t in tensor_list]
         self._data_file.writelines([arr.tobytes(order='C') for arr in np_arrays])
         for arr in np_arrays:
             self._sizes.append(arr.size)
