@@ -98,7 +98,7 @@ def write_longs(f, a):
     f.write(np.array(a, dtype=np.int64))
 
 
-# valid metric_dtypes as numpy and torch types
+# valid dtypes for metric_values and their corresponding numpy/torch types
 dtypes = {
     1: (np.uint8, torch.uint8),
     2: (np.int8, torch.int8),
