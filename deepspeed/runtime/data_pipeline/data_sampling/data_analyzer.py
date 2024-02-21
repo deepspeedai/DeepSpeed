@@ -12,7 +12,7 @@ import numpy as np
 import torch
 from torch.utils.data import BatchSampler, SequentialSampler, DataLoader, Subset
 
-from deepspeed.utils import logger, groups
+from deepspeed.utils import logger
 import deepspeed.comm as dist
 from deepspeed.runtime.data_pipeline.data_sampling.indexed_dataset import MMapIndexedDataset, valid_dtypes
 from deepspeed.runtime.data_pipeline.data_sampling.utils import split_dataset, split_index, create_mmap_dataset_builder, close_mmap_dataset_builder, find_fit_int_dtype
@@ -482,12 +482,12 @@ class DistributedDataAnalyzer(object):
             dist.init_distributed()
 
         # comm_group and worker_id+num_workers are mutually exclusive
-        if comm_group is not None:
-            self.comm_group = comm_group
-            self.num_workers = self.comm_group.size()
-            self.worker_id = self.comm_group.rank()
+        self.comm_group = comm_group
+        if self.comm_group is None:
+            # self.comm_group = deepspeed.utils.groups._clone_world_group()
+            self.num_workers = num_workers
+            self.worker_id = worker_id
         else:
-            self.comm_group = groups._clone_world_group()
             self.num_workers = self.comm_group.size()
             self.worker_id = self.comm_group.rank()
 
@@ -601,7 +601,6 @@ class DistributedDataAnalyzer(object):
                 metric_value_fname = f"{metric_save_path}/{metric_name}_metric_value"
                 dist.reduce(metric_values, dst=0, op=dist.ReduceOp.SUM, group=self.comm_group)
                 metric_value_dtype = find_fit_int_dtype(metric_values.min(), metric_values.max())
-
                 if self.worker_id == 0:
                     builder = create_mmap_dataset_builder(metric_value_fname, metric_value_dtype)
                     builder.add_item(metric_values.cpu())
@@ -635,9 +634,18 @@ class DistributedDataAnalyzer(object):
         # method to deserializes a buffer into rows of different lengths and write them to file
         def write_buffer_to_file(buff, src, builder):
             assert self.worker_id == 0, "only rank 0 can write to file"
+
+            # # write one buffer at a time
+            # for row_len in row_lens[src]:
+            #     builder.add_item(buff[:row_len].cpu())
+            #     buff = buff[row_len:]
+
+            # collect all buffers and write them all at once
+            buffer_list = []
             for row_len in row_lens[src]:
-                builder.add_item(buff[:row_len].cpu())
+                buffer_list.append(buff[:row_len].cpu())
                 buff = buff[row_len:]
+            builder.add_items(buffer_list)
 
         # 5. rank 0 prepares output folder and file
         if self.worker_id == 0:
@@ -757,8 +765,7 @@ class SerialDataAnalyzer(object):
         self,
         dataset,
         batch_size=1,
-        num_threads=4,  #num_workrs in DataLoader
-        prefetch_factor=4,
+        num_threads=4,
         metric_names=[],
         metric_functions=[],
         metric_types=[],
@@ -769,7 +776,6 @@ class SerialDataAnalyzer(object):
         self.dataset = dataset
         self.batch_size = batch_size
         self.num_threads = num_threads
-        self.prefetch_factor = prefetch_factor
         self.metric_names = metric_names
         self.metric_functions = metric_functions
         self.metric_types = metric_types
@@ -782,7 +788,6 @@ class SerialDataAnalyzer(object):
 
         dataloader = DataLoader(dataset=self.dataset,
                                 num_workers=self.num_threads,
-                                prefetch_factor=self.prefetch_factor,
                                 collate_fn=self.collate_fn,
                                 pin_memory=False)
 
@@ -883,22 +888,18 @@ class SerialDataAnalyzer(object):
         # prepares output folder and file
         os.makedirs(os.path.dirname(fname), exist_ok=True)
         builder = create_mmap_dataset_builder(fname, numpy_dtype)
-
-        # iterate through tensors and write them
-        for tensor in tensor_list:
-            builder.add_item(tensor)
-
+        builder.add_items(tensor_list)
         close_mmap_dataset_builder(builder, fname)  # close file
 
 
-def test_compare_data_analyzers(dataset, num_threads=8):
+def test_compare_data_analyzers(dataset, num_threads=16):
     """ given a dataset, compare file and memory based data analyser"""
 
     id = lambda t: torch.tensor(t).to(torch.int64)  # identity
     batch_sum = lambda t: id(t).sum()  #sum batch
     kwargs = dict(
         dataset=dataset,
-        batch_size=3,
+        batch_size=2**10,
         metric_names=["mod", "batch_sum"],
         metric_functions=[id, batch_sum],
         metric_types=['single_value_per_sample', 'accumulate_value_over_samples'],
@@ -937,6 +938,7 @@ def test_compare_data_analyzers(dataset, num_threads=8):
     if worker_id == 0:
         print("DataAnalyzer runtime: %s seconds " % (time.time() - start_time))
 
+    # check that all output files match
     output_paths = [
         "batch_sum/batch_sum_metric_value.bin", "batch_sum/batch_sum_metric_value.idx", \
         "mod/mod_index_to_metric.bin", "mod/mod_index_to_metric.idx", \
@@ -951,16 +953,18 @@ def test_compare_data_analyzers(dataset, num_threads=8):
                 open(os.path.join(dda.save_path, path), 'rb') as f2, \
                 open(os.path.join(sda.save_path, path), 'rb') as f3:
                 f1c, f2c, f3c = f1.read(), f2.read(), f3.read()
-                if f1c != f2c or f2c != f3c:
-                    print(f"files {path} are not identical.")
+                if f1c != f2c:
+                    print(f"DataAnalyzer and DistributedDataAnalyzer {path} are not identical.")
+                if f2c != f3c:
+                    print(f"DistributedDataAnalyzer and SerialDataAnalyzer {path} are not identical.")
 
 
 if __name__ == "__main__":
 
     class TestDataset(torch.utils.data.Dataset):
 
-        def __init__(self, size=200000):
-            self.values = [1001 + x % 6 for x in range(size)]
+        def __init__(self, size=20000):
+            self.values = [1001 + x % 37 for x in range(size)]
             self.size = size
 
         def __len__(self):
