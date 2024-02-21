@@ -407,7 +407,7 @@ def clip_grad_norm_(parameters, max_norm, norm_type=2, mpu=None):
     max_norm = torch.tensor([float(max_norm)], device=parameters[0].device)
     clip_coef = max_norm / (total_norm + 1e-6)
     tmp_tensor = torch.tensor([1.0], device=parameters[0].device)
-    clip_coef = torch.max(tmp_tensor, clip_coef)
+    clip_coef = torch.min(tmp_tensor, clip_coef)
     for p in parameters:
         p.grad.data.mul_(clip_coef)
     return total_norm
