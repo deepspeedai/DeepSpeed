@@ -13,6 +13,7 @@ import numpy as np
 import torch
 from torch.utils.data import BatchSampler, SequentialSampler, DataLoader, Subset
 
+from deepspeed.utils import logger
 import deepspeed.comm as dist
 from deepspeed.utils import logger
 from deepspeed.runtime.data_pipeline.data_sampling.indexed_dataset import MMapIndexedDataset, valid_dtypes
