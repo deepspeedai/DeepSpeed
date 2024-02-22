@@ -1911,9 +1911,6 @@ class DeepSpeedEngine(Module):
 
     @instrument_w_nvtx
     def allreduce_gradients(self, bucket_size=MEMORY_OPT_ALLREDUCE_SIZE):
-        assert not (self.bfloat16_enabled() and self.pipeline_parallelism), \
-            f'allreduce_gradients() is not valid when bfloat+pipeline_parallelism is enabled'
-
         # Pass (PP) gas boundary flag to optimizer (required for zero)
         self.optimizer.is_gradient_accumulation_boundary = self.is_gradient_accumulation_boundary()
         # ZeRO stage >= 2 communicates during non gradient accumulation boundaries as well
@@ -1926,7 +1923,11 @@ class DeepSpeedEngine(Module):
                     self.optimizer, 'reduce_gradients'):
                 self.optimizer.reduce_gradients(pipeline_parallel=self.pipeline_parallelism)
             else:
-                self.buffered_allreduce_fallback(elements_per_buffer=bucket_size)
+                grads = None
+                if hasattr(self.optimizer, "get_grads_for_reduction"):
+                    # This is currently for BF16 optimizer
+                    grads = self.optimizer.get_grads_for_reduction()
+                self.buffered_allreduce_fallback(grads=grads, elements_per_buffer=bucket_size)
 
     @instrument_w_nvtx
     def backward(self, loss, allreduce_gradients=True, release_loss=False, retain_graph=False, scale_wrt_gas=True):
@@ -3224,22 +3225,21 @@ class DeepSpeedEngine(Module):
         # In the case of E + D parallelism, only the
         # first expert parallel group should save the expert weights
         # since each expert parallel group is a copy of the model's experts
-        if exp_dp_rank != 0:
-            return
+        if exp_dp_rank == 0:
+            # Save optimizer states. They are different across each exp parallel rank.
+            optimizer_state = {
+                'optimizer': self.optimizer.state_dict() if self.optimizer and not self.zero_optimization() else None
+            }
+            # TODO: why use BufferedWriter not the path
+            file_path = self._get_optimizer_ckpt_name(save_dir, tag, expp_rank)
+            self.checkpoint_engine.save(optimizer_state, file_path)
 
-        # Save optimizer states. They are different across each exp parallel rank.
-        optimizer_state = {
-            'optimizer': self.optimizer.state_dict() if self.optimizer and not self.zero_optimization() else None
-        }
-        # TODO: why use BufferedWriter not the path
-        file_path = self._get_optimizer_ckpt_name(save_dir, tag, expp_rank)
-        self.checkpoint_engine.save(optimizer_state, file_path)
+        # Load flow uses below saved file for model parameters, RNG and more
+        if groups._get_data_parallel_rank() == 0:
+            # get non-moe parameters
+            model_state_dict = self._get_non_moe_state_dict(
+                self.module_state_dict(exclude_frozen_parameters=exclude_frozen_parameters))
 
-        # get non-moe parameters
-        model_state_dict = self._get_non_moe_state_dict(
-            self.module_state_dict(exclude_frozen_parameters=exclude_frozen_parameters))
-
-        if expp_rank == 0:
             # TODO: update num experts info,.. in checkpoint
             state = {
                 'module':

@@ -26,10 +26,10 @@ def test_call_to_str():
     assert c2s('hello', 1138, val=3) == 'hello(1138, val=3)'
 
 
-class TestClibGradNorm(DistributedTest):
+class TestClipGradNorm(DistributedTest):
     world_size = 2
 
-    def test(self):
+    def test_gather(self):
         param1 = torch.nn.Parameter(torch.Tensor([0]))
         param1.grad = torch.Tensor([1])
         param2 = torch.nn.Parameter(torch.Tensor([0]))
@@ -49,6 +49,27 @@ class TestClibGradNorm(DistributedTest):
         dist.all_gather(gathered_norm, norm)
 
         assert gathered_norm[0] == gathered_norm[1], "norm at rank 0 does not match the norm at rank 1"
+
+    def test_clipped_val(self):
+        max_norm = 0.1
+
+        def test_params():
+            param1 = torch.nn.Parameter(torch.Tensor([0]))
+            param1.grad = torch.Tensor([1])
+            param2 = torch.nn.Parameter(torch.Tensor([0]))
+            param2.grad = torch.Tensor([1])
+            return [param1, param2]
+
+        # This assumes gradients are same on all the ranks and doesn't consider multiple ranks
+        params_expected = test_params()
+        torch.nn.utils.clip_grad_norm_(params_expected, max_norm)
+
+        params_actual = test_params()
+        ds_utils.clip_grad_norm_(params_actual, max_norm=max_norm)
+
+        # This can be allclose
+        assert torch.equal(params_expected[0].grad, params_actual[0].grad)
+        assert torch.equal(params_expected[1].grad, params_actual[1].grad)
 
 
 @pytest.mark.parametrize("check_using_norm", [(False), (True)])

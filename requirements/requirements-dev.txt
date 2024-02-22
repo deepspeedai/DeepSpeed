@@ -6,7 +6,7 @@ future
 importlib-metadata>=4
 mup
 pre-commit>=2.20.0
-pytest
+pytest<=8.0.0
 pytest-forked
 pytest-randomly
 pytest-xdist

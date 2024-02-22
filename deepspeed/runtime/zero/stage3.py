@@ -21,7 +21,7 @@ from deepspeed.runtime.zero.config import ZeroStageEnum
 from deepspeed.runtime.zero.offload_config import OffloadDeviceEnum
 from deepspeed.runtime.zero.parameter_offload import DeepSpeedZeRoOffload
 from deepspeed.runtime.zero.utils import apply_to_tensors_only
-from deepspeed.ops.adam import DeepSpeedCPUAdam, FusedAdam
+from deepspeed.ops.adam import DeepSpeedCPUAdam
 from deepspeed.runtime.swap_tensor.partitioned_param_swapper import PartitionedParamStatus
 from deepspeed.runtime.swap_tensor.optimizer_utils import OptimizerSwapper
 from deepspeed.runtime.swap_tensor.partitioned_optimizer_swapper import PartitionedOptimizerSwapper
@@ -201,13 +201,12 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
             backup_gpu_tensor = torch.randn(1, device=get_accelerator().device_name()).to(self.dtype)
             backup_gpu_param = torch.nn.Parameter(backup_gpu_tensor)
             assert type(init_optimizer) == DeepSpeedCPUAdam, 'Hybrid Optimizer Only Supports DeepSpeedCPUAdam'
-            self.backup_optimizer = FusedAdam([backup_gpu_param],
-                                              lr=self.optimizer.param_groups[0]["lr"],
-                                              bias_correction=self.optimizer.param_groups[0]["bias_correction"],
-                                              betas=self.optimizer.param_groups[0]["betas"],
-                                              eps=self.optimizer.param_groups[0]["eps"],
-                                              weight_decay=self.optimizer.param_groups[0]["weight_decay"],
-                                              amsgrad=self.optimizer.param_groups[0]["amsgrad"])
+            self.backup_optimizer = torch.optim.AdamW([backup_gpu_param],
+                                                      lr=self.optimizer.param_groups[0]["lr"],
+                                                      betas=self.optimizer.param_groups[0]["betas"],
+                                                      eps=self.optimizer.param_groups[0]["eps"],
+                                                      weight_decay=self.optimizer.param_groups[0]["weight_decay"],
+                                                      amsgrad=self.optimizer.param_groups[0]["amsgrad"])
             # Multiple param_groups configs for back-up optimizer
             if len(self.optimizer.param_groups) > 1:
                 for i in range(1, len(self.optimizer.param_groups)):

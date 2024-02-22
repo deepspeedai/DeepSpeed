@@ -23,11 +23,11 @@ class SYCLOpBuilder(OpBuilder):
             from intel_extension_for_pytorch.xpu.cpp_extension import DPCPPExtension
         except ImportError:
             from intel_extension_for_pytorch.xpu.utils import DPCPPExtension
-
+        include_dirs = [os.path.abspath(x) for x in self.strip_empty_entries(self.include_paths())]
         print("dpcpp sources = {}".format(self.sources()))
         dpcpp_ext = DPCPPExtension(name=self.absolute_name(),
                                    sources=self.strip_empty_entries(self.sources()),
-                                   include_dirs=self.strip_empty_entries(self.include_paths()),
+                                   include_dirs=include_dirs,
                                    extra_compile_args={
                                        'cxx': self.strip_empty_entries(self.cxx_args()),
                                    },

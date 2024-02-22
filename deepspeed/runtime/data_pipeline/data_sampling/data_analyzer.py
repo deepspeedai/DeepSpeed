@@ -12,7 +12,7 @@ import numpy as np
 import torch
 from torch.utils.data import BatchSampler, SequentialSampler, DataLoader, Subset
 
-from deepspeed.utils import logger
+from deepspeed.utils import logger, groups
 import deepspeed.comm as dist
 from deepspeed.runtime.data_pipeline.data_sampling.indexed_dataset import MMapIndexedDataset, valid_dtypes
 from deepspeed.runtime.data_pipeline.data_sampling.utils import split_dataset, split_index, create_mmap_dataset_builder, close_mmap_dataset_builder, find_fit_int_dtype
@@ -601,6 +601,7 @@ class DistributedDataAnalyzer(object):
                 metric_value_fname = f"{metric_save_path}/{metric_name}_metric_value"
                 dist.reduce(metric_values, dst=0, op=dist.ReduceOp.SUM, group=self.comm_group)
                 metric_value_dtype = find_fit_int_dtype(metric_values.min(), metric_values.max())
+
                 if self.worker_id == 0:
                     builder = create_mmap_dataset_builder(metric_value_fname, metric_value_dtype)
                     builder.add_item(metric_values.cpu())
@@ -900,6 +901,9 @@ def test_compare_data_analyzers(dataset, num_threads=16):
     kwargs = dict(
         dataset=dataset,
         batch_size=2**10,
+        batch_size=3,
+        worker_id=int(os.environ['RANK']),
+        num_workers=int(os.environ['WORLD_SIZE']),
         metric_names=["mod", "batch_sum"],
         metric_functions=[id, batch_sum],
         metric_types=['single_value_per_sample', 'accumulate_value_over_samples'],
@@ -939,6 +943,26 @@ def test_compare_data_analyzers(dataset, num_threads=16):
         print("DataAnalyzer runtime: %s seconds " % (time.time() - start_time))
 
     # check that all output files match
+    dda = DistributedDataAnalyzer(
+        save_path="./output_dist",
+        device=f"cuda:{int(os.environ['LOCAL_RANK'])}",
+        **kwargs,
+    )
+    start_time = time.time()
+    dda.run_map_reduce()
+    if dda.worker_id == 0:
+        print("DistributedDataAnalyzer runtime: %s seconds " % (time.time() - start_time))
+
+    da = DataAnalyzer(num_threads=2,
+                      num_threads_reduce=2,
+                      metric_dtypes=[torch.int64, torch.int64],
+                      save_path="./output_disk",
+                      **kwargs)
+    start_time = time.time()
+    da.run_map_reduce()
+    if da.worker_id == 0:
+        print("DataAnalyzer runtime: %s seconds " % (time.time() - start_time))
+
     output_paths = [
         "batch_sum/batch_sum_metric_value.bin", "batch_sum/batch_sum_metric_value.idx", \
         "mod/mod_index_to_metric.bin", "mod/mod_index_to_metric.idx", \
