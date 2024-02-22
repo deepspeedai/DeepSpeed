@@ -12,7 +12,7 @@ import numpy as np
 import torch
 from torch.utils.data import BatchSampler, SequentialSampler, DataLoader, Subset
 
-from deepspeed.utils import logger, groups
+from deepspeed.utils import logger
 import deepspeed.comm as dist
 from deepspeed.runtime.data_pipeline.data_sampling.indexed_dataset import MMapIndexedDataset, valid_dtypes
 from deepspeed.runtime.data_pipeline.data_sampling.utils import split_dataset, split_index, create_mmap_dataset_builder, close_mmap_dataset_builder, find_fit_int_dtype
@@ -482,17 +482,17 @@ class DistributedDataAnalyzer(object):
             dist.init_distributed()
 
         # comm_group and worker_id+num_workers are mutually exclusive
-        if comm_group is not None:
-            self.comm_group = comm_group
-            self.num_workers = self.comm_group.size()
-            self.worker_id = self.comm_group.rank()
+        self.comm_group = comm_group
+        if self.comm_group is None:
+            # self.comm_group = deepspeed.utils.groups._clone_world_group()
+            self.num_workers = num_workers
+            self.worker_id = worker_id
         else:
-            self.comm_group = groups._clone_world_group()
             self.num_workers = self.comm_group.size()
             self.worker_id = self.comm_group.rank()
 
         if self.worker_id == 0:
-            logger.info(f"Data analyzer initialized with {self.num_workers} workers.")
+            logger.info(f"Distributed data analyzer initialized with {self.num_workers} workers.")
 
     def run_map_reduce(self):
 
@@ -635,9 +635,18 @@ class DistributedDataAnalyzer(object):
         # method to deserializes a buffer into rows of different lengths and write them to file
         def write_buffer_to_file(buff, src, builder):
             assert self.worker_id == 0, "only rank 0 can write to file"
+
+            # # write one buffer at a time
+            # for row_len in row_lens[src]:
+            #     builder.add_item(buff[:row_len].cpu())
+            #     buff = buff[row_len:]
+
+            # collect all buffers and write them all at once
+            buffer_list = []
             for row_len in row_lens[src]:
-                builder.add_item(buff[:row_len].cpu())
+                buffer_list.append(buff[:row_len].cpu())
                 buff = buff[row_len:]
+            builder.add_items(buffer_list)
 
         # 5. rank 0 prepares output folder and file
         if self.worker_id == 0:

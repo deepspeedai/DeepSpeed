@@ -581,9 +581,17 @@ class MMapIndexedDatasetBuilder(object):
         self._doc_idx = [0]
 
     def add_item(self, tensor):
+        """ write the tensor to the file and update its size in the index"""
         np_array = np.array(tensor.numpy(), dtype=self._dtype)
         self._data_file.write(np_array.tobytes(order='C'))
         self._sizes.append(np_array.size)
+
+    def add_items(self, tensor_list):
+        """ write a list of tensors to the file and update their sizes in the index"""
+        np_arrays = [np.array(t.numpy(), dtype=self._dtype) for t in tensor_list]
+        self._data_file.writelines([arr.tobytes(order='C') for arr in np_arrays])
+        for arr in np_arrays:
+            self._sizes.append(arr.size)
 
     def add_item_numpy(self, np_array):
         if np_array.dtype != self._dtype:
