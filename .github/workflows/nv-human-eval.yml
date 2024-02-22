@@ -1,0 +1,53 @@
+name: nv-human-eval
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  unit-tests:
+    runs-on: [self-hosted, nvidia, a6000]
+    container:
+      image: nvcr.io/nvidia/pytorch:23.03-py3
+      ports:
+        - 80
+      options: --gpus all --shm-size "8G"
+
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Check container state
+        run: |
+          ldd --version
+          nvcc --version
+          nvidia-smi
+          python -c "import torch; print('torch:', torch.__version__, torch)"
+          python -c "import torch; print('CUDA available:', torch.cuda.is_available())"
+      - name: Install transformers
+        run: |
+          git clone --depth=1 https://github.com/huggingface/transformers
+          cd transformers
+          git rev-parse --short HEAD
+          python -m pip install .
+      - name: Clone Human Eval
+        run: |
+          git clone --depth=1 https://github.com/openai/human-eval.git
+          sed -i '/exec(check_program, exec_globals)/ s/^# //' human-eval/human_eval/execution.py
+          cd human-eval
+          git rev-parse --short HEAD
+          python -m pip install .
+      - name: Install deepspeed
+        run: |
+          python -m pip install .[dev,1bit,autotuning]
+          ds_report
+      - name: Python environment
+        run: |
+          python -m pip list
+      - name: Unit tests
+        run: |
+          unset TORCH_CUDA_ARCH_LIST # only jit compile for current arch
+          cd tests
+          python -m pytest --color=yes --durations=0 --verbose -rF -m 'evaluation' -k "test_human_eval" unit/ --torch_ver="2.0" --cuda_ver="12"
