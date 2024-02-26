@@ -35,7 +35,7 @@ def get_backend_fn(backend: Union[str, Callable]) -> Union[str, Callable]:
         return backend
 
     elif isinstance(backend, str):
-        if backend in torch._dynamo.list_backends():
+        if backend in torch._dynamo.list_backends(exclude_tags=()):
             return backend
 
         # Get module name from backend name
