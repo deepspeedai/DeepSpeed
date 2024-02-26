@@ -78,3 +78,12 @@ repos:
         language: python
         exclude: ^(.github/workflows/|scripts/check-torchcuda.py|docs/_tutorials/accelerator-abstraction-interface.md|accelerator/cuda_accelerator.py|deepspeed/inference/engine.py|deepspeed/model_implementations/transformers/clip_encoder.py|deepspeed/model_implementations/diffusers/vae.py|deepspeed/model_implementations/diffusers/unet.py|op_builder/spatial_inference.py|op_builder/transformer_inference.py|op_builder/builder.py|setup.py|tests/unit/ops/sparse_attention/test_sparse_attention.py)
         # Specific deepspeed/ files are excluded for now until we wrap ProcessGroup in deepspeed.comm
+
+-   repo: local
+    hooks:
+    -   id: check-extraindexurl
+        name: check-extraindexurl
+        entry: ./scripts/check-extraindexurl.py
+        language: python
+        files: \.(yml|yaml|sh|py)$
+        exclude: ^(scripts/check-extraindexurl.py)
