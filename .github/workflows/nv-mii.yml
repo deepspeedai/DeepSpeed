@@ -2,6 +2,12 @@ name: nv-mii
 
 on:
   workflow_dispatch:
+    inputs:
+      mii_branch:
+        description: 'DeepSpeed-MII Branch'
+        required: false
+        default: 'main'
+        type: string
   pull_request:
     paths:
       - '.github/workflows/nv-mii.yml'
@@ -55,7 +61,12 @@ jobs:
 
       - name: MII unit tests
         run: |
-          git clone https://github.com/microsoft/DeepSpeed-MII.git
+          BRANCH="main"
+          if [[ ! -z "${{ github.event.inputs.mii_branch }}" ]]; then
+              BRANCH="${{ github.event.inputs.mii_branch }}"
+          fi
+          echo "Cloning DeepSpeed-MII branch: $BRANCH"
+          git clone -b $BRANCH --depth=1 https://github.com/microsoft/DeepSpeed-MII.git
           cd DeepSpeed-MII
           pip install .[dev]
           unset TORCH_CUDA_ARCH_LIST # only jit compile for current arch
