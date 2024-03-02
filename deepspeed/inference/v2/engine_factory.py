@@ -21,6 +21,7 @@ from .model_implementations import (
     FalconPolicy,
     PhiPolicy,
     QwenPolicy,
+    Qwen2Policy,
 )
 from .model_implementations.inference_policy_base import POLICIES, InferenceV2Policy
 from .model_implementations.flat_model_helpers import make_metadata_filename, ModelMetadata
@@ -120,6 +121,8 @@ def build_hf_engine(path: str,
             policy = PhiPolicy(model_config, checkpoint_engine=checkpoint_engine)
         elif model_config.model_type == "qwen":
             policy = QwenPolicy(model_config, checkpoint_engine=checkpoint_engine)
+        elif model_config.model_type == "qwen2":
+            policy = Qwen2Policy(model_config, checkpoint_engine=checkpoint_engine)
         else:
             raise ValueError(f"Unsupported model type {model_config.model_type}")
 
