@@ -12,8 +12,7 @@ from typing import List
 import torch
 from torch import Tensor
 from deepspeed import comm as dist
-# NOTE: Use torch.distributed's ProcessGroup class until we have our own.
-from torch.distributed import ProcessGroup, all_to_all_single
+from deepspeed.comm import ProcessGroup, all_to_all_single
 from deepspeed.accelerator import get_accelerator
 from deepspeed.utils import instrument_w_nvtx
 from deepspeed.ops import op_builder
