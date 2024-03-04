@@ -1,4 +1,4 @@
-name: nv-torch-latest-cpu
+name: cpu-torch-latest
 
 on:
   workflow_dispatch:
