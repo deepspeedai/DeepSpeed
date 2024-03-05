@@ -113,7 +113,7 @@ def prepare_tp_fused_qkvw(module, src, mp_size, gpu_index):
 
         raise ValueError("unknown fused_qkv_type")
 
-    module_name_matches = [k for k in fused_type_dict.keys() if module_str in k]
+    module_name_matches = [k for k in fused_type_dict.keys() if k in module_str]
     if module_name_matches:
         # There can be overlap with matches (e.g., "DecoderLayer" and "FalconDecoderLayer").
         # We take the longest matching module_name
