@@ -2,9 +2,9 @@ import random
 import torch
 from deepspeed.utils import logger
 from torch.utils.data import DistributedSampler
-from torch.optim import Optimizer
 from torch.optim.lr_scheduler import LRScheduler
 from torch.utils.data import DataLoader
+import torch.nn.functional as F
 import deepspeed
 
 
@@ -166,19 +166,19 @@ def dataloader_for_variable_batch_size(dataset,
         collate_fn = lambda b: collate_fn_wrapper(b, dataset, dataloader_collate_fn)
 
         dataloader = DataLoader(
-                dataset=microbatch_sample_ids,
-                sampler=sampler,
-                num_workers = dataloader_num_workers,
-                collate_fn = collate_fn,
-                pin_memory=dataloader_pin_memory,
-            )
+            dataset=microbatch_sample_ids,
+            sampler=sampler,
+            num_workers = dataloader_num_workers,
+            collate_fn = collate_fn,
+            pin_memory=dataloader_pin_memory,)
 
-        deepspeed_io_kwargs = dict(dataset=dataset,
-                        batch_size=1,
-                        pin_memory=dataloader_pin_memory,
-                        data_sampler=sampler,
-                        collate_fn=collate_fn,
-                        num_local_io_workers=dataloader_num_workers)
+        deepspeed_io_kwargs = dict(
+            dataset=microbatch_sample_ids,
+            batch_size=1,
+            pin_memory=dataloader_pin_memory,
+            data_sampler=sampler,
+            collate_fn=collate_fn,
+            num_local_io_workers=dataloader_num_workers,)
         
         return dataloader, deepspeed_io_kwargs
         
@@ -189,7 +189,7 @@ class StubLRScheduler(LRScheduler):
         return self.base_lrs
 
 def lr_scheduler_for_variable_batch_size(
-        base_batch_size, batch_sizes, lr_scaling_method='linear',
+        base_batch_size, batch_sizes, dataloader, lr_scaling_method='linear',
         optimizer=None, lr_scheduler_class=None, **lr_scheduler_kwargs):
     """
     returns a class that provides an LR scheduler that scales learning rate at every
@@ -214,7 +214,8 @@ def lr_scheduler_for_variable_batch_size(
             self.batch_sizes = batch_sizes
             self.base_batch_size = base_batch_size
             self.lr_scaling_method = lr_scaling_method
-            self.unscaled_lrs = [p['lr'] for p in optimizer.param_groups]
+            self.dataloader = dataloader
+            self._last_lr = [p['lr'] for p in optimizer.param_groups]
             super().__init__(optimizer=optimizer, **lr_scheduler_kwargs)
 
         def state_dict(self):
@@ -222,18 +223,19 @@ def lr_scheduler_for_variable_batch_size(
                 'base': super().state_dict(),
                 'base_batch_size': self.base_batch_size,
                 'lr_scaling_method': self.lr_scaling_method,
-                'unscaled_lrs': self.unscaled_lrs,
-                'batch_sizes': self.batch_sizes
+                'batch_sizes': self.batch_sizes,
                 }
 
         def load_state_dict(self, state_dict):
             super().load_state_dict(state_dict['base'])
             self.base_batch_size = state_dict['base_batch_size']
             self.lr_scaling_method = state_dict['lr_scaling_method']
-            self.unscaled_lrs = state_dict['unscaled_lrs']
             self.batch_sizes = state_dict['batch_sizes']
 
-        def step(self, epoch=None):
+        def get_lr(self):
+            return [group['lr'] for group in self.optimizer.param_groups]
+
+        def step(self, epoch=0):
             
             # call the base scheduler's step method to get LR for next epoch
             # note: optimizer.step preceeds lr_scheduler.step(), so the stepping workflow is:
@@ -242,24 +244,21 @@ def lr_scheduler_for_variable_batch_size(
             # epoch 1: optimizer.step(); lr_scheduler.step(2) --> set LR for epoch 2
 
             # reset unscaled LRs (to the original scheduler's one) for the current epoch
-            for param_group, lr in zip(self.optimizer.param_groups, self.unscaled_lrs):
-                param_group['lr'] = lr
-            self._last_lr = [group['lr'] for group in self.optimizer.param_groups]
+            for param_group, lr in zip(self.optimizer.param_groups, self._last_lr):
+                param_group['lr'] = lr # reset to last epoch's original/unscaled LR
 
-            super().step(epoch) # set lr, _step_count and last_epoch (for next epoch), _last_lr
-            self.unscaled_lrs = self.get_last_lr()[:] # backup next epoch LRs, cloned
+            super().step(epoch) # set unscaled lr, _step_count, last_epoch, _last_lr for new epoch
 
             # scale the learning rate for next epoch for each parameter group.
-            # if we reach the last element, assume looping of data, ie refer to the first element
-            if self.last_epoch % len(self.batch_sizes) == 0:
-                print("RESET")
-            batch_size = self.batch_sizes[self.last_epoch % len(self.batch_sizes)]
+            batch_size = self.batch_sizes[epoch % len(self.batch_sizes)]
             lr_multiplier = scale_lr(self.base_batch_size, batch_size, method=lr_scaling_method)
             for param_group in self.optimizer.param_groups:
-                param_group['lr'] *= lr_multiplier
-            self._last_lr = [group['lr'] for group in self.optimizer.param_groups]
-            print(f"LRs: {self.unscaled_lrs}, scaled by {lr_multiplier}, scaled LR: {self.get_last_lr()}")
+                param_group['lr'] *= lr_multiplier #set scale LR for new epoch
+            if self.verbose:
+                print(f"Batch id {epoch}, unscaled LR: {self._last_lr}, scaled LR: {self.get_lr()}")
 
+
+    #### main loop: double check arguments and returns correctly-instantiated LR scheduler
 
     if lr_scheduler_class is None:
         assert optimizer is not None, "optimizer must be provided if lr_scheduler_class is not"
@@ -293,7 +292,7 @@ def get_dataloader_and_lr_scheduler_for_variable_batch_size(
         dataloader_pin_memory=False,
         optimizer=None,
         lr_scheduler_class=None,
-        lr_scheduler_kwargs={},
+        lr_scheduler_kwargs={'verbose':False},
         verbose=False,
 ):
 
@@ -331,6 +330,7 @@ def get_dataloader_and_lr_scheduler_for_variable_batch_size(
             batch_sizes=batch_sizes,
             lr_scaling_method=lr_scaling_method,
             optimizer=optimizer,
+            dataloader=dataloader,
             lr_scheduler_class=lr_scheduler_class,
             **lr_scheduler_kwargs)
 
@@ -338,11 +338,9 @@ def get_dataloader_and_lr_scheduler_for_variable_batch_size(
 
 
 if __name__ == "__main__":
-
     # A small example/test on how to use this module
 
-    from torch.utils.data import Dataset
-    class TestData(Dataset):
+    class TestData(torch.utils.data.Dataset):
         """ A test dataset with sequences of random length, and their sum as the target"""
         def __init__(self, seq_count, min_seq_len=1, max_seq_len=21):
             self.seqs = [ torch.ones(random.randrange(min_seq_len,max_seq_len)) for _ in range(seq_count) ]
@@ -362,15 +360,13 @@ if __name__ == "__main__":
             labels = torch.tensor(labels)
             return padded, labels
 
-    import torch.nn as nn
-    import torch.nn.functional as F 
-    class TestFeedForward(nn.Module):
+    class TestFeedForward(torch.nn.Module):
 
         def __init__(self):
             super(TestFeedForward, self).__init__()
             # an affine operation: y = Wx + b
-            self.fc1 = nn.Linear(max_seq_len, 128)
-            self.fc2 = nn.Linear(128, 128)
+            self.fc1 = torch.nn.Linear(max_seq_len, 128)
+            self.fc2 = torch.nn.Linear(128, 128)
 
         def forward(self, x):
             x = F.relu(self.fc1(x))
@@ -379,7 +375,7 @@ if __name__ == "__main__":
 
 
     max_seq_len=15
-    dataset = TestData(seq_count=100, min_seq_len=5, max_seq_len=max_seq_len)
+    dataset = TestData(seq_count=30, min_seq_len=5, max_seq_len=max_seq_len)
     max_metric_value_per_batch=40
     dataloader_num_workers=2
     gradient_accumulation_steps=2
@@ -410,7 +406,6 @@ if __name__ == "__main__":
             optimizer=optimizer,
             # lr_scheduler_class=torch.optim.lr_scheduler.StepLR,
             # lr_scheduler_kwargs=dict(optimizer=optimizer, step_size=1, gamma=0.1),
-            verbose=True,
     )
  
     # test with PyTorch
@@ -425,12 +420,12 @@ if __name__ == "__main__":
                         outputs = model(inputs)
                         loss = F.mse_loss(outputs, labels)
                         loss.backward()
-                        print(f"Epoch {epoch}, batch {batch_id}, microbatch {microbatch_id}, loss {loss.item()}, LRs {lr_scheduler.get_last_lr()}")
+                        print(f"Epoch {epoch}, batch {batch_id}, microbatch {microbatch_id}, loss {loss.item()}, LRs {lr_scheduler.get_lr()}")
                     optimizer.step()
                     optimizer.zero_grad()  
-                    lr_scheduler.step()
+                    lr_scheduler.step(epoch=batch_id+1)
             except StopIteration:
-                # if we run out of data, we restart from the very first batch
+                # if we run out of data, we restart the dataloader and LR scheduler
                 dataloader_it = iter(dataloader)
                 continue
 
@@ -442,9 +437,8 @@ if __name__ == "__main__":
     }
     engine, optimizer, _, _ = deepspeed.initialize(config=config,
         model=model, optimizer=optimizer, lr_scheduler=lr_scheduler)
-    # engine.training_dataloader = dataloader
-    engine.deepspeed_io(**deepspeed_io_kwargs)
-    # engine.training_dataloader = engine.deepspeed_io()
+    # engine.training_dataloader = dataloader #use this or the deepspeed_io()
+    engine.training_dataloader = engine.deepspeed_io(**deepspeed_io_kwargs)
 
     dataloader_it = iter(engine.training_dataloader)
     for epoch in range(10):
@@ -456,10 +450,10 @@ if __name__ == "__main__":
                     outputs = engine(inputs)
                     loss = F.mse_loss(outputs, labels)
                     engine.backward(loss)
-                    engine.step()
-                    print(f"Epoch {epoch}, batch {batch_id}, microbatch {microbatch_id}, loss {loss.item()}, LRs {lr_scheduler.get_last_lr()}")
+                    print(f"Epoch {epoch}, batch {batch_id}, microbatch {microbatch_id}, loss {loss.item()}, LRs {lr_scheduler.get_lr()}")
+                    engine.step(lr_kwargs={'epoch': batch_id+1})
         except StopIteration:
-            # if we run out of data, we restart from the very first batch
+            # if we run out of data, we restart the dataloader and LR scheduler
             dataloader_it = iter(engine.training_dataloader)
             continue
 
