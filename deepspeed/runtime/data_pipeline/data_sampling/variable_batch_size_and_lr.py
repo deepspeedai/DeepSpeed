@@ -27,6 +27,7 @@ def batch_by_size(
     dataloader_num_replicas=1,
     gradient_accumulation_steps=1,
     required_microbatches_of_same_size=False,
+    verbose=False,
     ):
 
     """
@@ -116,32 +117,35 @@ def batch_by_size(
         microbatch = microbatches[rank: rank+num_microbatches_per_batch]
         batch_size = sum([len(mb) for mb in microbatch])
         batch_metric = sum([m[0] for m in microbatch[0]])
+        batch_sample_ids = [ [m[1] for m in metrics] for metrics in microbatch]
         batch_sizes.append(batch_size)
         batch_metrics.append(batch_metric)
-        microbatch_sample_ids += [ [m[1] for m in metrics] for metrics in microbatch]
+        microbatch_sample_ids += batch_sample_ids
+        if verbose:
+            print(f"Batch size {batch_size} samples, metric value {batch_metric}, samples: {batch_sample_ids}")
 
     # return the sample ids of each microbatch, and the batch sizes 
     assert len(batch_sizes) == len(microbatch_sample_ids)//num_microbatches_per_batch
     return microbatch_sample_ids, batch_sizes, batch_metrics
         
 
-def scale_lr(effective_batch_size, batch_size, base_lr=1, method="linear"):
+def scale_lr(base_batch_size, batch_size, base_lr=1, method="linear"):
     """ given a reference lr and batch_size, compute the new LR for a given batch size """
     if method == "linear":
         # Linear Scaling Rule: "When the minibatch size is multiplied by k, multiply the learning,
         # rate by k" (Accurate, Large Minibatch SGD: Training ImageNet in 1 Hour, Goyal et al)
-        return base_lr * batch_size / effective_batch_size
+        return base_lr * batch_size / base_batch_size
     if method == "sqrt":
         # Square Root scaling: "when multiplying the batch size by k, multiply the learning rate
         # by √k, to keep the variance in the gradient expectation constant" 
         # (A. Krizhevsky. One weird trick for parallelizing convolutional neural networks)
-        return base_lr * torch.sqrt(batch_size / effective_batch_size)
+        return base_lr * torch.sqrt(batch_size / base_batch_size)
     raise ValueError("Unknown scaling method: {}".format(method))
 
 
 def dataloader_for_variable_batch_size(dataset, 
         microbatch_sample_ids, dataloader_rank, dataloader_num_replicas, dataloader_collate_fn,
-        dataloader_num_workers=2, dataloader_pin_memory=False, deepspeed_engine=None): 
+        dataloader_num_workers=2, dataloader_pin_memory=False): 
 
         # equidistantly distribute the microbatches across the replicas in an interleaved fashion.
         sampler = DistributedSampler(
@@ -160,21 +164,23 @@ def dataloader_for_variable_batch_size(dataset,
             return collate_fn(batch_data) if collate_fn else batch_data
 
         collate_fn = lambda b: collate_fn_wrapper(b, dataset, dataloader_collate_fn)
-        if deepspeed_engine is None:
-            return DataLoader(
+
+        dataloader = DataLoader(
                 dataset=microbatch_sample_ids,
                 sampler=sampler,
                 num_workers = dataloader_num_workers,
                 collate_fn = collate_fn,
                 pin_memory=dataloader_pin_memory,
             )
-        else:
-            deepspeed_engine.deepspeed_io(dataset,
-                                batch_size=1,
-                                pin_memory=dataloader_pin_memory,
-                                data_sampler=sampler,
-                                collate_fn=collate_fn,
-                                num_local_io_workers=dataloader_num_workers)
+
+        deepspeed_io_kwargs = dict(dataset=dataset,
+                        batch_size=1,
+                        pin_memory=dataloader_pin_memory,
+                        data_sampler=sampler,
+                        collate_fn=collate_fn,
+                        num_local_io_workers=dataloader_num_workers)
+        
+        return dataloader, deepspeed_io_kwargs
         
 
 class StubLRScheduler(LRScheduler):
@@ -183,7 +189,7 @@ class StubLRScheduler(LRScheduler):
         return self.base_lrs
 
 def lr_scheduler_for_variable_batch_size(
-        effective_batch_size, batch_sizes, lr_scaling_method='linear',
+        base_batch_size, batch_sizes, lr_scaling_method='linear',
         optimizer=None, lr_scheduler_class=None, **lr_scheduler_kwargs):
     """
     returns a class that provides an LR scheduler that scales learning rate at every
@@ -192,7 +198,7 @@ def lr_scheduler_for_variable_batch_size(
     Otherwise, the base `LRScheduler` must be provided as  `lr_scheduler_class`.
 
     Arguments:
-    - `effective_batch_size`: the batch size that the base_LR refers to;
+    - `base_batch_size`: the batch size that the base LR in the optimizer or scheduler refers to;
     - `lr_scaling_method`: method to use to scale LR - see `scale_lr()`;
     - `batch_sizes`: the effective batch size of each batch in the dataloader;
     - `optimizer` and `lr_scheduler_class`: the base LR scheduler. It not provided,
@@ -206,21 +212,23 @@ def lr_scheduler_for_variable_batch_size(
 
         def __init__(self, optimizer, **lr_scheduler_kwargs):
             self.batch_sizes = batch_sizes
-            self.effective_batch_size = effective_batch_size
+            self.base_batch_size = base_batch_size
             self.lr_scaling_method = lr_scaling_method
             self.unscaled_lrs = [p['lr'] for p in optimizer.param_groups]
             super().__init__(optimizer=optimizer, **lr_scheduler_kwargs)
 
         def state_dict(self):
-            return {'base': super().state_dict(),
-                    'effective_batch_size': self.effective_batch_size,
-                    'lr_scaling_method': self.lr_scaling_method,
-                    'unscaled_lrs': self.unscaled_lrs,
-                    'batch_sizes': self.batch_sizes}
+            return {
+                'base': super().state_dict(),
+                'base_batch_size': self.base_batch_size,
+                'lr_scaling_method': self.lr_scaling_method,
+                'unscaled_lrs': self.unscaled_lrs,
+                'batch_sizes': self.batch_sizes
+                }
 
         def load_state_dict(self, state_dict):
             super().load_state_dict(state_dict['base'])
-            self.effective_batch_size = state_dict['effective_batch_size']
+            self.base_batch_size = state_dict['base_batch_size']
             self.lr_scaling_method = state_dict['lr_scaling_method']
             self.unscaled_lrs = state_dict['unscaled_lrs']
             self.batch_sizes = state_dict['batch_sizes']
@@ -236,15 +244,21 @@ def lr_scheduler_for_variable_batch_size(
             # reset unscaled LRs (to the original scheduler's one) for the current epoch
             for param_group, lr in zip(self.optimizer.param_groups, self.unscaled_lrs):
                 param_group['lr'] = lr
+            self._last_lr = [group['lr'] for group in self.optimizer.param_groups]
 
             super().step(epoch) # set lr, _step_count and last_epoch (for next epoch), _last_lr
             self.unscaled_lrs = self.get_last_lr()[:] # backup next epoch LRs, cloned
 
-            # scale the learning rate for next epoch for each parameter group
-            batch_size = self.batch_sizes[self.last_epoch]
-            lr_multiplier = scale_lr(self.effective_batch_size, batch_size, method=lr_scaling_method)
+            # scale the learning rate for next epoch for each parameter group.
+            # if we reach the last element, assume looping of data, ie refer to the first element
+            if self.last_epoch % len(self.batch_sizes) == 0:
+                print("RESET")
+            batch_size = self.batch_sizes[self.last_epoch % len(self.batch_sizes)]
+            lr_multiplier = scale_lr(self.base_batch_size, batch_size, method=lr_scaling_method)
             for param_group in self.optimizer.param_groups:
                 param_group['lr'] *= lr_multiplier
+            self._last_lr = [group['lr'] for group in self.optimizer.param_groups]
+            print(f"LRs: {self.unscaled_lrs}, scaled by {lr_multiplier}, scaled LR: {self.get_last_lr()}")
 
 
     if lr_scheduler_class is None:
@@ -280,7 +294,7 @@ def get_dataloader_and_lr_scheduler_for_variable_batch_size(
         optimizer=None,
         lr_scheduler_class=None,
         lr_scheduler_kwargs={},
-        deepspeed_engine=None,
+        verbose=False,
 ):
 
         # batch_by_size returns the effective batch size and the sample ids for each microbatch.
@@ -299,9 +313,10 @@ def get_dataloader_and_lr_scheduler_for_variable_batch_size(
             dataloader_num_replicas=dataloader_num_replicas,
             gradient_accumulation_steps=gradient_accumulation_steps,
             required_microbatches_of_same_size=pipeline_parallelism,
+            verbose=verbose,
         )
 
-        dataloader = dataloader_for_variable_batch_size(
+        dataloader, deepspeed_io_kwargs = dataloader_for_variable_batch_size(
             dataset=dataset,
             microbatch_sample_ids=microbatch_sample_ids,
             dataloader_rank=dataloader_rank,
@@ -309,18 +324,17 @@ def get_dataloader_and_lr_scheduler_for_variable_batch_size(
             dataloader_collate_fn=dataloader_collate_fn,
             dataloader_num_workers=dataloader_num_workers,
             dataloader_pin_memory=dataloader_pin_memory,
-            deepspeed_engine=deepspeed_engine,
         )
             
         lr_scheduler = lr_scheduler_for_variable_batch_size(
-            effective_batch_size=base_batch_size,
+            base_batch_size=base_batch_size,
             batch_sizes=batch_sizes,
             lr_scaling_method=lr_scaling_method,
             optimizer=optimizer,
             lr_scheduler_class=lr_scheduler_class,
             **lr_scheduler_kwargs)
 
-        return dataloader, lr_scheduler
+        return dataloader, lr_scheduler, deepspeed_io_kwargs
 
 
 if __name__ == "__main__":
@@ -366,17 +380,16 @@ if __name__ == "__main__":
 
     max_seq_len=15
     dataset = TestData(seq_count=100, min_seq_len=5, max_seq_len=max_seq_len)
-    max_metric_value_per_batch=50
+    max_metric_value_per_batch=40
     dataloader_num_workers=2
     gradient_accumulation_steps=2
-    base_lr=1,
     base_batch_size=8
-    gradient_accumulation_steps=2
-    model = TestFeedForward()
-    optimizer = torch.optim.Adam(model.parameters(), lr=1)
+    model = TestFeedForward().to("cuda")
+    base_lr=1e-3
+    optimizer = torch.optim.Adam(model.parameters(), lr=base_lr)
 
     metric_values = [ len(s[0]) for s in dataset] # difficulty = input sequence length
-    dataloader, lr_scheduler = get_dataloader_and_lr_scheduler_for_variable_batch_size(
+    dataloader, lr_scheduler, deepspeed_io_kwargs = get_dataloader_and_lr_scheduler_for_variable_batch_size(
             dataset=dataset,
             dataset_metric_values=metric_values,
             base_batch_size=base_batch_size,
@@ -397,47 +410,57 @@ if __name__ == "__main__":
             optimizer=optimizer,
             # lr_scheduler_class=torch.optim.lr_scheduler.StepLR,
             # lr_scheduler_kwargs=dict(optimizer=optimizer, step_size=1, gamma=0.1),
+            verbose=True,
     )
  
     # test with PyTorch
+    dataloader_it = iter(dataloader)
     with torch.set_grad_enabled(True):
         for epoch in range(10):
-            for batch_id in range(len(dataloader)//gradient_accumulation_steps):
-                for microbatch_id in range(gradient_accumulation_steps):
-                    inputs, label = next(iter(dataloader))
-                    outputs = model(inputs)
-                    loss = F.mse_loss(outputs, label)
-                    loss.backward()
-                    print(f"Epoch {epoch}, batch {batch_id}, microbatch {microbatch_id}, batch size {len(inputs)}, loss {loss.item()}, LRs {lr_scheduler.get_last_lr()}")
-                optimizer.step()
-                optimizer.zero_grad()  
-                lr_scheduler.step()
+            try:
+                for batch_id in range(len(dataloader)//gradient_accumulation_steps):
+                    for microbatch_id in range(gradient_accumulation_steps):
+                        inputs, labels = next(dataloader_it)
+                        inputs, labels = inputs.to("cuda"), labels.to("cuda")
+                        outputs = model(inputs)
+                        loss = F.mse_loss(outputs, labels)
+                        loss.backward()
+                        print(f"Epoch {epoch}, batch {batch_id}, microbatch {microbatch_id}, loss {loss.item()}, LRs {lr_scheduler.get_last_lr()}")
+                    optimizer.step()
+                    optimizer.zero_grad()  
+                    lr_scheduler.step()
+            except StopIteration:
+                # if we run out of data, we restart from the very first batch
+                dataloader_it = iter(dataloader)
+                continue
 
     # Test with DeepSpeed
     config = {
         "train_batch_size": base_batch_size,
         "gradient_accumulation_steps": gradient_accumulation_steps,
-        "optimizer": {
-            "type": "Adam",
-            "params": {
-            "lr": base_lr,
-            }
-        },
+        "optimizer": { "type": "Adam", "params": { "lr": base_lr, } },
     }
     engine, optimizer, _, _ = deepspeed.initialize(config=config,
         model=model, optimizer=optimizer, lr_scheduler=lr_scheduler)
-    engine.training_dataloader = dataloader
+    # engine.training_dataloader = dataloader
+    engine.deepspeed_io(**deepspeed_io_kwargs)
     # engine.training_dataloader = engine.deepspeed_io()
 
-    for epoch in range(2):
-        for batch_id in range(len(dataloader)//gradient_accumulation_steps):
-            for microbatch_id in range(gradient_accumulation_steps):
-                inputs, labels = next(iter(dataloader))
-                inputs, labels = inputs.to("cuda"), labels.to("cuda")
-                outputs = engine(inputs)
-                loss = F.mse_loss(outputs, labels)
-                engine.backward(loss)
-                engine.step()
-                print(f"Epoch {epoch}, batch {batch_id}, microbatch {microbatch_id}, batch size {len(inputs)}, loss {loss.item()}, LRs {lr_scheduler.get_last_lr()}")
+    dataloader_it = iter(engine.training_dataloader)
+    for epoch in range(10):
+        try:
+            for batch_id in range(len(engine.training_dataloader)//gradient_accumulation_steps):
+                for microbatch_id in range(gradient_accumulation_steps):
+                    inputs, labels = next(dataloader_it)
+                    inputs, labels = inputs.to("cuda"), labels.to("cuda")
+                    outputs = engine(inputs)
+                    loss = F.mse_loss(outputs, labels)
+                    engine.backward(loss)
+                    engine.step()
+                    print(f"Epoch {epoch}, batch {batch_id}, microbatch {microbatch_id}, loss {loss.item()}, LRs {lr_scheduler.get_last_lr()}")
+        except StopIteration:
+            # if we run out of data, we restart from the very first batch
+            dataloader_it = iter(engine.training_dataloader)
+            continue
 
             
