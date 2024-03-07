@@ -32,6 +32,7 @@ class MoE(nn.Module):
         use_rts (bool, optional): default=True, whether to use Random Token Selection.
         use_tutel (bool, optional): default=False, whether to use Tutel optimizations (if installed).
         enable_expert_tensor_parallelism (bool, optional): default=False, whether to use tensor parallelism for experts
+        top2_2nd_expert_sampling (bool, optional): default=True, whether to perform sampling for 2nd expert
     """
 
     def __init__(self,
@@ -48,7 +49,8 @@ class MoE(nn.Module):
                  drop_tokens: bool = True,
                  use_rts: bool = True,
                  use_tutel: bool = False,
-                 enable_expert_tensor_parallelism: bool = False) -> None:
+                 enable_expert_tensor_parallelism: bool = False,
+                 top2_2nd_expert_sampling: bool = True) -> None:
 
         super(MoE, self).__init__()
 
@@ -69,7 +71,8 @@ class MoE(nn.Module):
 
         experts = Experts(expert, self.num_local_experts, self.expert_group_name)
         self.deepspeed_moe = MOELayer(TopKGate(hidden_size, num_experts, k, capacity_factor, eval_capacity_factor,
-                                               min_capacity, noisy_gate_policy, drop_tokens, use_rts),
+                                               min_capacity, noisy_gate_policy, drop_tokens, use_rts,
+                                               top2_2nd_expert_sampling),
                                       experts,
                                       self.expert_group_name,
                                       self.ep_size,
