@@ -164,7 +164,7 @@ def flatten_inference_model(
                                                                    strides=tensor.stride(),
                                                                    offset=cur_offset)
 
-                cur_offset += pad_to_aligned_offset(elem_size(param.dtype) * param.numel())
+                cur_offset += pad_to_aligned_offset(elem_size(tensor.dtype) * tensor.numel())
 
             layer_metadata.params[p_name] = param_metadata
 

@@ -8,3 +8,4 @@ from .blas_kernels import *
 from .cuda_layer_norm import *
 from .cuda_rms_norm import *
 from .gated_activations import *
+from .cuda_linear import *
