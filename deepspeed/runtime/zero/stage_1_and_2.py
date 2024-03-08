@@ -2303,7 +2303,11 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
         self._load_global_state(optim_sd)
 
         tp_rank = bwc_tensor_model_parallel_rank(mpu=self.mpu)
-        tp_world_size = self.mpu.get_slice_parallel_world_size() if hasattr(self.mpu, "get_slice_parallel_world_size") \
+        if self.mpu is None:
+            logger.warn("MPU is not provided, setting tp size to 1 in checkpoint loading.")
+            tp_world_size = 1
+        else:
+            tp_world_size = self.mpu.get_slice_parallel_world_size() if hasattr(self.mpu, "get_slice_parallel_world_size") \
                 else self.mpu.get_tensor_model_parallel_world_size()
 
         for i, _ in enumerate(self.optimizer.param_groups):
