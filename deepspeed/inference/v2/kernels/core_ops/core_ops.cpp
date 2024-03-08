@@ -8,6 +8,7 @@
 
 #include "bias_activation.h"
 #include "blas.h"
+#include "cuda_linear_kernels.h"
 #include "gated_activation_kernels.h"
 #include "layer_norm.h"
 #include "rms_norm.h"
@@ -33,4 +34,9 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m)
     // rms_norm.h
     m.def("rms_norm", &rms_norm, "DeepSpeed rms norm in CUDA");
     m.def("rms_pre_norm", &rms_pre_norm, "DeepSpeed rms pre norm in CUDA");
+
+    // cuda_linear_kernels.h
+    m.def("cuda_wf6af16_linear", &cuda_wf6af16_linear, "DeepSpeed Wf6Af16 linear in CUDA");
+    m.def(
+        "preprocess_weight", &preprocess_weight, "preprocess the FP16 weight to be 2bit and 4 bit");
 }

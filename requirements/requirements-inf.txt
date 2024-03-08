@@ -1,6 +1,7 @@
 google
 lm-eval==0.3.0
 protobuf
+qtorch
 safetensors
 sentencepiece
 transformers>=4.32.1

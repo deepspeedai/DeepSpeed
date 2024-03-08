@@ -119,7 +119,10 @@ void launch_gated_activation_impl(T* output,
         DISPATCH_UNROLL(5);
     } else if (unroll == 6) {
         DISPATCH_UNROLL(6);
+    } else if (unroll == 7) {
+        DISPATCH_UNROLL(7);
     } else {
+        // TODO: provide a kernel with an outer loop to handle larger columns.
         throw std::runtime_error(
             "Called with more columns than supported, please report this bug and this limit will "
             "be increased.");
