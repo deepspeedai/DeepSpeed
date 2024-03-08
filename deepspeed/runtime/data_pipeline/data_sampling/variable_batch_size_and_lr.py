@@ -132,7 +132,7 @@ def batch_by_size(
 def scale_lr(base_batch_size, batch_size, base_lr=1, method="linear"):
     """ given a reference lr and batch_size, compute the new LR for a given batch size """
     if method == "linear":
-        # Linear Scaling Rule: "When the minibatch size is multiplied by k, multiply the learning,
+        # Linear Scaling Rule: "When the minibatch size is multiplied by k, multiply the learning
         # rate by k" (Accurate, Large Minibatch SGD: Training ImageNet in 1 Hour, Goyal et al)
         return base_lr * batch_size / base_batch_size
     if method == "sqrt":
