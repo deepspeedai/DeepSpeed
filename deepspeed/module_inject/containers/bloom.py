@@ -23,12 +23,14 @@ class DS_BloomContainer(MetaTensorContainer, HybridEngineContainer, BaseTransfor
 
         # All model specific things should be defined here instead of the base class.
         self.bigscience_bloom = True
+        self.triangular_masking = False
 
     def create_module(self, config=None):
         _config = config if config is not None else self.ds_model_config
 
         self.module = DeepSpeedBloomInference(_config, mp_group=self.mp_group)
         self.module.config.scale_attention = self.scale_attention
+        self.module.config.invert_mask = False
         return self.module
 
     def attention_qkv_mp(self, mp_replace, reversed_dim=False):
