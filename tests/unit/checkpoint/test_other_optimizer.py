@@ -19,6 +19,8 @@ class TestOtherOptimizerCheckpoint(DistributedTest):
 
     @pytest.mark.skipif(not deepspeed.ops.__compatible_ops__[FusedLambBuilder.NAME], reason="lamb is not compatible")
     def test_checkpoint_unfused_optimizer(self, tmpdir):
+        #if not get_accelerator().is_fp16_supported():
+        #    pytest.skip("fp16 is not supported")
         config_dict = {
             "train_batch_size": 2,
             "steps_per_print": 1,
@@ -29,9 +31,6 @@ class TestOtherOptimizerCheckpoint(DistributedTest):
                 }
             },
             "gradient_clipping": 1.0,
-            "fp16": {
-                "enabled": True
-            },
             "scheduler": {
                 "type": "OneCycle",
                 "params": {
@@ -49,6 +48,10 @@ class TestOtherOptimizerCheckpoint(DistributedTest):
                 }
             }
         }
+        if get_accelerator().is_fp16_supported():
+            config_dict["fp16"] = {"enabled": True}
+        elif get_accelerator().is_fp16_supported():
+            config_dict["bf16"] = {"enabled": True}
 
         args = args_from_dict(tmpdir, config_dict)
         hidden_dim = 10
@@ -69,6 +72,8 @@ class TestOtherOptimizerCheckpoint(DistributedTest):
                                             load_optimizer_states=False)
 
     def test_checkpoint_fused_optimizer(self, tmpdir):
+        if get_accelerator().device_name() == "cpu":
+            pytest.skip("CPU accelerator does not support this test")
         config_dict = {
             "train_batch_size": 2,
             "steps_per_print": 1,
@@ -81,10 +86,11 @@ class TestOtherOptimizerCheckpoint(DistributedTest):
                     "weight_decay": 3e-7
                 }
             },
-            "fp16": {
-                "enabled": True
-            }
         }
+        if get_accelerator().is_fp16_supported():
+            config_dict["fp16"] = {"enabled": True}
+        elif get_accelerator().is_bf16_supported():
+            config_dict["bf16"] = {"enabled": True}
 
         args = args_from_dict(tmpdir, config_dict)
         hidden_dim = 10
@@ -129,4 +135,4 @@ class TestOtherOptimizerCheckpoint(DistributedTest):
                                             models=models,
                                             hidden_dim=hidden_dim,
                                             tmpdir=tmpdir,
-                                            fp16=False)
+                                            dtype=torch.float32)

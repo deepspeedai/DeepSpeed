@@ -12,6 +12,7 @@ from deepspeed.ops.op_builder import CPUAdamBuilder
 from unit.simple_model import SimpleModel, SimpleOptimizer, random_dataloader
 from unit.util import bf16_required_version_check
 from deepspeed import comm as dist
+from deepspeed.accelerator import get_accelerator
 
 
 class TestAdamBF16ZeroOneCycleCompatibility(DistributedTest):
@@ -298,6 +299,10 @@ class TestZeroDtypeCocktail(DistributedTest):
                 pytest.skip(
                     " DeepSpeed BFloat16 tests need torch >= 1.10, NCCL >= 2.10.3, CUDA > =11.0 and HW support for BFloat16 to run correctly"
                 )
+
+        if comp_type == torch.float16 or comm_type == torch.float16:
+            if not get_accelerator().is_fp16_supported():
+                pytest.skip("fp16 is not supported")
 
         type_str = {torch.float16: "fp16", torch.bfloat16: "bfp16"}
 

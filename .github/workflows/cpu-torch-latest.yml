@@ -27,6 +27,10 @@ jobs:
       - id: setup-venv
         uses: ./.github/workflows/setup-venv
 
+      - name: Install system packages
+        run: |
+          sudo apt-get install -y numactl pdsh
+
       - name: Install pytorch
         run: |
           pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu

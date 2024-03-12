@@ -72,6 +72,8 @@ class TestCustomMethod(DistributedTest):
 
     @pytest.mark.skipif(not deepspeed.is_compile_supported(), reason="torch.compile is not supported")
     def test_custom_function(self, base_config):
+        if get_accelerator().device_name() == "cpu":
+            pytest.skip("CPU accelerator does not support this test yet.")
         test_value = 10
 
         engine = self._init_engine(base_config, test_value)

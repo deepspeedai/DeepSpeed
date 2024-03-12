@@ -7,7 +7,7 @@ import pytest
 import deepspeed.comm as dist
 import torch
 
-from unit.common import DistributedTest
+from unit.common import DistributedTest, preferred_dtype
 from unit.simple_model import random_dataloader, SimpleModel
 from unit.util import bf16_required_version_check
 
@@ -18,6 +18,7 @@ from deepspeed.utils import safe_get_local_fp32_param, safe_get_local_grad, safe
 from deepspeed.utils import safe_set_local_fp32_param, safe_set_local_optimizer_state
 from deepspeed.runtime.zero.offload_config import OffloadDeviceEnum
 from deepspeed.ops.aio import AsyncIOBuilder
+from deepspeed.accelerator import get_accelerator
 
 WEIGHT_KEY = 'weight'
 FIRST_ORDER_KEY = 'exp_avg'
@@ -112,14 +113,14 @@ class TestTensorFragmentGet(DistributedTest):
                     "lr": 1e-6
                 }
             },
-            "fp16": {
-                "enabled": True,
-                "initial_scale_power": 2
-            },
             "zero_optimization": {
                 "stage": zero_stage,
             }
         }
+        if get_accelerator().is_fp16_supported():
+            config_dict["fp16"] = {"enabled": True, "initial_scale_power": 2}
+        elif get_accelerator().is_bf16_supported():
+            config_dict["bf16"] = {"enabled": True}
 
         if offload_device == OffloadDeviceEnum.cpu:
             config_dict["zero_optimization"]["offload_optimizer"] = {"device": offload_device}
@@ -139,9 +140,12 @@ class TestTensorFragmentGet(DistributedTest):
         validate_after_bwd = lambda model: validate_tensor(model, api_type, opt_states=False)
         validate_after_step = lambda model: validate_tensor(model, api_type, opt_states=True)
 
-        run_fragmented_model(model, config_dict, hidden_dim, torch.float16, validate_after_bwd, validate_after_step)
+        run_fragmented_model(model, config_dict, hidden_dim, preferred_dtype(), validate_after_bwd,
+                             validate_after_step)
 
     def test_bf16_fragments(self, frozen_weights):
+        if get_accelerator().device_name() == "cpu":
+            pytest.skip("CPU accelerator does not support this test yet.")
         if frozen_weights:
             pytest.skip("TODO: Frozen weights not currently supported by BF16 Optimizer")
 
@@ -302,6 +306,8 @@ class TestTensorFragmentUpdate(DistributedTest):
             }
 
         if dtype == torch.float16:
+            if not get_accelerator().is_fp16_supported():
+                pytest.skip("fp16 is not supported")
             config_dict["fp16"] = {"enabled": True, "initial_scale_power": 8}
         elif dtype == torch.bfloat16:
             config_dict["bf16"] = {"enabled": True}

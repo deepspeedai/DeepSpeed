@@ -4,9 +4,14 @@
 # DeepSpeed Team
 
 import torch
-from deepspeed.accelerator.abstract_accelerator import DeepSpeedAccelerator
-import oneccl_bindings_for_pytorch  # noqa: F401 # type: ignore
-import psutil
+from .abstract_accelerator import DeepSpeedAccelerator
+
+try:
+    import oneccl_bindings_for_pytorch  # noqa: F401 # type: ignore
+    oneccl_imported_p = True
+except ImportError as e:
+    oneccl_imported_p = False
+
 import os
 
 
@@ -15,8 +20,17 @@ class CPU_Accelerator(DeepSpeedAccelerator):
 
     def __init__(self):
         self._name = 'cpu'
-        self._communication_backend_name = 'ccl'
-        self.max_mem = psutil.Process().memory_info().rss
+        if oneccl_imported_p:
+            self._communication_backend_name = 'ccl'
+        else:
+            # fallback to gloo if oneccl_binding_for_pytorch is not installed
+            self._communication_backend_name = 'gloo'
+        try:
+            import psutil
+            mem = psutil.Process().memory_info().rss
+            self.max_mem = mem
+        except ImportError as e:
+            self.max_mem = 0
 
     def is_synchronized_device(self):
         return True
@@ -115,12 +129,14 @@ class CPU_Accelerator(DeepSpeedAccelerator):
         return
 
     def get_rss(self):
+        import psutil
         mem = psutil.Process().memory_info().rss
         if mem > self.max_mem:
             self.max_mem = mem
         return mem
 
     def reset_rss(self):
+        import psutil
         mem = psutil.Process().memory_info().rss
         self.max_mem = mem
         return mem
@@ -166,9 +182,11 @@ class CPU_Accelerator(DeepSpeedAccelerator):
         return self.max_mem
 
     def total_memory(self, device_index=None):
+        import psutil
         return psutil.virtual_memory().total
 
     def available_memory(self, device_index=None):
+        import psutil
         return psutil.virtual_memory().available
 
     # Misc

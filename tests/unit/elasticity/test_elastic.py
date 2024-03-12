@@ -9,7 +9,7 @@ from unit.common import DistributedTest
 from deepspeed.git_version_info import version as ds_version
 import os
 from unit.simple_model import SimpleModel
-from deepspeed.ops.op_builder import FusedAdamBuilder
+from deepspeed.ops.op_builder import FusedAdamBuilder, FusedLambBuilder
 
 if not deepspeed.ops.__compatible_ops__[FusedAdamBuilder.NAME]:
     pytest.skip("This op had not been implemented on this system.", allow_module_level=True)
@@ -183,6 +183,8 @@ class TestNonElasticBatchParamsWithOverride(DistributedTest):
     world_size = 2
 
     def test(self):
+        if not deepspeed.ops.__compatible_ops__[FusedLambBuilder.NAME]:
+            pytest.skip("This op had not been implemented on this system.", allow_module_level=True)
         config_dict = {
             "train_batch_size": 2,
             "steps_per_print": 1,

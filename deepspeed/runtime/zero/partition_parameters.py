@@ -56,7 +56,8 @@ class NoGatherHandle:
         self.__param = param
 
     def wait(self) -> None:
-        get_accelerator().current_stream().synchronize()
+        if not get_accelerator().is_synchronized_device():
+            get_accelerator().current_stream().synchronize()
         self.__param.ds_status = ZeroParamStatus.AVAILABLE
 
 
@@ -81,7 +82,8 @@ class NoGatherCoalescedHandle:
         if self.__complete:
             return
 
-        get_accelerator().current_stream().synchronize()
+        if not get_accelerator().is_synchronized_device():
+            get_accelerator().current_stream().synchronize()
         for param in self.__params:
             assert param.ds_status == ZeroParamStatus.INFLIGHT, f"expected param {param.ds_summary()} to be inflight"
             param.ds_status = ZeroParamStatus.AVAILABLE
@@ -363,7 +365,8 @@ class InsertPostInitMethodToModuleSubClasses(object):
             else:
                 self.dtype = torch.float
         else:
-            self.dtype = dtype or torch.half
+            self.dtype = dtype or torch.float16 if get_accelerator().is_fp16_supported(
+            ) else torch.bfloat16 if get_accelerator().is_bf16_supported else torch.float32
 
     def patch_init_and_builtins(self):
 

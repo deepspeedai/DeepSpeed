@@ -9,6 +9,7 @@ from unit.simple_model import UnusedParametersModel, random_dataloader
 from deepspeed.ops.op_builder import CPUAdamBuilder
 
 import deepspeed
+from deepspeed.accelerator import get_accelerator
 
 
 @pytest.mark.parametrize('ignore_unused_parameters', [False, True])
@@ -36,11 +37,11 @@ class TestStage2IgnoreUnusedParameters(DistributedTest):
                     "lr": 1e-3
                 }
             },
-            "fp16": {
-                "enabled": True,
-                "initial_scale_power": 8
-            }
         }
+        if get_accelerator().is_fp16_supported():
+            config_dict["fp16"] = {"enabled": True, "initial_scale_power": 8}
+        else:
+            config_dict["bf16"] = {"enabled": True}
         hidden_dim = 4
 
         model = UnusedParametersModel(hidden_dim=hidden_dim)

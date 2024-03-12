@@ -7,9 +7,11 @@ unit tests for coalesced collectives
 """
 
 import torch
+import deepspeed
 import deepspeed.comm as dist
 from deepspeed.runtime.comm.coalesced_collectives import reduce_scatter_coalesced, all_to_all_quant_reduce
 from deepspeed.accelerator import get_accelerator
+import pytest
 
 from unit.common import DistributedTest
 
@@ -68,6 +70,9 @@ class TestAllToAllQuantReduceFallback(DistributedTest):
     def test_1d_tensor(self):
         # case 1: 1D tensor
         input = torch.zeros((10, ), dtype=torch.half, device=get_accelerator().current_device_name())
+        from deepspeed.ops.op_builder import QuantizerBuilder
+        if not deepspeed.ops.__compatible_ops__[QuantizerBuilder.NAME]:
+            pytest.skip("QuantizerBuilder is not implemented")
         output = all_to_all_quant_reduce([input], {})[0]
 
         if dist.get_rank() == 0:
@@ -80,6 +85,9 @@ class TestAllToAllQuantReduceFallback(DistributedTest):
     def test_non_divisible(self):
         # case 2: tensor size not divisible by global_world_size
         input = torch.zeros((7, 7), dtype=torch.half, device=get_accelerator().current_device_name())
+        from deepspeed.ops.op_builder import QuantizerBuilder
+        if not deepspeed.ops.__compatible_ops__[QuantizerBuilder.NAME]:
+            pytest.skip("QuantizerBuilder is not implemented")
         output = all_to_all_quant_reduce([input], {})[0]
 
         if dist.get_rank() == 0:

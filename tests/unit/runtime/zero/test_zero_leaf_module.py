@@ -6,11 +6,12 @@
 import deepspeed.comm as dist
 import torch
 
-from unit.common import DistributedTest
+from unit.common import DistributedTest, preferred_dtype
 from unit.simple_model import random_dataloader
 
 import deepspeed
 from deepspeed.utils import set_z3_leaf_modules, unset_z3_leaf_modules, get_z3_leaf_modules, z3_leaf_module
+from deepspeed.accelerator import get_accelerator
 
 
 class ChooseModuleByCounter(torch.nn.Module):
@@ -89,9 +90,6 @@ class TestSetZ3LeafModule(DistributedTest):
                     "lr": 1e-6
                 }
             },
-            "fp16": {
-                "enabled": True
-            },
             "zero_optimization": {
                 "stage": 3,
                 "stage3_prefetch_bucket_size": hidden_dim**2,
@@ -99,6 +97,10 @@ class TestSetZ3LeafModule(DistributedTest):
                 "stage3_max_reuse_distance": 0,
             }
         }
+        if get_accelerator().is_fp16_supported():
+            config_dict["fp16"] = {"enabled": True}
+        elif get_accelerator().is_bf16_supported():
+            config_dict["bf16"] = {"enabled": True}
 
         model = cls(hidden_dim)
 
@@ -106,7 +108,7 @@ class TestSetZ3LeafModule(DistributedTest):
         set_z3_leaf_modules(model, [cls])
         assert z3_leaf_module(model)
 
-        run_model(model, config_dict, hidden_dim, torch.float16, requires_grad)
+        run_model(model, config_dict, hidden_dim, preferred_dtype(), requires_grad)
 
     def test_choose_module_by_counter(self):
         self._test_set_z3_leaf_modules(ChooseModuleByCounter, True)

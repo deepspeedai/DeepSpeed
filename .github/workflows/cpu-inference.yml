@@ -47,42 +47,26 @@ jobs:
       - name: Detect instruction sets on instance
         run: |
           lscpu
-          pip install cmake
-          git clone https://github.com/intel/intel-extension-for-pytorch
-          cd intel-extension-for-pytorch/tests/cpu/isa
-          cmake .
-          make
-          ./cpu_features
 
       - name: Install numactl
         run: |
           sudo apt-get install -y numactl
 
-      - name: Install oneCCL Bindings for PyTorch
+      - name: Install dependencies
         run: |
           pip install torch
-          python -m pip install intel_extension_for_pytorch
-          # the curl line is for troubleshooting
-          curl -L https://pytorch-extension.intel.com/release-whl/stable/cpu/us/
-          python -m pip install oneccl_bind_pt --index-url https://pytorch-extension.intel.com/release-whl/stable/cpu/us/
-          pip install py-cpuinfo
           # check installed version
           pip list |grep \\\<torch\\\>
-          pip list |grep intel-extension-for-pytorch
-          pip list |grep oneccl-bind-pt
 
       - name: Install oneCCL
         run: |
+          pip install cmake
           git clone https://github.com/oneapi-src/oneCCL
           cd oneCCL
           mkdir build
           cd build
           cmake ..
-          make
-          make install
-          #source ./_install/env/setvars.sh
-          # test whether oneCCL is correctly installed
-          #mpirun -n 2 ./examples/benchmark/benchmark
+          make -j install
 
       - name: Install transformers
         run: |
@@ -103,7 +87,6 @@ jobs:
           source oneCCL/build/_install/env/setvars.sh
           export LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libstdc++.so.6
           # check whether the environment is properly setup
-          python -c "import torch;import intel_extension_for_pytorch as ipex;import oneccl_bindings_for_pytorch;print('done')"
           python -c "import deepspeed;from deepspeed.accelerator import get_accelerator;print(get_accelerator().device_name());print(get_accelerator().is_available())"
 
       - name: Unit tests

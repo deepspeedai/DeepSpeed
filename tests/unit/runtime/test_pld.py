@@ -10,6 +10,7 @@ from deepspeed.runtime.progressive_layer_drop import ProgressiveLayerDrop
 
 from unit.common import DistributedTest
 from unit.simple_model import SimpleModel, PLD_SimpleModel, random_dataloader
+from deepspeed.accelerator import get_accelerator
 
 
 @pytest.mark.parametrize('theta', [0, 0.1, 0.9, 1.0])
@@ -39,15 +40,16 @@ class TestPLDModel(DistributedTest):
                     "lr": 0.0001
                 }
             },
-            "fp16": {
-                "enabled": True
-            },
             "progressive_layer_drop": {
                 "enabled": True,
                 "theta": theta,
                 "gamma": gamma
             }
         }
+        if get_accelerator().is_fp16_supported():
+            config_dict["fp16"] = {"enabled": True}
+        elif get_accelerator().is_bf16_supported():
+            config_dict["bf16"] = {"enabled": True}
         hidden_dim = 10
 
         model = PLD_SimpleModel(hidden_dim, empty_grad=False)
@@ -80,15 +82,16 @@ class TestNonPLDModel(DistributedTest):
                     "lr": 0.0001
                 }
             },
-            "fp16": {
-                "enabled": True
-            },
             "progressive_layer_drop": {
                 "enabled": True,
                 "theta": theta,
                 "gamma": gamma
             }
         }
+        if get_accelerator().is_fp16_supported():
+            config_dict["fp16"] = {"enabled": True}
+        elif get_accelerator().is_bf16_supported():
+            config_dict["bf16"] = {"enabled": True}
         hidden_dim = 10
 
         model = SimpleModel(hidden_dim, empty_grad=False)
