@@ -34,53 +34,53 @@ if __name__ == "__main__":
         def collate_fn(self, batch):
             """ pad sequences of different lenghts into batch of size BxTxE """
             seqs, labels = zip(*batch)
-            seqlens = torch.tensor([ len(s) for s in seqs ]) 
             seqs = nn.utils.rnn.pad_sequence([s[0] for s in batch], batch_first=True, padding_value=self.padding_value)
+            seqs = torch.nn.utils.rnn.pad_sequence(seqs, batch_first=True, padding_value=self.padding_value)
             labels = torch.tensor([s[1] for s in batch], dtype=float)
-            return seqs, seqlens, labels
+            return seqs, labels
 
 
-    class SingleHeadAttentionAndFeedForward(nn.Module):
-        """ a test feedforward model """
+    class AttentionHeadAndFeedForward(nn.Module):
+        """ A single attention head followed by a feed forward. No embeddings  """
 
-        def __init__(self, max_seqlen, embed_dim):
-            super(SingleHeadAttentionAndFeedForward, self).__init__()
-
+        def __init__(self, max_seqlen, embed_dim, device):
+            super(AttentionHeadAndFeedForward, self).__init__()
             self.padding_value = 0
             self.max_seqlen = max_seqlen # M: size of mask
-            self.attn_head = nn.MultiheadAttention(embed_dim, num_heads=1)
+            self.device = device
+            self.qe = nn.Linear(embed_dim, embed_dim)
+            self.ke = nn.Linear(embed_dim, embed_dim)
+            self.ve = nn.Linear(embed_dim, embed_dim)
+            self.attn_head = nn.MultiheadAttention(embed_dim, num_heads=1, batch_first=True)
             self.fc1 = nn.Linear(embed_dim, 128)
             self.fc2 = nn.Linear(128, embed_dim)
 
-        def forward(self, x, attn_mask_seqlens=None):
+        def forward(self, x):
+
+            # compute length of each sequence as first index of padding value, or max length if no padding
+            B, T, E = x.shape
+            seqlens = torch.full(size=(B,), fill_value=T, dtype=int, device=x.device)
+            seq_ids, seq_padding_ids = torch.where(x[:,:,0]==self.padding_value)
+            seqlens[seq_ids] = seq_padding_ids
 
             # optional: 3D masks for attention, padded to individual input sequence lengths
-            B, T = len(x), max(attn_mask_seqlens)
-            if attn_mask_seqlens is not None:
-                masks = torch.tril(torch.ones((B,T,T), dtype=torch.float32)).to(x[0].device)
-                for i, seqlen in enumerate(attn_mask_seqlens):
-                    masks[i, seqlen:, :] = masks[i, :, seqlen:] = 0
+            masks = torch.tril(torch.ones((B,T,T), dtype=bool)).to(self.device)
+            for i, seqlen in enumerate(seqlens):
+                masks[i, seqlen:, :] = masks[i, :, seqlen:] = False
 
             # collates sequences of different lengths into a batch of size BxTxE
             x = torch.nn.utils.rnn.pad_sequence(x, batch_first=True, padding_value=self.padding_value)
+            x = x.to(self.device)
 
-            # compute q@k / sqrt(d_k) on input of shape BxTxE (where B and T can change)
-            k, q, v = x, x, x
-            out = q@k.transpose(-2,-1) # BxTxE @ BxExT --> BxTxT
-            out = out / (x.shape[-1]**0.5) # √d_k
+            # linear projections and attention head
+            q, k, v = self.qe(x), self.ke(x), self.ve(x)
+            out, _ = self.attn_head(q, k, v, need_weights=False, attn_mask=masks)
 
-            if attn_mask_seqlens is not None: # mask, if needed
-                out = out.masked_fill(masks==0, value=float('-inf'))
-
-            # softmax and multiply by values vector
-            out = F.softmax(out, dim=-1) # softmax --> BxTxT 
-            out = out@v # BxTxT @ BxTxE --> BxTxE
-
-            # feedforward: needs to converts BxTxE to BxMxE by padding extra tokens
+            # feedforward: needs to convert BxTxE to BxMxE by padding extra tokens
             out = F.pad(out, pad=(0, 0, 0, self.max_seqlen-T), value=self.padding_value)
             out = F.relu(self.fc1(out))
             out = F.relu(self.fc2(out))
-            return torch.tensor(out.sum(-1).sum(-1), requires_grad=True, dtype=float)
+            return torch.tensor(out.nansum(-1).nansum(-1), requires_grad=True)
 
 
         def to_layers(self):
@@ -95,15 +95,15 @@ if __name__ == "__main__":
     base_lr = 1e-3
     gradient_accumulation_steps = base_batch_size // dataloader_num_replicas
     pipeline_parallelism = True
-    order_by_seqlen = True  #enable for curriculum
+    order_by_seqlen = False  #enable for curriculum
 
     max_seqlen = 15
     torch_dist.init_process_group(backend='nccl')
     dataset = TestData(seq_count=300, min_seqlen=5, max_seqlen=max_seqlen)
-    model = SingleHeadAttentionAndFeedForward(max_seqlen, dataset.embed_dim).to(device)
+    model = AttentionHeadAndFeedForward(max_seqlen, dataset.embed_dim, device).to(device)
     model_ddp = DDP(model, device_ids=[device])
     optimizer = torch.optim.Adam(model_ddp.parameters(), lr=1e-3)
-    loss_fn = lambda x, y: F.mse_loss(x, y)
+    loss_fn = lambda x, y: F.mse_loss(x.float(), y.float())
 
     seqlens = [len(s[0]) for s in dataset]
     dataloader, lr_scheduler, deepspeed_io_kwargs = \
@@ -127,16 +127,16 @@ if __name__ == "__main__":
 
     # PyTorch example iterating whole dataset in one epoch
     for epoch in range(2):
-        for sample_idx, (seqs, seqlens, labels) in enumerate(dataloader):
+        for sample_idx, (seqs, labels) in enumerate(dataloader):
             batch_id = sample_idx // gradient_accumulation_steps
             microbatch_id = sample_idx % gradient_accumulation_steps
             seqs, labels = seqs.to(device), labels.to(device)
-            outputs = model_ddp(seqs, seqlens)
+            outputs = model_ddp(seqs)
             loss = loss_fn(outputs, labels)
             loss.backward()
             if (microbatch_id + 1) % gradient_accumulation_steps == 0:
                 if dataloader_rank == 0:
-                    print(f"batch {batch_id}, loss {loss.item()}, LRs {lr_scheduler.get_lr()}, epoch {epoch}")
+                    print(f"torch batch {batch_id}, loss {loss.item()}, LRs {lr_scheduler.get_lr()}, epoch {epoch}")
                 optimizer.step()
                 optimizer.zero_grad()
                 lr_scheduler.step()
@@ -157,21 +157,21 @@ if __name__ == "__main__":
 
     engine, optimizer, _, lr_scheduler = deepspeed.initialize(
         config=config, model=model, optimizer=optimizer, lr_scheduler=lr_scheduler)
-    # engine.training_dataloader = dataloader #use this or the deepspeed_io()
+    # engine.training_dataloader = dataloader # use this or the deepspeed_io() below
     engine.training_dataloader = engine.deepspeed_io(**deepspeed_io_kwargs)
 
     lr_scheduler.step(0)  # reset LR scheduler
     for epoch in range(2):
-        for sample_idx, (seqs, seqlens, labels) in enumerate(dataloader):
+        for sample_idx, (seqs, labels) in enumerate(dataloader):
             batch_id = sample_idx // gradient_accumulation_steps
             microbatch_id = sample_idx % gradient_accumulation_steps
             seqs, labels = seqs.to(device), labels.to(device)
-            outputs = engine(seqs, seqlens)
+            outputs = engine(seqs)
             loss = loss_fn(outputs, labels)
             engine.backward(loss)
             if dataloader_rank == 0:
                 print(
-                    f"batch {batch_id}, loss {loss.item()}, LRs {lr_scheduler.get_lr()}, epoch {epoch}"
+                    f"deepspeed batch {batch_id}, loss {loss.item()}, LRs {lr_scheduler.get_lr()}, epoch {epoch}"
                 )
             engine.step()
 
@@ -186,7 +186,7 @@ if __name__ == "__main__":
         lr_scheduler.step(0)  # reset LR scheduler
         for epoch in range(2):
             for batch_id in range(len(dataloader) // gradient_accumulation_steps):
-                engine.reset_activation_shape() # each batch has a diff length
+                engine.reset_activation_shape() # each batch has a diff BxT dimension
                 loss = engine.train_batch(data_iter=dataloader_it)
                 if dataloader_rank == 0:
-                    print(f"batch {batch_id}, loss {loss.item()}, LRs {lr_scheduler.get_lr()}, epoch {epoch}")
+                    print(f"pipeline batch {batch_id}, loss {loss.item()}, LRs {lr_scheduler.get_lr()}, epoch {epoch}")
