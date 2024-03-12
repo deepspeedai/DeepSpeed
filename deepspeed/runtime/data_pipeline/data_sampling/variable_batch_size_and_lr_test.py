@@ -7,10 +7,9 @@ import random
 import os
 import torch
 import torch.nn as nn
-from torch.nn.parallel import DistributedDataParallel as DDP
-from torch import distributed as torch_dist
 import torch.nn.functional as F
 import deepspeed
+import deepspeed.comm as dist
 from deepspeed.pipe import PipelineModule
 
 from deepspeed.runtime.data_pipeline.data_sampling.variable_batch_size_and_lr import get_dataloader_and_lr_scheduler_for_variable_batch_size
@@ -21,7 +20,7 @@ if __name__ == "__main__":
     class TestData(torch.utils.data.Dataset):
         """ A test dataset with sequences of random length, and the sequence length as the label"""
 
-        def __init__(self, seq_count, min_seqlen=1, max_seqlen=21, embed_dim=5, seed=0):
+        def __init__(self, seq_count, min_seqlen=1, max_seqlen=20, embed_dim=5, seed=0):
             data_random = random.Random(seed)
             self.mask_size = max_seqlen # M: size of mask
             self.padding_value = 0
@@ -35,7 +34,7 @@ if __name__ == "__main__":
             """ pad sequences of different lenghts into batch of size BxTxE """
             seqs, labels = zip(*batch)
             seqs = nn.utils.rnn.pad_sequence([s[0] for s in batch], batch_first=True, padding_value=self.padding_value)
-            seqs = torch.nn.utils.rnn.pad_sequence(seqs, batch_first=True, padding_value=self.padding_value)
+            seqs = F.pad(seqs, pad=(0, 0, 0, self.mask_size-seqs.shape[1]), value=self.padding_value)
             labels = torch.tensor([s[1] for s in batch], dtype=float)
             return seqs, labels
 
@@ -80,73 +79,33 @@ if __name__ == "__main__":
             out = F.pad(out, pad=(0, 0, 0, self.max_seqlen-T), value=self.padding_value)
             out = F.relu(self.fc1(out))
             out = F.relu(self.fc2(out))
-            return torch.tensor(out.nansum(-1).nansum(-1), requires_grad=True)
+            return torch.tensor(out.nansum(-1).nansum(-1).data, requires_grad=True)
 
 
         def to_layers(self):
             return [self.fc1, self.fc2, lambda x: x.sum(-1).sum(-1)]
 
-    dataloader_rank = int(os.environ.get('RANK', 0))
-    dataloader_num_replicas = int(os.environ.get('WORLD_SIZE', 1))
-    device_id = int(os.environ.get('LOCAL_RANK', 0))
-    device = f"cuda:{device_id}"
+    deepspeed.init_distributed()
+    device = f"cuda:{dist.get_local_rank()}"
     max_seqlen_per_batch = 40
     base_batch_size = 8
     base_lr = 1e-3
-    gradient_accumulation_steps = base_batch_size // dataloader_num_replicas
-    pipeline_parallelism = True
+    pipeline_num_stages = 2
     order_by_seqlen = False  #enable for curriculum
 
     max_seqlen = 15
-    torch_dist.init_process_group(backend='nccl')
     dataset = TestData(seq_count=300, min_seqlen=5, max_seqlen=max_seqlen)
     model = AttentionHeadAndFeedForward(max_seqlen, dataset.embed_dim, device).to(device)
-    model_ddp = DDP(model, device_ids=[device])
-    optimizer = torch.optim.Adam(model_ddp.parameters(), lr=1e-3)
+    optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
     loss_fn = lambda x, y: F.mse_loss(x.float(), y.float())
 
-    seqlens = [len(s[0]) for s in dataset]
-    dataloader, lr_scheduler, deepspeed_io_kwargs = \
-        get_dataloader_and_lr_scheduler_for_variable_batch_size(
-            dataset=dataset,
-            dataset_seqlens=seqlens,
-            base_batch_size=base_batch_size,
-            max_seqlen_per_batch=max_seqlen_per_batch,
-            dataloader_rank=dataloader_rank,
-            dataloader_num_replicas=dataloader_num_replicas,
-            lr_scaling_method="linear",
-            order_by_seqlen=order_by_seqlen,
-            gradient_accumulation_steps=gradient_accumulation_steps,
-            dataloader_num_workers=0,
-            dataloader_collate_fn=dataset.collate_fn,
-            optimizer=optimizer,
-            # lr_scheduler_class=torch.optim.lr_scheduler.StepLR,
-            # lr_scheduler_kwargs=dict(optimizer=optimizer, step_size=1, gamma=0.1),
-            required_microbatches_of_same_size=pipeline_parallelism,
-        )
+    if pipeline_num_stages:
+        model = PipelineModule(layers=model.to_layers(), num_stages=pipeline_num_stages, loss_fn=loss_fn)
 
-    # PyTorch example iterating whole dataset in one epoch
-    for epoch in range(2):
-        for sample_idx, (seqs, labels) in enumerate(dataloader):
-            batch_id = sample_idx // gradient_accumulation_steps
-            microbatch_id = sample_idx % gradient_accumulation_steps
-            seqs, labels = seqs.to(device), labels.to(device)
-            outputs = model_ddp(seqs)
-            loss = loss_fn(outputs, labels)
-            loss.backward()
-            if (microbatch_id + 1) % gradient_accumulation_steps == 0:
-                if dataloader_rank == 0:
-                    print(f"torch batch {batch_id}, loss {loss.item()}, LRs {lr_scheduler.get_lr()}, epoch {epoch}")
-                optimizer.step()
-                optimizer.zero_grad()
-                lr_scheduler.step()
-
-    torch_dist.destroy_process_group()
-
-    # DeepSpeed example
+    # DeepSpeed config
     config = {
         "train_batch_size": base_batch_size,
-        "gradient_accumulation_steps": gradient_accumulation_steps,
+        "train_micro_batch_size_per_gpu": 1, # due to variable batch size 
         "optimizer": {
             "type": "Adam",
             "params": {
@@ -156,37 +115,48 @@ if __name__ == "__main__":
     }
 
     engine, optimizer, _, lr_scheduler = deepspeed.initialize(
-        config=config, model=model, optimizer=optimizer, lr_scheduler=lr_scheduler)
+        config=config, model=model, optimizer=optimizer)
+
+    seqlens = [len(s[0]) for s in dataset]
+    dataloader, lr_scheduler, deepspeed_io_kwargs = \
+        get_dataloader_and_lr_scheduler_for_variable_batch_size(
+            dataset=dataset,
+            dataset_seqlens=seqlens,
+            base_batch_size=base_batch_size,
+            max_seqlen_per_batch=max_seqlen_per_batch,
+            dataloader_rank=engine.data_parallel_group.rank(),
+            dataloader_num_replicas=engine.data_parallel_group.size(),
+            lr_scaling_method="linear",
+            order_by_seqlen=order_by_seqlen,
+            gradient_accumulation_steps=engine.gradient_accumulation_steps(),
+            dataloader_num_workers=0,
+            dataloader_collate_fn=dataset.collate_fn,
+            optimizer=optimizer,
+            # lr_scheduler_class=torch.optim.lr_scheduler.StepLR,
+            # lr_scheduler_kwargs=dict(optimizer=optimizer, step_size=1, gamma=0.1),
+            required_microbatches_of_same_size=pipeline_num_stages>0,
+        )
+ 
     # engine.training_dataloader = dataloader # use this or the deepspeed_io() below
     engine.training_dataloader = engine.deepspeed_io(**deepspeed_io_kwargs)
+    engine.client_lr_scheduler = lr_scheduler
+    engine._configure_lr_scheduler(lr_scheduler)
+    gradient_acc_steps = engine.gradient_accumulation_steps()
 
-    lr_scheduler.step(0)  # reset LR scheduler
-    for epoch in range(2):
-        for sample_idx, (seqs, labels) in enumerate(dataloader):
-            batch_id = sample_idx // gradient_accumulation_steps
-            microbatch_id = sample_idx % gradient_accumulation_steps
-            seqs, labels = seqs.to(device), labels.to(device)
-            outputs = engine(seqs)
-            loss = loss_fn(outputs, labels)
-            engine.backward(loss)
-            if dataloader_rank == 0:
-                print(
-                    f"deepspeed batch {batch_id}, loss {loss.item()}, LRs {lr_scheduler.get_lr()}, epoch {epoch}"
-                )
-            engine.step()
-
-    # Deepspeed example for pipeline parallelism
-    if pipeline_parallelism:
-        model = PipelineModule(layers=model.to_layers(), num_stages=2, loss_fn=loss_fn)
-        engine, optimizer, _, lr_scheduler = deepspeed.initialize(
-            config=config, model=model, optimizer=optimizer, lr_scheduler=lr_scheduler)
-        engine.training_dataloader = engine.deepspeed_io(**deepspeed_io_kwargs)
-
-        dataloader_it = iter(dataloader)  # reset dataloader
-        lr_scheduler.step(0)  # reset LR scheduler
-        for epoch in range(2):
-            for batch_id in range(len(dataloader) // gradient_accumulation_steps):
+    n_batches_per_rank = len(dataloader)//gradient_acc_steps  
+    for epoch in range(10):
+        if pipeline_num_stages:
+            dataloader_it = iter(dataloader)  # point dataloader to first batch
+            lr_scheduler.step(0) # point LR scheduler to first batch
+            for batch_id in range(n_batches_per_rank):
                 engine.reset_activation_shape() # each batch has a diff BxT dimension
                 loss = engine.train_batch(data_iter=dataloader_it)
-                if dataloader_rank == 0:
-                    print(f"pipeline batch {batch_id}, loss {loss.item()}, LRs {lr_scheduler.get_lr()}, epoch {epoch}")
+        else:
+            for i, (seqs, labels) in enumerate(dataloader):
+                seqs, labels = seqs.to(device), labels.to(device)
+                outputs = engine(seqs)
+                loss = loss_fn(outputs, labels)
+                engine.backward(loss)
+            if engine.data_parallel_group.rank() == 0:
+                batch_id = i//gradient_acc_steps
+                print(f"batch {batch_id}, loss {loss.item()}, LRs {lr_scheduler.get_lr()}, epoch {epoch}")
