@@ -47,7 +47,7 @@ def get_data_sampling(param_dict):
         param_dict[DATA_SAMPLING] = {}
     sub_param_dict = param_dict[DATA_SAMPLING]
     output[CURRICULUM_LEARNING] = get_curriculum_learning(sub_param_dict)
-
+    # output[DYNAMIC_BATCHING] = get_dynamic_batching(sub_param_dict)
     return output
 
 
@@ -83,6 +83,32 @@ def get_curriculum_learning(param_dict):
         assert CURRICULUM_LEARNING_METRICS in sub_param_dict.keys(
         ), f"Curriculum learning is enabled, {CURRICULUM_LEARNING_METRICS} must be specified"
         for key, val in get_curriculum_learning_params(param_dict).items():
+            output[key] = val
+    return output
+
+
+def get_dynamic_batching_params(param_dict):
+    if DYNAMIC_BATCHING in param_dict.keys():
+        dynamic_batching_params = copy.copy(param_dict[DYNAMIC_BATCHING])
+        dynamic_batching_params.pop(DYNAMIC_BATCHING_ENABLED)
+        return dynamic_batching_params
+    else:
+        return {}
+    
+
+def get_dynamic_batching(param_dict):
+    output = {}
+    if DYNAMIC_BATCHING not in param_dict.keys():
+        sub_param_dict = param_dict[DYNAMIC_BATCHING]
+    sub_param_dict[DYNAMIC_BATCHING_ENABLED] = DYNAMIC_BATCHING_ENABLED_DEFAULT
+    sub_param_dict[DYNAMIC_BATCHING_LR_SCALING] = DYNAMIC_BATCHING_LR_SCALING
+    sub_param_dict[DYNAMIC_BATCHING_MIN_BATCH_SIZE] = DYNAMIC_BATCHING_MIN_BATCH_SIZE_DEFAULT
+    sub_param_dict[DYNAMIC_BATCHING_MAX_BATCH_SIZE] = None
+    sub_param_dict[DYNAMIC_BATCHING_SAMPLES_ORDER] = DYNAMIC_BATCHING_SAMPLES_ORDER_DEFAULT
+    if sub_param_dict[DYNAMIC_BATCHING_ENABLED]:
+        assert DYNAMIC_BATCHING_MAX_TOKENS_PER_BATCH in sub_param_dict.keys(), \
+            f"Dynamic batching is enabled, {DYNAMIC_BATCHING_MAX_TOKENS_PER_BATCH} must be specified"
+        for key, val in get_dynamic_batching_params(param_dict).items():
             output[key] = val
     return output
 
