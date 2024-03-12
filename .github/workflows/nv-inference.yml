@@ -46,7 +46,8 @@ jobs:
 
       - name: Install deepspeed
         run: |
-          pip install .[dev,1bit,autotuning,inf,triton]
+          DS_ACCELERATOR=cpu pip install .[dev,1bit,autotuning,inf]
+          #pip install .[dev,1bit,autotuning,inf,triton]
           ds_report
 
       - name: Python environment
@@ -60,3 +61,5 @@ jobs:
           #pytest $PYTEST_OPTS -m 'seq_inference' unit/ --torch_ver="2.1" --cuda_ver="11.8"
           pytest $PYTEST_OPTS -m 'inference_ops' unit/ --torch_ver="2.1" --cuda_ver="11.8"
           pytest $PYTEST_OPTS --forked -n 4 -m 'inference' unit/ --torch_ver="2.1" --cuda_ver="11.8"
+          # run ds_report again to check updated op list
+          ds_report

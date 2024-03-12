@@ -62,6 +62,8 @@ def _match_outputs(ref, tgt):
 
 
 def _test_activation_checkpoint(module, *inputs):
+    if get_accelerator().device_name() == "cpu":
+        pytest.skip("CPU accelerator does not support this test yet")
     # Move to device
     module.to(get_accelerator().device_name())
 
@@ -82,6 +84,8 @@ def _test_activation_checkpoint(module, *inputs):
 
 
 def _test_activation_checkpoint_ordering(module, expected_ordering, *inputs):
+    if get_accelerator().device_name() == "cpu":
+        pytest.skip("CPU accelerator does not support this test yet")
     # Move to device
     module.to(get_accelerator().device_name())
 

@@ -8,6 +8,7 @@ import torch
 
 from deepspeed.runtime.zero.offload_config import OffloadDeviceEnum
 from deepspeed.runtime.utils import required_torch_version
+from deepspeed.accelerator import get_accelerator
 
 from unit.runtime.compile.util import compare_loss
 from unit.common import DistributedTest
@@ -29,6 +30,8 @@ class TestZeRO(DistributedTest):
             pytest.skip(
                 " DeepSpeed BFloat16 tests need torch >= 1.10, NCCL >= 2.10.3, CUDA > =11.0 and HW support for BFloat16 to run correctly"
             )
+        if get_accelerator().device_name() == "cpu":
+            pytest.skip("CPU does not support this test yet")
 
         if offload_device == OffloadDeviceEnum.nvme:
             if zero_stage != 3:

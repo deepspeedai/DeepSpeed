@@ -7,6 +7,7 @@ import torch
 import os
 import deepspeed
 from deepspeed.accelerator import get_accelerator
+import pytest
 from unit.common import DistributedTest
 from unit.simple_model import Curriculum_SimpleModel, SimpleModel, random_dataloader, random_dataset
 
@@ -53,6 +54,8 @@ class TestDataEfficiency(DistributedTest):
     world_size = 2
 
     def test_curriculum_learning(self):
+        if get_accelerator().device_name() == "cpu":
+            pytest.skip("CPU accelerator does not support this test yet")
         config_dict = {
             "train_batch_size": 2,
             "steps_per_print": 1,
@@ -64,11 +67,6 @@ class TestDataEfficiency(DistributedTest):
                 }
             },
             "gradient_clipping": 1.0,
-            "fp16": {
-                "enabled": True,
-                "loss_scale": 0,
-                "initial_scale_power": 16
-            },
             "data_efficiency": {
                 "enabled": True,
                 "seed": 1234,
@@ -98,6 +96,10 @@ class TestDataEfficiency(DistributedTest):
                 }
             }
         }
+        if get_accelerator().is_fp16_supported():
+            config_dict["fp16"] = {"enabled": True, "loss_scale": 0, "initial_scale_power": 16}
+        elif get_accelerator().is_bf16_supported():
+            config_dict["bf16"] = {"enabled": True}
 
         def data_post_process(data, data_sampler_state_dict):
             assert 'dummy_metric' in data_sampler_state_dict['current_difficulties']
@@ -105,7 +107,7 @@ class TestDataEfficiency(DistributedTest):
 
         hidden_dim = 10
         model = SimpleModel(hidden_dim)
-        dataset = random_dataset(20, hidden_dim, torch.device('cpu'), dtype=torch.half)
+        dataset = random_dataset(20, hidden_dim, torch.device('cpu'))
         model, _, data_loader, _ = deepspeed.initialize(config=config_dict,
                                                         model=model,
                                                         training_data=dataset,
@@ -128,6 +130,8 @@ class TestLegacyCurriculumScheduler(DistributedTest):
     world_size = 2
 
     def test_fixed_discrete(self):
+        if get_accelerator().device_name() == "cpu":
+            pytest.skip("CPU accelerator does not support this test yet")
         config_dict = {
             "train_batch_size": 2,
             "steps_per_print": 1,
@@ -139,11 +143,6 @@ class TestLegacyCurriculumScheduler(DistributedTest):
                 }
             },
             "gradient_clipping": 1.0,
-            "fp16": {
-                "enabled": True,
-                "loss_scale": 0,
-                "initial_scale_power": 16
-            },
             "curriculum_learning": {
                 "enabled": True,
                 "curriculum_type": "seqlen",
@@ -156,6 +155,10 @@ class TestLegacyCurriculumScheduler(DistributedTest):
                 }
             }
         }
+        if get_accelerator().is_fp16_supported():
+            config_dict["fp16"] = {"enabled": True, "loss_scale": 0, "initial_scale_power": 16}
+        elif get_accelerator().is_bf16_supported():
+            config_dict["bf16"] = {"enabled": True}
         hidden_dim = 10
         ground_truths = {1: 1, 2: 1, 3: 2, 4: 2, 5: 3, 6: 3, 7: 4, 8: 4}
 
@@ -172,6 +175,8 @@ class TestLegacyCurriculumScheduler(DistributedTest):
             assert seqlen == true_seqlen, f"Incorrect curriculum schedule"
 
     def test_fixed_linear(self):
+        if get_accelerator().device_name() == "cpu":
+            pytest.skip("CPU accelerator does not support this test yet")
         config_dict = {
             "train_batch_size": 2,
             "steps_per_print": 1,
@@ -183,11 +188,6 @@ class TestLegacyCurriculumScheduler(DistributedTest):
                 }
             },
             "gradient_clipping": 1.0,
-            "fp16": {
-                "enabled": True,
-                "loss_scale": 0,
-                "initial_scale_power": 16
-            },
             "curriculum_learning": {
                 "enabled": True,
                 "curriculum_type": "seqlen",
@@ -200,6 +200,10 @@ class TestLegacyCurriculumScheduler(DistributedTest):
                 }
             }
         }
+        if get_accelerator().is_fp16_supported():
+            config_dict["fp16"] = {"enabled": True, "loss_scale": 0, "initial_scale_power": 16}
+        elif get_accelerator().is_bf16_supported():
+            config_dict["bf16"] = {"enabled": True}
         hidden_dim = 10
         ground_truths = {1: 2, 2: 4, 3: 4, 4: 6, 5: 6, 6: 8, 7: 8, 8: 10, 9: 10, 10: 10}
 
