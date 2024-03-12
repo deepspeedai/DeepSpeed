@@ -101,6 +101,7 @@ def batch_by_size(
                 break
 
         if not is_batch_valid: batch_size -= equal_size_multiple  #ignore last iteration (not valid)
+        if batch_size == 0 : break # last batch is not valid (size zero), so we are done
         batch = metrics[batch_init:batch_init + batch_size]
         microbatch = [batch[b::equal_size_multiple] for b in range(equal_size_multiple)]
         batch_init += sum([len(l) for l in microbatch])
@@ -110,24 +111,22 @@ def batch_by_size(
     microbatches = microbatches[:len(microbatches) - len(microbatches) % num_microbatches_per_batch]
 
     #compute the effective batch size for each microbatch.
-    batch_sizes, batch_max_seqlens, microbatch_ids = [], [], []
+    batch_sizes, microbatch_ids = [], []
     for rank in range(0, len(microbatches), num_microbatches_per_batch):
         batch_id = rank // num_microbatches_per_batch
         microbatch = microbatches[rank:rank + num_microbatches_per_batch]
         batch_size = sum([len(mb) for mb in microbatch])
-        batch_max_seqlen = max([m[0] for m in microbatch[0]])
-        mb_sample_ids = [[m[1] for m in metrics] for metrics in microbatch]
+        mb_ids = [ [m[1] for m in metrics] for metrics in microbatch]
         batch_sizes.append(batch_size)
-        batch_max_seqlens.append(batch_max_seqlen)
-        microbatch_ids.append( (batch_id, mb_sample_ids) )
+        microbatch_ids += mb_ids
         n_tokens_in_batch = sum([m[0] for m in microbatch[0]])
         assert n_tokens_in_batch <= max_tokens_per_batch
         if verbose:
-            print(f"Batch size {batch_size} samples, {n_tokens_in_batch} tokens, samples: {mb_sample_ids}")
+            print(f"Batch id {batch_id}, size {batch_size}, tokens {n_tokens_in_batch} tokens, samples: {mb_ids}")
 
     # return the sample ids of each microbatch, and the batch sizes
     assert len(batch_sizes) == len(microbatch_ids) // num_microbatches_per_batch
-    return microbatch_ids, batch_sizes, batch_max_seqlens
+    return microbatch_ids, batch_sizes
 
 
 def scale_lr(base_batch_size, batch_size, base_lr=1, method="linear"):
@@ -148,13 +147,11 @@ def scale_lr(base_batch_size, batch_size, base_lr=1, method="linear"):
 
 def dataloader_for_variable_batch_size(dataset,
                                        microbatch_ids,
-                                       batch_max_seqlens,
                                        dataloader_rank,
                                        dataloader_num_replicas,
                                        dataloader_collate_fn=None,
                                        dataloader_num_workers=2,
-                                       dataloader_pin_memory=False,
-                                       required_return_of_batch_max_seqlen=False):
+                                       dataloader_pin_memory=False):
 
     # equidistantly distribute the microbatches across the replicas in an interleaved fashion.
     sampler = DistributedSampler(
@@ -168,11 +165,8 @@ def dataloader_for_variable_batch_size(dataset,
     # collate function applies wraps user defined collate function to the variable batch data
     def collate_fn_wrapper(list_microbatch_ids, dataset, collate_fn=None):
         assert len(list_microbatch_ids) == 1, "only 1 element should be returned by the sampler."
-        batch_id, microbatch_sample_ids = list_microbatch_ids[0]
-        batch = [dataset[idx] for idx in microbatch_sample_ids]
-        if required_return_of_batch_max_seqlen:
-            max_seqlen = batch_max_seqlens[batch_id]
-            return collate_fn(batch, max_seqlen) if collate_fn else (batch, max_seqlen)
+        microbatch_ids = list_microbatch_ids[0]
+        batch = [dataset[idx] for idx in microbatch_ids]
         return collate_fn(batch) if collate_fn else batch
 
     collate_fn = lambda b: collate_fn_wrapper(b, dataset, dataloader_collate_fn)
@@ -313,11 +307,10 @@ def get_dataloader_and_lr_scheduler_for_variable_batch_size(
     lr_scheduler_class=None,
     lr_scheduler_kwargs={'verbose': False},
     required_microbatches_of_same_size=False,
-    required_return_of_batch_max_seqlen=False,
     verbose=False,
 ):
 
-    microbatch_ids, batch_sizes, batch_max_seqlens = batch_by_size(
+    microbatch_ids, batch_sizes = batch_by_size(
         seqlens=dataset_seqlens,
         max_tokens_per_batch=max_seqlen_per_batch,
         sample_ids=sample_ids,
@@ -334,13 +327,11 @@ def get_dataloader_and_lr_scheduler_for_variable_batch_size(
     dataloader, deepspeed_io_kwargs = dataloader_for_variable_batch_size(
         dataset=dataset,
         microbatch_ids=microbatch_ids,
-        batch_max_seqlens=batch_max_seqlens,
         dataloader_rank=dataloader_rank,
         dataloader_num_replicas=dataloader_num_replicas,
         dataloader_collate_fn=dataloader_collate_fn,
         dataloader_num_workers=dataloader_num_workers,
         dataloader_pin_memory=dataloader_pin_memory,
-        required_return_of_batch_max_seqlen=required_return_of_batch_max_seqlen,
     )
 
     lr_scheduler = lr_scheduler_for_variable_batch_size(base_batch_size=base_batch_size,
