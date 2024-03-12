@@ -63,6 +63,22 @@ CURRICULUM_LEARNING_DATA_CLUSTER_CURRENT_POSITION = "data_cluster_current_positi
 CURRICULUM_LEARNING_NP_RNG_STATE = "np_rng_state"
 
 #########################################
+# Data efficiency - Dynamic batching and LR scaling
+#########################################
+DYNAMIC_BATCHING = "dynamic_batching"
+DYNAMIC_BATCHING_ENABLED = "enabled"
+DYNAMIC_BATCHING_ENABLED_DEFAULT = False
+DYNAMIC_BATCHING_LR_SCALING = "lr_scaling" # "linear" / "sqrt" / "none"
+DYNAMIC_BATCHING_LR_SCALING_DEFAULT = "linear"
+DYNAMIC_BATCHING_MIN_BATCH_SIZE = "min_batch_size"
+DYNAMIC_BATCHING_MIN_BATCH_SIZE_DEFAULT = 1
+DYNAMIC_BATCHING_MAX_BATCH_SIZE = "max_batch_size"
+DYNAMIC_BATCHING_MAX_BATCH_SIZE_DEFAULT = None
+DYNAMIC_BATCHING_SAMPLES_ORDER = "samples_order" # "random" / "order" / "default"
+DYNAMIC_BATCHING_SAMPLES_ORDER_DEFAULT = "dataloader" # "random" / "order" / "dataloader"
+DYNAMIC_BATCHING_MAX_TOKENS_PER_BATCH = "max_tokens_per_batch"
+
+#########################################
 # Curriculum Learning legacy implementation
 #########################################
 CURRICULUM_LEARNING_LEGACY = "curriculum_learning"
