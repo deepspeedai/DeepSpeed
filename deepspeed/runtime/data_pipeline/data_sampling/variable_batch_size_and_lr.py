@@ -86,26 +86,26 @@ def batch_by_size(
     while batch_init < len(metrics):
 
         # we iterate over possible effective batch sizes (groups of microbatches of same size)
-        for batch_size in range(equal_size_multiple, len(metrics), equal_size_multiple):
+        valid_batch_end = batch_init
+        for batch_end in range(batch_init+equal_size_multiple, len(metrics), equal_size_multiple):
 
             # attempt effective batch
-            batch = metrics[batch_init:batch_init + batch_size]
+            batch = metrics[batch_init:batch_end]
 
             # pick interleaved samples for each microbatch to help with load balancing
             # (in the ordered use case), and to replicate what the distributed sampler does.
-            microbatch = [batch[b::equal_size_multiple] for b in range(equal_size_multiple)]
+            mbs = [batch[b::equal_size_multiple] for b in range(equal_size_multiple)]
 
             # if they are all valid micro-batches, keep them until you find longer mbatches, if any
-            is_batch_valid = all([is_microbatch_valid(mb) for mb in microbatch])
-            if not is_batch_valid:
-                break
+            is_batch_valid = all([is_microbatch_valid(mb) for mb in mbs])
+            if is_batch_valid:
+                valid_batch_end = batch_end
 
-        if not is_batch_valid: batch_size -= equal_size_multiple  #ignore last iteration (not valid)
-        if batch_size == 0 : break # last batch is not valid (size zero), so we are done
-        batch = metrics[batch_init:batch_init + batch_size]
-        microbatch = [batch[b::equal_size_multiple] for b in range(equal_size_multiple)]
-        batch_init += sum([len(l) for l in microbatch])
-        microbatches += microbatch
+        if batch_init == valid_batch_end: break # last batch is not valid (size zero), so we are done
+        batch = metrics[batch_init:valid_batch_end]
+        mbs = [batch[b::equal_size_multiple] for b in range(equal_size_multiple)]
+        batch_init += sum([len(l) for l in mbs])
+        microbatches += mbs
 
     # make sure we give the same number of (micro-)batches to each dataloader by trimming dataset
     microbatches = microbatches[:len(microbatches) - len(microbatches) % num_microbatches_per_batch]
@@ -114,12 +114,12 @@ def batch_by_size(
     batch_sizes, microbatch_ids = [], []
     for rank in range(0, len(microbatches), num_microbatches_per_batch):
         batch_id = rank // num_microbatches_per_batch
-        microbatch = microbatches[rank:rank + num_microbatches_per_batch]
-        batch_size = sum([len(mb) for mb in microbatch])
-        mb_ids = [ [m[1] for m in metrics] for metrics in microbatch]
+        mbs = microbatches[rank:rank + num_microbatches_per_batch]
+        batch_size = sum([len(mb) for mb in mbs])
+        mb_ids = [ [m[1] for m in metrics] for metrics in mbs]
         batch_sizes.append(batch_size)
         microbatch_ids += mb_ids
-        n_tokens_in_batch = sum([m[0] for m in microbatch[0]])
+        n_tokens_in_batch = sum([m[0] for m in mbs[0]])
         assert n_tokens_in_batch <= max_tokens_per_batch
         if verbose:
             print(f"Batch id {batch_id}, size {batch_size}, tokens {n_tokens_in_batch} tokens, samples: {mb_ids}")
