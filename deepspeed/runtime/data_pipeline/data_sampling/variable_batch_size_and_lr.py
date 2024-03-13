@@ -6,6 +6,7 @@
 import random
 import torch
 from torch.optim.lr_scheduler import LRScheduler
+from torch.optim.optimizer import Optimizer
 from torch.utils.data import DataLoader, DistributedSampler
 from deepspeed.utils import logger
 
@@ -149,8 +150,9 @@ def dataloader_for_variable_batch_size(
     dataset,
     microbatch_ids,
     batch_max_seqlens,
-    dataloader_rank,
-    dataloader_num_replicas,
+    dataloader_rank=0,
+    dataloader_batch_size=1,
+    dataloader_num_replicas=1,
     dataloader_collate_fn=None,
     dataloader_num_workers=2,
     dataloader_pin_memory=False,
@@ -178,12 +180,13 @@ def dataloader_for_variable_batch_size(
                 assert sample_padding_fn is not None, \
                     "padding dataloader_padding_fn must be provided if required_microbatches_of_same_seqlen is True"
                 pad_len = batch_max_seqlens[batch_id]
-                batch_data = [sample_padding_fn(b, pad_len) for b in batch_data]
+                batch_data = [sample_padding_fn(sample, pad_len) for sample in batch_data]
             batch+=batch_data
         return dataloader_collate_fn(batch) if dataloader_collate_fn else batch
 
     dataloader = DataLoader(
         dataset=microbatch_ids,
+        batch_size=dataloader_batch_size,
         sampler=sampler,
         num_workers=dataloader_num_workers,
         collate_fn=collate_fn_wrapper,
@@ -192,109 +195,125 @@ def dataloader_for_variable_batch_size(
 
     deepspeed_io_kwargs = dict(
         dataset=microbatch_ids,
-        batch_size=1,
+        batch_size=dataloader_batch_size,
         pin_memory=dataloader_pin_memory,
         data_sampler=sampler,
-        collate_fn=dataloader_collate_fn,
+        collate_fn=collate_fn_wrapper,
         num_local_io_workers=dataloader_num_workers,
     )
 
     return dataloader, deepspeed_io_kwargs
 
 
-class StubLRScheduler(LRScheduler):
-    """ a stub LR scheduler that does not change the LR, keeps it constant """
+class VariableBatchSizeLR(LRScheduler):
+    """ an LR scheduler that scales the LR of a given scheduler's LR """
 
-    def get_lr(self) -> float:
-        return self.base_lrs
+    @property
+    def verbose(self):
+        return self.base_lr_scheduler.verbose
+    
+    @property
+    def optimizer(self):
+        return self.base_lr_scheduler.optimizer
+    
+    @property
+    def base_lrs(self):
+        return self.base_lr_scheduler.base_lrs
+    
+    @property
+    def last_epoch(self):
+        return self.base_lr_scheduler.last_epoch
+    
+    def __init__(self, lr_scheduler, base_batch_size, batch_sizes, dataloader, lr_scaling_method="linear"):
+        self.batch_sizes = batch_sizes
+        self.base_batch_size = base_batch_size
+        self.lr_scaling_method = lr_scaling_method
+        self.dataloader = dataloader
+        self.base_lr_scheduler = lr_scheduler
+
+    def state_dict(self):
+        return {
+            'base_lr_scheduler': self.base_lr_scheduler.state_dict(),
+            'base_batch_size': self.base_batch_size,
+            'lr_scaling_method': self.lr_scaling_method,
+            'batch_sizes': self.batch_sizes,
+        }
+
+    def load_state_dict(self, state_dict):
+        self.base_lr_scheduler.load_state_dict(state_dict['base_lr_scheduler'])
+        self.base_batch_size = state_dict['base_batch_size']
+        self.lr_scaling_method = state_dict['lr_scaling_method']
+        self.batch_sizes = state_dict['batch_sizes']
+
+    def get_last_lr(self):
+        return self.base_lr_scheduler._last_lr
+
+    def get_lr(self):
+        try:
+            return self.base_lr_scheduler.get_lr()
+        except NotImplementedError:
+            return [group['lr'] for group in self.optimizer.param_groups]
+
+    def step(self, epoch=None):
+        # call the base scheduler's step method to get LR for next epoch
+        # Note: optimizer.step precedes lr_scheduler.step(), so the stepping workflow is:
+        # init: lr_scheduler.step(0) --> set LR for epoch 0
+        # epoch 0: optimizer.step(); lr_scheduler.step(1) --> set LR for epoch 1
+        # epoch 1: optimizer.step(); lr_scheduler.step(2) --> set LR for epoch 2
+
+        # reset unscaled LRs (to the original scheduler's one) for the current epoch
+        # Note: epoch==0: reset LR scheduler; epoch==None: scale LR for next epoch;
+        unscaled_lrs = self.base_lrs if epoch == 0 else self.get_last_lr()
+        for group, lr in zip(self.optimizer.param_groups, unscaled_lrs):
+            group['lr'] = lr
+
+        self.base_lr_scheduler.step(epoch)  # set unscaled lr, _step_count, last_epoch, _last_lr for new epoch
+
+        # scale the learning rate for next epoch for each parameter group.
+        batch_size = self.batch_sizes[self.last_epoch % len(self.batch_sizes)]
+        for group in self.optimizer.param_groups:
+            group['lr'] = scale_lr(self.base_batch_size, batch_size, group['lr'], self.lr_scaling_method)
+
+        if True: #self.verbose:
+            print(f"Batch id {self.last_epoch}, unscaled LR: {unscaled_lrs}, scaled LR: {self.get_lr()}")
 
 
 def lr_scheduler_for_variable_batch_size(base_batch_size,
                                          batch_sizes,
                                          dataloader,
-                                         lr_scaling_method='linear',
-                                         optimizer=None,
-                                         lr_scheduler_class=None,
-                                         **lr_scheduler_kwargs):
+                                         lr_scheduler_or_optimizer,
+                                         lr_scaling_method='linear'):
     """
     returns a class that provides an LR scheduler that scales learning rate at every
     epoch taking into account the batch size of each epoch.
-    If learning rate is constant, ie no LR scheduler, then `optimizer` must be provided.
-    Otherwise, the base `LRScheduler` must be provided as  `lr_scheduler_class`.
+    If learning rate is constant, ie no LR scheduler, then the LR will be taken from the
+    constant LR values in the optimizer param groups. Otherwise from the scheduler's LR.
 
     Arguments:
     - `base_batch_size`: the batch size that the base LR in the optimizer or scheduler refers to;
     - `lr_scaling_method`: method to use to scale LR - see `scale_lr()`;
+    - `lr_scheduler_or_optimizer`: one instance of `LRScheduler` or `Optimizer` to be used as base;
     - `batch_sizes`: the effective batch size of each batch in the dataloader;
-    - `optimizer` and `lr_scheduler_class`: the base LR scheduler. It not provided,
-       will use the constant LRs from the optimizer's param groups instead. If provided,
-       the initialization of the scheduler will be done with `lr_scheduler_kwargs`.
 
     Returns the new LRScheduler
     """
+    
+    class StubLRScheduler(LRScheduler):
+        """ a stub LR scheduler that does not change the LR, keeps it constant """
 
-    class VariableBatchSizeLR(lr_scheduler_class or StubLRScheduler):
+        def get_lr(self) -> float:
+            return self.base_lrs
 
-        def __init__(self, optimizer, **lr_scheduler_kwargs):
-            self.batch_sizes = batch_sizes
-            self.base_batch_size = base_batch_size
-            self.lr_scaling_method = lr_scaling_method
-            self.dataloader = dataloader
-            self._last_lr = [p['lr'] for p in optimizer.param_groups]
-            super().__init__(optimizer=optimizer, **lr_scheduler_kwargs)
-
-        def state_dict(self):
-            return {
-                'base': super().state_dict(),
-                'base_batch_size': self.base_batch_size,
-                'lr_scaling_method': self.lr_scaling_method,
-                'batch_sizes': self.batch_sizes,
-            }
-
-        def load_state_dict(self, state_dict):
-            super().load_state_dict(state_dict['base'])
-            self.base_batch_size = state_dict['base_batch_size']
-            self.lr_scaling_method = state_dict['lr_scaling_method']
-            self.batch_sizes = state_dict['batch_sizes']
-
-        def get_lr(self):
-            return [group['lr'] for group in self.optimizer.param_groups]
-
-        def step(self, epoch=None):
-            # call the base scheduler's step method to get LR for next epoch
-            # Note: optimizer.step preecceds lr_scheduler.step(), so the stepping workflow is:
-            # init: lr_scheduler.step(0) --> set LR for epoch 0
-            # epoch 0: optimizer.step(); lr_scheduler.step(1) --> set LR for epoch 1
-            # epoch 1: optimizer.step(); lr_scheduler.step(2) --> set LR for epoch 2
-
-            # reset unscaled LRs (to the original scheduler's one) for the current epoch
-            # Note: epoch==0: reset LR scheduler; epoch==None: scale LR for next epoch;
-            unscaled_lrs = self.base_lrs if epoch == 0 else self._last_lr
-            for group, lr in zip(self.optimizer.param_groups, unscaled_lrs):
-                group['lr'] = lr
-
-            super().step(epoch)  # set unscaled lr, _step_count, last_epoch, _last_lr for new epoch
-
-            # scale the learning rate for next epoch for each parameter group.
-            batch_size = self.batch_sizes[self.last_epoch % len(self.batch_sizes)]
-            for group in self.optimizer.param_groups:
-                group['lr'] = scale_lr(self.base_batch_size, batch_size, group['lr'], lr_scaling_method)
-
-            if self.verbose:
-                print(f"Batch id {self.last_epoch}, unscaled LR: {unscaled_lrs}, scaled LR: {self.get_lr()}")
-
-    #### main loop: double check arguments and returns correctly-instantiated LR scheduler
-
-    if lr_scheduler_class is None:
-        assert optimizer is not None, "optimizer must be provided if lr_scheduler_class is not"
+    if isinstance(lr_scheduler_or_optimizer, Optimizer):
+        lr_scheduler = StubLRScheduler(lr_scheduler_or_optimizer)
+    elif isinstance(lr_scheduler_or_optimizer, LRScheduler):
+        lr_scheduler = lr_scheduler_or_optimizer
     else:
-        assert issubclass(lr_scheduler_class, LRScheduler), "lr_scheduler should be a LRScheduler"
+        raise ValueError("Unknown type for lr_scheduler_or_optimizer: {}".format(type(lr_scheduler_or_optimizer)))
 
-    if optimizer is None:
-        assert lr_scheduler_class is not None, "lr_scheduler_class must be provided if optimizer is not"
-        optimizer = lr_scheduler_kwargs['optimizer']
-
-    return VariableBatchSizeLR(optimizer=optimizer, **lr_scheduler_kwargs)
+    return VariableBatchSizeLR(
+        lr_scheduler=lr_scheduler, base_batch_size=base_batch_size, batch_sizes=batch_sizes,
+        dataloader=dataloader, lr_scaling_method=lr_scaling_method)
 
 
 def get_dataloader_and_lr_scheduler_for_variable_batch_size(
@@ -308,21 +327,20 @@ def get_dataloader_and_lr_scheduler_for_variable_batch_size(
     max_batch_size=None,
     shuffle_seqlens=False,
     order_by_seqlen=False,
+    dataloader_batch_size=1,
     dataloader_rank=0,
     dataloader_num_replicas=1,
     dataloader_num_workers=0,
     dataloader_collate_fn=None,
     dataloader_pin_memory=False,
-    optimizer=None,
-    lr_scheduler_class=None,
-    lr_scheduler_kwargs={'verbose': False},
+    lr_scheduler_or_optimizer=None,
     required_microbatches_of_same_size=False,
     required_microbatches_of_same_seqlen=False,
     sample_padding_fn=None,
     verbose=False,
 ):
 
-    # effective_batch_size = train_micro_batch_size_per_gpu * gradient_accumulation_steps * number of GPUs.
+    # effective_batch_size = train_micro_batch_size_per_gpu * gradient_accumulation_steps * number of dataloaders
     microbatch_ids, batch_sizes, batch_max_seqlens = batch_by_size(
         seqlens=dataset_seqlens,
         max_tokens_per_batch=max_tokens_per_batch,
@@ -342,6 +360,7 @@ def get_dataloader_and_lr_scheduler_for_variable_batch_size(
         batch_max_seqlens=batch_max_seqlens,
         dataloader_rank=dataloader_rank,
         dataloader_num_replicas=dataloader_num_replicas,
+        dataloader_batch_size=dataloader_batch_size,
         dataloader_collate_fn=dataloader_collate_fn,
         dataloader_num_workers=dataloader_num_workers,
         dataloader_pin_memory=dataloader_pin_memory,
@@ -352,9 +371,7 @@ def get_dataloader_and_lr_scheduler_for_variable_batch_size(
     lr_scheduler = lr_scheduler_for_variable_batch_size(base_batch_size=effective_batch_size,
                                                         batch_sizes=batch_sizes,
                                                         lr_scaling_method=lr_scaling_method,
-                                                        optimizer=optimizer,
-                                                        dataloader=dataloader,
-                                                        lr_scheduler_class=lr_scheduler_class,
-                                                        **lr_scheduler_kwargs)
+                                                        lr_scheduler_or_optimizer=lr_scheduler_or_optimizer,
+                                                        dataloader=dataloader)
 
     return dataloader, lr_scheduler, deepspeed_io_kwargs

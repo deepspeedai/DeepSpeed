@@ -38,7 +38,7 @@ if __name__ == "__main__":
             return seqs, labels
 
         def padding_fn(self, sample, size):
-            """ pad sequence `seq` of shape TxE to size T'xE where T' is give by `size` """
+            """ pad sequence `seq` of shape TxE to size T'xE where T' is given by `size` """
             seq, label = sample
             seq = F.pad(seq, pad=(0, 0, 0, size - len(seq)), value=self.padding_value)
             return seq, label
@@ -49,7 +49,7 @@ if __name__ == "__main__":
         def __init__(self, max_seqlen, embed_dim, device):
             super(AttentionHeadAndFeedForward, self).__init__()
             self.padding_value = 0
-            self.max_seqlen = max_seqlen  # M: size of mask
+            self.max_seqlen = max_seqlen  # M: max possible seqlen, and input size to feedforward
             self.device = device
             self.qe = nn.Linear(embed_dim, embed_dim)
             self.ke = nn.Linear(embed_dim, embed_dim)
@@ -67,13 +67,9 @@ if __name__ == "__main__":
             seqlens[seq_ids] = seq_padding_ids
 
             # optional: 3D masks for attention, padded to individual input sequence lengths
-            masks = torch.tril(torch.ones((B, T, T), dtype=bool)).to(self.device)
+            masks = torch.tril(torch.ones((B, T, T), dtype=bool)).to(x.device)
             for i, seqlen in enumerate(seqlens):
                 masks[i, seqlen:, :] = masks[i, :, seqlen:] = False
-
-            # collates sequences of different lengths into a batch of size BxTxE
-            x = torch.nn.utils.rnn.pad_sequence(x, batch_first=True, padding_value=self.padding_value)
-            x = x.to(self.device)
 
             # linear projections and attention head. Attention size BxTxT
             q, k, v = self.qe(x), self.ke(x), self.ve(x)
@@ -91,10 +87,11 @@ if __name__ == "__main__":
     deepspeed.init_distributed()
     device = f"cuda:{dist.get_local_rank()}"
     max_tokens_per_batch = 40
-    pipeline_num_stages = 2
+    pipeline_num_stages = 0
 
     max_seqlen = 15
     dataset = TestData(seq_count=300, min_seqlen=5, max_seqlen=max_seqlen)
+    seqlens = [len(s[0]) for s in dataset]
     model = AttentionHeadAndFeedForward(max_seqlen, dataset.embed_dim, device).to(device)
     loss_fn = lambda x, y: F.mse_loss(x.float(), y.float())
 
@@ -111,59 +108,54 @@ if __name__ == "__main__":
                 "lr": 1e-3,
             }
         },
-        # "scheduler": {
-        #     "type": "WarmupLR",
-        #     "params": {
-        #         "warmup_min_lr": 0,
-        #         "warmup_max_lr": 0.001,
-        #         "warmup_num_steps": 1000
-        #     }
-        # }
     }
 
-    engine, _, _, lr_scheduler = deepspeed.initialize(config=config, model=model)
 
-    seqlens = [len(s[0]) for s in dataset]
+    # From deepspeed docs: https://deepspeed.readthedocs.io/en/latest/schedulers.html
+    # if the scheduler is supposed to execute at any other interval (e.g., training epochs), then the
+    # user should NOT pass the scheduler to DeepSpeed during initialization and must manage it explicitly.
+    engine, _, _, _ = deepspeed.initialize(config=config, model=model)
     dataloader, lr_scheduler, deepspeed_io_kwargs = \
         get_dataloader_and_lr_scheduler_for_variable_batch_size(
             dataset=dataset,
             dataset_seqlens=seqlens,
             effective_batch_size=engine.train_batch_size(),
             max_tokens_per_batch=max_tokens_per_batch,
-            dataloader_rank=engine.data_parallel_group.rank(),
-            dataloader_num_replicas=engine.data_parallel_group.size(),
             lr_scaling_method="linear",
             order_by_seqlen=False,
+            dataloader_batch_size=engine.train_micro_batch_size_per_gpu(),
+            dataloader_rank=engine.data_parallel_group.rank(),
+            dataloader_num_replicas=engine.data_parallel_group.size(),
             dataloader_num_workers=0,
             dataloader_collate_fn=dataset.collate_fn,
-            optimizer=engine.optimizer,
-            # lr_scheduler_class=torch.optim.lr_scheduler.StepLR,
-            # lr_scheduler_kwargs=dict(optimizer=optimizer, step_size=1, gamma=0.1),
+            lr_scheduler_or_optimizer = engine.optimizer or engine.lr_scheduler,
             required_microbatches_of_same_size = pipeline_num_stages>0,
             required_microbatches_of_same_seqlen = pipeline_num_stages>0,
             sample_padding_fn=dataset.padding_fn,
         )
 
-    # engine.training_dataloader = dataloader # use this or the deepspeed_io() below
+    # engine.training_dataloader = dataloader # if you need to use a torch dataloader directly
     engine.training_dataloader = engine.deepspeed_io(**deepspeed_io_kwargs)
-    engine.client_lr_scheduler = lr_scheduler
-    engine._configure_lr_scheduler(lr_scheduler)
     gradient_acc_steps = engine.gradient_accumulation_steps()
+    # effective_batch_size = train_micro_batch_size_per_gpu * gradient_accumulation_steps * number of dataloaders
+    n_batches_per_rank = len(engine.training_dataloader) // (gradient_acc_steps*engine.train_micro_batch_size_per_gpu())
 
-    n_batches_per_rank = len(dataloader) // gradient_acc_steps
     for epoch in range(10):
-        if pipeline_num_stages:
-            dataloader_it = iter(dataloader)  # point dataloader to first batch
-            lr_scheduler.step(0)  # point LR scheduler to first batch
-            for batch_id in range(n_batches_per_rank):
+        dataloader_it = iter(engine.training_dataloader)  # point dataloader to first batch
+        lr_scheduler.step(0)  # point LR scheduler to first batch
+        for batch_id in range(n_batches_per_rank):
+            if pipeline_num_stages:
                 engine.reset_activation_shape()  # each batch has a diff BxT dimension
                 loss = engine.train_batch(data_iter=dataloader_it)
-        else:
-            for i, (seqs, labels) in enumerate(dataloader):
-                seqs, labels = seqs.to(device), labels.to(device)
-                outputs = engine(seqs)
-                loss = loss_fn(outputs, labels)
-                engine.backward(loss)
+                if engine.data_parallel_group.rank() == 0:
+                    print(f"batch {batch_id}, loss {loss.item()}, LRs {lr_scheduler.get_lr()}, epoch {epoch}")
+            else:
+                for i in range(gradient_acc_steps):
+                    seqs, labels = next(dataloader_it)
+                    seqs, labels = seqs.to(device), labels.to(device)
+                    outputs = engine(seqs)
+                    loss = loss_fn(outputs, labels)
+                    engine.backward(loss)
             if engine.data_parallel_group.rank() == 0:
-                batch_id = i // gradient_acc_steps
                 print(f"batch {batch_id}, loss {loss.item()}, LRs {lr_scheduler.get_lr()}, epoch {epoch}")
+            lr_scheduler.step()
