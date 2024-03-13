@@ -4,6 +4,7 @@
 # DeepSpeed Team
 
 import os
+import re
 import torch
 import types
 from .constants import (FP32_WEIGHT_KEY, PARAM, VOCAB_TENSOR, CAT_DIM, PARAM_N_SUB_PARAMS)
@@ -11,15 +12,18 @@ from .constants import (FP32_WEIGHT_KEY, PARAM, VOCAB_TENSOR, CAT_DIM, PARAM_N_S
 
 def load_hp_checkpoint_state(self, folder, tp_rank, tp_world_size):
     hp_mapping = self._hp_mapping
-    optim_state_keys = hp_mapping.get_optim_state_keys()
-    hp_keys = [FP32_WEIGHT_KEY] + optim_state_keys
-    #print(f'{hp_keys=}')
-    checkpoint_files = {key: os.path.join(folder, f"{key}.pt") for key in hp_keys}
-    for file in checkpoint_files.values():
-        assert os.path.isfile(file), f'{file} is not a valid file'
+    hp_mapping.optim_fragment = {}
+
+    hp_keys = []
+    for file in os.listdir(folder):
+        # We expect files named something like "exp_avg.pt", "exp_avg_sq.pt", "fp32.pt"
+        pattern = r'(.+).pt'
+        match = re.search(pattern, file)
+        if match:
+            hp_keys.append(match.group(1))
 
     for key in hp_keys:
-        ckpt_file = checkpoint_files[key]
+        ckpt_file = os.path.join(folder, f"{key}.pt")
         ckpt_dict = torch.load(ckpt_file)
         full_hp_param = ckpt_dict[PARAM]
 
@@ -62,7 +66,6 @@ def load_hp_checkpoint_state(self, folder, tp_rank, tp_world_size):
 
         assert full_param_numel == tp_world_size * tp_slice_numel, \
             f'Loading {ckpt_file} full param numel {full_param_numel} != tensor slice numel {tp_slice_numel} * tp_world_size {tp_world_size}'
-        dst_tensor = hp_mapping.hp_fragment if key == FP32_WEIGHT_KEY else hp_mapping.get_optim_state_fragment(key)
 
         #        print(f"{full_hp_param.shape=} {full_param_numel=} {folder=}")
         #        print(f"{dst_tensor.shape=} {dst_tensor.numel()=}{folder=}")
@@ -84,13 +87,21 @@ def load_hp_checkpoint_state(self, folder, tp_rank, tp_world_size):
 
         lp_frag_address = hp_mapping.lp_fragment_address
         tp_hp_fragment = tp_hp_slice.narrow(0, lp_frag_address.start, lp_frag_address.numel)
-        assert dst_tensor.numel() == lp_frag_address.numel, \
-            f'Load checkpoint {key} dst_tensor numel {dst_tensor.numel()} != src numel {lp_frag_address.numel}'
 
         #        print(f"{key} SHAPE: {tp_hp_slice.shape=}")
         #        print(f"{key} SHAPE: {dst_tensor.shape=}")
         #        print(f"{key} SHAPE: {tp_hp_fragment.shape=}")
-        dst_tensor.data.copy_(tp_hp_fragment.data)
+
+        if key == FP32_WEIGHT_KEY:
+            dst_tensor = hp_mapping.get_hp_fragment()
+            assert dst_tensor.numel() == lp_frag_address.numel, \
+                f'Load checkpoint {key} dst numel {dst_tensor.numel()} != src numel {lp_frag_address.numel}'
+            dst_tensor.data.copy_(tp_hp_fragment.data)
+        else:
+            assert tp_hp_fragment.numel() == lp_frag_address.numel, \
+                f'Load checkpoint {key} dst numel {tp_hp_fragment.numel()} != src numel {lp_frag_address.numel}'
+
+            hp_mapping.optim_fragment[key] = tp_hp_fragment.clone().detach()
 
 
 def enable_universal_checkpoint(param_list):
