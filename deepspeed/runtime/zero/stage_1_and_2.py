@@ -1360,7 +1360,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
                 self.average_tensor(extra_large_grad_reduc.view(-1))
                 self.extra_large_param_to_reduce = None
             else:
-                self.average_tensor(self.ipg_buffer[self.ipg_index])
+                self.average_tensor(self.ipg_buffer[self.ipg_index].narrow(0, 0, self.elements_in_ipg_bucket))
         else:
             self.buffered_reduce_fallback(None,
                                           self.grads_in_ipg_bucket,
