@@ -3,6 +3,8 @@
 
 # DeepSpeed Team
 
+# support/questions/maintenance: github user @brunomaga, @bm-synth or @microsoft/DeepSpeed
+
 import random
 import torch
 import torch.nn as nn
