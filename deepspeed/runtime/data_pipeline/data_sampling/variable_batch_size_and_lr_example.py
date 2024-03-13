@@ -20,7 +20,6 @@ if __name__ == "__main__":
 
         def __init__(self, seq_count, min_seqlen=1, max_seqlen=20, embed_dim=5, seed=0):
             data_random = random.Random(seed)
-            self.mask_size = max_seqlen  # M: size of mask
             self.padding_value = 0
             self.embed_dim = embed_dim
             self.seqs = [
@@ -43,20 +42,24 @@ if __name__ == "__main__":
             seq = F.pad(seq, pad=(0, 0, 0, size - len(seq)), value=self.padding_value)
             return seq, label
 
-    class AttentionHeadAndFeedForward(nn.Module):
-        """ An attention head with variable-length inputs, followed by a feed forward of fixed input. No embeddings. """
 
-        def __init__(self, max_seqlen, embed_dim, device):
+    class AttentionHeadAndFeedForward(nn.Module):
+        """
+        A single attention head of batch of shape BxTxE (with variable T) and attention matrix
+        BxTxT, followed by a feed-forward network of input size BxMxE, where T<<M. No embeddings.
+        """
+
+        def __init__(self, max_seqlen, embed_dim):
             super(AttentionHeadAndFeedForward, self).__init__()
             self.padding_value = 0
             self.max_seqlen = max_seqlen  # M: max possible seqlen, and input size to feedforward
-            self.device = device
             self.qe = nn.Linear(embed_dim, embed_dim)
             self.ke = nn.Linear(embed_dim, embed_dim)
             self.ve = nn.Linear(embed_dim, embed_dim)
             self.attn_head = nn.MultiheadAttention(embed_dim, num_heads=1, batch_first=True)
             self.fc1 = nn.Linear(embed_dim, 128)
             self.fc2 = nn.Linear(128, embed_dim)
+            self.nansum_of_last_two_dims = lambda x: x.nansum(-1).nansum(-1)
 
         def forward(self, x):
 
@@ -66,7 +69,7 @@ if __name__ == "__main__":
             seq_ids, seq_padding_ids = torch.where(x[:, :, 0] == self.padding_value)
             seqlens[seq_ids] = seq_padding_ids
 
-            # optional: 3D masks for attention, padded to individual input sequence lengths
+            # optional: 3D masks for attention, shaped BxTxT, padded to individual input sequence lengths
             masks = torch.tril(torch.ones((B, T, T), dtype=bool)).to(x.device)
             for i, seqlen in enumerate(seqlens):
                 masks[i, seqlen:, :] = masks[i, :, seqlen:] = False
@@ -79,26 +82,25 @@ if __name__ == "__main__":
             out = F.pad(out, pad=(0, 0, 0, self.max_seqlen - T), value=self.padding_value)
             out = F.relu(self.fc1(out))
             out = F.relu(self.fc2(out))
-            return torch.tensor(out.nansum(-1).nansum(-1).data, requires_grad=True)
+            return self.nansum_of_last_two_dims(out)
 
         def to_layers(self):
-            return [self.fc1, self.fc2, lambda x: x.sum(-1).sum(-1)]
+            return [self.fc1, self.fc2, self.nansum_of_last_two_dims]
 
     deepspeed.init_distributed()
     device = f"cuda:{dist.get_local_rank()}"
-    max_tokens_per_batch = 40
     pipeline_num_stages = 2
 
     max_seqlen = 15
     dataset = TestData(seq_count=300, min_seqlen=5, max_seqlen=max_seqlen)
     dataset_seqlens = [len(s[0]) for s in dataset]
-    model = AttentionHeadAndFeedForward(max_seqlen, dataset.embed_dim, device).to(device)
+    model = AttentionHeadAndFeedForward(max_seqlen, dataset.embed_dim).to(device)
     loss_fn = lambda x, y: F.mse_loss(x.float(), y.float())
 
-    if pipeline_num_stages:
+    if pipeline_num_stages>0:
         model = PipelineModule(layers=model.to_layers(), num_stages=pipeline_num_stages, loss_fn=loss_fn)
 
-    # DeepSpeed config
+    # DeepSpeed config includes the dynamic batching
     config = {
         "train_batch_size": 16,
         "train_micro_batch_size_per_gpu": 2,  # Note: each microbatch per GPU will fill up to N tokens
@@ -125,48 +127,45 @@ if __name__ == "__main__":
                 "lr_scaling_method": "linear",
                 "min_batch_size": 1,
                 "max_batch_size": 10,
-                "samples_order": "dataloader",  # "random" / "order" / "default"
+                "samples_order": "dataloader",  # "random" / "seqlen" / "default"
                 "max_tokens_per_batch": 40,
+                "verbose": False,
             }
         },
     }
 
+    # initialize deepspeed engine without dataset/dataloader
     engine, _, _, _ = deepspeed.initialize(config=config, model=model)
-    dataloader, lr_scheduler, deepspeed_io_kwargs = \
+
+    # We will simulate a curriculum step, by filtering only a subset of sequences with a given seqlen
+    dataset_filter_ids = [i for i, seqlen in enumerate(dataset_seqlens) if seqlen>7 and seqlen<14] 
+    dataloader, lr_scheduler, _ = \
         get_dataloader_and_lr_scheduler_for_variable_batch_size_deepspeed(
             dataset=dataset,
             dataset_seqlens=dataset_seqlens,
+            dataset_filter_ids=dataset_filter_ids, #remove or None to include the whole dataset
             engine=engine,
-            batching_config=config["data_efficiency"]["dynamic_batching"],
             dataloader_collate_fn=dataset.collate_fn,
             sample_padding_fn=dataset.padding_fn)
             
-    # engine.training_dataloader = dataloader # if you need to use a torch dataloader directly
-    engine.training_dataloader = engine.deepspeed_io(**deepspeed_io_kwargs)
-    engine.lr_scheduler = engine.client_lr_scheduler = lr_scheduler
     gradient_acc_steps = engine.gradient_accumulation_steps()
-    # effective_batch_size = train_micro_batch_size_per_gpu * gradient_accumulation_steps * number of dataloaders
-    n_batches_per_rank = len(
-        engine.training_dataloader) // (gradient_acc_steps * engine.train_micro_batch_size_per_gpu())
+    n_batches_per_rank = len(dataloader) // (gradient_acc_steps * engine.train_micro_batch_size_per_gpu())
 
     for epoch in range(10):
-        engine.data_iterator = iter(engine.training_dataloader)  # point data iterator to first batch
+        data_iter = iter(dataloader)  # point data iterator to first batch
         lr_scheduler.step(0)  # point LR scheduler to first batch
         for batch_id in range(n_batches_per_rank):
             if pipeline_num_stages > 0:
-                engine.reset_activation_shape()  # each batch has a diff BxT dimension
-                loss = engine.train_batch()  # lr_kwargs={"epoch": batch_id}
-                assert (engine.training_dataloader is not None)
+                engine.reset_activation_shape()  # reset, as each batch has a diff BxT dimension
+                loss = engine.train_batch(data_iter=data_iter)  # lr_kwargs={"epoch": batch_id}
             else:
                 for i in range(gradient_acc_steps):
-                    seqs, labels = next(engine.data_iterator)
+                    seqs, labels = next(data_iter)
                     seqs, labels = seqs.to(device), labels.to(device)
                     outputs = engine(seqs)
                     loss = loss_fn(outputs, labels)
                     engine.backward(loss)
                     engine.step()  # lr_kwargs={"epoch": batch_id})
 
-            if engine.data_parallel_group.rank() == 0:
-                print(
-                    f"batch {batch_id}, dl rank {engine.data_parallel_group.rank()} loss {loss.item()}, LRs {lr_scheduler.get_lr()}, epoch {epoch}"
-                )
+            if engine.data_parallel_group.rank():
+                print( f"epoch {epoch}, batch {batch_id}, loss {loss.item()}, LRs {lr_scheduler.get_lr()}" )
