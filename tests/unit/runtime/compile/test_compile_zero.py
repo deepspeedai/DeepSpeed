@@ -55,6 +55,8 @@ class TestZeRO(DistributedTest):
             }
         }
 
+        if get_accelerator().device_name() == 'hpu':
+            config_dict['compile']['backend'] = 'hpu_backend'
         if offload_device == OffloadDeviceEnum.cpu:
             config_dict["zero_optimization"]["offload_optimizer"] = {"device": offload_device}
         elif offload_device == OffloadDeviceEnum.nvme:
