@@ -181,7 +181,7 @@ def dataloader_for_variable_batch_size(
                     "padding dataloader_padding_fn must be provided if required_microbatches_of_same_seqlen is True"
                 pad_len = batch_max_seqlens[batch_id]
                 batch_data = [sample_padding_fn(sample, pad_len) for sample in batch_data]
-            batch+=batch_data
+            batch += batch_data
         return dataloader_collate_fn(batch) if dataloader_collate_fn else batch
 
     dataloader = DataLoader(
@@ -209,30 +209,36 @@ class VariableBatchSizeLR(LRScheduler):
     """ an LR scheduler that scales the LR of a given scheduler's LR """
 
     @property
-    def verbose(self):
-        return self.base_lr_scheduler.verbose
-    
-    @property
     def optimizer(self):
         return self.base_lr_scheduler.optimizer
-    
-    def __init__(self, lr_scheduler, base_batch_size, batch_sizes, dataloader, lr_scaling_method="linear"):
+
+    def __init__(self,
+                 lr_scheduler,
+                 base_batch_size,
+                 batch_sizes,
+                 dataloader,
+                 lr_scaling_method="linear",
+                 verbose=False):
         self.batch_sizes = batch_sizes
         self.base_batch_size = base_batch_size
         self.lr_scaling_method = lr_scaling_method
         self.dataloader = dataloader
         self.base_lr_scheduler = lr_scheduler
-        # the following exist in LRScheduler but not in DeepSpeed's LRScheduler so we create them here
+        # the following exist in LRScheduler but not in DeepSpeed's LRScheduler so we redefine them here
         self.base_lrs = self.base_lr_scheduler.get_lr()
         self.last_epoch = 0
+        self.verbose = verbose
 
     def state_dict(self):
-        return { 'base_lr_scheduler': self.base_lr_scheduler.state_dict() } | {
+        return {
+            'base_lr_scheduler': self.base_lr_scheduler.state_dict()
+        } | {
             'base_batch_size': self.base_batch_size,
             'lr_scaling_method': self.lr_scaling_method,
             'batch_sizes': self.batch_sizes,
             'base_lrs': self.base_lrs,
             'last_epoch': self.last_epoch,
+            'verbose': self.verbose,
         }
 
     def load_state_dict(self, state_dict):
@@ -242,6 +248,7 @@ class VariableBatchSizeLR(LRScheduler):
         self.batch_sizes = state_dict['batch_sizes']
         self.base_lrs = state_dict['base_lrs']
         self.last_epoch = state_dict['last_epoch']
+        self.verbose = state_dict['verbose']
 
     def get_last_lr(self):
         return self.base_lr_scheduler._last_lr
@@ -293,7 +300,7 @@ def lr_scheduler_for_variable_batch_size(base_batch_size,
 
     Returns the new LRScheduler
     """
-    
+
     class StubLRScheduler(LRScheduler):
         """ a stub LR scheduler that does not change the LR, keeps it constant """
 
@@ -302,14 +309,16 @@ def lr_scheduler_for_variable_batch_size(base_batch_size,
 
     if isinstance(lr_scheduler_or_optimizer, Optimizer):
         lr_scheduler = StubLRScheduler(lr_scheduler_or_optimizer)
-    elif hasattr(lr_scheduler_or_optimizer, 'optimizer'): #LRScheduler or DeepSpeed 'object' schedulers
+    elif hasattr(lr_scheduler_or_optimizer, 'optimizer'):  #LRScheduler or DeepSpeed 'object' schedulers
         lr_scheduler = lr_scheduler_or_optimizer
     else:
         raise ValueError("Unknown type for lr_scheduler_or_optimizer: {}".format(type(lr_scheduler_or_optimizer)))
 
-    return VariableBatchSizeLR(
-        lr_scheduler=lr_scheduler, base_batch_size=base_batch_size, batch_sizes=batch_sizes,
-        dataloader=dataloader, lr_scaling_method=lr_scaling_method)
+    return VariableBatchSizeLR(lr_scheduler=lr_scheduler,
+                               base_batch_size=base_batch_size,
+                               batch_sizes=batch_sizes,
+                               dataloader=dataloader,
+                               lr_scaling_method=lr_scaling_method)
 
 
 def get_dataloader_and_lr_scheduler_for_variable_batch_size(
