@@ -58,6 +58,21 @@ class tensor_fragment:
         return self.get_optim_state_fragment(optim_state_key)
 
 
+def map_to_flat_opt_states(flat_hp_tensor, lp_tensors, optim_state, opt_keys):
+    for key in opt_keys:
+        hp_param = flat_hp_tensor
+        buffer = torch.zeros_like(hp_param)
+
+        for lp in lp_tensors:
+            if lp._hp_mapping is not None:
+                hp_fragment_address = lp._hp_mapping.get_hp_fragment_address()
+                hp_fragment = buffer.narrow(0, hp_fragment_address.start, hp_fragment_address.numel)
+                hp_fragment.data.copy_(lp._hp_mapping.get_hp_fragment(optim_state_key=key).data)
+                lp._hp_mapping.hp_fragment = hp_fragment
+
+        optim_state[hp_param][key] = buffer
+
+
 def get_full_hp_param(self, optim_state_key=None):
     reduce_buffer = torch.zeros_like(self, dtype=torch.float32).flatten()
     if self._hp_mapping is not None:

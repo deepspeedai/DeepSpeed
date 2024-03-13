@@ -2785,7 +2785,7 @@ class DeepSpeedEngine(Module):
         if self.load_universal_checkpoint():
             self.optimizer.update_lp_params()
             if load_zero_checkpoint:
-                self.update_optimizer_step(step=client_states['iteration'] + 1)
+                self.update_optimizer_step(step=client_states['iteration'])
 
         return load_path, client_states
 
@@ -2966,7 +2966,7 @@ class DeepSpeedEngine(Module):
     def update_optimizer_step(self, step):
 
         def set_step(d):
-            if isinstance(d['step'], torch.Tensor):
+            if 'step' in d and isinstance(d['step'], torch.Tensor):
                 d['step'] = torch.tensor(step, dtype=d['step'].dtype, device=d['step'].device)
             else:
                 d['step'] = step
@@ -2975,10 +2975,9 @@ class DeepSpeedEngine(Module):
         base_optimizer = optimizer.optimizer
         state = base_optimizer.state
         for group in optimizer.param_groups:
-            if 'step' in group:
-                set_step(group)
+            set_step(group)
             for p in group['params']:
-                if p in state and len(state[p]) > 0 and 'step' in state[p]:
+                if p in state and len(state[p]) > 0:
                     set_step(state[p])
 
     def _get_mp_rank_zero_checkpoint_names(self, load_dir, tag, mp_rank, dp_world_size, bf16_mode):

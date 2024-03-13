@@ -10,7 +10,7 @@ from .init_on_device import OnDevice
 from .groups import *
 from .nvtx import instrument_w_nvtx
 # TODO: Move tensor fragment and mixed precision to zero utils
-from .tensor_fragment import tensor_fragment, get_full_hp_param, get_hp_fragment_mapping, fragment_address, get_full_hp_grad
+from .tensor_fragment import tensor_fragment, get_full_hp_param, get_hp_fragment_mapping, fragment_address, get_full_hp_grad, map_to_flat_opt_states
 from .tensor_fragment import safe_get_full_fp32_param, safe_get_full_grad, safe_get_full_optimizer_state
 from .tensor_fragment import set_full_hp_param
 from .tensor_fragment import safe_set_full_fp32_param, safe_set_full_optimizer_state
