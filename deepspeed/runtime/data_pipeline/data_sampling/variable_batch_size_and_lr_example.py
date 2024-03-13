@@ -108,14 +108,14 @@ if __name__ == "__main__":
                 "lr": 1e-3,
             }
         },
-        # "scheduler": {
-        #     "type": "WarmupLR",
-        #     "params": {
-        #         "warmup_min_lr": 0.001,
-        #         "warmup_max_lr": 0.005,
-        #         "warmup_num_steps": 1000
-        #     }
-        # }
+        "scheduler": {
+            "type": "WarmupLR",
+            "params": {
+                "warmup_min_lr": 0.001,
+                "warmup_max_lr": 0.005,
+                "warmup_num_steps": 1000
+            }
+        }
     }
 
     engine, _, _, _ = deepspeed.initialize(config=config, model=model)
@@ -143,16 +143,17 @@ if __name__ == "__main__":
     engine.lr_scheduler = engine.client_lr_scheduler = lr_scheduler
     gradient_acc_steps = engine.gradient_accumulation_steps()
     # effective_batch_size = train_micro_batch_size_per_gpu * gradient_accumulation_steps * number of dataloaders
-    n_batches_per_rank = len(engine.training_dataloader) // (gradient_acc_steps*engine.train_micro_batch_size_per_gpu())
+    n_batches_per_rank = len(
+        engine.training_dataloader) // (gradient_acc_steps * engine.train_micro_batch_size_per_gpu())
 
     for epoch in range(10):
-        engine.data_iterator = iter(engine.training_dataloader) # point data iterator to first batch
+        engine.data_iterator = iter(engine.training_dataloader)  # point data iterator to first batch
         lr_scheduler.step(0)  # point LR scheduler to first batch
         for batch_id in range(n_batches_per_rank):
-            if pipeline_num_stages>0:
+            if pipeline_num_stages > 0:
                 engine.reset_activation_shape()  # each batch has a diff BxT dimension
-                loss = engine.train_batch() # lr_kwargs={"epoch": batch_id}
-                assert(engine.training_dataloader is not None)
+                loss = engine.train_batch()  # lr_kwargs={"epoch": batch_id}
+                assert (engine.training_dataloader is not None)
             else:
                 for i in range(gradient_acc_steps):
                     seqs, labels = next(engine.data_iterator)
@@ -160,7 +161,9 @@ if __name__ == "__main__":
                     outputs = engine(seqs)
                     loss = loss_fn(outputs, labels)
                     engine.backward(loss)
-                    engine.step() # lr_kwargs={"epoch": batch_id})
+                    engine.step()  # lr_kwargs={"epoch": batch_id})
 
             if engine.data_parallel_group.rank() == 0:
-                print(f"batch {batch_id}, loss {loss.item()}, LRs {lr_scheduler.get_lr()}, epoch {epoch}")
+                print(
+                    f"batch {batch_id}, dl rank {engine.data_parallel_group.rank()} loss {loss.item()}, LRs {lr_scheduler.get_lr()}, epoch {epoch}"
+                )
