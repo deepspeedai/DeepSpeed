@@ -93,7 +93,7 @@ if __name__ == "__main__":
     max_seqlen_per_batch = 40
     base_batch_size = 8
     base_lr = 1e-3
-    pipeline_num_stages = 0
+    pipeline_num_stages = 2
     order_by_seqlen = False  #enable for curriculum
 
     max_seqlen = 15
