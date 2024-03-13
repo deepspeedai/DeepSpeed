@@ -11,7 +11,7 @@ import deepspeed
 import deepspeed.comm as dist
 from deepspeed.pipe import PipelineModule
 
-from deepspeed.runtime.data_pipeline.data_sampling.variable_batch_size_and_lr import get_dataloader_and_lr_scheduler_for_variable_batch_size
+from deepspeed.runtime.data_pipeline.data_sampling.variable_batch_size_and_lr import get_dataloader_and_lr_scheduler_for_variable_batch_size_deepspeed
 
 if __name__ == "__main__":
 
@@ -91,7 +91,7 @@ if __name__ == "__main__":
 
     max_seqlen = 15
     dataset = TestData(seq_count=300, min_seqlen=5, max_seqlen=max_seqlen)
-    seqlens = [len(s[0]) for s in dataset]
+    dataset_seqlens = [len(s[0]) for s in dataset]
     model = AttentionHeadAndFeedForward(max_seqlen, dataset.embed_dim, device).to(device)
     loss_fn = lambda x, y: F.mse_loss(x.float(), y.float())
 
@@ -115,29 +115,32 @@ if __name__ == "__main__":
                 "warmup_max_lr": 0.005,
                 "warmup_num_steps": 1000
             }
-        }
+        },
+        "data_efficiency": {
+            "enabled": True,
+            "dynamic_batching": {
+                "enabled": True,
+                "dataloader_num_workers": 0,
+                "dataloader_pin_memory": 0,
+                "lr_scaling_method": "linear",
+                "min_batch_size": 1,
+                "max_batch_size": 10,
+                "samples_order": "dataloader",  # "random" / "order" / "default"
+                "max_tokens_per_batch": 40,
+            }
+        },
     }
 
     engine, _, _, _ = deepspeed.initialize(config=config, model=model)
     dataloader, lr_scheduler, deepspeed_io_kwargs = \
-        get_dataloader_and_lr_scheduler_for_variable_batch_size(
+        get_dataloader_and_lr_scheduler_for_variable_batch_size_deepspeed(
             dataset=dataset,
-            dataset_seqlens=seqlens,
-            effective_batch_size=engine.train_batch_size(),
-            max_tokens_per_batch=max_tokens_per_batch,
-            lr_scaling_method="linear",
-            order_by_seqlen=False,
-            dataloader_batch_size=engine.train_micro_batch_size_per_gpu(),
-            dataloader_rank=engine.data_parallel_group.rank(),
-            dataloader_num_replicas=engine.data_parallel_group.size(),
-            dataloader_num_workers=0,
+            dataset_seqlens=dataset_seqlens,
+            engine=engine,
+            batching_config=config["data_efficiency"]["dynamic_batching"],
             dataloader_collate_fn=dataset.collate_fn,
-            lr_scheduler_or_optimizer = engine.lr_scheduler or engine.optimizer,
-            required_microbatches_of_same_size = pipeline_num_stages>0,
-            required_microbatches_of_same_seqlen = pipeline_num_stages>0,
-            sample_padding_fn=dataset.padding_fn,
-        )
-
+            sample_padding_fn=dataset.padding_fn)
+            
     # engine.training_dataloader = dataloader # if you need to use a torch dataloader directly
     engine.training_dataloader = engine.deepspeed_io(**deepspeed_io_kwargs)
     engine.lr_scheduler = engine.client_lr_scheduler = lr_scheduler

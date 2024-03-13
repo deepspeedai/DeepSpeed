@@ -68,15 +68,20 @@ CURRICULUM_LEARNING_NP_RNG_STATE = "np_rng_state"
 DYNAMIC_BATCHING = "dynamic_batching"
 DYNAMIC_BATCHING_ENABLED = "enabled"
 DYNAMIC_BATCHING_ENABLED_DEFAULT = False
-DYNAMIC_BATCHING_LR_SCALING = "lr_scaling"  # "linear" / "sqrt" / "none"
-DYNAMIC_BATCHING_LR_SCALING_DEFAULT = "linear"
+DYNAMIC_BATCHING_LR_SCALING_METHOD = "lr_scaling_method"  # "linear" / "sqrt" / "none"
+DYNAMIC_BATCHING_LR_SCALING_METHOD_DEFAULT = "linear"
 DYNAMIC_BATCHING_MIN_BATCH_SIZE = "min_batch_size"
 DYNAMIC_BATCHING_MIN_BATCH_SIZE_DEFAULT = 1
 DYNAMIC_BATCHING_MAX_BATCH_SIZE = "max_batch_size"
 DYNAMIC_BATCHING_MAX_BATCH_SIZE_DEFAULT = None
+DYNAMIC_BATCHING_NUM_WORKERS = "dataloader_num_workers"
+DYNAMIC_BATCHING_NUM_WORKERS_DEFAULT = 0
+DYNAMIC_BATCHING_PIN_MEMORY = "dataloader_pin_memory"
+DYNAMIC_BATCHING_PIN_MEMORY_DEFAULT = False
 DYNAMIC_BATCHING_SAMPLES_ORDER = "samples_order"  # "random" / "order" / "default"
 DYNAMIC_BATCHING_SAMPLES_ORDER_DEFAULT = "dataloader"  # "random" / "order" / "dataloader"
 DYNAMIC_BATCHING_MAX_TOKENS_PER_BATCH = "max_tokens_per_batch"
+DYNAMIC_BATCHING_VERBOSE = "verbose"
 
 #########################################
 # Curriculum Learning legacy implementation
