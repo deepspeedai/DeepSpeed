@@ -42,7 +42,6 @@ if __name__ == "__main__":
             seq = F.pad(seq, pad=(0, 0, 0, size - len(seq)), value=self.padding_value)
             return seq, label
 
-
     class AttentionHeadAndFeedForward(nn.Module):
         """
         A single attention head of batch of shape BxTxE (with variable T) and attention matrix
@@ -97,7 +96,7 @@ if __name__ == "__main__":
     model = AttentionHeadAndFeedForward(max_seqlen, dataset.embed_dim).to(device)
     loss_fn = lambda x, y: F.mse_loss(x.float(), y.float())
 
-    if pipeline_num_stages>0:
+    if pipeline_num_stages > 0:
         model = PipelineModule(layers=model.to_layers(), num_stages=pipeline_num_stages, loss_fn=loss_fn)
 
     # DeepSpeed config includes the dynamic batching
@@ -138,7 +137,7 @@ if __name__ == "__main__":
     engine, _, _, _ = deepspeed.initialize(config=config, model=model)
 
     # We will simulate a curriculum step, by filtering only a subset of sequences with a given seqlen
-    dataset_filter_ids = [i for i, seqlen in enumerate(dataset_seqlens) if seqlen>7 and seqlen<14] 
+    dataset_filter_ids = [i for i, seqlen in enumerate(dataset_seqlens) if seqlen > 7 and seqlen < 14]
     dataloader, lr_scheduler, _ = \
         get_dataloader_and_lr_scheduler_for_variable_batch_size_deepspeed(
             dataset=dataset,
@@ -147,7 +146,7 @@ if __name__ == "__main__":
             engine=engine,
             dataloader_collate_fn=dataset.collate_fn,
             sample_padding_fn=dataset.padding_fn)
-            
+
     gradient_acc_steps = engine.gradient_accumulation_steps()
     n_batches_per_rank = len(dataloader) // (gradient_acc_steps * engine.train_micro_batch_size_per_gpu())
 
@@ -168,4 +167,4 @@ if __name__ == "__main__":
                     engine.step()  # lr_kwargs={"epoch": batch_id})
 
             if engine.data_parallel_group.rank():
-                print( f"epoch {epoch}, batch {batch_id}, loss {loss.item()}, LRs {lr_scheduler.get_lr()}" )
+                print(f"epoch {epoch}, batch {batch_id}, loss {loss.item()}, LRs {lr_scheduler.get_lr()}")

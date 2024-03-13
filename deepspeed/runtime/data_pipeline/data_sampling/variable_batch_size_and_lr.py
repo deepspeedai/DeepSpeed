@@ -34,7 +34,7 @@ def batch_by_size(
     Arguments:
     - `seqlens`: a list of difficulties (metric values) for every sample in the dataset;
     - `max_tokens_per_batch`: upper cap in total difficulty in a batch;
-    - `dataset_filter_ids`: user-defined indices of samples in teh dataset that will be used to
+    - `dataset_filter_ids`: user-defined indices of samples in the dataset that will be used to
        batch. Remaining indices to be ignored. Default is `None` for all indices.
     - `min_batch_size`: smallest allowed size of a batch;
     - `min_batch_size`: largest allowed size of a batch;
@@ -53,15 +53,14 @@ def batch_by_size(
 
     assert samples_order in ["random", "seqlen", "dataloader"]
     if dataset_filter_ids is None:
-        metrics = list(zip(seqlens, range(len(seqlens)))) # use all samples
+        metrics = list(zip(seqlens, range(len(seqlens))))  # use all samples
     else:
         metrics = list(zip(np.array(seqlens)[dataset_filter_ids], dataset_filter_ids))
-        
 
-    if samples_order=='random':
+    if samples_order == 'random':
         metric_random = random.Random(seed)
         metric_random.shuffle(metrics)
-    if samples_order=='seqlen':
+    if samples_order == 'seqlen':
         metrics = sorted(metrics)
 
     # go through metrics and warn user and filter samples that alone exceed the max batch threshold
@@ -124,7 +123,9 @@ def batch_by_size(
         n_tokens_in_batch = sum([m[0] for m in mbs[0]])
         assert n_tokens_in_batch <= max_tokens_per_batch
         if verbose:
-            logger.info(f"Batch id {batch_id}, size {batch_size}, tokens {n_tokens_in_batch} tokens, samples: {dataset_filter_ids}")
+            logger.info(
+                f"Batch id {batch_id}, size {batch_size}, tokens {n_tokens_in_batch} tokens, samples: {dataset_filter_ids}"
+            )
 
     # return the sample ids of each microbatch, and the batch sizes
     assert len(batch_sizes) == len(microbatch_ids) // effective_batch_size
@@ -325,43 +326,41 @@ def lr_scheduler_for_variable_batch_size(base_batch_size,
                                lr_scaling_method=lr_scaling_method)
 
 
-def get_dataloader_and_lr_scheduler_for_variable_batch_size_deepspeed(
-    dataset,
-    dataset_seqlens,
-    engine,
-    dataset_filter_ids=None,
-    dataloader_collate_fn=None,
-    sample_padding_fn=None,
-    replace_lr_scheduler=True,
-    replace_dataloader=True
-    ):
+def get_dataloader_and_lr_scheduler_for_variable_batch_size_deepspeed(dataset,
+                                                                      dataset_seqlens,
+                                                                      engine,
+                                                                      dataset_filter_ids=None,
+                                                                      dataloader_collate_fn=None,
+                                                                      sample_padding_fn=None,
+                                                                      replace_lr_scheduler=True,
+                                                                      replace_dataloader=True):
     """
     a simplified call to get_dataloader_and_lr_scheduler_for_variable_batch_size for the deepspeed runtime.
     See `batch_by_size()` for arguments and documentation.
     """
     batching_config = engine.config['data_efficiency']['dynamic_batching']
     dataloader, lr_scheduler, deepspeed_io_kwargs = get_dataloader_and_lr_scheduler_for_variable_batch_size(
-            dataset=dataset,
-            dataset_filter_ids=dataset_filter_ids,
-            dataset_seqlens=dataset_seqlens,
-            effective_batch_size=engine.train_batch_size(),
-            max_tokens_per_batch=batching_config["max_tokens_per_batch"],
-            lr_scaling_method=batching_config["lr_scaling_method"],
-            samples_order=batching_config["samples_order"],
-            min_batch_size=batching_config["min_batch_size"],
-            max_batch_size=batching_config["max_batch_size"],
-            dataloader_batch_size=engine.train_micro_batch_size_per_gpu(),
-            dataloader_rank=engine.data_parallel_group.rank(),
-            dataloader_num_replicas=engine.data_parallel_group.size(),
-            dataloader_num_workers=batching_config["dataloader_num_workers"],
-            dataloader_collate_fn=dataloader_collate_fn,
-            dataloader_pin_memory=batching_config["dataloader_pin_memory"],
-            sample_padding_fn=sample_padding_fn,
-            lr_scheduler_or_optimizer = engine.lr_scheduler or engine.optimizer,
-            required_microbatches_of_same_size = isinstance(engine, PipelineEngine),
-            required_microbatches_of_same_seqlen = isinstance(engine, PipelineEngine),
-            verbose=batching_config["verbose"],
-        )
+        dataset=dataset,
+        dataset_filter_ids=dataset_filter_ids,
+        dataset_seqlens=dataset_seqlens,
+        effective_batch_size=engine.train_batch_size(),
+        max_tokens_per_batch=batching_config["max_tokens_per_batch"],
+        lr_scaling_method=batching_config["lr_scaling_method"],
+        samples_order=batching_config["samples_order"],
+        min_batch_size=batching_config["min_batch_size"],
+        max_batch_size=batching_config["max_batch_size"],
+        dataloader_batch_size=engine.train_micro_batch_size_per_gpu(),
+        dataloader_rank=engine.data_parallel_group.rank(),
+        dataloader_num_replicas=engine.data_parallel_group.size(),
+        dataloader_num_workers=batching_config["dataloader_num_workers"],
+        dataloader_collate_fn=dataloader_collate_fn,
+        dataloader_pin_memory=batching_config["dataloader_pin_memory"],
+        sample_padding_fn=sample_padding_fn,
+        lr_scheduler_or_optimizer=engine.lr_scheduler or engine.optimizer,
+        required_microbatches_of_same_size=isinstance(engine, PipelineEngine),
+        required_microbatches_of_same_seqlen=isinstance(engine, PipelineEngine),
+        verbose=batching_config["verbose"],
+    )
     if replace_lr_scheduler:
         engine.lr_scheduler = lr_scheduler
     if replace_dataloader:
