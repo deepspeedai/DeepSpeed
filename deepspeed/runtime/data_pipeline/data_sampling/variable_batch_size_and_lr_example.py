@@ -44,7 +44,7 @@ if __name__ == "__main__":
             return seq, label
 
     class AttentionHeadAndFeedForward(nn.Module):
-        """ A single attention head followed by a feed forward. No embeddings  """
+        """ An attention head with variable-length inputs, followed by a feed forward of fixed input. No embeddings. """
 
         def __init__(self, max_seqlen, embed_dim, device):
             super(AttentionHeadAndFeedForward, self).__init__()
@@ -75,7 +75,7 @@ if __name__ == "__main__":
             x = torch.nn.utils.rnn.pad_sequence(x, batch_first=True, padding_value=self.padding_value)
             x = x.to(self.device)
 
-            # linear projections and attention head
+            # linear projections and attention head. Attention size BxTxT
             q, k, v = self.qe(x), self.ke(x), self.ve(x)
             out, _ = self.attn_head(q, k, v, need_weights=False, attn_mask=masks)
 
@@ -90,16 +90,12 @@ if __name__ == "__main__":
 
     deepspeed.init_distributed()
     device = f"cuda:{dist.get_local_rank()}"
-    max_seqlen_per_batch = 40
-    base_batch_size = 8
-    base_lr = 1e-3
+    max_tokens_per_batch = 40
     pipeline_num_stages = 2
-    order_by_seqlen = False  #enable for curriculum
 
     max_seqlen = 15
     dataset = TestData(seq_count=300, min_seqlen=5, max_seqlen=max_seqlen)
     model = AttentionHeadAndFeedForward(max_seqlen, dataset.embed_dim, device).to(device)
-    optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
     loss_fn = lambda x, y: F.mse_loss(x.float(), y.float())
 
     if pipeline_num_stages:
@@ -107,38 +103,45 @@ if __name__ == "__main__":
 
     # DeepSpeed config
     config = {
-        "train_batch_size": base_batch_size,
-        "train_micro_batch_size_per_gpu": 1,  # due to variable batch size
+        "train_batch_size": 16,
+        "train_micro_batch_size_per_gpu": 2,  # Note: each microbatch per GPU will fill up to N tokens
         "optimizer": {
             "type": "Adam",
             "params": {
-                "lr": base_lr
+                "lr": 1e-3,
             }
         },
+        # "scheduler": {
+        #     "type": "WarmupLR",
+        #     "params": {
+        #         "warmup_min_lr": 0,
+        #         "warmup_max_lr": 0.001,
+        #         "warmup_num_steps": 1000
+        #     }
+        # }
     }
 
-    engine, optimizer, _, lr_scheduler = deepspeed.initialize(config=config, model=model, optimizer=optimizer)
+    engine, _, _, lr_scheduler = deepspeed.initialize(config=config, model=model)
 
     seqlens = [len(s[0]) for s in dataset]
     dataloader, lr_scheduler, deepspeed_io_kwargs = \
         get_dataloader_and_lr_scheduler_for_variable_batch_size(
             dataset=dataset,
             dataset_seqlens=seqlens,
-            base_batch_size=base_batch_size,
-            max_seqlen_per_batch=max_seqlen_per_batch,
+            effective_batch_size=engine.train_batch_size(),
+            max_tokens_per_batch=max_tokens_per_batch,
             dataloader_rank=engine.data_parallel_group.rank(),
             dataloader_num_replicas=engine.data_parallel_group.size(),
             lr_scaling_method="linear",
-            order_by_seqlen=order_by_seqlen,
-            gradient_accumulation_steps=engine.gradient_accumulation_steps(),
+            order_by_seqlen=False,
             dataloader_num_workers=0,
             dataloader_collate_fn=dataset.collate_fn,
-            dataloader_padding_fn=dataset.padding_fn,
-            optimizer=optimizer,
+            optimizer=engine.optimizer,
             # lr_scheduler_class=torch.optim.lr_scheduler.StepLR,
             # lr_scheduler_kwargs=dict(optimizer=optimizer, step_size=1, gamma=0.1),
             required_microbatches_of_same_size = pipeline_num_stages>0,
             required_microbatches_of_same_seqlen = pipeline_num_stages>0,
+            sample_padding_fn=dataset.padding_fn,
         )
 
     # engine.training_dataloader = dataloader # use this or the deepspeed_io() below

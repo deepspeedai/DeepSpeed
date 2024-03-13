@@ -94,7 +94,7 @@ def get_dynamic_batching_params(param_dict):
         return dynamic_batching_params
     else:
         return {}
-    
+
 
 def get_dynamic_batching(param_dict):
     output = {}
