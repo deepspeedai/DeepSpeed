@@ -5,6 +5,7 @@
 
 import random
 import torch
+import numpy as np
 from torch.optim.lr_scheduler import LRScheduler
 from torch.optim.optimizer import Optimizer
 from torch.utils.data import DataLoader, DistributedSampler
@@ -15,7 +16,7 @@ from deepspeed.runtime.pipe.engine import PipelineEngine
 def batch_by_size(
     seqlens,
     max_tokens_per_batch,
-    sample_ids=None,
+    dataset_filter_ids=None,
     min_batch_size=1,
     max_batch_size=None,
     samples_order="dataloader",
@@ -33,11 +34,11 @@ def batch_by_size(
     Arguments:
     - `seqlens`: a list of difficulties (metric values) for every sample in the dataset;
     - `max_tokens_per_batch`: upper cap in total difficulty in a batch;
-    - `sample_ids`: user-defined ids of the samples in seqlens. If not provided,
-      automatically assigns a sequential order;
+    - `dataset_filter_ids`: user-defined indices of samples in teh dataset that will be used to
+       batch. Remaining indices to be ignored. Default is `None` for all indices.
     - `min_batch_size`: smallest allowed size of a batch;
     - `min_batch_size`: largest allowed size of a batch;
-    - `samples_order`: order in which to process samples: "dataloader" (default), "random" or (ascending) "order"
+    - `samples_order`: order in which to process samples: "dataloader" (default), "random" or "seqlen" (ascending)
     - `dataloader_num_replicas`: number of dataloaders
     - `effective_batch_size`: effective batch size;
     - `required_microbatches_of_same_size`: enable if each mini-batch (in a total of `batch_size_multiple`
@@ -50,15 +51,17 @@ def batch_by_size(
     - `batch_max_seqlens`: the max seqlen across all microbatches in a batch
     """
 
-    assert samples_order in ["random", "order", "default"]
+    assert samples_order in ["random", "seqlen", "dataloader"]
+    if dataset_filter_ids is None:
+        metrics = list(zip(seqlens, range(len(seqlens)))) # use all samples
+    else:
+        metrics = list(zip(np.array(seqlens)[dataset_filter_ids], dataset_filter_ids))
+        
 
-    sample_ids = sample_ids or list(range(len(seqlens)))
-    metrics = list(zip(seqlens, sample_ids))
-
-    if samples_order=='shuffle':
+    if samples_order=='random':
         metric_random = random.Random(seed)
         metric_random.shuffle(metrics)
-    if samples_order=='sort':
+    if samples_order=='seqlen':
         metrics = sorted(metrics)
 
     # go through metrics and warn user and filter samples that alone exceed the max batch threshold
@@ -113,15 +116,15 @@ def batch_by_size(
         mbs = microbatches[rank:rank + effective_batch_size]
         batch_size = sum([len(mb) for mb in mbs])
         batch_max_seqlen = max([m[0] for metrics in mbs for m in metrics])
-        sample_ids = [[m[1] for m in metrics] for metrics in mbs]
-        batch_and_mb_ids = zip([batch_id] * effective_batch_size, sample_ids)
+        dataset_filter_ids = [[m[1] for m in metrics] for metrics in mbs]
+        batch_and_mb_ids = zip([batch_id] * effective_batch_size, dataset_filter_ids)
         batch_sizes.append(batch_size)
         batch_max_seqlens.append(batch_max_seqlen)
         microbatch_ids += batch_and_mb_ids
         n_tokens_in_batch = sum([m[0] for m in mbs[0]])
         assert n_tokens_in_batch <= max_tokens_per_batch
         if verbose:
-            logger.info(f"Batch id {batch_id}, size {batch_size}, tokens {n_tokens_in_batch} tokens, samples: {sample_ids}")
+            logger.info(f"Batch id {batch_id}, size {batch_size}, tokens {n_tokens_in_batch} tokens, samples: {dataset_filter_ids}")
 
     # return the sample ids of each microbatch, and the batch sizes
     assert len(batch_sizes) == len(microbatch_ids) // effective_batch_size
@@ -326,15 +329,20 @@ def get_dataloader_and_lr_scheduler_for_variable_batch_size_deepspeed(
     dataset,
     dataset_seqlens,
     engine,
-    batching_config,
-    sample_ids=None,
+    dataset_filter_ids=None,
     dataloader_collate_fn=None,
-    sample_padding_fn=None
+    sample_padding_fn=None,
+    replace_lr_scheduler=True,
+    replace_dataloader=True
     ):
-    """ a simplified call to get_dataloader_and_lr_scheduler_for_variable_batch_size on deepspeed runtime"""
-    return get_dataloader_and_lr_scheduler_for_variable_batch_size(
+    """
+    a simplified call to get_dataloader_and_lr_scheduler_for_variable_batch_size for the deepspeed runtime.
+    See `batch_by_size()` for arguments and documentation.
+    """
+    batching_config = engine.config['data_efficiency']['dynamic_batching']
+    dataloader, lr_scheduler, deepspeed_io_kwargs = get_dataloader_and_lr_scheduler_for_variable_batch_size(
             dataset=dataset,
-            sample_ids=sample_ids,
+            dataset_filter_ids=dataset_filter_ids,
             dataset_seqlens=dataset_seqlens,
             effective_batch_size=engine.train_batch_size(),
             max_tokens_per_batch=batching_config["max_tokens_per_batch"],
@@ -354,13 +362,21 @@ def get_dataloader_and_lr_scheduler_for_variable_batch_size_deepspeed(
             required_microbatches_of_same_seqlen = isinstance(engine, PipelineEngine),
             verbose=batching_config["verbose"],
         )
+    if replace_lr_scheduler:
+        engine.lr_scheduler = lr_scheduler
+    if replace_dataloader:
+        engine.training_dataloader = dataloader
+        engine.data_iterator = iter(engine.training_dataloader)
+        # engine.deepspeed_io(**deepspeed_io_kwargs)
+    return dataloader, lr_scheduler, deepspeed_io_kwargs
+
 
 def get_dataloader_and_lr_scheduler_for_variable_batch_size(
     dataset,
     dataset_seqlens,
     max_tokens_per_batch,
     effective_batch_size,
-    sample_ids=None,
+    dataset_filter_ids=None,
     lr_scaling_method="linear",
     min_batch_size=1,
     max_batch_size=None,
@@ -377,12 +393,13 @@ def get_dataloader_and_lr_scheduler_for_variable_batch_size(
     sample_padding_fn=None,
     verbose=False,
 ):
+    """ returns a dataloader and LR scheduler for the variable batch size. see `batch_by_size()` for details. """
 
     # effective_batch_size = train_micro_batch_size_per_gpu * gradient_accumulation_steps * number of dataloaders
     microbatch_ids, batch_sizes, batch_max_seqlens = batch_by_size(
         seqlens=dataset_seqlens,
         max_tokens_per_batch=max_tokens_per_batch,
-        sample_ids=sample_ids,
+        dataset_filter_ids=dataset_filter_ids,
         min_batch_size=min_batch_size,
         max_batch_size=max_batch_size,
         samples_order=samples_order,
