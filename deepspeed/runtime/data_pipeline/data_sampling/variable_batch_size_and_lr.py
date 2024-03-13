@@ -216,27 +216,23 @@ class VariableBatchSizeLR(LRScheduler):
     def optimizer(self):
         return self.base_lr_scheduler.optimizer
     
-    @property
-    def base_lrs(self):
-        return self.base_lr_scheduler.base_lrs
-    
-    @property
-    def last_epoch(self):
-        return self.base_lr_scheduler.last_epoch
-    
     def __init__(self, lr_scheduler, base_batch_size, batch_sizes, dataloader, lr_scaling_method="linear"):
         self.batch_sizes = batch_sizes
         self.base_batch_size = base_batch_size
         self.lr_scaling_method = lr_scaling_method
         self.dataloader = dataloader
         self.base_lr_scheduler = lr_scheduler
+        # the following exist in LRScheduler but not in DeepSpeed's LRScheduler so we create them here
+        self.base_lrs = self.base_lr_scheduler.get_lr()
+        self.last_epoch = 0
 
     def state_dict(self):
-        return {
-            'base_lr_scheduler': self.base_lr_scheduler.state_dict(),
+        return { 'base_lr_scheduler': self.base_lr_scheduler.state_dict() } | {
             'base_batch_size': self.base_batch_size,
             'lr_scaling_method': self.lr_scaling_method,
             'batch_sizes': self.batch_sizes,
+            'base_lrs': self.base_lrs,
+            'last_epoch': self.last_epoch,
         }
 
     def load_state_dict(self, state_dict):
@@ -244,15 +240,14 @@ class VariableBatchSizeLR(LRScheduler):
         self.base_batch_size = state_dict['base_batch_size']
         self.lr_scaling_method = state_dict['lr_scaling_method']
         self.batch_sizes = state_dict['batch_sizes']
+        self.base_lrs = state_dict['base_lrs']
+        self.last_epoch = state_dict['last_epoch']
 
     def get_last_lr(self):
         return self.base_lr_scheduler._last_lr
 
     def get_lr(self):
-        try:
-            return self.base_lr_scheduler.get_lr()
-        except NotImplementedError:
-            return [group['lr'] for group in self.optimizer.param_groups]
+        return [group['lr'] for group in self.base_lr_scheduler.optimizer.param_groups]
 
     def step(self, epoch=None):
         # call the base scheduler's step method to get LR for next epoch
@@ -264,18 +259,19 @@ class VariableBatchSizeLR(LRScheduler):
         # reset unscaled LRs (to the original scheduler's one) for the current epoch
         # Note: epoch==0: reset LR scheduler; epoch==None: scale LR for next epoch;
         unscaled_lrs = self.base_lrs if epoch == 0 else self.get_last_lr()
-        for group, lr in zip(self.optimizer.param_groups, unscaled_lrs):
+        for group, lr in zip(self.base_lr_scheduler.optimizer.param_groups, unscaled_lrs):
             group['lr'] = lr
 
         self.base_lr_scheduler.step(epoch)  # set unscaled lr, _step_count, last_epoch, _last_lr for new epoch
 
         # scale the learning rate for next epoch for each parameter group.
+        self.last_epoch = self.last_epoch + 1 if epoch is None else epoch
         batch_size = self.batch_sizes[self.last_epoch % len(self.batch_sizes)]
-        for group in self.optimizer.param_groups:
+        for group in self.base_lr_scheduler.optimizer.param_groups:
             group['lr'] = scale_lr(self.base_batch_size, batch_size, group['lr'], self.lr_scaling_method)
 
-        if True: #self.verbose:
-            print(f"Batch id {self.last_epoch}, unscaled LR: {unscaled_lrs}, scaled LR: {self.get_lr()}")
+        if self.verbose:
+            print(f"Batch id {self.last_epoch}, unscaled LRs {unscaled_lrs}, scaled LRs {self.get_lr()}")
 
 
 def lr_scheduler_for_variable_batch_size(base_batch_size,
@@ -306,7 +302,7 @@ def lr_scheduler_for_variable_batch_size(base_batch_size,
 
     if isinstance(lr_scheduler_or_optimizer, Optimizer):
         lr_scheduler = StubLRScheduler(lr_scheduler_or_optimizer)
-    elif isinstance(lr_scheduler_or_optimizer, LRScheduler):
+    elif hasattr(lr_scheduler_or_optimizer, 'optimizer'): #LRScheduler or DeepSpeed 'object' schedulers
         lr_scheduler = lr_scheduler_or_optimizer
     else:
         raise ValueError("Unknown type for lr_scheduler_or_optimizer: {}".format(type(lr_scheduler_or_optimizer)))
