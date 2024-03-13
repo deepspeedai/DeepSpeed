@@ -50,6 +50,9 @@ def base_config():
             "backend": "inductor"
         }
     }
+
+    if get_accelerator().device_name() == 'hpu':
+        config_dict['compile']['backend'] = 'hpu_backend'
     return config_dict
 
 
