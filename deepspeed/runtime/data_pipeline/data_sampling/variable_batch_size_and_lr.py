@@ -329,12 +329,11 @@ def lr_scheduler_for_variable_batch_size(base_batch_size,
 
 
 def get_dataloader_and_lr_scheduler_for_variable_batch_size_deepspeed(dataset,
+                                                                      dataset_seqlens,
                                                                       engine,
-                                                                      dataset_seqlens=None,
                                                                       dataset_filter_ids=None,
                                                                       dataloader_collate_fn=None,
                                                                       sample_padding_fn=None,
-                                                                      sample_seqlen_fn=None,
                                                                       replace_lr_scheduler=True,
                                                                       replace_dataloader=True):
     """
@@ -359,7 +358,6 @@ def get_dataloader_and_lr_scheduler_for_variable_batch_size_deepspeed(dataset,
         dataloader_collate_fn=dataloader_collate_fn,
         dataloader_pin_memory=batching_config["dataloader_pin_memory"],
         sample_padding_fn=sample_padding_fn,
-        sample_seqlen_fn=sample_seqlen_fn,
         lr_scheduler_or_optimizer=engine.lr_scheduler or engine.optimizer,
         required_microbatches_of_same_size=isinstance(engine, PipelineEngine),
         required_microbatches_of_same_seqlen=isinstance(engine, PipelineEngine),
@@ -376,9 +374,9 @@ def get_dataloader_and_lr_scheduler_for_variable_batch_size_deepspeed(dataset,
 
 def get_dataloader_and_lr_scheduler_for_variable_batch_size(
     dataset,
+    dataset_seqlens,
     max_tokens_per_batch,
     effective_batch_size,
-    dataset_seqlens=None,
     dataset_filter_ids=None,
     lr_scaling_method="linear",
     min_batch_size=1,
@@ -394,14 +392,9 @@ def get_dataloader_and_lr_scheduler_for_variable_batch_size(
     required_microbatches_of_same_size=False,
     required_microbatches_of_same_seqlen=False,
     sample_padding_fn=None,
-    sample_seqlen_fn=None,
     verbose=False,
 ):
     """ returns a dataloader and LR scheduler for the variable batch size. see `batch_by_size()` for details. """
-
-    if dataset_seqlens is None:
-        assert sample_seqlen_fn is not None, "sample_seqlen_fn must be provided if dataset_seqlens is None"
-        dataset_seqlens = [sample_seqlen_fn(dataset[i]) for i in range(len(dataset))]
 
     # effective_batch_size = train_micro_batch_size_per_gpu * gradient_accumulation_steps * number of dataloaders
     microbatch_ids, batch_sizes, batch_max_seqlens = batch_by_size(
