@@ -44,6 +44,10 @@ if __name__ == "__main__":
             seq = F.pad(seq, pad=(0, 0, 0, size - len(seq)), value=self.padding_value)
             return seq, label
 
+        def seqlen_fn(self, sample):
+            seq, _ = sample
+            return len(seq)
+
     class AttentionHeadAndFeedForward(nn.Module):
         """
         A single attention head of batch of shape BxTxE (with variable T) and attention matrix
@@ -147,7 +151,9 @@ if __name__ == "__main__":
             dataset_filter_ids=dataset_filter_ids, #remove or None to include the whole dataset
             engine=engine,
             dataloader_collate_fn=dataset.collate_fn,
-            sample_padding_fn=dataset.padding_fn)
+            sample_padding_fn=dataset.padding_fn,
+            sample_seqlen_fn=dataset.seqlen_fn, #only used when dataset_seqlens is None
+            )
 
     gradient_acc_steps = engine.gradient_accumulation_steps()
     n_batches_per_rank = len(dataloader) // (gradient_acc_steps * engine.train_micro_batch_size_per_gpu())
