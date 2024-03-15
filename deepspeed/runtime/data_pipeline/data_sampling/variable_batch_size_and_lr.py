@@ -13,6 +13,7 @@ from torch.optim.optimizer import Optimizer
 from torch.utils.data import DataLoader, DistributedSampler
 from deepspeed.utils import logger
 from deepspeed.runtime.pipe.engine import PipelineEngine
+from deepspeed.runtime.data_pipeline.constants import DYNAMIC_BATCHING, DYNAMIC_BATCHING_ENABLED
 
 
 def batch_by_size(
@@ -333,14 +334,13 @@ def get_dataloader_and_lr_scheduler_for_variable_batch_size_deepspeed(dataset,
                                                                       engine,
                                                                       dataset_filter_ids=None,
                                                                       dataloader_collate_fn=None,
-                                                                      sample_padding_fn=None,
-                                                                      replace_lr_scheduler=True,
-                                                                      replace_dataloader=True):
+                                                                      sample_padding_fn=None):
     """
     a simplified call to get_dataloader_and_lr_scheduler_for_variable_batch_size for the deepspeed runtime.
     See `batch_by_size()` for arguments and documentation.
     """
-    batching_config = engine.config['data_efficiency']['dynamic_batching']
+    batching_config = engine._config.data_efficiency_config[DYNAMIC_BATCHING]
+    assert batching_config[DYNAMIC_BATCHING_ENABLED], "Dynamic batching is not enabled in the config"
     dataloader, lr_scheduler, deepspeed_io_kwargs = get_dataloader_and_lr_scheduler_for_variable_batch_size(
         dataset=dataset,
         dataset_filter_ids=dataset_filter_ids,
@@ -363,12 +363,6 @@ def get_dataloader_and_lr_scheduler_for_variable_batch_size_deepspeed(dataset,
         required_microbatches_of_same_seqlen=isinstance(engine, PipelineEngine),
         verbose=batching_config["verbose"],
     )
-    if replace_lr_scheduler:
-        engine.lr_scheduler = lr_scheduler
-    if replace_dataloader:
-        engine.training_dataloader = dataloader
-        engine.data_iterator = iter(engine.training_dataloader)
-        # engine.deepspeed_io(**deepspeed_io_kwargs)
     return dataloader, lr_scheduler, deepspeed_io_kwargs
 
 
