@@ -46,7 +46,7 @@ def get_data_sampling(param_dict):
         param_dict[DATA_SAMPLING] = {}
     sub_param_dict = param_dict[DATA_SAMPLING]
     output[CURRICULUM_LEARNING] = get_curriculum_learning(sub_param_dict)
-    output[DYNAMIC_BATCHING] = get_dynamic_batching(param_dict.get(DYNAMIC_BATCHING, {}))
+    output[DYNAMIC_BATCHING] = get_dynamic_batching(sub_param_dict)
     return output
 
 
@@ -86,36 +86,24 @@ def get_curriculum_learning(param_dict):
     return output
 
 
-def get_dynamic_batching_params(param_dict):
-    if DYNAMIC_BATCHING in param_dict.keys():
-        dynamic_batching_params = copy.copy(param_dict[DYNAMIC_BATCHING])
-        dynamic_batching_params.pop(DYNAMIC_BATCHING_ENABLED)
-        return dynamic_batching_params
-    else:
-        return {}
-
-
 def get_dynamic_batching(param_dict):
-    param_dict[DYNAMIC_BATCHING_ENABLED] = bool(
-        param_dict.get(DYNAMIC_BATCHING_ENABLED, DYNAMIC_BATCHING_ENABLED_DEFAULT))
-    param_dict[DYNAMIC_BATCHING_LR_SCALING_METHOD] = str(
-        param_dict.get(DYNAMIC_BATCHING_LR_SCALING_METHOD, DYNAMIC_BATCHING_LR_SCALING_METHOD_DEFAULT))
-    param_dict[DYNAMIC_BATCHING_MIN_BATCH_SIZE] = int(
-        param_dict.get(DYNAMIC_BATCHING_MIN_BATCH_SIZE, DYNAMIC_BATCHING_MIN_BATCH_SIZE_DEFAULT))
-    param_dict[DYNAMIC_BATCHING_NUM_WORKERS] = int(
-        param_dict.get(DYNAMIC_BATCHING_NUM_WORKERS, DYNAMIC_BATCHING_NUM_WORKERS_DEFAULT))
-    param_dict[DYNAMIC_BATCHING_MAX_BATCH_SIZE] = int(
-        param_dict[DYNAMIC_BATCHING_MAX_BATCH_SIZE]) if DYNAMIC_BATCHING_MAX_BATCH_SIZE in param_dict else None
-    param_dict[DYNAMIC_BATCHING_SAMPLES_ORDER] = str(
-        param_dict.get(DYNAMIC_BATCHING_SAMPLES_ORDER, DYNAMIC_BATCHING_SAMPLES_ORDER_DEFAULT))
-    if param_dict[DYNAMIC_BATCHING_ENABLED]:
-        assert DYNAMIC_BATCHING_MAX_TOKENS_PER_BATCH in param_dict.keys(
+    output = copy.copy(param_dict.get(DYNAMIC_BATCHING, {}))
+    output[DYNAMIC_BATCHING_ENABLED] = bool(output.get(DYNAMIC_BATCHING_ENABLED, DYNAMIC_BATCHING_ENABLED_DEFAULT))
+    output[DYNAMIC_BATCHING_LR_SCALING_METHOD] = str(
+        output.get(DYNAMIC_BATCHING_LR_SCALING_METHOD, DYNAMIC_BATCHING_LR_SCALING_METHOD_DEFAULT))
+    output[DYNAMIC_BATCHING_MIN_BATCH_SIZE] = int(
+        output.get(DYNAMIC_BATCHING_MIN_BATCH_SIZE, DYNAMIC_BATCHING_MIN_BATCH_SIZE_DEFAULT))
+    output[DYNAMIC_BATCHING_MAX_BATCH_SIZE] = int(output[DYNAMIC_BATCHING_MAX_BATCH_SIZE]) \
+        if DYNAMIC_BATCHING_MAX_BATCH_SIZE in output.keys() \
+        else DYNAMIC_BATCHING_MAX_BATCH_SIZE_DEFAULT
+    output[DYNAMIC_BATCHING_SAMPLES_ORDER] = str(
+        output.get(DYNAMIC_BATCHING_SAMPLES_ORDER, DYNAMIC_BATCHING_SAMPLES_ORDER_DEFAULT))
+    if output[DYNAMIC_BATCHING_ENABLED]:
+        assert DYNAMIC_BATCHING_MAX_TOKENS_PER_BATCH in output.keys(
         ), f"Dynamic batching is enabled, so {DYNAMIC_BATCHING_MAX_TOKENS_PER_BATCH} must be specified"
-    param_dict[DYNAMIC_BATCHING_MAX_TOKENS_PER_BATCH] = int(param_dict[DYNAMIC_BATCHING_MAX_TOKENS_PER_BATCH])
-    param_dict[DYNAMIC_BATCHING_PIN_MEMORY] = bool(
-        param_dict.get(DYNAMIC_BATCHING_PIN_MEMORY, DYNAMIC_BATCHING_PIN_MEMORY_DEFAULT))
-    param_dict[DYNAMIC_BATCHING_VERBOSE] = bool(param_dict.get(DYNAMIC_BATCHING_VERBOSE, False))
-    return param_dict
+        output[DYNAMIC_BATCHING_MAX_TOKENS_PER_BATCH] = int(output[DYNAMIC_BATCHING_MAX_TOKENS_PER_BATCH])
+    output[DYNAMIC_BATCHING_VERBOSE] = bool(output.get(DYNAMIC_BATCHING_VERBOSE, False))
+    return output
 
 
 def get_curriculum_learning_enabled(param_dict):

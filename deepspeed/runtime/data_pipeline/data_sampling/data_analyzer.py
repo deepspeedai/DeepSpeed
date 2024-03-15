@@ -575,7 +575,7 @@ class DistributedDataAnalyzer(object):
                             metric_to_samples_dict[value.item()] = []
                         metric_to_samples_dict[value.item()].append(sample.item())
 
-                # index_to_metric and index_to_sample serialize a dicitonary from metric to samples
+                # index_to_metric and index_to_sample serialize a dictionary from metric to samples
                 # index_to_metric stores a key per row, index_to_sample stores the values per row
                 values = [torch.tensor([x]) for x in metric_to_samples_dict.keys()]
                 samples = [torch.tensor(metric_to_samples_dict[x]) for x in metric_to_samples_dict.keys()]
