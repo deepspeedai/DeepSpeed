@@ -356,6 +356,7 @@ def get_dataloader_and_lr_scheduler_for_variable_batch_size_deepspeed(dataset,
                    f" path to the dynamic_batching config as {DYNAMIC_BATCHING_SEQLEN_SAMPLE_TO_METRIC_PATH}")
             raise ValueError(msg)
         dataset_seqlens = MMapIndexedDataset(sample_to_seqlen_path, skip_warmup=True)
+        dataset_seqlens = torch.tensor(list(dataset_seqlens), dtype=torch.int64).flatten() # from Nx1 to N
 
     dataloader, lr_scheduler, deepspeed_io_kwargs = get_dataloader_and_lr_scheduler_for_variable_batch_size(
         dataset=dataset,
