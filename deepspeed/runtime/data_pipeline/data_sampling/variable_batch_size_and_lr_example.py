@@ -94,7 +94,6 @@ if __name__ == "__main__":
 
     max_seqlen = 15
     dataset = TestData(seq_count=300, min_seqlen=5, max_seqlen=max_seqlen)
-    dataset_seqlens = [len(s[0]) for s in dataset]
     model = AttentionHeadAndFeedForward(max_seqlen, dataset.embed_dim).to(device)
     loss_fn = lambda x, y: F.mse_loss(x.float(), y.float())
 
@@ -121,17 +120,39 @@ if __name__ == "__main__":
         },
         "data_efficiency": {
             "enabled": True,
-            "dynamic_batching": {
+            "seed": 42,
+            "data_sampling": {
                 "enabled": True,
-                "dataloader_num_workers": 0,
-                "dataloader_pin_memory": False,
-                "lr_scaling_method": "linear",
-                "min_batch_size": 1,
-                "max_batch_size": 10,
-                "samples_order": "dataloader",  # "random" / "seqlen" / "default"
-                "max_tokens_per_batch": 40,
-                "verbose": False,
-            }
+                "num_epochs": 1,
+                "num_workers": 0,
+                "pin_memory": False,
+                # "curriculum_metrics": {
+                #     "seqlen": {
+                #         "index_to_sample_path": "./ds_curriculum_output/seqlen/seqlen_index_to_sample_percentile_merged",
+                #         "index_to_metric_path": "./ds_curriculum_output/seqlen/seqlen_index_to_metric",
+                #         "difficulty_type": "percentile",
+                #         "clustering_type": "schedule_based",
+                #         "max_difficulty": 100,
+                #         "min_difficulty": 1,
+                #         "schedule_type": "fixed_root",
+                #         "schedule_config": {
+                #         "total_curriculum_step": 110000,
+                #         "difficulty_step": 1, #multiple of 8 to support FP16?
+                #         "root_degree": 2
+                #         }
+                #     },
+                # },
+                "dynamic_batching": {
+                    "enabled": True,
+                    "seqlen_sample_to_metric_path": "./ds_curriculum_output/seqlen/seqlen_sample_to_metric",
+                    "lr_scaling_method": "linear",
+                    "min_batch_size": 1,
+                    "max_batch_size": 10,
+                    "samples_order": "dataloader",  # "random" / "seqlen" / "default"
+                    "max_tokens_per_batch": 40,
+                    "verbose": False,
+                },
+            },
         },
     }
 
@@ -139,11 +160,12 @@ if __name__ == "__main__":
     engine, _, _, _ = deepspeed.initialize(config=config, model=model)
 
     # We will simulate a curriculum step, by filtering only a subset of sequences with a given seqlen
+    dataset_seqlens = [len(s[0]) for s in dataset]
     dataset_filter_ids = [i for i, seqlen in enumerate(dataset_seqlens) if seqlen > 7 and seqlen < 14]
     dataloader, lr_scheduler, _ = \
         get_dataloader_and_lr_scheduler_for_variable_batch_size_deepspeed(
             dataset=dataset,
-            dataset_seqlens=dataset_seqlens,
+            dataset_seqlens=dataset_seqlens, #if not provided, will look for the output of DataAnalyzer
             dataset_filter_ids=dataset_filter_ids, #remove or None to include the whole dataset
             engine=engine,
             dataloader_collate_fn=dataset.collate_fn,
