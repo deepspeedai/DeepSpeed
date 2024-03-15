@@ -22,6 +22,8 @@ DATA_SAMPLING_NUM_EPOCHS = "num_epochs"
 DATA_SAMPLING_NUM_EPOCHS_DEFAULT = 1000
 DATA_SAMPLING_NUM_WORKERS = "num_workers"
 DATA_SAMPLING_NUM_WORKERS_DEFAULT = 0
+DATA_SAMPLING_PIN_MEMORY = "pin_memory"
+DATA_SAMPLING_PIN_MEMORY_DEFAULT = False
 
 #########################################
 # Data efficiency - Data Sampling - Curriculum Learning
