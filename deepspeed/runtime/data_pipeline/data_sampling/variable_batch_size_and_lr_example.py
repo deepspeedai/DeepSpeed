@@ -124,7 +124,7 @@ if __name__ == "__main__":
             "dynamic_batching": {
                 "enabled": True,
                 "dataloader_num_workers": 0,
-                "dataloader_pin_memory": 0,
+                "dataloader_pin_memory": False,
                 "lr_scaling_method": "linear",
                 "min_batch_size": 1,
                 "max_batch_size": 10,
@@ -168,5 +168,5 @@ if __name__ == "__main__":
                     engine.backward(loss)
                     engine.step()  # lr_kwargs={"epoch": batch_id})
 
-            if engine.data_parallel_group.rank():
+            if engine.data_parallel_group.rank() == 0:
                 print(f"epoch {epoch}, batch {batch_id}, loss {loss.item()}, LRs {lr_scheduler.get_lr()}")
