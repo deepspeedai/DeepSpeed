@@ -7,13 +7,15 @@
 
 import random
 import torch
+import os
 import numpy as np
 from torch.optim.lr_scheduler import LRScheduler
 from torch.optim.optimizer import Optimizer
 from torch.utils.data import DataLoader, DistributedSampler
 from deepspeed.utils import logger
 from deepspeed.runtime.pipe.engine import PipelineEngine
-from deepspeed.runtime.data_pipeline.constants import DYNAMIC_BATCHING, DYNAMIC_BATCHING_ENABLED
+from deepspeed.runtime.data_pipeline.constants import *
+from deepspeed.runtime.data_pipeline.data_sampling.indexed_dataset import MMapIndexedDataset
 
 
 def batch_by_size(
@@ -330,8 +332,8 @@ def lr_scheduler_for_variable_batch_size(base_batch_size,
 
 
 def get_dataloader_and_lr_scheduler_for_variable_batch_size_deepspeed(dataset,
-                                                                      dataset_seqlens,
                                                                       engine,
+                                                                      dataset_seqlens=None,
                                                                       dataset_filter_ids=None,
                                                                       dataloader_collate_fn=None,
                                                                       sample_padding_fn=None):
@@ -339,29 +341,43 @@ def get_dataloader_and_lr_scheduler_for_variable_batch_size_deepspeed(dataset,
     a simplified call to get_dataloader_and_lr_scheduler_for_variable_batch_size for the deepspeed runtime.
     See `batch_by_size()` for arguments and documentation.
     """
-    batching_config = engine._config.data_efficiency_config[DYNAMIC_BATCHING]
+    data_sampling_config = engine._config.data_efficiency_config[DATA_SAMPLING]
+    batching_config = data_sampling_config[DYNAMIC_BATCHING]
     assert batching_config[DYNAMIC_BATCHING_ENABLED], "Dynamic batching is not enabled in the config"
+
+    if dataset_seqlens is None:
+        # In not provided by user, look for the seqlen metric that was output by the Data Analyzer
+        # (see the mian in deepspeed/runtime/data_pipeline/data_sampling/data_analyzer.py for an example)
+        # TODO this only works when all nodes can access the same file storage
+        sample_to_seqlen_path = batching_config[DYNAMIC_BATCHING_SEQLEN_SAMPLE_TO_METRIC_PATH]
+        if not (os.path.exists(f"{sample_to_seqlen_path}.bin") and os.path.exists(f"{sample_to_seqlen_path}.idx")):
+            msg = (f"Cannot find metric files for sequence length in {sample_to_seqlen_path}.* . Run "
+                   "DataAnalyzer with metric_name='seqlen' and metric_value='single_value_per_sample' and pass the"
+                   f" path to the dynamic_batching config as {DYNAMIC_BATCHING_SEQLEN_SAMPLE_TO_METRIC_PATH}")
+            raise ValueError(msg)
+        dataset_seqlens = MMapIndexedDataset(sample_to_seqlen_path, skip_warmup=True)
+
     dataloader, lr_scheduler, deepspeed_io_kwargs = get_dataloader_and_lr_scheduler_for_variable_batch_size(
         dataset=dataset,
         dataset_filter_ids=dataset_filter_ids,
         dataset_seqlens=dataset_seqlens,
         effective_batch_size=engine.train_batch_size(),
-        max_tokens_per_batch=batching_config["max_tokens_per_batch"],
-        lr_scaling_method=batching_config["lr_scaling_method"],
-        samples_order=batching_config["samples_order"],
-        min_batch_size=batching_config["min_batch_size"],
-        max_batch_size=batching_config["max_batch_size"],
+        max_tokens_per_batch=batching_config[DYNAMIC_BATCHING_MAX_TOKENS_PER_BATCH],
+        lr_scaling_method=batching_config[DYNAMIC_BATCHING_LR_SCALING_METHOD],
+        samples_order=batching_config[DYNAMIC_BATCHING_SAMPLES_ORDER],
+        min_batch_size=batching_config[DYNAMIC_BATCHING_MIN_BATCH_SIZE],
+        max_batch_size=batching_config[DYNAMIC_BATCHING_MAX_BATCH_SIZE],
         dataloader_batch_size=engine.train_micro_batch_size_per_gpu(),
         dataloader_rank=engine.data_parallel_group.rank(),
         dataloader_num_replicas=engine.data_parallel_group.size(),
-        dataloader_num_workers=batching_config["dataloader_num_workers"],
+        dataloader_num_workers=data_sampling_config[DATA_SAMPLING_NUM_WORKERS],
         dataloader_collate_fn=dataloader_collate_fn,
-        dataloader_pin_memory=batching_config["dataloader_pin_memory"],
+        dataloader_pin_memory=data_sampling_config[DATA_SAMPLING_PIN_MEMORY],
         sample_padding_fn=sample_padding_fn,
         lr_scheduler_or_optimizer=engine.lr_scheduler or engine.optimizer,
         required_microbatches_of_same_size=isinstance(engine, PipelineEngine),
         required_microbatches_of_same_seqlen=isinstance(engine, PipelineEngine),
-        verbose=batching_config["verbose"],
+        verbose=batching_config[DYNAMIC_BATCHING_VERBOSE],
     )
     return dataloader, lr_scheduler, deepspeed_io_kwargs
 
