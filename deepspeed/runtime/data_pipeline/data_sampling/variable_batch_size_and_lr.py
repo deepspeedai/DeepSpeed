@@ -16,6 +16,8 @@ from deepspeed.utils import logger
 from deepspeed.runtime.pipe.engine import PipelineEngine
 from deepspeed.runtime.data_pipeline.constants import *
 from deepspeed.runtime.data_pipeline.data_sampling.indexed_dataset import MMapIndexedDataset
+from deepspeed.runtime.data_pipeline.data_sampling.data_analyzer import DistributedDataAnalyzer
+import pathlib
 
 
 def batch_by_size(
@@ -336,27 +338,52 @@ def get_dataloader_and_lr_scheduler_for_variable_batch_size_deepspeed(dataset,
                                                                       dataset_seqlens=None,
                                                                       dataset_filter_ids=None,
                                                                       dataloader_collate_fn=None,
-                                                                      sample_padding_fn=None):
+                                                                      sample_padding_fn=None,
+                                                                      batch_seqlens_fn=None):
     """
     a simplified call to get_dataloader_and_lr_scheduler_for_variable_batch_size for the deepspeed runtime.
-    See `batch_by_size()` for arguments and documentation.
+    Needs the seqlens of every sample. It will try three alternatives:
+    - if `dataset_seqlens` is provided by user, use that.
+    - otherwise, looks for the seqlen metric path (in the connfig) that contains the output of the Data Analyzer
+    - otherwise, use the user-provided function `batch_seqlens_fn` and call Data Analyzer to output seqlen metric
+    See `batch_by_size()` for arguments and more documentation.
     """
     data_sampling_config = engine._config.data_efficiency_config[DATA_SAMPLING]
     batching_config = data_sampling_config[DYNAMIC_BATCHING]
     assert batching_config[DYNAMIC_BATCHING_ENABLED], "Dynamic batching is not enabled in the config"
 
     if dataset_seqlens is None:
-        # In not provided by user, look for the seqlen metric that was output by the Data Analyzer
-        # (see the mian in deepspeed/runtime/data_pipeline/data_sampling/data_analyzer.py for an example)
-        # TODO this only works when all nodes can access the same file storage
+        # In seqlen provided by user, look for the seqlen metric that was output by the Data Analyzer
+        # (see the main in deepspeed/runtime/data_pipeline/data_sampling/data_analyzer.py for an example)
         sample_to_seqlen_path = batching_config[DYNAMIC_BATCHING_SEQLEN_SAMPLE_TO_METRIC_PATH]
         if not (os.path.exists(f"{sample_to_seqlen_path}.bin") and os.path.exists(f"{sample_to_seqlen_path}.idx")):
-            msg = (f"Cannot find metric files for sequence length in {sample_to_seqlen_path}.* . Run "
-                   "DataAnalyzer with metric_name='seqlen' and metric_value='single_value_per_sample' and pass the"
-                   f" path to the dynamic_batching config as {DYNAMIC_BATCHING_SEQLEN_SAMPLE_TO_METRIC_PATH}")
-            raise ValueError(msg)
+            # if the metric files are not found, we run the DataAnalyzer to write the metric files
+            msg = f"Cannot find metric files for sequence length in {sample_to_seqlen_path}.idx or *.bin."
+            msg += " We will run data analyzer to generated them..."
+            logger.warning(msg)
+
+            if batch_seqlens_fn is None:
+                raise ValueError("sample_seqlen_fn must be provided if dataset_seqlens is not provided")
+
+            DistributedDataAnalyzer(
+                dataset=dataset,
+                metric_functions=[batch_seqlens_fn],
+                collate_fn=dataloader_collate_fn,
+                batch_size=2**10,  # batch size for map-reduce, not training
+                num_workers=engine.world_size,
+                worker_id=engine.global_rank,
+                save_path=pathlib.Path(f"{sample_to_seqlen_path}.bin").parent.parent,
+                metric_types=['single_value_per_sample'],
+                metric_names=["seqlen"],
+                device=engine.device,
+            ).run_map_reduce()
+
         dataset_seqlens = MMapIndexedDataset(sample_to_seqlen_path, skip_warmup=True)
-        dataset_seqlens = torch.tensor(list(dataset_seqlens), dtype=torch.int64).flatten() # from Nx1 to N
+        assert len(dataset_seqlens) == len(dataset), "Seqlens size does not match the input dataset size"
+
+        # TODO we are copying all seqlens into memory, we should adapt the code to use an iterative streamer
+        # and use the other files output by DataAnalyzer that returns an ordered dictionary of seqlen to sample ids
+        dataset_seqlens = np.array(list(dataset_seqlens), dtype=np.int64).flatten()  # from Nx1 to N
 
     dataloader, lr_scheduler, deepspeed_io_kwargs = get_dataloader_and_lr_scheduler_for_variable_batch_size(
         dataset=dataset,
