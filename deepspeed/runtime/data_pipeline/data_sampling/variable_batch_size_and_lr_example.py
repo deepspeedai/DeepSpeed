@@ -31,18 +31,27 @@ if __name__ == "__main__":
         __len__ = lambda self: len(self.seqs)
         __getitem__ = lambda self, idx: (self.seqs[idx], len(self.seqs[idx]))
 
-        def collate_fn(self, batch):
+        def batch_collate_fn(self, batch):
             """ collate sequences of different lengths into batch of size BxTxE, where T is max seqlen """
             seqs, labels = zip(*batch)
             seqs = nn.utils.rnn.pad_sequence(seqs, batch_first=True, padding_value=self.padding_value)
             labels = torch.tensor(labels, dtype=float)
             return seqs, labels
 
-        def padding_fn(self, sample, size):
+        def sample_padding_fn(self, sample, size):
             """ pad sequence `seq` of shape TxE to size T'xE where T' is given by `size` """
             seq, label = sample
             seq = F.pad(seq, pad=(0, 0, 0, size - len(seq)), value=self.padding_value)
             return seq, label
+
+        def batch_seqlens_fn(self, batch):
+            """ given a batch, return the size of every sequence in the batch """
+            seqlens = []
+            seqs, _ = batch
+            for seq in seqs:
+                pad_indices = (seq[:, 0] == self.padding_value).nonzero(as_tuple=True)[0]
+                seqlens.append(len(seq) if len(pad_indices) == 0 else pad_indices[0].item())
+            return torch.tensor(seqlens, dtype=torch.int64)
 
     class AttentionHeadAndFeedForward(nn.Module):
         """
@@ -165,11 +174,12 @@ if __name__ == "__main__":
     dataloader, lr_scheduler, _ = \
         get_dataloader_and_lr_scheduler_for_variable_batch_size_deepspeed(
             dataset=dataset,
-            dataset_seqlens=dataset_seqlens, #if not provided, will look for the output of DataAnalyzer
+            # dataset_seqlens=dataset_seqlens, #if None, output metrics with DataAnalyzer and open them
             dataset_filter_ids=dataset_filter_ids, #remove or None to include the whole dataset
             engine=engine,
-            dataloader_collate_fn=dataset.collate_fn,
-            sample_padding_fn=dataset.padding_fn)
+            dataloader_collate_fn=dataset.batch_collate_fn,
+            sample_padding_fn=dataset.sample_padding_fn,
+            batch_seqlens_fn=dataset.batch_seqlens_fn,)
 
     gradient_acc_steps = engine.gradient_accumulation_steps()
     n_batches_per_rank = len(dataloader) // (gradient_acc_steps * engine.train_micro_batch_size_per_gpu())
