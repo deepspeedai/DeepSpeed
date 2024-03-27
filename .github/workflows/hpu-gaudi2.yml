@@ -26,6 +26,58 @@ jobs:
         - 80
       options: --runtime=habana -e HABANA_VISIBLE_DEVICES=all -e OMPI_MCA_btl_vader_single_copy_mechanism=none --cap-add=sys_nice
 
+    env:
+      PT_HPU_LAZY_MODE: 0
+      TEST_LIST: |
+        test_accelerator.py
+        test_autotuning.py
+        test_compression.py
+        test_dist.py
+        test_elastic.py
+        (test_intX_quantization.py and test_quantized_linear)
+        test_ds_arguments.py
+        test_run.py
+        test_multinode_runner.py
+        test_moe_tp.py
+        test_monitor.py
+        (test_zero_optimizer.py and (TestSaveTensorClone or TestZeRONonDistributed))
+        (test_latest_checkpoint.py and test_missing_latest)
+        test_reshape_checkpoint.py
+        test_shared_weights.py
+        test_sparse.py
+        test_tag_validation.py
+        test_pipe_module.py
+        (test_flops_profiler.py and test_flops_profiler_in_inference)
+        test_get_optim_files.py
+        test_groups.py
+        test_init_on_device.py
+        test_partition_balanced.py
+        (test_adamw.py and TestAdamConfigs)
+        test_coalesced_collectives.py
+        test_activation_checkpointing_non_reentrant.py
+        test_activation_checkpointing.py
+        test_data.py
+        (test_ds_config_dict.py and (TestBasicConfig or TestBatchConfig))
+        test_ds_config_model.py
+        test_mup_optimizers.py
+        (test_pld.py and test_pld_schedule)
+        test_runtime_utils.py
+        test_pipe_schedule.py
+        test_topology.py
+        (test_ds_initialize.py and (TestClientOptimizer or TestClientLrScheduler))
+        test_csr.py
+        (test_fp16.py and (TestZeroEmptyGrad or TestZeroAllowUntestedOptimizer))
+        (test_bf16.py and TestZeroDtypeCocktail)
+        test_partition.py
+        test_ignore_unused_parameters.py
+        test_zero_config.py
+        test_zero_context_ancestry.py
+        (test_zero_context.py and not TestSerialContext)
+        test_zero_dynamic_class.py
+        test_zero_nesting_init.py
+        test_zeropp.py
+        (test_zero.py and (TestZero3ParamPartitioningLargeParam or TestZero3ParamPartitioningLargeParam))
+
     # Steps represent a sequence of tasks that will be executed as part of the job
     steps:
       # Checks-out your repository under $GITHUB_WORKSPACE, so your job can access it
@@ -38,11 +90,28 @@ jobs:
           python -c "import torch; print('torch:', torch.__version__, torch)"
           python -c "import torch; print('CUDA available:', torch.cuda.is_available())"
 
+      - name: Install transformers
+        run: |
+          git clone https://github.com/huggingface/transformers
+          cd transformers
+          git rev-parse --short HEAD
+          pip install .
+
       - name: Install deepspeed
         run: |
-          pip install .[dev]
+          pip install .[dev,autotuning]
           ds_report
 
       - name: Python environment
         run: |
           pip list
+
+      - name: Unit tests
+        run: |
+          unset TORCH_CUDA_ARCH_LIST # only jit compile for current arch
+          cd tests
+          export PT_HPU_LAZY_MODE=${PT_HPU_LAZY_MODE}
+          TEST_LIST=$(echo "$TEST_LIST" | awk 'NF{printf "%s%s", (NR>1 ? " or " : ""), $0} END{if (NR>1) print ""}')
+          echo "TEST_LIST ${TEST_LIST}"
+          echo "PT_HPU_LAZY_MODE ${PT_HPU_LAZY_MODE}"
+          pytest --verbose unit/ -k "${TEST_LIST}"
