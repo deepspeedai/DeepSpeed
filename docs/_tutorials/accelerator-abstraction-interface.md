@@ -79,13 +79,13 @@ torch.distributed.init_process_group(get_accelerator().communication_backend_nam
 ```
 
 # Run DeepSpeed model on different accelerators
-Once a model is ported with DeepSpeed Accelerator Abstraction Interface, we can run this model on different accelerators using extension to DeepSpeed.  DeepSpeed check whether certain extension is installed in the environment to decide whether to use the Accelerator backend in that extension.  For example if we wish to run model on Intel GPU, we can install _Intel Extension for DeepSpeed_ following the instruction in [link](https://github.com/intel/intel-extension-for-deepspeed/)
+Once a model is ported with DeepSpeed Accelerator Abstraction Interface, we can run this model on different accelerators using an extension to DeepSpeed. DeepSpeed checks whether a certain extension is installed in the environment to decide whether to use the Accelerator backend in that extension. For example, if we wish to run a model on Intel GPU, we can install _Intel Extension for DeepSpeed_ following the instructions in the following [link](https://github.com/intel/intel-extension-for-deepspeed/)
 
-After the extension is installed, install DeepSpeed and run model.   The model will be running on top of DeepSpeed.   Because DeepSpeed installation is also accelerator related, it is recommended to install DeepSpeed accelerator extension before install DeepSpeed.
+After the extension is installed, install DeepSpeed and run the model.  The model will be running on top of DeepSpeed.   Because DeepSpeed installation is also accelerator related, it is recommended to install DeepSpeed accelerator extension before installing DeepSpeed.
 
 `CUDA_Accelerator` is the default accelerator in DeepSpeed.  If no other DeepSpeed accelerator extension is installed, `CUDA_Accelerator` will be used.
 
-When run a model on different accelerator in a cloud environment, the recommended practice is provision environment for each accelerator in different env with tool such as _anaconda/miniconda/virtualenv_.  When run model on different Accelerator, load the env accordingly.
+When running a model on different accelerators in a cloud environment, the recommended practice is to provision an environment for each accelerator in a different env with tools such as _anaconda/miniconda/virtualenv_.  When running models on different Accelerator, load the env accordingly.
 
 Note that different accelerator may have different 'flavor' of float16 or bfloat16.   So it is recommended to make the model configurable for both float16 and bfloat16, in that way model code does not need to be changed when running on different accelerators.
 
