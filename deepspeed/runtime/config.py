@@ -258,10 +258,10 @@ def get_communication_data_type(param_dict,
         return torch.float32
     elif val == "fp16":
         return torch.float16
-    elif val == "bfp16":
+    elif val == "bf16":
         return torch.bfloat16
 
-    raise ValueError(f"Invalid communication_data_type. Supported data types: ['fp16', 'bfp16', 'fp32']. Got: {val}")
+    raise ValueError(f"Invalid communication_data_type. Supported data types: ['fp16', 'bf16', 'fp32']. Got: {val}")
 
 
 def get_prescale_gradients(param_dict):
