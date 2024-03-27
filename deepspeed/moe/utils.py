@@ -146,3 +146,7 @@ def split_params_into_different_moe_groups_for_optimizer(
                 param_groups.append(param_group)
 
     return param_groups
+
+
+def is_moe_param_group(param_group):
+    return param_group.get('moe', False)

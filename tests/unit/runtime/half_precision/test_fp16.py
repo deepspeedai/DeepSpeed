@@ -13,6 +13,7 @@ from unit.simple_model import SimpleModel, SimpleOptimizer, random_dataloader, S
 from deepspeed.runtime.utils import required_torch_version
 from deepspeed.accelerator import get_accelerator
 from deepspeed.ops.op_builder import CPUAdamBuilder
+from deepspeed.moe.utils import split_params_into_different_moe_groups_for_optimizer
 
 try:
     from apex import amp  # noqa: F401 # type: ignore
@@ -215,8 +216,10 @@ class TestFP16OptimizerForMoE(DistributedTest):
 
         # initialize MoE
         model = SimpleMoEModel(hidden_dim, ep_size=2)
+        param_group = {'params': [p for p in model.parameters()], 'name': 'random-unique-name'}
+        params = split_params_into_different_moe_groups_for_optimizer(param_group)
         # optimizer = torch.optim.AdamW(params=model.parameters())
-        optimizer = FusedAdam(params=model.parameters())
+        optimizer = FusedAdam(params=params)
         engine, optimizer, _, _ = deepspeed.initialize(config=config_dict,
                                                        model=model,
                                                        optimizer=optimizer,

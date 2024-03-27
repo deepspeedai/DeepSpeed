@@ -11,12 +11,12 @@ import torch
 from torch._utils import _flatten_dense_tensors, _unflatten_dense_tensors
 
 from deepspeed.runtime import DeepSpeedOptimizer
-from deepspeed.runtime.utils import get_global_norm, get_grad_norm, CheckOverflow, get_weight_norm, required_torch_version
+from deepspeed.runtime.utils import get_global_norm, get_grad_norm, CheckOverflow, get_weight_norm, required_torch_version, get_norm_with_moe_layers
 from deepspeed.runtime.fp16.loss_scaler import INITIAL_LOSS_SCALE, SCALE_WINDOW, MIN_LOSS_SCALE
-from deepspeed.utils import groups, logger, log_dist
-from deepspeed import comm as dist
+from deepspeed.utils import logger, log_dist
 from deepspeed.checkpoint.constants import OPTIMIZER_STATE_DICT, CLIP_GRAD
 from deepspeed.accelerator import get_accelerator
+from deepspeed.moe.utils import is_moe_param_group
 
 OVERFLOW_CHECK_TIMER = 'overflow_check'
 COMPUTE_NORM_TIMER = 'compute_norm'
@@ -237,6 +237,10 @@ class FP16_Optimizer(DeepSpeedOptimizer):
             return self.overflow
 
         grads_groups_flat = []
+        non_experts_grads_for_norm = []
+        expert_grads_for_norm = {}
+        assert len(self.fp16_groups) == len(self.optimizer.param_groups)
+
         for i, group in enumerate(self.fp16_groups):
             data_type = self.fp32_groups_flat[i].dtype
 
@@ -250,15 +254,25 @@ class FP16_Optimizer(DeepSpeedOptimizer):
                 p.grad = None
 
             self.fp32_groups_flat[i].grad = grads_groups_flat[i]
+            param_group = self.optimizer.param_groups[i]
+            if self.has_moe_layers and is_moe_param_group(param_group):
+                if param_group['name'] not in expert_grads_for_norm:
+                    expert_grads_for_norm[param_group['name']] = []
+                expert_grads_for_norm[param_group['name']].append(self.fp32_groups_flat[i])
+            else:
+                non_experts_grads_for_norm.append(self.fp32_groups_flat[i])
 
         self.timers(COMPUTE_NORM_TIMER).start()
 
-        all_groups_norm = get_grad_norm(self.fp32_groups_flat, mpu=self.mpu)
+        all_groups_norm = get_grad_norm(non_experts_grads_for_norm, mpu=self.mpu)
 
         self.timers(COMPUTE_NORM_TIMER).stop()
 
         if self.has_moe_layers:
-            all_groups_norm = self._get_norm_with_moe_layers(all_groups_norm)
+            all_groups_norm = get_norm_with_moe_layers(all_groups_norm,
+                                                       mpu=self.mpu,
+                                                       expert_tensors=expert_grads_for_norm,
+                                                       norm_type=self.norm_type)
 
         scaled_global_grad_norm = get_global_norm(norm_list=[all_groups_norm])
 
@@ -289,20 +303,6 @@ class FP16_Optimizer(DeepSpeedOptimizer):
         self.timers.log(STEP_TIMERS)
 
         return self.overflow
-
-    def _get_norm_with_moe_layers(self, all_groups_norm):
-        #all_groups_norm_old = all_groups_norm
-        # Need to allreduce (avg) the norms across different ranks because moe params will not be synced during allreduce
-        if self.using_pipeline:
-            pg = self.deepspeed.mpu.get_data_parallel_group()
-        else:
-            pg = groups._get_data_parallel_group()
-        scaled_norm = all_groups_norm * 1.0 / float(dist.get_world_size(group=pg))
-        scaled_norm_tensor = torch.tensor(scaled_norm, device=self.fp32_groups_flat[0].device, dtype=torch.float)
-        dist.all_reduce(scaled_norm_tensor, group=pg)
-        all_groups_norm = scaled_norm_tensor.item()
-        #print(f"old = {all_groups_norm_old} and new = {all_groups_norm} at rank: {deepspeed.comm.get_rank()}")
-        return all_groups_norm
 
     def unscale_and_clip_grads(self, grad_groups_flat, total_norm, apply_scale=True):
         # compute combined scale factor for this group
