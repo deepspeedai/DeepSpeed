@@ -7,6 +7,8 @@ on:
   pull_request:
     paths:
       - ".github/workflows/hpu-gaudi2.yml"
+      - "accelerator/hpu_accelerator.py"
+
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
