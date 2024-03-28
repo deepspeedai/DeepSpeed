@@ -13,12 +13,36 @@ from io import open
 import deepspeed
 from pathlib import Path
 import atexit
+import subprocess
 
 
 # -----------------------------------------------------------------------------
 # util class/functions for triton
+def is_nfs_path(path):
+    # Normalize the path to get the absolute path
+    path = os.path.abspath(path)
+
+    # Use the 'df' command to find the file system type for the given path
+    try:
+        output = subprocess.check_output(['df', '-T', path], encoding='utf-8')
+    except subprocess.CalledProcessError:
+        return False  # Command failed
+
+    # Process the output of 'df -T' to check for 'nfs' in the filesystem type column
+    lines = output.strip().split('\n')
+    if len(lines) > 1:  # The first line is headers
+        fs_type = lines[1].split()[1].lower()  # File system type is the second column
+        return 'nfs' in fs_type
+    return False
+
+
 def _default_cache_dir():
-    return os.path.join(Path.home(), ".triton", "autotune")
+    tmp_path = os.path.join(Path.home(), ".triton", "autotune")
+    if is_nfs_path(tmp_path):
+        print(
+            f"Warning: The default cache directory for DeepSpeed Triton autotune, {tmp_path}, appears to be on an NFS system. While this is generally acceptable, if you experience slowdowns or hanging when DeepSpeed exits, it is recommended to set the TRITON_CACHE_DIR environment variable to a non-NFS path."
+        )
+    return tmp_path
 
 
 def bias_add_activation(C, bias=None, activation=""):
