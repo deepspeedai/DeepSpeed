@@ -243,7 +243,11 @@ class TestZeROElasticCheckpoint(DistributedTest):
         model, _, _, _ = deepspeed.initialize(config=ds_config,
                                               model=models[0],
                                               model_parameters=models[0].parameters())
-        data_loader = random_dataloader(model=model, total_samples=8, hidden_dim=hidden_dim, device=model.device)
+        run_steps = 8
+        data_loader = random_dataloader(model=model,
+                                        total_samples=run_steps,
+                                        hidden_dim=hidden_dim,
+                                        device=model.device)
         for n, batch in enumerate(data_loader):
             loss = model(batch[0], batch[1])
             model.backward(loss)

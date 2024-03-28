@@ -105,9 +105,11 @@ class ZeROCheckpoint(object):
             if group_paddings[key] == 0:
                 continue
             for state_name, state_value in group_state.items():
-                if torch.is_tensor(state_value):
+                if state_name != "step" and torch.is_tensor(state_value):
                     raw_length = state_value.numel() - group_paddings[key]
                     group_state[state_name] = torch.narrow(state_value, 0, 0, raw_length).clone()
+                else:
+                    group_state[state_name] = state_value
 
     def _clear_group_paddings(self, sd):
         group_paddings = self._get_optimizer_state(sd, GROUP_PADDINGS)
