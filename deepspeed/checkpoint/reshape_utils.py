@@ -4,9 +4,10 @@
 # DeepSpeed Team
 
 import os
+import re
 import torch
 from collections import OrderedDict
-from .constants import (ZERO_FILE_PREFIX, FP16_ZERO_FILE_PREFIX, BF16_ZERO_FILE_PREFIX)
+from .constants import (ZERO_FILE_PREFIX, FP16_ZERO_FILE_PREFIX, BF16_ZERO_FILE_PREFIX, MODEL_FILE_PREFIX)
 
 
 def basic_folder_validation(dir):
@@ -38,12 +39,28 @@ def get_files(dir):
     return file_list
 
 
+def sort_zero_files(files, prefix):
+    pattern = f"{prefix}([0-9]+)_{MODEL_FILE_PREFIX}([0-9]+)"
+    rank_pairs = []
+    for f in files:
+        m = re.search(pattern, f)
+        if m:
+            dp_rank = int(m.group(1))
+            mp_rank = int(m.group(2))
+            rank_pairs.append((dp_rank, mp_rank, f))
+        else:
+            raise ValueError(f"Cannot parse dp_rank and mp_rank from {f}")
+
+    sorted_files = sorted(rank_pairs, key=lambda x: (x[0], x[1]))
+    return [f for _, _, f in sorted_files]
+
+
 def get_zero_files(dir):
     file_list = get_files(dir)
     for prefix in [ZERO_FILE_PREFIX, FP16_ZERO_FILE_PREFIX, BF16_ZERO_FILE_PREFIX]:
         zero_files = get_files_with_prefix(file_list, prefix)
         if len(zero_files) > 0:
-            return zero_files
+            return sort_zero_files(zero_files, prefix)
 
     return []
 
