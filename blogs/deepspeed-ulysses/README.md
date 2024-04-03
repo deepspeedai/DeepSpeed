@@ -233,7 +233,7 @@ at different sequence length and GPU count.*
 
 Next, we evaluate Ulysses on 7 billion (7B) and 30 billion (30B) parameter
 GPT dense attention models and compare against Megatron-LM's sequence
-parallelism (Megatron LM) and Colosal AI sequence parallelism (ColAI-SP) on
+parallelism (Megatron LM) and Colossal AI sequence parallelism (ColAI-SP) on
 32 and 64 A100 GPUs respectively. The results of these evaluations are shown
 in Figures 3 and 4.
 
