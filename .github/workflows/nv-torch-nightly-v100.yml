@@ -15,7 +15,7 @@ permissions:
 
 jobs:
   unit-tests:
-    runs-on: [self-hosted, nvidia, cu116, v100]
+    runs-on: [self-hosted, nvidia, cu117, v100]
 
     steps:
       - uses: actions/checkout@v3
