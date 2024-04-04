@@ -868,6 +868,35 @@ __device__ __forceinline__ void store_global<4, StorePolicy::CacheStreaming>(voi
 #endif
 }
 
+template <>
+__device__ __forceinline__ void store_global<2>(void* dst, const void* src)
+{
+    const int16_t* data = reinterpret_cast<const int16_t*>(src);
+
+    int16_t* dst_cast = reinterpret_cast<int16_t*>(dst);
+    dst_cast[0] = data[0];
+}
+
+template <>
+__device__ __forceinline__ void store_global<2, StorePolicy::CacheGlobal>(void* dst,
+                                                                          const void* src)
+{
+    const int16_t* data = reinterpret_cast<const int16_t*>(src);
+
+    int16_t* dst_cast = reinterpret_cast<int16_t*>(dst);
+    dst_cast[0] = data[0];
+}
+
+template <>
+__device__ __forceinline__ void store_global<2, StorePolicy::CacheStreaming>(void* dst,
+                                                                             const void* src)
+{
+    const int16_t* data = reinterpret_cast<const int16_t*>(src);
+
+    int16_t* dst_cast = reinterpret_cast<int16_t*>(dst);
+    dst_cast[0] = data[0];
+}
+
 /////////// Store Shared ///////////
 
 template <>

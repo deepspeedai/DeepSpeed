@@ -10,6 +10,7 @@ pytest<=8.0.0
 pytest-forked
 pytest-randomly
 pytest-xdist
+qtorch==0.3.0
 recommonmark
 sphinx
 sphinx-rtd-theme
