@@ -16,6 +16,42 @@ from deepspeed.moe.utils import split_params_into_different_moe_groups_for_optim
 from deepspeed.runtime.utils import required_torch_version
 
 
+@pytest.mark.parametrize("zero_stage", [0, 1, 2])
+class TestSimpleMoE(DistributedTest):
+    world_size = 2
+
+    def test(self, zero_stage):
+        if not required_torch_version(min_version=1.8):
+            pytest.skip("DeepSpeed MoE tests need torch 1.8 or higher to run correctly")
+
+        config_dict = {
+            "train_micro_batch_size_per_gpu": 1,
+            "steps_per_print": 1,
+            "optimizer": {
+                "type": "Adam",
+                "params": {
+                    "lr": 0.00015
+                }
+            },
+            "fp16": {
+                "enabled": True
+            },
+            "zero_optimization": {
+                "stage": zero_stage
+            }
+        }
+        # should automatically create moe param groups in deepspeed backend
+        hidden_dim = 16
+        model = SimpleMoEModel(hidden_dim=hidden_dim, ep_size=1)
+        model, optimizer, _, _ = deepspeed.initialize(config=config_dict, model=model)
+        data_loader = sequence_dataloader(model=model, total_samples=50, hidden_dim=hidden_dim, device=model.device)
+
+        for n, batch in enumerate(data_loader):
+            loss = model(batch[0], batch[1])
+            model.backward(loss)
+            model.step()
+
+
 @pytest.mark.parametrize("ep_size", [2, 4])
 @pytest.mark.parametrize("zero_stage", [0, 1, 2])
 @pytest.mark.parametrize("use_residual", [True, False])
