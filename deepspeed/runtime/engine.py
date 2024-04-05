@@ -94,7 +94,7 @@ from .compiler import CompiledModuleWrapper
 from ..ops.adam import FusedAdam
 from ..moe.sharded_moe import TopKGate, MOELayer
 from ..moe.layer import MoE
-from ..moe.utils import is_moe_param
+from ..moe.utils import is_moe_param, configure_moe_param_groups
 from ..git_version_info import version
 
 from deepspeed.profiling.flops_profiler.profiler import FlopsProfiler
@@ -1227,6 +1227,8 @@ class DeepSpeedEngine(Module):
     # Configure optimizer
     def _configure_optimizer(self, client_optimizer, model_parameters):
         if client_optimizer is None:
+            if self.has_moe_layers:
+                model_parameters = configure_moe_param_groups(model_parameters)
             basic_optimizer = self._configure_basic_optimizer(model_parameters)
             log_dist(f"Using DeepSpeed Optimizer param name {self.optimizer_name()} as basic optimizer", ranks=[0])
         else:

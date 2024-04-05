@@ -150,3 +150,33 @@ def split_params_into_different_moe_groups_for_optimizer(
 
 def is_moe_param_group(param_group):
     return param_group.get('moe', False)
+
+
+def configure_moe_param_groups(model_parameters: List):
+    assert isinstance(model_parameters, list), "model_parameters must be a list"
+
+    for p in model_parameters:
+        # match torch.optim.Optimizer expectations,
+        # see: https://github.com/pytorch/pytorch/blob/2ffab6e663b9c6951048b8c8ba82d2cc5ca5c2fc/torch/optim/optimizer.py#L270-L272
+        if not isinstance(p, (torch.Tensor, dict)):
+            raise TypeError("param argument that would be given to the optimizer should be "
+                            f"an iterable of Tensors or dicts, but got {type(p)}")
+
+    # peak at the first element to determine how to proceed
+    first = model_parameters[0]
+
+    # Case 1: model_parameters is a list of torch.nn.Parameter
+    #   -> need to create moe compatible param groups
+    if isinstance(first, torch.nn.Parameter):
+        param_group = {'params': model_parameters, 'name': 'dense-params'}
+        return split_params_into_different_moe_groups_for_optimizer(param_group)
+
+    # Case 2: model_parameters is a list of param groups List[dict]
+    #   -> moe compatible param groups might already exist, if not create them
+    elif isinstance(first, dict):
+        #there are no moe groups created
+        if not any(['moe' in param_group for param_group in model_parameters]):
+            return split_params_into_different_moe_groups_for_optimizer(model_parameters)
+        else:
+            # moe groups exist, nothing to do
+            return model_parameters
