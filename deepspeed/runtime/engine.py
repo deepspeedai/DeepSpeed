@@ -3228,9 +3228,12 @@ class DeepSpeedEngine(Module):
 
         # Load flow uses below saved file for model parameters, RNG and more
         if groups._get_data_parallel_rank() == 0:
-            # get non-moe parameters
+            # Get non-moe parameters
+            # Classes DeepSpeedEngine and PipelineEngine have different behavior for method module_state_dict.
+            # DeepSpeedEngine returns the state dict, where PipelineEngine saves the state dict and returns None.
+            # We need to get the state dict, therefore, call to DeepSpeedEngine (base class for PipelineEngine)
             model_state_dict = self._get_non_moe_state_dict(
-                self.module_state_dict(exclude_frozen_parameters=exclude_frozen_parameters))
+                DeepSpeedEngine.module_state_dict(self, exclude_frozen_parameters=exclude_frozen_parameters))
 
             # TODO: update num experts info,.. in checkpoint
             state = {

@@ -18,7 +18,7 @@ def test_get_expert_parallel_ranks():
     expert_data_parallel_group = [0,8],[2,10],[4,12],[6,14],    [1,9],[3,11],[5,13],[7,15]
     """
     expert_parallel_groups, expert_data_parallel_groups = _get_expert_parallel_ranks(world_size=16,
-                                                                                     model_parallel_size_=2,
+                                                                                     tensor_parallel_size_=2,
                                                                                      expert_parallel_size_=4)
     assert expert_parallel_groups == [
         [0, 2, 4, 6],

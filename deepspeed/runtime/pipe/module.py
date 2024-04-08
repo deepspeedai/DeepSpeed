@@ -634,3 +634,10 @@ class PipelineModule(nn.Module):
             return all(f.__class__.__name__ in self.checkpointable_layers for f in funcs)
         params = [f.parameters() for f in funcs if isinstance(f, torch.nn.Module)]
         return any(len(list(p)) > 0 for p in params)
+
+    def get_additional_losses(self):
+        """ Returns model specific additional losses for reporting
+
+         Return a dictionary of {"loss name": loss_value} or None if no additional losses.
+        """
+        return None
