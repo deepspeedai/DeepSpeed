@@ -48,12 +48,15 @@ def bf16_required_version_check(accelerator_check=True):
     nccl_version_available = NCCL_MAJOR > 2 or (NCCL_MAJOR == 2 and NCCL_MINOR >= 10)
     npu_available = get_accelerator().device_name() == 'npu'
     hpu_available = get_accelerator().device_name() == 'hpu'
+    xpu_available = get_accelerator().device_name() == 'xpu'
 
     if torch_version_available and cuda_version_available and nccl_version_available and accelerator_pass:
         return True
     elif npu_available:
         return True
     elif hpu_available:
+        return True
+    elif xpu_available:
         return True
     else:
         return False

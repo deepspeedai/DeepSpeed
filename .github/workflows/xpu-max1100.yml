@@ -1,0 +1,75 @@
+name: xpu-max1100
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 0 * * *"
+  pull_request:
+    paths:
+      - ".github/workflows/xpu.yml"
+      - "accelerator/xpu_accelerator.py"
+      - "accelerator/abstract_accelerator.py"
+      - "accelerator/cpu_accelerator.py"
+      - "accelerator/real_accelerator.py"
+      - "deepspeed/runtime/engine.py"
+      - "deepspeed/runtime/bf16_optimizer.py"
+      - "deepspeed/runtime/zero/stage_1_and_2.py"
+      - "deepspeed/runtime/zero/stage3.py"
+      - "deepspeed/runtime/zero/partition_parameters.py"
+      - "deepspeed/runtime/zero/partitioned_param_coordinator.py"
+      - "deepspeed/runtime/zero/parameter_offload.py"
+      - "deepspeed/runtime/pipe/engine.py"
+      - "deepspeed/runtime/utils.py"
+      - "deepspeed/inference/**"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  issues: write
+
+
+jobs:
+  unit-tests:
+    runs-on: [self-hosted, intel, xpu]
+    container:
+      image: intel/intel-extension-for-pytorch:2.1.20-xpu
+      ports:
+        - 80
+      options: --privileged -it --rm --device /dev/dri:/dev/dri -v /dev/dri/by-path:/dev/dri/by-path --ipc=host --cap-add=ALL
+
+    steps:
+    - uses: actions/checkout@v3
+    - name: Check container state
+      shell: bash
+      run: |
+        ldd --version
+        python -c "import torch; print('torch:', torch.__version__, torch)"
+        python -c "import torch; import intel_extension_for_pytorch; print('XPU available:', torch.xpu.is_available())"
+
+    - name: Install deepspeed
+      run: |
+        pip install py-cpuinfo
+        pip install .[dev,autotuning]
+        ds_report
+        python -c "from deepspeed.accelerator import get_accelerator; print('accelerator:', get_accelerator()._name)"
+
+    - name: Python environment
+      run: |
+        pip list
+
+    - name: Unit tests
+      run: |
+        pip install pytest pytest-timeout tabulate
+        cd tests/unit
+        pytest --verbose accelerator/*
+        pytest --verbose autotuning/*
+        pytest --verbose checkpoint/test_reshape_checkpoint.py
+        pytest --verbose launcher/test_ds_arguments.py launcher/test_run.py
+        pytest --verbose runtime/test_ds_config_model.py
+        pytest --verbose runtime/pipe/test_pipe_schedule.py
+        pytest --verbose runtime/zero/test_zero_config.py
+        pytest --verbose runtime/zero/test_zero_tiled.py
+        pytest --verbose runtime/zero/test_zeropp.py
