@@ -6,7 +6,7 @@ on:
     - cron: "0 0 * * *"
   pull_request:
     paths:
-      - ".github/workflows/xpu.yml"
+      - ".github/workflows/xpu-max1100.yml"
       - "accelerator/xpu_accelerator.py"
       - "accelerator/abstract_accelerator.py"
       - "accelerator/cpu_accelerator.py"
@@ -20,7 +20,6 @@ on:
       - "deepspeed/runtime/zero/parameter_offload.py"
       - "deepspeed/runtime/pipe/engine.py"
       - "deepspeed/runtime/utils.py"
-      - "deepspeed/inference/**"
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
