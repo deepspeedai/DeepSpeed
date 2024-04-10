@@ -18,7 +18,7 @@ jobs:
     runs-on: [self-hosted, nvidia, cu117, v100]
 
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
 
       - id: setup-venv
         uses: ./.github/workflows/setup-venv

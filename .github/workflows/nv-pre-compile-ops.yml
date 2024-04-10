@@ -26,7 +26,7 @@ jobs:
       image: deepspeed/gh-builder:ubuntu1804-py38-torch1131-cu116
 
     steps:
-        - uses: actions/checkout@v3
+        - uses: actions/checkout@v4
 
         - name: environment
           run: |
