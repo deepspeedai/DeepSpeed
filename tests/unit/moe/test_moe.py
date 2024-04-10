@@ -13,7 +13,7 @@ import deepspeed.comm as dist
 from deepspeed import get_accelerator
 from deepspeed.moe.sharded_moe import top1gating
 from deepspeed.moe.utils import split_params_into_different_moe_groups_for_optimizer, is_moe_param
-from deepspeed.runtime.utils import required_torch_version
+from deepspeed.utils.torch import required_torch_version
 
 
 @pytest.mark.parametrize("zero_stage", [0, 1, 2])

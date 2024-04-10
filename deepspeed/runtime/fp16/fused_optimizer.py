@@ -11,9 +11,10 @@ import torch
 from torch._utils import _flatten_dense_tensors, _unflatten_dense_tensors
 
 from deepspeed.runtime.base_optimizer import DeepSpeedOptimizer
-from deepspeed.runtime.utils import get_global_norm, get_grad_norm, CheckOverflow, get_weight_norm, required_torch_version, get_norm_with_moe_layers
+from deepspeed.runtime.utils import get_global_norm, get_grad_norm, CheckOverflow, get_weight_norm, get_norm_with_moe_layers
 from deepspeed.runtime.fp16.loss_scaler import INITIAL_LOSS_SCALE, SCALE_WINDOW, MIN_LOSS_SCALE
 from deepspeed.utils import logger, log_dist
+from deepspeed.utils.torch import required_torch_version
 from deepspeed.checkpoint.constants import OPTIMIZER_STATE_DICT, CLIP_GRAD
 from deepspeed.accelerator import get_accelerator
 from deepspeed.moe.utils import is_moe_param_group

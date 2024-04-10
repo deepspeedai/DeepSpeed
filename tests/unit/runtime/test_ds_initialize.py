@@ -17,7 +17,8 @@ import deepspeed
 from deepspeed.ops.adam import FusedAdam
 from deepspeed.runtime.lr_schedules import WARMUP_LR, WarmupLR
 from deepspeed.runtime.config import ADAM_OPTIMIZER
-from deepspeed.runtime.utils import see_memory_usage, required_torch_version
+from deepspeed.runtime.utils import see_memory_usage
+from deepspeed.utils.torch import required_torch_version
 from deepspeed.accelerator import get_accelerator
 
 

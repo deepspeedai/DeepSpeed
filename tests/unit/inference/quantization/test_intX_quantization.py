@@ -11,7 +11,7 @@ from deepspeed.accelerator import get_accelerator
 from deepspeed.inference.quantization.quantization import _init_group_wise_weight_quantization
 from deepspeed.inference.quantization.utils import Quantizer, DeQuantizer
 from deepspeed.inference.quantization.layers import QuantizedLinear
-from deepspeed.runtime.utils import required_torch_version
+from deepspeed.utils.torch import required_torch_version
 from transformers.models.opt.modeling_opt import OPTDecoderLayer
 from transformers import AutoConfig, OPTConfig, AutoModel
 import pytest

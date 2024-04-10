@@ -9,6 +9,7 @@ from .utils import *
 from .backend import *
 from .comm import *
 from ..runtime import compiler
+from deepspeed.utils.torch import required_torch_version
 import os
 
 DS_COMM_ALL_GATHER_OFF = False
@@ -18,40 +19,19 @@ DS_COMM_ALL_REDUCE_OFF = False
 DS_COMM_REDUCE_OFF = False
 
 
-def is_torch_ver_eq_2_0():
-    TORCH_MAJOR, TORCH_MINOR = map(int, torch.__version__.split('.')[:2])
-    if TORCH_MAJOR == 2 and TORCH_MINOR == 0:
-        return True
-    return False
-
-
-def is_torch_ver_ge_2_1():
-    TORCH_MAJOR, TORCH_MINOR = map(int, torch.__version__.split('.')[:2])
-    if TORCH_MAJOR >= 2 and TORCH_MINOR >= 1:
-        return True
-    return False
-
-
-def torch_ver_ge_1_13():
-    TORCH_MAJOR, TORCH_MINOR = map(int, torch.__version__.split('.')[:2])
-    if TORCH_MAJOR >= 1 and TORCH_MINOR >= 13:
-        return True
-    return False
-
-
 def has_coalescing_manager():
     has_c10d = hasattr(torch.distributed, 'distributed_c10d')
     return has_c10d and hasattr(torch.distributed.distributed_c10d, '_coalescing_manager')
 
 
 def has_all_reduce_coalesced():
-    return hasattr(torch.distributed, "all_reduce_coalesced") and torch_ver_ge_1_13()
+    return hasattr(torch.distributed, "all_reduce_coalesced") and required_torch_version(min_version=1.13)
 
 
 def get_coalescing_manager(group, device, reqs, async_op):
-    if is_torch_ver_eq_2_0():
+    if required_torch_version(min_version=2.0, max_version=2.0):
         return torch.distributed.distributed_c10d._coalescing_manager(group, device=device, reqs=reqs)
-    elif is_torch_ver_ge_2_1():
+    elif required_torch_version(min_version=2.1):
         return torch.distributed.distributed_c10d._coalescing_manager(group, device=device, async_ops=async_op)
     else:
         return torch.distributed.distributed_c10d._coalescing_manager(group, reqs)
