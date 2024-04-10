@@ -7,7 +7,7 @@ import deepspeed
 from types import SimpleNamespace
 from torch.utils._pytree import tree_map
 
-from deepspeed.runtime.utils import required_torch_version
+from deepspeed.utils.torch import required_torch_version
 from deepspeed.checkpoint import UNIVERSAL_CHECKPOINT_INFO
 from deepspeed.checkpoint.ds_to_universal import main as convert_to_universal
 

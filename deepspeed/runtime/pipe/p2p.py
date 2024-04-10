@@ -9,9 +9,7 @@ import typing
 import torch
 from deepspeed import comm as dist
 
-# To query whether we have send/recv support
-from packaging.version import Version
-from deepspeed.git_version_info import torch_info
+from deepspeed.utils.torch import required_torch_version
 from deepspeed.accelerator import get_accelerator
 
 _groups = None
@@ -21,9 +19,7 @@ _async = []
 
 
 def can_send_recv() -> bool:
-    torch_version = Version(torch_info['version'])
-    sendrecv_min = Version('1.8')
-    return torch_version >= sendrecv_min
+    return required_torch_version(min_version=1.8)
 
 
 #initializes adjacent process groups

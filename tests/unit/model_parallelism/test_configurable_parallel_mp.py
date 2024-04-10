@@ -13,7 +13,7 @@ import deepspeed.comm as dist
 from deepspeed.accelerator import get_accelerator
 from unit.common import DistributedTest, DistributedFixture
 from unit.megatron_model import get_gpt2_model, get_megatron_version
-from deepspeed.runtime.utils import required_torch_version
+from deepspeed.utils.torch import required_torch_version
 
 pytestmark = pytest.mark.skipif(not required_torch_version(min_version=1.5, max_version=1.13),
                                 reason='Megatron-LM package requires Pytorch version >=1.5 and <=1.13')

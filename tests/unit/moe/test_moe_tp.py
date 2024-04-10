@@ -7,7 +7,7 @@ import torch
 import deepspeed
 import pytest
 from unit.common import DistributedTest
-from deepspeed.runtime.utils import required_torch_version
+from deepspeed.utils.torch import required_torch_version
 from deepspeed.moe.layer import MoE
 
 

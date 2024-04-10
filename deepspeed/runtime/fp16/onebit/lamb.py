@@ -7,7 +7,7 @@ import types
 import torch
 import numpy as np
 from deepspeed import comm as dist
-from deepspeed.runtime.utils import required_torch_version
+from deepspeed.utils.torch import required_torch_version
 from torch._utils import _flatten_dense_tensors, _unflatten_dense_tensors
 from deepspeed.accelerator import get_accelerator
 

@@ -9,7 +9,7 @@ import torch
 from unit.simple_model import SimpleModel
 import deepspeed
 from deepspeed.accelerator import get_accelerator
-from deepspeed.runtime.utils import required_torch_version
+from deepspeed.utils.torch import required_torch_version
 
 from unit.common import DistributedTest
 

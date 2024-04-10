@@ -7,7 +7,7 @@ import types
 import torch
 import numpy as np
 from deepspeed.accelerator import get_accelerator
-from deepspeed.runtime.utils import required_torch_version
+from deepspeed.utils.torch import required_torch_version
 from deepspeed import comm as dist
 
 

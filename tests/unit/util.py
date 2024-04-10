@@ -7,7 +7,6 @@ import pytest
 import torch
 from deepspeed.accelerator import get_accelerator, is_current_accelerator_supported
 from deepspeed.git_version_info import torch_info
-from packaging import version as pkg_version
 
 
 def skip_on_arch(min_arch=7):
@@ -60,20 +59,6 @@ def bf16_required_version_check(accelerator_check=True):
         return True
     else:
         return False
-
-
-def required_torch_version(min_version=None, max_version=None):
-    assert min_version or max_version, "Must provide a min_version or max_version argument"
-
-    torch_version = pkg_version.parse(torch.__version__)
-
-    if min_version and pkg_version.parse(str(min_version)) > torch_version:
-        return False
-
-    if max_version and pkg_version.parse(str(max_version)) < torch_version:
-        return False
-
-    return True
 
 
 def required_amp_check():
