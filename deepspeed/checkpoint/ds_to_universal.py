@@ -6,6 +6,7 @@
 # DeepSpeed Team
 
 from functools import partial
+from itertools import chain
 import argparse
 import glob
 import itertools
@@ -28,6 +29,7 @@ from deepspeed.checkpoint import (
     PARAM,
     CAT_DIM,
     PARAM_N_SUB_PARAMS,
+    SUB_PARAM_SHAPE,
     VOCAB_TENSOR,
     UNIVERSAL_CHECKPOINT_INFO,
     VOCABULARY_PARAMETER_PATTERNS,
@@ -36,6 +38,8 @@ from deepspeed.checkpoint import (
     PARAMETER_TO_AVERAGE_PATTERNS,
     PARAMETER_WITH_ROW_PARALLELISM_PATTERNS,
     PARAMETER_WITH_2_SUB_PARAMS_CAT_DIM_0,
+    PARAMETER_WITH_SUB_PARAMS,
+    SubparamShape,
 )
 
 
@@ -180,8 +184,11 @@ def merge_tp_slices(ds_checkpoint, dir, slice_dir, tp_degree, name_and_shape):
     parameters_with_row_parallelism = universal_checkpoint_info.get(PARAMETER_WITH_ROW_PARALLELISM_PATTERNS, [])
     vocabulary_parameters = universal_checkpoint_info.get(VOCABULARY_PARAMETER_PATTERNS, [])
     parameters_with_2_sub_params_cat_dim_0 = universal_checkpoint_info.get(PARAMETER_WITH_2_SUB_PARAMS_CAT_DIM_0, [])
+    parameter_with_sub_params = universal_checkpoint_info.get(PARAMETER_WITH_SUB_PARAMS, [])
+
     unmatched_patterns = set(replicated_parameters + parameters_to_average + parameters_with_row_parallelism +
                              vocabulary_parameters + parameters_with_2_sub_params_cat_dim_0)
+    unmatched_patterns.update(chain.from_iterable(SubparamShape(**s).patterns for s in parameter_with_sub_params))
 
     def get_matched_pattern(patterns_, name_):
         matched_ = [pattern_ for pattern_ in patterns_ if re.match(pattern_, name_)]
@@ -191,6 +198,17 @@ def merge_tp_slices(ds_checkpoint, dir, slice_dir, tp_degree, name_and_shape):
             unmatched_patterns.discard(pattern_)
             return pattern_
         return None
+
+    def get_matched_sub_params_pattern(name_):
+        for subparam_shape_dict in parameter_with_sub_params:
+            subparam_shape = SubparamShape(**subparam_shape_dict)
+            for pattern_ in subparam_shape.patterns:
+                if re.match(pattern_, name_):
+                    unmatched_patterns.discard(pattern_)
+                    return subparam_shape
+        return None
+
+    matched_sub_params_shape = get_matched_sub_params_pattern(name)
 
     step_merged = _merge_zero_shards(slice_base_path, "step", tp_degree, shape)
     if step_merged:
@@ -219,6 +237,26 @@ def merge_tp_slices(ds_checkpoint, dir, slice_dir, tp_degree, name_and_shape):
             param = torch.cat([merged_chunks_0, merged_chunks_1], dim=cat_dim)
             ckpt_dict[CAT_DIM] = cat_dim
             ckpt_dict[PARAM_N_SUB_PARAMS] = 2
+        elif matched_sub_params_shape:
+            merged_chunks = []
+            partition_dim = matched_sub_params_shape.partition_dim
+
+            sub_dim_sizes = matched_sub_params_shape.shape[partition_dim]
+            if not isinstance(sub_dim_sizes, tuple):
+                sub_dim_sizes = (sub_dim_sizes, )
+
+            partition_shape = [sum(d) if isinstance(d, tuple) else d for d in matched_sub_params_shape.shape]
+            partition_shape = [d // tp_degree if i == partition_dim else d for i, d in enumerate(partition_shape)]
+            slices = [s.view(partition_shape) for s in slices]
+
+            offset = 0
+            for sub_dim_size in sub_dim_sizes:
+                part_sub_dim_size = sub_dim_size // tp_degree
+                merged_chunks.append(
+                    torch.cat([s.narrow(partition_dim, offset, part_sub_dim_size) for s in slices], dim=partition_dim))
+                offset += part_sub_dim_size
+            param = torch.cat(merged_chunks, dim=partition_dim)
+            ckpt_dict[SUB_PARAM_SHAPE] = matched_sub_params_shape
         else:
             cat_dim = 1 if get_matched_pattern(parameters_with_row_parallelism, name) else 0
             # print(f"merge {name} with CAT DIM: {cat_dim}")

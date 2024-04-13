@@ -7,7 +7,16 @@ import os
 import re
 import torch
 import types
-from .constants import (FP32_WEIGHT_KEY, PARAM, VOCAB_TENSOR, CAT_DIM, PARAM_N_SUB_PARAMS)
+from typing import List, Tuple, Union
+from dataclasses import dataclass
+from .constants import (FP32_WEIGHT_KEY, PARAM, VOCAB_TENSOR, CAT_DIM, PARAM_N_SUB_PARAMS, SUB_PARAM_SHAPE)
+
+
+@dataclass
+class SubparamShape:
+    patterns: List[str]
+    shape: Tuple[Union[Tuple[int], int]]
+    partition_dim: int
 
 
 def load_hp_checkpoint_state(self, folder, tp_rank, tp_world_size):
@@ -76,12 +85,32 @@ def load_hp_checkpoint_state(self, folder, tp_rank, tp_world_size):
         #        print(f"{full_hp_param.shape=} {full_param_numel=} {folder=}")
         #        print(f"{dst_tensor.shape=} {dst_tensor.numel()=}{folder=}")
 
+        sub_param_shape = ckpt_dict.get(SUB_PARAM_SHAPE, None)
         # since when we do many to 1 on tp we cat sometimes on dim=0 and other times on dim=1 we have to do exactly the same in reverse
         # special case is when a single parameter is effectively a container for multiple sub parameters
         # (more details at PARAM_N_SUB_PARAMS definition)
         chunk_dim = ckpt_dict.get(CAT_DIM, 0)
         n_sub_params = ckpt_dict.get(PARAM_N_SUB_PARAMS, 1)
-        if n_sub_params > 1:
+        if sub_param_shape:
+            partition_dim = sub_param_shape.partition_dim
+            sub_dim_sizes = sub_param_shape.shape[partition_dim]
+            if not isinstance(sub_dim_sizes, tuple):
+                sub_dim_sizes = (sub_dim_sizes, )
+
+            partition_shape = [sum(d) if isinstance(d, tuple) else d for d in sub_param_shape.shape]
+            full_hp_param = full_hp_param.view(partition_shape)
+
+            offset = 0
+            merged_chunks = []
+            for sub_dim_size in sub_dim_sizes:
+                sub_params_tp_slice = full_hp_param.narrow(partition_dim,
+                                                           offset, sub_dim_size).chunk(tp_world_size,
+                                                                                       dim=partition_dim)[tp_rank]
+                merged_chunks.append(sub_params_tp_slice)
+                offset += sub_dim_size
+            tp_hp_slice = torch.cat(merged_chunks, dim=partition_dim)
+
+        elif n_sub_params > 1:
             sub_params = full_hp_param.chunk(n_sub_params, dim=chunk_dim)
             sub_params_tp_slice = [p.chunk(tp_world_size, dim=chunk_dim)[tp_rank] for p in sub_params]
             tp_hp_slice = torch.cat(sub_params_tp_slice, dim=chunk_dim)

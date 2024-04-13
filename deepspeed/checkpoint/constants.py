@@ -74,6 +74,8 @@ CAT_DIM = "cat_dim"
 # Similarly, load_hp_checkpoint_state has to take the needed actions when loading from universal.
 PARAM_N_SUB_PARAMS = "param_n_sub_params"
 
+SUB_PARAM_SHAPE = "sub_param_shape"
+
 # Regex list of parameters that require special handling
 VOCABULARY_PARAMETER_PATTERNS = 'vocabulary_parameter_patterns'
 PIPELINE_REPLICATED_PARAMETER_PATTERNS = 'pipeline_replicated_parameter_patterns'
@@ -81,3 +83,5 @@ PARAMETER_TO_AVERAGE_PATTERNS = 'parameter_to_average_patterns'
 PARAMETER_WITH_ROW_PARALLELISM_PATTERNS = 'parameter_with_row_parallelism_patterns'
 TP_REPLICATED_PARAMETER_PATTERNS = 'tp_replicated_parameter_patterns'
 PARAMETER_WITH_2_SUB_PARAMS_CAT_DIM_0 = 'parameter_with_2_sub_params_cat_dim_0'
+PARAMETER_WITH_SUB_PARAMS = 'parameter_with_sub_params'
+SUB_PARAMS_SHAPE = 'sub_params_shape'
