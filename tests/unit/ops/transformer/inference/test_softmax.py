@@ -43,7 +43,8 @@ def run_softmax_ds(input, use_triton_ops=False):
 def test_softmax(batch, sequence, channels, dtype, use_triton_ops):
     if not deepspeed.HAS_TRITON and use_triton_ops:
         pytest.skip("triton has to be installed for the test")
-    input_ds = torch.randn((batch, sequence, channels), dtype=dtype, device='cuda')
+    device = deepspeed.accelerator.get_accelerator().device_name()
+    input_ds = torch.randn((batch, sequence, channels), dtype=dtype, device=device)
     input_ref = input_ds.clone().detach()
 
     ds_out = run_softmax_ds(input_ds, use_triton_ops)
