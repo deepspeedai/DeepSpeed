@@ -15,6 +15,7 @@ from deepspeed.utils import safe_get_full_grad
 import numpy.testing as npt
 from unit.common import DistributedTest
 from deepspeed.ops.op_builder import InferenceBuilder
+from deepspeed.accelerator import get_accelerator
 
 if not deepspeed.ops.__compatible_ops__[InferenceBuilder.NAME]:
     pytest.skip("This op had not been implemented on this system.", allow_module_level=True)
@@ -125,7 +126,8 @@ class TestHybridEngineLoRA(DistributedTest):
         model_config.dropout = 0.0
         model = AutoModelForCausalLM.from_pretrained(model_name, config=model_config)
         model = model.half()
-        model = model.to(f'cuda:{local_rank}')
+        device = get_accelerator().device_name()
+        model = model.to(f'{device}:{local_rank}')
         return model
 
     def get_tokenizer(self, model_name):
@@ -190,7 +192,8 @@ class TestHybridEngineLoRA(DistributedTest):
 
         model.train()
         batch = tokenizer(train_sentences, max_length=16, padding="max_length", truncation=True, return_tensors="pt")
-        batch = to_device(batch, f'cuda:{local_rank}')
+        device = get_accelerator().device_name()
+        batch = to_device(batch, f'{device}:{local_rank}')
         batch["labels"] = batch["input_ids"]
         outputs = model(**batch, use_cache=False)
         loss = outputs.loss

@@ -31,23 +31,23 @@ def test_attention(BATCH, H, N_CTX, D_HEAD, causal, use_flash, dtype=torch.float
         pytest.skip("triton has to be installed for the test")
 
     minus_inf = -65504.0
-
+    dev = deepspeed.accelerator.get_accelerator().device_name()
     # skip autotune in testing
     from deepspeed.ops.transformer.inference.triton.matmul_ext import fp16_matmul
     fp16_matmul.skip_autotune()
 
     from deepspeed.ops.transformer.inference.triton.attention import _triton_attention, _triton_packed_flash
     torch.manual_seed(20)
-    q = torch.empty((BATCH, H, N_CTX, D_HEAD), dtype=dtype, device="cuda").normal_(mean=0, std=.5)
-    k = torch.empty((BATCH, H, N_CTX, D_HEAD), dtype=dtype, device="cuda").normal_(mean=0, std=.5)
-    v = torch.empty((BATCH, H, N_CTX, D_HEAD), dtype=dtype, device="cuda").normal_(mean=0, std=.5)
+    q = torch.empty((BATCH, H, N_CTX, D_HEAD), dtype=dtype, device=dev).normal_(mean=0, std=.5)
+    k = torch.empty((BATCH, H, N_CTX, D_HEAD), dtype=dtype, device=dev).normal_(mean=0, std=.5)
+    v = torch.empty((BATCH, H, N_CTX, D_HEAD), dtype=dtype, device=dev).normal_(mean=0, std=.5)
     sm_scale = 0.3
 
     # reference implementation
     p = torch.matmul(q, k.transpose(2, 3)) * sm_scale
     score = p
-    mask = torch.zeros((BATCH, H, N_CTX, N_CTX), dtype=dtype, device="cuda")
-    M = torch.tril(torch.ones((N_CTX, N_CTX), device="cuda"))
+    mask = torch.zeros((BATCH, H, N_CTX, N_CTX), dtype=dtype, device=dev)
+    M = torch.tril(torch.ones((N_CTX, N_CTX), device=dev))
     if causal:
         for z in range(BATCH):
             for h in range(H):
@@ -58,7 +58,7 @@ def test_attention(BATCH, H, N_CTX, D_HEAD, causal, use_flash, dtype=torch.float
     context = ref_out
 
     # adjust it to expected tensor format and run test
-    qkv = torch.randn((BATCH, N_CTX, 3 * H * D_HEAD), dtype=dtype, device='cuda', requires_grad=False)
+    qkv = torch.randn((BATCH, N_CTX, 3 * H * D_HEAD), dtype=dtype, device=dev, requires_grad=False)
     qkv[:, :, :H * D_HEAD] = q.permute(0, 2, 1, 3).contiguous().reshape((BATCH, N_CTX, H * D_HEAD))
     qkv[:, :, 1 * H * D_HEAD:2 * H * D_HEAD] = k.permute(0, 2, 1, 3).contiguous().reshape((BATCH, N_CTX, H * D_HEAD))
     qkv[:, :, 2 * H * D_HEAD:] = v.permute(0, 2, 1, 3).contiguous().reshape((BATCH, N_CTX, H * D_HEAD))
@@ -66,12 +66,12 @@ def test_attention(BATCH, H, N_CTX, D_HEAD, causal, use_flash, dtype=torch.float
     if use_flash:
         if not get_accelerator().is_triton_supported():
             pytest.skip("triton flash attention is supported when the compute capability > 8.0")
-        triton_mask = torch.zeros((BATCH, 1, 1, N_CTX), dtype=dtype, device="cuda")
+        triton_mask = torch.zeros((BATCH, 1, 1, N_CTX), dtype=dtype, device=dev)
         if not causal:
-            lengths = torch.randint(N_CTX - 8, N_CTX, (BATCH, 1), device='cuda')
+            lengths = torch.randint(N_CTX - 8, N_CTX, (BATCH, 1), device=dev)
             for i, l in enumerate(lengths):
                 triton_mask[i, ..., l:] = minus_inf
-            mask = torch.zeros((BATCH, H, N_CTX, N_CTX), dtype=dtype, device="cuda")
+            mask = torch.zeros((BATCH, H, N_CTX, N_CTX), dtype=dtype, device=dev)
             for b in range(BATCH):
                 mask[b, :, :, lengths[b]:] = minus_inf
             ref_out = ref_torch_attention(q, k, v, mask, sm_scale)

@@ -175,19 +175,20 @@ def test_layer_norm_residual_store_pre_ln_res(batch, seq_len, channels, dtype):
 def test_triton_layer_norm(M, N, dtype, residual, input_bias, eps=1e-5, device='cuda'):
     if not deepspeed.HAS_TRITON:
         pytest.skip("triton has to be installed for the test")
+    dev = get_accelerator().device_name()
     torch.manual_seed(0)
     # create data
     x_shape = (M, N)
     w_shape = (x_shape[-1], )
-    weight = torch.rand(w_shape, dtype=dtype, device='cuda', requires_grad=False)
-    bias = torch.rand(w_shape, dtype=dtype, device='cuda', requires_grad=False)
-    x_bias = torch.rand(w_shape, dtype=dtype, device='cuda', requires_grad=False)
-    x = -2.3 + 0.5 * torch.randn(x_shape, dtype=dtype, device='cuda')
+    weight = torch.rand(w_shape, dtype=dtype, device=dev, requires_grad=False)
+    bias = torch.rand(w_shape, dtype=dtype, device=dev, requires_grad=False)
+    x_bias = torch.rand(w_shape, dtype=dtype, device=dev, requires_grad=False)
+    x = -2.3 + 0.5 * torch.randn(x_shape, dtype=dtype, device=dev)
     dy = .1 * torch.randn_like(x)
     if residual:
-        res = torch.rand(x_shape, dtype=dtype, device='cuda', requires_grad=False)
+        res = torch.rand(x_shape, dtype=dtype, device=dev, requires_grad=False)
     else:
-        res = torch.zeros(x_shape, dtype=dtype, device='cuda', requires_grad=False)
+        res = torch.zeros(x_shape, dtype=dtype, device=dev, requires_grad=False)
     x.requires_grad_(True)
     # forward pass
     if residual or input_bias:

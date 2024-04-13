@@ -42,8 +42,9 @@ def run_gelu_ds(activations, use_triton_ops=False):
         from deepspeed.ops.transformer.inference.triton import gelu
         return gelu(activations)
 
+    device = deepspeed.accelerator.get_accelerator().device_name()
     channels = activations.shape[-1]
-    bias = torch.zeros((channels), dtype=activations.dtype, device='cuda')
+    bias = torch.zeros((channels), dtype=activations.dtype, device=device)
     global inference_module
     if inference_module is None:
         inference_module = InferenceBuilder().load()
@@ -60,7 +61,8 @@ def run_gelu_ds(activations, use_triton_ops=False):
 @pytest.mark.parametrize("dtype", [torch.float16])
 @pytest.mark.parametrize("use_triton_ops", [True, False])
 def test_gelu(batch, sequence, channels, dtype, use_triton_ops):
-    activations_ds = torch.randn((batch, sequence, channels), dtype=dtype, device='cuda')
+    device = deepspeed.accelerator.get_accelerator().device_name()
+    activations_ds = torch.randn((batch, sequence, channels), dtype=dtype, device=device)
     activations_ref = activations_ds.clone().detach()
 
     if not deepspeed.HAS_TRITON and use_triton_ops:

@@ -20,14 +20,14 @@ class TestStableDiffusion(DistributedTest):
     def test(self):
         from diffusers import DiffusionPipeline
         from image_similarity_measures.quality_metrics import rmse
-        generator = torch.Generator(device=get_accelerator().current_device())
+        dev = get_accelerator().device_name()
+        generator = torch.Generator(device=dev)
         seed = 0xABEDABE7
         generator.manual_seed(seed)
         prompt = "a dog on a rocket"
         model = "prompthero/midjourney-v4-diffusion"
         local_rank = int(os.getenv("LOCAL_RANK", "0"))
-        device = torch.device(f"cuda:{local_rank}")
-
+        device = torch.device(f"{dev}:{local_rank}")
         pipe = DiffusionPipeline.from_pretrained(model, torch_dtype=torch.half)
         pipe = pipe.to(device)
         baseline_image = pipe(prompt, guidance_scale=7.5, generator=generator).images[0]
