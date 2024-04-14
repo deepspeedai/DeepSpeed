@@ -15,7 +15,7 @@ from deepspeed.runtime.base_optimizer import ZeROOptimizer
 from deepspeed.utils import logger
 from deepspeed.runtime.fp16.loss_scaler import CreateLossScaler
 from deepspeed.runtime.comm.coalesced_collectives import reduce_scatter_coalesced, all_to_all_quant_reduce
-from deepspeed.runtime.utils import inf, get_global_norm, is_model_parallel_parameter, get_only_unique_item
+from deepspeed.runtime.utils import inf, is_model_parallel_parameter, get_only_unique_item
 from deepspeed.runtime.zero.partition_parameters import *
 from deepspeed.runtime.zero.config import ZeroStageEnum
 from deepspeed.runtime.zero.offload_config import OffloadDeviceEnum
@@ -2027,7 +2027,7 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
             return
 
         norm_groups = self._get_norm_groups()
-        scaled_global_grad_norm = get_global_norm(norm_list=norm_groups)
+        scaled_global_grad_norm = torch.norm(torch.stack(norm_groups))
 
         # Stash unscaled gradient norm
         self._global_grad_norm = scaled_global_grad_norm / self.loss_scale
