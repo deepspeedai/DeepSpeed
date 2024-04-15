@@ -5,8 +5,8 @@
 
 // This is a copy of FP6-LLM kernel code: https://arxiv.org/abs/2401.14112
 
-#ifndef UTILS_PARALLELDEQUANT_CUH
-#define UTILS_PARALLELDEQUANT_CUH
+#ifndef DEEPSPEED_CUDA_LINEAR_UTILS_PARALLELDEQUANT_CUH
+#define DEEPSPEED_CUDA_LINEAR_UTILS_PARALLELDEQUANT_CUH
 
 #include <cuda.h>
 #include <cuda_fp16.h>

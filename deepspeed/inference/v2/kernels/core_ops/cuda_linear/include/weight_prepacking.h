@@ -5,6 +5,9 @@
 
 // This is a copy of FP6-LLM kernel code: https://arxiv.org/abs/2401.14112
 
+#ifndef DEEPSPEED_CUDA_LINEAR_WEIGHT_PREPACKING_H
+#define DEEPSPEED_CUDA_LINEAR_WEIGHT_PREPACKING_H
+
 #include <assert.h>
 #include <stdio.h>
 #include <vector>
@@ -202,3 +205,5 @@ void weight_matrix_prepacking(int* FP6Weights, size_t M, size_t K)
     for (size_t i = 0; i < BytesPerThread_4bit * 32 / 4; i++)
         BitInterleaving_4bit(Weight_4bit + 4 * i);
 }
+
+#endif

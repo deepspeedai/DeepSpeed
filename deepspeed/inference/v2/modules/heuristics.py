@@ -90,8 +90,17 @@ def instantiate_linear(linear_config: DSLinearConfig, engine_config: RaggedInfer
     if quantization_mode is None:
         config = ConfigBundle(name="blas_fp_linear", config=linear_config)
     else:
-        # Currently, we only support ``quantized_wf6af16_linear``.
+        # Currently, we only support ``quantized_wf6af16_linear`` on NVIDIA Ampere GPUs.
         if quantization_mode == "wf6af16":
+            import torch
+            if not torch.cuda.is_available():  #ignore-cuda
+                raise ValueError("WF6AF16 quantization is only supported on CUDA")
+            else:
+                is_rocm_pytorch = hasattr(torch.version, 'hip') and torch.version.hip is not None
+                if is_rocm_pytorch:
+                    raise ValueError("WF6AF16 quantization is only supported on NVIDIA GPUs")
+                elif torch.cuda.get_device_properties(0).major != 8:  #ignore-cuda
+                    raise ValueError("WF6AF16 quantization is only supported on Ampere architectures")
             config = ConfigBundle(name="quantized_wf6af16_linear", config=linear_config)
         else:
             raise ValueError(f"Unsupported quantization mode: {quantization_mode}")

@@ -3,13 +3,14 @@
 
 // DeepSpeed Team
 
-#pragma once
+#ifndef DEEPSPEED_CUDA_LINEAR_KERNELS_H
+#define DEEPSPEED_CUDA_LINEAR_KERNELS_H
 
 #include <c10/cuda/CUDAStream.h>
 #include <torch/extension.h>
 #include "ds_kernel_utils.h"
 
-#include "fp6_linear.cuh"
+#include "linear_kernels_cuda.h"
 
 void cuda_wf6af16_linear(torch::Tensor& output,
                          torch::Tensor& hidden_states,
@@ -23,3 +24,5 @@ void cuda_wf6af16_linear(torch::Tensor& output,
                          int split_k);
 
 std::vector<torch::Tensor> preprocess_weight(torch::Tensor& Weight);
+
+#endif
