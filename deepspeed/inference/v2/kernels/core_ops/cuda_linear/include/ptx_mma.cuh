@@ -5,8 +5,8 @@
 
 // This is a copy of FP6-LLM kernel code: https://arxiv.org/abs/2401.14112
 
-#ifndef PTX_MMA_CUH
-#define PTX_MMA_CUH
+#ifndef DEEPSPEED_CUDA_LINEAR_PTX_MMA_CUH
+#define DEEPSPEED_CUDA_LINEAR_PTX_MMA_CUH
 
 #include <cuda.h>
 #include <cuda_fp16.h>
@@ -22,6 +22,7 @@ __device__ __forceinline__ void B_FromSharedToReg(
     half __restrict__ (*read_SPTR)[WARP_K + PADDING_SHARED_MEM_FOR_B_8],
     int slice_id)
 {
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 800
 #ifdef DEBUG_MODE
     static_assert((TilingConfig::WARP_COL_MMA_TENSORS == 1) ||
                   (TilingConfig::WARP_COL_MMA_TENSORS % 2 == 0));
@@ -54,6 +55,9 @@ __device__ __forceinline__ void B_FromSharedToReg(
             smem_local_ptr += 16 * (WARP_K + PADDING_SHARED_MEM_FOR_B_8) * sizeof(half);
         }
     }
+#else
+#warning "The matrix load functions are only supported on Ampere and newer architectures"
+#endif
 }
 #else
 // Debug: Whether ldmatrix.trans is required???
@@ -64,6 +68,7 @@ __device__ __forceinline__ void B_FromSharedToReg(
     half __restrict__ (*read_SPTR)[WARP_K + PADDING_SHARED_MEM_FOR_B_8],
     int k_offset)
 {
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 800
 #ifdef DEBUG_MODE
     static_assert((TilingConfig::WARP_COL_MMA_TENSORS == 1) ||
                   (TilingConfig::WARP_COL_MMA_TENSORS % 2 == 0));
@@ -96,6 +101,9 @@ __device__ __forceinline__ void B_FromSharedToReg(
             smem_local_ptr += 16 * (WARP_K + PADDING_SHARED_MEM_FOR_B_8) * sizeof(half);
         }
     }
+#else
+#warning "The matrix load functions are only supported on Ampere and newer architectures"
+#endif
 }
 #endif
 
@@ -103,6 +111,7 @@ __device__ __forceinline__ void MMA_FP16_M16N8K16(uint32_t __restrict__ c[],
                                                   uint32_t __restrict__* a,
                                                   uint32_t __restrict__* b)
 {
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 800
     asm volatile(
         "mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32"
         "{ %0, %1, %2, %3},"
@@ -120,6 +129,9 @@ __device__ __forceinline__ void MMA_FP16_M16N8K16(uint32_t __restrict__ c[],
           "r"(c[1]),
           "r"(c[2]),
           "r"(c[3]));
+#else
+#warning "The mma functions are only implemented for Ampere and newer architectures"
+#endif
 }
 
 #endif

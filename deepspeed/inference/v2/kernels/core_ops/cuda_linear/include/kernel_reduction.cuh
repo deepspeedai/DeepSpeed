@@ -5,6 +5,9 @@
 
 // This is a copy of FP6-LLM kernel code: https://arxiv.org/abs/2401.14112
 
+#ifndef DEEPSPEED_CUDA_LINEAR_KERNEL_REDUCTION_CUH
+#define DEEPSPEED_CUDA_LINEAR_KERNEL_REDUCTION_CUH
+
 #include <cuda.h>
 #include <cuda_fp16.h>
 #include <cuda_runtime.h>
@@ -36,3 +39,5 @@ __global__ void SplitK_Reduction(half* C,
 #pragma unroll
     for (int i = 0; i < HALF_PER_128BIT; i++) THREAD_GPTR_C[i] = __float2half_rn(Results[i]);
 }
+
+#endif

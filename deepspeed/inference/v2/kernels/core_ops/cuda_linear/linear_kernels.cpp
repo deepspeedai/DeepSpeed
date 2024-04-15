@@ -5,7 +5,7 @@
 
 #include <ATen/cuda/CUDAContext.h>
 
-#include "cuda_linear_kernels.h"
+#include "linear_kernels.h"
 
 namespace {
 

@@ -5,8 +5,8 @@
 
 // This is a copy of FP6-LLM kernel code: https://arxiv.org/abs/2401.14112
 
-#ifndef UTILS_CORE_CUH
-#define UTILS_CORE_CUH
+#ifndef DEEPSPEED_CUDA_LINEAR_UTILS_CORE_CUH
+#define DEEPSPEED_CUDA_LINEAR_UTILS_CORE_CUH
 
 #include <assert.h>
 

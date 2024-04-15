@@ -5,6 +5,9 @@
 
 // This is a copy of FP6-LLM kernel code: https://arxiv.org/abs/2401.14112
 
+#ifndef DEEPSPEED_CUDA_LINEAR_FP6_LINEAR_CUH
+#define DEEPSPEED_CUDA_LINEAR_FP6_LINEAR_CUH
+
 #include <cuda.h>
 #include <cuda_fp16.h>
 #include <cuda_runtime.h>
@@ -44,3 +47,5 @@ void weight_matrix_prepacking(int* FP6Weights, size_t M, size_t K);
  * Weight prepacking (Pytorch interface).
  */
 torch::Tensor weight_matrix_prepacking_cpu(torch::Tensor fp6_tensor, size_t M, size_t K);
+
+#endif

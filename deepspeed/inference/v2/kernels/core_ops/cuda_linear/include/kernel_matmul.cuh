@@ -5,6 +5,9 @@
 
 // This is a copy of FP6-LLM kernel code: https://arxiv.org/abs/2401.14112
 
+#ifndef DEEPSPEED_CUDA_LINEAR_KERNEL_MATMUL_CUH
+#define DEEPSPEED_CUDA_LINEAR_KERNEL_MATMUL_CUH
+
 #include "configs.h"
 #include "utils_core.cuh"
 #include "utils_gmem.cuh"
@@ -26,6 +29,8 @@ __global__ void QUANT_GEMM_Kernel(const uint4* Weight1,
                                   const size_t K_Global,
                                   int Split_K)
 {
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 800 && __CUDA_ARCH__ < 900
+
 #ifdef DEBUG_MODE
     assert(K_Global % TilingConfig::TILE_K == 0);
     assert(M_Global % TilingConfig::TILE_M == 0);
@@ -258,4 +263,10 @@ __global__ void QUANT_GEMM_Kernel(const uint4* Weight1,
             else
                 BlockGlobalPTR[j + i * M_Global] = smem_CFrag[i][j];
         }
+
+#else
+#warning "The FP6 functions are only available on Ampere GPUs."
+#endif
 }
+
+#endif

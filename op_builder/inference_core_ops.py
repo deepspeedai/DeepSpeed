@@ -57,8 +57,6 @@ class InferenceCoreBuilder(CUDAOpBuilder):
         return "deepspeed" if os.path.isdir(ds_path) else ".."
 
     def sources(self):
-        import torch
-
         sources = [
             "inference/v2/kernels/core_ops/core_ops.cpp",
             "inference/v2/kernels/core_ops/bias_activations/bias_activation.cpp",
@@ -69,16 +67,9 @@ class InferenceCoreBuilder(CUDAOpBuilder):
             "inference/v2/kernels/core_ops/cuda_rms_norm/rms_norm_cuda.cu",
             "inference/v2/kernels/core_ops/gated_activations/gated_activation_kernels.cpp",
             "inference/v2/kernels/core_ops/gated_activations/gated_activation_kernels_cuda.cu",
+            "inference/v2/kernels/core_ops/cuda_linear/linear_kernels.cpp",
+            "inference/v2/kernels/core_ops/cuda_linear/linear_kernels_cuda.cu",
         ]
-
-        # The source files with specific GPU architecture requirements.
-        if not self.is_rocm_pytorch() and torch.cuda.is_available():  #ignore-cuda
-            cuda_capability = torch.cuda.get_device_properties(0).major  #ignore-cuda
-            if cuda_capability != 8:
-                self.warning("FP6 quantization kernel is only supported on Ampere architectures")
-            else:
-                sources.append("inference/v2/kernels/core_ops/cuda_linear/fp6_linear.cu")
-                sources.append("inference/v2/kernels/core_ops/cuda_linear/cuda_linear_kernels.cpp")
 
         prefix = self.get_prefix()
         sources = [os.path.join(prefix, src) for src in sources]

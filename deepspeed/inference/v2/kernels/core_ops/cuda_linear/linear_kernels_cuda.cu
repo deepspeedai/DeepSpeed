@@ -19,6 +19,8 @@
 #include <assert.h>
 #include <stdio.h>
 
+#include "linear_kernels_cuda.h"
+
 template <typename TilingConfig, typename OutputDataType>
 static void Kernel_Ex(cudaStream_t stream,
                       const uint4* Weight1,
@@ -50,7 +52,7 @@ static void Kernel_Ex(cudaStream_t stream,
     size_t dimM = M_Global * Split_K / TilingConfig::TILE_M;
     dim3 GridDim(dimN, dimM, 1);
     dim3 BlockDim(WARP_SIZE * TilingConfig::BLOCK_WARPS, 1, 1);
-//
+
 #ifdef DEBUG_MODE
     printf(
         "GridDim.x: %d, GridDim.y: %d, GridDim.z: %d, BlockDim.x: %d, BlockDim.y: %d, BlockDim.z: "
@@ -64,6 +66,7 @@ static void Kernel_Ex(cudaStream_t stream,
         SHMEM_SZ);
     printf("\n");
 #endif
+
     QUANT_GEMM_Kernel<TilingConfig, OutputDataType><<<GridDim, BlockDim, SHMEM_SZ, stream>>>(
         Weight1, Weight2, Scales, B, C, M_Global, N_Global, K_Global, Split_K);
 }
@@ -121,7 +124,7 @@ cudaError_t fp6_linear_kernel(cudaStream_t stream,
                 break;
             default:
                 if (N_PowerOf2 % 128 != 0) {
-                    printf("QuantLLM_API Error: Unsupported N dimension %d!\n", N_PowerOf2);
+                    printf("QuantLLM_API Error: Unsupported N dimension %lu!\n", N_PowerOf2);
                     return cudaErrorUnknown;
                 }
                 Kernel_Ex<TilingConfig<4, 1, 8>, half>(
@@ -192,7 +195,7 @@ cudaError_t fp6_linear_kernel(cudaStream_t stream,
                 break;
             default:
                 if (N_PowerOf2 % 128 != 0) {
-                    printf("QuantLLM_API Error: Unsupported N dimension %d!\n", N_PowerOf2);
+                    printf("QuantLLM_API Error: Unsupported N dimension %lu!\n", N_PowerOf2);
                     return cudaErrorUnknown;
                 }
                 Kernel_Ex<TilingConfig<4, 1, 8>, float>(stream,
@@ -236,7 +239,7 @@ calling our CUDA kernel.
 torch::Tensor fp6_linear_forward_cuda(torch::Tensor _in_feats,
                                       torch::Tensor _weights,
                                       torch::Tensor _scales,
-                                      int splitK = 1)
+                                      int splitK)
 {
     int num_in_feats = _in_feats.size(0);
     int num_in_channels = _in_feats.size(1);
