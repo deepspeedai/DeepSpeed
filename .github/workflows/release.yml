@@ -35,7 +35,7 @@ jobs:
       run: |
         python release/bump_patch_version.py --current_version ${{ env.RELEASE_VERSION }}
     - name: Create Pull Request
-      uses: peter-evans/create-pull-request@v4
+      uses: peter-evans/create-pull-request@v6
       with:
         token: ${{ secrets.GH_PAT }}
         add-paths: |
