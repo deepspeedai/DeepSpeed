@@ -61,14 +61,28 @@ jobs:
 
     - name: Unit tests
       run: |
-        pip install pytest pytest-timeout tabulate
+        pip install pytest pytest-timeout tabulate tensorboard wandb
+        export ONEAPI_ROOT=/opt/intel/oneapi/redist
+        export FI_PROVIDER_PATH=$ONEAPI_ROOT/opt/mpi/libfabric/lib/prov
+        export LD_LIBRARY_PATH=$ONEAPI_ROOT/opt/mpi/libfabric/lib:$LD_LIBRARY_PATH
+        export LD_LIBRARY_PATH=$ONEAPI_ROOT/lib:$LD_LIBRARY_PATH
         cd tests/unit
         pytest --verbose accelerator/*
         pytest --verbose autotuning/*
         pytest --verbose checkpoint/test_reshape_checkpoint.py
+        pytest --verbose checkpoint/test_moe_checkpoint.py
+        pytest --verbose checkpoint/test_shared_weights.py
         pytest --verbose launcher/test_ds_arguments.py launcher/test_run.py
+        pytest --verbose moe/test_moe_tp.py
+        pytest --verbose monitor/*
         pytest --verbose runtime/test_ds_config_model.py
         pytest --verbose runtime/pipe/test_pipe_schedule.py
         pytest --verbose runtime/zero/test_zero_config.py
         pytest --verbose runtime/zero/test_zero_tiled.py
         pytest --verbose runtime/zero/test_zeropp.py
+        pytest --verbose runtime/test_autocast.py
+        pytest --verbose runtime/test_data.py
+        pytest --verbose runtime/test_runtime_utils.py
+        pytest --verbose runtime/activation_checkpointing/*
+        pytest --verbose runtime/utils/*
+        pytest --verbose runtime/zero/test_zero_dynamic_class.py
