@@ -247,7 +247,7 @@ void all_reduce_caching(torch::Tensor& data,
                  .wait());
 }
 
-void inference_all_reduce(torch::Tensor& data, py::object op, bool async_op)
+void inference_all_reduce(torch::Tensor& data, py::object op)
 {
 #ifdef DO_PROFILE
     static double total_time = 0.0;

@@ -505,7 +505,7 @@ def inference_all_reduce(tensor,
                          log_name='all_reduce',
                          debug=get_caller_func()):
     global cdb
-    return cdb.inference_all_reduce(tensor, op, group, async_op)
+    return cdb.inference_all_reduce(tensor, op, group)
 
 
 @timed_op
