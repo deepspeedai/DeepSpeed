@@ -3,6 +3,7 @@
 
 # DeepSpeed Team
 
+import deepspeed
 from deepspeed import utils
 
 from .utils import *
@@ -17,6 +18,15 @@ DS_COMM_REDUCE_SCATTER_OFF = False
 DS_COMM_BROADCAST_OFF = False
 DS_COMM_ALL_REDUCE_OFF = False
 DS_COMM_REDUCE_OFF = False
+
+
+def build_shm_op():
+    builder = get_accelerator().create_op_builder("ShareMemCommBuilder")
+    if builder is None or not deepspeed.ops.__compatible_ops__[builder.NAME]:
+        return None
+    shm_cpp_module = builder.load()
+    print(f'DeepSpeed {builder.absolute_name()} built successfully')
+    return shm_cpp_module
 
 
 def has_coalescing_manager():
@@ -88,6 +98,7 @@ class TorchBackend(Backend):
 
     def __init__(self, backend, timeout, init_method, rank=-1, world_size=-1, name='torch'):
         super(TorchBackend, self).__init__()
+        self.shm_comm_op = build_shm_op()
         self.has_all_reduce_coalesced = has_all_reduce_coalesced()
         self.has_coalescing_manager = has_coalescing_manager()
         self.all_gather_function = self.get_all_gather_function()
@@ -99,6 +110,8 @@ class TorchBackend(Backend):
         # it is not so we can run on a single GPU without doing any init_process_group
         self.single_gpu_mode = True
         self.init_process_group(backend, timeout, init_method, rank, world_size)
+        if self.shm_comm_op != None:
+            self.shm_comm_op.initialize(self.get_world_size(), self.get_rank())
 
     @classmethod
     @compiler.disable
@@ -139,9 +152,10 @@ class TorchBackend(Backend):
         return torch.distributed.all_reduce(tensor=tensor, op=op, group=group, async_op=async_op)
 
     @compiler.disable
-    def inference_all_reduce(self, tensor, op=torch.distributed.ReduceOp.SUM, group=None, async_op=False):
-        op = self._reduce_op(op)
-        return torch.distributed.all_reduce(tensor=tensor, op=op, group=group, async_op=async_op)
+    def inference_all_reduce(self, tensor, op, group=None):
+        if self.shm_comm_op == None or self.shm_comm_op.inference_all_reduce(tensor, op) == -1:
+            op = self._reduce_op(op)
+            return torch.distributed.all_reduce(tensor=tensor, op=op, group=group, async_op=False)
 
     @compiler.disable
     def all_reduce_coalesced(self, tensors, op=torch.distributed.ReduceOp.SUM, group=None, async_op=False):
