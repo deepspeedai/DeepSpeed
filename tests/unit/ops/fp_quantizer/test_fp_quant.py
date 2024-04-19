@@ -62,6 +62,35 @@ def test_fp_quant_meta(dtype):
 
 
 @pytest.mark.parametrize("dtype", [torch.bfloat16], ids=["bf16"])
+def test_fp_quant_selective(dtype):
+    group_size = 128
+    q_bits = 8
+    exp_bits = 4
+    man_bits = 3
+
+    fpq = FP_Quantize(group_size=group_size)
+    indexes = torch.zeros(2, dtype=torch.int32, device='cuda')
+    indexes[0] = 1
+    indexes[1] = 3
+    for i in range(10):
+        x = torch.rand(4, 1024, dtype=dtype, device='cuda')
+
+        x = x.reshape(4, 1, x.shape[-1])
+        ds_x = x.clone()
+        x_quantized = fpq.quantize(ds_x, q_bits=q_bits)
+        x_dequantized = fpq.selective_dequantize(x_quantized, indexes, q_bits=q_bits)
+
+        qtorch_out = qtorch_quantize(x.index_select(0, indexes),
+                                     exp_bits=exp_bits,
+                                     man_bits=man_bits,
+                                     group_size=group_size)
+        qtorch_error = (qtorch_out - x.index_select(0, indexes)).abs().sum() / x.numel()
+        ds_error = (x_dequantized - x.index_select(0, indexes)).abs().sum() / x.numel()
+
+        assert 0.0004 > abs(qtorch_error.item() - ds_error.item()), f"failed on iteration {i}"
+
+
+@pytest.mark.parametrize("dtype", [torch.bfloat16], ids=["bf16"])
 @pytest.mark.parametrize("q_bits", [8, 6, 12], ids=["qbits8", "qbits6", "qbits12"])
 def test_fp_quant(dtype, q_bits):
     group_size = 128

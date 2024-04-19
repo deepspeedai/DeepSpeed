@@ -270,6 +270,7 @@ __global__ void apply_dequantization(uint8_t* val, T* q_val, int group_size, int
             mem_access::load_global<quantization::quanitzed_access_granularity_6bits>(
                 int8_data + quantization::quanitzed_access_granularity_6bits * 2,
                 load_base_ptr + quantization::quanitzed_access_granularity_6bits * 2);
+
         } else {
             mem_access::load_global<quantization::quanitzed_access_granularity>(int8_data,
                                                                                 load_base_ptr);
@@ -393,3 +394,137 @@ void launch_dequantization(uint8_t* val,
 INSTANTIATE_LAUNCH_DEQUANTIZATION(__nv_bfloat16, 7);
 #endif
 INSTANTIATE_LAUNCH_DEQUANTIZATION(__half, 10);
+
+template <typename T,
+          int q_mantisa_bits,
+          int total_q_bits = 16,
+          int _mantisa_bits = 3,
+          int _exponent_bits = 4>
+__global__ void apply_selective_dequantization(uint8_t* val,
+                                               T* q_val,
+                                               int32_t* indexes,
+                                               int group_size,
+                                               int total_num_elements)
+{
+    int index = indexes[blockIdx.x];
+    constexpr uint32_t vector_size = quantization::access_granularity / sizeof(T);
+    int tidx = (blockIdx.y * blockDim.x + threadIdx.x) * vector_size;
+    int input_index = index * total_num_elements + tidx;
+    constexpr int quantized_bits = _mantisa_bits + _exponent_bits + 1;
+    constexpr int q_exponent_bits = total_q_bits - q_mantisa_bits - 1;
+    constexpr uint16_t _mantisa_mask = (1 << _mantisa_bits) - 1;
+    constexpr uint16_t _exponent_mask = ((1 << _exponent_bits) - 1) << _mantisa_bits;
+    constexpr uint16_t _sign_mask = 1 << (_mantisa_bits + _exponent_bits);
+    const uint32_t g_index = (input_index / group_size);
+    const uint32_t group_size_bytes = (group_size * quantized_bits / 8);
+    const uint8_t* load_base_ptr =
+        val + g_index * (group_size_bytes + 4) + (input_index % group_size) * quantized_bits / 8;
+
+    int mantisa_mask = ((1 << q_mantisa_bits) - 1);
+    mantisa_mask <<= (_mantisa_bits - q_mantisa_bits);
+
+    T* store_base_ptr = q_val + tidx + blockIdx.x * total_num_elements;
+    float scale;
+
+    uint8_t* scale_as_int8 = reinterpret_cast<uint8_t*>(&scale);
+    if (quantized_bits == 6) {
+        mem_access::load_global<quantization::quanitzed_access_granularity>(
+            scale_as_int8, val + g_index * (group_size_bytes + 4) + group_size_bytes);
+        mem_access::load_global<quantization::quanitzed_access_granularity_6bits>(
+            scale_as_int8 + quantization::quanitzed_access_granularity_6bits,
+            val + g_index * (group_size_bytes + 4) + group_size_bytes +
+                quantization::quanitzed_access_granularity_6bits);
+    } else
+        mem_access::load_global<quantization::quanitzed_access_granularity>(
+            scale_as_int8, val + g_index * (group_size_bytes + 4) + group_size_bytes);
+
+    if (tidx < total_num_elements) {
+        uint64_t q_buf_in;
+        uint64_t q_buf_in1;
+        uint8_t* int8_data = reinterpret_cast<uint8_t*>(&q_buf_in);
+        uint8_t* int8_data1 = reinterpret_cast<uint8_t*>(&q_buf_in1);
+        if (quantized_bits == 6) {
+            mem_access::load_global<quantization::quanitzed_access_granularity_6bits>(
+                int8_data, load_base_ptr);
+            mem_access::load_global<quantization::quanitzed_access_granularity_6bits>(
+                int8_data + quantization::quanitzed_access_granularity_6bits,
+                load_base_ptr + quantization::quanitzed_access_granularity_6bits);
+            mem_access::load_global<quantization::quanitzed_access_granularity_6bits>(
+                int8_data + quantization::quanitzed_access_granularity_6bits * 2,
+                load_base_ptr + quantization::quanitzed_access_granularity_6bits * 2);
+        } else {
+            mem_access::load_global<quantization::quanitzed_access_granularity>(int8_data,
+                                                                                load_base_ptr);
+            if (quantized_bits > 4) {
+                mem_access::load_global<quantization::quanitzed_access_granularity>(
+                    int8_data + quantization::quanitzed_access_granularity,
+                    load_base_ptr + quantization::quanitzed_access_granularity);
+                if (quantized_bits == 12) {
+                    mem_access::load_global<quantization::quanitzed_access_granularity>(
+                        int8_data1, load_base_ptr + quantization::quanitzed_access_granularity * 2);
+                }
+            }
+        }
+        T store_buf[vector_size];
+        uint16_t* q_buf = reinterpret_cast<uint16_t*>(store_buf);
+#pragma unroll
+        for (int j = 0; j < vector_size; j++) {
+            uint16_t new_data;
+            if (j < 5 || quantized_bits != 12) {
+                new_data = (uint16_t)(q_buf_in >> (j * quantized_bits));
+            } else {
+                if (j == 5) {
+                    new_data = (uint16_t)(q_buf_in1);
+                    new_data = (uint16_t)((new_data << 4) | (q_buf_in >> 60));
+                } else
+                    new_data = (uint16_t)(q_buf_in1 >> ((j - 6) * quantized_bits + 8));
+            }
+
+            uint16_t sign = (new_data & _sign_mask) >> (_mantisa_bits + _exponent_bits);
+            uint16_t dst_exponent = (new_data & _exponent_mask) >> _mantisa_bits;
+            uint16_t dst_mantisa = (new_data & _mantisa_mask);
+
+            if (dst_exponent != (1 << q_exponent_bits) - 1)
+                dst_exponent = (dst_exponent - ((1 << (_exponent_bits - 1)) - 1)) +
+                               (1 << (q_exponent_bits - 1)) - 1;
+
+            q_buf[j] =
+                ((sign << (q_exponent_bits + q_mantisa_bits)) | (dst_exponent << q_mantisa_bits) |
+                 (dst_mantisa << (q_mantisa_bits - _mantisa_bits)));
+            float up_cast = conversion::to<float>(store_buf[j]);
+            store_buf[j] = conversion::to<T>(up_cast * scale);
+        }
+        mem_access::store_global<quantization::access_granularity>(store_base_ptr, store_buf);
+    }
+}
+
+template <typename T, int mantisa>
+void launch_selective_dequantization(uint8_t* val,
+                                     T* q_val,
+                                     int32_t* indexes,
+                                     int num_groups,
+                                     int group_size,
+                                     int num_indexes,
+                                     int q_mantisa_bits,
+                                     int q_exponent_bits,
+                                     cudaStream_t stream)
+{
+    int total_elements_per_index = (num_groups / num_indexes) * group_size;
+    int blocks = (total_elements_per_index - 1) /
+                     (quantization::threads * (quantization::access_granularity / sizeof(T))) +
+                 1;
+    const dim3 grid(num_indexes, blocks);
+    const dim3 block(quantization::threads);
+    DEQUANT_SWITCH(q_mantisa_bits * q_exponent_bits, [&] {
+        apply_selective_dequantization<T, mantisa, 16, CONST_Q_MANTISA_BITS, CONST_Q_EXPONENT_BITS>
+            <<<grid, block, 0, stream>>>(val, q_val, indexes, group_size, total_elements_per_index);
+    });
+}
+#define INSTANTIATE_LAUNCH_SELECTIVE_DEQUANTIZATION(T, mantisa) \
+    template void launch_selective_dequantization<T, mantisa>(  \
+        uint8_t*, T*, int32_t*, int, int, int, int, int, cudaStream_t);
+// fp8(E4M3)
+#ifdef BF16_AVAILABLE
+INSTANTIATE_LAUNCH_SELECTIVE_DEQUANTIZATION(__nv_bfloat16, 7);
+#endif
+INSTANTIATE_LAUNCH_SELECTIVE_DEQUANTIZATION(__half, 10);
