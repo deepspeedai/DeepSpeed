@@ -78,8 +78,39 @@ void dequantize(torch::Tensor& val,
 #endif
 }
 
+#define DISPATCH_DEQUANTIZE_INDEX(T_TYPE, C_TYPE, mantisa)                                  \
+    if (val.options().dtype() == torch::T_TYPE) {                                           \
+        launch_selective_dequantization<C_TYPE, mantisa>((uint8_t*)val_q.data_ptr(),        \
+                                                         (C_TYPE*)val.data_ptr(),           \
+                                                         (int32_t*)indexes.data_ptr(),      \
+                                                         num_groups,                        \
+                                                         group_size,                        \
+                                                         num_indexes,                       \
+                                                         q_mantisa_bits,                    \
+                                                         q_exponent_bits,                   \
+                                                         at::cuda::getCurrentCUDAStream()); \
+        return;                                                                             \
+    }
+void selective_dequantize(torch::Tensor& val,
+                          torch::Tensor& val_q,
+                          torch::Tensor& indexes,
+                          int group_size,
+                          int q_mantisa_bits,
+                          int q_exponent_bits)
+{
+    int total_elems = at::numel(val);
+    int num_indexes = indexes.size(0);
+    int num_groups = total_elems / group_size;
+
+    DISPATCH_DEQUANTIZE_INDEX(kHalf, __half, 10);
+#ifdef BF16_AVAILABLE
+    DISPATCH_DEQUANTIZE_INDEX(kBFloat16, __nv_bfloat16, 7);
+#endif
+}
+
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m)
 {
     m.def("quantize", &quantize, "quantize function");
     m.def("dequantize", &dequantize, "dequantize function");
+    m.def("selective_dequantize", &selective_dequantize, "selective dequantize function");
 }
