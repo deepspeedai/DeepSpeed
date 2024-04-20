@@ -287,3 +287,11 @@ class DeepSpeedAccelerator(ABC):
     @abc.abstractmethod
     def export_envs(self):
         ...
+
+    @abc.abstractmethod
+    def visible_devices_envs(self):
+        ...
+
+    @abc.abstractmethod
+    def set_visible_devices_envs(self, current_env, local_accelerator_ids):
+        ...

@@ -159,11 +159,12 @@ dynamically link them at runtime.
 ## Contributed HW support
 * DeepSpeed now support various HW accelerators.
 
-| Contributor | Hardware | Accelerator Name | Contributor validated | Upstream validated |
-| ----------- | -------- | ---------------- | --------------------- | ------------------ |
-| Intel | Intel(R) Gaudi(R) 2 AI accelerator | hpu | Yes | Yes |
-| Intel | Intel(R) Xeon(R) Processors | cpu | Yes | Yes |
-| Intel | Intel(R) Data Center GPU Max series | xpu | Yes | Yes |
+| Contributor | Hardware                            | Accelerator Name | Contributor validated | Upstream validated |
+|-------------|-------------------------------------|------------------| --------------------- |--------------------|
+| Huawei      | Huawei Ascend NPU                   | npu              | Yes | No                 |
+| Intel       | Intel(R) Gaudi(R) 2 AI accelerator  | hpu              | Yes | Yes                |
+| Intel       | Intel(R) Xeon(R) Processors         | cpu              | Yes | Yes                |
+| Intel       | Intel(R) Data Center GPU Max series | xpu              | Yes | Yes                |
 
 ## PyPI
 We regularly push releases to [PyPI](https://pypi.org/project/deepspeed/) and encourage users to install from there in most cases.
