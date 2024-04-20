@@ -294,3 +294,10 @@ class HPU_Accelerator(DeepSpeedAccelerator):
 
     def export_envs(self):
         return []
+
+    def visible_devices_envs(self):
+        return ['HABANA_VISIBLE_MODULES']
+
+    def set_visible_devices_envs(self, current_env, local_accelerator_ids):
+        for env in self.visible_devices_envs():
+            current_env[env] = ",".join(map(str, local_accelerator_ids))
