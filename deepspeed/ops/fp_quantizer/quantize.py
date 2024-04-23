@@ -4,20 +4,47 @@
 # DeepSpeed Team
 
 import torch
+import abc
+from abc import ABC
 
 from deepspeed.ops.op_builder import FPQuantizerBuilder
 
 fp_quant_module = None
 
 
-class FP_Quantize:
+class Quantizer(ABC):
+    """
+    Abstract Quantizer class that implmenents quantize/dequantize methods.
+
+    Arguments:
+        group_size (int, optional): number of values or elements that are grouped
+            together for the quantization process.
+    """
+
+    def __init__(self, group_size=512) -> None:
+        self.group_size = group_size
+
+    @abc.abstractmethod
+    def quantize(self,
+                 input,
+                 q_bits=8,
+                 q_mantisa_bits=3,
+                 stochastic_mode=False,
+                 return_meta_tensor=False) -> torch.Tensor:
+        ...
+
+    @abc.abstractmethod
+    def dequantize(self, input_q, fp_out=None, q_bits=8, q_mantisa_bits=3, scale=None) -> torch.Tensor:
+        ...
+
+
+class FP_Quantize(Quantizer):
 
     def __init__(self, group_size=512) -> None:
         global fp_quant_module
+        super().__init__(group_size=group_size)
         if fp_quant_module is None:
             fp_quant_module = FPQuantizerBuilder().load()
-
-        self.group_size = group_size
         self.orig_dtype = None
 
     def quantize(self,
