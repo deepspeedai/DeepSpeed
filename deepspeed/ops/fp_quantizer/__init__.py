@@ -3,4 +3,4 @@
 
 # DeepSpeed Team
 
-from .quantize import FP_Quantize
+from .quantize import FP_Quantize, Quantizer
