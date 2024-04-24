@@ -20,6 +20,7 @@ class NPU_Accelerator(DeepSpeedAccelerator):
         super().__init__()
         self._name = 'npu'
         self._communication_backend_name = 'hccl'
+        self._compile_backend = "inductor"
         # dict that holds class name <--> class type mapping i.e.
         # 'AsyncIOBuilder': <class 'op_builder.async_io.AsyncIOBuilder'>
         # this dict will be filled at init stage
@@ -285,3 +286,14 @@ class NPU_Accelerator(DeepSpeedAccelerator):
     def set_visible_devices_envs(self, current_env, local_accelerator_ids):
         for env in self.visible_devices_envs():
             current_env[env] = ",".join(map(str, local_accelerator_ids))
+
+    def get_compile_backend(self):
+        return self._compile_backend
+
+    def set_compile_backend(self, backend):
+        supported_backends = torch._dynamo.list_backends(exclude_tags=())
+        if backend in supported_backends:
+            self._compile_backend = backend
+        else:
+            raise ValueError(
+                f"{backend} not supported by {self.device_name()}. Supported Backends are {supported_backends }")
