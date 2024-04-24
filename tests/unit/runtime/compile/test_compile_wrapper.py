@@ -31,11 +31,9 @@ def base_config():
         },
         "compile": {
             "enabled": True,
-            "backend": "inductor"
+            "backend": get_accelerator().get_compile_backend()
         }
     }
-    if get_accelerator().device_name() == 'hpu':
-        config_dict['compile']['backend'] = 'hpu_backend'
     return config_dict
 
 
