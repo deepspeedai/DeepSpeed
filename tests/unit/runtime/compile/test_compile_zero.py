@@ -12,7 +12,7 @@ from deepspeed.accelerator import get_accelerator
 
 from unit.runtime.compile.util import compare_loss
 from unit.common import DistributedTest
-from unit.util import bf16_required_version_check
+from unit.util import bf16_required_version_check, skip_on_arch
 
 pytestmark = pytest.mark.skipif(not required_torch_version(min_version=2.1),
                                 reason="Compile tests requires Pytorch version 2.1 or above")
@@ -26,9 +26,11 @@ class TestZeRO(DistributedTest):
     @pytest.mark.parametrize('zero_stage', [1, 2, 3])
     @pytest.mark.parametrize('offload_device', [OffloadDeviceEnum.none, OffloadDeviceEnum.cpu, OffloadDeviceEnum.nvme])
     def test_compile_zero(self, tmpdir, zero_stage, dtype, offload_device):
+        if dtype == torch.bfloat16:
+            skip_on_arch(min_arch=8)
         if dtype == torch.bfloat16 and not bf16_required_version_check():
             pytest.skip(
-                " DeepSpeed BFloat16 tests need torch >= 1.10, NCCL >= 2.10.3, CUDA > =11.0 and HW support for BFloat16 to run correctly"
+                "DeepSpeed BFloat16 tests need NCCL >= 2.10.3, CUDA >=11.0, and HW support for BFloat16 to run correctly"
             )
         if get_accelerator().device_name() == "cpu":
             pytest.skip("CPU does not support this test yet")
