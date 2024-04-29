@@ -219,9 +219,9 @@ def create_dir_symlink(src, dest):
 if sys.platform == "win32":
     # This creates a symbolic links on Windows.
     # It needs Administrator privilege to create symlinks on Windows.
-    create_dir_symlink('..\\..\\csrc', '.\\deepspeed\\ops\\csrc')
-    create_dir_symlink('..\\..\\op_builder', '.\\deepspeed\\ops\\op_builder')
-    create_dir_symlink('..\\accelerator', '.\\deepspeed\\accelerator')
+    create_dir_symlink('.\\deepspeed\\ops\\csrc', '..\\..\\csrc')
+    create_dir_symlink('.\\deepspeed\\ops\\op_builder', '..\\..\\op_builder')
+    create_dir_symlink('.\\deepspeed\\accelerator', '..\\accelerator')
     egg_info.manifest_maker.template = 'MANIFEST_win.in'
 
 # Parse the DeepSpeed version string from version.txt.
