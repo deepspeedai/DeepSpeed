@@ -241,7 +241,7 @@ class FP16_Optimizer(DeepSpeedOptimizer):
                     group_mask_idx_list.append([grad_flat_st_idx, grad_flat_en_idx])
             grad_flat_st_idx = grad_flat_en_idx
 
-        return torch.tensor(group_mask_idx_list, device=get_accelerator().current_device())
+        return torch.tensor(group_mask_idx_list, device=get_accelerator().current_device_name())
 
     def step(self, closure=None):
         """
