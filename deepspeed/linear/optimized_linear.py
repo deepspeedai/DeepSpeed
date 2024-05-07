@@ -85,7 +85,7 @@ class LoRAOptimizedLinear(nn.Module):
         self.bias = bias
         self.lora_config = lora_config
         self.quantization_config = quantization_config
-        device = get_accelerator().current_device() if device is None else device
+        device = get_accelerator().current_device_name() if device is None else device
         assert self.lora_config is not None, "DSOptimizedLinear requires a LoRA config"
 
         self.zero_shards = self.lora_config.base_weight_sharding

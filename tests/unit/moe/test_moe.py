@@ -177,7 +177,7 @@ class TestTopk(DistributedTest):
     world_size = 2
 
     def test(self):
-        device = get_accelerator().current_device()
+        device = get_accelerator().current_device_name()
         if dist.get_rank() == 0:
             logits = torch.rand(2, 2, device=device)
         elif dist.get_rank() == 1:

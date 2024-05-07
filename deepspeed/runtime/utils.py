@@ -171,7 +171,7 @@ def get_norm_with_moe_layers_fast(all_groups_norm, group):
     # This implementation standardizes the grad_norm across ranks. A more precise implementation can be found in 'get_norm_with_moe_layers'.
     # Need to allreduce (avg) the norms across different ranks because moe params will not be synced during allreduce
     scaled_norm = all_groups_norm * 1.0 / float(dist.get_world_size(group=group))
-    scaled_norm_tensor = torch.tensor(scaled_norm, device=get_accelerator().current_device(), dtype=torch.float)
+    scaled_norm_tensor = torch.tensor(scaled_norm, device=get_accelerator().current_device_name(), dtype=torch.float)
     dist.all_reduce(scaled_norm_tensor, group=group)
     all_groups_norm = scaled_norm_tensor.item()
     #print(f"old = {all_groups_norm_old} and new = {all_groups_norm} at rank: {deepspeed.comm.get_rank()}")
@@ -424,9 +424,11 @@ def get_flattened_grad_norm(parameters, norm_type=2, mpu=None, grad_norm_mask=No
                 # # mask_tensor_ = torch.zeros_like(p, device=p.device, dtype=bool)
                 # # for mask_idx in grad_norm_mask[idx]:
                 # #   mask_tensor_[mask_idx[0]:mask_idx[1]] = True
-                cum_sum_pairs = torch.tensor([1, -1], device=get_accelerator().current_device(),
+                cum_sum_pairs = torch.tensor([1, -1], device=get_accelerator().current_device_name(),
                                              dtype=p.dtype).repeat(grad_norm_mask[idx].shape[0], 1)
-                mask_tensor = torch.zeros(p.shape[0] + 1, device=get_accelerator().current_device(), dtype=p.dtype)
+                mask_tensor = torch.zeros(p.shape[0] + 1,
+                                          device=get_accelerator().current_device_name(),
+                                          dtype=p.dtype)
                 mask_tensor = mask_tensor.scatter_(0, grad_norm_mask[idx].view(-1),
                                                    cum_sum_pairs.view(-1)).cumsum(0).bool()[:-1]
 
