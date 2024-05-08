@@ -469,13 +469,6 @@ class DeepSpeedEngine(Module):
             return getattr(self, name)
         elif name in dir(_module):
             return getattr(_module, name)
-        elif isinstance(_module, CompiledModuleWrapper):
-            try:
-                return getattr(_module, name)
-            except AttributeError:
-                raise AttributeError(
-                    f"None of {type(self).__name__}, CompiledModuleWrapper, or the wrapped model has the attribute '{name}'"
-                )
         else:
             raise AttributeError(f"'{type(self).__name__}' object has no attribute '{name}'")
 
