@@ -83,84 +83,85 @@ class CompileConfig(DeepSpeedConfigModel):
         return field_value
 
 
-class CompiledModuleWrapper(torch.nn.Module):
+def CompiledModuleWrapper(mod, compile_config: Union[CompileConfig, None] = None):
 
-    def __init__(self, module, compile_config: Union[CompileConfig, None] = None):
-        super().__init__()
+    class wrapper(mod.__class__):
 
-        assert is_compile_supported(), "torch.compile is not supported on this version of PyTorch."
+        def __init__(self, module, compile_config: Union[CompileConfig, None] = None):
+            self.__dict__ = module.__dict__.copy()
 
-        modules = self.__dict__.get('_modules')
-        modules['wrapped'] = module
-        self.__dict__['wrapped'] = module
-        self._is_compiled = False
-        self._backend = get_backend_fn(compile_config.backend)
-        self._compile_kwargs = compile_config.kwargs
-        self._compiler_fn = None
+            assert is_compile_supported(), "torch.compile is not supported on this version of PyTorch."
 
-    def __getattr__(self, name):
-        return getattr(self.__dict__['wrapped'], name)
+            self.__dict__['wrapped'] = module
+            self._is_compiled = False
+            self._backend = get_backend_fn(compile_config.backend)
+            self._compile_kwargs = compile_config.kwargs
+            self._compiler_fn = None
 
-    def set_backend(self, backend: Union[str, Callable]):
-        """Set the backend for torch.compile.
+        def set_backend(self, backend: Union[str, Callable]):
+            """Set the backend for torch.compile.
 
-        Args:
-            backend (Union[str, Callable]): backend name or a function that takes a torch.nn.Module and returns a compiled module.
-            You can directly pass a function that works as a backend.
-            See also `backend` field in `CompileConfig` for more details.
-        """
-        self._backend = get_backend_fn(backend)
+            Args:
+                backend (Union[str, Callable]): backend name or a function that takes a torch.nn.Module and returns a compiled module.
+                You can directly pass a function that works as a backend.
+                See also `backend` field in `CompileConfig` for more details.
+            """
+            self._backend = get_backend_fn(backend)
 
-    def set_torch_compile_kwargs(self, kwargs: Dict[str, Union[str, Any]]) -> None:
-        """Set kwargs for torch.compile. Kwargs that are set in DeepSpeed config will be overwritten.
-        You can also pass a backend name with "backend" key to change the backend.
+        def set_torch_compile_kwargs(self, kwargs: Dict[str, Union[str, Any]]) -> None:
+            """Set kwargs for torch.compile. Kwargs that are set in DeepSpeed config will be overwritten.
+            You can also pass a backend name with "backend" key to change the backend.
 
-        Args:
-            kwargs (Dict[str, Union[str, Any]]): kwargs passed to torch.compile.
-        """
+            Args:
+                kwargs (Dict[str, Union[str, Any]]): kwargs passed to torch.compile.
+            """
 
-        if "backend" in kwargs:
-            raise ValueError("backend cannot be set as compile kwargs. Use set_backend instead.")
-        self._compile_kwargs.update(kwargs)
+            if "backend" in kwargs:
+                raise ValueError("backend cannot be set as compile kwargs. Use set_backend instead.")
+            self._compile_kwargs.update(kwargs)
 
-    def set_compiler_fn(self, compiler_fn: Callable) -> None:
-        """Set a function to be used for compiling the module.
-        This function should take a torch.nn.Module as input and return a compiled module.
-        Note that other compile options are ignored when a compiler_fn is set.
+        def set_compiler_fn(self, compiler_fn: Callable) -> None:
+            """Set a function to be used for compiling the module.
+            This function should take a torch.nn.Module as input and return a compiled module.
+            Note that other compile options are ignored when a compiler_fn is set.
 
-        Example:
-        ```python
-            def my_compiler_fn(module: torch.nn.Module):
-                ...
-                return torch.compile(module, ...)
+            Example:
+            ```python
+                def my_compiler_fn(module: torch.nn.Module):
+                    ...
+                    return torch.compile(module, ...)
 
-            engine.set_compiler_fn(my_compiler_fn)
-        ```
-        """
-        self._compiler_fn = compiler_fn
+                engine.set_compiler_fn(my_compiler_fn)
+            ```
+            """
+            self._compiler_fn = compiler_fn
 
-    def forward(self, *args, **kwargs) -> Any:
-        if not self.is_compiled:
-            if self._compiler_fn is None:
-                self.__dict__['wrapped'] = torch.compile(self.wrapped, backend=self._backend, **self._compile_kwargs)
-            else:
-                self.__dict__['wrapped'] = self._compiler_fn(self.wrapped)
-            self._is_compiled = True
+        def forward(self, *args, **kwargs) -> Any:
+            if not self.is_compiled:
+                if self._compiler_fn is None:
+                    self.__dict__['wrapped'] = torch.compile(self.wrapped,
+                                                             backend=self._backend,
+                                                             **self._compile_kwargs)
+                else:
+                    self.__dict__['wrapped'] = self._compiler_fn(self.wrapped)
+                self._is_compiled = True
 
-        return self.__dict__['wrapped'](*args, **kwargs)
+            return self.__dict__['wrapped'](*args, **kwargs)
 
-    @property
-    def is_compiled(self) -> bool:
-        return self._is_compiled
+        @property
+        def is_compiled(self) -> bool:
+            return self._is_compiled
 
-    @property
-    def backend(self) -> Union[str, Callable]:
-        return self._backend
+        @property
+        def backend(self) -> Union[str, Callable]:
+            return self._backend
 
-    @property
-    def torch_compile_kwargs(self) -> Dict[str, Any]:
-        return self._compile_kwargs
+        @property
+        def torch_compile_kwargs(self) -> Dict[str, Any]:
+            return self._compile_kwargs
 
-    @property
-    def compiler_fn(self) -> Union[Callable, None]:
-        return self._compiler_fn
+        @property
+        def compiler_fn(self) -> Union[Callable, None]:
+            return self._compiler_fn
+
+    return wrapper(mod, compile_config)
