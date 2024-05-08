@@ -12,6 +12,11 @@ def set_num_kv_heads(num):
     num_kv_heads = num
 
 
+def set_num_attention_heads(num):
+    global num_attention_heads
+    num_attention_heads = num
+
+
 def set_n_embd(num):
     global n_embd
     n_embd = num
@@ -20,6 +25,11 @@ def set_n_embd(num):
 def get_num_kv_heads():
     global num_kv_heads
     return num_kv_heads
+
+
+def get_num_attention_heads():
+    global num_attention_heads
+    return num_attention_heads
 
 
 def get_shard_size(total_size, mp_size, name=None, rank=None):
