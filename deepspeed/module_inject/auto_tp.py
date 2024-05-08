@@ -13,7 +13,7 @@ import torch
 from deepspeed import comm as dist
 from .layers import LinearAllreduce, LinearLayer, LmHeadLinearAllreduce
 from deepspeed.accelerator import get_accelerator
-from .fusedqkv_utils import require_tp_fused_qkvw, prepare_tp_fused_qkvw
+from .fusedqkv_utils import require_tp_fused_qkvw, prepare_tp_fused_qkvw, shard_chunk_mlp
 from deepspeed.module_inject.tp_shard import get_shard_size, get_shard_size_list
 
 
@@ -133,7 +133,8 @@ class Loading():
         load_layers = [nn.Linear, nn.Embedding, nn.LayerNorm]
         load_layer_names = [
             "LPLayerNorm", "SharedEmbedding", "OPTLearnedPositionalEmbedding", "LlamaRMSNorm", "FalconLinear",
-            "MistralRMSNorm", "T5LayerNorm", "MixtralRMSNorm"
+            "MistralRMSNorm", "T5LayerNorm", "MixtralRMSNorm", "Phi3RotaryEmbedding", "Phi3SuScaledRotaryEmbedding",
+            "Phi3RMSNorm"
         ]
         return module.__class__ in load_layers or module._get_name() in load_layer_names
 
@@ -328,6 +329,10 @@ class AutoTP():
         # For mixtral-7x8b, need to skip MoE gate linear replace.
         if name == "block_sparse_moe.gate":
             return child
+        # for phi3.
+        if 'gate_up_proj' in name:
+            weight, bias = shard_chunk_mlp(child.weight.data, child.bias, dist.get_rank(), dist.get_world_size())
+            return LinearLayer(weight=weight, bias=bias)
         if name in self.all_reduce_linears:
             # if conv_linear_layer [weight_shape[1], weight_shape[0] // mp_size]
             # else [weight_shape[0], weight_shape[1] // mp_size]

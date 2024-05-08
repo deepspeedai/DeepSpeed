@@ -4,7 +4,7 @@
 # DeepSpeed Team
 import torch
 from deepspeed.utils.logging import warning_once
-from deepspeed.module_inject.tp_shard import get_shard_size, get_shard_size_list, get_num_kv_heads, get_n_embd
+from deepspeed.module_inject.tp_shard import get_shard_size, get_shard_size_list, get_num_kv_heads, get_n_embd, get_num_attention_heads
 
 
 def split_by_qkvlist_and_refuse(qkv_list, split_size, split_dim=0, cat_dim=0):
@@ -42,6 +42,7 @@ def prepare_tp_fused_qkvw(module, src, mp_size, gpu_index):
         "FalconDecoderLayer": 'bloomtype',
         "GPTBigCodeBlock": 'bigcodetype',
         "DecoderLayer": 'glmtype',
+        "Phi3DecoderLayer": "phi3type"
     }
 
     def _codegen_type_transpose(input, mp_size, codegen_mp_num=4):
@@ -93,6 +94,20 @@ def prepare_tp_fused_qkvw(module, src, mp_size, gpu_index):
         split_q = q.split(get_shard_size_list(shape[0], mp_size), dim=0)
         return torch.cat((split_q[gpu_index], kv), dim=0)
 
+    def _phi3_type_transpose(input, mp_size):
+        num_kv_heads = get_num_kv_heads()
+        num_heads = get_num_attention_heads()
+        hidden_size = input.shape[1]
+        head_dim = hidden_size // num_heads
+        q_pos = input.shape[0] - 2 * num_kv_heads * head_dim
+        q = input[:q_pos]
+        k = input[q_pos:q_pos + num_kv_heads * head_dim]
+        v = input[q_pos + num_kv_heads * head_dim:]
+        split_q = q.split(get_shard_size_list(q.shape[0], mp_size), dim=0)
+        split_k = k.split(get_shard_size_list(k.shape[0], mp_size), dim=0)
+        split_v = v.split(get_shard_size_list(v.shape[0], mp_size), dim=0)
+        return torch.cat((split_q[gpu_index], split_k[gpu_index], split_v[gpu_index]), dim=0)
+
     def _transpose_fused_qkvw(src, mp_size, fused_qkv_type=None, module=None):
 
         # suppose num_heads=n, q(n)_w means the n-th q head linear weight, the weight format are as following
@@ -110,6 +125,8 @@ def prepare_tp_fused_qkvw(module, src, mp_size, gpu_index):
             return _qwen_type_transpose(src, mp_size, module)
         elif fused_qkv_type == 'bigcodetype':
             return _bigcode_type_transpose(src, mp_size)
+        elif fused_qkv_type == 'phi3type':
+            return _phi3_type_transpose(src, mp_size)
 
         raise ValueError("unknown fused_qkv_type")
 
@@ -123,3 +140,24 @@ def prepare_tp_fused_qkvw(module, src, mp_size, gpu_index):
     warning_once(f"Unrecognized fusedkqv weight type, default to using bloom type,"
                  f"please check in prepare_tp_fused_qkvw() to avoid potential calculation errors")
     return _bloom_type_transpose(src, mp_size)
+
+
+# For phi3 with chunk mlp, adjust the weight order.
+def shard_chunk_mlp(
+    weight,
+    bias,
+    rank,
+    world_size,
+):
+    weight_gate, weight_states = weight.chunk(2, dim=0)
+    total_size = weight_gate.shape[0]
+    split_weight_gate = weight_gate.split(get_shard_size_list(total_size, world_size, "mlp"), dim=0)
+    split_weight_states = weight_states.split(get_shard_size_list(total_size, world_size, "mlp"), dim=0)
+    shard_weight = torch.cat((split_weight_gate[rank], split_weight_states[rank]), dim=0)
+    if bias is not None:
+        bias_gate, bias_states = bias.chunk(2, dim=0)
+        split_bias_gate = bias_gate.split(get_shard_size_list(total_size, world_size, "mlp"), dim=0)
+        split_bias_states = bias_states.split(get_shard_size_list(total_size, world_size, "mlp"), dim=0)
+        return shard_weight, torch.cat((split_bias_gate[rank], split_bias_states[rank]), dim=0)
+
+    return shard_weight, None
