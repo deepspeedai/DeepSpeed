@@ -41,7 +41,7 @@ lnav:
       - title: 'Flops Profiler'
         url: /docs/config-json/#flops-profiler
       - title: 'Monitoring'
-        url: /docs/config-json/#monitoring-module-tensorboard-wandb-csv
+        url: /docs/config-json/#monitoring-module
       - title: 'Communication Logging'
         url: /docs/config-json/#communication-logging
       - title: 'Model Compression'

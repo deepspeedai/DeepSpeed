@@ -1139,15 +1139,16 @@ DeepSpeed Data Efficiency Library includes two techniques: curriculum learning a
 | ---------------------------------------------------------------------------------------------------------------------------- | ------- |
 | List of which step to change difficulty level. One of the `schedule_config` when the `fixed_discrete` schedule_type is used. | N/A     |
 
-### Monitoring Module (TensorBoard, WandB, CSV)
+### Monitoring Module
 
 **Note:** Deepspeed logs to TensorBoard through PyTorch. Logging to TensorBoard requires that the `tensorboard` package is installed (read more in the [PyTorch documentation](https://pytorch.org/docs/1.8.0/tensorboard.html)).
 {: .notice--warning}
 **Note:** Logging to WandB requires that the `wandb` package is installed (read more in the [WandB documentation](https://docs.wandb.ai/quickstart)).
 {: .notice--warning}
+**Note:** Logging to Comet requires that the `comet_ml` package is installed (read more in the [Comet documentation](https://www.comet.com/docs/v2/guides/quickstart/#1-install-and-configure-the-comet-ml-sdk)).
+{: .notice--warning}
 
-
-Deepspeed's Monitor module can log training details into a [Tensorboard](https://www.tensorflow.org/tensorboard)-compatible file, to [WandB](https://wandb.ai/site), or to simple CSV files. Below is an overview of what DeepSpeed will log automatically.
+Deepspeed's Monitor module can log training details into a [Tensorboard](https://www.tensorflow.org/tensorboard)-compatible file, to [WandB](https://wandb.ai/site), to [Comet](https://www.comet.com/site/?utm_source=deepseed&utm_medium=docs&utm_content=docs) or to simple CSV files. Below is an overview of what DeepSpeed will log automatically.
 
 | Field | Description                                                                                                                                                                                                                                                                                               |Conditions |
 | ------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ----- |
@@ -1198,6 +1199,36 @@ Example of <i>**wandb**</i> configuration:
     "group": "my_group",
     "team": "my_team",
     "project": "my_project"
+}
+```
+
+<i>**comet**</i>: [dictionary]
+
+| Fields  | Value   | Default   |
+|---  |---  |---  |
+| enabled   | Whether logging to [Comet](https://www.comet.com/site/) is enabled.   | `false`   |
+| workspace   | Comet workspace name.   | `None`  |
+| project   | Comet project name.   | `None`  |
+| samples_log_interval  | Metrics will be submitted to Comet after processing every `samples_log_intervas` samples.   | `100`   |
+| experiment_name   | The name for comet experiment to be used for logging.   | `None`  |
+| api_key   | Comet API key. It's not recommended to save the Comet API Key in code.  | `None`  |
+| experiment_key  | The key for comet experiment to be used for logging. Must be an alphanumeric string whose length is between 32 and 50 characters.   | `None`  |
+| online  | If True, the data will be logged to Comet server, otherwise it will be stored locally in offline experiment. Default is `True`.   | `None`  |
+| mode  | Control how the Comet experiment is started. "get": Continue logging to an existing experiment identified by the `experiment_key` value. "create": Always creates of a new experiment, useful for HPO sweeps. "get_or_create" (default): Starts a fresh experiment if required, or persists logging to an existing one.   | `None`  |
+
+
+Example of <i>**comet**</i> configuration:
+
+```json
+"comet": {
+    "enabled": true,
+    "workspace": "my_workspace",
+    "project": "my_project",
+    "samples_log_interval": 50,
+    "experiment_name": "llama-fine-tuning",
+    "experiment_key": "0c4a1c4a90664f2a8084e600b19a9d7",
+    "online": false,
+    "mode": "get",
 }
 ```
 
