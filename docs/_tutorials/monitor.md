@@ -11,7 +11,7 @@ In this tutorial, we introduce the DeepSpeed Monitor and provide examples of its
 
 ## Overview
 
-Monitoring model and system metrics during training is vital to ensure hardware resources are fully utilized. The DeepSpeed Monitor enables live logging of metrics through one or more monitoring backends such as PyTorch's [TensorBoard](https://pytorch.org/docs/1.8.0/tensorboard.html), [WandB](https://docs.wandb.ai/quickstart), and simple CSV files.
+Monitoring model and system metrics during training is vital to ensure hardware resources are fully utilized. The DeepSpeed Monitor enables live logging of metrics through one or more monitoring backends such as PyTorch's [TensorBoard](https://pytorch.org/docs/1.8.0/tensorboard.html), [WandB](https://docs.wandb.ai/quickstart), [Comet](https://www.comet.com/site/?utm_source=deepseed&utm_medium=docs&utm_content=tutorial) and simple CSV files.
 
 Below is a live monitoring view for TensorBoard:
 
@@ -21,16 +21,20 @@ Below is a live monitoring view for WandB:
 
 ![WandB Example Output](/assets/images/wandb_monitor.PNG){: .align-center}
 
+Below is a live monitoring view for Comet:
+
+![CometML Example Output](/assets/images/comet_monitor.png){: .align-center}
+
 ## Usage
 
-The DeepSpeed Monitor is configured within the deepspeed [configuration file](/docs/config-json/#monitoring-module-tensorboard-wandb-csv). DeepSpeed will automatically monitor key training metrics, including those tracked with the `wall_clock_breakdown` configuration option. In addition, users can log their own custom events and metrics.
+The DeepSpeed Monitor is configured within the deepspeed [configuration file](/docs/config-json/#monitoring-module). DeepSpeed will automatically monitor key training metrics, including those tracked with the `wall_clock_breakdown` configuration option. In addition, users can log their own custom events and metrics.
 
   - [Automatic Monitoring](#automatic-monitoring)
   - [Custom Monitoring](#custom-monitoring)
 
 ### Automatic Monitoring
 
-When using DeepSpeed for model training, the Monitor can be configured in the DeepSpeed [configuration file](/docs/config-json/#monitoring-module-tensorboard-wandb-csv). No explicit API calls are needed to use the Monitor. The Monitor can be enabled by adding the following field to DeepSpeed's configuration json file. Refer to [Monitoring](/docs/config-json/#monitoring-module-tensorboard-wandb-csv) for details.
+When using DeepSpeed for model training, the Monitor can be configured in the DeepSpeed [configuration file](/docs/config-json/#monitoring-module). No explicit API calls are needed to use the Monitor. The Monitor can be enabled by adding the following field to DeepSpeed's configuration json file. Refer to [Monitoring](/docs/config-json/#monitoring-module) for details.
 
 ```json
 {
@@ -44,6 +48,11 @@ When using DeepSpeed for model training, the Monitor can be configured in the De
     "team": "my_team",
     "group": "my_group",
     "project": "my_project"
+  }
+  "comet": {
+    "enabled": true,
+    "project": "my_project",
+    "experiment_name": "my_experiment"
   }
   "csv_monitor": {
     "enabled": true,

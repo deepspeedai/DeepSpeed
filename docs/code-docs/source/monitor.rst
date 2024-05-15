@@ -29,6 +29,11 @@ WandB
 .. _WandbConfig:
 .. autopydantic_model:: deepspeed.monitor.config.WandbConfig
 
+Comet
+-----
+.. _CometConfig:
+.. autopydantic_model:: deepspeed.monitor.config.CometConfig
+
 CSV Monitor
 -----------
 .. _CSVConfig:
