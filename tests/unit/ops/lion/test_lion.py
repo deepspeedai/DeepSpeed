@@ -12,6 +12,7 @@ from deepspeed.ops.lion import DeepSpeedCPULion
 from unit.common import DistributedTest
 from unit.simple_model import SimpleModel
 from deepspeed.accelerator import get_accelerator
+from deepspeed.ops.op_builder import CPULionBuilder
 
 if torch.half not in get_accelerator().supported_dtypes():
     pytest.skip(f"fp16 not supported, valid dtype: {get_accelerator().supported_dtypes()}", allow_module_level=True)
@@ -27,6 +28,7 @@ class TestLionConfigs(DistributedTest):
     world_size = 1
     reuse_dist_env = True
 
+    @pytest.mark.skipif(not deepspeed.ops.__compatible_ops__[CPULionBuilder.NAME], reason="CPULionBuilder has not been implemented on this system.")
     def test(self,
              optimizer,
              zero_offload,

@@ -9,12 +9,14 @@ import pytest
 import random
 import copy
 import os
+import deepspeed
 from torch import nn
 from deepspeed import DeepSpeedTransformerLayer, DeepSpeedTransformerConfig
 from deepspeed.accelerator import get_accelerator
 from unit.modeling import BertConfig, BertLayerNorm, BertEncoder as BertEncoderPostln
 from unit.modelingpreln import BertEncoder as BertEncoderPreln
 from unit.common import DistributedTest, is_rocm_pytorch
+from deepspeed.ops.op_builder import TransformerBuilder
 
 if torch.half not in get_accelerator().supported_dtypes():
     pytest.skip(f"fp16 not supported, valid dtype: {get_accelerator().supported_dtypes()}", allow_module_level=True)
@@ -257,6 +259,8 @@ class TestCUDABackward(DistributedTest):
         #This is to flush denorms in forward pass. Please refer to https://github.com/pytorch/pytorch/blob/main/docs/source/notes/numerical_accuracy.rst#reduced-precision-fp16-and-bf16-gemms-and-convolutions-on-amd-instinct-mi200-devices
         os.environ['ROCBLAS_INTERNAL_FP16_ALT_IMPL'] = '1'
 
+    @pytest.mark.skipif(not deepspeed.ops.__compatible_ops__[TransformerBuilder.NAME],
+                        reason="TransformerBuilder has not been implemented on this system.")
     def test_backward(self, is_preln, use_fp16, batch_size, hidden_size, seq_len, heads, num_layers, atol):
         # Only run fp16 test cases on devices with FP16 capability.
         if not get_accelerator().is_fp16_supported() and (use_fp16 is True or is_preln is False):
