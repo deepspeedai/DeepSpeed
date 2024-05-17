@@ -67,7 +67,9 @@ public:
                            B,
                            A,
                            C,
-#ifdef __HIP_PLATFORM_AMD__
+// TODO HIP: Remove backward compatibility for torch<=2.0 in future
+#if defined(__HIP_PLATFORM_AMD__) && \
+    ((TORCH_VERSION_MAJOR < 2) || (TORCH_VERSION_MAJOR == 2 && TORCH_VERSION_MINOR == 0))
                            static_cast<rocblas_gemm_algo>(algo));
 #else
                            static_cast<cublasGemmAlgo_t>(algo));
@@ -86,7 +88,8 @@ public:
                            A,
                            C,
                            B,
-#ifdef __HIP_PLATFORM_AMD__
+#if defined(__HIP_PLATFORM_AMD__) && \
+    ((TORCH_VERSION_MAJOR < 2) || (TORCH_VERSION_MAJOR == 2 && TORCH_VERSION_MINOR == 0))
                            static_cast<rocblas_gemm_algo>(algo));
 #else
                            static_cast<cublasGemmAlgo_t>(algo));
@@ -105,7 +108,8 @@ public:
                            B,
                            C,
                            A,
-#ifdef __HIP_PLATFORM_AMD__
+#if defined(__HIP_PLATFORM_AMD__) && \
+    ((TORCH_VERSION_MAJOR < 2) || (TORCH_VERSION_MAJOR == 2 && TORCH_VERSION_MINOR == 0))
                            static_cast<rocblas_gemm_algo>(algo));
 #else
                            static_cast<cublasGemmAlgo_t>(algo));
@@ -121,8 +125,11 @@ public:
         float fast_latency = (std::numeric_limits<float>::max)();
         int fast_algo = 0;
 
-#ifdef __HIP_PLATFORM_AMD__
+#if defined(__HIP_PLATFORM_AMD__) && \
+    ((TORCH_VERSION_MAJOR < 2) || (TORCH_VERSION_MAJOR == 2 && TORCH_VERSION_MINOR == 0))
         for (int algo = (int)rocblas_gemm_algo_standard; algo <= (int)rocblas_gemm_algo_standard;
+#elif defined(__HIP_PLATFORM_AMD__)
+        for (int algo = (int)HIPBLAS_GEMM_DEFAULT; algo <= (int)HIPBLAS_GEMM_DEFAULT;
 #else
         for (int algo = (int)CUBLAS_GEMM_DEFAULT_TENSOR_OP;
              algo <= (int)CUBLAS_GEMM_ALGO15_TENSOR_OP;
@@ -211,7 +218,8 @@ public:
                                         stride_b,
                                         stride_c,
                                         bsz,
-#ifdef __HIP_PLATFORM_AMD__
+#if defined(__HIP_PLATFORM_AMD__) && \
+    ((TORCH_VERSION_MAJOR < 2) || (TORCH_VERSION_MAJOR == 2 && TORCH_VERSION_MINOR == 0))
                                         static_cast<rocblas_gemm_algo>(algo));
 #else
                                         static_cast<cublasGemmAlgo_t>(algo));
@@ -245,7 +253,8 @@ public:
                                         stride_b,
                                         stride_c,
                                         bsz,
-#ifdef __HIP_PLATFORM_AMD__
+#if defined(__HIP_PLATFORM_AMD__) && \
+    ((TORCH_VERSION_MAJOR < 2) || (TORCH_VERSION_MAJOR == 2 && TORCH_VERSION_MINOR == 0))
                                         static_cast<rocblas_gemm_algo>(algo));
 #else
                                         static_cast<cublasGemmAlgo_t>(algo));
@@ -276,7 +285,8 @@ public:
                                         stride_b,
                                         stride_c,
                                         bsz,
-#ifdef __HIP_PLATFORM_AMD__
+#if defined(__HIP_PLATFORM_AMD__) && \
+    ((TORCH_VERSION_MAJOR < 2) || (TORCH_VERSION_MAJOR == 2 && TORCH_VERSION_MINOR == 0))
                                         static_cast<rocblas_gemm_algo>(algo));
 #else
                                         static_cast<cublasGemmAlgo_t>(algo));
@@ -292,11 +302,17 @@ public:
         float fast_latency = (std::numeric_limits<float>::max)();
         int fast_algo = 0;
 
-#ifdef __HIP_PLATFORM_AMD__
+#if defined(__HIP_PLATFORM_AMD__) && \
+    ((TORCH_VERSION_MAJOR < 2) || (TORCH_VERSION_MAJOR == 2 && TORCH_VERSION_MINOR == 0))
         for (int algo = (int)rocblas_gemm_algo_standard; algo <= (int)rocblas_gemm_algo_standard;
+#else
+#ifdef __HIP_PLATFORM_AMD__
+        for (int algo = (int)CUBLAS_GEMM_DEFAULT_TENSOR_OP;
+             algo <= (int)CUBLAS_GEMM_DEFAULT_TENSOR_OP;
 #else
         for (int algo = (int)CUBLAS_GEMM_DEFAULT_TENSOR_OP;
              algo <= (int)CUBLAS_GEMM_ALGO15_TENSOR_OP;
+#endif
 #endif
              algo++) {
             int warm_up = 5;

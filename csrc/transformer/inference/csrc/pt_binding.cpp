@@ -163,7 +163,9 @@ at::Tensor einsum_sec_sm_ecm(at::Tensor& Q, at::Tensor& W)
                    (T*)W.data_ptr(),
                    (T*)Q.data_ptr(),
                    (T*)O.data_ptr(),
-#ifdef __HIP_PLATFORM_AMD__
+// TODO HIP: Remove backward compatibility for torch<=2.0 in future
+#if defined(__HIP_PLATFORM_AMD__) && \
+    ((TORCH_VERSION_MAJOR < 2) || (TORCH_VERSION_MAJOR == 2 && TORCH_VERSION_MINOR == 0))
                    rocblas_gemm_algo_standard);
 #else
                    CUBLAS_GEMM_DEFAULT_TENSOR_OP);
@@ -216,7 +218,8 @@ void attention_unfused(at::Tensor& prev_key_cont,
                                 seq_len * k,
                                 seq_len * soft_len,
                                 bsz * heads,
-#ifdef __HIP_PLATFORM_AMD__
+#if defined(__HIP_PLATFORM_AMD__) && \
+    ((TORCH_VERSION_MAJOR < 2) || (TORCH_VERSION_MAJOR == 2 && TORCH_VERSION_MINOR == 0))
                                 rocblas_gemm_algo_standard);
 #else
                                 CUBLAS_GEMM_DEFAULT_TENSOR_OP);
@@ -253,7 +256,8 @@ void attention_unfused(at::Tensor& prev_key_cont,
                                 seq_len * soft_len,
                                 seq_len * k,
                                 bsz * heads,
-#ifdef __HIP_PLATFORM_AMD__
+#if defined(__HIP_PLATFORM_AMD__) && \
+    ((TORCH_VERSION_MAJOR < 2) || (TORCH_VERSION_MAJOR == 2 && TORCH_VERSION_MINOR == 0))
                                 rocblas_gemm_algo_standard);
 #else
                                 CUBLAS_GEMM_DEFAULT_TENSOR_OP);
@@ -388,7 +392,8 @@ void attention_unfused(T* prev_key_cont,
                                 seq_len * k,
                                 seq_len * soft_len,
                                 bsz * heads,
-#ifdef __HIP_PLATFORM_AMD__
+#if defined(__HIP_PLATFORM_AMD__) && \
+    ((TORCH_VERSION_MAJOR < 2) || (TORCH_VERSION_MAJOR == 2 && TORCH_VERSION_MINOR == 0))
                                 rocblas_gemm_algo_standard);
 #else
                                 CUBLAS_GEMM_DEFAULT_TENSOR_OP);
@@ -421,7 +426,8 @@ void attention_unfused(T* prev_key_cont,
                                 seq_len * soft_len,
                                 seq_len * k,
                                 bsz * heads,
-#ifdef __HIP_PLATFORM_AMD__
+#if defined(__HIP_PLATFORM_AMD__) && \
+    ((TORCH_VERSION_MAJOR < 2) || (TORCH_VERSION_MAJOR == 2 && TORCH_VERSION_MINOR == 0))
                                 rocblas_gemm_algo_standard);
 #else
                                 CUBLAS_GEMM_DEFAULT_TENSOR_OP);
@@ -886,7 +892,8 @@ void quantized_gemm(void* output,
                    weight16,
                    (T*)input,
                    (T*)output,
-#ifdef __HIP_PLATFORM_AMD__
+#if defined(__HIP_PLATFORM_AMD__) && \
+    ((TORCH_VERSION_MAJOR < 2) || (TORCH_VERSION_MAJOR == 2 && TORCH_VERSION_MINOR == 0))
                    rocblas_gemm_algo_standard);
 #else
                    CUBLAS_GEMM_DEFAULT_TENSOR_OP);
@@ -931,7 +938,8 @@ at::Tensor qkv_unfused_cublas(at::Tensor& output,
                        (T*)weight.data_ptr(),
                        workspace,
                        (T*)output.data_ptr(),
-#ifdef __HIP_PLATFORM_AMD__
+#if defined(__HIP_PLATFORM_AMD__) && \
+    ((TORCH_VERSION_MAJOR < 2) || (TORCH_VERSION_MAJOR == 2 && TORCH_VERSION_MINOR == 0))
                        rocblas_gemm_algo_standard);
 #else
                        CUBLAS_GEMM_DEFAULT_TENSOR_OP);
@@ -1003,7 +1011,8 @@ std::vector<at::Tensor> ds_rms_qkv(at::Tensor& input,
                        (T*)weight.data_ptr(),
                        (T*)rms_norm.data_ptr(),
                        (T*)output.data_ptr(),
-#ifdef __HIP_PLATFORM_AMD__
+#if defined(__HIP_PLATFORM_AMD__) && \
+    ((TORCH_VERSION_MAJOR < 2) || (TORCH_VERSION_MAJOR == 2 && TORCH_VERSION_MINOR == 0))
                        rocblas_gemm_algo_standard);
 #else
                        CUBLAS_GEMM_DEFAULT_TENSOR_OP);
@@ -1089,7 +1098,8 @@ void quantized_gemm(at::Tensor& output,
                    (T*)weight16.data_ptr(),
                    (T*)input.data_ptr(),
                    (T*)output.data_ptr(),
-#ifdef __HIP_PLATFORM_AMD__
+#if defined(__HIP_PLATFORM_AMD__) && \
+    ((TORCH_VERSION_MAJOR < 2) || (TORCH_VERSION_MAJOR == 2 && TORCH_VERSION_MINOR == 0))
                    rocblas_gemm_algo_standard);
 #else
                    CUBLAS_GEMM_DEFAULT_TENSOR_OP);
@@ -1135,7 +1145,8 @@ at::Tensor ds_linear_layer(at::Tensor& input,
                    (T*)weight.data_ptr(),
                    (T*)input_cont.data_ptr(),
                    (T*)output.data_ptr(),
-#ifdef __HIP_PLATFORM_AMD__
+#if defined(__HIP_PLATFORM_AMD__) && \
+    ((TORCH_VERSION_MAJOR < 2) || (TORCH_VERSION_MAJOR == 2 && TORCH_VERSION_MINOR == 0))
                    rocblas_gemm_algo_standard);
 #else
                    CUBLAS_GEMM_DEFAULT_TENSOR_OP);
@@ -1353,7 +1364,8 @@ at::Tensor ds_vector_matmul(at::Tensor& input,
                        (T*)weight.data_ptr(),
                        (T*)input.data_ptr(),
                        (T*)output.data_ptr(),
-#ifdef __HIP_PLATFORM_AMD__
+#if defined(__HIP_PLATFORM_AMD__) && \
+    ((TORCH_VERSION_MAJOR < 2) || (TORCH_VERSION_MAJOR == 2 && TORCH_VERSION_MINOR == 0))
                        rocblas_gemm_algo_standard);
 #else
                        CUBLAS_GEMM_DEFAULT_TENSOR_OP);
@@ -1439,7 +1451,8 @@ at::Tensor mlp_unfused_cublas(at::Tensor& output,
                        (T*)weight.data_ptr(),
                        inp_norm,
                        intermediate,
-#ifdef __HIP_PLATFORM_AMD__
+#if defined(__HIP_PLATFORM_AMD__) && \
+    ((TORCH_VERSION_MAJOR < 2) || (TORCH_VERSION_MAJOR == 2 && TORCH_VERSION_MINOR == 0))
                        rocblas_gemm_algo_standard);
 #else
                        CUBLAS_GEMM_DEFAULT_TENSOR_OP);
@@ -1483,7 +1496,8 @@ at::Tensor mlp_unfused_cublas(at::Tensor& output,
                        (T*)weight1.data_ptr(),
                        intermediate,
                        (T*)output.data_ptr(),
-#ifdef __HIP_PLATFORM_AMD__
+#if defined(__HIP_PLATFORM_AMD__) && \
+    ((TORCH_VERSION_MAJOR < 2) || (TORCH_VERSION_MAJOR == 2 && TORCH_VERSION_MINOR == 0))
                        rocblas_gemm_algo_standard);
 #else
                        CUBLAS_GEMM_DEFAULT_TENSOR_OP);
@@ -1617,7 +1631,8 @@ std::vector<at::Tensor> ds_rms_mlp_gemm(at::Tensor& input,
                        (T*)weight_interm.data_ptr(),
                        (T*)inp_norm.data_ptr(),
                        intermediate_ptr,
-#ifdef __HIP_PLATFORM_AMD__
+#if defined(__HIP_PLATFORM_AMD__) && \
+    ((TORCH_VERSION_MAJOR < 2) || (TORCH_VERSION_MAJOR == 2 && TORCH_VERSION_MINOR == 0))
                        rocblas_gemm_algo_standard);
 #else
                        CUBLAS_GEMM_DEFAULT_TENSOR_OP);
@@ -1680,7 +1695,8 @@ std::vector<at::Tensor> ds_rms_mlp_gemm(at::Tensor& input,
                        (T*)weight_out.data_ptr(),
                        intermediate_ptr,
                        (T*)output.data_ptr(),
-#ifdef __HIP_PLATFORM_AMD__
+#if defined(__HIP_PLATFORM_AMD__) && \
+    ((TORCH_VERSION_MAJOR < 2) || (TORCH_VERSION_MAJOR == 2 && TORCH_VERSION_MINOR == 0))
                        rocblas_gemm_algo_standard,
 #else
                        CUBLAS_GEMM_DEFAULT_TENSOR_OP,
@@ -1742,7 +1758,8 @@ at::Tensor fused_gemm_gelu(at::Tensor& input,
                        (T*)weight.data_ptr(),
                        (T*)input.data_ptr(),
                        (T*)intermediate.data_ptr(),
-#ifdef __HIP_PLATFORM_AMD__
+#if defined(__HIP_PLATFORM_AMD__) && \
+    ((TORCH_VERSION_MAJOR < 2) || (TORCH_VERSION_MAJOR == 2 && TORCH_VERSION_MINOR == 0))
                        rocblas_gemm_algo_standard);
 #else
                        CUBLAS_GEMM_DEFAULT_TENSOR_OP);
@@ -1776,7 +1793,8 @@ at::Tensor fused_gemm_gelu(at::Tensor& input,
                        (T*)weight_out.data_ptr(),
                        (T*)intermediate.data_ptr(),
                        (T*)output.data_ptr(),
-#ifdef __HIP_PLATFORM_AMD__
+#if defined(__HIP_PLATFORM_AMD__) && \
+    ((TORCH_VERSION_MAJOR < 2) || (TORCH_VERSION_MAJOR == 2 && TORCH_VERSION_MINOR == 0))
                        rocblas_gemm_algo_standard);
 #else
                        CUBLAS_GEMM_DEFAULT_TENSOR_OP);
