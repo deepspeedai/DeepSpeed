@@ -23,7 +23,7 @@ used throughout the codebase.
 #ifdef __HIP_PLATFORM_AMD__
 
 // constexpr variant of warpSize for templating
-constexpr int hw_warp_size = 64;
+constexpr int hw_warp_size = ROCM_WAVEFRONT_SIZE;
 #define HALF_PRECISION_AVAILABLE = 1
 #include <hip/hip_cooperative_groups.h>
 #include <hip/hip_fp16.h>
