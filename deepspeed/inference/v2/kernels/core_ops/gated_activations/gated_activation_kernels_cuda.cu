@@ -17,7 +17,7 @@ constexpr int access_size = 16;
 constexpr int threads = 1024;
 
 template <ActivationType ActType>
-float gated_act_fn(float x, float y);
+DS_D_INLINE float gated_act_fn(float x, float y);
 
 template <>
 DS_D_INLINE float gated_act_fn<ActivationType::GEGLU>(float x, float y)
