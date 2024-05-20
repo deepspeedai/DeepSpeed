@@ -18,8 +18,8 @@ pytest.cpu_vendor = get_cpu_info()["vendor_id_raw"].lower()
 
 
 def check_equal(first, second, atol=1e-2, verbose=False):
-    x = first.detach().numpy()
-    y = second.detach().numpy()
+    x = first.detach().float().numpy()
+    y = second.detach().float().numpy()
     print("ATOL", atol)
     if verbose:
         print("x = {}".format(x.flatten()))
@@ -40,7 +40,7 @@ def _compare_optimizers(model_size, param1, optimizer1, param2, optimizer2):
     check_equal(param1.float().norm(), param2.float().cpu().norm(), atol=tolerance, verbose=True)
 
 
-@pytest.mark.parametrize('dtype', [torch.half, torch.float], ids=["fp16", "fp32"])
+@pytest.mark.parametrize('dtype', [torch.half, torch.bfloat16, torch.float], ids=["fp16", "bf16", "fp32"])
 @pytest.mark.parametrize('model_size',
                          [
                              (64),

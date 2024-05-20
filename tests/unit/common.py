@@ -82,8 +82,12 @@ def set_accelerator_visible():
                 if match:
                     num_accelerators += 1
         elif get_accelerator().device_name() == 'hpu':
-            hl_smi = subprocess.check_output(['hl-smi', "-L"])
-            num_accelerators = re.findall(r"Module ID\s+:\s+(\d+)", hl_smi.decode())
+            try:
+                hl_smi = subprocess.check_output(['hl-smi', "-L"])
+                num_accelerators = re.findall(r"Module ID\s+:\s+(\d+)", hl_smi.decode())
+            except FileNotFoundError:
+                sim_list = subprocess.check_output(['ls', '-1', '/dev/accel'])
+                num_accelerators = re.findall(r"accel(\d+)", sim_list.decode())
             num_accelerators = sorted(num_accelerators, key=int)
             os.environ["HABANA_VISIBLE_MODULES"] = ",".join(num_accelerators)
         elif get_accelerator().device_name() == 'npu':

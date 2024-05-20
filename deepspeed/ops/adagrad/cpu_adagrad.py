@@ -34,7 +34,7 @@ class DeepSpeedCPUAdagrad(torch.optim.Optimizer):
             group.setdefault('amsgrad', False)
 
     @torch.no_grad()
-    def step(self, closure=None, fp16_param_groups=None):
+    def step(self, closure=None):
         """Update the model parameters.
 
         .. note::
@@ -46,8 +46,6 @@ class DeepSpeedCPUAdagrad(torch.optim.Optimizer):
         Args:
             closure (callable, optional): closure to compute the loss.
                 Defaults to ``None``.
-            fp16_param_groups: FP16 GPU parameters to update. Performing the
-                copy here reduces communication time. Defaults to ``None``.
 
         Returns:
             loss: if ``closure`` is provided. Otherwise ``None``.
@@ -94,16 +92,7 @@ class DeepSpeedCPUAdagrad(torch.optim.Optimizer):
                                                        sparse_exp_avg_sq.values())
                     p[sparse_param.indices()] = sparse_param.values()
                     state['exp_avg_sq'][sparse_exp_avg_sq.indices()] = sparse_exp_avg_sq.values()
-                    if fp16_param_groups is not None:
-                        fp16_param_groups[group_id][param_id][sparse_param.indices()] = sparse_param.values()
                 else:
-                    if fp16_param_groups is not None:
-                        self.ds_opt_adagrad.adagrad_update_copy(self.opt_id, state['step'], group['lr'], group['eps'],
-                                                                group['weight_decay'], p.data, p.grad.data,
-                                                                state['exp_avg_sq'],
-                                                                fp16_param_groups[group_id][param_id].data)
-                    else:
-                        self.ds_opt_adagrad.adagrad_update(self.opt_id, state['step'], group['lr'], group['eps'],
-                                                           group['weight_decay'], p.data, p.grad.data,
-                                                           state['exp_avg_sq'])
+                    self.ds_opt_adagrad.adagrad_update(self.opt_id, state['step'], group['lr'], group['eps'],
+                                                       group['weight_decay'], p.data, p.grad.data, state['exp_avg_sq'])
         return loss

@@ -18,8 +18,8 @@ if not deepspeed.ops.__compatible_ops__[CPUAdagradBuilder.NAME]:
 
 
 def check_equal(first, second, atol=1e-2, verbose=False):
-    x = first.detach().numpy()
-    y = second.detach().numpy()
+    x = first.detach().float().numpy()
+    y = second.detach().float().numpy()
     if verbose:
         print("x = {}".format(x.flatten()))
         print("y = {}".format(y.flatten()))
