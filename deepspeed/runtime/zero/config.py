@@ -20,6 +20,7 @@ ZeRO optimization should be enabled as:
     "stage": [0|1|2],
     "stage3_max_live_parameters" : 1000000000,
     "stage3_max_reuse_distance" : 1000000000,
+    "stage3_use_all_reduce_for_fetch_params": [true|false],
     "allgather_partitions": [true|false],
     "use_multi_rank_bucket_allreduce": [true|false],
     "allgather_bucket_size": 500000000,
@@ -232,6 +233,12 @@ class DeepSpeedZeroConfig(DeepSpeedConfigModel):
     Since the weights are partitioned across GPUs, they aren’t part of
     ``state_dict``, so this function automatically gathers the weights when
     this option is enabled and then saves the fp16 model weights.
+    """
+
+    use_all_reduce_for_fetch_params: bool = Field(False, alias="stage3_use_all_reduce_for_fetch_params")
+    """
+    Use all_reduce op when fetching module parameters at stage3. This improves performance by reducing
+    the overhead of concatenation and slicing on the host.
     """
 
     stage3_gather_fp16_weights_on_model_save: bool = Field(False,
