@@ -20,11 +20,6 @@ class CPUAdamBuilder(CPUOpBuilder):
     def sources(self):
         return ['csrc/adam/cpu_adam.cpp', 'csrc/adam/cpu_adam_impl.cpp']
 
-    def cxx_args(self):
-        args = super().cxx_args()
-        args += ['-DENABLE_BFLOAT16']
-        return args
-
     def libraries_args(self):
         args = super().libraries_args()
         return args

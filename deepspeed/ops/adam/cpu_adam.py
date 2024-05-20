@@ -107,7 +107,7 @@ class DeepSpeedCPUAdam(torch.optim.Optimizer):
             group.setdefault('amsgrad', False)
 
     @torch.no_grad()
-    def step(self, closure=None, fp16_param_groups=None):
+    def step(self, closure=None):
         """Update the model parameters.
 
         .. note::
@@ -119,8 +119,6 @@ class DeepSpeedCPUAdam(torch.optim.Optimizer):
         Args:
             closure (callable, optional): closure to compute the loss.
                 Defaults to ``None``.
-            fp16_param_groups: FP16 GPU parameters to update. Performing the
-                copy here reduces communication time. Defaults to ``None``.
 
         Returns:
             loss: if ``closure`` is provided. Otherwise ``None``.
@@ -133,13 +131,6 @@ class DeepSpeedCPUAdam(torch.optim.Optimizer):
 
         # intended device for step
         device = torch.device('cpu')
-
-        # converting the fp16 params to a group of parameter
-        if type(fp16_param_groups) is list:
-            if type(fp16_param_groups[0]) is not list:
-                fp16_param_groups = [fp16_param_groups]
-        elif fp16_param_groups is not None:
-            fp16_param_groups = [[fp16_param_groups]]
 
         for group_id, group in enumerate(self.param_groups):
             for param_id, p in enumerate(group['params']):
@@ -169,13 +160,7 @@ class DeepSpeedCPUAdam(torch.optim.Optimizer):
                 state['step'] += 1
                 beta1, beta2 = group['betas']
 
-                if fp16_param_groups is not None:
-                    self.ds_opt_adam.adam_update_copy(self.opt_id, state['step'], group['lr'], beta1, beta2,
-                                                      group['eps'], group['weight_decay'], group['bias_correction'],
-                                                      p.data, p.grad.data, state['exp_avg'], state['exp_avg_sq'],
-                                                      fp16_param_groups[group_id][param_id].data)
-                else:
-                    self.ds_opt_adam.adam_update(self.opt_id, state['step'], group['lr'], beta1, beta2, group['eps'],
-                                                 group['weight_decay'], group['bias_correction'], p.data, p.grad.data,
-                                                 state['exp_avg'], state['exp_avg_sq'])
+                self.ds_opt_adam.adam_update(self.opt_id, state['step'], group['lr'], beta1, beta2, group['eps'],
+                                             group['weight_decay'], group['bias_correction'], p.data, p.grad.data,
+                                             state['exp_avg'], state['exp_avg_sq'])
         return loss
