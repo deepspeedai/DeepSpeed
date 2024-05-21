@@ -220,7 +220,7 @@ def top1gating(logits: Tensor,
             tp = 1 if groups.mpu is None else bwc_tensor_model_parallel_world_size(mpu=groups.mpu)
             new_capacity = torch.ceil(new_capacity / tp).mul(tp).to(new_capacity.dtype)
         # Make sure the capacity value does not exceed the number of tokens.
-        capacity = min(new_capacity, torch.tensor(mask1.size(0)))
+        capacity = min(new_capacity, torch.tensor(mask1.size(0)).to(new_capacity.device))
 
     # Compute l_aux
     me = torch.mean(gates, dim=0)
