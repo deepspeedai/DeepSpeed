@@ -1474,7 +1474,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
         for param_id in self.is_grad_computed[i][partition_id]:
             param = self.param_dict[param_id]
             if param.grad is None:
-                param.grad = torch.zero_like(param)
+                param.grad = torch.zeros_like(param)
 
     ######################Reduction Related Methods##############################
     def allreduce_bucket(self, bucket, rank=None, log=None, divide=True, process_group=None):
