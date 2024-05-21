@@ -88,7 +88,7 @@ def CompiledModuleWrapper(mod, compile_config: Union[CompileConfig, None] = None
     class wrapper(mod.__class__):
 
         def __init__(self, module, compile_config: Union[CompileConfig, None] = None):
-            self.__dict__ = module.__dict__.copy()
+            self.__dict__ = {k: module.__dict__[k] for k in module.__dict__ if not k in self.__class__.__dict__}
 
             assert is_compile_supported(), "torch.compile is not supported on this version of PyTorch."
 
