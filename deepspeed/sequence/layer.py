@@ -81,7 +81,7 @@ class DistributedAttention(torch.nn.Module):
         self.scatter_idx = scatter_idx
         self.gather_idx = gather_idx
 
-    def forward(self, query: Tensor, key: Tensor, value: Tensor, *args: Any) -> Tensor:
+    def forward(self, query: Tensor, key: Tensor, value: Tensor, *args: Any, **kwargs) -> Tensor:
         """ forward
 
         Arguments:
@@ -101,7 +101,7 @@ class DistributedAttention(torch.nn.Module):
         value_layer = _SeqAllToAll.apply(self.spg, value, self.scatter_idx, self.gather_idx)
 
         #out shape : e.g., [s:h/p:]
-        context_layer = self.local_attn(query_layer, key_layer, value_layer, *args)
+        context_layer = self.local_attn(query_layer, key_layer, value_layer, *args, **kwargs)
 
         output = _SeqAllToAll.apply(self.spg, context_layer, self.gather_idx, self.scatter_idx)
 
