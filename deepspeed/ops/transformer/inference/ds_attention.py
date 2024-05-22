@@ -93,7 +93,7 @@ class DeepSpeedSelfAttention(nn.Module):
         if isinstance(qkv_out, list) or isinstance(qkv_out, tuple):
             qkv_out = qkv_out[0]
 
-        no_masking = input_mask is None
+        no_masking = input_mask is None or input_mask is False
 
         if no_masking:
             input_mask = torch.empty(1)
