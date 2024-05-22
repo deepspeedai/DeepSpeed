@@ -110,7 +110,7 @@ class TestCheckpointShardinAutoTP(DistributedTest):
                 cached_repo_dir = snapshot_download(
                     model_name,
                     local_files_only=is_offline_mode(),
-                    cache_dir=os.getenv("TRANSFORMERS_CACHE", None),
+                    cache_dir=os.getenv("HF_HOME", None),
                     ignore_patterns=["*.safetensors", "*.msgpack", "*.h5"],
                 )
                 file_list = [str(entry) for entry in Path(cached_repo_dir).rglob("*.[bp][it][n]") if entry.is_file()]
