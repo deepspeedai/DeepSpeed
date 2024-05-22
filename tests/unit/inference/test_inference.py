@@ -84,7 +84,7 @@ class ModelInfo:
 def _hf_model_list() -> List[ModelInfo]:
     """ Caches HF model list to avoid repeated API calls """
 
-    cache_dir = os.getenv("TRANSFORMERS_CACHE", "~/.cache/huggingface")
+    cache_dir = os.getenv("HF_HOME", "~/.cache/huggingface")
     cache_file_path = os.path.join(cache_dir, "DS_model_cache.pkl")
     cache_expiration_seconds = 60 * 60 * 24  # 1 day
 

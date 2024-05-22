@@ -22,7 +22,7 @@ runs:
     - id: set-env-vars
       run: |
         echo TEST_DATA_DIR=/blob/ >> $GITHUB_ENV
-        echo TRANSFORMERS_CACHE=/blob/transformers_cache/ >> $GITHUB_ENV
+        echo HF_HOME=/blob/hf_home/ >> $GITHUB_ENV
         echo TORCH_EXTENSIONS_DIR=./torch-extensions/ >> $GITHUB_ENV
         echo TORCH_CACHE=/blob/torch_cache/ >> $GITHUB_ENV
         echo HF_DATASETS_CACHE=/blob/datasets_cache/ >> $GITHUB_ENV
