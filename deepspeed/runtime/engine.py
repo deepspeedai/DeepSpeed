@@ -271,11 +271,10 @@ class DeepSpeedEngine(Module):
         # Configure wall clock timers
         self.timers = SynchronizedWallClockTimer()
         # Throughput timer
-        self.tput_timer = ThroughputTimer(
-            batch_size=self.train_batch_size(),
-            steps_per_output=self.steps_per_print(),
-            monitor_memory=False,
-        )
+        self.tput_timer = ThroughputTimer(self._config.timers_config,
+                                          batch_size=self.train_batch_size(),
+                                          steps_per_output=self.steps_per_print(),
+                                          monitor_memory=False)
 
         log_dist(f"DeepSpeed Flops Profiler Enabled: {self.flops_profiler_enabled()}", ranks=[0])
 
