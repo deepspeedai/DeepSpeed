@@ -43,7 +43,7 @@ class MiCS_AllGatherCoalescedHandle(AllGatherCoalescedHandle):
         """
         # let the current stream to op
         try:
-            print("HANDLE", self.allgather_handle)
+            # print("HANDLE", self.allgather_handle)
             instrument_w_nvtx(self.allgather_handle.wait)()
         except (ValueError, RuntimeError) as e:
             log_dist(
