@@ -52,8 +52,8 @@ class FPQuantizerBuilder(CUDAOpBuilder):
 
     def sources(self):
         return [
-            "csrc/fp_quantizer/quantize.cu",
-            "csrc/fp_quantizer/quantize.cpp",
+            "csrc/fp_quantizer/fp_quantize.cu",
+            "csrc/fp_quantizer/fp_quantize.cpp",
         ]
 
     def extra_ldflags(self):
