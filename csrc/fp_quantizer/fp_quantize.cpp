@@ -3,7 +3,7 @@
 
 // DeepSpeed Team
 
-#include "quantize.h"
+#include "fp_quantize.h"
 
 #include <c10/cuda/CUDAStream.h>
 #include <torch/extension.h>
