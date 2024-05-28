@@ -79,6 +79,7 @@
     top: auto;
     right: 0;
     width: $right-sidebar-width-narrow;
+    margin-right: -1.5 * $right-sidebar-width-narrow;
     padding-left: 1em;
     z-index: 10;
 
@@ -93,6 +94,7 @@
 
   @include breakpoint($x-large) {
     width: $right-sidebar-width;
+    margin-right: -1.5 * $right-sidebar-width-narrow;
   }
 }
 
