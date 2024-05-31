@@ -241,7 +241,7 @@ std::vector<at::Tensor> quantized_reduction(at::Tensor& input_vals,
                               .device(at::kCUDA)
                               .requires_grad(false);
 
-    std::vector<long int> sz(input_vals.sizes().begin(), input_vals.sizes().end());
+    std::vector<int64_t> sz(input_vals.sizes().begin(), input_vals.sizes().end());
     sz[sz.size() - 1] = sz.back() / devices_per_node;  // num of GPU per nodes
     const int elems_per_in_tensor = at::numel(input_vals) / devices_per_node;
     auto output = torch::empty(sz, output_options);
