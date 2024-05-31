@@ -12,6 +12,7 @@
 
 #define TILE (128 * 1024 * 1024)
 #if defined(__AVX512__) or defined(__AVX256__)
+#include <immintrin.h>
 
 template <typename T>
 inline T readAs(const void* src)
