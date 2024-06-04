@@ -2432,7 +2432,9 @@ def estimate_zero2_model_states_mem_needs(total_params,
         gpu_mem = 2 * total_params
         cpu_mem = total_params * max(4 * total_gpus, 16) * additional_buffer_factor
     else:
-        gpu_mem = 4 * total_params + int(16 * total_params / total_gpus)
+        # GPU's total_params multipliers: 2 = params_16bit,
+        # 18 = 2_grads_16bit + 4_grads_32bit + 4_params_32bit + 8_optimizer_states_32bit(momentum and variance)
+        gpu_mem = 2 * total_params + int(18 * total_params / total_gpus)
         cpu_mem = total_params * 4 * num_gpus_per_node * additional_buffer_factor
 
     return int(cpu_mem), int(gpu_mem)
