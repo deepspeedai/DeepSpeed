@@ -123,6 +123,10 @@ class OnebitLamb(torch.optim.Optimizer):
             from deepspeed.runtime.comm.hccl import HcclBackend
             self.using_pipeline = hasattr(self.deepspeed, 'pipeline_enable_backward_allreduce')
             self.comm_backend_handle = HcclBackend(self.deepspeed.mpu)
+        elif self.comm_backend_name == 'compressed':
+            from deepspeed.runtime.comm.compressed import CompressedBackend
+            self.using_pipeline = hasattr(self.deepspeed, 'pipeline_enable_backward_allreduce')
+            self.comm_backend_handle = CompressedBackend(self.deepspeed.mpu)
 
         self.size = self.comm_backend_handle.size
 
