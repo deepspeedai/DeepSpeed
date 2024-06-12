@@ -74,8 +74,8 @@ class XPU_Accelerator(DeepSpeedAccelerator):
     def manual_seed_all(self, seed):
         return torch.xpu.manual_seed_all(seed)
 
-    def initial_seed(self, seed):
-        return torch.xpu.initial_seed(seed)
+    def initial_seed(self):
+        return torch.xpu.initial_seed()
 
     def default_generator(self, device_index):
         return torch.xpu.default_generators[device_index]

@@ -84,8 +84,8 @@ class NPU_Accelerator(DeepSpeedAccelerator):
     def manual_seed_all(self, seed):
         return torch.npu.manual_seed_all(seed)
 
-    def initial_seed(self, seed):
-        return torch.npu.initial_seed(seed)
+    def initial_seed(self):
+        return torch.npu.initial_seed()
 
     def default_generator(self, device_index):
         return torch.npu.default_generators[device_index]
