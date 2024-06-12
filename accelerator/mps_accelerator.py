@@ -77,7 +77,7 @@ class MPS_Accelerator(DeepSpeedAccelerator):
     def seed(self):
         return torch.mps.seed()
 
-    def initial_seed(self, seed):
+    def initial_seed(self):
         return
 
     def default_generator(self, device_index):

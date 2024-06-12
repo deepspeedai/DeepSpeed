@@ -81,7 +81,7 @@ class DeepSpeedAccelerator(ABC):
         ...
 
     @abc.abstractmethod
-    def initial_seed(self, seed):
+    def initial_seed(self):
         ...
 
     @abc.abstractmethod

@@ -74,13 +74,13 @@ class HPU_Accelerator(DeepSpeedAccelerator):
         return self.hpu.random.get_rng_state()
 
     def manual_seed(self, seed):
-        self.hpu.random.manual_seed(seed)
+        return self.hpu.random.manual_seed(seed)
 
     def manual_seed_all(self, seed):
         self.hpu.random.manual_seed_all(seed)
 
-    def initial_seed(self, seed):
-        self.hpu.random.initial_seed(seed)
+    def initial_seed(self):
+        return self.hpu.random.initial_seed()
 
     def default_generator(self, device_index):
         return self.hpu.random.default_generators[device_index]
