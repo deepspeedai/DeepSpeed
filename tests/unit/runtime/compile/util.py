@@ -84,7 +84,6 @@ def compare_loss(self, config, dtype):
     baseline_config = deepcopy(config)
     baseline_config["zero_optimization"]["stage"] = 0
     baseline_config["zero_optimization"]["offload_optimizer"] = {}
-    baseline_config["compile"]["enabled"] = False
     baseline_engine, baseline_optimizer, _, _ = deepspeed.initialize(config=baseline_config,
                                                                      model=baseline_model,
                                                                      model_parameters=baseline_model.parameters())
@@ -101,6 +100,7 @@ def compare_loss(self, config, dtype):
     target_engine, target_optimizer, _, _ = deepspeed.initialize(config=config,
                                                                  model=target_model,
                                                                  model_parameters=target_model.parameters())
+    target_engine.compile()
 
     train_batch_size = config["train_micro_batch_size_per_gpu"]
 
