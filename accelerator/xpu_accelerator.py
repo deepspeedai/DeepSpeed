@@ -159,7 +159,10 @@ class XPU_Accelerator(DeepSpeedAccelerator):
         return
 
     def lazy_call(self, callback):
-        return torch.xpu.lazy_init._lazy_call(callback)
+        if hasattr(torch.xpu, "_lazy_call"):
+            return torch.xpu._lazy_call(callback)
+        else:
+            return torch.xpu.lazy_init._lazy_call(callback)
 
     def communication_backend_name(self):
         return self._communication_backend_name
