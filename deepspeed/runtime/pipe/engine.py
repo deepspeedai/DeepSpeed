@@ -742,7 +742,7 @@ class PipelineEngine(DeepSpeedEngine):
                 raise ValueError("expecting a tensor or a tuple of tensors")
             part = PartitionedTensor(tensor=first_output, group=self.grid.get_slice_parallel_group())
             # Clear the large output data, but save the computation graph
-            first_output.data = torch.zeros(1)
+            first_output.data = torch.zeros(1, device=first_output.data.device)
             self.pipe_buffers['output_tensors'][buffer_id] = first_output
             # Inject the partitioned tensor into the output before sending
             outputs = (part.to_meta(), part.data(), *outputs_tail)
