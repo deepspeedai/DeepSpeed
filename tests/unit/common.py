@@ -203,10 +203,13 @@ class DistributedExec(ABC):
         master_port = get_master_port()
         skip_msg = mp.Queue()  # Allows forked processes to share pytest.skip reason
         processes = []
+        prev_start_method = mp.get_start_method()
+        mp.set_start_method('spawn', force=True)
         for local_rank in range(num_procs):
             p = mp.Process(target=self._dist_run, args=(local_rank, num_procs, master_port, skip_msg))
             p.start()
             processes.append(p)
+        mp.set_start_method(prev_start_method, force=True)
 
         # Now loop and wait for a test to complete. The spin-wait here isn't a big
         # deal because the number of processes will be O(#GPUs) << O(#CPUs).
