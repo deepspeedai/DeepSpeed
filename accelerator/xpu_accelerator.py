@@ -225,7 +225,7 @@ class XPU_Accelerator(DeepSpeedAccelerator):
         if align_bytes == 1:
             return tensor.pin_memory(device=self.current_device_name())
         elif align_bytes == 0:
-            from intel_extension_for_deepspeed.op_builder.async_io import AsyncIOBuilder
+            from deepspeed.ops.op_builder.xpu import AsyncIOBuilder
             self.aio_handle = AsyncIOBuilder().load().aio_handle(128 * 1024, 8, False, False, False)
             aligned_t = self.aio_handle.new_cpu_locked_tensor(tensor.numel(), tensor)
             aligned_t = aligned_t[:tensor.numel()].copy_(tensor)
