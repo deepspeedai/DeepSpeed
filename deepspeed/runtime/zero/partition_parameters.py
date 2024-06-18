@@ -1689,7 +1689,7 @@ class Init(InsertPostInitMethodToModuleSubClasses):
             one_dim_param = param.contiguous().view(-1)
 
             # ds_numel is unpadded, so the last chunk of the secondary tensor might not be secondary_partition_size
-            sec_numel = param.ds_numel - secondary_start if secondary_end > param.ds_numel else secondary_partition_size
+            sec_numel = max(0, min(param.ds_numel - secondary_start, secondary_partition_size))
 
             # copy from full tensor to secondary tensor
             param.ds_secondary_tensor.narrow(0, 0,
