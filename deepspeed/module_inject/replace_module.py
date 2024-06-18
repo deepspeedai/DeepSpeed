@@ -14,6 +14,7 @@ from deepspeed.ops.transformer.inference.diffusers_2d_transformer import Diffuse
 from deepspeed.accelerator import get_accelerator
 from .replace_policy import replace_policies, generic_policies
 from .auto_tp import AutoTP, ReplaceWithTensorSlicing, Loading
+from .layers import TensorParallelOcShardConv2d, TensorParallelIcShardConv2d
 
 from deepspeed import comm as dist
 from deepspeed.module_inject.tp_shard import set_num_kv_heads, set_n_embd, set_num_attention_heads
@@ -340,6 +341,28 @@ def replace_transformer_layer(orig_layer_impl, model, checkpoint_dict, config, m
             module = replace_wo_policy(module, ("embed_out", ), 0, "embed_out")
         return module
 
+    def conv2d_parallel_shard_weights(model, rank, world_size):
+        # add conv policy
+        shard_oc_name = ["conv1"]
+        shard_ic_name = ["conv2"]
+        for name, sub_m in model.named_children():
+            for l_name, l_sub_m in sub_m.named_children():
+                if l_name in shard_oc_name:
+                    TPConv2d = TensorParallelOcShardConv2d(
+                        l_sub_m,
+                        rank,
+                        world_size,
+                    )
+                    setattr(sub_m, l_name, TPConv2d)
+                if l_name in shard_ic_name:
+                    TPConv2d = TensorParallelIcShardConv2d(
+                        l_sub_m,
+                        rank,
+                        world_size,
+                    )
+                    setattr(sub_m, l_name, TPConv2d)
+            conv2d_parallel_shard_weights(sub_m, rank, world_size)
+
     if checkpoint_dict is not None and not config.replace_with_kernel_inject:
         # AutoTP shard loading
         checkpoint = checkpoint_dict["checkpoints"]
@@ -354,6 +377,10 @@ def replace_transformer_layer(orig_layer_impl, model, checkpoint_dict, config, m
             pbar.update(1)
             gc.collect()
         replaced_module = set_lm_head(replaced_module)
+        # conv2d tp module replace
+        # Now is for yuan model. Add model list and conv policy to decide whether to replace conv.
+        if 'Yuan' in str(replaced_module):
+            conv2d_parallel_shard_weights(replaced_module, dist.get_rank(), dist.get_world_size())
     else:
         replaced_module = replace_module(model=model,
                                          orig_class=orig_layer_impl,

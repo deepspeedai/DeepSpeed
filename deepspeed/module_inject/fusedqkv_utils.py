@@ -142,6 +142,61 @@ def prepare_tp_fused_qkvw(module, src, mp_size, gpu_index):
     return _bloom_type_transpose(src, mp_size)
 
 
+# For share qk type:
+# q = [q1,...,q_{n/4}, q_{n/2+1},...,q_{3n/4}, k1,...,k_{n/4}, k_{n/2+1},...,k_{3n/4}]
+# k = [q_{n/4+1},...,q_{n/2}, q_{3n/4+1},...,qn, k_{n/4+1},...,k_{n/2}, k{3n/4+1},...,kn]
+# Avoid modifying the modeling code. We adjust the value and oproj weight to fit this qk type.
+def shard_value_with_share_qk(
+        weight,
+        bias,
+        rank,
+        world_size,
+        shard_value=True  # True -> shard_value; False -> shard_oproj
+):
+    if shard_value:
+        total_size = weight.shape[0]
+        weight_cat_dim = 0
+    else:
+        total_size = weight.shape[1]
+        weight_cat_dim = 1
+    num_heads = get_num_kv_heads()
+    head_dim = total_size // num_heads
+    assert (num_heads % world_size == 0)
+    if world_size > num_heads // 2:
+        RuntimeError(f"world_size {world_size} is larger than half of num_heads {num_heads}")
+    head_per_rank = num_heads // world_size
+    q_head_start = rank * head_per_rank
+    # mapping q_head to v_head
+    v_head_ids = []
+    i = 0
+    # mapping neighbor q_head to v_head
+    while i < head_per_rank:
+        v_head_ids.append(q_head_start // 2)
+        q_head_start += 2
+        i = i + 2
+
+    # mapping neighbor k_head to v_head
+    v_head_ids.extend([i + num_heads // 2 for i in v_head_ids])
+    sharded_weight = []
+    sharded_bias = []
+    for head_id in v_head_ids:
+        if shard_value:
+            sharded_weight.append(weight[head_id * head_dim:(head_id + 1) * head_dim])
+            if bias is not None:
+                sharded_bias.append(bias.data[head_id * head_dim:(head_id + 1) * head_dim])
+        else:
+            sharded_weight.append(weight[:, head_id * head_dim:(head_id + 1) * head_dim])
+    sharded_weight = torch.cat(sharded_weight, dim=weight_cat_dim)
+    if bias is not None:
+        if shard_value:
+            sharded_bias = torch.cat(sharded_bias, dim=0)
+        else:
+            bias = bias / float(world_size)
+        return torch.nn.Parameter(sharded_weight), torch.nn.Parameter(sharded_bias)
+    else:
+        return torch.nn.Parameter(sharded_weight), None
+
+
 # For phi3 with chunk mlp, adjust the weight order.
 def shard_chunk_mlp(
     weight,
