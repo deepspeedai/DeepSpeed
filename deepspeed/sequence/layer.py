@@ -33,7 +33,7 @@ def single_all_to_all(input, scatter_idx, gather_idx, group):
 
     # if scattering the seq-dim, transpose the heads back to the original dimension
     if scatter_idx < 2:
-        output = output.transpose(0, 1).contiguous()
+        output = output.transpose(0, 2).contiguous()
 
     return output.reshape(
         inp_shape[: gather_idx] + \
