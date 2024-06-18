@@ -5,7 +5,11 @@
 
 import copy
 
-from numpy import BUFSIZE
+import numpy
+if numpy.__version__ < '2.0.0':
+    from numpy import BUFSIZE
+else:
+    from numpy._core.umath import BUFSIZE
 import json
 import subprocess
 import sys
