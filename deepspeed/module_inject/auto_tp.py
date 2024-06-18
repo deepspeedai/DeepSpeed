@@ -13,7 +13,7 @@ import torch
 from deepspeed import comm as dist
 from .layers import LinearAllreduce, LinearLayer, LmHeadLinearAllreduce
 from deepspeed.accelerator import get_accelerator
-from .fusedqkv_utils import require_tp_fused_qkvw, prepare_tp_fused_qkvw, shard_chunk_mlp
+from .fusedqkv_utils import require_tp_fused_qkvw, prepare_tp_fused_qkvw, shard_value_with_share_qk, shard_chunk_mlp
 from deepspeed.module_inject.tp_shard import get_shard_size, get_shard_size_list
 
 
@@ -134,7 +134,7 @@ class Loading():
         load_layer_names = [
             "LPLayerNorm", "SharedEmbedding", "OPTLearnedPositionalEmbedding", "LlamaRMSNorm", "FalconLinear",
             "MistralRMSNorm", "T5LayerNorm", "MixtralRMSNorm", "Phi3RotaryEmbedding", "Phi3SuScaledRotaryEmbedding",
-            "Phi3RMSNorm"
+            "Phi3RMSNorm", "YuanRMSNorm", "YuanRotaryEmbedding"
         ]
         return module.__class__ in load_layers or module._get_name() in load_layer_names
 
@@ -331,6 +331,16 @@ class AutoTP():
         # For mixtral-7x8b, need to skip MoE gate linear replace.
         if name == "block_sparse_moe.gate":
             return child
+        # For Yuan model
+        if 'Yuan' in str(self.module):
+            if 'v_proj' in name:
+                weight, bias = shard_value_with_share_qk(child.weight.data, child.bias, dist.get_rank(),
+                                                         dist.get_world_size(), True)
+                return LinearLayer(weight=weight, bias=bias)
+            elif 'o_proj' in name:
+                weight, bias = shard_value_with_share_qk(child.weight.data, child.bias, dist.get_rank(),
+                                                         dist.get_world_size(), False)
+                return LinearAllreduce(weight, bias, self.mp_group)
         # for phi3.
         if 'gate_up_proj' in name:
             weight, bias = shard_chunk_mlp(child.weight.data, child.bias, dist.get_rank(), dist.get_world_size())
@@ -412,11 +422,13 @@ class AutoTP():
     def update_mp_params(self, child):
         if getattr(child, "replaced", False) == True:
             return
-        for param in [
-                "n_heads", "inner_dim", "num_heads", "num_kv", "num_attention_heads", "num_attn_heads",
-                "all_head_size", "embed_dim", "hidden_size", "num_key_value_heads", "num_kv_heads", "kv_n_heads",
-                "d_model"
-        ]:
+        param_list = [
+            "n_heads", "inner_dim", "num_heads", "num_kv", "num_attention_heads", "num_attn_heads", "all_head_size",
+            "embed_dim", "hidden_size", "num_key_value_heads", "num_kv_heads", "kv_n_heads", "d_model"
+        ]
+        for param in param_list:
+            if "Yuan" in str(child) and 'embed_dim' in param_list:
+                param_list.remove('embed_dim')
             if hasattr(child, param):
                 param_val = getattr(child, param)
                 setattr(child, param, get_shard_size(param_val, self.mp_size))
