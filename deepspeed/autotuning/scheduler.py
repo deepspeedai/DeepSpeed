@@ -5,11 +5,6 @@
 
 import copy
 
-import numpy
-if numpy.__version__ < '2.0.0':
-    from numpy import BUFSIZE
-else:
-    from numpy._core.umath import BUFSIZE
 import json
 import subprocess
 import sys
@@ -22,7 +17,7 @@ import hjson
 from tqdm import tqdm
 
 from ..utils import logger
-from .constants import AUTOTUNING, AUTOTUNING_METRIC_PATH
+from .constants import AUTOTUNING, AUTOTUNING_METRIC_PATH, BUFSIZE
 from .utils import get_val_by_key, search_error, was_interruptted
 """
 thread-0: loop over experiment queue dispatching experiments if they become available
