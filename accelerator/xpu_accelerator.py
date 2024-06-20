@@ -9,6 +9,9 @@ import intel_extension_for_pytorch as ipex  # noqa: F401 # type: ignore
 import oneccl_bindings_for_pytorch  # noqa: F401 # type: ignore
 import functools
 
+import importlib
+import inspect
+
 
 class XPU_Accelerator(DeepSpeedAccelerator):
 
@@ -17,6 +20,7 @@ class XPU_Accelerator(DeepSpeedAccelerator):
         self._communication_backend_name = 'ccl'
         self._compile_backend = "inductor"
         self.aligned_tensors = []
+        self.class_dict = None
 
     def is_synchronized_device(self):
         return False
@@ -257,35 +261,29 @@ class XPU_Accelerator(DeepSpeedAccelerator):
         else:
             return False
 
+    def _lazy_init_class_dict(self):
+        if self.class_dict:
+            return
+
+        op_builder_module = importlib.import_module(self.op_builder_dir())
+
+        # get op builder class from op_builder/xpu/__init__.py
+        self.class_dict = {}
+        for class_name, class_obj in inspect.getmembers(op_builder_module, inspect.isclass):
+            self.class_dict[class_name] = class_obj
+
     # create an instance of op builder and return, name specified by class_name
-    def create_op_builder(self, op_name):
-        builder_class = self.get_op_builder(op_name)
-        if builder_class != None:
-            return builder_class()
-        return None
+    def create_op_builder(self, class_name):
+        builder_class = self.get_op_builder(class_name)
+        return builder_class()
 
     # return an op builder class, name specified by class_name
     def get_op_builder(self, class_name):
-        try:
-            # is op_builder from deepspeed or a 3p version? this should only succeed if it's deepspeed
-            # if successful this also means we're doing a local install and not JIT compile path
-            from op_builder import __deepspeed__  # noqa: F401 # type: ignore
-            from op_builder.xpu import CPUAdagradBuilder, CPUAdamBuilder, FusedAdamBuilder, AsyncIOBuilder, PackbitsBuilder
-        except ImportError:
-            from deepspeed.ops.op_builder.xpu import CPUAdagradBuilder, CPUAdamBuilder, FusedAdamBuilder, AsyncIOBuilder, PackbitsBuilder
-
-        if class_name == "AsyncIOBuilder":
-            return AsyncIOBuilder
-        elif class_name == "CPUAdagradBuilder":
-            return CPUAdagradBuilder
-        elif class_name == "CPUAdamBuilder":
-            return CPUAdamBuilder
-        elif class_name == "FusedAdamBuilder":
-            return FusedAdamBuilder
-        elif class_name == "PackbitsBuilder":
-            return PackbitsBuilder
+        self._lazy_init_class_dict()
+        if class_name in self.class_dict:
+            return self.class_dict[class_name]
         else:
-            return None
+            return self.class_dict['NotImplementedBuilder']
 
     def build_extension(self):
         try:
