@@ -8,13 +8,14 @@ Copyright 2021 The Microsoft DeepSpeed Team
 
 import torch
 from deepspeed.accelerator import get_accelerator
+from deepspeed.ops.op_builder import NotImplementedBuilder
 from .reduce_op import ReduceOp
 from .torch import TorchBackend
 
 
 def build_ccl_op():
     builder = get_accelerator().create_op_builder("CCLCommBuilder")
-    if builder is None:
+    if builder is None or NotImplementedBuilder:
         return None
     ccl_cpp_module = builder.load()
     print(f'DeepSpeed {builder.absolute_name()} built successfully')
