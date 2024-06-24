@@ -57,7 +57,7 @@ __device__ __forceinline__ void CopyFromGlobalToShared_Scales(half* SPTR_QuantSc
  */
 template <int MaxNumOfLinesToCopy, int BLOCK_WARPS>
 __device__ __forceinline__ void CopyFromGlobalToShared(
-    half __restrict__ (*SharedPTR)[WARP_K + PADDING_SHARED_MEM_FOR_B_8],
+    half (*__restrict__ SharedPTR)[WARP_K + PADDING_SHARED_MEM_FOR_B_8],
     const half* GlobalPTR,
     const int GlobalStride,
     const int NumOfLinesLeft,  // To support arbitrary N dimensions.

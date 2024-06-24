@@ -18,8 +18,8 @@
 #ifdef PIPELINE_LEVEL_SMEM
 template <typename TilingConfig>
 __device__ __forceinline__ void B_FromSharedToReg(
-    uint32_t __restrict__ Reg[][4],
-    half __restrict__ (*read_SPTR)[WARP_K + PADDING_SHARED_MEM_FOR_B_8],
+    uint32_t (*__restrict__ Reg)[4],
+    half (*__restrict__ read_SPTR)[WARP_K + PADDING_SHARED_MEM_FOR_B_8],
     int slice_id)
 {
 #if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 800
@@ -56,7 +56,8 @@ __device__ __forceinline__ void B_FromSharedToReg(
         }
     }
 #else
-#warning "The matrix load functions are only supported on Ampere and newer architectures"
+    assert(
+        ("The matrix load functions are only supported on Ampere and newer architectures", false));
 #endif
 }
 #else
@@ -64,8 +65,8 @@ __device__ __forceinline__ void B_FromSharedToReg(
 // B is in column-major
 template <typename TilingConfig>
 __device__ __forceinline__ void B_FromSharedToReg(
-    uint32_t __restrict__ Reg[][4],
-    half __restrict__ (*read_SPTR)[WARP_K + PADDING_SHARED_MEM_FOR_B_8],
+    uint32_t (*__restrict__ Reg)[4],
+    half (*__restrict__ read_SPTR)[WARP_K + PADDING_SHARED_MEM_FOR_B_8],
     int k_offset)
 {
 #if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 800
@@ -102,14 +103,15 @@ __device__ __forceinline__ void B_FromSharedToReg(
         }
     }
 #else
-#warning "The matrix load functions are only supported on Ampere and newer architectures"
+    assert(
+        ("The matrix load functions are only supported on Ampere and newer architectures", false));
 #endif
 }
 #endif
 
-__device__ __forceinline__ void MMA_FP16_M16N8K16(uint32_t __restrict__ c[],
-                                                  uint32_t __restrict__* a,
-                                                  uint32_t __restrict__* b)
+__device__ __forceinline__ void MMA_FP16_M16N8K16(uint32_t* __restrict__ c,
+                                                  uint32_t* __restrict__ a,
+                                                  uint32_t* __restrict__ b)
 {
 #if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 800
     asm volatile(
@@ -130,7 +132,7 @@ __device__ __forceinline__ void MMA_FP16_M16N8K16(uint32_t __restrict__ c[],
           "r"(c[2]),
           "r"(c[3]));
 #else
-#warning "The mma functions are only implemented for Ampere and newer architectures"
+    assert(("The mma functions are only implemented for Ampere and newer architectures", false));
 #endif
 }
 

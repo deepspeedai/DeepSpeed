@@ -17,7 +17,7 @@
  * Outputs: R1, R2
  * Note:    Simplified Exponent calculation is applied.
  */
-__device__ __forceinline__ void FP6_FP16_Cast_4Way(u_int32_t* R1, u_int32_t* R2)
+__device__ __forceinline__ void FP6_FP16_Cast_4Way(uint32_t* R1, uint32_t* R2)
 {
     *R2 = *R1 & 0x80808080;
     *R1 = *R1 >> 2;
@@ -33,7 +33,7 @@ __device__ __forceinline__ void FP6_FP16_Cast_4Way(u_int32_t* R1, u_int32_t* R2)
  * Outputs: R1, R2
  * Note:    Simplified Exponent calculation is NOT applied.
  */
-__device__ __forceinline__ void FP6_FP16_Cast_4Way_Naive(u_int32_t* R1, u_int32_t* R2)
+__device__ __forceinline__ void FP6_FP16_Cast_4Way_Naive(uint32_t* R1, uint32_t* R2)
 {
     //*R2 = *R1 & 0x80808080;
     *R2 = *R1 & 0xc0c0c0c0;
@@ -56,7 +56,7 @@ __device__ __forceinline__ void FP6_FP16_Cast_4Way_Naive(u_int32_t* R1, u_int32_
     //*R2 = 0x3c003c00;
 }
 
-__device__ __forceinline__ u_int32_t MultScale(u_int32_t PackedFP16Pair, half Scale)
+__device__ __forceinline__ uint32_t MultScale(uint32_t PackedFP16Pair, half Scale)
 {
     half* FP16_1 = reinterpret_cast<half*>(&PackedFP16Pair);
     half* FP16_2 = FP16_1 + 1;
@@ -67,17 +67,17 @@ __device__ __forceinline__ u_int32_t MultScale(u_int32_t PackedFP16Pair, half Sc
     return output;
 }
 
-__device__ __forceinline__ void Dequant_32FP6_4Way(u_int32_t __restrict__ Reg[][4],
-                                                   u_int32_t __restrict__* read_RPTR_Frag1,
-                                                   u_int32_t __restrict__* read_RPTR_Frag2,
-                                                   u_int32_t* Scales)
+__device__ __forceinline__ void Dequant_32FP6_4Way(uint32_t (*__restrict__ Reg)[4],
+                                                   uint32_t* __restrict__ read_RPTR_Frag1,
+                                                   uint32_t* __restrict__ read_RPTR_Frag2,
+                                                   uint32_t* Scales)
 {
-    u_int32_t* OutputRegs = reinterpret_cast<u_int32_t*>(Reg);
-    u_int32_t* Frag1_PTR = read_RPTR_Frag1;
-    u_int32_t* Frag2_PTR = read_RPTR_Frag2;
+    uint32_t* OutputRegs = reinterpret_cast<uint32_t*>(Reg);
+    uint32_t* Frag1_PTR = read_RPTR_Frag1;
+    uint32_t* Frag2_PTR = read_RPTR_Frag2;
     half* Scale_RPTR = reinterpret_cast<half*>(Scales);
-    u_int32_t Packed_FP6 = 0;
-    u_int32_t tmp = 0;
+    uint32_t Packed_FP6 = 0;
+    uint32_t tmp = 0;
 // Dequantizing 32 FP6, each Loop dequantizing 4 FP6
 #pragma unroll(8)
     for (int i = 0; i < 8; i++) {
