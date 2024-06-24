@@ -30,7 +30,8 @@ __device__ __forceinline__ void cp_async(half* smem_ptr,
         "l"(global_ptr),
         "n"(SizeInBytes));
 #else
-#warning "The async copy functions are only supported on Ampere and newer architectures"
+    assert(
+        ("The async copy functions are only supported on Ampere and newer architectures", false));
 #endif
 }
 
@@ -40,7 +41,8 @@ __device__ __forceinline__ void cp_async_group_commit()
 #if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 800
     asm volatile("cp.async.commit_group;\n" ::);
 #else
-#warning "The async copy functions are only supported on Ampere and newer architectures"
+    assert(
+        ("The async copy functions are only supported on Ampere and newer architectures", false));
 #endif
 }
 
@@ -51,7 +53,8 @@ __device__ __forceinline__ void cp_async_wait_group()
 #if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 800
     asm volatile("cp.async.wait_group %0;\n" ::"n"(N));
 #else
-#warning "The async copy functions are only supported on Ampere and newer architectures"
+    assert(
+        ("The async copy functions are only supported on Ampere and newer architectures", false));
 #endif
 }
 
@@ -64,7 +67,8 @@ __device__ __forceinline__ void cp_async_wait_all()
 #if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 800
     asm volatile("cp.async.wait_all;\n" ::);
 #else
-#warning "The async copy functions are only supported on Ampere and newer architectures"
+    assert(
+        ("The async copy functions are only supported on Ampere and newer architectures", false));
 #endif
 }
 

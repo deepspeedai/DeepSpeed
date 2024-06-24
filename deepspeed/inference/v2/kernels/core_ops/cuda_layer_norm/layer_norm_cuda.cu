@@ -252,7 +252,6 @@ __global__ void fused_residual_ln(T* output,
     for (int i = 0; i < unRoll; i++) {
         T* iteration_buffer = local_buffer + i * T_per_load;
         T residual_buffer[T_per_load];
-        T bias_buffer[T_per_load];
 
         mem_access::load_global<ln::granularity>(
             iteration_buffer, input_base + i * stride, thread_offset + i * stride < elems_per_row);

@@ -18,6 +18,7 @@ BACKWARD_REDUCE_MICRO_TIMER = 'bwd_allreduce_microstep'
 BACKWARD_REDUCE_GLOBAL_TIMER = 'bwd_allreduce'
 STEP_MICRO_TIMER = 'step_microstep'
 STEP_GLOBAL_TIMER = 'step'
+TIME_EPSILON = 1e-6
 
 try:
     import psutil
@@ -262,7 +263,7 @@ class ThroughputTimer:
                             self.micro_step_count,
                             self.global_step_count,
                             self.avg_samples_per_sec(),
-                            self.batch_size / self.step_elapsed_time,
+                            self.batch_size / (self.step_elapsed_time + TIME_EPSILON),
                             round(get_accelerator().memory_allocated() / 1024**3, 2),
                             round(get_accelerator().max_memory_allocated() / 1024**3, 2),
                         ))
