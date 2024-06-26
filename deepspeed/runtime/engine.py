@@ -3613,6 +3613,9 @@ class DeepSpeedEngine(Module):
         """Compile the module using the specified backend and kwargs.
         If a compiler_fn is set, it will be used instead of torch.compile().
         """
+        # Avoid graph breaks
+        deepspeed.utils.nvtx.enable_nvtx = False
+
         if not is_compile_supported():
             raise RuntimeError("compile is not supported in your version of PyTorch.")
 
