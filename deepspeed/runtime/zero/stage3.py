@@ -2593,7 +2593,8 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
                         load_optimizer_states=True,
                         load_from_fp32_weights=False,
                         checkpoint_folder=None,
-                        load_serial=None):
+                        load_serial=None,
+                        param_shapes=None):
         r"""Loading a ZeRO checkpoint
         Arguments:
             state_dict_list: List of all saved ZeRO checkpoints, one for each saved partition.
@@ -2622,24 +2623,113 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
         if self.elastic_checkpoint:
             raise NotImplementedError("ZeRO-3 does not yet support elastic checkpointing, please disable for now.")
 
-        self._rigid_load_state_dict(state_dict_list[dist.get_rank(group=self.dp_process_group)],
-                                    load_optimizer_states=load_optimizer_states)
+        if checkpoint_folder:
+            self._load_universal_checkpoint(checkpoint_folder, load_optimizer_states, load_from_fp32_weights,
+                                            param_shapes)
+        else:
+            self._rigid_load_state_dict(state_dict_list[dist.get_rank(group=self.dp_process_group)],
+                                        load_optimizer_states=load_optimizer_states)
 
-        # when use loading checkpoint serial, after finish loading, we need to
-        # delete the temp state_dict_list variable to save memory, then trigger
-        # the next rank's loading
-        if load_serial is not None:
-            load_serial += 1
-            rank = dist.get_rank(group=self.dp_process_group)
-            local_rank = dist.get_local_rank()
-            del state_dict_list[rank]
-            rank_end = dist.get_world_size() - 1
-            if local_rank != rank_end:
-                dist.send(tensor=load_serial, dst=rank + 1)
+            # when use loading checkpoint serial, after finish loading, we need to
+            # delete the temp state_dict_list variable to save memory, then trigger
+            # the next rank's loading
+            if load_serial is not None:
+                load_serial += 1
+                rank = dist.get_rank(group=self.dp_process_group)
+                local_rank = dist.get_local_rank()
+                del state_dict_list[rank]
+                rank_end = dist.get_world_size() - 1
+                if local_rank != rank_end:
+                    dist.send(tensor=load_serial, dst=rank + 1)
 
-        if len(self.persistent_parameters) > 0:
-            self.persistent_parameters[0].partition(self.persistent_parameters)
-            # self.persistent_parameters[0].all_gather(self.persistent_parameters) # this will be done in checkpoint_event_epilogue() so remove it to prevent double all_gather
+            if len(self.persistent_parameters) > 0:
+                self.persistent_parameters[0].partition(self.persistent_parameters)
+                # self.persistent_parameters[0].all_gather(self.persistent_parameters) # this will be done in checkpoint_event_epilogue() so remove it to prevent double all_gather
+
+    def _load_universal_checkpoint(self, checkpoint_folder, load_optimizer_states, load_from_fp32_weights,
+                                   param_shapes):
+        self.load_hp_checkpoint_state_from_checkpoint_dir_stage3(checkpoint_folder, param_shapes)
+
+    def load_hp_checkpoint_state_from_checkpoint_dir_stage3(self, checkpoint_dir, param_shapes):
+        """ Load optimizer and model states from the checkpoint directory. """
+        checkpoint_dir = os.path.join(checkpoint_dir, "zero")
+        optim_state_path = os.path.join(checkpoint_dir, "optimizer_state.pt")
+        assert os.path.isfile(
+            optim_state_path), f'{optim_state_path} containing optimizer global state is missing! Cannot proceed.'
+
+        optim_sd = torch.load(optim_state_path)
+        self._load_global_state_stage3(optim_sd)
+
+        key_list = ["fp32", "exp_avg", "exp_avg_sq"]
+
+        for key in key_list:
+            key_tensor = torch.empty(0)
+            for layer in param_shapes[0].keys():
+                key_layer_state_partition = self.load_hp_checkpoint_state(os.path.join(checkpoint_dir, layer), key)
+                key_tensor = torch.cat((key_tensor, key_layer_state_partition))
+            if key == "fp32":
+                self.fp32_partitioned_groups_flat[0].data.copy_(key_tensor)
+                self.optimizer.param_groups[0]['params'].append(self.fp32_partitioned_groups_flat[0])
+            else:
+                optim_sd[OPTIMIZER_STATE_DICT]['state'][0][key] = key_tensor
+
+        if self.swap_optimizer or self.params_in_nvme_and_cpu:
+            # Purge the swapped optimizer state, it was initialized to the freshly created model and not the checkpoint
+            for swap_info in self.optimizer_swapper.swap_params_info.values():
+                swap_info.tensors = [swap_info.tensors[0]]
+                swap_info.has_state_tensors = False
+
+        if self.swap_optimizer:
+            # Touch all parameters to synchronize all buffers
+            timer_names = set()
+            self._partition_all_parameters()
+            for sub_group_id, group in enumerate(self.fp16_groups):
+                self._prepare_sub_group(sub_group_id, timer_names)
+                self._reassign_or_swap_out_partitioned_parameters(sub_group_id)
+                self._release_sub_group(sub_group_id, timer_names)
+            self._post_step(timer_names)
+
+        self.optimizer.load_state_dict(optim_sd[OPTIMIZER_STATE_DICT])
+        for param_group in self.optimizer.param_groups:
+            param_group['params'] = []
+
+        for sub_group_id in range(len(self.fp32_partitioned_groups_flat)):
+            fp32_param = self.fp32_partitioned_groups_flat[sub_group_id]
+            if sum(fp32_param.size()) > 0:
+                fp16_param = self.fp16_partitioned_groups_flat[sub_group_id]
+                fp16_param.data.copy_(fp32_param.data)
+
+        for sub_group_id in range(len(self.fp16_partitioned_groups_flat)):
+            updated_params = self.unflatten(self.fp16_partitioned_groups_flat[sub_group_id],
+                                            self.fp16_partitioned_groups[sub_group_id])
+
+            for partitioned_param, q in zip(self.fp16_partitioned_groups[sub_group_id], updated_params):
+                partitioned_param.data = q.data
+
+    def _load_global_state_stage3(self, sd):
+        self.loss_scaler = sd.get(LOSS_SCALER, self.loss_scaler)
+        self.dynamic_loss_scale = sd.get('dynamic_loss_scale', self.dynamic_loss_scale)
+        self.overflow = sd.get('overflow', self.overflow)
+
+    def load_hp_checkpoint_state(self, folder, key):
+        local_rank = dist.get_local_rank()
+
+        # Load tensors from files and reshape them to flat vectors
+        loaded_checkpoint_state = torch.load(os.path.join(folder, f"{key}.pt")).view(-1)
+
+        # Partition the loaded data according to the local rank
+        world_size = dist.get_world_size(group=self.dp_process_group)
+        unpartitioned_numel = loaded_checkpoint_state.numel()
+        partitioned_numel = math.ceil(unpartitioned_numel / world_size)
+
+        if world_size * partitioned_numel != unpartitioned_numel:
+            padding_size = world_size * partitioned_numel - unpartitioned_numel
+            padding_tensor = torch.zeros(padding_size, dtype=loaded_checkpoint_state.dtype)
+            loaded_checkpoint_state = torch.cat([loaded_checkpoint_state, padding_tensor])
+        checkpoint_state_partition = loaded_checkpoint_state.narrow(0, local_rank * partitioned_numel,
+                                                                    partitioned_numel)
+
+        return checkpoint_state_partition
 
     def reset_swap_buffers(self):
         timer_names = set()

@@ -10,6 +10,7 @@ from itertools import chain
 import argparse
 import glob
 import itertools
+import math
 from concurrent.futures import ProcessPoolExecutor
 import os
 import re
@@ -21,6 +22,7 @@ import tqdm
 from deepspeed.checkpoint import DeepSpeedCheckpoint
 from deepspeed.checkpoint import (
     OPTIMIZER_STATE_DICT,
+    ZERO_STAGE,
     BASE_OPTIMIZER_STATE,
     SINGLE_PARTITION_OF_FP32_GROUPS,
     PARAM_GROUPS,
@@ -68,6 +70,19 @@ def parse_arguments():
     args = parser.parse_args()
     print(f'args = {args}')
     return args
+
+
+def atoi(text):
+    return int(text) if text.isdigit() else text
+
+
+def natural_keys(text):
+    '''
+    alist.sort(key=natural_keys) sorts in human order
+    http://nedbatchelder.com/blog/200712/human_sorting.html
+    (See Toothy's implementation in the comments)
+    '''
+    return [atoi(c) for c in re.split(r'(\d+)', text)]
 
 
 def _create_checkpoint_paths(base_folder, iteration, tp_degree, pp_degree):
@@ -129,6 +144,26 @@ def extract_zero_shards(dir, ds_checkpoint, indices_3D):
                                     fragment_mapping.start, fragment_mapping.numel)
 
 
+def extract_zero_shards_stage3(optim_files, param_shapes, dp_degree, temp_dir, dp_index):
+    state_dict = torch.load(optim_files[dp_index], map_location='cpu')
+
+    flat_state = dict(
+        exp_avg=state_dict[OPTIMIZER_STATE_DICT]['optimizer_state_dict']['state'][0]["exp_avg"],
+        exp_avg_sq=state_dict[OPTIMIZER_STATE_DICT]['optimizer_state_dict']['state'][0]["exp_avg_sq"],
+        fp32=state_dict[OPTIMIZER_STATE_DICT]['fp32_flat_groups'][0],
+    )
+
+    offset = 0
+    for name, shape in param_shapes.items():
+        unpartitioned_numel = shape.numel()
+        partitioned_numel, _ = _zero_partitioned_param_info(unpartitioned_numel, dp_degree)
+        padding_free_numel = min(partitioned_numel, abs(unpartitioned_numel - dp_index * partitioned_numel))
+        for state_key in flat_state.keys():
+            dump_param_fragment(temp_dir, 0, dp_index, state_key, flat_state[state_key], name, offset,
+                                padding_free_numel)
+        offset += partitioned_numel
+
+
 cnt = 0
 
 
@@ -155,7 +190,7 @@ def dump_param_fragment(dir, tp_index, dp_index, state_name, state_flat_tensor, 
     _save_checkpoint(path, state_flat_tensor)
 
 
-def _merge_zero_shards(param_base_path, state, tp_degree, slice_shape):
+def _merge_zero_shards(param_base_path, state, tp_degree, slice_shape=None):
     slices = []
     for tp_index in range(tp_degree):
         prefix_path = os.path.join(param_base_path, str(tp_index), f"{state}")
@@ -180,7 +215,10 @@ def _merge_zero_shards(param_base_path, state, tp_degree, slice_shape):
             assert all(v == shards[0] for v in shards), "All shards must have the same step value"
             slice = shards[0]
         else:
-            slice = torch.cat(shards, dim=0).reshape(slice_shape)
+            if slice_shape is None:
+                slice = torch.cat(shards, dim=0)
+            else:
+                slice = torch.cat(shards, dim=0).reshape(slice_shape)
 
         slices.append(slice)
     return slices
@@ -292,6 +330,16 @@ def merge_tp_slices(ds_checkpoint, dir, slice_dir, tp_degree, name_and_shape):
     return unmatched_patterns
 
 
+def merge_zero3_slices(dp_degree, dir, slice_dir, name):
+    slice_base_path = os.path.join(slice_dir, name)
+    param_base_path = os.path.join(dir, name)
+
+    for state in ("fp32", "exp_avg", "exp_avg_sq"):
+        slices = _merge_zero_shards(slice_base_path, state, 1)
+        final_path = os.path.join(param_base_path, f"{state}.pt")
+        _save_checkpoint(final_path, slices[0])
+
+
 def _do_parallel_work(do_work, work_chunks, num_workers):
     results = []
     if num_workers > 1:
@@ -317,6 +365,11 @@ def _extract_zero_shard_files(args, ds_checkpoint, temp_dir):
     _do_parallel_work(do_work, _3d_range_list, args.num_extract_workers)
 
 
+def _extract_zero_shard_files_stage3(args, optim_files, param_shapes, dp_degree, temp_dir):
+    do_work = partial(extract_zero_shards_stage3, optim_files, param_shapes, dp_degree, temp_dir)
+    _do_parallel_work(do_work, list(range(dp_degree)), args.num_extract_workers)
+
+
 def _merge_tp_slice_files(args, ds_checkpoint, slice_shapes, temp_dir):
     zero_output_folder = os.path.join(args.output_folder, "zero")
     do_work = partial(merge_tp_slices, ds_checkpoint, zero_output_folder, temp_dir, ds_checkpoint.tp_degree)
@@ -332,6 +385,23 @@ def _merge_tp_slice_files(args, ds_checkpoint, slice_shapes, temp_dir):
         print(f'Warning: Unused patterns={unmatched_patterns} while merging tp slices')
 
 
+def _merge_zero3_slice_files(args, param_shapes, dp_degree, temp_dir):
+    zero_output_folder = os.path.join(args.output_folder, "zero")
+    do_work = partial(merge_zero3_slices, dp_degree, zero_output_folder, temp_dir)
+    _do_parallel_work(do_work, param_shapes.keys(), args.num_merge_workers)
+
+
+def _zero_partitioned_param_info(unpartitioned_numel, world_size):
+    remainder = unpartitioned_numel % world_size
+    padding_numel = (world_size - remainder) if remainder else 0
+    partitioned_numel = math.ceil(unpartitioned_numel / world_size)
+    return partitioned_numel, padding_numel
+
+
+def _parse_model_states_stage3(files):
+    return torch.load(files[0], map_location=torch.device('cpu'))[PARAM_SHAPES]
+
+
 def _save_optimizer_state(args, ds_checkpoint):
     sharded_states = [BASE_OPTIMIZER_STATE, PARAM_SLICE_MAPPINGS, SINGLE_PARTITION_OF_FP32_GROUPS]
     sd = ds_checkpoint.get_zero_checkpoint_state(pp_index=0, tp_index=0, dp_index=0)
@@ -344,6 +414,39 @@ def _save_optimizer_state(args, ds_checkpoint):
     _save_checkpoint(output_file_path, output_sd)
 
 
+def _save_optimizer_state_stage3(args, optim_files):
+    sd = torch.load(optim_files[0], map_location=torch.device('cpu'))
+    output_sd = sd[OPTIMIZER_STATE_DICT]
+    output_sd[PARAM_GROUPS] = output_sd[OPTIMIZER_STATE_DICT][PARAM_GROUPS]
+    zero_output_folder = os.path.join(args.output_folder, "zero")
+    output_file_path = os.path.join(zero_output_folder, f"optimizer_state.pt")
+    _save_checkpoint(output_file_path, output_sd)
+
+
+def _get_optim_files(checkpoint_dir):
+    return _get_checkpoint_files(checkpoint_dir, "*_optim_states.pt")
+
+
+def _get_model_state_files(checkpoint_dir):
+    return _get_checkpoint_files(checkpoint_dir, "*_model_states.pt")
+
+
+def _get_checkpoint_files(checkpoint_dir, glob_pattern):
+    ckpt_files = sorted(glob.glob(os.path.join(checkpoint_dir, glob_pattern)), key=natural_keys)
+
+    if len(ckpt_files) == 0:
+        raise FileNotFoundError(f"can't find {glob_pattern} files in directory '{checkpoint_dir}'")
+
+    return ckpt_files
+
+
+def _get_zero_stage(optim_files):
+    state_dict = torch.load(optim_files[0], map_location=torch.device('cpu'))
+    optimizer_state = state_dict[OPTIMIZER_STATE_DICT]
+    zero_stage = optimizer_state.get(ZERO_STAGE, 1)
+    return zero_stage
+
+
 def _check_for_required_state(ds_checkpoint):
     universal_checkpoint_info = ds_checkpoint.get_checkpoint_info(UNIVERSAL_CHECKPOINT_INFO)
     assert universal_checkpoint_info is not None, f'Required {UNIVERSAL_CHECKPOINT_INFO} state is missing in checkpoint. Verify that client creates this state.'
@@ -354,38 +457,66 @@ def main(args):
 
     print(f'Converting DeepSpeed checkpoint in {args.input_folder} to Universal checkpoint in {args.output_folder}')
 
-    ds_checkpoint = DeepSpeedCheckpoint(args.input_folder)
-    _check_for_required_state(ds_checkpoint)
+    optim_files = _get_optim_files(args.input_folder)
+    zero_stage = _get_zero_stage(optim_files)
 
-    iteration = ds_checkpoint.get_iteration()
-    #_create_latest_file(args.output_folder, iteration)
-    checkpoint_paths = _create_checkpoint_paths(args.output_folder, iteration, ds_checkpoint.tp_degree,
-                                                ds_checkpoint.pp_degree)
+    if zero_stage <= 2:
+        ds_checkpoint = DeepSpeedCheckpoint(args.input_folder)
+        _check_for_required_state(ds_checkpoint)
 
-    slice_shapes = []
-    for mp_rank_file in ds_checkpoint.mp_rank_files:
-        mp_sd = torch.load(mp_rank_file, map_location=torch.device('cpu'))
-        slice_shapes += mp_sd[PARAM_SHAPES]
+        iteration = ds_checkpoint.get_iteration()
+        #_create_latest_file(args.output_folder, iteration)
+        checkpoint_paths = _create_checkpoint_paths(args.output_folder, iteration, ds_checkpoint.tp_degree,
+                                                    ds_checkpoint.pp_degree)
 
-    # fix back to normal flat dict, merge duplicates for tp>1
-    slice_shapes = dict((k, v) for d in slice_shapes for k, v in d.items())
-    temp_dir = os.path.join(args.output_folder, 'tmp')
+        slice_shapes = []
+        for mp_rank_file in ds_checkpoint.mp_rank_files:
+            mp_sd = torch.load(mp_rank_file, map_location=torch.device('cpu'))
+            slice_shapes += mp_sd[PARAM_SHAPES]
 
-    print('*** 1. Extracting ZeRO fragments')
-    _extract_zero_shard_files(args, ds_checkpoint, temp_dir)
+        # fix back to normal flat dict, merge duplicates for tp>1
+        slice_shapes = dict((k, v) for d in slice_shapes for k, v in d.items())
+        temp_dir = os.path.join(args.output_folder, 'tmp')
 
-    print('*** 2. Merging slices .....')
-    _merge_tp_slice_files(args, ds_checkpoint, slice_shapes, temp_dir)
+        print('*** 1. Extracting ZeRO fragments')
+        _extract_zero_shard_files(args, ds_checkpoint, temp_dir)
 
-    print('*** 3. Saving common optimizer states')
-    _save_optimizer_state(args, ds_checkpoint)
+        print('*** 2. Merging slices .....')
+        _merge_tp_slice_files(args, ds_checkpoint, slice_shapes, temp_dir)
 
-    if not args.keep_temp_folder:
-        shutil.rmtree(temp_dir, ignore_errors=True)
+        print('*** 3. Saving common optimizer states')
+        _save_optimizer_state(args, ds_checkpoint)
 
-    # Copy mp* files into output folder
-    for f in glob.glob(os.path.join(args.input_folder, 'mp*')):
-        shutil.copy2(f, args.output_folder)
+        if not args.keep_temp_folder:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
+        # Copy mp* files into output folder
+        for f in glob.glob(os.path.join(args.input_folder, 'mp*')):
+            shutil.copy2(f, args.output_folder)
+
+    else:
+        model_files = _get_model_state_files(args.input_folder)
+        param_shapes = _parse_model_states_stage3(model_files)
+        param_shapes = {k: v for d in param_shapes for k, v in d.items()}
+        dp_degree = len(model_files)
+
+        temp_dir = os.path.join(args.output_folder, 'tmp')
+
+        print('*** 1. Extracting ZeRO fragments')
+        _extract_zero_shard_files_stage3(args, optim_files, param_shapes, dp_degree, temp_dir)
+
+        print('*** 2. Merging slices .....')
+        _merge_zero3_slice_files(args, param_shapes, dp_degree, temp_dir)
+
+        print('*** 3. Saving common optimizer states')
+        _save_optimizer_state_stage3(args, optim_files)
+
+        if not args.keep_temp_folder:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
+        # Copy *model_states files into output folder
+        for f in glob.glob(os.path.join(args.input_folder, '*model_states.pt')):
+            shutil.copy2(f, args.output_folder)
 
     # Update latest to output folder
     checkpoint_root_folder, step_folder = os.path.split(args.output_folder)
