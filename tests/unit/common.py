@@ -450,7 +450,7 @@ class DistributedTest(DistributedExec):
                 world_size = mark.args[0]
                 break
         else:
-            world_size = self.world_size
+            world_size = self._fixture_kwargs.get("world_size", self.world_size)
 
         if isinstance(world_size, int):
             world_size = [world_size]

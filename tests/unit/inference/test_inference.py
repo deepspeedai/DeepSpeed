@@ -162,6 +162,11 @@ def enable_triton(request):
     return request.param
 
 
+@pytest.fixture(params=[1, 2], ids=["ws1", "ws2"])
+def world_size(request):
+    return request.param
+
+
 """ Fixtures for running query """
 
 
@@ -490,24 +495,14 @@ class TestLowCpuMemUsage(DistributedTest):
 )
 @pytest.mark.parametrize("dtype", [torch.float], ids=["fp32"])
 class TestInjectionPolicy(DistributedTest):
-    world_size = [1, 2]
 
-    def test(
-        self,
-        model_w_task,
-        injection_policy,
-        query,
-        inf_kwargs,
-        assert_fn,
-        dtype,
-    ):
+    def test(self, model_w_task, injection_policy, query, inf_kwargs, assert_fn, dtype, world_size):
         invalid_test_msg = validate_test(model_w_task, dtype, enable_cuda_graph=False, enable_triton=False)
         if invalid_test_msg:
             pytest.skip(invalid_test_msg)
 
         model, task = model_w_task
         local_rank = int(os.getenv("LOCAL_RANK", "0"))
-        world_size = int(os.getenv("WORLD_SIZE", "2"))
 
         pipe = pipeline(task,
                         model=model,
