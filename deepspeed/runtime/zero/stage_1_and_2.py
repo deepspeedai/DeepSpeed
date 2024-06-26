@@ -552,6 +552,10 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
         self._param_slice_mappings = self._create_param_mapping()
 
     def destroy(self):
+        for i, _ in enumerate(self.optimizer.param_groups):
+            for p in self.bit16_groups[i]:
+                if getattr(p, '_hp_mapping', None):
+                    p._hp_mapping = None
         for hook in self._grad_acc_hooks:
             hook.remove()
         self.print_rank_0("Removed grad acc hooks")
