@@ -17,13 +17,11 @@ class CPUAdamBuilder(SYCLOpBuilder):
         return f'deepspeed.ops.adam.{self.NAME}_op'
 
     def sources(self):
-        if self.build_for_cpu:
-            return ['csrc/xpu/adam/cpu_adam.cpp', 'csrc/xpu/adam/cpu_adam_impl.cpp']
+        return ['csrc/adam/cpu_adam.cpp', 'csrc/adam/cpu_adam_impl.cpp']
 
-        return [
-            'csrc/xpu/adam/cpu_adam.cpp', 'csrc/xpu/adam/cpu_adam_impl.cpp',
-            'csrc/xpu/common/custom_cuda_kernel.dp.cpp'
-        ]
+    def libraries_args(self):
+        args = super().libraries_args()
+        return args
 
     def include_paths(self):
-        return ['csrc/xpu/includes']
+        return ['csrc/includes']
