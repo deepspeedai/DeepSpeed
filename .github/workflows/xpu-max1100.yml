@@ -11,6 +11,7 @@ on:
       - "accelerator/abstract_accelerator.py"
       - "accelerator/cpu_accelerator.py"
       - "accelerator/real_accelerator.py"
+      - "csrc/xpu/**"
       - "deepspeed/runtime/engine.py"
       - "deepspeed/runtime/bf16_optimizer.py"
       - "deepspeed/runtime/zero/stage_1_and_2.py"
@@ -20,6 +21,7 @@ on:
       - "deepspeed/runtime/zero/parameter_offload.py"
       - "deepspeed/runtime/pipe/engine.py"
       - "deepspeed/runtime/utils.py"
+      - "opbuilder/xpu/**"
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
