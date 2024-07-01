@@ -36,7 +36,7 @@ jobs:
   unit-tests:
     runs-on: [self-hosted, intel, xpu]
     container:
-      image: intel/intel-extension-for-pytorch:2.1.20-xpu
+      image: intel/intel-extension-for-pytorch:2.1.30-xpu
       ports:
         - 80
       options: --privileged -it --rm --device /dev/dri:/dev/dri -v /dev/dri/by-path:/dev/dri/by-path --ipc=host --cap-add=ALL
