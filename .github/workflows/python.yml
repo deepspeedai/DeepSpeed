@@ -21,7 +21,7 @@ jobs:
   unit-tests:
     strategy:
       matrix:
-        pyVersion: ["3.6", "3.7", "3.8", "3.9", "3.10"]
+        pyVersion: ["3.7", "3.8", "3.9", "3.10"]
       fail-fast: false
 
     runs-on: ubuntu-20.04
@@ -29,7 +29,7 @@ jobs:
       image: deepspeed/gh-builder:py${{ matrix.pyVersion }}
 
     steps:
-        - uses: actions/checkout@v3
+        - uses: actions/checkout@v4
 
         - name: environment
           run: |
