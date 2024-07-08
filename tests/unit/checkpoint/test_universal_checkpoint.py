@@ -110,7 +110,8 @@ def train_save_convert(ds_config, hidden_dim, load_optim, use_torch_adam, dtype,
                            num_extract_workers=1,
                            num_merge_workers=1,
                            keep_temp_folder=False,
-                           strict=True)
+                           strict=True,
+                           inject_missing_state=False)
 
     dist.barrier()
     if dist.get_rank() == 0:

@@ -69,7 +69,7 @@ def parse_arguments():
                         dest='strict',
                         action='store_false',
                         help='Do not perform validity checks on converted checkpoint.')
-    parser.add_argument('--inject-missing-state',
+    parser.add_argument('--inject_missing_state',
                         action='store_true',
                         help='Inject missing checkpoint state into the checkpoint if it is absent.')
     args = parser.parse_args()
