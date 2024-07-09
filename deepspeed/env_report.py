@@ -110,7 +110,7 @@ def installed_cann_version():
 def get_shm_size():
     try:
         shm_stats = os.statvfs('/dev/shm')
-    except (OSError, FileNotFoundError, ValueError):
+    except (OSError, FileNotFoundError, ValueError, AttributeError):
         return "UNKNOWN", None
 
     shm_size = shm_stats.f_frsize * shm_stats.f_blocks
