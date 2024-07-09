@@ -285,6 +285,14 @@ thisdir = os.path.abspath(os.path.dirname(__file__))
 with open(os.path.join(thisdir, 'README.md'), encoding='utf-8') as fin:
     readme_text = fin.read()
 
+if sys.platform == "win32":
+    scripts = ['bin/deepspeed.bat', 'bin/ds', 'bin/ds_report.bat', 'bin/ds_report']
+else:
+    scripts = [
+        'bin/deepspeed', 'bin/deepspeed.pt', 'bin/ds', 'bin/ds_ssh', 'bin/ds_report', 'bin/ds_bench', 'bin/dsr',
+        'bin/ds_elastic'
+    ]
+
 start_time = time.time()
 
 setup(name='deepspeed',
@@ -303,10 +311,7 @@ setup(name='deepspeed',
       extras_require=extras_require,
       packages=find_packages(include=['deepspeed', 'deepspeed.*']),
       include_package_data=True,
-      scripts=[
-          'bin/deepspeed', 'bin/deepspeed.pt', 'bin/ds', 'bin/ds_ssh', 'bin/ds_report', 'bin/ds_bench', 'bin/dsr',
-          'bin/ds_elastic'
-      ],
+      scripts=scripts,
       classifiers=[
           'Programming Language :: Python :: 3.6', 'Programming Language :: Python :: 3.7',
           'Programming Language :: Python :: 3.8', 'Programming Language :: Python :: 3.9',

@@ -1,5 +1,6 @@
 @echo off
 
+set CUDA_HOME=%CUDA_PATH%
 set DISTUTILS_USE_SDK=1
 
 set DS_BUILD_AIO=0
