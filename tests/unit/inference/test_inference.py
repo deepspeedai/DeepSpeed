@@ -9,6 +9,7 @@ import itertools
 import pickle
 import os
 import time
+import requests
 
 from dataclasses import dataclass
 from typing import List
@@ -101,9 +102,21 @@ def _hf_model_list() -> List[ModelInfo]:
     if ((model_data["cache_time"] + cache_expiration_seconds) < current_time) or os.getenv("FORCE_UPDATE_HF_CACHE",
                                                                                            default=False):
         api = HfApi()
-        model_data["model_list"] = [
-            ModelInfo(modelId=m.modelId, pipeline_tag=m.pipeline_tag, tags=m.tags) for m in api.list_models()
-        ]
+        while True:
+            try:
+                model_list = []
+                for model in _test_models:
+                    model_list.extend(api.list_models(model_name=model))
+                model_data["model_list"] = [
+                    ModelInfo(modelId=m.modelId, pipeline_tag=m.pipeline_tag, tags=m.tags) for m in model_list
+                ]
+                break  # Exit the loop if the operation is successful
+            except requests.exceptions.HTTPError as e:
+                if e.response.status_code == 429:
+                    print("Rate limit exceeded. Retrying in 60 seconds...")
+                    time.sleep(60)
+                else:
+                    raise  # Re-raise the exception if it's not a 429 error
         model_data["cache_time"] = current_time
 
         # Save the updated cache
