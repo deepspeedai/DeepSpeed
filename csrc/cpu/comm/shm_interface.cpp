@@ -46,15 +46,13 @@ void initialize(int size, int rank)
     if (all_ranks_local_p) { shm_initialize(size, rank, addr_string, port_string); }
 }
 
-int get_rank(int group = 0) { return world_rank; }
-
-int get_world_size(int group = 0) { return world_size; }
+void inference_all_reduce_(torch::Tensor& data, int op);
 
 // Success - return 0
 // Fail (cannot hornor the request and need to fall back) - return -1
-int inference_all_reduce(torch::Tensor& data, py::object op)
+void inference_all_reduce_(torch::Tensor& data, int op)
 {
-    if (!all_ranks_local_p) return -1;
+    assert(op == 0);
 #ifdef DO_PROFILE
     static double total_time = 0.0;
     static double total_time_sq = 0.0;
@@ -66,11 +64,6 @@ int inference_all_reduce(torch::Tensor& data, py::object op)
     // if (all_ranks_local_p) { barrier_wait(0, world_size); }
     auto start = std::chrono::system_clock::now();
 #endif
-
-    static py::object ReduceOp = py::module_::import("deepspeed.comm").attr("ReduceOp");
-    static auto ReduceOpSum = (int)py::int_(ReduceOp.attr("SUM").attr("value"));
-
-    assert(py::int_(op.attr("value")) == ReduceOpSum);
 
     auto numel = data.numel();
 
@@ -84,7 +77,7 @@ int inference_all_reduce(torch::Tensor& data, py::object op)
         default: data_type_fallback = true;
     }
 
-    if (data_type_fallback) return -1;
+    if (data_type_fallback) return;
 
     all_reduce_outer_loop(data, numel, data_size);
 
@@ -109,13 +102,85 @@ int inference_all_reduce(torch::Tensor& data, py::object op)
         }
     }
 #endif
-    return 0;
+    return;
 }
 
-PYBIND11_MODULE(TORCH_EXTENSION_NAME, m)
+PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) { m.def("initialize", &initialize, "shm initialize"); }
+
+TORCH_LIBRARY(deepspeed, m)
 {
-    m.def("initialize", &initialize, "shm initialize");
-    m.def("get_rank", &get_rank, "get rank");
-    m.def("get_world_size", &get_world_size, "get world size");
-    m.def("inference_all_reduce", &inference_all_reduce, "low latency all_reduce implementation");
+    m.def("inference_all_reduce(Tensor self) -> Tensor");
+    m.def("inference_all_reduce_(Tensor(a!) self) -> Tensor(a!)");
+}
+
+torch::Tensor inference_all_reduce_meta(const torch::Tensor& self_)
+{
+    torch::Tensor result_ = torch::empty_like(self_);
+    return result_;
+}
+
+torch::Tensor& inference_all_reduce__meta(torch::Tensor& self_) { return self_; }
+
+torch::Tensor& inference_all_reduce__cpu(torch::Tensor& self_)
+{
+    TORCH_INTERNAL_ASSERT(self_.device().type() == torch::DeviceType::CPU);
+    torch::Tensor self_tensor = self_.contiguous();
+    inference_all_reduce_(self_tensor, 0);
+    return self_;
+}
+
+torch::Tensor inference_all_reduce_cpu(const torch::Tensor& self_)
+{
+    torch::Tensor result = self_.clone();
+    inference_all_reduce__cpu(result);
+    return result;
+}
+
+#include <ATen/FunctionalTensorWrapper.h>
+// The boilerplate functionalization logic, that teaches functionalization
+// how to map x_() calls into x() calls.
+// Long term, we'd like to not require users to write this logic.
+// HOWEVER, if you have a custom op that is mutable,
+// You will still need to write an out-of-place version of that op!
+at::Tensor& inference_all_reduce__functionalization_glue(at::Tensor& x)
+{
+    // We expect all tensor inputs to our op to be "functional tensors"
+    TORCH_INTERNAL_ASSERT(at::functionalization::impl::isFunctionalTensor(x));
+    // First, sync and unwrap and functional tensors
+    at::functionalization::impl::sync(x);
+    auto x_ = at::functionalization::impl::from_functional_tensor(x);
+    // Grab the dispatcher entry corresponding to the out-of-place op, "x"
+    static auto op_handle = c10::Dispatcher::singleton()
+                                // specify namespace::op_name, op_overload_name
+                                .findSchemaOrThrow("deepspeed::inference_all_reduce", "")
+                                // Specify the C++ schema of the out-of-place op.
+                                .typed<at::Tensor(const at::Tensor&)>();
+    // Next, redispatch to the out-of-place op, x() (user called x_, we call x)
+    at::Tensor tmp_output;
+    {
+        at::AutoDispatchSkipFunctionalize guard;
+        tmp_output = op_handle.call(x_);
+    }
+    // Finally, tell functionalization about this mutation.
+    at::functionalization::impl::replace_(x, tmp_output);
+    at::functionalization::impl::commit_update(x);
+    at::functionalization::impl::sync(x);
+    return x;
+}
+
+TORCH_LIBRARY_IMPL(deepspeed, CPU, m)
+{
+    m.impl("inference_all_reduce", inference_all_reduce_cpu);
+    m.impl("inference_all_reduce_", inference_all_reduce__cpu);
+}
+
+TORCH_LIBRARY_IMPL(deepspeed, Meta, m)
+{
+    m.impl("inference_all_reduce", inference_all_reduce_meta);
+    m.impl("inference_all_reduce_", inference_all_reduce__meta);
+}
+
+TORCH_LIBRARY_IMPL(deepspeed, Functionalize, m)
+{
+    m.impl("inference_all_reduce_", inference_all_reduce__functionalization_glue);
 }
