@@ -134,7 +134,7 @@ class Loading():
         load_layer_names = [
             "LPLayerNorm", "SharedEmbedding", "OPTLearnedPositionalEmbedding", "LlamaRMSNorm", "FalconLinear",
             "MistralRMSNorm", "T5LayerNorm", "MixtralRMSNorm", "Phi3RotaryEmbedding", "Phi3SuScaledRotaryEmbedding",
-            "Phi3RMSNorm", "YuanRMSNorm", "YuanRotaryEmbedding"
+            "Phi3RMSNorm", "YuanRMSNorm", "YuanRotaryEmbedding", "Phi3LongRoPEScaledRotaryEmbedding"
         ]
         return module.__class__ in load_layers or module._get_name() in load_layer_names
 
