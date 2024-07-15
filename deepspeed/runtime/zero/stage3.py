@@ -338,7 +338,6 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
         self.params_in_ipg_bucket = []
 
         self.params_already_reduced = {}
-        self.is_gradient_accumulation_boundary = True
         self._release_ipg_buffers()
         self.previous_reduced_grads = None
 
