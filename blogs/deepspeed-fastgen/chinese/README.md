@@ -226,6 +226,10 @@ DeepSpeed-FastGen 是 [DeepSpeed-MII](https://github.com/microsoft/DeepSpeed-MII
 * [LLaMA](https://huggingface.co/models?other=llama) 和 [LLaMA-2](https://huggingface.co/models?other=llama-2)
 * [Mistral](https://huggingface.co/models?other=mistral)
 * [OPT](https://huggingface.co/models?other=opt)
+* [Falcon](https://huggingface.co/models?other=falcon)
+* [Mixtral](https://huggingface.co/models?other=mixtral)
+* [Phi-2](https://huggingface.co/models?other=phi-msft)
+* [Qwen](https://huggingface.co/models?other=qwen)
 
 所有当前模型都利用了后端的 [HuggingFace](https://github.com/huggingface) API 来提供模型权重和模型对应的分词器。
 
