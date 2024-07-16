@@ -3,6 +3,7 @@
 
 # DeepSpeed Team
 
+import functools
 import os
 import pkgutil
 import importlib
@@ -196,31 +197,31 @@ class HPU_Accelerator(DeepSpeedAccelerator):
     # Tensor operations
     @property
     def BFloat16Tensor(self):
-        return self.hpu.BFloat16Tensor
+        return functools.partial(torch.tensor, dtype=torch.bfloat16, device='hpu')
 
     @property
     def ByteTensor(self):
-        return self.hpu.ByteTensor
+        return functools.partial(torch.tensor, dtype=torch.uint8, device='hpu')
 
     @property
     def DoubleTensor(self):
-        return self.hpu.DoubleTensor
+        return functools.partial(torch.tensor, dtype=torch.double, device='hpu')
 
     @property
     def FloatTensor(self):
-        return self.hpu.FloatTensor
+        return functools.partial(torch.tensor, dtype=torch.float, device='hpu')
 
     @property
     def HalfTensor(self):
-        return self.hpu.HalfTensor
+        return functools.partial(torch.tensor, dtype=torch.half, device='hpu')
 
     @property
     def IntTensor(self):
-        return self.hpu.IntTensor
+        return functools.partial(torch.tensor, dtype=torch.int, device='hpu')
 
     @property
     def LongTensor(self):
-        return self.hpu.LongTensor
+        return functools.partial(torch.tensor, dtype=torch.long, device='hpu')
 
     def pin_memory(self, tensor, align_bytes=1):
         return tensor.pin_memory(self.device())
