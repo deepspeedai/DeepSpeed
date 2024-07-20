@@ -17,9 +17,6 @@ from deepspeed.accelerator import get_accelerator
 
 FWD_MODULE_STACK = list()
 
-# ensure we only warn once, otherwise every iteration will trigger a warning
-warned = False
-
 
 #for each tensor in outputs run the forward_function and register backward_function as hook
 def _apply_forward_and_backward_to_tensors_only(module, forward_function, backward_function, outputs):
