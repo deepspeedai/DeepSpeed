@@ -13,7 +13,7 @@ from .ragged_testing_utils import build_batch_and_manager, validate_kv_cache
 
 @pytest.mark.inference_v2_ops
 @pytest.mark.parametrize("n_tokens, history_size", [(1, 0), (17, 0), (33, 8), (63, 1)])
-@pytest.mark.parametrize("head_size", [64, 80, 128])
+@pytest.mark.parametrize("head_size", [64, 80, 96, 128])
 def test_single_sequence_single_block(n_tokens: int, history_size: int, head_size: int):
     """
     Validate that the copy works correctly
@@ -46,7 +46,7 @@ def test_single_sequence_single_block(n_tokens: int, history_size: int, head_siz
 
 @pytest.mark.inference_v2_ops
 @pytest.mark.parametrize("n_tokens, history_size", [(128, 0), (177, 0), (169, 8), (117, 88)])
-@pytest.mark.parametrize("head_size", [64, 80, 128])
+@pytest.mark.parametrize("head_size", [64, 80, 96, 128])
 def test_single_sequence_multiple_blocks(n_tokens: int, history_size: int, head_size: int):
     """
     Validate that the copy works correctly
@@ -78,7 +78,7 @@ def test_single_sequence_multiple_blocks(n_tokens: int, history_size: int, head_
 
 
 @pytest.mark.inference_v2_ops
-@pytest.mark.parametrize("head_size", [64, 80, 128])
+@pytest.mark.parametrize("head_size", [64, 80, 96, 128])
 def test_multi_sequence(head_size: int) -> None:
     n_heads_q = 16
     n_heads_kv = 16
