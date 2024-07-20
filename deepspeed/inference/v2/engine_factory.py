@@ -20,6 +20,7 @@ from .model_implementations import (
     MixtralPolicy,
     FalconPolicy,
     PhiPolicy,
+    Phi3Policy,
     QwenPolicy,
     Qwen2Policy,
 )
@@ -119,6 +120,8 @@ def build_hf_engine(path: str,
             policy = FalconPolicy(model_config, checkpoint_engine=checkpoint_engine)
         elif model_config.model_type == "phi":
             policy = PhiPolicy(model_config, checkpoint_engine=checkpoint_engine)
+        elif model_config.model_type == "phi3":
+            policy = Phi3Policy(model_config, checkpoint_engine=checkpoint_engine)
         elif model_config.model_type == "qwen":
             policy = QwenPolicy(model_config, checkpoint_engine=checkpoint_engine)
         elif model_config.model_type == "qwen2":

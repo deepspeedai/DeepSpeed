@@ -84,7 +84,7 @@ def rotary_pos_embs(q: torch.Tensor,
 @pytest.mark.inference_v2_ops
 @pytest.mark.parametrize("n_tokens, history_size", [(1, 0), (17, 0), (33, 15), (1, 63)])
 @pytest.mark.parametrize("trained_emb", [False, True])
-@pytest.mark.parametrize("head_size", [64, 80])
+@pytest.mark.parametrize("head_size", [64, 80, 96])
 def test_single_sequence_single_block(n_tokens: int, history_size: int, trained_emb: bool, head_size: int):
     """
     Validate that the copy works correctly
@@ -128,7 +128,7 @@ def test_single_sequence_single_block(n_tokens: int, history_size: int, trained_
 @pytest.mark.inference_v2_ops
 @pytest.mark.parametrize("n_tokens, history_size", [(128, 0), (177, 0), (169, 8), (117, 88)])
 @pytest.mark.parametrize("trained_emb", [False, True])
-@pytest.mark.parametrize("head_size", [64, 80])
+@pytest.mark.parametrize("head_size", [64, 80, 96])
 def test_single_sequence_multiple_blocks(n_tokens: int, history_size: int, trained_emb: bool, head_size: int):
     """
     Validate that the copy works correctly
@@ -171,7 +171,7 @@ def test_single_sequence_multiple_blocks(n_tokens: int, history_size: int, train
 
 @pytest.mark.inference_v2_ops
 @pytest.mark.parametrize("trained_emb", [False, True])
-@pytest.mark.parametrize("head_size", [64, 80])
+@pytest.mark.parametrize("head_size", [64, 80, 96])
 def test_multi_sequences(trained_emb: bool, head_size: int) -> None:
     n_heads_q = 16
     n_heads_kv = 16
@@ -216,9 +216,9 @@ def test_multi_sequences(trained_emb: bool, head_size: int) -> None:
 
 
 @pytest.mark.inference_v2_ops
-def test_rotary_dim() -> None:
+@pytest.mark.parametrize("head_size", [80, 96])
+def test_rotary_dim(head_size: int) -> None:
     trained_emb = False
-    head_size = 80
     rotary_dim = 64
     n_heads_q = 16
     n_heads_kv = 16
