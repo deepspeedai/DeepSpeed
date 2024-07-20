@@ -223,6 +223,8 @@ __global__ void kv_rotary_pos_kernel(T* kv_cache,
         LAUNCH_KV_ROTARY_FOR_Q_RATIO_HEAD_SIZE(Q_RATIO, 64);  \
     } else if (head_size == 80) {                             \
         LAUNCH_KV_ROTARY_FOR_Q_RATIO_HEAD_SIZE(Q_RATIO, 80);  \
+    } else if (head_size == 96) {                             \
+        LAUNCH_KV_ROTARY_FOR_Q_RATIO_HEAD_SIZE(Q_RATIO, 96);  \
     } else if (head_size == 128) {                            \
         LAUNCH_KV_ROTARY_FOR_Q_RATIO_HEAD_SIZE(Q_RATIO, 128); \
     } else {                                                  \
@@ -326,6 +328,8 @@ INSTANTIATE_KV_ROTARY_KERNEL(__nv_bfloat16)
         LAUNCH_KV_COPY_FOR_Q_RATIO_HEAD_SIZE(Q_RATIO, 64);  \
     } else if (head_size == 80) {                           \
         LAUNCH_KV_COPY_FOR_Q_RATIO_HEAD_SIZE(Q_RATIO, 80);  \
+    } else if (head_size == 96) {                           \
+        LAUNCH_KV_COPY_FOR_Q_RATIO_HEAD_SIZE(Q_RATIO, 96);  \
     } else if (head_size == 128) {                          \
         LAUNCH_KV_COPY_FOR_Q_RATIO_HEAD_SIZE(Q_RATIO, 128); \
     } else {                                                \
