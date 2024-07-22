@@ -77,7 +77,7 @@ _test_tasks = [
 
 @dataclass
 class ModelInfo:
-    modelId: str
+    id: str
     pipeline_tag: str
     tags: List[str]
 
@@ -108,7 +108,7 @@ def _hf_model_list() -> List[ModelInfo]:
                 for model in _test_models:
                     model_list.extend(api.list_models(model_name=model))
                 model_data["model_list"] = [
-                    ModelInfo(modelId=m.modelId, pipeline_tag=m.pipeline_tag, tags=m.tags) for m in model_list
+                    ModelInfo(id=m.id, pipeline_tag=m.pipeline_tag, tags=m.tags) for m in model_list
                 ]
                 break  # Exit the loop if the operation is successful
             except requests.exceptions.HTTPError as e:
@@ -129,8 +129,8 @@ def _hf_model_list() -> List[ModelInfo]:
 
 # Get a list of all models and mapping from task to supported models
 _hf_models = _hf_model_list()
-_hf_model_names = [m.modelId for m in _hf_models]
-_hf_task_to_models = {task: [m.modelId for m in _hf_models if m.pipeline_tag == task] for task in _test_tasks}
+_hf_model_names = [m.id for m in _hf_models]
+_hf_task_to_models = {task: [m.id for m in _hf_models if m.pipeline_tag == task] for task in _test_tasks}
 
 # Get all combinations of task:model to test
 _model_w_tasks = [(m, t) for m, t in itertools.product(*[_test_models, _test_tasks]) if m in _hf_task_to_models[t]]
