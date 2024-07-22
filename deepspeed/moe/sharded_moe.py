@@ -533,13 +533,18 @@ class MOELayer(Base):
         if self.wall_clock_breakdown:
             self.timers(FIRST_ALLTOALL_TIMER).start()
 
-        if groups._get_expert_model_parallel_world_size() == 1:
-            # If the non-expert is tensor-parallel, it will create
+        tensor_model_world_size = bwc_tensor_model_parallel_world_size(groups.mpu)
+        if tensor_model_world_size > 1:
+            # If the non-expert is tensor-parallel,
+            # Whether expert is tensor-parallel or not , it will create
             # duplicate tokens on the tensor-parallel ranks.
-            # Since our experts are not tensor-parallel, these duplicates
-            # need to be dropped to ensure correctness.
-            # this also doubles up as a communication optimization as we are
-            # reducing the all-to-all communication volume.
+            # drop duplicate tokens also doubles up as a communication
+            # optimization as we are reducing the all-to-all communication volume.
+            # 1: for not tensor-parallel expert,drop duplicate tokens to ensure
+            # both correctness and reduce all-to-all communication.
+            # 2: for tensor-parallel expert,drop duplicate tokens to reduce all-to-all
+            # communication volume,before expert execution, it is necessary to perform
+            # an allgather to ensure correctness,
             dispatched_input = drop_tokens(dispatched_input, dim=1)
 
         dispatched_input = _AllToAll.apply(self.ep_group, dispatched_input)
@@ -548,10 +553,22 @@ class MOELayer(Base):
             self.timers(FIRST_ALLTOALL_TIMER).stop()
             self.time_falltoall = self.timers(FIRST_ALLTOALL_TIMER).elapsed(reset=False)
 
+        if tensor_model_world_size > 1 and groups._get_expert_model_parallel_world_size() > 1:
+            # if both expert and non-expert are tensor-parallel
+            # the dropped duplicate tokens need to be gathered on each
+            # tensor parallel rank again to ensure correctness
+            dispatched_input = gather_tokens(dispatched_input, dim=1)
+
         # Re-shape after all-to-all: ecm -> gecm
         dispatched_input = dispatched_input.reshape(self.ep_size, self.num_local_experts, -1, d_model)
-
         expert_output = self.experts(dispatched_input)
+        # Re-shape before drop_tokens: gecm -> ecm
+        expert_output = expert_output.reshape(self.ep_size * self.num_local_experts, -1, d_model)
+        if tensor_model_world_size > 1 and groups._get_expert_model_parallel_world_size() > 1:
+            # if both expert and non-expert are tensor-parallel
+            # drop duplicate tokens to ensure both correctness
+            # and reduce all-to-all communication.
+            expert_output = drop_tokens(expert_output, dim=1)
 
         if self.wall_clock_breakdown:
             self.timers(SECOND_ALLTOALL_TIMER).start()
@@ -562,10 +579,7 @@ class MOELayer(Base):
             self.timers(SECOND_ALLTOALL_TIMER).stop()
             self.time_salltoall = self.timers(SECOND_ALLTOALL_TIMER).elapsed(reset=False)
 
-        # Re-shape back: gecm -> ecm
-        expert_output = expert_output.reshape(self.ep_size * self.num_local_experts, -1, d_model)
-
-        if groups._get_expert_model_parallel_world_size() == 1:
+        if tensor_model_world_size > 1:
             # the dropped duplicate tokens need to be gathered on each
             # tensor parallel rank again for the tensor-parallel
             # non-expert of the next layer.
