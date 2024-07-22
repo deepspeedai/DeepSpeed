@@ -24,7 +24,7 @@ jobs:
         pyVersion: ["3.7", "3.8", "3.9", "3.10"]
       fail-fast: false
 
-    runs-on: ubuntu-20.04
+    runs-on: ubuntu-22.04
     container:
       image: deepspeed/gh-builder:py${{ matrix.pyVersion }}
 
