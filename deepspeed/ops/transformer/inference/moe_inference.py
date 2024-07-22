@@ -327,7 +327,7 @@ class DeepSpeedMoEInference(nn.Module):
 
             if self.expert_mp_group is not None:
                 world_size = dist.get_world_size(group=self.expert_mp_group)
-                gather_buffer = torch.zeros(world_size * attention_output.numel(),
+                gather_buffer = torch.empty(world_size * attention_output.numel(),
                                             dtype=attention_output.dtype,
                                             device=attention_output.device)
                 dist.all_gather_into_tensor(gather_buffer, attention_output, group=self.expert_mp_group)
