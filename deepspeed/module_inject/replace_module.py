@@ -281,7 +281,7 @@ def replace_transformer_layer(orig_layer_impl, model, checkpoint_dict, config, m
 
         # 4.1 Get n_embd
         n_embd = None
-        multi_query_n_embd_names = ['n_embd']
+        multi_query_n_embd_names = ['n_embd', 'hidden_size']
         for name in multi_query_n_embd_names:
             if hasattr(model_config, name):
                 n_embd = getattr(model_config, name)
