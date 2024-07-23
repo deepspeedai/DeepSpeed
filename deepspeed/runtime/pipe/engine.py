@@ -213,6 +213,8 @@ class PipelineEngine(DeepSpeedEngine):
                 self.module.activation_checkpoint_func = ds_checkpointing.non_reentrant_checkpoint
                 if self.grid.get_global_rank() == 0:
                     logger.info(f'CONFIG: activation_checkpoint_func=non_reentrant_checkpoint')
+        if self.module.activation_checkpoint_interval > 0:
+            self.module._precompute_checkpointable_values()
 
         self.module.checkpoint_parallel_write_pipeline = self._config.checkpoint_parallel_write_pipeline
 
