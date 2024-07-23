@@ -67,11 +67,24 @@ def prepare_tp_fused_qkvw(module, src, mp_size, gpu_index):
     def _glm_type_transpose(input, mp_size):
         #input : [3*hidden_dim, hidden_dim](weight) or [3*hidden_dim](bias)
 
-        shape = input.shape
-        src_split = torch.split(input, shape[0] // 3, dim=0)
+        # For chatglm2 & chatglm3(kv_heads=2), need to special handle.
+        if get_num_kv_heads() == 2:
+            shape = input.shape
+            hidden_dim = get_n_embd()
+            kv_dim = (shape[0] - hidden_dim) // get_num_kv_heads()
+            q = input[:hidden_dim]
+            k = input[hidden_dim:hidden_dim + kv_dim]
+            v = input[hidden_dim + kv_dim:]
+            q_split = q.split(get_shard_size_list(q.shape[0], mp_size), dim=0)
+            k_split = k.split(get_shard_size_list(k.shape[0], mp_size), dim=0)
+            v_split = v.split(get_shard_size_list(v.shape[0], mp_size), dim=0)
+            return torch.cat((q_split[gpu_index], k_split[gpu_index], v_split[gpu_index]), dim=0)
+        else:
+            shape = input.shape
+            src_split = torch.split(input, shape[0] // 3, dim=0)
 
-        split_fusedqkv = split_by_qkvlist_and_refuse(src_split, get_shard_size_list(shape[0] // 3, mp_size))
-        return split_fusedqkv[gpu_index]
+            split_fusedqkv = split_by_qkvlist_and_refuse(src_split, get_shard_size_list(shape[0] // 3, mp_size))
+            return split_fusedqkv[gpu_index]
 
     def _bloom_type_transpose(input, mp_size):
         shape = input.shape
