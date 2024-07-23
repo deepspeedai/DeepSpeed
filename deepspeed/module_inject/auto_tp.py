@@ -309,6 +309,10 @@ class AutoTP():
                     gem_list = gem_list + [layer]
                 elif 'self_attn.dense' in layer and 'Phi' in str(type(module)):
                     gem_list = gem_list + [layer]
+                elif 'self_attention.dense' in layer and 'ChatGLM' in str(model):
+                    gem_list = gem_list + [layer]
+                elif 'dense_4h_to_h' in layer and 'ChatGLM' in str(model):
+                    gem_list = gem_list + [layer]
 
             layer_list = []
             if gem_list != []:
@@ -341,8 +345,8 @@ class AutoTP():
                 weight, bias = shard_value_with_share_qk(child.weight.data, child.bias, dist.get_rank(),
                                                          dist.get_world_size(), False)
                 return LinearAllreduce(weight, bias, self.mp_group)
-        # for phi3.
-        if 'gate_up_proj' in name:
+        # For MLP including chunk layer.
+        if 'gate_up_proj' in name or ('dense_h_to_4h' in name and 'GLM' in str(self.module)):
             weight, bias = shard_chunk_mlp(child.weight.data, child.bias, dist.get_rank(), dist.get_world_size())
             return LinearLayer(weight=weight, bias=bias)
         if name in self.all_reduce_linears:
@@ -424,7 +428,8 @@ class AutoTP():
             return
         param_list = [
             "n_heads", "inner_dim", "num_heads", "num_kv", "num_attention_heads", "num_attn_heads", "all_head_size",
-            "embed_dim", "hidden_size", "num_key_value_heads", "num_kv_heads", "kv_n_heads", "d_model"
+            "embed_dim", "hidden_size", "num_key_value_heads", "num_kv_heads", "kv_n_heads", "d_model",
+            "num_attention_heads_per_partition", "num_multi_query_groups_per_partition", "hidden_size_per_partition"
         ]
         for param in param_list:
             if "Yuan" in str(child) and 'embed_dim' in param_list:
@@ -488,7 +493,10 @@ class AutoTP():
 
     def get_model_num_kv_heads(self, config):
         num_kv_heads = None
-        kv_head_names = ['num_kv_heads', 'num_key_value_heads', 'num_attention_heads', 'n_heads']
+        # multi_query_group_num is for chatglm2 & chatglm3
+        kv_head_names = [
+            'multi_query_group_num', 'num_kv_heads', 'num_key_value_heads', 'num_attention_heads', 'n_heads'
+        ]
         for name in kv_head_names:
             if hasattr(config, name):
                 num_kv_heads = getattr(config, name)
