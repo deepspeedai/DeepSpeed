@@ -126,6 +126,8 @@ The following model families have been successfully tested with automatic tensor
 - bigbird_pegasus
 - bloom
 - camembert
+- chatglm2
+- chatglm3
 - codegen
 - codellama
 - deberta_v2
@@ -144,6 +146,7 @@ The following model families have been successfully tested with automatic tensor
 - m2m_100
 - marian
 - mistral
+- mixtral
 - mpt
 - mvp
 - nezha
@@ -151,8 +154,10 @@ The following model families have been successfully tested with automatic tensor
 - opt
 - pegasus
 - perceiver
+- phi
 - plbart
 - qwen
+- qwen2
 - reformer
 - roberta
 - roformer
@@ -162,6 +167,7 @@ The following model families have been successfully tested with automatic tensor
 - xglm
 - xlm_roberta
 - yoso
+- yuan
 
 # Unsupported Models
 
