@@ -196,6 +196,16 @@ class PipelineModule(nn.Module):
         #newseed = get_accelerator().initial_seed() + self._grid.get_stage_id()
         #ds_utils.set_random_seed(newseed)
 
+        self.activation_checkpoint_interval = activation_checkpoint_interval
+
+        self.activation_checkpoint_func = activation_checkpoint_func
+
+        #storage for precomputed checkpointeble results
+        self.is_checkpointable_results = []
+        self.is_checkpointable_results_interval = None
+
+        # if configuration use_reentrant = False, self.activation_checkpoint_func will be set to ``checkpointing.non_reentrant_checkpoint``
+
         #with torch.random.fork_rng(devices=[get_accelerator().current_device_name()]):
         self._build()
         self.to(get_accelerator().device_name(self.local_rank))
@@ -203,10 +213,15 @@ class PipelineModule(nn.Module):
         self.tied_comms = self._index_tied_modules()
         self._synchronize_tied_weights()
 
-        self.activation_checkpoint_interval = activation_checkpoint_interval
-
-        self.activation_checkpoint_func = activation_checkpoint_func
-        # if configuration use_reentrant = False, self.activation_checkpoint_func will be set to ``checkpointing.non_reentrant_checkpoint``
+    def _precompute_checkpointable_values(self):
+        if self.activation_checkpoint_interval > 0 and self.is_checkpointable_results_interval != self.activation_checkpoint_interval:
+            num_layers = len(self.forward_funcs)
+            self.interval_was_zero = False
+            for start_idx in range(0, num_layers, self.activation_checkpoint_interval):
+                end_idx = min(start_idx + self.activation_checkpoint_interval, num_layers)
+                funcs = self.forward_funcs[start_idx:end_idx]
+                self.is_checkpointable_results.append(self._is_checkpointable(funcs))
+            self.is_checkpointable_results_interval = self.activation_checkpoint_interval
 
     def _build(self):
         specs = self._layer_specs
@@ -352,7 +367,9 @@ class PipelineModule(nn.Module):
         else:
             num_layers = len(self.forward_funcs)
             x = forward_input
-            for start_idx in range(0, num_layers, self.activation_checkpoint_interval):
+            for start_idx, is_checkpointable_result in \
+                zip(range(0, num_layers, self.activation_checkpoint_interval), self.is_checkpointable_results):
+
                 end_idx = min(start_idx + self.activation_checkpoint_interval, num_layers)
 
                 funcs = self.forward_funcs[start_idx:end_idx]
@@ -361,7 +378,7 @@ class PipelineModule(nn.Module):
                 if not isinstance(x, tuple):
                     x = (x, )
 
-                if self._is_checkpointable(funcs):
+                if is_checkpointable_result:
                     x = self.activation_checkpoint_func(exec_range_func(start_idx, end_idx), *x)
                 else:
                     x = exec_range_func(start_idx, end_idx)(*x)
