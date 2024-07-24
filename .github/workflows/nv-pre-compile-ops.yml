@@ -21,7 +21,7 @@ concurrency:
 
 jobs:
   unit-tests:
-    runs-on: ubuntu-20.04
+    runs-on: ubuntu-22.04
     container:
       image: deepspeed/gh-builder:ubuntu1804-py38-torch1131-cu116
 
