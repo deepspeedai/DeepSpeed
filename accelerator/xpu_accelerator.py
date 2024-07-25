@@ -26,7 +26,11 @@ class XPU_Accelerator(DeepSpeedAccelerator):
         return False
 
     def use_host_timers(self):
-        return self.is_synchronized_device()
+        # WA XPU event will be consolidated in 2.5
+        if ipex.__version__ < '2.5':
+            return True
+        else:
+            return self.is_synchronized_device()
 
     def resolves_data_dependency(self):
         return self.is_synchronized_device()
