@@ -42,7 +42,7 @@ class TestQuantParam(DistributedTest):
         assert qp.device == torch.device('cpu')
         qp = qp.to(get_accelerator().current_device_name())
         assert qp.device == torch.device(device)
-        assert qp.dtype == torch.int8
+        assert qp.dtype == torch.uint8
 
     def test_hf_clone(self):
         device = get_accelerator().current_device_name()
