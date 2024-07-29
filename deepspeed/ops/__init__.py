@@ -9,7 +9,7 @@ from . import lamb
 from . import lion
 from . import sparse_attention
 from . import transformer
-
+from . import fp_quantizer
 from .transformer import DeepSpeedTransformerLayer, DeepSpeedTransformerConfig
 
 from ..git_version_info import compatible_ops as __compatible_ops__

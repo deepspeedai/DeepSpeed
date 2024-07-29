@@ -57,18 +57,18 @@ class QuantizedParameter(nn.Parameter):
 
     def _ensure_quantized(self, tensor: torch.Tensor):
         # If the tensor is on the accelerator and is not quantized, then quantize it in-place.
-        if get_accelerator().on_accelerator(tensor) and tensor.dtype != torch.int8:
+        if get_accelerator().on_accelerator(tensor) and tensor.dtype != torch.uint8:
             with get_accelerator().stream(get_accelerator().current_stream(tensor.device)):
                 tensor.data = self.quantizer.quantize(tensor.data,
                                                       q_bits=self.quantization_config.q_bits,
                                                       q_mantisa_bits=self.quantization_config.mantissa_bits)
-            assert tensor.dtype == torch.int8
+            assert tensor.dtype == torch.uint8
 
     def dequantized(self) -> torch.Tensor:
         """
         Return a tensor containing the dequantized weights of this parameter.
         """
-        if get_accelerator().on_accelerator(self.data) and self.data.dtype == torch.int8:
+        if get_accelerator().on_accelerator(self.data) and self.data.dtype == torch.uint8:
             with get_accelerator().stream(get_accelerator().current_stream(self.data.device)):
                 return self.quantizer.dequantize(self.data,
                                                  q_bits=self.quantization_config.q_bits,
