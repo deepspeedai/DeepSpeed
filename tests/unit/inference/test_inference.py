@@ -94,7 +94,10 @@ def _hf_model_list() -> List[ModelInfo]:
     model_data = {"cache_time": 0, "model_list": []}
     if os.path.isfile(cache_file_path):
         with open(cache_file_path, 'rb') as f:
-            model_data = pickle.load(f)
+            try:
+                model_data = pickle.load(f)
+            except Exception as e:
+                print(f"Error loading cache file {cache_file_path}: {e}")
 
     current_time = time.time()
 
