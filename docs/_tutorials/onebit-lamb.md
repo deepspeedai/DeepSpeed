@@ -61,6 +61,10 @@ Alternatively, the standard mpirun launcher can also be used as follows:
 mpirun -np [num processes] -ppn [num GPUs on each node] -hostfile [hostfile] [MPI flags] python [training_script.py]
 ```
 
+#### 1.2.3 Compressed implementation
+This backend provides an approach to abstract the generic part of one-bit optimizers and implements accelerator dependent part with DeepSpeed custom op builder. To use this `CompressedBackend`, you should make sure that your current accelerator supports `PackbitsBuilder`, so that it could be loaded to do high performance packing and unpacking between float and Byte datatype, which is utilized in one-bit algorithm. An example can be found in `Deepspeed/op_builder/xpu/packbits.py`.
+This approach does not require NCCL or MPI based communication library. It will automatically use your default communication library selected by your accelerator in `deepspeed/comm`.
+
 ### 1.3 1-bit LAMB Algorithm
 
 The detailed description of the 1-bit LAMB algorithm can be seen from our [paper](https://arxiv.org/abs/2104.06069).
@@ -101,7 +105,7 @@ Please note the new parameters `freeze_step`, `cuda_aware`, `comm_backend_name`,
 
 `cuda_aware` is used for MPI-based implementation to indicate that the underlying MPI library supports CUDA-Aware communication. This feature is only supported on systems with InfiniBand interconnect and a CUDA-Aware MPI library like [MVAPICH2-GDR](http://mvapich.cse.ohio-state.edu/userguide/gdr/) or OpenMPI built with CUDA-Aware support. Setting `cuda_aware` to False will allow training on Ethernet based systems. However, the communication will happen using sender as well as receiver side memory copies between CPU and GPU buffers before and after communication.
 
-`comm_backend_name` is used to indicate which backend implementation to use. You can choose between NCCL and MPI-based implementations by setting `comm_backend_name` to "nccl" or "mpi". When using NCCL-based implementation, there is no need to set `cuda_aware`.
+`comm_backend_name` is used to indicate which backend implementation to use. You can choose between NCCL, MPI-based and compressed implementations by setting `comm_backend_name` to "nccl", "mpi" or "compressed". When using NCCL-based implementation, there is no need to set `cuda_aware`.
 
 `coeff_beta` is used when calculating a moving average of the LAMB scaling coefficient during the warmup stage. This moving average is then used as the frozen base scaling coefficient during the compression stage.
 
