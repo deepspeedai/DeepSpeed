@@ -37,7 +37,7 @@ jobs:
 
       - name: Install pytorch
         run: |
-          pip3 install -U --cache-dir $TORCH_CACHE torch --index-url https://download.pytorch.org/whl/cu118
+          pip3 install -U --cache-dir $TORCH_CACHE torch torchvision --index-url https://download.pytorch.org/whl/cu118
           python -c "import torch; print('torch:', torch.__version__, torch)"
           python -c "import torch; print('CUDA available:', torch.cuda.is_available())"
 
