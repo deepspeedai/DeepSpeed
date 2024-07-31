@@ -749,11 +749,18 @@ class CUDAOpBuilder(OpBuilder):
             except ValueError:
                 nvcc_threads = min(os.cpu_count(), 8)
 
-            cuda_major, _ = installed_cuda_version()
+            cuda_major, cuda_minor = installed_cuda_version()
+            if cuda_major > 10:
+                if cuda_major == 12 and cuda_minor >= 5:
+                    std_lib = '-std=c++20'
+                else:
+                    std_lib = '-std=c++17'
+            else:
+                std_lib = '-std=c++14'
             args += [
-                '-allow-unsupported-compiler' if sys.platform == "win32" else '', '--use_fast_math',
-                '-std=c++17' if cuda_major > 10 else '-std=c++14', '-U__CUDA_NO_HALF_OPERATORS__',
-                '-U__CUDA_NO_HALF_CONVERSIONS__', '-U__CUDA_NO_HALF2_OPERATORS__', f'--threads={nvcc_threads}'
+                '-allow-unsupported-compiler' if sys.platform == "win32" else '', '--use_fast_math', std_lib,
+                '-U__CUDA_NO_HALF_OPERATORS__', '-U__CUDA_NO_HALF_CONVERSIONS__', '-U__CUDA_NO_HALF2_OPERATORS__',
+                f'--threads={nvcc_threads}'
             ]
             if os.environ.get('DS_DEBUG_CUDA_BUILD', '0') == '1':
                 args.append('--ptxas-options=-v')
