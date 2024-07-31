@@ -800,25 +800,32 @@ class CUDAOpBuilder(OpBuilder):
 
 class TorchCPUOpBuilder(CUDAOpBuilder):
 
+    def get_cuda_lib64_path(self):
+        import torch
+        if not self.is_rocm_pytorch():
+            CUDA_LIB64 = os.path.join(torch.utils.cpp_extension.CUDA_HOME, "lib64")
+            if not os.path.exists(CUDA_LIB64):
+                CUDA_LIB64 = os.path.join(torch.utils.cpp_extension.CUDA_HOME, "lib")
+        else:
+            CUDA_LIB64 = os.path.join(torch.utils.cpp_extension.ROCM_HOME, "lib")
+        return CUDA_LIB64
+
     def extra_ldflags(self):
         if self.build_for_cpu:
             return ['-fopenmp']
 
         if not self.is_rocm_pytorch():
-            return ['-lcurand']
+            ld_flags = ['-lcurand']
+            if not self.build_for_cpu:
+                ld_flags.append(f'-L{self.get_cuda_lib64_path()}')
+            return ld_flags
 
         return []
 
     def cxx_args(self):
-        import torch
         args = []
         if not self.build_for_cpu:
-            if not self.is_rocm_pytorch():
-                CUDA_LIB64 = os.path.join(torch.utils.cpp_extension.CUDA_HOME, "lib64")
-                if not os.path.exists(CUDA_LIB64):
-                    CUDA_LIB64 = os.path.join(torch.utils.cpp_extension.CUDA_HOME, "lib")
-            else:
-                CUDA_LIB64 = os.path.join(torch.utils.cpp_extension.ROCM_HOME, "lib")
+            CUDA_LIB64 = self.get_cuda_lib64_path()
 
             args += super().cxx_args()
             args += [
