@@ -4,6 +4,7 @@
 # DeepSpeed Team
 
 import os
+import re
 import sys
 import time
 import importlib
@@ -215,6 +216,7 @@ class OpBuilder(ABC):
 
         ROCM_MAJOR = '0'
         ROCM_MINOR = '0'
+        ROCM_VERSION_DEV_RAW = ""
         if OpBuilder.is_rocm_pytorch():
             from torch.utils.cpp_extension import ROCM_HOME
             rocm_ver_file = Path(ROCM_HOME).joinpath(".info/version-dev")
@@ -223,11 +225,22 @@ class OpBuilder(ABC):
                     ROCM_VERSION_DEV_RAW = file.read()
             elif "rocm" in torch.__version__:
                 ROCM_VERSION_DEV_RAW = torch.__version__.split("rocm")[1]
+            if ROCM_VERSION_DEV_RAW != "":
+                ROCM_MAJOR = ROCM_VERSION_DEV_RAW.split('.')[0]
+                ROCM_MINOR = ROCM_VERSION_DEV_RAW.split('.')[1]
             else:
+                # Look in /usr/include/rocm-version.h
+                rocm_ver_file = Path("/usr/include/rocm_version.h")
+                if rocm_ver_file.is_file():
+                    with open(rocm_ver_file, 'r') as file:
+                        for ln in file.readlines():
+                            if "#define ROCM_VERSION_MAJOR" in ln:
+                                ROCM_MAJOR = re.findall(r'\S+', ln)[2]
+                            elif "#define ROCM_VERSION_MINOR" in ln:
+                                ROCM_MINOR = re.findall(r'\S+', ln)[2]
+            if ROCM_MAJOR == '0':
                 assert False, "Could not detect ROCm version"
-            assert ROCM_VERSION_DEV_RAW != "", "Could not detect ROCm version"
-            ROCM_MAJOR = ROCM_VERSION_DEV_RAW.split('.')[0]
-            ROCM_MINOR = ROCM_VERSION_DEV_RAW.split('.')[1]
+
         OpBuilder._rocm_version = (int(ROCM_MAJOR), int(ROCM_MINOR))
         return OpBuilder._rocm_version
 
@@ -235,7 +248,10 @@ class OpBuilder(ABC):
     def get_rocm_gpu_arch():
         if OpBuilder._rocm_gpu_arch:
             return OpBuilder._rocm_gpu_arch
-        rocm_gpu_arch_cmd = "/opt/rocm/bin/rocminfo | grep -o -m 1 'gfx.*'"
+        rocm_info = Path("/opt/rocm/bin/rocminfo")
+        if (not rocm_info.is_file()):
+            rocm_info = Path("rocminfo")
+        rocm_gpu_arch_cmd = str(rocm_info) + " | grep -o -m 1 'gfx.*'"
         try:
             result = subprocess.check_output(rocm_gpu_arch_cmd, shell=True)
             rocm_gpu_arch = result.decode('utf-8').strip()
@@ -248,7 +264,12 @@ class OpBuilder(ABC):
     def get_rocm_wavefront_size():
         if OpBuilder._rocm_wavefront_size:
             return OpBuilder._rocm_wavefront_size
-        rocm_wavefront_size_cmd = "/opt/rocm/bin/rocminfo | grep -Eo -m1 'Wavefront Size:[[:space:]]+[0-9]+' | grep -Eo '[0-9]+'"
+
+        rocm_info = Path("/opt/rocm/bin/rocminfo")
+        if (not rocm_info.is_file()):
+            rocm_info = Path("rocminfo")
+        rocm_wavefront_size_cmd = str(
+            rocm_info) + " | grep -Eo -m1 'Wavefront Size:[[:space:]]+[0-9]+' | grep -Eo '[0-9]+'"
         try:
             result = subprocess.check_output(rocm_wavefront_size_cmd, shell=True)
             rocm_wavefront_size = result.decode('utf-8').strip()
