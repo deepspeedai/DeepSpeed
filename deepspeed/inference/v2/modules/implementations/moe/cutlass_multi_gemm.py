@@ -42,7 +42,7 @@ class DSMultiGemmMoE(DSMoEBase):
         if config.input_dtype != torch.float16 and config.input_dtype != torch.bfloat16:
             return False
 
-        if config.top_k != 1 and config.top_k != 2:
+        if config.top_k != 1 and config.top_k != 2 and config.top_k != 4:
             return False
 
         return True
