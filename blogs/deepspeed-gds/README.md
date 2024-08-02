@@ -17,17 +17,17 @@ this problem, DeepSpeed has created a suite of I/O optimizations collectively ca
 
 DeepNVMe improves the performance and efficiency of I/O-bound DL applications by accelerating I/O operations
 and reducing hardware requirements. It achieves this by leveraging storage innovations such as Non-Volatile
-Memory Express (NVMe) Solid Storage Devices (SSDs) and Nvidia Magnum IO^TM GPUDirect® Storage (GDS). In this
+Memory Express (NVMe) Solid Storage Devices (SSDs) and NVIDIA Magnum IO<sup>TM</sup> GPUDirect® Storage (GDS). In this
 blog we show the benefits of DeepNVMe using microbenchmarks and an inference application. In experiments
 conducted on an Azure NC96ads\_A100\_v4 VM, we observed that DeepNVMe saturates available NVMe bandwidth for
 data transfers with GPU or CPU memory, achieving up to 10GB/sec reads and 5 GB/secs writes.
 
 # Background
-High-performance access to persistent storage is a common challenge in many computing domains, including DL. Thus, a significant number of hardware and software solutions have been proposed. DeepNVMe builds on three such solutions: (1) NVMe SSDs, (2) Nvidia GDS, and (3) Linux Asynchronous I/O (libaio). We will briefly describe each of these technologies.
+High-performance access to persistent storage is a common challenge in many computing domains, including DL. Thus, a significant number of hardware and software solutions have been proposed. DeepNVMe builds on three such solutions: (1) NVMe SSDs, (2) NVIDIA GDS, and (3) Linux Asynchronous I/O (libaio). We will briefly describe each of these technologies.
 
-NVMe SSDs are Flash-based storage devices that are replacing much slower hard disk drives (HDD) as primary persistent storage in modern servers. For example, an Azure NC96ads\_A100\_v4 VM is equipped with four NVMe SSDs which are individually capable of 3.25 GB/sec reads and can be combined in a RAID-0 configuration for a theoretical aggregate read bandwidth of 13 GB/sec. Nvidia GDS enables direct transfers between NVMe and GPU memory thus avoiding the inefficiencies of the traditional approach of using intermediate CPU memory (bounce buffer). Nvidia GDS is generally available in CUDA versions 11.4 and above. Finally, libaio is an asynchronous I/O stack introduced in Linux to better extract raw performance of fast storage devices like NVMe SSDs compared to the traditional I/O stack.
+NVMe SSDs are Flash-based storage devices that are replacing much slower hard disk drives (HDD) as primary persistent storage in modern servers. For example, an Azure NC96ads\_A100\_v4 VM is equipped with four NVMe SSDs which are individually capable of 3.25 GB/sec reads and can be combined in a RAID-0 configuration for a theoretical aggregate read bandwidth of 13 GB/sec. NVIDIA GDS enables direct transfers between NVMe and GPU memory thus avoiding the inefficiencies of the traditional approach of using intermediate CPU memory (bounce buffer). NVIDIA GDS is generally available in CUDA versions 11.4 and above. Finally, libaio is an asynchronous I/O stack introduced in Linux to better extract raw performance of fast storage devices like NVMe SSDs compared to the traditional I/O stack.
 
-# DeepNVMe: an Optimization Module for DeepLearning I/O
+# DeepNVMe: an Optimization Module for Deep Learning I/O
 
 DeepNVMe is a Python module that we developed with two key design principles. First, it leverages the above discussed storage technologies to implement powerful optimizations such as non-blocking I/O operations, bulk submission of I/O operations, parallelization of an individual I/O operation, and a lightweight runtime. Second, it exposes these I/O optimizations through a simple POSIX-like interface to foster easy integration into DL applications while avoiding the complexities of the underlying technologies.
 
@@ -43,7 +43,7 @@ Table 1: Experimental setup details
 
 ## Microbenchmark Performance
 
-We used three benchmarking tools for our evaluations. The first is fio, the popular I/O benchmarking tool written in C. The second is gdsio from Nvidia for benchmarking GDS performance. The third is ds\_io, a Python tool that we created for easy integration with DeepNVMe and to be more representative of DL applications which are commonly Python-based.
+We used three benchmarking tools for our evaluations. The first is fio, the popular I/O benchmarking tool written in C. The second is gdsio from NVIDIA for benchmarking GDS performance. The third is ds\_io, a Python tool that we created for easy integration with DeepNVMe and to be more representative of DL applications which are commonly Python-based.
 
 ## High-Performance I/O with CPU Buffers via NVMe Scaling
 
@@ -85,4 +85,4 @@ In this blog post, we introduced DeepNVMe, an I/O optimization technology create
 
 
 # Acknowlegements
-This work is the result of a deep collaboration between Microsoft and Nvidia. The contributors include Joe Mayer, Martin Cai, and Olatunji Ruwase from Microsoft; Kiran Modukuri, Vahid Noormofidi, Sourab Gupta, and Sandeep Joshi from Nivida.
+This work is the result of a deep collaboration between Microsoft and NVIDIA. The contributors include Joe Mayer, Martin Cai, and Olatunji Ruwase from Microsoft; Kiran Modukuri, Vahid Noormofidi, Sourab Gupta, and Sandeep Joshi from Nivida.
