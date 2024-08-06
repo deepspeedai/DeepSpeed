@@ -27,7 +27,7 @@ inline void writeAs(void* dst, const T& val)
     std::memcpy(dst, &val, sizeof(T));
 }
 
-#define ROUND_DOWN(size, step) ((size) & ~((step)-1))
+#define ROUND_DOWN(size, step) ((size) & ~((step) - 1))
 
 #if defined(__AVX512__)
 #define SIMD_STORE(a, d) _mm512_storeu_ps(a, d)
