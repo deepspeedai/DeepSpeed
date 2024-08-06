@@ -1,5 +1,5 @@
 accelerate
-clang-format==16.0.2
+clang-format==18.1.3
 comet_ml>=3.41.0
 deepspeed-kernels ; sys_platform == 'linux'
 docutils<0.18
