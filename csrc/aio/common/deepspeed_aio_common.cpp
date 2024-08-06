@@ -301,9 +301,8 @@ int regular_read(const char* filename, std::vector<char>& buffer)
     } while (r > 0);
 
     if (read_bytes != num_bytes) {
-        std::cerr << "read error "
-                  << " read_bytes (read) = " << read_bytes << " num_bytes (fstat) = " << num_bytes
-                  << std::endl;
+        std::cerr << "read error " << " read_bytes (read) = " << read_bytes
+                  << " num_bytes (fstat) = " << num_bytes << std::endl;
     }
     assert(read_bytes == num_bytes);
     close(fd);

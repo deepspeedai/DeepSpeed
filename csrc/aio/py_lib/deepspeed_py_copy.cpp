@@ -10,7 +10,7 @@ Functionality for swapping optimizer tensors to/from (NVMe) storage devices.
 #include "deepspeed_py_copy.h"
 #include <omp.h>
 
-#define ROUND_DOWN(size, step) ((size) & ~((step)-1))
+#define ROUND_DOWN(size, step) ((size) & ~((step) - 1))
 
 #if defined(__AVX512__) or defined(__AVX256__)
 union AVX_Data {

@@ -82,11 +82,11 @@
     }
 
 template <typename T>
-__inline__ __attribute__((always_inline)) T reduce_block_into_lanes(
-    T* x,
-    T val,
-    int lanes = 1,
-    bool share_result = false)  // lanes is intended to be <= 32.
+__inline__ __attribute__((always_inline)) T
+reduce_block_into_lanes(T* x,
+                        T val,
+                        int lanes = 1,
+                        bool share_result = false)  // lanes is intended to be <= 32.
 {
     auto item_ct1 = sycl::ext::oneapi::experimental::this_nd_item<3>();
     int tid = item_ct1.get_local_id(2) + item_ct1.get_local_id(1) * item_ct1.get_local_range(2);
