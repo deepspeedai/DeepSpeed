@@ -39,13 +39,14 @@ jobs:
     # The type of runner that the job will run on
     runs-on: [self-hosted, intel, gaudi2]
     container:
-      image: vault.habana.ai/gaudi-docker/1.15.1/ubuntu22.04/habanalabs/pytorch-installer-2.2.0:latest
+      image: vault.habana.ai/gaudi-docker/1.16.2/ubuntu22.04/habanalabs/pytorch-installer-2.2.2:latest
       ports:
         - 80
       options: --runtime=habana -e HABANA_VISIBLE_DEVICES=all -e OMPI_MCA_btl_vader_single_copy_mechanism=none --cap-add=sys_nice
 
     env:
       PT_HPU_LAZY_MODE: 0
+      TORCHINDUCTOR_COMPILE_THREADS: 1
       TEST_LIST: |
         test_accelerator.py
         test_autotuning.py
@@ -103,7 +104,7 @@ jobs:
       - name: Check container state
         run: |
           ldd --version
-          hl-smi
+          hl-smi -L
           python -c "import torch; print('torch:', torch.__version__, torch)"
           python -c "import torch; print('CUDA available:', torch.cuda.is_available())"
 
@@ -128,7 +129,7 @@ jobs:
           unset TORCH_CUDA_ARCH_LIST # only jit compile for current arch
           cd tests
           export PT_HPU_LAZY_MODE=${PT_HPU_LAZY_MODE}
+          export TORCHINDUCTOR_COMPILE_THREADS=${TORCHINDUCTOR_COMPILE_THREADS}
           TEST_LIST=$(echo "$TEST_LIST" | awk 'NF{printf "%s%s", (NR>1 ? " or " : ""), $0} END{if (NR>1) print ""}')
           echo "TEST_LIST ${TEST_LIST}"
-          echo "PT_HPU_LAZY_MODE ${PT_HPU_LAZY_MODE}"
           pytest --verbose unit/ -k "${TEST_LIST}"
