@@ -91,6 +91,13 @@ class FP_Quantize(Quantizer):
 
         return out
 
+    def to(self, *args, **kwargs):
+        # Intermediate tensors may need to be moved to different devices
+        if hasattr(self, 'input_q'):
+            self.input_q = self.input_q.to(*args, **kwargs)
+        if hasattr(self, 'scale'):
+            self.scale = self.scale.to(*args, **kwargs)
+
     def get_scales(self):
         return fp_quant_module.get_scales(self.scale, self.num_groups)
 

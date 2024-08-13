@@ -75,6 +75,13 @@ class QuantizedParameter(nn.Parameter):
                                                  q_mantisa_bits=self.quantization_config.mantissa_bits)
         return self.data
 
+    def offload(self, revert=False):
+        if getattr(self, 'ds_offload', False):
+            if revert:
+                self.data = self.to(get_accelerator().current_device_name())
+            else:
+                self.data = self.to('cpu')
+
     def __getstate__(self):
         state = self.__dict__
         state["data"] = self.data
@@ -104,7 +111,9 @@ class QuantizedParameter(nn.Parameter):
         return new_instance
 
     def cuda(self, device=None, non_blocking=False):
-        return self.to(device="cuda" if device is None else device, non_blocking=non_blocking)
+        device = "cuda" if device is None else device
+        self.quantizer.to(device, non_blocking=non_blocking)
+        return self.to(device, non_blocking=non_blocking)
 
     def to(self, *args, **kwargs):
         """
@@ -112,6 +121,7 @@ class QuantizedParameter(nn.Parameter):
         quantize it.
         """
         tensor = super().to(*args, **kwargs)
+        self.quantizer.to(*args, **kwargs)
         self._ensure_quantized(tensor)
         return tensor
 
