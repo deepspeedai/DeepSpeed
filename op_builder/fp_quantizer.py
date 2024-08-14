@@ -22,11 +22,12 @@ class FPQuantizerBuilder(CUDAOpBuilder):
     def absolute_name(self):
         return f'deepspeed.ops.fp_quantizer.{self.NAME}_op'
 
-    def is_compatible(self, verbose=True):
+    def is_compatible(self, verbose=False):
         try:
             import torch
         except ImportError:
-            self.warning("Please install torch if trying to pre-compile inference kernels")
+            if verbose:
+                self.warning("Please install torch if trying to pre-compile inference kernels")
             return False
 
         cuda_okay = True
@@ -35,17 +36,20 @@ class FPQuantizerBuilder(CUDAOpBuilder):
             torch_cuda_major = int(torch.version.cuda.split('.')[0])
             cuda_capability = torch.cuda.get_device_properties(0).major  #ignore-cuda
             if cuda_capability < 8:
-                self.warning("NVIDIA Inference is only supported on Ampere and newer architectures")
+                if verbose:
+                    self.warning("NVIDIA Inference is only supported on Ampere and newer architectures")
                 cuda_okay = False
             if cuda_capability >= 8:
                 if torch_cuda_major < 11 or sys_cuda_major < 11:
-                    self.warning("On Ampere and higher architectures please use CUDA 11+")
+                    if verbose:
+                        self.warning("On Ampere and higher architectures please use CUDA 11+")
                     cuda_okay = False
 
         try:
             import triton
         except ImportError:
-            self.warning(f"please install triton==2.3.0 or 2.3.1 if you want to use the FP Quantizer Kernels")
+            if verbose:
+                self.warning(f"please install triton==2.3.0 or 2.3.1 if you want to use the FP Quantizer Kernels")
             return False
 
         # triton 2.3.0 and 2.3.1 are okay and the only versions released in 2.3.x before 3.x was released
@@ -59,9 +63,10 @@ class FPQuantizerBuilder(CUDAOpBuilder):
             triton_mismatch = major != "2" or minor != "3"
 
         if triton_mismatch:
-            self.warning(
-                f"FP Quantizer is using an untested triton version ({installed_triton}), only 2.3.0 and 2.3.1 are known to be compatible with these kernels"
-            )
+            if verbose:
+                self.warning(
+                    f"FP Quantizer is using an untested triton version ({installed_triton}), only 2.3.0 and 2.3.1 are known to be compatible with these kernels"
+                )
             return False
 
         return super().is_compatible(verbose) and cuda_okay
