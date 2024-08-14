@@ -41,18 +41,21 @@ class EvoformerAttnBuilder(CUDAOpBuilder):
         args.append(f"-DGPU_ARCH={major}{minor}")
         return args
 
-    def is_compatible(self, verbose=True):
+    def is_compatible(self, verbose=False):
         try:
             import torch
         except ImportError:
-            self.warning("Please install torch if trying to pre-compile kernels")
+            if verbose:
+                self.warning("Please install torch if trying to pre-compile kernels")
             return False
         if self.cutlass_path is None:
-            self.warning("Please specify the CUTLASS repo directory as environment variable $CUTLASS_PATH")
+            if verbose:
+                self.warning("Please specify the CUTLASS repo directory as environment variable $CUTLASS_PATH")
             return False
         with open(f'{self.cutlass_path}/CHANGELOG.md', 'r') as f:
             if '3.1.0' not in f.read():
-                self.warning("Please use CUTLASS version >= 3.1.0")
+                if verbose:
+                    self.warning("Please use CUTLASS version >= 3.1.0")
                 return False
         cuda_okay = True
         if not self.is_rocm_pytorch() and torch.cuda.is_available():  #ignore-cuda
@@ -60,10 +63,12 @@ class EvoformerAttnBuilder(CUDAOpBuilder):
             torch_cuda_major = int(torch.version.cuda.split('.')[0])
             cuda_capability = torch.cuda.get_device_properties(0).major  #ignore-cuda
             if cuda_capability < 7:
-                self.warning("Please use a GPU with compute capability >= 7.0")
+                if verbose:
+                    self.warning("Please use a GPU with compute capability >= 7.0")
                 cuda_okay = False
             if torch_cuda_major < 11 or sys_cuda_major < 11:
-                self.warning("Please use CUDA 11+")
+                if verbose:
+                    self.warning("Please use CUDA 11+")
                 cuda_okay = False
         return super().is_compatible(verbose) and cuda_okay
 
