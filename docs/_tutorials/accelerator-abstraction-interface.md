@@ -12,7 +12,6 @@ tags: getting-started
   - [Tensor operations](#tensor-operations)
   - [Communication backend](#communication-backend)
 - [Run DeepSpeed model on different accelerators](#run-deepspeed-model-on-different-accelerators)
-- [Run DeepSpeed model on CPU](#run-deepspeed-model-on-cpu)
 - [Implement new accelerator extension](#implement-new-accelerator-extension)
 
 # Introduction
@@ -79,69 +78,9 @@ torch.distributed.init_process_group(get_accelerator().communication_backend_nam
 ```
 
 # Run DeepSpeed model on different accelerators
-Once a model is ported with DeepSpeed Accelerator Abstraction Interface, we can run this model on different accelerators using an extension to DeepSpeed. DeepSpeed checks whether a certain extension is installed in the environment to decide whether to use the Accelerator backend in that extension. For example, if we wish to run a model on Intel GPU, we can install _Intel Extension for DeepSpeed_ following the instructions in the following [link](https://github.com/intel/intel-extension-for-deepspeed/)
-
-After the extension is installed, install DeepSpeed and run the model.  The model will be running on top of DeepSpeed.   Because DeepSpeed installation is also accelerator related, it is recommended to install DeepSpeed accelerator extension before installing DeepSpeed.
-
-`CUDA_Accelerator` is the default accelerator in DeepSpeed.  If no other DeepSpeed accelerator extension is installed, `CUDA_Accelerator` will be used.
-
-When running a model on different accelerators in a cloud environment, the recommended practice is to provision an environment for each accelerator in a different env with tools such as _anaconda/miniconda/virtualenv_.  When running models on different Accelerator, load the env accordingly.
-
-Note that different accelerator may have different 'flavor' of float16 or bfloat16.   So it is recommended to make the model configurable for both float16 and bfloat16, in that way model code does not need to be changed when running on different accelerators.
-
-# Run DeepSpeed model on CPU
-DeepSpeed support using CPU as accelerator.  DeepSpeed model using DeepSpeed Accelerator Abstraction Interface could run on CPU without change to model code.   DeepSpeed decide whether _Intel Extension for PyTorch_ is installed in the environment.  If this packaged is installed, DeepSpeed will use CPU as accelerator.  Otherwise CUDA device will be used as accelerator.
-
-To run DeepSpeed model on CPU, use the following steps to prepare environment:
-
-```
-python -m pip install intel_extension_for_pytorch
-python -m pip install oneccl_bind_pt -f https://developer.intel.com/ipex-whl-stable-cpu
-git clone https://github.com/oneapi-src/oneCCL
-cd oneCCL
-mkdir build
-cd build
-cmake ..
-make
-make install
-```
-
-Before run CPU workload, we need to source oneCCL environment variables
-```
-source <path-to-oneCCL>/build/_install/env/setvars.sh
-```
-
-After environment is prepared, we can launch DeepSpeed inference with the following command
-```
-deepspeed --bind_cores_to_rank <deepspeed-model-script>
-```
-
-This command would launch number of workers equal to number of CPU sockets on the system.  Currently DeepSpeed support running inference model with AutoTP on top of CPU.  The argument `--bind_cores_to_rank` distribute CPU cores on the system evenly among workers, to allow each worker running on a dedicated set of CPU cores.
-
-On CPU system, there might be daemon process that periodically activate which would increase variance of each worker.  One practice is leave a couple of cores for daemon process using `--bind-core-list` argument:
-
-```
-deepspeed --bind_cores_to_rank --bind_core_list 0-51,56-107 <deepspeed-model-script>
-```
-
-The command above leave 4 cores on each socket to daemon process (assume two sockets, each socket has 56 cores).
-
-We can also set an arbitrary number of workers.  Unlike GPU, CPU cores on host can be further divided into subgroups.  When this number is not set, DeepSpeed would detect number of NUMA nodes on the system and launch one worker for each NUMA node.
-
-```
-deepspeed --num_accelerators 4 --bind_cores_to_rank <deepspeed-model-script>
-```
-
-Launching DeepSpeed model on multiple CPU nodes is similar to other accelerators.  We need to specify `impi` as launcher and specify `--bind_cores_to_rank` for better core binding.  Also specify `slots` number according to number of CPU sockets in host file.
-
-```
-# hostfile content should follow the format
-# worker-1-hostname slots=<#sockets>
-# worker-2-hostname slots=<#sockets>
-# ...
-
-deepspeed --hostfile=<hostfile> --bind_cores_to_rank --launcher impi --master_addr <master-ip> <deepspeed-model-script>
-```
+[Accelerator Setup Guide](accelerator-setup-guide.md) provides a guide on how to setup different accelerators for DeepSpeed.  It also comes with simple example how to run deepspeed for different accelerators.  The following guides are provided:
+1. Run DeepSpeed model on CPU
+2. Run DeepSpeed model on XPU
 
 # Implement new accelerator extension
 It is possible to implement a new DeepSpeed accelerator extension to support new accelerator in DeepSpeed.  An example to follow is _[Intel Extension For DeepSpeed](https://github.com/intel/intel-extension-for-deepspeed/)_.   An accelerator extension contains the following components:
