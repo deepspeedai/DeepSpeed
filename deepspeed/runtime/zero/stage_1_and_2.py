@@ -972,6 +972,8 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
             logger.info(message)
 
     def gradient_reduction_w_predivide(self, tensor):
+        if tensor.size().numel() == 0:
+            return tensor
 
         dp_world_size = dist.get_world_size(group=self.dp_process_group)
 
