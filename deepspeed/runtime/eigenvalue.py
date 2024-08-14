@@ -7,6 +7,7 @@ import torch
 from deepspeed.utils import log_dist
 import numpy as np
 import logging
+from deepspeed.utils.torch import required_torch_version
 
 
 class Eigenvalue(object):
@@ -36,12 +37,15 @@ class Eigenvalue(object):
             ranks=[0])
 
     # Replace all nan/pos-inf/neg-inf to zero
-    # TODO: Pytorch new version may add this function, replace this one by then.
     def nan_to_num(self, x):
-        device = x.device
-        x = x.cpu().numpy()
-        x = np.nan_to_num(x=x, copy=False, nan=0.0, posinf=0.0, neginf=0.0)
-        return torch.from_numpy(x).to(device)
+        if required_torch_version(min_version=1.8):
+            return torch.nan_to_num(x, nan=0.0, posinf=0.0, neginf=0.0)
+        else:
+            # Fallback to numpy based implementation for backwards-compatibility with PyTorch 1.7 or older versions.
+            device = x.device
+            x = x.cpu().numpy()
+            x = np.nan_to_num(x=x, copy=False, nan=0.0, posinf=0.0, neginf=0.0)
+            return torch.from_numpy(x).to(device)
 
     def normalize(self, v):
         norm_squared = self.inner_product(v, v)
