@@ -36,38 +36,36 @@ jobs:
   unit-tests:
     runs-on: [self-hosted, intel, xpu]
     container:
-      image: intel/intel-extension-for-pytorch:2.1.30-xpu
+      image: intel/oneapi-basekit:2024.1.1-devel-ubuntu22.04
       ports:
         - 80
       options: --privileged -it --rm --device /dev/dri:/dev/dri -v /dev/dri/by-path:/dev/dri/by-path --ipc=host --cap-add=ALL
 
     steps:
     - uses: actions/checkout@v4
+    - name: Install prerequisite
+      run: |
+        apt-get update
+        apt-get install clinfo libaio-dev python3-pip -y
+        pip install torch==2.1.0.post2 -f https://developer.intel.com/ipex-whl-stable-xpu
+        pip install intel-extension-for-pytorch==2.1.30+xpu -f https://developer.intel.com/ipex-whl-stable-xpu
+        pip install intel-extension-for-pytorch-deepspeed==2.1.30 -f https://developer.intel.com/ipex-whl-stable-xpu
+        pip install oneccl_bind_pt==2.1.300+xpu -f https://developer.intel.com/ipex-whl-stable-xpu
+        pip install torchvision==0.16.0.post2 -f https://developer.intel.com/ipex-whl-stable-xpu
+        pip install py-cpuinfo numpy==1.26
+        pip install .[dev,autotuning]
+
     - name: Check container state
-      shell: bash
       run: |
         ldd --version
-        python -c "import torch; print('torch:', torch.__version__, torch)"
-        python -c "import torch; import intel_extension_for_pytorch; print('XPU available:', torch.xpu.is_available())"
-
-    - name: Install deepspeed
-      run: |
-        pip install py-cpuinfo
-        pip install .[dev,autotuning]
         ds_report
-        python -c "from deepspeed.accelerator import get_accelerator; print('accelerator:', get_accelerator()._name)"
-
-    - name: Python environment
-      run: |
+        python3 -c "import torch; print('torch:', torch.__version__, torch)"
+        python3 -c "import torch; import intel_extension_for_pytorch; print('XPU available:', torch.xpu.is_available())"
+        python3 -c "from deepspeed.accelerator import get_accelerator; print('accelerator:', get_accelerator()._name)"
         pip list
 
     - name: Unit tests
       run: |
-        pip install pytest pytest-timeout tabulate tensorboard wandb
-        export ONEAPI_ROOT=/opt/intel/oneapi/redist
-        export FI_PROVIDER_PATH=$ONEAPI_ROOT/opt/mpi/libfabric/lib/prov
-        export LD_LIBRARY_PATH=$ONEAPI_ROOT/opt/mpi/libfabric/lib:$LD_LIBRARY_PATH
-        export LD_LIBRARY_PATH=$ONEAPI_ROOT/lib:$LD_LIBRARY_PATH
         cd tests/unit
         pytest --verbose accelerator/*
         pytest --verbose autotuning/*
@@ -75,8 +73,10 @@ jobs:
         pytest --verbose checkpoint/test_moe_checkpoint.py
         pytest --verbose checkpoint/test_shared_weights.py
         pytest --verbose launcher/test_ds_arguments.py launcher/test_run.py
+        pytest --verbose model_parallelism/*
         pytest --verbose moe/test_moe_tp.py
         pytest --verbose monitor/*
+        pytest --verbose utils/*
         pytest --verbose runtime/test_ds_config_model.py
         pytest --verbose runtime/pipe/test_pipe_schedule.py
         pytest --verbose runtime/zero/test_zero_config.py
