@@ -1009,13 +1009,13 @@ class DeepSpeedEngine(Module):
         device_rank = args.device_rank if args is not None and hasattr(args, 'device_rank') else self.local_rank
         if device_rank >= 0:
             get_accelerator().set_device(device_rank)
-            self.device = torch.device(get_accelerator().device_name(), device_rank)
+            self.device = torch.device(get_accelerator().device_name(device_rank))
             self.world_size = dist.get_world_size()
             self.global_rank = dist.get_rank()
         else:
             self.world_size = 1
             self.global_rank = 0
-            self.device = torch.device(get_accelerator().device_name())
+            self.device = get_accelerator().device()
 
     # Configure based on command line arguments
     def _configure_with_arguments(self, args, mpu):

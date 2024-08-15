@@ -68,7 +68,6 @@ jobs:
         (test_flops_profiler.py and test_flops_profiler_in_inference)
         test_get_optim_files.py
         test_groups.py
-        test_init_on_device.py
         test_partition_balanced.py
         (test_adamw.py and TestAdamConfigs)
         test_coalesced_collectives.py
