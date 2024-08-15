@@ -11,7 +11,7 @@ from unit.common import DistributedTest
 from unit.simple_model import SimplePRMoEModel, SimpleMoEModel, sequence_dataloader
 import deepspeed.comm as dist
 from deepspeed import get_accelerator
-from deepspeed.moe.sharded_moe import top1gating
+from deepspeed.moe.sharded_moe import top1gating, topkgating
 from deepspeed.moe.utils import split_params_into_different_moe_groups_for_optimizer, is_moe_param
 from deepspeed.utils.torch import required_torch_version
 
@@ -191,3 +191,50 @@ class TestTopk(DistributedTest):
                             drop_tokens=False,
                             use_rts=True,
                             use_tutel=False)
+
+
+class TestTopkGate(DistributedTest):
+
+    def test(self):
+
+        def check_equal(logits, cap, sparse_truth, res):
+            m, n = logits.shape
+            dispatch_mask_truth = torch.zeros(m, n, cap)
+            i, j, k = sparse_truth.t()
+            dispatch_mask_truth[i, j, k] = 1
+            assert (torch.equal(dispatch_mask_truth, res))
+
+        #s=4   e=4  topk=2   cap=2(s*topk/e)
+        logits = torch.tensor([[0.11, 0.2, 0.1, 0.3], [0.3, 0.4, 0.11, 0.1], [0.11, 0.1, 0.6, 0.5],
+                               [0.1, 0.11, 0.7, 0.8]])
+        logits *= dist.get_rank() + 1
+        probs_dispatch_res = topkgating(logits, 2, 1, min_capacity=1, drop_policy='probs')[2]
+        probs_sec_sparse = torch.tensor([[0, 1, 0], [1, 0, 0], [1, 1, 1], [2, 2, 0], [2, 3, 0], [3, 2, 1], [3, 3, 1]])
+        check_equal(logits, 2, probs_sec_sparse, probs_dispatch_res)
+
+        position_sec_sparse = torch.tensor([[0, 1, 0], [0, 3, 0], [1, 0, 0], [1, 1, 1], [2, 2, 0], [2, 3, 1],
+                                            [3, 2, 1]])
+        position_dispatch_res = topkgating(logits, 2, 1, min_capacity=1, drop_policy='position')[2]
+        check_equal(logits, 2, position_sec_sparse, position_dispatch_res)
+
+        #s=4   e=6  topk=3   cap=2(s*topk/e)
+        logits2 = torch.tensor([[0.5858, 0.4801, 0.6269, 0.5397, 0.9722, 0.7034],
+                                [0.5445, 0.6332, 0.4519, 0.6308, 0.0519, 0.6450],
+                                [0.4874, 0.8110, 0.7467, 0.8474, 0.0277, 0.3068],
+                                [0.8570, 0.6714, 0.5310, 0.3274, 0.4836, 0.9892]])
+        logits2 *= dist.get_rank() + 1
+
+        #top3 full mask     #prob_mask          #postion_mask
+        #0 0 1 0 1 1        #0 0 1 0 1 1        #0 0 1 0 1 1
+        #0 1 0 1 0 1        #0 0 0 1 0 0        #0 1 0 1 0 1
+        #0 1 1 1 0 0        #0 1 1 1 0 0        #0 1 1 1 0 0
+        #1 1 0 0 0 1        #1 1 0 0 0 1        #1 0 0 0 0 0
+        probs_dispatch_res = topkgating(logits2, 3, 1, min_capacity=1, drop_policy='probs')[2]
+        probs_sec_sparse = torch.tensor([[0, 2, 0], [0, 4, 0], [0, 5, 0], [1, 3, 0], [2, 1, 0], [2, 2, 1], [2, 3, 1],
+                                         [3, 0, 0], [3, 1, 1], [3, 5, 1]])
+        check_equal(logits2, 2, probs_sec_sparse, probs_dispatch_res)
+
+        position_sec_sparse = torch.tensor([[0, 2, 0], [0, 4, 0], [0, 5, 0], [1, 1, 0], [1, 3, 0], [1, 5, 1],
+                                            [2, 1, 1], [2, 2, 1], [2, 3, 1], [3, 0, 0]])
+        position_dispatch_res = topkgating(logits2, 3, 1, min_capacity=1, drop_policy='position')[2]
+        check_equal(logits2, 2, position_sec_sparse, position_dispatch_res)
