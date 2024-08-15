@@ -92,6 +92,10 @@ extras_require = {
     'triton': fetch_requirements('requirements/requirements-triton.txt'),
 }
 
+# Only install pynvml on nvidia gpus.
+if torch_available and get_accelerator().device_name() == 'cuda' and not is_rocm_pytorch:
+    install_requires.append('nvidia-ml-py')
+
 # Add specific cupy version to both onebit extension variants.
 if torch_available and get_accelerator().device_name() == 'cuda':
     cupy = None
