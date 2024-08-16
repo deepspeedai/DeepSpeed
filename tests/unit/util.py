@@ -5,6 +5,8 @@
 
 import pytest
 import torch
+
+import deepspeed
 from deepspeed.accelerator import get_accelerator, is_current_accelerator_supported
 from deepspeed.git_version_info import torch_info
 
@@ -67,3 +69,22 @@ def required_amp_check():
         return False
     else:
         return True
+
+
+class no_child_process_in_deepspeed_io:
+
+    def __enter__(self):
+        # deepspeed_io defaults to creating a dataloader that uses a
+        # multiprocessing pool. Our tests use pools and we cannot nest pools in
+        # python. Therefore we're injecting this kwarg to ensure that no pools
+        # are used in the dataloader.
+        self.old_method = deepspeed.runtime.engine.DeepSpeedEngine.deepspeed_io
+
+        def new_method(*args, **kwargs):
+            kwargs["num_local_io_workers"] = 0
+            return self.old_method(*args, **kwargs)
+
+        deepspeed.runtime.engine.DeepSpeedEngine.deepspeed_io = new_method
+
+    def __exit__(self, *_):
+        deepspeed.runtime.engine.DeepSpeedEngine.deepspeed_io = self.old_method
