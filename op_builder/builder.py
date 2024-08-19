@@ -305,7 +305,7 @@ class OpBuilder(ABC):
     def extra_ldflags(self):
         return []
 
-    def has_function(self, funcname, libraries, verbose=False):
+    def has_function(self, funcname, libraries, library_dirs=None, verbose=False):
         '''
         Test for existence of a function within a tuple of libraries.
 
@@ -361,7 +361,8 @@ class OpBuilder(ABC):
             compiler.link_executable(objs,
                                      os.path.join(tempdir, 'a.out'),
                                      extra_preargs=self.strip_empty_entries(ldflags),
-                                     libraries=libraries)
+                                     libraries=libraries,
+                                     library_dirs=library_dirs)
 
             # Compile and link succeeded
             return True

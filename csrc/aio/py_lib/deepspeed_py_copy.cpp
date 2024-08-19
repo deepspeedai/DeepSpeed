@@ -4,7 +4,7 @@
 // DeepSpeed Team
 
 /*
-Functionality for swapping optimizer tensors to/from (NVMe) storage devices.
+Functionality for swapping tensors to/from (NVMe) storage devices.
 */
 
 #include "deepspeed_py_copy.h"
