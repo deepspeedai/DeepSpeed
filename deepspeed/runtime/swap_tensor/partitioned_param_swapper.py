@@ -13,6 +13,7 @@ import torch
 from deepspeed import comm as dist
 from deepspeed.accelerator import get_accelerator
 from deepspeed.ops.op_builder import AsyncIOBuilder
+from deepspeed.ops.op_builder import GDSBuilder
 from .constants import *
 from .utils import swap_in_tensors, swap_out_tensors, MIN_AIO_BYTES, AIO_ALIGNED_BYTES, print_object, SwapBufferPool
 
@@ -37,8 +38,6 @@ class AsyncPartitionedParameterSwapper(object):
 
     def __init__(self, ds_config, model_dtype):
 
-        aio_op = AsyncIOBuilder().load(verbose=False)
-        self.aio_handle = aio_op.aio_handle
         self.dtype = model_dtype
 
         #set swap buffers, create aio handles
@@ -93,6 +92,10 @@ class AsyncPartitionedParameterSwapper(object):
 
         self.aio_config = ds_config.aio_config
 
+        self.use_gds = self.aio_config[AIO_USE_GDS]
+        self.aio_handle = GDSBuilder().load(verbose=False).gds_handle if self.use_gds else AsyncIOBuilder().load(
+            verbose=False).aio_handle
+
         # Read/Write alignment for each thread during Intra-request parallelism
         self.min_aio_bytes = max(MIN_AIO_BYTES, self.aio_config[AIO_BLOCK_SIZE])
         self.aligned_bytes = AIO_ALIGNED_BYTES * self.aio_config[AIO_THREAD_COUNT]
@@ -104,11 +107,6 @@ class AsyncPartitionedParameterSwapper(object):
 
         self.available_buffer_ids = [i for i in range(self.param_buffer_count)]
         self.reserved_buffer_ids = []
-        self.buffers = get_accelerator().pin_memory(torch.empty(int(self.aligned_elements_per_buffer *
-                                                                    self.param_buffer_count),
-                                                                dtype=self.dtype,
-                                                                requires_grad=False),
-                                                    align_bytes=0)
 
         self.aio_read_handle = self.aio_handle(self.aio_config[AIO_BLOCK_SIZE], self.aio_config[AIO_QUEUE_DEPTH],
                                                self.aio_config[AIO_SINGLE_SUBMIT], self.aio_config[AIO_OVERLAP_EVENTS],
@@ -117,6 +115,19 @@ class AsyncPartitionedParameterSwapper(object):
         self.aio_write_handle = self.aio_handle(self.aio_config[AIO_BLOCK_SIZE], self.aio_config[AIO_QUEUE_DEPTH],
                                                 self.aio_config[AIO_SINGLE_SUBMIT],
                                                 self.aio_config[AIO_OVERLAP_EVENTS], self.aio_config[AIO_THREAD_COUNT])
+
+        if self.use_gds:
+            self.buffers = torch.empty(int(self.aligned_elements_per_buffer * self.param_buffer_count),
+                                       dtype=self.dtype,
+                                       device=get_accelerator().device_name(),
+                                       requires_grad=False)
+            self.aio_read_handle.new_device_locked_tensor(self.buffers)
+        else:
+            self.buffers = get_accelerator().pin_memory(torch.empty(int(self.aligned_elements_per_buffer *
+                                                                        self.param_buffer_count),
+                                                                    dtype=self.dtype,
+                                                                    requires_grad=False),
+                                                        align_bytes=0)
 
         self.swap_out_params = []
 

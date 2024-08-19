@@ -25,25 +25,33 @@ function validate_environment()
 
 validate_environment
 
-if [[ $# -ne 3 ]]; then
-    echo "Usage: $0 <write size in MB> <write dir ><output log dir>"
-    exit 1
-fi
-
-SIZE="$1M"
-WRITE_DIR=$2
-LOG_DIR=$3/aio_perf_sweep
-
-OUTPUT_FILE=${WRITE_DIR}/ds_aio_write_${SIZE}B.pt
-WRITE_OPT="--write_file ${OUTPUT_FILE} --write_size ${SIZE}"
-
-
-prep_folder ${WRITE_DIR}
-prep_folder ${LOG_DIR}
-
+IO_SIZE=$1
+LOG_DIR=$2/aio_perf_sweep
+MAP_DIR=$2/aio
+GPU_MEM=$3
+USE_GDS=$4
 RUN_SCRIPT=./test_ds_aio.py
 
-DISABLE_CACHE="sync; sudo bash -c 'echo 1 > /proc/sys/vm/drop_caches' "
+OUTPUT_FILE=${MAP_DIR}/ds_aio_write_${SIZE}B.pt
+WRITE_OPT=""
+
+
+prep_folder ${MAP_DIR}
+prep_folder ${LOG_DIR}
+
+
+if [[ ${GPU_MEM} == "gpu" ]]; then
+    gpu_opt="--gpu"
+else
+    gpu_opt=""
+fi
+if [[ ${USE_GDS} == "gds" ]]; then
+    gds_opt="--use_gds"
+else
+    gds_opt=""
+fi
+
+DISABLE_CACHE="sync; bash -c 'echo 1 > /proc/sys/vm/drop_caches' "
 SYNC="sync"
 
 for sub in single block; do
@@ -53,19 +61,19 @@ for sub in single block; do
         sub_opt=""
     fi
     for ov in overlap sequential; do
-        if [[ $ov == "overlap" ]]; then
-            ov_opt="--overlap_events"
+        if [[ $ov == "sequential" ]]; then
+            ov_opt="--sequential_requests"
         else
             ov_opt=""
         fi
-        for t in 1 2 4 8; do
-            for p in 1; do
-                for d in 1 2 4 8 16 32; do
-                    for bs in 128K 256K 512K 1M; do
-                        SCHED_OPTS="${sub_opt} ${ov_opt} --handle --threads ${t}"
-                        OPTS="--io_parallel ${p} --queue_depth ${d} --block_size ${bs}"
+        for p in 1 2 4 8; do
+            for t in 1 2 4 8; do
+                for d in 32 64 128; do
+                    for bs in 256K 512K 1M; do
+                        SCHED_OPTS="${sub_opt} ${ov_opt} --handle ${gpu_opt} ${gds_opt} --folder ${MAP_DIR}"
+                        OPTS="--queue_depth ${d} --block_size ${bs} --io_size ${IO_SIZE} --multi_process ${p} --io_parallel ${t}"
                         LOG="${LOG_DIR}/write_${sub}_${ov}_t${t}_p${p}_d${d}_bs${bs}.txt"
-                        cmd="python ${RUN_SCRIPT} ${WRITE_OPT} ${OPTS} ${SCHED_OPTS} &> ${LOG}"
+                        cmd="python ${RUN_SCRIPT} ${OPTS} ${SCHED_OPTS} &> ${LOG}"
                         echo ${DISABLE_CACHE}
                         echo ${cmd}
                         echo ${SYNC}

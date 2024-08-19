@@ -5,6 +5,6 @@
 """
 Functionality of swapping optimizer tensors to/from (NVMe) storage devices.
 """
-from deepspeed.ops.op_builder import AsyncIOBuilder
-assert AsyncIOBuilder().is_compatible()
-assert AsyncIOBuilder().load()
+from deepspeed.ops.op_builder import GDSBuilder
+assert GDSBuilder().is_compatible(True)
+assert GDSBuilder().load(True)
