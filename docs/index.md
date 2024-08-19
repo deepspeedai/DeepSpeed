@@ -7,11 +7,12 @@ title: "Latest News"
 ---
 <b> <span style="color:orange" > DeepSpeed empowers ChatGPT-like model training with a single click, offering 15x speedup over SOTA RLHF systems with unprecedented cost reduction at all scales; [learn how](https://github.com/microsoft/DeepSpeed/tree/master/blogs/deepspeed-chat)</span>.</b>
 
+* [2024/08] [DeepSpeed on Windows](https://github.com/microsoft/DeepSpeed/blob/master/blogs/windows/08-2024/README.md)[[日本語](https://github.com/microsoft/DeepSpeed/blob/master/blogs/windows/08-2024/japanese/README.md)] [[中文](https://github.com/microsoft/DeepSpeed/blob/master/blogs/windows/08-2024/chinese/README.md)]
+
 * [2024/08] [DeepNVMe: Improving DL Applications through I/O Optimizations](https://github.com/microsoft/DeepSpeed/blob/master/blogs/deepspeed-gds/README.md)[[日本語](https://github.com/microsoft/DeepSpeed/blob/master/blogs/deepspeed-gds/japanese/README.md)] [[中文](https://github.com/microsoft/DeepSpeed/blob/master/blogs/deepspeed-gds/chinese/README.md)]
 * [2024/07] [DeepSpeed Universal Checkpointing: Efficient and Flexible Checkpointing for Large Scale Distributed Training](https://github.com/microsoft/DeepSpeed/tree/master/blogs/deepspeed-ucp/README.md)[[日本語](https://github.com/microsoft/DeepSpeed/tree/master/blogs/deepspeed-ucp/japanese/README.md)]
 * [2024/03] [DeepSpeed-FP6: The Power of FP6-Centric Serving for Large Language Models](https://github.com/microsoft/DeepSpeed/tree/master/blogs/deepspeed-fp6/03-05-2024/README.md) [[English](https://github.com/microsoft/DeepSpeed/tree/master/blogs/deepspeed-fp6/03-05-2024/README.md)] [[中文](https://github.com/microsoft/DeepSpeed/tree/master/blogs/deepspeed-fp6/03-05-2024/README-Chinese.md)]
 * [2024/01] [DeepSpeed-FastGen: Introducting Mixtral, Phi-2, and Falcon support with major performance and feature enhancements.](https://github.com/microsoft/DeepSpeed/tree/master/blogs/deepspeed-fastgen/2024-01-19)
-* [2023/11] [Llama 2 Inference on 4th Gen Intel® Xeon® Scalable Processor with DeepSpeed](https://github.com/microsoft/DeepSpeed/tree/master/blogs/intel-inference) [[Intel version]](https://www.intel.com/content/www/us/en/developer/articles/technical/xllama-2-on-xeon-scalable-processor-with-deepspeed.html)
 
 <!-- NOTE: we must use html for news items otherwise links will be broken in the 'more news' section -->
 
@@ -19,12 +20,12 @@ title: "Latest News"
  <summary>More news</summary>
  <ul>
 
-   <li>[2023/11] <a href="https://github.com/microsoft/DeepSpeed/tree/master/blogs/deepspeed-offloadpp/README.md">DeepSpeed ZeRO-Offload++: 6x Higher Training Throughput via Collaborative CPU/GPU Twin-Flow</a></li>
+  <li>[2023/11] <a href="https://github.com/microsoft/DeepSpeed/tree/master/blogs/intel-inference/README.md">Llama 2 Inference on 4th Gen Intel® Xeon® Scalable Processor with DeepSpeed</a> [<a href="https://www.intel.com/content/www/us/en/developer/articles/technical/xllama-2-on-xeon-scalable-processor-with-deepspeed.html">Intel version</a>]</li>
+
+  <li>[2023/11] <a href="https://github.com/microsoft/DeepSpeed/tree/master/blogs/deepspeed-offloadpp/README.md">DeepSpeed ZeRO-Offload++: 6x Higher Training Throughput via Collaborative CPU/GPU Twin-Flow</a></li>
 
   <li>[2023/11] <a href="https://github.com/microsoft/DeepSpeed/tree/master/blogs/deepspeed-fastgen">DeepSpeed-FastGen: High-throughput Text Generation for LLMs via MII and DeepSpeed-Inference</a> [<a href="https://github.com/microsoft/DeepSpeed/tree/master/blogs/deepspeed-fastgen/chinese/README.md">中文</a>] [<a href="https://github.com/microsoft/DeepSpeed/tree/master/blogs/deepspeed-fastgen/japanese/README.md">日本語</a>]</li>
 
-
-  <li>[2023/10] <a href="https://github.com/microsoft/DeepSpeed/tree/master/blogs/deepspeed-visualchat/10-03-2023/README.md">DeepSpeed-VisualChat: Improve Your Chat Experience with Multi-Round Multi-Image Inputs</a> [<a href="https://github.com/microsoft/DeepSpeed/blob/master/blogs/deepspeed-visualchat/10-03-2023/README-Chinese.md">中文</a>] [<a href="https://github.com/microsoft/DeepSpeed/blob/master/blogs/deepspeed-visualchat/10-03-2023/README-Japanese.md">日本語</a>]</li>
 
  </ul>
 </details>
