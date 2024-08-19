@@ -2,6 +2,9 @@ name: nv-nightly
 
 on:
   workflow_dispatch:
+  pull_request:
+    paths:
+      - '.github/workflows/nv-nightly.yml'
   schedule:
     - cron: "0 0 * * *"
 
@@ -25,7 +28,7 @@ jobs:
 
       - name: Install pytorch
         run: |
-          pip install -U --cache-dir $TORCH_CACHE torch==1.13.1 torchvision --index-url https://download.pytorch.org/whl/cu117
+          pip install -U --cache-dir $TORCH_CACHE torch torchvision --index-url https://download.pytorch.org/whl/cu118
           python -c "import torch; print('torch:', torch.__version__, torch)"
           python -c "import torch; print('CUDA available:', torch.cuda.is_available())"
 
@@ -34,7 +37,7 @@ jobs:
           git clone https://github.com/huggingface/transformers
           cd transformers
           # if needed switch to the last known good SHA until transformers@master is fixed
-          # git checkout 1cc453d33
+          git checkout v4.42.4
           git rev-parse --short HEAD
           pip install .
 
@@ -55,7 +58,7 @@ jobs:
         run: |
           unset TORCH_CUDA_ARCH_LIST # only jit compile for current arch
           cd tests
-          pytest $PYTEST_OPTS --forked -m 'nightly' unit/ --torch_ver="1.13" --cuda_ver="11.7"
+          pytest $PYTEST_OPTS --forked -m 'nightly' unit/ --torch_ver="2.4" --cuda_ver="11.8"
 
       - name: Open GitHub issue if nightly CI fails
         if: ${{ failure() && (github.event_name == 'schedule') }}
