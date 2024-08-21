@@ -8,45 +8,45 @@
 from ..common_parameters import *
 from ..layer_container_base import LayerContainer
 '''
- # HF Qwen1.5-MoE-A2.7B model looks like this:
+ # HF Qwen2-57B-A14B model looks like this:
 
 Qwen2MoeForCausalLM(
   (model): Qwen2MoeModel(
-    (embed_tokens): Embedding(151936, 2048)
+    (embed_tokens): Embedding(151936, 3584)
     (layers): ModuleList(
-      (0-23): 24 x Qwen2MoeDecoderLayer(
+      (0-27): 28 x Qwen2MoeDecoderLayer(
         (self_attn): Qwen2MoeSdpaAttention(
-          (q_proj): Linear(in_features=2048, out_features=2048, bias=True)
-          (k_proj): Linear(in_features=2048, out_features=2048, bias=True)
-          (v_proj): Linear(in_features=2048, out_features=2048, bias=True)
-          (o_proj): Linear(in_features=2048, out_features=2048, bias=False)
+          (q_proj): Linear(in_features=3584, out_features=3584, bias=True)
+          (k_proj): Linear(in_features=3584, out_features=512, bias=True)
+          (v_proj): Linear(in_features=3584, out_features=512, bias=True)
+          (o_proj): Linear(in_features=3584, out_features=3584, bias=False)
           (rotary_emb): Qwen2MoeRotaryEmbedding()
         )
         (mlp): Qwen2MoeSparseMoeBlock(
-          (gate): Linear(in_features=2048, out_features=60, bias=False)
+          (gate): Linear(in_features=3584, out_features=64, bias=False)
           (experts): ModuleList(
-            (0-59): 60 x Qwen2MoeMLP(
-              (gate_proj): Linear(in_features=2048, out_features=1408, bias=False)
-              (up_proj): Linear(in_features=2048, out_features=1408, bias=False)
-              (down_proj): Linear(in_features=1408, out_features=2048, bias=False)
+            (0-63): 64 x Qwen2MoeMLP(
+              (gate_proj): Linear(in_features=3584, out_features=2560, bias=False)
+              (up_proj): Linear(in_features=3584, out_features=2560, bias=False)
+              (down_proj): Linear(in_features=2560, out_features=3584, bias=False)
               (act_fn): SiLU()
             )
           )
           (shared_expert): Qwen2MoeMLP(
-            (gate_proj): Linear(in_features=2048, out_features=5632, bias=False)
-            (up_proj): Linear(in_features=2048, out_features=5632, bias=False)
-            (down_proj): Linear(in_features=5632, out_features=2048, bias=False)
+            (gate_proj): Linear(in_features=3584, out_features=20480, bias=False)
+            (up_proj): Linear(in_features=3584, out_features=20480, bias=False)
+            (down_proj): Linear(in_features=20480, out_features=3584, bias=False)
             (act_fn): SiLU()
           )
-          (shared_expert_gate): Linear(in_features=2048, out_features=1, bias=False)
+          (shared_expert_gate): Linear(in_features=3584, out_features=1, bias=False)
         )
-        (input_layernorm): Qwen2MoeRMSNorm()
-        (post_attention_layernorm): Qwen2MoeRMSNorm()
+        (input_layernorm): Qwen2MoeRMSNorm((3584,), eps=1e-06)
+        (post_attention_layernorm): Qwen2MoeRMSNorm((3584,), eps=1e-06)
       )
     )
-    (norm): Qwen2MoeRMSNorm()
+    (norm): Qwen2MoeRMSNorm((3584,), eps=1e-06)
   )
-  (lm_head): Linear(in_features=2048, out_features=151936, bias=False)
+  (lm_head): Linear(in_features=3584, out_features=151936, bias=False)
 )
 '''
 
