@@ -73,7 +73,7 @@ class Qwen2MoeInferenceModel(DSMoETransformerModelBase):
 
     @property
     def intermediate_dim(self) -> int:
-        return self._config.intermediate_size
+        return self._config.shared_expert_intermediate_size
 
     @property
     def n_heads_kv(self) -> int:
