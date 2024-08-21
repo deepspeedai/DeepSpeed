@@ -208,7 +208,7 @@ def top1gating(logits: Tensor,
         mask1 = einsum("s,se->se", used_token, mask1)
 
     # gating decisions
-    exp_counts = torch.sum(mask1, dim=0).detach().to('cpu')
+    exp_counts = torch.sum(mask1, dim=0).detach().to(logits.device)
 
     # if we don't want to drop any tokens
     if not drop_tokens:
@@ -324,7 +324,7 @@ def top2gating(logits: Tensor,
     l_aux = torch.mean(me * ce) * num_experts * num_experts
 
     # gating decisions
-    exp_counts = torch.sum(mask1 + mask2, dim=0)
+    exp_counts = torch.sum(mask1 + mask2, dim=0).detach().to(logits.device)
 
     if drop_tokens:
         # Calculate configured capacity and remove locations outside capacity from mask
@@ -368,7 +368,7 @@ def top2gating(logits: Tensor,
     combine_weights = combine1_sec + combine2_sec
     dispatch_mask = combine_weights.bool()
 
-    return l_aux, combine_weights, dispatch_mask, exp_counts.detach().to('cpu')
+    return l_aux, combine_weights, dispatch_mask, exp_counts
 
 
 def topkgating(
