@@ -705,7 +705,7 @@ class DeepSpeedConfigWriter:
 
 class DeepSpeedConfig(object):
 
-    def __init__(self, config: Union[str, dict], mpu=None):
+    def __init__(self, config: Union[str, dict], mpu=None, mesh_device=None):
         super(DeepSpeedConfig, self).__init__()
         if isinstance(config, dict):
             self._param_dict = config
@@ -721,14 +721,16 @@ class DeepSpeedConfig(object):
                 )
         try:
             self.global_rank = dist.get_rank()
-            if mpu is None:
-                self.world_size = dist.get_world_size()
-            else:
+            if mpu is not None:
                 self.world_size = mpu.get_data_parallel_world_size()
+            elif mesh_device is not None:
+                self.world_size = dist.get_world_size(mesh_device.get_group(mesh_dim="data_parallel"))
+            else:
+                self.world_size = dist.get_world_size()
         except:
             self.global_rank = 0
             self.world_size = 1
-
+        logger.info(f"Config mesh_device {mesh_device} world_size = {self.world_size}")
         # If elastic-mode enabled, update compute + update _param_dict
         self.elasticity_enabled = elasticity_enabled(self._param_dict)
         if self.elasticity_enabled:
