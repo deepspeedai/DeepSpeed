@@ -5,7 +5,9 @@
 
 from enum import Enum
 from pathlib import Path
-from deepspeed.pydantic_v1 import Field, validator
+from pydantic import Field, model_validator
+from typing import Optional
+
 from deepspeed.runtime.config_utils import DeepSpeedConfigModel, pp_int
 
 
@@ -25,7 +27,7 @@ class DeepSpeedZeroOffloadParamConfig(DeepSpeedConfigModel):
     `nvme`.
     """
 
-    nvme_path: Path = None
+    nvme_path: Optional[Path] = None
     """ Filesystem path for NVMe device for parameter offloading. """
 
     buffer_count: int = Field(5, ge=0)
@@ -56,7 +58,7 @@ class DeepSpeedZeroOffloadOptimizerConfig(DeepSpeedConfigModel):
     `nvme`. Optimizer computation is offload to CPU regardless of device option.
     """
 
-    nvme_path: Path = None
+    nvme_path: Optional[Path] = None
     """ Filesystem path for NVMe device for optimizer state offloading. """
 
     buffer_count: int = Field(4, ge=0)
@@ -88,10 +90,11 @@ class DeepSpeedZeroOffloadOptimizerConfig(DeepSpeedConfigModel):
     fast_init: bool = False
     """ Enable fast optimizer initialization when offloading to NVMe. """
 
-    @validator("pipeline_read", "pipeline_write", always=True)
-    def set_pipeline(cls, field_value, values):
-        values["pipeline"] = field_value or values.get("pipeline", False)
-        return field_value
-
     ratio: float = Field(1.0, ge=0.0, le=1.0)
     """ Percentage of offloaded optimizer states to CPU Adam. Only valid with ZeRO Stage 3."""
+
+    @model_validator(mode="after")
+    def set_pipeline(self):
+        pipeline = self.pipeline_read or self.pipeline_write
+        self.__dict__["pipeline"] = pipeline
+        return self

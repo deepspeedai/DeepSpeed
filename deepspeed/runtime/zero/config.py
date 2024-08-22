@@ -6,7 +6,7 @@
 import sys
 from typing import Optional
 from enum import Enum
-from deepspeed.pydantic_v1 import Field, validator, root_validator
+from pydantic import Field, model_validator
 from deepspeed.runtime.config_utils import get_scalar_param, pp_int, DeepSpeedConfigModel
 from deepspeed.utils import logger
 from .offload_config import DeepSpeedZeroOffloadParamConfig, DeepSpeedZeroOffloadOptimizerConfig, OffloadDeviceEnum
@@ -30,7 +30,7 @@ ZeRO optimization should be enabled as:
     "reduce_bucket_size": 500000000,
     "load_from_fp32_weights": [true|false],
     "cpu_offload": [true|false] (deprecated),
-    "cpu_offload_params" : [true|false] (deprecated),
+    "cpu_offload_param" : [true|false] (deprecated),
     "cpu_offload_use_pin_memory": [true|false] (deprecated),
     "sub_group_size" : 1000000000000,
     "offload_param": {...},
@@ -128,7 +128,7 @@ class DeepSpeedZeroConfig(DeepSpeedConfigModel):
     the allgather for large model sizes
     """
 
-    overlap_comm: bool = None  # None for dynamic default value (see validator `overlap_comm_valid` below)
+    overlap_comm: Optional[bool] = None  # None for dynamic default value (see validator `overlap_comm_valid` below)
     """
     Attempts to overlap the reduction of the gradients with backward computation
     """
@@ -168,27 +168,37 @@ class DeepSpeedZeroConfig(DeepSpeedConfigModel):
     parameters). Used by ZeRO3-Offload and ZeRO-Infinity
     """
 
-    cpu_offload_param: bool = Field(
+    cpu_offload_param: Optional[bool] = Field(
         None,
-        deprecated=True,
-        new_param="offload_param",
-        new_param_fn=(lambda val: DeepSpeedZeroOffloadParamConfig(device=OffloadDeviceEnum.cpu) if val else None),
+        json_schema_extra={
+            "deprecated": True,
+            "new_param": "offload_param",
+            "new_param_fn": (lambda val: DeepSpeedZeroOffloadParamConfig(device=OffloadDeviceEnum.cpu)
+                             if val else None)
+        },
     )
     """ Deprecated, please use ``offload_param`` """
 
-    cpu_offload_use_pin_memory: bool = Field(
+    cpu_offload_use_pin_memory: Optional[bool] = Field(
         None,
-        deprecated=True,
-        new_param="offload_param or offload_optimizer",
-        set_new_param=False,
+        json_schema_extra={
+            "deprecated": True,
+            "new_param": "offload_param or offload_optimizer",
+            "set_new_param": False
+        },
     )
     """ Deprecated, please use ``offload_param`` or ``offload_optimizer`` """
 
-    cpu_offload: bool = Field(
+    cpu_offload: Optional[bool] = Field(
         None,
-        deprecated=True,
-        new_param="offload_optimizer",
-        new_param_fn=(lambda val: DeepSpeedZeroOffloadOptimizerConfig(device=OffloadDeviceEnum.cpu) if val else None),
+        json_schema_extra={
+            "deprecated":
+            True,
+            "new_param":
+            "offload_optimizer",
+            "new_param_fn": (lambda val: DeepSpeedZeroOffloadOptimizerConfig(device=OffloadDeviceEnum.cpu)
+                             if val else None)
+        },
     )
     """ Deprecated, please use ``offload_optimizer`` """
 
@@ -242,8 +252,10 @@ class DeepSpeedZeroConfig(DeepSpeedConfigModel):
     """
 
     stage3_gather_fp16_weights_on_model_save: bool = Field(False,
-                                                           deprecated=True,
-                                                           new_param="gather_16bit_weights_on_model_save")
+                                                           json_schema_extra={
+                                                               "deprecated": True,
+                                                               "new_param": "gather_16bit_weights_on_model_save"
+                                                           })
     """ Deprecated, please use ``gather_16bit_weights_on_model_save`` """
 
     ignore_unused_parameters: bool = True
@@ -309,16 +321,15 @@ class DeepSpeedZeroConfig(DeepSpeedConfigModel):
     """
 
     # Validators
-    @validator("overlap_comm")
-    def overlap_comm_valid(cls, field_value, values):
-        if field_value is None:
-            assert ("stage" in values), "DeepSpeedZeroConfig: 'stage' must be defined before 'overlap_comm'"
-            field_value = values["stage"] == ZeroStageEnum.weights
-        return field_value
+    @model_validator(mode="after")
+    def overlap_comm_valid(self):
+        if self.overlap_comm is None:
+            self.overlap_comm = self.stage == ZeroStageEnum.weights
+        return self
 
-    @root_validator
-    def offload_ratio_check(cls, values):
-        offload_config = getattr(values, "offload_optimizer", {})
+    @model_validator(mode="after")
+    def offload_ratio_check(self):
+        offload_config = self.offload_optimizer
         if offload_config and offload_config.ratio < 1.0:
-            assert values.get("stage") == ZeroStageEnum.weights, "Partial offloading only supported for ZeRO Stage 3."
-        return values
+            assert self.stage == ZeroStageEnum.weights, "Partial offloading only supported for ZeRO Stage 3."
+        return self

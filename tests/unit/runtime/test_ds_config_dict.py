@@ -67,13 +67,11 @@ def _batch_assert(status, ds_config, batch, micro_batch, gas, success):
 
     if not success:
         assert not status
-        print("Failed but All is well")
         return
 
     assert ds_config.train_batch_size == batch
     assert ds_config.train_micro_batch_size_per_gpu == micro_batch
     assert ds_config.gradient_accumulation_steps == gas
-    print("All is well")
 
 
 #Tests different batch config provided in deepspeed json file
