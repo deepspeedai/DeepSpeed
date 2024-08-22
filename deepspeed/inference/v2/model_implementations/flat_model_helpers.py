@@ -27,9 +27,9 @@ class TensorMetadata(DeepSpeedConfigModel):
     """
     A class to represent a tensor specification.
     """
-    dtype: Optional[str]
-    shape: Optional[Tuple[int, ...]]
-    strides: Optional[Tuple[int, ...]]
+    dtype: Optional[str] = None
+    shape: Optional[Tuple[int, ...]] = None
+    strides: Optional[Tuple[int, ...]] = None
     offset: int
 
 
@@ -37,7 +37,7 @@ class ParameterMetadata(DeepSpeedConfigModel):
     """
     A class to represent a parameter specification.
     """
-    core_param: TensorMetadata = None
+    core_param: Optional[TensorMetadata] = None
     aux_params: Dict[str, TensorMetadata] = {}
 
 

@@ -5,38 +5,25 @@
 
 import torch
 import deepspeed
-from deepspeed.pydantic_v1 import Field, validator
+from pydantic import Field, field_validator
 from deepspeed.runtime.config_utils import DeepSpeedConfigModel
 from deepspeed.runtime.zero.config import DeepSpeedZeroConfig
-from typing import Dict, Union
+from typing import Dict, Union, Optional
 from enum import Enum
 
 
 class DtypeEnum(Enum):
-    # The torch dtype must always be the first value (so we return torch.dtype)
-    fp16 = torch.float16, "torch.float16", "fp16", "float16", "half"
-    fp32 = torch.float32, "torch.float32", "fp32", "float32", "float"
-    bf16 = torch.bfloat16, "torch.bfloat16", "bf16", "bfloat16", "bfloat"
-    int8 = torch.int8, "torch.int8", "int8"
+    fp16 = (torch.float16, "torch.float16", "fp16", "float16", "half")
+    fp32 = (torch.float32, "torch.float32", "fp32", "float32", "float")
+    bf16 = (torch.bfloat16, "torch.bfloat16", "bf16", "bfloat16", "bfloat")
+    int8 = (torch.int8, "torch.int8", "int8")
 
-    # Copied from https://stackoverflow.com/a/43210118
-    # Allows us to use multiple values for each Enum index and returns first
-    # listed value when Enum is called
-    def __new__(cls, *values):
-        obj = object.__new__(cls)
-        # first value is canonical value
-        obj._value_ = values[0]
-        for other_value in values[1:]:
-            cls._value2member_map_[other_value] = obj
-        obj._all_values = values
-        return obj
-
-    def __repr__(self):
-        return "<%s.%s: %s>" % (
-            self.__class__.__name__,
-            self._name_,
-            ", ".join([repr(v) for v in self._all_values]),
-        )
+    @classmethod
+    def from_str(cls, value: str):
+        for dtype in cls:
+            if value in dtype.value:
+                return dtype
+        raise ValueError(f"'{value}' is not a valid DtypeEnum")
 
 
 class MoETypeEnum(str, Enum):
@@ -91,24 +78,24 @@ class QuantTypeEnum(str, Enum):
 
 
 class BaseQuantConfig(DeepSpeedConfigModel):
-    enabled = True
-    num_bits = 8
+    enabled: bool = True
+    num_bits: int = 8
     q_type: QuantTypeEnum = QuantTypeEnum.sym
     q_groups: int = 1
 
 
 class WeightQuantConfig(BaseQuantConfig):
-    enabled = True
+    enabled: bool = True
     quantized_initialization: Dict = {}
     post_init_quant: Dict = {}
 
 
 class ActivationQuantConfig(BaseQuantConfig):
-    enabled = True
+    enabled: bool = True
 
 
 class QKVQuantConfig(DeepSpeedConfigModel):
-    enabled = True
+    enabled: bool = True
 
 
 class QuantizationConfig(DeepSpeedConfigModel):
@@ -120,9 +107,9 @@ class QuantizationConfig(DeepSpeedConfigModel):
 
 # todo: brainstorm on how to do ckpt loading for DS inference
 class InferenceCheckpointConfig(DeepSpeedConfigModel):
-    checkpoint_dir: str = None
-    save_mp_checkpoint_path: str = None
-    base_dir: str = None
+    checkpoint_dir: Optional[str] = None
+    save_mp_checkpoint_path: Optional[str] = None
+    base_dir: Optional[str] = None
 
 
 class DeepSpeedInferenceConfig(DeepSpeedConfigModel):
@@ -136,7 +123,7 @@ class DeepSpeedInferenceConfig(DeepSpeedConfigModel):
     `(attention_output projection, transformer output projection)`
     """
 
-    dtype: DtypeEnum = torch.float16
+    dtype: torch.dtype = torch.float16
     """
     Desired model data type, will convert model to this type.
     Supported target types: `torch.half`, `torch.int8`, `torch.float`
@@ -198,7 +185,7 @@ class DeepSpeedInferenceConfig(DeepSpeedConfigModel):
     """
 
     #todo: refactor the following 3 into the new checkpoint_config
-    checkpoint: Union[str, Dict] = None
+    checkpoint: Optional[Union[str, Dict]] = None
     """
     Path to deepspeed compatible checkpoint or path to JSON with load policy.
     """
@@ -214,7 +201,7 @@ class DeepSpeedInferenceConfig(DeepSpeedConfigModel):
     specifying whether the inference-module is created with empty or real Tensor
     """
 
-    save_mp_checkpoint_path: str = None
+    save_mp_checkpoint_path: Optional[str] = None
     """
     The path for which we want to save the loaded model with a checkpoint. This
     feature is used for adjusting the parallelism degree to help alleviate the
@@ -243,19 +230,21 @@ class DeepSpeedInferenceConfig(DeepSpeedConfigModel):
 
     replace_method: str = Field(
         "auto",
-        deprecated=True,
-        deprecated_msg="This parameter is no longer needed, please remove from your call to DeepSpeed-inference")
+        json_schema_extra={
+            "deprecated": True,
+            "deprecated_msg": "This parameter is no longer needed, please remove from your call to DeepSpeed-inference"
+        })
 
-    injection_policy: Dict = Field(None, alias="injection_dict")
+    injection_policy: Optional[Dict] = Field(None, alias="injection_dict")
     """
     Dictionary mapping a client nn.Module to its corresponding injection
     policy. e.g., `{BertLayer : deepspeed.inference.HFBertLayerPolicy}`
     """
 
-    injection_policy_tuple: tuple = None
+    injection_policy_tuple: Optional[tuple] = None
     """ TODO: Add docs """
 
-    config: Dict = Field(None, alias="args")  # todo: really no need for this field if we can refactor
+    config: Optional[Dict] = Field(None, alias="args")  # todo: really no need for this field if we can refactor
 
     max_out_tokens: int = Field(1024, alias="max_tokens")
     """
@@ -274,31 +263,49 @@ class DeepSpeedInferenceConfig(DeepSpeedConfigModel):
 
     transposed_mode: bool = Field(False, alias="transposed_mode")
 
-    mp_size: int = Field(1, deprecated=True, new_param="tensor_parallel.tp_size")
+    mp_size: int = Field(1, json_schema_extra={"deprecated": True, "new_param": "tensor_parallel.tp_size"})
     """
     Desired model parallel size, default is 1 meaning no model parallelism.
     Deprecated, please use the ``tensor_parallel` config to control model
     parallelism.
     """
-    mpu: object = Field(None, deprecated=True, new_param="tensor_parallel.mpu")
-    ep_size: int = Field(1, deprecated=True, new_param="moe.ep_size")
-    ep_group: object = Field(None, alias="expert_group", deprecated=True, new_param="moe.ep_group")
-    ep_mp_group: object = Field(None, alias="expert_mp_group", deprecated=True, new_param="moe.ep_mp_group")
-    moe_experts: list = Field([1], deprecated=True, new_param="moe.moe_experts")
-    moe_type: MoETypeEnum = Field(MoETypeEnum.standard, deprecated=True, new_param="moe.type")
+    mpu: object = Field(None, json_schema_extra={"deprecated": True, "new_param": "tensor_parallel.mpu"})
+    ep_size: int = Field(1, json_schema_extra={"deprecated": True, "new_param": "moe.ep_size"})
+    ep_group: object = Field(None,
+                             alias="expert_group",
+                             json_schema_extra={
+                                 "deprecated": True,
+                                 "new_param": "moe.ep_group"
+                             })
+    ep_mp_group: object = Field(None,
+                                alias="expert_mp_group",
+                                json_schema_extra={
+                                    "deprecated": True,
+                                    "new_param": "moe.ep_mp_group"
+                                })
+    moe_experts: list = Field([1], json_schema_extra={"deprecated": True, "new_param": "moe.moe_experts"})
+    moe_type: MoETypeEnum = Field(MoETypeEnum.standard,
+                                  json_schema_extra={
+                                      "deprecated": True,
+                                      "new_param": "moe.type"
+                                  })
 
-    @validator("moe")
+    @field_validator("dtype", mode="before")
+    def validate_dtype(cls, field_value, values):
+        if isinstance(field_value, str):
+            return DtypeEnum.from_str(field_value).value[0]
+        if isinstance(field_value, torch.dtype):
+            return field_value
+        raise TypeError(f"Invalid type for dtype: {type(field_value)}")
+
+    @field_validator("moe")
     def moe_backward_compat(cls, field_value, values):
         if isinstance(field_value, bool):
             return DeepSpeedMoEConfig(moe=field_value)
         return field_value
 
-    @validator("use_triton")
+    @field_validator("use_triton")
     def has_triton(cls, field_value, values):
         if field_value and not deepspeed.HAS_TRITON:
             raise ValueError('Triton needs to be installed to use deepspeed with triton kernels')
         return field_value
-
-    class Config:
-        # Get the str representation of the datatype for serialization
-        json_encoders = {torch.dtype: lambda x: str(x)}

@@ -47,7 +47,8 @@ jobs:
       - name: Install deepspeed
         run: |
           python -m pip install docutils==0.18.1 jinja2==3.0 urllib3==1.26.11 ninja
-          python -m pip install pydantic==1.10.11
+          # Update packages included in the container that do not support pydantic 2+ to versions that do
+          python -m pip install thinc spacy confection --upgrade
           python -m pip install .[dev,1bit,autotuning,inf]
           ds_report
       - name: Python environment

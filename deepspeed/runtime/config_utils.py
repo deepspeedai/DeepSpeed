@@ -5,11 +5,12 @@
 """
 Collection of DeepSpeed configuration utilities
 """
-import json
 import collections
-import collections.abc
+import json
+import torch
 from functools import reduce
-from deepspeed.pydantic_v1 import BaseModel
+from pydantic import BaseModel, ConfigDict, field_serializer
+
 from deepspeed.utils import logger
 
 
@@ -54,67 +55,73 @@ class DeepSpeedConfigModel(BaseModel):
         if (not strict):  # This is temporary until we refactor all DS configs, allows HF to load models
             data = {k: v for k, v in data.items() if (v != "auto" or k == "replace_method")}
         super().__init__(**data)
-        self._deprecated_fields_check(self)
+        self._deprecated_fields_check()
 
-    def _process_deprecated_field(self, pydantic_config, field):
+    def _process_deprecated_field(self, dep_field):
         # Get information about the deprecated field
-        fields_set = pydantic_config.__fields_set__
-        dep_param = field.name
-        kwargs = field.field_info.extra
+        pydantic_config = self
+        fields_set = pydantic_config.model_fields_set
+        kwargs = pydantic_config.model_fields[dep_field].json_schema_extra
         new_param_fn = kwargs.get("new_param_fn", lambda x: x)
-        param_value = new_param_fn(getattr(pydantic_config, dep_param))
-        new_param = kwargs.get("new_param", "")
+        param_value = new_param_fn(getattr(pydantic_config, dep_field))
+        new_field = kwargs.get("new_param", "")
         dep_msg = kwargs.get("deprecated_msg", "")
-        if dep_param in fields_set:
-            logger.warning(f"Config parameter {dep_param} is deprecated" +
-                           (f" use {new_param} instead" if new_param else "") + (f". {dep_msg}" if dep_msg else ""))
+        if dep_field in fields_set:
+            logger.warning(f"Config parameter {dep_field} is deprecated" +
+                           (f" use {new_field} instead" if new_field else "") + (f". {dep_msg}" if dep_msg else ""))
             # Check if there is a new param and if it should be set with a value
-            if new_param and kwargs.get("set_new_param", True):
+            if new_field and kwargs.get("set_new_param", True):
                 # Remove the deprecate field if there is a replacing field
                 try:
-                    delattr(pydantic_config, dep_param)
+                    delattr(pydantic_config, dep_field)
                 except Exception as e:
-                    logger.error(f"Tried removing deprecated '{dep_param}' from config")
+                    logger.error(f"Tried removing deprecated '{dep_field}' from config")
                     raise e
 
                 # Set new param value
-                new_param_nested = new_param.split(".")
+                new_param_nested = new_field.split(".")
                 if len(new_param_nested) > 1:
                     # If the new param exists in a subconfig, we need to get
                     # the fields set for that subconfig
                     pydantic_config = reduce(getattr, new_param_nested[:-1], pydantic_config)
-                    fields_set = pydantic_config.__fields_set__
+                    fields_set = pydantic_config.model_fields_set
                 new_param_name = new_param_nested[-1]
                 assert (
                     new_param_name not in fields_set
-                ), f"Cannot provide deprecated parameter '{dep_param}' and replacing parameter '{new_param}' together"
+                ), f"Cannot provide deprecated parameter '{dep_field}' and replacing parameter '{new_field}' together"
                 # A custom function for converting the old param value to new param value can be provided
                 try:
                     setattr(pydantic_config, new_param_name, param_value)
                 except Exception as e:
-                    logger.error(f"Tried setting value for '{new_param}' with value from deprecated '{dep_param}'")
+                    logger.error(f"Tried setting value for '{new_field}' with value from deprecated '{dep_field}'")
                     raise e
 
-    def _deprecated_fields_check(self, pydantic_config):
-        fields = pydantic_config.__fields__
-        for field in fields.values():
-            if field.field_info.extra.get("deprecated", False):
-                self._process_deprecated_field(pydantic_config, field)
+    def _deprecated_fields_check(self):
+        fields = self.model_fields
+        for field_name, field_info in fields.items():
+            if field_info.json_schema_extra and field_info.json_schema_extra.get("deprecated", False):
+                self._process_deprecated_field(field_name)
 
-    class Config:
-        validate_all = True
-        validate_assignment = True
-        use_enum_values = True
-        allow_population_by_field_name = True
-        extra = "forbid"
-        arbitrary_types_allowed = True
+    model_config = ConfigDict(
+        validate_default=True,
+        validate_assignment=True,
+        use_enum_values=True,
+        populate_by_name=True,
+        extra="forbid",
+        arbitrary_types_allowed=True,
+        protected_namespaces=(),
+    )
+
+    @field_serializer("dtype", check_fields=False)
+    def serialize_torch_dtype(dtype: torch.dtype) -> str:
+        return str(dtype)
 
 
 def get_config_default(config, field_name):
-    assert field_name in config.__fields__, f"'{field_name}' is not a field in {config}"
-    assert not config.__fields__.get(
-        field_name).required, f"'{field_name}' is a required field and does not have a default value"
-    return config.__fields__.get(field_name).default
+    assert field_name in config.model_fields, f"'{field_name}' is not a field in {config}"
+    assert not config.model_fields.get(
+        field_name).is_required(), f"'{field_name}' is a required field and does not have a default value"
+    return config.model_fields.get(field_name).get_default()
 
 
 class pp_int(int):
