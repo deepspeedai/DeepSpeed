@@ -21,7 +21,7 @@ on:
       - "deepspeed/runtime/zero/parameter_offload.py"
       - "deepspeed/runtime/pipe/engine.py"
       - "deepspeed/runtime/utils.py"
-      - "opbuilder/xpu/**"
+      - "op_builder/xpu/**"
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
