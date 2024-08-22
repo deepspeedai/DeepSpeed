@@ -725,8 +725,9 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
     def get_first_param_index(self, group_id, param_group, partition_id):
         for index, param in enumerate(param_group):
             param_id = self.get_param_id(param)
-            if partition_id in self.param_to_partition_ids[group_id][param_id]:
-                return index
+            if group_id in self.param_to_partition_ids and param_id in self.param_to_partition_ids[group_id]:
+                if partition_id in self.param_to_partition_ids[group_id][param_id]:
+                    return index
         return None
 
     def initialize_gradient_partitioning_data_structures(self):

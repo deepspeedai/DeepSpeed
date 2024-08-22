@@ -1,10 +1,10 @@
-autodoc_pydantic
+autodoc_pydantic>=2.0.0
 docutils<0.18
 hjson
 packaging
 psutil
 py-cpuinfo
-pydantic<2.0.0
+pydantic>=2.0.0
 recommonmark
 sphinx_rtd_theme
 torch

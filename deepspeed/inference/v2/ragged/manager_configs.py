@@ -6,7 +6,7 @@
 from enum import Enum
 from typing import Tuple
 
-from deepspeed.pydantic_v1 import PositiveInt, validator
+from pydantic import PositiveInt, model_validator
 
 from deepspeed.runtime.config_utils import DeepSpeedConfigModel
 from ..inference_utils import DtypeEnum
@@ -173,11 +173,9 @@ class DSStateManagerConfig(DeepSpeedConfigModel):
     Enable tracking for offloading KV-cache to host memory. Currently unsupported.
     """
 
-    @validator("max_ragged_sequence_count")
-    def max_ragged_sequence_count_validator(cls, v: int, values: dict):
+    @model_validator(mode="after")
+    def max_ragged_sequence_count_validator(self):
         # If the attributes below failed their validation they won't appear in the values dict.
-        if "max_tracked_sequences" in values and v > values["max_tracked_sequences"]:
-            raise ValueError("max_ragged_sequence_count must be less than max_tracked_sequences")
-        if "max_ragged_batch_size" in values and v > values["max_ragged_batch_size"]:
-            raise ValueError("max_ragged_sequence_count must be less than max_ragged_batch_size")
-        return v
+        assert self.max_ragged_sequence_count <= self.max_tracked_sequences, "max_ragged_sequence_count must be less than max_tracked_sequences"
+        assert self.max_ragged_sequence_count <= self.max_ragged_batch_size, "max_ragged_sequence_count must be less than max_ragged_batch_size"
+        return self
