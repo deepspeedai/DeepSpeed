@@ -17,7 +17,7 @@ from deepspeed.runtime.zero.mics_utils import (MiCS_CommGroups, create_mics_comm
 from deepspeed.runtime.zero.parameter_offload import DeepSpeedZeRoOffload
 from deepspeed.runtime.zero.partition_parameters import Init, AllGatherCoalescedHandle, ZeroParamStatus
 from deepspeed.runtime.zero.stage3 import DeepSpeedZeroOptimizer_Stage3
-from deepspeed.utils import instrument_w_nvtx, log_dist
+from deepspeed.utils import instrument_w_nvtx, log_dist, logger
 from deepspeed.accelerator import get_accelerator
 from torch import Tensor
 from torch.nn import Parameter
@@ -88,6 +88,8 @@ class MiCS_Init(Init):
                 if it was constructed in the context.
             data_parallel_group (``deepspeed.comm`` process group, optional):
                 The group of processes to partition among. Defaults to all processes.
+                Synonymous with sequence data parallel group for param partitioning
+                across both sequence and data parallel groups.
             mem_efficient_linear (bool, optional): Replace
                 torch.nn.functional.linear with an implementation that allows
                 DeepSpeed to partition parameters. Defaults to ``True``.
@@ -149,16 +151,19 @@ class MiCS_Init(Init):
             dist.init_distributed()
             assert dist.is_initialized(), "Parameters cannot be scattered without initializing deepspeed.comm"
 
-        if data_parallel_group is None and sequence_data_parallel_group is None:
+        if data_parallel_group is None:
             ds_process_group = dist.get_world_group()
-        elif sequence_data_parallel_group is not None:
-            ds_process_group = sequence_data_parallel_group
-        elif data_parallel_group is not None:
+        else:
             ds_process_group = data_parallel_group
-        else:  # both given
-            raise ValueError(
-                "Both 'data_parallel_group' and 'sequence_data_parallel_group' were specified. Please provide only one of these arguments."
-            )
+
+        if sequence_data_parallel_group is not None:
+            logger.warning(
+                f"sequence_data_parallel_group' is deprecated and will be removed. Use 'data_parallel_group' instead.")
+            if data_parallel_group is not None:
+                raise ValueError(
+                    "Both 'data_parallel_group' and 'sequence_data_parallel_group' were specified. Please provide only one of these arguments."
+                )
+            self.ds_process_group = sequence_data_parallel_group
 
         self.mics_comm_groups = create_mics_comm_groups(
             _ds_config.mics_shard_size,

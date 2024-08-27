@@ -814,24 +814,22 @@ class Init(InsertPostInitMethodToModuleSubClasses):
     apply_param_persistence = False
     override_module_apply = get_config_default(DeepSpeedZeroConfig, "override_module_apply")
 
-    def __init__(
-        self,
-        module=None,
-        data_parallel_group=None,
-        mem_efficient_linear=True,
-        remote_device=None,
-        pin_memory=False,
-        config_dict_or_path=None,
-        config=None,
-        enabled=True,
-        dtype=None,
-        mpu=None,
-        zero_param_parallel_group=None,
-        zero_quantized_weights=False,
-        zero_quantized_nontrainable_weights=False,
-        sequence_data_parallel_group=None,
-        param_swapper=None,
-    ):
+    def __init__(self,
+                 module=None,
+                 data_parallel_group=None,
+                 mem_efficient_linear=True,
+                 remote_device=None,
+                 pin_memory=False,
+                 config_dict_or_path=None,
+                 config=None,
+                 enabled=True,
+                 dtype=None,
+                 mpu=None,
+                 zero_param_parallel_group=None,
+                 zero_quantized_weights=False,
+                 zero_quantized_nontrainable_weights=False,
+                 sequence_data_parallel_group=None,
+                 param_swapper=None):
         """A context to enable massive model construction for training with
         ZeRO-3. Models are automatically partitioned (or, sharded) across the
         system and converted to half precision.
@@ -841,6 +839,8 @@ class Init(InsertPostInitMethodToModuleSubClasses):
                 if it was constructed in the context.
             data_parallel_group (``deepspeed.comm`` process group, optional):
                 The group of processes to partition among. Defaults to all processes.
+                Synonymous with sequence data parallel group for param partitioning
+                across both sequence and data parallel groups.
             mem_efficient_linear (bool, optional): Replace
                 torch.nn.functional.linear with an implementation that allows
                 DeepSpeed to partition parameters. Defaults to ``True``.
@@ -940,16 +940,19 @@ class Init(InsertPostInitMethodToModuleSubClasses):
             init_distributed()
             assert dist.is_initialized(), "Parameters cannot be scattered without initializing deepspeed.comm"
 
-        if data_parallel_group is None and sequence_data_parallel_group is None:
+        if data_parallel_group is None:
             self.ds_process_group = dist.get_world_group()
-        elif sequence_data_parallel_group is not None:
-            self.ds_process_group = sequence_data_parallel_group
-        elif data_parallel_group is not None:
+        else:
             self.ds_process_group = data_parallel_group
-        else:  # both given
-            raise ValueError(
-                "Both 'data_parallel_group' and 'sequence_data_parallel_group' were specified. Please provide only one of these arguments."
-            )
+
+        if sequence_data_parallel_group is not None:
+            logger.warning(
+                f"sequence_data_parallel_group' is deprecated and will be removed. Use 'data_parallel_group' instead.")
+            if data_parallel_group is not None:
+                raise ValueError(
+                    "Both 'data_parallel_group' and 'sequence_data_parallel_group' were specified. Please provide only one of these arguments."
+                )
+            self.ds_process_group = sequence_data_parallel_group
 
         self.rank = dist.get_rank(group=self.ds_process_group)
         self.dp_world_size = dist.get_world_size(group=self.ds_process_group)
