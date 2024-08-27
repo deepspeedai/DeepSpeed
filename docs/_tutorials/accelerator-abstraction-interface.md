@@ -81,6 +81,7 @@ torch.distributed.init_process_group(get_accelerator().communication_backend_nam
 [Accelerator Setup Guide](accelerator-setup-guide.md) provides a guide on how to setup different accelerators for DeepSpeed.  It also comes with simple example how to run deepspeed for different accelerators.  The following guides are provided:
 1. Run DeepSpeed model on CPU
 2. Run DeepSpeed model on XPU
+3. Run DeepSpeed model on Huawei Ascend NPU
 
 # Implement new accelerator extension
 It is possible to implement a new DeepSpeed accelerator extension to support new accelerator in DeepSpeed.  An example to follow is _[Intel Extension For DeepSpeed](https://github.com/intel/intel-extension-for-deepspeed/)_.   An accelerator extension contains the following components:
