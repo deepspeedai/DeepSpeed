@@ -8,6 +8,7 @@ tags: getting-started
 - [Introduction](#introduction)
 - [Intel Architecture (IA) CPU](#intel-architecture-ia-cpu)
 - [Intel XPU](#intel-xpu)
+- [Huawei Ascend NPU](#huawei-ascend-npu)
 
 # Introduction
 DeepSpeed supports different accelerators from different companies.   Setup steps to run DeepSpeed on certain accelerators might be different.  This guide allows user to lookup setup instructions for the accelerator family and hardware they are using.
@@ -132,3 +133,115 @@ accelerator: xpu
 
 ## More example for using DeepSpeed on Intel XPU
 Refer to https://github.com/intel/intel-extension-for-pytorch/tree/release/xpu/2.1.40/examples/gpu/inference/python/llm for more extensive guide.
+
+
+# Huawei Ascend NPU
+
+DeepSpeed has been verified on the following Huawei Ascend NPU products:
+* Atlas 300T A2
+
+## Installation steps for Huawei Ascend NPU
+
+The following steps outline the process for installing DeepSpeed on an Huawei Ascend NPU:
+1. Install the Huawei Ascend NPU Driver and Firmware
+    <details>
+    <summary>Click to expand</summary>
+
+    Before proceeding with the installation, please download the necessary files from [Huawei Ascend NPU Driver and Firmware](https://www.hiascend.com/en/hardware/firmware-drivers/commercial?product=4&model=11).
+
+    The following instructions below are sourced from the [Ascend Community](https://www.hiascend.com/document/detail/en/canncommercial/700/quickstart/quickstart/quickstart_18_0002.html) (refer to the [Chinese version](https://www.hiascend.com/document/detail/zh/canncommercial/700/quickstart/quickstart/quickstart_18_0002.html)):
+
+    - Execute the following command to install the driver:
+    ```
+    ./Ascend-hdk-<soc_version>-npu-driver_x.x.x_linux-{arch}.run --full --install-for-all
+    ```
+
+    - Execute the following command to install the firmware:
+    ```
+    ./Ascend-hdk-<soc_version>-npu-firmware_x.x.x.x.X.run --full
+    ```
+    </details>
+
+2. Install CANN
+    <details>
+    <summary>Click to expand</summary>
+
+    Prior to installation, download the [CANN Toolkit](https://www.hiascend.com/en/software/cann/commercial).
+
+    - Install third-party dependencies.
+        - Ubuntu (The operations are the same for Debian, UOS20, and Linux.)
+        ```
+        apt-get install -y gcc g++ make cmake zlib1g zlib1g-dev openssl libsqlite3-dev libssl-dev libffi-dev unzip pciutils net-tools libblas-dev gfortran libblas3
+        ```
+        - openEuler (The operations are the same for EulerOS, CentOS, and BC-Linux.)
+        ```
+        yum install -y gcc gcc-c++ make cmake unzip zlib-devel libffi-devel openssl-devel pciutils net-tools sqlite-devel lapack-devel gcc-gfortran
+        ```
+    - Install the required Python dependencies:
+    ```
+    pip3 install attrs numpy decorator sympy cffi pyyaml pathlib2 psutil protobuf scipy requests absl-py wheel typing_extensions
+    ```
+    - Install the CANN Toolkit.
+    ```
+    ./Ascend-cann-toolkit_x.x.x_linux-{arch}.run --install
+    ```
+    </details>
+
+3. Install PyTorch \
+    `pip install torch torch_npu`
+
+4. Install DeepSpeed \
+    `pip install deepspeed`
+
+You can view the installation results using the `ds_report` command, Here is an example:
+```
+--------------------------------------------------
+DeepSpeed C++/CUDA extension op report
+--------------------------------------------------
+NOTE: Ops not installed will be just-in-time (JIT) compiled at
+    runtime if needed. Op compatibility means that your system
+    meet the required dependencies to JIT install the op.
+--------------------------------------------------
+JIT compiled ops requires ninja
+ninja .................. [OKAY]
+--------------------------------------------------
+op name ................ installed .. compatible
+--------------------------------------------------
+deepspeed_not_implemented  [NO] ....... [OKAY]
+async_io ............... [NO] ....... [OKAY]
+cpu_adagrad ............ [NO] ....... [OKAY]
+cpu_adam ............... [NO] ....... [OKAY]
+cpu_lion ............... [NO] ....... [OKAY]
+fused_adam ............. [NO] ....... [OKAY]
+transformer_inference .. [NO] ....... [OKAY]
+--------------------------------------------------
+DeepSpeed general environment info:
+torch install path ............... ['/root/miniconda3/envs/ds/lib/python3.10/site-packages/torch']
+torch version .................... 2.2.0
+deepspeed install path ........... ['/root/miniconda3/envs/ds/lib/python3.10/site-packages/deepspeed']
+deepspeed info ................... 0.14.4, unknown, unknown
+deepspeed wheel compiled w. ...... torch 2.2
+torch_npu install path ........... ['/root/miniconda3/envs/ds/lib/python3.10/site-packages/torch_npu']
+torch_npu version ................ 2.2.0
+ascend_cann version .............. 8.0.RC2.alpha002
+shared memory (/dev/shm) size .... 20.00 GB
+```
+
+## How to launch DeepSpeed on Huawei Ascend NPU
+
+To validate the Huawei Ascend NPU availability and if the accelerator is correctly chosen, here is an example(Huawei Ascend NPU detection is automatic starting with DeepSpeed v0.12.6):
+```
+>>> import torch
+>>> print('torch:',torch.__version__)
+torch: 2.2.0
+>>> import torch_npu
+>>> print('torch_npu:',torch.npu.is_available(),",version:",torch_npu.__version__)
+torch_npu: True ,version: 2.2.0
+>>> from deepspeed.accelerator import get_accelerator
+>>> print('accelerator:', get_accelerator()._name)
+accelerator: npu
+```
+
+## Multi-card parallel training using Huawei Ascend NPU
+
+To perform model training across multiple Huawei Ascend NPU cards using DeepSpeed, see the examples provided in [DeepSpeed Examples](https://github.com/microsoft/DeepSpeedExamples/blob/master/training/cifar/cifar10_deepspeed.py).
