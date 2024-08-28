@@ -226,6 +226,36 @@ deepspeed --include="worker-2:0,1" \
 	<client_entry.py> <client args> \
 	--deepspeed --deepspeed_config ds_config.json
 ```
+### Launching without passwordless SSH
+
+DeepSpeed now supports launching training jobs without the need for passwordless SSH. This mode is
+particularly useful in cloud environments such as Kubernetes, where flexible container orchestration
+is possible, and setting up a leader-worker architecture with passwordless SSH adds unnecessary
+complexity.
+
+To use this mode, you need to run the DeepSpeed command separately on all nodes. The command should
+be structured as follows:
+
+```bash
+deepspeed --hostfile=myhostfile --no_ssh --node_rank=<n> \
+    --master_addr=<addr> --master_port=<port> \
+    <client_entry.py> <client args> \
+    --deepspeed --deepspeed_config ds_config.json
+```
+
+- `--hostfile=myhostfile`: Specifies the hostfile that contains information about the nodes and GPUs.
+- `--no_ssh`: Enables the no-SSH mode.
+- `--node_rank=<n>`: Specifies the rank of the node. This should be a unique integer from 0 to n - 1.
+- `--master_addr=<addr>`: The address of the leader node (rank 0).
+- `--master_port=<port>`: The port of the leader node.
+
+In this setup, the hostnames in the hostfile do not need to be reachable via passwordless SSH.
+However, the hostfile is still required for the launcher to collect information about the environment,
+such as the number of nodes and the number of GPUs per node.
+
+Each node must be launched with a unique `node_rank`, and all nodes must be provided with the address
+and port of the leader node (rank 0). This mode causes the launcher to act similarly to the `torchrun`
+launcher, as described in the [PyTorch documentation](https://pytorch.org/docs/stable/elastic/run.html).
 
 ## Multi-Node Environment Variables
 
