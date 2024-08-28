@@ -16,6 +16,9 @@ from deepspeed.ops.op_builder import InferenceBuilder
 if not deepspeed.ops.__compatible_ops__[InferenceBuilder.NAME]:
     pytest.skip("This op had not been implemented on this system.", allow_module_level=True)
 
+if torch.half not in get_accelerator().supported_dtypes():
+    pytest.skip(f"fp16 not supported, valid dtype: {get_accelerator().supported_dtypes()}", allow_module_level=True)
+
 
 @pytest.mark.inference
 @pytest.mark.parametrize("use_cuda_events", [True, False])
