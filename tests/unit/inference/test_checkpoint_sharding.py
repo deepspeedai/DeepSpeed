@@ -14,6 +14,7 @@ import deepspeed.comm as dist
 from huggingface_hub import snapshot_download
 from transformers.utils import is_offline_mode
 from deepspeed.ops.op_builder import InferenceBuilder
+from deepspeed.accelerator import get_accelerator
 
 if not deepspeed.ops.__compatible_ops__[InferenceBuilder.NAME]:
     pytest.skip("This op had not been implemented on this system.", allow_module_level=True)
@@ -44,6 +45,8 @@ def model_name(request):
 
 @pytest.fixture(params=[torch.float16, torch.int8], ids=["fp16", "int8"])
 def dtype(request):
+    if request.param not in get_accelerator().supported_dtypes():
+        pytest.skip(f"{request.param} not supported by {get_accelerator().device_name()}.")
     return request.param
 
 
