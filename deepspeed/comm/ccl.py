@@ -15,7 +15,7 @@ from .torch import TorchBackend
 
 def build_ccl_op():
     builder = get_accelerator().create_op_builder("CCLCommBuilder")
-    if builder is None or NotImplementedBuilder:
+    if builder is None or isinstance(builder, NotImplementedBuilder):
         return None
     ccl_cpp_module = builder.load()
     print(f'DeepSpeed {builder.absolute_name()} built successfully')
