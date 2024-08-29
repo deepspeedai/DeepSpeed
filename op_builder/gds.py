@@ -36,6 +36,11 @@ class GDSBuilder(AsyncIOBuilder):
         return super().extra_ldflags() + ['-lcufile']
 
     def is_compatible(self, verbose=False):
+        if self.is_rocm_pytorch():
+            if verbose:
+                self.warning(f'{self.NAME} is not compatible with ROCM')
+            return False
+
         try:
             import torch.utils.cpp_extension
         except ImportError:
