@@ -20,7 +20,7 @@ deepspeed_gds_handle_t::deepspeed_gds_handle_t(const int block_size,
                                                const bool single_submit,
                                                const bool overlap_events,
                                                const int num_threads)
-    : deepspeed_io_handle_t(block_size, queue_depth, single_submit, overlap_events, num_threads)
+    : deepspeed_io_handle_t(block_size, queue_depth, single_submit, overlap_events, 1)
 {
     _init_cuFile(block_size, queue_depth, num_threads);
 }
