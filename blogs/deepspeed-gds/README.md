@@ -17,7 +17,7 @@ this problem, DeepSpeed has created a suite of I/O optimizations collectively ca
 
 DeepNVMe improves the performance and efficiency of I/O-bound DL applications by accelerating I/O operations
 and reducing hardware requirements. It achieves this by leveraging storage innovations such as Non-Volatile
-Memory Express (NVMe) Solid Storage Devices (SSDs) and NVIDIA Magnum IO<sup>TM</sup> GPUDirect® Storage (GDS). In this
+Memory Express (NVMe) Solid State Drives (SSDs) and NVIDIA Magnum IO<sup>TM</sup> GPUDirect® Storage (GDS). In this
 blog we show the benefits of DeepNVMe using microbenchmarks and an inference application. In experiments
 conducted on an Azure NC96ads\_A100\_v4 VM, we observed that DeepNVMe saturates available NVMe bandwidth for
 data transfers with GPU or CPU memory, achieving up to 10GB/sec reads and 5 GB/secs writes.

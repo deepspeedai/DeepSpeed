@@ -55,6 +55,10 @@ lnav:
         url: /getting-started/
       - title: 'Getting started on Azure'
         url: /tutorials/azure/
+      - title: 'Accelerator Abstraction'
+        url: /tutorials/accelerator-abstraction-interface/
+      - title: 'Accelerator Setup Guides'
+        url: /tutorials/accelerator-setup-guide/
       - title: 'Automatic Tensor Parallelism'
         url: /tutorials/automatic-tensor-parallelism/
       - title: 'Autotuning'
@@ -69,6 +73,8 @@ lnav:
         url: /tutorials/curriculum-learning/
       - title: 'Data Efficiency'
         url: /tutorials/data-efficiency/
+      - title: 'DeepNVMe'
+        url: /tutorials/deepnvme/
       - title: 'DS4Sci_EvoformerAttention'
         url: /tutorials/ds4sci_evoformerattention/
       - title: 'Flops Profiler'

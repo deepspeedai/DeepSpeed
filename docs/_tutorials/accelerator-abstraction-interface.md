@@ -1,6 +1,6 @@
 ---
 title: DeepSpeed Accelerator Abstraction Interface
-tags: getting-started
+tags: getting-started training accelerator
 ---
 
 # Contents
