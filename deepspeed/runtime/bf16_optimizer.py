@@ -482,7 +482,7 @@ class BF16_Optimizer(ZeROOptimizer):
 
     def load_state_dict(self,
                         state_dict_list,
-                        checkpoint_folder,
+                        checkpoint_folder=None,
                         load_optimizer_states=True,
                         load_from_fp32_weights=False,
                         load_serial=None,
