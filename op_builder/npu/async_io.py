@@ -74,8 +74,8 @@ class AsyncIOBuilder(NPUOpBuilder):
             flag, lib, tool = data
             path = distutils.spawn.find_executable(pkgmgr)
             if path is not None:
-                cmd = f"{pkgmgr} {flag} {lib}"
-                result = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, shell=True)
+                cmd = [pkgmgr, flag, lib]
+                result = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
                 if result.wait() == 0:
                     found = True
                 else:
