@@ -1,6 +1,6 @@
 ---
 title: DeepSpeed Accelerator Setup Guides
-tags: getting-started
+tags: getting-started training accelerator
 ---
 
 # Contents
