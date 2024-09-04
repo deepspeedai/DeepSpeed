@@ -262,7 +262,7 @@ def get_new_tensor_fn_for_dtype(dtype: torch.dtype) -> Callable:
 
 
 # https://stackoverflow.com/a/63851681/9201239
-def get_all_subclasses(cls):
+def get_all_subclasses(cls, include_root=True):
     subclass_list = []
 
     def recurse(cl):
@@ -272,7 +272,10 @@ def get_all_subclasses(cls):
 
     recurse(cls)
 
-    return set(subclass_list)
+    ret = set(subclass_list)
+    if include_root:
+        ret.add(cls)
+    return ret
 
 
 @instrument_w_nvtx
@@ -465,11 +468,13 @@ class InsertPostInitMethodToModuleSubClasses(object):
                 return wrapper
 
             def _enable_class_apply(cls):
-                cls._old_apply_of_skip_init_hook = cls._apply
-                cls._apply = partition_after_empty_init(cls._apply)
+                if '_apply' in cls.__dict__:
+                    cls._old_apply_of_skip_init_hook = cls._apply
+                    cls._apply = partition_after_empty_init(cls._apply)
 
             def _disable_class_apply(cls):
-                cls._apply = cls._old_apply_of_skip_init_hook
+                if hasattr(cls, '_old_apply_of_skip_init_hook'):
+                    cls._apply = cls._old_apply_of_skip_init_hook
 
             # add hooks for to_empty: apply_(empty_like)
             for subclass in get_all_subclasses(torch.nn.modules.module.Module):
@@ -522,12 +527,14 @@ class InsertPostInitMethodToModuleSubClasses(object):
             return wrapper
 
         def _enable_class(cls):
-            cls._old_init = cls.__init__
-            cls.__init__ = partition_after(cls.__init__)
+            if '__init__' in cls.__dict__:
+                cls._old_init = cls.__init__
+                cls.__init__ = partition_after(cls.__init__)
 
         def _init_subclass(cls, **kwargs):
-            cls._old_init = cls.__init__
-            cls.__init__ = partition_after(cls.__init__)
+            if '__init__' in cls.__dict__:
+                cls._old_init = cls.__init__
+                cls.__init__ = partition_after(cls.__init__)
 
         # Replace .__init__() for all existing subclasses of torch.nn.Module recursively
         for subclass in get_all_subclasses(torch.nn.modules.module.Module):
@@ -567,7 +574,8 @@ class InsertPostInitMethodToModuleSubClasses(object):
         if self.patched:
 
             def _disable_class(cls):
-                cls.__init__ = cls._old_init
+                if hasattr(cls, '_old_init'):
+                    cls.__init__ = cls._old_init
 
             for subclass in get_all_subclasses(torch.nn.modules.module.Module):
                 _disable_class(subclass)
