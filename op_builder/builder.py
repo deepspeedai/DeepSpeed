@@ -482,7 +482,8 @@ class OpBuilder(ABC):
             cmds = [cmd]
         valid = False
         for cmd in cmds:
-            result = subprocess.Popen(f'type {cmd}', stdout=subprocess.PIPE, shell=True)
+            safe_cmd = ["bash", "-c", f"type {cmd}"]
+            result = subprocess.Popen(safe_cmd, stdout=subprocess.PIPE)
             valid = valid or result.wait() == 0
 
         if not valid and len(cmds) > 1:
