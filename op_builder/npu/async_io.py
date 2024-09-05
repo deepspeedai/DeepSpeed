@@ -83,7 +83,7 @@ class AsyncIOBuilder(NPUOpBuilder):
                 break
         return found
 
-    def is_compatible(self, verbose=True):
+    def is_compatible(self, verbose=False):
         # Check for the existence of libaio by using distutils
         # to compile and link a test program that calls io_submit,
         # which is a function provided by libaio that is used in the async_io op.
