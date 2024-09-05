@@ -17,7 +17,7 @@ class InferenceBuilder(CUDAOpBuilder):
     def absolute_name(self):
         return f'deepspeed.ops.transformer.inference.{self.NAME}_op'
 
-    def is_compatible(self, verbose=True):
+    def is_compatible(self, verbose=False):
         try:
             import torch
         except ImportError:

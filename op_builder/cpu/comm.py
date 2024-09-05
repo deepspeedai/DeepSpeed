@@ -28,7 +28,7 @@ class CCLCommBuilder(CPUOpBuilder):
     def cxx_args(self):
         return ['-O2', '-fopenmp']
 
-    def is_compatible(self, verbose=True):
+    def is_compatible(self, verbose=False):
         # TODO: add soft compatibility check for private binary release.
         #  a soft check, as in we know it can be trivially changed.
         return super().is_compatible(verbose)
@@ -65,7 +65,7 @@ class ShareMemCommBuilder(CPUOpBuilder):
     def cxx_args(self):
         return ['-O2', '-fopenmp']
 
-    def is_compatible(self, verbose=True):
+    def is_compatible(self, verbose=False):
         # TODO: add soft compatibility check for private binary release.
         #  a soft check, as in we know it can be trivially changed.
         return super().is_compatible(verbose)

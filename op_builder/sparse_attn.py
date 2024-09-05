@@ -64,7 +64,6 @@ class SparseAttnBuilder(OpBuilder):
             if verbose:
                 self.warning(
                     f'{self.NAME} requires a torch version >= 1.5 and < 2.0 but detected {TORCH_MAJOR}.{TORCH_MINOR}')
-
         try:
             import triton
         except ImportError:

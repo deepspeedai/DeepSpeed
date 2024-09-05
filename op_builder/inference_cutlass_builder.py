@@ -18,7 +18,7 @@ class InferenceCutlassBuilder(CUDAOpBuilder):
     def absolute_name(self):
         return f'deepspeed.inference.v2.kernels.cutlass_ops.{self.NAME}'
 
-    def is_compatible(self, verbose=True):
+    def is_compatible(self, verbose=False):
         try:
             import torch
         except ImportError:
