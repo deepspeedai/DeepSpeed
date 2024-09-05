@@ -482,9 +482,7 @@ class PipelineEngine(DeepSpeedEngine):
         micro_batches = self.micro_batches if num_micro_batches is None else num_micro_batches
 
         # Do the work
-        sched = schedule.InferenceSchedule(micro_batches=self.micro_batches,
-                                           stages=self.num_stages,
-                                           stage_id=self.stage_id)
+        sched = schedule.InferenceSchedule(micro_batches=micro_batches, stages=self.num_stages, stage_id=self.stage_id)
 
         # prevent dead-lock with multiple evals sequence
         dist.barrier()
