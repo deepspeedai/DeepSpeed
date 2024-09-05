@@ -18,6 +18,7 @@ class HPU_Accelerator(DeepSpeedAccelerator):
         self._name = 'hpu'
         self._communication_backend_name = 'hccl'
         self._compile_backend = "hpu_backend"
+        self.apply_hpu_workarounds()
         try:
             import habana_frameworks.torch.hpu as hpu
             hpu.setDeterministic(True)
@@ -27,6 +28,15 @@ class HPU_Accelerator(DeepSpeedAccelerator):
                 f"HPU_Accelerator requires habana_frameworks.torch.hpu, which is not installed on this system.")
 
         self.fp16_supported = None
+
+    def apply_hpu_workarounds(self):
+
+        def update_wa_env_var(key, value):
+            if key not in os.environ.keys():
+                os.environ[key] = value
+
+        update_wa_env_var("PT_HPU_LAZY_ACC_PAR_MODE", "0")
+        update_wa_env_var("PT_HPU_ENABLE_REFINE_DYNAMIC_SHAPES", "0")
 
     # Device APIs
     def is_synchronized_device(self):
