@@ -95,8 +95,9 @@ ipex_model = ipex.llm.optimize(deepspeed_model)
 ```
 to get model optimzied by Intel Extension for PyTorch.
 
-## More example for using DeepSpeed with Intel Extension for PyTorch on Intel Architecture CPU
-Refer to https://github.com/intel/intel-extension-for-pytorch/tree/main/examples/cpu/inference/python/llm for more extensive guide.
+## More examples for using DeepSpeed on Intel CPU
+Refer to [LLM examples](https://github.com/intel/intel-extension-for-pytorch/tree/main/examples/cpu/llm) for more code samples of running inference with DeepSpeed on Intel CPU.
+
 
 # Intel XPU
 DeepSpeed XPU accelerator supports Intel® Data Center GPU Max Series.
@@ -131,8 +132,8 @@ XPU available: True
 accelerator: xpu
 ```
 
-## More example for using DeepSpeed on Intel XPU
-Refer to https://github.com/intel/intel-extension-for-pytorch/tree/release/xpu/2.1.40/examples/gpu/inference/python/llm for more extensive guide.
+## More examples for using DeepSpeed on Intel XPU
+Refer to [LLM examples](https://github.com/intel/intel-extension-for-pytorch/tree/xpu-main/examples/gpu/llm), [Megatron-DeepSpeed training examples](https://github.com/intel/intel-extension-for-deepspeed/tree/main/examples) for more code samples of running LLM with DeepSpeed on Intel XPU.
 
 
 # Huawei Ascend NPU
