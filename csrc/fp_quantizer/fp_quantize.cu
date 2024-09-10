@@ -15,7 +15,9 @@
 #include <cuda_fp16.h>
 #include <curand_kernel.h>
 
+#ifdef BF16_AVAILABLE
 #include <cuda_bf16.h>
+#endif
 #include <cuda_runtime_api.h>
 
 using ROp = reduce::ROpType;
