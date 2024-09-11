@@ -10,6 +10,7 @@ import unittest
 import subprocess
 import os
 import re
+import shlex
 from .test_common import BaseTestCase
 
 LAYERS = 2
@@ -18,9 +19,9 @@ ATTN_HEADS = 8
 
 
 def remove_file(test_id, filename):
-    cmd = f"if [ -f {filename} ] ; then rm -v {filename}; fi"
+    cmd = shlex.split(f"if [ -f {filename} ] ; then rm -v {filename}; fi")
     print(f"{test_id} cmd: {cmd}")
-    subprocess.run(cmd, shell=True, check=False, executable='/bin/bash')
+    subprocess.run(cmd, check=False, executable='/bin/bash')
 
 
 def grep_loss_from_file(file_name):
@@ -451,9 +452,9 @@ class GPT2CheckpointTestCase(BaseTestCase):
         checkpoint_name = test_config["checkpoint_name"]
         #---------------remove old checkpoint---------------#
         try:
-            cmd = f"rm -rf {checkpoint_name}"
+            cmd = shlex.split(f"rm -rf {checkpoint_name}")
             print(f"{self.id()} cmd: {cmd}")
-            subprocess.run(cmd, shell=True, check=False, executable='/bin/bash')
+            subprocess.run(cmd, check=False, executable='/bin/bash')
         except:
             print("No old checkpoint")
 
@@ -474,8 +475,8 @@ class GPT2CheckpointTestCase(BaseTestCase):
 
         # remove previous test log
         try:
-            cmd = f"rm {base_file}"
-            subprocess.run(cmd, shell=True, check=False, executable='/bin/bash')
+            cmd = shlex.split(f"rm {base_file}")
+            subprocess.run(cmd, check=False, executable='/bin/bash')
         except:
             print(f"{self.id()} No old logs")
 
@@ -489,9 +490,9 @@ class GPT2CheckpointTestCase(BaseTestCase):
 
         # set checkpoint load iteration
         try:
-            cmd = f"echo {checkpoint_interval} > {checkpoint_name}/latest_checkpointed_iteration.txt"
+            cmd = shlex.split(f"echo {checkpoint_interval} > {checkpoint_name}/latest_checkpointed_iteration.txt")
             print(f"{self.id()} running cmd: {cmd}")
-            subprocess.run(cmd, shell=True, check=False, executable='/bin/bash')
+            subprocess.run(cmd, check=False, executable='/bin/bash')
         except:
             print(f"{self.id()} Failed to update the checkpoint iteration file")
             return False
@@ -506,8 +507,8 @@ class GPT2CheckpointTestCase(BaseTestCase):
 
         # remove previous test log
         try:
-            cmd = f"rm {test_file}"
-            subprocess.run(cmd, shell=True, check=False, executable='/bin/bash')
+            cmd = shlex.split(f"rm {test_file}")
+            subprocess.run(cmd, check=False, executable='/bin/bash')
         except:
             print(f"{self.id()} no previous logs for")
         self.run_gpt2_test(test_config, test_file)

@@ -7,6 +7,7 @@ import unittest
 import subprocess
 import os
 import time
+import shlex
 
 
 class BaseTestCase(unittest.TestCase):
@@ -40,9 +41,9 @@ class BaseTestCase(unittest.TestCase):
             os.makedirs(dirname)
 
     def clean_test_env(self):
-        cmd = "dlts_ssh pkill -9 -f /usr/bin/python"
+        cmd = shlex.split("dlts_ssh pkill -9 -f /usr/bin/python")
         print(cmd)
-        subprocess.run(cmd, shell=True, check=False, executable='/bin/bash')
+        subprocess.run(cmd, check=False, executable='/bin/bash')
         time.sleep(20)
 
     def run_BingBertSquad_test(self, test_config, output):
@@ -50,8 +51,8 @@ class BaseTestCase(unittest.TestCase):
         other_args = " " + test_config["other_args"] if "other_args" in test_config else " "
 
         cmd = "./run_BingBertSquad_sanity.sh -e 1 -g {0} {1} {2}".format(test_config["gpus"], other_args, ds_flag)
-
+        cmd = shlex.split(cmd)
         self.ensure_directory_exists(output)
         with open(output, "w") as f:
             print(cmd)
-            subprocess.run(cmd, shell=True, check=False, executable='/bin/bash', stdout=f, stderr=f)
+            subprocess.run(cmd, check=False, executable='/bin/bash', stdout=f, stderr=f)

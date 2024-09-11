@@ -10,7 +10,10 @@ import sys
 required_env = ["RANK", "WORLD_SIZE", "MASTER_ADDR", "MASTER_PORT", "LOCAL_RANK"]
 if not all(map(lambda v: v in os.environ, required_env)):
     import subprocess
-    subprocess.run("deepspeed $(which ds_bench) " + " ".join(sys.argv[1:]), shell=True)
+    r = subprocess.check_output(["which", "ds_bench"])
+    ds_bench_bin = r.decode('utf-8').strip()
+    safe_cmd = ["deepspeed", ds_bench_bin] + sys.argv[1:]
+    subprocess.run(safe_cmd)
 else:
     args = benchmark_parser().parse_args()
     rank = args.local_rank
