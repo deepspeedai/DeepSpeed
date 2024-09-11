@@ -6,6 +6,7 @@
 Functionality of swapping tensors to/from (NVMe) storage devices.
 """
 import subprocess
+import shlex
 
 
 class Job(object):
@@ -39,10 +40,10 @@ class Job(object):
 
 
 def run_job(job):
-    args = ' '.join(job.cmd())
+    args = shlex.split(' '.join(job.cmd()))
     print(f'args = {args}')
     job.open_output_file()
-    proc = subprocess.run(args=args, shell=True, stdout=job.get_stdout(), stderr=job.get_stderr(), cwd=job.get_cwd())
+    proc = subprocess.run(args=args, stdout=job.get_stdout(), stderr=job.get_stderr(), cwd=job.get_cwd())
     job.close_output_file()
     assert proc.returncode == 0, \
     f"This command failed: {job.cmd()}"

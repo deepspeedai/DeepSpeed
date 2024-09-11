@@ -58,6 +58,20 @@ def get_master_port(base_port=29500, port_range_size=1000):
     raise IOError('no free ports')
 
 
+def _get_cpu_socket_count():
+    import shlex
+    p1 = subprocess.Popen(shlex.split("cat /proc/cpuinfo"), stdout=subprocess.PIPE)
+    p2 = subprocess.Popen(["grep", "physical id"], stdin=p1.stdout, stdout=subprocess.PIPE)
+    p1.stdout.close()
+    p3 = subprocess.Popen(shlex.split("sort -u"), stdin=p2.stdout, stdout=subprocess.PIPE)
+    p2.stdout.close()
+    p4 = subprocess.Popen(shlex.split("wc -l"), stdin=p3.stdout, stdout=subprocess.PIPE)
+    p3.stdout.close()
+    r = int(p4.communicate()[0])
+    p4.stdout.close()
+    return r
+
+
 def set_accelerator_visible():
     cuda_visible = os.environ.get("CUDA_VISIBLE_DEVICES", None)
     xdist_worker_id = get_xdist_worker_id()
@@ -95,9 +109,7 @@ def set_accelerator_visible():
             num_accelerators = int(npu_smi.decode('utf-8').strip().split('\n')[0].split(':')[1].strip())
         else:
             assert get_accelerator().device_name() == 'cpu'
-            cpu_sockets = int(
-                subprocess.check_output('cat /proc/cpuinfo | grep "physical id" | sort -u | wc -l', shell=True))
-            num_accelerators = cpu_sockets
+            num_accelerators = _get_cpu_socket_count()
 
         if isinstance(num_accelerators, list):
             cuda_visible = ",".join(num_accelerators)

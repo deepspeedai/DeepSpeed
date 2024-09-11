@@ -27,6 +27,7 @@ from setuptools import setup, find_packages
 from setuptools.command import egg_info
 import time
 import typing
+import shlex
 
 torch_available = True
 try:
@@ -157,10 +158,11 @@ if BUILD_OP_DEFAULT:
 
 def command_exists(cmd):
     if sys.platform == "win32":
-        result = subprocess.Popen(f'{cmd}', stdout=subprocess.PIPE, shell=True)
+        safe_cmd = shlex.split(f'{cmd}')
+        result = subprocess.Popen(safe_cmd, stdout=subprocess.PIPE)
         return result.wait() == 1
     else:
-        safe_cmd = ["bash", "-c", f"type {cmd}"]
+        safe_cmd = shlex.split(f"bash -c type {cmd}")
         result = subprocess.Popen(safe_cmd, stdout=subprocess.PIPE)
         return result.wait() == 0
 
@@ -200,13 +202,13 @@ for op_name, builder in ALL_OPS.items():
 print(f'Install Ops={install_ops}')
 
 # Write out version/git info.
-git_hash_cmd = "git rev-parse --short HEAD"
-git_branch_cmd = "git rev-parse --abbrev-ref HEAD"
+git_hash_cmd = shlex.split("bash -c git rev-parse --short HEAD")
+git_branch_cmd = shlex.split("bash -c git rev-parse --abbrev-ref HEAD")
 if command_exists('git') and not is_env_set('DS_BUILD_STRING'):
     try:
-        result = subprocess.check_output(git_hash_cmd, shell=True)
+        result = subprocess.check_output(git_hash_cmd)
         git_hash = result.decode('utf-8').strip()
-        result = subprocess.check_output(git_branch_cmd, shell=True)
+        result = subprocess.check_output(git_branch_cmd)
         git_branch = result.decode('utf-8').strip()
     except subprocess.CalledProcessError:
         git_hash = "unknown"
