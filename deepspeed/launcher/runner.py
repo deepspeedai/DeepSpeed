@@ -20,6 +20,7 @@ import collections
 from copy import deepcopy
 import signal
 import time
+import shlex
 
 from .multinode_runner import PDSHRunner, OpenMPIRunner, MVAPICHRunner, SlurmRunner, MPICHRunner, IMPIRunner
 from .constants import PDSH_LAUNCHER, OPENMPI_LAUNCHER, MVAPICH_LAUNCHER, SLURM_LAUNCHER, MPICH_LAUNCHER, IMPI_LAUNCHER
@@ -445,7 +446,8 @@ def main(args=None):
             if args.ssh_port is not None:
                 ssh_check_cmd += f"-p {args.ssh_port} "
             ssh_check_cmd += f"{first_host} hostname"
-            subprocess.check_call(ssh_check_cmd, stderr=subprocess.DEVNULL, stdout=subprocess.DEVNULL, shell=True)
+            safe_ssh_cmd = shlex.split(ssh_check_cmd)
+            subprocess.check_call(safe_ssh_cmd, stderr=subprocess.DEVNULL, stdout=subprocess.DEVNULL)
         except subprocess.CalledProcessError:
             raise RuntimeError(
                 f"Using hostfile at {args.hostfile} but host={first_host} was not reachable via ssh. If you are running with a single node please remove {args.hostfile} or setup passwordless ssh."
@@ -458,9 +460,9 @@ def main(args=None):
         if args.ssh_port is not None:
             ssh_check_cmd += f" -p {args.ssh_port}"
         ssh_check_cmd += f" {first_host} hostname -I"
-        hostname_cmd = [ssh_check_cmd]
+        hostname_cmd = shlex.split(ssh_check_cmd)
         try:
-            result = subprocess.check_output(hostname_cmd, shell=True)
+            result = subprocess.check_output(hostname_cmd)
         except subprocess.CalledProcessError as err:
             logger.error(
                 "Unable to detect suitable master address via `hostname -I`, please manually specify one via --master_addr"
