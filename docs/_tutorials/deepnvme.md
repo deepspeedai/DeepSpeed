@@ -188,7 +188,7 @@ This tutorial has been significantly improved by feedback from [Guanhua Wang](ht
 ## Appendix
 
 ### Advanced Handle Creation
-Achieving peak I/O performance with DeepNVMe requires careful configuration of handle creation. In particular, the parameters of `aio_handle` and `gds_handle` constructors are performance-critical because they determine how efficiently DeepNVMe interacts with the underlying storage subsystem (i.e., `libaio`, GDS, and SSD). For convenience we make it possible to create handles using default parameter values which will provide decent performance in most scenarios. However, squeezing out every available performance in your environment will likely require tuning the constructor parameters, namely `block_size`, `queue_depth`, `single_submit`, `overlap_events`, and `num_threads`. The `aio_handle` constructor parameters and default values are illustrated below:
+Achieving peak I/O performance with DeepNVMe requires careful configuration of handle creation. In particular, the parameters of `aio_handle` and `gds_handle` constructors are performance-critical because they determine how efficiently DeepNVMe interacts with the underlying storage subsystem (i.e., `libaio`, GDS, PCIe, and SSD). For convenience we make it possible to create handles using default parameter values which will provide decent performance in most scenarios. However, squeezing out every available performance in your environment will likely require tuning the constructor parameters, namely `block_size`, `queue_depth`, `single_submit`, `overlap_events`, and `num_threads`. The `aio_handle` constructor parameters and default values are illustrated below:
 ```bash
 >>> from deepspeed.ops.op_builder import AsyncIOBuilder
 >>> help(AsyncIOBuilder().load().aio_handle())
@@ -206,6 +206,56 @@ class aio_handle(pybind11_builtins.pybind11_object)
  |      __init__(self: async_io.aio_handle, block_size: int = 1048576, queue_depth: int = 128, single_submit: bool = False, overlap_events: bool = False, num_threads: int = 1) -> None
  |
  |      AIO handle constructor
+```
+
+### Performance Tuning
+As discussed [earlier](#advanced-handle-creation), achieving peak DeepNVMe performance for a target workload or environment requires using optimally configured `aio_handle` or `gds_handle` handles. For configuration convenience, we provide a utility called `ds_nvme_tune` to automate the discovery of optimal DeepNVMe configurations. `ds_nvme_tune` automatically explores a user-specified or default configuration space and recommends the option that provides the best read and write performance. Below is an example usage of `ds_nvme_tune` to tune `aio_handle` data transfers between GPU memory and a local NVVMe SSD mounted on `/local_nvme`. This example used the default configuration space of `ds_nvme_tune` for tuning.
+
+```bash
+$ ds_nvme_tune --nvme_dir /local_nvme --gpu
+Running DeepNVMe performance tuning on ['/local_nvme/']
+Best performance (GB/sec): read =  3.69, write =  3.18
+{
+   "aio": {
+      "single_submit": "false",
+      "overlap_events": "true",
+      "num_threads": 8,
+      "queue_depth": 32,
+      "block_size": 1048576
+   }
+}
+```
+The above tuning was executed on a Lambda workstation equipped with two NVIDIA A6000-48GB GPUs, 252GB of DRAM, and a [CS3040 NVMe 2TB SDD](https://www.pny.com/CS3040-M2-NVMe-SSD?sku=M280CS3040-2TB-RB) with peak read and write speeds of 5.6 GB/s and 4.3 GB/s respectively. The tuning required about four and half minutes. Based on the results, one can expect to achieve read and write transfer speeds of 3.69 GB/sec and 3.18 GB/sec respectively by using an `aio_handle` configured as below.
+
+```python
+>>> from deepspeed.ops.op_builder import AsyncIOBuilder
+>>> h = AsyncIOBuilder().load().aio_handle(block_size=1048576,
+                                           queue_depth=32,
+                                           single_submit=False,
+                                           overlap_events=True,
+                                           num_threads=8)
+```
+
+
+The full command line options of `ds_nvme_tune` can be obtained via the normal `-h` or `--help`.
+```bash
+usage: ds_nvme_tune [-h] --nvme_dir NVME_DIR [NVME_DIR ...] [--sweep_config SWEEP_CONFIG] [--no_read] [--no_write] [--io_size IO_SIZE] [--gpu] [--gds] [--flush_page_cache] [--log_dir LOG_DIR] [--loops LOOPS] [--verbose]
+
+options:
+  -h, --help            show this help message and exit
+  --nvme_dir NVME_DIR [NVME_DIR ...]
+                        Directory in which to perform I/O tests. A writeable directory on a NVMe device.
+  --sweep_config SWEEP_CONFIG
+                        Performance sweep configuration json file.
+  --no_read             Disable read performance measurements.
+  --no_write            Disable write performance measurements.
+  --io_size IO_SIZE     Number of I/O bytes to read/write for performance measurements.
+  --gpu                 Test tensor transfers between GPU device and NVME device.
+  --gds                 Run the sweep over NVIDIA GPUDirectStorage operator
+  --flush_page_cache    Page cache will not be flushed and reported read speeds may be higher than actual ***Requires sudo access***.
+  --log_dir LOG_DIR     Output directory for performance log files. Default is ./_aio_bench_logs
+  --loops LOOPS         Count of operation repetitions
+  --verbose             Print debugging information.
 ```
 
 ### DeepNVMe APIs
