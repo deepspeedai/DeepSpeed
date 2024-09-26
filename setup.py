@@ -298,7 +298,7 @@ if sys.platform == "win32":
 else:
     scripts = [
         'bin/deepspeed', 'bin/deepspeed.pt', 'bin/ds', 'bin/ds_ssh', 'bin/ds_report', 'bin/ds_bench', 'bin/dsr',
-        'bin/ds_elastic'
+        'bin/ds_elastic', 'bin/ds_nvme_tune', 'bin/ds_io'
     ]
 
 start_time = time.time()
