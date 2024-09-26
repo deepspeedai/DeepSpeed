@@ -38,7 +38,7 @@ def _apply_forward_and_backward_to_tensors_only(module, forward_function, backwa
 
 class ZeROOrderedDict(OrderedDict):
 
-    def __init__(self, parent_module, *args, **kwargs):
+    def __init__(self, parent_module=None, *args, **kwargs):
         """A replacement for ``collections.OrderedDict`` to detect external ZeRO params.
 
         Args:
@@ -56,7 +56,7 @@ class ZeROOrderedDict(OrderedDict):
         if param is None:
             return param
 
-        if param.ds_status == ZeroParamStatus.NOT_AVAILABLE:
+        if hasattr(param, "ds_status") and param.ds_status == ZeroParamStatus.NOT_AVAILABLE:
             if self._parent_module._parameters._in_forward:
                 register_external_parameter(FWD_MODULE_STACK[-1], param)
                 param.all_gather()
