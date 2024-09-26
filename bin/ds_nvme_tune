@@ -1,0 +1,9 @@
+#!/usr/bin/env python3
+
+from deepspeed.nvme import sweep_main, generate_main, parse_sweep_arguments
+
+if __name__ == '__main__':
+    args = parse_sweep_arguments()
+    print(f"Running DeepNVMe performance tuning on {args.nvme_dir}")
+    sweep_main(args)
+    generate_main(args.log_dir)

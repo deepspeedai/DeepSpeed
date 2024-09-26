@@ -1,0 +1,6 @@
+#!/usr/bin/env python3
+
+from deepspeed.nvme import ds_io_main
+
+if __name__ == '__main__':
+    ds_io_main()
