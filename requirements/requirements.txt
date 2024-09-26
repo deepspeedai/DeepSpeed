@@ -1,4 +1,5 @@
 hjson
+msgpack
 ninja
 numpy
 packaging>=20.0
