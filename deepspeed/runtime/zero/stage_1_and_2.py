@@ -39,6 +39,7 @@ OPTIMIZER_ALLGATHER_TIMER = 'optimizer_allgather'
 OPTIMIZER_GRADIENTS_TIMER = 'optimizer_gradients'
 OPTIMIZER_STEP_TIMER = 'optimizer_step'
 OPTIMIZER_TIMERS = [OPTIMIZER_ALLGATHER_TIMER, OPTIMIZER_GRADIENTS_TIMER, OPTIMIZER_STEP_TIMER]
+INITIAL_MICRO_STEP_ID = -1
 
 
 def input(msg):
@@ -224,7 +225,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
         self.gradient_predivide_factor = gradient_predivide_factor
         self.postscale_gradients = postscale_gradients
         self.gradient_accumulation_steps = gradient_accumulation_steps
-        self.micro_step_id = 0
+        self.micro_step_id = INITIAL_MICRO_STEP_ID
         self.ignore_unused_parameters = ignore_unused_parameters
         self.round_robin_gradients = round_robin_gradients
 
@@ -1231,9 +1232,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
 
         if self.micro_step_id > 0:
             accumulate_gradients()
-
-        # at the boundary we will send 32bit directly
-        if not self.is_gradient_accumulation_boundary:
+        else:
             copy_gradients_to_cpu()
 
     def set_norm_for_param_grad(self, param):
@@ -1824,7 +1823,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
         """
         Not supporting closure.
         """
-        self.micro_step_id = -1
+        self.micro_step_id = INITIAL_MICRO_STEP_ID
 
         see_memory_usage(f"In step before checking overflow")
 
