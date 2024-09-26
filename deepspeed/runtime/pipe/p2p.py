@@ -3,7 +3,7 @@
 
 # DeepSpeed Team
 
-import pickle
+import msgpack
 import typing
 
 import torch
@@ -96,7 +96,7 @@ def wait():
 def send_obj(msg: typing.Any, dest: int):
     """Send an arbitrary python object to ``dest``.
 
-    Note: ``msg`` must be pickleable.
+    Note: ``msg`` must be serializable by msgpack.
 
     WARN: This incurs a CPU -> GPU transfer and should be used sparingly
     for performance reasons.
@@ -106,7 +106,7 @@ def send_obj(msg: typing.Any, dest: int):
         dest (int): Destination rank.
     """
     # serialize the message
-    msg = pickle.dumps(msg)
+    msg = msgpack.packb(msg)
     # construct a tensor to send
     msg = torch.ByteTensor(torch.ByteStorage.from_buffer(msg)).to(get_accelerator().device_name())
 
@@ -133,7 +133,7 @@ def recv_obj(sender: int) -> typing.Any:
     msg = torch.empty(length.item(), dtype=torch.uint8).to(get_accelerator().device_name())
     dist.recv(msg, src=sender)
 
-    msg = pickle.loads(msg.cpu().numpy().tobytes())
+    msg = msgpack.unpackb(msg.cpu().numpy().tobytes())
 
     def _to(x):
         """Recursively move to the current device."""
