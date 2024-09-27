@@ -5,6 +5,7 @@ on:
   pull_request:
     paths:
       - '.github/workflows/no-torch.yml'
+      - 'op_builder/**'
   schedule:
     - cron: "0 0 * * *"
 
