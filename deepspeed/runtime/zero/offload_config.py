@@ -98,3 +98,12 @@ class DeepSpeedZeroOffloadOptimizerConfig(DeepSpeedConfigModel):
         pipeline = self.pipeline_read or self.pipeline_write
         self.__dict__["pipeline"] = pipeline
         return self
+
+
+class OffloadStateTypeEnum(str, Enum):
+    """ Enum for internal buffer types """
+    optim_states = "optim_states"
+    hp_params = "hp_params"
+    lp_params = "lp_params"
+    lp_grads = "lp_grads"
+    contiguous_grad_buffer = "contiguous_grad_buffer"

@@ -1065,3 +1065,39 @@ def get_norm_with_moe_layers(non_expert_norm, mpu, expert_tensors, norm_type=2):
             total_norm = -1
 
     return total_norm
+
+
+def _make_offload_state_key(key):
+    return f"{key}_offload_buffer"
+
+
+def offload_adam_states(optimizer, device, pin_memory: bool = False, non_blocking: bool = False):
+    """Move optimizer states to device. Note that this assumes the state structure of DeepSpeed Adam."""
+
+    def move_key(state, key):
+        offload_buf_key = _make_offload_state_key(key)
+        if offload_buf_key not in state:
+            state[offload_buf_key] = torch.empty_like(state[key], device=device)
+            if pin_memory:
+                state[offload_buf_key] = get_accelerator().pin_memory(state[offload_buf_key])
+        state[offload_buf_key].copy_(state[key], non_blocking=non_blocking)
+        state[key].data = state[offload_buf_key]
+
+    for _, state in optimizer.state.items():
+        if "exp_avg" in state:
+            move_key(state, "exp_avg")
+        if "exp_avg_sq" in state:
+            move_key(state, "exp_avg_sq")
+
+
+def reload_adam_states(optimizer, device, non_blocking: bool = False):
+    """Move optimizer states to device. Note that this assumes the state structure of DeepSpeed Adam."""
+
+    def move_back_key(state, key):
+        state[key].data = state[_make_offload_state_key(key)].to(device, non_blocking=non_blocking)
+
+    for _, state in optimizer.state.items():
+        if "exp_avg" in state:
+            move_back_key(state, "exp_avg")
+        if "exp_avg_sq" in state:
+            move_back_key(state, "exp_avg_sq")
