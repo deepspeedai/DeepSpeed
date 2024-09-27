@@ -4,7 +4,7 @@
 # DeepSpeed Team
 
 import os
-from typing import List
+from typing import List, Tuple
 
 import torch
 from deepspeed import comm as dist
@@ -160,3 +160,16 @@ def apply_to_tensors_only(function, value, warning_msg_fn=None):
                 logger.warning(warning_msg_fn(value))
                 warned = True
         return value
+
+
+def get_mapping_to_flat_buffer(tensors: List[torch.Tensor]) -> List[Tuple[torch.Tensor, int, int]]:
+    tensor_infos: List[Tuple[torch.Tensor, int, int]] = []
+
+    offset = 0
+    for tensor in tensors:
+        tensor_numel = tensor.numel()
+        # record some data so we can restore the device tensor later
+        tensor_infos.append((tensor, offset, tensor_numel))
+        offset += tensor_numel
+
+    return tensor_infos
