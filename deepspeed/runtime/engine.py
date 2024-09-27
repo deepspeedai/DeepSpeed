@@ -18,13 +18,13 @@ from torch.optim import Optimizer
 from torch.optim.lr_scheduler import _LRScheduler
 from torch._utils import _flatten_dense_tensors, _unflatten_dense_tensors
 
-from typing import Callable, Dict, Union, Iterable
+from typing import Callable, Dict, Union, Iterable, Container
 
 import deepspeed
 
 from deepspeed import comm as dist
 from deepspeed.runtime.utils import see_memory_usage, DummyOptim
-from .zero.offload_config import OffloadDeviceEnum
+from .zero.offload_config import OffloadDeviceEnum, OffloadStateTypeEnum
 from deepspeed.runtime.zero.stage_1_and_2 import DeepSpeedZeroOptimizer
 from deepspeed.runtime.zero.partition_parameters import ZeroParamStatus
 from deepspeed.runtime.zero.utils import is_zero_supported_optimizer, ZeRORuntimeException
@@ -3681,3 +3681,40 @@ class DeepSpeedEngine(Module):
     @property
     def is_compiled(self) -> bool:
         return self._is_compiled
+
+    def offload_states(self,
+                       include: Container[OffloadStateTypeEnum] = None,
+                       device: OffloadDeviceEnum = OffloadDeviceEnum.cpu,
+                       pin_memory: bool = True,
+                       non_blocking: bool = False) -> None:
+        """Offload the engine's states to the specified device.
+
+        Arguments:
+            include: Optional. The set of states to offload. If not provided, all states are offloaded.
+            device: Optional. The device to move the ZeRO optimizer buffers to. Currently only `OffloadDeviceEnum.cpu` is supported.
+            pin_memory: Optional. Whether to pin the memory of the offloaded states.
+            non_blocking: Optional. Whether to offload the states asynchronously.
+        """
+        assert self.zero_optimization_stage(
+        ) == ZeroStageEnum.weights, "Moving buffers across devices is supported only for ZeRO stage 3."
+
+        assert not self.zero_offload_param(), "Moving states across devices is not supported for offloaded parameters."
+
+        if device == OffloadDeviceEnum.none:
+            logger.warning("No device specified for offloading states.")
+            return
+
+        if device == OffloadDeviceEnum.nvme:
+            raise ValueError("NVMe offload is not supported for offloading states.")
+
+        self.optimizer.offload_states(include=include, device=device, pin_memory=pin_memory, non_blocking=non_blocking)
+
+    def reload_states(self, non_blocking: bool = False) -> None:
+        """Reload the engine states to the original device.
+
+        Arguments:
+            non_blocking: Optional. Whether to offload the states asynchronously.
+        """
+        assert self.zero_optimization_stage(
+        ) == ZeroStageEnum.weights, "Moving buffers back is supported only for ZeRO stage 3."
+        self.optimizer.reload_states(non_blocking=non_blocking)

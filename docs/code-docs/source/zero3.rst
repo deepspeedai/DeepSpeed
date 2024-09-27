@@ -456,3 +456,56 @@ The following code snippet illustrates this functionality.
 
     # Free GPU memory consumed by model parameters
     ds_engine.empty_partition_cache()
+
+
+Offload States
+--------------
+
+The DeepSpeed engine maintains a set of states in device memory (e.g., CUDA memory). The following API allows you to offload these states to a different device (currently, only CPU memory is supported), reducing the memory footprint on the device.
+
+.. code-block:: python
+
+    def offload_states(self,
+                       include: Container[OffloadStateTypeEnum] = None,
+                       device: OffloadDeviceEnum = OffloadDeviceEnum.cpu,
+                       pin_memory: bool = True,
+                       non_blocking: bool = False) -> None:
+        """Offload the engine's states to the specified device.
+
+        Arguments:
+            include: Optional. The set of states to offload. If not provided, all states are offloaded.
+            device: Optional. The device to move the ZeRO optimizer buffers to. Currently only `OffloadDeviceEnum.cpu` is supported.
+            pin_memory: Optional. Whether to pin the memory of the offloaded states.
+            non_blocking: Optional. Whether to offload the states asynchronously.
+        """
+
+You can selectively offload specific states by specifying the ``OffloadStateTypeEnum`` in the include argument. ``OffloadStateTypeEnum`` is an enum that defines the states that can be offloaded. The following states are supported:
+
+* ``OffloadStateTypeEnum.optim_states``: Optimizer states. Currently, only states of DeepSpeed's FusedAdam optimizer are supported.
+* ``OffloadStateTypeEnum.hp_params``: FP32 parameters.
+* ``OffloadStateTypeEnum.lp_params``: BF16/FP16 parameters.
+* ``OffloadStateTypeEnum.lp_grads``: BF16/FP16 gradients.
+* ``OffloadStateTypeEnum.contiguous_grad_buffer``: The contiguous gradient buffer for reduce operations.
+
+Note that offloading states comes with a trade-off between memory savings and computational overhead. This API allows states to be reloaded back into device memory when needed.
+
+.. code-block:: python
+
+    def reload_states(self, non_blocking: bool = False) -> None:
+        """Reload the engine states to the original device.
+
+        Arguments:
+            non_blocking: Optional. Whether to offload the states asynchronously.
+        """
+
+Below is an example code snippet demonstrating how to offload FP32 parameters and optimizer states to CPU memory:
+
+.. code-block:: python
+
+    # Offload after forward, backward, and step
+    ds_engine.offload_states(include=[OffloadStateTypeEnum.hp_params, OffloadStateTypeEnum.optim_states])
+
+    # Do something requiring a lot of device memory
+    ...
+    # Load states back to device memory
+    ds_engine.reload_states()
