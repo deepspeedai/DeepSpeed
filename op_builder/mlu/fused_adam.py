@@ -5,7 +5,11 @@
 # DeepSpeed Team
 
 from .builder import MLUOpBuilder
-import torch
+
+try:
+    import torch
+except ImportError as e:
+    pass
 
 
 class MLUFusedAdam:
