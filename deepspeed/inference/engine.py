@@ -73,8 +73,9 @@ class InferenceEngine(Module):
         if hasattr(self.module, "config"):
             TransformerPolicy.hf_model_config = self.module.config
 
-        if config.dtype == torch.half and not get_accelerator().is_fp16_supported():
-            raise ValueError("Type fp16 is not supported.")
+        if config.dtype not in get_accelerator().supported_dtypes():
+            raise ValueError(
+                f"Data type {config.dtype} is not supported by {get_accelerator().device_name()} accelerator")
 
         # todo: keep this self.injection_dict because we don't use to change config.injection_policy API
         # todo: this will get changed when Molly's PR on auto injection dict is merged
@@ -324,7 +325,7 @@ class InferenceEngine(Module):
         if self._config.checkpoint is not None and not isinstance(self._config.checkpoint, (str, dict)):
             raise ValueError(f"checkpoint must be None, str or dict, got {type(self._config.checkpoint)}")
 
-        supported_dtypes = [None, torch.half, torch.int8, torch.float]
+        supported_dtypes = [None, torch.half, torch.int8, torch.float, torch.bfloat16]
         if self._config.dtype not in supported_dtypes:
             raise ValueError(f"{self._config.dtype} not supported, valid dtype: {supported_dtypes}")
 
