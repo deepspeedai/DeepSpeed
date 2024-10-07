@@ -7,50 +7,50 @@
 
 
 # top-level repo folders
-/.github/ @mrwyattii @loadams
-/azure/ @mrwyattii @awan-10
-/benchmarks/ @awan-10 @mrwyattii
-/bin/ @mrwyattii
-/csrc/ @awan-10 @mrwyattii @cmikeh2 @arashb
-/deepspeed/ @mrwyattii
-/docker/ @mrwyattii @awan-10
-/docs/ @mrwyattii
-/examples/ @awan-10 @mrwyattii
-/op_builder/ @mrwyattii @cmikeh2
-/release/ @loadams @mrwyattii
-/requirements/ @loadams @mrwyattii
-/scripts/ @mrwyattii @awan-10
-/tests/ @mrwyattii @tjruwase @loadams
+/.github/ @loadams
+/azure/ @awan-10
+/benchmarks/ @awan-10 @tjruwase
+/bin/ @loadams
+/csrc/ @awan-10
+/deepspeed/ @loadams @tjruwase
+/docker/ @awan-10
+/docs/ @loadams @tjruwase
+/examples/ @awan-10 @tohtana
+/op_builder/ @loadams @tjruwase @jomayeri
+/release/ @loadams
+/requirements/ @loadams
+/scripts/ @awan-10
+/tests/ @tjruwase @loadams @tohtana
 
 # deepspeed
-/deepspeed/autotuning/ @mrwyattii
+/deepspeed/autotuning/ @loadams
 /deepspeed/checkpoint/ @tjruwase
 /deepspeed/comm/ @awan-10
-/deepspeed/compression/ @minjiaz @xiaoxiawu-microsoft @conglongli
-/deepspeed/elasticity/ @mrwyattii @awan-10
-/deepspeed/launcher/ @mrwyattii @awan-10
-/deepspeed/module_inject/ @mrwyattii @awan-10 @cmikeh2 @arashb
-/deepspeed/moe/ @awan-10
-/deepspeed/monitor/ @awan-10 @mrwyattii
-/deepspeed/nebula/ @tjruwase @mrwyattii
-/deepspeed/ops/ @mrwyattii @awan-10 @cmikeh2 @arashb
-/deepspeed/pipe/ @ShadenSmith @duli2012
-/deepspeed/profiling/ @ShijieZZZZ
-/deepspeed/utils/ @mrwyattii @tjruwase @awan-10
+/deepspeed/compression/ @tjruwase
+/deepspeed/elasticity/ @awan-10
+/deepspeed/launcher/ @loadams
+/deepspeed/module_inject/ @awan-10
+/deepspeed/moe/ @tohtana
+/deepspeed/monitor/ @awan-10
+/deepspeed/nebula/ @tjruwase
+/deepspeed/ops/ @tohtana
+/deepspeed/pipe/ @tohtana @loadams
+/deepspeed/profiling/ @loadams
+/deepspeed/utils/ @tjruwase @awan-10
 
 # inference
-/deepspeed/inference/ @mrwyattii @awan-10 @cmikeh2 @arashb
-/deepspeed/model_implementations/ @mrwyattii @awan-10 @cmikeh2 @arashb
+/deepspeed/inference/ @awan-10
+/deepspeed/model_implementations/ @awan-10
 
 # training
-/deepspeed/runtime/ @mrwyattii @tjruwase
-/deepspeed/runtime/activation_checkpointing/ @mrwyattii @tjruwase
-/deepspeed/runtime/checkpoint_engine/ @tjruwase @mrwyattii
+/deepspeed/runtime/ @tjruwase @tohtana
+/deepspeed/runtime/activation_checkpointing/ @tjruwase
+/deepspeed/runtime/checkpoint_engine/ @tjruwase
 /deepspeed/runtime/comm/ @awan-10
-/deepspeed/runtime/compression/ @awan-10 @conglongli
-/deepspeed/runtime/data_pipeline/ @conglongli
-/deepspeed/runtime/fp16/ @mrwyattii @tjruwase
-/deepspeed/runtime/fp16/onebit/ @conglongli @awan-10
-/deepspeed/runtime/pipe/ @ShadenSmith @duli2012
-/deepspeed/runtime/swap_tensor/ @tjruwase @mrwyattii
-/deepspeed/runtime/zero/ @tjruwase @mrwyattii
+/deepspeed/runtime/compression/ @awan-10
+/deepspeed/runtime/data_pipeline/ @tjruwase
+/deepspeed/runtime/fp16/ @tjruwase
+/deepspeed/runtime/fp16/onebit/ @awan-10
+/deepspeed/runtime/pipe/ @loadams
+/deepspeed/runtime/swap_tensor/ @tjruwase
+/deepspeed/runtime/zero/ @tjruwase
