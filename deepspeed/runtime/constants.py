@@ -77,7 +77,7 @@ ZERO_FORCE_DS_CPU_OPTIMIZER_DEFAULT = True
 
 # Steps
 STEPS_PER_PRINT = "steps_per_print"
-STEPS_PER_PRINT_DEFAULT = 10
+STEPS_PER_PRINT_DEFAULT = None
 
 #########################################
 # Training micro batch size per GPU

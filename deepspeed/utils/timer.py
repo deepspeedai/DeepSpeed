@@ -198,7 +198,7 @@ class NoopTimer:
 
 class ThroughputTimer:
 
-    def __init__(self, config, batch_size, start_step=2, steps_per_output=50, monitor_memory=False, logging_fn=None):
+    def __init__(self, config, batch_size, start_step=2, steps_per_output=None, monitor_memory=False, logging_fn=None):
         from deepspeed.utils import logger
         self.config = config
         self.start_time = 0
@@ -238,6 +238,11 @@ class ThroughputTimer:
                 get_accelerator().synchronize()
             self.start_time = time.time()
 
+    def _is_report_boundary(self):
+        if self.steps_per_output is None:
+            return False
+        return self.global_step_count % self.steps_per_output == 0
+
     def stop(self, global_step=False, report_speed=True):
         if not self.config.enabled or not self.started:
             return
@@ -255,7 +260,7 @@ class ThroughputTimer:
             self.step_elapsed_time += duration
 
             if global_step:
-                if report_speed and self.global_step_count % self.steps_per_output == 0:
+                if report_speed and self._is_report_boundary():
                     self.logging(
                         "epoch={}/micro_step={}/global_step={}, RunningAvgSamplesPerSec={}, CurrSamplesPerSec={}, "
                         "MemAllocated={}GB, MaxMemAllocated={}GB".format(
