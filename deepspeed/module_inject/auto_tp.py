@@ -495,7 +495,8 @@ class AutoTP():
         num_kv_heads = None
         # multi_query_group_num is for chatglm2 & chatglm3
         kv_head_names = [
-            'multi_query_group_num', 'num_kv_heads', 'num_key_value_heads', 'num_attention_heads', 'n_heads'
+            'multi_query_group_num', 'num_kv_heads', 'num_key_value_heads', 'num_attention_heads', 'n_heads',
+            'attention_heads'
         ]
         for name in kv_head_names:
             if hasattr(config, name):
