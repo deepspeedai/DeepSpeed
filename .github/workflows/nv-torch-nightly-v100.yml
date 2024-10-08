@@ -15,7 +15,7 @@ permissions:
 
 jobs:
   unit-tests:
-    runs-on: [self-hosted, nvidia, cu117, v100]
+    runs-on: [self-hosted, nvidia, cu121, v100]
 
     steps:
       - uses: actions/checkout@v4
@@ -25,7 +25,7 @@ jobs:
 
       - name: Install pytorch
         run: |
-          pip install --pre torch torchvision --index-url https://download.pytorch.org/whl/nightly/cu118
+          pip install --pre torch torchvision --index-url https://download.pytorch.org/whl/nightly/cu121
           python -c "import torch; print('torch:', torch.__version__, torch)"
           python -c "import torch; print('CUDA available:', torch.cuda.is_available())"
 

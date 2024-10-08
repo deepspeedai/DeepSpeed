@@ -19,7 +19,7 @@ concurrency:
 
 jobs:
   unit-tests:
-    runs-on: [self-hosted, nvidia, cu111, v100]
+    runs-on: [self-hosted, nvidia, cu121, v100]
 
     env: {ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION: true} # Allow using Node16 actions
 
@@ -31,7 +31,7 @@ jobs:
 
       - name: Install pytorch
         run: |
-          pip install -U --cache-dir $TORCH_CACHE torch torchvision --index-url https://download.pytorch.org/whl/cu118
+          pip install -U --cache-dir $TORCH_CACHE torch torchvision --index-url https://download.pytorch.org/whl/cu121
           python -c "import torch; print('torch:', torch.__version__, torch)"
           python -c "import torch; print('CUDA available:', torch.cuda.is_available())"
 
