@@ -274,7 +274,13 @@ def replace_transformer_layer(orig_layer_impl, model, checkpoint_dict, config, m
         _autotp.set_tensor_parallel_config(config.tensor_parallel.tp_size, config.tensor_parallel.tp_group)
 
         # 3. Try to get num_key_heads from model_config.num_key_value_heads
-        num_kv_heads = _autotp.get_model_num_kv_heads(model_config)
+        if hasattr(model_config, "vision_config"):
+            if "MllamaVisionEncoderLayer" in str(module):
+                num_kv_heads = _autotp.get_model_num_kv_heads(model_config.vision_config)
+            else:
+                num_kv_heads = _autotp.get_model_num_kv_heads(model_config.text_config)
+        else:
+            num_kv_heads = _autotp.get_model_num_kv_heads(model_config)
 
         # 4. When we have num_kv_heads defined, uneven division is possible, otherwise enforce even division
         set_num_kv_heads(num_kv_heads)
@@ -339,6 +345,8 @@ def replace_transformer_layer(orig_layer_impl, model, checkpoint_dict, config, m
                                                       "weight") and not module.embed_out.weight.is_meta and isinstance(
                                                           module.embed_out, torch.nn.Linear):
             module = replace_wo_policy(module, ("embed_out", ), 0, "embed_out")
+        elif hasattr(module.language_model, "lm_head"):
+            module = replace_wo_policy(module.language_model, ("lm_head", ), 0, "lm_head")
         return module
 
     def conv2d_parallel_shard_weights(model, rank, world_size):
