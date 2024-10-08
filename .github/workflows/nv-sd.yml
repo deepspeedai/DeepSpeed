@@ -53,6 +53,8 @@ jobs:
           pip install image-similarity-measures
           python -m pip install opencv-python==4.6.* --force-reinstall
           python -m pip install docutils==0.18.1 jinja2==3.0 urllib3==1.26.11 ninja
+          # Update packages included in the container that do not support pydantic 2+ to versions that do
+          python -m pip install thinc spacy confection --upgrade
           python -m pip install .[dev,1bit,autotuning,sd]
           ds_report
       - name: Python environment
