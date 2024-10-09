@@ -68,8 +68,8 @@ static void _get_aio_latencies(std::vector<std::chrono::duration<double>>& raw_l
         std::accumulate(lat_usec.begin(), lat_usec.end(), 0) / lat_usec.size();
 }
 
-static void _do_io_submit_singles(const long long int n_iocbs,
-                                  const long long int iocb_index,
+static void _do_io_submit_singles(const int64_t n_iocbs,
+                                  const int64_t iocb_index,
                                   std::unique_ptr<aio_context>& aio_ctxt,
                                   std::vector<std::chrono::duration<double>>& submit_times)
 {
@@ -89,8 +89,8 @@ static void _do_io_submit_singles(const long long int n_iocbs,
     }
 }
 
-static void _do_io_submit_block(const long long int n_iocbs,
-                                const long long int iocb_index,
+static void _do_io_submit_block(const int64_t n_iocbs,
+                                const int64_t iocb_index,
                                 std::unique_ptr<aio_context>& aio_ctxt,
                                 std::vector<std::chrono::duration<double>>& submit_times)
 {
@@ -109,18 +109,18 @@ static void _do_io_submit_block(const long long int n_iocbs,
     assert(submit_ret > 0);
 }
 
-static int _do_io_complete(const long long int min_completes,
-                           const long long int max_completes,
+static int _do_io_complete(const int64_t min_completes,
+                           const int64_t max_completes,
                            std::unique_ptr<aio_context>& aio_ctxt,
                            std::vector<std::chrono::duration<double>>& reap_times)
 {
     const auto start_time = std::chrono::high_resolution_clock::now();
-    long long int n_completes = io_pgetevents(aio_ctxt->_io_ctxt,
-                                              min_completes,
-                                              max_completes,
-                                              aio_ctxt->_io_events.data(),
-                                              nullptr,
-                                              nullptr);
+    int64_t n_completes = io_pgetevents(aio_ctxt->_io_ctxt,
+                                        min_completes,
+                                        max_completes,
+                                        aio_ctxt->_io_events.data(),
+                                        nullptr,
+                                        nullptr);
     reap_times.push_back(std::chrono::high_resolution_clock::now() - start_time);
     assert(n_completes >= min_completes);
     return n_completes;
@@ -134,7 +134,7 @@ void do_aio_operation_sequential(const bool read_op,
 {
     struct io_prep_context prep_ctxt(read_op, xfer_ctxt, aio_ctxt->_block_size, &aio_ctxt->_iocbs);
 
-    const auto num_io_blocks = static_cast<long long int>(
+    const auto num_io_blocks = static_cast<int64_t>(
         ceil(static_cast<double>(xfer_ctxt->_num_bytes) / aio_ctxt->_block_size));
 #if DEBUG_DS_AIO_PERF
     const auto io_op_name = std::string(read_op ? "read" : "write");
@@ -145,15 +145,14 @@ void do_aio_operation_sequential(const bool read_op,
     std::vector<std::chrono::duration<double>> submit_times;
     std::vector<std::chrono::duration<double>> reap_times;
     const auto max_queue_bytes =
-        static_cast<long long int>(aio_ctxt->_queue_depth * aio_ctxt->_block_size);
+        static_cast<int64_t>(aio_ctxt->_queue_depth * aio_ctxt->_block_size);
 
     auto start = std::chrono::high_resolution_clock::now();
-    for (long long iocb_index = 0; iocb_index < num_io_blocks;
-         iocb_index += aio_ctxt->_queue_depth) {
+    for (int64_t iocb_index = 0; iocb_index < num_io_blocks; iocb_index += aio_ctxt->_queue_depth) {
         const auto start_offset = iocb_index * aio_ctxt->_block_size;
         const auto start_buffer = (char*)xfer_ctxt->_mem_buffer + start_offset;
         const auto n_iocbs =
-            min(static_cast<long long>(aio_ctxt->_queue_depth), (num_io_blocks - iocb_index));
+            min(static_cast<int64_t>(aio_ctxt->_queue_depth), (num_io_blocks - iocb_index));
         const auto num_bytes = min(max_queue_bytes, (xfer_ctxt->_num_bytes - start_offset));
         prep_ctxt.prep_iocbs(n_iocbs, num_bytes, start_buffer, start_offset);
 
@@ -285,13 +284,13 @@ int open_file(const char* filename, const bool read_op)
 
 int regular_read(const char* filename, std::vector<char>& buffer)
 {
-    long long int num_bytes;
+    int64_t num_bytes;
     const auto f_size = get_file_size(filename, num_bytes);
     assert(f_size != -1);
     buffer.resize(num_bytes);
     const auto fd = open(filename, O_RDONLY, 0600);
     assert(fd != -1);
-    long long int read_bytes = 0;
+    int64_t read_bytes = 0;
     auto r = 0;
     do {
         const auto buffer_ptr = buffer.data() + read_bytes;
@@ -309,7 +308,7 @@ int regular_read(const char* filename, std::vector<char>& buffer)
     return 0;
 }
 
-static bool _validate_buffer(const char* filename, void* aio_buffer, const long long int num_bytes)
+static bool _validate_buffer(const char* filename, void* aio_buffer, const int64_t num_bytes)
 {
     std::vector<char> regular_buffer;
     const auto reg_ret = regular_read(filename, regular_buffer);
@@ -317,7 +316,7 @@ static bool _validate_buffer(const char* filename, void* aio_buffer, const long 
     std::cout << "regular read of " << filename << " returned " << regular_buffer.size() << " bytes"
               << std::endl;
 
-    if (static_cast<long long int>(regular_buffer.size()) != num_bytes) { return false; }
+    if (static_cast<int64_t>(regular_buffer.size()) != num_bytes) { return false; }
 
     return (0 == memcmp(aio_buffer, regular_buffer.data(), regular_buffer.size()));
 }
@@ -325,7 +324,7 @@ static bool _validate_buffer(const char* filename, void* aio_buffer, const long 
 bool validate_aio_operation(const bool read_op,
                             const char* filename,
                             void* aio_buffer,
-                            const long long int num_bytes)
+                            const int64_t num_bytes)
 {
     const auto msg_suffix = std::string("deepspeed_aio_") +
                             std::string(read_op ? "read()" : "write()") +

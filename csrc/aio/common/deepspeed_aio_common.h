@@ -35,4 +35,4 @@ int regular_read(const char* filename, std::vector<char>& buffer);
 bool validate_aio_operation(const bool read_op,
                             const char* filename,
                             void* aio_buffer,
-                            const long long int num_bytes);
+                            const int64_t num_bytes);

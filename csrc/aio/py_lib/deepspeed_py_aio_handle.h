@@ -16,7 +16,7 @@ struct deepspeed_aio_handle_t : deepspeed_io_handle_t {
                            const int queue_depth,
                            const bool single_submit,
                            const bool overlap_events,
-                           const int num_threads);
+                           const int intra_op_parallelism);
 
     ~deepspeed_aio_handle_t();
 };

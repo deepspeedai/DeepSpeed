@@ -54,7 +54,7 @@ def _get_test_write_file_and_device_buffer(tmpdir, ref_buffer, gds_handle, index
 def _validate_handle_state(handle, single_submit, overlap_events):
     assert handle.get_single_submit() == single_submit
     assert handle.get_overlap_events() == overlap_events
-    assert handle.get_thread_count() == IO_PARALLEL
+    assert handle.get_intra_op_parallelism() == IO_PARALLEL
     assert handle.get_block_size() == BLOCK_SIZE
     assert handle.get_queue_depth() == QUEUE_DEPTH
 
