@@ -3,9 +3,10 @@
 
 # DeepSpeed Team
 
-import os
 import torch
 from typing import Optional
+
+from .vector_add import VectorAddOp
 from ..config import DeepSpeedInferenceConfig
 from .base import BaseOp
 
@@ -22,11 +23,32 @@ class ResidualAddOp(BaseOp):
             else:
                 self.residual_add_func = self.inference_module.residual_add_bias_fp32
         except AttributeError:
-            self.residual_add_func = None
-        try:
-            self._vector_add = self.inference_module._vector_add
-        except AttributeError:
-            self._vector_add = None
+            self.residual_add_func = self.residual_add_fallback
+        self.vector_add = VectorAddOp()
+
+    @staticmethod
+    def res_add_bias(hidden_state, residual, attn_output, attn_bias, final_bias, add_attn_bias, mp_size):
+        hidden_state += attn_output + (residual + final_bias) / mp_size
+        if add_attn_bias:
+            hidden_state += attn_bias / mp_size
+
+        return hidden_state
+
+    @staticmethod
+    def residual_add_fallback(hidden_state, residual, attention_output, attention_bias, final_bias, mp_size,
+                              mlp_after_attn, add_bias, pre_layer_norm):
+        if mlp_after_attn:
+            if pre_layer_norm:
+                tmp = (residual.float() + attention_output.float() + attention_bias.float() +
+                       final_bias.float()) / mp_size + hidden_state.float()
+            else:
+                tmp = residual.float() + hidden_state.float() + final_bias.float()
+        else:
+            tmp = ResidualAddOp.res_add_bias(hidden_state, residual, attention_output, attention_bias, final_bias,
+                                             add_bias, mp_size)
+        residual.copy_(tmp.to(hidden_state.dtype))
+
+        return residual
 
     def forward(self,
                 hidden_state: torch.Tensor,
@@ -37,28 +59,15 @@ class ResidualAddOp(BaseOp):
                 attention_bias: Optional[torch.Tensor] = None,
                 final_bias: Optional[torch.Tensor] = None):
 
-        if self.residual_add_func is not None:
-            if final_bias is None:
-                residual = self._vector_add(residual, hidden_state, 1.0 / self.config.mp_size)
-            else:
-                if not self.config.pre_layer_norm and residual_add is not None:
-                    # only use residual add if its set and we are not pre layer norm
-                    residual = residual_add
-
-                self.residual_add_func(hidden_state, residual, attention_output, attention_bias, final_bias,
-                                       self.config.mp_size, self.config.mlp_after_attn, add_bias,
-                                       self.config.pre_layer_norm)
+        if final_bias is None and attention_bias is None:
+            residual = self.vector_add(residual + attention_output, hidden_state, 1.0 / self.config.mp_size)
         else:
-            # fallback
-            if os.environ.get('DS_KI_FALLBACK') == 'True' and self.config.mlp_after_attn:
-                if self.config.pre_layer_norm:
-                    tmp = (residual.float() + attention_output.float() + attention_bias.float() +
-                           final_bias.float()) / self.config.mp_size + hidden_state.float()
-                else:
-                    tmp = residual.float() + hidden_state.float() + final_bias.float()
+            if not self.config.pre_layer_norm and residual_add is not None:
+                # only use residual add if its set and we are not pre layer norm
+                residual = residual_add
 
-                input_dtype = hidden_state.dtype
-                residual = tmp.to(input_dtype)
-            else:
-                raise NotImplementedError
+            self.residual_add_func(hidden_state, residual, attention_output, attention_bias, final_bias,
+                                   self.config.mp_size, self.config.mlp_after_attn, add_bias,
+                                   self.config.pre_layer_norm)
+
         return residual

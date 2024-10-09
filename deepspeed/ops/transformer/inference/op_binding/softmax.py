@@ -3,11 +3,11 @@
 
 # DeepSpeed Team
 
-import os
 import torch
 import torch.nn.functional as F
 from ..config import DeepSpeedInferenceConfig
 from .base import BaseOp
+from deepspeed.ops.transformer.inference.op_binding.workspace import InferenceContext
 
 
 class SoftmaxOp(BaseOp):
@@ -25,24 +25,42 @@ class SoftmaxOp(BaseOp):
         except AttributeError:
             self.softmax_func = self.softmax_fallback
 
-    def softmax_fallback(self, attn_scores, attn_mask, alibi, triangular, recompute, local_attention, window_size,
-                         async_op, layer_scale, head_offset, mp_size):
-        if os.environ.get('DS_KI_FALLBACK') == 'True':
-            alibi = alibi[head_offset:head_offset + self.num_attention_heads_per_partition]
-            input_dtype = attn_scores.dtype
-            if (triangular):
-                tri = ~torch.tril(torch.ones(attn_scores.size(), device=attn_scores.device)).to(bool)
-                attn_scores = torch.masked_fill(attn_scores * layer_scale, tri, torch.finfo(input_dtype).min)
-            if alibi is not None:
-                attn_scores += alibi
-            if attn_mask is not None:
-                # expand atten_mask from two dim into 4 dim, insert two dims in the middle
+    @staticmethod
+    def softmax_fallback(attn_scores, attn_mask, alibi, triangular, recompute, local_attention, window_size, async_op,
+                         layer_scale, head_offset, mp_size):
+        scores_len = len(attn_scores.size())
+        heads = 1
+        if scores_len > 1:
+            heads = attn_scores.size()[1]
+        num_attention_heads_per_partition = heads // mp_size
+
+        if alibi is not None:
+            if len(alibi.shape) == 1:
+                alibi = None
+            else:
+                alibi = alibi[head_offset:head_offset + num_attention_heads_per_partition]
+        if attn_mask is not None and len(attn_mask.shape) == 1:
+            attn_mask = None
+        input_dtype = attn_scores.dtype
+        attn_scores *= layer_scale
+
+        if alibi is not None:
+            attn_scores += alibi
+        if attn_mask is not None:
+            # expand atten_mask from two dim into 4 dim, insert two dims in the middle
+            if len(attn_mask.shape) == 2:
                 attn_mask = attn_mask[:, None, None, :]
-                attn_scores += attn_mask
-            output = F.softmax(attn_scores, dim=-1, dtype=torch.float32).to(input_dtype)
-            return output
-        else:
-            raise NotImplementedError
+            attn_scores += attn_mask
+        if triangular:
+            if attn_scores.shape[2] == 1:  # query using kv cache
+                token_idx = InferenceContext.Instance().current_tokens()
+                tri = torch.arange(attn_scores.shape[2], device=attn_scores.device).ge(token_idx)
+            else:
+                tri = ~torch.tril(torch.ones(attn_scores.size(), device=attn_scores.device)).to(bool)
+            attn_scores = torch.masked_fill(attn_scores, tri, float('-inf'))
+        output = F.softmax(attn_scores, dim=-1, dtype=torch.float32).to(input_dtype)
+
+        return output
 
     def forward(self, attn_scores: torch.Tensor, attn_mask: torch.Tensor, alibi: torch.Tensor, triangular: bool,
                 recompute: bool, local_attention: bool, window_size: int, async_op: bool, layer_scale: float,

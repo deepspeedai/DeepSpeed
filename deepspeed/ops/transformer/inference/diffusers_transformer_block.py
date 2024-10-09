@@ -10,26 +10,9 @@ from deepspeed import module_inject
 from .diffusers_attention import DeepSpeedDiffusersAttention
 from .bias_add import nhwc_bias_add
 from .diffusers_2d_transformer import Diffusers2DTransformerConfig
-from deepspeed.ops.op_builder import InferenceBuilder, SpatialInferenceBuilder
 from deepspeed.utils.types import ActivationFuncType
-
-# Ops will be loaded on demand
-transformer_cuda_module = None
-spatial_cuda_module = None
-
-
-def load_transformer_module():
-    global transformer_cuda_module
-    if transformer_cuda_module is None:
-        transformer_cuda_module = InferenceBuilder().load()
-    return transformer_cuda_module
-
-
-def load_spatial_module():
-    global spatial_cuda_module
-    if spatial_cuda_module is None:
-        spatial_cuda_module = SpatialInferenceBuilder().load()
-    return spatial_cuda_module
+from .op_binding.gated_activation import GatedActivationOp
+from .op_binding.layer_norm import LayerNormOp
 
 
 class DeepSpeedDiffusersTransformerBlock(nn.Module):
@@ -76,8 +59,8 @@ class DeepSpeedDiffusersTransformerBlock(nn.Module):
         else:
             self.attn_2_bias = nn.Paramaeter(torch.zeros_like(self.norm3_g), requires_grad=False)
 
-        self.transformer_cuda_module = load_transformer_module()
-        load_spatial_module()
+        self.gated_activation = GatedActivationOp()
+        self.layer_norm = LayerNormOp()
 
     def forward(self, hidden_states, context=None, timestep=None, **kwargs):
         # In v0.12.0 of diffuser, several new kwargs were added. Capturing
@@ -88,17 +71,17 @@ class DeepSpeedDiffusersTransformerBlock(nn.Module):
         if "encoder_hidden_states" in kwargs and kwargs["encoder_hidden_states"] is not None:
             context = kwargs["encoder_hidden_states"]
 
-        out_norm_1 = self.transformer_cuda_module.layer_norm(hidden_states, self.norm1_g, self.norm1_b, self.norm1_eps)
+        out_norm_1 = self.layer_norm(hidden_states, self.norm1_g, self.norm1_b, self.norm1_eps)
         out_attn_1 = self.attn_1(out_norm_1)
 
-        out_norm_2, out_attn_1 = self.transformer_cuda_module.layer_norm_residual_store_pre_ln_res(
+        out_norm_2, out_attn_1 = self.layer_norm.layer_norm_residual_store_pre_ln_res(
             out_attn_1, self.attn_1_bias, hidden_states, self.norm2_g, self.norm2_b, self.norm2_eps)
         out_attn_2 = self.attn_2(out_norm_2, context=context)
-        out_norm_3, out_attn_2 = self.transformer_cuda_module.layer_norm_residual_store_pre_ln_res(
+        out_norm_3, out_attn_2 = self.layer_norm.layer_norm_residual_store_pre_ln_res(
             out_attn_2, self.attn_2_bias, out_attn_1, self.norm3_g, self.norm3_b, self.norm3_eps)
 
         out_ff1 = nn.functional.linear(out_norm_3, self.ff1_w)
-        out_geglu = self.transformer_cuda_module.gated_activation(out_ff1, self.ff1_b, ActivationFuncType.GATED_GELU)
+        out_geglu = self.gated_activation(out_ff1, self.ff1_b, ActivationFuncType.GATED_GELU)
 
         out_ff2 = nn.functional.linear(out_geglu, self.ff2_w)
         return nhwc_bias_add(out_ff2, self.ff2_b, other=out_attn_2)

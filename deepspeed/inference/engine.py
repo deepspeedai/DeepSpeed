@@ -53,12 +53,7 @@ class InferenceEngine(Module):
         DS_INFERENCE_ENABLED = True
 
         super().__init__()
-
-        # Have to import here because inference_module is a global, but python
-        # globals only work at the module level and will not be updated unless
-        # we import it each time we init a new inference engine.
-        from ..model_implementations.transformers.ds_transformer import inference_module
-        if inference_module is not None:
+        if DeepSpeedTransformerInference.workspace is not None:
             self.destroy()
 
         self.module = model
@@ -191,15 +186,11 @@ class InferenceEngine(Module):
         self._is_compiled = False
 
     def destroy(self):
-        # Have to import here because inference_module is a global, but python
-        # globals only work at the module level and will not be updated unless
-        # we import it each time we init a new inference engine.
-        from ..model_implementations.transformers.ds_transformer import inference_module
         DeepSpeedTransformerInference.layer_id = 0
         DeepSpeedSelfAttention.num_layers = 0
-        if inference_module is not None:
-            inference_module.release_workspace()
-            inference_module = None
+        if DeepSpeedTransformerInference.workspace.is_allocated():
+            DeepSpeedTransformerInference.workspace.release_workspace()
+        DeepSpeedTransformerInference.workspace = None
 
     def profile_model_time(self, use_cuda_events=True):
         if not self.model_profile_enabled and not self._config.enable_cuda_graph:

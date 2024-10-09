@@ -125,7 +125,7 @@ class TritonSelfAttention(nn.Module):
             context_4d_matmul(output, qkv, head_size)
         Fp16Matmul._update_autotune_table()
 
-    def ds_compute_attention(self, qkv_out, input_mask, layer_past, alibi):
+    def ds_compute_attention(self, qkv_out, input_mask, layer_past, alibi, is_prompt, token_idx, position_ids):
         if isinstance(qkv_out, list):
             qkv_out = qkv_out[0]
 
@@ -143,7 +143,10 @@ class TritonSelfAttention(nn.Module):
             no_masking=no_masking,
             layer_id=self.config.layer_id,
             num_layers=TritonSelfAttention.num_layers,
-            alibi=alibi)
+            alibi=alibi,
+            is_prompt=is_prompt,
+            token_idx=token_idx,
+            position_ids=position_ids)
 
         context_layer, key_layer, value_layer = attn_key_value
         return context_layer, key_layer, value_layer
@@ -161,7 +164,8 @@ class TritonSelfAttention(nn.Module):
             norm_w=None,
             norm_b=None,
             alibi=None,
-            use_triton_attention=True):
+            use_triton_attention=True,
+            **kwargs):
 
         if not self.config.pre_layer_norm:
             qkv_out = self.linear_func(input=input,
@@ -192,10 +196,16 @@ class TritonSelfAttention(nn.Module):
                                               triangular=self.triangular_masking)
             key_layer, value_layer = qkv[:, :, self.hidden_size:2 * self.hidden_size], qkv[:, :, 2 * self.hidden_size:]
         else:
+            is_prompt = kwargs.get("first_token", qkv_out[0].shape[1] > 1)
+            token_idx = kwargs.get("token_idx", None)
+            position_ids = kwargs.get("position_ids", None)
             context_layer, key_layer, value_layer = self.ds_compute_attention(qkv_out=qkv_out,
                                                                               input_mask=input_mask,
                                                                               layer_past=layer_past,
-                                                                              alibi=alibi)
+                                                                              alibi=alibi,
+                                                                              is_prompt=is_prompt,
+                                                                              toke_idx=token_idx,
+                                                                              position_ids=position_ids)
         output = self.vector_matmul_func(input=context_layer, weight=self.attn_ow)
 
         inp_norm = qkv_out[-1]
