@@ -333,7 +333,8 @@ class AutoTP():
         weight_shape = child.weight.shape
         mp_replace = ReplaceWithTensorSlicing(mp_group=self.mp_group)
         # For mixtral-7x8b, need to skip MoE gate linear replace.
-        if name == "block_sparse_moe.gate":
+        if name == "block_sparse_moe.gate" or (('mlp.shared_expert_gate' == name or 'mlp.gate' == name)
+                                               and 'qwen2_moe' in str(type(self.module))):
             return child
         # For Yuan model
         if 'Yuan' in str(self.module):
