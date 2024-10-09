@@ -5,12 +5,12 @@
 
 from typing import Optional
 
-import os
 import torch
 import torch.nn.functional as F
 from ..config import DeepSpeedInferenceConfig
 from .base import BaseOp
 from deepspeed.utils.types import NormType
+from .pre_rms_norm import PreRMSNormOp
 
 
 class MLPGemmOp(BaseOp):
@@ -39,23 +39,45 @@ class MLPGemmOp(BaseOp):
                 self.mlp_gemm_func = self.mlp_gemm_fallback
             elif self.config.norm_type == NormType.RMSNorm:
                 self.mlp_gemm_func = self.rms_mlp_gemm_fallback
+        self.pre_rms_norm = PreRMSNormOp()
 
     def mlp_gemm_fallback(self, input, residual, input_bias, weight_interm, weight_out, bias, gamma, beta, eps,
                           pre_layer_norm, mlp_after_attn, interm_scale, out_scale, dtype, mlp_act_func_type,
                           transpose):
-        if os.environ.get('DS_KI_FALLBACK') == 'True' and mlp_after_attn and not transpose:
-            residual_add = F.layer_norm(input + residual + input_bias, (input.shape[2], ), gamma, beta,
-                                        self.config.epsilon)
-            tmp = torch.matmul(residual_add, weight_interm)
+        if mlp_after_attn:
+            residual_add = F.layer_norm(input + residual + input_bias, (input.shape[2], ), gamma, beta, eps)
+            tmp = torch.matmul(residual_add, weight_interm.t() if transpose else weight_interm)
             tmp = F.gelu(tmp + bias)
-            output = torch.matmul(tmp, weight_out)
-            return (output, residual_add)
+            output = torch.matmul(tmp, weight_out.t() if transpose else weight_out)
+
+            return output, residual_add
         else:
             raise NotImplementedError
 
     def rms_mlp_gemm_fallback(self, input, residual, weight_interm, weight_out, gamma, eps, interm_scale, out_scale,
                               dtype, mlp_act_func_type, transpose):
-        raise NotImplementedError
+        inp_norm, residual = self.pre_rms_norm(input, residual, gamma, eps)
+        tmp = torch.matmul(inp_norm.view([-1, inp_norm.size(2)]), weight_interm.t() if transpose else weight_interm)
+        up_proj, gate_proj = tmp.chunk(2, dim=1)
+
+        from deepspeed.utils.types import ActivationFuncType
+        if mlp_act_func_type == ActivationFuncType.GELU:
+            intermediate = F.gelu(gate_proj)
+        elif mlp_act_func_type == ActivationFuncType.ReLU:
+            intermediate = F.relu(gate_proj)
+        elif mlp_act_func_type == ActivationFuncType.GATED_GELU:
+            intermediate = F.gelu(gate_proj)
+        elif mlp_act_func_type == ActivationFuncType.GATED_SILU:
+            intermediate = F.silu(gate_proj)
+        else:
+            raise f"rms_mlp_gemm_fallback not implemented for activation type {mlp_act_func_type}"
+
+        intermediate = intermediate * up_proj
+
+        output = torch.matmul(intermediate, weight_out.t() if transpose else weight_out)
+        output = output.view([input.size(0), input.size(1), -1])
+
+        return [output, residual]
 
     def forward(self,
                 input: torch.Tensor,

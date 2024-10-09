@@ -6,18 +6,17 @@
 import torch
 import torch.nn as nn
 from deepspeed import comm as dist
+from deepspeed.ops.transformer.inference.op_binding.layer_norm import LayerNormOp
 from deepspeed.utils.logging import log_dist
 
 from deepspeed.ops.transformer.inference.ds_mlp import DeepSpeedMLP
 from deepspeed.ops.transformer.inference.ds_attention import DeepSpeedSelfAttention, BloomSelfAttention
+from deepspeed.ops.transformer.inference.op_binding.workspace import WorkspaceOp
 from deepspeed.accelerator import get_accelerator
-from deepspeed.ops.op_builder import InferenceBuilder
 import deepspeed
 if deepspeed.HAS_TRITON:
     from deepspeed.ops.transformer.inference.triton.mlp import TritonMLP
     from deepspeed.ops.transformer.inference.triton.attention import TritonSelfAttention
-
-inference_module = None
 
 
 class DeepSpeedTransformerInference(nn.Module):
@@ -37,6 +36,7 @@ class DeepSpeedTransformerInference(nn.Module):
                 for specific downstream tasks.
     """
     layer_id = 0
+    workspace = None
 
     def __init__(self,
                  config,
@@ -52,10 +52,6 @@ class DeepSpeedTransformerInference(nn.Module):
         DeepSpeedTransformerInference.layer_id += 1
 
         data_type = torch.half if self.config.dtype == torch.int8 else self.config.dtype
-        global inference_module
-        if inference_module is None:
-            builder = InferenceBuilder()
-            inference_module = builder.load()
 
         if DeepSpeedTransformerInference.layer_id == 1:
             log_dist(f"DeepSpeed-Inference config: {self.config.__dict__}", [0])
@@ -88,22 +84,25 @@ class DeepSpeedTransformerInference(nn.Module):
             self.norm_b = nn.Parameter(torch.empty(self.config.hidden_size, dtype=data_type, device=device),
                                        requires_grad=False)
         self.layer_past = None
-        try:
-            if config.dtype == torch.float32:
-                self.allocate_workspace = inference_module.allocate_workspace_fp32
-            elif config.dtype == torch.bfloat16:
-                self.allocate_workspace = inference_module.allocate_workspace_bf16
-            else:
-                self.allocate_workspace = inference_module.allocate_workspace_fp32
-            self._alloc_workspace = True
-        except AttributeError:
-            self.allocate_workspace = None
-            self._alloc_workspace = False
+        self.layer_norm = LayerNormOp()
+        if DeepSpeedTransformerInference.workspace is None:
+            DeepSpeedTransformerInference.workspace = WorkspaceOp(self.config)
+        self._should_allocate_workspace = True
+
+    def allocate_workspace(self, size):
+        # Allocate memory only on first layer forward
+        if self.config.layer_id == 0 and self._should_allocate_workspace:
+            DeepSpeedTransformerInference.workspace.allocate_workspace(
+                self.config.hidden_size, self.config.heads, size[1], size[0], DeepSpeedTransformerInference.layer_id,
+                self.config.mp_size, self.config.bigscience_bloom,
+                dist.get_rank() if dist.is_initialized() else 0, self.config.max_out_tokens,
+                self.config.min_out_tokens)
+            self._should_allocate_workspace = False
 
     @classmethod
     def reset_cache(cls):
-        if inference_module is not None:
-            inference_module.reset_cache()
+        if cls.workspace is not None:
+            cls.workspace.reset_cache()
 
     def forward(
             self,
@@ -136,15 +135,7 @@ class DeepSpeedTransformerInference(nn.Module):
 
         input_mask = (input_mask if attn_mask is None else attn_mask) if attention_mask is None else attention_mask
 
-        # Allocate memory only on first layer forward
-        if self.config.layer_id == 0 and self._alloc_workspace:
-            self.allocate_workspace(self.config.hidden_size, self.config.heads,
-                                    input.size()[1],
-                                    input.size()[0], DeepSpeedTransformerInference.layer_id, self.config.mp_size,
-                                    self.config.bigscience_bloom,
-                                    dist.get_rank() if dist.is_initialized() else 0, self.config.max_out_tokens,
-                                    self.config.min_out_tokens)
-            self._alloc_workspace = False
+        self.allocate_workspace(input.size())
 
         get_present = (get_present or get_key_value or use_cache)
         input_mask = input_mask if attention_mask is None else attention_mask
@@ -178,14 +169,15 @@ class DeepSpeedTransformerInference(nn.Module):
                                               output_attentions,
                                               self.norm_w,
                                               self.norm_b,
-                                              alibi)
+                                              alibi,
+                                              **kwargs)
 
             presents = (key, value)
             self.layer_past = presents if layer_past is None else None
             output = self.mlp(attention_output, input, inp_norm, self.attention.attn_ob)
 
             if not self.config.pre_layer_norm:
-                output = inference_module.layer_norm(output, self.norm_w, self.norm_b, self.config.epsilon)
+                output = self.layer_norm(output, self.norm_w, self.norm_b, self.config.epsilon)
 
             output = output.to(input_type)
         if get_present:

@@ -7,11 +7,12 @@ import pytest
 import torch
 import deepspeed
 from deepspeed.ops.op_builder import InferenceBuilder
+from deepspeed.ops.transformer import DeepSpeedInferenceConfig
+from deepspeed.ops.transformer.inference.op_binding.bias_gelu import BiasGeluOp
 
 if not deepspeed.ops.__compatible_ops__[InferenceBuilder.NAME]:
     pytest.skip("Inference ops are not available on this system", allow_module_level=True)
 
-inference_module = None
 torch_minor_version = None
 
 
@@ -45,13 +46,8 @@ def run_gelu_ds(activations, use_triton_ops=False):
     device = deepspeed.accelerator.get_accelerator().device_name()
     channels = activations.shape[-1]
     bias = torch.zeros((channels), dtype=activations.dtype, device=device)
-    global inference_module
-    if inference_module is None:
-        inference_module = InferenceBuilder().load()
-    if activations.dtype == torch.float16:
-        return inference_module.bias_gelu_fp16(activations, bias)
-    else:
-        return inference_module.bias_gelu_fp32(activations, bias)
+    config = DeepSpeedInferenceConfig(dtype=activations.dtype)
+    return BiasGeluOp(config)(activations, bias)
 
 
 @pytest.mark.inference_ops

@@ -7,16 +7,16 @@ import json
 import math
 import torch
 from torch.autograd import Function
-# accelerator modules will be imported if needed
-inference_module = None
-specialized_mode = None
 import torch.nn as nn
 from .ds_attention import DeepSpeedSelfAttention
 from .config import DeepSpeedInferenceConfig
+from .op_binding import SoftmaxOp, VectorMatMulOp, GELUGemmOp
+from .op_binding.bias_residual import BiasResidualOp
+from .op_binding.einsum_sec_sm_ecm import EinsumSecSmEcmOp
+from .op_binding.layer_norm import LayerNormOp
 from ....moe.sharded_moe import TopKGate
 from deepspeed import comm as dist
-from deepspeed.accelerator import get_accelerator
-from deepspeed.ops.op_builder import InferenceBuilder
+from .op_binding.moe_res_matmul import MoEResMatmulOp
 
 
 class DeepSpeedMoEInferenceConfig(DeepSpeedInferenceConfig):
@@ -110,16 +110,13 @@ class DeepSpeedMLPFunction(Function):
 
     @staticmethod
     def forward(ctx, input, inter_w, inter_b, config, output_b, output_w, q_scales, q_groups, merge_count, mp_group,
-                async_op):
+                async_op, gelu_gemm_func, vector_matmul_func):
         if config.q_int8:
-            intermediate = inference_module.fused_gemm_gelu_int8(input, inter_w, inter_b, config.epsilon, q_scales[2],
-                                                                 (q_groups * (2**merge_count)), config.pre_layer_norm)
-            output = inference_module.vector_matmul_int8(intermediate, output_w, q_scales[3], q_groups, (merge_count))
+            intermediate = gelu_gemm_func(input, inter_w, inter_b, config.epsilon, q_scales[2],
+                                          (q_groups * (2**merge_count)), config.pre_layer_norm)
+            output = vector_matmul_func(intermediate, output_w, q_scales[3], q_groups, (merge_count))
         else:
-            mlp_gemm_func = inference_module.fused_gemm_gelu_fp16 if config.fp16 else \
-                                    inference_module.fused_gemm_gelu_fp32
-
-            output = mlp_gemm_func(input, inter_w, inter_b, output_w, config.epsilon, config.pre_layer_norm, async_op)
+            output = gelu_gemm_func(input, inter_w, inter_b, output_w, config.epsilon, config.pre_layer_norm, async_op)
         if mp_group is not None and dist.get_world_size(group=mp_group) > 1:
             dist.all_reduce(output, group=mp_group, async_op=async_op)
 
@@ -150,10 +147,13 @@ class DeepSpeedMoEMLP(nn.Module):
         self.q_groups = q_groups * 2 if mlp_extra_grouping else q_groups
         self.merge_count = int(math.log2(merge_count))
         self.mp_group = mp_group
+        self.gelu_gemm_func = GELUGemmOp(self.config)
+        self.vector_matmul_func = VectorMatMulOp(self.config)
 
     def forward(self, input, async_op=False):
         return DeepSpeedMLPFunction.apply(input, self.inter_w, self.inter_b, self.config, self.output_b, self.output_w,
-                                          self.q_scales, self.q_groups, self.merge_count, self.mp_group, async_op)
+                                          self.q_scales, self.q_groups, self.merge_count, self.mp_group, async_op,
+                                          self.gelu_gemm_func, self.vector_matmul_func)
 
 
 class DeepSpeedMoEInference(nn.Module):
@@ -187,18 +187,7 @@ class DeepSpeedMoEInference(nn.Module):
 
         self.config = config
         self.config.layer_id = DeepSpeedMoEInference.layer_id
-        global inference_module
-        global specialized_mode
-        if inference_module is None:
-            specialized_mode = False
-            # InferenceSpecializedBuilder is not among DeepSpeed provided builder yet, so we infer by builder name string
-            builder = get_accelerator().create_op_builder("InferenceSpecializedBuilder")
-            if builder is not None and builder.is_compatible():
-                inference_module = builder.load()
-                specialized_mode = True
-            else:
-                inference_module = InferenceBuilder().load()
-        self.config.specialized_mode = specialized_mode
+
         assert self.config.dtype != torch.bfloat16, "DeepSpeed MoE Transformer Inference not yet tested for bfloat support"
 
         DeepSpeedMoEInference.layer_id += 1
@@ -213,10 +202,8 @@ class DeepSpeedMoEInference(nn.Module):
             self.res_mlp = DeepSpeedMoEMLP(config, quantize_scales, quantize_groups, merge_count, mlp_extra_grouping,
                                            mp_group)
             self.res_coef = nn.Parameter(torch.Tensor(self.config.hidden_size, 2))
-            self.coef_func = inference_module.softmax_fp16 if self.config.dtype in [torch.float16, torch.int8] else \
-                                        inference_module.softmax_fp32
-            self.vector_matmul_func = inference_module.vector_matmul_fp16 if self.config.dtype == torch.float16 else \
-                                    inference_module.vector_matmul_fp32
+            self.coef_func = SoftmaxOp(self.config)
+            self.vector_matmul_func = VectorMatMulOp(self.config)
 
         config.mp_size = 1
         self.mlp = nn.ModuleList(
@@ -234,12 +221,10 @@ class DeepSpeedMoEInference(nn.Module):
 
         print("DeepSpeed MoE Transformer Inference config is ", self.config.__dict__)
 
-        self.bias_residual_func = inference_module.bias_residual_fp16 if self.config.dtype in [torch.float16, torch.int8] else \
-                                        inference_module.bias_residual_fp32
-        self.ds_layernorm = inference_module.layer_norm_fp16 if self.config.dtype in [torch.float16, torch.int8] else \
-                                        inference_module.layer_norm_fp32
-        self.einsum_sec_sm_ecm = inference_module.einsum_sec_sm_ecm_fp16 if self.config.dtype in [torch.float16, torch.int8] else \
-                                        inference_module.einsum_sec_sm_ecm_fp32
+        self.bias_residual_func = BiasResidualOp(self.config)
+        self.ds_layernorm = LayerNormOp(self.config)
+        self.einsum_sec_sm_ecm = EinsumSecSmEcmOp(self.config)
+        self.moe_res_matmul = MoEResMatmulOp(self.config)
 
     def res_coef_func(self, inp, async_op):
         inp = self.vector_matmul_func(inp, self.res_coef, async_op)
@@ -346,7 +331,7 @@ class DeepSpeedMoEInference(nn.Module):
                                       dim=0)[dist.get_rank(group=self.expert_mp_group)]
 
             if self.config.mlp_type == 'residual':
-                inference_module.moe_res_matmul(res_mlp_out, res_coef_out, output)
+                self.moe_res_matmul(res_mlp_out, res_coef_out, output)
 
             output = self.bias_residual_func(output, residual_add, torch.empty(1))
 
