@@ -50,7 +50,7 @@ Type "help", "copyright", "credits" or "license" for more information.
 >>> h = AsyncIOBuilder().load().aio_handle()
 >>> h.
 h.async_pread(             h.free_cpu_locked_tensor(  h.get_overlap_events(      h.get_single_submit(       h.new_cpu_locked_tensor(   h.pwrite(                  h.sync_pread(              h.wait(
-h.async_pwrite(            h.get_block_size(          h.get_queue_depth(         h.get_thread_count(        h.pread(                   h.read(                    h.sync_pwrite(             h.write(
+h.async_pwrite(            h.get_block_size(          h.get_queue_depth(         h.get_intra_op_parallelism(        h.pread(                   h.read(                    h.sync_pwrite(             h.write(
 ```
 The APIs of interest for performing I/O operations are those named with `pread` and `pwrite` substrings. For brevity, we will focus on the file write APIs, namely `sync_pwrite`, `async_pwrite`, and `pwrite`. We will discuss only `sync_pwrite` and `async_pwrite` below because they are specializations of `pwrite`.
 
@@ -107,7 +107,7 @@ Similar safety problems apply to reading the destination tensor of a non-blockin
 
 
 ### Parallel File Write
-An important DeepNVMe optimization is the ability to parallelize individual I/O operations. This optimization is enabled by specifying the desired parallelism degree when constructing a DeepNVMe handle. Subsequent I/O operations with that handle are automatically parallelized over the requested number of host or device threads, as appropriate. I/O parallelism is composable with either the blocking or non-blocking I/O APIs. The example below illustrates 4-way parallelism of a file write using `async_pwrite`. Note the use of `num_threads` argument to specify the desired parallelism degree in handle creation.
+An important DeepNVMe optimization is the ability to parallelize individual I/O operations. This optimization is enabled by specifying the desired parallelism degree when constructing a DeepNVMe handle. Subsequent I/O operations with that handle are automatically parallelized over the requested number of host or device threads, as appropriate. I/O parallelism is composable with either the blocking or non-blocking I/O APIs. The example below illustrates 4-way parallelism of a file write using `async_pwrite`. Note the use of `intra_op_parallelism` argument to specify the desired parallelism degree in handle creation.
 
 ```bash
 >>> import os
@@ -116,7 +116,7 @@ False
 >>> import torch
 >>> t=torch.empty(1024**3, dtype=torch.uint8).cuda()
 >>> from deepspeed.ops.op_builder import AsyncIOBuilder
->>> h = AsyncIOBuilder().load().aio_handle(num_threads=4)
+>>> h = AsyncIOBuilder().load().aio_handle(intra_op_parallelism=4)
 >>> h.async_pwrite(t,'/local_nvme/test_1GB.pt')
 >>> h.wait()
 1
@@ -188,7 +188,7 @@ This tutorial has been significantly improved by feedback from [Guanhua Wang](ht
 ## Appendix
 
 ### Advanced Handle Creation
-Achieving peak I/O performance with DeepNVMe requires careful configuration of handle creation. In particular, the parameters of `aio_handle` and `gds_handle` constructors are performance-critical because they determine how efficiently DeepNVMe interacts with the underlying storage subsystem (i.e., `libaio`, GDS, PCIe, and SSD). For convenience we make it possible to create handles using default parameter values which will provide decent performance in most scenarios. However, squeezing out every available performance in your environment will likely require tuning the constructor parameters, namely `block_size`, `queue_depth`, `single_submit`, `overlap_events`, and `num_threads`. The `aio_handle` constructor parameters and default values are illustrated below:
+Achieving peak I/O performance with DeepNVMe requires careful configuration of handle creation. In particular, the parameters of `aio_handle` and `gds_handle` constructors are performance-critical because they determine how efficiently DeepNVMe interacts with the underlying storage subsystem (i.e., `libaio`, GDS, PCIe, and SSD). For convenience we make it possible to create handles using default parameter values which will provide decent performance in most scenarios. However, squeezing out every available performance in your environment will likely require tuning the constructor parameters, namely `block_size`, `queue_depth`, `single_submit`, `overlap_events`, and `intra_op_parallelism`. The `aio_handle` constructor parameters and default values are illustrated below:
 ```bash
 >>> from deepspeed.ops.op_builder import AsyncIOBuilder
 >>> help(AsyncIOBuilder().load().aio_handle())
@@ -203,7 +203,7 @@ class aio_handle(pybind11_builtins.pybind11_object)
  |  Methods defined here:
  |
  |  __init__(...)
- |      __init__(self: async_io.aio_handle, block_size: int = 1048576, queue_depth: int = 128, single_submit: bool = False, overlap_events: bool = False, num_threads: int = 1) -> None
+ |      __init__(self: async_io.aio_handle, block_size: int = 1048576, queue_depth: int = 128, single_submit: bool = False, overlap_events: bool = False, intra_op_parallelism: int = 1) -> None
  |
  |      AIO handle constructor
 ```
@@ -219,7 +219,7 @@ Best performance (GB/sec): read =  3.69, write =  3.18
    "aio": {
       "single_submit": "false",
       "overlap_events": "true",
-      "num_threads": 8,
+      "intra_op_parallelism": 8,
       "queue_depth": 32,
       "block_size": 1048576
    }
@@ -233,7 +233,7 @@ The above tuning was executed on a Lambda workstation equipped with two NVIDIA A
                                            queue_depth=32,
                                            single_submit=False,
                                            overlap_events=True,
-                                           num_threads=8)
+                                           intra_op_parallelism=8)
 ```
 
 
@@ -292,6 +292,6 @@ Function | Description
 |---|---|
 get_queue_depth | Return queue depth setting |
 get_single_submit | Return whether single_submit is enabled |
-get_thread_count | Return I/O parallelism degree |
+get_intra_op_parallelism | Return I/O parallelism degree |
 get_block_size | Return I/O block size setting |
 get_overlap_events | Return whether overlap_event is enabled |
