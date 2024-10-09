@@ -3,11 +3,11 @@
 
 # DeepSpeed Team
 
-import os
 import torch
 import torch.nn.functional as F
 from ..config import DeepSpeedInferenceConfig
 from .base import BaseOp
+from .rms_norm import RMSNormOp
 import deepspeed
 from deepspeed.utils.types import NormType
 
@@ -56,19 +56,23 @@ class QKVGemmOp(BaseOp):
             matmul(A, B)
         Fp16Matmul._update_autotune_table()
 
-    def qkv_gemm_fallback(self, input, weight, q_scale, bias, gamma, beta, eps, add_bias, q_int8, transpose):
-        if os.environ.get('DS_KI_FALLBACK') == 'True' and not transpose:
-            inp_norm = F.layer_norm(input, (input.shape[2], ), gamma, beta, eps)
-            tmp = torch.matmul(inp_norm, weight)
-            if add_bias:
-                tmp += bias
-            output = [tmp, inp_norm]
-            return output
-        else:
-            raise NotImplementedError
+    @staticmethod
+    def qkv_gemm_fallback(input, weight, q_scale, bias, gamma, beta, eps, add_bias, q_int8, transpose):
+        inp_norm = F.layer_norm(input, (input.shape[2], ), gamma, beta, eps)
+        tmp = torch.matmul(inp_norm, weight.t() if transpose else weight)
+        if add_bias:
+            tmp += bias
+        output = [tmp, inp_norm]
 
-    def rms_qkv_gemm_fallback(self, input, weight, q_scale, gamma, eps, q_int8, transpose):
-        raise NotImplementedError
+        return output
+
+    @staticmethod
+    def rms_qkv_gemm_fallback(input, weight, q_scale, gamma, eps, q_int8, transpose):
+        inp_norm = RMSNormOp.rms_norm_fallback(input, gamma, eps)
+        tmp = torch.matmul(inp_norm, weight.t() if transpose else weight)
+        output = [tmp, inp_norm]
+
+        return output
 
     def forward(self, input: torch.Tensor, weight: torch.Tensor, bias: torch.Tensor, gamma: torch.Tensor,
                 beta: torch.Tensor):

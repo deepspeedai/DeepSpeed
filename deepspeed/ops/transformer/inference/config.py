@@ -103,7 +103,6 @@ class DeepSpeedInferenceConfig(TransformerConfig):
         self.return_tuple = return_tuple
         self.mlp_after_attn = mlp_after_attn
         self.mlp_act_func_type = mlp_act_func_type
-        self.specialized_mode = False
         self.training_mp_size = training_mp_size
         self.bigscience_bloom = bigscience_bloom
         self.max_out_tokens = max_out_tokens

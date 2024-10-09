@@ -8,13 +8,13 @@ import torch
 import deepspeed
 from deepspeed.ops.op_builder import InferenceBuilder
 from deepspeed.accelerator import get_accelerator
+from deepspeed.ops.transformer.inference.op_binding.gated_activation import GatedActivationOp
 from deepspeed.utils.types import ActivationFuncType
 from .inference_test_utils import allclose, get_dtypes
 
 if not deepspeed.ops.__compatible_ops__[InferenceBuilder.NAME]:
     pytest.skip("Inference ops are not available on this system", allow_module_level=True)
 
-inference_module = None
 torch_minor_version = None
 
 
@@ -27,10 +27,7 @@ def run_bias_geglu_reference(activations, bias):
 
 
 def run_bias_geglu_ds(activation, bias):
-    global inference_module
-    if inference_module is None:
-        inference_module = InferenceBuilder().load()
-    return inference_module.gated_activation(activation, bias, ActivationFuncType.GATED_GELU)
+    return GatedActivationOp()(activation, bias, ActivationFuncType.GATED_GELU)
 
 
 @pytest.mark.inference_ops
@@ -56,17 +53,14 @@ def run_gated_silu_reference(activations, bias):
 
 
 def run_gated_silu_ds(activation, bias):
-    global inference_module
-    if inference_module is None:
-        inference_module = InferenceBuilder().load()
-    return inference_module.gated_activation(activation, bias, ActivationFuncType.GATED_SILU)
+    return GatedActivationOp()(activation, bias, ActivationFuncType.GATED_SILU)
 
 
 @pytest.mark.inference_ops
 @pytest.mark.parametrize("batch", [1, 2])
 @pytest.mark.parametrize("sequence", [1, 128, 255])
 @pytest.mark.parametrize("channels", [512, 1232, 4096])
-@pytest.mark.parametrize("dtype", [torch.float16, torch.float32])
+@pytest.mark.parametrize("dtype", get_dtypes())
 def test_gated_silu(batch, sequence, channels, dtype):
     activation = torch.randn((batch, sequence, channels * 2), dtype=dtype, device=get_accelerator().device_name())
     bias = torch.randn((channels * 2), dtype=dtype, device=get_accelerator().device_name())

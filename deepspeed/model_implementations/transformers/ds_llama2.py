@@ -4,10 +4,7 @@
 # DeepSpeed Team
 
 import torch
-from deepspeed import comm as dist
 from deepspeed.model_implementations.transformers.ds_transformer import DeepSpeedTransformerInference
-
-inference_module = None
 
 
 class DeepSpeedLlama2Inference(DeepSpeedTransformerInference):
@@ -27,17 +24,9 @@ class DeepSpeedLlama2Inference(DeepSpeedTransformerInference):
 
         input = args[0]
         input_mask = None
-        # Allocate memory only on first layer forward
-        if self.config.layer_id == 0 and self._alloc_workspace:
-            self.allocate_workspace(self.config.hidden_size, self.config.heads,
-                                    input.size()[1],
-                                    input.size()[0], DeepSpeedTransformerInference.layer_id, self.config.mp_size,
-                                    self.config.bigscience_bloom,
-                                    dist.get_rank() if dist.is_initialized() else 0, self.config.max_out_tokens,
-                                    self.config.min_out_tokens)
-            self._alloc_workspace = False
-
         get_present = True
+
+        self.allocate_workspace(input.size())
 
         # We set the prev key/value to None when there is a prompt
         if input.shape[1] > 1:

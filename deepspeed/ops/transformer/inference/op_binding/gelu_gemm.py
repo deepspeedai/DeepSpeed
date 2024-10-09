@@ -4,6 +4,7 @@
 # DeepSpeed Team
 
 import torch
+import torch.nn.functional as F
 from ..config import DeepSpeedInferenceConfig
 from .base import BaseOp
 import deepspeed
@@ -14,7 +15,9 @@ class GELUGemmOp(BaseOp):
     def __init__(self, config: DeepSpeedInferenceConfig):
         super(GELUGemmOp, self).__init__(config)
         try:
-            if self.config.dtype in [torch.float16, torch.int8]:
+            if self.config.dtype == torch.int8:
+                self.fused_gemm_gelu = self.inference_module.fused_gemm_gelu_int8
+            elif self.config.dtype == torch.float16:
                 if deepspeed.HAS_TRITON and self.config.use_triton and self.config.dtype == torch.float16:
                     from deepspeed.ops.transformer.inference.triton.ops import fused_gemm_gelu as _triton_fused_gemm_gelu
                     self.fused_gemm_gelu = _triton_fused_gemm_gelu  # type: ignore
@@ -28,7 +31,11 @@ class GELUGemmOp(BaseOp):
             self.fused_gemm_gelu = self.gelu_gemm_fallback
 
     def gelu_gemm_fallback(self, input, weight, scale, bias, out, out_scale, dtype, transpose):
-        raise NotImplementedError
+        tmp = torch.matmul(input, weight)
+        tmp = F.gelu(tmp.to(torch.float32) + bias.to(torch.float32), approximate="tanh").to(tmp.dtype)
+        output = torch.matmul(tmp, out)
+
+        return output
 
     def forward(self, input: torch.Tensor, weight: torch.Tensor, bias: torch.Tensor, weight_out: torch.Tensor):
 

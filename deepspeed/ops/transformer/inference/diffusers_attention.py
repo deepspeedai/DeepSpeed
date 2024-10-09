@@ -10,10 +10,11 @@ import torch.nn as nn
 from packaging import version as pkg_version
 from deepspeed.utils.logging import log_dist
 from deepspeed.accelerator import get_accelerator
-from deepspeed.ops.op_builder import InferenceBuilder
+from deepspeed.ops.transformer.inference.op_binding.workspace import WorkspaceOp
+from deepspeed.ops.transformer.inference.op_binding.softmax_context import SoftmaxContextOp
+from deepspeed.ops.transformer.inference.op_binding import LinearOp
+from deepspeed.ops.transformer.inference.op_binding.pad_transform import PadTransformOp
 
-# Cuda modules will be imported if needed
-inference_module = None
 minus_inf = -10000.0
 triton_flash_attn = None
 
@@ -36,7 +37,8 @@ class DeepSpeedDiffusersAttentionFunction(Function):
     @staticmethod
     def forward(ctx, input, context, input_mask, config, attn_qkvw, attn_qw, attn_kw, attn_vw, attn_qkvb,
                 num_attention_heads_per_partition, norm_factor, hidden_size_per_partition, attn_ow, attn_ob,
-                do_out_bias, score_context_func, linear_func, triton_flash_attn_kernel, rope_theta):
+                do_out_bias, score_context_func, linear_func, pad_transform_func, triton_flash_attn_kernel,
+                rope_theta):
 
         def _transpose_for_context(x):
             x = x.permute(0, 2, 1, 3)
@@ -77,7 +79,7 @@ class DeepSpeedDiffusersAttentionFunction(Function):
                     query = query.contiguous()
                     key = key.contiguous()
                     value = value.contiguous()
-                query, key, value = inference_module.pad_transform_fp16(query, key, value, config.heads, do_flash_attn)
+                query, key, value = pad_transform_func(query, key, value, config.heads, do_flash_attn)
                 attention_scores = (torch.matmul(query, key.transpose(-1, -2)) * scale).softmax(dim=-1)
                 context_layer = _transpose_for_context(torch.matmul(attention_scores, value))
 
@@ -117,10 +119,6 @@ class DeepSpeedDiffusersAttention(nn.Module):
 
         data_type = self.config.dtype
         data_type_fp = torch.half if self.config.dtype == torch.int8 else self.config.dtype
-        global inference_module
-        if inference_module is None:
-            builder = InferenceBuilder()
-            inference_module = builder.load()
 
         if DeepSpeedDiffusersAttention.layer_id == 1:
             log_dist(f"DeepSpeed-Attention config: {self.config.__dict__}", [0])
@@ -171,26 +169,24 @@ class DeepSpeedDiffusersAttention(nn.Module):
             self.norm_factor *= math.sqrt(self.config.layer_id + 1)
             # https://github.com/huggingface/transformers/blob/v4.24.0/src/transformers/models/gpt2/modeling_gpt2.py#L191
 
-        if self.config.dtype in [torch.float16, torch.int8]:
-            self.score_context_func = inference_module.softmax_context_fp16
-            self.linear_func = inference_module.linear_layer_fp16
-            self.allocate_workspace = inference_module.allocate_workspace_fp16
-        else:
-            self.score_context_func = inference_module.softmax_context_fp32
-            self.linear_func = inference_module.linear_layer_fp32
-            self.allocate_workspace = inference_module.allocate_workspace_fp32
+        self.workspace = WorkspaceOp(self.config)
+        self.score_context_func = SoftmaxContextOp(self.config)
+        self.linear_func = LinearOp(self.config)
+        self.pad_transform_func = PadTransformOp(self.config)
+
+    def allocate_workspace(self, size):
+        # Allocate memory only on first layer forward
+        if self.config.layer_id == 0:
+            self.workspace.allocate_workspace(self.config.hidden_size, self.config.heads, size[1], size[0],
+                                              DeepSpeedDiffusersAttention.layer_id, self.config.mp_size, False, 0,
+                                              self.config.max_out_tokens, self.config.min_out_tokens)
 
     def forward(self, input, context=None, input_mask=None):
-        if self.config.layer_id == 0:
-            self.allocate_workspace(self.config.hidden_size, self.config.heads,
-                                    input.size()[1],
-                                    input.size()[0], DeepSpeedDiffusersAttention.layer_id, self.config.mp_size, False,
-                                    0, self.config.max_out_tokens, self.config.min_out_tokens)
-        output = DeepSpeedDiffusersAttentionFunction.apply(input, context, input_mask, self.config, self.attn_qkvw,
-                                                           self.attn_qw, self.attn_kw, self.attn_vw, self.attn_qkvb,
-                                                           self.num_attention_heads_per_partition, self.norm_factor,
-                                                           self.hidden_size_per_partition, self.attn_ow, self.attn_ob,
-                                                           self.do_out_bias, self.score_context_func, self.linear_func,
-                                                           self.triton_flash_attn_kernel, self.config.rope_theta)
+        self.allocate_workspace(input.size())
+        output = DeepSpeedDiffusersAttentionFunction.apply(
+            input, context, input_mask, self.config, self.attn_qkvw, self.attn_qw, self.attn_kw, self.attn_vw,
+            self.attn_qkvb, self.num_attention_heads_per_partition, self.norm_factor, self.hidden_size_per_partition,
+            self.attn_ow, self.attn_ob, self.do_out_bias, self.score_context_func, self.linear_func,
+            self.pad_transform_func, self.triton_flash_attn_kernel, self.config.rope_theta)
 
         return output
