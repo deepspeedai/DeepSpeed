@@ -36,8 +36,10 @@ deepspeed_checkpointing_enabled = False
 
 # MP parameters
 mpu = None
-mp_rank = None
-mp_size = None
+
+#set default values
+mp_rank = 0
+mp_size = 1
 mp_group = None
 
 # Model Parameters
@@ -61,8 +63,6 @@ PROFILE_TIME = False
 
 # Default name for the model parallel rng tracker.
 _MODEL_PARALLEL_RNG_TRACKER_NAME = 'model-parallel-rng'
-transport_stream = None
-cuda_device = None
 
 
 def detach_variable(inputs, device=None):
@@ -518,35 +518,10 @@ class CheckpointFunction(torch.autograd.Function):
         global mp_rank, mp_size, mp_group
         global contiguous_data_buffers, contiguous_size_buffers
         global data_offsets, size_offsets
-        if mp_rank is None:
-            if mpu is not None:
-                if hasattr(mpu, 'get_tensor_model_parallel_rank'):
-                    mp_rank = mpu.get_tensor_model_parallel_rank()
-                    mp_size = mpu.get_tensor_model_parallel_world_size()
-                    mp_group = mpu.get_tensor_model_parallel_group()
-                else:
-                    mp_rank = mpu.get_model_parallel_rank()
-                    mp_size = mpu.get_model_parallel_world_size()
-                    mp_group = mpu.get_model_parallel_group()
-            else:
-                mp_rank = 0
-                mp_size = 1
-                mp_group = None
+        global PARTITION_ACTIVATIONS, buffer_0, buffer_1, buffer_0_offset, buffer_1_offset
 
-        global cuda_device, transport_stream, PARTITION_ACTIVATIONS, buffer_0, buffer_1, buffer_0_offset, buffer_1_offset
-
-        if cuda_device is None:
-            see_memory_usage("First Forward Beginning", force=False)
-            if dist.get_rank() == 0:
-                logger.info(f"Activation Checkpointing Information")
-                logger.info(f"----Partition Activations {PARTITION_ACTIVATIONS}, CPU CHECKPOINTING {CPU_CHECKPOINT}")
-                logger.info(
-                    f"----contiguous Memory Checkpointing {CONTIGUOUS_CHECKPOINTING} with {num_layers} total layers")
-                logger.info(f"----Synchronization {SYNCHRONIZE}")
-                logger.info(f"----Profiling time in checkpointing {PROFILE_TIME}")
-
-            cuda_device = get_accelerator().current_device_name()
-            transport_stream = get_accelerator().Stream(device=cuda_device)
+        cuda_device = get_accelerator().current_device_name()
+        transport_stream = get_accelerator().Stream(device=cuda_device)
 
         if PARTITION_ACTIVATIONS:
             inputs = partition_activations(args, CPU_CHECKPOINT, CONTIGUOUS_CHECKPOINTING)
@@ -631,8 +606,9 @@ class CheckpointFunction(torch.autograd.Function):
             raise RuntimeError("Checkpointing is not compatible with .grad(), "
                                "please use .backward() if possible")
 
-        global cuda_device, transport_stream, PARTITION_ACTIVATIONS
-
+        global PARTITION_ACTIVATIONS
+        cuda_device = get_accelerator().current_device_name()
+        transport_stream = get_accelerator().Stream(device=cuda_device)
         # Rebuild deepspeed_saved_tensors
         for t in ctx.deepspeed_saved_tensors:
             if t is not None and hasattr(t, 'saved_data') and t.saved_data is not None:
@@ -764,35 +740,10 @@ def non_reentrant_checkpoint(function, *args):
     global mp_rank, mp_size, mp_group
     global contiguous_data_buffers, contiguous_size_buffers
     global data_offsets, size_offsets
-    if mp_rank is None:
-        if mpu is not None:
-            if hasattr(mpu, 'get_tensor_model_parallel_rank'):
-                mp_rank = mpu.get_tensor_model_parallel_rank()
-                mp_size = mpu.get_tensor_model_parallel_world_size()
-                mp_group = mpu.get_tensor_model_parallel_group()
-            else:
-                mp_rank = mpu.get_model_parallel_rank()
-                mp_size = mpu.get_model_parallel_world_size()
-                mp_group = mpu.get_model_parallel_group()
-        else:
-            mp_rank = 0
-            mp_size = 1
-            mp_group = None
+    global PARTITION_ACTIVATIONS, buffer_0, buffer_1, buffer_0_offset, buffer_1_offset
 
-    global cuda_device, transport_stream, PARTITION_ACTIVATIONS, buffer_0, buffer_1, buffer_0_offset, buffer_1_offset
-
-    if cuda_device is None:
-        see_memory_usage("First Forward Beginning", force=False)
-        if dist.get_rank() == 0:
-            logger.info(f"Activation Checkpointing Information")
-            logger.info(f"----Partition Activations {PARTITION_ACTIVATIONS}, CPU CHECKPOINTING {CPU_CHECKPOINT}")
-            logger.info(
-                f"----contiguous Memory Checkpointing {CONTIGUOUS_CHECKPOINTING} with {num_layers} total layers")
-            logger.info(f"----Synchronization {SYNCHRONIZE}")
-            logger.info(f"----Profiling time in checkpointing {PROFILE_TIME}")
-
-        cuda_device = get_accelerator().current_device_name()
-        transport_stream = get_accelerator().Stream(device=cuda_device)
+    cuda_device = get_accelerator().current_device_name()
+    transport_stream = get_accelerator().Stream(device=cuda_device)
 
     if PARTITION_ACTIVATIONS:
         inputs = partition_activations(args, CPU_CHECKPOINT, CONTIGUOUS_CHECKPOINTING)
@@ -899,7 +850,9 @@ def non_reentrant_checkpoint(function, *args):
                 raise RuntimeError("Checkpointing is not compatible with .grad(), "
                                    "please use .backward() if possible")
 
-            global cuda_device, transport_stream, PARTITION_ACTIVATIONS
+            global PARTITION_ACTIVATIONS
+            cuda_device = get_accelerator().current_device_name()
+            transport_stream = get_accelerator().Stream(device=cuda_device)
 
             # gather inputs which is partitioned or checkpointed before first forward
             if PARTITION_ACTIVATIONS:
@@ -1151,6 +1104,27 @@ def configure(
         assert PARTITION_ACTIVATIONS, "Contiguous Checkpointing is only available with partitioned activations. Set partitioned activations to true in deepspeed config"
     if CONTIGUOUS_CHECKPOINTING:
         assert num_layers is not None, "Must specify the number of layers with contiguous memory checkpointing"
+
+    global mp_rank, mp_size, mp_group
+
+    if mpu is not None:
+        if hasattr(mpu, 'get_tensor_model_parallel_rank'):
+            mp_rank = mpu.get_tensor_model_parallel_rank()
+            mp_size = mpu.get_tensor_model_parallel_world_size()
+            mp_group = mpu.get_tensor_model_parallel_group()
+        else:
+            mp_rank = mpu.get_model_parallel_rank()
+            mp_size = mpu.get_model_parallel_world_size()
+            mp_group = mpu.get_model_parallel_group()
+
+    #print configuration only once
+    see_memory_usage("After configuration", force=False)
+    if dist.get_rank() == 0:
+        logger.info(f"Activation Checkpointing Information")
+        logger.info(f"----Partition Activations {PARTITION_ACTIVATIONS}, CPU CHECKPOINTING {CPU_CHECKPOINT}")
+        logger.info(f"----contiguous Memory Checkpointing {CONTIGUOUS_CHECKPOINTING} with {num_layers} total layers")
+        logger.info(f"----Synchronization {SYNCHRONIZE}")
+        logger.info(f"----Profiling time in checkpointing {PROFILE_TIME}")
 
 
 def is_configured():
