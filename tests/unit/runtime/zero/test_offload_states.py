@@ -15,19 +15,22 @@ from unit.simple_model import random_dataloader, SimpleModel
 import deepspeed
 from deepspeed.runtime.zero.offload_config import OffloadDeviceEnum, OffloadStateTypeEnum
 from deepspeed.utils import safe_get_local_fp32_param, safe_get_local_optimizer_state
+from deepspeed.runtime.zero.offload_states import get_state_devices
 
 
 def validate_device(model, device: torch.device, include) -> None:
-    # Make sure the model parameters are offloaded
-    if include is None or OffloadStateTypeEnum.hp_params in include:
-        assert all(safe_get_local_fp32_param(p).device == device for p in model.parameters())
-    if include is None or OffloadStateTypeEnum.lp_params in include:
-        assert all(p.ds_tensor.device == device for p in model.parameters())
-    if include is None or OffloadStateTypeEnum.lp_grads in include:
-        assert model.optimizer.grad_partitions_flat_buffer.device == device
-    if include is None or OffloadStateTypeEnum.optim_states in include:
-        assert all(safe_get_local_optimizer_state(p, "exp_avg").device == device for p in model.parameters())
-        assert all(safe_get_local_optimizer_state(p, "exp_avg_sq").device == device for p in model.parameters())
+
+    def compare_device(state) -> bool:
+        devices = get_state_devices(model, state)
+        return len(devices) == 1 and device in devices
+
+    for state in OffloadStateTypeEnum:
+        if include is None or state in include:
+            if state == OffloadStateTypeEnum.contiguous_grad_buffer and device == torch.device("cpu"):
+                assert len(get_state_devices(model,
+                                             state)) == 0, f"State {state} must be removed after offload_states()"
+            else:
+                assert compare_device(state), f"State {state} is not on device {device}"
 
 
 def run_model(model, config_dict, hidden_dim, dtype, include, pin_memory, non_blocking):

@@ -9,28 +9,28 @@ Helper functions and classes from multiple sources.
 """
 
 from collections.abc import Iterable
-from deepspeed.moe.utils import is_moe_param
 import os
 import psutil
 import gc
 from math import sqrt
 
+from numpy import prod
+
 import torch
-from deepspeed import comm as dist
+from torch.nn import functional as F
 try:
     from torch._six import inf
 except ModuleNotFoundError:
     from torch import inf
 
+from deepspeed import comm as dist
+from deepspeed.moe.utils import is_moe_param
 from deepspeed.utils import groups, logger
 from deepspeed.utils.bwc import (bwc_tensor_model_parallel_rank, bwc_pipeline_parallel_world_size,
                                  bwc_pipeline_parallel_group)
 from deepspeed.runtime.constants import PIPE_REPLICATED
-from numpy import prod
 from deepspeed.accelerator import get_accelerator
-
 from deepspeed.module_inject.policy import transpose
-from torch.nn import functional as F
 
 torch_memory_reserved = get_accelerator().memory_reserved
 torch_max_memory_reserved = get_accelerator().max_memory_reserved

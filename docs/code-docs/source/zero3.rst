@@ -509,3 +509,19 @@ Below is an example code snippet demonstrating how to offload FP32 parameters an
     ...
     # Load states back to device memory
     ds_engine.reload_states()
+
+``deepspeed.runtime.zero.offload_states.get_state_devices`` returns devices of the specified state.
+
+.. code-block:: python
+
+    def get_state_devices(model, state: OffloadStateTypeEnum) -> Set[torch.device]:
+        """Retrieve the devices of the specified state of the model.
+
+        Args:
+            model (DeepSpeedEngine): The model whose device allocations are to be checked.
+            state (OffloadStateTypeEnum): The specific state for which the devices should be retrieved.
+
+        Returns:
+            Set[torch.device]: A set of devices of the specified state.
+
+        """

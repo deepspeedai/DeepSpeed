@@ -18,12 +18,13 @@ from deepspeed.runtime.base_optimizer import ZeROOptimizer
 from deepspeed.utils import logger
 from deepspeed.runtime.fp16.loss_scaler import CreateLossScaler
 from deepspeed.runtime.comm.coalesced_collectives import reduce_scatter_coalesced, all_to_all_quant_reduce
-from deepspeed.runtime.utils import inf, is_model_parallel_parameter, get_only_unique_item, offload_adam_states, reload_adam_states
+from deepspeed.runtime.utils import inf, is_model_parallel_parameter, get_only_unique_item
 from deepspeed.runtime.zero.partition_parameters import *
 from deepspeed.runtime.zero.config import ZeroStageEnum
 from deepspeed.runtime.zero.offload_config import OffloadDeviceEnum, OffloadStateTypeEnum
 from deepspeed.runtime.zero.parameter_offload import DeepSpeedZeRoOffload
 from deepspeed.runtime.zero.utils import apply_to_tensors_only, get_mapping_to_flat_buffer
+from deepspeed.runtime.zero.offload_states import offload_adam_states, reload_adam_states
 from deepspeed.ops.adam import DeepSpeedCPUAdam
 from deepspeed.runtime.swap_tensor.partitioned_param_swapper import PartitionedParamStatus
 from deepspeed.runtime.swap_tensor.optimizer_utils import OptimizerSwapper
