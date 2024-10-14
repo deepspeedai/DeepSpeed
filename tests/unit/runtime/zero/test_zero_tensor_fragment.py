@@ -13,9 +13,9 @@ from unit.util import bf16_required_version_check
 
 import deepspeed
 from deepspeed.utils import safe_get_full_fp32_param, safe_get_full_grad, safe_get_full_optimizer_state
-from deepspeed.utils import safe_set_full_fp32_param, safe_set_full_optimizer_state
+from deepspeed.utils import safe_set_full_fp32_param, safe_set_full_grad, safe_set_full_optimizer_state
 from deepspeed.utils import safe_get_local_fp32_param, safe_get_local_grad, safe_get_local_optimizer_state
-from deepspeed.utils import safe_set_local_fp32_param, safe_set_local_optimizer_state
+from deepspeed.utils import safe_set_local_fp32_param, safe_set_local_grad, safe_set_local_optimizer_state
 from deepspeed.runtime.zero.offload_config import OffloadDeviceEnum
 from deepspeed.ops.aio import AsyncIOBuilder
 from deepspeed.accelerator import get_accelerator
@@ -23,6 +23,7 @@ from deepspeed.accelerator import get_accelerator
 WEIGHT_KEY = 'weight'
 FIRST_ORDER_KEY = 'exp_avg'
 SECOND_ORDER_KEY = 'exp_avg_sq'
+GRADIENT_KEY = 'gradient'
 
 
 def validate_tensor(model, api_type, opt_states):
@@ -180,13 +181,14 @@ class TestTensorFragmentGet(DistributedTest):
         run_fragmented_model(model, config_dict, hidden_dim, torch.bfloat16, validate_after_bwd, validate_after_step)
 
 
-def create_random_values(model, key_list, group, use_cuda=True):
+def create_random_values(model, key_list, group, grad_dtype, use_cuda=True):
     param_values = {}
     for n, lp in model.named_parameters():
         param_shape = lp.ds_shape if hasattr(lp, 'ds_id') else lp.shape
         param_values[n] = {}
         for key in key_list:
-            rand_value = torch.rand(param_shape, dtype=torch.float32, device=model.device)
+            dtype = grad_dtype if key == GRADIENT_KEY else torch.float32
+            rand_value = torch.rand(param_shape, dtype=dtype, device=model.device)
             dist.broadcast(rand_value, src=0, group=group)
             param_values[n][key] = rand_value
     return param_values
@@ -195,7 +197,9 @@ def create_random_values(model, key_list, group, use_cuda=True):
 def set_param_values_with_dict(model, value_dict):
     for n, lp in model.named_parameters():
         for key, value_tensor in value_dict[n].items():
-            if key == WEIGHT_KEY:
+            if key == GRADIENT_KEY:
+                safe_set_full_grad(lp, value_tensor)
+            elif key == WEIGHT_KEY:
                 safe_set_full_fp32_param(lp, value_tensor)
             else:
                 safe_set_full_optimizer_state(lp, value_tensor, key)
@@ -204,21 +208,25 @@ def set_param_values_with_dict(model, value_dict):
 def validate_param_values_with_dict(model, value_dict):
     for n, lp in model.named_parameters():
         for key, expected_tensor in value_dict[n].items():
-            if key == WEIGHT_KEY:
+            if key == GRADIENT_KEY:
+                actual_tensor = safe_get_full_grad(lp)
+            elif key == WEIGHT_KEY:
                 actual_tensor = safe_get_full_fp32_param(lp)
             else:
                 actual_tensor = safe_get_full_optimizer_state(lp, key)
+
             assert torch.equal(expected_tensor, actual_tensor)
 
 
-def create_random_values_for_local(model, key_list, group, use_cuda=True):
+def create_random_values_for_local(model, key_list, group, grad_dtype, use_cuda=True):
     param_values = {}
     for n, lp in model.named_parameters():
         param_shape = lp.ds_tensor.shape
         param_values[n] = {}
         for key in key_list:
             device = model.device if use_cuda else "cpu"
-            rand_value = torch.rand(param_shape, dtype=torch.float32, device=device)
+            dtype = grad_dtype if key == GRADIENT_KEY else torch.float32
+            rand_value = torch.rand(param_shape, dtype=dtype, device=device)
             # dist.broadcast(rand_value, src=0, group=group)
             param_values[n][key] = rand_value
     return param_values
@@ -228,7 +236,9 @@ def set_local_param_values_with_dict(model, value_dict):
     for n, lp in model.named_parameters():
 
         for key, value_tensor in value_dict[n].items():
-            if key == WEIGHT_KEY:
+            if key == GRADIENT_KEY:
+                safe_set_local_grad(lp, value_tensor)
+            elif key == WEIGHT_KEY:
                 safe_set_local_fp32_param(lp, value_tensor)
             else:
                 safe_set_local_optimizer_state(lp, value_tensor, key)
@@ -237,10 +247,13 @@ def set_local_param_values_with_dict(model, value_dict):
 def validate_local_param_values_with_dict(model, value_dict):
     for n, lp in model.named_parameters():
         for key, expected_tensor in value_dict[n].items():
-            if key == WEIGHT_KEY:
+            if key == GRADIENT_KEY:
+                actual_tensor = safe_get_local_grad(lp)
+            elif key == WEIGHT_KEY:
                 actual_tensor = safe_get_local_fp32_param(lp)
             else:
                 actual_tensor = safe_get_local_optimizer_state(lp, key)
+
             assert torch.equal(expected_tensor, actual_tensor)
 
 
@@ -325,12 +338,20 @@ class TestTensorFragmentUpdate(DistributedTest):
 
         dist.barrier()
 
-        def validate_func(model):
-            optim_keys = [WEIGHT_KEY, FIRST_ORDER_KEY, SECOND_ORDER_KEY]
+        def after_bwd_validate_func(model):
+            state_keys = [WEIGHT_KEY, GRADIENT_KEY]
             helper_funcs = helper_funcs_mapping[api_type]
             optim_state_values = helper_funcs["create_random_values"](
-                model, optim_keys, group, use_cuda=offload_device == OffloadDeviceEnum.none)
+                model, state_keys, group, grad_dtype=dtype, use_cuda=offload_device == OffloadDeviceEnum.none)
             helper_funcs["set_param_values_with_dict"](model, optim_state_values)
             helper_funcs["validate_param_values_with_dict"](model, optim_state_values)
 
-        run_fragmented_model(model, config_dict, hidden_dim, dtype, lambda _: None, validate_func)
+        def after_step_validate_func(model):
+            state_keys = [WEIGHT_KEY, FIRST_ORDER_KEY, SECOND_ORDER_KEY]
+            helper_funcs = helper_funcs_mapping[api_type]
+            optim_state_values = helper_funcs["create_random_values"](
+                model, state_keys, group, grad_dtype=dtype, use_cuda=offload_device == OffloadDeviceEnum.none)
+            helper_funcs["set_param_values_with_dict"](model, optim_state_values)
+            helper_funcs["validate_param_values_with_dict"](model, optim_state_values)
+
+        run_fragmented_model(model, config_dict, hidden_dim, dtype, after_bwd_validate_func, after_step_validate_func)
