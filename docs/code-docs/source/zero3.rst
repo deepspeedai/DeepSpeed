@@ -369,13 +369,13 @@ These routines can be used in a training loop as shown in the following snippet.
     from deepspeed.utils import safe_get_full_fp32_param, safe_get_full_grad, safe_get_full_optimizer_state
     for n, lp in model.named_parameters():
         # 1. Access the full states
-        # 1) gradient lookup
+        #  1.1) gradient lookup
         # For zero1 and zero2, gradient lookup must be called after `backward` and before `step`
         # For zero3, gradient lookup must be called after `backward`
         hp_grad = safe_get_full_grad(lp)
 
 
-        # 2) fp32 and optim states can probably be called anywhere in the training loop, but will be updated after `step`
+        # 1.2) fp32 and optim states can probably be called anywhere in the training loop, but will be updated after `step`
         hp = safe_get_full_fp32_param(lp)
         exp_avg = safe_get_full_optimizer_state(lp, "exp_avg")
         exp_avg_sq = safe_get_full_optimizer_state(lp, "exp_avg_sq")
@@ -396,40 +396,70 @@ These routines can be used in a training loop as shown in the following snippet.
 Modifying Partitioned States
 ----------------------------
 
-Sometimes, a user may want to modify parameters or optimizer states outside of the regular training loop. This is currently difficult in ZeRO training because of partitioning. To overcome that, DeepSpeed provides the following routines for modifying the fp32 master parameters and the fp32 optimizer states.
+Sometimes, a user may want to modify parameters, gradients, or optimizer states outside of the regular training loop. This is currently difficult in ZeRO training because of partitioning. To overcome that, DeepSpeed provides the following routines for modifying the fp32 master parameters and the fp32 optimizer states.
 
 .. autofunction:: deepspeed.utils.safe_set_full_fp32_param
 
 .. autofunction:: deepspeed.utils.safe_set_full_optimizer_state
 
+.. autofunction:: deepspeed.utils.safe_set_full_grad
+
 .. autofunction:: deepspeed.utils.safe_set_local_fp32_param
+
+.. autofunction:: deepspeed.utils.safe_set_local_grad
 
 .. autofunction:: deepspeed.utils.safe_set_local_optimizer_state
 
-These routines can be used at any point after initialization of the DeepSpeed engine (i.e., ``deepspeed.initialize()``) as shown in the following snippet.
+The routines for modifying parameters and optimizer states can be used at any point after initialization of the DeepSpeed engine (i.e., ``deepspeed.initialize()``) as shown in the following snippet.
 
 .. code-block:: python
 
     [...]
+    from deepspeed.runtime.zero.utils import is_zero_param
     from deepspeed.utils import safe_set_full_fp32_param, safe_set_full_optimizer_state
     from deepspeed.utils import safe_set_local_fp32_param, safe_set_local_optimizer_state
     # Here is an example to zero all the fp32 parameters and optimizer states.
     for n, lp in model.named_parameters():
-        # 1. For zero stage 1 or 2, set the full fp32 and their full optim states
-        zero_tensor = torch.zeros_like(lp)
+        # 1. For zero stage 1, 2, or 3 set the full fp32 and their full optim states
+        zero_tensor = torch.zeros(lp.ds_shape) if is_zero_param(lp) else torch.zeros(lp.shape)
 
         safe_set_full_fp32_param(lp, zero_tensor)
         safe_get_full_optimizer_state(lp, zero_tensor, "exp_avg")
         safe_get_full_optimizer_state(lp, zero_tensor, "exp_avg_sq")
 
         # 2. For zero stage 3, each process sets its local fp32 parameters and their local optimizer states individually
-        zero_tensor_local = torch.zeros_like(lp.ds_tensor.shape)
+        zero_tensor_local = torch.zeros(lp.ds_tensor.shape)
 
         safe_set_local_fp32_param(lp, zero_tensor_local)
         safe_set_local_optimizer_state(lp, zero_tensor_local, "exp_avg")
         safe_set_local_optimizer_state(lp, zero_tensor_local, "exp_avg_sq")
 
     [...]
+
+
+The routines for modifying gradients can be used after ``backward`` but before ``step`` as shown in the following snippet.
+
+.. code-block:: python
+
+    backward(loss)
+    [...]
+    from deepspeed.runtime.zero.utils import is_zero_param
+    from deepspeed.utils import safe_set_full_grad, safe_set_local_grad
+    # Here is an example of how to zero all the gradients.
+    for n, lp in model.named_parameters():
+        # 1. For zero stage 1, 2, or 3 set the full gradient.
+        zero_tensor = torch.zeros(lp.ds_shape) if is_zero_param(lp) else torch.zeros(lp.shape)
+
+        safe_set_full_grad(lp, zero_tensor)
+
+        # 2. For zero stage 3, each process sets its local gradient partition.
+        zero_tensor_local = torch.zeros_like(lp.ds_tensor.shape)
+
+        safe_set_local_grad(lp, zero_tensor_local)
+
+    [...]
+    optimizer.step()
+
 
 
 GPU Memory Management
