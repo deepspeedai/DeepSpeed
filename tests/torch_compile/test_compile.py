@@ -14,22 +14,9 @@ from torch.utils.data import Dataset, DataLoader
 
 torch._dynamo.config.cache_size_limit = 100
 
-import collections
-
 
 def get_dynamo_stats():
-    # TODO: consider deepcopy'ing the entire counters struct and
-    # adding a helper to do subtraction on it
-    return collections.Counter({
-        "calls_captured": torch._dynamo.utils.counters["stats"]["calls_captured"],
-        "unique_graphs": torch._dynamo.utils.counters["stats"]["unique_graphs"],
-        "graph_breaks": sum(torch._dynamo.utils.counters["graph_break"].values()),
-        # NB: The plus removes zero counts
-        "unique_graph_breaks": len(+torch._dynamo.utils.counters["graph_break"]),
-        "autograd_captures": torch._dynamo.utils.counters["compiled_autograd"]["captures"],
-        "autograd_compiles": torch._dynamo.utils.counters["compiled_autograd"]["compiles"],
-        "cudagraph_skips": torch._dynamo.utils.counters["inductor"]["cudagraph_skips"],
-    })
+    return torch._dynamo.utils.counters["graph_break"]
 
 
 class RandomDataset(Dataset):
@@ -70,7 +57,7 @@ parser = argparse.ArgumentParser()
 parser.add_argument('--local_rank', type=int, default=-1, help='local rank passed from distributed launcher')
 parser.add_argument('--deepspeed_config',
                     type=str,
-                    default='ds_config.json',
+                    default='ds_config_z3.json',
                     help='path to DeepSpeed configuration file')
 cmd_args = parser.parse_args()
 
@@ -81,6 +68,11 @@ model_engine.compile()
 residual = torch.rand(256, 256, dtype=torch.float).to(get_accelerator().current_device_name())
 
 start_stats = get_dynamo_stats()
+
+if comm.get_rank() == 0:
+    #print(dynamo_stats['graph_breaks'])
+    for item in start_stats.items():
+        print(item)
 
 for step, batch in enumerate(rand_loader):
     if step % 10 == 0 and comm.get_rank() == 0:
@@ -93,7 +85,14 @@ for step, batch in enumerate(rand_loader):
     model_engine.step()
 
 dynamo_stats = get_dynamo_stats()
-dynamo_stats.subtract(start_stats)
 
 if comm.get_rank() == 0:
-    print(dynamo_stats)
+    # print break down of graph break stats with markdown, print in table format, start with reason, then count
+    # print a tag 'dynamo_output' before each line to allow post processing
+    print("dynamo_output | Reason | Count |")
+    print("dynamo_output | ------ | ----- |")
+    for item in dynamo_stats.items():
+        # replace '|' in item[0] with a literal '|' to avoid mess with table format
+        item = (item[0].replace('|', r'\|'), item[1])
+        print(f"dynamo_output | {item[0]} | {item[1]} |")
+    print(f"dynamo_output | Total | {sum(dynamo_stats.values())} |")

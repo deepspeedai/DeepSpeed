@@ -51,9 +51,15 @@ jobs:
     - name: Compile Status
       shell: bash
       run: |
+        echo "# torch.compile graph breaks" >> $GITHUB_STEP_SUMMARY
         export FI_HMEM=system
         ulimit -n 1048575
         cd tests/torch_compile
         export ZE_AFFINITY_MASK=0,1
-        deepspeed test_compile.py --deepspeed_config ds_config.json 2>&1 | tee log.txt
-        cat log.txt |  grep "'graph_breaks'" | sed 's/,/ /g' | awk '{print $2}' >> $GITHUB_STEP_SUMMARY
+        echo "## ZeRO stage 3" >> $GITHUB_STEP_SUMMARY
+        deepspeed test_compile.py --deepspeed_config ds_config_z3.json 2>&1 | tee log_z3.txt
+        # for each line start with 'dynamo_output', extract the second field and following fields and append to GITHUB_STEP_SUMMARY using awk
+        cat log_z3.txt | awk '/^dynamo_output/ {$1=""; print $0}' >> $GITHUB_STEP_SUMMARY
+        echo "## ZeRO stage 2" >> $GITHUB_STEP_SUMMARY
+        deepspeed test_compile.py --deepspeed_config ds_config_z2.json 2>&1 | tee log_z2.txt
+        cat log_z2.txt | awk '/^dynamo_output/ {$1=""; print $0}' >> $GITHUB_STEP_SUMMARY
