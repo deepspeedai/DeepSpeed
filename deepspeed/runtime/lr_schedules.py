@@ -247,6 +247,12 @@ def get_lr_from_config(config):
     return lr_params[WARMUP_MAX_LR], ''
 
 
+def update_lr(param_groups, lrs):
+    for param_group, lr in zip(param_groups, lrs):
+        param_group['lr'] = lr
+    return [group['lr'] for group in param_groups]
+
+
 """
 Only optimizers that are subclass of torch.optim.Optimizer are supported. So check the passed optimizer and wrapped
 optimizer to see if requirement is satisfied.
@@ -328,7 +334,7 @@ class LRRangeTest(object):
         self.interval_fn = self._staircase_interval if lr_range_test_staircase else self._continuous_interval
 
         if last_batch_iteration == -1:
-            self._update_optimizer(self.min_lr)
+            self._last_lr = update_lr(self.optimizer.param_groups, self.min_lr)
 
     def _staircase_interval(self):
         return math.floor(float(self.last_batch_iteration + 1) / self.step_size)
@@ -349,16 +355,11 @@ class LRRangeTest(object):
         assert getattr(self, '_last_lr', None) is not None, "need to call step() first"
         return self._last_lr
 
-    def _update_optimizer(self, group_lrs):
-        for param_group, lr in zip(self.optimizer.param_groups, group_lrs):
-            param_group['lr'] = lr
-
     def step(self, batch_iteration=None):
         if batch_iteration is None:
             batch_iteration = self.last_batch_iteration + 1
         self.last_batch_iteration = batch_iteration
-        self._update_optimizer(self.get_lr())
-        self._last_lr = [group['lr'] for group in self.optimizer.param_groups]
+        self._last_lr = update_lr(self.optimizer.param_groups, self.get_lr())
 
     def state_dict(self):
         return {'last_batch_iteration': self.last_batch_iteration}
@@ -615,9 +616,7 @@ class OneCycle(object):
             batch_iteration = self.last_batch_iteration + 1
 
         self.last_batch_iteration = batch_iteration
-        for param_group, lr in zip(self.optimizer.param_groups, self.get_lr()):
-            param_group['lr'] = lr
-        self._last_lr = [group['lr'] for group in self.optimizer.param_groups]
+        self._last_lr = update_lr(self.optimizer.param_groups, self.get_lr())
 
         if self.cycle_momentum:
             momentums = self.get_mom()
@@ -675,11 +674,14 @@ class WarmupLR(object):
         self.warmup_type = warmup_type
         self.inverse_log_warm_up = 1.0 / math.log(self.warmup_num_steps)
         self.last_batch_iteration = last_batch_iteration
+        # Initialize lr in optimizer
+        if last_batch_iteration == -1:
+            self._last_lr = update_lr(self.optimizer.param_groups, self.get_lr())
 
     def get_lr(self):
         if self.last_batch_iteration < 0:
             logger.warning("Attempting to get learning rate from scheduler before it has started")
-            return [0.0]
+            return self.min_lrs
         gamma = self._get_gamma()
         return [min_lr + (delta_lr * gamma) for min_lr, delta_lr in zip(self.min_lrs, self.delta_lrs)]
 
@@ -693,9 +695,7 @@ class WarmupLR(object):
         if last_batch_iteration is None:
             last_batch_iteration = self.last_batch_iteration + 1
         self.last_batch_iteration = last_batch_iteration
-        for param_group, lr in zip(self.optimizer.param_groups, self.get_lr()):
-            param_group['lr'] = lr
-        self._last_lr = [group['lr'] for group in self.optimizer.param_groups]
+        self._last_lr = update_lr(self.optimizer.param_groups, self.get_lr())
 
     def state_dict(self):
         return {'last_batch_iteration': self.last_batch_iteration}
@@ -819,6 +819,10 @@ class WarmupCosineLR(object):
                 total_num_steps, warmup_num_steps))
         self.org_lrs = [group['lr'] for group in self.optimizer.param_groups]
 
+        # Initialize lrs in optimizer groups
+        if last_batch_iteration == -1:
+            self._last_lr = update_lr(self.optimizer.param_groups, self.get_lr())
+
     def get_lr_ratio(self):
         if self.last_batch_iteration < 0:
             logger.warning("Attempting to get learning rate from scheduler before it has started")
@@ -844,11 +848,7 @@ class WarmupCosineLR(object):
         if last_batch_iteration is None:
             last_batch_iteration = self.last_batch_iteration + 1
         self.last_batch_iteration = last_batch_iteration
-
-        lrs = self.get_lr()
-        for param_group, lr in zip(self.optimizer.param_groups, lrs):
-            param_group['lr'] = lr
-        self._last_lr = [group['lr'] for group in self.optimizer.param_groups]
+        self._last_lr = update_lr(self.optimizer.param_groups, self.get_lr())
 
     def get_lr(self):
         if self.last_batch_iteration < 0:
