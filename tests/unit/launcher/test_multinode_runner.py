@@ -32,6 +32,27 @@ def test_openmpi_runner(runner_info):
     runner = mnrunner.OpenMPIRunner(args, world_info, resource_pool)
     cmd = runner.get_cmd(env, resource_pool)
     assert cmd[0] == 'mpirun'
+    assert 'eth0' in cmd
+
+
+def test_btl_nic_openmpi_runner(runner_info):
+    env, resource_pool, world_info, _ = runner_info
+    args = parse_args(['--launcher_arg', '-mca btl_tcp_if_include eth1', 'test_launcher.py'])
+
+    runner = mnrunner.OpenMPIRunner(args, world_info, resource_pool)
+    cmd = runner.get_cmd(env, resource_pool)
+    assert 'eth0' not in cmd
+    assert 'eth1' in cmd
+
+
+def test_btl_nic_two_dashes_openmpi_runner(runner_info):
+    env, resource_pool, world_info, _ = runner_info
+    args = parse_args(['--launcher_arg', '--mca btl_tcp_if_include eth1', 'test_launcher.py'])
+
+    runner = mnrunner.OpenMPIRunner(args, world_info, resource_pool)
+    cmd = runner.get_cmd(env, resource_pool)
+    assert 'eth0' not in cmd
+    assert 'eth1' in cmd
 
 
 def test_mpich_runner(runner_info):
