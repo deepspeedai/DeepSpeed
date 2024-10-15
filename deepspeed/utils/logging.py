@@ -7,6 +7,8 @@ import functools
 import logging
 import sys
 import os
+import torch
+from deepspeed.runtime.compiler import is_compile_supported
 
 log_levels = {
     "debug": logging.DEBUG,
@@ -18,6 +20,31 @@ log_levels = {
 
 
 class LoggerFactory:
+
+    def create_warning_filter(logger):
+        warn = False
+
+        def warn_once(record):
+            nonlocal warn
+            if is_compile_supported() and torch.compiler.is_compiling() and not warn:
+                warn = True
+                logger.warning("To avoid graph breaks caused by logger in compile-mode, it is recommended to"
+                               " disable logging by setting env var DISABLE_LOGS_WHILE_COMPILING=1")
+            return True
+
+        return warn_once
+
+    @staticmethod
+    def logging_decorator(func):
+
+        @functools.wraps(func)
+        def wrapper(*args, **kwargs):
+            if torch.compiler.is_compiling():
+                return
+            else:
+                return func(*args, **kwargs)
+
+        return wrapper
 
     @staticmethod
     def create_logger(name=None, level=logging.INFO):
@@ -44,6 +71,12 @@ class LoggerFactory:
         ch.setLevel(level)
         ch.setFormatter(formatter)
         logger_.addHandler(ch)
+        if os.getenv("DISABLE_LOGS_WHILE_COMPILING", "0") == "1":
+            for method in ['info', 'debug', 'error', 'warning', 'critical', 'exception']:
+                original_logger = getattr(logger_, method)
+                setattr(logger_, method, LoggerFactory.logging_decorator(original_logger))
+        else:
+            logger_.addFilter(LoggerFactory.create_warning_filter(logger_))
         return logger_
 
 
