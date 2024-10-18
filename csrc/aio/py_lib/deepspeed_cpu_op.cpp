@@ -38,7 +38,10 @@ void cpu_op_desc_t::finish()
 {
     if (_use_bounce_buffer) {
         if (_read_op) {
-            if (_buffer.is_cuda()) { _buffer.copy_(_cpu_buffer.to(torch::kCUDA)); }
+            if (_buffer.is_cuda()) {
+                _buffer.copy_(_cpu_buffer.to(torch::Device(torch::kCUDA, _buffer.get_device()),
+                                             /*non_blocking=*/true));
+            }
             if (_buffer.is_xpu()) { _buffer.copy_(_cpu_buffer.to(torch::kXPU)); }
             if (_buffer.is_cpu()) { _buffer.copy_(_cpu_buffer); }
 #if defined(__ENABLE_CANN__)
