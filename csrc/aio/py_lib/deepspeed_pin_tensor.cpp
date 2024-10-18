@@ -15,6 +15,7 @@ deepspeed_pin_tensor_t::~deepspeed_pin_tensor_t()
 {
     for (auto iter = _locked_tensors.begin(); iter != _locked_tensors.end(); ++iter) {
         munlock(iter->first, iter->second);
+        std::free((void*)iter->first);
     }
     _locked_tensors.clear();
 }
@@ -43,6 +44,7 @@ bool deepspeed_pin_tensor_t::free(torch::Tensor& locked_tensor)
     auto addr = locked_tensor.data_ptr();
     if (_locked_tensors.find(addr) != _locked_tensors.end()) {
         munlock(addr, _locked_tensors[addr]);
+        std::free(addr);
         _locked_tensors.erase(addr);
         return true;
     }
