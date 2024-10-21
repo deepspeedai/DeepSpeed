@@ -36,7 +36,7 @@ jobs:
   unit-tests:
     runs-on: [self-hosted, intel, xpu]
     container:
-      image: intel/oneapi-basekit:2024.1.1-devel-ubuntu22.04
+      image: intel/oneapi-basekit:2024.2.1-0-devel-ubuntu22.04
       ports:
         - 80
       options: --privileged -it --rm --device /dev/dri:/dev/dri -v /dev/dri/by-path:/dev/dri/by-path --ipc=host --cap-add=ALL
@@ -47,12 +47,11 @@ jobs:
       run: |
         apt-get update
         apt-get install clinfo libaio-dev python3-pip -y
-        pip install torch==2.1.0.post2 -f https://developer.intel.com/ipex-whl-stable-xpu
-        pip install intel-extension-for-pytorch==2.1.30+xpu -f https://developer.intel.com/ipex-whl-stable-xpu
-        pip install intel-extension-for-pytorch-deepspeed==2.1.30 -f https://developer.intel.com/ipex-whl-stable-xpu
-        pip install oneccl_bind_pt==2.1.300+xpu -f https://developer.intel.com/ipex-whl-stable-xpu
-        pip install torchvision==0.16.0.post2 -f https://developer.intel.com/ipex-whl-stable-xpu
-        pip install py-cpuinfo numpy==1.26
+        pip install torch==2.3.1 -f https://pytorch-extension.intel.com/release-whl/stable/xpu/us/torch/
+        pip install intel-extension-for-pytorch==2.3.110+xpu -f https://pytorch-extension.intel.com/release-whl/stable/xpu/us/intel-extension-for-pytorch/
+        pip install oneccl_bind_pt==2.3.100+xpu -f https://pytorch-extension.intel.com/release-whl/stable/xpu/us/oneccl-bind-pt/
+        pip install torchvision==0.18.1 -f https://pytorch-extension.intel.com/release-whl/stable/xpu/us/torchvision/
+        pip install py-cpuinfo numpy
         pip install .[dev,autotuning]
 
     - name: Check container state
