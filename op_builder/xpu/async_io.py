@@ -31,7 +31,7 @@ class AsyncIOBuilder(OpBuilder):
             'csrc/aio/common/deepspeed_aio_types.cpp',
             'csrc/aio/py_lib/deepspeed_pin_tensor.cpp',
             'csrc/aio/py_lib/deepspeed_py_io_handle.cpp',
-            'csrc/xpu/aio/deepspeed_cpu_op.cpp',
+            'csrc/aio/py_lib/deepspeed_cpu_op.cpp',
             'csrc/aio/py_lib/deepspeed_aio_op_desc.cpp',
         ]
 
