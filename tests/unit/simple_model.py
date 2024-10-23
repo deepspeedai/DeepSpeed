@@ -79,7 +79,7 @@ class Curriculum_SimpleModel(SimpleModel):
 
 class SimpleMoEModel(torch.nn.Module):
 
-    def __init__(self, hidden_dim, num_experts=4, ep_size=1, use_residual=False):
+    def __init__(self, hidden_dim, num_experts=4, ep_size=1, use_residual=False, use_rts=True):
         super(SimpleMoEModel, self).__init__()
         self.linear1 = torch.nn.Linear(hidden_dim, hidden_dim)
         expert = torch.nn.Sequential(torch.nn.Linear(hidden_dim, hidden_dim), torch.nn.Linear(hidden_dim, hidden_dim))
@@ -89,7 +89,8 @@ class SimpleMoEModel(torch.nn.Module):
                          ep_size=ep_size,
                          use_residual=use_residual,
                          num_experts=num_experts,
-                         k=1)
+                         k=1,
+                         use_rts=use_rts)
         # interleaving MoE modules with dense to create an opportunity
         # for gradients to be merged in ZeRO stage 2 average_tensor reduce bucket
         self.linear2 = torch.nn.Linear(hidden_dim, hidden_dim)
@@ -98,7 +99,8 @@ class SimpleMoEModel(torch.nn.Module):
                          ep_size=ep_size,
                          use_residual=use_residual,
                          num_experts=num_experts,
-                         k=1)
+                         k=1,
+                         use_rts=use_rts)
         self.linear3 = torch.nn.Linear(hidden_dim, hidden_dim)
         self.cross_entropy_loss = torch.nn.CrossEntropyLoss()
 
