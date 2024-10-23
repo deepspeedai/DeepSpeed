@@ -345,7 +345,7 @@ def replace_transformer_layer(orig_layer_impl, model, checkpoint_dict, config, m
                                                       "weight") and not module.embed_out.weight.is_meta and isinstance(
                                                           module.embed_out, torch.nn.Linear):
             module = replace_wo_policy(module, ("embed_out", ), 0, "embed_out")
-        elif hasattr(module.language_model, "lm_head"):
+        elif hasattr(module, "language_model") and hasattr(module.language_model, "lm_head"):
             module = replace_wo_policy(module.language_model, ("lm_head", ), 0, "lm_head")
         return module
 
