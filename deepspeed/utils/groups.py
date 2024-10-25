@@ -484,6 +484,8 @@ def _get_sequence_parallel_rank():
     global mpu
     if mpu is not None and hasattr(mpu, 'get_sequence_parallel_rank'):
         return mpu.get_sequence_parallel_rank()
+    if mesh_device is not None:
+        return dist.get_rank(mesh_device.get_group(mesh_dim="sequence_parallel"))
     return 0
 
 
