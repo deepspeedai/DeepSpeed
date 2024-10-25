@@ -10,6 +10,8 @@ from torch.nn import Module
 
 import deepspeed.comm as dist
 from deepspeed.accelerator import get_accelerator
+from deepspeed.module_inject.tp_shard import get_shard_size_list, set_num_kv_heads, get_num_kv_heads
+from deepspeed.utils import groups
 
 
 def post_all2all(scatter_idx, batch_dim_idx, seq_world_size, bs, seq_len, num_head, head_dim):
@@ -38,8 +40,132 @@ def post_all2all(scatter_idx, batch_dim_idx, seq_world_size, bs, seq_len, num_he
     return post_func
 
 
+def uneven_heads_all2all(input, scatter_idx, gather_idx, batch_dim_idx, group):
+    seq_world_size = dist.get_world_size(group)
+    inp_shape = list(input.shape)
+    assert batch_dim_idx in [0, 1], "batch_dim_idx must be either 0 or 1"
+
+    if not (scatter_idx < 2):
+        input_splits = get_shard_size_list(inp_shape[scatter_idx], seq_world_size)
+        input = input.transpose(0, scatter_idx).contiguous()
+        local_heads = input_splits[groups._get_sequence_parallel_rank()]
+        output_splits = [local_heads] * seq_world_size
+
+        output_buffer_shape = [seq_world_size * local_heads] + list(input.shape[1:])
+        output = torch.empty(output_buffer_shape, device=input.device, dtype=input.dtype)
+        dist.all_to_all_single(output,input,output_split_sizes=output_splits,\
+            input_split_sizes=input_splits,group=group)
+        ###[seq_ws*local_heads, ...] to [seq_ws, local_heads, ...]
+        output = output.view(seq_world_size, local_heads, *output.shape[1:])
+        ###[seq_ws,local_heads,b,seq_len,...] to [seq_ws,seq_len,b,local_heads,...]
+
+        ### batch_dim_idx=0 [seq_ws,local_heads,seq_len,b,...] to [b, seq_ws, seq_len, local_heads ...]
+        ### batch_dim_idx=1 [seq_ws,local_heads,b,seq_len,...] to [seq_ws,seq_len,b,local_heads,...]
+        if batch_dim_idx == 0:
+            order = [3, 0, 2, 1] + list(range(4, len(output.shape)))
+            output = output.permute(order).contiguous()
+            ###[b, seq_ws*local_seq_len, local_heads,...]
+            output = output.view(output.shape[0], inp_shape[gather_idx] * seq_world_size,
+                                 *output.shape[3:]).contiguous()
+        elif batch_dim_idx == 1:
+            output = output.transpose(1, 3).contiguous()
+            ###[seq_ws*local_seq_len, b, local_heads,...]
+            output = output.view(inp_shape[gather_idx] * seq_world_size, *output.shape[2:]).contiguous()
+    else:
+        # The compatibility handling of 4D and 3D tensors, standardizing to 3D.
+        input = input.reshape(input.shape[0], input.shape[1], -1)
+
+        if batch_dim_idx == 0:  #b,s,h
+            input = input.permute(1, 2, 0).contiguous()  #s,h,b
+        elif batch_dim_idx == 1:  #s,b,h
+            input = input.transpose(1, 2).contiguous()  #s,h,b
+        seq_len, h, batch_size = input.shape
+        num_local_heads_list = get_shard_size_list(get_num_kv_heads(), seq_world_size)
+        local_heads = num_local_heads_list[groups._get_sequence_parallel_rank()]
+        h_dim = h // local_heads
+        local_seq_len = seq_len // seq_world_size
+
+        input = input.view(seq_len * h, batch_size)
+        local_seq_len_with_heads = int(input.shape[0] / seq_world_size)  # dim size of local_seq_len*local_heads*hdim
+        input_splits = [local_seq_len_with_heads] * seq_world_size
+        coeff = local_seq_len_with_heads // local_heads  #per head: dim size of local_seq_len*hdim
+
+        #uneven seq_world_size coeff,  total_heads/local_heads.
+        heads_scale_coeff = get_num_kv_heads() / local_heads
+
+        output_splits = [num_local_heads * coeff for num_local_heads in num_local_heads_list]
+        output_buff_d1_size = int(heads_scale_coeff * local_seq_len_with_heads)
+        total_h = int(inp_shape[gather_idx] * heads_scale_coeff)
+        output = torch.empty(output_buff_d1_size, input.shape[1], device=input.device, dtype=input.dtype)
+        dist.all_to_all_single(output,input,output_split_sizes=output_splits, \
+            input_split_sizes=input_splits,group=group)
+        ##################
+        #suppose 7 heads divide into 4 ranks [2,2,2,1]
+        #chunk_num_heads_small=floor(7/4)=1
+        #chunk_num_heads_large=ceil(7/4)=2
+        #num_chunk_heads_large=len([2,2,2])=3, all2all_buffer_counts
+        #num_chunk_heads_small=len([1])=1, all2all_buffer_counts
+        #total_num_large_heads=sum([2,2,2])=7
+        #total_num_small_heads=sum([1])=1
+
+        chunk_num_heads_small = get_num_kv_heads() // seq_world_size  # even heads compatible
+        chunk_num_heads_large = chunk_num_heads_small + 1
+        num_chunk_heads_large = get_num_kv_heads() % seq_world_size
+        num_chunk_heads_small = seq_world_size - num_chunk_heads_large
+        total_num_large_heads = num_chunk_heads_large * chunk_num_heads_large
+        total_num_small_heads = num_chunk_heads_small * chunk_num_heads_small
+
+        heads_large_combine_size = coeff * total_num_large_heads
+        heads_small_combine_size = coeff * total_num_small_heads
+        heads_large_chunk, heads_small_chunk = output.split([heads_large_combine_size, heads_small_combine_size],
+                                                            dim=0)
+        heads_large_chunk = heads_large_chunk.view(num_chunk_heads_large, local_seq_len, chunk_num_heads_large, h_dim,
+                                                   batch_size)
+        heads_small_chunk = heads_small_chunk.view(num_chunk_heads_small, local_seq_len, chunk_num_heads_small, h_dim,
+                                                   batch_size)
+        if batch_dim_idx == 0:
+            #[all2all_buffer_counts, local_seq_len, n_heads,dim,batch]->[batch,local_seq_len,all2all_buffer_counts*n_heads,dim]
+            order = [4, 1, 0, 2, 3]
+            heads_large_chunk = heads_large_chunk.permute(order).contiguous().view(batch_size, local_seq_len,
+                                                                                   total_num_large_heads, h_dim)
+            heads_small_chunk = heads_small_chunk.permute(order).contiguous().view(batch_size, local_seq_len,
+                                                                                   total_num_small_heads, h_dim)
+        elif batch_dim_idx == 1:
+            #[all2all_buffer_counts, local_seq_len, n_heads,dim,batch]->[local_seq_len,batch,all2all_buffer_counts*n_heads,dim]
+            order = [1, 4, 0, 2, 3]
+            heads_large_chunk = heads_large_chunk.permute(order).contiguous().view(local_seq_len, batch_size,
+                                                                                   total_num_large_heads, h_dim)
+            heads_small_chunk = heads_small_chunk.permute(order).contiguous().view(local_seq_len, batch_size,
+                                                                                   total_num_small_heads, h_dim)
+
+        output = torch.cat([heads_large_chunk, heads_small_chunk], dim=2).contiguous()
+
+        inp_shape[scatter_idx] = inp_shape[scatter_idx] // seq_world_size
+        output_shape=  inp_shape[: gather_idx] + \
+            [total_h,] + \
+            inp_shape[gather_idx + 1:]
+
+        output = output.view(output_shape)
+
+    return output
+
+
 def single_all_to_all(input, scatter_idx, gather_idx, batch_dim_idx, group, async_op=False, handle=None, type=None):
     seq_world_size = dist.get_world_size(group)
+    # we only need num_heads once
+    num_heads = input.shape[2]
+
+    if get_num_kv_heads() is not None or num_heads % seq_world_size != 0:
+        # Assuming here that the number of heads for q is consistent with kv
+        # If not, additional logic is required for cases like GQA
+        if get_num_kv_heads() is None:
+            assert num_heads > seq_world_size, f"Number of heads ({num_heads}) must be larger than sequence parallel size ({seq_world_size})"
+            # set heads at first call by num_total_heads.
+            # then use ``get_num_kv_heads() is not None`` to re-entry uneven path.
+            set_num_kv_heads(num_heads)
+        assert async_op == False, "uneven head sp does not support async op"
+        return uneven_heads_all2all(input, scatter_idx, gather_idx, batch_dim_idx, group)
+
     if batch_dim_idx == 0:
         # b, s, n, h
         if scatter_idx < 2:
