@@ -115,7 +115,7 @@ class FlopsProfiler(object):
                 get_accelerator().synchronize()
                 module.__start_time__ = time.time()
 
-            if not hasattr(module, "__start_time_hook_handle"):
+            if not hasattr(module, "__start_time_hook_handle__"):
                 module.__start_time_hook_handle__ = module.register_forward_pre_hook(start_time_hook)
 
             def end_time_hook(module, input, output):
