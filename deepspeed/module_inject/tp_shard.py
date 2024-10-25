@@ -24,7 +24,9 @@ def set_n_embd(num):
 
 def get_num_kv_heads():
     global num_kv_heads
-    return num_kv_heads
+    if 'num_kv_heads' in globals():
+        return num_kv_heads
+    return None
 
 
 def get_num_attention_heads():
