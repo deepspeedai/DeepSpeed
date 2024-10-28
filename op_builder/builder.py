@@ -67,7 +67,7 @@ def get_default_compute_capabilities():
             # Special treatment of CUDA 11.0 because compute_86 is not supported.
             compute_caps += ";8.0"
         else:
-            compute_caps += ";8.0;8.6"
+            compute_caps += ";8.0;8.6;9.0"
     return compute_caps
 
 
