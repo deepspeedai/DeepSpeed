@@ -131,8 +131,7 @@ def train_save_convert(ds_config, hidden_dim, load_optim, use_torch_adam, dtype,
         torch.save((model_state, optimizer_state), os.path.join(tmpdir, "baseline_state.pt"))
 
     dist.barrier()
-
-    return model, sd
+    model.destroy()
 
 
 @pytest.fixture
@@ -212,6 +211,8 @@ class TestZeROUniversalCheckpointDP(DistributedTest):
             loss = univ_model(batch[0], batch[1])
             univ_model.backward(loss)
             univ_model.step()
+
+        univ_model.destroy()
 
     @pytest.mark.world_size(2)
     def test_dp_world_size_2to2(self, baseline_ws2, tmpdir, dtype, ds_config, load_optim, use_torch_adam):
