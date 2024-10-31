@@ -277,8 +277,10 @@ def replace_transformer_layer(orig_layer_impl, model, checkpoint_dict, config, m
         if hasattr(model_config, "vision_config"):
             if "MllamaVisionEncoderLayer" in str(module):
                 num_kv_heads = _autotp.get_model_num_kv_heads(model_config.vision_config)
-            else:
+            elif hasattr(model_config, "text_config"):
                 num_kv_heads = _autotp.get_model_num_kv_heads(model_config.text_config)
+            else:
+                num_kv_heads = _autotp.get_model_num_kv_heads(model_config)
         else:
             num_kv_heads = _autotp.get_model_num_kv_heads(model_config)
 
