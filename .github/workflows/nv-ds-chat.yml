@@ -12,6 +12,7 @@ on:
         type: string
   pull_request:
     paths:
+      - ".github/workflows/nv-ds-chat.yml"
       - "deepspeed/runtime/zero/stage_1_and_2.py"
       - "deepspeed/runtime/zero/stage3.py"
       - "deepspeed/runtime/hybrid_engine.py"
@@ -42,6 +43,7 @@ jobs:
 
       - name: Install deepspeed
         run: |
+          pip install transformers==4.45.2
           pip install .[dev]
           ds_report
 
