@@ -593,8 +593,8 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
 
         return device_buffer
 
-    def _get_param_coordinator(self, training):
-        return self.parameter_offload.get_param_coordinator(training)
+    def _get_param_coordinator(self):
+        return self.parameter_offload.get_param_coordinator()
 
     def _configure_offloading(self, offload_optimizer_config, offload_param_config):
         ###################### offload optimizer setup ##################################
@@ -1874,7 +1874,7 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
         see_memory_usage(f"In step before checking overflow", force=False)
 
         print_rank_0("Finished Tracing at Beginning of Step")
-        self._get_param_coordinator(training=True).hierarchy = 0
+        self._get_param_coordinator().hierarchy = 0
 
         print_rank_0("Finished Tracing at Beginning of Step")
 
@@ -2257,8 +2257,6 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
             scaled_loss.backward()
         else:
             self.loss_scaler.backward(loss.float(), retain_graph=retain_graph)
-
-        self._get_param_coordinator(training=True).reset_step()
 
         if self.swap_optimizer:
             self.optimizer_swapper.post_backward()
