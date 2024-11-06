@@ -640,9 +640,10 @@ class PipelineEngine(DeepSpeedEngine):
             self.dp_group_loss = losses[0].clone().detach()
             agg_loss = losses[1].clone().detach()
             if additional_losses is not None:
-                self.agg_additional_losses = OrderedDict(
-                    {name: losses[2 + i].clone().detach()
-                     for i, name in enumerate(additional_losses.keys())})
+                self.agg_additional_losses = OrderedDict({
+                    name: losses[2 + i].clone().detach()
+                    for i, name in enumerate(additional_losses.keys())
+                })
         return agg_loss
 
     def set_dataloader(self, loader):
