@@ -257,8 +257,8 @@ class CheckOverflow(object):
         elif self.mpu is not None:
             if self.deepspeed is not None:
                 using_pipeline = hasattr(self.deepspeed, 'pipeline_enable_backward_allreduce')
-                if (using_pipeline and self.deepspeed.pipeline_enable_backward_allreduce is False) or (
-                        not using_pipeline and self.deepspeed.enable_backward_allreduce is False):
+                if (using_pipeline and self.deepspeed.pipeline_enable_backward_allreduce
+                        is False) or (not using_pipeline and self.deepspeed.enable_backward_allreduce is False):
                     dist.all_reduce(overflow_gpu, op=dist.ReduceOp.MAX, group=self.mpu.get_data_parallel_group())
             dist.all_reduce(overflow_gpu, op=dist.ReduceOp.MAX, group=self.mpu.get_model_parallel_group())
         elif self.deepspeed is not None and self.deepspeed.enable_backward_allreduce is False:

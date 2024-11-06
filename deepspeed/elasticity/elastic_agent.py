@@ -160,8 +160,8 @@ class DSElasticAgent(LocalElasticAgent):
                          f" Waiting {self._exit_barrier_timeout} seconds for other agents to finish.")
                 self._exit_barrier()
                 return run_result
-            elif state in {WorkerState.UNHEALTHY, WorkerState.FAILED
-                           } or len(participants) > len(rdzv_handler._state_holder.state.participants):
+            elif state in {WorkerState.UNHEALTHY, WorkerState.FAILED} or len(participants) > len(
+                    rdzv_handler._state_holder.state.participants):
                 if self._remaining_restarts > 0:
                     log.info(f"[{role}] Worker group {state.name}. "
                              f"{self._remaining_restarts}/{spec.max_restarts} attempts left;"

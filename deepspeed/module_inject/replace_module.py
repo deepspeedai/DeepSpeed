@@ -496,9 +496,10 @@ def replace_transformer_layer(orig_layer_impl, model, checkpoint_dict, config, m
         if not dist.is_initialized() or dist.get_rank() == 0:
             print("Saving tp-sharded checkpoints")
             torch.save(
-                OrderedDict({k: v
-                             for k, v in dict(replaced_module.state_dict()).items()
-                             if transformer_name not in k}), f'{config.save_mp_checkpoint_path}/{non_tp_ckpt_name}')
+                OrderedDict({
+                    k: v
+                    for k, v in dict(replaced_module.state_dict()).items() if transformer_name not in k
+                }), f'{config.save_mp_checkpoint_path}/{non_tp_ckpt_name}')
 
             dtype_reprs = {
                 torch.float32: 'float32',
