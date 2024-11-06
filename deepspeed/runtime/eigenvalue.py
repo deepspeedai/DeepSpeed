@@ -114,8 +114,8 @@ class Eigenvalue(object):
             eigenvalue_current, eigenvalue_previous = 1., 0.
 
             while (i < self.max_iter) and abs(eigenvalue_current) > 0 and (abs(
-                (eigenvalue_current - eigenvalue_previous) / eigenvalue_current) >=
-                                                                           self.tol):  # test convergence criteria
+                (eigenvalue_current - eigenvalue_previous) / eigenvalue_current)
+                                                                           >= self.tol):  # test convergence criteria
                 eigenvalue_previous = eigenvalue_current
 
                 Hv = torch.autograd.grad(grads, params, grad_outputs=v, only_inputs=True, retain_graph=True)

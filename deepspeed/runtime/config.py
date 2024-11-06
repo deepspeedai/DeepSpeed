@@ -1012,8 +1012,8 @@ class DeepSpeedConfig(object):
             self.gradient_accumulation_steps), "DeepSpeedConfig: {} is not defined".format(GRADIENT_ACCUMULATION_STEPS)
 
         if self.zero_enabled:
-            assert (self.zero_optimization_stage <=
-                    ZeroStageEnum.max_stage), "DeepSpeedConfig: Maximum supported ZeRO stage is {}".format(
+            assert (self.zero_optimization_stage
+                    <= ZeroStageEnum.max_stage), "DeepSpeedConfig: Maximum supported ZeRO stage is {}".format(
                         ZeroStageEnum.max_stage)
 
         if self.fp16_master_weights_and_gradients:

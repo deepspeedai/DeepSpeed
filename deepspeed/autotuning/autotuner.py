@@ -248,8 +248,8 @@ class Autotuner:
         return self.autotuning_config.mp_size
 
     def max_train_micro_batch_size_per_gpu(self):
-        if self.max_train_batch_size(
-        ) and self.max_train_batch_size() > 0:  # if the user specifies a max_train_batch_size
+        if self.max_train_batch_size() and self.max_train_batch_size(
+        ) > 0:  # if the user specifies a max_train_batch_size
             max_train_micro_batch_size = self.max_train_batch_size() * self.mp_size() // (
                 self.exp_num_gpus * self.exp_num_nodes)  # gradient accumulation steps >=1
             return min(self.autotuning_config.max_train_micro_batch_size_per_gpu, max_train_micro_batch_size)
@@ -964,8 +964,8 @@ class Autotuner:
                     low = mid + 1
                     self.update_records(tuning_space_name, exp, metric_val, 1)
                     used_micro_batch_sizes.append(mid)
-                    if prev_metric_val and (
-                        (metric_val - prev_metric_val) / prev_metric_val) < METRIC_PERCENT_DIFF_CONST:
+                    if prev_metric_val and ((metric_val - prev_metric_val) /
+                                            prev_metric_val) < METRIC_PERCENT_DIFF_CONST:
                         logger.info(f"performance plateaus at mbs = {low}")
                         break
                     prev_metric_val = metric_val
@@ -1026,8 +1026,8 @@ class Autotuner:
         # NUM_GPUS=$(( ${NUM_WORKERS} * ${NUM_GPUS_PER_WORKER} ))
         # DP_SIZE=$(( ${NUM_GPUS} / (${PP_SIZE} * ${MP_SIZE}) ))
         # GRAD_ACC_STEPS=$(( ${TARGET_GLOBAL_BATCH_SIZE} / (${BATCH_SIZE} * ${DP_SIZE}) ))
-        if self.max_train_batch_size(
-        ) and self.max_train_batch_size() > 0:  # if the user specifies a max_train_batch_size
+        if self.max_train_batch_size() and self.max_train_batch_size(
+        ) > 0:  # if the user specifies a max_train_batch_size
             max_train_batch_size_per_gpu = self.max_train_batch_size() * self.mp_size() // (self.exp_num_gpus *
                                                                                             self.exp_num_nodes)
         else:
