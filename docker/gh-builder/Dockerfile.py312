@@ -1,0 +1,35 @@
+# Start with NGC container
+FROM nvcr.io/nvidia/pytorch:24.03-py3
+
+# Set noninteractive mode for apt-get
+ARG DEBIAN_FRONTEND=noninteractive
+
+# Install necessary dependencies for building Python
+RUN apt-get update && apt-get install -y \
+    wget \
+    build-essential \
+    libssl-dev \
+    zlib1g-dev \
+    libbz2-dev \
+    libreadline-dev \
+    libsqlite3-dev \
+    curl \
+    libncursesw5-dev \
+    libgdbm-dev \
+    libc6-dev \
+    libffi-dev \
+    tk-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# Download and install Python 3.12
+RUN wget https://www.python.org/ftp/python/3.12.5/Python-3.12.5.tgz \
+    && tar xzf Python-3.12.5.tgz \
+    && cd Python-3.12.5 \
+    && ./configure --enable-optimizations \
+    && make altinstall \
+    && cd .. \
+    && rm -rf Python-3.12.5 Python-3.12.5.tgz
+
+# Set Python 3.12 as the default Python version
+RUN update-alternatives --install /usr/bin/python python /usr/local/bin/python3.12 1 \
+    && update-alternatives --install /usr/bin/python3 python3 /usr/local/bin/python3.12 1
