@@ -17,9 +17,9 @@ static std::unordered_map<int, std::shared_ptr<void>> s_optimizers;
 
 // C++ interface
 
-template <typename ds_params_percision_t, typename ds_state_precision_t>
-void Adagrad_Optimizer::Step_1(ds_params_percision_t* _params,
-                               ds_params_percision_t* grads,
+template <typename ds_params_precision_t, typename ds_state_precision_t>
+void Adagrad_Optimizer::Step_1(ds_params_precision_t* _params,
+                               ds_params_precision_t* grads,
                                ds_state_precision_t* _exp_avg_sq,
                                size_t _param_size)
 {
@@ -56,9 +56,9 @@ void Adagrad_Optimizer::Step_1(ds_params_percision_t* _params,
     }
 }
 
-template <typename ds_params_percision_t, typename ds_state_precision_t>
-void Adagrad_Optimizer::Step_4(ds_params_percision_t* _params,
-                               ds_params_percision_t* grads,
+template <typename ds_params_precision_t, typename ds_state_precision_t>
+void Adagrad_Optimizer::Step_4(ds_params_precision_t* _params,
+                               ds_params_precision_t* grads,
                                ds_state_precision_t* _exp_avg_sq,
                                size_t _param_size)
 {
@@ -104,9 +104,9 @@ int create_adagrad_optimizer(int optimizer_id,
     return 0;
 }
 
-template <typename ds_params_percision_t, typename ds_state_precision_t>
-void Adagrad_Optimizer::Step_8(ds_params_percision_t* _params,
-                               ds_params_percision_t* grads,
+template <typename ds_params_precision_t, typename ds_state_precision_t>
+void Adagrad_Optimizer::Step_8(ds_params_precision_t* _params,
+                               ds_params_precision_t* grads,
                                ds_state_precision_t* _exp_avg_sq,
                                size_t _param_size)
 {
@@ -121,15 +121,15 @@ void Adagrad_Optimizer::Step_8(ds_params_percision_t* _params,
                (_param_size - rounded_size));
 }
 
-template <typename ds_params_percision_t, typename ds_state_precision_t>
+template <typename ds_params_precision_t, typename ds_state_precision_t>
 void step_invoker(std::shared_ptr<Adagrad_Optimizer> opt,
                   void* _params,
                   void* grads,
                   void* _exp_avg_sq,
                   size_t _param_size)
 {
-    opt->Step_8((ds_params_percision_t*)(_params),
-                (ds_params_percision_t*)(grads),
+    opt->Step_8((ds_params_precision_t*)(_params),
+                (ds_params_precision_t*)(grads),
                 (ds_state_precision_t*)(_exp_avg_sq),
                 _param_size);
 }
@@ -139,12 +139,12 @@ std::map<std::tuple<c10::ScalarType, c10::ScalarType>,
     invokers;
 
 // Fill map with template functions for each type
-template <class ds_params_percision_t, class ds_state_precision_t>
+template <class ds_params_precision_t, class ds_state_precision_t>
 void create_invoker()
 {
-    invokers[std::tuple(c10::CppTypeToScalarType<ds_params_percision_t>(),
+    invokers[std::tuple(c10::CppTypeToScalarType<ds_params_precision_t>(),
                         c10::CppTypeToScalarType<ds_state_precision_t>())] =
-        step_invoker<ds_params_percision_t, ds_state_precision_t>;
+        step_invoker<ds_params_precision_t, ds_state_precision_t>;
 }
 struct InvokerInitializer {
     InvokerInitializer()
