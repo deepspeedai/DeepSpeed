@@ -42,7 +42,7 @@ from .module_inject import replace_transformer_layer, revert_transformer_layer
 from .utils import log_dist, OnDevice, logger
 from .comm.comm import init_distributed
 
-from .runtime import zero
+from .runtime import zero, domino
 from .runtime.compiler import is_compile_supported
 
 from .pipe import PipelineModule
