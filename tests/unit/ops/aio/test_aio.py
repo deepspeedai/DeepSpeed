@@ -35,14 +35,19 @@ def _get_local_rank():
     return 0
 
 
-def _do_ref_write(tmpdir, index=0):
+def _do_ref_write(tmpdir, index=0, file_size=IO_SIZE):
     file_suffix = f'{_get_local_rank()}_{index}'
     ref_file = os.path.join(tmpdir, f'_py_random_{file_suffix}.pt')
-    ref_buffer = os.urandom(IO_SIZE)
+    ref_buffer = os.urandom(file_size)
     with open(ref_file, 'wb') as f:
         f.write(ref_buffer)
 
     return ref_file, ref_buffer
+
+
+def _get_file_path(tmpdir, file_prefix, index=0):
+    file_suffix = f'{_get_local_rank()}_{index}'
+    return os.path.join(tmpdir, f'{file_prefix}_{file_suffix}.pt')
 
 
 def _get_test_write_file(tmpdir, index):
@@ -103,7 +108,7 @@ class TestRead(DistributedTest):
         _validate_handle_state(h, single_submit, overlap_events)
 
         ref_file, _ = _do_ref_write(tmpdir)
-        read_status = h.sync_pread(aio_buffer, ref_file)
+        read_status = h.sync_pread(aio_buffer, ref_file, 0)
         assert read_status == 1
 
         with open(ref_file, 'rb') as f:
@@ -131,7 +136,7 @@ class TestRead(DistributedTest):
         _validate_handle_state(h, single_submit, overlap_events)
 
         ref_file, _ = _do_ref_write(tmpdir)
-        read_status = h.async_pread(aio_buffer, ref_file)
+        read_status = h.async_pread(aio_buffer, ref_file, 0)
         assert read_status == 0
 
         wait_status = h.wait()
@@ -172,7 +177,7 @@ class TestWrite(DistributedTest):
 
         _validate_handle_state(h, single_submit, overlap_events)
 
-        write_status = h.sync_pwrite(aio_buffer, aio_file)
+        write_status = h.sync_pwrite(aio_buffer, aio_file, 0)
         assert write_status == 1
 
         if not use_cuda_pinned_tensor:
@@ -201,7 +206,7 @@ class TestWrite(DistributedTest):
 
         _validate_handle_state(h, single_submit, overlap_events)
 
-        write_status = h.async_pwrite(aio_buffer, aio_file)
+        write_status = h.async_pwrite(aio_buffer, aio_file, 0)
         assert write_status == 0
 
         wait_status = h.wait()
@@ -258,7 +263,7 @@ class TestAsyncQueue(DistributedTest):
         _validate_handle_state(h, single_submit, overlap_events)
 
         for i in range(async_queue):
-            read_status = h.async_pread(aio_buffers[i], ref_files[i])
+            read_status = h.async_pread(aio_buffers[i], ref_files[i], 0)
             assert read_status == 0
 
         wait_status = h.wait()
@@ -305,7 +310,7 @@ class TestAsyncQueue(DistributedTest):
         _validate_handle_state(h, single_submit, overlap_events)
 
         for i in range(async_queue):
-            read_status = h.async_pwrite(aio_buffers[i], aio_files[i])
+            read_status = h.async_pwrite(aio_buffers[i], aio_files[i], 0)
             assert read_status == 0
 
         wait_status = h.wait()
@@ -320,3 +325,79 @@ class TestAsyncQueue(DistributedTest):
 
             filecmp.clear_cache()
             assert filecmp.cmp(ref_files[i], aio_files[i], shallow=False)
+
+
+@pytest.mark.parametrize("use_cuda_pinned_tensor", [True, False])
+@pytest.mark.parametrize('file_partitions', [[1, 1, 1], [1, 1, 2], [1, 2, 1], [2, 1, 1]])
+class TestAsyncFileOffset(DistributedTest):
+    world_size = 1
+
+    def test_offset_write(self, tmpdir, file_partitions, use_cuda_pinned_tensor):
+
+        _skip_for_invalid_environment(use_cuda_pinned_tensor=use_cuda_pinned_tensor)
+        ref_file = _get_file_path(tmpdir, '_py_random')
+        aio_file = _get_file_path(tmpdir, '_aio_random')
+        partition_unit_size = BLOCK_SIZE
+        file_size = sum(file_partitions) * partition_unit_size
+
+        h = AsyncIOBuilder().load().aio_handle(BLOCK_SIZE, QUEUE_DEPTH, True, True, IO_PARALLEL)
+
+        if use_cuda_pinned_tensor:
+            data_buffer = torch.ByteTensor(list(os.urandom(file_size))).pin_memory()
+        else:
+            data_buffer = h.new_cpu_locked_tensor(file_size, torch.empty(0, dtype=torch.uint8))
+
+        file_offsets = []
+        next_offset = 0
+        for i in range(len(file_partitions)):
+            file_offsets.append(next_offset)
+            next_offset += file_partitions[i] * partition_unit_size
+
+        ref_fd = open(ref_file, 'wb')
+        for i in range(len(file_partitions)):
+            src_buffer = torch.narrow(data_buffer, 0, file_offsets[i], file_partitions[i] * partition_unit_size)
+
+            ref_fd.write(src_buffer.numpy().tobytes())
+            ref_fd.flush()
+
+            assert 1 == h.sync_pwrite(buffer=src_buffer, filename=aio_file, file_offset=file_offsets[i])
+
+            filecmp.clear_cache()
+            assert filecmp.cmp(ref_file, aio_file, shallow=False)
+
+        ref_fd.close()
+
+        if not use_cuda_pinned_tensor:
+            h.free_cpu_locked_tensor(data_buffer)
+
+    def test_offset_read(self, tmpdir, file_partitions, use_cuda_pinned_tensor):
+
+        _skip_for_invalid_environment(use_cuda_pinned_tensor=use_cuda_pinned_tensor)
+        partition_unit_size = BLOCK_SIZE
+        file_size = sum(file_partitions) * partition_unit_size
+        ref_file, _ = _do_ref_write(tmpdir, 0, file_size)
+        h = AsyncIOBuilder().load().aio_handle(BLOCK_SIZE, QUEUE_DEPTH, True, True, IO_PARALLEL)
+
+        if use_cuda_pinned_tensor:
+            data_buffer = torch.zeros(file_size, dtype=torch.uint8, device='cpu').pin_memory()
+        else:
+            data_buffer = h.new_cpu_locked_tensor(file_size, torch.empty(0, dtype=torch.uint8))
+
+        file_offsets = []
+        next_offset = 0
+        for i in range(len(file_partitions)):
+            file_offsets.append(next_offset)
+            next_offset += file_partitions[i] * partition_unit_size
+
+        with open(ref_file, 'rb') as ref_fd:
+            for i in range(len(file_partitions)):
+                ref_fd.seek(file_offsets[i])
+                bytes_to_read = file_partitions[i] * partition_unit_size
+                ref_buf = list(ref_fd.read(bytes_to_read))
+
+                dst_tensor = torch.narrow(data_buffer, 0, 0, bytes_to_read)
+                assert 1 == h.sync_pread(dst_tensor, ref_file, file_offsets[i])
+                assert dst_tensor.tolist() == ref_buf
+
+        if not use_cuda_pinned_tensor:
+            h.free_cpu_locked_tensor(data_buffer)
