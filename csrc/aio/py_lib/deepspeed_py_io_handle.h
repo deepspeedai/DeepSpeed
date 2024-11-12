@@ -38,27 +38,35 @@ struct deepspeed_io_handle_t {
     const bool get_overlap_events() const;
     const int get_intra_op_parallelism() const;
 
-    int read(torch::Tensor& buffer, const char* filename, const bool validate);
+    int read(torch::Tensor& buffer,
+             const char* filename,
+             const bool validate,
+             const int64_t file_offset);
 
-    int write(const torch::Tensor& buffer, const char* filename, const bool validate);
+    int write(const torch::Tensor& buffer,
+              const char* filename,
+              const bool validate,
+              const int64_t file_offset);
 
     int pread(const torch::Tensor& buffer,
               const char* filename,
               const bool validate,
-              const bool async);
+              const bool async,
+              const int64_t file_offset);
 
     int pwrite(const torch::Tensor& buffer,
                const char* filename,
                const bool validate,
-               const bool async);
+               const bool async,
+               const int64_t file_offset);
 
-    int sync_pread(torch::Tensor& buffer, const char* filename);
+    int sync_pread(torch::Tensor& buffer, const char* filename, const int64_t file_offset);
 
-    int sync_pwrite(const torch::Tensor& buffer, const char* filename);
+    int sync_pwrite(const torch::Tensor& buffer, const char* filename, const int64_t file_offset);
 
-    int async_pread(torch::Tensor& buffer, const char* filename);
+    int async_pread(torch::Tensor& buffer, const char* filename, const int64_t file_offset);
 
-    int async_pwrite(const torch::Tensor& buffer, const char* filename);
+    int async_pwrite(const torch::Tensor& buffer, const char* filename, const int64_t file_offset);
 
     // TODO: Make API's args to be shape and dtype.
     torch::Tensor new_cpu_locked_tensor(const int64_t num_elem,
@@ -81,5 +89,6 @@ struct deepspeed_io_handle_t {
                                                                     const int fd,
                                                                     const char* filename,
                                                                     const int64_t file_num_bytes,
-                                                                    const bool validate);
+                                                                    const bool validate,
+                                                                    const int64_t file_offset);
 };

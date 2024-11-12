@@ -19,9 +19,14 @@ const int c_io_queue_depth = 8;
 
 io_xfer_ctxt::io_xfer_ctxt(const int fd,
                            const int64_t file_offset,
+                           const int64_t buffer_offset,
                            const int64_t num_bytes,
                            const void* buffer)
-    : _fd(fd), _base_offset(file_offset), _mem_buffer(buffer), _num_bytes(num_bytes)
+    : _fd(fd),
+      _file_base_offset(file_offset),
+      _buffer_base_offset(buffer_offset),
+      _mem_buffer(buffer),
+      _num_bytes(num_bytes)
 {
 }
 
@@ -41,9 +46,10 @@ void io_prep_context::prep_iocbs(const int n_iocbs,
     assert(static_cast<size_t>(n_iocbs) <= _iocbs->size());
     for (auto i = 0; i < n_iocbs; ++i) {
         const auto shift = i * _block_size;
-        const auto xfer_buffer = (char*)start_buffer + _xfer_ctxt->_base_offset + shift;
-        const auto xfer_offset = _xfer_ctxt->_base_offset + start_offset + shift;
+        const auto xfer_buffer = (char*)start_buffer + _xfer_ctxt->_buffer_base_offset + shift;
+        const auto xfer_offset = _xfer_ctxt->_file_base_offset + start_offset + shift;
         auto byte_count = _block_size;
+
         if ((shift + _block_size) > num_bytes) { byte_count = num_bytes - shift; }
 
         if (_read_op) {
@@ -79,10 +85,10 @@ int io_prep_generator::prep_iocbs(const int n_iocbs, std::vector<struct iocb*>* 
 
     auto actual_n_iocbs = min(static_cast<int64_t>(n_iocbs), _remaining_io_blocks);
     for (auto i = 0; i < actual_n_iocbs; ++i, ++_next_iocb_index) {
-        const auto xfer_offset = _xfer_ctxt->_base_offset + (_next_iocb_index * _block_size);
-        const auto xfer_buffer = (char*)_xfer_ctxt->_mem_buffer + xfer_offset;
+        const auto xfer_buffer = (char*)_xfer_ctxt->_mem_buffer + _xfer_ctxt->_buffer_base_offset +
+                                 (_next_iocb_index * _block_size);
+        const auto xfer_offset = _xfer_ctxt->_file_base_offset + (_next_iocb_index * _block_size);
         const auto num_bytes = min(static_cast<int64_t>(_block_size), _remaining_bytes);
-
         if (_read_op) {
             io_prep_pread(iocbs->at(i), _xfer_ctxt->_fd, xfer_buffer, num_bytes, xfer_offset);
         } else {

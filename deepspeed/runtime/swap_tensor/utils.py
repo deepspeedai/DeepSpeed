@@ -18,12 +18,12 @@ AIO_ALIGNED_BYTES = 1024
 
 def swap_in_tensors(swap_handle, tensor_buffers, swap_paths):
     for buffer, path in zip(tensor_buffers, swap_paths):
-        assert (swap_handle.async_pread(buffer, path) == 0)
+        assert (swap_handle.async_pread(buffer, path, 0) == 0)
 
 
 def swap_out_tensors(swap_handle, tensor_buffers, swap_paths):
     for buffer, path in zip(tensor_buffers, swap_paths):
-        assert (swap_handle.async_pwrite(buffer, path) == 0)
+        assert (swap_handle.async_pwrite(buffer, path, 0) == 0)
 
 
 def print_object(obj, name, exclude_list=[]):

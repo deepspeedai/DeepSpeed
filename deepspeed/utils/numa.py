@@ -23,7 +23,10 @@ import subprocess
 # ]
 def get_numa_cores():
     ret = []
-    output = subprocess.check_output(['numactl', '--hardware']).decode("utf-8")
+    try:
+        output = subprocess.check_output(['numactl', '--hardware']).decode("utf-8")
+    except:
+        return []
     lines = output.split('\n')
     for line in lines:
         if line.startswith('available:'):

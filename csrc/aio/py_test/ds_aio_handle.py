@@ -92,7 +92,7 @@ def main_parallel_read(pool_params):
 
     start_time = time.time()
     dest_buffer = BOUNCE_BUFFER if ctxt[BOUNCE_BUFFER] is not None else BUFFER
-    ret = handle.pread(ctxt[dest_buffer], ctxt['file'], args.validate, True)
+    ret = handle.pread(ctxt[dest_buffer], ctxt['file'], args.validate, 0, True)
     assert ret != -1
     handle.wait()
     if dest_buffer == BOUNCE_BUFFER:

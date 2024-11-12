@@ -95,8 +95,16 @@ gds_op_desc_t::gds_op_desc_t(const bool read_op,
                              const char* filename,
                              const int64_t file_num_bytes,
                              const int intra_op_parallelism,
-                             const bool validate)
-    : io_op_desc_t(read_op, buffer, fd, filename, file_num_bytes, intra_op_parallelism, validate)
+                             const bool validate,
+                             const int64_t file_offset)
+    : io_op_desc_t(read_op,
+                   buffer,
+                   fd,
+                   filename,
+                   file_num_bytes,
+                   intra_op_parallelism,
+                   validate,
+                   file_offset)
 {
     _contiguous_buffer = _buffer.contiguous();
     const int64_t device = _buffer.get_device();
@@ -124,17 +132,17 @@ void gds_op_desc_t::run(const int tid,
 {
     assert(tid < _intra_op_parallelism);
     check_cudaruntimecall(cudaSetDevice(_buffer.get_device()));
-    int64_t buf_offset = data_ptr() + (_num_bytes_per_thread * tid) - (char*)_base_ptr;
-    const auto file_offset = _num_bytes_per_thread * tid;
+    const auto buf_offset = data_ptr() + (_num_bytes_per_thread * tid) - (char*)_base_ptr;
+    const auto tid_file_offset = _file_offset + (_num_bytes_per_thread * tid);
 
     if (_read_op) {
         auto ret =
-            cuFileRead(_cf_handle, _base_ptr, _num_bytes_per_thread, file_offset, buf_offset);
-        if (ret < 0) { _report_error(ret, errno, buf_offset); }
+            cuFileRead(_cf_handle, _base_ptr, _num_bytes_per_thread, tid_file_offset, buf_offset);
+        if (ret < 0) { _report_error(ret, errno, tid_file_offset); }
     } else {
         auto ret =
-            cuFileWrite(_cf_handle, _base_ptr, _num_bytes_per_thread, file_offset, buf_offset);
-        if (ret < 0) { _report_error(ret, errno, buf_offset); }
+            cuFileWrite(_cf_handle, _base_ptr, _num_bytes_per_thread, tid_file_offset, buf_offset);
+        if (ret < 0) { _report_error(ret, errno, tid_file_offset); }
     }
 }
 
