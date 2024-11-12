@@ -3,6 +3,7 @@
 
 # DeepSpeed Team
 
+import pytest
 import deepspeed.comm as dist
 import torch
 
@@ -12,6 +13,8 @@ from unit.simple_model import random_dataloader
 import deepspeed
 from deepspeed.utils import set_z3_leaf_modules, unset_z3_leaf_modules, get_z3_leaf_modules, z3_leaf_module
 from deepspeed.accelerator import get_accelerator
+from torch import nn
+import time
 
 
 class ChooseModuleByCounter(torch.nn.Module):
@@ -49,6 +52,49 @@ class ChooseModuleByRankModel(torch.nn.Module):
         # Each rank runs only one of the linear layers
         x = self.linears[dist.get_rank() % len(self.linears)](x)
         x = self.act(x)
+        loss = self.cel(x, y)
+        return x, loss
+
+
+class MLPBlock(nn.Module):
+
+    def __init__(self, hidden_dim):
+        super(MLPBlock, self).__init__()
+        self.gate_proj = nn.Linear(hidden_dim, hidden_dim, bias=False)
+        self.up_proj = nn.Linear(hidden_dim, hidden_dim, bias=False)
+        self.down_proj = nn.Linear(hidden_dim, hidden_dim, bias=False)
+        self.act_fn = nn.GELU()
+
+    def forward(self, x):
+        return self.down_proj(self.act_fn(self.gate_proj(x)) * self.up_proj(x))
+
+
+class FineGrainedBlock(nn.Module):
+
+    def __init__(self, hidden_dim, num_block):
+        super(FineGrainedBlock, self).__init__()
+        self.num_block = num_block
+        self.mlp_layers = torch.nn.ModuleList([MLPBlock(hidden_dim=hidden_dim) for _ in range(self.num_block)])
+
+    def forward(self, x):
+        for i in range(self.num_block):
+            x = self.mlp_layers[i](x)
+        return x
+
+
+class modelWithFineGrainedBlock(nn.Module):
+
+    def __init__(self, hidden_dim, num_block):
+        super(modelWithFineGrainedBlock, self).__init__()
+        self.coarse_grained_layer1 = nn.Linear(hidden_dim, 8 * hidden_dim)
+        self.coarse_grained_layer2 = nn.Linear(8 * hidden_dim, hidden_dim)
+        self.fine_grained_layer = FineGrainedBlock(hidden_dim, num_block)
+        self.cel = torch.nn.CrossEntropyLoss()
+
+    def forward(self, x, y):
+        x = self.coarse_grained_layer1(x)
+        x = self.coarse_grained_layer2(x)
+        x = self.fine_grained_layer(x)
         loss = self.cel(x, y)
         return x, loss
 
@@ -97,9 +143,9 @@ class TestSetZ3LeafModule(DistributedTest):
                 "stage3_max_reuse_distance": 0,
             }
         }
-        if get_accelerator().is_fp16_supported():
+        if preferred_dtype() is torch.float16:
             config_dict["fp16"] = {"enabled": True}
-        elif get_accelerator().is_bf16_supported():
+        elif preferred_dtype() is torch.bfloat16:
             config_dict["bf16"] = {"enabled": True}
 
         model = cls(hidden_dim)
@@ -143,3 +189,74 @@ class TestSetZ3LeafModule(DistributedTest):
             raise AssertionError("Expected error that no module is set as a leaf module")
         except ValueError as e:
             pass
+
+
+@pytest.mark.parametrize("module_granularity_threshold", [0, 100, 12100, 10000000])
+class TestZ3LeafOptimization(DistributedTest):
+    world_size = 2
+    reuse_dist_env = True
+
+    def test_finegrained_optimization(self, module_granularity_threshold: int):
+        hidden_dim = 128
+        num_block = 16
+        config_dict = {
+            "train_micro_batch_size_per_gpu": 1,
+            "steps_per_print": 1,
+            "optimizer": {
+                "type": "Adam",
+                "params": {
+                    "lr": 1e-6
+                }
+            },
+            "zero_optimization": {
+                "stage": 3,
+                "stage3_prefetch_bucket_size": hidden_dim**2,
+                "stage3_param_persistence_threshold": 0,
+                "stage3_max_reuse_distance": 0,
+            }
+        }
+        if preferred_dtype() is torch.float16:
+            config_dict["fp16"] = {"enabled": True}
+        elif preferred_dtype() is torch.bfloat16:
+            config_dict["bf16"] = {"enabled": True}
+
+        def bench_loss_and_time(config):
+            warm_up_step = 10
+            model = modelWithFineGrainedBlock(hidden_dim, num_block)
+            model, _, _, _ = deepspeed.initialize(model=model, model_parameters=model.parameters(), config=config)
+            data_loader = random_dataloader(model=model,
+                                            total_samples=20,
+                                            hidden_dim=hidden_dim,
+                                            device=model.device,
+                                            dtype=preferred_dtype())
+            dist.barrier()
+            loss_list = []
+
+            for i, batch in enumerate(data_loader):
+                if i == warm_up_step:
+                    dist.barrier()
+                    get_accelerator().synchronize()
+                    start_time = time.time()
+                batch[0].requires_grad = True
+                loss = model(batch[0], batch[1])
+                loss = loss[1]
+                loss_list.append(loss)
+                model.backward(loss)
+                model.step()
+            get_accelerator().synchronize()
+            end_time = time.time()
+            duration = end_time - start_time
+            model.destroy()
+            return loss_list, duration
+
+        baseline_loss_list, baseline_exec_time = bench_loss_and_time(config_dict)
+
+        config_dict["zero_optimization"]["stage3_module_granularity_threshold"] = module_granularity_threshold
+        loss, duration = bench_loss_and_time(config_dict)
+
+        if dist.get_rank() == 0:
+            print(f"baseline exec time:", baseline_exec_time)
+            print(
+                f"finegrained optimziation exec time: {duration},granularity threshold:{module_granularity_threshold} "
+            )
+            assert baseline_loss_list == loss, f"incorrect loss value with threshold:{module_granularity_threshold}"

@@ -21,6 +21,7 @@ ZeRO optimization should be enabled as:
     "stage3_max_live_parameters" : 1000000000,
     "stage3_max_reuse_distance" : 1000000000,
     "stage3_use_all_reduce_for_fetch_params": [true|false],
+    "stage3_module_granularity_threshold": 0,
     "allgather_partitions": [true|false],
     "use_multi_rank_bucket_allreduce": [true|false],
     "allgather_bucket_size": 500000000,
@@ -243,6 +244,14 @@ class DeepSpeedZeroConfig(DeepSpeedConfigModel):
     Since the weights are partitioned across GPUs, they aren’t part of
     ``state_dict``, so this function automatically gathers the weights when
     this option is enabled and then saves the fp16 model weights.
+    """
+
+    module_granularity_threshold: int = Field(pp_int(0), alias="stage3_module_granularity_threshold")
+    """
+    The granularity of a module is determined by the ratio of "parameter_count / (1 + descendant count)".
+    ZeRO3 classifies modules with a granularity below the threshold as fine-grained,
+    which are treated as integral units during parameter fetching. This reduces host overhead
+    and the separate allgather overhead introduced by hooks for fine-grained layers when fetching parameters.
     """
 
     use_all_reduce_for_fetch_params: bool = Field(False, alias="stage3_use_all_reduce_for_fetch_params")
