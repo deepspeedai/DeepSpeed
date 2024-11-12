@@ -136,7 +136,7 @@ You can also use a pre-trained BERT model checkpoint from either DeepSpeed, [Hug
 
 ### 2.1 Running BingBertSQuAD with DeepSpeed and 1-bit Adam
 
-We provide example scripts under [DeepSpeedExamples/BingBertSquad/1-bit_adam/](https://github.com/microsoft/DeepSpeedExamples/tree/master/BingBertSquad/1-bit_adam). There are 3 sets of scripts corresponding to NCCL-based implementation, MPI-based implementation on Ethernet systems, and MPI-based implementation on InfiniBand systems. For MPI-based implementation, we provide both example scripts when launching with deepspeed or mpirun.
+We provide example scripts under [DeepSpeedExamples/training/BingBertSquad/1-bit_adam/](https://github.com/microsoft/DeepSpeedExamples/tree/master/training/BingBertSquad/1-bit_adam). There are 3 sets of scripts corresponding to NCCL-based implementation, MPI-based implementation on Ethernet systems, and MPI-based implementation on InfiniBand systems. For MPI-based implementation, we provide both example scripts when launching with deepspeed or mpirun.
 
 <!-- The main part of training is done in `nvidia_run_squad_deepspeed.py`, which has
 already been modified to use DeepSpeed. The `run_squad_deepspeed.sh` script
@@ -157,7 +157,7 @@ To enable the 1-bit compressed training, 1-bit Adam uses an MPI library (E.g. MV
 
 ### Launch with deepspeed
 
-The following helper script in the DeepSpeedExamples/BingBertSQuAD will launch the training without the need for setting any `mpirun` parameters. The number of nodes and GPUs will be automatically detected and the job will be launched on all the available resources.
+The following helper script in the DeepSpeedExamples/training/BingBertSQuAD will launch the training without the need for setting any `mpirun` parameters. The number of nodes and GPUs will be automatically detected and the job will be launched on all the available resources.
 
 ```shell
 bash run_squad_deepspeed_onebitadam.sh <PATH_TO_OUTPUT_DIR>
