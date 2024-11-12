@@ -10,14 +10,14 @@ In this tutorial we will be adding DeepSpeed to the BingBert model for the SQuAD
 
 If you don't already have a copy of the DeepSpeed repository, please clone in
 now and checkout the DeepSpeedExamples submodule the contains the BingBertSquad
-example (DeepSpeedExamples/BingBertSquad) we will be going over in the rest of
+example (DeepSpeedExamples/training/BingBertSquad) we will be going over in the rest of
 this tutorial.
 
 ```shell
 git clone https://github.com/microsoft/DeepSpeed
 cd DeepSpeed
 git submodule update --init --recursive
-cd DeepSpeedExamples/BingBertSquad
+cd DeepSpeedExamples/training/BingBertSquad
 ```
 
 ### Pre-requisites
