@@ -160,8 +160,11 @@ run_cmd="deepspeed.pt \
       --master_port ${master_port}
       ${BingBertSquad_script} ${other_args} ${squad_args}"
 
-echo ${run_cmd}
-eval ${run_cmd}
+# Sanitize input before running eval()
+safe_cmd=$(printf '%q' "$run_cmd")
+
+echo ${safe_cmd}
+eval ${safe_cmd}
 
 set +x
 
