@@ -2297,11 +2297,6 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
     def _load_universal_checkpoint(self, checkpoint_folder, load_optimizer_states, load_from_fp32_weights):
         self.load_hp_checkpoint_state_from_checkpoint_dir("bit16_groups", checkpoint_folder)
 
-    @property
-    def param_groups(self):
-        """Forward the wrapped optimizer's parameters."""
-        return self.optimizer.param_groups
-
     def _load_global_state(self, sd):
         self.loss_scaler = sd.get(LOSS_SCALER, self.loss_scaler)
         self.dynamic_loss_scale = sd.get('dynamic_loss_scale', self.dynamic_loss_scale)
