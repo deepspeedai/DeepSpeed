@@ -17,6 +17,7 @@ from torch.nn.parameter import Parameter
 from torch.optim import Optimizer
 from torch.optim.lr_scheduler import _LRScheduler
 from torch._utils import _flatten_dense_tensors, _unflatten_dense_tensors
+from contextlib import contextmanager
 
 from typing import Callable, Dict, Union, Iterable, Container
 
@@ -216,6 +217,7 @@ class DeepSpeedEngine(Module):
         self.loaded_checkpoint_mp_world_size = None
         self.loaded_checkpoint_dp_world_size = None
         self.enable_backward_allreduce = True
+        self.inside_no_sync_ctxt = False
         self.progressive_layer_drop = None
         self.eigenvalue = None
         self.block_eigenvalue = None
@@ -1981,12 +1983,31 @@ class DeepSpeedEngine(Module):
                 grads = None
                 self.buffered_allreduce_fallback(grads=grads, elements_per_buffer=bucket_size)
 
+    @contextmanager
+    def no_sync(self):
+        r"""
+            Context manager to disable gradient reduction during backward pass.
+            This context manager has the following effects on other DeepSpeed features.
+            1. Incompatible with ZeRO stage 2/3 which rely on reduction for gradient partitioning.
+            2. It is illegal to  call engine.step() within the context manager.
+            3. Tracking of gradient accumulation steps is disabled.
+        """
+        assert not self.zero_optimization_partition_gradients(), \
+        f"no_sync context manager is incompatible with gradient partitioning logic of ZeRO stage {self.zero_optimization_stage()}"
+
+        assert not self.inside_no_sync_ctxt, f"no_sync context manager reentry is unsupported"
+
+        self.inside_no_sync_ctxt = True
+        try:
+            yield
+        finally:
+            self.inside_no_sync_ctxt = False
+
     @instrument_w_nvtx
-    def backward(self, loss, allreduce_gradients=True, release_loss=False, retain_graph=False, scale_wrt_gas=True):
+    def backward(self, loss, release_loss=False, retain_graph=False, scale_wrt_gas=True):
         r"""Execute backward pass on the loss
         Arguments:
             loss: Torch tensor on which to execute backward propagation
-            allreduce_gradients: is deprecated, ignored, and will soon be removed'
             retain_graph: bool, default: false
                 forward on user defined choice of retain_graph
         """
@@ -1996,11 +2017,10 @@ class DeepSpeedEngine(Module):
         if self.scale_wrt_gas is not None:
             scale_wrt_gas = self.scale_wrt_gas
 
-        if not allreduce_gradients:
-            logger.warning(f"Argument `allreduce_gradients` is deprecated, ignored, and will soon be removed")
+        do_gradient_reduction = self.enable_backward_allreduce and not self.inside_no_sync_ctxt
 
-        # scale loss w.r.t. gradient accumulation if needed
-        if self.gradient_accumulation_steps() > 1 and scale_wrt_gas:
+        # scale loss w.r.t. gradient accumulation if reduction is not disabled
+        if do_gradient_reduction and self.gradient_accumulation_steps() > 1 and scale_wrt_gas:
             loss = self._scale_loss_by_gas(loss.float())
 
         # Log training loss
@@ -2049,7 +2069,7 @@ class DeepSpeedEngine(Module):
 
         self._start_timers(self.engine_timers.backward_reduce_timers)
 
-        if allreduce_gradients and self.enable_backward_allreduce:
+        if do_gradient_reduction:
             # Traditional code path that allreduces the module parameter grads
             self.allreduce_gradients()
 
@@ -2185,6 +2205,9 @@ class DeepSpeedEngine(Module):
         r"""Execute the weight update step after forward and backward propagation
         on effective_train_batch.
         """
+        assert not self.inside_no_sync_ctxt, \
+        "It is illegal to call Engine.step() inside no_sync context manager"
+
         see_memory_usage("Engine before step", force=self.memory_breakdown())
 
         # Check early because self.global_steps is incremented at some point here.
