@@ -34,7 +34,7 @@ def load_hp_checkpoint_state(self, folder, tp_rank, tp_world_size):
     step = None
     for key in hp_keys:
         ckpt_file = os.path.join(folder, f"{key}.pt")
-        ckpt_dict = torch.load(ckpt_file)
+        ckpt_dict = torch.load(ckpt_file, weights_only=False)
 
         if key == "step":
             step = ckpt_dict

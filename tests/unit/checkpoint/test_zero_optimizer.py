@@ -264,7 +264,7 @@ class TestZeROElasticCheckpoint(DistributedTest):
         model.load_checkpoint(tmpdir, load_optimizer_states=load_optim)
 
         if load_optim:
-            saved_sd = torch.load(os.path.join(tmpdir, opt_state_dict_file))
+            saved_sd = torch.load(os.path.join(tmpdir, opt_state_dict_file), weights_only=False)
             curr_sd = model.optimizer.optimizer.state_dict()
             compare_opt_state_dicts(curr_sd, saved_sd, expected_mismatch_keys)
 
@@ -523,7 +523,7 @@ class TestZeROCheckpointFrozenWeights(DistributedTest):
         all_ckpt_folder = os.path.join(tmpdir, 'all_params')
         ds_engine.save_checkpoint(all_ckpt_folder)
         all_params_ckpt_file = get_model_ckpt_name_for_rank(os.path.join(all_ckpt_folder, 'global_step0'), '00')
-        loaded_all_param_model = torch.load(all_params_ckpt_file)['module']
+        loaded_all_param_model = torch.load(all_params_ckpt_file, weights_only=False)['module']
         all_param_names = set([n for n, p in model.named_parameters()])
         assert set(loaded_all_param_model.keys()) == all_param_names
 
@@ -536,7 +536,7 @@ class TestZeROCheckpointFrozenWeights(DistributedTest):
         # Excluding frozen parameters should reduce checkpoint size
         assert os.path.getsize(all_params_ckpt_file) > os.path.getsize(trainable_ckpt_file)
 
-        loaded_trainable_param_model = torch.load(trainable_ckpt_file)['module']
+        loaded_trainable_param_model = torch.load(trainable_ckpt_file, weights_only=False)['module']
         frozen_param_names = set([n for n, p in model.named_parameters() if not p.requires_grad])
         loaded_trainable_param_names = set(loaded_trainable_param_model.keys())
         overlap_names = set.intersection(loaded_trainable_param_names, frozen_param_names)
@@ -575,7 +575,7 @@ class TestZeROCheckpointFrozenWeights(DistributedTest):
 
         custom_state_dict_ckpt_file = get_model_ckpt_name_for_rank(
             os.path.join(custom_state_dict_ckpt_folder, 'global_step0'), '00')
-        loaded_custom_state_dict_param_model = torch.load(custom_state_dict_ckpt_file)['module']
+        loaded_custom_state_dict_param_model = torch.load(custom_state_dict_ckpt_file, weights_only=False)['module']
         loaded_custom_state_dict_param_names = set(loaded_custom_state_dict_param_model.keys())
 
         custom_state_dict_param_names = set([k for k, v in model.state_dict().items()])
@@ -618,7 +618,8 @@ class TestSaveTensorClone(DistributedTest):
         clone_ckpt_file = os.path.join(tmpdir, 'clone_ckpt.pt')
         torch.save(clone_state_dict, clone_ckpt_file)
 
-        compare_state_dicts(torch.load(ref_ckpt_file), torch.load(clone_ckpt_file))
+        compare_state_dicts(torch.load(ref_ckpt_file, weights_only=False),
+                            torch.load(clone_ckpt_file, weights_only=False))
 
 
 class TestZeRONonDistributed(DistributedTest):
