@@ -225,7 +225,7 @@ class TestConfigurableResizePP(ConfigurablePP):
                 assert torch.is_tensor(test[0][0])
                 test = test[0][0].cpu()
                 load_path = os.path.join(class_tmpdir, f"output-{checkpoint_tag}.pt")
-                baseline = torch.load(load_path)
+                baseline = torch.load(load_path, weights_only=False)
                 assert torch.allclose(
                     baseline, test,
                     atol=1e-03), f"Baseline output {baseline} is not equal to save-then-load output {test}"

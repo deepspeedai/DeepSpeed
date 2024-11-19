@@ -452,7 +452,7 @@ class InferenceEngine(Module):
         checkpoint = sd_loader['checkpoints']
 
         if type(checkpoint) is list:
-            self.sd = torch.load(checkpoint[0], map_location='cpu')
+            self.sd = torch.load(checkpoint[0], map_location='cpu', weights_only=False)
             self.key_list = list(self.sd.keys())
 
             self.load_model_with_checkpoint(self.module)
@@ -460,7 +460,7 @@ class InferenceEngine(Module):
             for i in range(1, len(checkpoint)):
                 if not dist.is_initialized() or dist.get_rank() == 0:
                     print(f"loading checkpoint ({i})")
-                self.sd = torch.load(checkpoint[i], map_location=get_accelerator().device_name())
+                self.sd = torch.load(checkpoint[i], map_location=get_accelerator().device_name(), weights_only=False)
                 self.key_list = list(self.sd.keys())
                 self.load_model_with_checkpoint(self.module)
         else:

@@ -2741,7 +2741,7 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
         assert os.path.isfile(
             optim_state_path), f'{optim_state_path} containing optimizer global state is missing! Cannot proceed.'
 
-        optim_sd = torch.load(optim_state_path)
+        optim_sd = torch.load(optim_state_path, weights_only=False)
         self._load_global_state_stage3(optim_sd)
 
         key_list = ["fp32", "exp_avg", "exp_avg_sq"]
@@ -2799,7 +2799,7 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
         local_rank = dist.get_local_rank()
 
         # Load tensors from files and reshape them to flat vectors
-        loaded_checkpoint_state = torch.load(os.path.join(folder, f"{key}.pt")).view(-1)
+        loaded_checkpoint_state = torch.load(os.path.join(folder, f"{key}.pt"), weights_only=False).view(-1)
 
         # Partition the loaded data according to the local rank
         world_size = dist.get_world_size(group=self.dp_process_group)

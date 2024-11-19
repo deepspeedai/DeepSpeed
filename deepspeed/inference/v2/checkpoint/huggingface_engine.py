@@ -80,7 +80,7 @@ class HuggingFaceCheckpointEngine(CheckpointEngineBase):
         else:
             model_param_json_fname = "pytorch_model.bin.index.json"
             model_file_fname = "pytorch_model.bin"
-            self._checkpoint_load_fn = partial(torch.load, map_location="cpu")
+            self._checkpoint_load_fn = partial(torch.load, map_location="cpu", weights_only=False)
 
         model_param_json = os.path.join(self._local_checkpoint_dir, model_param_json_fname)
 

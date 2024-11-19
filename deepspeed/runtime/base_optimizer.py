@@ -22,7 +22,7 @@ class ZeROOptimizer(DeepSpeedOptimizer):
         optim_state_path = os.path.join(checkpoint_dir, "optimizer_state.pt")
         assert os.path.isfile(
             optim_state_path), f'{optim_state_path} containing optimizer global state is missing! Cannot proceed.'
-        optim_sd = torch.load(optim_state_path)
+        optim_sd = torch.load(optim_state_path, weights_only=False)
 
         self._load_global_state(optim_sd)
 
