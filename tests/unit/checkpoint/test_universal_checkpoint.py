@@ -181,7 +181,7 @@ class TestZeROUniversalCheckpointDP(DistributedTest):
             )
 
         hidden_dim = 10
-        loaded_model_state, loaded_optimizer_state = torch.load(f"{tmpdir}/baseline_state.pt")
+        loaded_model_state, loaded_optimizer_state = torch.load(f"{tmpdir}/baseline_state.pt", weights_only=False)
 
         ds_config["checkpoint"] = {"load_universal": True}
         univ_model = SimpleModel(hidden_dim)

@@ -102,7 +102,7 @@ def get_model_state_files(checkpoint_dir):
 def parse_model_states(files):
     zero_model_states = []
     for file in files:
-        state_dict = torch.load(file, map_location=device)
+        state_dict = torch.load(file, map_location=device, weights_only=False)
 
         if BUFFER_NAMES not in state_dict:
             raise ValueError(f"{file} is not a model state checkpoint")
@@ -149,7 +149,7 @@ def parse_optim_states(files, ds_checkpoint_dir):
     total_files = len(files)
     state_dicts = []
     for f in tqdm(files, desc='Loading checkpoint shards'):
-        state_dict = torch.load(f, map_location=device, mmap=True)
+        state_dict = torch.load(f, map_location=device, mmap=True, weights_only=False)
         # immediately discard the potentially huge 2 optimizer states as we only care for fp32 master weights
         # and also handle the case where it was already removed by another helper script
         state_dict["optimizer_state_dict"].pop("optimizer_state_dict", None)

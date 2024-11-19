@@ -54,7 +54,7 @@ class ZeROCheckpoint(object):
         state_file_list = self.get_files_for_rank(pp_index, tp_index, dp_index)
         merged_sd = None
         for state_file in state_file_list:
-            sd = torch.load(state_file, map_location=torch.device('cpu'))
+            sd = torch.load(state_file, map_location=torch.device('cpu'), weights_only=False)
             for key in keys_to_ignore:
                 sd.pop(key, None)
 
