@@ -311,7 +311,7 @@ class DeepSpeedZeroConfig(DeepSpeedConfigModel):
     for efficient all_2_all_reduce comm
     """
 
-    mics_shard_size: int = Field(-1, new_param="mics_shard_size")
+    mics_shard_size: int = Field(-1, json_schema_extra={"new_param": "mics_shard_size"})
 
     mics_hierarchical_params_gather: bool = False
 
