@@ -392,7 +392,8 @@ class DeepSpeedZeRoOffload(object):
                                                                _run_after_backward_hook, inputs)
 
         def _post_backward_module_hook(module, inputs):
-            module.ds_grads_remaining = 0
+            if not hasattr(module, "ds_grads_remaining"):
+                module.ds_grads_remaining = 0
 
             if not hasattr(module, "post_bwd_fn"):
 
