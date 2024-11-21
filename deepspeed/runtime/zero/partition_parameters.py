@@ -1882,6 +1882,7 @@ class Init(InsertPostInitMethodToModuleSubClasses):
 
         return None
 
+    @torch.no_grad()
     def _allgather_params(self, param_list, hierarchy=0):
         if len(param_list) == 0:
             return
