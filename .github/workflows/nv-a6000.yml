@@ -40,9 +40,8 @@ jobs:
           python -c "import torch; print('CUDA available:', torch.cuda.is_available())"
       - name: Install transformers
         run: |
-          git clone https://github.com/huggingface/transformers
+          git clone --depth=1 https://github.com/huggingface/transformers
           cd transformers
-          git checkout 7df93d6ffb48946e532c7d766fe10372e98d78b6
           git rev-parse --short HEAD
           python -m pip install .
       - name: Install deepspeed
