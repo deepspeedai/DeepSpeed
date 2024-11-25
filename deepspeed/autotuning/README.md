@@ -336,7 +336,7 @@ The Autotuner stops exploring the space when any of the following conditions mee
 
 ## Using Autotuning with Hugging Face
 
-Hugging Face users can set some configurations values to ["auto"](https://huggingface.co/transformers/main_classes/deepspeed.html?highlight=gradient_accumulation_steps#shared-configuration).
+Hugging Face users can set some configurations values to ["auto"](https://huggingface.co/docs/transformers/deepspeed#deepspeed-and-trainer-parameters).
 `"auto"` means the value will be set to the default in Hugging Face or be overwritten using the supplied values from the command line arguments.
 In DeepSpeed Autotuning, if the user-provided DeepSpeed configuration file has "auto" keywords, they are treated as the value "auto".
 
