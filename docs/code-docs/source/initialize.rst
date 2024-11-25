@@ -38,7 +38,7 @@ Example usage:
 .. autofunction:: deepspeed.initialize
 
 Distributed Initialization
------------------------
+--------------------------
 Optional distributed backend initialization separate from ``deepspeed.initialize()``. Useful in scenarios where the user wants to use torch distributed calls before calling ``deepspeed.initialize()``, such as when using model parallelism, pipeline parallelism, or certain data loader scenarios.
 
 .. autofunction:: deepspeed.init_distributed

@@ -71,7 +71,7 @@ Optimizers
    optimizers
 
 Learning Rate Schedulers
---------------------
+------------------------
 .. toctree::
    :maxdepth: 2
 

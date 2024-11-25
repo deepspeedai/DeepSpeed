@@ -1,5 +1,5 @@
 Mixture of Experts (MoE)
-====================
+========================
 
 Layer specification
 --------------------

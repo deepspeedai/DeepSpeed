@@ -310,6 +310,7 @@ DeepSpeed can automatically detect the following external parameter scenarios:
 
 
 .. `Module.apply <https://pytorch.org/docs/stable/generated/torch.nn.Module.html?highlight=module+apply#torch.nn.Module.apply>`_
+
 Overriding Module.apply
 ===============================
 A convenient mechanism for customizing model initialization is `Module.apply <https://pytorch.org/docs/stable/generated/torch.nn.Module.html?highlight=module+apply#torch.nn.Module.apply>`_.
