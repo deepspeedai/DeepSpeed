@@ -8,10 +8,39 @@ from typing import Any, Tuple
 from torch import Tensor
 from torch.nn import Module
 
+from einops import rearrange
+
 import deepspeed.comm as dist
 from deepspeed.accelerator import get_accelerator
 from deepspeed.module_inject.tp_shard import get_shard_size_list, set_num_kv_heads, get_num_kv_heads
 from deepspeed.utils import groups
+
+
+def _rotate_half(x):
+    """
+    change sign so the last dimension becomes [-odd, +even]
+    """
+    x = rearrange(x, '... (j d) -> ... j d', j=2)
+    x1, x2 = x.unbind(dim=-2)
+    return torch.cat((-x2, x1), dim=-1)
+
+
+def apply_rotary_pos_emb(t, freqs_cos, freqs_sin):
+    """
+    input tensor t is of shape [seq_length, ..., dim]
+    rotary positional embeding tensor freqs is of shape [seq_length, ..., dim]
+    check https://kexue.fm/archives/8265 for detailed formulas
+    """
+    rot_dim = freqs_cos.shape[-1]
+    # ideally t_pass is empty so rotary pos embedding is applied to all tensor t
+    t, t_pass = t[..., :rot_dim], t[..., rot_dim:]
+
+    # first part is cosine component
+    # second part is sine component, need to change signs with _rotate_half method
+    t = (t * freqs_cos) + (_rotate_half(t) * freqs_sin)
+
+    res = t if t_pass.shape[-1] == 0 else torch.cat((t, t_pass), dim=-1)
+    return res
 
 
 def post_all2all(scatter_idx, batch_dim_idx, seq_world_size, bs, seq_len, num_head, head_dim):
@@ -304,7 +333,14 @@ class DistributedAttention(torch.nn.Module):
         if self.sp_overlap_comm and hasattr(layer, 'done_event'):
             self.dafult_stream.wait_event(layer.done_event)
 
-    def forward(self, query: Tensor, key: Tensor, value: Tensor, batch_dim_idx: int, *args: Any, **kwargs) -> Tensor:
+    def forward(self,
+                query: Tensor,
+                key: Tensor,
+                value: Tensor,
+                batch_dim_idx: int,
+                rotary_pos_emb=None,
+                *args: Any,
+                **kwargs) -> Tensor:
         """ forward
 
         Arguments:
@@ -359,6 +395,10 @@ class DistributedAttention(torch.nn.Module):
             grad_fn_k.register_prehook(bwd_hook(layer_type='k'))
 
         #out shape : e.g., [s:h/p:]
+        if rotary_pos_emb is not None:
+            pos_emb_cos, pos_emb_sin = rotary_pos_emb[0].permute(1, 0, 2, 3), rotary_pos_emb[1].permute(1, 0, 2, 3)
+            query_layer = apply_rotary_pos_emb(query_layer, pos_emb_cos, pos_emb_sin)
+            key_layer = apply_rotary_pos_emb(key_layer, pos_emb_cos, pos_emb_sin)
 
         context_layer = self.local_attn(query_layer, key_layer, value_layer, *args, **kwargs)
 
