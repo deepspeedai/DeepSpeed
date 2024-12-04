@@ -369,7 +369,9 @@ def is_activation_to_checkpoint(item):
         Is an activation to be checkpointed
     """
     global mp_size
-    return torch.is_tensor(item) and item.is_floating_point() and item.numel() >= mp_size
+    extra_flag = (not hasattr(item, 'no_checkpointing')) or (hasattr(item, 'no_checkpointing')
+                                                             and item.no_checkpointing == False)
+    return torch.is_tensor(item) and item.is_floating_point() and item.numel() >= mp_size and extra_flag
 
 
 def partition_activations(args, cpu_checkpoint, contiguous_checkpoint):
