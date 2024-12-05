@@ -6,7 +6,7 @@ docutils<0.18
 future
 importlib-metadata>=4
 mup
-pre-commit>=2.20.0
+pre-commit>=3.2.0
 pytest>=7.2.0
 pytest-forked
 pytest-randomly
