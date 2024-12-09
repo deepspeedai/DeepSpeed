@@ -52,7 +52,7 @@ jobs:
           pip install .[testing]
           # force protobuf version due to issues
           pip install "protobuf<4.21.0"
-          # tmp fix: force newer datasets version
-          #pip install "datasets>=2.0.0"
+          # force pytest-subtests version due to issues
+          pip install pytest-subtests==0.13.1
           pip list
           pytest $PYTEST_OPTS --color=yes --durations=0 --verbose tests/deepspeed
