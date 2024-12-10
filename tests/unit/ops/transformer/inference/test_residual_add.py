@@ -74,8 +74,8 @@ def run_residual_add_reference(hidden_state, residual, attn_output, attn_bias, f
 @pytest.mark.parametrize("use_triton_ops", [True, False])
 def test_residual_add(batch, sequence, hidden_dim, dtype, mlp_after_attn, add_bias, mp_size, pre_attn_norm,
                       use_triton_ops):
-    if not deepspeed.HAS_TRITON and use_triton_ops:
-        pytest.skip("triton has to be installed for the test")
+    if not deepspeed.get_accelerator().is_triton_supported():
+        pytest.skip("triton is not supported on this system")
     ds_out = torch.randn((batch, sequence, hidden_dim), dtype=dtype, device=get_accelerator().device_name())
     residual = torch.randn((batch, sequence, hidden_dim), dtype=dtype, device=get_accelerator().device_name())
     attn_output = torch.randn((batch, sequence, hidden_dim), dtype=dtype, device=get_accelerator().device_name())

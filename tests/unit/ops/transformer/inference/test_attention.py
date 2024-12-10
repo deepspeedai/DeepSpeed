@@ -27,8 +27,8 @@ def ref_torch_attention(q, k, v, mask, sm_scale):
 @pytest.mark.parametrize("causal", [True, False])
 @pytest.mark.parametrize("use_flash", [True, False])
 def test_attention(BATCH, H, N_CTX, D_HEAD, causal, use_flash, dtype=torch.float16):
-    if not deepspeed.HAS_TRITON:
-        pytest.skip("triton has to be installed for the test")
+    if not deepspeed.get_accelerator().is_triton_supported():
+        pytest.skip("triton is not supported on this system")
 
     minus_inf = -65504.0
     dev = deepspeed.accelerator.get_accelerator().device_name()
