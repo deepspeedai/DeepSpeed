@@ -61,8 +61,8 @@ def test_gelu(batch, sequence, channels, dtype, use_triton_ops):
     activations_ds = torch.randn((batch, sequence, channels), dtype=dtype, device=device)
     activations_ref = activations_ds.clone().detach()
 
-    if not deepspeed.HAS_TRITON and use_triton_ops:
-        pytest.skip("triton has to be installed for the test")
+    if not deepspeed.get_accelerator().is_triton_supported():
+        pytest.skip("triton is not supported on this system")
     ds_out = run_gelu_ds(activations_ds, use_triton_ops)
     ref_out = run_gelu_reference(activations_ref)
     assert (allclose(ds_out, ref_out))
