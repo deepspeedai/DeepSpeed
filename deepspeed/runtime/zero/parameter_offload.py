@@ -52,7 +52,7 @@ class ZeROOrderedDict(OrderedDict):
 
     def __reduce__(self):
         r0, _, *r2 = super().__reduce__()
-        return (r0, (self._parent_module, )) + r2
+        return (r0, (self._parent_module, )) + tuple(r2)
 
     def __getitem__(self, key):
         param = super().__getitem__(key)
