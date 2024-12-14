@@ -125,10 +125,9 @@ def get_accelerator():
         if accelerator_name is None:
             try:
                 import intel_extension_for_pytorch as ipex
+
                 if ipex._C._has_xpu():
                     accelerator_name = "xpu"
-                else:
-                    accelerator_name = "cpu"
             except ImportError as e:
                 pass
         if accelerator_name is None:
@@ -162,7 +161,6 @@ def get_accelerator():
             except ImportError as e:
                 pass
         if accelerator_name is None:
-            # borrow this log from PR#5084
             try:
                 import torch
 
@@ -174,16 +172,16 @@ def get_accelerator():
                 # For reference: https://github.com/microsoft/DeepSpeed/pull/6810
                 if torch.cuda.device_count() > 0 and torch.cuda.is_available():  #ignore-cuda
                     accelerator_name = "cuda"
-                else:
-                    if accel_logger is not None:
-                        accel_logger.warn(
-                            "Setting accelerator to CPU. If you have GPU or other accelerator, we were unable to detect it."
-                        )
-                    accelerator_name = "cpu"
             except (RuntimeError, ImportError) as e:
                 # TODO need a more decent way to detect which accelerator to use, consider using nvidia-smi command for detection
-                accelerator_name = "cuda"
                 pass
+        if accelerator_name is None:
+            # borrow this log from PR#5084
+            if accel_logger is not None:
+                accel_logger.warn(
+                    "Setting accelerator to CPU. If you have GPU or other accelerator, we were unable to detect it.")
+            # cpu added as catch-all when accelerator detection fails
+            accelerator_name = "cpu"
 
         ds_set_method = "auto detect"
 
