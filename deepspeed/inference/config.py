@@ -40,6 +40,9 @@ class DeepSpeedTPConfig(DeepSpeedConfigModel):
     tp_size: int = 1
     """ Number of devices to split the model across using tensor parallelism. """
 
+    tp_grain_size: int = 64
+    "Desired MLP/lm_head tp size granularity. DNN library favors tensor size in granularity of power of 2, we pick 64 as a default size."
+
     mpu: object = None
     """
     A model parallelism unit object that implements

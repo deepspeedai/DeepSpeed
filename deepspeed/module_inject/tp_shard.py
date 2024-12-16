@@ -22,6 +22,11 @@ def set_n_embd(num):
     n_embd = num
 
 
+def set_tp_grain_size(num):
+    global tp_grain_size
+    tp_grain_size = num
+
+
 def get_num_kv_heads():
     global num_kv_heads
     if 'num_kv_heads' in globals():
@@ -45,9 +50,9 @@ def get_shard_size(total_size, mp_size, name=None, rank=None):
         my_slices = (num_kv_heads // mp_size) + (1 if rank < (num_kv_heads % mp_size) else 0)
         return total_size * my_slices // num_kv_heads
     else:
-        if total_size >= 64:
-            grain_size = total_size // 64
-            return (grain_size // mp_size + (1 if rank < (grain_size % mp_size) else 0)) * 64
+        if total_size >= tp_grain_size:
+            grain_size = total_size // tp_grain_size
+            return (grain_size // mp_size + (1 if rank < (grain_size % mp_size) else 0)) * tp_grain_size
         else:
             return total_size // mp_size + (1 if rank < (total_size % mp_size) else 0)
 
