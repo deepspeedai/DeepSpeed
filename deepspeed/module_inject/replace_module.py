@@ -17,7 +17,7 @@ from .auto_tp import AutoTP, ReplaceWithTensorSlicing, Loading
 from .layers import TensorParallelOcShardConv2d, TensorParallelIcShardConv2d
 
 from deepspeed import comm as dist
-from deepspeed.module_inject.tp_shard import set_num_kv_heads, set_n_embd, set_num_attention_heads
+from deepspeed.module_inject.tp_shard import set_num_kv_heads, set_n_embd, set_num_attention_heads, set_tp_grain_size
 
 from .load_checkpoint import load_model_with_checkpoint
 import time
@@ -302,6 +302,9 @@ def replace_transformer_layer(orig_layer_impl, model, checkpoint_dict, config, m
         # 4.3 set attention_heads
         if hasattr(model_config, 'num_attention_heads'):
             set_num_attention_heads(getattr(model_config, 'num_attention_heads'))
+
+        # 4.4 set tp_grain_size
+        set_tp_grain_size(config.tensor_parallel.tp_grain_size)
 
         # 5. Set linear policies
         _autotp.update_linear_policies()
