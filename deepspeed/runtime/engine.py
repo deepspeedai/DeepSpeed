@@ -3738,6 +3738,11 @@ class DeepSpeedEngine(Module):
         assert self.zero_optimization_stage(
         ) == ZeroStageEnum.weights, "Moving buffers across devices is supported only for ZeRO stage 3."
 
+        opt_offload_config = self.zero_offload_optimizer()
+        assert opt_offload_config is None or opt_offload_config.device == OffloadDeviceEnum.none, "Moving states across devices is not supported for offloaded optimizer states."
+        param_offload_config = self.zero_offload_param()
+        assert param_offload_config is None or param_offload_config.device == OffloadDeviceEnum.none, "Moving states across devices is not supported for offloaded parameters."
+
         assert not self.zero_offload_param(), "Moving states across devices is not supported for offloaded parameters."
 
         if device == OffloadDeviceEnum.none:
