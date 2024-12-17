@@ -16,8 +16,6 @@ from packaging import version as pkg_version
 if not deepspeed.ops.__compatible_ops__[InferenceBuilder.NAME]:
     pytest.skip("Inference ops are not available on this system", allow_module_level=True)
 
-torch_minor_version = None
-
 
 def run_bias_gelu_reference(activations, bias):
     # Expected behavior is that of casting to float32 internally and using the tanh approximation
