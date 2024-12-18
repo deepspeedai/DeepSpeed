@@ -3,8 +3,14 @@
 
 # DeepSpeed Team
 
-import torch
 from .abstract_accelerator import DeepSpeedAccelerator
+
+# During setup stage torch may not be installed, pass on no torch will
+# allow op builder related API to be executed.
+try:
+    import torch
+except ImportError as e:
+    pass
 
 try:
     import oneccl_bindings_for_pytorch  # noqa: F401 # type: ignore
