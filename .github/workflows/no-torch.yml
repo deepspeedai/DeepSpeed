@@ -4,6 +4,7 @@ on:
   workflow_dispatch:
   pull_request:
     paths:
+      - 'accelerator/**'
       - '.github/workflows/no-torch.yml'
       - 'op_builder/**'
   schedule:
