@@ -93,7 +93,8 @@ class TestMoE(DistributedTest):
             process_group = optimizer.dp_process_group
             curr_size = 0
             pg_offsets = []
-            for i, param, param_id in optimizer.params_in_ipg_bucket:
+            for i, param_idx, param_id in optimizer.params_in_ipg_bucket:
+                param = optimizer.bit16_groups[i][param_idx]
                 process_group = optimizer.dp_process_group
                 if optimizer.ipg_bucket_has_moe_params:
                     process_group = optimizer.expert_dp_process_group[param.group_name] if is_moe_param(
