@@ -21,8 +21,8 @@ class HPU_Accelerator(DeepSpeedAccelerator):
         self.apply_hpu_workarounds()
         try:
             import habana_frameworks.torch.hpu as hpu
-            hpu.setDeterministic(True)
             self.hpu = hpu
+            torch.use_deterministic_algorithms(True)
         except ImportError as e:
             raise ValueError(
                 f"HPU_Accelerator requires habana_frameworks.torch.hpu, which is not installed on this system.")
