@@ -310,6 +310,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
             for param in param_group['params']:
                 if param.requires_grad:
                     param.grad_accum = None
+                    param.param_idx_in_group = len(trainable_parameters)
                     trainable_parameters.append(param)
             self.bit16_groups.append(trainable_parameters)
 
@@ -961,7 +962,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
         assert grad_reduc is not None, f"rank {dist.get_rank()} - Invalid to reduce Param {param_id} with None gradient"
 
         self.grads_in_ipg_bucket.append(grad_reduc)
-        self.params_in_ipg_bucket.append((i, param, param_id))
+        self.params_in_ipg_bucket.append((i, param.param_idx_in_group, param_id))
 
         #make sure the average tensor function knows how to average the gradients
         if is_moe_param(param):
@@ -1067,7 +1068,8 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
 
             process_group = self.dp_process_group
             # count = 0
-            for i, param, param_id in self.params_in_ipg_bucket:
+            for i, param_idx_in_group, param_id in self.params_in_ipg_bucket:
+                param = self.bit16_groups[i][param_idx_in_group]
 
                 process_group = self.dp_process_group
 
@@ -1383,7 +1385,8 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
             stream = get_accelerator().current_stream()
 
         with get_accelerator().stream(stream):
-            for _, param, param_id in self.params_in_ipg_bucket:
+            for group_idx, param_idx_in_group, param_id in self.params_in_ipg_bucket:
+                param = self.bit16_groups[group_idx][param_idx_in_group]
 
                 assert self.params_already_reduced[param_id] == False, \
                     f"The parameter {param_id} has already been reduced. \
