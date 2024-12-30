@@ -60,9 +60,12 @@ def batch_input():
 
 class TestPipeModuleSequential(DistributedTest):
     world_size = 2
+    # needs to be set for torch.compile: running torch.compile with daemonic process causes an error
+    non_daemonic_procs = True
 
     @pytest.mark.parametrize("activation_checkpoints", [False, True])
-    def test(self, sequential_model, simple_config, batch_input, activation_checkpoints):
+    @pytest.mark.parametrize("use_compile", [False, True])
+    def test(self, sequential_model, simple_config, batch_input, activation_checkpoints, use_compile):
         base_model = copy.deepcopy(sequential_model)
         base_input = batch_input.clone().detach()
         base_output = base_model(base_input)
@@ -71,7 +74,8 @@ class TestPipeModuleSequential(DistributedTest):
 
         pipe_model = copy.deepcopy(sequential_model)
         pipe_model = PipelineModule(layers=pipe_model, num_stages=2)
-
+        if (use_compile):
+            pipe_model.compile()
         # Ensure all parameters are accounted for.
         my_params = sum(p.numel() for p in pipe_model.parameters())
         total_pipe_params = torch.LongTensor([my_params]).to(get_accelerator().device_name())
