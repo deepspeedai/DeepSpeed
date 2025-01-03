@@ -16,6 +16,7 @@ from deepspeed.utils import groups, z3_leaf_parameter
 from torch._utils import _flatten_dense_tensors, _unflatten_dense_tensors
 from deepspeed.runtime.base_optimizer import ZeROOptimizer
 from deepspeed.utils import logger
+from deepspeed.utils.torch import register_grad_hook
 from deepspeed.runtime.fp16.loss_scaler import CreateLossScaler
 from deepspeed.runtime.comm.coalesced_collectives import reduce_scatter_coalesced, all_to_all_quant_reduce, all_to_all_loco_quant_reduce
 from deepspeed.runtime.utils import inf, is_model_parallel_parameter, get_only_unique_item
@@ -1159,7 +1160,6 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
 
     def create_reduce_and_remove_grad_hooks(self):
         print_rank_0(f'[Begin] Create gradient reduction hooks')
-        self.grad_accs = []
         self.leaf_parameters = defaultdict(list)
         for i, param_group in enumerate(self.fp16_groups):
             for param in param_group:
@@ -1172,15 +1172,12 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
 
                     #print(f"After all gather {param.device}, {param.shape}")
                     def wrapper(param):
-                        param_tmp = param.expand_as(param)
-                        grad_acc = param_tmp.grad_fn.next_functions[0][0]
 
                         @instrument_w_nvtx
                         def reduce_partition_and_remove_grads(*notneeded):
                             self.reduce_ready_partitions_and_remove_grads(param)
 
-                        self._grad_acc_hooks.append(grad_acc.register_hook(reduce_partition_and_remove_grads))
-                        self.grad_accs.append(grad_acc)
+                        self._grad_acc_hooks.append(register_grad_hook(param, reduce_partition_and_remove_grads))
 
                     #print(f"param grad fn {param.expand_as(param).grad_fn}")
                     if z3_leaf_parameter(param):
