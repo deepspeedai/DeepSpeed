@@ -15,8 +15,6 @@ from .inference_test_utils import allclose, get_dtypes
 if not deepspeed.ops.__compatible_ops__[InferenceBuilder.NAME]:
     pytest.skip("Inference ops are not available on this system", allow_module_level=True)
 
-torch_minor_version = None
-
 
 def run_bias_add_reference(activations, bias):
     return activations + bias
