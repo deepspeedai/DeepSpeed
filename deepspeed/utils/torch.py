@@ -20,3 +20,12 @@ def required_torch_version(min_version=None, max_version=None):
         return False
 
     return True
+
+
+def register_grad_hook(param, hook):
+    if required_torch_version(min_version=2.1):
+        return param.register_post_accumulate_grad_hook(hook)
+    else:
+        param_tmp = param.expand_as(param)
+        grad_acc = param_tmp.grad_fn.next_functions[0][0]
+        return grad_acc.register_hook(hook)

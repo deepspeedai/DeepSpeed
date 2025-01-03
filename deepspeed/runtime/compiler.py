@@ -4,6 +4,7 @@
 # DeepSpeed Team
 
 import torch
+from deepspeed.utils.torch import required_torch_version
 
 try:
     from torch.compiler import is_compiling as torch_is_compiling
@@ -16,7 +17,7 @@ except ImportError:
 
 
 def is_compile_supported():
-    return hasattr(torch, "compiler") and hasattr(torch.nn.Module, "compile")
+    return required_torch_version(min_version=2.1)
 
 
 def disable(func):
