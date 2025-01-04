@@ -8,6 +8,7 @@
 import pytest
 import torch
 import deepspeed
+from deepspeed.pipe import PipelineModule, LayerSpec
 from deepspeed.accelerator import get_accelerator
 from copy import deepcopy
 from unit.common import DistributedTest
@@ -259,3 +260,52 @@ class TestCheckpointNonTensorOutputOrdering(DistributedTest):
         else:
             ordering += [torch.is_tensor(non_tensor_output)]
         _test_activation_checkpoint_ordering(module, ordering, inputs)
+
+
+class TestCheckpointableLayersConfig(DistributedTest):
+    world_size = 1
+
+    def test_gpt2_checkpointable_layers(self):
+        if get_accelerator().device_name() == "cpu":
+            pytest.skip("CPU accelerator does not support this test yet")
+
+        # Create a simple topology for testing
+        from deepspeed.runtime.pipe.topology import PipeModelDataParallelTopology
+        topo = PipeModelDataParallelTopology(num_pp=1, num_mp=1, num_dp=1)
+
+        # Create test classes that we want to checkpoint
+        class TestTransformerLayer(torch.nn.Module):
+
+            def forward(self, x):
+                return x
+
+        class ParallelTransformerLayerPipe(TestTransformerLayer):
+            pass
+
+        class GMLPBlock(TestTransformerLayer):
+            pass
+
+        # Create a mock GPT2 model with different layer types
+        class TestGPT2ModelPipe(PipelineModule):
+
+            def __init__(self):
+                self.layers_spec = [
+                    LayerSpec(ParallelTransformerLayerPipe),
+                    LayerSpec(GMLPBlock),
+                    LayerSpec(torch.nn.Linear, 10, 10),  # Should not be checkpointed
+                ]
+
+                super().__init__(layers=self.layers_spec,
+                                 topology=topo,
+                                 checkpointable_layers=["GMLPBlock", "ParallelTransformerLayerPipe"])
+
+        model = TestGPT2ModelPipe()
+        model.to(get_accelerator().device_name())
+
+        # Build layers manually for testing
+        layers = [spec.build() for spec in model.layers_spec]
+
+        # Test that _is_checkpointable returns correct values
+        assert model._is_checkpointable([layers[0]]) == True  # ParallelTransformerLayerPipe
+        assert model._is_checkpointable([layers[1]]) == True  # GMLPBlock
+        assert model._is_checkpointable([layers[2]]) == False  # Linear layer
