@@ -116,7 +116,9 @@ class PipelineModule(nn.Module):
         partition_method (str, optional): The method upon which the layers are partitioned. Defaults to 'parameters'.
         activation_checkpoint_interval (int, optional): The granularity activation checkpointing in terms of number of layers. 0 disables activation checkpointing.
         activation_checkpoint_func (callable, optional): The function to use for activation checkpointing. Defaults to ``deepspeed.checkpointing.checkpoint``.
-        checkpointable_layers(list, optional): Checkpointable layers may not be checkpointed. Defaults to None which does not additional filtering.
+        checkpointable_layers (list[str], optional): List of layer class names that are eligible for checkpointing. For GPT models,
+            ParallelTransformerLayerPipe is always checkpointed regardless of this list. If None, all layers with parameters are
+            considered checkpointable. Defaults to None.
         dynamic_shape: Allows dynamic shapes of inputs. This might have a performance impact.
     """
 
@@ -650,9 +652,17 @@ class PipelineModule(nn.Module):
             # because only non_reentrant_checkpoint can accept inputs with requires_grad=False
             # otherwise, the backward of the embedding layer won't receive gradients.
             if self.__class__.__name__ in ('GPTModelPipe', 'GPT2ModelPipe'):
-                return all('ParallelTransformerLayerPipe' in f.__class__.__name__ for f in funcs)
+                # For GPT models, checkpoint both transformer layers and any additional
+                # layers specified in checkpointable_layers (if provided)
+                return all('ParallelTransformerLayerPipe' in f.__class__.__name__ or (
+                    self.checkpointable_layers is not None and f.__class__.__name__ in self.checkpointable_layers)
+                           for f in funcs)
+
         if self.checkpointable_layers is not None:
+            # For non-GPT models, only checkpoint layers specified in checkpointable_layers
             return all(f.__class__.__name__ in self.checkpointable_layers for f in funcs)
+
+        # Default behavior: checkpoint any layer that has parameters
         params = [f.parameters() for f in funcs if isinstance(f, torch.nn.Module)]
         return any(len(list(p)) > 0 for p in params)
 
