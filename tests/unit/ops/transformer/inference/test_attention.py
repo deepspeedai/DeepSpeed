@@ -7,7 +7,7 @@ import pytest
 import torch
 import deepspeed
 from deepspeed.accelerator import get_accelerator
-from .inference_test_utils import assert_almost_equal
+from .inference_test_utils import allclose
 
 
 # reference timplementation
@@ -88,4 +88,4 @@ def test_attention(BATCH, H, N_CTX, D_HEAD, causal, use_flash, dtype=torch.float
                                     use_triton_flash=False,
                                     use_ds_attention=False)
     tri_out = tri_out.reshape((BATCH, N_CTX, H, D_HEAD)).permute(0, 2, 1, 3)
-    assert_almost_equal(ref_out, tri_out)
+    assert (allclose(ref_out, tri_out))
