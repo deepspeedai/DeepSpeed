@@ -38,7 +38,7 @@ class MiCS_AllGatherCoalescedHandle(AllGatherCoalescedHandle):
     def __init__(self, allgather_handle, params: List[Parameter], partitions: List[Tensor], world_size: int) -> None:
         super().__init__(allgather_handle, params, partitions, world_size)
 
-    def wait(self) -> None:
+    def wait(self, **kwargs) -> None:
         """
         """
         # let the current stream to op
