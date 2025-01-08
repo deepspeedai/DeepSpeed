@@ -19,6 +19,9 @@ import subprocess
 # -----------------------------------------------------------------------------
 # util class/functions for triton
 def is_nfs_path(path):
+    if os.name == 'nt':
+        return False
+
     # Normalize the path to get the absolute path
     path = os.path.abspath(path)
 
@@ -99,7 +102,7 @@ class AutotuneCacheManager:
             with FileLock(self.lock_path):
                 with open(self.file_path + ".tmp", 'wb') as handle:
                     pickle.dump(table, handle)
-                os.rename(self.file_path + ".tmp", self.file_path)
+                os.replace(self.file_path + ".tmp", self.file_path)
 
     def load(self):
         if os.path.exists(self.file_path):
