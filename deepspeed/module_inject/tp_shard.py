@@ -42,11 +42,16 @@ def get_num_attention_heads():
 def get_shard_size(total_size, mp_size, name=None, rank=None):
     global num_kv_heads
     last_linear = ["lm_head", "embed_out"]
+    # MoE MLP layer use near even division will get better perf.
+    moe_mlp_layer = ["gate_proj", "up_proj", "down_proj", "w1", "w2", "w3"]
+    not_moe_mlp_layer = True
+    if name != None and any(s in str(name) for s in moe_mlp_layer):
+        not_moe_mlp_layer = False
     # When we have num_kv_heads defined, uneven division is possible, otherwise enforce near even division
     if rank == None:
         rank = dist.get_rank()
     if num_kv_heads != None and total_size % num_kv_heads == 0 and "mlp" not in str(name) and str(
-            name) not in last_linear:
+            name) not in last_linear and not_moe_mlp_layer:
         my_slices = (num_kv_heads // mp_size) + (1 if rank < (num_kv_heads % mp_size) else 0)
         return total_size * my_slices // num_kv_heads
     else:
