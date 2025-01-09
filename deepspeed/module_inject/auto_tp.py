@@ -134,7 +134,8 @@ class Loading():
         load_layer_names = [
             "LPLayerNorm", "SharedEmbedding", "OPTLearnedPositionalEmbedding", "LlamaRMSNorm", "FalconLinear",
             "MistralRMSNorm", "T5LayerNorm", "MixtralRMSNorm", "Phi3RotaryEmbedding", "Phi3SuScaledRotaryEmbedding",
-            "Phi3RMSNorm", "YuanRMSNorm", "YuanRotaryEmbedding", "Phi3LongRoPEScaledRotaryEmbedding", "Qwen2RMSNorm"
+            "Phi3RMSNorm", "YuanRMSNorm", "YuanRotaryEmbedding", "Phi3LongRoPEScaledRotaryEmbedding", "Qwen2RMSNorm",
+            "DeepseekV2RMSNorm", "DeepseekV2YarnRotaryEmbedding", "MoEGate"
         ]
         return module.__class__ in load_layers or module._get_name() in load_layer_names
 
@@ -332,9 +333,9 @@ class AutoTP():
             return
         weight_shape = child.weight.shape
         mp_replace = ReplaceWithTensorSlicing(mp_group=self.mp_group)
-        # For mixtral-7x8b, need to skip MoE gate linear replace.
-        if name == "block_sparse_moe.gate" or (('mlp.shared_expert_gate' == name or 'mlp.gate' == name)
-                                               and 'qwen2_moe' in str(type(self.module))):
+        # For TP layer skip, e.g., MoE gate, deepseek low rank layer skip
+        if "q_a_proj" in name or "kv_a_proj_with_mqa" in name or name == "block_sparse_moe.gate" or (
+            ('mlp.shared_expert_gate' == name or 'mlp.gate' == name) and 'qwen2_moe' in str(type(self.module))):
             return child
         # For Yuan model
         if 'Yuan' in str(self.module):
@@ -350,11 +351,15 @@ class AutoTP():
         arctic_w2_all_reduce_linear = False
         if 'Arctic' in str(self.module) and 'w2' in name:
             arctic_w2_all_reduce_linear = True
+        # For MoE MLP model, e.g., deepseek and jamba
+        down_proj = False
+        if 'down_proj' in name:
+            down_proj = True
         # For MLP including chunk layer.
         if 'gate_up_proj' in name or ('dense_h_to_4h' in name and 'GLM' in str(self.module)):
             weight, bias = shard_chunk_mlp(child.weight.data, child.bias, dist.get_rank(), dist.get_world_size())
             return LinearLayer(weight=weight, bias=bias)
-        if name in self.all_reduce_linears or arctic_w2_all_reduce_linear:
+        if name in self.all_reduce_linears or arctic_w2_all_reduce_linear or down_proj:
             # if conv_linear_layer [weight_shape[1], weight_shape[0] // mp_size]
             # else [weight_shape[0], weight_shape[1] // mp_size]
 
