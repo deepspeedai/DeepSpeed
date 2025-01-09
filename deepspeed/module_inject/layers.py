@@ -191,7 +191,7 @@ class OPTEmbedding(EmbeddingLayer):
         self.offset = 2
         super().__init__(weight_shape, weight=weight)
 
-    def forward(self, attention_mask: torch.LongTensor, past_key_values_length: int = 0):
+    def forward(self, attention_mask: torch.LongTensor, past_key_values_length: int = 0, position_ids: int = 0):
         """`input_ids_shape` is expected to be [bsz x seqlen]."""
         attention_mask = attention_mask.long()
 
