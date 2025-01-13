@@ -125,11 +125,14 @@ def get_accelerator():
         if accelerator_name is None:
             try:
                 import intel_extension_for_pytorch as ipex
-
                 if ipex._C._has_xpu():
                     accelerator_name = "xpu"
             except ImportError as e:
-                pass
+                import torch
+                if torch.xpu.is_available():
+                    accelerator_name = "xpu"
+                else:
+                    pass
         if accelerator_name is None:
             try:
                 import torch_npu  # noqa: F401,F811 # type: ignore
