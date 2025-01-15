@@ -28,7 +28,7 @@ class ZeROOptimizer(DeepSpeedOptimizer):
 
         tp_rank = bwc_tensor_model_parallel_rank(mpu=self.mpu)
         if self.mpu is None:
-            logger.warn("MPU is not provided, setting tp size to 1 in checkpoint loading.")
+            logger.warning("MPU is not provided, setting tp size to 1 in checkpoint loading.")
             tp_world_size = 1
         else:
             tp_world_size = self.mpu.get_slice_parallel_world_size() if hasattr(self.mpu, "get_slice_parallel_world_size") \
