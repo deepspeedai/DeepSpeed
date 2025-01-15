@@ -178,7 +178,7 @@ def get_accelerator():
         if accelerator_name is None:
             # borrow this log from PR#5084
             if accel_logger is not None:
-                accel_logger.warn(
+                accel_logger.warning(
                     "Setting accelerator to CPU. If you have GPU or other accelerator, we were unable to detect it.")
             # cpu added as catch-all when accelerator detection fails
             accelerator_name = "cpu"
