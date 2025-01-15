@@ -169,7 +169,7 @@ class InferenceEngine(Module):
         is_meta_device = hasattr(self.module, "device") and self.module.device.type == 'meta'
         if is_meta_device:
             self.module.to_empty(device=device)
-        else:
+        elif not config.keep_module_on_host:
             self.module.to(device)
 
         if config.tensor_parallel.tp_size > 1:
