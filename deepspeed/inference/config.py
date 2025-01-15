@@ -174,6 +174,15 @@ class DeepSpeedInferenceConfig(DeepSpeedConfigModel):
     values for :any:`DeepSpeedMoEConfig`.
     """
 
+    keep_module_on_host: bool = False
+    """
+    When loading checkpoints to model parameters, they are moved to the device. In very large models
+    this might fill the device and cause OOM. Setting this flag to true, will keep checkpoints on
+    host and not move them directly to the device (giving an option to quantize checkpoint data before
+    moving it to the device for example).
+    Set only for models with injection policies and auto TP.
+    """
+
     quant: QuantizationConfig = {}
     """
     NOTE: only works for int8 dtype.

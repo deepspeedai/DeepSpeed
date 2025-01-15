@@ -268,7 +268,8 @@ def replace_transformer_layer(orig_layer_impl, model, checkpoint_dict, config, m
         #mp_replace = ReplaceWithTensorSlicing(mp_group=config.tensor_parallel.tp_group)
 
         # 1. Create AutoTP object
-        _autotp = AutoTP(module, all_reduce_linears, prefix, state_dict, linear_layer_setting, orig_layer_impl)
+        _autotp = AutoTP(module, all_reduce_linears, prefix, state_dict, linear_layer_setting, orig_layer_impl,
+                         config.keep_module_on_host)
 
         # 2. Set the tensor parallelism config
         _autotp.set_tensor_parallel_config(config.tensor_parallel.tp_size, config.tensor_parallel.tp_group)
