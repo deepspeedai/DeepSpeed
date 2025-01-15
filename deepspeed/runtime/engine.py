@@ -3120,7 +3120,7 @@ class DeepSpeedEngine(Module):
                 if bf16_mode is not self.bfloat16_enabled():
                     checkpoint_bit16 = BFLOAT16 if bf16_mode else FP16
                     engine_bit16 = BFLOAT16 if self.bfloat16_enabled() else FP16
-                    logger.warn(f'Loading {checkpoint_bit16} zero checkpoints into {engine_bit16} training engine')
+                    logger.warning(f'Loading {checkpoint_bit16} zero checkpoints into {engine_bit16} training engine')
                 return self._get_all_zero_checkpoint_state_dicts(zero_ckpt_names)
 
         return None
@@ -3276,7 +3276,7 @@ class DeepSpeedEngine(Module):
 
                     local_expert_id = None
                     if not m:
-                        logger.warn(f'No expert found in key {key}.')
+                        logger.warning(f'No expert found in key {key}.')
                     else:
                         local_expert_id = m.group(1)
 
