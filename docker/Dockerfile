@@ -132,7 +132,6 @@ RUN pip install psutil \
         sentencepiece \
         msgpack \
         requests \
-        pandas \
         sphinx \
         sphinx_rtd_theme \
         scipy \
