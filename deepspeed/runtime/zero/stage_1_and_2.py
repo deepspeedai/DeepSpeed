@@ -1691,7 +1691,8 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
                     continue
                 if is_model_parallel_parameter(p) or (self.model_parallel_rank == 0):
                     all_norms.append(
-                        torch.norm(g.data.double().detach(), norm_type).to(get_accelerator().current_device_name()))
+                        torch.linalg.vector_norm(g.data.double().detach(),
+                                                 ord=norm_type).to(get_accelerator().current_device_name()))
             if len(all_norms) > 0:
                 total_norm = torch.stack(all_norms).square().sum().float()
             else:
@@ -1795,7 +1796,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
             self._average_expert_grad_norms(norm_groups)
 
         # calculating L2 norm
-        return torch.norm(torch.stack(norm_groups), p=norm_type)
+        return torch.linalg.vector_norm(torch.stack(norm_groups), ord=norm_type)
 
     def get_bit16_param_group(self, group_no):
         bit16_partitions = self.parallel_partitioned_bit16_groups[group_no]
