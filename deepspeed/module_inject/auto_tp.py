@@ -260,8 +260,7 @@ class AutoTP():
             for i, policy in enumerate(policy_list):
                 # if module already exists in policy, combine gems and remove duplicates
                 if policy[0] == type(new_module):
-                    #new_gems = set(new_gems + policy[1])
-                    print('new_gems ,policy[1] type', type(new_gems), type(policy[1]))
+                    #new_gems = set(new_gems + policy[1])                    
                     new_gems = (new_gems + policy[1])
                     policy_list[i] = tuple([type(new_module), new_gems])
                     return policy_list
