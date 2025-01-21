@@ -83,7 +83,7 @@ class HcclBackend(object):
 
         compensated_server_m.add_(server_error)
 
-        server_scale = torch.norm(compensated_server_m) / np.sqrt(compensated_server_m.numel())
+        server_scale = torch.linalg.norm(compensated_server_m) / np.sqrt(compensated_server_m.numel())
 
         server_error.set_(compensated_server_m -
                           server_scale * compensated_server_m.sign().add_(1).bool().float().add_(-0.5).mul_(2.0))
