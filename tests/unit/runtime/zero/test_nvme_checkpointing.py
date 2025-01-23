@@ -22,8 +22,10 @@ class TestNVMeCheckpointing(DistributedTest):
     world_size = 1
 
     @pytest.mark.parametrize('param_offload_device, optim_offload_device',
-                             [(OffloadDeviceEnum.cpu, OffloadDeviceEnum.cpu),
+                             [(OffloadDeviceEnum.none, OffloadDeviceEnum.nvme),
                               (OffloadDeviceEnum.cpu, OffloadDeviceEnum.nvme),
+                              (OffloadDeviceEnum.nvme, OffloadDeviceEnum.none),
+                              (OffloadDeviceEnum.nvme, OffloadDeviceEnum.cpu),
                               (OffloadDeviceEnum.nvme, OffloadDeviceEnum.nvme)])
     def test_nvme_checkpointing(self, tmpdir, param_offload_device, optim_offload_device):
         zero_dir, ckpt_dir = os.path.join(tmpdir, "zero"), os.path.join(tmpdir, "checkpoint")

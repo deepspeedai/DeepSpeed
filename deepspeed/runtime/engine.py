@@ -799,10 +799,8 @@ class DeepSpeedEngine(Module):
     def zero_elastic_checkpoint(self):
         return self._config.zero_config.elastic_checkpoint
 
-    def zero_has_nvme_offload(self):
-        if not hasattr(self.optimizer, "swap_optimizer"):
-            return False
-        return self.optimizer.swap_optimizer or self.optimizer.params_in_nvme_and_cpu
+    def zero_nvme_offload_optimizer(self):
+        return getattr(self.optimizer, "swap_optimizer", False)
 
     def zero_max_live_parameters(self):
         return self._config.zero_config.max_live_parameters
@@ -2865,7 +2863,7 @@ class DeepSpeedEngine(Module):
             if not success:
                 self.optimizer._restore_from_bit16_weights()
 
-        if self.zero_has_nvme_offload():
+        if self.zero_nvme_offload_optimizer():
             from shutil import copytree, disk_usage
             offload_dir = self.optimizer.optimizer_swapper.swap_folder
             offload_ckpt_dir = os.path.join(load_dir, tag, "offloaded_tensors")
@@ -3205,7 +3203,7 @@ class DeepSpeedEngine(Module):
             self._create_zero_checkpoint_files(save_dir, tag)
             self._save_zero_checkpoint(save_dir, tag)
 
-        if self.zero_has_nvme_offload():
+        if self.zero_nvme_offload_optimizer():
             from shutil import copytree, disk_usage
             offload_dir = self.optimizer.optimizer_swapper.swap_folder
             offload_ckpt_dir = os.path.join(save_dir, tag, "offloaded_tensors")
