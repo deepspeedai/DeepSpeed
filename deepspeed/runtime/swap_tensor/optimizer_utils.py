@@ -153,6 +153,11 @@ class OptimizerSwapper(object):
             'timer_names',
         ]
 
+    def purge_state(self):
+        for swap_info in self.swap_params_info.values():
+            swap_info.tensors = [swap_info.tensors[0]]
+            swap_info.has_state_tensors = False
+
     def swappable_tensor(self, param=None, numel=None):
         assert param is not None or numel is not None, "Either param or numel must be provided"
         if param is not None:
