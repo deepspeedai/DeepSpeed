@@ -5,8 +5,8 @@
 """
 DeepSpeed library
 
-To build wheel on Windows:
-1. Install pytorch, such as pytorch 1.12 + cuda 11.6.
+To build wheels on Windows:
+1. Install pytorch, such as pytorch 2.3 + cuda 12.1.
 2. Install visual cpp build tool.
 3. Include cuda toolkit.
 4. Launch cmd console with Administrator privilege for creating required symlink folders.
