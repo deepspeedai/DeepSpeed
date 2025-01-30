@@ -37,7 +37,7 @@ jobs:
 
       - name: Install pytorch
         run: |
-          pip3 install -U --cache-dir $TORCH_CACHE torch --index-url https://download.pytorch.org/whl/cu121
+          pip install -U --cache-dir $TORCH_CACHE torch torchvision --index-url https://download.pytorch.org/whl/cu121
           python -c "import torch; print('torch:', torch.__version__, torch)"
           python -c "import torch; print('CUDA available:', torch.cuda.is_available())"
 
@@ -67,6 +67,7 @@ jobs:
         run: |
           cd DeepSpeedExamples/applications/DeepSpeed-Chat
           unset TORCH_CUDA_ARCH_LIST # only jit compile for current arch
+          unset NCCL_DEBUG
           cd tests
           pytest $PYTEST_OPTS ./
 
