@@ -102,7 +102,7 @@ def unwrap_model_for_generation(model):
             optimizer_offload = model.optimizer.parameter_offload
         elif model.optimizer is not None:
             optimizer_offload = model.optimizer
-        optimizer_offload._register_hooks_recursively(optimizer_offload.module)
+        optimizer_offload._register_deepspeed_module(optimizer_offload.module)
     return
 
 
