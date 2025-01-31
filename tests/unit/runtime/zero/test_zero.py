@@ -1673,3 +1673,37 @@ class TestZero3SwitchModes(DistributedTest):
             with torch.no_grad():
                 for batch in data_loader:
                     loss = model(batch[0], batch[1])
+
+
+# Avoid overwriting client module id
+# https://github.com/microsoft/DeepSpeed/issues/6772
+class TestZero3ClientModuleID(DistributedTest):
+    world_size = 2
+
+    def test_client_module_id(self):
+        config_dict = {
+            "train_micro_batch_size_per_gpu": 1,
+            "steps_per_print": 1,
+            "optimizer": {
+                "type": "Adam",
+            },
+            "zero_optimization": {
+                "stage": 3
+            },
+        }
+
+        class MyModel(torch.nn.Module):
+
+            def __init__(self):
+                super().__init__()
+                self.id = 3  # ID arbitrary client usage, e.g. GPU placement
+                self.fc = Linear(128, 128)
+
+            def forward(self, x):
+                return self.fc(x)
+
+        model = MyModel()
+        pre_init_m_id = model.id
+        model, _, _, _ = deepspeed.initialize(model=model, model_parameters=model.parameters(), config=config_dict)
+        post_init_m_id = model.id
+        assert pre_init_m_id == post_init_m_id
