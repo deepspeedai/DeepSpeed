@@ -612,8 +612,8 @@ class CUDAOpBuilder(OpBuilder):
 
         - `TORCH_CUDA_ARCH_LIST` may use ; or whitespace separators. Examples:
 
-        TORCH_CUDA_ARCH_LIST="6.1;7.5;8.6" pip install ...
-        TORCH_CUDA_ARCH_LIST="6.0 6.1 7.0 7.5 8.0 8.6+PTX" pip install ...
+        TORCH_CUDA_ARCH_LIST="6.1;7.5;8.6;9.0;10.0" pip install ...
+        TORCH_CUDA_ARCH_LIST="6.0 6.1 7.0 7.5 8.0 8.6 9.0 10.0+PTX" pip install ...
 
         - `cross_compile_archs` uses ; separator.
 
@@ -651,9 +651,9 @@ class CUDAOpBuilder(OpBuilder):
         args = []
         self.enable_bf16 = True
         for cc in ccs:
-            num = cc[0] + cc[2]
+            num = cc[0] + cc[1].split('+')[0]
             args.append(f'-gencode=arch=compute_{num},code=sm_{num}')
-            if cc.endswith('+PTX'):
+            if cc[1].endswith('+PTX'):
                 args.append(f'-gencode=arch=compute_{num},code=compute_{num}')
 
             if int(cc[0]) <= 7:
@@ -666,7 +666,7 @@ class CUDAOpBuilder(OpBuilder):
         Prune any compute capabilities that are not compatible with the builder. Should log
         which CCs have been pruned.
         """
-        return ccs
+        return [cc.split('.') for cc in ccs]
 
     def version_dependent_macros(self):
         # Fix from apex that might be relevant for us as well, related to https://github.com/NVIDIA/apex/issues/456
