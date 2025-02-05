@@ -15,7 +15,7 @@ from deepspeed.accelerator import get_accelerator
 from .replace_policy import replace_policies, generic_policies
 from .auto_tp import AutoTP, ReplaceWithTensorSlicing, Loading
 from .layers import TensorParallelOcShardConv2d, TensorParallelIcShardConv2d
-
+from deepspeed.module_inject.layers import is_autotp_training_mode
 from deepspeed import comm as dist
 from deepspeed.module_inject.tp_shard import set_num_kv_heads, set_n_embd, set_num_attention_heads, set_tp_grain_size
 
@@ -323,7 +323,7 @@ def replace_transformer_layer(orig_layer_impl, model, checkpoint_dict, config, m
 
         else:
             # copy relevant state from child -> new module
-            if config.replace_with_kernel_inject:
+            if not is_autotp_training_mode() and config.replace_with_kernel_inject:
                 new_module = replace_with_policy(child,
                                                  _policy,
                                                  config.triangular_masking,
@@ -475,7 +475,7 @@ def replace_transformer_layer(orig_layer_impl, model, checkpoint_dict, config, m
         set_lm_head(replaced_module)
         print(f"checkpoint loading time at rank {rank}: {time.time()-start_time} sec")
 
-    if config.save_mp_checkpoint_path is not None:
+    if not is_autotp_training_mode() and config.save_mp_checkpoint_path is not None:
         from collections import OrderedDict
         import json
         num_partitions = 8
