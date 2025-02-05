@@ -62,6 +62,7 @@ from ..compression.config import get_compression_config, get_quantize_enabled
 from ..compression.constants import *
 from .swap_tensor.aio_config import get_aio_config
 
+from .tensor_parallel import get_tensor_parallel_config
 from .data_pipeline.config import get_data_efficiency_enabled, get_data_efficiency_config, get_curriculum_enabled_legacy, get_curriculum_params_legacy
 from .data_pipeline.constants import *
 
@@ -913,6 +914,7 @@ class DeepSpeedConfig(object):
             **param_dict['weight_quantization']) if 'weight_quantization' in param_dict else None
 
         self.timers_config = get_timers_config(param_dict)
+        self.tensor_parallel_config = get_tensor_parallel_config(param_dict)
 
     def _batch_assertion(self):
 
