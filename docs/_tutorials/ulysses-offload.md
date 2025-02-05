@@ -3,7 +3,7 @@ title: "DeepSpeed Ulysses-Offload"
 tags: training ultra long context language model with fully pipelined distributed transformer
 ---
 
-DeepSpeed Ulysses-Offload is a system of chunking and offloading long-context transformer model training scheme built on top of [ZeRO](/tutorials/zero/) and [DeepSpeed Ulysses](https://github.com/microsoft/DeepSpeed/blob/master/blogs/deepspeed-ulysses/README.md). It adopts Fully Pipeliend Distributed Transformer (FPDT) which enables 2M context size training on 8B models with only 4 GPUs, and 4M context size training on 70B models with 32 GPUs. Read our [Ulysses-Offload blog](https://github.com/microsoft/DeepSpeed/blob/master/blogs/ulysses-offload/README.md) and [paper](https://arxiv.org/pdf/2408.16978) to learn more!
+DeepSpeed Ulysses-Offload is a system of chunking and offloading long-context transformer model training scheme built on top of [ZeRO](/tutorials/zero/) and [DeepSpeed Ulysses](https://github.com/deepspeedai/DeepSpeed/blob/master/blogs/deepspeed-ulysses/README.md). It adopts Fully Pipeliend Distributed Transformer (FPDT) which enables 2M context size training on 8B models with only 4 GPUs, and 4M context size training on 70B models with 32 GPUs. Read our [Ulysses-Offload blog](https://github.com/deepspeedai/DeepSpeed/blob/master/blogs/ulysses-offload/README.md) and [paper](https://arxiv.org/pdf/2408.16978) to learn more!
 
 We recommend that you read the tutorials on [Getting Started](/getting-started/), [ZeRO](/tutorials/zero/)  and [Megatron-DeepSpeed](/tutorials/megatron/) before stepping through this tutorial.
 
@@ -16,7 +16,7 @@ Ulysses-Offload supports ZeRO, which shards the model and tensors among GPU memo
 
 ## Training Environment
 
-For this tutorial, Flash Attention (CUDA) is required. We will configure a 8 billion parameter LLaMA model using the DeepSpeed [Megatron-DeepSpeed](https://github.com/microsoft/Megatron-DeepSpeed/tree/master/) code. We will use 1 nodes of 4x [NVIDIA Tesla A100-SXM4 Tensor Core GPU](https://www.nvidia.com/en-us/data-center/a100/).
+For this tutorial, Flash Attention (CUDA) is required. We will configure a 8 billion parameter LLaMA model using the DeepSpeed [Megatron-DeepSpeed](https://github.com/deepspeedai/Megatron-DeepSpeed/tree/master/) code. We will use 1 nodes of 4x [NVIDIA Tesla A100-SXM4 Tensor Core GPU](https://www.nvidia.com/en-us/data-center/a100/).
 
 
 ## Training a 6.7B parameter GPT with Ulysses-Offload
@@ -61,7 +61,7 @@ For 6.7B model, we will enable ZeRO-3, Ulysses, activation checkpointing with CP
     fi
     ```
 
-You can find the full script [here](https://github.com/microsoft/Megatron-DeepSpeed/tree/main/examples_deepspeed/sequence_parallel/ds_pretrain_gpt_6.7B_fpdt_32k.sh).
+You can find the full script [here](https://github.com/deepspeedai/Megatron-DeepSpeed/tree/main/examples_deepspeed/sequence_parallel/ds_pretrain_gpt_6.7B_fpdt_32k.sh).
 
 See more details on Megatron-DeepSpeed [tutorial](/tutorials/megatron/) examples on how to launch a Megatron-DeepSpeed job.
 

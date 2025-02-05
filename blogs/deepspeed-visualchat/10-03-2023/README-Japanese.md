@@ -152,7 +152,7 @@ DeepSpeed-VisualChatは使いやすく、かつ優れたスケーラビリティ
 DeepSpeed-VisualChatの訓練は簡単かつ便利に実行できます。ここではCLIPビジュアルエンコーダーとLLaMa-7Bモデルを使用する例を示します：
 
 ```
-git clone https://github.com/microsoft/DeepSpeedExamples.git
+git clone https://github.com/deepspeedai/DeepSpeedExamples.git
 cd DeepSpeedExamples/applications/DeepSpeed-VisualChat/
 pip install -r requirements.txt
 cd training
@@ -168,21 +168,21 @@ bash chat_scripts/run.sh # You need to change necessary variables, e.g, ckpt pat
 
 より大規模なモデル推論をサポートするために、我々はHugging Faceの大規模モデル推論をDeepSpeed-VisualChat APIに組み込みました。そのため、ユーザーはGPUメモリ容量とモデルサイズに基づいて、異なるGPU数を選択することができます。
 
-詳細は[ランディングページ](https://github.com/microsoft/DeepSpeedExamples/tree/master/applications/DeepSpeed-VisualChat)をご参照ください。
+詳細は[ランディングページ](https://github.com/deepspeedai/DeepSpeedExamples/tree/master/applications/DeepSpeed-VisualChat)をご参照ください。
 
 # 7. 早速使ってみましょう！
 
 DeepSpeed-VisualChatがオープンソース化され、AIコミュニティで利用できるようになったことを大変嬉しく思います。
 
-* まずは、DeepSpeed-VisualChatのGitHubページをご覧ください： [GitHubランディングページ](https://github.com/microsoft/DeepSpeedExamples/tree/master/applications/DeepSpeed-VisualChat)
+* まずは、DeepSpeed-VisualChatのGitHubページをご覧ください： [GitHubランディングページ](https://github.com/deepspeedai/DeepSpeedExamples/tree/master/applications/DeepSpeed-VisualChat)
 
-* DeepSpeed-VisualChatは、皆様からのフィードバックとサポートにより改良を続けていきます。私たちの[ロードマップ](https://github.com/microsoft/DeepSpeedExamples/tree/master/applications/DeepSpeed-VisualChat/README.md#-deepspeed-visualchats-roadmap-)は、現在サポートされている機能と将来的に計画している機能を示しています。
+* DeepSpeed-VisualChatは、皆様からのフィードバックとサポートにより改良を続けていきます。私たちの[ロードマップ](https://github.com/deepspeedai/DeepSpeedExamples/tree/master/applications/DeepSpeed-VisualChat/README.md#-deepspeed-visualchats-roadmap-)は、現在サポートされている機能と将来的に計画している機能を示しています。
 
 DeepSpeed-VisualChatは、さまざまなDeep Learningシステムやモデリング技術を含む、より大きなDeepSpeedエコシステムの一部です。詳細については、以下をご覧ください。
 
 * 私たちの[ウェブサイト](https://www.deepspeed.ai/)で、詳細なブログ記事、チュートリアル、役立つドキュメントを提供しています。
 * DeepSpeedの最新ニュースは、[English X(Twitter)](https://twitter.com/MSFTDeepSpeed)、[Japanese X(Twitter)](https://twitter.com/MSFTDeepSpeedJP)、[Chinese Zhihu](https://www.zhihu.com/people/deepspeed)をフォローしてください。
 
-DeepSpeedは、皆様の開発への参加を歓迎しています。DeepSpeedのGitHubページで、バグ報告、Pull Request、ディスカッションへの参加が可能です。詳細は[ガイドライン](https://github.com/microsoft/DeepSpeed/blob/master/CONTRIBUTING.md)をご覧ください。また、大学、研究所、企業とのコラボレーションも行っています。こうしたコラボレーションについてのご要望（およびGitHubには適さないその他の話題）については<deepspeed-info@microsoft.com> まで直接メールをお送りください。
+DeepSpeedは、皆様の開発への参加を歓迎しています。DeepSpeedのGitHubページで、バグ報告、Pull Request、ディスカッションへの参加が可能です。詳細は[ガイドライン](https://github.com/deepspeedai/DeepSpeed/blob/master/CONTRIBUTING.md)をご覧ください。また、大学、研究所、企業とのコラボレーションも行っています。こうしたコラボレーションについてのご要望（およびGitHubには適さないその他の話題）については<deepspeed-info@microsoft.com> まで直接メールをお送りください。
 
-* 私たちの[DeepSpeed GitHub](https://github.com/microsoft/DeepSpeed/)および[DeepSpeedExamples GitHub](https://github.com/microsoft/DeepSpeedExamples/)リポジトリが気に入ったら、ぜひスターをつけてください！
+* 私たちの[DeepSpeed GitHub](https://github.com/deepspeedai/DeepSpeed/)および[DeepSpeedExamples GitHub](https://github.com/deepspeedai/DeepSpeedExamples/)リポジトリが気に入ったら、ぜひスターをつけてください！

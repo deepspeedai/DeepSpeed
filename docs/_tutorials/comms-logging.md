@@ -64,7 +64,7 @@ The steps to add DeepSpeed communication log summaries are as follows:
 2. (Optional) If your application contains `torch.distributed` calls that you wish to log, import `deepspeed.comm` package and modify `torch.distributed` calls to use `deepspeed.comm` (Note: The `deepspeed.comm` collective and pt2pt APIs exactly match `torch.distributed`)
 3. Call `deepspeed.comm.log_summary`
 
-For example usage, see the following modified [DeepSpeedExamples/cifar](https://github.com/microsoft/DeepSpeedExamples/tree/master/cifar) example:
+For example usage, see the following modified [DeepSpeedExamples/cifar](https://github.com/deepspeedai/DeepSpeedExamples/tree/master/cifar) example:
 
 ```python
 # Step 2: (Optional) Import deepspeed.comm

@@ -23,11 +23,11 @@
 
 GPT-4 和 LLaMA 这样的大型语言模型（LLMs）已在各个层次上成为了集成 AI 的主流服务应用。从常规聊天模型到文档摘要，从自动驾驶到各个软件中的Copilot功能，这些模型的部署和服务需求正在迅速增加。像 DeepSpeed、PyTorch 和其他几个框架可以在 LLM 训练期间实现良好的硬件利用率。但它们在与用户互动及处理开放式文本生成等任务时，受限于这些操作的计算密集度相对较低，现有系统往往在推理吞吐量上遇到瓶颈。
 
-为了解决这一问题， [vLLM](https://arxiv.org/pdf/2309.06180.pdf) 这样由 PagedAttention 驱动的框架和 [Orca](https://www.usenix.org/system/files/osdi22-yu.pdf) 这样的系统显著提高了 LLM 推理的性能。然而，这些系统在面对长提示的工作负载时，依旧难以提供良好的服务质量。随着越来越多的模型（例如 [MPT-StoryWriter](https://www.mosaicml.com/blog/mpt-7b)）和系统（例如[DeepSpeed Ulysses](https://github.com/microsoft/DeepSpeed/tree/master/blogs/deepspeed-ulysses)）支持延伸到数万个令牌的上下文窗口，这些长提示工作负载变得越来越重要。为了更好地理解问题，我们在下文中提供了详细的示例来说明 LLM 的文本生成是如何在“提示处理”和“生成”的这两个阶段中工作的。当系统将它们视为不同的阶段时，生成阶段将被提示处理所抢占，这可能会破坏服务级别协议（SLAs）。
+为了解决这一问题， [vLLM](https://arxiv.org/pdf/2309.06180.pdf) 这样由 PagedAttention 驱动的框架和 [Orca](https://www.usenix.org/system/files/osdi22-yu.pdf) 这样的系统显著提高了 LLM 推理的性能。然而，这些系统在面对长提示的工作负载时，依旧难以提供良好的服务质量。随着越来越多的模型（例如 [MPT-StoryWriter](https://www.mosaicml.com/blog/mpt-7b)）和系统（例如[DeepSpeed Ulysses](https://github.com/deepspeedai/DeepSpeed/tree/master/blogs/deepspeed-ulysses)）支持延伸到数万个令牌的上下文窗口，这些长提示工作负载变得越来越重要。为了更好地理解问题，我们在下文中提供了详细的示例来说明 LLM 的文本生成是如何在“提示处理”和“生成”的这两个阶段中工作的。当系统将它们视为不同的阶段时，生成阶段将被提示处理所抢占，这可能会破坏服务级别协议（SLAs）。
 
 今天，我们很高兴地介绍 DeepSpeed-FastGen 框架，它通过采用我们提出的动态 SplitFuse 技术，能够提供比vLLM 等先进系统高出多达 2.3 倍的有效吞吐量。DeepSpeed-FastGen 是 DeepSpeed-MII 和 DeepSpeed-Inference 的结合，提供了一个易于使用的服务系统。
 
-**快速开始：** 要使用 DeepSpeed-FastGen 只需安装最新的 [DeepSpeed-MII](https://github.com/microsoft/DeepSpeed-MII) 发行版：
+**快速开始：** 要使用 DeepSpeed-FastGen 只需安装最新的 [DeepSpeed-MII](https://github.com/deepspeedai/DeepSpeed-MII) 发行版：
 
 ```bash
 pip install deepspeed-mii
@@ -207,7 +207,7 @@ DeepSpeed-FastGen 提供了副本级负载均衡，可以将请求均匀分布�
 
 ## 5. DeepSpeed-FastGen：软件实现与使用指南 <a name="using-deepspeed-fastgen"></a>
 
-DeepSpeed-FastGen 是 [DeepSpeed-MII](https://github.com/microsoft/DeepSpeed-MII) 和 [DeepSpeed-Inference](https://github.com/microsoft/DeepSpeed) 的协同组合，如下图所示。这两个软件包共同提供了系统的各个组成部分，包括前端 API、用于使用动态 SplitFuse 调度批次的主机和设备基础设施、优化的内核实现，以及构建新模型实现的工具。
+DeepSpeed-FastGen 是 [DeepSpeed-MII](https://github.com/deepspeedai/DeepSpeed-MII) 和 [DeepSpeed-Inference](https://github.com/deepspeedai/DeepSpeed) 的协同组合，如下图所示。这两个软件包共同提供了系统的各个组成部分，包括前端 API、用于使用动态 SplitFuse 调度批次的主机和设备基础设施、优化的内核实现，以及构建新模型实现的工具。
 
 <div align="center">
 <img src="../assets/images/fastgen-arch-light.png#gh-light-mode-only" width="800px">
@@ -217,7 +217,7 @@ DeepSpeed-FastGen 是 [DeepSpeed-MII](https://github.com/microsoft/DeepSpeed-MII
 
 使用我们的 alpha 版 DeepSpeed-FastGen 最快的入门方式是：`pip install deepspeed-mii`。
 
-请按照我们的 [入门指南](https://github.com/microsoft/deepspeed-mii#getting-started-with-mii) 获取更多细节。如需使用和报告问题，请使用 [DeepSpeed-MII Github 仓库](https://github.com/microsoft/DeepSpeed-MII)。
+请按照我们的 [入门指南](https://github.com/deepspeedai/deepspeed-mii#getting-started-with-mii) 获取更多细节。如需使用和报告问题，请使用 [DeepSpeed-MII Github 仓库](https://github.com/deepspeedai/DeepSpeed-MII)。
 
 ### A. 支持的模型
 
@@ -233,10 +233,10 @@ DeepSpeed-FastGen 是 [DeepSpeed-MII](https://github.com/microsoft/DeepSpeed-MII
 
 所有当前模型都利用了后端的 [HuggingFace](https://github.com/huggingface) API 来提供模型权重和模型对应的分词器。
 
-> 我们计划在最初发布后的几周和几个月内添加更多模型。如果您希望支持特定的模型架构，请[提交问题](https://github.com/microsoft/DeepSpeed-MII/issues)来让我们知道。
+> 我们计划在最初发布后的几周和几个月内添加更多模型。如果您希望支持特定的模型架构，请[提交问题](https://github.com/deepspeedai/DeepSpeed-MII/issues)来让我们知道。
 
 ### B. 部署选项
-以下所有示例均可在 [DeepSpeedExamples](https://github.com/microsoft/DeepSpeedExamples/tree/master/inference/mii) 中运行。安装后，您有两种部署方式：交互式非持久管道或持久化服务部署：
+以下所有示例均可在 [DeepSpeedExamples](https://github.com/deepspeedai/DeepSpeedExamples/tree/master/inference/mii) 中运行。安装后，您有两种部署方式：交互式非持久管道或持久化服务部署：
 
 #### 非持久管道
 
@@ -274,20 +274,20 @@ client.terminate_server()
 
 ### C. 高级安装方式
 
-为了使用方便并显著减少许多其他框架所需的冗长编译时间，我们通过名为 [DeepSpeed-Kernels](https://github.com/microsoft/DeepSpeed-Kernels) 的新库分发了覆盖我们大部分自定义内核的预编译 Python wheel。我们发现这个库在环境中非常便携，只要这些环境具有 NVIDIA GPU 计算能力 8.0+（Ampere+）、CUDA 11.6+ 和 Ubuntu 20+。在大多数情况下，您甚至不需要知道这个库的存在，因为它是 DeepSpeed-MII 的依赖项，并将自动与之一起安装。然而，如果您因任何原因需要手动编译我们的内核，请参阅我们的[高级安装文档](https://github.com/microsoft/DeepSpeed-Kernels#source)。
+为了使用方便并显著减少许多其他框架所需的冗长编译时间，我们通过名为 [DeepSpeed-Kernels](https://github.com/deepspeedai/DeepSpeed-Kernels) 的新库分发了覆盖我们大部分自定义内核的预编译 Python wheel。我们发现这个库在环境中非常便携，只要这些环境具有 NVIDIA GPU 计算能力 8.0+（Ampere+）、CUDA 11.6+ 和 Ubuntu 20+。在大多数情况下，您甚至不需要知道这个库的存在，因为它是 DeepSpeed-MII 的依赖项，并将自动与之一起安装。然而，如果您因任何原因需要手动编译我们的内核，请参阅我们的[高级安装文档](https://github.com/deepspeedai/DeepSpeed-Kernels#source)。
 
 
 # 6. 尝试 DeepSpeed-FastGen <a name="try"></a>
 我们非常高兴分享 DeepSpeed-FastGen 的首个 alpha 版本。
 
-* 要开始，请访问我们的 DeepSpeed-MII GitHub 页面： [GitHub 登陆页面](https://github.com/microsoft/DeepSpeed-MII)
+* 要开始，请访问我们的 DeepSpeed-MII GitHub 页面： [GitHub 登陆页面](https://github.com/deepspeedai/DeepSpeed-MII)
 
 DeepSpeed-FastGen 是更大的 DeepSpeed 生态系统的一部分，该生态系统包含了多种深度学习系统和建模技术。要了解更多，
 
 * 请访问我们的[网站](https://www.deepspeed.ai/)，详细查看博客文章、教程和有用的文档。
 * 您也可以通过我们的[英文 Twitter](https://twitter.com/MSFTDeepSpeed)、[日本 Twitter](https://twitter.com/MSFTDeepSpeedJP) 和[中文知乎](https://www.zhihu.com/people/deepspeed) 关注我们，以获取 DeepSpeed 的最新消息。
 
-DeepSpeed 欢迎您的贡献！我们鼓励您在 [DeepSpeed GitHub](https://github.com/microsoft/DeepSpeed/) 页面上报告问题、贡献 PR，并参与讨论。有关更多详细信息，请参见我们的[贡献指南](https://github.com/microsoft/DeepSpeed/blob/master/CONTRIBUTING.md)。我们愿意与大学、研究实验室和公司合作，比如那些在深度学习研究上共同工作，应用 DeepSpeed 来赋能真实世界的 AI 模型和应用等。对于那些不适合在 GitHub 上提出的请求（以及其他请求），请直接发送电子邮件至 deepspeed-info@microsoft.com。
+DeepSpeed 欢迎您的贡献！我们鼓励您在 [DeepSpeed GitHub](https://github.com/deepspeedai/DeepSpeed/) 页面上报告问题、贡献 PR，并参与讨论。有关更多详细信息，请参见我们的[贡献指南](https://github.com/deepspeedai/DeepSpeed/blob/master/CONTRIBUTING.md)。我们愿意与大学、研究实验室和公司合作，比如那些在深度学习研究上共同工作，应用 DeepSpeed 来赋能真实世界的 AI 模型和应用等。对于那些不适合在 GitHub 上提出的请求（以及其他请求），请直接发送电子邮件至 deepspeed-info@microsoft.com。
 
 以下项目在我们的路线图上，我们计划通过我们的 GitHub 问题和 PR 与我们的社区在这些项目上进行交流：
 
@@ -296,7 +296,7 @@ DeepSpeed 欢迎您的贡献！我们鼓励您在 [DeepSpeed GitHub](https://git
 - 通过与合作伙伴的合作支持新硬件后端
 - 发布性能测试套件（例如此博客中生成的图表）
 
-如果您喜欢我们的工作，请为我们的 [DeepSpeed GitHub](https://github.com/microsoft/DeepSpeed/) 和 [DeepSpeedMII GitHub](https://github.com/microsoft/DeepSpeed-MII/) 仓库打上“星标”！
+如果您喜欢我们的工作，请为我们的 [DeepSpeed GitHub](https://github.com/deepspeedai/DeepSpeed/) 和 [DeepSpeedMII GitHub](https://github.com/deepspeedai/DeepSpeed-MII/) 仓库打上“星标”！
 
 # 7. 致谢 <a name="acknowledgements"></a>
 

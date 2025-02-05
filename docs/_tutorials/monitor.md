@@ -81,7 +81,7 @@ The steps to create a custom monitor are as follows:
 
 \* Note - Some Monitor backends don't support mixed sample values. Be sure to use your DeepSpeed engine object's `global_samples` attribute in each 3-tuple
 
-For example usage, see the following modified [DeepSpeedExamples/cifar](https://github.com/microsoft/DeepSpeedExamples/tree/master/cifar) example:
+For example usage, see the following modified [DeepSpeedExamples/cifar](https://github.com/deepspeedai/DeepSpeedExamples/tree/master/cifar) example:
 
 ```python
 # Step 1: Import monitor (and DeepSpeed config, if needed)

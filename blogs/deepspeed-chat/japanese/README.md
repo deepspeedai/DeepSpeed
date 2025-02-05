@@ -62,7 +62,7 @@ DeepSpeed-RLHFシステムは、大規模モデルの学習において類を見
 *表2. 複数ノード（64x A100-80GB）を用いた場合の訓練時間とAzureでの概算実行コスト*
 </div>
 
-> ***注意事項***: 上記の2つの表の数値は、訓練のステージ3のものです。DeepSpeed-RLHFが用いるデータセットと訓練の設定において、合計1.35億トークンを1エポックで訓練した際のスループットの実測値に基づいています。合計6750万のクエリートークン（配列長256の13万件のクエリー）と6750万の生成トークン（配列長256の13万件の回答）があり、ステップごとの最大グローバルバッチサイズは 50万 トークン（クエリーと回答それぞれ1024件）です。DeepSpeedRLHFを用いた場合のコストおよび実行時間の比較にあたっては、これらの詳細をよくご確認ください。さらに詳細な情報は[ベンチマーク設定](https://github.com/microsoft/DeepSpeedExamples/blob/staging-deepspeed-chat-v2/applications/DeepSpeed-Chat/training/step3_rlhf_finetuning/BenckmarkSetting.md)を参照ください。
+> ***注意事項***: 上記の2つの表の数値は、訓練のステージ3のものです。DeepSpeed-RLHFが用いるデータセットと訓練の設定において、合計1.35億トークンを1エポックで訓練した際のスループットの実測値に基づいています。合計6750万のクエリートークン（配列長256の13万件のクエリー）と6750万の生成トークン（配列長256の13万件の回答）があり、ステップごとの最大グローバルバッチサイズは 50万 トークン（クエリーと回答それぞれ1024件）です。DeepSpeedRLHFを用いた場合のコストおよび実行時間の比較にあたっては、これらの詳細をよくご確認ください。さらに詳細な情報は[ベンチマーク設定](https://github.com/deepspeedai/DeepSpeedExamples/blob/staging-deepspeed-chat-v2/applications/DeepSpeed-Chat/training/step3_rlhf_finetuning/BenckmarkSetting.md)を参照ください。
 
 ***RLHFを誰もが利用できるように***: DeepSpeed-HEは、1台のGPUのみで130億以上のパラメーターを持つモデルの訓練を実行できます。複数のGPUを備えた高価な計算設備を持たないデータサイエンティストも、小規模なトイモデルではなく、実際のシナリオで使用できる大規模で強力なRLHFモデルを作成できます。
 
@@ -92,7 +92,7 @@ DeepSpeed-RLHFシステムは、大規模モデルの学習において類を見
 ```python
 pip install deepspeed>=0.9.0
 
-git clone https://github.com/microsoft/DeepSpeedExamples.git
+git clone https://github.com/deepspeedai/DeepSpeedExamples.git
 cd DeepSpeedExamples/applications/DeepSpeed-Chat/
 pip install -r requirements.txt
 
@@ -279,7 +279,7 @@ DeepSpeed-RLHFは、Colossal-AIや、ネイティブのPyTorchを用いたHuggin
 
 ## 実効スループットとスケーラビリティ
 
-***(I) 実効スループット分析*** RLHFのステージ3におけるDeepSpeed-HEの実効スループットは、生成フェーズと強化学習の訓練フェーズの両方のスループットで決まります。我々の作成したRLHFのパイプラインでは、生成フェーズが全計算量の約20%を占め、強化学習の訓練フェーズが残りの80%を占めています（詳細は[ベンチマークのページ](https://github.com/microsoft/DeepSpeedExamples/tree/master/applications/DeepSpeed-Chat/training/step3_rlhf_finetuning/BenckmarkSetting.md)を参照）。しかし、計算量で見た割合が少ないとはいえ、前者は生成された256個のトークンのそれぞれに対して、初期プロンプトの256個のトークンに対してアクターモデルによる推論をそれぞれ1回実行する必要があるため、end-to-endの時間で見ると、その大部分を占めることになり、メモリ帯域が制限されて高いスループットを得ることが難しくなります。一方、強化学習の訓練フェーズでは、1サンプルあたりプロンプトと生成の両方から512個のトークンをフルに使用して、参照アクターモデルについて、数回のフォワードパスとバックワードパスで実行できるため、高いスループットを達成できます。
+***(I) 実効スループット分析*** RLHFのステージ3におけるDeepSpeed-HEの実効スループットは、生成フェーズと強化学習の訓練フェーズの両方のスループットで決まります。我々の作成したRLHFのパイプラインでは、生成フェーズが全計算量の約20%を占め、強化学習の訓練フェーズが残りの80%を占めています（詳細は[ベンチマークのページ](https://github.com/deepspeedai/DeepSpeedExamples/tree/master/applications/DeepSpeed-Chat/training/step3_rlhf_finetuning/BenckmarkSetting.md)を参照）。しかし、計算量で見た割合が少ないとはいえ、前者は生成された256個のトークンのそれぞれに対して、初期プロンプトの256個のトークンに対してアクターモデルによる推論をそれぞれ1回実行する必要があるため、end-to-endの時間で見ると、その大部分を占めることになり、メモリ帯域が制限されて高いスループットを得ることが難しくなります。一方、強化学習の訓練フェーズでは、1サンプルあたりプロンプトと生成の両方から512個のトークンをフルに使用して、参照アクターモデルについて、数回のフォワードパスとバックワードパスで実行できるため、高いスループットを達成できます。
 
 <div align="center">
 
@@ -314,8 +314,8 @@ DeepSpeed-HEはトレーニングにZeROの技術を採用しているため、�
 
 DeepSpeed-ChatをオープンソースソフトウェアとしてAIコミュニティに公開できることを嬉しく思います。
 
-* DeepSpeed-Chatの[GitHubページ](https://github.com/microsoft/DeepSpeedExamples/tree/master/applications/DeepSpeed-Chat)を見て、早速使い始めましょう。
-* ユーザのみなさまからのフィードバックと協力で、これからも継続的に DeepSpeed-Chat を改善していく予定です。現在サポートされている機能や、将来的にサポートされている機能については、[ロードマップ](https://github.com/microsoft/DeepSpeedExamples/tree/master/applications/DeepSpeed-Chat/README.md#-deepspeed-chats-roadmap-)をご覧ください。
+* DeepSpeed-Chatの[GitHubページ](https://github.com/deepspeedai/DeepSpeedExamples/tree/master/applications/DeepSpeed-Chat)を見て、早速使い始めましょう。
+* ユーザのみなさまからのフィードバックと協力で、これからも継続的に DeepSpeed-Chat を改善していく予定です。現在サポートされている機能や、将来的にサポートされている機能については、[ロードマップ](https://github.com/deepspeedai/DeepSpeedExamples/tree/master/applications/DeepSpeed-Chat/README.md#-deepspeed-chats-roadmap-)をご覧ください。
 
 
 # 7. DeepSpeedについて
@@ -341,5 +341,5 @@ DeepSpeedについてのより詳しい情報は、以下をご覧ください�
 
 DeepSpeedチームは、ユーザの方々からのフィードバックやご連絡を受け付けています。
 
-* ユーザのみなさまからのバグ報告、Pull request、さまざまな議論への参加は、[GitHub](https://github.com/microsoft/DeepSpeed/)で受け付けています。詳細については、[ガイドライン](https://github.com/microsoft/DeepSpeed/blob/master/CONTRIBUTING.md)を確認してください。
+* ユーザのみなさまからのバグ報告、Pull request、さまざまな議論への参加は、[GitHub](https://github.com/deepspeedai/DeepSpeed/)で受け付けています。詳細については、[ガイドライン](https://github.com/deepspeedai/DeepSpeed/blob/master/CONTRIBUTING.md)を確認してください。
 * DeepSpeedチームでは、DeepSpeedを用いた深層学習の研究や実世界へのAIモデルやアプリケーションに関して、大学、研究所、企業との方々とのコラボレーションを行っています（日本語でコミュニケーション可能な研究員も在籍しています）。こうしたコラボレーションについてのご要望（およびGitHubには適さないその他の話題）については、deepspeed-info@microsoft.com まで直接メールをお送りください。

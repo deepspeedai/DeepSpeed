@@ -8,7 +8,7 @@ from deepspeed.ops.sparse_attention import SparseSelfAttention, FixedSparsityCon
 
 
 class BertSparseSelfAttention(nn.Module):
-    """Implements Sparse Self Attention layer of Bert model based on https://github.com/microsoft/DeepSpeedExamples/blob/master/bing_bert/nvidia/modelingpreln.py#L373
+    """Implements Sparse Self Attention layer of Bert model based on https://github.com/deepspeedai/DeepSpeedExamples/blob/master/bing_bert/nvidia/modelingpreln.py#L373
 
     For more information please see, TODO DeepSpeed Sparse Transformer.
 
