@@ -85,7 +85,7 @@ class TestZeroUnbalancedGradients(DistributedTest):
         run_unbalanced_gradients(model, data_loader)
 
 
-# testing the fix https://github.com/microsoft/DeepSpeed/pull/1227
+# testing the fix https://github.com/deepspeedai/DeepSpeed/pull/1227
 @pytest.mark.parametrize("mics_enabled", [True, False])
 class TestZero3RepeatForwardLoop(DistributedTest):
     world_size = 1
@@ -144,8 +144,8 @@ class TestZero3RepeatForwardLoop(DistributedTest):
             model.step()
 
 
-# testing the fix https://github.com/microsoft/DeepSpeed/pull/1227
-# also reproduces the https://github.com/microsoft/DeepSpeed/pull/1372
+# testing the fix https://github.com/deepspeedai/DeepSpeed/pull/1227
+# also reproduces the https://github.com/deepspeedai/DeepSpeed/pull/1372
 @pytest.mark.parametrize("zero_stage", [2, 3])
 @pytest.mark.parametrize("freeze_params", [True, False])
 class TestZeroToFP32(DistributedTest):
@@ -178,7 +178,7 @@ class TestZeroToFP32(DistributedTest):
 
             def __init__(self, hidden_dim, n_layers, freeze_params):
                 super().__init__()
-                # to reproduce https://github.com/microsoft/DeepSpeed/pull/1372 it is important that
+                # to reproduce https://github.com/deepspeedai/DeepSpeed/pull/1372 it is important that
                 # the number of total elements is uneven:
                 # (1) 4 layers of 3*(3+1)=12 elements each, 48 in total
                 self.ll = torch.nn.ModuleList(torch.nn.Linear(hidden_dim, hidden_dim) for i in range(n_layers))
@@ -1676,7 +1676,7 @@ class TestZero3SwitchModes(DistributedTest):
 
 
 # Avoid overwriting client module id
-# https://github.com/microsoft/DeepSpeed/issues/6772
+# https://github.com/deepspeedai/DeepSpeed/issues/6772
 class TestZero3ClientModuleID(DistributedTest):
     world_size = 2
 

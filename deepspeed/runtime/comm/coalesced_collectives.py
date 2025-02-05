@@ -45,7 +45,7 @@ def all_to_all_quant_reduce(tensors: List[Tensor], groups: {}) -> List[Tensor]:
         elif tensor.numel() % (2 * global_world_size) != 0:
             # Due to the constraint of 2-stage all-to-all, the input tensor must be divisible by 2 * global_world_size
             # Otherwise, all-to-all cannot be performed because of shape mismatch.
-            # See more at https://github.com/microsoft/DeepSpeed/pull/5056
+            # See more at https://github.com/deepspeedai/DeepSpeed/pull/5056
             logger.warning(
                 f"qgZ falls back to reduce_scatter because tensor size = {tensor.numel()} is not divisible by (2 * global_world_size) = {2 * global_world_size}. Please consider allocating a new world to enable qgZ"
             )
@@ -101,7 +101,7 @@ def all_to_all_loco_quant_reduce(
         elif tensor.numel() % (2 * global_world_size) != 0:
             # Due to the constraint of 2-stage all-to-all, the input tensor must be divisible by 2 * global_world_size
             # Otherwise, all-to-all cannot be performed because of shape mismatch.
-            # See more at https://github.com/microsoft/DeepSpeed/pull/5056
+            # See more at https://github.com/deepspeedai/DeepSpeed/pull/5056
             logger.warning(
                 f"qgZ falls back to reduce_scatter because tensor size = {tensor.numel()} is not divisible by (2 * global_world_size) = {2 * global_world_size}. Please consider allocating a new world to enable qgZ"
             )

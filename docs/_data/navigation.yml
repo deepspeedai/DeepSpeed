@@ -8,7 +8,7 @@ main:
   - title: 'Documentation'
     url: https://deepspeed.readthedocs.io/
   - title: 'GitHub'
-    url: https://github.com/microsoft/DeepSpeed
+    url: https://github.com/deepspeedai/DeepSpeed
 
 lnav:
   - title: 'Training'

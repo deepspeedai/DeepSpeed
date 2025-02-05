@@ -52,5 +52,5 @@ Parallelism techniques such as ZeRO data parallelism (DP), Tensor parallelism (T
 optimizer states make it difficult to resume training with a checkpoint that was created on a different number of GPUs. DeepSpeed provides the
 Universal Checkpoint mechanism to address this problem. Universal Checkpoints give users the flexibility of changing the number of GPUs when training
 with 3D (TP, PP, and DP) parallelism, and enables more efficient use of elastic training hardware. The easiest way to get started with
-using Universal Checkpoints is to consult the `Megatron-DeepSpeed <https://github.com/microsoft/Megatron-DeepSpeed/blob/main/examples_deepspeed/universal_checkpointing/README.md>`_
+using Universal Checkpoints is to consult the `Megatron-DeepSpeed <https://github.com/deepspeedai/Megatron-DeepSpeed/blob/main/examples_deepspeed/universal_checkpointing/README.md>`_
 and `BLOOM <https://github.com/bigscience-workshop/bigscience/blob/master/train/tr11-176B-ml/README.md#checkpoint-reshaping>`_ examples.

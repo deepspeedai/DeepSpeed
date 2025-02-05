@@ -16,7 +16,7 @@ First we will go over how to run the original CIFAR-10 model. Then we will proce
 
 ## Running Original CIFAR-10
 
-Original model code from the [CIFAR-10 Tutorial](https://github.com/pytorch/tutorials/blob/main/beginner_source/blitz/cifar10_tutorial.py), We've copied this repo under [DeepSpeedExamples/training/cifar/](https://github.com/microsoft/DeepSpeedExamples/tree/master/training/cifar) and made it available as a submodule. To download, execute:
+Original model code from the [CIFAR-10 Tutorial](https://github.com/pytorch/tutorials/blob/main/beginner_source/blitz/cifar10_tutorial.py), We've copied this repo under [DeepSpeedExamples/training/cifar/](https://github.com/deepspeedai/DeepSpeedExamples/tree/master/training/cifar) and made it available as a submodule. To download, execute:
 
 ```bash
 git submodule update --init --recursive

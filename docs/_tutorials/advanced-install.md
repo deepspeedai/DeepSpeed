@@ -106,7 +106,7 @@ pip install .
 
 For installs spanning multiple nodes we find it useful to install DeepSpeed
 using the
-[install.sh](https://github.com/microsoft/DeepSpeed/blob/master/install.sh)
+[install.sh](https://github.com/deepspeedai/DeepSpeed/blob/master/install.sh)
 script in the repo. This will build a Python wheel locally and copy it to all
 the nodes listed in your hostfile (either given via `--hostfile`, or defaults to
 `/job/hostfile`).
@@ -195,7 +195,7 @@ DS_SKIP_CUDA_CHECK=1
 Some DeepSpeed features require specific dependencies outside the general dependencies of DeepSpeed.
 
 * Python package dependencies per feature/op please
-see our [requirements directory](https://github.com/microsoft/DeepSpeed/tree/master/requirements).
+see our [requirements directory](https://github.com/deepspeedai/DeepSpeed/tree/master/requirements).
 
 * We attempt to keep the system level dependencies to a minimum, however some features do require special system-level
 packages. Please see our `ds_report` tool output to see if you are missing any system-level packages for a given feature.

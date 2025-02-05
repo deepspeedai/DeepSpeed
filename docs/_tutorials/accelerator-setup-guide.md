@@ -246,7 +246,7 @@ accelerator: npu
 
 ## Multi-card parallel training using Huawei Ascend NPU
 
-To perform model training across multiple Huawei Ascend NPU cards using DeepSpeed, see the examples provided in [DeepSpeed Examples](https://github.com/microsoft/DeepSpeedExamples/blob/master/training/cifar/cifar10_deepspeed.py).
+To perform model training across multiple Huawei Ascend NPU cards using DeepSpeed, see the examples provided in [DeepSpeed Examples](https://github.com/deepspeedai/DeepSpeedExamples/blob/master/training/cifar/cifar10_deepspeed.py).
 
 # Intel Gaudi
 PyTorch models can be run on Intel® Gaudi® AI accelerator using DeepSpeed. Refer to the following user guides to start using DeepSpeed with Intel Gaudi:

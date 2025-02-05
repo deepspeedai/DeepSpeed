@@ -3,7 +3,7 @@ title: "Mixed Precision ZeRO++"
 tags: training ZeRO communication-efficiency large-model
 ---
 
-Mixed Precision ZeRO++ (MixZ++) is a set of optimization strategies based on [ZeRO](/tutorials/zero/) and [ZeRO++](/tutorials/zeropp/) to improve the efficiency and reduce memory usage for large model training and inference when users use [Low-Rank Adaptation (LoRA)]([/tutorials/zero/](https://arxiv.org/abs/2106.09685)) training. MixZ++ partitions model parameters across GPUs to reduce footprint and gathers them with quantized communication only when needed similar to its ZeRO and ZeRO++ siblings. Our evaluation indicates MixZ++ increases the training throughput by up to [3.3x](https://github.com/microsoft/DeepSpeed/tree/master/blogs/deepspeed-chat/ds-chat-release-8-31) for the Llama-2-70B model running on 128 V100 GPUs. Read our [DeepSpeed Chat Blog](https://github.com/microsoft/DeepSpeed/tree/master/blogs/deepspeed-chat/ds-chat-release-8-31), [ZeRO++ blog](https://www.microsoft.com/en-us/research/blog/deepspeed-zero-a-leap-in-speed-for-llm-and-chat-model-training-with-4x-less-communication/) and [paper](https://arxiv.org/pdf/2306.10209.pdf) to learn more!
+Mixed Precision ZeRO++ (MixZ++) is a set of optimization strategies based on [ZeRO](/tutorials/zero/) and [ZeRO++](/tutorials/zeropp/) to improve the efficiency and reduce memory usage for large model training and inference when users use [Low-Rank Adaptation (LoRA)]([/tutorials/zero/](https://arxiv.org/abs/2106.09685)) training. MixZ++ partitions model parameters across GPUs to reduce footprint and gathers them with quantized communication only when needed similar to its ZeRO and ZeRO++ siblings. Our evaluation indicates MixZ++ increases the training throughput by up to [3.3x](https://github.com/deepspeedai/DeepSpeed/tree/master/blogs/deepspeed-chat/ds-chat-release-8-31) for the Llama-2-70B model running on 128 V100 GPUs. Read our [DeepSpeed Chat Blog](https://github.com/deepspeedai/DeepSpeed/tree/master/blogs/deepspeed-chat/ds-chat-release-8-31), [ZeRO++ blog](https://www.microsoft.com/en-us/research/blog/deepspeed-zero-a-leap-in-speed-for-llm-and-chat-model-training-with-4x-less-communication/) and [paper](https://arxiv.org/pdf/2306.10209.pdf) to learn more!
 
 We recommend that you read the tutorials on [Getting Started](/getting-started/), [ZeRO](/tutorials/zero/)  and [Megatron-DeepSpeed](/tutorials/megatron/) before stepping through this tutorial.
 
@@ -16,7 +16,7 @@ Collectively, the optimizations bring better scalability and efficiency to LoRA 
 
 ## Enabling Mixed Precision ZeRO++ (MixZ++)
 
-A ready to go MixZ++ example has been prepared at [MixZ++ example script](https://github.com/microsoft/DeepSpeedExamples/blob/master/applications/DeepSpeed-Chat/training/step3_rlhf_finetuning/training_scripts/llama2/run_llama2_7b_mixz.sh). If you prefer to manually enable MixZ++ in your pipeline, please refer to the instructions below.
+A ready to go MixZ++ example has been prepared at [MixZ++ example script](https://github.com/deepspeedai/DeepSpeedExamples/blob/master/applications/DeepSpeed-Chat/training/step3_rlhf_finetuning/training_scripts/llama2/run_llama2_7b_mixz.sh). If you prefer to manually enable MixZ++ in your pipeline, please refer to the instructions below.
 
 ### DeepSpeed Configuration Changes
 An example snippet of deepspeed configurations with all MixZ++ optimization enabled is shown below:

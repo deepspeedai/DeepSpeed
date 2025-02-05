@@ -153,7 +153,7 @@ DeepSpeed-VisualChat is an easy-to-use training framework with great scalability
 
 The training experience of DeepSpeed-VisualChat is straightforward and convenient. Here we give an example based on the CLIP visual encoder and the LLaMa-7B model:
 ```
-git clone https://github.com/microsoft/DeepSpeedExamples.git
+git clone https://github.com/deepspeedai/DeepSpeedExamples.git
 cd DeepSpeedExamples/applications/DeepSpeed-VisualChat/
 pip install -r requirements.txt
 cd training
@@ -167,15 +167,15 @@ bash chat_scripts/run.sh # You need to change necessary variables, e.g, ckpt pat
 ```
 To support larger model inference, we have incorporated Hugging Face large model inference into our DeepSpeed-VisualChat API. Therefore, users can choose a different number of GPUs based on the GPU memory capacity and the model size.
 
-Please refer to our [GitHub Landing Page](https://github.com/microsoft/DeepSpeedExamples/tree/master/applications/DeepSpeed-VisualChat) for more details.
+Please refer to our [GitHub Landing Page](https://github.com/deepspeedai/DeepSpeedExamples/tree/master/applications/DeepSpeed-VisualChat) for more details.
 
 # 7. Release: Try DeepSpeed-VisualChat today!
 
 We are very excited to share that DeepSpeed-VisualChat is now open-sourced and available to the AI community.
 
-* To get started, please visit our GitHub page for DeepSpeed-VisualChat: [GitHub Landing Page](https://github.com/microsoft/DeepSpeedExamples/tree/master/applications/DeepSpeed-VisualChat)
+* To get started, please visit our GitHub page for DeepSpeed-VisualChat: [GitHub Landing Page](https://github.com/deepspeedai/DeepSpeedExamples/tree/master/applications/DeepSpeed-VisualChat)
 
-* We will continue to improve DeepSpeed-VisualChat with your feedback and support. Our [roadmap](https://github.com/microsoft/DeepSpeedExamples/tree/master/applications/DeepSpeed-VisualChat/README.md#-deepspeed-visualchats-roadmap-) shows currently supported features as well as ones that are planned for the future.
+* We will continue to improve DeepSpeed-VisualChat with your feedback and support. Our [roadmap](https://github.com/deepspeedai/DeepSpeedExamples/tree/master/applications/DeepSpeed-VisualChat/README.md#-deepspeed-visualchats-roadmap-) shows currently supported features as well as ones that are planned for the future.
 
 
 DeepSpeed-VisualChat is a component of the larger DeepSpeed ecosystem, which includes a range of Deep Learning systems and modeling technologies. To learn more,
@@ -183,6 +183,6 @@ DeepSpeed-VisualChat is a component of the larger DeepSpeed ecosystem, which inc
 * Please visit our [website](https://www.deepspeed.ai/) for detailed blog posts, tutorials, and helpful documentation.
 * Follow us on our [English X(Twitter)](https://twitter.com/MSFTDeepSpeed), [Japanese X(Twitter)](https://twitter.com/MSFTDeepSpeedJP), and [Chinese Zhihu](https://www.zhihu.com/people/deepspeed) for latest news on DeepSpeed.
 
-We welcome your contributions to DeepSpeed! We encourage you to report issues, contribute PRs, and join discussions on the [DeepSpeed GitHub](https://github.com/microsoft/DeepSpeed/) page. Please see our [contributing guide](https://github.com/microsoft/DeepSpeed/blob/master/CONTRIBUTING.md) for more details. We are open to collaborations with universities, research labs, companies, such as those working together on deep learning research, applying DeepSpeed to empower real-world AI models and applications, and so on. For such requests (and other requests unsuitable for GitHub), please directly email to deepspeed-info@microsoft.com.
+We welcome your contributions to DeepSpeed! We encourage you to report issues, contribute PRs, and join discussions on the [DeepSpeed GitHub](https://github.com/deepspeedai/DeepSpeed/) page. Please see our [contributing guide](https://github.com/deepspeedai/DeepSpeed/blob/master/CONTRIBUTING.md) for more details. We are open to collaborations with universities, research labs, companies, such as those working together on deep learning research, applying DeepSpeed to empower real-world AI models and applications, and so on. For such requests (and other requests unsuitable for GitHub), please directly email to deepspeed-info@microsoft.com.
 
-* "Star" our [DeepSpeed GitHub](https://github.com/microsoft/DeepSpeed/) and [DeepSpeedExamples GitHub](https://github.com/microsoft/DeepSpeedExamples/) repositories if you like our work!
+* "Star" our [DeepSpeed GitHub](https://github.com/deepspeedai/DeepSpeed/) and [DeepSpeedExamples GitHub](https://github.com/deepspeedai/DeepSpeedExamples/) repositories if you like our work!

@@ -54,7 +54,7 @@ jobs:
               BRANCH="${{ github.event.inputs.dse_branch }}"
           fi
           echo "DeepSpeedExamples Branch: $BRANCH"
-          git clone -b $BRANCH https://github.com/microsoft/DeepSpeedExamples.git
+          git clone -b $BRANCH https://github.com/deepspeedai/DeepSpeedExamples.git
           cd DeepSpeedExamples/applications/DeepSpeed-Chat
           pip install -r requirements.txt
           pip install -e .

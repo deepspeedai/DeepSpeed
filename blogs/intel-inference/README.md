@@ -128,15 +128,15 @@ This work was made possible through deep collaboration between software engineer
 
 [8] 	Intel, "Intel® Neural Compressor," [Online]. Available: https://github.com/intel/neural-compressor.
 
-[9] 	Microsoft, "DeepSpeed Accelerator Abstraction Interface," [Online]. Available: https://github.com/microsoft/DeepSpeed/blob/master/docs/_tutorials/accelerator-abstraction-interface.md.
+[9] 	Microsoft, "DeepSpeed Accelerator Abstraction Interface," [Online]. Available: https://github.com/deepspeedai/DeepSpeed/blob/master/docs/_tutorials/accelerator-abstraction-interface.md.
 
 [10] 	Microsoft, "Automatic Tensor Parallelism for HuggingFace Models," [Online]. Available: https://www.deepspeed.ai/tutorials/automatic-tensor-parallelism.
 
 [11] 	Intel, "Intel® oneCCL Bindings for PyTorch," [Online]. Available: https://github.com/intel/torch-ccl.
 
-[12] 	Microsoft, "deepspeed," [Online]. Available: https://github.com/microsoft/deepspeed.
+[12] 	Microsoft, "deepspeed," [Online]. Available: https://github.com/deepspeedai/deepspeed.
 
-[13] 	Intel, "DeepSpeed Accelerator Abstraction Interface," [Online]. Available: https://github.com/microsoft/DeepSpeed/pull/3184.
+[13] 	Intel, "DeepSpeed Accelerator Abstraction Interface," [Online]. Available: https://github.com/deepspeedai/DeepSpeed/pull/3184.
 
 [14] 	Intel, "Intel® Extension for PyTorch large language model example," [Online]. Available: https://github.com/intel/intel-extension-for-pytorch/tree/llm_feature_branch/examples/cpu/inference/python/llm.
 

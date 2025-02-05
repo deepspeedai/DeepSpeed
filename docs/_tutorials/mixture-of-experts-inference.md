@@ -54,7 +54,7 @@ output = model('Input String')
 Here, we show a text-generation example using an MoE model for which we can specify the model-parallel size and number of experts.
 DeepSpeed inference-engine takes care of creating the different parallelism groups using the tensor-slicing degree, number of experts, and the total number of GPUs used for running the MoE model. Regarding the expert parameters, we first use the expert-parallelism to assign each group of experts to one GPU. If number of GPUs is higher than number of experts, we use expert-slicing to partition each expert vertically/horizontally across the GPUs.
 
-Let's take a look at some of the parameters passed to run our example. Please refer to [DeepSpeed-Example](https://github.com/microsoft/Megatron-DeepSpeed/blob/main/examples_deepspeed/generate_text.sh) for a complete generate-text inference example.
+Let's take a look at some of the parameters passed to run our example. Please refer to [DeepSpeed-Example](https://github.com/deepspeedai/Megatron-DeepSpeed/blob/main/examples_deepspeed/generate_text.sh) for a complete generate-text inference example.
 
 
 ```bash

@@ -169,7 +169,7 @@ def get_accelerator():
                 # ensuring that we are free from CUDA initialization errors.
                 # While "torch.cuda.device_count() > 0" check ensures that       #ignore-cuda
                 # we won't try to do any CUDA calls when no device is available
-                # For reference: https://github.com/microsoft/DeepSpeed/pull/6810
+                # For reference: https://github.com/deepspeedai/DeepSpeed/pull/6810
                 if torch.cuda.device_count() > 0 and torch.cuda.is_available():  #ignore-cuda
                     accelerator_name = "cuda"
             except (RuntimeError, ImportError) as e:

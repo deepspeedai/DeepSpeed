@@ -32,7 +32,7 @@ config = {
 
 
 # test that sub-classes get params that aren't prematurely partitioned and thus requiring gathering
-# fixed by https://github.com/microsoft/DeepSpeed/pull/1202
+# fixed by https://github.com/deepspeedai/DeepSpeed/pull/1202
 class GrandPa(torch.nn.Module):
 
     def __init__(self, *args):

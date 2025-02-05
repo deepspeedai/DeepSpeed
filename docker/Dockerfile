@@ -174,7 +174,7 @@ USER deepspeed
 ##############################################################################
 # DeepSpeed
 ##############################################################################
-RUN git clone https://github.com/microsoft/DeepSpeed.git ${STAGE_DIR}/DeepSpeed
+RUN git clone https://github.com/deepspeedai/DeepSpeed.git ${STAGE_DIR}/DeepSpeed
 RUN cd ${STAGE_DIR}/DeepSpeed && \
         git checkout . && \
         git checkout master && \

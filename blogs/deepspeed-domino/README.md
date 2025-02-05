@@ -181,7 +181,7 @@ Backward is a bit more challenging because backward computation graph is automat
 
 # Getting Started: Try out DeepSpeed-Domino
 
-To try out DeepSpeed-Domino, please refer to [Domino tutorial](https://github.com/microsoft/DeepSpeedExamples/blob/master/training/DeepSpeed-Domino/README.md) in our DeepSpeedExample repo.
+To try out DeepSpeed-Domino, please refer to [Domino tutorial](https://github.com/deepspeedai/DeepSpeedExamples/blob/master/training/DeepSpeed-Domino/README.md) in our DeepSpeedExample repo.
 
 ## Citation
 

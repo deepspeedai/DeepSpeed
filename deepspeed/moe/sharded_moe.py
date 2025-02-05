@@ -43,7 +43,7 @@ exp_selection_uniform_map: Dict[torch.device, Callable] = {}
 
 try:
     # To enable Tutel MoE optimizations:
-    #   python3 -m pip install --user --upgrade git+https://github.com/microsoft/tutel@v0.1.x
+    #   python3 -m pip install --user --upgrade git+https://github.com/deepspeedai/tutel@v0.1.x
     from tutel import moe as tutel_moe
     TUTEL_INSTALLED = True
 except:

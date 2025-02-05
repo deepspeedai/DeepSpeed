@@ -60,7 +60,7 @@ class MetaTensorContainer(ABC):
                 layer of the model for searching the parameter's name
                 in a checkpoint file. For more information of how this
                 is used please see
-                https://github.com/microsoft/DeepSpeed/blob/master/deepspeed/module_inject/load_checkpoint.py
+                https://github.com/deepspeedai/DeepSpeed/blob/master/deepspeed/module_inject/load_checkpoint.py
             2. `split_qkv` (Default: True): we use this flag when splitting
                 the qkv parameter into heads. If it is False, it means the heads
                 of q, k, and v are stored together and needs to split in the

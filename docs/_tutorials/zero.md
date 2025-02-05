@@ -20,7 +20,7 @@ ZeRO leverages the aggregate computation and memory resources of data parallelis
 In addition, ZeRO-3 includes the *infinity offload engine* to form ZeRO-Infinity ([paper](https://arxiv.org/abs/2104.07857)), which can offload to both CPU and NVMe memory for huge memory savings.
 
 ## Training environment
-We use the DeepSpeed [Megatron-LM](https://github.com/microsoft/DeepSpeedExamples/tree/master/Megatron-LM-v1.1.5-ZeRO3) GPT-2 code for this exercise. You can step through the Megatron-LM [tutorial](/tutorials/megatron/) to familiarize yourself with the code. We will train the models in this tutorial on [NVIDIA Tesla V100-SXM3 Tensor Core GPUs](https://www.nvidia.com/en-us/data-center/v100/) with 32GB RAM.
+We use the DeepSpeed [Megatron-LM](https://github.com/deepspeedai/DeepSpeedExamples/tree/master/Megatron-LM-v1.1.5-ZeRO3) GPT-2 code for this exercise. You can step through the Megatron-LM [tutorial](/tutorials/megatron/) to familiarize yourself with the code. We will train the models in this tutorial on [NVIDIA Tesla V100-SXM3 Tensor Core GPUs](https://www.nvidia.com/en-us/data-center/v100/) with 32GB RAM.
 
 ## Enabling ZeRO Optimization
 To enable ZeRO optimizations for a DeepSpeed model, we simply add the **_zero_optimization_** key to the DeepSpeed JSON configuration. A full description of configuration knobs of the **zero_optimization** key is available [here](/docs/config-json/#zero-optimizations-for-fp16-training).
@@ -212,7 +212,7 @@ The `deepspeed.zero.TiledLinear` module exploits the data fetch and release
 pattern of ZeRO-3 to reduce the working memory requirements by breaking down
 a large operator into smaller tiles that can be executed sequentially.
 
-We include the changes for one example from Megatron-LM's [ParallelMLP](https://github.com/microsoft/DeepSpeedExamples/blob/bdf8e59aede8c8e0577e8d4d557298ca8515268f/Megatron-LM-v1.1.5-ZeRO3/megatron/model/transformer.py#L82). Three more
+We include the changes for one example from Megatron-LM's [ParallelMLP](https://github.com/deepspeedai/DeepSpeedExamples/blob/bdf8e59aede8c8e0577e8d4d557298ca8515268f/Megatron-LM-v1.1.5-ZeRO3/megatron/model/transformer.py#L82). Three more
 model-parallel layers in `transformer.py` proceed similarly.
 
 The model parallel layers of Megatron-LM have a special form in which the

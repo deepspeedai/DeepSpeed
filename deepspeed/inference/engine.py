@@ -594,7 +594,7 @@ class InferenceEngine(Module):
 
         if num_beams > 1:
             raise NotImplementedError("DeepSpeed does not support `num_beams` > 1, if this is important to you please "
-                                      "add your request to: https://github.com/microsoft/DeepSpeed/issues/2506")
+                                      "add your request to: https://github.com/deepspeedai/DeepSpeed/issues/2506")
 
         if ("input_ids" in kwargs) and (kwargs["input_ids"].dim() == 2):
             for input_tensor in kwargs["input_ids"]:
