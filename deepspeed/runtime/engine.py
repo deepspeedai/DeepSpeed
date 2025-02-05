@@ -37,6 +37,7 @@ from deepspeed.runtime.fp16.unfused_optimizer import FP16_UnfusedOptimizer
 from deepspeed.runtime.bf16_optimizer import BF16_Optimizer
 
 from deepspeed.linear.optimized_linear import LoRAOptimizedLinear
+from deepspeed.module_inject.layers import GatherReplacedLayerParams
 
 from deepspeed.runtime.config import DEEPSPEED_OPTIMIZERS, \
     ADAGRAD_OPTIMIZER, ADAM_OPTIMIZER, ADAMW_OPTIMIZER, LAMB_OPTIMIZER, ONEBIT_ADAM_OPTIMIZER, ONEBIT_LAMB_OPTIMIZER, \
@@ -75,7 +76,7 @@ from deepspeed.utils.timer import NoopTimer, ThroughputTimer, SynchronizedWallCl
 from deepspeed.utils.debug import debug_extract_module_and_param_names, debug_clear_module_and_param_names
 from deepspeed.monitor.monitor import MonitorMaster
 from deepspeed.runtime.progressive_layer_drop import ProgressiveLayerDrop
-from deepspeed.runtime.utils import clip_grad_norm_
+from deepspeed.runtime.utils import clip_grad_norm_, compare_tensors_in_structures
 from deepspeed.runtime.eigenvalue import Eigenvalue
 from deepspeed.runtime.data_pipeline.constants import DATA_SAMPLING, \
     DATA_ROUTING, DATA_SAMPLING_ENABLED, CURRICULUM_LEARNING, \
@@ -230,7 +231,6 @@ class DeepSpeedEngine(Module):
         self._step_applied = False
         self._global_grad_norm = None
         self.use_ds_comm = False  # False --> Use torch.dist, True --> Use ds.comm backend.
-
         self.checkpoint_engine = None
 
         self._is_gradient_accumulation_boundary = None
@@ -247,6 +247,8 @@ class DeepSpeedEngine(Module):
         self._do_args_sanity_check(args)
         self._configure_with_arguments(args, mpu)
         self._do_sanity_check()
+        if self.autotp_size() > 1:
+            self._configure_tensor_parallel_states(model)
         see_memory_usage(f"DeepSpeed Engine: After args sanity test", force=self.memory_breakdown())
         if mpu is not None:
             if self.elasticity_enabled():
@@ -410,6 +412,71 @@ class DeepSpeedEngine(Module):
                     p.offload()
                 else:
                     p.ds_offload = False
+
+    def _configure_tensor_parallel_states(self, model):
+        """
+        Configures the tensor parallel states for the model.
+        This includes setting up the tensor parallel groups, initializing the TP mesh,
+        and registering a pre-hook to ensure that the Dataloader inputs are consistent across ranks.
+        """
+        self._set_client_model(model)
+
+        # sanity check
+        # currently, the compatibility between 'autotp' and 'zero > 1' has not been validated
+        assert self.zero_optimization_stage(
+        ) <= 1, "Currently, the compatibility between 'autotp' and 'zero_stage > 1' has not been validated"
+
+        self.mpu = groups
+        self.mpu._init_tp_mesh_device(tensor_model_parallel_size=self.autotp_size())
+
+        self.first_dataloader_check = None
+
+        def check_dataloader_inputs_same_across_ranks(module, args, kwargs):
+
+            def broadcast_and_check(args, bcast_rank, bcast_group):
+                if isinstance(args, tuple):
+                    args = list(args)
+                if len(args) > 0:
+                    if self.mpu.get_tensor_model_parallel_rank() == 0:
+                        _src_args = [args]
+                        dist.broadcast_object_list(object_list=_src_args,
+                                                   src=bcast_rank,
+                                                   group=bcast_group,
+                                                   device=get_accelerator().current_device())
+                        # Rank 0 does not need to compare with itself
+                        is_equal = True
+                    else:
+                        _src_args = [None]
+                        dist.broadcast_object_list(object_list=_src_args,
+                                                   src=bcast_rank,
+                                                   group=bcast_group,
+                                                   device=get_accelerator().current_device())
+
+                        is_equal = compare_tensors_in_structures(args, _src_args[0])
+
+                    equal_tensor = torch.tensor(is_equal,
+                                                dtype=self.communication_data_type,
+                                                device=get_accelerator().current_device())
+                    dist.all_reduce(equal_tensor, group=bcast_group)
+                    assert torch.equal(
+                        equal_tensor,
+                        torch.tensor(groups.get_tensor_model_parallel_world_size(),
+                                     dtype=self.communication_data_type,
+                                     device=get_accelerator().current_device())
+                    ), "Data inconsistency within the TP group. Please check the Dataloader implementation to ensure consistency."
+
+            bcast_rank = self.mpu.get_tensor_model_parallel_src_rank()
+            bcast_group = self.mpu.get_tensor_model_parallel_group()
+
+            broadcast_and_check(args, bcast_rank, bcast_group)
+            broadcast_and_check(kwargs, bcast_rank, bcast_group)
+
+            logger.info(f":The Dataloader has passed the TP group consistency check.")
+            self.first_dataloader_check.remove()
+
+        self.first_dataloader_check = self.module.register_forward_pre_hook(check_dataloader_inputs_same_across_ranks,
+                                                                            prepend=True,
+                                                                            with_kwargs=True)
 
     def destroy(self):
         if self.optimizer is not None and hasattr(self.optimizer, 'destroy'):
@@ -831,6 +898,9 @@ class DeepSpeedEngine(Module):
 
     def zero_ignore_unused_parameters(self):
         return self._config.zero_config.ignore_unused_parameters
+
+    def autotp_size(self):
+        return self._config.tensor_parallel_config.autotp_size
 
     def graph_harvesting(self):
         return self._config.graph_harvesting
@@ -3568,6 +3638,52 @@ class DeepSpeedEngine(Module):
             self._copy_recovery_script(save_path)
         ckpt_type = 'zero' if self.zero_optimization() else 'bf16_zero'
         logger.info(f'{ckpt_type} checkpoint saved {zero_checkpoint_name}')
+
+    def _replace_module_consolidated_state_dict(self):
+        """
+        Get a full non-partitioned state_dict with fp16 weights on cpu.
+        Important: this function must be called on all ranks and not just rank 0.
+        This is similar to nn.Module.state_dict (modelled after _save_to_state_dict)
+        This method is used for tensor parallel training.
+
+        Returns:
+        OrderedDict: The consolidated state dictionary if the current process rank is 0, otherwise None.
+        """
+        #TODO: If we use both Zero3 and tensor parallel simultaneously
+        # we need to consolidate the gather mechanisms of both.
+        state_dict = OrderedDict() if dist.get_rank() == 0 else None
+
+        def get_layer_state_dict(module, prefix=""):
+            with GatherReplacedLayerParams(list(module.parameters(recurse=False)), module, enabled=True):
+                for name, param in module.named_parameters(recurse=False):
+                    if param is None:
+                        continue
+                    key = prefix + name
+                    if (dist.get_rank() == 0):
+                        state_dict[key] = param.detach().cpu()
+                        # print(key,module, param.detach().cpu().shape)
+
+            for name, child in module.named_children():
+                if child is not None:
+                    get_layer_state_dict(child, prefix + name + ".")
+
+        get_layer_state_dict(self.module, prefix="")
+
+        # ensure that all GPU communication tasks are completed before the process exits
+        get_accelerator().synchronize()
+        return state_dict
+
+    def _consolidated_16bit_state_dict(self, exclude_frozen_parameters=False):
+        """
+        Consolidate the 16-bit state dictionary.
+        """
+        if self.zero_optimization_stage() == ZeroStageEnum.weights:
+            return self._zero3_consolidated_16bit_state_dict(exclude_frozen_parameters)
+        elif self.autotp_size() > 1:
+            return self._replace_module_consolidated_state_dict()
+
+        raise ValueError("consolidated_16bit_state_dict is only applicable to cases where weights are partitioned, "
+                         "including Zero Stage 3 and tensor parallelism.")
 
     def _zero3_consolidated_16bit_state_dict(self, exclude_frozen_parameters=False):
         """
