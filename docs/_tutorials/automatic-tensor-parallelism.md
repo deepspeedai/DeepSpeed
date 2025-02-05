@@ -66,7 +66,7 @@ With automatic tensor parallelism, we do not need to provide the injection polic
 
 # Example Script
 
-We can observe performance improvement with automatic tensor parallelism using the [inference test suite](https://github.com/microsoft/DeepSpeedExamples/blob/master/inference/huggingface/text-generation/inference-test.py). This script is for testing text-generation models and includes per token latency, bandwidth, throughput and memory checks for comparison. See the [README](https://github.com/microsoft/DeepSpeedExamples/tree/master/inference/huggingface/text-generation#deepspeed-huggingface-text-generation-examples) for more information.
+We can observe performance improvement with automatic tensor parallelism using the [inference test suite](https://github.com/deepspeedai/DeepSpeedExamples/blob/master/inference/huggingface/text-generation/inference-test.py). This script is for testing text-generation models and includes per token latency, bandwidth, throughput and memory checks for comparison. See the [README](https://github.com/deepspeedai/DeepSpeedExamples/tree/master/inference/huggingface/text-generation#deepspeed-huggingface-text-generation-examples) for more information.
 
 
 ## Launching

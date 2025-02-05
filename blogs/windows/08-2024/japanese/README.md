@@ -12,7 +12,7 @@ DeepSpeedは、分散学習と推論を簡単かつ効率的に行うための�
 
 # テスト環境
 
-Windows 11 Version 23H2 および Build 22631.3880 を実行している Surface Laptop Studio 2 でテストを行いました。このハードウェアには、4GBのVRAMを搭載した NVIDIA RTX A2000 GPU が1つ搭載されています。また、PyTorchバージョン 2.3.0 および HuggingFace Transformersバージョン 4.41.2 を使用しました。使用したサンプルスクリプトは[DeepSpeedExamplesリポジトリ](https://github.com/microsoft/DeepSpeedExamples)から取得できます。以下の例を実行する前にリポジトリをクローンしてください。
+Windows 11 Version 23H2 および Build 22631.3880 を実行している Surface Laptop Studio 2 でテストを行いました。このハードウェアには、4GBのVRAMを搭載した NVIDIA RTX A2000 GPU が1つ搭載されています。また、PyTorchバージョン 2.3.0 および HuggingFace Transformersバージョン 4.41.2 を使用しました。使用したサンプルスクリプトは[DeepSpeedExamplesリポジトリ](https://github.com/deepspeedai/DeepSpeedExamples)から取得できます。以下の例を実行する前にリポジトリをクローンしてください。
 
 # インストール
 

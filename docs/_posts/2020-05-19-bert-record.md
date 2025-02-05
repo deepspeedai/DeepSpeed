@@ -19,4 +19,4 @@ the same number and generation of GPUs.
 * Brief overview, see our [press release](https://www.microsoft.com/en-us/research/blog/ZeRO-2-deepspeed-shattering-barriers-of-deep-learning-speed-scale/).
 * Detailed technology deep dive, see our [blog post](https://www.deepspeed.ai/2020/05/27/fastest-bert-training.html).
 * Tutorial on how to reproduce our results, see our [BERT pre-training tutorial](https://www.deepspeed.ai/tutorials/bert-pretraining/).
-* The source code for our transformer kernels can be found in the [DeepSpeed repo](https://github.com/microsoft/deepspeed) and BERT pre-training code can be found in the [DeepSpeedExamples repo](https://github.com/microsoft/deepspeedexamples).
+* The source code for our transformer kernels can be found in the [DeepSpeed repo](https://github.com/deepspeedai/deepspeed) and BERT pre-training code can be found in the [DeepSpeedExamples repo](https://github.com/deepspeedai/deepspeedexamples).

@@ -19,7 +19,7 @@ If you don't already have a copy of the DeepSpeed repository, please clone it
 now and checkout the DeepSpeedExamples submodule that contains the BERT Pre-training example.
 
 ```shell
-git clone https://github.com/microsoft/DeepSpeed
+git clone https://github.com/deepspeedai/DeepSpeed
 cd DeepSpeed
 git submodule update --init --recursive
 cd DeepSpeedExamples/
@@ -112,7 +112,7 @@ Please note the new parameters `freeze_step`, `cuda_aware`, `comm_backend_name`,
 `factor_max`, `factor_min`, and `factor_threshold` are used to regularize the adaptive scaling of the frozen base scaling coefficient during the compression stage. `factor_max` and `factor_min` are the scaling factor upper/lower bound. `factor_threshold` defines the threshold of how much the scaling factor can fluctuate between steps.
 
 #### 1.4.1 Momentum masks for parameters with constant zero gradients
-Because 1-bit compression cannot represent exact zero, the compression error would keep accumulating in the momentum if a parameter have constant zero gradients during training. For example, for BERT pre-training seq length 128, `bert.embeddings.position_embeddings.weight` has constant zeros in its gradient and momentum for row 129 to 512, because it only learns up to seq length 128 while the model supports up to seq length 512. Thus in 1-bit LAMB we added support of a momentum mask for users to specify those params that have constant exact zeros in their gradients. See [example script](https://github.com/microsoft/DeepSpeedExamples/blob/master/bing_bert/deepspeed_train.py) for how to configure this momentum mask. One thing to note is that we don't use momentum mask saved in checkpoints since this mask could change during training (e.g., BERT seqlen 128 and 512 require different masks). So you have to provide this mask every time in your training script.
+Because 1-bit compression cannot represent exact zero, the compression error would keep accumulating in the momentum if a parameter have constant zero gradients during training. For example, for BERT pre-training seq length 128, `bert.embeddings.position_embeddings.weight` has constant zeros in its gradient and momentum for row 129 to 512, because it only learns up to seq length 128 while the model supports up to seq length 512. Thus in 1-bit LAMB we added support of a momentum mask for users to specify those params that have constant exact zeros in their gradients. See [example script](https://github.com/deepspeedai/DeepSpeedExamples/blob/master/bing_bert/deepspeed_train.py) for how to configure this momentum mask. One thing to note is that we don't use momentum mask saved in checkpoints since this mask could change during training (e.g., BERT seqlen 128 and 512 require different masks). So you have to provide this mask every time in your training script.
 
 **Watch out!**
 1-bit LAMB relies on an compression error compensation mechanism to maintain the convergence speed at compression stage. When loading checkpoints, we actually reset the compression errors for 3 reasons: 1) The worker and server error at each GPU are distinct, so in current implementation only rank 0's errors are saved in the checkpoint. Thus we have to reset the errors. If we want to save them correctly we need O(num_gpu*model_size) memory in order to gather all the error, which is a very large memory requirement. It's possible to save them in a distributed way, but it will make the checkpoint saving/loading much more complicated. 2) Even if we are able to save the compression errors correctly, you need to have the exact same number of GPUs in order to load them correctly. 3) We verified on BERT pre-training that occasionally resetting the compression error at checkpoint loading does not affect the convergence. However, please avoid frequent checkpoint loading which could break the error compensation mechanism thus affect the convergence.
@@ -123,7 +123,7 @@ For data downloading and pre-processing, please refer to the [BERT Pre-training 
 
 ### 2.1 Running Pre-training with DeepSpeed and 1-bit LAMB
 
-We provide example scripts under [DeepSpeedExamples/bing_bert/1-bit_lamb/](https://github.com/microsoft/DeepSpeedExamples/tree/master/bing_bert/1-bit_lamb). There are 3 sets of scripts corresponding to NCCL-based implementation, MPI-based implementation on Ethernet systems, and MPI-based implementation on InfiniBand systems. For MPI-based implementation, we provide both example scripts when launching with deepspeed or mpirun.
+We provide example scripts under [DeepSpeedExamples/bing_bert/1-bit_lamb/](https://github.com/deepspeedai/DeepSpeedExamples/tree/master/bing_bert/1-bit_lamb). There are 3 sets of scripts corresponding to NCCL-based implementation, MPI-based implementation on Ethernet systems, and MPI-based implementation on InfiniBand systems. For MPI-based implementation, we provide both example scripts when launching with deepspeed or mpirun.
 
 ### 2.2 Configuration for BERT Pre-training with DeepSpeed and 1-bit LAMB enabled
 

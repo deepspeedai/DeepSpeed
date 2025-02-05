@@ -3,7 +3,7 @@ title: "Getting Started with DeepSpeed-Ulysses for Training Transformer Models w
 tags: training
 ---
 
-In this tutorial we describe how to enable DeepSpeed-Ulysses. DeepSpeed-Ulysses is a simple but highly communication and memory efficient mechanism sequence parallelism approach for training of large transformer models with massive sequence lengths. It partitions input tensors along the sequence dimension and uses a communication-efficient all-2-all collective for distributed attention computations. Additionally, DeepSpeed-Ulysses incorporates advanced modeling and system optimizations, such as Flash attention, sparse attention, and ZeRO optimizer, to optimize both computational efficiency and memory usage. Training with DeepSpeed sequence parallelism allows both model size and sequence length to scale near indefinitely unbounded by single GPU memory limitation and at a high fraction of peak compute performance. Currently, DeepSpeed-Ulysses can handle sequences up to 1 million in length (10 times the size of a complete Harry Potter book!) on 64 A100 GPUs. Please read our [DeepSpeed-Ulysses blog](https://github.com/microsoft/DeepSpeed/tree/master/blogs/deepspeed-ulysses) to learn more!
+In this tutorial we describe how to enable DeepSpeed-Ulysses. DeepSpeed-Ulysses is a simple but highly communication and memory efficient mechanism sequence parallelism approach for training of large transformer models with massive sequence lengths. It partitions input tensors along the sequence dimension and uses a communication-efficient all-2-all collective for distributed attention computations. Additionally, DeepSpeed-Ulysses incorporates advanced modeling and system optimizations, such as Flash attention, sparse attention, and ZeRO optimizer, to optimize both computational efficiency and memory usage. Training with DeepSpeed sequence parallelism allows both model size and sequence length to scale near indefinitely unbounded by single GPU memory limitation and at a high fraction of peak compute performance. Currently, DeepSpeed-Ulysses can handle sequences up to 1 million in length (10 times the size of a complete Harry Potter book!) on 64 A100 GPUs. Please read our [DeepSpeed-Ulysses blog](https://github.com/deepspeedai/DeepSpeed/tree/master/blogs/deepspeed-ulysses) to learn more!
 
 ## 1. Installation
 
@@ -12,10 +12,10 @@ You will need to install DeepSpeed v0.10.2 or higher to use the DeepSpeed Sequen
 
 ## 2. How to use DeepSpeed-Ulysses in your application?
 
-Integrating DS-Seq into your training code is easy, and in this section we describe how to integrate DeepSpeed-Ulysses through our [Megatron-DeepSpeed](https://github.com/microsoft/Megatron-DeepSpeed) code repo.
+Integrating DS-Seq into your training code is easy, and in this section we describe how to integrate DeepSpeed-Ulysses through our [Megatron-DeepSpeed](https://github.com/deepspeedai/Megatron-DeepSpeed) code repo.
 
 
-* **Replace attention module**: First, you need to update your attention module with DeepSpeed-Ulysses DistributedAttention. Here, we use the attention from [Megatron-DeepSpeed ](https://github.com/microsoft/Megatron-DeepSpeed/blob/main/megatron/model/transformer.py) which is the causal attention used in GPT-3 like model training. Rewrite the attention block:
+* **Replace attention module**: First, you need to update your attention module with DeepSpeed-Ulysses DistributedAttention. Here, we use the attention from [Megatron-DeepSpeed ](https://github.com/deepspeedai/Megatron-DeepSpeed/blob/main/megatron/model/transformer.py) which is the causal attention used in GPT-3 like model training. Rewrite the attention block:
 
 ```python
 def __init__():
