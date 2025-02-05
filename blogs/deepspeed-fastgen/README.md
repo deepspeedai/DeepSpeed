@@ -23,11 +23,11 @@
 
 Large language models (LLMs) like GPT-4 and LLaMA have emerged as a dominant workload in serving a wide range of applications infused with AI at every level. From general chat models to document summarization, and from autonomous driving to copilots at every layer of the software stack, the demand to deploy and serve these models at scale has skyrocketed. While frameworks like DeepSpeed, PyTorch, and several others can regularly achieve good hardware utilization during LLM training, the interactive nature of these applications and the poor arithmetic intensity of tasks like open-ended text generation have become the bottleneck for inference throughput in existing systems.
 
-To this end, frameworks like [vLLM](https://arxiv.org/pdf/2309.06180.pdf) powered by PagedAttention and research systems like [Orca](https://www.usenix.org/system/files/osdi22-yu.pdf) have significantly improved the performance of inference for LLMs. However, these systems still struggle to provide consistent quality of service, particularly for workloads with longer prompts. These long prompt workloads are becoming increasingly important as more and more models, like [MPT-StoryWriter](https://www.mosaicml.com/blog/mpt-7b), and systems, such as [DeepSpeed Ulysses](https://github.com/microsoft/DeepSpeed/tree/master/blogs/deepspeed-ulysses), support context windows stretching to tens of thousands of tokens. To better understand the problem space, we provide detailed examples of how text generation works for LLMs in two distinct phases called prompt processing and generation. When systems treat them as distinct phases, generation will be preempted by prompt processing that risks breaking the service level agreements (SLAs).
+To this end, frameworks like [vLLM](https://arxiv.org/pdf/2309.06180.pdf) powered by PagedAttention and research systems like [Orca](https://www.usenix.org/system/files/osdi22-yu.pdf) have significantly improved the performance of inference for LLMs. However, these systems still struggle to provide consistent quality of service, particularly for workloads with longer prompts. These long prompt workloads are becoming increasingly important as more and more models, like [MPT-StoryWriter](https://www.mosaicml.com/blog/mpt-7b), and systems, such as [DeepSpeed Ulysses](https://github.com/deepspeedai/DeepSpeed/tree/master/blogs/deepspeed-ulysses), support context windows stretching to tens of thousands of tokens. To better understand the problem space, we provide detailed examples of how text generation works for LLMs in two distinct phases called prompt processing and generation. When systems treat them as distinct phases, generation will be preempted by prompt processing that risks breaking the service level agreements (SLAs).
 
 Today, we are glad to present DeepSpeed-FastGen, a system that overcomes these limitations by leveraging the proposed Dynamic SplitFuse technique and offers up to 2.3x higher effective throughput compared to state-of-the-art systems like vLLM. DeepSpeed-FastGen leverages the combination of DeepSpeed-MII and DeepSpeed-Inference to provide an easy-to-use serving system.
 
-**Quick Start:** Trying DeepSpeed-FastGen is as simple as installing the latest [DeepSpeed-MII](https://github.com/microsoft/DeepSpeed-MII) release:
+**Quick Start:** Trying DeepSpeed-FastGen is as simple as installing the latest [DeepSpeed-MII](https://github.com/deepspeedai/DeepSpeed-MII) release:
 
 ```bash
 pip install deepspeed-mii
@@ -209,7 +209,7 @@ In addition to the deep analysis on A100, we provide additional benchmarking res
 
 ## 5. DeepSpeed-FastGen: Implementation and Usage  <a name="using-deepspeed-fastgen"></a>
 
-DeepSpeed-FastGen is the synergistic composition of [DeepSpeed-MII](https://github.com/microsoft/DeepSpeed-MII) and [DeepSpeed-Inference](https://github.com/microsoft/DeepSpeed) as illustrated in the figure below. Together, both of these software packages provide various components of the system including the frontend APIs, the host and device infrastructure to schedule batches using Dynamic SplitFuse, optimized kernel implementations, and the tools to construct new model implementations.
+DeepSpeed-FastGen is the synergistic composition of [DeepSpeed-MII](https://github.com/deepspeedai/DeepSpeed-MII) and [DeepSpeed-Inference](https://github.com/deepspeedai/DeepSpeed) as illustrated in the figure below. Together, both of these software packages provide various components of the system including the frontend APIs, the host and device infrastructure to schedule batches using Dynamic SplitFuse, optimized kernel implementations, and the tools to construct new model implementations.
 
 <div align="center">
 <img src="assets/images/fastgen-arch-light.png#gh-light-mode-only" width="800px">
@@ -219,7 +219,7 @@ DeepSpeed-FastGen is the synergistic composition of [DeepSpeed-MII](https://gith
 
 The fastest way to get started with our alpha release of DeepSpeed-FastGen is: `pip install deepspeed-mii`.
 
-Please follow our [Getting Started](https://github.com/microsoft/deepspeed-mii#getting-started-with-mii) guide for more details. For usage and reporting issues, please use the [DeepSpeed-MII Github repository](https://github.com/microsoft/DeepSpeed-MII).
+Please follow our [Getting Started](https://github.com/deepspeedai/deepspeed-mii#getting-started-with-mii) guide for more details. For usage and reporting issues, please use the [DeepSpeed-MII Github repository](https://github.com/deepspeedai/DeepSpeed-MII).
 
 ### A. Supported Models
 
@@ -238,10 +238,10 @@ We currently support the following model architectures in this alpha release of 
 
 All current models leverage [HuggingFace](https://github.com/huggingface) APIs in our backend to provide both the model weights and the model's corresponding tokenizer.
 
-We plan to add additional models in the coming weeks and months after the initial release. If there are specific model architectures you would like supported, please [file an issue](https://github.com/microsoft/DeepSpeed-MII/issues) and let us know.
+We plan to add additional models in the coming weeks and months after the initial release. If there are specific model architectures you would like supported, please [file an issue](https://github.com/deepspeedai/DeepSpeed-MII/issues) and let us know.
 
 ### B. Deployment options
-All of the examples below are runnable in [DeepSpeedExamples](https://github.com/microsoft/DeepSpeedExamples/tree/master/inference/mii). Once installed you have two options for deployment: an interactive non-persistent pipeline or a persistent serving deployment:
+All of the examples below are runnable in [DeepSpeedExamples](https://github.com/deepspeedai/DeepSpeedExamples/tree/master/inference/mii). Once installed you have two options for deployment: an interactive non-persistent pipeline or a persistent serving deployment:
 
 #### Non-persistent pipeline
 
@@ -280,20 +280,20 @@ client.terminate_server()
 
 ### C. Advanced Installation Information
 
-For ease of use and a significant reduction in lengthy compile times that many projects require in this space, we distribute a pre-compiled Python wheel covering the majority of our custom kernels through a new library called [DeepSpeed-Kernels](https://github.com/microsoft/DeepSpeed-Kernels). We have found this library to be very portable across environments with NVIDIA GPUs with compute capabilities 8.0+ (Ampere+), CUDA 11.6+, and Ubuntu 20+. In most cases, you shouldn't even need to know this library exists as it is a dependency of DeepSpeed-MII and will be installed with it. However, if for whatever reason you need to compile our kernels manually please see our [advanced installation docs](https://github.com/microsoft/DeepSpeed-Kernels#source).
+For ease of use and a significant reduction in lengthy compile times that many projects require in this space, we distribute a pre-compiled Python wheel covering the majority of our custom kernels through a new library called [DeepSpeed-Kernels](https://github.com/deepspeedai/DeepSpeed-Kernels). We have found this library to be very portable across environments with NVIDIA GPUs with compute capabilities 8.0+ (Ampere+), CUDA 11.6+, and Ubuntu 20+. In most cases, you shouldn't even need to know this library exists as it is a dependency of DeepSpeed-MII and will be installed with it. However, if for whatever reason you need to compile our kernels manually please see our [advanced installation docs](https://github.com/deepspeedai/DeepSpeed-Kernels#source).
 
 
 # 6. Try Out DeepSpeed-FastGen <a name="try"></a>
 We are very excited to share this DeepSpeed-FastGen alpha release.
 
-* To get started, please visit our GitHub page for DeepSpeed-MII: [GitHub Landing Page](https://github.com/microsoft/DeepSpeed-MII)
+* To get started, please visit our GitHub page for DeepSpeed-MII: [GitHub Landing Page](https://github.com/deepspeedai/DeepSpeed-MII)
 
 DeepSpeed-FastGen is part of the bigger DeepSpeed ecosystem comprising a multitude of Deep Learning systems and modeling technologies. To learn more,
 
 * Please visit our [website](https://www.deepspeed.ai/) for detailed blog posts, tutorials, and helpful documentation.
 * You can also follow us on our [English Twitter](https://twitter.com/MSFTDeepSpeed), [Japanese Twitter](https://twitter.com/MSFTDeepSpeedJP), and [Chinese Zhihu](https://www.zhihu.com/people/deepspeed) for latest news on DeepSpeed.
 
-DeepSpeed welcomes your contributions! We encourage you to report issues, contribute PRs, and join discussions on the [DeepSpeed GitHub](https://github.com/microsoft/DeepSpeed/) page. Please see our [contributing guide](https://github.com/microsoft/DeepSpeed/blob/master/CONTRIBUTING.md) for more details. We are open to collaborations with universities, research labs, and companies, such as those working together on deep learning research, applying DeepSpeed to empower real-world AI models and applications, and so on. For such requests (and other requests unsuitable for GitHub), please directly email to deepspeed-info@microsoft.com.
+DeepSpeed welcomes your contributions! We encourage you to report issues, contribute PRs, and join discussions on the [DeepSpeed GitHub](https://github.com/deepspeedai/DeepSpeed/) page. Please see our [contributing guide](https://github.com/deepspeedai/DeepSpeed/blob/master/CONTRIBUTING.md) for more details. We are open to collaborations with universities, research labs, and companies, such as those working together on deep learning research, applying DeepSpeed to empower real-world AI models and applications, and so on. For such requests (and other requests unsuitable for GitHub), please directly email to deepspeed-info@microsoft.com.
 
 The following items are on our roadmap and we plan to engage with our community on these through our GitHub issues and PRs:
 
@@ -302,7 +302,7 @@ The following items are on our roadmap and we plan to engage with our community 
 - New hardware backends through collaboration with partners
 - Release performance benchmarks (used to generate plots in this blog)
 
-**"Star" our [DeepSpeed GitHub](https://github.com/microsoft/DeepSpeed/) and [DeepSpeedMII GitHub](https://github.com/microsoft/DeepSpeed-MII/) repositories if you like our work!**
+**"Star" our [DeepSpeed GitHub](https://github.com/deepspeedai/DeepSpeed/) and [DeepSpeedMII GitHub](https://github.com/deepspeedai/DeepSpeed-MII/) repositories if you like our work!**
 
 # 7. Acknowledgements <a name="acknowledgements"></a>
 

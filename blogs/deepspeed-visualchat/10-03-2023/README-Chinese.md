@@ -146,7 +146,7 @@ DeepSpeed-VisualChat 是一个易于使用的训练框架，具有很好的可�
 使用 DeepSpeed-VisualChat 训练模型是简单和方便的。这里我们给出了基于 CLIP 视觉编码器和 LLaMa-7B 模型的一个例子：
 
 ```
-git clone https://github.com/microsoft/DeepSpeedExamples.git
+git clone https://github.com/deepspeedai/DeepSpeedExamples.git
 cd DeepSpeedExamples/applications/DeepSpeed-VisualChat/
 pip install -r requirements.txt
 cd training
@@ -161,21 +161,21 @@ bash chat_scripts/run.sh # You need to change necessary variables, e.g, ckpt pat
 
 为了支持更大的模型推理，我们已经将 Hugging Face 大模型推理集成到我们的 DeepSpeed-VisualChat API 中。因此，用户可以根据 GPU 内存容量和模型大小选择不同数量的 GPU。
 
-请参考我们的 [GitHub 主页](https://github.com/microsoft/DeepSpeedExamples/tree/master/applications/DeepSpeed-VisualChat) 了解更多细节。
+请参考我们的 [GitHub 主页](https://github.com/deepspeedai/DeepSpeedExamples/tree/master/applications/DeepSpeed-VisualChat) 了解更多细节。
 
 # 7. 发布：今天尝试 DeepSpeed-VisualChat！
 
 我们非常兴奋地分享 DeepSpeed-VisualChat 现已开源并供 AI 社区使用。
 
-* 要开始使用，请访问我们的 DeepSpeed-VisualChat GitHub 页面：[GitHub 主页](https://github.com/microsoft/DeepSpeedExamples/tree/master/applications/DeepSpeed-VisualChat)
+* 要开始使用，请访问我们的 DeepSpeed-VisualChat GitHub 页面：[GitHub 主页](https://github.com/deepspeedai/DeepSpeedExamples/tree/master/applications/DeepSpeed-VisualChat)
 
-* 我们将继续在您的反馈和支持下改进 DeepSpeed-VisualChat。我们的 [路线图](https://github.com/microsoft/DeepSpeedExamples/tree/master/applications/DeepSpeed-VisualChat/README.md#-deepspeed-visualchats-roadmap-) 显示了目前支持的功能以及未来计划支持的功能。
+* 我们将继续在您的反馈和支持下改进 DeepSpeed-VisualChat。我们的 [路线图](https://github.com/deepspeedai/DeepSpeedExamples/tree/master/applications/DeepSpeed-VisualChat/README.md#-deepspeed-visualchats-roadmap-) 显示了目前支持的功能以及未来计划支持的功能。
 
 DeepSpeed-VisualChat 是更大的 DeepSpeed 生态系统的一部分，其中包括一系列深度学习系统和建模技术。要了解更多信息，
 
 * 请访问我们的 [网站](https://www.deepspeed.ai/) 了解详细的博客文章、教程和文档。
 * 在我们的 [英文 X(Twitter)](https://twitter.com/MSFTDeepSpeed)、[日语 X(Twitter)](https://twitter.com/MSFTDeepSpeedJP) 和 [中文知乎](https://www.zhihu.com/people/deepspeed) 上关注我们，以获取 DeepSpeed 的最新消息。
 
-我们欢迎您为 DeepSpeed 做出贡献！我们鼓励您报告问题、贡献 PRs、并在 [DeepSpeed GitHub](https://github.com/microsoft/DeepSpeed/) 页面上参加讨论。有关更多详细信息，请查看我们的 [贡献指南](https://github.com/microsoft/DeepSpeed/blob/master/CONTRIBUTING.md)。我们对与大学、研究实验室、公司等进行合作持开放态度，例如共同进行深度学习研究、应用 DeepSpeed 为现实世界的 AI 模型和应用提供支持等等。对于此类请求（以及其他不适合 GitHub 的请求），请直接发送电子邮件至 deepspeed-info@microsoft.com。
+我们欢迎您为 DeepSpeed 做出贡献！我们鼓励您报告问题、贡献 PRs、并在 [DeepSpeed GitHub](https://github.com/deepspeedai/DeepSpeed/) 页面上参加讨论。有关更多详细信息，请查看我们的 [贡献指南](https://github.com/deepspeedai/DeepSpeed/blob/master/CONTRIBUTING.md)。我们对与大学、研究实验室、公司等进行合作持开放态度，例如共同进行深度学习研究、应用 DeepSpeed 为现实世界的 AI 模型和应用提供支持等等。对于此类请求（以及其他不适合 GitHub 的请求），请直接发送电子邮件至 deepspeed-info@microsoft.com。
 
-* 如果你喜欢我们的工作，请在 [DeepSpeed GitHub](https://github.com/microsoft/DeepSpeed/) 和 [DeepSpeedExamples GitHub](https://github.com/microsoft/DeepSpeedExamples/) 上为我们的仓库点“星”。
+* 如果你喜欢我们的工作，请在 [DeepSpeed GitHub](https://github.com/deepspeedai/DeepSpeed/) 和 [DeepSpeedExamples GitHub](https://github.com/deepspeedai/DeepSpeedExamples/) 上为我们的仓库点“星”。

@@ -61,7 +61,7 @@ class TestUlyssesAll2All(DistributedTest):
         outputs = []
         seq_dims = [0]  #seq first API
         #TODO: Add support for batch first (that seq_dims=[0,1]) after PR for bs>1 issue with batch first is fixed
-        ## See discussion in : https://github.com/microsoft/DeepSpeed/issues/5808
+        ## See discussion in : https://github.com/deepspeedai/DeepSpeed/issues/5808
         for seq_dim in seq_dims:
             gather_idx = seq_dim
             #first all2all: sequence parallel to head parallel

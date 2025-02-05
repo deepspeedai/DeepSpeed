@@ -214,7 +214,7 @@ If `"stage"` is not defined or set as `"all"`, then the overwriting applies to a
 
 Currently, the DeepSpeed Autotuner does not tune offloading behaviors but instead uses the values defined in the offload section of the DeepSpeed configuration file. See [Parameter offloading](https://www.deepspeed.ai/docs/config-json/#parameter-offloading) and [Optimizer offloading](https://www.deepspeed.ai/docs/config-json/#optimizer-offloading) for details.
 
-If using NVME for offloading, users can run a benchmark offline to select the optimal `aio` setup in DeepSpeed. Refer to [profiling NVMe and configuring aio param section](https://github.com/microsoft/DeepSpeed/issues/998).
+If using NVME for offloading, users can run a benchmark offline to select the optimal `aio` setup in DeepSpeed. Refer to [profiling NVMe and configuring aio param section](https://github.com/deepspeedai/DeepSpeed/issues/998).
 
 ## Autotuning Output
 
@@ -342,7 +342,7 @@ In DeepSpeed Autotuning, if the user-provided DeepSpeed configuration file has "
 
 ##  GPT2-large Example
 
-This section shows an example of using DeepSpeed autotuning. For more examples, refer to [autotuning](https://github.com/microsoft/DeepSpeedExamples/tree/master/autotuning) in the DeepSpeedExamples repo.
+This section shows an example of using DeepSpeed autotuning. For more examples, refer to [autotuning](https://github.com/deepspeedai/DeepSpeedExamples/tree/master/autotuning) in the DeepSpeedExamples repo.
 
 Example training script:
 
@@ -412,4 +412,4 @@ Notation: Hugging Face (HF), DeepSpeed (DS), ZeRO stage (z), gradient accumulati
 | ---------- | -------------------- | ------------------------ | ------------------------------ |
 | GPT2-large | 27.874 (mbs = 1)     | 56.797 (z = 1, mbs = 2), | 69.061 (z = 1, mbs = 3)        |
 
-As we can see the DeepSpeed Autotuner can select a better than hand-tuned configuration with a reasonable number of experiments. Examples in [Autotuning Hugging Face Examples](https://github.com/microsoft/DeepSpeedExamples/tree/master/autotuning/hf#autotuning-hugging-face-examples) would demonstrate the effectiveness of autotuning across different models.
+As we can see the DeepSpeed Autotuner can select a better than hand-tuned configuration with a reasonable number of experiments. Examples in [Autotuning Hugging Face Examples](https://github.com/deepspeedai/DeepSpeedExamples/tree/master/autotuning/hf#autotuning-hugging-face-examples) would demonstrate the effectiveness of autotuning across different models.

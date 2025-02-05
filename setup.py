@@ -313,7 +313,7 @@ setup(name='deepspeed',
       url='http://deepspeed.ai',
       project_urls={
           'Documentation': 'https://deepspeed.readthedocs.io',
-          'Source': 'https://github.com/microsoft/DeepSpeed',
+          'Source': 'https://github.com/deepspeedai/DeepSpeed',
       },
       install_requires=install_requires,
       extras_require=extras_require,

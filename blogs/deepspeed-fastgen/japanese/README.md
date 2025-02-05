@@ -24,14 +24,14 @@
 AIを様々な目的に利用する幅広いアプリケーションで、GPT-4やLLaMAのような大規模言語モデル（LLM）が、主要なワークロードになってきています。一般的なチャットモデルから、文書の要約、自動運転、ソフトウェアスタックの各層におけるプログラミングの補助まで、これらのモデルを大規模に展開・提供する需要が急増しています。DeepSpeedやPyTorchをはじめとするフレームワークは、一般に、LLMの訓練では良好なハードウェアの利用効率を達成できるものの、オープンエンドのテキスト生成などの課題では、GPUなどのハードウェア上で一度に実行される計算量が少ないことが、既存システムにおいて推論スループットのボトルネックとなっています。
 
 PagedAttentionを搭載した [vLLM](https://arxiv.org/pdf/2309.06180.pdf) や [Orca](https://www.usenix.org/system/files/osdi22-yu.pdf) のような既存システムは、こうした課題を解決するために設計され、LLMの推論性能を大幅に向上させました。しかしこれらのシステムは依然として、特に長いプロンプトを含むワークロードにおいて、一貫したサービス品質の提供という点で課題を残しています。
-数千トークンに及ぶコンテキストウィンドウをサポートするモデルやシステム、例えば [MPT-StoryWriter](https://www.mosaicml.com/blog/mpt-7b) や [DeepSpeed Ulysses](https://github.com/microsoft/DeepSpeed/tree/master/blogs/deepspeed-ulysses) などが増えるにつれて、これらの長いプロンプトのワークロードはますます重要になってきています。
+数千トークンに及ぶコンテキストウィンドウをサポートするモデルやシステム、例えば [MPT-StoryWriter](https://www.mosaicml.com/blog/mpt-7b) や [DeepSpeed Ulysses](https://github.com/deepspeedai/DeepSpeed/tree/master/blogs/deepspeed-ulysses) などが増えるにつれて、これらの長いプロンプトのワークロードはますます重要になってきています。
 これらの問題をより深く理解するために、LLMによるテキスト生成がどのように機能するか説明します。LLMによるテキスト生成は、プロンプト処理と生成と呼ばれる2つの異なるフェーズから構成されます。システムがこれらを全く独立に扱うと、生成のフェーズは、プロンプト処理によって中断されることになります。その結果、システムのレイテンシなどを定めた SLA (Service Level Agreement) に違反する可能性が高くなります。
 
 このブログで紹介するDeepSpeed-FastGenは、新たに提案するDynamic SplitFuse技術などを活用することでこうした課題を解決し、vLLMなどの最新の既存システムと比較して最大2.3倍の実効スループットを実現するシステムです。
 DeepSpeed-FastGenは、DeepSpeed-MIIとDeepSpeed-Inferenceの組み合わせにより、使いやすいテキスト生成機能を実現します。
 
 
-**クイックスタート:** 最新の[DeepSpeed-MII](https://github.com/microsoft/DeepSpeed-MII)をインストールするだけで、 DeepSpeed-FastGenを試すことができます。
+**クイックスタート:** 最新の[DeepSpeed-MII](https://github.com/deepspeedai/DeepSpeed-MII)をインストールするだけで、 DeepSpeed-FastGenを試すことができます。
 
 
 ```bash
@@ -218,7 +218,7 @@ A100 GPUを用いた分析に加えて、H100とA6000を使用したベンチマ
 
 ## 5. DeepSpeed-FastGen: 実装と使い方 <a name="using-deepspeed-fastgen"></a>
 
-DeepSpeed-FastGenは、以下の図に示されているように、[DeepSpeed-MII](https://github.com/microsoft/DeepSpeed-MII)と[DeepSpeed-Inference](https://github.com/microsoft/DeepSpeed)を融合的に組み合わせたものです。これらのソフトウェアパッケージは、フロントエンドAPI、Dynamic SplitFuseを使用してバッチをスケジュールするホストおよびデバイスインフラストラクチャ、最適化されたカーネル実装、新しいモデル実装を構築するためのツールなど、システムの様々なコンポーネントを提供します。
+DeepSpeed-FastGenは、以下の図に示されているように、[DeepSpeed-MII](https://github.com/deepspeedai/DeepSpeed-MII)と[DeepSpeed-Inference](https://github.com/deepspeedai/DeepSpeed)を融合的に組み合わせたものです。これらのソフトウェアパッケージは、フロントエンドAPI、Dynamic SplitFuseを使用してバッチをスケジュールするホストおよびデバイスインフラストラクチャ、最適化されたカーネル実装、新しいモデル実装を構築するためのツールなど、システムの様々なコンポーネントを提供します。
 
 
 <div align="center">
@@ -228,7 +228,7 @@ DeepSpeed-FastGenは、以下の図に示されているように、[DeepSpeed-M
 
 DeepSpeed-FastGenのアルファリリースを使い始める最も簡単な方法は、 ``pip install deepspeed-mii`` を実行することです。
 
-詳細については、[Getting Started](https://github.com/microsoft/deepspeed-mii#getting-started-with-mii)ガイドを参照してください。使用法や問題の報告には、[DeepSpeed-MII Github リポジトリ](https://github.com/microsoft/DeepSpeed-MII)を使用してください。
+詳細については、[Getting Started](https://github.com/deepspeedai/deepspeed-mii#getting-started-with-mii)ガイドを参照してください。使用法や問題の報告には、[DeepSpeed-MII Github リポジトリ](https://github.com/deepspeedai/DeepSpeed-MII)を使用してください。
 
 ### A. 対応モデル
 
@@ -240,11 +240,11 @@ DeepSpeed-FastGenのアルファリリースを使い始める最も簡単な方
 
 現在のすべてのモデルは、モデルの重みとモデルに対応するトークナイザーの両方を提供するために、バックエンドで [HuggingFace](https://github.com/huggingface) を利用しています。
 
-初期リリース後の数週間と数ヶ月に追加のモデルを追加する予定です。サポートを希望する特定のモデルアーキテクチャがある場合は、[issue](https://github.com/microsoft/DeepSpeed-MII/issues) を登録してください。。
+初期リリース後の数週間と数ヶ月に追加のモデルを追加する予定です。サポートを希望する特定のモデルアーキテクチャがある場合は、[issue](https://github.com/deepspeedai/DeepSpeed-MII/issues) を登録してください。。
 
 ### B. デプロイメントのオプション
 
-以下の例はすべて [DeepSpeedExamples](https://github.com/microsoft/DeepSpeedExamples/tree/master/inference/mii) で実行可能です。インストール後、デプロイメントのオプションとして、対話型の非永続パイプラインまたは永続的なサービス提供デプロイメントの2つのオプションがあります。
+以下の例はすべて [DeepSpeedExamples](https://github.com/deepspeedai/DeepSpeedExamples/tree/master/inference/mii) で実行可能です。インストール後、デプロイメントのオプションとして、対話型の非永続パイプラインまたは永続的なサービス提供デプロイメントの2つのオプションがあります。
 
 #### 非永続パイプライン
 
@@ -284,21 +284,21 @@ client.terminate_server()
 ### C. インストールの詳細情報
 
 類似の他のプロジェクトでは、カスタムカーネルのコンパイルに非常に時間がかかることがよくあります。
-DeepSpeed-FastGenでは、このコンパイル時間を大幅に短縮し、利便性を向上するため、主要なカスタムカーネルの大部分を事前コンパイルしたPython wheelを、[DeepSpeed-Kernels](https://github.com/microsoft/DeepSpeed-Kernels)という新しいライブラリを通じて配布しています。
+DeepSpeed-FastGenでは、このコンパイル時間を大幅に短縮し、利便性を向上するため、主要なカスタムカーネルの大部分を事前コンパイルしたPython wheelを、[DeepSpeed-Kernels](https://github.com/deepspeedai/DeepSpeed-Kernels)という新しいライブラリを通じて配布しています。
 このライブラリは、NVIDIA GPUのコンピュート能力が8.0以上（Ampere+）、CUDA 11.6以上、Ubuntu 20以上の環境で非常に移植性が高いことがわかっています。
-このライブラリは、DeepSpeed-MIIの依存関係としてインストールされるため、ほとんどの場合では、このライブラリの存在を知る必要はありません。しかし、何らかの理由でカーネルを手動でコンパイルする必要がある場合は、インストールに関する[詳細ドキュメント](https://github.com/microsoft/DeepSpeed-Kernels#source)をご覧ください。
+このライブラリは、DeepSpeed-MIIの依存関係としてインストールされるため、ほとんどの場合では、このライブラリの存在を知る必要はありません。しかし、何らかの理由でカーネルを手動でコンパイルする必要がある場合は、インストールに関する[詳細ドキュメント](https://github.com/deepspeedai/DeepSpeed-Kernels#source)をご覧ください。
 
 # 6. DeepSpeed-FastGen を使ってみる <a name="try"></a>
 
 このDeepSpeed-FastGenアルファリリースをユーザの皆さんと共有できることを非常に嬉しく思います。
 
-* 使用を始めるにあたっては、DeepSpeed-MIIのGitHubページをご覧ください: [GitHubランディングページ](https://github.com/microsoft/DeepSpeed-MII)
+* 使用を始めるにあたっては、DeepSpeed-MIIのGitHubページをご覧ください: [GitHubランディングページ](https://github.com/deepspeedai/DeepSpeed-MII)
 
 DeepSpeed-FastGenは、Deep Learningシステムやモデリングテクノロジーを数多く含む、より大きなDeepSpeedエコシステムの一部です。さらに詳しい情報が必要な方は、
 [詳細なブログ記事]、チュートリアル、役立つドキュメントがある私たちの [ウェブサイト](https://www.deepspeed.ai/) をご覧ください。
 DeepSpeedの最新情報については、[英語のTwitter](https://twitter.com/MSFTDeepSpeed)、[日本語のTwitter](https://twitter.com/MSFTDeepSpeedJP)、[中国語の知乎](https://www.zhihu.com/people/deepspeed)をフォローしてください。
 
-DeepSpeedは、皆様の開発への参加を歓迎しています。DeepSpeedのGitHubページで、バグ報告、Pull Request、ディスカッションへの参加が可能です。詳細は[ガイドライン](https://github.com/microsoft/DeepSpeed/blob/master/CONTRIBUTING.md)をご覧ください。[contributing guide](https://github.com/microsoft/DeepSpeed/blob/master/CONTRIBUTING.md) にはより詳細な情報があります。
+DeepSpeedは、皆様の開発への参加を歓迎しています。DeepSpeedのGitHubページで、バグ報告、Pull Request、ディスカッションへの参加が可能です。詳細は[ガイドライン](https://github.com/deepspeedai/DeepSpeed/blob/master/CONTRIBUTING.md)をご覧ください。[contributing guide](https://github.com/deepspeedai/DeepSpeed/blob/master/CONTRIBUTING.md) にはより詳細な情報があります。
 また、深層学習の研究や、実世界のAIモデルやアプリケーションへのDeepSpeedの適用に取り組む大学、研究所、企業とのコラボレーションも行っています。こうしたコラボレーションについてのご要望（およびGitHubには適さないその他の話題）については<deepspeed-info@microsoft.com> まで直接メールをお送りください。
 
 以下の項目は、今後のロードマップです。GitHubの問題やPRを通じてコミュニティと協力して取り組む予定です:
@@ -308,7 +308,7 @@ DeepSpeedは、皆様の開発への参加を歓迎しています。DeepSpeed�
 - パートナーとのコラボレーションによる新しいハードウェアバックエンド
 - ブログに掲載したプロットを生成するパフォーマンスベンチマークのリリース
 
-このプロジェクトが気に入ったら、ぜひ [DeepSpeed GitHub](https://github.com/microsoft/DeepSpeed/) と [DeepSpeedMII GitHub](https://github.com/microsoft/DeepSpeed-MII/) のリポジトリに "スター" をつけてください。
+このプロジェクトが気に入ったら、ぜひ [DeepSpeed GitHub](https://github.com/deepspeedai/DeepSpeed/) と [DeepSpeedMII GitHub](https://github.com/deepspeedai/DeepSpeed-MII/) のリポジトリに "スター" をつけてください。
 
 # 7. 謝辞 <a name="acknowledgements"></a>
 

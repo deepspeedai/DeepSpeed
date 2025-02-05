@@ -10,4 +10,4 @@ We introduce a new technology called ZeRO-Offload to enable **10X bigger model t
 
 * For more information on ZeRO-Offload, see our [press release]( {{ site.press_release_v3 }} ).
 * For more information on how to use ZeRO-Offload, see our [ZeRO-Offload tutorial](https://www.deepspeed.ai/tutorials/ZeRO-offload/).
-* The source code for ZeRO-Offload can be found in the [DeepSpeed repo](https://github.com/microsoft/deepspeed).
+* The source code for ZeRO-Offload can be found in the [DeepSpeed repo](https://github.com/deepspeedai/deepspeed).

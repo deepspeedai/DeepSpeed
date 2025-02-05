@@ -33,7 +33,7 @@ The first step in leveraging DeepSpeed Universal Checkpointing is to create a Ze
 
 Once you have a ZeRO checkpoint, the next step is to convert it into the Universal format. This format is designed to be flexible and compatible across different model architectures and DeepSpeed configurations. To convert a checkpoint:
 
- - Use the [ds_to_universal.py](https://github.com/microsoft/DeepSpeed/blob/master/deepspeed/checkpoint/ds_to_universal.py) script provided by DeepSpeed.
+ - Use the [ds_to_universal.py](https://github.com/deepspeedai/DeepSpeed/blob/master/deepspeed/checkpoint/ds_to_universal.py) script provided by DeepSpeed.
  - Specify the path to your ZeRO checkpoint and the desired output path for the Universal checkpoint.
 
 ```bash
@@ -49,8 +49,8 @@ With the Universal checkpoint ready, you can now resume training on potentially 
 ## Conclusion
 DeepSpeed Universal Checkpointing simplifies the management of model states, making it easier to save, load, and transfer model states across different training sessions and parallelism techniques. By following the steps outlined in this tutorial, you can integrate Universal Checkpointing into your DeepSpeed applications, enhancing your model training and development workflow.
 
-For more detailed examples and advanced configurations, please refer to the [Megatron-DeepSpeed examples](https://github.com/microsoft/Megatron-DeepSpeed/tree/main/examples_deepspeed/universal_checkpointing).
+For more detailed examples and advanced configurations, please refer to the [Megatron-DeepSpeed examples](https://github.com/deepspeedai/Megatron-DeepSpeed/tree/main/examples_deepspeed/universal_checkpointing).
 
-For technical in-depth of DeepSpeed Universal Checkpointing, please see [arxiv manuscript](https://arxiv.org/abs/2406.18820) and [blog](https://github.com/microsoft/DeepSpeed/blob/master/blogs/deepspeed-ucp/).
+For technical in-depth of DeepSpeed Universal Checkpointing, please see [arxiv manuscript](https://arxiv.org/abs/2406.18820) and [blog](https://github.com/deepspeedai/DeepSpeed/blob/master/blogs/deepspeed-ucp/).
 
 Happy training!
