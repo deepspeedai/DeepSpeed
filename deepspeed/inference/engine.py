@@ -15,7 +15,6 @@ from packaging import version as pkg_version
 from deepspeed.runtime.checkpoint_engine.torch_checkpoint_engine import TorchCheckpointEngine
 from deepspeed.utils.timer import SynchronizedWallClockTimer
 from deepspeed.runtime.compiler import is_compile_supported
-
 from ..runtime.state_dict_factory import SDLoaderFactory
 from ..runtime.weight_quantizer import WeightQuantization
 from ..module_inject import replace_transformer_layer, generic_injection

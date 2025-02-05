@@ -46,8 +46,6 @@ expert_tensor_parallel_world_size = 1
 # All to All quantized graident communication groups
 _ALL_TO_ALL_GROUP = {}
 
-_DATA_PARALLEL_GROUP = None
-
 mesh_device = None
 
 
@@ -62,6 +60,127 @@ def initialize(ep_size=1, mpu=None):
 def _ensure_divisibility(numerator, denominator):
     """Ensure that numerator is divisible by the denominator."""
     assert numerator % denominator == 0, '{} is not divisible by {}'.format(numerator, denominator)
+
+
+# ======== Start: Tensor Parallel Group Attributes ========
+
+# Intra-layer model parallel group that the current rank belongs to.
+_TENSOR_MODEL_PARALLEL_GROUP = None
+
+# Model parallel group (both intra- and pipeline) that the current rank belongs to.
+_MODEL_PARALLEL_GROUP = None
+# Data parallel group that the current rank belongs to.
+_DATA_PARALLEL_GROUP = None
+
+# These values enable us to change the mpu sizes on the fly.
+_MPU_TENSOR_MODEL_PARALLEL_WORLD_SIZE = None
+_MPU_TENSOR_MODEL_PARALLEL_RANK = None
+
+
+def _init_tp_mesh_device(tensor_model_parallel_size=1, data_parallel_size=None):
+    """Initialize model data parallel groups."""
+
+    global _DATA_PARALLEL_GROUP
+    global _MODEL_PARALLEL_GROUP
+    global _TENSOR_MODEL_PARALLEL_GROUP
+
+    if _TENSOR_MODEL_PARALLEL_GROUP is not None:
+        return
+
+    if data_parallel_size is None:
+        data_parallel_size = dist.get_world_size() // tensor_model_parallel_size
+
+    mesh_device = dist.initialize_mesh_device((data_parallel_size, tensor_model_parallel_size),
+                                              ("data_parallel", "tensor_parallel"))
+    _TENSOR_MODEL_PARALLEL_GROUP = mesh_device.get_group(mesh_dim="tensor_parallel")
+    _DATA_PARALLEL_GROUP = mesh_device.get_group(mesh_dim="data_parallel")
+
+    # They are always equal only in 2D (DP + TP) parallelism.
+    # _MODEL_PARALLEL_GROUP is assigned the same value as _TENSOR_MODEL_PARALLEL_GROUP
+    # to allow for future potential changes.
+    _MODEL_PARALLEL_GROUP = _TENSOR_MODEL_PARALLEL_GROUP
+
+    return _DATA_PARALLEL_GROUP, _MODEL_PARALLEL_GROUP
+
+
+def get_tensor_model_parallel_group():
+    """Get the tensor model parallel group the caller rank belongs to."""
+
+    assert _TENSOR_MODEL_PARALLEL_GROUP is not None, \
+        'intra_layer_model parallel group is not initialized'
+    return _TENSOR_MODEL_PARALLEL_GROUP
+
+
+def get_model_parallel_group():
+    """Get the model parallel group the caller rank belongs to."""
+
+    assert _MODEL_PARALLEL_GROUP is not None, \
+        'model parallel group is not initialized'
+    return _MODEL_PARALLEL_GROUP
+
+
+def get_data_parallel_group():
+    """Get the data parallel group the caller rank belongs to."""
+    assert _DATA_PARALLEL_GROUP is not None, \
+        'data parallel group is not initialized'
+    return _DATA_PARALLEL_GROUP
+
+
+def set_tensor_model_parallel_world_size(world_size):
+    """Set the tensor model parallel size"""
+    global _MPU_TENSOR_MODEL_PARALLEL_WORLD_SIZE
+    _MPU_TENSOR_MODEL_PARALLEL_WORLD_SIZE = world_size
+
+
+def get_tensor_model_parallel_world_size():
+    """Return world size for the tensor model parallel group."""
+    global _MPU_TENSOR_MODEL_PARALLEL_WORLD_SIZE
+    if _MPU_TENSOR_MODEL_PARALLEL_WORLD_SIZE is not None:
+        return _MPU_TENSOR_MODEL_PARALLEL_WORLD_SIZE
+    return dist.get_world_size(group=get_tensor_model_parallel_group())
+
+
+def get_model_parallel_world_size():
+    return get_tensor_model_parallel_world_size()
+
+
+def set_tensor_model_parallel_rank(rank):
+    """Set tensor model parallel rank."""
+    global _MPU_TENSOR_MODEL_PARALLEL_RANK
+    _MPU_TENSOR_MODEL_PARALLEL_RANK = rank
+
+
+def get_tensor_model_parallel_rank():
+    """Return my rank for the tensor model parallel group."""
+    global _MPU_TENSOR_MODEL_PARALLEL_RANK
+    if _MPU_TENSOR_MODEL_PARALLEL_RANK is not None:
+        return _MPU_TENSOR_MODEL_PARALLEL_RANK
+    return dist.get_rank(group=get_tensor_model_parallel_group())
+
+
+def get_model_parallel_rank():
+    return get_tensor_model_parallel_rank()
+
+
+def get_tensor_model_parallel_src_rank():
+    """Calculate the global rank corresponding to the first local rank
+    in the tensor model parallel group."""
+    global_rank = dist.get_rank()
+    local_world_size = get_tensor_model_parallel_world_size()
+    return (global_rank // local_world_size) * local_world_size
+
+
+def get_data_parallel_world_size():
+    """Return world size for the data parallel group."""
+    return dist.get_world_size(group=get_data_parallel_group())
+
+
+def get_data_parallel_rank():
+    """Return my rank for the data parallel group."""
+    return dist.get_rank(group=get_data_parallel_group())
+
+
+# ======== End: Tensor Parallel Group Attributes ========
 
 
 # Not currently used. Helper function to create a model (tensor) parallel group.

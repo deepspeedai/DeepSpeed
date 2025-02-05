@@ -206,6 +206,10 @@ class TorchBackend(Backend):
             return torch.distributed.broadcast(tensor=tensor, src=src, group=group, async_op=async_op)
 
     @disable_compiler_collective
+    def broadcast_object_list(self, object_list, src, group=None, device=None):
+        return torch.distributed.broadcast_object_list(object_list=object_list, src=src, group=group, device=device)
+
+    @disable_compiler_collective
     def all_gather(self, tensor_list, tensor, group=None, async_op=False):
         if DS_COMM_ALL_GATHER_OFF:
             if int(os.getenv('RANK', '0')) == 0:
