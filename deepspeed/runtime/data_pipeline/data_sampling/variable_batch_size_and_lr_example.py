@@ -125,8 +125,8 @@ if __name__ == "__main__":
                 "pin_memory": False,
                 "dynamic_batching": {
                     "enabled": True,
-                    # Path to load the sequence lengths from, as {metrics_path}/seqlen/seqlen_sample_to_metric.bin and *.idx
-                    # If these 2 files dont exist, they'll be output there on the first run, and loaded on subsequent runs.
+                    # Files to load the sequence lengths from: {metrics_path}/seqlen/seqlen_sample_to_metric.bin and *.idx
+                    # If files dont exist, they'll be computed and saved on the first run, and loaded on subsequent runs.
                     "metrics_path": "./curriculum_output/",
                     "lr_scaling_method": "linear",
                     "min_batch_size": 1,
@@ -176,3 +176,5 @@ if __name__ == "__main__":
 
             if engine.data_parallel_group.rank() == 0:
                 print(f"epoch {epoch}, batch {batch_id}, loss {loss.item()}, LRs {lr_scheduler.get_lr()}")
+    dist.barrier()
+    dist.destroy_process_group()
