@@ -77,8 +77,8 @@ DYNAMIC_BATCHING_MIN_BATCH_SIZE = "min_batch_size"
 DYNAMIC_BATCHING_MIN_BATCH_SIZE_DEFAULT = 1
 DYNAMIC_BATCHING_MAX_BATCH_SIZE = "max_batch_size"
 DYNAMIC_BATCHING_MAX_BATCH_SIZE_DEFAULT = None
-DYNAMIC_BATCHING_SAMPLES_ORDER = "samples_order"  # "random" / "order" / "default"
-DYNAMIC_BATCHING_SAMPLES_ORDER_DEFAULT = "dataloader"  # "random" / "order" / "dataloader"
+DYNAMIC_BATCHING_SAMPLES_ORDER = "samples_order"  # "random" / "seqlen" / "dataloader"
+DYNAMIC_BATCHING_SAMPLES_ORDER_DEFAULT = "dataloader"  # "random" / "seqlen" / "dataloader"
 DYNAMIC_BATCHING_MAX_TOKENS_PER_BATCH = "max_tokens_per_batch"
 DYNAMIC_BATCHING_VERBOSE = "verbose"
 
