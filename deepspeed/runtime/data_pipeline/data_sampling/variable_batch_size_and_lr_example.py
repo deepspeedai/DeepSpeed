@@ -99,6 +99,7 @@ if __name__ == "__main__":
 
     deepspeed.init_distributed()
     device = f"cuda:{dist.get_local_rank()}"
+    assert dist.get_local_rank() <= torch.cuda.device_count(), "needs at least 1 GPU per process"
     pipeline_num_stages = 2
 
     max_seqlen = 15
@@ -106,7 +107,7 @@ if __name__ == "__main__":
     model = AttentionHeadAndFeedForward(max_seqlen, dataset.embed_dim).to(device)
     loss_fn = lambda x, y: F.mse_loss(x.float(), y.float())
 
-    if pipeline_num_stages > 0:
+    if pipeline_num_stages > 1:
         model = PipelineModule(layers=model.to_layers(), num_stages=pipeline_num_stages, loss_fn=loss_fn)
 
     # DeepSpeed config includes the dynamic batching
@@ -145,9 +146,9 @@ if __name__ == "__main__":
                 #         "min_difficulty": 1,
                 #         "schedule_type": "fixed_root",
                 #         "schedule_config": {
-                #         "total_curriculum_step": 110000,
-                #         "difficulty_step": 1, #multiple of 8 to support FP16?
-                #         "root_degree": 2
+                #           "total_curriculum_step": 110000,
+                #           "difficulty_step": 1, #multiple of 8 to support FP16?
+                #           "root_degree": 2
                 #         }
                 #     },
                 # },
@@ -157,7 +158,7 @@ if __name__ == "__main__":
                     "lr_scaling_method": "linear",
                     "min_batch_size": 1,
                     "max_batch_size": 10,
-                    "samples_order": "dataloader",  # "random" / "seqlen" / "default"
+                    "samples_order": "dataloader",  # "random" / "seqlen" / "dataloader"
                     "max_tokens_per_batch": 40,
                     "verbose": False,
                 },
@@ -174,7 +175,7 @@ if __name__ == "__main__":
     dataloader, lr_scheduler, _ = \
         get_dataloader_and_lr_scheduler_for_variable_batch_size_deepspeed(
             dataset=dataset,
-            # dataset_seqlens=dataset_seqlens, #if None, output metrics with DataAnalyzer and open them
+            # dataset_seqlens=dataset_seqlens, #if None, use DataAnalyzer to output seqlens and then and load them
             dataset_filter_ids=dataset_filter_ids, #remove or None to include the whole dataset
             engine=engine,
             dataloader_collate_fn=dataset.batch_collate_fn,
