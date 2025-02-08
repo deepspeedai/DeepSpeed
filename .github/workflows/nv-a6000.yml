@@ -42,7 +42,8 @@ jobs:
         run: |
           git clone https://github.com/huggingface/transformers
           cd transformers
-          git checkout v4.47.1
+          # if you need to use an older transformers version temporarily in case of breakage
+          # git checkout v4.47.1
           git rev-parse --short HEAD
           python -m pip install .
       - name: Install deepspeed
