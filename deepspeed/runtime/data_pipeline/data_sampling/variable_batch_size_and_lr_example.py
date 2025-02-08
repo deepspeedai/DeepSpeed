@@ -18,7 +18,7 @@ from deepspeed.runtime.data_pipeline.data_sampling.variable_batch_size_and_lr im
 if __name__ == "__main__":
 
     class TestData(torch.utils.data.Dataset):
-        """ A test dataset with sequences of random length, and the sequence length as the label"""
+        """ A test dataset with sequences of random lengths, and the sequence length as the label"""
 
         def __init__(self, seq_count, min_seqlen=1, max_seqlen=20, embed_dim=5, seed=0):
             data_random = random.Random(seed)
@@ -56,7 +56,7 @@ if __name__ == "__main__":
     class AttentionHeadAndFeedForward(nn.Module):
         """
         A single attention head of batch of shape BxTxE (with variable T) and attention matrix
-        BxTxT, followed by a feed-forward network of input size BxMxE, where T<<M. No embeddings.
+        BxTxT, followed by a feed-forward network of input size BxMxE, where T<<M.
         """
 
         def __init__(self, max_seqlen, embed_dim):
