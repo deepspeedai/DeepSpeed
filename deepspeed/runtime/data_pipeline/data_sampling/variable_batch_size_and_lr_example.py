@@ -114,20 +114,7 @@ if __name__ == "__main__":
     config = {
         "train_batch_size": 16,
         "train_micro_batch_size_per_gpu": 2,  # Note: each microbatch per GPU will fill up to N tokens
-        "optimizer": {
-            "type": "Adam",
-            "params": {
-                "lr": 1e-3,
-            }
-        },
-        "scheduler": {
-            "type": "WarmupLR",
-            "params": {
-                "warmup_min_lr": 0.001,
-                "warmup_max_lr": 0.005,
-                "warmup_num_steps": 1000
-            }
-        },
+        "optimizer": { "type": "Adam", "params": { "lr": 1e-3, } },
         "data_efficiency": {
             "enabled": True,
             "seed": 42,
