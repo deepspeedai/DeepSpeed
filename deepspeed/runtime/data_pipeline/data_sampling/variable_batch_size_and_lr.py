@@ -355,7 +355,8 @@ def get_dataloader_and_lr_scheduler_for_variable_batch_size_deepspeed(dataset,
     if dataset_seqlens is None:
         # In seqlen provided by user, look for the seqlen metric that was output by the Data Analyzer
         # (see the main in deepspeed/runtime/data_pipeline/data_sampling/data_analyzer.py for an example)
-        sample_to_seqlen_path = batching_config[DYNAMIC_BATCHING_SEQLEN_SAMPLE_TO_METRIC_PATH]
+        metrics_path = batching_config[DYNAMIC_BATCHING_METRICS_PATH]
+        sample_to_seqlen_path = os.path.join(metrics_path, "seqlen/seqlen_sample_to_metric")
         if not (os.path.exists(f"{sample_to_seqlen_path}.bin") and os.path.exists(f"{sample_to_seqlen_path}.idx")):
             # if the metric files are not found, we run the DataAnalyzer to write the metric files
             msg = f"Cannot find metric files for sequence length in {sample_to_seqlen_path}.idx or *.bin."
@@ -372,7 +373,7 @@ def get_dataloader_and_lr_scheduler_for_variable_batch_size_deepspeed(dataset,
                 batch_size=2**10,  # batch size for map-reduce, not training
                 num_workers=engine.world_size,
                 worker_id=engine.global_rank,
-                save_path=pathlib.Path(f"{sample_to_seqlen_path}.bin").parent.parent,
+                save_path=pathlib.Path(metrics_path),
                 metric_types=['single_value_per_sample'],
                 metric_names=["seqlen"],
                 device=engine.device,
