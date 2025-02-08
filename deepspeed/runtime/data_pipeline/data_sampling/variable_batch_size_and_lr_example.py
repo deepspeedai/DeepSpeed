@@ -28,8 +28,8 @@ if __name__ == "__main__":
                 torch.ones(data_random.randrange(min_seqlen, max_seqlen), embed_dim) for _ in range(seq_count)
             ]
 
-        __len__ = lambda self: len(self.seqs)
-        __getitem__ = lambda self, idx: (self.seqs[idx], len(self.seqs[idx]))
+        __len__ = lambda self: len(self.seqs)  # noqa
+        __getitem__ = lambda self, idx: (self.seqs[idx], len(self.seqs[idx]))  # noqa
 
         def batch_collate_fn(self, batch):
             """ collate sequences of different lengths into batch of size BxTxE, where T is max seqlen """
@@ -105,7 +105,7 @@ if __name__ == "__main__":
     max_seqlen = 15
     dataset = TestData(seq_count=300, min_seqlen=5, max_seqlen=max_seqlen)
     model = AttentionHeadAndFeedForward(max_seqlen, dataset.embed_dim).to(device)
-    loss_fn = lambda x, y: F.mse_loss(x.float(), y.float())
+    loss_fn = lambda x, y: F.mse_loss(x.float(), y.float())  # noqa
 
     if pipeline_num_stages > 1:
         model = PipelineModule(layers=model.to_layers(), num_stages=pipeline_num_stages, loss_fn=loss_fn)
