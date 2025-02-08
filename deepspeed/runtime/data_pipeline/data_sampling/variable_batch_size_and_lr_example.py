@@ -136,25 +136,11 @@ if __name__ == "__main__":
                 "num_epochs": 1,
                 "num_workers": 0,
                 "pin_memory": False,
-                # "curriculum_metrics": {
-                #     "seqlen": {
-                #         "index_to_sample_path": "./ds_curriculum_output/seqlen/seqlen_index_to_sample_percentile_merged",
-                #         "index_to_metric_path": "./ds_curriculum_output/seqlen/seqlen_index_to_metric",
-                #         "difficulty_type": "percentile",
-                #         "clustering_type": "schedule_based",
-                #         "max_difficulty": 100,
-                #         "min_difficulty": 1,
-                #         "schedule_type": "fixed_root",
-                #         "schedule_config": {
-                #           "total_curriculum_step": 110000,
-                #           "difficulty_step": 1, #multiple of 8 to support FP16?
-                #           "root_degree": 2
-                #         }
-                #     },
-                # },
                 "dynamic_batching": {
                     "enabled": True,
-                    "seqlen_sample_to_metric_path": "./ds_curriculum_output/seqlen/seqlen_sample_to_metric",
+                    # Path to load the sequence lengths from, as {metrics_path}/seqlen/seqlen_sample_to_metric.bin and *.idx
+                    # If these 2 files dont exist, they'll be output there on the first run, and loaded on subsequent runs.
+                    "metrics_path": "./curriculum_output/",
                     "lr_scaling_method": "linear",
                     "min_batch_size": 1,
                     "max_batch_size": 10,
@@ -175,8 +161,8 @@ if __name__ == "__main__":
     dataloader, lr_scheduler, _ = \
         get_dataloader_and_lr_scheduler_for_variable_batch_size_deepspeed(
             dataset=dataset,
-            # dataset_seqlens=dataset_seqlens, #if None, use DataAnalyzer to output seqlens and then and load them
-            dataset_filter_ids=dataset_filter_ids, #remove or None to include the whole dataset
+            # dataset_seqlens=dataset_seqlens, # if None: use DataAnalyzer to output seqlens and then and load them
+            dataset_filter_ids=dataset_filter_ids, # if None: include the whole dataset
             engine=engine,
             dataloader_collate_fn=dataset.batch_collate_fn,
             sample_padding_fn=dataset.sample_padding_fn,
