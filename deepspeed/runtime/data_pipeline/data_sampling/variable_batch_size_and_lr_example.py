@@ -124,7 +124,7 @@ if __name__ == "__main__":
         },
         "data_efficiency": {
             "enabled": True,
-            # seed to be applied on all data effiency modules, including dynamic batching
+            # seed to be applied to all data effiency modules, including dynamic batching
             "seed": 42,
             "data_sampling": {
                 "num_workers": 0, # dataloader num_workers argument
