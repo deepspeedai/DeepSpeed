@@ -98,12 +98,12 @@ def get_dynamic_batching(param_dict):
     output[DYNAMIC_BATCHING_MAX_BATCH_SIZE] = int(output[DYNAMIC_BATCHING_MAX_BATCH_SIZE]) \
         if DYNAMIC_BATCHING_MAX_BATCH_SIZE in output.keys() \
         else DYNAMIC_BATCHING_MAX_BATCH_SIZE_DEFAULT
-    output[DYNAMIC_BATCHING_SAMPLES_ORDER] = str(
-        output.get(DYNAMIC_BATCHING_SAMPLES_ORDER, DYNAMIC_BATCHING_SAMPLES_ORDER_DEFAULT))
+    output[DYNAMIC_BATCHING_SENTENCES_PICKING_ORDER] = str(
+        output.get(DYNAMIC_BATCHING_SENTENCES_PICKING_ORDER, DYNAMIC_BATCHING_SENTENCES_PICKING_ORDER_DEFAULT))
     if output[DYNAMIC_BATCHING_ENABLED]:
-        assert DYNAMIC_BATCHING_MAX_TOKENS_PER_BATCH in output.keys(
-        ), f"Dynamic batching is enabled, so {DYNAMIC_BATCHING_MAX_TOKENS_PER_BATCH} must be specified"
-        output[DYNAMIC_BATCHING_MAX_TOKENS_PER_BATCH] = int(output[DYNAMIC_BATCHING_MAX_TOKENS_PER_BATCH])
+        assert DYNAMIC_BATCHING_MAX_TOKENS in output.keys(
+        ), f"Dynamic batching is enabled, so {DYNAMIC_BATCHING_MAX_TOKENS} must be specified"
+        output[DYNAMIC_BATCHING_MAX_TOKENS] = int(output[DYNAMIC_BATCHING_MAX_TOKENS])
     output[DYNAMIC_BATCHING_VERBOSE] = bool(output.get(DYNAMIC_BATCHING_VERBOSE, False))
     return output
 
