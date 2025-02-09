@@ -875,7 +875,7 @@ if __name__ == "__main__":
 
     class TestDataset(torch.utils.data.Dataset):
 
-        def __init__(self, size=10_000):
+        def __init__(self, size=10_000_000):
             self.values = [(x + 7) % 10_000 for x in range(size)]
             self.size = size
 
