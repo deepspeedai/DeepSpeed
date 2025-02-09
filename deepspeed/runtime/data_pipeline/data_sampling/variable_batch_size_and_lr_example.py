@@ -124,10 +124,10 @@ if __name__ == "__main__":
         },
         "data_efficiency": {
             "enabled": True,
-            # seed to be applied to all data effiency modules, including dynamic batching
+            # seed to be applied to all data efficiency modules, including dynamic batching
             "seed": 42,
             "data_sampling": {
-                "num_workers": 0, # dataloader num_workers argument
+                "num_workers": 0,  # dataloader num_workers argument
                 "pin_memory": False,  # dataloader pin_memory argument
                 "dynamic_batching": {
                     # enables or disables dynamic batching
@@ -174,26 +174,28 @@ if __name__ == "__main__":
             sample_padding_fn=dataset.sample_padding_fn,
             batch_seqlens_fn=dataset.batch_seqlens_fn)
 
-    for it in range(20):
-        data_iter = iter(dataloader)  # point data iterator to first batch
+    # train on 2 epochs with 20 iterations per epoch
+    for epoch in range(2):
         lr_scheduler.step(0)  # point LR scheduler to first batch
-        if pipeline_num_stages > 0:
-            engine.reset_activation_shape()  # reset, as each batch has a diff BxT dimension
-            loss = engine.train_batch(data_iter=data_iter)  # lr_kwargs={"epoch": batch_id}
-        else:
-            for gas in range(engine.gradient_accumulation_steps()):
-                seqs, labels = next(data_iter)
-                n_tokens = (seqs[:, :, 0] != 0).sum().item()
-                seqs, labels = seqs.to(device), labels.to(device)
-                outputs = engine(seqs)
-                loss = loss_fn(outputs, labels)
-                engine.backward(loss)
-                engine.step()  # lr_kwargs={"epoch": batch_id})
-                print(
-                    f"- dp_rank {dp_rank}, grad acc step {gas}: shape {list(seqs.shape)}, n_tokens {n_tokens}, lr {lr_scheduler.get_lr()}"
-                )
+        for it in range(10):
+            data_iter = iter(dataloader)  # point data iterator to first batch
+            if pipeline_num_stages > 0:
+                engine.reset_activation_shape()  # reset, as each batch has a diff BxT dimension
+                loss = engine.train_batch(data_iter=data_iter)  # lr_kwargs={"epoch": batch_id}
+            else:
+                for gas in range(engine.gradient_accumulation_steps()):
+                    seqs, labels = next(data_iter)
+                    n_tokens = (seqs[:, :, 0] != 0).sum().item()
+                    seqs, labels = seqs.to(device), labels.to(device)
+                    outputs = engine(seqs)
+                    loss = loss_fn(outputs, labels)
+                    engine.backward(loss)
+                    engine.step()  # lr_kwargs={"epoch": it})
+                    print(
+                        f"- acc step {gas}, dp_rank {dp_rank}: shape {list(seqs.shape)}, n_tokens {n_tokens}, lr {lr_scheduler.get_lr()}"
+                    )
 
-        if dp_rank == 0:
-            print(f"iteration {it}, loss {loss.item()}, lrs {lr_scheduler.get_lr()}")
+            if dp_rank == 0:
+                print(f"epoch {epoch}, iteration {it}, loss {loss.item()}, lrs {lr_scheduler.get_lr()}")
     dist.barrier()
     dist.destroy_process_group()
