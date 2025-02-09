@@ -24,9 +24,9 @@ if __name__ == "__main__":
             data_random = random.Random(seed)
             self.padding_value = 0
             self.embed_dim = embed_dim
-            self.seqs = [
-                torch.ones(data_random.randrange(min_seqlen, max_seqlen), embed_dim) for _ in range(seq_count)
-            ]
+            self.seqs = []
+            for _ in range(seq_count):
+                self.seqs.append(torch.ones(data_random.randrange(min_seqlen, max_seqlen), embed_dim))
 
         __len__ = lambda self: len(self.seqs)  # noqa
         __getitem__ = lambda self, idx: (self.seqs[idx], len(self.seqs[idx]))  # noqa
@@ -100,10 +100,10 @@ if __name__ == "__main__":
     deepspeed.init_distributed()
     device = f"cuda:{dist.get_local_rank()}"
     assert dist.get_local_rank() <= torch.cuda.device_count(), "needs at least 1 GPU per process"
-    pipeline_num_stages = 2
 
-    max_seqlen = 15
-    dataset = TestData(seq_count=300, min_seqlen=5, max_seqlen=max_seqlen)
+    pipeline_num_stages = 0
+    max_seqlen = 50
+    dataset = TestData(seq_count=1000, min_seqlen=3, max_seqlen=max_seqlen)
     model = AttentionHeadAndFeedForward(max_seqlen, dataset.embed_dim).to(device)
     loss_fn = lambda x, y: F.mse_loss(x.float(), y.float())  # noqa
 
@@ -113,7 +113,9 @@ if __name__ == "__main__":
     # DeepSpeed config includes the dynamic batching
     config = {
         "train_batch_size": 16,
-        "train_micro_batch_size_per_gpu": 2,  # Note: each microbatch per GPU will fill up to N tokens
+        # `train_micro_batch_size_per_gpu` tells how many sequence packs of `max_tokens` each will be collated together.
+        #  I.e. the number of tokens per micro batch (ie per gpu iteration) is `train_micro_batch_size_per_gpu`*`max_tokens`.
+        "train_micro_batch_size_per_gpu": 2,
         "optimizer": {
             "type": "Adam",
             "params": {
@@ -122,23 +124,34 @@ if __name__ == "__main__":
         },
         "data_efficiency": {
             "enabled": True,
+            # seed to be applied on all data effiency modules, including dynamic batching
             "seed": 42,
             "data_sampling": {
-                "enabled": True,
-                "num_epochs": 1,
-                "num_workers": 0,
-                "pin_memory": False,
+                "num_workers": 0, # dataloader num_workers argument
+                "pin_memory": False,  # dataloader pin_memory argument
                 "dynamic_batching": {
+                    # enables or disables dynamic batching
                     "enabled": True,
-                    # Files to load the sequence lengths from: {metrics_path}/seqlen/seqlen_sample_to_metric.bin and *.idx
+                    # how many tokens we need to fill a pack of sequences (that will be collated together as a sample)
+                    "max_tokens": 100,
+                    # Input and output write to read from or write the length of every sequence.
+                    # Sequence lengths will be loaded from: {metrics_path}/seqlen/seqlen_sample_to_metric.bin and *.idx
                     # If files dont exist, they'll be computed and saved on the first run, and loaded on subsequent runs.
                     "metrics_path": "./curriculum_output/",
+                    # As batch size increases/decreses, which method to use to scale LR accordingly?
+                    # Options: linear, sqrt (square root), or None to disable
                     "lr_scaling_method": "linear",
+                    # how to pick sentences to be packed into samples:
+                    # - dataloader: by same order as they come in with the dataloader
+                    # - seqlen: by sequence length (shortest to longest)
+                    # - random: random order using the seed in config['data_efficiency']['seed'
+                    "sentence_picking_order": "dataloader",  # "random" / "seqlen" / "dataloader"
+                    # minimum number of sequences required to reach `max_tokens`. If sentence pack is smaller, it's discarded.
                     "min_batch_size": 1,
+                    # maximum number of sequences required to reach `max_tokens`. If sentence pack is larger, it's discarded.
                     "max_batch_size": 10,
-                    "samples_order": "dataloader",  # "random" / "seqlen" / "dataloader"
-                    "max_tokens_per_batch": 40,
-                    "verbose": False,
+                    # enable the output of microbatching information about sentence packing
+                    "verbose": True,
                 },
             },
         },
@@ -146,6 +159,7 @@ if __name__ == "__main__":
 
     # initialize deepspeed engine without dataset/dataloader
     engine, _, _, _ = deepspeed.initialize(config=config, model=model)
+    dp_rank = engine.data_parallel_group.rank()
 
     # We will simulate a curriculum step, by filtering only a subset of sequences with a given seqlen
     dataset_seqlens = [len(s[0]) for s in dataset]
@@ -158,28 +172,28 @@ if __name__ == "__main__":
             engine=engine,
             dataloader_collate_fn=dataset.batch_collate_fn,
             sample_padding_fn=dataset.sample_padding_fn,
-            batch_seqlens_fn=dataset.batch_seqlens_fn,)
+            batch_seqlens_fn=dataset.batch_seqlens_fn)
 
-    gradient_acc_steps = engine.gradient_accumulation_steps()
-    n_batches_per_rank = len(dataloader) // (gradient_acc_steps * engine.train_micro_batch_size_per_gpu())
-
-    for epoch in range(10):
+    for it in range(20):
         data_iter = iter(dataloader)  # point data iterator to first batch
         lr_scheduler.step(0)  # point LR scheduler to first batch
-        for batch_id in range(n_batches_per_rank):
-            if pipeline_num_stages > 0:
-                engine.reset_activation_shape()  # reset, as each batch has a diff BxT dimension
-                loss = engine.train_batch(data_iter=data_iter)  # lr_kwargs={"epoch": batch_id}
-            else:
-                for i in range(gradient_acc_steps):
-                    seqs, labels = next(data_iter)
-                    seqs, labels = seqs.to(device), labels.to(device)
-                    outputs = engine(seqs)
-                    loss = loss_fn(outputs, labels)
-                    engine.backward(loss)
-                    engine.step()  # lr_kwargs={"epoch": batch_id})
+        if pipeline_num_stages > 0:
+            engine.reset_activation_shape()  # reset, as each batch has a diff BxT dimension
+            loss = engine.train_batch(data_iter=data_iter)  # lr_kwargs={"epoch": batch_id}
+        else:
+            for gas in range(engine.gradient_accumulation_steps()):
+                seqs, labels = next(data_iter)
+                n_tokens = (seqs[:, :, 0] != 0).sum().item()
+                seqs, labels = seqs.to(device), labels.to(device)
+                outputs = engine(seqs)
+                loss = loss_fn(outputs, labels)
+                engine.backward(loss)
+                engine.step()  # lr_kwargs={"epoch": batch_id})
+                print(
+                    f"- dp_rank {dp_rank}, grad acc step {gas}: shape {list(seqs.shape)}, n_tokens {n_tokens}, lr {lr_scheduler.get_lr()}"
+                )
 
-            if engine.data_parallel_group.rank() == 0:
-                print(f"epoch {epoch}, batch {batch_id}, loss {loss.item()}, LRs {lr_scheduler.get_lr()}")
+        if dp_rank == 0:
+            print(f"iteration {it}, loss {loss.item()}, lrs {lr_scheduler.get_lr()}")
     dist.barrier()
     dist.destroy_process_group()
