@@ -113,6 +113,7 @@ def batch_by_seqlens(
         microbatches += mbs
 
     # make sure we give the same number of (micro-)batches to each dataloader by trimming the dataset
+    assert len(microbatches) >= effective_batch_size, "not enough datapoints to create a single sample per dataloader"
     microbatches = microbatches[:len(microbatches) - len(microbatches) % effective_batch_size]
 
     #compute the effective batch size for each microbatch.
@@ -129,11 +130,11 @@ def batch_by_seqlens(
         batch_sizes.append(batch_size)
         batch_max_seqlens.append(batch_max_seqlen)
         microbatch_ids += batch_and_mb_ids
-        n_tokens_in_batch = sum([m[0] for m in mbs[0]])
-        assert n_tokens_in_batch <= max_tokens
         if verbose:
+            n_tokens_per_mb = [sum([m[0] for m in mb]) for mb in mbs]
+            assert all([n <= max_tokens for n in n_tokens_per_mb]), "size of microbatch exceeds max tokens"
             logger.info(
-                f"Batch id {batch_id}, samples {batch_size}, tokens {n_tokens_in_batch} tokens, samples: {dataset_filter_ids}"
+                f"Batch id {batch_id}, batch_size: {batch_size} sentences, n_tokens per microbatch {n_tokens_per_mb} tokens, sentence ids per microbatch: {dataset_filter_ids}"
             )
 
     # return the sample ids of each microbatch, and the batch sizes
@@ -291,18 +292,21 @@ class VariableBatchSizeLR(LRScheduler):
             group['lr'] = scale_lr(self.base_batch_size, batch_size, group['lr'], self.lr_scaling_method)
 
         if self.verbose:
-            logger.info(f"Batch id {self.last_epoch}, unscaled LRs {unscaled_lrs}, scaled LRs {self.get_lr()}")
+            logger.info(
+                f"Batch id {self.last_epoch}. Reference: batch_size {self.base_batch_size}, lr {unscaled_lrs}. Scaled: batch_size {batch_size}, lr {self.get_lr()}"
+            )
 
 
 def lr_scheduler_for_variable_batch_size(base_batch_size,
                                          batch_sizes,
                                          dataloader,
                                          lr_scheduler_or_optimizer,
-                                         lr_scaling_method='linear'):
+                                         lr_scaling_method='linear',
+                                         verbose=False):
     """
-    returns a class that provides an LR scheduler that scales learning rate at every
-    epoch taking into account the batch size of each epoch.
-    If learning rate is constant, ie no LR scheduler, then the LR will be taken from the
+    returns a class that provides an LR scheduler that scales the learning rate at every
+    iteration taking into account the batch size of that iteration.
+    If learning rate is constant, ie no LR scheduler, then the base LR will be taken from the
     constant LR values in the optimizer param groups. Otherwise from the scheduler's LR.
 
     Arguments:
@@ -332,7 +336,8 @@ def lr_scheduler_for_variable_batch_size(base_batch_size,
                                base_batch_size=base_batch_size,
                                batch_sizes=batch_sizes,
                                dataloader=dataloader,
-                               lr_scaling_method=lr_scaling_method)
+                               lr_scaling_method=lr_scaling_method,
+                               verbose=verbose)
 
 
 def get_dataloader_and_lr_scheduler_for_variable_batch_size_deepspeed(dataset,
@@ -472,6 +477,7 @@ def get_dataloader_and_lr_scheduler_for_variable_batch_size(
                                                         batch_sizes=batch_sizes,
                                                         lr_scaling_method=lr_scaling_method,
                                                         lr_scheduler_or_optimizer=lr_scheduler_or_optimizer,
-                                                        dataloader=dataloader)
+                                                        dataloader=dataloader,
+                                                        verbose=verbose)
 
     return dataloader, lr_scheduler, deepspeed_io_kwargs
