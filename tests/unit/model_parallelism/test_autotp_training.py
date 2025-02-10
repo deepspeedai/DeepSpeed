@@ -330,7 +330,7 @@ class TestParamsGather(DistributedTest):
         assert total_params == params1
 
         for name, param in tp_layer.named_parameters(recurse=False):
-            param.partition([param])
+            param._tp_partition([param])
 
         tp_params2 = sum(p.numel() for p in tp_layer.parameters())
 

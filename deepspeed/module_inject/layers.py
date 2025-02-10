@@ -124,7 +124,7 @@ class ColumnParallel(torch.autograd.Function):
         return None, grad_output
 
 
-class Replaced_Layer(nn.Module, ABC):
+class TensorParallel_Layer(nn.Module, ABC):
     """
     A base class for model layers with  tensor parallelism support.
     This class is designed to be extended by specific layers that require distributed
@@ -141,7 +141,7 @@ class Replaced_Layer(nn.Module, ABC):
 
     def __init__(self, mp_group: Optional[dist.ProcessGroup], **kwargs: Any):
         """
-        Initializes the Replaced_Layer with optional model parallelism group and layer name.
+        Initializes the TensorParallel_Layer with optional model parallelism group and layer name.
 
         Args:
             mp_group (Optional[dist.ProcessGroup]): The process group for model parallelism.
@@ -177,7 +177,7 @@ class Replaced_Layer(nn.Module, ABC):
         pass
 
     @abstractmethod
-    def partition(self, params_list: List[torch.Tensor]):
+    def _tp_partition(self, params_list: List[torch.Tensor]):
         """
         Partitions the parameters for tensor parallelism.
         It is necessary to ensure that this function only involves the logic of params partitioning.
@@ -205,7 +205,7 @@ class Replaced_Layer(nn.Module, ABC):
             setattr(weight, DS_TENSOR_MODEL_PARALLEL, True)
             setattr(weight, DS_IS_REPLACED_MODULE, True)
             weight.gather_params = self.gather_params
-            weight.partition = self.partition
+            weight._tp_partition = self._tp_partition
 
     def is_training_mode(self):
         global DEEPSPEED_AUTOTP_MODE
@@ -294,17 +294,17 @@ class GatherReplacedLayerParams:
         """
         #TODO : Check whether there are any missing attributes.
         if self.enabled:
-            self.params[0].partition(self.params)
+            self.params[0]._tp_partition(self.params)
 
 
-class LinearAllreduce(Replaced_Layer):
+class LinearAllreduce(TensorParallel_Layer):
 
     def __init__(self, module, mp_group, **kwargs):
         super(LinearAllreduce, self).__init__(mp_group, **kwargs)
         self.weight = module.weight
         self.bias = module.bias
 
-        self.partition([self.weight, self.bias])
+        self._tp_partition([self.weight, self.bias])
         self.support_training = True
         self.config_tp_params(self.weight)
         if self.bias is not None:
@@ -335,7 +335,7 @@ class LinearAllreduce(Replaced_Layer):
         return
 
     @torch.no_grad()
-    def partition(self, params_list):
+    def _tp_partition(self, params_list):
 
         if not self.is_training_mode():
             self.uneven_partition(params_list)
@@ -367,21 +367,22 @@ class LinearAllreduce(Replaced_Layer):
 
 
 #remove kwargs from partition.
-class LinearLayer(Replaced_Layer):
+class LinearLayer(TensorParallel_Layer):
 
-    def __init__(self, module, mp_group, skip_partition=False, **kwargs):
+    def __init__(self, module, mp_group=None, skip_partition=False, **kwargs):
         super(LinearLayer, self).__init__(mp_group, **kwargs)
         self.weight = module.weight
         self.bias = module.bias
         if not skip_partition:
-            self.partition([self.weight, self.bias])
+            self._tp_partition([self.weight, self.bias])
         self.support_training = True
         self.config_tp_params(self.weight)
         if self.bias is not None:
             self.config_tp_params(self.bias)
 
     def forward(self, input):
-        input = ColumnParallel.apply(self.mp_group, input)
+        if getattr(self, 'mp_group', None) is not None:
+            input = ColumnParallel.apply(self.mp_group, input)
         output = torch.matmul(input, self.weight.transpose(-1, -2))
         if self.bias is not None:
             output += self.bias
@@ -401,7 +402,7 @@ class LinearLayer(Replaced_Layer):
             params_list[idx].data = output_param.contiguous()
 
     @torch.no_grad()
-    def partition(self, params_list):
+    def _tp_partition(self, params_list):
 
         if not self.is_training_mode():
             self.uneven_partition(params_list)
@@ -466,7 +467,7 @@ class fused_LinearLayer(LinearLayer):
         super().__init__(module, mp_group, skip_partition, **kwargs)
 
     @torch.no_grad()
-    def partition(self, params_list):
+    def _tp_partition(self, params_list):
         for idx, param in enumerate(params_list):
             if param is None:
                 return
@@ -481,7 +482,7 @@ class fused_LinearLayer(LinearLayer):
 class conv_LinearLayer(LinearLayer):
 
     @torch.no_grad()
-    def partition(self, params_list):
+    def _tp_partition(self, params_list):
         weight = None
         bias = None
         if len(params_list) == 1:
@@ -506,7 +507,7 @@ class Yuan_LinearAllreduce(LinearAllreduce):
 
     #Yuan2
     @torch.no_grad()
-    def partition(self, params_list):
+    def _tp_partition(self, params_list):
         weight, bias = shard_value_with_share_qk(params_list[0].data, params_list[1], self.tp_index,
                                                  self.tp_world_size, False)
         params_list[0].data = weight
@@ -517,7 +518,7 @@ class Yuan_LinearAllreduce(LinearAllreduce):
 class Yuan_LinearLayer(LinearLayer):
     #Yuan2
     @torch.no_grad()
-    def partition(self, params_list):
+    def _tp_partition(self, params_list):
         weight, bias = shard_value_with_share_qk(params_list[0].data, params_list[1], self.tp_index,
                                                  self.tp_world_size, True)
         params_list[0].data = move(weight, get_accelerator().current_device_name()).detach()
@@ -528,7 +529,7 @@ class Yuan_LinearLayer(LinearLayer):
 class GateUpPack_LinearLayer(LinearLayer):
     # chatGLM2, chatGLM2
     @torch.no_grad()
-    def partition(self, params_list):
+    def _tp_partition(self, params_list):
         weight, bias = shard_chunk_mlp(params_list[0].data, params_list[1], self.tp_index, self.tp_world_size)
         params_list[0].data = move(weight, device=get_accelerator().current_device_name()).detach()
         if bias is not None:
@@ -538,7 +539,7 @@ class GateUpPack_LinearLayer(LinearLayer):
 class Conv_LinearALlreduce(LinearAllreduce):
 
     @torch.no_grad()
-    def partition(self, params_list):
+    def _tp_partition(self, params_list):
         for idx, param in enumerate(params_list):
             if param is None:
                 return
