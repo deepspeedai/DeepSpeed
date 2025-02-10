@@ -23,10 +23,10 @@ import pathlib
 def batch_by_seqlens(
     seqlens,
     max_tokens,
-    dataset_filter_ids=None,
+    sequence_ids_per_mb=None,
     min_batch_size=1,
     max_batch_size=None,
-    sentence_picking_order="dataloader",
+    sequence_picking_order="dataloader",
     effective_batch_size=1,
     required_microbatches_of_same_size=False,
     verbose=False,
@@ -35,8 +35,8 @@ def batch_by_seqlens(
     """
     Yield mini-batches of indices bucketed by size. Batches may contain sequences of different lengths.
     Similar to "Attention is all you need", Section 5.1:
-    "Sentence pairs were batched together by approximate sequence length. Each training batch
-    contained a set of sentence pairs containing approximately X source tokens and X target tokens"
+    "sequence pairs were batched together by approximate sequence length. Each training batch
+    contained a set of sequence pairs containing approximately X source tokens and X target tokens"
 
     Arguments:
     - `seqlens`: a list of difficulties (metric values) for every sample in the dataset;
@@ -45,12 +45,12 @@ def batch_by_seqlens(
        batch. Remaining indices to be ignored. Default is `None` for all indices.
     - `min_batch_size`: smallest allowed size of a batch;
     - `min_batch_size`: largest allowed size of a batch;
-    - `sentence_picking_order`: order in which to process samples: "dataloader" (default), "random" or "seqlen" (ascending)
+    - `sequence_picking_order`: order in which to process samples: "dataloader" (default), "random" or "seqlen" (ascending)
     - `dataloader_num_replicas`: number of dataloaders
     - `effective_batch_size`: effective batch size;
     - `required_microbatches_of_same_size`: enable if each mini-batch (in a total of `batch_size_multiple`
        micro-batches per batch), should have all micro-batches with the same batch size ie the same
-       number of sentences.
+       number of sequences.
 
     Returns:
     - `microbatch_ids`: list of tuple of batch id and samples ids per microbatch
@@ -58,16 +58,16 @@ def batch_by_seqlens(
     - `batch_max_seqlens`: the max seqlen across all microbatches in a batch
     """
 
-    assert sentence_picking_order in ["random", "seqlen", "dataloader"]
-    if dataset_filter_ids is None:
+    assert sequence_picking_order in ["random", "seqlen", "dataloader"]
+    if sequence_ids_per_mb is None:
         metrics = list(zip(seqlens, range(len(seqlens))))  # use all samples
     else:
-        metrics = list(zip(np.array(seqlens)[dataset_filter_ids], dataset_filter_ids))
+        metrics = list(zip(np.array(seqlens)[sequence_ids_per_mb], sequence_ids_per_mb))
 
-    if sentence_picking_order == 'random':
+    if sequence_picking_order == 'random':
         metric_random = random.Random(seed)
         metric_random.shuffle(metrics)
-    if sentence_picking_order == 'seqlen':
+    if sequence_picking_order == 'seqlen':
         metrics = sorted(metrics)
 
     # go through metrics, warn user, and filter samples that alone exceed the max batch threshold
@@ -122,20 +122,25 @@ def batch_by_seqlens(
         batch_id = rank // effective_batch_size
         mbs = microbatches[rank:rank + effective_batch_size]
         # compute the number of samples (not tokens) in this batch (not microbatch)
-        batch_size = sum([len(mb) for mb in mbs])  #
-        # compute the longest sentence (as number of tokens) in this batch (not microbatch)
-        batch_max_seqlen = max([m[0] for metrics in mbs for m in metrics])
-        dataset_filter_ids = [[m[1] for m in metrics] for metrics in mbs]
-        batch_and_mb_ids = zip([batch_id] * effective_batch_size, dataset_filter_ids)
-        batch_sizes.append(batch_size)
+        n_sequences = sum([len(mb) for mb in mbs])
+        # compute the longest sequence (as number of tokens) in this batch (not microbatch)
+        sequence_ids_per_mb = [[m[1] for m in metrics] for metrics in mbs]
+        sequence_lens_per_mb = [[m[0] for m in metrics] for metrics in mbs]
+        batch_max_seqlen = max([max(seqlens) for seqlens in sequence_lens_per_mb])
+        batch_and_mb_ids = zip([batch_id] * effective_batch_size, sequence_ids_per_mb)
+        batch_sizes.append(n_sequences)
         batch_max_seqlens.append(batch_max_seqlen)
         microbatch_ids += batch_and_mb_ids
         if verbose:
             n_tokens_per_mb = [sum([m[0] for m in mb]) for mb in mbs]
+            n_sequences_per_mb = [len(mb) for mb in mbs]
             assert all([n <= max_tokens for n in n_tokens_per_mb]), "size of microbatch exceeds max tokens"
             logger.info(
-                f"Batch id {batch_id}, batch_size: {batch_size} sentences, n_tokens per microbatch {n_tokens_per_mb} tokens, sentence ids per microbatch: {dataset_filter_ids}"
-            )
+                f"Batch id {batch_id} contains in total {len(mbs)} microbatches or {n_sequences} sequences. "\
+                f"n_sequences per microbatch {n_sequences_per_mb}. "\
+                f"n_tokens per microbatch {n_tokens_per_mb}. "\
+                f"sequence ids per microbatch: {sequence_ids_per_mb}. "\
+                f"sequence lengths per microbatch: {sequence_lens_per_mb}.")
 
     # return the sample ids of each microbatch, and the batch sizes
     assert len(batch_sizes) == len(microbatch_ids) // effective_batch_size
@@ -241,7 +246,7 @@ class VariableBatchSizeLR(LRScheduler):
         self.base_lrs = self.base_lr_scheduler.get_lr()
         self.last_epoch = last_epoch
         self.verbose = verbose
-        self.step(0)
+        self.step(0)  # scale LR for first sample in the dataloader
 
     def state_dict(self):
         return {
@@ -287,14 +292,16 @@ class VariableBatchSizeLR(LRScheduler):
 
         # scale the learning rate for next epoch for each parameter group.
         self.last_epoch = self.last_epoch + 1 if epoch is None else epoch
+        # batch sizes are precomputed and stored in batch_sizes se we loop around to get the next one
         batch_size = self.batch_sizes[self.last_epoch % len(self.batch_sizes)]
         for group in self.base_lr_scheduler.optimizer.param_groups:
             group['lr'] = scale_lr(self.base_batch_size, batch_size, group['lr'], self.lr_scaling_method)
 
         if self.verbose:
             logger.info(
-                f"Batch id {self.last_epoch}. Reference: batch_size {self.base_batch_size}, lr {unscaled_lrs}. Scaled: batch_size {batch_size}, lr {self.get_lr()}"
-            )
+                f"Batch id {self.last_epoch}. "\
+                f"Reference: batch_size {self.base_batch_size}, lr {unscaled_lrs}. "\
+                f"Scaled: batch_size {batch_size}, lr {self.get_lr()}")
 
 
 def lr_scheduler_for_variable_batch_size(base_batch_size,
@@ -388,7 +395,8 @@ def get_dataloader_and_lr_scheduler_for_variable_batch_size_deepspeed(dataset,
             ).run_map_reduce()
 
         dataset_seqlens = MMapIndexedDataset(sample_to_seqlen_path, skip_warmup=True)
-        assert len(dataset_seqlens) == len(dataset), "Seqlens size does not match the input dataset size"
+        assert len(dataset_seqlens) == len(dataset), \
+            "Seqlens size does not match the input dataset size. If you changed the dataset, delete the metrics_path folder."
 
         # TODO we are copying all seqlens into memory, we should adapt the code to use an iterative streamer
         # and use the other files output by DataAnalyzer that returns an ordered dictionary of seqlen to sample ids
@@ -401,7 +409,7 @@ def get_dataloader_and_lr_scheduler_for_variable_batch_size_deepspeed(dataset,
         effective_batch_size=engine.train_batch_size(),
         max_tokens=batching_config[DYNAMIC_BATCHING_MAX_TOKENS],
         lr_scaling_method=batching_config[DYNAMIC_BATCHING_LR_SCALING_METHOD],
-        sentence_picking_order=batching_config[DYNAMIC_BATCHING_SENTENCES_PICKING_ORDER],
+        sequence_picking_order=batching_config[DYNAMIC_BATCHING_SEQUENCE_PICKING_ORDER],
         min_batch_size=batching_config[DYNAMIC_BATCHING_MIN_BATCH_SIZE],
         max_batch_size=batching_config[DYNAMIC_BATCHING_MAX_BATCH_SIZE],
         dataloader_batch_size=engine.train_micro_batch_size_per_gpu(),
@@ -429,7 +437,7 @@ def get_dataloader_and_lr_scheduler_for_variable_batch_size(
     lr_scaling_method="linear",
     min_batch_size=1,
     max_batch_size=None,
-    sentence_picking_order="dataloader",
+    sequence_picking_order="dataloader",
     dataloader_batch_size=1,
     dataloader_rank=0,
     dataloader_num_replicas=1,
@@ -449,10 +457,10 @@ def get_dataloader_and_lr_scheduler_for_variable_batch_size(
     microbatch_ids, batch_sizes, batch_max_seqlens = batch_by_seqlens(
         seqlens=dataset_seqlens,
         max_tokens=max_tokens,
-        dataset_filter_ids=dataset_filter_ids,
+        sequence_ids_per_mb=dataset_filter_ids,
         min_batch_size=min_batch_size,
         max_batch_size=max_batch_size,
-        sentence_picking_order=sentence_picking_order,
+        sequence_picking_order=sequence_picking_order,
         effective_batch_size=effective_batch_size,
         required_microbatches_of_same_size=required_microbatches_of_same_size,
         verbose=verbose,

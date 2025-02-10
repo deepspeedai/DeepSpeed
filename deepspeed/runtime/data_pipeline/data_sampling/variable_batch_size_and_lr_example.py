@@ -5,6 +5,7 @@
 
 # support/questions/maintenance: github user @brunomaga or @microsoft/DeepSpeed
 
+import os
 import random
 import torch
 import torch.nn as nn
@@ -102,9 +103,9 @@ if __name__ == "__main__":
     device = f"cuda:{dist.get_local_rank()}"
     assert dist.get_local_rank() <= torch.cuda.device_count(), "needs at least 1 GPU per process"
 
-    # dummy dataset with 2000 sequences of random lengths between 3 and 10 tokens per sentence.
-    max_seqlen = 10
-    dataset = TestData(seq_count=2000, min_seqlen=3, max_seqlen=max_seqlen, seed=42)
+    # dummy dataset with 2000 sequences of random lengths between 3 and 10 tokens per sequence.
+    min_seqlen, max_seqlen = 3, 20
+    dataset = TestData(seq_count=1000, min_seqlen=min_seqlen, max_seqlen=max_seqlen, seed=42)
 
     model = AttentionHeadAndFeedForward(max_seqlen, dataset.embed_dim).to(device)
     loss_fn = lambda x, y: F.mse_loss(x.float(), y.float())  # noqa
@@ -115,6 +116,7 @@ if __name__ == "__main__":
         model = PipelineModule(layers=model.to_layers(), num_stages=pipeline_num_stages, loss_fn=loss_fn)
 
     # DeepSpeed config includes the dynamic batching
+    verbose = os.environ.get("GLOBAL_RANK", "0") == "0",  # avoid clutter by using only 1 rank to output verbose info
     config = {
         "train_batch_size": 16,
         # `train_micro_batch_size_per_gpu` tells how many sequence packs of `max_tokens` each will be collated together.
@@ -137,7 +139,7 @@ if __name__ == "__main__":
                     # enables or disables dynamic batching
                     "enabled": True,
                     # how many tokens we need to fill a pack of sequences (that will be collated together as a sample)
-                    "max_tokens": 50,
+                    "max_tokens": 20,
                     # Input and output write to read from or write the length of every sequence.
                     # Sequence lengths will be loaded from: {metrics_path}/seqlen/seqlen_sample_to_metric.bin and *.idx
                     # If files dont exist, they'll be computed and saved on the first run, and loaded on subsequent runs.
@@ -145,17 +147,17 @@ if __name__ == "__main__":
                     # As batch size increases/decreses, which method to use to scale LR accordingly?
                     # Options: linear, sqrt (square root), or None to disable
                     "lr_scaling_method": "linear",
-                    # how to pick sentences to be packed into samples:
+                    # how to pick sequences to be packed into samples:
                     # - dataloader: by same order as they come in with the dataloader
                     # - seqlen: by sequence length (shortest to longest)
                     # - random: random order using the seed in config['data_efficiency']['seed'
-                    "sentence_picking_order": "seqlen",  # "random" / "seqlen" / "dataloader"
-                    # minimum number of sequences required to reach `max_tokens`. If sentence pack is smaller, it's discarded.
+                    "sequence_picking_order": "seqlen",  # "random" / "seqlen" / "dataloader"
+                    # minimum number of sequences required to reach `max_tokens`. If sequence pack is smaller, it's discarded.
                     "min_batch_size": 1,
-                    # maximum number of sequences required to reach `max_tokens`. If sentence pack is larger, it's discarded.
+                    # maximum number of sequences required to reach `max_tokens`. If sequence pack is larger, it's discarded.
                     "max_batch_size": 10,
-                    # enable the output of microbatching information about sentence packing
-                    "verbose": True,
+                    # enable the output of microbatching information about sequence packing
+                    "verbose": verbose,
                 },
             },
         },
@@ -182,9 +184,11 @@ if __name__ == "__main__":
     n_iterations = len(dataloader) // engine.gradient_accumulation_steps()
     for epoch in range(3):
         data_iter = iter(dataloader)  # point data iterator to beginning of dataset
-        # lr_scheduler.step(0)  # optional: reset dynamic LR scheduler to point to the first batch in dataset
+        # optional: tell dynamic LR scheduler scheduler (VariableBatchLR) to compute lr for batch 0
+        lr_scheduler.step(0)
         for it in range(n_iterations):
-            lr_kwargs = {}  # optional: epoch argument to pass to engine.lr_scheduler.step() e.g. {"epoch": it}
+            # optional: pass to dynamic LR scheduler to compute LR for batch `it` (happens after engine.backward)
+            lr_kwargs = {"epoch": it}
             if pipeline_num_stages > 0:
                 engine.reset_activation_shape()  # reset, as each batch has a diff BxT dimension
                 loss = engine.train_batch(data_iter=data_iter, lr_kwargs=lr_kwargs)
