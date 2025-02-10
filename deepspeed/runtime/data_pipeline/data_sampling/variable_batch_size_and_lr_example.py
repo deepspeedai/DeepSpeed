@@ -26,7 +26,8 @@ if __name__ == "__main__":
             self.embed_dim = embed_dim
             self.seqs = []
             for _ in range(seq_count):
-                self.seqs.append(torch.ones(data_random.randrange(min_seqlen, max_seqlen), embed_dim))
+                seqlen = data_random.randrange(min_seqlen, max_seqlen)
+                self.seqs.append(torch.ones(seqlen, embed_dim))
 
         __len__ = lambda self: len(self.seqs)  # noqa
         __getitem__ = lambda self, idx: (self.seqs[idx], len(self.seqs[idx]))  # noqa
@@ -101,12 +102,15 @@ if __name__ == "__main__":
     device = f"cuda:{dist.get_local_rank()}"
     assert dist.get_local_rank() <= torch.cuda.device_count(), "needs at least 1 GPU per process"
 
-    pipeline_num_stages = 0
-    max_seqlen = 50
-    dataset = TestData(seq_count=1000, min_seqlen=3, max_seqlen=max_seqlen)
+    # dummy dataset with 2000 sequences of random lengths between 3 and 10 tokens per sentence.
+    max_seqlen = 10
+    dataset = TestData(seq_count=2000, min_seqlen=3, max_seqlen=max_seqlen, seed=42)
+
     model = AttentionHeadAndFeedForward(max_seqlen, dataset.embed_dim).to(device)
     loss_fn = lambda x, y: F.mse_loss(x.float(), y.float())  # noqa
 
+    # number of pipeline stages. 0 or 1 to disable pipelining, >1 to enable
+    pipeline_num_stages = 0
     if pipeline_num_stages > 1:
         model = PipelineModule(layers=model.to_layers(), num_stages=pipeline_num_stages, loss_fn=loss_fn)
 
@@ -133,7 +137,7 @@ if __name__ == "__main__":
                     # enables or disables dynamic batching
                     "enabled": True,
                     # how many tokens we need to fill a pack of sequences (that will be collated together as a sample)
-                    "max_tokens": 100,
+                    "max_tokens": 50,
                     # Input and output write to read from or write the length of every sequence.
                     # Sequence lengths will be loaded from: {metrics_path}/seqlen/seqlen_sample_to_metric.bin and *.idx
                     # If files dont exist, they'll be computed and saved on the first run, and loaded on subsequent runs.
@@ -145,7 +149,7 @@ if __name__ == "__main__":
                     # - dataloader: by same order as they come in with the dataloader
                     # - seqlen: by sequence length (shortest to longest)
                     # - random: random order using the seed in config['data_efficiency']['seed'
-                    "sentence_picking_order": "dataloader",  # "random" / "seqlen" / "dataloader"
+                    "sentence_picking_order": "seqlen",  # "random" / "seqlen" / "dataloader"
                     # minimum number of sequences required to reach `max_tokens`. If sentence pack is smaller, it's discarded.
                     "min_batch_size": 1,
                     # maximum number of sequences required to reach `max_tokens`. If sentence pack is larger, it's discarded.
@@ -174,26 +178,31 @@ if __name__ == "__main__":
             sample_padding_fn=dataset.sample_padding_fn,
             batch_seqlens_fn=dataset.batch_seqlens_fn)
 
-    # train on 2 epochs with 20 iterations per epoch
-    for epoch in range(2):
-        lr_scheduler.step(0)  # point LR scheduler to first batch
-        for it in range(10):
-            data_iter = iter(dataloader)  # point data iterator to first batch
+    # train loop with 3 epochs
+    n_iterations = len(dataloader) // engine.gradient_accumulation_steps()
+    for epoch in range(3):
+        data_iter = iter(dataloader)  # point data iterator to beginning of dataset
+        # lr_scheduler.step(0)  # optional: reset dynamic LR scheduler to point to the first batch in dataset
+        for it in range(n_iterations):
+            lr_kwargs = {}  # optional: epoch argument to pass to engine.lr_scheduler.step() e.g. {"epoch": it}
             if pipeline_num_stages > 0:
                 engine.reset_activation_shape()  # reset, as each batch has a diff BxT dimension
-                loss = engine.train_batch(data_iter=data_iter)  # lr_kwargs={"epoch": batch_id}
+                loss = engine.train_batch(data_iter=data_iter, lr_kwargs=lr_kwargs)
             else:
                 for gas in range(engine.gradient_accumulation_steps()):
                     seqs, labels = next(data_iter)
-                    n_tokens = (seqs[:, :, 0] != 0).sum().item()
                     seqs, labels = seqs.to(device), labels.to(device)
                     outputs = engine(seqs)
                     loss = loss_fn(outputs, labels)
                     engine.backward(loss)
-                    engine.step()  # lr_kwargs={"epoch": it})
-                    print(
-                        f"- acc step {gas}, dp_rank {dp_rank}: shape {list(seqs.shape)}, n_tokens {n_tokens}, lr {lr_scheduler.get_lr()}"
-                    )
+                    engine.step(lr_kwargs=lr_kwargs)
+
+                    # optional: output some information about dynamic batching
+                    n_tokens = (seqs[:, :, 0] != 0).sum().item()
+                    lr = lr_scheduler.get_lr()[0]
+                    shape = list(seqs.shape)
+                    print(f"- {epoch}.{it}.{gas}, rank {dp_rank}: shape {shape}, n_tokens {n_tokens}, lr {lr}")
+                    dist.barrier()  # optional
 
             if dp_rank == 0:
                 print(f"epoch {epoch}, iteration {it}, loss {loss.item()}, lrs {lr_scheduler.get_lr()}")
