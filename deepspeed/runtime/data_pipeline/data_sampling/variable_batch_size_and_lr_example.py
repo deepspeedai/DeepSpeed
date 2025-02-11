@@ -13,6 +13,7 @@ import torch.nn.functional as F
 import deepspeed
 import deepspeed.comm as dist
 from deepspeed.pipe import PipelineModule
+from deepspeed.utils import logger
 
 from deepspeed.runtime.data_pipeline.data_sampling.variable_batch_size_and_lr import get_dataloader_and_lr_scheduler_for_variable_batch_size_deepspeed
 
@@ -30,8 +31,8 @@ if __name__ == "__main__":
                 seqlen = data_random.randrange(min_seqlen, max_seqlen)
                 self.seqs.append(torch.ones(seqlen, embed_dim))
 
-        __len__ = lambda self: len(self.seqs)  # noqa
-        __getitem__ = lambda self, idx: (self.seqs[idx], len(self.seqs[idx]))  # noqa
+        __len__ = lambda self: len(self.seqs)
+        __getitem__ = lambda self, idx: (self.seqs[idx], len(self.seqs[idx]))
 
         def batch_collate_fn(self, batch):
             """ collate sequences of different lengths into batch of size BxTxE, where T is max seqlen """
@@ -103,8 +104,8 @@ if __name__ == "__main__":
     device = f"cuda:{dist.get_local_rank()}"
     assert dist.get_local_rank() <= torch.cuda.device_count(), "needs at least 1 GPU per process"
 
-    # dummy dataset with 2000 sequences of random lengths between 3 and 10 tokens per sequence.
-    min_seqlen, max_seqlen = 3, 20
+    # dummy dataset with 2000 sequences of random lengths between 3 and 15 tokens per sequence.
+    min_seqlen, max_seqlen = 3, 15
     dataset = TestData(seq_count=1000, min_seqlen=min_seqlen, max_seqlen=max_seqlen, seed=42)
 
     model = AttentionHeadAndFeedForward(max_seqlen, dataset.embed_dim).to(device)
@@ -116,7 +117,6 @@ if __name__ == "__main__":
         model = PipelineModule(layers=model.to_layers(), num_stages=pipeline_num_stages, loss_fn=loss_fn)
 
     # DeepSpeed config includes the dynamic batching
-    verbose = os.environ.get("GLOBAL_RANK", "0") == "0",  # avoid clutter by using only 1 rank to output verbose info
     config = {
         "train_batch_size": 16,
         # `train_micro_batch_size_per_gpu` tells how many sequence packs of `max_tokens` each will be collated together.
@@ -157,7 +157,7 @@ if __name__ == "__main__":
                     # maximum number of sequences required to reach `max_tokens`. If sequence pack is larger, it's discarded.
                     "max_batch_size": 10,
                     # enable the output of microbatching information about sequence packing
-                    "verbose": verbose,
+                    "verbose": os.environ.get("RANK", "0") == "0",  # use only 1 rank to output verbose info
                 },
             },
         },
@@ -167,31 +167,30 @@ if __name__ == "__main__":
     engine, _, _, _ = deepspeed.initialize(config=config, model=model)
     dp_rank = engine.data_parallel_group.rank()
 
-    # We will simulate a curriculum step, by filtering only a subset of sequences with a given seqlen
+    # optional: simulate a curriculum step, by filtering only a subset of sequences with a given seqlen
     dataset_seqlens = [len(s[0]) for s in dataset]
-    dataset_filter_ids = [i for i, seqlen in enumerate(dataset_seqlens) if seqlen > 7 and seqlen < 14]
-    dataloader, lr_scheduler, _ = \
-        get_dataloader_and_lr_scheduler_for_variable_batch_size_deepspeed(
-            dataset=dataset,
-            # dataset_seqlens=dataset_seqlens, # if None: use DataAnalyzer to output seqlens and then and load them
-            dataset_filter_ids=dataset_filter_ids, # if None: include the whole dataset
-            engine=engine,
-            dataloader_collate_fn=dataset.batch_collate_fn,
-            sample_padding_fn=dataset.sample_padding_fn,
-            batch_seqlens_fn=dataset.batch_seqlens_fn)
+    dataset_filter_ids = [i for (i, seqlen) in enumerate(dataset_seqlens) if seqlen >= 5 and seqlen <= 10]
+    dataloader, lr_scheduler, _ = get_dataloader_and_lr_scheduler_for_variable_batch_size_deepspeed(
+        dataset=dataset,
+        # dataset_seqlens=dataset_seqlens, # if None: use DataAnalyzer to output seqlens and then and load them
+        dataset_filter_ids=dataset_filter_ids,  # if None: include the whole dataset
+        engine=engine,
+        dataloader_collate_fn=dataset.batch_collate_fn,
+        sample_padding_fn=dataset.sample_padding_fn,
+        batch_seqlens_fn=dataset.batch_seqlens_fn)
+    engine.lr_scheduler = lr_scheduler
+    # engine.training_dataloader = dataloader # optional
 
     # train loop with 3 epochs
-    n_iterations = len(dataloader) // engine.gradient_accumulation_steps()
-    for epoch in range(3):
+    n_batches = len(dataloader) // engine.gradient_accumulation_steps()
+    for epoch in range(2):
         data_iter = iter(dataloader)  # point data iterator to beginning of dataset
-        # optional: tell dynamic LR scheduler scheduler (VariableBatchLR) to compute lr for batch 0
-        lr_scheduler.step(0)
-        for it in range(n_iterations):
+        lr_scheduler.step(0)  # reset dynamic LR scheduler (VariableBatchLR) to point to beginning of data iter.
+        for batch_id in range(n_batches):
             # optional: pass to dynamic LR scheduler to compute LR for batch `it` (happens after engine.backward)
-            lr_kwargs = {"epoch": it}
             if pipeline_num_stages > 0:
                 engine.reset_activation_shape()  # reset, as each batch has a diff BxT dimension
-                loss = engine.train_batch(data_iter=data_iter, lr_kwargs=lr_kwargs)
+                loss = engine.train_batch(data_iter=data_iter)
             else:
                 for gas in range(engine.gradient_accumulation_steps()):
                     seqs, labels = next(data_iter)
@@ -199,16 +198,17 @@ if __name__ == "__main__":
                     outputs = engine(seqs)
                     loss = loss_fn(outputs, labels)
                     engine.backward(loss)
-                    engine.step(lr_kwargs=lr_kwargs)
+                    lrs = lr_scheduler.get_lr()
 
                     # optional: output some information about dynamic batching
                     n_tokens = (seqs[:, :, 0] != 0).sum().item()
-                    lr = lr_scheduler.get_lr()[0]
-                    shape = list(seqs.shape)
-                    print(f"- {epoch}.{it}.{gas}, rank {dp_rank}: shape {shape}, n_tokens {n_tokens}, lr {lr}")
-                    dist.barrier()  # optional
+                    logger.info(f"{epoch}.{batch_id}.{gas}, rank {dp_rank}: {seqs.shape[0]} sentences "\
+                                f"padded to length {seqs.shape[1]}, n_tokens {n_tokens}")
+                    dist.barrier()
+
+                    engine.step()  # LR will now now be updated for next batch
 
             if dp_rank == 0:
-                print(f"epoch {epoch}, iteration {it}, loss {loss.item()}, lrs {lr_scheduler.get_lr()}")
+                logger.info(f"epoch {epoch}, batch {batch_id}, loss {loss.item()}")
     dist.barrier()
     dist.destroy_process_group()
