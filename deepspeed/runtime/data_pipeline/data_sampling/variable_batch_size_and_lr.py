@@ -196,8 +196,10 @@ def dataloader_for_variable_batch_size(
             if required_microbatches_of_same_seqlen:
                 assert sample_padding_fn is not None, \
                     "padding dataloader_padding_fn must be provided if required_microbatches_of_same_seqlen is True"
-                pad_len = batch_max_seqlens[batch_id]
-                batch_data = [sample_padding_fn(sample, pad_len) for sample in batch_data]
+                max_seqlen = batch_max_seqlens[batch_id]
+                assert all([len(sample) <= max_seqlen for sample in batch_data]), \
+                    "some samples are longer than the computed max seqlen for the batch those samples belong to"
+                batch_data = [sample_padding_fn(sample, max_seqlen) for sample in batch_data]
             batch += batch_data
         return dataloader_collate_fn(batch) if dataloader_collate_fn else batch
 
@@ -282,7 +284,7 @@ class VariableBatchSizeLR(LRScheduler):
         # epoch 0: optimizer.step(); lr_scheduler.step(1) --> set LR for epoch 1
         # epoch 1: optimizer.step(); lr_scheduler.step(2) --> set LR for epoch 2
 
-        # reset unscaled LRs (to the original scheduler's one) for the current epoch
+        # reset unscaled LRs (to the original scheduler's one) to be able to step the base LR scheduler
         # Note: epoch==0: reset LR scheduler; epoch==None: scale LR for next epoch;
         unscaled_lrs = self.base_lrs if epoch == 0 else self.get_last_lr()
         for group, lr in zip(self.base_lr_scheduler.optimizer.param_groups, unscaled_lrs):
@@ -290,7 +292,7 @@ class VariableBatchSizeLR(LRScheduler):
 
         self.base_lr_scheduler.step(epoch)  # set unscaled lr, _step_count, last_epoch, _last_lr for new epoch
 
-        # scale the learning rate for next epoch for each parameter group.
+        # scale the learning rate for the the next iteration for each parameter group.
         self.last_epoch = self.last_epoch + 1 if epoch is None else epoch
         # batch sizes are precomputed and stored in batch_sizes se we loop around to get the next one
         batch_size = self.batch_sizes[self.last_epoch % len(self.batch_sizes)]
@@ -299,9 +301,9 @@ class VariableBatchSizeLR(LRScheduler):
 
         if self.verbose:
             logger.info(
-                f"Batch id {self.last_epoch}. "\
-                f"Reference: batch_size {self.base_batch_size}, lr {unscaled_lrs}. "\
-                f"Scaled: batch_size {batch_size}, lr {self.get_lr()}")
+                f"Next batch id {self.last_epoch}. "\
+                f"Reference batch_size {self.base_batch_size} and lr {unscaled_lrs}. "\
+                f"Scaled batch_size {batch_size} and lr {self.get_lr()}.")
 
 
 def lr_scheduler_for_variable_batch_size(base_batch_size,
