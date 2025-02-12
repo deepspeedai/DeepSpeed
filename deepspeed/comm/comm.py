@@ -704,9 +704,13 @@ def mpi_discovery(distributed_port=TORCH_DISTRIBUTED_DEFAULT_PORT, verbose=True)
     master_addr = None
     if rank == 0:
         import shlex
-        hostname_cmd = shlex.split("hostname -I")
-        result = subprocess.check_output(hostname_cmd)
-        master_addr = result.decode('utf-8').split()[0]
+        try:
+            hostname_cmd = shlex.split("hostname -I")
+            result = subprocess.check_output(hostname_cmd)
+            master_addr = result.decode('utf-8').split()[0]
+        except subprocess.CalledProcessError:  # hostname -I not available (e.g. on macOS)
+            import socket
+            master_addr = socket.gethostbyname(socket.gethostname())
     master_addr = comm.bcast(master_addr, root=0)
 
     # Determine local rank by assuming hostnames are unique
