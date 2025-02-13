@@ -94,7 +94,10 @@ class FPQuantizerBuilder(CUDAOpBuilder):
         ]
 
     def extra_ldflags(self):
-        return ['-lcurand']
+        if not self.is_rocm_pytorch():
+            return ['-lcurand']
+        else:
+            return []
 
     def include_paths(self):
         return ['csrc/fp_quantizer/includes', 'csrc/includes']
