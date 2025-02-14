@@ -65,8 +65,11 @@ class AsyncIOBuilder(TorchCPUOpBuilder):
 
         import torch.utils.cpp_extension
         CUDA_HOME = torch.utils.cpp_extension.CUDA_HOME
-        CUDA_LIB64 = os.path.join(CUDA_HOME, "lib64")
-        ldflags = [f'-L{CUDA_HOME}', f'-L{CUDA_LIB64}', '-laio', '-lcuda', '-lcudart']
+        if CUDA_HOME is None:
+            ldflags = ['-laio']  # the ROCM case
+        else:
+            CUDA_LIB64 = os.path.join(CUDA_HOME, "lib64")
+            ldflags = [f'-L{CUDA_HOME}', f'-L{CUDA_LIB64}', '-laio', '-lcuda', '-lcudart']
         return ldflags
 
     def check_for_libaio_pkg(self):
