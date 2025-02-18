@@ -61,13 +61,20 @@ def installed_cuda_version(name=""):
 
 def get_default_compute_capabilities():
     compute_caps = DEFAULT_COMPUTE_CAPABILITIES
+    # Update compute capability according to: https://en.wikipedia.org/wiki/CUDA#GPUs_supported
     import torch.utils.cpp_extension
-    if torch.utils.cpp_extension.CUDA_HOME is not None and installed_cuda_version()[0] >= 11:
-        if installed_cuda_version()[0] == 11 and installed_cuda_version()[1] == 0:
-            # Special treatment of CUDA 11.0 because compute_86 is not supported.
-            compute_caps += ";8.0"
-        else:
+    if torch.utils.cpp_extension.CUDA_HOME is not None:
+        if installed_cuda_version()[0] == 11:
+            if installed_cuda_version()[1] >= 0:
+                compute_caps += ";8.0"
+            if installed_cuda_version()[1] >= 1:
+                compute_caps += ";8.6"
+            if installed_cuda_version()[1] >= 8:
+                compute_caps += ";9.0"
+        elif installed_cuda_version()[0] == 12:
             compute_caps += ";8.0;8.6;9.0"
+            if installed_cuda_version()[1] >= 8:
+                compute_caps += ";10.0;12.0"
     return compute_caps
 
 
