@@ -983,6 +983,9 @@ class DeepSpeedEngine(Module):
     def zeropp_loco_param(self):
         return self._config.zero_config.zeropp_loco_param
 
+    def zero_log_trace_cache_warnings(self):
+        return self._config.zero_config.log_trace_cache_warnings
+
     def dump_state(self):
         return self._config.dump_state
 
@@ -1692,6 +1695,7 @@ class DeepSpeedEngine(Module):
                     zero_quantized_weights=self.zero_quantized_weights(),
                     zero_quantized_nontrainable_weights=self.zero_quantized_nontrainable_weights(),
                     zero_module_granularity_threshold=self.zero_module_granularity_threshold(),
+                    log_trace_cache_warnings=self.zero_log_trace_cache_warnings(),
                 )
             else:
                 log_dist(
@@ -1740,6 +1744,7 @@ class DeepSpeedEngine(Module):
                     zero_quantized_nontrainable_weights=self.zero_quantized_nontrainable_weights(),
                     zero_module_granularity_threshold=self.zero_module_granularity_threshold(),
                     zeropp_loco_param=self.zeropp_loco_param(),
+                    log_trace_cache_warnings=self.zero_log_trace_cache_warnings(),
                 )
 
         else:

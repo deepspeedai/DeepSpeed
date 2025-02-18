@@ -103,6 +103,7 @@ class DeepSpeedZeRoOffload(object):
         zero_quantized_weights=False,
         zero_quantized_nontrainable_weights=False,
         zero_module_granularity_threshold=0,
+        log_trace_cache_warnings=False,
     ):
 
         see_memory_usage("DeepSpeedZeRoOffload initialize [begin]", force=True)
@@ -118,6 +119,7 @@ class DeepSpeedZeRoOffload(object):
         self.zero_param_parallel_group = zero_param_parallel_group
         self.zero_quantized_weights = zero_quantized_weights
         self.zero_quantized_nontrainable_weights = zero_quantized_nontrainable_weights
+        self.log_trace_cache_warnings = log_trace_cache_warnings
 
         if offload_param_config is not None and offload_param_config.device != OffloadDeviceEnum.none:
             self.offload_device = offload_param_config.device
@@ -165,7 +167,9 @@ class DeepSpeedZeRoOffload(object):
             timers=self.timers,
             zero_quantized_weights=self.zero_quantized_weights,
             zero_quantized_nontrainable_weights=self.zero_quantized_nontrainable_weights,
-            fast_sharding_for_leaf_module=self.fast_sharding_for_leaf_module)
+            fast_sharding_for_leaf_module=self.fast_sharding_for_leaf_module,
+            log_trace_cache_warnings=self.log_trace_cache_warnings,
+        )
 
         self.forward_hooks = []
         self.backward_hooks = []
