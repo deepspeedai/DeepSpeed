@@ -91,6 +91,7 @@ from deepspeed.runtime.data_pipeline.data_routing.basic_layer import RandomLayer
 
 from deepspeed.runtime.checkpoint_engine.torch_checkpoint_engine import TorchCheckpointEngine
 from deepspeed.utils.zero_to_fp32 import get_fp32_state_dict_from_zero_checkpoint
+from deepspeed.runtime.torch_autocast import init_autocast_params
 
 from .pipe.module import PipelineModule
 from .utils import get_ma_status
@@ -312,6 +313,9 @@ class DeepSpeedEngine(Module):
         # Convert model parameters from generator to list
         if not isinstance(model_parameters, list):
             model_parameters = list(model_parameters)
+
+        if self.torch_autocast_enabled():
+            init_autocast_params(self, self.torch_autocast_dtype())
 
         if has_optimizer:
             self._configure_optimizer(optimizer, model_parameters)
@@ -919,6 +923,12 @@ class DeepSpeedEngine(Module):
 
     def amp_params(self):
         return self._config.amp_params
+
+    def torch_autocast_enabled(self):
+        return self._config.torch_autocast_enabled
+
+    def torch_autocast_dtype(self):
+        return self._config.torch_autocast_dtype
 
     def fp16_auto_cast(self):
         return self._config.fp16_auto_cast
@@ -1984,7 +1994,10 @@ class DeepSpeedEngine(Module):
         if self.fp16_auto_cast():
             inputs = self._cast_inputs_half(inputs)
 
-        loss = self.module(*inputs, **kwargs)
+        with torch.autocast(device_type=get_accelerator().device_name(),
+                            dtype=self.torch_autocast_dtype(),
+                            enabled=self.torch_autocast_enabled()):
+            loss = self.module(*inputs, **kwargs)
 
         if self.zero_optimization_partition_weights():
             # Disable automated discovery of external parameters

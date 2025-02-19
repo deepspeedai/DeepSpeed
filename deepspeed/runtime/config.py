@@ -157,6 +157,24 @@ def get_amp_params(param_dict):
         return False
 
 
+def get_torch_autocast_enabled(param_dict):
+    if TORCH_AUTOCAST in param_dict.keys():
+        return get_scalar_param(param_dict[TORCH_AUTOCAST], TORCH_AUTOCAST_ENABLED, TORCH_AUTOCAST_ENABLED_DEFAULT)
+    else:
+        return False
+
+
+def get_torch_autocast_dtype(param_dict):
+    if TORCH_AUTOCAST in param_dict:
+        if TORCH_AUTOCAST_DTYPE in param_dict[TORCH_AUTOCAST]:
+            try:
+                return DtypeEnum(param_dict[TORCH_AUTOCAST][TORCH_AUTOCAST_DTYPE]).value
+            except KeyError:
+                raise ValueError(
+                    f"Invalid dtype for torch autocast: {param_dict[TORCH_AUTOCAST][TORCH_AUTOCAST_DTYPE]}")
+    return None
+
+
 def get_fp16_enabled(param_dict):
     if FP16 in param_dict.keys():
         return get_scalar_param(param_dict[FP16], FP16_ENABLED, FP16_ENABLED_DEFAULT)
@@ -836,6 +854,8 @@ class DeepSpeedConfig(object):
         self.fp16_master_weights_and_gradients = get_fp16_master_weights_and_grads_enabled(param_dict)
         self.amp_enabled = get_amp_enabled(param_dict)
         self.amp_params = get_amp_params(param_dict)
+        self.torch_autocast_enabled = get_torch_autocast_enabled(param_dict)
+        self.torch_autocast_dtype = get_torch_autocast_dtype(param_dict)
         self.loss_scale = get_loss_scale(param_dict)
         self.initial_dynamic_scale = get_initial_dynamic_scale(param_dict)
         self.dynamic_loss_scale_args = get_dynamic_loss_scale_args(param_dict)

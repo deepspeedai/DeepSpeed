@@ -11,6 +11,9 @@ import socket
 import subprocess
 from abc import ABC, abstractmethod
 from pathlib import Path
+import random
+import numpy as np
+from typing import Callable, Any
 
 import torch
 import torch.multiprocessing as mp
@@ -505,3 +508,54 @@ def preferred_dtype():
         return torch.bfloat16
     else:
         return torch.float32
+
+
+class EnableDeterminism:
+
+    def __init__(self, seed: int):
+        local_rank = int(os.getenv("LOCAL_RANK", "0"))
+
+        self.seed = seed + local_rank
+        self.saved_random_state = None
+        self.saved_np_random_state = None
+        self.saved_cuda_launch_blocking = None
+        self.saved_cublas_workspace_config = None
+        self.saved_deterministic_algorithms = None
+
+    def __enter__(self):
+        self.saved_random_state = random.getstate()
+        self.saved_np_random_state = np.random.get_state()
+        self.saved_acc_rng_state = get_accelerator().get_rng_state()
+        self.saved_cuda_launch_blocking = os.environ.get("CUDA_LAUNCH_BLOCKING", "")
+        self.saved_cublas_workspace_config = os.environ.get("CUBLAS_WORKSPACE_CONFIG", "")
+        self.saved_deterministic_algorithms = torch.are_deterministic_algorithms_enabled()
+
+        random.seed(self.seed)
+        np.random.seed(self.seed)
+        get_accelerator().manual_seed(self.seed)
+        get_accelerator().manual_seed_all(self.seed)
+
+        os.environ["CUDA_LAUNCH_BLOCKING"] = "1"
+        os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":16:8"
+        torch.use_deterministic_algorithms(True)
+
+    def __exit__(self, type, value, traceback):
+        random.setstate(self.saved_random_state)
+        np.random.set_state(self.saved_np_random_state)
+        get_accelerator().set_rng_state(self.saved_acc_rng_state)
+        os.environ["CUDA_LAUNCH_BLOCKING"] = self.saved_cuda_launch_blocking
+        os.environ["CUBLAS_WORKSPACE_CONFIG"] = self.saved_cublas_workspace_config
+        torch.use_deterministic_algorithms(self.saved_deterministic_algorithms)
+
+
+def enable_determinism(seed: int):
+
+    def decorator(func: Callable) -> Callable:
+
+        def wrapper(*args: Any, **kwargs: Any):
+            with EnableDeterminism(seed):
+                return func(*args, **kwargs)
+
+        return wrapper
+
+    return decorator
