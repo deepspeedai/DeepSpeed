@@ -98,7 +98,7 @@ class AsyncPartitionedParameterSwapper(object):
 
         # Read/Write alignment for each thread during Intra-request parallelism
         self.min_aio_bytes = max(MIN_AIO_BYTES, self.aio_config[AIO_BLOCK_SIZE])
-        self.aligned_bytes = AIO_ALIGNED_BYTES * self.aio_config[AIO_THREAD_COUNT]
+        self.aligned_bytes = AIO_ALIGNED_BYTES * self.aio_config[AIO_INTRA_OP_PARALLELISM]
         self.numel_alignment = self.aligned_bytes // self.swap_element_size
 
         self.elements_per_buffer = self.swap_config.buffer_size
@@ -108,13 +108,17 @@ class AsyncPartitionedParameterSwapper(object):
         self.available_buffer_ids = [i for i in range(self.param_buffer_count)]
         self.reserved_buffer_ids = []
 
-        self.aio_read_handle = self.aio_handle(self.aio_config[AIO_BLOCK_SIZE], self.aio_config[AIO_QUEUE_DEPTH],
-                                               self.aio_config[AIO_SINGLE_SUBMIT], self.aio_config[AIO_OVERLAP_EVENTS],
-                                               self.aio_config[AIO_THREAD_COUNT])
+        self.aio_read_handle = self.aio_handle(block_size=self.aio_config[AIO_BLOCK_SIZE],
+                                               queue_depth=self.aio_config[AIO_QUEUE_DEPTH],
+                                               single_submit=self.aio_config[AIO_SINGLE_SUBMIT],
+                                               overlap_events=self.aio_config[AIO_OVERLAP_EVENTS],
+                                               intra_op_parallelism=self.aio_config[AIO_INTRA_OP_PARALLELISM])
 
-        self.aio_write_handle = self.aio_handle(self.aio_config[AIO_BLOCK_SIZE], self.aio_config[AIO_QUEUE_DEPTH],
-                                                self.aio_config[AIO_SINGLE_SUBMIT],
-                                                self.aio_config[AIO_OVERLAP_EVENTS], self.aio_config[AIO_THREAD_COUNT])
+        self.aio_write_handle = self.aio_handle(block_size=self.aio_config[AIO_BLOCK_SIZE],
+                                                queue_depth=self.aio_config[AIO_QUEUE_DEPTH],
+                                                single_submit=self.aio_config[AIO_SINGLE_SUBMIT],
+                                                overlap_events=self.aio_config[AIO_OVERLAP_EVENTS],
+                                                intra_op_parallelism=self.aio_config[AIO_INTRA_OP_PARALLELISM])
 
         if self.use_gds:
             self.buffers = torch.empty(int(self.aligned_elements_per_buffer * self.param_buffer_count),

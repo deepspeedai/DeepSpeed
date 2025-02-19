@@ -130,7 +130,7 @@ class OptimizerSwapper(object):
 
         # Read/Write alignment for each thread during Intra-request parallelism
         self.min_aio_bytes = max(MIN_AIO_BYTES, aio_config[AIO_BLOCK_SIZE])
-        self.aligned_bytes = AIO_ALIGNED_BYTES * aio_config[AIO_THREAD_COUNT]
+        self.aligned_bytes = AIO_ALIGNED_BYTES * aio_config[AIO_INTRA_OP_PARALLELISM]
         self.numel_alignment = self.aligned_bytes // self.swap_element_size
 
         # Swap buffer management
