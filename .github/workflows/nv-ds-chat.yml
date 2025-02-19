@@ -43,7 +43,7 @@ jobs:
 
       - name: Install deepspeed
         run: |
-          pip install transformers
+          pip install transformers==4.48.3
           pip install .[dev]
           ds_report
 
