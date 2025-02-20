@@ -316,10 +316,14 @@ local machine to discover the number of slots available. The `--include` and
 `--exclude` arguments work as normal, but the user should specify 'localhost'
 as the hostname.
 
-Also note that `CUDA_VISIBLE_DEVICES` can't be used with DeepSpeed to control
-which devices should be used. For example, to use only gpu1 of the current
-node, do:
+Also note that `CUDA_VISIBLE_DEVICES` can be used with `deepspeed` to control
+which devices should be used on a single node. So either of these would work
+to launch just on devices 0 and 1 of the current node:
 
 ```bash
-deepspeed --include localhost:1 ...
+deepspeed --include localhost:0,1 ...
+```
+
+```bash
+CUDA_VISIBLE_DEVICES=0,1 deepspeed ...
 ```
