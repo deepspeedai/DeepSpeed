@@ -732,10 +732,7 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
         # move parameters to flattened buffer
         if not self.offload_param:  # partitioned params remain in GPU during training
             # move parameter partitions into a single contiguous flat buffer
-            parameter_partitions: List[Tensor] = []
-            for sub_group in self.fp16_groups:
-                for param in sub_group:
-                    parameter_partitions.append(param.ds_tensor)
+            parameter_partitions = self._get_parameter_partitions()
 
             # We need to keep the reference to this buffer to make sure you can free it in `offload_states`
             self.lp_param_buffer = __class__.defragment(parameter_partitions)
@@ -785,6 +782,9 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
 
             assert len(largest_partition_numel) > 0, f'Unexpected that largest partition is empty'
             self.fp16_groups[0][0].nvme_swapper.reserve_partitioned_swap_space(largest_partition_numel)
+
+    def _get_parameter_partitions(self) -> List[Tensor]:
+        return [param.ds_tensor for sub_group in self.fp16_groups for param in sub_group]
 
     def _swap_in_sub_group_to_flat_buffer(self, flat_buffer, sub_group_id):
         offset = 0
@@ -2954,8 +2954,8 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
             self.lp_param_buffer.data = cpu_buffer.data.to(device, non_blocking=non_blocking)
             self._set_fp16_partitioned_groups_flat()
 
-            for tensor, offset, tensor_numel in get_mapping_to_flat_buffer(
-                [p.ds_tensor for p in self.module.parameters()]):
+            parameter_partitions = self._get_parameter_partitions()
+            for tensor, offset, tensor_numel in get_mapping_to_flat_buffer(parameter_partitions):
                 tensor.data = self.lp_param_buffer.narrow(0, offset, tensor_numel)
             self.offloaded_states.remove(OffloadStateTypeEnum.lp_params)
 
