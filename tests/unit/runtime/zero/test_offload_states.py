@@ -33,11 +33,11 @@ def validate_device(model, device: torch.device, include) -> None:
                 assert compare_device(state), f"State {state} is not on device {device}"
 
 
-def run_model(model, config_dict, hidden_dim, dtype, include, pin_memory, non_blocking):
+def run_model(model, param_groups, config_dict, hidden_dim, dtype, include, pin_memory, non_blocking):
     # Currently we only support OffloadDeviceEnum.cpu
     offload_device = OffloadDeviceEnum.cpu
 
-    model, _, _, _ = deepspeed.initialize(model=model, model_parameters=model.parameters(), config=config_dict)
+    model, _, _, _ = deepspeed.initialize(model=model, model_parameters=param_groups, config=config_dict)
     data_loader = random_dataloader(model=model,
                                     total_samples=10,
                                     hidden_dim=hidden_dim,
@@ -124,5 +124,12 @@ class TestOffloadStates(DistributedTest):
         with deepspeed.zero.Init(config_dict_or_path=config_dict):
             model = SimpleModel(hidden_dim, nlayers=4)
 
+        param_groups = [{
+            "params": [p for n, p in model.named_parameters() if not 'bias' in n],
+            "weight_decay": 0.1
+        }, {
+            "params": [p for n, p in model.named_parameters() if 'bias' in n],
+            "weight_decay": 0.0
+        }]
         include = None if included_state is None else [included_state]
-        run_model(model, config_dict, hidden_dim, torch.bfloat16, include, pin_memory, non_blocking)
+        run_model(model, param_groups, config_dict, hidden_dim, torch.bfloat16, include, pin_memory, non_blocking)
