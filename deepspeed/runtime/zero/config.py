@@ -45,6 +45,7 @@ ZeRO optimization should be enabled as:
     "memory_efficient_linear": [true|false],
     "override_module_apply": [true|false],
     "zeropp_loco_param": {...},
+    "log_trace_cache_warnings" : [true|false],
     }
 }
 """
@@ -338,6 +339,11 @@ class DeepSpeedZeroConfig(DeepSpeedConfigModel):
     override_module_apply: bool = True
     """
     Override nn.Module apply function, for Stage 3.
+    """
+
+    log_trace_cache_warnings: bool = False
+    """
+    Whether to log warnings from trace cache, such as invalidation events.
     """
 
     # Validators

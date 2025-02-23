@@ -102,8 +102,8 @@ if torch_available and get_accelerator().device_name() == 'cuda':
     cupy = None
     if is_rocm_pytorch:
         rocm_major, rocm_minor = rocm_version
-        # XXX cupy support for rocm 5 is not available yet.
-        if rocm_major <= 4:
+        # cupy support for rocm>5.0 is not available yet.
+        if (rocm_major == 5 and rocm_minor == 0) or rocm_major <= 4:
             cupy = f"cupy-rocm-{rocm_major}-{rocm_minor}"
     else:
         cuda_major_ver, cuda_minor_ver = installed_cuda_version()
