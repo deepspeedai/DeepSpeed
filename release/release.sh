@@ -38,7 +38,7 @@ if [ $? != 0 ]; then
     exit 1
 fi
 
-DS_BUILD_STRING="" python setup.py sdist
+DS_BUILD_STRING="" python -m build --sdist
 
 if [ ! -f dist/deepspeed-${version}.tar.gz ]; then
     echo "prepared version does not match version given ($version), bump version first?"
