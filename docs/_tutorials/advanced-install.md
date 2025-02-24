@@ -84,7 +84,7 @@ This should complete the full build 2-3 times faster. You can adjust `-j` to spe
 You can also build a binary wheel and install it on multiple machines that have the same type of GPUs and the same software environment (CUDA toolkit, PyTorch, Python, etc.)
 
 ```bash
-DS_BUILD_OPS=1 python setup.py build_ext -j8 bdist_wheel
+DS_BUILD_OPS=1 python -m build --wheel --no-isolation --config-setting="--build-option=build_ext" --config-setting="--build-option=-j8"
 ```
 
 This will create a pypi binary wheel under `dist`, e.g., ``dist/deepspeed-0.3.13+8cd046f-cp38-cp38-linux_x86_64.whl`` and then you can install it directly on multiple machines, in our example:
