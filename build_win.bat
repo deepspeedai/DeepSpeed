@@ -11,6 +11,6 @@ set DS_BUILD_GDS=0
 set DS_BUILD_RAGGED_DEVICE_OPS=0
 set DS_BUILD_SPARSE_ATTN=0
 
-python setup.py bdist_wheel
+python -m build --wheel --no-isolation
 
 :end
