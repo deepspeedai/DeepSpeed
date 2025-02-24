@@ -284,12 +284,13 @@ int open_file(const char* filename, const bool read_op)
 
 int regular_read(const char* filename, std::vector<char>& buffer)
 {
-    int64_t num_bytes;
-    const auto f_size = get_file_size(filename, num_bytes);
-    assert(f_size != -1);
-    buffer.resize(num_bytes);
     const auto fd = open(filename, O_RDONLY, 0600);
     assert(fd != -1);
+    struct stat fs;
+    const auto result = fstat(fd, &fs);
+    assert(result != -1);
+    int64_t num_bytes = fs.st_size;
+    buffer.resize(num_bytes);
     int64_t read_bytes = 0;
     auto r = 0;
     do {
