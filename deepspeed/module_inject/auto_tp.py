@@ -137,7 +137,8 @@ class Loading():
             "LPLayerNorm", "SharedEmbedding", "OPTLearnedPositionalEmbedding", "LlamaRMSNorm", "FalconLinear",
             "MistralRMSNorm", "T5LayerNorm", "MixtralRMSNorm", "Phi3RotaryEmbedding", "Phi3SuScaledRotaryEmbedding",
             "Phi3RMSNorm", "YuanRMSNorm", "YuanRotaryEmbedding", "Phi3LongRoPEScaledRotaryEmbedding", "Qwen2RMSNorm",
-            "DeepseekV2RMSNorm", "DeepseekV2YarnRotaryEmbedding", "MoEGate"
+            "DeepseekV2RMSNorm", "DeepseekV3RMSNorm", "DeepseekV2YarnRotaryEmbedding", "DeepseekV3YarnRotaryEmbedding",
+            "MoEGate"
         ]
         return module.__class__ in load_layers or module._get_name() in load_layer_names
 
