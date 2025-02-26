@@ -1134,9 +1134,10 @@ def compare_tensors_in_structures(inputs1: Union[List, Dict], inputs2: Union[Lis
         if inputs1.keys() != inputs2.keys():
             return False
         for key in inputs1:
-            val1 = inputs1[key].to(get_accelerator().current_device())
-            val2 = inputs2[key].to(get_accelerator().current_device())
+            val1, val2 = inputs1[key], inputs2[key]
             if isinstance(val1, torch.Tensor) and isinstance(val2, torch.Tensor):
+                val1 = val1.to(get_accelerator().current_device())
+                val2 = val2.to(get_accelerator().current_device())
                 if not torch.equal(val1, val2):
                     return False
             elif val1 != val2:

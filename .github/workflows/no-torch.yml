@@ -32,11 +32,12 @@ jobs:
         run: |
           pip uninstall torch --yes
           pip install setuptools
+          pip install build
           pip list
 
       - name: Build deepspeed
         run: |
-          DS_BUILD_STRING=" " python setup.py sdist
+          DS_BUILD_STRING=" " python -m build --sdist
 
       - name: Open GitHub issue if nightly CI fails
         if: ${{ failure() && (github.event_name == 'schedule') }}
