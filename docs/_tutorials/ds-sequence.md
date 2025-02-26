@@ -111,7 +111,7 @@ pip install .
 cd ${WORK_DIR}
 git clone -b v1.0.4 https://github.com/HazyResearch/flash-attention
 cd flash-attention
-python setup.py install
+python -m pip install .
 ```
 
 You may also want to ensure your model configuration is compliant with FlashAttention's requirements. For instance, to achieve optimal performance, the head size should be divisible by 8. Refer to the FlashAttention documentation for more details.

@@ -335,6 +335,10 @@ def replace_transformer_layer(orig_layer_impl, model, checkpoint_dict, config, m
         return new_module
 
     def set_lm_head(module):
+        if is_autotp_training_mode():
+            # we need to handle autoTP training mode separately.
+            return
+
         embedding_weight = None
         for n, p in module.named_parameters():
             if "word_embeddings." in n or "embed_tokens." in n or "wte." in n:
