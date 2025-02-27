@@ -17,6 +17,8 @@ from .fusedqkv_utils import require_tp_fused_qkvw
 from deepspeed.module_inject.tp_shard import get_shard_size, get_shard_size_list
 from deepspeed.utils import groups
 from deepspeed.module_inject.layers import is_autotp_training_mode
+import os
+import ast
 
 
 def move(tensor, device, copy=True):
@@ -191,6 +193,7 @@ class Loading():
 
 
 class AutoTP():
+    moe_experts_reduce_once = False
 
     def __init__(self,
                  module,
@@ -289,6 +292,12 @@ class AutoTP():
         module_list = []
         layer_list = []
         gem_list = []
+        #'DS_MOE_EXPERTS_REDUCE_ONCE' is a environment variable that indicates 
+        # whether the MoE experts adopt the reduce-once optimization.
+        if not AutoTP.moe_experts_reduce_once:
+            ds_moe_experts_reduce_once = os.environ.get('DS_MOE_EXPERTS_REDUCE_ONCE')
+            if ds_moe_experts_reduce_once:
+                AutoTP.moe_experts_reduce_once = ast.literal_eval(ds_moe_experts_reduce_once)
 
         module_list = AutoTP.get_module_list(model)
         assert AutoTP.supported(model), "AutoTP not supported for model. Please use kernel injection since container policy for model exists." \
@@ -311,13 +320,16 @@ class AutoTP():
                     gem_list = gem_list + [layer]
                 elif 'o_proj' in layer:
                     gem_list = gem_list + [layer]
-                elif 'down_proj' in layer and not (('DeepseekV2' in str(type(module))) or
-                                                   ('qwen2_moe' in str(type(module)))):
+                elif 'down_proj' in layer and not (('DeepseekV2' in str(type(module))) or \
+                                                   ('qwen2_moe' in str(type(module))) or \
+                                                   not AutoTP.moe_experts_reduce_once):
                     gem_list = gem_list + [layer]
-                elif 'shared_experts.down_proj' in layer and (('DeepseekV2' in str(type(module))) or
-                                                              ('qwen2_moe' in str(type(module)))):
+                elif 'shared_experts.down_proj' in layer and (('DeepseekV2' in str(type(module))) or \
+                                                              ('qwen2_moe' in str(type(module)))) \
+                                                        and AutoTP.moe_experts_reduce_once:
                     gem_list = gem_list + [layer]
-                elif 'mlp.down_proj' in layer and ('DeepseekV2' in str(type(module))):
+                elif 'mlp.down_proj' in layer and ('DeepseekV2' in str(type(module)) \
+                                                   and AutoTP.moe_experts_reduce_once):
                     gem_list = gem_list + [layer]
                 elif 'attention.dense' in layer and 'GPTNeoX' in str(model):
                     gem_list = gem_list + [layer]
@@ -416,7 +428,8 @@ class AutoTP():
                     device_name, return_new_copy)
             else:
                 if ('shared_experts.down_proj' not in name and 'mlp.down_proj' not in name and 'down_proj' in name \
-                    and ('DeepseekV2' in str(type(self.module)) or 'qwen2_moe' in str(type(self.module)))):
+                    and ('DeepseekV2' in str(type(self.module)) or 'qwen2_moe' in str(type(self.module))) \
+                    and AutoTP.moe_experts_reduce_once ):
                     data = child.weight.data.split(get_shard_size_list(weight_shape[1], self.mp_size), dim=1)
                     data_dc = move(data[mp_replace.gpu_index], get_accelerator().current_device_name()).detach()
                     del data
@@ -438,14 +451,8 @@ class AutoTP():
                     else:
                         bias_data_dc = None
 
-            setattr(child, "replaced", True)
-            if self.conv_linear_layer:
-                conv_LinearLayer(child, self.mp_group)
-            elif require_tp_fused_qkvw(name, self.mp_size):
-                #Check and handle fused qkv for TP
-                return fused_LinearLayer(child, self.mp_group, fused_module=self.module)
-
-            return LinearLayer(child, self.mp_group, name=name)
+            setattr(child, "replaced", True)            
+            return LinearLayer(weight=torch.nn.parameter.Parameter(data_dc, requires_grad=False), bias=bias_data_dc)
 
     def _slice_embedding(self, child, name, conv_linear_layer):
         if getattr(child, "replaced", False) == True:
