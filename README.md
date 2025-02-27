@@ -18,7 +18,7 @@
 
 * [2024/12] [Ulysses-Offload: Democratizing Long Context LLM Training ](https://github.com/deepspeedai/DeepSpeed/blob/master/blogs/ulysses-offload/README.md)
 * [2024/12] [DeepSpeed-Domino: Communication-Free LLM Training Engine](https://github.com/deepspeedai/DeepSpeed/blob/master/blogs/deepspeed-domino/README.md)
-* [2024/08] [DeepSpeed on Windows](https://github.com/deepspeedai/DeepSpeed/tree/master/blogs/windows/08-2024/README.md) [[日本語](https://github.com/deepspeedai/DeepSpeed/tree/master/blogs/windows/08-2024/japanese/README.md)]
+* [2024/08] [DeepSpeed on Windows](https://github.com/deepspeedai/DeepSpeed/tree/master/blogs/windows/08-2024/README.md) [[日本語](https://github.com/deepspeedai/DeepSpeed/tree/master/blogs/windows/08-2024/japanese/README.md)]  [[中文](https://github.com/deepspeedai/DeepSpeed/tree/master/blogs/windows/08-2024/chinese/README.md)]
 * [2024/08] [DeepNVMe: Improving DL Applications through I/O Optimizations](https://github.com/deepspeedai/DeepSpeed/tree/master/blogs/deepspeed-gds/README.md) [[日本語](https://github.com/deepspeedai/DeepSpeed/tree/master/blogs/deepspeed-gds/japanese/README.md)]
 * [2024/07] [DeepSpeed Universal Checkpointing: Efficient and Flexible Checkpointing for Large Scale Distributed Training](https://github.com/deepspeedai/DeepSpeed/tree/master/blogs/deepspeed-ucp/README.md) [[中文](https://github.com/deepspeedai/DeepSpeed/tree/master/blogs/deepspeed-ucp/chinese/README.md)] [[日本語](https://github.com/deepspeedai/DeepSpeed/tree/master/blogs/deepspeed-ucp/japanese/README.md)]
 * [2024/03] [DeepSpeed-FP6:The power of FP6-Centric Serving for Large Language Models](https://github.com/deepspeedai/DeepSpeed/tree/master/blogs/deepspeed-fp6/03-05-2024) [[English](https://github.com/deepspeedai/DeepSpeed/tree/master/blogs/deepspeed-fp6/03-05-2024/README.md)] [[中文](https://github.com/deepspeedai/DeepSpeed/tree/master/blogs/deepspeed-fp6/03-05-2024/README-Chinese.md)]
@@ -172,6 +172,7 @@ dynamically link them at runtime.
 | Intel       | Intel(R) Gaudi(R) 2 AI accelerator  | hpu              | Yes | Yes                |
 | Intel       | Intel(R) Xeon(R) Processors         | cpu              | Yes | Yes                |
 | Intel       | Intel(R) Data Center GPU Max series | xpu              | Yes | Yes                |
+| Tecorigin   | Scalable Data Analytics Accelerator | sdaa             | Yes | No                 |
 
 ## PyPI
 We regularly push releases to [PyPI](https://pypi.org/project/deepspeed/) and encourage users to install from there in most cases.

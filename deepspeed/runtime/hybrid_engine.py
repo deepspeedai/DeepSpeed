@@ -290,8 +290,13 @@ class DeepSpeedHybridEngine(DeepSpeedEngine):
 
                     layer_id += 1
                 else:
-                    self._other_layers.append(self.inference_policies[child.__class__][0](
-                        weight=child.weight, bias=child.bias if hasattr(child, 'bias') else None))
+                    if self.inference_policies[child.__class__][0] == LinearLayer:
+                        self._other_layers.append(self.inference_policies[child.__class__][0](module=child,
+                                                                                              mp_group=None,
+                                                                                              skip_partition=True))
+                    else:
+                        self._other_layers.append(self.inference_policies[child.__class__][0](
+                            weight=child.weight, bias=child.bias if hasattr(child, 'bias') else None))
                     self._orig_modules_others.append(child)
                     self._orig_fwds_others.append(child.forward)
             else:

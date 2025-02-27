@@ -76,17 +76,20 @@ class PartitionedParameterCoordinator:
         param: Parameter
         step_id_last_used_at: int
 
-    def __init__(self,
-                 prefetch_bucket_sz: int,
-                 max_reuse_distance_in_numel: int,
-                 max_available_parameters_in_numel: int,
-                 allgather_stream: get_accelerator().Stream,
-                 inflight_param_registry: InflightParamRegistry,
-                 prefetch_nvme: bool = False,
-                 timers=None,
-                 zero_quantized_weights=False,
-                 zero_quantized_nontrainable_weights=False,
-                 fast_sharding_for_leaf_module=False) -> None:
+    def __init__(
+        self,
+        prefetch_bucket_sz: int,
+        max_reuse_distance_in_numel: int,
+        max_available_parameters_in_numel: int,
+        allgather_stream: get_accelerator().Stream,
+        inflight_param_registry: InflightParamRegistry,
+        prefetch_nvme: bool = False,
+        timers=None,
+        zero_quantized_weights=False,
+        zero_quantized_nontrainable_weights=False,
+        fast_sharding_for_leaf_module=False,
+        log_trace_cache_warnings=False,
+    ) -> None:
         # mapping of param -> handle for each param that is currently in flight
         self.__inflight_param_registry = inflight_param_registry
         # keeps track of the number of submodules invoked so far.
@@ -128,6 +131,9 @@ class PartitionedParameterCoordinator:
         # TODO. make this configurable via JSON
         self.__max_ongoing_fetch_events: int = 2
         self.__profiler = PartitionedParameterProfiler(timers if ENABLE_PROFILER else None)
+
+        # Whether to log trace cache warnings, e.g. invalidation events
+        self.__log_trace_cache_warnings = log_trace_cache_warnings
 
         # whether to enable fast fetch for the z3 leaf module.
         # this will improve fetch speed but will not break down leaf module parameters to alleviate memory pressure.
@@ -177,7 +183,7 @@ class PartitionedParameterCoordinator:
                 print_rank_0(
                     f"Invalidate trace cache @ step {self.__step_id} and module {sub_module.ds_id}: "
                     f"cache has only {len(self.__submodule_order)} modules",
-                    force=True)
+                    force=self.__log_trace_cache_warnings)
                 self._invalidate_trace()
                 return
 
@@ -186,7 +192,7 @@ class PartitionedParameterCoordinator:
                 print_rank_0(
                     f"Invalidate trace cache @ step {self.__step_id}: "
                     f"expected module {expected_module_id}, but got module {sub_module.ds_id}",
-                    force=True)
+                    force=self.__log_trace_cache_warnings)
                 self._invalidate_trace()
 
     @compiler.disable

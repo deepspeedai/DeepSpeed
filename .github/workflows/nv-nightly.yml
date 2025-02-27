@@ -18,7 +18,7 @@ permissions:
 
 jobs:
   unit-tests:
-    runs-on: [self-hosted, nvidia, cu121, v100]
+    runs-on: [self-hosted, nvidia, cu124, v100]
 
     steps:
       - uses: actions/checkout@v4
@@ -28,7 +28,7 @@ jobs:
 
       - name: Install pytorch
         run: |
-          pip install -U --cache-dir $TORCH_CACHE torch torchvision --index-url https://download.pytorch.org/whl/cu121
+          pip install -U --cache-dir $TORCH_CACHE torch torchvision --index-url https://download.pytorch.org/whl/cu124
           python -c "import torch; print('torch:', torch.__version__, torch)"
           python -c "import torch; print('CUDA available:', torch.cuda.is_available())"
 
@@ -58,7 +58,7 @@ jobs:
         run: |
           unset TORCH_CUDA_ARCH_LIST # only jit compile for current arch
           cd tests
-          pytest $PYTEST_OPTS --forked -m 'nightly' unit/ --torch_ver="2.5" --cuda_ver="12.1"
+          pytest $PYTEST_OPTS --forked -m 'nightly' unit/ --torch_ver="2.6" --cuda_ver="12.4"
 
       - name: Open GitHub issue if nightly CI fails
         if: ${{ failure() && (github.event_name == 'schedule') }}

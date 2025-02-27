@@ -18,7 +18,7 @@ concurrency:
 
 jobs:
   unit-tests:
-    runs-on: [self-hosted, nvidia, cu121, v100]
+    runs-on: [self-hosted, nvidia, cu124, v100]
 
     steps:
       - uses: actions/checkout@v4
@@ -29,7 +29,7 @@ jobs:
       - name: Install pytorch
         run: |
           # use the same pytorch version as transformers CI
-          pip install -U --cache-dir $TORCH_CACHE torch==2.0.1+cu121 --index-url https://download.pytorch.org/whl/cu121
+          pip install -U --cache-dir $TORCH_CACHE torch==2.0.1+cu124 --index-url https://download.pytorch.org/whl/cu124
           python -c "import torch; print('torch:', torch.__version__, torch)"
           python -c "import torch; print('CUDA available:', torch.cuda.is_available())"
 
