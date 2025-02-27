@@ -6,7 +6,7 @@
 import torch
 from dataclasses import dataclass
 from deepspeed import comm as dist
-from typing import Dict
+from typing import Dict, List, Callable
 
 
 @dataclass
@@ -307,6 +307,42 @@ def safe_set_local_fp32_param(param, value):
 
 
 ### Local API  END ###
+
+
+### VECTORIZED API  BEGIN ###
+def safe_update_full_grad_vectorized(param_list: List[torch.nn.Parameter], update_func: Callable):
+    """
+        Vectorized update of the partitioned gradients of a list of low-precision (e.g., fp16) parameters.
+        To avoid precision issues, the update value should have the data type of
+        gradient accumulation.
+
+        Args:
+            param_list (``List[torch.nn.Parameter]``): List of model parameters
+            update_func (``torch.Tensor``): A function that takes current full gradient value and returns new one.
+    """
+    partitioned_grad_params = []
+    for p in param_list:
+        if p.grad is not None:
+            p.grad.copy_(update_func(p.grad, p))
+        elif p.requires_grad:
+            partitioned_grad_params.append(p)
+
+    if not partitioned_grad_params:
+        return
+
+    if hasattr(partitioned_grad_params[0], 'ds_id'):
+        # ZeRO stage 3 param
+        partitioned_grad_params[0]._z3_optimizer.update_fp32_grad_for_param_vectorized(
+            update_func, partitioned_grad_params)
+    elif hasattr(partitioned_grad_params[0], '_hp_mapping'):
+        # ZeRO stage 1, 2, and bf16_optimizer params
+        for p in partitioned_grad_params:
+            old_grad = safe_get_full_grad(p)
+            new_grad = update_func(old_grad, p)
+            p.set_full_hp_grad(new_grad)
+
+
+### VECTORIZED API  END ###
 
 
 def get_hp_fragment_mapping(lp_param, lp_start, flat_hp_partition, gradient_dict, offload_gradient_dict, use_offload,

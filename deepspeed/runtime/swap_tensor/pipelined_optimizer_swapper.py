@@ -187,7 +187,7 @@ class PipelinedOptimizerSwapper(OptimizerSwapper):
                 dst = get_sized_buffer(pinned_dst, unpinned_src.numel())
                 dst.data.copy_(unpinned_src.data)
 
-        swap_paths = param_info.swap_paths.copy()
+        swap_paths = param_info.get_swap_paths()
         assert len(swap_paths) == len(swap_buffers)
 
         swap_out_tensors(aio_handle, swap_buffers, swap_paths)
@@ -206,7 +206,8 @@ class PipelinedOptimizerSwapper(OptimizerSwapper):
         if param_info is None:
             return None
 
-        required_buffer_count = len(param_info.tensors) + (1 if param_info.has_gradients() else 0)
+        num_swap_tensors = param_info.num_tensors()
+        required_buffer_count = num_swap_tensors + (1 if param_info.has_gradients() else 0)
         aligned_numel = self._io_aligned_numel(param_info.numel())
         allocated_buffers = self.swap_buffer_manager.allocate(num_elems=aligned_numel,
                                                               count=required_buffer_count,
@@ -214,11 +215,11 @@ class PipelinedOptimizerSwapper(OptimizerSwapper):
         assert allocated_buffers is not None, \
         f"PipelinedOptimizerSwapper ran out of swap buffers, try increasing 'buffer_count'"
 
-        state_buffers = allocated_buffers[:len(param_info.tensors)]
-        param_info.set_swap_buffers(state_buffers)
+        state_buffers = allocated_buffers[:num_swap_tensors]
+        param_info.set_swap_buffers(state_buffers, aligned_numel)
 
         swap_buffers = state_buffers.copy()
-        swap_paths = param_info.swap_paths.copy()
+        swap_paths = param_info.get_swap_paths()
 
         if param_info.has_gradients():
             parameter.grad = allocated_buffers[-1].narrow(0, 0, param_info.numel())

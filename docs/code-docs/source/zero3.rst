@@ -411,6 +411,8 @@ Sometimes, a user may want to modify parameters, gradients, or optimizer states 
 
 .. autofunction:: deepspeed.utils.safe_set_local_optimizer_state
 
+.. autofunction:: deepspeed.utils.safe_update_full_grad_vectorized
+
 The routines for modifying parameters and optimizer states can be used at any point after initialization of the DeepSpeed engine (i.e., ``deepspeed.initialize()``) as shown in the following snippet.
 
 .. code-block:: python
