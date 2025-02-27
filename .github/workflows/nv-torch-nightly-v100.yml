@@ -54,7 +54,7 @@ jobs:
         run: |
           unset TORCH_CUDA_ARCH_LIST # only jit compile for current arch
           cd tests
-          pytest $PYTEST_OPTS --forked -n 4 unit/
+          pytest $PYTEST_OPTS --forked -n 8 unit/
           pytest $PYTEST_OPTS --forked -m 'sequential' unit/
 
       - name: Open GitHub issue if nightly CI fails
