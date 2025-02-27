@@ -19,7 +19,8 @@ import deepspeed.comm as dist
 
 # A test on its own
 import deepspeed
-from deepspeed.runtime.config import DeepSpeedConfig, get_bfloat16_enabled
+from deepspeed.runtime.config import DeepSpeedConfig
+from deepspeed.runtime.precision_config import get_bfloat16_config
 
 
 class TestBasicConfig(DistributedTest):
@@ -151,7 +152,7 @@ def test_get_bfloat16_enabled(bf16_key):
             "enabled": True,
         },
     }
-    assert get_bfloat16_enabled(cfg) == True
+    assert get_bfloat16_config(cfg).enabled == True
 
 
 class TestConfigLoad(DistributedTest):
