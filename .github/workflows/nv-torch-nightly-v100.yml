@@ -2,11 +2,11 @@ name: nv-torch-nightly-v100
 
 on:
   workflow_dispatch:
-    pull_request:
-    paths:
-      - '.github/workflows/nv-torch-nightly-v100.yml'
   schedule:
     - cron: "0 0 * * *"
+  pull_request:
+    paths:
+      - '.github/workflows/nv-torch-nightly-v100.yml'
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -37,7 +37,7 @@ jobs:
           git clone https://github.com/huggingface/transformers
           cd transformers
           # if needed switch to the last known good SHA until transformers@master is fixed
-          # git checkout 6c3f168b3
+          git checkout 981c276
           git rev-parse --short HEAD
           pip install .
 
