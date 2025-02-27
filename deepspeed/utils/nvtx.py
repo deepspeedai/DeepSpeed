@@ -5,7 +5,6 @@
 
 from deepspeed.accelerator import get_accelerator
 from deepspeed.runtime.compiler import is_compiling
-import torch
 
 enable_nvtx = True
 
