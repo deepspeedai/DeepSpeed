@@ -17,8 +17,11 @@ from .fusedqkv_utils import require_tp_fused_qkvw
 from deepspeed.module_inject.tp_shard import get_shard_size, get_shard_size_list
 from deepspeed.utils import groups
 from deepspeed.module_inject.layers import is_autotp_training_mode
+<<<<<<< HEAD
 import os
 import ast
+=======
+>>>>>>> origin/master
 
 
 def move(tensor, device, copy=True):
