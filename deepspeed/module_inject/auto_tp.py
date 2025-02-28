@@ -292,10 +292,10 @@ class AutoTP():
         module_list = []
         layer_list = []
         gem_list = []
-        #'DS_MOE_EXPERTS_REDUCE_ONCE' is a environment variable that indicates 
+        #'DS_MOE_TP_SINGLE_ALLREDUCE' is a environment variable that indicates 
         # whether the MoE experts adopt the reduce-once optimization.
         if not AutoTP.moe_experts_reduce_once:
-            ds_moe_experts_reduce_once = os.environ.get('DS_MOE_EXPERTS_REDUCE_ONCE')
+            ds_moe_experts_reduce_once = os.environ.get('DS_MOE_TP_SINGLE_ALLREDUCE')
             if ds_moe_experts_reduce_once:
                 AutoTP.moe_experts_reduce_once = ast.literal_eval(ds_moe_experts_reduce_once)
 
