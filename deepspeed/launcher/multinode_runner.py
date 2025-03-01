@@ -8,6 +8,7 @@ import sys
 import shutil
 import subprocess
 import warnings
+import re
 from shlex import split
 from abc import ABC, abstractmethod
 from deepspeed.accelerator import get_accelerator
@@ -34,7 +35,10 @@ class MultiNodeRunner(ABC):
         """Return the command to execute on node"""
 
     def add_export(self, key, var):
-        self.exports[key.strip()] = f"\"{var.strip()}\""
+        var = var.strip()
+        if re.search(r'[^\w@%+=:,./-]', var):
+            var = f"\"{var}\""
+        self.exports[key.strip()] = var
 
     def parse_user_args(self):
         return self.args.user_args
