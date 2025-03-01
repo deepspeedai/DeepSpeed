@@ -95,8 +95,9 @@ int deepspeed_io_handle_t::read(torch::Tensor& buffer,
     if (validate) { validate_aio_operation(true, filename, read_buffer, num_file_bytes); }
     const std::chrono::duration<double> fn_time =
         std::chrono::high_resolution_clock::now() - start_time;
-    std::cout << "Elapsed time(usec): " << "aio = " << aio_time.count() * 1e6
-              << " call = " << fn_time.count() * 1e6 << std::endl;
+    std::cout << "Elapsed time(usec): "
+              << "aio = " << aio_time.count() * 1e6 << " call = " << fn_time.count() * 1e6
+              << std::endl;
     return 0;
 }
 
@@ -131,8 +132,9 @@ int deepspeed_io_handle_t::write(const torch::Tensor& buffer,
 
     const std::chrono::duration<double> fn_time =
         std::chrono::high_resolution_clock::now() - start_time;
-    std::cout << "Elapsed time(usec): " << "aio = " << aio_time.count() * 1e6
-              << " call = " << fn_time.count() * 1e6 << std::endl;
+    std::cout << "Elapsed time(usec): "
+              << "aio = " << aio_time.count() * 1e6 << " call = " << fn_time.count() * 1e6
+              << std::endl;
     return 0;
 }
 
