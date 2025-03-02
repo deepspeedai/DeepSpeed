@@ -14,6 +14,7 @@ import deepspeed
 import deepspeed.comm as dist
 from deepspeed.pipe import PipelineModule
 from deepspeed.utils import logger
+from deepspeed.accelerator import get_accelerator
 
 from deepspeed.runtime.data_pipeline.data_sampling.variable_batch_size_and_lr import get_dataloader_and_lr_scheduler_for_variable_batch_size_deepspeed
 
@@ -102,7 +103,7 @@ if __name__ == "__main__":
 
     deepspeed.init_distributed()
     device = f"cuda:{dist.get_local_rank()}"
-    assert dist.get_local_rank() <= torch.cuda.device_count(), "needs at least 1 GPU per process"
+    assert dist.get_local_rank() <= get_accelerator().device_count(), "needs at least 1 GPU per process"
 
     # dummy dataset with 2000 sequences of random lengths between 3 and 15 tokens per sequence.
     min_seqlen, max_seqlen = 3, 15
