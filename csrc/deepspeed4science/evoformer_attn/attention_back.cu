@@ -16,10 +16,8 @@ constexpr auto kBlockSizeJ = 64;
 template <typename arch,
           typename scalar_t,
           typename torch_scalar_t,
-          template <typename, typename, typename>
-          class Broadcast1_,
-          template <typename, typename, typename>
-          class Broadcast2_>
+          template <typename, typename, typename> class Broadcast1_,
+          template <typename, typename, typename> class Broadcast2_>
 typename std::enable_if<!CheckArch<arch, scalar_t>::value>::type attention_back_impl_template(
     torch::Tensor& go,
     torch::Tensor& q,
@@ -42,10 +40,8 @@ typename std::enable_if<!CheckArch<arch, scalar_t>::value>::type attention_back_
 template <typename arch,
           typename scalar_t,
           typename torch_scalar_t,
-          template <typename, typename, typename>
-          class Broadcast1_,
-          template <typename, typename, typename>
-          class Broadcast2_>
+          template <typename, typename, typename> class Broadcast1_,
+          template <typename, typename, typename> class Broadcast2_>
 typename std::enable_if<CheckArch<arch, scalar_t>::value>::type attention_back_impl_template(
     torch::Tensor& go,
     torch::Tensor& q,
