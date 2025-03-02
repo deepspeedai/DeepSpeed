@@ -108,7 +108,7 @@ void launch_top_k_gating(int32_t* expert_counts,
 }
 
 #define INSTANTIATE_top_k_KERNEL(T)                                                   \
-    template void launch_top_k_gating<T>(int32_t * expert_counts,                     \
+    template void launch_top_k_gating<T>(int32_t* expert_counts,                      \
                                          float* scores,                               \
                                          int32_t* assignments,                        \
                                          int32_t* offsets,                            \
