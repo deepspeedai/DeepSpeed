@@ -32,8 +32,8 @@ if __name__ == "__main__":
                 seqlen = data_random.randrange(min_seqlen, max_seqlen)
                 self.seqs.append(torch.ones(seqlen, embed_dim))
 
-        __len__ = lambda self: len(self.seqs)  # noqa
-        __getitem__ = lambda self, idx: (self.seqs[idx], len(self.seqs[idx]))  # noqa
+        __len__ = lambda self: len(self.seqs)
+        __getitem__ = lambda self, idx: (self.seqs[idx], len(self.seqs[idx]))
 
         def batch_collate_fn(self, batch):
             """ collate sequences of different lengths into batch of size BxTxE, where T is max seqlen """

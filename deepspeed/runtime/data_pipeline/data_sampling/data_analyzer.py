@@ -13,7 +13,6 @@ import numpy as np
 import torch
 from torch.utils.data import BatchSampler, SequentialSampler, DataLoader, Subset
 
-from deepspeed.utils import logger
 import deepspeed.comm as dist
 from deepspeed.utils import logger
 from deepspeed.runtime.data_pipeline.data_sampling.indexed_dataset import MMapIndexedDataset, valid_dtypes
@@ -40,7 +39,7 @@ class DataAnalyzer(object):
                  custom_map_update=None,
                  custom_map_finalize=None,
                  custom_reduce=None,
-                 comm_group=None):
+                 sample_indices=None):
         super().__init__()
         self.dataset = dataset
         self.num_workers = num_workers
@@ -59,7 +58,7 @@ class DataAnalyzer(object):
         self.custom_map_update = custom_map_update
         self.custom_map_finalize = custom_map_finalize
         self.custom_reduce = custom_reduce
-        self.comm_group = comm_group
+        self.sample_indices = sample_indices
 
     def init_metric_results(self, thread_id, metric_names, metric_types, metric_dtypes, save_path, worker_id):
         metric_results = []
@@ -215,7 +214,6 @@ class DataAnalyzer(object):
         else:
             assert self.num_threads == 1
             self.run_map_helper(0)
-        dist.barrier(group=self.comm_group)
 
     def get_metric_value_percentiles(self, metric_name, num_sample_per_value, total_num_samples):
         logger.info(f"Checking the value percentiles of metric {metric_name}...")
@@ -388,26 +386,10 @@ class DataAnalyzer(object):
                     index_to_metric_builder.merge_file_(chunk_im_fname)
                 close_mmap_dataset_builder(index_to_sample_builder, index_to_sample_fname)
                 close_mmap_dataset_builder(index_to_metric_builder, index_to_metric_fname)
-                num_sample_per_value = {}
-                index_to_sample = MMapIndexedDataset(index_to_sample_fname, skip_warmup=True)
-                index_to_metric = MMapIndexedDataset(index_to_metric_fname, skip_warmup=True)
-                index_to_sample_merged_fname = f"{metric_save_path}/{metric_name}_index_to_sample_percentile_merged"
-                index_to_sample_merged_builder = create_mmap_dataset_builder(index_to_sample_merged_fname,
-                                                                             sample_idx_dtype)
-                for v_idx in range(len(index_to_sample)):
-                    if v_idx > 0:
-                        assert index_to_metric[v_idx] > index_to_metric[v_idx - 1]
-                    num_sample_per_value[index_to_metric[v_idx][0]] = len(index_to_sample[v_idx])
-                assert sum(num_sample_per_value.values()) == total_num_samples
-                merge_step = max(1, len(index_to_sample) // 100)
-                for v_idx in range(0, len(index_to_sample), merge_step):
-                    merged_samples = np.copy(
-                        np.concatenate(index_to_sample[v_idx:min(len(index_to_sample), (v_idx + merge_step))],
-                                       axis=None))
-                    index_to_sample_merged_builder.add_item(
-                        torch.tensor(merged_samples.astype(np.int64), dtype=torch.long))
-                    logger.info(f"Finished merging index_to_sample {v_idx} to {v_idx+merge_step}.")
-                close_mmap_dataset_builder(index_to_sample_merged_builder, index_to_sample_merged_fname)
+
+                num_sample_per_value = DataAnalyzer.output_index_to_sample_percentile(
+                    index_to_sample_fname, index_to_metric_fname, metric_name, metric_save_path, total_num_samples,
+                    sample_idx_dtype)
                 self.get_metric_value_percentiles(metric_name, num_sample_per_value, total_num_samples)
             elif metric_type == 'accumulate_value_over_samples':
                 metric_save_path = f"{save_path}/{metric_name}/"
@@ -429,15 +411,36 @@ class DataAnalyzer(object):
                 metric_value_builder.add_item(torch.tensor(metric_value.astype(np.int64), dtype=torch.long))
                 close_mmap_dataset_builder(metric_value_builder, metric_value_fname)
 
+    @staticmethod
+    def output_index_to_sample_percentile(index_to_sample_fname, index_to_metric_fname, metric_name, metric_save_path,
+                                          total_num_samples, sample_idx_dtype):
+        """ read index_to_metric and index_to_sample files and write distribution to index_to_sample_percentage_merged """
+        num_sample_per_value = {}
+        index_to_sample = MMapIndexedDataset(index_to_sample_fname, skip_warmup=True)
+        index_to_metric = MMapIndexedDataset(index_to_metric_fname, skip_warmup=True)
+        index_to_sample_merged_fname = f"{metric_save_path}/{metric_name}_index_to_sample_percentile_merged"
+        index_to_sample_merged_builder = create_mmap_dataset_builder(index_to_sample_merged_fname, sample_idx_dtype)
+        for v_idx in range(len(index_to_sample)):
+            if v_idx > 0:
+                assert index_to_metric[v_idx] > index_to_metric[v_idx - 1]
+            num_sample_per_value[index_to_metric[v_idx][0]] = len(index_to_sample[v_idx])
+        assert sum(list(num_sample_per_value.values())) == total_num_samples
+        merge_step = max(1, len(index_to_sample) // 100)
+        for v_idx in range(0, len(index_to_sample), merge_step):
+            merged_samples = np.copy(
+                np.concatenate(index_to_sample[v_idx:min(len(index_to_sample), (v_idx + merge_step))], axis=None))
+            index_to_sample_merged_builder.add_item(torch.tensor(merged_samples.astype(np.int64), dtype=torch.long))
+            logger.info(f"Finished merging index_to_sample {v_idx} to {v_idx+merge_step}.")
+        close_mmap_dataset_builder(index_to_sample_merged_builder, index_to_sample_merged_fname)
+        return num_sample_per_value
+
     def run_reduce(self):
-        if self.worker_id == 0: # only one node does merging of files
-          if self.custom_reduce is None:
+        if self.custom_reduce is None:
             self.merge_map_results(self.dataset, self.metric_names, self.metric_types, self.save_path,
                                    self.num_workers, self.num_threads, self.num_threads_reduce)
-          else:
+        else:
             self.custom_reduce(self.dataset, self.metric_names, self.metric_types, self.save_path, self.num_workers,
                                self.num_threads, self.num_threads_reduce)
-        dist.barrier(group=self.comm_group)
 
     def run_map_reduce(self, comm_group=None):
         self.run_map()
@@ -637,7 +640,7 @@ class DistributedDataAnalyzer(object):
                             metric_to_samples_dict[value.item()] = []
                         metric_to_samples_dict[value.item()].append(sample.item())
 
-                # index_to_metric and index_to_sample serialize a dictionary from metric to samples
+                # index_to_metric and index_to_sample serialize a dicitonary from metric to samples
                 # index_to_metric stores a key per row, index_to_sample stores the values per row
                 values = [torch.tensor([x]) for x in metric_to_samples_dict.keys()]
                 samples = [torch.tensor(metric_to_samples_dict[x]) for x in metric_to_samples_dict.keys()]
