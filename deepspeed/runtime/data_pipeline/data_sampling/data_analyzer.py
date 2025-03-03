@@ -106,7 +106,6 @@ class DataAnalyzer(object):
                 metric_values = torch.from_numpy(metric_values)
 
             if metric_type == 'single_value_per_sample':
-                metric_values = metric_function(data)
                 for row in range(metric_values.size()[0]):
                     sample_idx = batch_start_idx + row  # sample idx following dataset iteration order
                     if isinstance(data, dict) and 'index' in data:  # Megatron use case, idx provided in 'index' field
@@ -123,7 +122,6 @@ class DataAnalyzer(object):
                             writer.writerows([metric_result["metric_to_sample_dict"][m_value]])
                         metric_result["metric_to_sample_dict"][m_value] = []
             elif metric_type == 'accumulate_value_over_samples':
-                metric_values = metric_function(data)
                 if metric_result["metric_value"] is None:
                     metric_result["metric_value"] = metric_values
                 else:
@@ -661,6 +659,7 @@ class DistributedDataAnalyzer(object):
                 metric_value_fname = f"{metric_save_path}/{metric_name}_metric_value"
                 dist.reduce(metric_values, dst=0, op=dist.ReduceOp.SUM, group=self.comm_group)
                 metric_value_dtype = find_fit_int_dtype(metric_values.min(), metric_values.max())
+
                 if self.worker_id == 0:
                     builder = create_mmap_dataset_builder(metric_value_fname, metric_value_dtype)
                     builder.add_item(metric_values.cpu())
