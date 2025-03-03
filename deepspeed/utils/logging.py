@@ -158,6 +158,6 @@ def should_log_le(max_log_level_str):
 
     max_log_level_str = max_log_level_str.lower()
     if max_log_level_str not in log_levels:
-        raise ValueError(f"{max_log_level_str} is not one of the `logging` levels")
+        raise ValueError(f"{max_log_level_str} is not one of the logging levels")
 
     return get_current_level() <= log_levels[max_log_level_str]
