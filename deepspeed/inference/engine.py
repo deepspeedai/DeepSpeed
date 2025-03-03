@@ -600,7 +600,7 @@ class InferenceEngine(Module):
                 tensor_length = input_tensor.shape[-1]
                 if tensor_length > self._config.max_out_tokens:
                     raise RuntimeError(
-                        f"Input with size {tensor_length} exceeds maximum length of {self._config.max_out_tokens}. Please increase `max_tokens` in the DeepSpeed Inference Config."
+                        f"Input with size {tensor_length} exceeds maximum length of {self._config.max_out_tokens}. Please increase max_tokens in the DeepSpeed Inference Config."
                     )
 
         return self.module.generate(*inputs, **kwargs)
