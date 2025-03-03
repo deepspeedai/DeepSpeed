@@ -428,8 +428,8 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
         self.use_multi_rank_bucket_allreduce = use_multi_rank_bucket_allreduce
         self.allgather_bucket_size = int(allgather_bucket_size)
 
+        self.reduction_events = [get_accelerator().Event(enable_timing=False, blocking=False) for _ in range(2)]
         self.reduction_stream = None if get_accelerator().is_synchronized_device() else get_accelerator().Stream()
-        #self.copy_grad_stream = get_accelerator().Stream()
         self.callback_queued = False
 
         self.param_dict = {}
@@ -943,6 +943,8 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
             self.report_ipg_memory_usage("In ipg_remove_grads before reduce_ipg_grads", param.numel())
             self.reduce_ipg_grads()
             if self.contiguous_gradients and self.overlap_comm:
+                # Wait until buffer reader finish
+                self.reduction_events[1 - self.ipg_index].wait(get_accelerator().current_stream())
                 # Swap ipg_index between 0 and 1
                 self.ipg_index = 1 - self.ipg_index
             self.report_ipg_memory_usage("In ipg_remove_grads after reduce_ipg_grads", param.numel())
@@ -1414,6 +1416,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
                 else:  # zero stage 1 - partition only optimizer state
                     if self.contiguous_gradients and self.is_param_in_current_partition[param_id]:
                         self.copy_grads_in_partition(param)
+            self.reduction_events[self.ipg_index].record(stream)
 
         self.grads_in_ipg_bucket = []
         self.params_in_ipg_bucket = []
