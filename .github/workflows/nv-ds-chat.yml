@@ -27,7 +27,7 @@ permissions:
 
 jobs:
   unit-tests:
-    runs-on: [self-hosted, nvidia, cu121, v100]
+    runs-on: [self-hosted, nvidia, cu124, v100]
 
     steps:
       - uses: actions/checkout@v4
@@ -37,13 +37,13 @@ jobs:
 
       - name: Install pytorch
         run: |
-          pip3 install -U --cache-dir $TORCH_CACHE torch --index-url https://download.pytorch.org/whl/cu121
+          pip install -U --cache-dir $TORCH_CACHE torch torchvision --index-url https://download.pytorch.org/whl/cu124
           python -c "import torch; print('torch:', torch.__version__, torch)"
           python -c "import torch; print('CUDA available:', torch.cuda.is_available())"
 
       - name: Install deepspeed
         run: |
-          pip install transformers
+          pip install transformers==4.48.3
           pip install .[dev]
           ds_report
 
@@ -54,7 +54,7 @@ jobs:
               BRANCH="${{ github.event.inputs.dse_branch }}"
           fi
           echo "DeepSpeedExamples Branch: $BRANCH"
-          git clone -b $BRANCH https://github.com/microsoft/DeepSpeedExamples.git
+          git clone -b $BRANCH https://github.com/deepspeedai/DeepSpeedExamples.git
           cd DeepSpeedExamples/applications/DeepSpeed-Chat
           pip install -r requirements.txt
           pip install -e .
@@ -67,6 +67,7 @@ jobs:
         run: |
           cd DeepSpeedExamples/applications/DeepSpeed-Chat
           unset TORCH_CUDA_ARCH_LIST # only jit compile for current arch
+          unset NCCL_DEBUG
           cd tests
           pytest $PYTEST_OPTS ./
 

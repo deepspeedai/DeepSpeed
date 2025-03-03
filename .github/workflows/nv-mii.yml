@@ -27,7 +27,7 @@ concurrency:
 
 jobs:
   unit-tests:
-    runs-on: [self-hosted, nvidia, cu121, v100]
+    runs-on: [self-hosted, nvidia, cu124, v100]
 
     steps:
       - uses: actions/checkout@v4
@@ -37,7 +37,7 @@ jobs:
 
       - name: Install pytorch
         run: |
-          pip3 install -U --cache-dir $TORCH_CACHE torch torchvision --index-url https://download.pytorch.org/whl/cu121
+          pip3 install -U --cache-dir $TORCH_CACHE torch torchvision --index-url https://download.pytorch.org/whl/cu124
           python -c "import torch; print('torch:', torch.__version__, torch)"
           python -c "import torch; print('CUDA available:', torch.cuda.is_available())"
 
@@ -66,7 +66,7 @@ jobs:
               BRANCH="${{ github.event.inputs.mii_branch }}"
           fi
           echo "Cloning DeepSpeed-MII branch: $BRANCH"
-          git clone -b $BRANCH --depth=1 https://github.com/microsoft/DeepSpeed-MII.git
+          git clone -b $BRANCH --depth=1 https://github.com/deepspeedai/DeepSpeed-MII.git
           cd DeepSpeed-MII
           pip install .[dev]
           unset TORCH_CUDA_ARCH_LIST # only jit compile for current arch

@@ -130,7 +130,7 @@ class OptimizerSwapper(object):
 
         # Read/Write alignment for each thread during Intra-request parallelism
         self.min_aio_bytes = max(MIN_AIO_BYTES, aio_config[AIO_BLOCK_SIZE])
-        self.aligned_bytes = AIO_ALIGNED_BYTES * aio_config[AIO_THREAD_COUNT]
+        self.aligned_bytes = AIO_ALIGNED_BYTES * aio_config[AIO_INTRA_OP_PARALLELISM]
         self.numel_alignment = self.aligned_bytes // self.swap_element_size
 
         # Swap buffer management
@@ -152,6 +152,11 @@ class OptimizerSwapper(object):
             'timers',
             'timer_names',
         ]
+
+    def purge_state(self):
+        for swap_info in self.swap_params_info.values():
+            swap_info.tensors = [swap_info.tensors[0]]
+            swap_info.has_state_tensors = False
 
     def swappable_tensor(self, param=None, numel=None):
         assert param is not None or numel is not None, "Either param or numel must be provided"

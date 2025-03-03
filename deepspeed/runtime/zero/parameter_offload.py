@@ -103,6 +103,7 @@ class DeepSpeedZeRoOffload(object):
         zero_quantized_weights=False,
         zero_quantized_nontrainable_weights=False,
         zero_module_granularity_threshold=0,
+        log_trace_cache_warnings=False,
     ):
 
         see_memory_usage("DeepSpeedZeRoOffload initialize [begin]", force=True)
@@ -118,6 +119,7 @@ class DeepSpeedZeRoOffload(object):
         self.zero_param_parallel_group = zero_param_parallel_group
         self.zero_quantized_weights = zero_quantized_weights
         self.zero_quantized_nontrainable_weights = zero_quantized_nontrainable_weights
+        self.log_trace_cache_warnings = log_trace_cache_warnings
 
         if offload_param_config is not None and offload_param_config.device != OffloadDeviceEnum.none:
             self.offload_device = offload_param_config.device
@@ -165,7 +167,9 @@ class DeepSpeedZeRoOffload(object):
             timers=self.timers,
             zero_quantized_weights=self.zero_quantized_weights,
             zero_quantized_nontrainable_weights=self.zero_quantized_nontrainable_weights,
-            fast_sharding_for_leaf_module=self.fast_sharding_for_leaf_module)
+            fast_sharding_for_leaf_module=self.fast_sharding_for_leaf_module,
+            log_trace_cache_warnings=self.log_trace_cache_warnings,
+        )
 
         self.forward_hooks = []
         self.backward_hooks = []
@@ -243,7 +247,7 @@ class DeepSpeedZeRoOffload(object):
         self.module.register_forward_pre_hook(_start_of_forward_hook)
 
         #likely one of them should be enough but just to be safe
-        self._register_hooks_recursively(self.module)
+        self._register_deepspeed_module(self.module)
 
         # Add top module to stack trace
         global FWD_MODULE_STACK
@@ -269,11 +273,11 @@ class DeepSpeedZeRoOffload(object):
 
         return persistent_params
 
-    def _register_hooks_recursively(self, module, count=[0]):
+    def _register_deepspeed_module(self, module, count=[0]):
         my_count = count[0]
-        module.id = my_count
+        module.ds_id = my_count
 
-        #print(f"{module.__class__} : {module.id}")
+        #print(f"{module.__class__} : {module.ds_id}")
 
         if z3_leaf_module(module):
             for param in module.parameters():
@@ -281,7 +285,7 @@ class DeepSpeedZeRoOffload(object):
         else:
             for child in module.children():
                 count[0] = count[0] + 1
-                self._register_hooks_recursively(child, count=count)
+                self._register_deepspeed_module(child, count=count)
 
         @instrument_w_nvtx
         def _pre_forward_module_hook(module, *args):
@@ -466,14 +470,16 @@ class DeepSpeedZeRoOffload(object):
 
     @torch.no_grad()
     def post_sub_module_forward_function(self, sub_module):
-        see_memory_usage(f"After sub module function {sub_module.__class__.__name__} {sub_module.id} before release",
-                         force=False)
+        see_memory_usage(
+            f"After sub module function {sub_module.__class__.__name__} {sub_module.ds_id} before release",
+            force=False)
 
         param_coordinator = self.get_param_coordinator()
         param_coordinator.release_sub_module(sub_module)
 
-        see_memory_usage(f"After sub module function {sub_module.__class__.__name__}  {sub_module.id} after release",
-                         force=False)
+        see_memory_usage(
+            f"After sub module function {sub_module.__class__.__name__}  {sub_module.ds_id} after release",
+            force=False)
 
     @torch.no_grad()
     def pre_sub_module_backward_function(self, sub_module):
@@ -488,13 +494,13 @@ class DeepSpeedZeRoOffload(object):
     def post_sub_module_backward_function(self, sub_module):
         # assert sub_module.training, "backward pass is invalid for module in evaluation mode"
         see_memory_usage(
-            f"After sub module backward function {sub_module.__class__.__name__} {sub_module.id} before release",
+            f"After sub module backward function {sub_module.__class__.__name__} {sub_module.ds_id} before release",
             force=False)
 
         self.get_param_coordinator().release_sub_module(sub_module)
 
         see_memory_usage(
-            f"After sub module backward function {sub_module.__class__.__name__} {sub_module.id} after release",
+            f"After sub module backward function {sub_module.__class__.__name__} {sub_module.ds_id} after release",
             force=False)
 
     def _set_z3_leaf_modules_by_threshold(self, module, zero_module_granularity_threshold):

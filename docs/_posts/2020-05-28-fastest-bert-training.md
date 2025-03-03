@@ -284,7 +284,7 @@ and faster convergence.
 To try out these optimizations and training recipe, please check out our [BERT
 training tutorial](https://www.deepspeed.ai/tutorials/bert-pretraining/) and
 source code at the [DeepSpeed GitHub
-repo](https://github.com/microsoft/deepspeed).
+repo](https://github.com/deepspeedai/deepspeed).
 
 ### References
 

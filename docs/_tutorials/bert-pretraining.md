@@ -5,7 +5,7 @@ tags: training pre-training
 ---
 
 **Note:**
-On 08/15/2022 we have added another BERT pre-training/fine-tuning example at [github.com/microsoft/Megatron-DeepSpeed/tree/main/examples_deepspeed/bert_with_pile](https://github.com/microsoft/Megatron-DeepSpeed/tree/main/examples_deepspeed/bert_with_pile), which includes a README.md that describes how to use it. Compared to the example described below, the new example in Megatron-DeepSpeed adds supports of ZeRO and tensor-slicing model parallelism (thus support larger model scale), uses a public and richer [Pile dataset](https://github.com/EleutherAI/the-pile) (user can also use their own data), together with some changes to the model architecture and training hyperparameters as described in [this paper](https://arxiv.org/abs/1909.08053). As a result, the BERT models trained by the new example is able to provide better MNLI results than original BERT, but with a slightly different model architecture and larger computation requirements. If you want to train a larger-scale or better quality BERT-style model, we recommend to follow the new example in Megatron-DeepSpeed. If your goal is to strictly reproduce the original BERT model, we recommend to follow the example under DeepSpeedExamples/bing_bert as described below. On the other hand, the tutorial below helps explaining how to integrate DeepSpeed into a pre-training codebase, regardless of which BERT example you use.
+On 08/15/2022 we have added another BERT pre-training/fine-tuning example at [github.com/deepspeedai/Megatron-DeepSpeed/tree/main/examples_deepspeed/bert_with_pile](https://github.com/deepspeedai/Megatron-DeepSpeed/tree/main/examples_deepspeed/bert_with_pile), which includes a README.md that describes how to use it. Compared to the example described below, the new example in Megatron-DeepSpeed adds supports of ZeRO and tensor-slicing model parallelism (thus support larger model scale), uses a public and richer [Pile dataset](https://github.com/EleutherAI/the-pile) (user can also use their own data), together with some changes to the model architecture and training hyperparameters as described in [this paper](https://arxiv.org/abs/1909.08053). As a result, the BERT models trained by the new example is able to provide better MNLI results than original BERT, but with a slightly different model architecture and larger computation requirements. If you want to train a larger-scale or better quality BERT-style model, we recommend to follow the new example in Megatron-DeepSpeed. If your goal is to strictly reproduce the original BERT model, we recommend to follow the example under DeepSpeedExamples/bing_bert as described below. On the other hand, the tutorial below helps explaining how to integrate DeepSpeed into a pre-training codebase, regardless of which BERT example you use.
 {: .notice--info}
 
 In this tutorial we will apply DeepSpeed to pre-train the BERT
@@ -26,7 +26,7 @@ We work from adaptations of
 [huggingface/transformers](https://github.com/huggingface/transformers) and
 [NVIDIA/DeepLearningExamples](https://github.com/NVIDIA/DeepLearningExamples).
 We have forked this repo under
-[DeepSpeedExamples/bing_bert](https://github.com/microsoft/DeepSpeedExamples/tree/master/bing_bert)
+[DeepSpeedExamples/bing_bert](https://github.com/deepspeedai/DeepSpeedExamples/tree/master/bing_bert)
 and made several modifications in their script:
 
   * We adopted the modeling code from NVIDIA's BERT under `bing_bert/nvidia/`.
@@ -360,7 +360,7 @@ the scripts/json configs in our DeepSpeedExamples repo. Below is a table contain
 summary of the configurations. Specifically see the
 `ds_train_bert_bsz64k_seq128.sh` and `ds_train_bert_bsz32k_seq512.sh` scripts
 for more details in
-[DeepSpeedExamples](https://github.com/microsoft/DeepSpeedExamples/tree/master/bing_bert).
+[DeepSpeedExamples](https://github.com/deepspeedai/DeepSpeedExamples/tree/master/bing_bert).
 
 
 | Parameters               | 128 Sequence              | 512 Sequence              |

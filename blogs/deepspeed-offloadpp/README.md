@@ -43,7 +43,7 @@ We conduct our performance evaluations over both A100 and H100 DGX machine and t
 
 ## Tutorials
 
-Examples and Tutorials are [here](https://github.com/microsoft/Megatron-DeepSpeed/blob/main/examples_deepspeed/offload_pp/README.md)
+Examples and Tutorials are [here](https://github.com/deepspeedai/Megatron-DeepSpeed/blob/main/examples_deepspeed/offload_pp/README.md)
 
 ## Contributors:
 

@@ -10,4 +10,4 @@ We introduce a new technology called progressive layer dropping (PLD) to speedup
 
   * For detailed technology deep dive, see our [technical report](https://arxiv.org/pdf/2010.13369.pdf).
   * For more information on how to use PLD, see our [Progressive layer dropping tutorial](https://www.deepspeed.ai/tutorials/progressive_layer_dropping/).
-  * The source code for PLD is now available at the [DeepSpeed repo](https://github.com/microsoft/deepspeed).
+  * The source code for PLD is now available at the [DeepSpeed repo](https://github.com/deepspeedai/deepspeed).

@@ -14,7 +14,7 @@ example (DeepSpeedExamples/training/BingBertSquad) we will be going over in the 
 this tutorial.
 
 ```shell
-git clone https://github.com/microsoft/DeepSpeed
+git clone https://github.com/deepspeedai/DeepSpeed
 cd DeepSpeed
 git submodule update --init --recursive
 cd DeepSpeedExamples/training/BingBertSquad

@@ -554,6 +554,7 @@ class TestInjectionPolicy(DistributedTest):
 
 
 @pytest.mark.seq_inference
+@pytest.mark.parametrize('keep_module_on_host', [True, False])
 @pytest.mark.parametrize(
     "model_w_task",
     [("Helsinki-NLP/opus-mt-en-de", "translation"), ("Salesforce/codegen-350M-mono", "text-generation")],
@@ -570,6 +571,7 @@ class TestAutoTensorParallelism(DistributedTest):
         inf_kwargs,
         assert_fn,
         dtype,
+        keep_module_on_host,
     ):
         invalid_test_msg = validate_test(model_w_task, dtype, enable_cuda_graph=False, enable_triton=False)
         if invalid_test_msg:
@@ -592,12 +594,19 @@ class TestAutoTensorParallelism(DistributedTest):
                         framework="pt")
         bs_output = pipe(query, **inf_kwargs)
 
-        pipe.model = deepspeed.init_inference(pipe.model, mp_size=world_size, dtype=dtype)
+        pipe.model = deepspeed.init_inference(pipe.model,
+                                              mp_size=world_size,
+                                              dtype=dtype,
+                                              keep_module_on_host=keep_module_on_host)
         ds_output = pipe(query, **inf_kwargs)
 
         print(local_rank, "baseline", bs_output)
         print(local_rank, "deepspeed", ds_output)
         assert assert_fn(bs_output, ds_output)
+
+        if keep_module_on_host:
+            for name, param in model.named_parameters():
+                assert param.device == torch.device('cpu'), f"keep_module_on_host is on but param {name} is not on cpu"
 
     @pytest.mark.world_size(3)
     def test_odd_world_size(
@@ -607,6 +616,7 @@ class TestAutoTensorParallelism(DistributedTest):
         inf_kwargs,
         assert_fn,
         dtype,
+        keep_module_on_host,
     ):
         invalid_test_msg = validate_test(model_w_task, dtype, enable_cuda_graph=False, enable_triton=False)
         if invalid_test_msg:
@@ -624,12 +634,19 @@ class TestAutoTensorParallelism(DistributedTest):
                         framework="pt")
         bs_output = pipe(query, **inf_kwargs)
 
-        pipe.model = deepspeed.init_inference(pipe.model, mp_size=world_size, dtype=dtype)
+        pipe.model = deepspeed.init_inference(pipe.model,
+                                              mp_size=world_size,
+                                              dtype=dtype,
+                                              keep_module_on_host=keep_module_on_host)
         ds_output = pipe(query, **inf_kwargs)
 
         print(local_rank, "baseline", bs_output)
         print(local_rank, "deepspeed", ds_output)
         assert assert_fn(bs_output, ds_output)
+
+        if keep_module_on_host:
+            for name, param in model.named_parameters():
+                assert param.device == torch.device('cpu'), f"keep_module_on_host is on but param {name} is not on cpu"
 
 
 @pytest.mark.nightly

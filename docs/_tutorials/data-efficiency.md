@@ -20,7 +20,7 @@ Curriculum learning has been successfully applied to various training tasks (see
 ### 1.3 How to use Curriculum Learning
 
 #### 1.3.1 GPT-3 and BERT pretraining
-The `examples_deepspeed/data_efficiency` directory in our [Megatron-DeepSpeed repo](https://github.com/microsoft/Megatron-DeepSpeed) includes our examples of how to apply curriculum learning to GPT-3 and BERT pretraining. There are 3 steps: data analysis, pretraining, and eval/finetuning.
+The `examples_deepspeed/data_efficiency` directory in our [Megatron-DeepSpeed repo](https://github.com/deepspeedai/Megatron-DeepSpeed) includes our examples of how to apply curriculum learning to GPT-3 and BERT pretraining. There are 3 steps: data analysis, pretraining, and eval/finetuning.
 
 **Data analysis:** Curriculum learning requires a data analysis before pretraining that calculate the difficulty of each data sample (based on the metric provided by user), and build an index that map difficulty value to corresponding data samples. (There are exceptions: for example the truncation-based sequence length metric can be achieved by data postprocessing without data analysis.) We provide a data analyzer to perform the offline CPU-only data analysis.
 
@@ -31,7 +31,7 @@ The `examples_deepspeed/data_efficiency` directory in our [Megatron-DeepSpeed re
 **Eval/finetuning** `examples_deepspeed/data_efficiency/gpt/eval/` and `examples_deepspeed/data_efficiency/bert/finetune` include the example scripts for GPT-3 model's zero-/few-shot evaluation and BERT model's finetuning. Our [paper](https://arxiv.org/abs/2212.03597) includes the reference eval/finetune results if you follow our example scripts to perform the pretraining/eval/finetuning.
 
 #### 1.3.2 GPT-2 finetuning
-The `data_efficiency/gpt_finetuning` directory in our [DeepSpeedExamples repo](https://github.com/microsoft/DeepSpeedExamples) includes our examples of how to apply curriculum learning to GPT-2 finetuning. `data_efficiency/gpt_finetuning/finetune/ds_finetune_gpt2_run.sh` is the example finetuning script. For CL metrics that require data analysis (e.g., the vocabulary rarity metric), you need to first use ```data_efficiency/gpt_finetuning/finetune/ds_analyze_gpt_data_*``` to analyze and index the dataset, similar to the GPT-3 pre-training case described above in 1.3.1.
+The `data_efficiency/gpt_finetuning` directory in our [DeepSpeedExamples repo](https://github.com/deepspeedai/DeepSpeedExamples) includes our examples of how to apply curriculum learning to GPT-2 finetuning. `data_efficiency/gpt_finetuning/finetune/ds_finetune_gpt2_run.sh` is the example finetuning script. For CL metrics that require data analysis (e.g., the vocabulary rarity metric), you need to first use ```data_efficiency/gpt_finetuning/finetune/ds_analyze_gpt_data_*``` to analyze and index the dataset, similar to the GPT-3 pre-training case described above in 1.3.1.
 
 ## 2. Random layerwise token dropping (random-LTD)
 
@@ -44,14 +44,14 @@ When you want to pretrain/fine-tune a transformer-based model, it is always a go
 ### 2.3 How to use random-LTD
 
 #### 2.3.1 GPT-3 and BERT pretraining
-The `examples_deepspeed/data_efficiency` directory in our [Megatron-DeepSpeed repo](https://github.com/microsoft/Megatron-DeepSpeed) includes our examples of how to apply random-LTD to GPT-3 and BERT pretraining.
+The `examples_deepspeed/data_efficiency` directory in our [Megatron-DeepSpeed repo](https://github.com/deepspeedai/Megatron-DeepSpeed) includes our examples of how to apply random-LTD to GPT-3 and BERT pretraining.
 
 `examples_deepspeed/data_efficiency/gpt/pretrain` and `examples_deepspeed/data_efficiency/bert/pretrain` include the example pretraining scripts with random-LTD feature. Several changes are needed to enable random-LTD during pretraining: (1) User need to provide a DeepSpeed json config file which includes configurations for random-LTD (see [list of configuration](/docs/config-json/#data-efficiency) for details). We provide tested example configurations in `examples_deepspeed/data_efficiency/gpt/pretrain/ds_pretrain_gpt_1.3B_dense_run.sh` and `examples_deepspeed/data_efficiency/bert/pretrain/ds_pretrain_bert_336M_run.sh`. (2) After initializing the DeepSpeed engine via `deepspeed.initialize`, user needs to use the `convert_to_random_ltd` API to convert and wrap the model layers in order to enable the random-LTD feature. We provide an example implementation of this change in `megatron/training.py` function `setup_model_and_optimizer`. (3) In order for random-LTD to understand the input argument mapping of the forward function, user need to change all the input arguments (except the hidden_states input) into keyword/named argument. For example, in `megatron/model/transformer.py` we changed the forward function from `def forward(self, hidden_states, attention_mask, encoder_output=None, enc_dec_attn_mask=None, layer_past=None, get_key_value=False):` to `def forward(self, hidden_states, attention_mask=None, encoder_output=None, enc_dec_attn_mask=None, layer_past=None, get_key_value=False):`. (4) When saving model checkpoints, (especially if the state dictionary has non-traditional structure) user needs to use the `remove_random_ltd_state_dict` API to convert the random-LTD-wrapped layers back to original model layers. We provide an example implementation of this change in `megatron/model/language_model.py`.
 
 For eval/finetuning of the pretrained model, see [previous section](#131-gpt-3-and-bert-pretraining) about how to use our example scripts.
 
 #### 2.3.2 GPT-2 and ViT finetuning
-The `data_efficiency` directory in our [DeepSpeedExamples repo](https://github.com/microsoft/DeepSpeedExamples) includes our examples of how to apply random-LTD to GPT-2 and ViT finetuning.
+The `data_efficiency` directory in our [DeepSpeedExamples repo](https://github.com/deepspeedai/DeepSpeedExamples) includes our examples of how to apply random-LTD to GPT-2 and ViT finetuning.
 
 Just like pretraining case, similar changes are required to enable random-LTD for finetuning: (1) DeepSpeed json config file. (2) Use the `convert_to_random_ltd` API to convert and wrap the model layers. (3) When saving model checkpoints, use the `remove_random_ltd_state_dict` API to convert the random-LTD-wrapped layers back to original model layers.
 
@@ -92,9 +92,9 @@ iter 5474 | LR [0.0001]| val_acc 97.97000122070312 | layer_token 305784192
 ## 3. Composing curriculum learning and random-LTD to achieve more
 
 ### 3.1 GPT-3 and BERT pretraining
-The `examples_deepspeed/data_efficiency` directory in our [Megatron-DeepSpeed repo](https://github.com/microsoft/Megatron-DeepSpeed) includes our examples of how to compose curriculum learning random-LTD, and apply both of them to GPT-3 and BERT pretraining.
+The `examples_deepspeed/data_efficiency` directory in our [Megatron-DeepSpeed repo](https://github.com/deepspeedai/Megatron-DeepSpeed) includes our examples of how to compose curriculum learning random-LTD, and apply both of them to GPT-3 and BERT pretraining.
 
 The changes needed are the same as described in previous two sections, since DeepSpeed Data Efficiency already handles the complexity when composing the two techniques. However, one thing to note is that since both random-LTD and some of the curriculum learning metrics will change the sequence length, it could require some extra code to calculate the effective sequence length at each step. We provide an example implementation of this change in `megatron/training.py` function `train` where we calculate the `actual_seq_length`.
 
 #### 3.2 GPT-2 finetuning
-The `data_efficiency/gpt_finetuning` directory in our [DeepSpeedExamples repo](https://github.com/microsoft/DeepSpeedExamples) includes our examples of how to compose curriculum learning random-LTD for GPT-2 finetuning. `data_efficiency/gpt_finetuning/finetune/ds_finetune_gpt2_run.sh` is the example finetuning script.
+The `data_efficiency/gpt_finetuning` directory in our [DeepSpeedExamples repo](https://github.com/deepspeedai/DeepSpeedExamples) includes our examples of how to compose curriculum learning random-LTD for GPT-2 finetuning. `data_efficiency/gpt_finetuning/finetune/ds_finetune_gpt2_run.sh` is the example finetuning script.

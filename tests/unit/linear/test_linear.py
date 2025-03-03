@@ -46,7 +46,6 @@ class TestLoRALinear(DistributedTest):
 
     def test(self, base_weight_sharding):
         rank = dist.get_rank()
-        lora_config = None
         quantization_config = None
 
         input_features = 64  # Number of input features
@@ -77,15 +76,13 @@ class TestQuantLinear(DistributedTest):
     world_size = 2
 
     def test(self, q_bits):
-        rank = dist.get_rank()
-        lora_config = None
-
         input_features = 64  # Number of input features
         output_features = 64  # Number of output features
         batch_size = 5  # Number of samples in a batch
 
         lora_config = None
         quantization_config = QuantizationConfig(q_bits=q_bits)
+        quantization_config.q_dtype = FPQuantizerBuilder.get_default_quant_dtype()
 
         linear_layer = OptimizedLinear(input_dim=input_features,
                                        output_dim=output_features,
@@ -106,15 +103,13 @@ class TestOptimizedLinear(DistributedTest):
     world_size = 2
 
     def test(self, base_weight_sharding, q_bits):
-        rank = dist.get_rank()
-        lora_config = None
-
         input_features = 64  # Number of input features
         output_features = 64  # Number of output features
         batch_size = 5  # Number of samples in a batch
 
         lora_config = LoRAConfig(lora_r=16, lora_alpha=16, base_weight_sharding=base_weight_sharding)
         quantization_config = QuantizationConfig(q_bits=q_bits)
+        quantization_config.q_dtype = FPQuantizerBuilder.get_default_quant_dtype()
 
         linear_layer = OptimizedLinear(input_dim=input_features,
                                        output_dim=output_features,

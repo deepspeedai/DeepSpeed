@@ -15,7 +15,7 @@ from deepspeed.accelerator import get_accelerator
 from .replace_policy import replace_policies, generic_policies
 from .auto_tp import AutoTP, ReplaceWithTensorSlicing, Loading
 from .layers import TensorParallelOcShardConv2d, TensorParallelIcShardConv2d
-
+from deepspeed.module_inject.layers import is_autotp_training_mode
 from deepspeed import comm as dist
 from deepspeed.module_inject.tp_shard import set_num_kv_heads, set_n_embd, set_num_attention_heads, set_tp_grain_size
 
@@ -268,7 +268,8 @@ def replace_transformer_layer(orig_layer_impl, model, checkpoint_dict, config, m
         #mp_replace = ReplaceWithTensorSlicing(mp_group=config.tensor_parallel.tp_group)
 
         # 1. Create AutoTP object
-        _autotp = AutoTP(module, all_reduce_linears, prefix, state_dict, linear_layer_setting, orig_layer_impl)
+        _autotp = AutoTP(module, all_reduce_linears, prefix, state_dict, linear_layer_setting, orig_layer_impl,
+                         config.keep_module_on_host)
 
         # 2. Set the tensor parallelism config
         _autotp.set_tensor_parallel_config(config.tensor_parallel.tp_size, config.tensor_parallel.tp_group)
@@ -322,7 +323,7 @@ def replace_transformer_layer(orig_layer_impl, model, checkpoint_dict, config, m
 
         else:
             # copy relevant state from child -> new module
-            if config.replace_with_kernel_inject:
+            if not is_autotp_training_mode() and config.replace_with_kernel_inject:
                 new_module = replace_with_policy(child,
                                                  _policy,
                                                  config.triangular_masking,
@@ -334,6 +335,10 @@ def replace_transformer_layer(orig_layer_impl, model, checkpoint_dict, config, m
         return new_module
 
     def set_lm_head(module):
+        if is_autotp_training_mode():
+            # we need to handle autoTP training mode separately.
+            return
+
         embedding_weight = None
         for n, p in module.named_parameters():
             if "word_embeddings." in n or "embed_tokens." in n or "wte." in n:
@@ -474,7 +479,7 @@ def replace_transformer_layer(orig_layer_impl, model, checkpoint_dict, config, m
         set_lm_head(replaced_module)
         print(f"checkpoint loading time at rank {rank}: {time.time()-start_time} sec")
 
-    if config.save_mp_checkpoint_path is not None:
+    if not is_autotp_training_mode() and config.save_mp_checkpoint_path is not None:
         from collections import OrderedDict
         import json
         num_partitions = 8
@@ -643,7 +648,7 @@ def replace_module(model, orig_class, replace_fn, _replace_policy, checkpoint=No
                 policy.update({plcy._orig_layer_class: (replace_fn, plcy)})
     assert len(policy.items()) > 0,\
         "No default policy found! Please specify your policy injection_policy (like {BertLayer:HFBEertLayerPolicy})." +\
-        "You can find some samples here: https://github.com/microsoft/DeepSpeed/blob/master/deepspeed/module_inject/replace_policy.py"
+        "You can find some samples here: https://github.com/deepspeedai/DeepSpeed/blob/master/deepspeed/module_inject/replace_policy.py"
 
     replaced_module, _ = _replace_module(model, policy, state_dict=sd)
     return replaced_module

@@ -45,7 +45,7 @@ class InferenceCutlassBuilder(CUDAOpBuilder):
     def filter_ccs(self, ccs):
         ccs_retained = []
         ccs_pruned = []
-        for cc in ccs:
+        for cc in [cc.split('.') for cc in ccs]:
             if int(cc[0]) >= 8:
                 # Only support Ampere and newer
                 ccs_retained.append(cc)

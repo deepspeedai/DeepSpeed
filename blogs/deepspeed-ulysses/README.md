@@ -367,4 +367,4 @@ on X, formerly Twitter, ([English](https://twitter.com/MSFTDeepSpeed), [Japanese
 We are open to collaborations with universities, research labs, and
 companies. For such requests (and other requests unsuitable for GitHub),
 please directly email to <deepspeed-info@microsoft.com>. If you like
-our work, please "Star" our [repo](https://github.com/microsoft/DeepSpeed).
+our work, please "Star" our [repo](https://github.com/deepspeedai/DeepSpeed).

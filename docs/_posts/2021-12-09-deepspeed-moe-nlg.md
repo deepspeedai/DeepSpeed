@@ -170,9 +170,9 @@ high quality language models accessible to a broad audience, even with limited
 compute resources.
 
 To this end we are releasing our [end-to-end pipeline for training MoE based
-NLG models](https://github.com/microsoft/Megatron-DeepSpeed/tree/moe-training),
+NLG models](https://github.com/deepspeedai/Megatron-DeepSpeed/tree/moe-training),
 along with [specific example
-scripts](https://github.com/microsoft/Megatron-DeepSpeed/tree/moe-training/examples_deepspeed/MoE)
+scripts](https://github.com/deepspeedai/Megatron-DeepSpeed/tree/moe-training/examples_deepspeed/MoE)
 and [tutorial](/tutorials/mixture-of-experts-nlg) to help get started with our pipeline.  We look forward to the application and
 the innovations that this may bring to the deep learning community.
 

@@ -16,7 +16,7 @@ In this tutorial we describe how to use DeepSpeed Sparse Attention (SA) and its 
   * `Attention mask`
   * `Key padding mask`
 on the intermediate attention scores. For more details about self attention, please check [MultiHeadAttention](https://pytorch.org/docs/master/generated/torch.nn.MultiheadAttention.html#multiheadattention).
-* **BertSparseSelfAttention**: This module contains a simplified BertSelfAttention layer that can be used instead of original dense Bert Self-Attention layer. Our implementation is based on [DeepSpeedExample](https://github.com/microsoft/DeepSpeedExamples/blob/master/bing_bert/nvidia/modelingpreln.py#L373-#L434).
+* **BertSparseSelfAttention**: This module contains a simplified BertSelfAttention layer that can be used instead of original dense Bert Self-Attention layer. Our implementation is based on [DeepSpeedExample](https://github.com/deepspeedai/DeepSpeedExamples/blob/master/bing_bert/nvidia/modelingpreln.py#L373-#L434).
 * **SparseAttentionUtils**: This module provides few utility functions to handle adapting pre-trained model with sparse attention:
   * `replace_model_self_attention_with_sparse_self_attention`: If you have currently loaded a model and want to replace self-attention module with sparse self-attention, you can simply use this function to handle it for you. It currently handles BERT and RoBERTa based pre-trained models, but you can extend it base on your model type if it is different from these two. You also need to extend the position embedding to handle new sequence length; this can be done using `extend_position_embedding` function.
   * `update_tokenizer_model_max_length`: This function simply updates maximum position embedding in your tokenizer with the new value.
@@ -34,9 +34,9 @@ on the intermediate attention scores. For more details about self attention, ple
 {: .notice--warning}
 
 ## How to use sparse attention with DeepSpeed launcher
-In this section we describe how to use DeepSpeed Sparse Attention through our [bing_bert](https://github.com/microsoft/DeepSpeedExamples/blob/master/bing_bert/nvidia/modelingpreln.py) code.
+In this section we describe how to use DeepSpeed Sparse Attention through our [bing_bert](https://github.com/deepspeedai/DeepSpeedExamples/blob/master/bing_bert/nvidia/modelingpreln.py) code.
 
-* **Update attention module**: First, you need to update your attention module based on sparse computation. Here, we use [BertSparseSelfAttention](https://github.com/microsoft/DeepSpeed/blob/master/deepspeed/ops/sparse_attention/bert_sparse_self_attention.py) which is the sparse version of `BertSelfAttention` from our [bing_bert](https://github.com/microsoft/DeepSpeedExamples/blob/master/bing_bert/nvidia/modelingpreln.py) code. It rewrites `BertSelfAttention` where it replaces:
+* **Update attention module**: First, you need to update your attention module based on sparse computation. Here, we use [BertSparseSelfAttention](https://github.com/deepspeedai/DeepSpeed/blob/master/deepspeed/ops/sparse_attention/bert_sparse_self_attention.py) which is the sparse version of `BertSelfAttention` from our [bing_bert](https://github.com/deepspeedai/DeepSpeedExamples/blob/master/bing_bert/nvidia/modelingpreln.py) code. It rewrites `BertSelfAttention` where it replaces:
 
 ```python
 attention_scores = torch.matmul(query_layer, key_layer)
@@ -68,7 +68,7 @@ context_layer =
 	key_padding_mask=attention_mask)
 ```
 
-in which `sparse_self_attention` is an instance of [SparseSelfAttention](https://github.com/microsoft/DeepSpeed/blob/master/deepspeed/ops/sparse_attention/sparse_self_attention.py). This module computes attention context through sparse attention replacing underlying matrix multiplications and softmax with their equivalent sparse version. You can update any other attention module similarly.
+in which `sparse_self_attention` is an instance of [SparseSelfAttention](https://github.com/deepspeedai/DeepSpeed/blob/master/deepspeed/ops/sparse_attention/sparse_self_attention.py). This module computes attention context through sparse attention replacing underlying matrix multiplications and softmax with their equivalent sparse version. You can update any other attention module similarly.
 
 * **Setup sparse attention config in the model**: You need to setup the sparse attention config. In our example, this is done in the `BertModel`.
 
@@ -82,7 +82,7 @@ self.encoder = BertEncoder(
    config, args, sparse_attention_config=self.sparse_attention_config)
 ```
 
-* **Update encoder model**: Further, you need to update your encoder model to use SA for the attention layer when SA is enabled. Please check our [bing_bert example](https://github.com/microsoft/DeepSpeedExamples/blob/master/bing_bert/nvidia/modelingpreln.py) in which we use `BertSparseSelfAttention` instead of `BertSelfAttention` when SA is enabled.
+* **Update encoder model**: Further, you need to update your encoder model to use SA for the attention layer when SA is enabled. Please check our [bing_bert example](https://github.com/deepspeedai/DeepSpeedExamples/blob/master/bing_bert/nvidia/modelingpreln.py) in which we use `BertSparseSelfAttention` instead of `BertSelfAttention` when SA is enabled.
 
 ```python
 if sparse_attention_config is not None:
@@ -92,7 +92,7 @@ if sparse_attention_config is not None:
          config, sparsity_config=sparse_attention_config)
 ```
 
-* **Pad and unpad input data**: Also you may need to pad sequence dimension of `input_ids` and `attention_mask` to be multiple of sparse block size. As mentioned in [module](#sparse-attention-modules) section above, DeepSpeed provides utility functions for padding and unpadding. Please check our [bing_bert example](https://github.com/microsoft/DeepSpeedExamples/blob/master/bing_bert/nvidia/modelingpreln.py) to see where and how pad and unpad the inputs or outputs of the model.
+* **Pad and unpad input data**: Also you may need to pad sequence dimension of `input_ids` and `attention_mask` to be multiple of sparse block size. As mentioned in [module](#sparse-attention-modules) section above, DeepSpeed provides utility functions for padding and unpadding. Please check our [bing_bert example](https://github.com/deepspeedai/DeepSpeedExamples/blob/master/bing_bert/nvidia/modelingpreln.py) to see where and how pad and unpad the inputs or outputs of the model.
 
 ```python
 if self.sparse_attention_config is not None:
@@ -120,9 +120,9 @@ if self.sparse_attention_config is not None and pad_len > 0:
 --deepspeed_sparse_attention
 ```
 
-Please check [our bing_bert runner script](https://github.com/microsoft/DeepSpeedExamples/blob/master/bing_bert/ds_sa_train_bert_bsz64k_seq128.sh) as an example of how to enable SA with DeepSpeed launcher.
+Please check [our bing_bert runner script](https://github.com/deepspeedai/DeepSpeedExamples/blob/master/bing_bert/ds_sa_train_bert_bsz64k_seq128.sh) as an example of how to enable SA with DeepSpeed launcher.
 
-* **Add sparsity config**: The sparsity config can be set through the [DeepSpeed JSON config file](https://github.com/microsoft/DeepSpeedExamples/blob/master/bing_bert/deepspeed_bsz64k_lamb_config_seq128.json). In this example, we have used `fixed` sparsity mode that will be described in [How to config sparsity structures](#how-to-config-sparsity-structures) section.
+* **Add sparsity config**: The sparsity config can be set through the [DeepSpeed JSON config file](https://github.com/deepspeedai/DeepSpeedExamples/blob/master/bing_bert/deepspeed_bsz64k_lamb_config_seq128.json). In this example, we have used `fixed` sparsity mode that will be described in [How to config sparsity structures](#how-to-config-sparsity-structures) section.
 
 ```json
 "sparse_attention": {

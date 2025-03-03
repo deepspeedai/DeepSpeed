@@ -508,7 +508,7 @@ class OneCycle(object):
     def _initialize_momentum(self, optimizer, cycle_min_mom, cycle_max_mom, decay_mom_rate, last_batch_iteration):
         if 'betas' not in optimizer.defaults:
             optimizer_name = type(optimizer).__name__
-            logger.warn(
+            logger.warning(
                 f"cycle_momentum is disabled because optimizer {optimizer_name} does not support momentum, no betas attribute in defaults"
             )
             self.cycle_momentum = False

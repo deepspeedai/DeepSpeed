@@ -28,7 +28,7 @@ Since, ZeRO is a replacement to data parallelism, it offers a seamless integrati
 
 ## Deciding which technology to use
 
-**3D Parallelism for GPT-2/GPT-3 like models**: If you are attempting to train a model whose architecture resembles very closely with GPT-2 or GPT-3, then we have already done the hard work of porting 3D parallelism to a GPT-2/GPT-3 architecture-based model and have created a training pipeline that you can use to efficiently train models with hundreds of billion or even trillions of parameters. Both Megatron-Turing NLG 530B and Big Science use a variation of this code base to scale the model training. You can find the code and tutorial to get started in the [DeepSpeed-Megatron GPT-3](https://github.com/microsoft/megatron-deepspeed) repo. For more information on 3D parallelism please checkout the resources below:
+**3D Parallelism for GPT-2/GPT-3 like models**: If you are attempting to train a model whose architecture resembles very closely with GPT-2 or GPT-3, then we have already done the hard work of porting 3D parallelism to a GPT-2/GPT-3 architecture-based model and have created a training pipeline that you can use to efficiently train models with hundreds of billion or even trillions of parameters. Both Megatron-Turing NLG 530B and Big Science use a variation of this code base to scale the model training. You can find the code and tutorial to get started in the [DeepSpeed-Megatron GPT-3](https://github.com/deepspeedai/megatron-deepspeed) repo. For more information on 3D parallelism please checkout the resources below:
 
 [3D Parallelism Tutorial](https://www.deepspeed.ai/tutorials/pipeline/) A generic tutorial on how to port your model to use DeepSpeed 3D parallelism
 

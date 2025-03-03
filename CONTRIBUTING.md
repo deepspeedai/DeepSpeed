@@ -23,7 +23,7 @@ and then repeat the previous `git commit` command.
 ## Testing
 DeepSpeed tracks two types of tests: unit tests and more costly model convergence tests.
 The model convergence tests train
-[DeepSpeedExamples](https://github.com/microsoft/DeepSpeedExamples/) and measure
+[DeepSpeedExamples](https://github.com/deepspeedai/DeepSpeedExamples/) and measure
 end-to-end convergence and related metrics. Unit tests are found in `tests/unit/` and
 the model convergence tests are found in `tests/model/`.
 
@@ -40,7 +40,7 @@ tests. Note that [pytest-forked](https://github.com/pytest-dev/pytest-forked) an
 
 ### Model Tests
 To execute model tests, first [install DeepSpeed](#installation). The
-[DeepSpeedExamples](https://github.com/microsoft/DeepSpeedExamples/) repository is cloned
+[DeepSpeedExamples](https://github.com/deepspeedai/DeepSpeedExamples/) repository is cloned
 as part of this process. Next, execute the model test driver:
 ```bash
 cd tests/model/
@@ -85,8 +85,8 @@ Based on the issue we shall discuss the merit of the new feature and decide whet
 ### Step 2: implementation and verification
 Contributor will go ahead and implement the feature, and the DeepSpeed team will provide guidance/helps as needed. The required deliverables include:
 
-* A PR to [microsoft/DeepSpeed](https://github.com/microsoft/DeepSpeed) including (1) the feature implementation (2) unit tests (3) documentation (4) tutorial
-* A PR to [microsoft/DeepSpeedExamples](https://github.com/microsoft/DeepSpeedExamples) or [microsoft/Megatron-DeepSpeed](https://github.com/microsoft/Megatron-DeepSpeed) including the examples of how to use the feature (this is related to the planned testing experiments in proposal)
+* A PR to [deepspeedai/DeepSpeed](https://github.com/deepspeedai/DeepSpeed) including (1) the feature implementation (2) unit tests (3) documentation (4) tutorial
+* A PR to [deepspeedai/DeepSpeedExamples](https://github.com/deepspeedai/DeepSpeedExamples) or [deepspeedai/Megatron-DeepSpeed](https://github.com/deepspeedai/Megatron-DeepSpeed) including the examples of how to use the feature (this is related to the planned testing experiments in proposal)
 * In the implementation (code, documentation, tutorial), we require the feature author to record their GitHub username as a contact method for future questions/maintenance.
 
 After receiving the PRs, we will review them and merge them after necessary tests/fixes.

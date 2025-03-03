@@ -15,6 +15,7 @@ if not deepspeed.ops.__compatible_ops__[FPQuantizerBuilder.NAME]:
 from deepspeed.ops.fp_quantizer import FP_Quantize, matmul_fp8
 
 from deepspeed import get_accelerator
+from deepspeed.linear import QuantizationConfig
 
 
 @pytest.mark.parametrize("dtype", [torch.bfloat16], ids=["bf16"])
@@ -25,7 +26,9 @@ from deepspeed import get_accelerator
 def test_fp_quant(dtype, q_bits, M):
     device_name = get_accelerator().device_name()
     quantization_group_size = 128
-    fpq = FP_Quantize(group_size=quantization_group_size)
+    quant_config = QuantizationConfig(q_dtype=FPQuantizerBuilder.get_default_quant_dtype(),
+                                      group_size=quantization_group_size)
+    fpq = FP_Quantize(quantization_config=quant_config)
 
     N = 8192
     H = 4096

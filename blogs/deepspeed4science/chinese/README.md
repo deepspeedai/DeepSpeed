@@ -123,11 +123,11 @@ DeepSpeed4Science的旅程始于两个开创性的基于LLM的结构生物学研
 *图9：由不同框架在不同规模下支持的两个GenSLMs模型的最大序列长度。使用NVIDIA DGX，每个节点有八个40G A100 GPU。*
 </div>
 
-具体在系统层面，我们发布了包括[长序列支持和其他新优化](https://github.com/microsoft/Megatron-DeepSpeed/tree/main/examples_deepspeed/deepspeed4science/megatron_long_seq_support)的最新的[Megatron-DeepSpeed框架](https://github.com/microsoft/Megatron-DeepSpeed)。科学家现在可以通过我们新添加的内存优化技术（如注意力掩码异步处理和位置码分割）、张量并行、流水线并行、序列并行、基于ZeRO的数据并行和模型状态异步处理等技术的协同组合，用更长的序列训练他们的GenSLMs等大型科学模型。图9展示了我们的新版本使GenSLMs的25B和33B模型的最长序列长度分别比之前的Megatron-DeepSpeed版本增加了12倍和14倍。在支持的序列长度方面，这个新Megatron-DeepSpeed框架也显著地超过了NVIDIA的Megatron-LM（对于25B和33B模型分别高达9.8倍和9.1倍）。例如，阿贡实验室团队的GenSLMs 25B模型在64个GPU上的原始序列长度为42K，而现在可以用512K的核苷酸序列进行训练。这在不损失准确性的条件下大大提高了模型质量和科学发现的范围。对于那些更喜欢相对位置编码技术这样的算法策略的领域科学家，这个[新版本](https://deepspeed4science.ai/2023/09/18/model-showcase-genslms/)也进行了集成。
+具体在系统层面，我们发布了包括[长序列支持和其他新优化](https://github.com/deepspeedai/Megatron-DeepSpeed/tree/main/examples_deepspeed/deepspeed4science/megatron_long_seq_support)的最新的[Megatron-DeepSpeed框架](https://github.com/deepspeedai/Megatron-DeepSpeed)。科学家现在可以通过我们新添加的内存优化技术（如注意力掩码异步处理和位置码分割）、张量并行、流水线并行、序列并行、基于ZeRO的数据并行和模型状态异步处理等技术的协同组合，用更长的序列训练他们的GenSLMs等大型科学模型。图9展示了我们的新版本使GenSLMs的25B和33B模型的最长序列长度分别比之前的Megatron-DeepSpeed版本增加了12倍和14倍。在支持的序列长度方面，这个新Megatron-DeepSpeed框架也显著地超过了NVIDIA的Megatron-LM（对于25B和33B模型分别高达9.8倍和9.1倍）。例如，阿贡实验室团队的GenSLMs 25B模型在64个GPU上的原始序列长度为42K，而现在可以用512K的核苷酸序列进行训练。这在不损失准确性的条件下大大提高了模型质量和科学发现的范围。对于那些更喜欢相对位置编码技术这样的算法策略的领域科学家，这个[新版本](https://deepspeed4science.ai/2023/09/18/model-showcase-genslms/)也进行了集成。
 
 ## 总结和路线图
 
-我们非常自豪和兴奋地宣布DeepSpeed4Science计划以及几个研发亮点和成果。从今天开始，我们将在[deepspeed4science.ai](https://deepspeed4science.ai/)上介绍我们的新计划，包括关于我们的外部合作者的信息，以及当前和未来的DeepSpeed4Science技术发布。我们的一个高层次目标是推广广泛解决大规模科学发现的主要系统痛点的AI系统技术。我们希望全球的科学家们能够从DeepSpeed4Science通过开源软件解锁的新功能中受益。我们期待更好地了解阻碍您的科学发现的AI系统设计挑战。我们真诚地欢迎您的参与，帮助构建一个更有前途的AI4Science未来。请给我们发送电子邮件至<deepspeed-info@microsoft.com>。我们鼓励您在我们的[DeepSpeed GitHub](https://github.com/microsoft/DeepSpeed/)上报告问题、贡献PR、参与讨论。
+我们非常自豪和兴奋地宣布DeepSpeed4Science计划以及几个研发亮点和成果。从今天开始，我们将在[deepspeed4science.ai](https://deepspeed4science.ai/)上介绍我们的新计划，包括关于我们的外部合作者的信息，以及当前和未来的DeepSpeed4Science技术发布。我们的一个高层次目标是推广广泛解决大规模科学发现的主要系统痛点的AI系统技术。我们希望全球的科学家们能够从DeepSpeed4Science通过开源软件解锁的新功能中受益。我们期待更好地了解阻碍您的科学发现的AI系统设计挑战。我们真诚地欢迎您的参与，帮助构建一个更有前途的AI4Science未来。请给我们发送电子邮件至<deepspeed-info@microsoft.com>。我们鼓励您在我们的[DeepSpeed GitHub](https://github.com/deepspeedai/DeepSpeed/)上报告问题、贡献PR、参与讨论。
 
 ## 致谢
 

@@ -18,7 +18,7 @@ Collectively, the three optimization reduces communication volume by 4x compared
 
 ## Training Environment
 
-For this tutorial, we will configure a 18 billion parameter GPT-2 model using the DeepSpeed [Megatron-DeepSpeed](https://github.com/microsoft/Megatron-DeepSpeed/tree/master/) GPT-2 code. We will use 4 nodes of 16x [NVIDIA Tesla V100-SXM3 Tensor Core GPU](https://www.nvidia.com/en-us/data-center/v100/) with 32GB RAM per node for this exercise.
+For this tutorial, we will configure a 18 billion parameter GPT-2 model using the DeepSpeed [Megatron-DeepSpeed](https://github.com/deepspeedai/Megatron-DeepSpeed/tree/master/) GPT-2 code. We will use 4 nodes of 16x [NVIDIA Tesla V100-SXM3 Tensor Core GPU](https://www.nvidia.com/en-us/data-center/v100/) with 32GB RAM per node for this exercise.
 
 
 ## Training a 18B parameter GPT-2 with ZeRO++

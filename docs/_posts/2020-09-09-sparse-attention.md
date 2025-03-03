@@ -28,7 +28,7 @@ In a pre-training experiment, we ran BERT model under three settings: dense, den
 ![Maximum sequence runnable on BERT](/assets/images/sa_maximum_sequence_runnable_on_bert.png){: .align-center}
 
 * **Up to 6.3x faster computation**
-We continued the pre-training experiment for different batch sizes and sequence lengths, using [BERT base/large](https://github.com/microsoft/DeepSpeedExamples/tree/master/bing_bert) and [Megatron GPT2](https://github.com/microsoft/DeepSpeedExamples/tree/master/Megatron-LM). In this experiment we let the training to continue for 100 iteration and recorded the average time per last 30 iterations. SA reduces total computation comparing with dense and improves training speed:  the boost is higher with increased sequence length and it is up to 6.3x faster for BERT base, 5.3x for BERT large, and 6.1x for GPT2. Following charts show these results.
+We continued the pre-training experiment for different batch sizes and sequence lengths, using [BERT base/large](https://github.com/deepspeedai/DeepSpeedExamples/tree/master/bing_bert) and [Megatron GPT2](https://github.com/deepspeedai/DeepSpeedExamples/tree/master/Megatron-LM). In this experiment we let the training to continue for 100 iteration and recorded the average time per last 30 iterations. SA reduces total computation comparing with dense and improves training speed:  the boost is higher with increased sequence length and it is up to 6.3x faster for BERT base, 5.3x for BERT large, and 6.1x for GPT2. Following charts show these results.
 
 ![Training time for BERT base with varying sequence length](/assets/images/sa_bert_base_time_result.png){: .align-center}
 

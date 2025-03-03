@@ -177,7 +177,7 @@ class OnebitLamb(torch.optim.Optimizer):
                 # This is used to reduce compression error during compression stage.
                 momentum_scales = []
                 for group in self.param_groups:
-                    momentum_scales.append([(torch.linalg.norm(self.state[p]['exp_avg']) /
+                    momentum_scales.append([(torch.linalg.vector_norm(self.state[p]['exp_avg']) /
                                              np.sqrt(torch.numel(self.state[p]['exp_avg']))).item()
                                             for p in group['params']])
                 united_scale = sum([sum(x) for x in momentum_scales]) / sum([len(x) for x in momentum_scales])

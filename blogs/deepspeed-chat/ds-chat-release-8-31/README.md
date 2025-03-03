@@ -24,7 +24,7 @@
 
 # 1. Introduction <a name="introduction"></a>
 
-DeepSpeed-Chat is a general system framework for RLHF training that enables easy, fast, affordable, and scalable training of ChatGPT-style models that we [publicly released on GitHub](https://github.com/microsoft/DeepSpeed/blob/master/blogs/deepspeed-chat/README.md). The detailed performance and capabilities of DeepSpeed-Chat have been published in our [blog post](https://github.com/microsoft/DeepSpeed/tree/master/blogs/deepspeed-chat) and [arXiv](https://arxiv.org/abs/2308.01320) paper.
+DeepSpeed-Chat is a general system framework for RLHF training that enables easy, fast, affordable, and scalable training of ChatGPT-style models that we [publicly released on GitHub](https://github.com/deepspeedai/DeepSpeed/blob/master/blogs/deepspeed-chat/README.md). The detailed performance and capabilities of DeepSpeed-Chat have been published in our [blog post](https://github.com/deepspeedai/DeepSpeed/tree/master/blogs/deepspeed-chat) and [arXiv](https://arxiv.org/abs/2308.01320) paper.
 
 We are happy to share that today we are improving DeepSpeed-Chat along three areas: i) system support for Llama/Llama-2 family of models, ii) system features for improved efficiency and accessibility, and iii) stability and software enhancements.
 
@@ -33,15 +33,15 @@ We are happy to share that today we are improving DeepSpeed-Chat along three are
   We ***introduce system support for training Llama and Llama-2 models*** in DeepSpeed-Chat enabling and leveraging various optimizations and features including the Hybrid Engine, ZeRO family of optimizations, Low-Rank Adaptation (LoRA) support, as well as full integration into the three-stage DeepSpeed-Chat RLHF pipeline. By leveraging the Hybrid-Engine, we speed up the experience generation phase for Llama-2-7B and Llama-2-13B models by **up to 7.1X**.
 
 -  **New System Features for Improved Efficiency and Accessibility**
-    - ***Mixed Precision ZeRO++ ([MixZ++](https://github.com/microsoft/DeepSpeed/pull/3954))***. It is an extended set of optimization strategies built upon [ZeRO++](https://www.deepspeed.ai/tutorials/zeropp/) tailored to reduce memory usage and improve training/inference efficiency for RLHF training with LoRA. MixZ++ partitions model parameters across GPUs to reduce footprint and gathers them with quantized communication only when needed similar to its ZeRO and ZeRO++ siblings. Our evaluation indicates MixZ++ increases the training throughput by **up to 3.3x** for the Llama-2-70B model running on 128 V100 GPUs.
+    - ***Mixed Precision ZeRO++ ([MixZ++](https://github.com/deepspeedai/DeepSpeed/pull/3954))***. It is an extended set of optimization strategies built upon [ZeRO++](https://www.deepspeed.ai/tutorials/zeropp/) tailored to reduce memory usage and improve training/inference efficiency for RLHF training with LoRA. MixZ++ partitions model parameters across GPUs to reduce footprint and gathers them with quantized communication only when needed similar to its ZeRO and ZeRO++ siblings. Our evaluation indicates MixZ++ increases the training throughput by **up to 3.3x** for the Llama-2-70B model running on 128 V100 GPUs.
 
     - ***[ZeRO-Offload](https://www.microsoft.com/en-us/research/blog/zero-infinity-and-deepspeed-unlocking-unprecedented-model-scale-for-deep-learning-training/)***. It is an optimization that offloads optimizer memory and computation from the GPU to the host CPU, enabling larger models to be trained with fewer GPU resources. After training stability fixes and testing, we have enabled this feature across all three stages of the DeepSpeed-Chat RLHF training pipeline. ZeRO-Offload reduces the minimum number of GPUs required to train large models by **up to 16x**.
 
 - **Stability and Software Enhancements**
 
-  - DeepSpeed-Chat contains a rich set of features for training across many different platforms and scenarios. Composing these features in a systematic way and ensuring both system stability and decent training convergence is critical for the usability of the framework. Thus, in addition to new features in DeepSpeed-Chat, many system stability and training convergence issues have been fixed both in DeepSpeed-Chat (client code) and DeepSpeed (runtime). These improvements have been thoroughly tested using the OPT model family for end-to-end training. Furthermore, end-to-end testing, characterization scripts, and several instrumentation features like TensorBoard support are now also available. *To try out these latest features and software improvements, please use DeepSpeed release [v0.10.2](https://github.com/microsoft/DeepSpeed/tree/v0.10.2) and the latest DeepSpeed-Chat in [DeepSpeedExamples](https://github.com/microsoft/DeepSpeedExamples)*.
+  - DeepSpeed-Chat contains a rich set of features for training across many different platforms and scenarios. Composing these features in a systematic way and ensuring both system stability and decent training convergence is critical for the usability of the framework. Thus, in addition to new features in DeepSpeed-Chat, many system stability and training convergence issues have been fixed both in DeepSpeed-Chat (client code) and DeepSpeed (runtime). These improvements have been thoroughly tested using the OPT model family for end-to-end training. Furthermore, end-to-end testing, characterization scripts, and several instrumentation features like TensorBoard support are now also available. *To try out these latest features and software improvements, please use DeepSpeed release [v0.10.2](https://github.com/deepspeedai/DeepSpeed/tree/v0.10.2) and the latest DeepSpeed-Chat in [DeepSpeedExamples](https://github.com/deepspeedai/DeepSpeedExamples)*.
 
-  - Finally, to ensure the long-term health of the DeepSpeed-Chat training framework, [PyTests](https://github.com/microsoft/DeepSpeedExamples/blob/master/applications/DeepSpeed-Chat/training/tests/test_training.py) were added for testing Step 3 of the RLHF training pipeline and are run on a nightly basis through a newly developed [GitHub Actions workflow](https://github.com/microsoft/DeepSpeed/actions/workflows/nv-ds-chat.yml).
+  - Finally, to ensure the long-term health of the DeepSpeed-Chat training framework, [PyTests](https://github.com/deepspeedai/DeepSpeedExamples/blob/master/applications/DeepSpeed-Chat/training/tests/test_training.py) were added for testing Step 3 of the RLHF training pipeline and are run on a nightly basis through a newly developed [GitHub Actions workflow](https://github.com/deepspeedai/DeepSpeed/actions/workflows/nv-ds-chat.yml).
 
 We now dive into the details of our new features, training stability, and software improvements.
 
@@ -54,19 +54,19 @@ The DeepSpeed-Chat training framework now provides system support for the Llama 
 The following key optimizations in DeepSpeed are now fully integrated for Llama and Llama-2 models:
 
 - **DeepSpeed-Chat Integration**: Fully integrated into the complete, end-to-end three-stage DeepSpeed-Chat RLHF training framework, based on the OpenAI InstructGPT training strategy.
-- **Hybrid Engine**: DeepSpeed Hybrid Engine allows for superior generation phase [acceleration](https://github.com/microsoft/DeepSpeed/blob/master/blogs/deepspeed-chat/README.md#throughput-and-model-size-scalability-comparisons-with-existing-rlhf-systems), now supported for all Llama-1 model variants, Llama-2-7B, and Llama-2-13B models.
-- **ZeRO and ZeRO-Offload**: Fully supported by the [ZeRO](https://github.com/microsoft/DeepSpeed/blob/master/blogs/deepspeed-chat/README.md#throughput-and-model-size-scalability-comparisons-with-existing-rlhf-systems) family of optimizations including offload support leveraging full memory capacity of a system thus enabling training of even larger models.
+- **Hybrid Engine**: DeepSpeed Hybrid Engine allows for superior generation phase [acceleration](https://github.com/deepspeedai/DeepSpeed/blob/master/blogs/deepspeed-chat/README.md#throughput-and-model-size-scalability-comparisons-with-existing-rlhf-systems), now supported for all Llama-1 model variants, Llama-2-7B, and Llama-2-13B models.
+- **ZeRO and ZeRO-Offload**: Fully supported by the [ZeRO](https://github.com/deepspeedai/DeepSpeed/blob/master/blogs/deepspeed-chat/README.md#throughput-and-model-size-scalability-comparisons-with-existing-rlhf-systems) family of optimizations including offload support leveraging full memory capacity of a system thus enabling training of even larger models.
 - **Mixed Precision ZeRO++ (MixZ++)**: Enhanced support for larger models like Llama-2-70B through the new MixZ++ feature, improving efficiency and reducing memory usage when there are frozen or non-trainable parameters.
-- **LoRA**: Fully supported by the [LoRA](https://github.com/microsoft/LoRA) feature, which vastly reduces the storage requirements for large language models by freezing original weights and learning pairs of rank-decomposition matrices.
+- **LoRA**: Fully supported by the [LoRA](https://github.com/deepspeedai/LoRA) feature, which vastly reduces the storage requirements for large language models by freezing original weights and learning pairs of rank-decomposition matrices.
 
 ## Getting Started
 
 Users looking to try the new Llama and Llama-2 model support can get started by using the newly added Llama scripts.
 | Step Number | Scripts |
 | --- | --- |
-| 1 | [Llama-2 Step 1 Scripts](https://github.com/microsoft/DeepSpeedExamples/tree/master/applications/DeepSpeed-Chat/training/step1_supervised_finetuning/training_scripts/llama2) |
-| 2 | [Llama-2 Step 2 Scripts](https://github.com/microsoft/DeepSpeedExamples/tree/master/applications/DeepSpeed-Chat/training/step2_reward_model_finetuning/training_scripts/llama2) |
-| 3 | [Llama-2 Step 3 Scripts](https://github.com/microsoft/DeepSpeedExamples/tree/master/applications/DeepSpeed-Chat/training/step3_rlhf_finetuning/training_scripts/llama2) |
+| 1 | [Llama-2 Step 1 Scripts](https://github.com/deepspeedai/DeepSpeedExamples/tree/master/applications/DeepSpeed-Chat/training/step1_supervised_finetuning/training_scripts/llama2) |
+| 2 | [Llama-2 Step 2 Scripts](https://github.com/deepspeedai/DeepSpeedExamples/tree/master/applications/DeepSpeed-Chat/training/step2_reward_model_finetuning/training_scripts/llama2) |
+| 3 | [Llama-2 Step 3 Scripts](https://github.com/deepspeedai/DeepSpeedExamples/tree/master/applications/DeepSpeed-Chat/training/step3_rlhf_finetuning/training_scripts/llama2) |
 
 *Note*: While all the system aspects of Llama and Llama-2 support have been extensively tested, there are no guarantees about training convergence and may require hyper-parameter tuning to achieve convergence.
 
@@ -103,11 +103,11 @@ We now dive into the details of two new features we are introducing today: 1) Mi
 
 ## 3.3x Higher Throughput with MixZ++ for LoRA <a name="mixz"></a>
 
-Mixed Precision ZeRO++ ([MixZ++](https://github.com/microsoft/DeepSpeed/pull/3954)) is an extended set of optimization strategies built upon [ZeRO](https://www.deepspeed.ai/tutorials/zero/) and [ZeRO++](https://www.deepspeed.ai/tutorials/zeropp/) tailored to reduce memory usage and improve training/inference efficiency for RLHF training with LoRA.
+Mixed Precision ZeRO++ ([MixZ++](https://github.com/deepspeedai/DeepSpeed/pull/3954)) is an extended set of optimization strategies built upon [ZeRO](https://www.deepspeed.ai/tutorials/zero/) and [ZeRO++](https://www.deepspeed.ai/tutorials/zeropp/) tailored to reduce memory usage and improve training/inference efficiency for RLHF training with LoRA.
 
 Similar to [ZeRO](https://www.deepspeed.ai/tutorials/zero/), MixZ++ partitions model parameters across GPUs to reduce footprint and gathers them only when needed. In addition, similar to ZeRO++, MixZ++ allows for hierarchical partitioning and quantized communication. The hierarchical partitioning allows all the parameters to be stored within a node when possible so that the communication happens within a node, where communication bandwidth is significantly higher than communicating across nodes. The communication overhead is further reduced by quantizing the weights before gathering them.
 
-Finally, unlike ZeRO++ where parameters are always stored in fp16/bf16, and quantized/dequantized before and after communication, MixZ++ can persistently store the frozen weights in [Low-Rank Adaptation (LoRA)](https://github.com/microsoft/LoRA) in lower-precision, significantly reducing the communication overhead, eliminating quantization overhead, and supporting larger batch sizes that enable better efficiency.
+Finally, unlike ZeRO++ where parameters are always stored in fp16/bf16, and quantized/dequantized before and after communication, MixZ++ can persistently store the frozen weights in [Low-Rank Adaptation (LoRA)](https://github.com/deepspeedai/LoRA) in lower-precision, significantly reducing the communication overhead, eliminating quantization overhead, and supporting larger batch sizes that enable better efficiency.
 
 A comprehensive exploration of technical details can be accessed through our [ZeRO++ blog](https://www.microsoft.com/en-us/research/blog/deepspeed-zero-a-leap-in-speed-for-llm-and-chat-model-training-with-4x-less-communication/), [MixZ++ tutorial](https://www.deepspeed.ai/tutorials/mixed_precision_zeropp/), and [paper](https://arxiv.org/pdf/2306.10209.pdf).
 
@@ -147,13 +147,13 @@ To try this feature, please refer to [MixZ++ tutorial](https://www.deepspeed.ai/
 
 </div>
 
-ZeRO-Offload was [disabled](https://github.com/microsoft/DeepSpeedExamples/pull/553)
+ZeRO-Offload was [disabled](https://github.com/deepspeedai/DeepSpeedExamples/pull/553)
  with the initial release of DeepSpeed-Chat due to training instability that was observed when it was used with Hybrid Engine and LoRA. After improvements to Hybrid Engine and LoRA as well as extensive testing of all feature configurations for ZeRO Stage2 and ZeRO Stage 3, this feature can now be enabled across all three steps of the DeepSpeed-Chat training framework. Please note that configuring ZeRO-Offload with ZeRO Stage 2 and Hybrid Engine with LoRA disabled is currently unsupported due to observed training instability.
 
 <div align="center">
   <img src="../assets/images/zero_offload_after_stability.png" width="750">
 
-  *Figure 5: Reward scores for all supported DeepSpeed-Chat configurations with ZeRO-Offload enabled. Run with 16 V100 GPUs, [AdamG012/chat-opt-1.3b-sft-deepspeed](https://huggingface.co/AdamG012/chat-opt-1.3b-sft-deepspeed) actor model, [AdamG012/chat-opt-350m-reward-deepspeed](https://huggingface.co/AdamG012/chat-opt-350m-reward-deepspeed) critic model, DS commit: [f036f00c](https://github.com/microsoft/DeepSpeed/tree/f036f00c3763694e539a9070a98130e2667e49bd), DSE commit: [81a8521f](https://github.com/microsoft/DeepSpeedExamples/tree/81a8521f05e2761eed34fcf65f19873df9f74403).*
+  *Figure 5: Reward scores for all supported DeepSpeed-Chat configurations with ZeRO-Offload enabled. Run with 16 V100 GPUs, [AdamG012/chat-opt-1.3b-sft-deepspeed](https://huggingface.co/AdamG012/chat-opt-1.3b-sft-deepspeed) actor model, [AdamG012/chat-opt-350m-reward-deepspeed](https://huggingface.co/AdamG012/chat-opt-350m-reward-deepspeed) critic model, DS commit: [f036f00c](https://github.com/deepspeedai/DeepSpeed/tree/f036f00c3763694e539a9070a98130e2667e49bd), DSE commit: [81a8521f](https://github.com/deepspeedai/DeepSpeedExamples/tree/81a8521f05e2761eed34fcf65f19873df9f74403).*
 
 </div>
 
@@ -164,11 +164,11 @@ A wide range of issues have been addressed in the DeepSpeed runtime and the Deep
 <div align="center">
   <img src="../assets/images/ds_chat_stability_sweep.png" width="750">
 
-  *Figure 6: Step 3 Reward Scores for all supported DeepSpeed-Chat configurations. Run with 16 V100 GPUs, [AdamG012/chat-opt-1.3b-sft-deepspeed](https://huggingface.co/AdamG012/chat-opt-1.3b-sft-deepspeed) actor model, [AdamG012/chat-opt-350m-reward-deepspeed](https://huggingface.co/AdamG012/chat-opt-350m-reward-deepspeed) critic model, DS commit: [f036f00c](https://github.com/microsoft/DeepSpeed/tree/f036f00c3763694e539a9070a98130e2667e49bd), DSE commit: [81a8521f](https://github.com/microsoft/DeepSpeedExamples/tree/81a8521f05e2761eed34fcf65f19873df9f74403).*
+  *Figure 6: Step 3 Reward Scores for all supported DeepSpeed-Chat configurations. Run with 16 V100 GPUs, [AdamG012/chat-opt-1.3b-sft-deepspeed](https://huggingface.co/AdamG012/chat-opt-1.3b-sft-deepspeed) actor model, [AdamG012/chat-opt-350m-reward-deepspeed](https://huggingface.co/AdamG012/chat-opt-350m-reward-deepspeed) critic model, DS commit: [f036f00c](https://github.com/deepspeedai/DeepSpeed/tree/f036f00c3763694e539a9070a98130e2667e49bd), DSE commit: [81a8521f](https://github.com/deepspeedai/DeepSpeedExamples/tree/81a8521f05e2761eed34fcf65f19873df9f74403).*
 
 </div>
 
-*Figure 6* above shows the training convergence across all supported DeepSpeed-Chat configurations. This data was collected using 16 V100 NVIDIA GPUs, the [AdamG012/chat-opt-1.3b-sft-deepspeed](https://huggingface.co/AdamG012/chat-opt-1.3b-sft-deepspeed) OPT model as the actor, the [AdamG012/chat-opt-350m-reward-deepspeed](https://huggingface.co/AdamG012/chat-opt-350m-reward-deepspeed) OPT model as the critic, and the following DeepSpeed and DeepSpeedExamples repository commits: DS commit: [f036f00c](https://github.com/microsoft/DeepSpeed/tree/f036f00c3763694e539a9070a98130e2667e49bd), DSE commit: [81a8521f](https://github.com/microsoft/DeepSpeedExamples/tree/81a8521f05e2761eed34fcf65f19873df9f74403).
+*Figure 6* above shows the training convergence across all supported DeepSpeed-Chat configurations. This data was collected using 16 V100 NVIDIA GPUs, the [AdamG012/chat-opt-1.3b-sft-deepspeed](https://huggingface.co/AdamG012/chat-opt-1.3b-sft-deepspeed) OPT model as the actor, the [AdamG012/chat-opt-350m-reward-deepspeed](https://huggingface.co/AdamG012/chat-opt-350m-reward-deepspeed) OPT model as the critic, and the following DeepSpeed and DeepSpeedExamples repository commits: DS commit: [f036f00c](https://github.com/deepspeedai/DeepSpeed/tree/f036f00c3763694e539a9070a98130e2667e49bd), DSE commit: [81a8521f](https://github.com/deepspeedai/DeepSpeedExamples/tree/81a8521f05e2761eed34fcf65f19873df9f74403).
 
 We now dive into the details of all the fixes across different areas.
 
@@ -178,13 +178,13 @@ In this section we discuss the functionality and training stability fixes in the
 
 - **Training Stability:**
 
-  - [PR #620 - Make training more stable](https://github.com/microsoft/DeepSpeedExamples/pull/620)
+  - [PR #620 - Make training more stable](https://github.com/deepspeedai/DeepSpeedExamples/pull/620)
 
     - To improve the training stability in Step 3, several different areas of training were tuned and changed. To start, the Kullback-Liebler (KL) divergence used in the Proximal Policy Optimization (PPO) trainer was slightly tuned to reduce divergence between the new and reference policies and improve the reward score. Next, the sequence generation function in the PPO trainer (`_generate_sequence()`) removed the specification of a `min_length` in the Actor model's `generate()` call, which means generated sequences won't be artificially enlarged, allowing for the possibility of sequence generation to collapse i.e. when training convergence is extremely poor. A minor off-by-one error was also fixed in the PPO trainer's reward computation function (`compute_rewards()`). Finally, the PPO trainer's RLHF training function was updated to zero out the reward and value after the end of a conversation to prevent incorrect `advantages` and `returns`.
 
-  - [PR #633 - DS Chat Step 3 - Add separate Lora Adam optimizer group](https://github.com/microsoft/DeepSpeedExamples/pull/633)
+  - [PR #633 - DS Chat Step 3 - Add separate Lora Adam optimizer group](https://github.com/deepspeedai/DeepSpeedExamples/pull/633)
 
-    - The [LoRA](https://github.com/microsoft/LoRA) feature is supported across all three training steps of the DeepSpeed-Chat framework. Prior to this stability effort, there was no distinction between the overall learning rate and the LoRA learning rate i.e. the LoRA learning rate was set to whatever the overall learning rate was. This led to instability in training convergence and can be seen in *Figure 7* below showing the reward score across training steps for various Step 3 configurations:
+    - The [LoRA](https://github.com/deepspeedai/LoRA) feature is supported across all three training steps of the DeepSpeed-Chat framework. Prior to this stability effort, there was no distinction between the overall learning rate and the LoRA learning rate i.e. the LoRA learning rate was set to whatever the overall learning rate was. This led to instability in training convergence and can be seen in *Figure 7* below showing the reward score across training steps for various Step 3 configurations:
 
       <div align="center">
         <img src="../assets/images/sweep_before_lora_fix.png" width="650">
@@ -204,25 +204,25 @@ In this section we discuss the functionality and training stability fixes in the
 
       The next fix details the addition of separate LoRA learning rate arguments.
 
-  - [PR ##685 Add LoRA LR for DS Chat steps 1-3](https://github.com/microsoft/DeepSpeedExamples/pull/685)
+  - [PR ##685 Add LoRA LR for DS Chat steps 1-3](https://github.com/deepspeedai/DeepSpeedExamples/pull/685)
 
     - A *separate* LoRA learning rate argument can now be provided in each of the three training steps, with Step 3 having individual LoRA learning rates for the Actor and Critic models.
 
 - **Bug Fixes:**
 
-  - [PR #636 - DS Chat Step 3 - Fix Zero Stage 3](https://github.com/microsoft/DeepSpeedExamples/pull/636)
+  - [PR #636 - DS Chat Step 3 - Fix Zero Stage 3](https://github.com/deepspeedai/DeepSpeedExamples/pull/636)
 
       - During DeepSpeed-Chat Step 3 training, we observed hangs when ZeRO Stage 3 was enabled for the actor model and when the `world_size > 1`. When observing the state of each rank, one rank would still be in the sequence generation phase `self._generate_sequence()`, while the other rank had already progressed to the `self.actor_model()` call. This ZeRO Stage 3 desynchronization, due to misaligned token generation between the GPUs, can normally be automatically detected and accounted for in the HuggingFace Transformers library via `synced_gpus`. However, due to the nature of the DeepSpeed-Chat pipeline and the lifetime of the corresponding model configuration objects, this automatic detection code was not triggered. To resolve this, when invoking the `generate()` function, the `synced_gpus` argument is explicitly passed and set to `True` when ZeRO Stage 3 is being used.
 
-  - [PR #658 - Fix only optimize lora and ack-ckpting compatible](https://github.com/microsoft/DeepSpeedExamples/pull/658)
+  - [PR #658 - Fix only optimize lora and ack-ckpting compatible](https://github.com/deepspeedai/DeepSpeedExamples/pull/658)
 
     - This fix allows Step 3 training to run with the combination of gradient checkpointing and *LoRA-only* parameter optimization, a previously unsupported training case. With the addition of the [enable_input_require_grads](https://github.com/huggingface/transformers/blob/f26099e7b5cf579f99a42bab6ddd371bf2c8d548/src/transformers/modeling_utils.py#L1225) model utility function in the HuggingFace Transformers library, which enables the gradients for the input embeddings, gradient checkpointing and optimization of *only* the LoRA parameters is made possible.
 
-  - [PR #576 - Fix argparse](https://github.com/microsoft/DeepSpeedExamples/pull/576)
+  - [PR #576 - Fix argparse](https://github.com/deepspeedai/DeepSpeedExamples/pull/576)
 
     - An external contributor helped in resolving an argument parsing issue.
 
-  - [PR #584 - Fix unused parameter bug](https://github.com/microsoft/DeepSpeedExamples/pull/584)
+  - [PR #584 - Fix unused parameter bug](https://github.com/deepspeedai/DeepSpeedExamples/pull/584)
 
     - An external contributor fixed the passing of an uninitialized parameter that was hardcoded earlier.
 
@@ -230,11 +230,11 @@ In this section we discuss the functionality and training stability fixes in the
 ## Hybrid Engine Fixes
 In this section we discuss several fixes in the Hybrid Engine.
 
-- [PR #3563 - Fix LoRA Fuse/Unfuse in Hybrid Engine](https://github.com/microsoft/DeepSpeed/pull/3563)
+- [PR #3563 - Fix LoRA Fuse/Unfuse in Hybrid Engine](https://github.com/deepspeedai/DeepSpeed/pull/3563)
 
   - During Step 3 training for OPT with LoRA and Hybrid Engine enabled, an issue arose regarding a tensor size mismatch of the LoRA weights. Specifically, the LoRA QKV weights were not fused in the OPT container policy, yet they were expected to be fused by the Hybrid Engine. This challenge was effectively resolved by introducing both fused and unfused LoRA methods in the Hybrid Engine. We thank @sxjscience for providing this fix.
 
-- [PR #3883 - Extend HE-Lora test with Z3 support + Fix/add guard in HE for Z3](https://github.com/microsoft/DeepSpeed/pull/3883)
+- [PR #3883 - Extend HE-Lora test with Z3 support + Fix/add guard in HE for Z3](https://github.com/deepspeedai/DeepSpeed/pull/3883)
 
   - The Hybrid Engine was updated to properly check whether ZeRO Stage 3 was enabled when resetting the inference container parameters, along with expanding the corresponding unit tests.
 
@@ -242,17 +242,17 @@ In this section we discuss several fixes in the Hybrid Engine.
 ## ZeRO Stage 3 Fixes
 In this section we discuss several fixes in support of the ZeRO Stage 3 feature.
 
-- [PR #3819 - Fix racing condition in GatheredParameters](https://github.com/microsoft/DeepSpeed/pull/3819)
+- [PR #3819 - Fix racing condition in GatheredParameters](https://github.com/deepspeedai/DeepSpeed/pull/3819)
 
   - A race condition in the the ZeRO `GatheredParameters` context, which resulted in various `'status': 'INFLIGHT'` issues, was fixed by removing duplicate input parameters that were being passed from the Hybrid Engine.
 
-- [PR #3884 - Separate ZeRO3 InflightParamRegistry for train and eval](https://github.com/microsoft/DeepSpeed/pull/3884)
+- [PR #3884 - Separate ZeRO3 InflightParamRegistry for train and eval](https://github.com/deepspeedai/DeepSpeed/pull/3884)
 
   - The ZeRO Stage 3 `InflightParamRegistry` was updated to use a separate `InflightParamRegistry` for training and evaluation, fixing an issue where leftover parameters in flight were causing inflight parameter errors. These fixes, along with related fixes in the Hybrid Engine, enabled the use of the ZeRO-Offload feature in the DeepSpeed-Chat training pipeline.
 
-- [PR #3928 - Remove the param.ds_tensor from print](https://github.com/microsoft/DeepSpeed/pull/3928)
+- [PR #3928 - Remove the param.ds_tensor from print](https://github.com/deepspeedai/DeepSpeed/pull/3928)
 
-  - A minor change that was necessary to address the DeepSpeed-Chat Step 3 hang issue ([PR #636](https://github.com/microsoft/DeepSpeedExamples/pull/636)) as it allowed us to progress further into execution and observe the desynchronization point.
+  - A minor change that was necessary to address the DeepSpeed-Chat Step 3 hang issue ([PR #636](https://github.com/deepspeedai/DeepSpeedExamples/pull/636)) as it allowed us to progress further into execution and observe the desynchronization point.
 
 
 # 5. Software Improvements <a name="software-improvements"></a>
@@ -263,9 +263,9 @@ To improve the characterization, ease of debug, and maintainability of the DeepS
 
 The DeepSpeed-Chat training framework provides a rich set of features (Hybrid Engine, ZeRO, LoRA, etc.) that can be composed in many different combinations, depending on the scenario. The interactions between the features are often complex and composing them in a systematic way for characterization is useful for understanding their behavior. To support such use cases, characterization scripts have been added to run sweeps of Steps 1, 2, and 3 training for various combinations of features. The scripts default to OPT but can be modified to run with Llama. Please see the READMEs in the following folders for more details:
 
-- [Step 1 Sweep Scripts](https://github.com/microsoft/DeepSpeedExamples/tree/master/applications/DeepSpeed-Chat/training/step1_supervised_finetuning/training_scripts/opt/single_node/sweep)
-- [Step 2 Sweep Scripts](https://github.com/microsoft/DeepSpeedExamples/tree/master/applications/DeepSpeed-Chat/training/step2_reward_model_finetuning/training_scripts/opt/single_node/sweep)
-- [Step 3 Sweep Scripts](https://github.com/microsoft/DeepSpeedExamples/tree/master/applications/DeepSpeed-Chat/training/step3_rlhf_finetuning/training_scripts/opt/single_node/sweep)
+- [Step 1 Sweep Scripts](https://github.com/deepspeedai/DeepSpeedExamples/tree/master/applications/DeepSpeed-Chat/training/step1_supervised_finetuning/training_scripts/opt/single_node/sweep)
+- [Step 2 Sweep Scripts](https://github.com/deepspeedai/DeepSpeedExamples/tree/master/applications/DeepSpeed-Chat/training/step2_reward_model_finetuning/training_scripts/opt/single_node/sweep)
+- [Step 3 Sweep Scripts](https://github.com/deepspeedai/DeepSpeedExamples/tree/master/applications/DeepSpeed-Chat/training/step3_rlhf_finetuning/training_scripts/opt/single_node/sweep)
 
 For example, the Step 3 characterization script sweeps across various training features:
 | Feature | Values |
@@ -286,13 +286,13 @@ The training log for each combination of features will be stored in a folder wit
 
 Related PRs:
 
-- [DS Chat Characterization Scripts (Step 1 and 3)](https://github.com/microsoft/DeepSpeedExamples/pull/638)
-- [Add step 2 sweep script, clean up scripts](https://github.com/microsoft/DeepSpeedExamples/pull/664)
-- [Update script location and docs for all 3 steps](https://github.com/microsoft/DeepSpeedExamples/pull/681)
+- [DS Chat Characterization Scripts (Step 1 and 3)](https://github.com/deepspeedai/DeepSpeedExamples/pull/638)
+- [Add step 2 sweep script, clean up scripts](https://github.com/deepspeedai/DeepSpeedExamples/pull/664)
+- [Update script location and docs for all 3 steps](https://github.com/deepspeedai/DeepSpeedExamples/pull/681)
 
 ## Instrumentation
 
-To gain better insight into DeepSpeed-Chat training, new [instrumentation features](https://github.com/microsoft/DeepSpeedExamples/pull/624) were added across all three steps of DeepSpeed-Chat and can be enabled via arguments to each step's `main.py`.
+To gain better insight into DeepSpeed-Chat training, new [instrumentation features](https://github.com/deepspeedai/DeepSpeedExamples/pull/624) were added across all three steps of DeepSpeed-Chat and can be enabled via arguments to each step's `main.py`.
 
 | Argument | Description | Step(s) |
 | --- | --- | --- |
@@ -318,11 +318,11 @@ TensorBoard logging can be enabled in each of the three training steps, with som
 
 ## Testing
 
-As part of the DeepSpeed team's commitment to maintaining the DeepSpeed-Chat training framework, continuous integration [PyTest](https://github.com/microsoft/DeepSpeedExamples/blob/master/applications/DeepSpeed-Chat/training/tests/test_training.py) testing has been added for Step 3 RLHF training in a new [GitHub Actions workflow](https://github.com/microsoft/DeepSpeed/actions/workflows/nv-ds-chat.yml).
+As part of the DeepSpeed team's commitment to maintaining the DeepSpeed-Chat training framework, continuous integration [PyTest](https://github.com/deepspeedai/DeepSpeedExamples/blob/master/applications/DeepSpeed-Chat/training/tests/test_training.py) testing has been added for Step 3 RLHF training in a new [GitHub Actions workflow](https://github.com/deepspeedai/DeepSpeed/actions/workflows/nv-ds-chat.yml).
 
 | Description | Status |
 | ----------- | ------ |
-| Integrations | [![nv-ds-chat](https://github.com/microsoft/DeepSpeed/actions/workflows/nv-ds-chat.yml/badge.svg?branch=master)](https://github.com/microsoft/DeepSpeed/actions/workflows/nv-ds-chat.yml) |
+| Integrations | [![nv-ds-chat](https://github.com/deepspeedai/DeepSpeed/actions/workflows/nv-ds-chat.yml/badge.svg?branch=master)](https://github.com/deepspeedai/DeepSpeed/actions/workflows/nv-ds-chat.yml) |
 
  The workflow is run on a **nightly** basis across a **16-case** test matrix (see table below), and uses the **facebook/opt-125m** model for both the actor and critic.
 
@@ -338,15 +338,15 @@ Each configuration (16 total) runs through a limited number of Step 3 non-overfl
 # 6. Try Out DeepSpeed-Chat <a name="try-out-deepspeed-chat"></a>
 We are very excited to share this DeepSpeed-Chat feature and stability release.
 
-* To get started, please visit our GitHub page for DeepSpeed-Chat: [GitHub Landing Page](https://github.com/microsoft/DeepSpeedExamples/tree/master/applications/DeepSpeed-Chat)
+* To get started, please visit our GitHub page for DeepSpeed-Chat: [GitHub Landing Page](https://github.com/deepspeedai/DeepSpeedExamples/tree/master/applications/DeepSpeed-Chat)
 
-* We will continue to improve DeepSpeed-Chat with your feedback and support. Our [roadmap](https://github.com/microsoft/DeepSpeedExamples/tree/master/applications/DeepSpeed-Chat/README.md#-deepspeed-chats-roadmap-) shows currently supported features as well as ones that are planned for future.
+* We will continue to improve DeepSpeed-Chat with your feedback and support. Our [roadmap](https://github.com/deepspeedai/DeepSpeedExamples/tree/master/applications/DeepSpeed-Chat/README.md#-deepspeed-chats-roadmap-) shows currently supported features as well as ones that are planned for future.
 
 DeepSpeed-Chat is part of the bigger DeepSpeed ecosystem comprising of a multitude of Deep Learning systems and modeling technologies. To learn more,
 
 * Please visit our [website](https://www.deepspeed.ai/) for detailed blog posts, tutorials, and helpful documentation.
 * You can also follow us on our [English Twitter](https://twitter.com/MSFTDeepSpeed), [Japanese Twitter](https://twitter.com/MSFTDeepSpeedJP), and [Chinese Zhihu](https://www.zhihu.com/people/deepspeed) for latest news on DeepSpeed.
 
-DeepSpeed welcomes your contributions! We encourage you to report issues, contribute PRs, and join discussions on the [DeepSpeed GitHub](https://github.com/microsoft/DeepSpeed/) page. Please see our [contributing guide](https://github.com/microsoft/DeepSpeed/blob/master/CONTRIBUTING.md) for more details. We are open to collaborations with universities, research labs, companies, such as those working together on deep learning research, applying DeepSpeed to empower real-world AI models and applications, and so on. For such requests (and other requests unsuitable for GitHub), please directly email to deepspeed-info@microsoft.com.
+DeepSpeed welcomes your contributions! We encourage you to report issues, contribute PRs, and join discussions on the [DeepSpeed GitHub](https://github.com/deepspeedai/DeepSpeed/) page. Please see our [contributing guide](https://github.com/deepspeedai/DeepSpeed/blob/master/CONTRIBUTING.md) for more details. We are open to collaborations with universities, research labs, companies, such as those working together on deep learning research, applying DeepSpeed to empower real-world AI models and applications, and so on. For such requests (and other requests unsuitable for GitHub), please directly email to deepspeed-info@microsoft.com.
 
-* "Star" our [DeepSpeed GitHub](https://github.com/microsoft/DeepSpeed/) and [DeepSpeedExamples GitHub](https://github.com/microsoft/DeepSpeedExamples/) repositories if you like our work!
+* "Star" our [DeepSpeed GitHub](https://github.com/deepspeedai/DeepSpeed/) and [DeepSpeedExamples GitHub](https://github.com/deepspeedai/DeepSpeedExamples/) repositories if you like our work!
