@@ -412,8 +412,8 @@ class OpBuilder(ABC):
         try:
             cpu_info = get_cpu_info()
         except Exception as e:
-            self.warning(f"{self.name} attempted to use `py-cpuinfo` but failed (exception type: {type(e)}, {e}), "
-                         "falling back to `lscpu` to get this information.")
+            self.warning(f"{self.name} attempted to use py-cpuinfo but failed (exception type: {type(e)}, {e}), "
+                         "falling back to lscpu to get this information.")
             cpu_info = self._backup_cpuinfo()
             if cpu_info is None:
                 return "-march=native"
@@ -471,8 +471,8 @@ class OpBuilder(ABC):
         try:
             cpu_info = get_cpu_info()
         except Exception as e:
-            self.warning(f"{self.name} attempted to use `py-cpuinfo` but failed (exception type: {type(e)}, {e}), "
-                         "falling back to `lscpu` to get this information.")
+            self.warning(f"{self.name} attempted to use py-cpuinfo but failed (exception type: {type(e)}, {e}), "
+                         "falling back to lscpu to get this information.")
             cpu_info = self._backup_cpuinfo()
             if cpu_info is None:
                 return '-D__SCALAR__'
@@ -642,7 +642,7 @@ class CUDAOpBuilder(OpBuilder):
             if cross_compile_archs_env is not None:
                 if cross_compile_archs is not None:
                     print(
-                        f"{WARNING} env var `TORCH_CUDA_ARCH_LIST={cross_compile_archs_env}` overrides `cross_compile_archs={cross_compile_archs}`"
+                        f"{WARNING} env var TORCH_CUDA_ARCH_LIST={cross_compile_archs_env} overrides cross_compile_archs={cross_compile_archs}"
                     )
                 cross_compile_archs = cross_compile_archs_env.replace(' ', ';')
             else:
