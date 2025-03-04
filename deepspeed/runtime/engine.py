@@ -998,6 +998,9 @@ class DeepSpeedEngine(Module):
     def initial_dynamic_scale(self):
         return self._config.initial_dynamic_scale
 
+    def fp16_fused_mode(self):
+        return self._config.fp16_fused_mode
+
     def dynamic_loss_scale_args(self):
         return self._config.dynamic_loss_scale_args
 
@@ -1546,8 +1549,12 @@ class DeepSpeedEngine(Module):
             fused_opts = (apex.optimizers.FusedAdam, FusedAdam)
         else:
             fused_opts = FusedAdam
-        if isinstance(optimizer, fused_opts) \
-                or self.optimizer_name() in [ONEBIT_ADAM_OPTIMIZER, ZERO_ONE_ADAM_OPTIMIZER]:
+
+        use_fp16_fused_mode = self.fp16_fused_mode() \
+            or isinstance(optimizer, fused_opts) \
+                or self.optimizer_name() in [ONEBIT_ADAM_OPTIMIZER, ZERO_ONE_ADAM_OPTIMIZER]
+
+        if use_fp16_fused_mode:
             if self.dynamic_loss_scale():
                 log_dist(f'Creating fp16 optimizer with dynamic loss scale', ranks=[0])
                 timers = self.timers if self.wall_clock_breakdown() else NoopTimer()
