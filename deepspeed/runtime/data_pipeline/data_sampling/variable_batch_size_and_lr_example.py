@@ -102,7 +102,7 @@ if __name__ == "__main__":
             return [self.fc1, self.fc2, self.nansum_of_last_two_dims]
 
     deepspeed.init_distributed()
-    device = f"cuda:{dist.get_local_rank()}"
+    device = get_accelerator().current_device_name()
     assert dist.get_local_rank() <= get_accelerator().device_count(), "needs at least 1 GPU per process"
 
     # dummy dataset with 2000 sequences of random lengths between 3 and 15 tokens per sequence.
