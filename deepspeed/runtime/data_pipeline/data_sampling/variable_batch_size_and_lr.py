@@ -3,7 +3,7 @@
 
 # DeepSpeed Team
 
-# support/questions/maintenance: github user @brunomaga or @microsoft/DeepSpeed
+# support/questions/maintenance: github user @brunomaga or @deepspeedai/deepspeed
 
 import random
 import torch
