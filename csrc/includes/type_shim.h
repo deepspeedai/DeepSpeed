@@ -107,7 +107,7 @@ reduce_block_into_lanes(T* x,
             final = x[tid] + x[tid + 32];
         else
             final = val;
-        // __SYNCWARP();
+            // __SYNCWARP();
 
 #pragma unroll
         for (int i = 16; i >= lanes; i >>= 1)
