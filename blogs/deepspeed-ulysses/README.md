@@ -362,7 +362,7 @@ on what is possible when long context window is no longer a limitation.
 DeepSpeed-Ulysses is part of the bigger DeepSpeed ecosystem of
 large-scale AI training and inference. For more details on all DeepSpeed
 technologies and innovations, please visit our [website]((https://www.deepspeed.ai/)) and follow us
-on X, formerly Twitter, ([English](https://twitter.com/MSFTDeepSpeed), [Japanese](https://twitter.com/MSFTDeepSpeedJP)) and [Chinese Zhihu](https://www.zhihu.com/people/deepspeed).
+on X, formerly Twitter, ([English](https://twitter.com/DeepSpeedAI), [Japanese](https://twitter.com/DeepSpeedAI_JP)) and [Chinese Zhihu](https://www.zhihu.com/people/deepspeed).
 
 We are open to collaborations with universities, research labs, and
 companies. For such requests (and other requests unsuitable for GitHub),
