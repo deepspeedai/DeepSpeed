@@ -259,5 +259,5 @@ ecosystem of large-scale AI training, finetuning and inference. For more
 details on all DeepSpeed technologies and innovations, please visit our
 [website]((https://www.deepspeed.ai/)) and follow us
 on X, formerly Twitter, ([English](https://twitter.com/DeepSpeedAI),
-[Japanese](https://twitter.com/MSFTDeepSpeedJP)) and
+[Japanese](https://twitter.com/DeepSpeedAI_JP)) and
 [Chinese Zhihu](https://www.zhihu.com/people/deepspeed).
