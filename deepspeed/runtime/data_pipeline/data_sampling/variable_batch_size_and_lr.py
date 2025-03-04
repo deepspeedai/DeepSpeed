@@ -41,16 +41,15 @@ def batch_by_seqlens(
     Arguments:
     - `seqlens`: a list of difficulties (metric values) for every sample in the dataset;
     - `max_tokens`: maximum cap in total difficulty in a batch;
-    - `dataset_filter_ids`: user-defined indices of samples in the dataset that will be used to
-       batch. Remaining indices to be ignored. Default is `None` for all indices.
     - `min_batch_size`: smallest allowed size of a batch;
     - `min_batch_size`: largest allowed size of a batch;
     - `sequence_picking_order`: order in which to process samples: "dataloader" (default), "random" or "seqlen" (ascending)
-    - `dataloader_num_replicas`: number of dataloaders
     - `effective_batch_size`: effective batch size;
     - `required_microbatches_of_same_size`: enable if each mini-batch (in a total of `batch_size_multiple`
        micro-batches per batch), should have all micro-batches with the same batch size ie the same
        number of sequences.
+    - `verbose`: print debug information;
+    - `seed`: random seed for reproducibility;
 
     Returns:
     - `microbatch_ids`: list of tuple of batch id and samples ids per microbatch
