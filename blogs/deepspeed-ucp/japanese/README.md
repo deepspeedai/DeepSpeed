@@ -100,7 +100,7 @@ DeepSpeed *UCP*における中心的な考え方は、チェックポイント�
 
 DeepSpeed Universal Checkpointは、リベースされたMegatron-DeepSpeedバージョンに完全に統合されており、DeepSpeedおよびMegatron-DeepSpeedのGitHubリポジトリを通じてアクセスできます。使用に関する詳細なチュートリアルは、[DeepSpeedチュートリアルページ](https://www.deepspeed.ai/tutorials/universal-checkpointing/)にあります。
 
-DeepSpeedでは、広範なオープンソースコミュニティからの貢献とコラボレーションを受け入れています。DeepSpeed Universal Checkpointは、大規模AIトレーニングおよび推論のためのDeepSpeedエコシステムの一部です。すべてのDeepSpeed技術とイノベーションについての詳細は、[ウェブサイト](https://www.deepspeed.ai/)をご覧いただき、X（旧Twitter）での[英語](https://twitter.com/MSFTDeepSpeed)、[日本語](https://twitter.com/MSFTDeepSpeedJP)、および[中国のZhihu](https://www.zhihu.com/people/deepspeed)をフォローしてください。
+DeepSpeedでは、広範なオープンソースコミュニティからの貢献とコラボレーションを受け入れています。DeepSpeed Universal Checkpointは、大規模AIトレーニングおよび推論のためのDeepSpeedエコシステムの一部です。すべてのDeepSpeed技術とイノベーションについての詳細は、[ウェブサイト](https://www.deepspeed.ai/)をご覧いただき、X（旧Twitter）での[英語](https://twitter.com/DeepSpeedAI)、[日本語](https://twitter.com/DeepSpeedAI_JP)、および[中国のZhihu](https://www.zhihu.com/people/deepspeed)をフォローしてください。
 
 # 謝辞と貢献
 
