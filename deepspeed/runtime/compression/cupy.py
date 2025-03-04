@@ -14,10 +14,10 @@ class CupyBackend(object):
         pass
 
     def torch2cupy(self, tensor):
-        return cupy.fromDlpack(to_dlpack(tensor))
+        return cupy.from_dlpack(to_dlpack(tensor))
 
     def cupy2torch(self, cupy_tensor):
-        return from_dlpack(cupy_tensor.toDlpack())
+        return from_dlpack(cupy_tensor)
 
     def compress_by_chunk(self, cupy_bool_tensor, num_chunks):
         packed_sign = cupy.packbits(cupy_bool_tensor)
