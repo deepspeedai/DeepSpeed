@@ -1198,10 +1198,15 @@ class TestZero3ParamPartitioningBaseBF16(DistributedTest):
         _assert_partition_status(ds_engine, {ZeroParamStatus.NOT_AVAILABLE})
 
 
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
 class TestParamPartitioningSkipInit(DistributedTest):
     world_size = 2
 
-    def test(self):
+    def test(self, dtype):
+
+        if not dtype in get_accelerator().supported_dtypes():
+            pytest.skip("{dtype} is not supported")
+
         config_dict = {
             "train_batch_size": 4,
             "steps_per_print": 1,
@@ -1215,10 +1220,8 @@ class TestParamPartitioningSkipInit(DistributedTest):
                 "stage": 3
             },
         }
-        if get_accelerator().is_fp16_supported():
-            config_dict["fp16"] = {"enabled": True}
-        elif get_accelerator().is_bf16_supported():
-            config_dict["bf16"] = {"enabled": True}
+        dtype_str = "fp16" if dtype == torch.float16 else "bf16"
+        config_dict[dtype_str] = {"enabled": True}
         hidden_dim = 10
 
         class SubModel(torch.nn.Module):
@@ -1266,7 +1269,11 @@ class TestParamPartitioningSkipInit(DistributedTest):
         assert model.l4.module_list[0].weight.ds_tensor.numel() == ds_tensor_numel
 
         model, _, _, _ = deepspeed.initialize(model=model, model_parameters=model.parameters(), config=config_dict)
-        data_loader = random_dataloader(model=model, total_samples=50, hidden_dim=hidden_dim, device=model.device)
+        data_loader = random_dataloader(model=model,
+                                        total_samples=16,
+                                        hidden_dim=hidden_dim,
+                                        device=model.device,
+                                        dtype=dtype)
         dist.barrier()
         for n, batch in enumerate(data_loader):
             loss = model(batch[0], batch[1])
