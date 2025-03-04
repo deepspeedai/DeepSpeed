@@ -229,7 +229,7 @@ class TensorParallel_Layer(nn.Module, ABC):
 
     def extra_repr(self):
         if self.weight is not None:
-            out_features, in_features = self.weight.shape if self.weight is not None else (None, None)
+            out_features, in_features = self.weight.shape[-2:] if self.weight is not None else (None, None)
             dtype = self.weight.dtype if self.weight is not None else None
             extra_repr_str = "in_features={}, out_features={}, bias={}, dtype={}".format(
                 in_features, out_features, self.bias is not None, dtype)
