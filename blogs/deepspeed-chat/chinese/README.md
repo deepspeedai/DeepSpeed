@@ -319,7 +319,7 @@ DeepSpeed-HE 的核心技术基于 ZeRO，用于训练过程中将模型状态�
 DeepSpeed-Chat 是更大的DeepSpeed生态系统的一部分，包括众多深度学习系统和建模技术。要了解更多信息，
 
 * 请访问我们的[网站](https://www.deepspeed.ai/)，了解详细的博客文章、教程和有用的文档。
-* 我们会在[知乎](https://www.zhihu.com/people/deepspeed)上发布最新中文博客及动态。你还可以关注我们的[英文 Twitter](https://twitter.com/MSFTDeepSpeed) 和[日文 Twitter](https://twitter.com/MSFTDeepSpeedJP)。
+* 我们会在[知乎](https://www.zhihu.com/people/deepspeed)上发布最新中文博客及动态。你还可以关注我们的[英文 Twitter](https://twitter.com/DeepSpeedAI) 和[日文 Twitter](https://twitter.com/DeepSpeedAI_JP)。
 
 
 DeepSpeed 欢迎你的贡献！我们鼓励你在 [DeepSpeed GitHub](https://github.com/deepspeedai/DeepSpeed/) 页面报告问题、贡献 PR 并参与讨论。请参阅我们的[贡献指南](https://github.com/deepspeedai/DeepSpeed/blob/master/CONTRIBUTING.md)了解更多详情。我们愿意与大学、研究实验室、公司等进行合作，共同开展深度学习研究，将 DeepSpeed 应用于赋能现实世界的 AI 模型和应用等。对于此类需求（以及其他不适合在 GitHub 上提出的需求），请直接发送电子邮件至 deepspeed-info@microsoft.com。
