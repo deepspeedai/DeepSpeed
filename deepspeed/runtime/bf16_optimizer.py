@@ -36,6 +36,7 @@ class BF16_Optimizer(ZeROOptimizer):
     def __init__(self,
                  init_optimizer,
                  param_names,
+                 bfloat16_config,
                  mpu=None,
                  clip_grad=0.0,
                  norm_type=2,
@@ -44,7 +45,6 @@ class BF16_Optimizer(ZeROOptimizer):
                  timers=None,
                  grad_acc_dtype=None,
                  graph_harvesting=False,
-                 immediate_grad_update=False,
                  has_moe_layers=False):
         super().__init__()
         see_memory_usage('begin bf16_optimizer', force=True)
@@ -53,10 +53,12 @@ class BF16_Optimizer(ZeROOptimizer):
         self.param_names = param_names
         self.using_real_optimizer = not isinstance(self.optimizer, DummyOptim)
 
+        assert bfloat16_config.enabled, f"BF16Optimizer: requires bfloat16 to be enabled"
         assert grad_acc_dtype in [torch.float32, torch.bfloat16
                                   ], f"BF16Optimizer: Unsupported gradient accumulation data type: {grad_acc_dtype}"
         self.grad_acc_dtype = grad_acc_dtype
-        self.immediate_grad_update = immediate_grad_update
+
+        self.immediate_grad_update = bfloat16_config.immediate_grad_update
 
         self.clip_grad = clip_grad
         self.norm_type = norm_type
