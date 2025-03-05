@@ -491,7 +491,7 @@ def main(args=None):
         args.master_addr = result.decode('utf-8').split()[0]
         if not args.master_addr:
             raise RuntimeError(
-                f"Unable to detect suitable master address via `hostname -I`, please manually specify one via --master_addr"
+                "Unable to detect suitable master address via `hostname -I`, please manually specify one via --master_addr"
             )
         logger.info(f"Using IP address of {args.master_addr} for node {first_host}")
 

@@ -119,7 +119,7 @@ https://github.com/deepspeedai/DeepSpeedExamples/blob/master/benchmarks/inferenc
 我们的DeepSpeed-FP6目前仅支持线性GEMM。我们期待未来能够支持MoE GEMM。我们将继续根据您的反馈和支持改进DeepSpeed-FP6。DeepSpeed-FP6是更大DeepSpeed生态系统的一部分，包括一系列深度学习系统和建模技术。要了解更多，
 
 * 请访问我们的 [网站](https://www.deepspeed.ai/) 了解详细的博客文章、教程和文档。
-* 在我们的 [英文 X(Twitter)](https://twitter.com/MSFTDeepSpeed)、[日语 X(Twitter)](https://twitter.com/MSFTDeepSpeedJP) 和 [中文知乎](https://www.zhihu.com/people/deepspeed) 上关注我们，以获取 DeepSpeed 的最新消息。
+* 在我们的 [英文 X(Twitter)](https://twitter.com/DeepSpeedAI)、[日语 X(Twitter)](https://twitter.com/DeepSpeedAI_JP) 和 [中文知乎](https://www.zhihu.com/people/deepspeed) 上关注我们，以获取 DeepSpeed 的最新消息。
 
 我们欢迎您为 DeepSpeed 做出贡献！我们鼓励您报告问题、贡献 PRs、并在 [DeepSpeed GitHub](https://github.com/deepspeedai/DeepSpeed/) 页面上参加讨论。有关更多详细信息，请查看我们的 [贡献指南](https://github.com/deepspeedai/DeepSpeed/blob/master/CONTRIBUTING.md)。我们对与大学、研究实验室、公司等进行合作持开放态度，例如共同进行深度学习研究、应用 DeepSpeed 为现实世界的 AI 模型和应用提供支持等等。对于此类请求（以及其他不适合 GitHub 的请求），请直接发送电子邮件至 deepspeed-info@microsoft.com。
 
