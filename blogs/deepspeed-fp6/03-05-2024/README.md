@@ -120,7 +120,7 @@ Please also visit the [FP6-LLM github](https://github.com/usyd-fsalab/fp6_llm) f
 Currently, DeepSpeed-FP6 supports only dense models with MoE models support upcoming. We will continue to improve DeepSpeed-FP6 with your feedback and support. DeepSpeed-FP6 is a component of the larger DeepSpeed ecosystem, which includes a range of Deep Learning systems and modeling technologies. To learn more,
 
 * Please visit our [website](https://www.deepspeed.ai/) for detailed blog posts, tutorials, and helpful documentation.
-* Follow us on our [English X(Twitter)](https://twitter.com/MSFTDeepSpeed), [Japanese X(Twitter)](https://twitter.com/MSFTDeepSpeedJP), and [Chinese Zhihu](https://www.zhihu.com/people/deepspeed) for latest news on DeepSpeed.
+* Follow us on our [English X(Twitter)](https://twitter.com/DeepSpeedAI), [Japanese X(Twitter)](https://twitter.com/DeepSpeedAI_JP), and [Chinese Zhihu](https://www.zhihu.com/people/deepspeed) for latest news on DeepSpeed.
 
 We welcome your contributions to DeepSpeed! We encourage you to report issues, contribute PRs, and join discussions on the [DeepSpeed GitHub](https://github.com/deepspeedai/DeepSpeed/) page. Please see our [contributing guide](https://github.com/deepspeedai/DeepSpeed/blob/master/CONTRIBUTING.md) for more details. We are open to collaborations with universities, research labs, companies, such as those working together on deep learning research, applying DeepSpeed to empower real-world AI models and applications, and so on. For such requests (and other requests unsuitable for GitHub), please directly email to deepspeed-info@microsoft.com.
 
