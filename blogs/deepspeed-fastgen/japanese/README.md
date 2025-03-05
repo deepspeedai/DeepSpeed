@@ -296,7 +296,7 @@ DeepSpeed-FastGenでは、このコンパイル時間を大幅に短縮し、利
 
 DeepSpeed-FastGenは、Deep Learningシステムやモデリングテクノロジーを数多く含む、より大きなDeepSpeedエコシステムの一部です。さらに詳しい情報が必要な方は、
 [詳細なブログ記事]、チュートリアル、役立つドキュメントがある私たちの [ウェブサイト](https://www.deepspeed.ai/) をご覧ください。
-DeepSpeedの最新情報については、[英語のTwitter](https://twitter.com/MSFTDeepSpeed)、[日本語のTwitter](https://twitter.com/MSFTDeepSpeedJP)、[中国語の知乎](https://www.zhihu.com/people/deepspeed)をフォローしてください。
+DeepSpeedの最新情報については、[英語のTwitter](https://twitter.com/DeepSpeedAI)、[日本語のTwitter](https://twitter.com/DeepSpeedAI_JP)、[中国語の知乎](https://www.zhihu.com/people/deepspeed)をフォローしてください。
 
 DeepSpeedは、皆様の開発への参加を歓迎しています。DeepSpeedのGitHubページで、バグ報告、Pull Request、ディスカッションへの参加が可能です。詳細は[ガイドライン](https://github.com/deepspeedai/DeepSpeed/blob/master/CONTRIBUTING.md)をご覧ください。[contributing guide](https://github.com/deepspeedai/DeepSpeed/blob/master/CONTRIBUTING.md) にはより詳細な情報があります。
 また、深層学習の研究や、実世界のAIモデルやアプリケーションへのDeepSpeedの適用に取り組む大学、研究所、企業とのコラボレーションも行っています。こうしたコラボレーションについてのご要望（およびGitHubには適さないその他の話題）については<deepspeed-info@microsoft.com> まで直接メールをお送りください。
