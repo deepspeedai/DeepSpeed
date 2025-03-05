@@ -109,7 +109,7 @@ alt="A graph of training step Description automatically generated" />
 
 我们很高兴发布DeepSpeed通用检查点。DeepSpeed通用检查点已与Megatron-DeepSpeed的重构版本完全集成，并可通过DeepSpeed和Megatron-DeepSpeed的GitHub仓库访问。详细的使用教程可在[DeepSpeed教程页面](https://www.deepspeed.ai/tutorials/universal-checkpointing/)上找到。
 
-我们欢迎来自更广泛开源社区的贡献和合作。DeepSpeed通用检查点是大规模AI训练和推理DeepSpeed生态系统的一部分。有关所有DeepSpeed技术和创新的更多详细信息，请访问我们的[网站](https://www.deepspeed.ai/)并在X（前Twitter）（[英文](https://twitter.com/MSFTDeepSpeed)，[日文](https://twitter.com/MSFTDeepSpeedJP)）和[中文知乎](https://www.zhihu.com/people/deepspeed)上关注我们。
+我们欢迎来自更广泛开源社区的贡献和合作。DeepSpeed通用检查点是大规模AI训练和推理DeepSpeed生态系统的一部分。有关所有DeepSpeed技术和创新的更多详细信息，请访问我们的[网站](https://www.deepspeed.ai/)并在X（前Twitter）（[英文](https://twitter.com/DeepSpeedAI)，[日文](https://twitter.com/DeepSpeedAI_JP)）和[中文知乎](https://www.zhihu.com/people/deepspeed)上关注我们。
 
 # 致谢和贡献
 我们感谢伊利诺伊大学厄巴纳-香槟分校、Statosphere和英特尔Habana的合作。

@@ -285,7 +285,7 @@ client.terminate_server()
 DeepSpeed-FastGen 是更大的 DeepSpeed 生态系统的一部分，该生态系统包含了多种深度学习系统和建模技术。要了解更多，
 
 * 请访问我们的[网站](https://www.deepspeed.ai/)，详细查看博客文章、教程和有用的文档。
-* 您也可以通过我们的[英文 Twitter](https://twitter.com/MSFTDeepSpeed)、[日本 Twitter](https://twitter.com/MSFTDeepSpeedJP) 和[中文知乎](https://www.zhihu.com/people/deepspeed) 关注我们，以获取 DeepSpeed 的最新消息。
+* 您也可以通过我们的[英文 Twitter](https://twitter.com/DeepSpeedAI)、[日本 Twitter](https://twitter.com/DeepSpeedAI_JP) 和[中文知乎](https://www.zhihu.com/people/deepspeed) 关注我们，以获取 DeepSpeed 的最新消息。
 
 DeepSpeed 欢迎您的贡献！我们鼓励您在 [DeepSpeed GitHub](https://github.com/deepspeedai/DeepSpeed/) 页面上报告问题、贡献 PR，并参与讨论。有关更多详细信息，请参见我们的[贡献指南](https://github.com/deepspeedai/DeepSpeed/blob/master/CONTRIBUTING.md)。我们愿意与大学、研究实验室和公司合作，比如那些在深度学习研究上共同工作，应用 DeepSpeed 来赋能真实世界的 AI 模型和应用等。对于那些不适合在 GitHub 上提出的请求（以及其他请求），请直接发送电子邮件至 deepspeed-info@microsoft.com。
 
