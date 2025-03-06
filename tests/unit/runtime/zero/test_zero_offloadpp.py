@@ -39,9 +39,11 @@ class TestZeroPartialOffloadConfigSweep(DistributedTest):
     world_size = 4
 
     def test(self, h_dim: int, n_layers: int) -> None:
+
         config_dict = {
             "train_batch_size": 256,
             "steps_per_print": 1,
+            "gradient_clipping": 1.0,
             "optimizer": {
                 "type": "Adam",
                 "params": {

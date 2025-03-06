@@ -38,7 +38,7 @@ class DSClipEncoder(CUDAGraph, torch.nn.Module):
         for k in kwargs:
             if torch.is_tensor(kwargs[k]):
                 self.static_kwargs[self.iter][k].copy_(kwargs[k])
-        self._cuda_graphs[self.iter].replay()
+        get_accelerator().replay_graph(self._cuda_graphs[self.iter])
         return self.static_output[self.iter]
 
     def forward(self, *inputs, **kwargs):
@@ -63,11 +63,11 @@ class DSClipEncoder(CUDAGraph, torch.nn.Module):
         torch.cuda.current_stream().wait_stream(cuda_stream)
 
         # create cuda_graph and assign static_inputs and static_outputs
-        self._cuda_graphs[self.iter] = torch.cuda.CUDAGraph()
+        self._cuda_graphs[self.iter] = get_accelerator().create_graph()
         self.static_inputs[self.iter] = inputs
         self.static_kwargs[self.iter] = kwargs
 
-        with torch.cuda.graph(self._cuda_graphs[self.iter]):
+        with get_accelerator().capture_to_graph(self._cuda_graphs[self.iter]):
             self.static_output[self.iter] = self._forward(*self.static_inputs[self.iter],
                                                           **self.static_kwargs[self.iter])
 

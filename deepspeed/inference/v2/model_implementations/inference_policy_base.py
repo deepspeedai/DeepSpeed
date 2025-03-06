@@ -205,7 +205,7 @@ class InferenceV2Policy(ABC, metaclass=PolicyMeta):
             buffer_path = make_param_filename(self._inf_checkpoint_path, self.model.tp_rank, self.model.tp_size)
             metadata_path = make_metadata_filename(self._inf_checkpoint_path, self.model.tp_rank, self.model.tp_size)
 
-            buffer = torch.load(buffer_path)
+            buffer = torch.load(buffer_path, weights_only=False)
             metadata = json.load(open(metadata_path, "r"))
             metadata = ModelMetadata.parse_raw(metadata)
 

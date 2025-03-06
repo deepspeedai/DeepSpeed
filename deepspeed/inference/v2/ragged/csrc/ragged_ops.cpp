@@ -23,7 +23,7 @@ copies.
 */
 torch::Tensor allocate_fast_host_buffer(torch::Tensor device_mirror)
 {
-#ifdef __HIP_PLATFORM_HCC__
+#ifdef __HIP_PLATFORM_AMD__
     auto options =
         torch::TensorOptions().device(torch::kCPU).pinned_memory(true).dtype(device_mirror.dtype());
     auto buffer = torch::empty(device_mirror.sizes(), options);

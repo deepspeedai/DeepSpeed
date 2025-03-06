@@ -127,10 +127,7 @@ class DSStateManager:
         Get the sequence descriptor for the given sequence id. If the sequence does not exist,
         then None is returned.
         """
-        if uid not in self._seqs:
-            return None
-
-        return self._seqs[uid]
+        return self._seqs.get(uid, None)
 
     def get_or_create_sequence(self, uid: int) -> DSSequenceDescriptor:
         """
@@ -139,8 +136,9 @@ class DSStateManager:
         if one may be allocated and should not be used from APIs that are attempting
         to test the schedulability of a hypothetical batch.
         """
-        if uid in self._seqs:
-            return self._seqs[uid]
+        seq = self.get_sequence(uid)
+        if seq is not None:
+            return seq
         else:
             return self._create_sequence(uid)
 

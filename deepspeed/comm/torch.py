@@ -3,11 +3,14 @@
 
 # DeepSpeed Team
 
+import deepspeed
 from deepspeed import utils
 
 from .utils import *
 from .backend import *
 from .comm import *
+from ..runtime import compiler
+from deepspeed.utils.torch import required_torch_version
 import os
 
 DS_COMM_ALL_GATHER_OFF = False
@@ -17,25 +20,19 @@ DS_COMM_ALL_REDUCE_OFF = False
 DS_COMM_REDUCE_OFF = False
 
 
-def is_torch_ver_eq_2_0():
-    TORCH_MAJOR, TORCH_MINOR = map(int, torch.__version__.split('.')[:2])
-    if TORCH_MAJOR == 2 and TORCH_MINOR == 0:
-        return True
-    return False
+def disable_compiler_collective(func):
+    if required_torch_version(min_version=2.3):
+        return func
+    return compiler.disable(func)
 
 
-def is_torch_ver_ge_2_1():
-    TORCH_MAJOR, TORCH_MINOR = map(int, torch.__version__.split('.')[:2])
-    if TORCH_MAJOR >= 2 and TORCH_MINOR >= 1:
-        return True
-    return False
-
-
-def torch_ver_ge_1_13():
-    TORCH_MAJOR, TORCH_MINOR = map(int, torch.__version__.split('.')[:2])
-    if TORCH_MAJOR >= 1 and TORCH_MINOR >= 13:
-        return True
-    return False
+def build_shm_op():
+    builder = get_accelerator().create_op_builder("ShareMemCommBuilder")
+    if builder is None or not deepspeed.ops.__compatible_ops__[builder.NAME]:
+        return None
+    shm_cpp_module = builder.load()
+    print(f'DeepSpeed {builder.absolute_name()} built successfully')
+    return shm_cpp_module
 
 
 def has_coalescing_manager():
@@ -44,13 +41,13 @@ def has_coalescing_manager():
 
 
 def has_all_reduce_coalesced():
-    return hasattr(torch.distributed, "all_reduce_coalesced") and torch_ver_ge_1_13()
+    return hasattr(torch.distributed, "all_reduce_coalesced") and required_torch_version(min_version=1.13)
 
 
 def get_coalescing_manager(group, device, reqs, async_op):
-    if is_torch_ver_eq_2_0():
+    if required_torch_version(min_version=2.0, max_version=2.0):
         return torch.distributed.distributed_c10d._coalescing_manager(group, device=device, reqs=reqs)
-    elif is_torch_ver_ge_2_1():
+    elif required_torch_version(min_version=2.1):
         return torch.distributed.distributed_c10d._coalescing_manager(group, device=device, async_ops=async_op)
     else:
         return torch.distributed.distributed_c10d._coalescing_manager(group, reqs)
@@ -107,6 +104,7 @@ class TorchBackend(Backend):
 
     def __init__(self, backend, timeout, init_method, rank=-1, world_size=-1, name='torch'):
         super(TorchBackend, self).__init__()
+        self.shm_comm_op = build_shm_op()
         self.has_all_reduce_coalesced = has_all_reduce_coalesced()
         self.has_coalescing_manager = has_coalescing_manager()
         self.all_gather_function = self.get_all_gather_function()
@@ -118,8 +116,11 @@ class TorchBackend(Backend):
         # it is not so we can run on a single GPU without doing any init_process_group
         self.single_gpu_mode = True
         self.init_process_group(backend, timeout, init_method, rank, world_size)
+        if self.shm_comm_op != None:
+            self.shm_comm_op.initialize(self.get_world_size(), self.get_rank())
 
     @classmethod
+    @disable_compiler_collective
     def get_all_gather_function(self):
         if hasattr(torch.distributed, "all_gather_into_tensor"):
             return torch.distributed.all_gather_into_tensor
@@ -128,6 +129,7 @@ class TorchBackend(Backend):
         return None
 
     @classmethod
+    @disable_compiler_collective
     def get_reduce_scatter_function(self):
         if hasattr(torch.distributed, "reduce_scatter_tensor"):
             return torch.distributed.reduce_scatter_tensor
@@ -150,14 +152,19 @@ class TorchBackend(Backend):
                                                  world_size=world_size)
         self.using_mpi = torch.distributed.get_backend() == 'mpi'
 
+    @disable_compiler_collective
     def all_reduce(self, tensor, op=torch.distributed.ReduceOp.SUM, group=None, async_op=False):
         op = self._reduce_op(op)
         return torch.distributed.all_reduce(tensor=tensor, op=op, group=group, async_op=async_op)
 
-    def inference_all_reduce(self, tensor, op=torch.distributed.ReduceOp.SUM, group=None, async_op=False):
-        op = self._reduce_op(op)
-        return torch.distributed.all_reduce(tensor=tensor, op=op, group=group, async_op=async_op)
+    def inference_all_reduce(self, tensor, op, group=None):
+        if not hasattr(torch.ops, 'deepspeed') or not hasattr(torch.ops.deepspeed, 'inference_all_reduce_'):
+            op = self._reduce_op(op)
+            return torch.distributed.all_reduce(tensor=tensor, op=op, group=group, async_op=False)
+        else:
+            return torch.ops.deepspeed.inference_all_reduce_(tensor)
 
+    @disable_compiler_collective
     def all_reduce_coalesced(self, tensors, op=torch.distributed.ReduceOp.SUM, group=None, async_op=False):
         """ proxy func to torch.distributed.all_reduce_coalesced,
         which is included in PyTorch 1.13 and above
@@ -168,6 +175,7 @@ class TorchBackend(Backend):
         op = self._reduce_op(op)
         return torch.distributed.all_reduce_coalesced(tensors=tensors, op=op, group=group, async_op=async_op)
 
+    @disable_compiler_collective
     def reduce(self, tensor, dst, op=ReduceOp.SUM, group=None, async_op=False):
         if DS_COMM_REDUCE_OFF:
             if int(os.getenv('RANK', '0')) == 0:
@@ -175,6 +183,7 @@ class TorchBackend(Backend):
             return Noop()
         return torch.distributed.reduce(tensor=tensor, dst=dst, op=self._reduce_op(op), group=group, async_op=async_op)
 
+    @disable_compiler_collective
     def reduce_scatter(self, output, input_list, op=ReduceOp.SUM, group=None, async_op=False):
         if DS_COMM_REDUCE_SCATTER_OFF:
             if int(os.getenv('RANK', '0')) == 0:
@@ -187,6 +196,7 @@ class TorchBackend(Backend):
                                                     group=group,
                                                     async_op=async_op)
 
+    @disable_compiler_collective
     def broadcast(self, tensor, src, group=None, async_op=False):
         if DS_COMM_BROADCAST_OFF:
             if int(os.getenv('RANK', '0')) == 0:
@@ -195,6 +205,11 @@ class TorchBackend(Backend):
         else:
             return torch.distributed.broadcast(tensor=tensor, src=src, group=group, async_op=async_op)
 
+    @disable_compiler_collective
+    def broadcast_object_list(self, object_list, src, group=None, device=None):
+        return torch.distributed.broadcast_object_list(object_list=object_list, src=src, group=group, device=device)
+
+    @disable_compiler_collective
     def all_gather(self, tensor_list, tensor, group=None, async_op=False):
         if DS_COMM_ALL_GATHER_OFF:
             if int(os.getenv('RANK', '0')) == 0:
@@ -203,6 +218,7 @@ class TorchBackend(Backend):
         else:
             return torch.distributed.all_gather(tensor_list=tensor_list, tensor=tensor, group=group, async_op=async_op)
 
+    @disable_compiler_collective
     def all_gather_into_tensor(self, output_tensor, input_tensor, group=None, async_op=False):
         if self.has_all_gather_into_tensor():
             return self.all_gather_function(output_tensor=output_tensor,
@@ -210,6 +226,7 @@ class TorchBackend(Backend):
                                             group=group,
                                             async_op=async_op)
 
+    @disable_compiler_collective
     def all_gather_base(self, output_tensor, input_tensor, group=None, async_op=False):
         if DS_COMM_ALL_GATHER_OFF:
             if int(os.getenv('RANK', '0')) == 0:
@@ -227,6 +244,7 @@ class TorchBackend(Backend):
                                      "please consider upgrading your pytorch installation.")
                 pass
 
+    @disable_compiler_collective
     def all_gather_coalesced(self, output_tensors, input_tensors, group=None, async_op=False):
         """"""
         assert len(output_tensors) == len(input_tensors), ""
@@ -250,6 +268,7 @@ class TorchBackend(Backend):
             else:
                 reqs[-1].wait()
 
+    @disable_compiler_collective
     def reduce_scatter_tensor(self, output_tensor, input_tensor, op=ReduceOp.SUM, group=None, async_op=False):
         if self.has_reduce_scatter_tensor():
             return self.reduce_scatter_function(output_tensor,
@@ -263,6 +282,7 @@ class TorchBackend(Backend):
                                  "please consider upgrading your pytorch installation.")
             pass
 
+    @disable_compiler_collective
     def all_to_all_single(self,
                           output,
                           input,
@@ -277,21 +297,27 @@ class TorchBackend(Backend):
                                                    group=group,
                                                    async_op=async_op)
 
+    @disable_compiler_collective
     def all_to_all(self, output_tensor_list, input_tensor_list, group=None, async_op=False):
         return torch.distributed.all_to_all(output_tensor_list, input_tensor_list, group=group, async_op=async_op)
 
+    @disable_compiler_collective
     def send(self, tensor, dst, group=None, tag=0):
         return torch.distributed.send(tensor=tensor, dst=dst, group=group, tag=tag)
 
+    @disable_compiler_collective
     def recv(self, tensor, src=None, group=None, tag=0):
         return torch.distributed.recv(tensor=tensor, src=src, group=group, tag=tag)
 
+    @disable_compiler_collective
     def isend(self, tensor, dst, group=None, tag=0):
         return torch.distributed.isend(tensor=tensor, dst=dst, group=group, tag=tag)
 
+    @disable_compiler_collective
     def irecv(self, tensor, src=None, group=None, tag=0):
         return torch.distributed.irecv(tensor=tensor, src=src, group=group, tag=tag)
 
+    @disable_compiler_collective
     def gather(self, tensor, gather_list=None, dst=0, group=None, async_op=False):
         return torch.distributed.gather(tensor=tensor,
                                         gather_list=gather_list,
@@ -299,6 +325,7 @@ class TorchBackend(Backend):
                                         group=group,
                                         async_op=async_op)
 
+    @disable_compiler_collective
     def scatter(self, tensor, scatter_list=None, src=0, group=None, async_op=False):
         return torch.distributed.scatter(tensor=tensor,
                                          scatter_list=scatter_list,
@@ -306,11 +333,13 @@ class TorchBackend(Backend):
                                          group=group,
                                          async_op=async_op)
 
+    @disable_compiler_collective
     def barrier(self, group=torch.distributed.GroupMember.WORLD, async_op=False, device_ids=None):
         if group is None:
             group = torch.distributed.GroupMember.WORLD
         return torch.distributed.barrier(group=group, async_op=async_op, device_ids=device_ids)
 
+    @disable_compiler_collective
     def monitored_barrier(self, group=torch.distributed.GroupMember.WORLD, timeout=None, wait_all_ranks=False):
         if group is None:
             group = torch.distributed.GroupMember.WORLD
@@ -366,6 +395,19 @@ class TorchBackend(Backend):
             elif op == ReduceOp.BXOR:
                 op = torch.distributed.ReduceOp.BXOR
         return op
+
+    def init_device_mesh(self, mesh_shape, mesh_dim_names):
+        if not required_torch_version(min_version=2.2):
+            raise RuntimeError(f"Current torch version does not have device mesh"
+                               f"api (torch.__version__: {torch.__version__})")
+        if not required_torch_version(max_version=2.4):
+            return torch.distributed.device_mesh.init_device_mesh(get_accelerator().device_name(),
+                                                                  mesh_shape,
+                                                                  mesh_dim_names=mesh_dim_names)
+        else:
+            return torch.distributed.device_mesh.init_device_mesh(get_accelerator().current_device_name(),
+                                                                  mesh_shape,
+                                                                  mesh_dim_names=mesh_dim_names)
 
 
 # This will become a light-weight wrapper around torch.distributed functions

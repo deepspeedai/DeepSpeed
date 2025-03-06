@@ -4,23 +4,42 @@
 # DeepSpeed Team
 
 import os
+import re
 import torch
 import types
-from .constants import (FP32_WEIGHT_KEY, PARAM, VOCAB_TENSOR, CAT_DIM, PARAM_N_SUB_PARAMS)
+from typing import List, Tuple, Union
+from dataclasses import dataclass
+from .constants import (FP32_WEIGHT_KEY, PARAM, VOCAB_TENSOR, CAT_DIM, PARAM_N_SUB_PARAMS, SUB_PARAM_SHAPE)
+
+
+@dataclass
+class SubparamShape:
+    patterns: List[str]
+    shape: Tuple[Union[Tuple[int], int]]
+    partition_dim: int
 
 
 def load_hp_checkpoint_state(self, folder, tp_rank, tp_world_size):
     hp_mapping = self._hp_mapping
-    optim_state_keys = hp_mapping.get_optim_state_keys()
-    hp_keys = [FP32_WEIGHT_KEY] + optim_state_keys
-    checkpoint_files = {key: os.path.join(folder, f"{key}.pt") for key in hp_keys}
+    hp_mapping.optim_fragment = {}
 
-    for file in checkpoint_files.values():
-        assert os.path.isfile(file), f'{file} is not a valid file'
+    hp_keys = []
+    for file in os.listdir(folder):
+        # We expect files named something like "exp_avg.pt", "exp_avg_sq.pt", "fp32.pt"
+        pattern = r'(.+).pt'
+        match = re.search(pattern, file)
+        if match:
+            hp_keys.append(match.group(1))
 
+    step = None
     for key in hp_keys:
-        ckpt_file = checkpoint_files[key]
-        ckpt_dict = torch.load(ckpt_file)
+        ckpt_file = os.path.join(folder, f"{key}.pt")
+        ckpt_dict = torch.load(ckpt_file, weights_only=False)
+
+        if key == "step":
+            step = ckpt_dict
+            continue
+
         full_hp_param = ckpt_dict[PARAM]
 
         # need to deal with slices that were averaged.
@@ -62,17 +81,36 @@ def load_hp_checkpoint_state(self, folder, tp_rank, tp_world_size):
 
         assert full_param_numel == tp_world_size * tp_slice_numel, \
             f'Loading {ckpt_file} full param numel {full_param_numel} != tensor slice numel {tp_slice_numel} * tp_world_size {tp_world_size}'
-        dst_tensor = hp_mapping.hp_fragment if key == FP32_WEIGHT_KEY else hp_mapping.get_optim_state_fragment(key)
 
         #        print(f"{full_hp_param.shape=} {full_param_numel=} {folder=}")
         #        print(f"{dst_tensor.shape=} {dst_tensor.numel()=}{folder=}")
 
+        sub_param_shape = ckpt_dict.get(SUB_PARAM_SHAPE, None)
         # since when we do many to 1 on tp we cat sometimes on dim=0 and other times on dim=1 we have to do exactly the same in reverse
         # special case is when a single parameter is effectively a container for multiple sub parameters
         # (more details at PARAM_N_SUB_PARAMS definition)
         chunk_dim = ckpt_dict.get(CAT_DIM, 0)
         n_sub_params = ckpt_dict.get(PARAM_N_SUB_PARAMS, 1)
-        if n_sub_params > 1:
+        if sub_param_shape:
+            partition_dim = sub_param_shape.partition_dim
+            sub_dim_sizes = sub_param_shape.shape[partition_dim]
+            if not isinstance(sub_dim_sizes, tuple):
+                sub_dim_sizes = (sub_dim_sizes, )
+
+            partition_shape = [sum(d) if isinstance(d, tuple) else d for d in sub_param_shape.shape]
+            full_hp_param = full_hp_param.view(partition_shape)
+
+            offset = 0
+            merged_chunks = []
+            for sub_dim_size in sub_dim_sizes:
+                sub_params_tp_slice = full_hp_param.narrow(partition_dim,
+                                                           offset, sub_dim_size).chunk(tp_world_size,
+                                                                                       dim=partition_dim)[tp_rank]
+                merged_chunks.append(sub_params_tp_slice)
+                offset += sub_dim_size
+            tp_hp_slice = torch.cat(merged_chunks, dim=partition_dim)
+
+        elif n_sub_params > 1:
             sub_params = full_hp_param.chunk(n_sub_params, dim=chunk_dim)
             sub_params_tp_slice = [p.chunk(tp_world_size, dim=chunk_dim)[tp_rank] for p in sub_params]
             tp_hp_slice = torch.cat(sub_params_tp_slice, dim=chunk_dim)
@@ -84,13 +122,23 @@ def load_hp_checkpoint_state(self, folder, tp_rank, tp_world_size):
 
         lp_frag_address = hp_mapping.lp_fragment_address
         tp_hp_fragment = tp_hp_slice.narrow(0, lp_frag_address.start, lp_frag_address.numel)
-        assert dst_tensor.numel() == lp_frag_address.numel, \
-            f'Load checkpoint {key} dst_tensor numel {dst_tensor.numel()} != src numel {lp_frag_address.numel}'
 
         #        print(f"{key} SHAPE: {tp_hp_slice.shape=}")
         #        print(f"{key} SHAPE: {dst_tensor.shape=}")
         #        print(f"{key} SHAPE: {tp_hp_fragment.shape=}")
-        dst_tensor.data.copy_(tp_hp_fragment.data)
+
+        if key == FP32_WEIGHT_KEY:
+            dst_tensor = hp_mapping.get_hp_fragment()
+            assert dst_tensor.numel() == lp_frag_address.numel, \
+                f'Load checkpoint {key} dst numel {dst_tensor.numel()} != src numel {lp_frag_address.numel}'
+            dst_tensor.data.copy_(tp_hp_fragment.data)
+        else:
+            assert tp_hp_fragment.numel() == lp_frag_address.numel, \
+                f'Load checkpoint {key} dst numel {tp_hp_fragment.numel()} != src numel {lp_frag_address.numel}'
+
+            hp_mapping.optim_fragment[key] = tp_hp_fragment.clone().detach()
+
+    return step
 
 
 def enable_universal_checkpoint(param_list):

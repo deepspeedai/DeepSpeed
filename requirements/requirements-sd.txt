@@ -1,2 +1,2 @@
-diffusers
+diffusers>=0.25.0
 triton>=2.1.0

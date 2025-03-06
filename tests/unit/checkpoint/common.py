@@ -14,6 +14,7 @@ from deepspeed.runtime.fp16.unfused_optimizer import FP16_UnfusedOptimizer
 from deepspeed.runtime.zero.stage3 import DeepSpeedZeroOptimizer_Stage3
 from deepspeed.runtime.zero.partition_parameters import ZeroParamStatus
 
+from unit.common import preferred_dtype
 from unit.simple_model import *
 from unittest.mock import MagicMock, patch
 
@@ -85,15 +86,33 @@ def compare_model_states(saved_model, loaded_model, compare_optimizer=True, load
 
 
 def compare_state_dicts(state0, state1, expected_mismatch_keys=[]):
-    for (k0, s0), (k1, s1) in zip(state0.items(), state1.items()):
-        assert k0 == k1, f'failure due to key mismatch {k0} != {k1}'
-        if k0 in expected_mismatch_keys:
+    key_set0 = set(k for k in state0.keys() if k not in expected_mismatch_keys)
+    key_set1 = set(k for k in state1.keys() if k not in expected_mismatch_keys)
+    assert key_set0 == key_set1, f'failure due to key mismatch {key_set0} != {key_set1}'
+
+    for k in key_set0:
+        s0 = state0[k]
+        s1 = state1[k]
+        if k in expected_mismatch_keys:
             continue
         if isinstance(s0, torch.Tensor) and isinstance(s1, torch.Tensor):
             assert id(s0) != id(s1), f'Comparing optimizer state tensor against itself: {id(s0)} <====> {id(s1)}'
             assert torch.equal(s0.to('cpu'), s1.to('cpu'))
         else:
-            assert s0 == s1, f'failures with keys = {k0}, {k1}, values = {type(s0[0])} and {type(s1[0])}'
+            assert s0 == s1, f'failures with keys = {k}, {k}, values = {s0} and {s1}'
+
+
+def compare_opt_state_dicts(state0, state1, expected_mismatch_keys=[]):
+    for param_group0, saved_param_group1 in zip(state0['param_groups'], state1['param_groups']):
+        compare_state_dicts(param_group0, saved_param_group1, expected_mismatch_keys)
+
+    assert "state" in state0
+    assert "state" in state1
+    assert len([state0["state"].keys()]) == len([state1["state"].keys()])
+
+    for (k0, s0), (k1, s1) in zip(state0["state"].items(), state1["state"].items()):
+        assert k0 == k1, f'failure due to key mismatch {k0} != {k1}'
+        compare_state_dicts(s0, s1, expected_mismatch_keys)
 
 
 def compare_optimizer_states(saved_model, loaded_model, hidden_dim, fp16=True):
@@ -150,13 +169,15 @@ def checkpoint_correctness_verification(config_dict,
                                         tmpdir,
                                         load_optimizer_states=False,
                                         load_lr_scheduler_states=False,
-                                        fp16=True,
                                         train_batch=False,
                                         base_optimizers=[None, None],
                                         empty_tag=False,
                                         seq_dataloader=False,
-                                        load_module_only=False):
-    dtype = torch.half if fp16 else torch.float32
+                                        load_module_only=False,
+                                        dtype=None):
+    if dtype == None:
+        dtype = preferred_dtype()
+
     ds_model = create_deepspeed_model(config_dict=config_dict, model=models[0], base_optimizer=base_optimizers[0])
 
     if seq_dataloader:
@@ -197,7 +218,7 @@ def checkpoint_correctness_verification(config_dict,
     for root, _, files in os.walk(save_folder):
         for f in files:
             if "_expert_" in f and "_model_states" in f:
-                expert = torch.load(os.path.join(root, f))
+                expert = torch.load(os.path.join(root, f), weights_only=False)
                 needed, storages = 0, {}
                 for name, tensor in expert.items():
                     needed += tensor.size().numel()
@@ -228,7 +249,7 @@ def checkpoint_correctness_verification(config_dict,
                          load_module_only=load_module_only)
 
     if load_optimizer_states:
-        compare_optimizer_states(trained_model, loaded_model, hidden_dim, fp16)
+        compare_optimizer_states(trained_model, loaded_model, hidden_dim, dtype == torch.float16)
 
     if load_lr_scheduler_states:
         compare_lr_scheduler_states(trained_model, loaded_model)

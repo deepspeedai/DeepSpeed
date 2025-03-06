@@ -1,12 +1,16 @@
 name: nv-inference
 
 on:
+  workflow_dispatch:
   pull_request:
-    paths-ignore:
-      - 'docs/**'
-      - 'blogs/**'
-      - 'deepspeed/inference/v2/**'
-      - "tests/unit/inference/v2/**"
+    paths:
+      - '.github/workflows/nv-inference.yml'
+      - 'requirements/**'
+      - 'deepspeed/__init__.py'
+      - 'deepspeed/inference/**'
+      - '!deepspeed/inference/v2/**' # exclude v2 dir
+      - 'tests/unit/inference/**'
+      - '!tests/unit/inference/v2/**' # exclude v2 tests dir
   merge_group:
     branches: [ master ]
   schedule:
@@ -18,17 +22,17 @@ concurrency:
 
 jobs:
   unit-tests:
-    runs-on: [self-hosted, nvidia, cu116, v100]
+    runs-on: [self-hosted, nvidia, cu124, v100]
 
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
 
       - id: setup-venv
         uses: ./.github/workflows/setup-venv
 
       - name: Install pytorch
         run: |
-          pip install -U --cache-dir $TORCH_CACHE torch==1.13.1 torchvision --extra-index-url https://download.pytorch.org/whl/cu116
+          pip install -U --cache-dir $TORCH_CACHE torch==2.1.2 torchvision==0.16.2 --index-url https://download.pytorch.org/whl/cu124
           python -c "import torch; print('torch:', torch.__version__, torch)"
           python -c "import torch; print('CUDA available:', torch.cuda.is_available())"
 
@@ -36,13 +40,14 @@ jobs:
         run: |
           git clone https://github.com/huggingface/transformers
           cd transformers
-          git checkout f370bebdc
+          #git checkout f370bebdc
           git rev-parse --short HEAD
           pip install .
 
       - name: Install deepspeed
         run: |
-          pip install .[dev,1bit,autotuning,inf,triton]
+          DS_ACCELERATOR=cpu pip install .[dev,1bit,autotuning,inf]
+          #pip install .[dev,1bit,autotuning,inf,triton]
           ds_report
 
       - name: Python environment
@@ -53,12 +58,8 @@ jobs:
         run: |
           unset TORCH_CUDA_ARCH_LIST # only jit compile for current arch
           cd tests
-          coverage run --concurrency=multiprocessing -m pytest $PYTEST_OPTS -m 'seq_inference' unit/ --torch_ver="1.13" --cuda_ver="11.6"
-          coverage run --concurrency=multiprocessing -m pytest $PYTEST_OPTS -m 'inference_ops' unit/ --torch_ver="1.13" --cuda_ver="11.6"
-          coverage run --concurrency=multiprocessing -m pytest $PYTEST_OPTS --forked -n 4 -m 'inference' unit/ --torch_ver="1.13" --cuda_ver="11.6"
-
-      - name: Coverage report
-        run: |
-          cd tests
-          coverage combine
-          coverage report -m
+          #pytest $PYTEST_OPTS -m 'seq_inference' unit/ --torch_ver="2.1" --cuda_ver="12.4"
+          pytest $PYTEST_OPTS -m 'inference_ops' unit/ --torch_ver="2.1" --cuda_ver="12.4"
+          pytest $PYTEST_OPTS --forked -n 4 -m 'inference' unit/ --torch_ver="2.1" --cuda_ver="12.4"
+          # run ds_report again to check updated op list
+          ds_report

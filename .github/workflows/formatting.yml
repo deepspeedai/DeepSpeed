@@ -1,6 +1,7 @@
 name: Formatting
 
 on:
+  workflow_dispatch:
   pull_request:
     branches:
       '**'
@@ -16,11 +17,11 @@ concurrency:
 jobs:
 
   # formatting and basic install on cpu-only machine
-  formatting:
-    runs-on: ubuntu-20.04
+  unit-tests:
+    runs-on: ubuntu-22.04
 
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
 
       - name: environment
         run: |

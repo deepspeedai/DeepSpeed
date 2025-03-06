@@ -1,0 +1,136 @@
+name: hpu-gaudi2
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 0 * * *"
+  pull_request:
+    paths:
+      - ".github/workflows/hpu-gaudi2.yml"
+      - "accelerator/hpu_accelerator.py"
+      - "op_builder/hpu/**"
+      - "deepspeed/runtime/engine.py"
+      - "deepspeed/runtime/bf16_optimizer.py"
+      - "deepspeed/runtime/zero/stage_1_and_2.py"
+      - "deepspeed/runtime/zero/stage3.py"
+      - "deepspeed/runtime/zero/partition_parameters.py"
+      - "deepspeed/runtime/zero/partitioned_param_coordinator.py"
+      - "deepspeed/runtime/zero/parameter_offload.py"
+      - "deepspeed/runtime/pipe/engine.py"
+      - "deepspeed/runtime/utils.py"
+      - "deepspeed/inference/engine.py"
+      - "deepspeed/module_inject/auto_tp.py"
+      - "deepspeed/module_inject/replace_module.py"
+      - "deepspeed/module_inject/load_checkpoint.py"
+      - "deepspeed/module_inject/inject.py"
+      - "deepspeed/ops/transformer/**"
+      - "deepspeed/ops/adam/**"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  unit-tests:
+    # The type of runner that the job will run on
+    runs-on: [self-hosted, intel, gaudi2]
+    container:
+      image: vault.habana.ai/gaudi-docker/1.19.0/ubuntu22.04/habanalabs/pytorch-installer-2.5.1:latest
+      ports:
+        - 80
+      options: --runtime=habana -e HABANA_VISIBLE_DEVICES=all -e OMPI_MCA_btl_vader_single_copy_mechanism=none --cap-add=sys_nice
+
+    env:
+      PT_HPU_LAZY_MODE: 0
+      TORCHINDUCTOR_COMPILE_THREADS: 1
+      TEST_LIST: |
+        test_accelerator.py
+        test_autotuning.py
+        test_compression.py
+        test_dist.py
+        test_elastic.py
+        test_ds_arguments.py
+        test_run.py
+        test_multinode_runner.py
+        test_moe_tp.py
+        test_monitor.py
+        (test_zero_optimizer.py and (TestSaveTensorClone or TestZeRONonDistributed))
+        (test_latest_checkpoint.py and test_missing_latest)
+        test_reshape_checkpoint.py
+        test_shared_weights.py
+        test_sparse.py
+        test_tag_validation.py
+        test_pipe_module.py
+        (test_flops_profiler.py and test_flops_profiler_in_inference)
+        test_get_optim_files.py
+        test_groups.py
+        test_partition_balanced.py
+        (test_adamw.py and TestAdamConfigs)
+        test_coalesced_collectives.py
+        test_activation_checkpointing_non_reentrant.py
+        test_activation_checkpointing.py
+        test_data.py
+        (test_ds_config_dict.py and (TestBasicConfig or TestBatchConfig))
+        test_ds_config_model.py
+        test_mup_optimizers.py
+        (test_pld.py and test_pld_schedule)
+        test_runtime_utils.py
+        test_pipe_schedule.py
+        test_topology.py
+        (test_ds_initialize.py and (TestClientOptimizer or TestClientLrScheduler))
+        test_csr.py
+        (test_fp16.py and (TestZeroEmptyGrad or TestZeroAllowUntestedOptimizer))
+        (test_bf16.py and TestZeroDtypeCocktail)
+        test_partition.py
+        test_ignore_unused_parameters.py
+        test_zero_config.py
+        test_zero_context_ancestry.py
+        (test_zero_context.py and not TestSerialContext)
+        test_zero_dynamic_class.py
+        test_zero_nesting_init.py
+        test_zeropp.py
+        (test_zero.py and (TestZero3ParamPartitioningLargeParam or TestZero3ParamPartitioningLargeParam))
+
+    # Steps represent a sequence of tasks that will be executed as part of the job
+    steps:
+      # Checks-out your repository under $GITHUB_WORKSPACE, so your job can access it
+      - uses: actions/checkout@v4
+
+      - name: Check container state
+        run: |
+          ldd --version
+          hl-smi -L
+          python -c "import torch; print('torch:', torch.__version__, torch)"
+          python -c "import torch; print('CUDA available:', torch.cuda.is_available())"
+
+      - name: Install transformers
+        run: |
+          git clone https://github.com/huggingface/transformers
+          cd transformers
+          # if needed switch to the last known good SHA until transformers@master is fixed
+          git checkout 981c276
+          git rev-parse --short HEAD
+          pip install .
+
+      - name: Install deepspeed
+        run: |
+          pip install .[dev,autotuning]
+          ds_report
+
+      - name: Python environment
+        run: |
+          pip list
+
+      - name: Unit tests
+        run: |
+          unset TORCH_CUDA_ARCH_LIST # only jit compile for current arch
+          cd tests
+          export PT_HPU_LAZY_MODE=${PT_HPU_LAZY_MODE}
+          export TORCHINDUCTOR_COMPILE_THREADS=${TORCHINDUCTOR_COMPILE_THREADS}
+          TEST_LIST=$(echo "$TEST_LIST" | awk 'NF{printf "%s%s", (NR>1 ? " or " : ""), $0} END{if (NR>1) print ""}')
+          echo "TEST_LIST ${TEST_LIST}"
+          pytest --verbose unit/ -k "${TEST_LIST}"

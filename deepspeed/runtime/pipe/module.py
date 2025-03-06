@@ -116,7 +116,10 @@ class PipelineModule(nn.Module):
         partition_method (str, optional): The method upon which the layers are partitioned. Defaults to 'parameters'.
         activation_checkpoint_interval (int, optional): The granularity activation checkpointing in terms of number of layers. 0 disables activation checkpointing.
         activation_checkpoint_func (callable, optional): The function to use for activation checkpointing. Defaults to ``deepspeed.checkpointing.checkpoint``.
-        checkpointable_layers(list, optional): Checkpointable layers may not be checkpointed. Defaults to None which does not additional filtering.
+        checkpointable_layers (list[str], optional): List of layer class names that are eligible for checkpointing. For GPT models,
+            ParallelTransformerLayerPipe is always checkpointed regardless of this list. If None, all layers with parameters are
+            considered checkpointable. Defaults to None.
+        dynamic_shape: Allows dynamic shapes of inputs. This might have a performance impact.
     """
 
     def __init__(self,
@@ -130,7 +133,8 @@ class PipelineModule(nn.Module):
                  partition_method='parameters',
                  activation_checkpoint_interval=0,
                  activation_checkpoint_func=checkpointing.checkpoint,
-                 checkpointable_layers=None):
+                 checkpointable_layers=None,
+                 dynamic_shape=False):
 
         super().__init__()
 
@@ -196,6 +200,16 @@ class PipelineModule(nn.Module):
         #newseed = get_accelerator().initial_seed() + self._grid.get_stage_id()
         #ds_utils.set_random_seed(newseed)
 
+        self.activation_checkpoint_interval = activation_checkpoint_interval
+
+        self.activation_checkpoint_func = activation_checkpoint_func
+
+        #storage for precomputed checkpointeble results
+        self.is_checkpointable_results = []
+        self.is_checkpointable_results_interval = None
+
+        # if configuration use_reentrant = False, self.activation_checkpoint_func will be set to ``checkpointing.non_reentrant_checkpoint``
+
         #with torch.random.fork_rng(devices=[get_accelerator().current_device_name()]):
         self._build()
         self.to(get_accelerator().device_name(self.local_rank))
@@ -203,10 +217,17 @@ class PipelineModule(nn.Module):
         self.tied_comms = self._index_tied_modules()
         self._synchronize_tied_weights()
 
-        self.activation_checkpoint_interval = activation_checkpoint_interval
+        self.dynamic_shape = dynamic_shape
 
-        self.activation_checkpoint_func = activation_checkpoint_func
-        # if configuration use_reentrant = False, self.activation_checkpoint_func will be set to ``checkpointing.non_reentrant_checkpoint``
+    def _precompute_checkpointable_values(self):
+        if self.activation_checkpoint_interval > 0 and self.is_checkpointable_results_interval != self.activation_checkpoint_interval:
+            num_layers = len(self.forward_funcs)
+            self.interval_was_zero = False
+            for start_idx in range(0, num_layers, self.activation_checkpoint_interval):
+                end_idx = min(start_idx + self.activation_checkpoint_interval, num_layers)
+                funcs = self.forward_funcs[start_idx:end_idx]
+                self.is_checkpointable_results.append(self._is_checkpointable(funcs))
+            self.is_checkpointable_results_interval = self.activation_checkpoint_interval
 
     def _build(self):
         specs = self._layer_specs
@@ -352,7 +373,9 @@ class PipelineModule(nn.Module):
         else:
             num_layers = len(self.forward_funcs)
             x = forward_input
-            for start_idx in range(0, num_layers, self.activation_checkpoint_interval):
+            for start_idx, is_checkpointable_result in \
+                zip(range(0, num_layers, self.activation_checkpoint_interval), self.is_checkpointable_results):
+
                 end_idx = min(start_idx + self.activation_checkpoint_interval, num_layers)
 
                 funcs = self.forward_funcs[start_idx:end_idx]
@@ -361,7 +384,7 @@ class PipelineModule(nn.Module):
                 if not isinstance(x, tuple):
                     x = (x, )
 
-                if self._is_checkpointable(funcs):
+                if is_checkpointable_result:
                     x = self.activation_checkpoint_func(exec_range_func(start_idx, end_idx), *x)
                 else:
                     x = exec_range_func(start_idx, end_idx)(*x)
@@ -629,8 +652,31 @@ class PipelineModule(nn.Module):
             # because only non_reentrant_checkpoint can accept inputs with requires_grad=False
             # otherwise, the backward of the embedding layer won't receive gradients.
             if self.__class__.__name__ in ('GPTModelPipe', 'GPT2ModelPipe'):
-                return all('ParallelTransformerLayerPipe' in f.__class__.__name__ for f in funcs)
+                # For GPT models, checkpoint both transformer layers and any additional
+                # layers specified in checkpointable_layers (if provided)
+                return all('ParallelTransformerLayerPipe' in f.__class__.__name__ or (
+                    self.checkpointable_layers is not None and f.__class__.__name__ in self.checkpointable_layers)
+                           for f in funcs)
+
         if self.checkpointable_layers is not None:
+            # For non-GPT models, only checkpoint layers specified in checkpointable_layers
             return all(f.__class__.__name__ in self.checkpointable_layers for f in funcs)
+
+        # Default behavior: checkpoint any layer that has parameters
         params = [f.parameters() for f in funcs if isinstance(f, torch.nn.Module)]
         return any(len(list(p)) > 0 for p in params)
+
+    def get_additional_losses(self):
+        """ Returns model specific additional losses for reporting
+
+         Return a dictionary of {"loss name": loss_value} or None if no additional losses.
+        """
+        return None
+
+    def compile(self, *args, **kwargs):
+        for idx, layer in enumerate(self.forward_funcs):
+            if isinstance(layer, nn.Module):
+                layer.compile(*args, **kwargs)
+            else:
+                new_layer = torch.compile(layer, *args, **kwargs)
+                self.forward_funcs[idx] = new_layer

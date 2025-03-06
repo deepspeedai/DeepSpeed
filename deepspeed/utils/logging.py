@@ -7,6 +7,8 @@ import functools
 import logging
 import sys
 import os
+import torch
+from deepspeed.utils.torch import required_torch_version
 
 log_levels = {
     "debug": logging.DEBUG,
@@ -44,6 +46,15 @@ class LoggerFactory:
         ch.setLevel(level)
         ch.setFormatter(formatter)
         logger_.addHandler(ch)
+        if required_torch_version(min_version=2.6) and os.getenv("DISABLE_LOGS_WHILE_COMPILING", "0") == "1":
+            excluded_set = {
+                item.strip()
+                for item in os.getenv("LOGGER_METHODS_TO_EXCLUDE_FROM_DISABLE", "").split(",")
+            }
+            ignore_set = {'info', 'debug', 'error', 'warning', 'critical', 'exception', 'isEnabledFor'} - excluded_set
+            for method in ignore_set:
+                original_logger = getattr(logger_, method)
+                torch._dynamo.config.ignore_logger_methods.add(original_logger)
         return logger_
 
 
@@ -147,6 +158,6 @@ def should_log_le(max_log_level_str):
 
     max_log_level_str = max_log_level_str.lower()
     if max_log_level_str not in log_levels:
-        raise ValueError(f"{max_log_level_str} is not one of the `logging` levels")
+        raise ValueError(f"{max_log_level_str} is not one of the logging levels")
 
     return get_current_level() <= log_levels[max_log_level_str]

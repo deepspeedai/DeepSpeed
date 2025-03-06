@@ -71,7 +71,7 @@ class Autotuner:
                 logger.info(f"Created autotuning experiments directory: {self.exps_dir}")
             except:
                 logger.error(
-                    f"Failed to create {self.exps_dir}, please check `exps_dir` in the autotuning config file is accessible by all the nodes in the job."
+                    f"Failed to create {self.exps_dir}, please check exps_dir in the autotuning config file is accessible by all the nodes in the job."
                 )
                 exit(-1)
 
@@ -84,7 +84,7 @@ class Autotuner:
                 logger.info(f"Created autotuning results directory: {self.exps_dir}")
             except:
                 logger.error(
-                    f"Failed to create {self.results_dir}, please check `results_dir` in the autotuning config file is accessible by all the nodes in the job."
+                    f"Failed to create {self.results_dir}, please check results_dir in the autotuning config file is accessible by all the nodes in the job."
                 )
                 exit(-1)
 
@@ -248,8 +248,8 @@ class Autotuner:
         return self.autotuning_config.mp_size
 
     def max_train_micro_batch_size_per_gpu(self):
-        if self.max_train_batch_size(
-        ) and self.max_train_batch_size() > 0:  # if the user specifies a max_train_batch_size
+        if self.max_train_batch_size() and self.max_train_batch_size(
+        ) > 0:  # if the user specifies a max_train_batch_size
             max_train_micro_batch_size = self.max_train_batch_size() * self.mp_size() // (
                 self.exp_num_gpus * self.exp_num_nodes)  # gradient accumulation steps >=1
             return min(self.autotuning_config.max_train_micro_batch_size_per_gpu, max_train_micro_batch_size)
@@ -686,6 +686,7 @@ class Autotuner:
         exp_config[DS_CONFIG] = ds_config
         exp_config['num_gpus'] = self.exp_num_gpus
         exp_config['num_nodes'] = self.exp_num_nodes
+        exp_config['hostfile'] = self.args.hostfile
         exp_path = os.path.join(self.exps_dir, f'{exp_name}.json')
 
         with open(exp_path, 'w', buffering=BUFSIZE) as fd:
@@ -766,6 +767,7 @@ class Autotuner:
             exp_config[DS_CONFIG] = ds_config
             exp_config['num_gpus'] = self.exp_num_gpus
             exp_config['num_nodes'] = self.exp_num_nodes
+            exp_config['hostfile'] = self.args.hostfile
             exp_path = os.path.join(self.exps_dir, f'{exp_name}.json')
 
             with open(exp_path, 'w', buffering=BUFSIZE) as fd:
@@ -967,8 +969,8 @@ class Autotuner:
                     low = mid + 1
                     self.update_records(tuning_space_name, exp, metric_val, 1)
                     used_micro_batch_sizes.append(mid)
-                    if prev_metric_val and (
-                        (metric_val - prev_metric_val) / prev_metric_val) < METRIC_PERCENT_DIFF_CONST:
+                    if prev_metric_val and ((metric_val - prev_metric_val) /
+                                            prev_metric_val) < METRIC_PERCENT_DIFF_CONST:
                         logger.info(f"performance plateaus at mbs = {low}")
                         break
                     prev_metric_val = metric_val
@@ -1029,8 +1031,8 @@ class Autotuner:
         # NUM_GPUS=$(( ${NUM_WORKERS} * ${NUM_GPUS_PER_WORKER} ))
         # DP_SIZE=$(( ${NUM_GPUS} / (${PP_SIZE} * ${MP_SIZE}) ))
         # GRAD_ACC_STEPS=$(( ${TARGET_GLOBAL_BATCH_SIZE} / (${BATCH_SIZE} * ${DP_SIZE}) ))
-        if self.max_train_batch_size(
-        ) and self.max_train_batch_size() > 0:  # if the user specifies a max_train_batch_size
+        if self.max_train_batch_size() and self.max_train_batch_size(
+        ) > 0:  # if the user specifies a max_train_batch_size
             max_train_batch_size_per_gpu = self.max_train_batch_size() * self.mp_size() // (self.exp_num_gpus *
                                                                                             self.exp_num_nodes)
         else:
@@ -1060,6 +1062,7 @@ class Autotuner:
         exp_config[DS_CONFIG] = ds_config
         exp_config['num_gpus'] = self.exp_num_gpus
         exp_config['num_nodes'] = self.exp_num_nodes
+        exp_config['hostfile'] = self.args.hostfile
         exp_path = os.path.join(self.exps_dir, f'{exp_name}.json')
 
         logger.debug(f'run_ds_config exp_name = {exp_name}')

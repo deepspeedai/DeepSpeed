@@ -32,7 +32,7 @@ class DSRaggedEmbedding(DSEmbeddingBase):
         if config.use_token_type:
             return False
 
-        if config.output_normalization != None:
+        if config.output_normalization is not None:
             return False
 
         try:

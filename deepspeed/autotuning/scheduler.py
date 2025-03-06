@@ -5,7 +5,6 @@
 
 import copy
 
-from numpy import BUFSIZE
 import json
 import subprocess
 import sys

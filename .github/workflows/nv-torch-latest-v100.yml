@@ -1,12 +1,13 @@
 name: nv-torch-latest-v100
 
 on:
+  workflow_dispatch:
   pull_request:
     paths-ignore:
       - 'docs/**'
       - 'blogs/**'
       - 'deepspeed/inference/v2/**'
-      - "tests/unit/inference/v2/**"
+      - 'tests/unit/inference/v2/**'
   merge_group:
     branches: [ master ]
   schedule:
@@ -18,17 +19,17 @@ concurrency:
 
 jobs:
   unit-tests:
-    runs-on: [self-hosted, nvidia, cu116, v100]
+    runs-on: [self-hosted, nvidia, cu124, v100]
 
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
 
       - id: setup-venv
         uses: ./.github/workflows/setup-venv
 
       - name: Install pytorch
         run: |
-          pip install -U --cache-dir $TORCH_CACHE torch torchvision --index-url https://download.pytorch.org/whl/cu118
+          pip install -U --cache-dir $TORCH_CACHE torch torchvision --index-url https://download.pytorch.org/whl/cu124
           python -c "import torch; print('torch:', torch.__version__, torch)"
           python -c "import torch; print('CUDA available:', torch.cuda.is_available())"
 
@@ -37,7 +38,7 @@ jobs:
           git clone https://github.com/huggingface/transformers
           cd transformers
           # if needed switch to the last known good SHA until transformers@master is fixed
-          # git checkout 1cc453d33
+          git checkout 981c276
           git rev-parse --short HEAD
           pip install .
 
@@ -54,11 +55,5 @@ jobs:
         run: |
           unset TORCH_CUDA_ARCH_LIST # only jit compile for current arch
           cd tests
-          coverage run --concurrency=multiprocessing -m pytest $PYTEST_OPTS --forked -n 4 unit/ --torch_ver="2.1" --cuda_ver="11.8"
-          coverage run --concurrency=multiprocessing -m pytest $PYTEST_OPTS --forked -m 'sequential' unit/ --torch_ver="2.1" --cuda_ver="11.8"
-
-      - name: Coverage report
-        run: |
-          cd tests
-          coverage combine
-          coverage report -m
+          pytest $PYTEST_OPTS --forked -n 8 unit/ --torch_ver="2.6" --cuda_ver="12.4"
+          pytest $PYTEST_OPTS --forked -m 'sequential' unit/ --torch_ver="2.6" --cuda_ver="12.4"

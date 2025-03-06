@@ -5,10 +5,10 @@
 
 from typing import Any
 
-from deepspeed.inference.v2.config_v2 import RaggedInferenceEngineConfig
-from deepspeed.inference.v2.model_implementations.inference_policy_base import ContainerMap, InferenceV2Policy
-from deepspeed.inference.v2.model_implementations.mistral.container import MistralNonTransformerContainer, MistralTransformerContainer
-from deepspeed.inference.v2.model_implementations.mistral.model import MistralInferenceModel
+from ...config_v2 import RaggedInferenceEngineConfig
+from ..inference_policy_base import ContainerMap, InferenceV2Policy
+from .container import MistralNonTransformerContainer, MistralTransformerContainer
+from .model import MistralInferenceModel
 
 
 class MistralPolicy(InferenceV2Policy):

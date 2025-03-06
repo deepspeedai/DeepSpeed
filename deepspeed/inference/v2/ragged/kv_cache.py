@@ -140,9 +140,6 @@ class BlockedKVCache:
 
         self._caches = tuple(caches)
         self._allocators = tuple(allocators)
-        self._free_blocks = torch.empty(len(self._allocators), dtype=torch.int32, device="cpu")
-        for i, allocator in enumerate(self._allocators):
-            self._free_blocks[i] = allocator.free_blocks
 
     def reserve(self, num_blocks: int, cache_group: int = 0) -> torch.Tensor:
         """
@@ -201,9 +198,7 @@ class BlockedKVCache:
         """
         Return the number of free blocks in each cache
         """
-        for i, allocator in enumerate(self._allocators):
-            self._free_blocks[i] = allocator.free_blocks
-        return self._free_blocks
+        return [allocator.free_blocks for allocator in self._allocators]
 
     @property
     def num_caches(self) -> int:

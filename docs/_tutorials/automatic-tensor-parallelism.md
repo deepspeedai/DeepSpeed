@@ -66,7 +66,7 @@ With automatic tensor parallelism, we do not need to provide the injection polic
 
 # Example Script
 
-We can observe performance improvement with automatic tensor parallelism using the [inference test suite](https://github.com/microsoft/DeepSpeedExamples/blob/master/inference/huggingface/text-generation/inference-test.py). This script is for testing text-generation models and includes per token latency, bandwidth, throughput and memory checks for comparison. See the [README](https://github.com/microsoft/DeepSpeedExamples/tree/master/inference/huggingface/text-generation#deepspeed-huggingface-text-generation-examples) for more information.
+We can observe performance improvement with automatic tensor parallelism using the [inference test suite](https://github.com/deepspeedai/DeepSpeedExamples/blob/master/inference/huggingface/text-generation/inference-test.py). This script is for testing text-generation models and includes per token latency, bandwidth, throughput and memory checks for comparison. See the [README](https://github.com/deepspeedai/DeepSpeedExamples/tree/master/inference/huggingface/text-generation#deepspeed-huggingface-text-generation-examples) for more information.
 
 
 ## Launching
@@ -121,15 +121,21 @@ The following results were collected using V100 SXM2 32GB GPUs.
 The following model families have been successfully tested with automatic tensor parallelism. Other models may work but have not been tested yet.
 
 - albert
+- arctic
+- baichuan
 - bert
 - bigbird_pegasus
 - bloom
 - camembert
+- chatglm2
+- chatglm3
 - codegen
+- codellama
 - deberta_v2
 - electra
 - ernie
 - esm
+- falcon
 - glm
 - gpt-j
 - gpt-neo
@@ -137,8 +143,11 @@ The following model families have been successfully tested with automatic tensor
 - longt5
 - luke
 - llama
+- llama2
 - m2m_100
 - marian
+- mistral
+- mixtral
 - mpt
 - mvp
 - nezha
@@ -146,15 +155,21 @@ The following model families have been successfully tested with automatic tensor
 - opt
 - pegasus
 - perceiver
+- phi
 - plbart
+- qwen
+- qwen2
+- qwen2-moe
 - reformer
 - roberta
 - roformer
 - splinter
+- starcode
 - t5
 - xglm
 - xlm_roberta
 - yoso
+- yuan
 
 # Unsupported Models
 

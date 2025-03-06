@@ -7,7 +7,7 @@ import types
 import torch
 import numpy as np
 from deepspeed.accelerator import get_accelerator
-from deepspeed.runtime.utils import required_torch_version
+from deepspeed.utils.torch import required_torch_version
 from deepspeed import comm as dist
 
 
@@ -70,8 +70,6 @@ class OnebitAdam(torch.optim.Optimizer):
 
         super(OnebitAdam, self).__init__(params, defaults)
         self.eps_mode = 0 if eps_inside_sqrt else 1
-        assert (dist.is_initialized())
-
         self.comm_time = 0.0
         self.step_time = 0.0
         self.ave_step = 1
@@ -86,22 +84,27 @@ class OnebitAdam(torch.optim.Optimizer):
 
         self.comm_backend_name = comm_backend_name
 
+        assert dist.is_initialized(), "Please initialize the torch distributed backend."
         # Empty initializer. Set handle based on the comm backend as follows.
         self.comm_backend_handle = None
-
         if self.comm_backend_name == 'nccl':
             assert (
                 required_torch_version(min_version=1.8)
             ), "Please use torch 1.8 or greater to enable NCCL backend in 1-bit Adam. Alternatively, please specify 'mpi' as the 'comm_backend_name' in config file to proceed with the MPI backend"
-            assert dist.is_initialized() == True, "Please initialize the torch distributed backend."
             from deepspeed.runtime.comm.nccl import NcclBackend
             self.using_pipeline = hasattr(self.deepspeed, 'pipeline_enable_backward_allreduce')
             self.comm_backend_handle = NcclBackend(self.deepspeed.mpu)
-
         elif self.comm_backend_name == 'mpi':
             from deepspeed.runtime.comm.mpi import MpiBackend
             self.comm_backend_handle = MpiBackend(cuda_aware)
-
+        elif self.comm_backend_name == 'hccl':
+            from deepspeed.runtime.comm.hccl import HcclBackend
+            self.using_pipeline = hasattr(self.deepspeed, 'pipeline_enable_backward_allreduce')
+            self.comm_backend_handle = HcclBackend(self.deepspeed.mpu)
+        elif self.comm_backend_name == 'compressed':
+            from deepspeed.runtime.comm.compressed import CompressedBackend
+            self.using_pipeline = hasattr(self.deepspeed, 'pipeline_enable_backward_allreduce')
+            self.comm_backend_handle = CompressedBackend(self.deepspeed.mpu)
         self.size = self.comm_backend_handle.size
 
         self.divider = int(self.size * 8 / np.gcd(self.size, 8))

@@ -3,7 +3,8 @@
 
 # DeepSpeed Team
 
-from deepspeed.pydantic_v1 import Field
+from pydantic import Field
+from typing import Optional
 
 from deepspeed.runtime.config_utils import DeepSpeedConfigModel
 from .ragged import DSStateManagerConfig
@@ -14,6 +15,16 @@ class DeepSpeedTPConfig(DeepSpeedConfigModel):
 
     tp_size: int = 1
     """ Number of devices to split the model across using tensor parallelism. """
+
+
+class QuantizationConfig(DeepSpeedConfigModel):
+    """ Configure tensor parallelism settings """
+
+    quantization_mode: Optional[str] = None
+    """ The quantization mode in string format. The supported modes are as follows:
+        - 'wf6af16', weight-only quantization with FP6 weight and FP16 activation.
+    """
+    # TODO: may reuse the constants in deepspeed/compression/constants.py
 
 
 class RaggedInferenceEngineConfig(DeepSpeedConfigModel):
@@ -29,3 +40,5 @@ class RaggedInferenceEngineConfig(DeepSpeedConfigModel):
     """
     Configuration for managing persistent state
     """
+
+    quantization: QuantizationConfig = {}

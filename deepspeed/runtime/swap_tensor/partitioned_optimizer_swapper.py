@@ -33,9 +33,11 @@ class PartitionedOptimizerSwapper(OptimizerSwapper):
                                                           largest_numel, device, dtype, timers)
 
         aio_op = AsyncIOBuilder().load()
-        self.aio_handle = aio_op.aio_handle(aio_config[AIO_BLOCK_SIZE], aio_config[AIO_QUEUE_DEPTH],
-                                            aio_config[AIO_SINGLE_SUBMIT], aio_config[AIO_OVERLAP_EVENTS],
-                                            aio_config[AIO_THREAD_COUNT])
+        self.aio_handle = aio_op.aio_handle(block_size=aio_config[AIO_BLOCK_SIZE],
+                                            queue_depth=aio_config[AIO_QUEUE_DEPTH],
+                                            single_submit=aio_config[AIO_SINGLE_SUBMIT],
+                                            overlap_events=aio_config[AIO_OVERLAP_EVENTS],
+                                            intra_op_parallelism=aio_config[AIO_INTRA_OP_PARALLELISM])
 
         # Overlap swapping out
         self.gradient_swapper = AsyncTensorSwapper(aio_handle=self.aio_handle,
@@ -185,7 +187,7 @@ class PartitionedOptimizerSwapper(OptimizerSwapper):
         return pinned_tensors, pinned_paths, unpinned_tensors, unpinned_paths
 
     def _swap_in_pinned_gradients(self, aio_handle, parameter, gradient_tensor):
-        swap_info = self.swap_params_info[id(parameter)]
+        swap_info = self.swap_params_info[OptimizerSwapper.parameter_id(parameter)]
         param_gradients = swap_info.swapped_gradients.values()
         swap_buffers = [gradient_tensor.narrow(0, grad.offset, grad.length) for grad in param_gradients]
         swap_paths = [grad.path for grad in param_gradients]
@@ -203,7 +205,7 @@ class PartitionedOptimizerSwapper(OptimizerSwapper):
         self._log_timers([SWAP_READ_GRADIENTS, SWAP_WAIT_GRADIENTS])
 
     def _swap_in_gradients(self, aio_handle, parameter, dest_buffer):
-        swap_info = self.swap_params_info.get(id(parameter), None)
+        swap_info = self.swap_params_info.get(OptimizerSwapper.parameter_id(parameter), None)
         if not (swap_info and swap_info.has_gradients()):
             return
 

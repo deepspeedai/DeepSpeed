@@ -3,7 +3,12 @@
 
 # DeepSpeed Team
 
-from .attention_configs import (DSSelfAttentionConfig, PositionalEmbeddingType, MaskingType)
+from .attention_configs import (
+    DSSelfAttentionConfig,
+    PositionalEmbeddingType,
+    MaskingType,
+    RotateHalfConfig,
+)
 from .embedding_config import DSEmbeddingsConfig
 from .linear_config import DSLinearConfig
 from .moe_config import DSMoEConfig

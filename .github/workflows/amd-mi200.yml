@@ -1,9 +1,13 @@
 name: amd-mi200
 
 on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - '.github/workflows/amd-mi200.yml'
+      - 'requirements/**'
   schedule:
     - cron: "0 0 * * *"
-  workflow_dispatch:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -21,14 +25,14 @@ jobs:
     # Steps represent a sequence of tasks that will be executed as part of the job
     steps:
       # Checks-out your repository under $GITHUB_WORKSPACE, so your job can access it
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
 
       - id: setup-venv
         uses: ./.github/workflows/setup-venv
 
       - name: Install pytorch
         run: |
-          pip install -U --cache-dir $TORCH_CACHE torch torchvision --index-url https://download.pytorch.org/whl/rocm5.6
+          pip install -U --cache-dir $TORCH_CACHE torch torchvision --index-url https://download.pytorch.org/whl/rocm6.0
           python -c "import torch; print('torch:', torch.__version__, torch)"
           python -c "import torch; print('CUDA available:', torch.cuda.is_available())"
 
@@ -44,8 +48,6 @@ jobs:
       - name: Install (ROCm) apex
         run: |
           git clone https://github.com/ROCmSoftwarePlatform/apex.git
-          cd apex
-          git checkout torch_2.1_higher
           CURRENT_VER=$(git rev-parse HEAD)
           INSTALLED_VER=$(cat /blob/amd-apex/.venv_installed_version)
           if [[ "$CURRENT_VER" != "$INSTALLED_VER" ]]; then

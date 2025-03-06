@@ -40,13 +40,13 @@ class MoEScatter(DSKernelBase):
         Scatters the hidden states such that the token stride for each expert's input is contiguous.
 
         Arguments:
-            moe_input (torch.Tensor): The direct input for the MoE GEMM of shape [n_tokens, hidden_size].
+            moe_input (torch.Tensor): The direct input for the MoE GEMM of shape [n_tokens * n_top_k, hidden_size].
             expert_cumsum (torch.Tensor): The cumulative sum of the expert counts of shape [n_experts].
-            mapped_slots (torch.Tensor): The index of the token in the expert's input of shape [n_tokens].
+            mapped_slots (torch.Tensor): The index of the token in the expert's input of shape [n_tokens, n_top_k].
             hidden_states (torch.Tensor): The hidden states of shape [n_tokens, hidden_size].
             expert_counts (torch.Tensor): The number of tokens assigned to each expert of shape [n_experts].
-            assignments (torch.Tensor): The expert assignments of shape [n_tokens].
-            offsets (torch.Tensor): The offsets into the expert for a given token of shape [n_tokens].
+            assignments (torch.Tensor): The expert assignments of shape [n_tokens, n_top_k].
+            offsets (torch.Tensor): The offsets into the expert for a given token of shape [n_tokens, n_top_K].
 
         Returns:
             Tuple[torch.Tensor, torch.Tensor, torch.Tensor]: The MoE input (with scattered values), the cumsum of the offsets (for the MoE kernels themselves), and the assignments Tensor modified in place to show which row that token was mapped to in the input.

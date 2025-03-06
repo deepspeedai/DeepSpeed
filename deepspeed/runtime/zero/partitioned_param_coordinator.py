@@ -9,6 +9,7 @@ from collections import UserDict
 from typing import Deque, Set
 
 from deepspeed import comm as dist
+from deepspeed.utils import z3_leaf_module
 from deepspeed.utils.logging import logger
 from deepspeed.runtime.zero.offload_config import OffloadDeviceEnum
 from deepspeed.runtime.zero.partition_parameters import *
@@ -16,6 +17,9 @@ from deepspeed.runtime.zero.partitioned_param_profiler import PartitionedParamet
 from deepspeed.runtime.swap_tensor.partitioned_param_swapper import PartitionedParamStatus
 from deepspeed.utils.debug import debug_module2name_id, debug_param2name_id
 from deepspeed.accelerator import get_accelerator
+import deepspeed.runtime.compiler as compiler
+from deepspeed.runtime.compiler import is_compiling
+
 import logging
 
 ENABLE_PROFILER = False
@@ -31,6 +35,7 @@ def get_all_parameters(sub_module, recurse=False):
     return itertools.chain(sub_module.named_parameters(recurse=recurse), sub_module.ds_external_parameters())
 
 
+@compiler.disable
 def iter_params(module: Module, recurse=False) -> Iterable[Parameter]:
     return map(lambda pair: pair[1], get_all_parameters(module, recurse))
 
@@ -82,13 +87,15 @@ class PartitionedParameterCoordinator:
         timers=None,
         zero_quantized_weights=False,
         zero_quantized_nontrainable_weights=False,
+        fast_sharding_for_leaf_module=False,
+        log_trace_cache_warnings=False,
     ) -> None:
         # mapping of param -> handle for each param that is currently in flight
         self.__inflight_param_registry = inflight_param_registry
         # keeps track of the number of submodules invoked so far.
         self.__step_id: int = 0
         # network tracing mode
-        self.__trace_mode: ZeRoTraceMode = ZeRoTraceMode.RECORD
+        self.__trace_mode: ZeRoTraceMode = ZeRoTraceMode.INVALID
         # sequence of submodules/parameters in forward pass + backward pass
         self.__submodule_order: Iterable[Module] = []
         self.__param_order: Iterable[__class__.__ParamInTrace] = []
@@ -125,6 +132,13 @@ class PartitionedParameterCoordinator:
         self.__max_ongoing_fetch_events: int = 2
         self.__profiler = PartitionedParameterProfiler(timers if ENABLE_PROFILER else None)
 
+        # Whether to log trace cache warnings, e.g. invalidation events
+        self.__log_trace_cache_warnings = log_trace_cache_warnings
+
+        # whether to enable fast fetch for the z3 leaf module.
+        # this will improve fetch speed but will not break down leaf module parameters to alleviate memory pressure.
+        self.fast_sharding_for_leaf_module = fast_sharding_for_leaf_module
+
     """Tracing and Tracking
     TODO. consider performing trace before initializing PartitionedParameterCoordinator
     and passing trace results into constructor. This way all the code in here can
@@ -149,46 +163,59 @@ class PartitionedParameterCoordinator:
     def is_record_trace(self) -> bool:
         return self.__trace_mode == ZeRoTraceMode.RECORD
 
+    def _clean_inflight_param_registry(self) -> None:
+        for param, handle in self.__inflight_param_registry.items():
+            handle.wait()
+            self.__release_param(param)
+        self.__inflight_param_registry.clear()
+
     def _invalidate_trace(self) -> None:
         if self.is_invalid_trace():
             raise RuntimeError("attempted to invalidate already invalid trace")
         self.__trace_mode = ZeRoTraceMode.INVALID
         self._clear_trace_structures()
+        self._clean_inflight_param_registry()
 
     def trace_prologue(self, sub_module: Module) -> None:
         if self.is_complete_trace():
             # sub_module must match expectation else invalidate trace cache
             if len(self.__submodule_order) <= self.__step_id:
                 print_rank_0(
-                    f"Invalidate trace cache @ step {self.__step_id} and module {sub_module.id}: "
+                    f"Invalidate trace cache @ step {self.__step_id} and module {sub_module.ds_id}: "
                     f"cache has only {len(self.__submodule_order)} modules",
-                    force=True)
+                    force=self.__log_trace_cache_warnings)
                 self._invalidate_trace()
                 return
 
             if sub_module != self.__submodule_order[self.__step_id]:
-                expected_module_id = self.__submodule_order[self.__step_id].id
+                expected_module_id = self.__submodule_order[self.__step_id].ds_id
                 print_rank_0(
                     f"Invalidate trace cache @ step {self.__step_id}: "
-                    f"expected module {expected_module_id}, but got module {sub_module.id}",
-                    force=True)
+                    f"expected module {expected_module_id}, but got module {sub_module.ds_id}",
+                    force=self.__log_trace_cache_warnings)
                 self._invalidate_trace()
 
+    @compiler.disable
     def record_module(self, sub_module: Module) -> None:
         """adds sub module to trace"""
+        if is_compiling():
+            return
+
         if not self.is_record_trace():
             raise RuntimeError(f"attempted to record trace when status = {self.__trace_mode}")
 
         self.__submodule_order.append(sub_module)
-        self.__step_id_module_fetched_for[sub_module.id].append(self.__step_id)
+        self.__step_id_module_fetched_for[sub_module.ds_id].append(self.__step_id)
 
     def record_parameters(self, sub_module: Module) -> None:
+        if is_compiling():
+            return
         """adds sub module to trace"""
         if not self.is_record_trace():
             raise RuntimeError(f"attempted to record trace when status = {self.__trace_mode}")
 
-        step_id = self.__step_id_module_fetched_for[sub_module.id].popleft()
-        for param in sorted(set(iter_params(sub_module)), key=lambda p: p.ds_id):
+        step_id = self.__step_id_module_fetched_for[sub_module.ds_id].popleft()
+        for param in sorted(set(iter_params(sub_module, recurse=z3_leaf_module(sub_module))), key=lambda p: p.ds_id):
             self.__param_order.append(__class__.__ParamInTrace(param=param, step_id_last_used_at=step_id))
 
     def construct_parameter_trace_from_module_trace(self):
@@ -197,15 +224,17 @@ class PartitionedParameterCoordinator:
         for sub_module in self.__submodule_order:
             self.record_parameters(sub_module)
 
+    @compiler.disable
     def reset_step(self) -> None:
         """indicate that we have completed one fwd+bwd for the model"""
-        if self.__inflight_param_registry:
-            raise RuntimeError(f"still have inflight params "
-                               f"{[p.ds_summary() for p in self.__inflight_param_registry.keys()]}")
+        if is_compiling():
+            return
+
+        self._clean_inflight_param_registry()
 
         if not self.is_complete_trace():  # not self.trace_complete:
             # Make sure that recorded submodule orders are identical across ranks
-            assert_ints_same_as_other_ranks([m.id for m in self.__submodule_order])
+            assert_ints_same_as_other_ranks([m.ds_id for m in self.__submodule_order])
 
             if self.is_record_trace():
                 # Successfully recorded a trace
@@ -218,7 +247,7 @@ class PartitionedParameterCoordinator:
                 self.__param_order = tuple(self.__param_order)  # freeze
                 self.__trace_mode = ZeRoTraceMode.COMPLETE
                 print_rank_0(
-                    f"completed record trace of {len(self.__submodule_order)} sub modules: {[m.id for m in self.__submodule_order]}",
+                    f"completed record trace of {len(self.__submodule_order)} sub modules: {[m.ds_id for m in self.__submodule_order]}",
                     force=False)
             else:
                 # Enable trace recording for next forward/backward pass
@@ -232,7 +261,6 @@ class PartitionedParameterCoordinator:
         self.__most_recent_step_id_param_fetched_for = collections.defaultdict(lambda: int(-1e10))
         self.__step_id_module_fetched_for = collections.defaultdict(lambda: collections.deque())
         self.__step_id = 0
-        self.__n_available_params = 0
         self.__profiler.reset_events()
 
     def _dump_params(self, tag, sub_module, params, step_id=None):
@@ -251,6 +279,7 @@ class PartitionedParameterCoordinator:
     Fetching, prefetching, and releasing parameters
     """
 
+    @compiler.disable
     @instrument_w_nvtx
     @torch.no_grad()
     def fetch_sub_module(self, current_submodule: Module, forward: bool) -> None:
@@ -261,19 +290,20 @@ class PartitionedParameterCoordinator:
         """
         if logger.isEnabledFor(logging.DEBUG):
             debug_rank0(
-                f"{self.__step_id}: M{current_submodule.id}({type(current_submodule).__name__}) P{[p.ds_id for p in iter_params(current_submodule)]} "
+                f"{self.__step_id}: M{current_submodule.ds_id}({type(current_submodule).__name__}) P{[p.ds_id for p in iter_params(current_submodule, recurse=z3_leaf_module(current_submodule))]} "
                 + str({
                     "avail": f"{self.__n_available_params:.1e}",
                     "queue_sz": f"{len(self.__param_queue or [])}",
                     "inflight": [p.ds_id for p in self.__inflight_param_registry],
                 }))
 
-        params_to_fetch = frozenset(iter_params(current_submodule))
+        params_to_fetch = set(iter_params(current_submodule, recurse=z3_leaf_module(current_submodule)))
         fetch_numel = sum(
             [p.partition_numel() for p in params_to_fetch if p.ds_status == ZeroParamStatus.NOT_AVAILABLE])
+
         if fetch_numel > 0:
             event_name = __class__.FORWARD_FETCH_SUBMIT if forward else __class__.BACKWARD_FETCH_SUBMIT
-            self._dump_param_ids(event_name, current_submodule.id,
+            self._dump_param_ids(event_name, current_submodule.ds_id,
                                  [p.ds_id for p in params_to_fetch if p.ds_status == ZeroParamStatus.NOT_AVAILABLE])
             self.__profiler.start_event(event_name)
             # kick off all gather for params in the immediately required submodule
@@ -287,9 +317,10 @@ class PartitionedParameterCoordinator:
         wait_numel = 0
         wait_event_name = __class__.FORWARD_FETCH_WAIT if forward else __class__.BACKWARD_FETCH_WAIT
         self.__profiler.start_event(wait_event_name)
+        fast_fetch = self.fast_sharding_for_leaf_module and z3_leaf_module(current_submodule)
         # wait for parameters in the immediately needed submodule to become available
         for param in params_to_fetch:
-            param.ds_active_sub_modules.add(current_submodule.id)
+            param.ds_active_sub_modules.add(current_submodule.ds_id)
             if logger.isEnabledFor(logging.DEBUG):
                 debug_rank0(f"-wait: {param.ds_summary()}")
             if param in self.__inflight_param_registry:
@@ -300,16 +331,18 @@ class PartitionedParameterCoordinator:
                     if len(self.__ongoing_fetch_events) > self.__max_ongoing_fetch_events:
                         self.__ongoing_fetch_events.popleft().synchronize()
 
-                    self.__inflight_param_registry.pop(param).wait()
+                    self.__inflight_param_registry.pop(param).wait(handle_dependency=not fast_fetch)
 
-                    if not get_accelerator().is_synchronized_device():
+                    if not get_accelerator().handles_memory_backpressure() and not fast_fetch:
                         event = get_accelerator().Event()
                         event.record()
                         self.__ongoing_fetch_events.append(event)
 
             assert param.ds_status == ZeroParamStatus.AVAILABLE, param.ds_summary()
-        if not get_accelerator().is_synchronized_device():
+        if not get_accelerator().resolves_data_dependency():
             get_accelerator().current_stream().wait_stream(self.__allgather_stream)
+        if fast_fetch:
+            AllGatherCoalescedHandle.free_buffer()
         self.__profiler.stop_event(wait_event_name, wait_numel)
 
         # kick off parameter prefetches for upcoming modules
@@ -331,7 +364,7 @@ class PartitionedParameterCoordinator:
             if discarded_from_prefetch_queue != params_not_already_fetched:
                 raise RuntimeError(
                     f"tracing error at step {self.__step_id}: \n"
-                    f"module id: {current_submodule.id}, training: {current_submodule.training}\n"
+                    f"module id: {current_submodule.ds_id}, training: {current_submodule.training}\n"
                     f"expected the next {len(params_not_already_fetched)} parameters in the "
                     f"parameter fetch queue to be {tuple(p.ds_summary(use_debug_name=True) for p in params_not_already_fetched)} \n"
                     f"but got \n {tuple(p.ds_summary(use_debug_name=True) for p in discarded_from_prefetch_queue)}.")
@@ -386,15 +419,25 @@ class PartitionedParameterCoordinator:
 
     @instrument_w_nvtx
     @torch.no_grad()
-    def release_sub_module(self, submodule: Module, backward: bool) -> None:
+    def release_sub_module(self, submodule: Module) -> None:
         """release the parameters of a sub module, assuming they meet conditions to
         be released."""
         params_to_release = (self.__params_to_release(submodule, self.__step_id) if self.is_complete_trace() else set(
-            p.ds_id for p in iter_params(submodule)))
-        for param in iter_params(submodule):
-            param.ds_active_sub_modules.discard(submodule.id)
+            p.ds_id for p in iter_params(submodule, recurse=z3_leaf_module(submodule))))
+
+        free_data = not z3_leaf_module(submodule) or not self.fast_sharding_for_leaf_module
+        if not free_data:
+            # wait for the computation to finish and launch as early as possible.
+            empty_buffer = torch.empty(1, device=get_accelerator().current_device())
+
+        for param in iter_params(submodule, recurse=z3_leaf_module(submodule)):
+            param.ds_active_sub_modules.discard(submodule.ds_id)
             if param.ds_id in params_to_release and not param.is_external_param:
-                self.__release_param(param, backward)
+                self.__release_param(param, free_data)
+            if not free_data:
+                if param.ds_id in params_to_release and not param.is_external_param:
+                    # empty buffer ensures that all computations are complete
+                    param.data = empty_buffer
 
     @instrument_w_nvtx
     @torch.no_grad()
@@ -402,13 +445,13 @@ class PartitionedParameterCoordinator:
         """release all module parameters"""
         for param in iter_params(module, recurse=True):
             if param in self.__inflight_param_registry:
-                raise RuntimeError(f"param {param.ds_summary()} still in flight")
+                self.__inflight_param_registry.pop(param).wait()
 
             # TODO. make this throw if if there are still active submodules. currently
             # there's a hook execution issue
             param.ds_active_sub_modules.clear()
-            self.__release_param(param, backward=False)
-
+            self.__release_param(param)
+        self.__n_available_params = 0
         for param in iter_params(module, recurse=True):
             if param.ds_status != ZeroParamStatus.NOT_AVAILABLE:
                 raise RuntimeError(f"{param.ds_summary()} expected to be released")
@@ -431,26 +474,34 @@ class PartitionedParameterCoordinator:
         """for each partitioned parameter, kick off an async allgather and store
         the work handle for the in flight parameters."""
         partitioned_params = []
-        all_gather_numel = 0
+        all_gather_numel = 0  # numel = num of elements
         for param in params:
             if param.ds_status == ZeroParamStatus.NOT_AVAILABLE:
                 partitioned_params.append(param)
                 all_gather_numel += param.ds_numel
 
         if partitioned_params:
-            partitioned_params
             self.__n_available_params += all_gather_numel
-            with get_accelerator().stream(self.__allgather_stream):
-                event_name = __class__.FORWARD_ALL_GATHER if forward else __class__.BACKWARD_ALL_GATHER
-                self.__profiler.start_event(event_name)
-                handle = partitioned_params[0].all_gather_coalesced(partitioned_params,
-                                                                    forward=forward,
-                                                                    quantize=quantize)
-                self.__profiler.stop_event(event_name, all_gather_numel)
-
-            for param in partitioned_params:
-                assert param.ds_status == ZeroParamStatus.INFLIGHT, param.ds_summary()
-                self.__inflight_param_registry[param] = handle
+            # here we need to handle a special case where some of the parameters have a valid hpz secondary tensor (e.g. they are not trainable so their secondary tensor never expire) but others do not.
+            partitioned_params_with_secondary_tensors = [
+                p for p in partitioned_params if p.ds_secondary_tensor is not None
+            ]
+            partitioned_params_without_secondary_tensors = [
+                p for p in partitioned_params if p.ds_secondary_tensor is None
+            ]
+            for param_group in [
+                    partitioned_params_with_secondary_tensors, partitioned_params_without_secondary_tensors
+            ]:
+                if not param_group:
+                    continue
+                with get_accelerator().stream(self.__allgather_stream):
+                    event_name = __class__.FORWARD_ALL_GATHER if forward else __class__.BACKWARD_ALL_GATHER
+                    self.__profiler.start_event(event_name)
+                    handle = param_group[0].all_gather_coalesced(param_group, quantize=quantize)
+                    self.__profiler.stop_event(event_name, all_gather_numel)
+                for param in param_group:
+                    assert param.ds_status == ZeroParamStatus.INFLIGHT, param.ds_summary()
+                    self.__inflight_param_registry[param] = handle
 
             # Release swap buffers for persisted params on nvme since they will never be partitioned or evicted from GPU
             swap_persisted_params = [
@@ -459,12 +510,13 @@ class PartitionedParameterCoordinator:
             if swap_persisted_params:
                 swap_persisted_params[0].nvme_swapper.remove_partition_and_release_buffers(swap_persisted_params)
 
+    @compiler.disable
     @instrument_w_nvtx
-    def __release_param(self, param: Parameter, backward: bool) -> None:
+    def __release_param(self, param: Parameter, free_data: bool = True) -> None:
         if param.ds_status == ZeroParamStatus.AVAILABLE and not param.ds_active_sub_modules:
             if logger.isEnabledFor(logging.DEBUG):
                 debug_rank0(f"-release: {param.ds_summary()}")
-            param.partition(backward=backward)
+            param.partition(free_data=free_data)
             self.__n_available_params -= param.ds_numel
 
     @instrument_w_nvtx
@@ -473,7 +525,9 @@ class PartitionedParameterCoordinator:
         if not self.is_complete_trace():
             raise RuntimeError("expected trace to be complete")
 
-        params_to_release = set(p.ds_id for p in iter_params(submodule_to_release) if not p.ds_persist)
+        params_to_release = set(
+            p.ds_id for p in iter_params(submodule_to_release, recurse=z3_leaf_module(submodule_to_release))
+            if not p.ds_persist)
 
         # Problem: When prefetcher scans the param trace, it skips AVAILABLE params.
         # This creates issues if those params are released before the skipped uses:
@@ -482,7 +536,7 @@ class PartitionedParameterCoordinator:
         # diverges from the trace.
         # Solution: Don't release params whose reuse was skipped by prefetch. This is
         # possible because we detect such skips during prefetch and mark those params.
-        for param in iter_params(submodule_to_release):
+        for param in iter_params(submodule_to_release, recurse=z3_leaf_module(submodule_to_release)):
             if self.__most_recent_step_id_param_fetched_for[param] > step_id:
                 params_to_release.discard(param.ds_id)
 
@@ -493,7 +547,7 @@ class PartitionedParameterCoordinator:
         for module in self.__submodule_order[step_id:]:
             if params_traversed >= self.__max_reuse_dist_in_numel:
                 break
-            for param in iter_params(module):
+            for param in iter_params(module, recurse=z3_leaf_module(submodule_to_release)):
                 params_to_release.discard(param.ds_id)
                 params_traversed += param.ds_numel
 

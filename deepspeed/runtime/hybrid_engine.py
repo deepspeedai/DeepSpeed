@@ -17,16 +17,14 @@ from deepspeed import comm as dist
 from deepspeed.accelerator import get_accelerator
 from torch import nn
 from deepspeed.utils import logger
-
-from deepspeed.ops.op_builder import InferenceBuilder
-
 from deepspeed.module_inject.layers import LinearLayer, Normalize, EmbeddingLayer, OPTEmbedding
+from ..ops.transformer.inference.op_binding.workspace import WorkspaceOp
+
 try:
     import transformers
     OPTLearnedPositionalEmbedding = transformers.models.opt.modeling_opt.OPTLearnedPositionalEmbedding
 except:
     OPTLearnedPositionalEmbedding = None
-inference_cuda_module = None
 
 
 class DeepSpeedHybridEngine(DeepSpeedEngine):
@@ -61,12 +59,8 @@ class DeepSpeedHybridEngine(DeepSpeedEngine):
         self._total_batch_size = None
         self._gather_latency = 0
 
-        global inference_cuda_module
-        if inference_cuda_module is None:
-            builder = InferenceBuilder()
-            inference_cuda_module = builder.load()
-
         self.is_lora_fused = False
+        self.workspace = WorkspaceOp()
 
     def convert_to_linear_transposed(self, model):
 
@@ -160,13 +154,13 @@ class DeepSpeedHybridEngine(DeepSpeedEngine):
 
     def retake_inference_cache(self):
         if self._config.hybrid_engine.release_inference_cache:
-            retake_success = inference_cuda_module.retake_workspace()
+            retake_success = self.workspace.retake_workspace()
 
             if not retake_success:
                 logger.warning("Unable to acquire workspace on first attempt, emptying cache and retrying.")
                 gc.collect()
                 get_accelerator().empty_cache()
-                retake_success = inference_cuda_module.retake_workspace()
+                retake_success = self.workspace.retake_workspace()
 
                 if not retake_success:
                     raise RuntimeError("Unable to retake inference workspace.")
@@ -269,7 +263,7 @@ class DeepSpeedHybridEngine(DeepSpeedEngine):
                 self.is_lora_fused = False
 
         if self._config.hybrid_engine.release_inference_cache:
-            inference_cuda_module.release_workspace()
+            self.workspace.release_workspace()
             gc.collect()
             get_accelerator().empty_cache()
 
@@ -296,8 +290,13 @@ class DeepSpeedHybridEngine(DeepSpeedEngine):
 
                     layer_id += 1
                 else:
-                    self._other_layers.append(self.inference_policies[child.__class__][0](
-                        weight=child.weight, bias=child.bias if hasattr(child, 'bias') else None))
+                    if self.inference_policies[child.__class__][0] == LinearLayer:
+                        self._other_layers.append(self.inference_policies[child.__class__][0](module=child,
+                                                                                              mp_group=None,
+                                                                                              skip_partition=True))
+                    else:
+                        self._other_layers.append(self.inference_policies[child.__class__][0](
+                            weight=child.weight, bias=child.bias if hasattr(child, 'bias') else None))
                     self._orig_modules_others.append(child)
                     self._orig_fwds_others.append(child.forward)
             else:
@@ -385,14 +384,20 @@ class DeepSpeedHybridEngine(DeepSpeedEngine):
             self._total_latency = self._total_latency + latency
             self._iters = self._iters + 1
             if not dist.is_initialized() or dist.get_rank() == 0:
+                if self._total_batch_size is not None:
+                    cur_samples_p_sec = f'|CurSamplesPerSec={(1 / latency * self._total_batch_size):.2f} '
+                    avg_samples_p_sec = f'|AvgSamplesPerSec={(1 / (self._total_latency / self._iters) * self._total_batch_size):.2f}'
+                else:
+                    cur_samples_p_sec = ''
+                    avg_samples_p_sec = ''
                 others = latency - (self._generate_latency + self._training_latency)
                 print(f'|E2E latency={(latency):.2f}s ' + \
                       f'|Gather latency={self._gather_latency:.2f}s ({(self._gather_latency / latency * 100):.2f}%) '
                       f'|Generate time={(self._generate_latency):.2f}s ({(self._generate_latency / latency * 100):.2f}%) ' + \
                       f'|Training time={(self._training_latency):.2f}s ({(self._training_latency / latency * 100):.2f}%) ' + \
-                      f'|Others={others:.2f} ({(others / latency * 100):.2f}%)'
-                      f'|CurSamplesPerSec={(1 / latency * self._total_batch_size):.2f} ' + \
-                      f'|AvgSamplesPerSec={(1 / (self._total_latency / self._iters) * self._total_batch_size):.2f}')
+                      f'|Others={others:.2f} ({(others / latency * 100):.2f}%)' + \
+                      cur_samples_p_sec + \
+                      avg_samples_p_sec)
             self._t_start = time.time()
         self._training_latency = 0
         super().eval()

@@ -1,6 +1,7 @@
 name: nv-pre-compile-ops
 
 on:
+  workflow_dispatch:
   pull_request:
     branches:
       '**'
@@ -8,7 +9,7 @@ on:
       - 'docs/**'
       - 'blogs/**'
       - 'deepspeed/inference/v2/**'
-      - "tests/unit/inference/v2/**"
+      - 'tests/unit/inference/v2/**'
   merge_group:
     branches: [ master ]
   schedule:
@@ -19,13 +20,13 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  build-ops:
-    runs-on: ubuntu-20.04
+  unit-tests:
+    runs-on: ubuntu-24.04
     container:
       image: deepspeed/gh-builder:ubuntu1804-py38-torch1131-cu116
 
     steps:
-        - uses: actions/checkout@v3
+        - uses: actions/checkout@v4
 
         - name: environment
           run: |
@@ -35,7 +36,7 @@ jobs:
             #python -c "import torch; print('CUDA available:', torch.cuda.is_available())"
         - name: Compile DeepSpeed Ops
           run: |
-            TORCH_CUDA_ARCH_LIST="7.0;7.5;8.0" DS_BUILD_OPS=1 DS_BUILD_SPARSE_ATTN=0  DS_BUILD_CUTLASS_OPS=0 DS_BUILD_RAGGED_DEVICE_OPS=0 DS_BUILD_EVOFORMER_ATTN=0 pip3 install .
+            DS_ACCELERATOR=cuda DS_ENABLE_NINJA=1 TORCH_CUDA_ARCH_LIST="7.0;7.5;8.0" DS_BUILD_OPS=1 DS_BUILD_SPARSE_ATTN=0 DS_BUILD_FP_QUANTIZER=0 DS_BUILD_CUTLASS_OPS=0 DS_BUILD_GDS=0 DS_BUILD_RAGGED_DEVICE_OPS=0 DS_BUILD_EVOFORMER_ATTN=0 pip3 install .
         - name: DS Report
           run: |
              ds_report

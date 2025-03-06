@@ -6,7 +6,7 @@
 from torch.distributed.elastic.agent.server.local_elastic_agent import LocalElasticAgent
 from typing import Any, Dict, Optional, Tuple
 from datetime import datetime
-from torch.distributed.elastic.agent.server.api import log, _get_socket_with_port
+from torch.distributed.elastic.utils.distributed import get_free_port
 from torch.distributed.elastic.metrics import put_metric
 from torch.distributed.elastic.agent.server.api import (
     RunResult,
@@ -24,6 +24,10 @@ import copy
 from contextlib import closing
 import subprocess
 
+from torch.distributed.elastic.utils.logging import get_logger
+
+log = get_logger(__name__)
+
 
 class DSElasticAgent(LocalElasticAgent):
 
@@ -39,15 +43,20 @@ class DSElasticAgent(LocalElasticAgent):
         self.ds_env = env
 
     @staticmethod
-    def _set_master_addr_port(store: Store, master_addr: Optional[str], master_port: Optional[int]):
+    def _set_master_addr_port(store: Store,
+                              master_addr: Optional[str],
+                              master_port: Optional[int],
+                              local_addr: Optional[str] = None):
         if master_port is None:
-            sock = _get_socket_with_port()
+            sock = get_free_port()
             with closing(sock):
                 master_port = sock.getsockname()[1]
 
         if master_addr is None:
             # master_addr = _get_fq_hostname()
-            result = subprocess.check_output("hostname -I", shell=True)
+            import shlex
+            safe_cmd = shlex.split("hostname -I")
+            result = subprocess.check_output(safe_cmd)
             master_addr = result.decode('utf-8').split()[0]
 
         store.set("MASTER_ADDR", master_addr.encode(encoding="UTF-8"))
@@ -151,8 +160,8 @@ class DSElasticAgent(LocalElasticAgent):
                          f" Waiting {self._exit_barrier_timeout} seconds for other agents to finish.")
                 self._exit_barrier()
                 return run_result
-            elif state in {WorkerState.UNHEALTHY, WorkerState.FAILED
-                           } or len(participants) > len(rdzv_handler._state_holder.state.participants):
+            elif state in {WorkerState.UNHEALTHY, WorkerState.FAILED} or len(participants) > len(
+                    rdzv_handler._state_holder.state.participants):
                 if self._remaining_restarts > 0:
                     log.info(f"[{role}] Worker group {state.name}. "
                              f"{self._remaining_restarts}/{spec.max_restarts} attempts left;"

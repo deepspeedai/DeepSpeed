@@ -7,7 +7,7 @@ import types
 import torch
 import numpy as np
 from deepspeed import comm as dist
-from deepspeed.runtime.utils import required_torch_version
+from deepspeed.utils.torch import required_torch_version
 from torch._utils import _flatten_dense_tensors, _unflatten_dense_tensors
 from deepspeed.accelerator import get_accelerator
 
@@ -93,8 +93,6 @@ class OnebitLamb(torch.optim.Optimizer):
 
         super(OnebitLamb, self).__init__(params, defaults)
         self.eps_mode = 0 if eps_inside_sqrt else 1
-        assert (dist.is_initialized())
-
         self.deepspeed = deepspeed
         self.lamb_freeze_key = False
         self.initialize = False
@@ -108,21 +106,27 @@ class OnebitLamb(torch.optim.Optimizer):
 
         self.comm_backend_name = comm_backend_name
 
+        assert dist.is_initialized(), "Please initialize the torch distributed backend."
         # Empty initializer. Set handle based on the comm backend as follows.
         self.comm_backend_handle = None
-
         if self.comm_backend_name == 'nccl':
             assert (
                 required_torch_version(min_version=1.8)
             ), "Please use torch 1.8 or greater to enable NCCL backend in 1-bit Adam. Alternatively, please specify 'mpi' as the 'comm_backend_name' in config file to proceed with the MPI backend"
-            assert dist.is_initialized() == True, "Please initialize the torch distributed backend."
             from deepspeed.runtime.comm.nccl import NcclBackend
             self.using_pipeline = hasattr(self.deepspeed, 'pipeline_enable_backward_allreduce')
             self.comm_backend_handle = NcclBackend(self.deepspeed.mpu)
-
         elif self.comm_backend_name == 'mpi':
             from deepspeed.runtime.comm.mpi import MpiBackend
             self.comm_backend_handle = MpiBackend(cuda_aware)
+        elif self.comm_backend_name == 'hccl':
+            from deepspeed.runtime.comm.hccl import HcclBackend
+            self.using_pipeline = hasattr(self.deepspeed, 'pipeline_enable_backward_allreduce')
+            self.comm_backend_handle = HcclBackend(self.deepspeed.mpu)
+        elif self.comm_backend_name == 'compressed':
+            from deepspeed.runtime.comm.compressed import CompressedBackend
+            self.using_pipeline = hasattr(self.deepspeed, 'pipeline_enable_backward_allreduce')
+            self.comm_backend_handle = CompressedBackend(self.deepspeed.mpu)
 
         self.size = self.comm_backend_handle.size
 
@@ -161,7 +165,7 @@ class OnebitLamb(torch.optim.Optimizer):
         else:
             grads_group = grads
 
-        #remove the previous stats
+        # remove the previous stats
         del self.lamb_coeffs[:]
 
         if self.lamb_freeze_key:
@@ -173,7 +177,7 @@ class OnebitLamb(torch.optim.Optimizer):
                 # This is used to reduce compression error during compression stage.
                 momentum_scales = []
                 for group in self.param_groups:
-                    momentum_scales.append([(torch.linalg.norm(self.state[p]['exp_avg']) /
+                    momentum_scales.append([(torch.linalg.vector_norm(self.state[p]['exp_avg']) /
                                              np.sqrt(torch.numel(self.state[p]['exp_avg']))).item()
                                             for p in group['params']])
                 united_scale = sum([sum(x) for x in momentum_scales]) / sum([len(x) for x in momentum_scales])

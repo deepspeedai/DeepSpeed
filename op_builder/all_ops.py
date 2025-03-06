@@ -30,3 +30,4 @@ for _, module_name, _ in pkgutil.iter_modules([os.path.dirname(op_builder_module
                 __op_builders__.append(builder)
 
 ALL_OPS = {op.name: op for op in __op_builders__ if op is not None}
+accelerator_name = get_accelerator()._name

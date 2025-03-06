@@ -68,9 +68,16 @@ class DSDenseBlockedAttention(DSSelfAttentionBase):
 
         Args:
             config (DSSelfAttentionConfig): The self attention config for all attention DSModules.
-            implementation_config (Dict[str, Any]): The implementation config for this DSModule may
-                contain a `trained_freqs` key. If passed, the implementation will expect a `trained_freqs`
-                tensor in the `forward` method and will not synthesize the frequencies internally.
+            implementation_config (Dict[str, Any]):
+                There are two (dependent) potential components in the implementtion config.
+
+                1. `trained_freqs` - If the embedding weights for RoPE are trained, the implementation
+                config should contain {'trained_freqs': True}. This will mean the implementation will
+                expect a `trained_freqs` tensor in the `forward` method and will not synthesize the
+                values internally.
+
+                2. `theta_base` - The base value for synthesized frequencies in the rotary embeddings.
+                This will only be used if `trained_freqs` is False or not present in the `implementation_config`. If this is not included, the default value of 10000.0 will be used.
         """
         super().__init__(config, implementation_config)
 
@@ -79,14 +86,20 @@ class DSDenseBlockedAttention(DSSelfAttentionBase):
             self._kv_copy = LinearBlockedKVCopy(self._config.head_size, self._config.n_heads_q,
                                                 self._config.n_heads_kv, self._config.input_dtype)
         elif embed_type == PositionalEmbeddingType.rotate_half:
-            use_trained_freqs = "trained_freqs" in self._config.positional_embedding_args and self._config.positional_embedding_args[
-                "trained_freqs"]
-            if use_trained_freqs:
+            rotary_config = config.positional_embedding_config
+            assert rotary_config is not None, "Rotary config must be provided if using rotate_half as Positional Embedding Type."
+
+            if rotary_config.use_trained_freqs:
+                # Theta and rotary dim are effectively embedded into either the values (theta) or the shape (rotary_dim)
+                # of the trained_freqs tensor.
                 self._kv_copy = BlockedTrainedRotaryEmbeddings(self._config.head_size, self._config.n_heads_q,
                                                                self._config.n_heads_kv, self._config.input_dtype)
             else:
+                theta_base = rotary_config.theta_base
+                rotary_dim = rotary_config.rotate_dim if rotary_config.rotate_dim is not None else self._config.head_size
                 self._kv_copy = BlockedRotaryEmbeddings(self._config.head_size, self._config.n_heads_q,
-                                                        self._config.n_heads_kv, self._config.input_dtype)
+                                                        self._config.n_heads_kv, self._config.input_dtype, rotary_dim,
+                                                        theta_base)
 
         self._softmax_scale = self._config.scale_factor
 

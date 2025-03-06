@@ -23,7 +23,10 @@ import subprocess
 # ]
 def get_numa_cores():
     ret = []
-    output = subprocess.check_output(['numactl', '--hardware']).decode("utf-8")
+    try:
+        output = subprocess.check_output(['numactl', '--hardware']).decode("utf-8")
+    except:
+        return []
     lines = output.split('\n')
     for line in lines:
         if line.startswith('available:'):
@@ -49,8 +52,8 @@ def check_for_numactl_pkg():
         flag, lib, tool = data
         path = distutils.spawn.find_executable(pkgmgr)
         if path is not None:
-            cmd = f"{pkgmgr} {flag} {lib}"
-            result = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, shell=True)
+            cmd = [pkgmgr, flag, lib]
+            result = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
             if result.wait() == 0:
                 found = True
             else:

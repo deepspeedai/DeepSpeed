@@ -11,8 +11,10 @@ import torch.nn.functional as F
 import deepspeed
 import deepspeed.comm as dist
 import deepspeed.runtime.utils as ds_utils
+from deepspeed.utils.torch import required_torch_version
 from deepspeed.accelerator import get_accelerator
 from deepspeed.runtime.pipe.module import PipelineModule, LayerSpec
+from .util import no_child_process_in_deepspeed_io
 
 
 class AlexNet(nn.Module):
@@ -82,7 +84,7 @@ def cast_to_half(x):
 
 def cifar_trainset(fp16=False):
     torchvision = pytest.importorskip("torchvision", minversion="0.5.0")
-    import torchvision.transforms as transforms
+    from torchvision import transforms
 
     transform_list = [
         transforms.ToTensor(),
@@ -99,20 +101,25 @@ def cifar_trainset(fp16=False):
     dist.barrier()
     if local_rank != 0:
         dist.barrier()
-
     data_root = os.getenv("TEST_DATA_DIR", "/tmp/")
-    trainset = torchvision.datasets.CIFAR10(root=os.path.join(data_root, "cifar10-data"),
-                                            train=True,
-                                            download=True,
-                                            transform=transform)
+    if os.getenv("CIFAR10_DATASET_PATH"):
+        data_root = os.getenv("CIFAR10_DATASET_PATH")
+        download = False
+    else:
+        data_root = os.path.join(os.getenv("TEST_DATA_DIR", "/tmp"), "cifar10-data")
+        download = True
+    trainset = torchvision.datasets.CIFAR10(root=data_root, train=True, download=download, transform=transform)
     if local_rank == 0:
         dist.barrier()
     return trainset
 
 
 def train_cifar(model, config, num_steps=400, average_dp_losses=True, fp16=True, seed=123):
-    with get_accelerator().random().fork_rng(devices=[get_accelerator().current_device_name()],
-                                             device_type=get_accelerator().device_name()):
+    if required_torch_version(min_version=2.1):
+        fork_kwargs = {"device_type": get_accelerator().device_name()}
+    else:
+        fork_kwargs = {}
+    with get_accelerator().random().fork_rng(devices=[get_accelerator().current_device_name()], **fork_kwargs):
         ds_utils.set_random_seed(seed)
 
         # disable dropout
@@ -121,22 +128,11 @@ def train_cifar(model, config, num_steps=400, average_dp_losses=True, fp16=True,
         trainset = cifar_trainset(fp16=fp16)
         config['local_rank'] = dist.get_rank()
 
-        # deepspeed_io defaults to creating a dataloader that uses a
-        # multiprocessing pool. Our tests use pools and we cannot nest pools in
-        # python. Therefore we're injecting this kwarg to ensure that no pools
-        # are used in the dataloader.
-        old_method = deepspeed.runtime.engine.DeepSpeedEngine.deepspeed_io
-
-        def new_method(*args, **kwargs):
-            kwargs["num_local_io_workers"] = 0
-            return old_method(*args, **kwargs)
-
-        deepspeed.runtime.engine.DeepSpeedEngine.deepspeed_io = new_method
-
-        engine, _, _, _ = deepspeed.initialize(config=config,
-                                               model=model,
-                                               model_parameters=[p for p in model.parameters()],
-                                               training_data=trainset)
+        with no_child_process_in_deepspeed_io():
+            engine, _, _, _ = deepspeed.initialize(config=config,
+                                                   model=model,
+                                                   model_parameters=[p for p in model.parameters()],
+                                                   training_data=trainset)
 
         losses = []
         for step in range(num_steps):
