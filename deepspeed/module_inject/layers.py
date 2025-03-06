@@ -262,11 +262,12 @@ class TensorParallel_Layer(nn.Module, ABC):
             # Using copy=True instead of clone() will help in case of cpu --> cpu.
             # Otherwise to() will not create a new copy for the view of the full tensor, and it will not be de-referenced.
             cloned_tensor = tensor.to(device, copy=return_new_copy)
-
-            # free the memory of the original tensor to reduce memory peak
-            # Equivalent to directly deleting the tensor reference outside the function.
-            # see https://github.com/microsoft/DeepSpeed/pull/4353
-            tensor.data = torch.empty(0, device=tensor.device)
+            
+            if return_new_copy:
+                # free the memory of the original tensor to reduce memory peak
+                # Equivalent to directly deleting the tensor reference outside the function.
+                # see https://github.com/microsoft/DeepSpeed/pull/4353
+                tensor.data = torch.empty(0, device=tensor.device)
             return cloned_tensor
 
 
