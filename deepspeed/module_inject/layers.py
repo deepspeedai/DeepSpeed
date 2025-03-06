@@ -17,19 +17,9 @@ from deepspeed.runtime.tensor_parallel import AUTOTP_MODE
 from copy import deepcopy
 from typing import Union
 
-
-
 __all__ = [
-    "TensorParallel_Layer",
-    "LinearAllreduce",
-    "LinearLayer",
-    "LmHeadLinearAllreduce",
-    "Yuan_LinearAllreduce",
-    "Yuan_LinearLayer",
-    "GateUpPack_LinearLayer",
-    "Conv_LinearALlreduce",
-    "fused_LinearLayer",
-    "conv_LinearLayer"
+    "TensorParallel_Layer", "LinearAllreduce", "LinearLayer", "LmHeadLinearAllreduce", "Yuan_LinearAllreduce",
+    "Yuan_LinearLayer", "GateUpPack_LinearLayer", "Conv_LinearALlreduce", "fused_LinearLayer", "conv_LinearLayer"
 ]
 
 DEEPSPEED_AUTOTP_MODE = AUTOTP_MODE.INFERENCE
@@ -139,7 +129,6 @@ class TensorParallel_Layer(nn.Module, ABC):
     # cases it can be done from the disk even to prevent filling host's memory), thus no need to create a new copy.
     keep_module_on_host: bool = False
 
-    
     def __init__(self, mp_group: Optional[dist.ProcessGroup], **kwargs: Any):
         """
         Initializes the TensorParallel_Layer with optional model parallelism group and layer name.
@@ -172,7 +161,7 @@ class TensorParallel_Layer(nn.Module, ABC):
             value (bool): The new value for keep_module_on_host.
         """
         cls.keep_module_on_host = value
-        
+
     @abstractmethod
     def forward(self, input):
         """
@@ -244,7 +233,7 @@ class TensorParallel_Layer(nn.Module, ABC):
             extra_repr_str = "in_features={}, out_features={}, bias={}, dtype={}".format(
                 in_features, out_features, self.bias is not None, dtype)
         return extra_repr_str
-    
+
     def move(self, tensor):
         # TODO: consider the timing of deletion
         # to save host resources when DP > 1。
@@ -257,12 +246,12 @@ class TensorParallel_Layer(nn.Module, ABC):
         else:
             device = 'cpu' if self.__class__.keep_module_on_host else get_accelerator().current_device_name()
             return_new_copy = not self.__class__.keep_module_on_host
-            
+
             # Using new tensors help in freeing memory (after split for example) was done before by calling clone().
             # Using copy=True instead of clone() will help in case of cpu --> cpu.
             # Otherwise to() will not create a new copy for the view of the full tensor, and it will not be de-referenced.
             cloned_tensor = tensor.to(device, copy=return_new_copy)
-            
+
             if return_new_copy:
                 # free the memory of the original tensor to reduce memory peak
                 # Equivalent to directly deleting the tensor reference outside the function.

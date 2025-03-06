@@ -351,7 +351,7 @@ class AutoTP():
         # and avoid any complex shard-related logic.
         if getattr(child, "replaced", False) == True:
             return
-   
+
         weight_shape = child.weight.shape
         mp_replace = ReplaceWithTensorSlicing(mp_group=self.mp_group)
         # For TP layer skip, e.g., MoE gate, deepseek low rank layer skip
