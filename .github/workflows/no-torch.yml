@@ -1,0 +1,49 @@
+name: no-torch
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - 'accelerator/**'
+      - '.github/workflows/no-torch.yml'
+      - 'op_builder/**'
+  schedule:
+    - cron: "0 0 * * *"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+    contents: read
+    issues: write
+
+jobs:
+  unit-tests:
+    runs-on: ubuntu-24.04
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - id: setup-venv
+        uses: ./.github/workflows/setup-venv
+
+      - name: Python environment
+        run: |
+          pip uninstall torch --yes
+          pip install setuptools
+          pip install build
+          pip list
+
+      - name: Build deepspeed
+        run: |
+          DS_BUILD_STRING=" " python -m build --sdist
+
+      - name: Open GitHub issue if nightly CI fails
+        if: ${{ failure() && (github.event_name == 'schedule') }}
+        uses: JasonEtco/create-an-issue@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          filename: .github/ISSUE_TEMPLATE/ci_failure_report.md
+          update_existing: true

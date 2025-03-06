@@ -35,7 +35,7 @@ class MultiNodeRunner(ABC):
         """Return the command to execute on node"""
 
     def add_export(self, key, var):
-        self.exports[key.strip()] = var.strip()
+        self.exports[key.strip()] = f"\"{var.strip()}\""
 
     def parse_user_args(self):
         return self.args.user_args
@@ -57,17 +57,26 @@ class PDSHRunner(MultiNodeRunner):
     def backend_exists(self):
         return shutil.which('pdsh')
 
+    def parse_user_args(self):
+        processed_args = []
+        for arg in self.args.user_args:
+            # With pdsh, if we are passing a string as an argument, it will get
+            # split on whitespace. To avoid this and support strings that
+            # contain '"', we do this extra processing step:
+            if " " in arg:
+                arg = '"{}"'.format(arg.replace('"', '\\"'))
+            processed_args.append(arg)
+        return processed_args
+
     @property
     def name(self):
         return "pdsh"
 
-    def parse_user_args(self):
-        return list(map(lambda x: x if x.startswith("-") else f"'{x}'", self.args.user_args))
-
     def get_cmd(self, environment, active_resources):
         environment['PDSH_RCMD_TYPE'] = 'ssh'
         if self.args.ssh_port is not None:  # only specify ssh port if it is specified
-            environment["PDSH_SSH_ARGS_APPEND"] += f" -p {self.args.ssh_port}"
+            environment["PDSH_SSH_ARGS_APPEND"] = f"{environment.get('PDSH_SSH_ARGS_APPEND', '')} \
+            -p {self.args.ssh_port}"
 
         active_workers = ",".join(active_resources.keys())
         logger.info("Running on the following workers: %s" % active_workers)
@@ -96,6 +105,8 @@ class PDSHRunner(MultiNodeRunner):
             deepspeed_launch.append("--no_local_rank")
         if self.args.save_pid:
             deepspeed_launch += ["--save_pid", f"{os.getpid()}"]
+        if self.args.enable_each_rank_log:
+            deepspeed_launch.append(f"--enable_each_rank_log={self.args.enable_each_rank_log}")
         if self.args.elastic_training:
             deepspeed_launch.append("--enable_elastic_training")
             deepspeed_launch.append(f"--max_elastic_nodes={self.args.max_elastic_nodes}")
@@ -124,14 +135,44 @@ class OpenMPIRunner(MultiNodeRunner):
 
     def validate_args(self):
         super().validate_args()
+
+        # Validate and set MPI environment variables
+        self._setup_mpi_environment()
+
         #TODO: Allow for include/exclude at node-level but not gpu-level
         if self.args.include != "" or self.args.exclude != "":
             raise ValueError(f"{self.name} backend does not support worker include/exclusion")
         if self.args.num_nodes != -1 or self.args.num_gpus != -1:
             raise ValueError(f"{self.name} backend does not support limiting num nodes/gpus")
 
+    def _setup_mpi_environment(self):
+        """Sets up MPI-related environment variables or raises an error if they're missing."""
+
+        required_vars = ['OMPI_COMM_WORLD_LOCAL_RANK', 'OMPI_COMM_WORLD_RANK', 'OMPI_COMM_WORLD_SIZE']
+
+        # Check if all these are present
+        if not all(var in os.environ for var in required_vars):
+            raise EnvironmentError("MPI environment variables are not set. "
+                                   "Ensure you are running the script with an MPI-compatible launcher.")
+
+        # Now safe to read all
+        os.environ['LOCAL_RANK'] = os.environ['OMPI_COMM_WORLD_LOCAL_RANK']
+        os.environ['RANK'] = os.environ['OMPI_COMM_WORLD_RANK']
+        os.environ['WORLD_SIZE'] = os.environ['OMPI_COMM_WORLD_SIZE']
+
     def get_cmd(self, environment, active_resources):
         total_process_count = sum(self.resource_pool.values())
+
+        launcher_args = split(self.args.launcher_args)
+
+        # If btl_tcp_if_include option is provided through launcher_args, we use it. Otherwise, we add
+        # `--mca btl_tcp_if_include eth0` option as a default value for compatibility.
+        btl_tcp_opt = ['--mca', 'btl_tcp_if_include', 'eth0']
+        if len(launcher_args) >= 2:
+            for i in range(len(launcher_args) - 1):
+                if launcher_args[i] in ['-mca', '--mca'] and launcher_args[i + 1] == 'btl_tcp_if_include':
+                    btl_tcp_opt = []
+                    break
 
         mpirun_cmd = [
             'mpirun',
@@ -142,10 +183,7 @@ class OpenMPIRunner(MultiNodeRunner):
             '--mca',
             'btl',
             '^openib',
-            '--mca',
-            'btl_tcp_if_include',
-            'eth0',
-        ] + split(self.args.launcher_args)
+        ] + btl_tcp_opt + launcher_args
 
         export_cmd = []
         for k, v in self.exports.items():
@@ -247,6 +285,10 @@ class MPICHRunner(MultiNodeRunner):
 
         mpirun_cmd = [
             'mpirun',
+            '-n',
+            f'{total_process_count}',
+            '-ppn',
+            f'{process_per_node}',
         ] + split(self.args.launcher_args)
         export_cmd = []
 
@@ -258,32 +300,29 @@ class MPICHRunner(MultiNodeRunner):
         export_cmd += ['-genv', 'WORLD_SIZE', str(total_process_count)]
         export_cmd += ['-genv', 'LOCAL_SIZE', str(process_per_node)]
 
-        hosts = list(self.resource_pool.keys())
-
-        per_host_cmd = []
-        host_id = 0
-        host_count = 0
-        for i in range(total_process_count):
-            local_rank = i % process_per_node
-            python_exec = []
-            if not self.args.no_python:
-                python_exec += [sys.executable, "-u"]
-                if self.args.module:
-                    python_exec.append("-m")
-            env_mapping = ['-env', 'RANK', str(i)]
-            env_mapping += ['-env', 'LOCAL_RANK', str(local_rank)]
+        export_cmd += ['-hosts']
+        hosts = ""
+        for i, host in enumerate(self.resource_pool.keys()):
             if i == 0:
-                per_host_cmd = ['-n', '1', '-host', hosts[host_id]
-                                ] + env_mapping + python_exec + [self.user_script] + self.user_arguments
+                hosts = f"{host}"
             else:
-                per_host_cmd = per_host_cmd + [':', '-n', '1', '-host', hosts[host_id]
-                                               ] + env_mapping + python_exec + [self.user_script] + self.user_arguments
-            host_count = host_count + 1
-            if host_count == process_per_node:
-                host_id = host_id + 1
-                host_count = 0
+                hosts += f",{host}"
+        export_cmd += [hosts]
 
-        return mpirun_cmd + export_cmd + per_host_cmd
+        helper_args = ["--launcher"] + [self.args.launcher]
+        python_exec = []
+        if not self.args.no_python:
+            python_exec += [sys.executable, "-u"]
+            if self.args.module:
+                python_exec.append("-m")
+                helper_args.append("--module")
+        else:
+            helper_args.append("--no_python")
+
+        helper_cmd = str(os.path.dirname(os.path.realpath(__file__))) + '/launcher_helper.py'
+        helper_cmd = [helper_cmd] + helper_args + [self.user_script] + self.user_arguments
+
+        return mpirun_cmd + export_cmd + python_exec + helper_cmd
 
 
 class IMPIRunner(MultiNodeRunner):
@@ -482,7 +521,7 @@ class MVAPICHRunner(MultiNodeRunner):
         if not mpiname_exists:
             warnings.warn("mpiname does not exist, mvapich is not installed properly")
         else:
-            results = subprocess.check_output('mpiname', shell=True)
+            results = subprocess.check_output(['mpiname'])
             mpiname_results = results.decode('utf-8').strip()
             if "MVAPICH2-GDR" in mpiname_results:
                 exists = True

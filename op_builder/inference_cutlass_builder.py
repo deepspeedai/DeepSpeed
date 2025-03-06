@@ -18,11 +18,12 @@ class InferenceCutlassBuilder(CUDAOpBuilder):
     def absolute_name(self):
         return f'deepspeed.inference.v2.kernels.cutlass_ops.{self.NAME}'
 
-    def is_compatible(self, verbose=True):
+    def is_compatible(self, verbose=False):
         try:
             import torch
         except ImportError:
-            self.warning("Please install torch if trying to pre-compile inference kernels")
+            if verbose:
+                self.warning("Please install torch if trying to pre-compile inference kernels")
             return False
 
         cuda_okay = True
@@ -31,18 +32,20 @@ class InferenceCutlassBuilder(CUDAOpBuilder):
             torch_cuda_major = int(torch.version.cuda.split('.')[0])
             cuda_capability = torch.cuda.get_device_properties(0).major  #ignore-cuda
             if cuda_capability < 6:
-                self.warning("NVIDIA Inference is only supported on Pascal and newer architectures")
+                if verbose:
+                    self.warning("NVIDIA Inference is only supported on Pascal and newer architectures")
                 cuda_okay = False
             if cuda_capability >= 8:
                 if torch_cuda_major < 11 or sys_cuda_major < 11:
-                    self.warning("On Ampere and higher architectures please use CUDA 11+")
+                    if verbose:
+                        self.warning("On Ampere and higher architectures please use CUDA 11+")
                     cuda_okay = False
         return super().is_compatible(verbose) and cuda_okay
 
     def filter_ccs(self, ccs):
         ccs_retained = []
         ccs_pruned = []
-        for cc in ccs:
+        for cc in [cc.split('.') for cc in ccs]:
             if int(cc[0]) >= 8:
                 # Only support Ampere and newer
                 ccs_retained.append(cc)

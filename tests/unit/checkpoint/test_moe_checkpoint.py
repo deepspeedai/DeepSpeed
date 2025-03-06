@@ -4,7 +4,7 @@
 # DeepSpeed Team
 
 from deepspeed.moe.utils import split_params_into_different_moe_groups_for_optimizer
-from deepspeed.runtime.utils import required_torch_version
+from deepspeed.utils.torch import required_torch_version
 
 from unit.common import DistributedTest
 from unit.simple_model import *
@@ -33,10 +33,10 @@ class TestMoECheckpoint(DistributedTest):
                                             tmpdir=tmpdir,
                                             load_optimizer_states=True,
                                             load_lr_scheduler_states=False,
-                                            fp16=config_dict["fp16"]["enabled"],
                                             empty_tag=True,
                                             base_optimizers=optimizers,
-                                            seq_dataloader=True)
+                                            seq_dataloader=True,
+                                            dtype=torch.float16)
 
     @pytest.mark.parametrize("ep_size, load_optim_states", [(4, True), (4, False), (2, True), (2, False)])
     def test_checkpoint_moe_and_zero(self, tmpdir, ep_size, load_optim_states):
@@ -77,7 +77,7 @@ class TestMoECheckpoint(DistributedTest):
                                             tmpdir=tmpdir,
                                             load_optimizer_states=load_optim_states,
                                             load_lr_scheduler_states=False,
-                                            fp16=config_dict["fp16"]["enabled"],
                                             empty_tag=True,
                                             base_optimizers=optimizers,
-                                            seq_dataloader=True)
+                                            seq_dataloader=True,
+                                            dtype=torch.float16)

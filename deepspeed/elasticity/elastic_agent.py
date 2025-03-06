@@ -54,7 +54,9 @@ class DSElasticAgent(LocalElasticAgent):
 
         if master_addr is None:
             # master_addr = _get_fq_hostname()
-            result = subprocess.check_output("hostname -I", shell=True)
+            import shlex
+            safe_cmd = shlex.split("hostname -I")
+            result = subprocess.check_output(safe_cmd)
             master_addr = result.decode('utf-8').split()[0]
 
         store.set("MASTER_ADDR", master_addr.encode(encoding="UTF-8"))
@@ -158,8 +160,8 @@ class DSElasticAgent(LocalElasticAgent):
                          f" Waiting {self._exit_barrier_timeout} seconds for other agents to finish.")
                 self._exit_barrier()
                 return run_result
-            elif state in {WorkerState.UNHEALTHY, WorkerState.FAILED
-                           } or len(participants) > len(rdzv_handler._state_holder.state.participants):
+            elif state in {WorkerState.UNHEALTHY, WorkerState.FAILED} or len(participants) > len(
+                    rdzv_handler._state_holder.state.participants):
                 if self._remaining_restarts > 0:
                     log.info(f"[{role}] Worker group {state.name}. "
                              f"{self._remaining_restarts}/{spec.max_restarts} attempts left;"

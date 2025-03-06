@@ -9,10 +9,10 @@ from unit.common import DistributedTest
 from deepspeed.git_version_info import version as ds_version
 import os
 from unit.simple_model import SimpleModel
-from deepspeed.ops.op_builder import FusedAdamBuilder
+from deepspeed.ops.op_builder import FusedAdamBuilder, FusedLambBuilder
 
 if not deepspeed.ops.__compatible_ops__[FusedAdamBuilder.NAME]:
-    pytest.skip("This op had not been implemented on this system.", allow_module_level=True)
+    pytest.skip("This op has not been implemented on this system.", allow_module_level=True)
 
 
 @pytest.fixture
@@ -150,6 +150,8 @@ def test_proper_mbsz(ds_config):
 class TestNonElasticBatchParams(DistributedTest):
     world_size = 2
 
+    @pytest.mark.skipif(not deepspeed.ops.__compatible_ops__[FusedLambBuilder.NAME],
+                        reason="FusedLambBuilder has not been implemented on this system.")
     def test(self):
         config_dict = {
             "train_batch_size": 2,
@@ -182,6 +184,8 @@ class TestNonElasticBatchParams(DistributedTest):
 class TestNonElasticBatchParamsWithOverride(DistributedTest):
     world_size = 2
 
+    @pytest.mark.skipif(not deepspeed.ops.__compatible_ops__[FusedLambBuilder.NAME],
+                        reason="FusedLambBuilder has not been implemented on this system.")
     def test(self):
         config_dict = {
             "train_batch_size": 2,
@@ -213,6 +217,8 @@ class TestNonElasticBatchParamsWithOverride(DistributedTest):
 class TestElasticConfigChanged(DistributedTest):
     world_size = 2
 
+    @pytest.mark.skipif(not deepspeed.ops.__compatible_ops__[FusedLambBuilder.NAME],
+                        reason="FusedLambBuilder has not been implemented on this system.")
     def test(self):
         config_dict = {
             "train_batch_size": 2,

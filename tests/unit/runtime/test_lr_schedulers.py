@@ -37,6 +37,9 @@ def _verify_staircase_increase(values, step_size):
                                                    (WARMUP_DECAY_LR, {
                                                        WARMUP_NUM_STEPS: 10,
                                                        TOTAL_NUM_STEPS: 20
+                                                   }), (WARMUP_COSINE_LR, {
+                                                       WARMUP_NUM_STEPS: 10,
+                                                       TOTAL_NUM_STEPS: 20
                                                    }), (ONE_CYCLE, {
                                                        CYCLE_MIN_LR: 0,
                                                        CYCLE_MAX_LR: 0.1
@@ -71,6 +74,11 @@ class TestGetLrBeforeTrain(DistributedTest):
                                         hidden_dim=hidden_dim,
                                         device=model.device,
                                         dtype=torch.float)
+
+        true_lrs = lr_scheduler.get_lr()
+        for group, true_lr in zip(model.optimizer.param_groups, true_lrs):
+            assert group['lr'] == true_lr, f"True lr {true_lr}, optimizer lr {group['lr']}"
+
         for n, batch in enumerate(data_loader):
             # get lr before training starts
             lr_scheduler.get_lr()

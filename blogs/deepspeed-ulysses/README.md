@@ -32,7 +32,7 @@ that process speech, images and waveforms concurrently require long
 context reasoning over high dimensional inputs with extremely large
 sequences. Similarly, chapter and book level summarization (estimated at
 tens and hundreds of thousands of words) are of great importance in
-conversational AI and abstractive summarization tasks.
+conversational AI and abstract summarization tasks.
 
 Long sequence length is equally critical for AI for science opening
 doors for better understanding of structure biology, health care,
@@ -233,7 +233,7 @@ at different sequence length and GPU count.*
 
 Next, we evaluate Ulysses on 7 billion (7B) and 30 billion (30B) parameter
 GPT dense attention models and compare against Megatron-LM's sequence
-parallelism (Megatron LM) and Colosal AI sequence parallelism (ColAI-SP) on
+parallelism (Megatron LM) and Colossal AI sequence parallelism (ColAI-SP) on
 32 and 64 A100 GPUs respectively. The results of these evaluations are shown
 in Figures 3 and 4.
 
@@ -362,9 +362,9 @@ on what is possible when long context window is no longer a limitation.
 DeepSpeed-Ulysses is part of the bigger DeepSpeed ecosystem of
 large-scale AI training and inference. For more details on all DeepSpeed
 technologies and innovations, please visit our [website]((https://www.deepspeed.ai/)) and follow us
-on X, formerly Twitter, ([English](https://twitter.com/MSFTDeepSpeed), [Japanese](https://twitter.com/MSFTDeepSpeedJP)) and [Chinese Zhihu](https://www.zhihu.com/people/deepspeed).
+on X, formerly Twitter, ([English](https://twitter.com/DeepSpeedAI), [Japanese](https://twitter.com/DeepSpeedAI_JP)) and [Chinese Zhihu](https://www.zhihu.com/people/deepspeed).
 
 We are open to collaborations with universities, research labs, and
 companies. For such requests (and other requests unsuitable for GitHub),
 please directly email to <deepspeed-info@microsoft.com>. If you like
-our work, please "Star" our [repo](https://github.com/microsoft/DeepSpeed).
+our work, please "Star" our [repo](https://github.com/deepspeedai/DeepSpeed).

@@ -8,12 +8,12 @@ import torch
 import pytest
 from deepspeed.accelerator import get_accelerator
 from deepspeed.ops.op_builder import InferenceBuilder  # type: ignore
+from deepspeed.ops.transformer.inference.op_binding.pre_rms_norm import PreRMSNormOp
+from deepspeed.ops.transformer.inference.op_binding.rms_norm import RMSNormOp
 from .inference_test_utils import allclose, get_dtypes
 
 if not deepspeed.ops.__compatible_ops__[InferenceBuilder.NAME]:
     pytest.skip("Inference ops are not available on this system", allow_module_level=True)
-
-inference_module = None
 
 
 def ref_implementation(vals, gamma, epsilon):
@@ -27,10 +27,7 @@ def ref_implementation(vals, gamma, epsilon):
 
 
 def ds_implementation(vals, gamma, epsilon):
-    global inference_module
-    if inference_module is None:
-        inference_module = InferenceBuilder().load()
-    return inference_module.rms_norm(vals, gamma, epsilon)
+    return RMSNormOp()(vals, gamma, epsilon)
 
 
 @pytest.mark.inference_ops
@@ -51,10 +48,7 @@ def test_rms_norm(batch, seq_len, channels, dtype):
 
 
 def pre_ds_implementation(vals, residual, gamma, epsilon):
-    global inference_module
-    if inference_module is None:
-        inference_module = InferenceBuilder().load()
-    return inference_module.pre_rms_norm(vals, residual, gamma, epsilon)
+    return PreRMSNormOp()(vals, residual, gamma, epsilon)
 
 
 def pre_ref_implementation(vals, residual, gamma, epsilon):

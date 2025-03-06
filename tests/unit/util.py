@@ -5,9 +5,10 @@
 
 import pytest
 import torch
+
+import deepspeed
 from deepspeed.accelerator import get_accelerator, is_current_accelerator_supported
 from deepspeed.git_version_info import torch_info
-from packaging import version as pkg_version
 
 
 def skip_on_arch(min_arch=7):
@@ -39,7 +40,7 @@ def bf16_required_version_check(accelerator_check=True):
 
     # Sometimes bf16 tests are runnable even if not natively supported by accelerator
     if accelerator_check:
-        accelerator_pass = torch_info['bf16_support']
+        accelerator_pass = get_accelerator().is_bf16_supported()
     else:
         accelerator_pass = True
 
@@ -47,27 +48,19 @@ def bf16_required_version_check(accelerator_check=True):
     cuda_version_available = CUDA_MAJOR >= 11
     nccl_version_available = NCCL_MAJOR > 2 or (NCCL_MAJOR == 2 and NCCL_MINOR >= 10)
     npu_available = get_accelerator().device_name() == 'npu'
+    hpu_available = get_accelerator().device_name() == 'hpu'
+    xpu_available = get_accelerator().device_name() == 'xpu'
 
     if torch_version_available and cuda_version_available and nccl_version_available and accelerator_pass:
         return True
     elif npu_available:
         return True
+    elif hpu_available:
+        return True
+    elif xpu_available:
+        return True
     else:
         return False
-
-
-def required_torch_version(min_version=None, max_version=None):
-    assert min_version or max_version, "Must provide a min_version or max_version argument"
-
-    torch_version = pkg_version.parse(torch.__version__)
-
-    if min_version and pkg_version.parse(str(min_version)) > torch_version:
-        return False
-
-    if max_version and pkg_version.parse(str(max_version)) < torch_version:
-        return False
-
-    return True
 
 
 def required_amp_check():
@@ -76,3 +69,22 @@ def required_amp_check():
         return False
     else:
         return True
+
+
+class no_child_process_in_deepspeed_io:
+
+    def __enter__(self):
+        # deepspeed_io defaults to creating a dataloader that uses a
+        # multiprocessing pool. Our tests use pools and we cannot nest pools in
+        # python. Therefore we're injecting this kwarg to ensure that no pools
+        # are used in the dataloader.
+        self.old_method = deepspeed.runtime.engine.DeepSpeedEngine.deepspeed_io
+
+        def new_method(*args, **kwargs):
+            kwargs["num_local_io_workers"] = 0
+            return self.old_method(*args, **kwargs)
+
+        deepspeed.runtime.engine.DeepSpeedEngine.deepspeed_io = new_method
+
+    def __exit__(self, *_):
+        deepspeed.runtime.engine.DeepSpeedEngine.deepspeed_io = self.old_method

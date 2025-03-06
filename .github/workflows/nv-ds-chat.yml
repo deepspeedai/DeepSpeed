@@ -10,29 +10,40 @@ on:
         required: false
         default: 'master'
         type: string
+  pull_request:
+    paths:
+      - ".github/workflows/nv-ds-chat.yml"
+      - "deepspeed/runtime/zero/stage_1_and_2.py"
+      - "deepspeed/runtime/zero/stage3.py"
+      - "deepspeed/runtime/hybrid_engine.py"
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+permissions:
+    contents: read
+    issues: write
+
 jobs:
   unit-tests:
-    runs-on: [self-hosted, nvidia, cu116, v100]
+    runs-on: [self-hosted, nvidia, cu124, v100]
 
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
 
       - id: setup-venv
         uses: ./.github/workflows/setup-venv
 
       - name: Install pytorch
         run: |
-          pip3 install -U --cache-dir $TORCH_CACHE torch --index-url https://download.pytorch.org/whl/cu118
+          pip install -U --cache-dir $TORCH_CACHE torch torchvision --index-url https://download.pytorch.org/whl/cu124
           python -c "import torch; print('torch:', torch.__version__, torch)"
           python -c "import torch; print('CUDA available:', torch.cuda.is_available())"
 
       - name: Install deepspeed
         run: |
+          pip install transformers==4.48.3
           pip install .[dev]
           ds_report
 
@@ -43,7 +54,7 @@ jobs:
               BRANCH="${{ github.event.inputs.dse_branch }}"
           fi
           echo "DeepSpeedExamples Branch: $BRANCH"
-          git clone -b $BRANCH https://github.com/microsoft/DeepSpeedExamples.git
+          git clone -b $BRANCH https://github.com/deepspeedai/DeepSpeedExamples.git
           cd DeepSpeedExamples/applications/DeepSpeed-Chat
           pip install -r requirements.txt
           pip install -e .
@@ -56,6 +67,7 @@ jobs:
         run: |
           cd DeepSpeedExamples/applications/DeepSpeed-Chat
           unset TORCH_CUDA_ARCH_LIST # only jit compile for current arch
+          unset NCCL_DEBUG
           cd tests
           pytest $PYTEST_OPTS ./
 

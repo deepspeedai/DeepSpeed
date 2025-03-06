@@ -58,10 +58,10 @@ class TestPipelineCheckpoint(DistributedTest):
                                             models=models,
                                             hidden_dim=models[0].hidden_dim,
                                             tmpdir=tmpdir,
-                                            fp16=config_dict['fp16']['enabled'],
                                             load_optimizer_states=True,
                                             load_lr_scheduler_states=True,
-                                            train_batch=True)
+                                            train_batch=True,
+                                            dtype=torch.float16 if zero_stage > 0 else torch.float32)
 
     @pytest.mark.parametrize(
         "base_topo,test_topo",

@@ -12,11 +12,7 @@ import deepspeed.comm as dist
 from ...allocator import empty_from
 from ...inference_utils import ActivationType, DtypeEnum
 from ...model_implementations import *
-from ...modules.configs import (
-    DSEmbeddingsConfig,
-    NormTypeEnum,
-    PositionalEmbeddingType,
-)
+from ...modules.configs import *
 from ...ragged import RaggedBatchWrapper
 from .container import OPTNonTransformerContainer, OPTTransformerContainer
 
@@ -94,6 +90,10 @@ class OPTInferenceModel(DSTransformerModelBase):
     def positional_embedding_type(self) -> PositionalEmbeddingType:
         return PositionalEmbeddingType.none
 
+    @property
+    def positional_embedding_config(self) -> Optional[RotateHalfConfig]:
+        return None
+
     """
     Overrides of ``DSTransformerModelBase`` methods
     """
@@ -131,8 +131,7 @@ class OPTInferenceModel(DSTransformerModelBase):
         kv_cache = self.state_manager.get_cache(layer_idx)
 
         hidden_states = self.qkv(hidden_states, cur_params.qkv_w, b=cur_params.qkv_b)
-        hidden_states = self.attn(hidden_states, kv_cache,
-                                  ragged_batch_info)  #, inv_freqs=None) #cur_params.rotary_emb)
+        hidden_states = self.attn(hidden_states, kv_cache, ragged_batch_info)
         hidden_states = self.attn_out(hidden_states, cur_params.attn_out_w, b=cur_params.attn_out_b)
 
         if self.tp_size > 1:
@@ -164,8 +163,11 @@ class OPTInferenceModel(DSTransformerModelBase):
         return residual, hidden_states
 
     def _forward_unembed(self, hidden_states: torch.Tensor, ragged_batch_info: RaggedBatchWrapper) -> torch.Tensor:
-        logits = self.unembed(hidden_states, self._non_transformer.word_unembed, ragged_batch_info,
-                              self._non_transformer.final_norm_w, self._non_transformer.final_norm_b)
+        logits = self.unembed(hidden_states,
+                              self._non_transformer.word_unembed,
+                              ragged_batch_info,
+                              gamma=self._non_transformer.final_norm_w,
+                              beta=self._non_transformer.final_norm_b)
 
         if self.tp_size > 1:
             comm_buffer = empty_from(self._comm_logits, (self.tp_size, logits.shape[0], logits.shape[1]))

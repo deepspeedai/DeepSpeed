@@ -76,7 +76,7 @@
 
   @include breakpoint($large) {
     position: absolute;
-    top: 0;
+    top: auto;
     right: 0;
     width: $right-sidebar-width-narrow;
     margin-right: -1.5 * $right-sidebar-width-narrow;
@@ -94,7 +94,7 @@
 
   @include breakpoint($x-large) {
     width: $right-sidebar-width;
-    margin-right: -1.5 * $right-sidebar-width;
+    margin-right: -1.5 * $right-sidebar-width-narrow;
   }
 }
 

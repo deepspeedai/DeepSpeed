@@ -93,7 +93,7 @@ done
 
 # Validate path to BingBertSquad script
 if [ -z "${BingBertSquad_DIR+x}" ]; then
-  export BingBertSquad_DIR=../../../../DeepSpeedExamples/BingBertSquad
+  export BingBertSquad_DIR=../../../../DeepSpeedExamples/training/BingBertSquad
   echo "BingBertSquad_DIR environment variable not set; trying default: ${BingBertSquad_DIR}"
 fi
 validate_folder ${BingBertSquad_DIR} "BingBertSquad_DIR"
@@ -160,8 +160,11 @@ run_cmd="deepspeed.pt \
       --master_port ${master_port}
       ${BingBertSquad_script} ${other_args} ${squad_args}"
 
-echo ${run_cmd}
-eval ${run_cmd}
+# Sanitize input before running eval()
+safe_cmd=$(printf '%q' "$run_cmd")
+
+echo ${safe_cmd}
+eval ${safe_cmd}
 
 set +x
 

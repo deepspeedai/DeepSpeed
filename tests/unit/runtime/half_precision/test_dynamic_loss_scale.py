@@ -5,9 +5,12 @@
 
 import torch
 import deepspeed
+from deepspeed.accelerator import get_accelerator
+import pytest
 import numpy as np
 from unit.common import DistributedTest
 from unit.simple_model import SimpleModel
+from deepspeed.ops.op_builder import FusedLambBuilder
 
 
 def run_model_step(model, gradient_list):
@@ -22,6 +25,9 @@ class TestFused(DistributedTest):
     world_size = 1
 
     def test_no_overflow(self):
+        if not get_accelerator().is_fp16_supported():
+            pytest.skip("fp16 is not supported")
+
         config_dict = {
             "train_batch_size": 1,
             "steps_per_print": 1,
@@ -57,6 +63,8 @@ class TestFused(DistributedTest):
                 expected_loss_scale *= 2
 
     def test_all_overflow(self):
+        if not get_accelerator().is_fp16_supported():
+            pytest.skip("fp16 is not supported")
         config_dict = {
             "train_batch_size": 1,
             "steps_per_print": 1,
@@ -90,6 +98,8 @@ class TestFused(DistributedTest):
             assert optim.cur_iter == (i + 1)
 
     def test_some_overflow(self):
+        if not get_accelerator().is_fp16_supported():
+            pytest.skip("fp16 is not supported")
         config_dict = {
             "train_batch_size": 1,
             "steps_per_print": 1,
@@ -143,10 +153,14 @@ class TestFused(DistributedTest):
         assert optim.cur_iter == expected_iteration
 
 
+@pytest.mark.skipif(not deepspeed.ops.__compatible_ops__[FusedLambBuilder.NAME],
+                    reason="FusedLambBuilder has not been implemented on this system.")
 class TestUnfused(DistributedTest):
     world_size = 1
 
     def test_no_overflow(self):
+        if not get_accelerator().is_fp16_supported():
+            pytest.skip("fp16 is not supported")
         config_dict = {
             "train_batch_size": 1,
             "steps_per_print": 1,
@@ -181,6 +195,8 @@ class TestUnfused(DistributedTest):
                 expected_loss_scale *= 2
 
     def test_all_overflow(self):
+        if not get_accelerator().is_fp16_supported():
+            pytest.skip("fp16 is not supported")
         config_dict = {
             "train_batch_size": 1,
             "steps_per_print": 1,
@@ -217,6 +233,8 @@ class TestUnfused(DistributedTest):
             assert optim.cur_iter == (i + 1)
 
     def test_some_overflow(self):
+        if not get_accelerator().is_fp16_supported():
+            pytest.skip("fp16 is not supported")
         config_dict = {
             "train_batch_size": 1,
             "steps_per_print": 1,

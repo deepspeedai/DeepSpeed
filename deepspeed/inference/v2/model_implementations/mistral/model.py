@@ -104,6 +104,10 @@ class MistralInferenceModel(DSTransformerModelBase):
     def positional_embedding_type(self) -> PositionalEmbeddingType:
         return PositionalEmbeddingType.rotate_half
 
+    @property
+    def positional_embedding_config(self) -> Optional[RotateHalfConfig]:
+        return RotateHalfConfig(theta_base=self._config.rope_theta)
+
     """
     Forward implementations
     """
@@ -144,8 +148,7 @@ class MistralInferenceModel(DSTransformerModelBase):
         kv_cache = self.state_manager.get_cache(layer_idx)
 
         hidden_states = self.qkv(hidden_states, cur_params.qkv_w, b=None)
-        hidden_states = self.attn(hidden_states, kv_cache,
-                                  ragged_batch_info)  #, inv_freqs=None) #cur_params.rotary_emb)
+        hidden_states = self.attn(hidden_states, kv_cache, ragged_batch_info)
         hidden_states = self.attn_out(hidden_states, cur_params.attn_out_w, b=None)
 
         if self.tp_size > 1:
@@ -175,8 +178,10 @@ class MistralInferenceModel(DSTransformerModelBase):
         Performs unembedding of the hidden states to logits. This will only sample the final
         token of each sequence.
         """
-        logits = self.unembed(hidden_states, self._non_transformer.word_unembed, ragged_batch_info,
-                              self._non_transformer.final_norm)
+        logits = self.unembed(hidden_states,
+                              self._non_transformer.word_unembed,
+                              ragged_batch_info,
+                              gamma=self._non_transformer.final_norm)
 
         if self.tp_size > 1:
             comm_buffer = empty_from(self._comm_logits, (self.tp_size, logits.shape[0], logits.shape[1]))

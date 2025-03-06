@@ -47,9 +47,6 @@ def base_config():
                 "lr": 0.00015
             }
         },
-        "fp16": {
-            "enabled": True
-        }
     }
     return config_dict
 
@@ -70,13 +67,11 @@ def _batch_assert(status, ds_config, batch, micro_batch, gas, success):
 
     if not success:
         assert not status
-        print("Failed but All is well")
         return
 
     assert ds_config.train_batch_size == batch
     assert ds_config.train_micro_batch_size_per_gpu == micro_batch
     assert ds_config.gradient_accumulation_steps == gas
-    print("All is well")
 
 
 #Tests different batch config provided in deepspeed json file
@@ -90,7 +85,7 @@ class TestBatchConfig(DistributedTest):
 
     def test(self, num_ranks, batch, micro_batch, gas, success):
         assert dist.get_world_size() == num_ranks, \
-        'The test assumes a world size of f{num_ranks}'
+        f'The test assumes a world size of {num_ranks}'
 
         ds_batch_config = get_test_path('ds_batch_config.json')
         ds_config = DeepSpeedConfig(ds_batch_config)
@@ -163,11 +158,19 @@ class TestConfigLoad(DistributedTest):
     world_size = 1
 
     def test_dict(self, base_config):
+        if get_accelerator().is_fp16_supported():
+            base_config["fp16"] = {"enabled": True}
+        elif get_accelerator().is_bf16_supported():
+            base_config["bf16"] = {"enabled": True}
         hidden_dim = 10
         model = SimpleModel(hidden_dim)
         model, _, _, _ = deepspeed.initialize(config=base_config, model=model, model_parameters=model.parameters())
 
     def test_json(self, base_config, tmpdir):
+        if get_accelerator().is_fp16_supported():
+            base_config["fp16"] = {"enabled": True}
+        elif get_accelerator().is_bf16_supported():
+            base_config["bf16"] = {"enabled": True}
         config_path = os.path.join(tmpdir, "config.json")
         with open(config_path, 'w') as fp:
             json.dump(base_config, fp)
@@ -176,6 +179,10 @@ class TestConfigLoad(DistributedTest):
         model, _, _, _ = deepspeed.initialize(config=config_path, model=model, model_parameters=model.parameters())
 
     def test_hjson(self, base_config, tmpdir):
+        if get_accelerator().is_fp16_supported():
+            base_config["fp16"] = {"enabled": True}
+        elif get_accelerator().is_bf16_supported():
+            base_config["bf16"] = {"enabled": True}
         config_path = os.path.join(tmpdir, "config.json")
         with open(config_path, 'w') as fp:
             hjson.dump(base_config, fp)
@@ -188,6 +195,10 @@ class TestDeprecatedDeepScaleConfig(DistributedTest):
     world_size = 1
 
     def test(self, base_config, tmpdir):
+        if get_accelerator().is_fp16_supported():
+            base_config["fp16"] = {"enabled": True}
+        elif get_accelerator().is_bf16_supported():
+            base_config["bf16"] = {"enabled": True}
         config_path = create_config_from_dict(tmpdir, base_config)
         parser = argparse.ArgumentParser()
         args = parser.parse_args(args='')
@@ -209,6 +220,10 @@ class TestDistInit(DistributedTest):
     world_size = 1
 
     def test(self, base_config):
+        if get_accelerator().is_fp16_supported():
+            base_config["fp16"] = {"enabled": True}
+        elif get_accelerator().is_bf16_supported():
+            base_config["bf16"] = {"enabled": True}
         hidden_dim = 10
 
         model = SimpleModel(hidden_dim)
@@ -227,6 +242,12 @@ class TestInitNoOptimizer(DistributedTest):
     world_size = 1
 
     def test(self, base_config):
+        if get_accelerator().is_fp16_supported():
+            base_config["fp16"] = {"enabled": True}
+        elif get_accelerator().is_bf16_supported():
+            base_config["bf16"] = {"enabled": True}
+        if get_accelerator().device_name() == "cpu":
+            pytest.skip("This test timeout with CPU accelerator")
         del base_config["optimizer"]
         hidden_dim = 10
 
@@ -246,6 +267,10 @@ class TestArgs(DistributedTest):
     world_size = 1
 
     def test_none_args(self, base_config):
+        if get_accelerator().is_fp16_supported():
+            base_config["fp16"] = {"enabled": True}
+        elif get_accelerator().is_bf16_supported():
+            base_config["bf16"] = {"enabled": True}
         model = SimpleModel(hidden_dim=10)
         model, _, _, _ = deepspeed.initialize(args=None, model=model, config=base_config)
         data_loader = random_dataloader(model=model, total_samples=5, hidden_dim=10, device=model.device)
@@ -253,6 +278,10 @@ class TestArgs(DistributedTest):
             loss = model(batch[0], batch[1])
 
     def test_no_args(self, base_config):
+        if get_accelerator().is_fp16_supported():
+            base_config["fp16"] = {"enabled": True}
+        elif get_accelerator().is_bf16_supported():
+            base_config["bf16"] = {"enabled": True}
         model = SimpleModel(hidden_dim=10)
         model, _, _, _ = deepspeed.initialize(model=model, config=base_config)
         data_loader = random_dataloader(model=model, total_samples=5, hidden_dim=10, device=model.device)
@@ -264,6 +293,10 @@ class TestNoModel(DistributedTest):
     world_size = 1
 
     def test(self, base_config):
+        if get_accelerator().is_fp16_supported():
+            base_config["fp16"] = {"enabled": True}
+        elif get_accelerator().is_bf16_supported():
+            base_config["bf16"] = {"enabled": True}
         model = SimpleModel(hidden_dim=10)
         with pytest.raises(AssertionError):
             model, _, _, _ = deepspeed.initialize(model=None, config=base_config)

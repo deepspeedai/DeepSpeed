@@ -160,7 +160,7 @@ def init_deepspeed_backend(ds_backend, timeout, init_method):
         ccl_backend = CCLBackend(rank=rank, world_size=size, timeout=timeout, init_method=init_method)
         utils.logger.info(f"Initialize {ds_backend} backend")
     elif ds_backend == HCCL_BACKEND:
-        utils.logger.warn("HCCL backend in DeepSpeed not yet implemented")
+        utils.logger.debug("HCCL backend in DeepSpeed not yet implemented")
     else:
         utils.logger.debug(f"DeepSpeed does not support {ds_backend} backend")
 
@@ -222,6 +222,12 @@ def set_backend():
 def broadcast(tensor, src, group=None, async_op=False, prof=False, log_name='broadcast', debug=get_caller_func()):
     global cdb
     return cdb.broadcast(tensor=tensor, src=src, group=group, async_op=async_op)
+
+
+@timed_op
+def broadcast_object_list(object_list, src, group=None, device=None):
+    global cdb
+    return cdb.broadcast_object_list(object_list=object_list, src=src, group=group, device=device)
 
 
 @timed_op
@@ -505,7 +511,7 @@ def inference_all_reduce(tensor,
                          log_name='all_reduce',
                          debug=get_caller_func()):
     global cdb
-    return cdb.inference_all_reduce(tensor, op, group, async_op)
+    return cdb.inference_all_reduce(tensor, op, group)
 
 
 @timed_op
@@ -595,9 +601,24 @@ def get_all_ranks_from_group(group=None):
         while True:
             group_ranks.append(cdb.get_global_rank(group, rank))
             rank += 1
-    except RuntimeError:
+    except (RuntimeError, ValueError):
         pass
     return group_ranks
+
+
+def initialize_mesh_device(mesh_shape, mesh_dim_names):
+    global cdb
+    assert cdb is not None and cdb.is_initialized(
+    ), 'DeepSpeed backend not set, please initialize it using init_process_group()'
+    mesh_device = None
+    if hasattr(cdb, 'init_device_mesh'):
+        utils.logger.info(f"Initializing mesh device with backend {cdb.name} \
+                with shape {mesh_shape} and dim names {mesh_dim_names}")
+        mesh_device = cdb.init_device_mesh(mesh_shape, mesh_dim_names)
+    else:
+        if get_rank() == 0:
+            utils.logger.warning_once(f"Backend {cdb.name} does not support mesh device initialization")
+    return mesh_device
 
 
 # Main DeepSpeed Comms. public API.
@@ -614,11 +635,11 @@ def init_distributed(dist_backend=None,
     ''' Initialize dist backend, potentially performing MPI discovery if needed
 
     Arguments:
-        dist_backend: Optional (str). torch distributed backend, e.g., nccl, mpi, gloo
+        dist_backend: Optional (str). torch distributed backend, e.g., nccl, mpi, gloo, hccl
         auto_mpi_discovery Optional (bool). if distributed environment variables are not set, attempt to discover them from MPI
         distributed_port: Optional (int). torch distributed backend port
         verbose: Optional (bool). verbose logging
-        timeout: Optional (timedelta). Timeout for operations executed against the process group. Default value equals 30 minutes.
+        timeout: Optional (timedelta). Timeout for operations executed against the process group. The default value of 30 minutes can be overridden by the environment variable `DEEPSPEED_TIMEOUT`.
         init_method: Optional (string). Torch distributed, URL specifying how to initialize the process group. Default is “env://” if no init_method or store is specified.
         config: Optional (dict). DeepSpeed configuration for setting up comms options (e.g. Comms profiling)
         rank: Optional (int). The current manually specified rank. Some init_method like “tcp://” need the rank and world_size as well (see: https://pytorch.org/docs/stable/distributed.html#tcp-initialization)
@@ -682,9 +703,14 @@ def mpi_discovery(distributed_port=TORCH_DISTRIBUTED_DEFAULT_PORT, verbose=True)
 
     master_addr = None
     if rank == 0:
-        hostname_cmd = ["hostname -I"]
-        result = subprocess.check_output(hostname_cmd, shell=True)
-        master_addr = result.decode('utf-8').split()[0]
+        import shlex
+        try:
+            hostname_cmd = shlex.split("hostname -I")
+            result = subprocess.check_output(hostname_cmd)
+            master_addr = result.decode('utf-8').split()[0]
+        except subprocess.CalledProcessError:  # hostname -I not available (e.g. on macOS)
+            import socket
+            master_addr = socket.gethostbyname(socket.gethostname())
     master_addr = comm.bcast(master_addr, root=0)
 
     # Determine local rank by assuming hostnames are unique

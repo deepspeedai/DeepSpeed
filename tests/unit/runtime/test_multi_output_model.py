@@ -5,8 +5,9 @@
 
 import torch
 import deepspeed
+from deepspeed.accelerator import get_accelerator
 from pytest import approx
-from unit.common import DistributedTest
+from unit.common import DistributedTest, preferred_dtype
 from unit.multi_output_model import MultiOutputModel, multi_output_dataloader
 
 
@@ -28,10 +29,11 @@ class TestTwoOutputModel(DistributedTest):
                     "lr": 0.00015
                 }
             },
-            "fp16": {
-                "enabled": True
-            }
         }
+        if get_accelerator().is_fp16_supported():
+            config_dict["fp16"] = {"enabled": True}
+        elif get_accelerator().is_bf16_supported():
+            config_dict["bf16"] = {"enabled": True}
 
         hidden_dim = 10
         weight_value = 0.1
@@ -53,7 +55,7 @@ class TestTwoOutputModel(DistributedTest):
             inputs, targets = batch[:midpoint], batch[midpoint:]
             loss_tuple = model(inputs, targets)
 
-            expected_loss = torch.tensor(2.302734375, dtype=torch.half, device=model.device)
+            expected_loss = torch.tensor(2.302734375, dtype=preferred_dtype(), device=model.device)
             for loss in loss_tuple:
                 assert loss.shape == torch.Size([])
                 assert loss.item() == approx(expected_loss.item())
@@ -84,10 +86,11 @@ class TestThreeOutputModel(DistributedTest):
                     "lr": 0.00015
                 }
             },
-            "fp16": {
-                "enabled": True
-            }
         }
+        if get_accelerator().is_fp16_supported():
+            config_dict["fp16"] = {"enabled": True}
+        elif get_accelerator().is_bf16_supported():
+            config_dict["bf16"] = {"enabled": True}
 
         hidden_dim = 10
         weight_value = 0.1
@@ -111,7 +114,7 @@ class TestThreeOutputModel(DistributedTest):
             loss_tuple = model(inputs, targets)
             assert len(loss_tuple) == 3
 
-            expected_loss = torch.tensor(2.302734375, dtype=torch.half, device=model.device)
+            expected_loss = torch.tensor(2.302734375, dtype=preferred_dtype(), device=model.device)
 
             for loss in loss_tuple:
                 assert loss.shape == torch.Size([])
