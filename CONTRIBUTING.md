@@ -13,7 +13,7 @@ pre-commit install
 Afterwards, our suite of formatting tests run automatically before each `git commit`. You
 can also run these manually:
 ```bash
-pre-commit run --all-files
+pre-commit run --files  $(git diff --name-only master)
 ```
 If a formatting test fails, it will fix the modified code in place and abort
 the `git commit`. After looking over the changes, you can `git add <modified files>`
