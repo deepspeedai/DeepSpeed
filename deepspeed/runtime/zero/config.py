@@ -4,9 +4,9 @@
 # DeepSpeed Team
 
 import sys
-from typing import Optional
+from typing import Optional, Dict, Any
 from enum import Enum
-from deepspeed.pydantic_v1 import Field, validator, root_validator
+from pydantic import Field, model_validator
 from deepspeed.runtime.config_utils import get_scalar_param, pp_int, DeepSpeedConfigModel
 from deepspeed.utils import logger
 from .offload_config import DeepSpeedZeroOffloadParamConfig, DeepSpeedZeroOffloadOptimizerConfig, OffloadDeviceEnum
@@ -20,6 +20,8 @@ ZeRO optimization should be enabled as:
     "stage": [0|1|2],
     "stage3_max_live_parameters" : 1000000000,
     "stage3_max_reuse_distance" : 1000000000,
+    "stage3_use_all_reduce_for_fetch_params": [true|false],
+    "stage3_module_granularity_threshold": 0,
     "allgather_partitions": [true|false],
     "use_multi_rank_bucket_allreduce": [true|false],
     "allgather_bucket_size": 500000000,
@@ -29,7 +31,7 @@ ZeRO optimization should be enabled as:
     "reduce_bucket_size": 500000000,
     "load_from_fp32_weights": [true|false],
     "cpu_offload": [true|false] (deprecated),
-    "cpu_offload_params" : [true|false] (deprecated),
+    "cpu_offload_param" : [true|false] (deprecated),
     "cpu_offload_use_pin_memory": [true|false] (deprecated),
     "sub_group_size" : 1000000000000,
     "offload_param": {...},
@@ -42,6 +44,8 @@ ZeRO optimization should be enabled as:
     "zero_quantized_gradients": [true|false],
     "memory_efficient_linear": [true|false],
     "override_module_apply": [true|false],
+    "zeropp_loco_param": {...},
+    "log_trace_cache_warnings" : [true|false],
     }
 }
 """
@@ -127,7 +131,7 @@ class DeepSpeedZeroConfig(DeepSpeedConfigModel):
     the allgather for large model sizes
     """
 
-    overlap_comm: bool = None  # None for dynamic default value (see validator `overlap_comm_valid` below)
+    overlap_comm: Optional[bool] = None  # None for dynamic default value (see validator `overlap_comm_valid` below)
     """
     Attempts to overlap the reduction of the gradients with backward computation
     """
@@ -167,27 +171,37 @@ class DeepSpeedZeroConfig(DeepSpeedConfigModel):
     parameters). Used by ZeRO3-Offload and ZeRO-Infinity
     """
 
-    cpu_offload_param: bool = Field(
+    cpu_offload_param: Optional[bool] = Field(
         None,
-        deprecated=True,
-        new_param="offload_param",
-        new_param_fn=(lambda val: DeepSpeedZeroOffloadParamConfig(device=OffloadDeviceEnum.cpu) if val else None),
+        json_schema_extra={
+            "deprecated": True,
+            "new_param": "offload_param",
+            "new_param_fn": (lambda val: DeepSpeedZeroOffloadParamConfig(device=OffloadDeviceEnum.cpu)
+                             if val else None)
+        },
     )
     """ Deprecated, please use ``offload_param`` """
 
-    cpu_offload_use_pin_memory: bool = Field(
+    cpu_offload_use_pin_memory: Optional[bool] = Field(
         None,
-        deprecated=True,
-        new_param="offload_param or offload_optimizer",
-        set_new_param=False,
+        json_schema_extra={
+            "deprecated": True,
+            "new_param": "offload_param or offload_optimizer",
+            "set_new_param": False
+        },
     )
     """ Deprecated, please use ``offload_param`` or ``offload_optimizer`` """
 
-    cpu_offload: bool = Field(
+    cpu_offload: Optional[bool] = Field(
         None,
-        deprecated=True,
-        new_param="offload_optimizer",
-        new_param_fn=(lambda val: DeepSpeedZeroOffloadOptimizerConfig(device=OffloadDeviceEnum.cpu) if val else None),
+        json_schema_extra={
+            "deprecated":
+            True,
+            "new_param":
+            "offload_optimizer",
+            "new_param_fn": (lambda val: DeepSpeedZeroOffloadOptimizerConfig(device=OffloadDeviceEnum.cpu)
+                             if val else None)
+        },
     )
     """ Deprecated, please use ``offload_optimizer`` """
 
@@ -234,9 +248,25 @@ class DeepSpeedZeroConfig(DeepSpeedConfigModel):
     this option is enabled and then saves the fp16 model weights.
     """
 
+    module_granularity_threshold: int = Field(pp_int(0), alias="stage3_module_granularity_threshold")
+    """
+    The granularity of a module is determined by the ratio of "parameter_count / (1 + descendant count)".
+    ZeRO3 classifies modules with a granularity below the threshold as fine-grained,
+    which are treated as integral units during parameter fetching. This reduces host overhead
+    and the separate allgather overhead introduced by hooks for fine-grained layers when fetching parameters.
+    """
+
+    use_all_reduce_for_fetch_params: bool = Field(False, alias="stage3_use_all_reduce_for_fetch_params")
+    """
+    Use all_reduce op when fetching module parameters at stage3. This improves performance by reducing
+    the overhead of concatenation and slicing on the host.
+    """
+
     stage3_gather_fp16_weights_on_model_save: bool = Field(False,
-                                                           deprecated=True,
-                                                           new_param="gather_16bit_weights_on_model_save")
+                                                           json_schema_extra={
+                                                               "deprecated": True,
+                                                               "new_param": "gather_16bit_weights_on_model_save"
+                                                           })
     """ Deprecated, please use ``gather_16bit_weights_on_model_save`` """
 
     ignore_unused_parameters: bool = True
@@ -282,8 +312,18 @@ class DeepSpeedZeroConfig(DeepSpeedConfigModel):
     Boolean indicating whether to use quantized zero gradients
     for efficient all_2_all_reduce comm
     """
+    zeropp_loco_param: Optional[Dict[str, Any]] = None
+    """
+    This dictionary contains parameters for using LoCo-Zero++, with two key parameters:
+    - `err_beta`: A coefficient for the moving average of quantization errors before and after gradient computation.
+    It ranges between 0 and 1, with a default value of 0.8.
+    - `reset_T`: The number of steps after which the moving-average error buffer is cleared. The default value is 1024.
+    These parameters can be adjusted based on performance needs. Example configuration in ds config:
+    "zeropp_loco_param": { "err_beta": 0.8, "reset_T": 1024 }.
+    See LoCo paper for more details: (https://arxiv.org/abs/2407.04480).
+    """
 
-    mics_shard_size: int = Field(-1, new_param="mics_shard_size")
+    mics_shard_size: int = Field(-1, json_schema_extra={"new_param": "mics_shard_size"})
 
     mics_hierarchical_params_gather: bool = False
 
@@ -301,17 +341,21 @@ class DeepSpeedZeroConfig(DeepSpeedConfigModel):
     Override nn.Module apply function, for Stage 3.
     """
 
-    # Validators
-    @validator("overlap_comm")
-    def overlap_comm_valid(cls, field_value, values):
-        if field_value is None:
-            assert ("stage" in values), "DeepSpeedZeroConfig: 'stage' must be defined before 'overlap_comm'"
-            field_value = values["stage"] == ZeroStageEnum.weights
-        return field_value
+    log_trace_cache_warnings: bool = False
+    """
+    Whether to log warnings from trace cache, such as invalidation events.
+    """
 
-    @root_validator
-    def offload_ratio_check(cls, values):
-        offload_config = getattr(values, "offload_optimizer", {})
+    # Validators
+    @model_validator(mode="after")
+    def overlap_comm_valid(self):
+        if self.overlap_comm is None:
+            self.overlap_comm = self.stage == ZeroStageEnum.weights
+        return self
+
+    @model_validator(mode="after")
+    def offload_ratio_check(self):
+        offload_config = self.offload_optimizer
         if offload_config and offload_config.ratio < 1.0:
-            assert values.get("stage") == ZeroStageEnum.weights, "Partial offloading only supported for ZeRO Stage 3."
-        return values
+            assert self.stage == ZeroStageEnum.weights, "Partial offloading only supported for ZeRO Stage 3."
+        return self

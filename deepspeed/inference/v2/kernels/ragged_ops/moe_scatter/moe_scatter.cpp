@@ -18,6 +18,7 @@
                            n_channels,                                \
                            n_tokens,                                  \
                            n_experts,                                 \
+                           n_top_k,                                   \
                            at::cuda::getCurrentCUDAStream());         \
         return;                                                       \
     }
@@ -36,12 +37,16 @@ void moe_scatter(torch::Tensor& moe_input,
 {
     const int32_t n_tokens = activations.size(0);
     const int32_t n_channels = activations.size(1);
+    const int32_t n_top_k = assignments.size(1);
 
     // Should have a lot of matching buffer sizes here.
-    TORCH_CHECK(n_tokens == moe_input.size(0));
     TORCH_CHECK(n_tokens == assignments.size(0));
     TORCH_CHECK(n_tokens == offsets.size(0));
     TORCH_CHECK(n_channels == moe_input.size(1));
+
+    TORCH_CHECK(n_top_k == offsets.size(1));
+    TORCH_CHECK(n_top_k * n_tokens == moe_input.size(0));
+    TORCH_CHECK(n_top_k == mapped_slots.size(1));
 
     const int32_t n_experts = expert_count_cumsums.size(0);
 

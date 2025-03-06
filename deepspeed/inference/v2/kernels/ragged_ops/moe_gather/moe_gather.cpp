@@ -16,6 +16,8 @@
                           n_channels,                              \
                           n_experts,                               \
                           n_tokens,                                \
+                          n_top_k,                                 \
+                          normalize_scales,                        \
                           at::cuda::getCurrentCUDAStream());       \
         return;                                                    \
     }
@@ -27,16 +29,20 @@ void moe_gather(torch::Tensor& layer_output,
                 const torch::Tensor& moe_output,
                 const torch::Tensor& scores,
                 const torch::Tensor& mapped_slots,
-                const torch::Tensor& expert_count)
+                const torch::Tensor& expert_count,
+                const bool normalize_scales)
 {
     const int32_t n_channels = layer_output.size(1);
     const int32_t n_experts = expert_count.size(0);
     const int32_t n_tokens = layer_output.size(0);
+    const int32_t n_top_k = mapped_slots.size(1);
 
-    TORCH_CHECK(moe_output.size(0) == n_tokens);
+    TORCH_CHECK(moe_output.size(0) == n_tokens * n_top_k);
     TORCH_CHECK(moe_output.size(1) == n_channels);
     TORCH_CHECK(scores.size(0) == n_tokens);
     TORCH_CHECK(mapped_slots.size(0) == n_tokens);
+
+    TORCH_CHECK(scores.size(1) == n_top_k);
 
     TORCH_CHECK(layer_output.scalar_type() == moe_output.scalar_type());
     TORCH_CHECK(scores.scalar_type() == torch::kFloat32);

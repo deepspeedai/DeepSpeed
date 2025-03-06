@@ -2,8 +2,8 @@ include *.txt README.md
 include deepspeed/inference/v2/kernels/ragged_ops/libs/*.so
 include deepspeed/inference/v2/kernels/cutlass_ops/libs/*.so
 recursive-include requirements *.txt
-recursive-include deepspeed *.cpp *.h *.cu *.hip *.tr *.cuh *.cc *.json
-recursive-include csrc *.cpp *.h *.cu *.tr *.cuh *.cc
+recursive-include deepspeed *.cpp *.h *.hpp *.cu *.hip *.tr *.cuh *.cc *.json
+recursive-include csrc *.cpp *.h *.hpp *.cu *.tr *.cuh *.cc
 recursive-include op_builder *.py
 recursive-include benchmarks *.py
 recursive-include accelerator *.py

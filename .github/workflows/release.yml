@@ -7,11 +7,11 @@ on:
 
 jobs:
   deploy:
-    runs-on: ubuntu-20.04
+    runs-on: ubuntu-24.04
     environment: release-env
 
     steps:
-    - uses: actions/checkout@v3
+    - uses: actions/checkout@v4
       with:
         ref: "master"
     - id: setup-venv
@@ -25,7 +25,9 @@ jobs:
         python release/check_release_version.py --release_version ${{ env.RELEASE_VERSION }}
     - name: Build DeepSpeed
       run: |
-        DS_BUILD_STRING=" " python setup.py sdist
+        pip install setuptools
+        pip install build
+        DS_BUILD_STRING=" " python -m build --sdist
     - name: Publish to PyPI
       uses: pypa/gh-action-pypi-publish@release/v1
       with:
@@ -35,7 +37,7 @@ jobs:
       run: |
         python release/bump_patch_version.py --current_version ${{ env.RELEASE_VERSION }}
     - name: Create Pull Request
-      uses: peter-evans/create-pull-request@v4
+      uses: peter-evans/create-pull-request@v6
       with:
         token: ${{ secrets.GH_PAT }}
         add-paths: |

@@ -17,6 +17,13 @@ from .model_implementations import (
     OPTPolicy,
     Llama2Policy,
     MistralPolicy,
+    MixtralPolicy,
+    FalconPolicy,
+    PhiPolicy,
+    Phi3Policy,
+    QwenPolicy,
+    Qwen2Policy,
+    Qwen2MoePolicy,
 )
 from .model_implementations.inference_policy_base import POLICIES, InferenceV2Policy
 from .model_implementations.flat_model_helpers import make_metadata_filename, ModelMetadata
@@ -93,7 +100,7 @@ def build_hf_engine(path: str,
         if model_config.model_type == "opt":
             if not model_config.do_layer_norm_before:
                 raise ValueError(
-                    "Detected OPT-350m model. This model is not currently supported. If this is not the 350m model, please open an issue: https://github.com/microsoft/DeepSpeed-MII/issues"
+                    "Detected OPT-350m model. This model is not currently supported. If this is not the 350m model, please open an issue: https://github.com/deepspeedai/DeepSpeed-MII/issues"
                 )
             policy = OPTPolicy(model_config, checkpoint_engine=checkpoint_engine)
         elif model_config.model_type == "llama":
@@ -104,6 +111,24 @@ def build_hf_engine(path: str,
             assert version.parse(transformers.__version__) >= version.parse("4.34.0"), \
                 f"Mistral requires transformers >= 4.34.0, you have version {transformers.__version__}"
             policy = MistralPolicy(model_config, checkpoint_engine=checkpoint_engine)
+        elif model_config.model_type == "mixtral":
+            # Ensure we're using the correct version of transformers for mistral
+            import transformers
+            assert version.parse(transformers.__version__) >= version.parse("4.36.1"), \
+                f"Mistral requires transformers >= 4.36.1, you have version {transformers.__version__}"
+            policy = MixtralPolicy(model_config, checkpoint_engine=checkpoint_engine)
+        elif model_config.model_type == "falcon":
+            policy = FalconPolicy(model_config, checkpoint_engine=checkpoint_engine)
+        elif model_config.model_type == "phi":
+            policy = PhiPolicy(model_config, checkpoint_engine=checkpoint_engine)
+        elif model_config.model_type == "phi3":
+            policy = Phi3Policy(model_config, checkpoint_engine=checkpoint_engine)
+        elif model_config.model_type == "qwen":
+            policy = QwenPolicy(model_config, checkpoint_engine=checkpoint_engine)
+        elif model_config.model_type == "qwen2":
+            policy = Qwen2Policy(model_config, checkpoint_engine=checkpoint_engine)
+        elif model_config.model_type == "qwen2_moe":
+            policy = Qwen2MoePolicy(model_config, checkpoint_engine=checkpoint_engine)
         else:
             raise ValueError(f"Unsupported model type {model_config.model_type}")
 

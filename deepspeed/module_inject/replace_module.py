@@ -14,9 +14,10 @@ from deepspeed.ops.transformer.inference.diffusers_2d_transformer import Diffuse
 from deepspeed.accelerator import get_accelerator
 from .replace_policy import replace_policies, generic_policies
 from .auto_tp import AutoTP, ReplaceWithTensorSlicing, Loading
-
+from .layers import TensorParallelOcShardConv2d, TensorParallelIcShardConv2d
+from deepspeed.module_inject.layers import is_autotp_training_mode
 from deepspeed import comm as dist
-from deepspeed.module_inject.tp_shard import set_num_kv_heads
+from deepspeed.module_inject.tp_shard import set_num_kv_heads, set_n_embd, set_num_attention_heads, set_tp_grain_size
 
 from .load_checkpoint import load_model_with_checkpoint
 import time
@@ -267,16 +268,44 @@ def replace_transformer_layer(orig_layer_impl, model, checkpoint_dict, config, m
         #mp_replace = ReplaceWithTensorSlicing(mp_group=config.tensor_parallel.tp_group)
 
         # 1. Create AutoTP object
-        _autotp = AutoTP(module, all_reduce_linears, prefix, state_dict, linear_layer_setting, orig_layer_impl)
+        _autotp = AutoTP(module, all_reduce_linears, prefix, state_dict, linear_layer_setting, orig_layer_impl,
+                         config.keep_module_on_host)
 
         # 2. Set the tensor parallelism config
         _autotp.set_tensor_parallel_config(config.tensor_parallel.tp_size, config.tensor_parallel.tp_group)
 
         # 3. Try to get num_key_heads from model_config.num_key_value_heads
-        num_kv_heads = _autotp.get_model_num_kv_heads(model_config)
+        if hasattr(model_config, "vision_config"):
+            if "MllamaVisionEncoderLayer" in str(module):
+                num_kv_heads = _autotp.get_model_num_kv_heads(model_config.vision_config)
+            elif hasattr(model_config, "text_config"):
+                num_kv_heads = _autotp.get_model_num_kv_heads(model_config.text_config)
+            else:
+                num_kv_heads = _autotp.get_model_num_kv_heads(model_config)
+        else:
+            num_kv_heads = _autotp.get_model_num_kv_heads(model_config)
 
         # 4. When we have num_kv_heads defined, uneven division is possible, otherwise enforce even division
         set_num_kv_heads(num_kv_heads)
+
+        # 4.1 Get n_embd
+        n_embd = None
+        multi_query_n_embd_names = ['n_embd', 'hidden_size']
+        for name in multi_query_n_embd_names:
+            if hasattr(model_config, name):
+                n_embd = getattr(model_config, name)
+            if n_embd != None:
+                break
+
+        # 4.2 set n_embd
+        set_n_embd(n_embd)
+
+        # 4.3 set attention_heads
+        if hasattr(model_config, 'num_attention_heads'):
+            set_num_attention_heads(getattr(model_config, 'num_attention_heads'))
+
+        # 4.4 set tp_grain_size
+        set_tp_grain_size(config.tensor_parallel.tp_grain_size)
 
         # 5. Set linear policies
         _autotp.update_linear_policies()
@@ -294,7 +323,7 @@ def replace_transformer_layer(orig_layer_impl, model, checkpoint_dict, config, m
 
         else:
             # copy relevant state from child -> new module
-            if config.replace_with_kernel_inject:
+            if not is_autotp_training_mode() and config.replace_with_kernel_inject:
                 new_module = replace_with_policy(child,
                                                  _policy,
                                                  config.triangular_masking,
@@ -306,6 +335,10 @@ def replace_transformer_layer(orig_layer_impl, model, checkpoint_dict, config, m
         return new_module
 
     def set_lm_head(module):
+        if is_autotp_training_mode():
+            # we need to handle autoTP training mode separately.
+            return
+
         embedding_weight = None
         for n, p in module.named_parameters():
             if "word_embeddings." in n or "embed_tokens." in n or "wte." in n:
@@ -314,12 +347,37 @@ def replace_transformer_layer(orig_layer_impl, model, checkpoint_dict, config, m
                 module.lm_head, "weight") and module.lm_head.weight.is_meta:
             module.lm_head.weight = embedding_weight
         # enable tensor parallel for the last linear
-        if hasattr(module, "lm_head") and hasattr(module.lm_head, "weight") and not module.lm_head.weight.is_meta:
+        if hasattr(module, "lm_head") and hasattr(module.lm_head, "weight") and isinstance(
+                module.lm_head, torch.nn.Linear):
             module = replace_wo_policy(module, ("lm_head", ), 0, "lm_head")
-        elif hasattr(module, "embed_out") and hasattr(module.embed_out,
-                                                      "weight") and not module.embed_out.weight.is_meta:
+        elif hasattr(module, "embed_out") and hasattr(module.embed_out, "weight") and isinstance(
+                module.embed_out, torch.nn.Linear):
             module = replace_wo_policy(module, ("embed_out", ), 0, "embed_out")
+        elif hasattr(module, "language_model") and hasattr(module.language_model, "lm_head"):
+            module = replace_wo_policy(module.language_model, ("lm_head", ), 0, "lm_head")
         return module
+
+    def conv2d_parallel_shard_weights(model, rank, world_size):
+        # add conv policy
+        shard_oc_name = ["conv1"]
+        shard_ic_name = ["conv2"]
+        for name, sub_m in model.named_children():
+            for l_name, l_sub_m in sub_m.named_children():
+                if l_name in shard_oc_name:
+                    TPConv2d = TensorParallelOcShardConv2d(
+                        l_sub_m,
+                        rank,
+                        world_size,
+                    )
+                    setattr(sub_m, l_name, TPConv2d)
+                if l_name in shard_ic_name:
+                    TPConv2d = TensorParallelIcShardConv2d(
+                        l_sub_m,
+                        rank,
+                        world_size,
+                    )
+                    setattr(sub_m, l_name, TPConv2d)
+            conv2d_parallel_shard_weights(sub_m, rank, world_size)
 
     if checkpoint_dict is not None and not config.replace_with_kernel_inject:
         # AutoTP shard loading
@@ -334,12 +392,18 @@ def replace_transformer_layer(orig_layer_impl, model, checkpoint_dict, config, m
                                              checkpoint=checkpoint_file)
             pbar.update(1)
             gc.collect()
-        replaced_module = set_lm_head(replaced_module)
+        # conv2d tp module replace
+        # Now is for yuan model. Add model list and conv policy to decide whether to replace conv.
+        if 'Yuan' in str(replaced_module):
+            conv2d_parallel_shard_weights(replaced_module, dist.get_rank(), dist.get_world_size())
     else:
         replaced_module = replace_module(model=model,
                                          orig_class=orig_layer_impl,
                                          replace_fn=replace_fn,
                                          _replace_policy=config.injection_policy_tuple)
+    # AutoTP default set lm_head tp
+    if not config.replace_with_kernel_inject:
+        replaced_module = set_lm_head(replaced_module)
 
     quantizer = GroupQuantizer(q_int8=quantize)
     world_size = dist.get_world_size() if dist.is_initialized() else 1
@@ -359,7 +423,7 @@ def replace_transformer_layer(orig_layer_impl, model, checkpoint_dict, config, m
             pbar = tqdm.tqdm(total=len(checkpoint), desc=f"Loading {len(checkpoint)} checkpoint shards")
 
             for i in range(len(checkpoint)):
-                sd = [torch.load(os.path.join(base_dir1, checkpoint[i]), map_location='cpu')]
+                sd = [torch.load(os.path.join(base_dir1, checkpoint[i]), map_location='cpu', weights_only=False)]
                 load_model_with_checkpoint(replaced_module,
                                            sd,
                                            mp_replace,
@@ -381,7 +445,7 @@ def replace_transformer_layer(orig_layer_impl, model, checkpoint_dict, config, m
                     os.path.join(base_dir1, ckpt_list[ckpt_index + j]) if base_dir1 else ckpt_list[ckpt_index + j]
                     for j in range(sd_count)
                 ]
-                sds = [torch.load(ckpt_file, map_location='cpu') for ckpt_file in ckpt_files]
+                sds = [torch.load(ckpt_file, map_location='cpu', weights_only=False) for ckpt_file in ckpt_files]
                 load_model_with_checkpoint(replaced_module,
                                            sds,
                                            mp_replace,
@@ -401,7 +465,7 @@ def replace_transformer_layer(orig_layer_impl, model, checkpoint_dict, config, m
                     pbar.update(1)
                     ckpt_file = os.path.join(base_dir1,
                                              checkpoint["non_tp"][i]) if base_dir1 else checkpoint["non_tp"][i]
-                    sds = [torch.load(ckpt_file, map_location='cpu')]
+                    sds = [torch.load(ckpt_file, map_location='cpu', weights_only=False)]
                     load_model_with_checkpoint(replaced_module,
                                                sds,
                                                mp_replace,
@@ -415,7 +479,7 @@ def replace_transformer_layer(orig_layer_impl, model, checkpoint_dict, config, m
         set_lm_head(replaced_module)
         print(f"checkpoint loading time at rank {rank}: {time.time()-start_time} sec")
 
-    if config.save_mp_checkpoint_path is not None:
+    if not is_autotp_training_mode() and config.save_mp_checkpoint_path is not None:
         from collections import OrderedDict
         import json
         num_partitions = 8
@@ -440,9 +504,10 @@ def replace_transformer_layer(orig_layer_impl, model, checkpoint_dict, config, m
         if not dist.is_initialized() or dist.get_rank() == 0:
             print("Saving tp-sharded checkpoints")
             torch.save(
-                OrderedDict({k: v
-                             for k, v in dict(replaced_module.state_dict()).items()
-                             if transformer_name not in k}), f'{config.save_mp_checkpoint_path}/{non_tp_ckpt_name}')
+                OrderedDict({
+                    k: v
+                    for k, v in dict(replaced_module.state_dict()).items() if transformer_name not in k
+                }), f'{config.save_mp_checkpoint_path}/{non_tp_ckpt_name}')
 
             dtype_reprs = {
                 torch.float32: 'float32',
@@ -563,7 +628,12 @@ def replace_module(model, orig_class, replace_fn, _replace_policy, checkpoint=No
     """
     sd = None
     if checkpoint is not None:
-        sd = torch.load(checkpoint, map_location='cpu')
+        if checkpoint.endswith(".safetensors"):
+            from safetensors.torch import load_file
+            sd = load_file(checkpoint)
+        else:
+            sd = torch.load(checkpoint, map_location='cpu', weights_only=False)
+
     policy = {}
     if orig_class is not None:
         policy.update({orig_class: (replace_fn, _replace_policy)})
@@ -578,7 +648,7 @@ def replace_module(model, orig_class, replace_fn, _replace_policy, checkpoint=No
                 policy.update({plcy._orig_layer_class: (replace_fn, plcy)})
     assert len(policy.items()) > 0,\
         "No default policy found! Please specify your policy injection_policy (like {BertLayer:HFBEertLayerPolicy})." +\
-        "You can find some samples here: https://github.com/microsoft/DeepSpeed/blob/master/deepspeed/module_inject/replace_policy.py"
+        "You can find some samples here: https://github.com/deepspeedai/DeepSpeed/blob/master/deepspeed/module_inject/replace_policy.py"
 
     replaced_module, _ = _replace_module(model, policy, state_dict=sd)
     return replaced_module
@@ -597,7 +667,7 @@ def skip_level_0_prefix(model, state_dict):
     if key is None:
         key = re.match(r"(.*?)Model", model)
     # if keys start with 'model.', don't skip level 0 prefix
-    if state_dict != None:
+    if state_dict is not None:
         for item in state_dict.keys():
             if re.match("^model[.]", item):
                 return False

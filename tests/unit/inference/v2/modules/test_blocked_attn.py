@@ -12,7 +12,7 @@ import torch
 
 from deepspeed.accelerator import get_accelerator
 from deepspeed.inference.v2.modules import ConfigBundle
-from deepspeed.inference.v2.modules.configs import DSSelfAttentionConfig, PositionalEmbeddingType
+from deepspeed.inference.v2.modules.configs import DSSelfAttentionConfig, PositionalEmbeddingType, RotateHalfConfig
 from deepspeed.inference.v2.modules.interfaces import DSSelfAttentionRegistry, DSSelfAttentionBase
 
 from ..kernels.ragged_ops.ragged_testing_utils import build_batch_and_manager
@@ -37,13 +37,10 @@ def _blocked_flash_testing_helper(head_size: int,
     """
     if trained_freqs is None:
         embed_type = PositionalEmbeddingType.none
-        embed_args = {}
+        embed_args = None
     else:
         embed_type = PositionalEmbeddingType.rotate_half
-        if trained_freqs:
-            embed_args = {'trained_freqs': True}
-        else:
-            embed_args = {'trained_freqs': False}
+        embed_args = RotateHalfConfig(use_trained_freqs=trained_freqs)
 
     attn_config = DSSelfAttentionConfig(max_tokens=2048,
                                         n_heads_q=n_heads_q,
@@ -51,7 +48,7 @@ def _blocked_flash_testing_helper(head_size: int,
                                         head_size=head_size,
                                         max_sequences=32,
                                         positional_embedding_type=embed_type,
-                                        positional_embedding_args=embed_args)
+                                        positional_embedding_config=embed_args)
 
     config = ConfigBundle(name='dense_blocked_attention', config=attn_config)
     attn_module: DSSelfAttentionBase = DSSelfAttentionRegistry.instantiate_config(config)

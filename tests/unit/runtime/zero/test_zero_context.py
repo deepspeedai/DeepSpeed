@@ -6,11 +6,13 @@
 from types import SimpleNamespace
 
 import torch
+import pytest
 import deepspeed
 from deepspeed.runtime.zero.partition_parameters import ZeroParamStatus, partitioned_param_data_shape
 import deepspeed.comm as dist
+from deepspeed.accelerator import get_accelerator
 
-from unit.common import DistributedTest
+from unit.common import DistributedTest, preferred_dtype
 from unit.simple_model import SimpleModel
 from utils import setup_serial_env
 
@@ -47,15 +49,16 @@ config = {
             "lr": 0.00015
         }
     },
-    "fp16": {
-        "enabled": True,
-        "loss_scale": 138.
-    },
     "zero_optimization": {
         "stage": 3,
         "stage3_param_persistence_threshold": 1,
     }
 }
+
+if get_accelerator().is_fp16_supported():
+    config["fp16"] = {"enabled": True, "loss_scale": 138.}
+elif get_accelerator().is_bf16_supported():
+    config["bf16"] = {"enabled": True}
 
 
 class TestZeroGatheredParametersFree(DistributedTest):
@@ -72,6 +75,29 @@ class TestZeroGatheredParametersFree(DistributedTest):
                 self.l1 = torch.nn.Linear(hidden_dim, hidden_dim)
 
         with deepspeed.zero.Init(config_dict_or_path=config_dict):
+            model = MyModel(hidden_dim)
+
+        with deepspeed.zero.GatheredParameters(list(model.parameters())):
+            assert model.l1.weight.numel() != 0, "GatheredParameters should give a non-0-sized tensor"
+
+        # on exit from `GatheredParameters` the gathered params should be freed and not leak memory
+        assert model.l1.weight.numel() == 0, "outside of GatheredParameters the param should go back to be 0-sized"
+
+
+class TestMiCSGatheredParametersFree(DistributedTest):
+    world_size = 1
+
+    def test(self):
+        config_dict = {"train_batch_size": 1, "zero_optimization": {"stage": 3, "mics_shard_size": 1}}
+        hidden_dim = 10
+
+        class MyModel(torch.nn.Module):
+
+            def __init__(self, hidden_dim):
+                super(MyModel, self).__init__()
+                self.l1 = torch.nn.Linear(hidden_dim, hidden_dim)
+
+        with deepspeed.zero.MiCS_Init(config_dict_or_path=config_dict):
             model = MyModel(hidden_dim)
 
         with deepspeed.zero.GatheredParameters(list(model.parameters())):
@@ -101,6 +127,8 @@ class TestSerialContext(DistributedTest):
             assert dist.is_initialized()
 
     def test_scatter_halftype(self):
+        if not get_accelerator().is_fp16_supported():
+            pytest.skip("fp16 is not supported")
         setup_serial_env()
 
         with deepspeed.zero.Init():
@@ -190,9 +218,9 @@ class TestSerialContext(DistributedTest):
             engine.tput_timer.stop(global_step=global_step)
             duration = engine.tput_timer.end_time - engine.tput_timer.start_time
             # step elapsed time is reset after gradient accumulation steps
-            assert engine.tput_timer.step_elapsed_time == (
-                0 if engine.tput_timer.global_step_count != engine.tput_timer.start_step else current_duration +
-                duration)
+            assert engine.tput_timer.step_elapsed_time == (0 if engine.tput_timer.global_step_count
+                                                           != engine.tput_timer.start_step else current_duration +
+                                                           duration)
             assert engine.tput_timer.total_elapsed_time == total_duration + duration
 
     def test_ext_param_getattr(self):
@@ -225,7 +253,7 @@ class TestSerialContext(DistributedTest):
         with deepspeed.zero.GatheredParameters(net.linear1.weight):
             assert net.linear1.weight.numel() == net.dim**2
 
-        input = torch.rand(net.dim).to(engine.device).half()
+        input = torch.rand(net.dim).to(engine.device).to(preferred_dtype())
         loss = engine(input)
         engine.backward(loss)
         engine.step()

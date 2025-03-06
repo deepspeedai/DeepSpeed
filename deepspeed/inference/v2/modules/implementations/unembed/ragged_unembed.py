@@ -9,8 +9,8 @@ import torch
 
 from deepspeed.accelerator import get_accelerator
 from ....allocator import empty_from
-from ....inference_utils import DtypeEnum
-from ....kernels.core_ops import CUDAFPLN, BlasLibLinear, CUDARMSNorm
+from ....inference_utils import DtypeEnum, ActivationType
+from ....kernels.core_ops import CUDAFPLN, BlasLibLinear, CUDARMSNorm, CUDABiasActivation
 from ....kernels.ragged_ops import RaggedLogitsGather
 from ....ragged import RaggedBatchWrapper
 from ...interfaces import DSUnembedBase, DSUnembedRegistry
@@ -65,6 +65,8 @@ class DSRaggedUnembed(DSUnembedBase):
             self._norm = None
 
         self._linear = BlasLibLinear(self._config.dtype)
+        # Here the activation kernel is being used to apply bias, hence the identity activation type!
+        self._act_fn = CUDABiasActivation(self._config.vocab_size, self._config.dtype, ActivationType.IDENTITY)
 
         self._intermediate = torch.empty((self._config.max_sequences, self._config.model_dim),
                                          dtype=self._config.dtype,
@@ -82,6 +84,7 @@ class DSRaggedUnembed(DSUnembedBase):
                 hidden_states: torch.Tensor,
                 vocab_embedding: torch.Tensor,
                 ragged_metadata: RaggedBatchWrapper,
+                bias: Optional[torch.Tensor] = None,
                 gamma: Optional[torch.Tensor] = None,
                 beta: Optional[torch.Tensor] = None) -> torch.Tensor:
         """
@@ -111,5 +114,7 @@ class DSRaggedUnembed(DSUnembedBase):
 
         output = empty_from(self._output, (ragged_metadata.current_sequences, self._config.vocab_size))
         self._linear(output, cut_down_hidden_states, vocab_embedding)
+        if bias is not None:
+            self._act_fn(output, bias)
 
         return output

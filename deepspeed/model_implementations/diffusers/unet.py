@@ -4,6 +4,7 @@
 # DeepSpeed Team
 
 import torch
+from deepspeed.accelerator import get_accelerator
 from ..features.cuda_graph import CUDAGraph
 
 
@@ -29,7 +30,7 @@ class DSUNet(CUDAGraph, torch.nn.Module):
         for k in kwargs:
             if torch.is_tensor(kwargs[k]):
                 self.static_kwargs[k].copy_(kwargs[k])
-        self._cuda_graphs.replay()
+        get_accelerator().replay_graph(self._cuda_graphs)
         return self.static_output
 
     def forward(self, *inputs, **kwargs):
@@ -53,11 +54,11 @@ class DSUNet(CUDAGraph, torch.nn.Module):
         torch.cuda.current_stream().wait_stream(cuda_stream)
 
         # create cuda_graph and assign static_inputs and static_outputs
-        self._cuda_graphs = torch.cuda.CUDAGraph()
+        self._cuda_graphs = get_accelerator().create_graph()
         self.static_inputs = inputs
         self.static_kwargs = kwargs
 
-        with torch.cuda.graph(self._cuda_graphs):
+        with get_accelerator().capture_to_graph(self._cuda_graphs):
             self.static_output = self._forward(*self.static_inputs, **self.static_kwargs)
 
         self.cuda_graph_created = True
@@ -68,7 +69,8 @@ class DSUNet(CUDAGraph, torch.nn.Module):
                  encoder_hidden_states,
                  return_dict=True,
                  cross_attention_kwargs=None,
-                 timestep_cond=None):
+                 timestep_cond=None,
+                 added_cond_kwargs=None):
         if cross_attention_kwargs:
             return self.unet(sample,
                              timestamp,

@@ -3,10 +3,21 @@
 
 # DeepSpeed Team
 
-import torch
-from deepspeed.accelerator.abstract_accelerator import DeepSpeedAccelerator
-import oneccl_bindings_for_pytorch  # noqa: F401 # type: ignore
-import psutil
+from .abstract_accelerator import DeepSpeedAccelerator
+
+# During setup stage torch may not be installed, pass on no torch will
+# allow op builder related API to be executed.
+try:
+    import torch
+except ImportError as e:
+    pass
+
+try:
+    import oneccl_bindings_for_pytorch  # noqa: F401 # type: ignore
+    oneccl_imported_p = True
+except ImportError as e:
+    oneccl_imported_p = False
+
 import os
 
 
@@ -15,11 +26,30 @@ class CPU_Accelerator(DeepSpeedAccelerator):
 
     def __init__(self):
         self._name = 'cpu'
-        self._communication_backend_name = 'ccl'
-        self.max_mem = psutil.Process().memory_info().rss
+        self._compile_backend = "inductor"
+        if oneccl_imported_p:
+            self._communication_backend_name = 'ccl'
+        else:
+            # fallback to gloo if oneccl_binding_for_pytorch is not installed
+            self._communication_backend_name = 'gloo'
+        try:
+            import psutil
+            mem = psutil.Process().memory_info().rss
+            self.max_mem = mem
+        except ImportError as e:
+            self.max_mem = 0
 
     def is_synchronized_device(self):
         return True
+
+    def use_host_timers(self):
+        return self.is_synchronized_device()
+
+    def resolves_data_dependency(self):
+        return self.is_synchronized_device()
+
+    def handles_memory_backpressure(self):
+        return self.is_synchronized_device()
 
     # Device APIs
     def device_name(self, device_index=None):
@@ -47,6 +77,8 @@ class CPU_Accelerator(DeepSpeedAccelerator):
             # In flat mode, HBM is in separate NUMA node with no cores on this node.
             # Ignore these NUMA nodes with no cores.
             numa_core_lists = get_numa_cores()
+            if not numa_core_lists:
+                return 1
             numa_count = 0
             prev_core_list = []
             for core_list in numa_core_lists:
@@ -63,7 +95,7 @@ class CPU_Accelerator(DeepSpeedAccelerator):
         return torch.random
 
     def set_rng_state(self, new_state, device_index=None):
-        if device_index == None:
+        if device_index is None:
             return torch.set_rng_state(new_state)
         return torch.set_rng_state(new_state, device_index)
 
@@ -76,8 +108,8 @@ class CPU_Accelerator(DeepSpeedAccelerator):
     def manual_seed_all(self, seed):
         return torch.manual_seed(seed)
 
-    def initial_seed(self, seed):
-        return torch.initial_seed(seed)
+    def initial_seed(self):
+        return torch.initial_seed()
 
     def default_generator(self, device_index):
         return torch.default_generator
@@ -106,12 +138,14 @@ class CPU_Accelerator(DeepSpeedAccelerator):
         return
 
     def get_rss(self):
+        import psutil
         mem = psutil.Process().memory_info().rss
         if mem > self.max_mem:
             self.max_mem = mem
         return mem
 
     def reset_rss(self):
+        import psutil
         mem = psutil.Process().memory_info().rss
         self.max_mem = mem
         return mem
@@ -157,9 +191,11 @@ class CPU_Accelerator(DeepSpeedAccelerator):
         return self.max_mem
 
     def total_memory(self, device_index=None):
+        import psutil
         return psutil.virtual_memory().total
 
     def available_memory(self, device_index=None):
+        import psutil
         return psutil.virtual_memory().available
 
     # Misc
@@ -198,8 +234,18 @@ class CPU_Accelerator(DeepSpeedAccelerator):
     def supported_dtypes(self):
         return [torch.float, torch.bfloat16]
 
-    # Tensor operations
+    # Graph operations
+    def create_graph(self):
+        return None
 
+    def capture_to_graph(self, graph, pool=None, stream=None):
+        from deepspeed.runtime.utils import noop_context
+        return noop_context()
+
+    def replay_graph(self, graph):
+        return
+
+    # Tensor operations
     @property
     def BFloat16Tensor(self):
         return torch.BFloat16Tensor
@@ -253,7 +299,7 @@ class CPU_Accelerator(DeepSpeedAccelerator):
     # create an instance of op builder and return, name specified by class_name
     def create_op_builder(self, op_name):
         builder_class = self.get_op_builder(op_name)
-        if builder_class != None:
+        if builder_class is not None:
             return builder_class()
         return None
 
@@ -263,16 +309,20 @@ class CPU_Accelerator(DeepSpeedAccelerator):
             # is op_builder from deepspeed or a 3p version? this should only succeed if it's deepspeed
             # if successful this also means we're doing a local install and not JIT compile path
             from op_builder import __deepspeed__  # noqa: F401 # type: ignore
-            from op_builder.cpu import CCLCommBuilder, FusedAdamBuilder, CPUAdamBuilder, NotImplementedBuilder
+            from op_builder.cpu import AsyncIOBuilder, CCLCommBuilder, ShareMemCommBuilder, FusedAdamBuilder, CPUAdamBuilder, NotImplementedBuilder
         except ImportError:
-            from deepspeed.ops.op_builder.cpu import CCLCommBuilder, FusedAdamBuilder, CPUAdamBuilder, NotImplementedBuilder
+            from deepspeed.ops.op_builder.cpu import AsyncIOBuilder, CCLCommBuilder, ShareMemCommBuilder, FusedAdamBuilder, CPUAdamBuilder, NotImplementedBuilder
 
         if class_name == "CCLCommBuilder":
             return CCLCommBuilder
+        elif class_name == "ShareMemCommBuilder":
+            return ShareMemCommBuilder
         elif class_name == "FusedAdamBuilder":
             return FusedAdamBuilder
         elif class_name == "CPUAdamBuilder":
             return CPUAdamBuilder
+        elif class_name == "AsyncIOBuilder":
+            return AsyncIOBuilder
         else:
             # return a NotImplementedBuilder to avoid get NoneType[Name] in unit tests
             return NotImplementedBuilder
@@ -280,3 +330,25 @@ class CPU_Accelerator(DeepSpeedAccelerator):
     def build_extension(self):
         from torch.utils.cpp_extension import BuildExtension
         return BuildExtension
+
+    def export_envs(self):
+        return []
+
+    # TODO: cpu's visible envs is confirmed, keep as CUDA_VISIBLE_DEVICES
+    def visible_devices_envs(self):
+        return ['CUDA_VISIBLE_DEVICES']
+
+    def set_visible_devices_envs(self, current_env, local_accelerator_ids):
+        for env in self.visible_devices_envs():
+            current_env[env] = ",".join(map(str, local_accelerator_ids))
+
+    def get_compile_backend(self):
+        return self._compile_backend
+
+    def set_compile_backend(self, backend):
+        supported_backends = torch._dynamo.list_backends(exclude_tags=())
+        if backend in supported_backends:
+            self._compile_backend = backend
+        else:
+            raise ValueError(
+                f"{backend} not supported by {self.device_name()}. Supported Backends are {supported_backends}")

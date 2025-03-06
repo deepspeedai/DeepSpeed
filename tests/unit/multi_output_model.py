@@ -4,6 +4,7 @@
 # DeepSpeed Team
 
 import torch
+from .common import preferred_dtype
 
 
 class MultiOutputModel(torch.nn.Module):
@@ -28,8 +29,11 @@ def multi_output_dataloader(model, total_samples, hidden_dim, device, inputs, ta
     batch_size = model.train_micro_batch_size_per_gpu()
 
     train_data = [
-        torch.full(size=(total_samples, hidden_dim), fill_value=x, device=device, dtype=torch.half, requires_grad=True)
-        for x in inputs
+        torch.full(size=(total_samples, hidden_dim),
+                   fill_value=x,
+                   device=device,
+                   dtype=preferred_dtype(),
+                   requires_grad=True) for x in inputs
     ]
 
     train_label = [torch.empty(total_samples, device=device, dtype=torch.long).fill_(y) for y in targets]

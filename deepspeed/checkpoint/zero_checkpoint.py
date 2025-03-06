@@ -54,7 +54,7 @@ class ZeROCheckpoint(object):
         state_file_list = self.get_files_for_rank(pp_index, tp_index, dp_index)
         merged_sd = None
         for state_file in state_file_list:
-            sd = torch.load(state_file, map_location=torch.device('cpu'))
+            sd = torch.load(state_file, map_location=torch.device('cpu'), weights_only=False)
             for key in keys_to_ignore:
                 sd.pop(key, None)
 
@@ -105,9 +105,11 @@ class ZeROCheckpoint(object):
             if group_paddings[key] == 0:
                 continue
             for state_name, state_value in group_state.items():
-                if torch.is_tensor(state_value):
+                if state_name != "step" and torch.is_tensor(state_value):
                     raw_length = state_value.numel() - group_paddings[key]
                     group_state[state_name] = torch.narrow(state_value, 0, 0, raw_length).clone()
+                else:
+                    group_state[state_name] = state_value
 
     def _clear_group_paddings(self, sd):
         group_paddings = self._get_optimizer_state(sd, GROUP_PADDINGS)

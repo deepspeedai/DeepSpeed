@@ -113,12 +113,23 @@ class RaggedBatchWrapper:
         # Default behavior should be no padding
         self._is_padded = False
 
+        self._current_tokens = 0
+        self._current_sequences = 0
+        self._batch_tokens = []
+        self._inflight_seq_descriptors_shadow_buf = []
+        self._kv_blocks_ptr_buf = []
+        self._token_to_seq_storage_shadow_buf = []
+
     def clear(self) -> None:
         """
         Clear the ragged batch. This will reset the number of tokens and sequences to 0.
         """
-        self._batch_metadata_storage_shadow[0] = 0
-        self._batch_metadata_storage_shadow[1] = 0
+        self._current_tokens = 0
+        self._current_sequences = 0
+        self._batch_tokens = []
+        self._inflight_seq_descriptors_shadow_buf = []
+        self._kv_blocks_ptr_buf = []
+        self._token_to_seq_storage_shadow_buf = []
 
     def insert_sequence(self, seq_descriptor: DSSequenceDescriptor, tokens: torch.Tensor, do_checks=True) -> None:
         """
@@ -140,18 +151,23 @@ class RaggedBatchWrapper:
         if do_checks and self.current_tokens + seq_tokens > self._config.max_ragged_batch_size:
             raise RuntimeError(f"Ragged batch is full due to capacity limit: {self._config.max_ragged_batch_size})")
 
-        self._input_ids_shadow[self.current_tokens:self.current_tokens + seq_tokens].copy_(tokens)
-        self._token_to_seq_storage_shadow[self.current_tokens:self.current_tokens + seq_tokens].fill_(
-            self.current_sequences)
+        # The values in _inflight_seq_descriptors_shadow_buf, _token_to_seq_storage_shadow_buf, _kv_blocks_ptr_buf, etc.,
+        # are ultimately stored in PyTorch tensors: _inflight_seq_descriptors_shadow, _token_to_seq_storage_shadow, _kv_ptrs_shadow, etc.
+        # However, we found it inefficient to iterate over and substitute values into tensor slices or to use copy/fill calls for this purpose.
+        # Therefore, we initially store the values in Python lists or primitive data types and then copy them collectively in the finalize() method,
+        # instead of updating the tensors directly in each iteration.
+        self._batch_tokens.append(tokens)
+        self._inflight_seq_descriptors_shadow_buf.append(self.current_tokens)
+        self._inflight_seq_descriptors_shadow_buf.append(seq_tokens)
+        self._inflight_seq_descriptors_shadow_buf.append(seq_descriptor.seen_tokens)
+        self._inflight_seq_descriptors_shadow_buf.append(0)  # alignment
 
-        self._inflight_seq_descriptors_shadow[self.current_sequences][0] = self.current_tokens
-        self._inflight_seq_descriptors_shadow[self.current_sequences][1] = seq_tokens
-        self._inflight_seq_descriptors_shadow[self.current_sequences][2] = seq_descriptor.seen_tokens
+        self._token_to_seq_storage_shadow_buf.extend([self.current_sequences] * seq_tokens)
 
-        self._kv_ptrs_shadow[self.current_sequences] = seq_descriptor.kv_blocks_ptr
+        self._kv_blocks_ptr_buf.append(seq_descriptor.kv_blocks_ptr)
 
-        self._batch_metadata_storage_shadow[0] += seq_tokens
-        self._batch_metadata_storage_shadow[1] += 1
+        self._current_tokens += seq_tokens
+        self._current_sequences += 1
 
     @property
     def tensor_toks(self) -> torch.Tensor:
@@ -170,6 +186,15 @@ class RaggedBatchWrapper:
         Completes construction of the ragged batch by flushing the host buffers to the device.
         """
         cur_toks = self.current_tokens
+
+        # Batch-copy the values recorded in insert_sequence() into PyTorch tensors to enhance efficiency.
+        self._inflight_seq_descriptors_shadow.flatten()[:len(self._inflight_seq_descriptors_shadow_buf)].copy_(
+            torch.tensor(self._inflight_seq_descriptors_shadow_buf))
+        self._input_ids_shadow[:self.current_tokens].copy_(torch.cat(self._batch_tokens, dim=0))
+        self._token_to_seq_storage_shadow[:len(self._token_to_seq_storage_shadow_buf)].copy_(
+            torch.tensor(self._token_to_seq_storage_shadow_buf))
+        self._kv_ptrs_shadow[:len(self._kv_blocks_ptr_buf)].copy_(torch.tensor(self._kv_blocks_ptr_buf))
+        self._batch_metadata_storage_shadow.copy_(torch.tensor([cur_toks, self.current_sequences]))
 
         if padding:
             padded_toks = to_padded(cur_toks)
@@ -256,7 +281,7 @@ class RaggedBatchWrapper:
         The number of tokens in the in-flight ragged batch. This will not trigger
         synchronization with the device.
         """
-        return self._batch_metadata_storage_shadow[0].item()
+        return self._current_tokens
 
     @property
     def current_sequences(self) -> int:
@@ -264,4 +289,4 @@ class RaggedBatchWrapper:
         The number of sequences in the in-flight ragged batch. This will not trigger
         synchronization with the device.
         """
-        return self._batch_metadata_storage_shadow[1].item()
+        return self._current_sequences

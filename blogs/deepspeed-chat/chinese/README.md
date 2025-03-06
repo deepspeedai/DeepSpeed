@@ -63,7 +63,7 @@ DeepSpeed-RLHF 系统在大规模训练中具有无与伦比的效率，使复�
 *表 2. 多节点 64x A100-80GB：训练时长及预估的 Azure 费用。*
 </div>
 
-> ***非常重要的细节***: 上述两个表格（即表一和表二）中的数据均针对 RLHF 训练的第 3 步，基于实际数据集和 DeepSpeed-RLHF 训练吞吐量的测试。该训练在总共 1.35 亿（135M）个字符（token）上进行一个时期（epoch）的训练。我们总共有 6750 万个查询（query）字符（131.9k 个 query，每个序列长度为 256）和 6750 万个生成/回答字符（131.9k 个答案，每个序列长度为 256），每步的最大全局字符批量大小约为 500 万个字符（1024 个查询-答案对）。在与 DeepSpeed-RLHF 进行任何成本和端到端时间比较之前，我们建议读者注意这些设定。想要了解更多详细信息，请参阅我们的页面 [benchmark setting](https://github.com/microsoft/DeepSpeedExamples-internal/blob/staging-deepspeed-chat-v2/applications/DeepSpeed-Chat/training/step3_rlhf_finetuning/BenckmarkSetting.md)。
+> ***非常重要的细节***: 上述两个表格（即表一和表二）中的数据均针对 RLHF 训练的第 3 步，基于实际数据集和 DeepSpeed-RLHF 训练吞吐量的测试。该训练在总共 1.35 亿（135M）个字符（token）上进行一个时期（epoch）的训练。我们总共有 6750 万个查询（query）字符（131.9k 个 query，每个序列长度为 256）和 6750 万个生成/回答字符（131.9k 个答案，每个序列长度为 256），每步的最大全局字符批量大小约为 500 万个字符（1024 个查询-答案对）。在与 DeepSpeed-RLHF 进行任何成本和端到端时间比较之前，我们建议读者注意这些设定。想要了解更多详细信息，请参阅我们的页面 [benchmark setting](https://github.com/deepspeedai/DeepSpeedExamples-internal/blob/staging-deepspeed-chat-v2/applications/DeepSpeed-Chat/training/step3_rlhf_finetuning/BenckmarkSetting.md)。
 
 ***实现 RLHF 训练的普及化***：仅凭单个 GPU，DeepSpeed-HE 就能支持训练超过 130 亿参数的模型。这使得那些无法使用多 GPU 系统的数据科学家和研究者不仅能够轻松创建轻量级的 RLHF 模型，还能创建大型且功能强大的模型，以应对不同的使用场景。
 
@@ -91,7 +91,7 @@ DeepSpeed-RLHF 系统在大规模训练中具有无与伦比的效率，使复�
 ```
 pip install deepspeed>=0.9.0
 
-git clone https://github.com/microsoft/DeepSpeedExamples.git
+git clone https://github.com/deepspeedai/DeepSpeedExamples.git
 cd DeepSpeedExamples/applications/DeepSpeed-Chat/
 pip install -r requirements.txt
 
@@ -274,7 +274,7 @@ DeepSpeed-HE可以在训练和推理之间无缝更改模型分区，以支持�
 
 ## 有效吞吐量和可扩展性分析
 
-***(I) 有效吞吐量分析。*** 在 RLHF 训练的第 3 阶段，DeepSpeed-HE 的有效吞吐量取决于它在生成和 RL 训练阶段所实现的吞吐量。在我们的 RLHF （详见 [benchmarking setting](https://github.com/microsoft/DeepSpeedExamples/blob/master/applications/DeepSpeed-Chat/training/step3_rlhf_finetuning/BenckmarkSetting.md)）中，生成阶段占总计算的约 20%，而 RL 训练阶段占剩余的 80%。然而，尽管比例较小，前者可能会占用大部分的端到端时间，因为它需要为每个生成的字符运行一次 actor 模型，使其受到内存带宽限制，难以实现高吞吐量。相比之下，RL 训练阶段是计算密集型的，仅需运行参考 actor 模型进行几次前向和后向传递，每个样本都有来自提示和生成的全部 512 个字符，可以实现良好的吞吐量。
+***(I) 有效吞吐量分析。*** 在 RLHF 训练的第 3 阶段，DeepSpeed-HE 的有效吞吐量取决于它在生成和 RL 训练阶段所实现的吞吐量。在我们的 RLHF （详见 [benchmarking setting](https://github.com/deepspeedai/DeepSpeedExamples/blob/master/applications/DeepSpeed-Chat/training/step3_rlhf_finetuning/BenckmarkSetting.md)）中，生成阶段占总计算的约 20%，而 RL 训练阶段占剩余的 80%。然而，尽管比例较小，前者可能会占用大部分的端到端时间，因为它需要为每个生成的字符运行一次 actor 模型，使其受到内存带宽限制，难以实现高吞吐量。相比之下，RL 训练阶段是计算密集型的，仅需运行参考 actor 模型进行几次前向和后向传递，每个样本都有来自提示和生成的全部 512 个字符，可以实现良好的吞吐量。
 
 <div align="center">
 
@@ -300,7 +300,7 @@ DeepSpeed-HE可以在训练和推理之间无缝更改模型分区，以支持�
 
 ***(II) 可扩展性分析。*** 不同模型大小的最佳有效吞吐量取决于不同的 GPU 数量。部分原因是因为一些较大的模型大小需要更多的内存来运行。基于此，我们接下来讨论 DeepSpeed-HE 的可扩展性特性。
 
-图 7 显示 DeepSeed-RLHF 在多达 64 个 GPU的集群 上实现了良好的整体扩展。然而，如果我们仔细观察，可以发现 DeepSpeed-RLHF 训练在小规模时实现了超线性扩展，随后在较大规模时实现了接近线性或次线性扩展。这是由于内存可用性和最大全局批量大小之间的相互作用。
+图 7 显示 DeepSpeed-RLHF 在多达 64 个 GPU的集群 上实现了良好的整体扩展。然而，如果我们仔细观察，可以发现 DeepSpeed-RLHF 训练在小规模时实现了超线性扩展，随后在较大规模时实现了接近线性或次线性扩展。这是由于内存可用性和最大全局批量大小之间的相互作用。
 
 DeepSpeed-HE 的核心技术基于 ZeRO，用于训练过程中将模型状态分割到每个GPU上。这意味着随着 GPU 数量的增加，每个 GPU 的内存消耗会减少，使得 DeepSpeed-HE 能够在每个 GPU 上支持更大的批量，从而实现超线性扩展。然而，在大规模情况下，尽管可用内存持续增加，但最大全局批量大小仍然限制了每个 GPU 的批量大小，导致接近线性或次线性扩展。因此，在给定的最大全局批量大小（例如，我们设置为 1024 个句子，每个句子长度为 512）下，DeepSpeed-HE 在超线性和次线性可扩展性之间实现了最佳的吞吐量和成本效益。具体的平衡点主要取决于每个 GPU 上可运行的最大批量大小，而这又受到可用内存和全局批量大小的函数所决定。
 
@@ -308,18 +308,18 @@ DeepSpeed-HE 的核心技术基于 ZeRO，用于训练过程中将模型状态�
 
 我们非常高兴地宣布，DeepSpeed-Chat现已开源并向 AI 社区开放。
 
-* 如果你发现我们的成果对你有用或者喜欢我们的开源成果，请在 [DeepSpeed](https://github.com/microsoft/DeepSpeed) 和 [DeepSpeedExamples](https://github.com/microsoft/DeepSpeedExamples)上点⭐。
+* 如果你发现我们的成果对你有用或者喜欢我们的开源成果，请在 [DeepSpeed](https://github.com/deepspeedai/DeepSpeed) 和 [DeepSpeedExamples](https://github.com/deepspeedai/DeepSpeedExamples)上点⭐。
 
 
-* 请访问我们的DeepSpeed-Chat GitHub页面以开始使用：[GitHub 登陆页面](https://github.com/microsoft/DeepSpeedExamples/tree/master/applications/DeepSpeed-Chat)
+* 请访问我们的DeepSpeed-Chat GitHub页面以开始使用：[GitHub 登陆页面](https://github.com/deepspeedai/DeepSpeedExamples/tree/master/applications/DeepSpeed-Chat)
 
 
-* 我们将继续根据你的反馈和支持改进 DeepSpeed-Chat。我们的[计划图](https://github.com/microsoft/DeepSpeedExamples/tree/master/applications/DeepSpeed-Chat/README.md#-deepspeed-chats-roadmap-)显示了当前支持的功能以及计划在未来支持的功能。
+* 我们将继续根据你的反馈和支持改进 DeepSpeed-Chat。我们的[计划图](https://github.com/deepspeedai/DeepSpeedExamples/tree/master/applications/DeepSpeed-Chat/README.md#-deepspeed-chats-roadmap-)显示了当前支持的功能以及计划在未来支持的功能。
 
 DeepSpeed-Chat 是更大的DeepSpeed生态系统的一部分，包括众多深度学习系统和建模技术。要了解更多信息，
 
 * 请访问我们的[网站](https://www.deepspeed.ai/)，了解详细的博客文章、教程和有用的文档。
-* 我们会在[知乎](https://www.zhihu.com/people/deepspeed)上发布最新中文博客及动态。你还可以关注我们的[英文 Twitter](https://twitter.com/MSFTDeepSpeed) 和[日文 Twitter](https://twitter.com/MSFTDeepSpeedJP)。
+* 我们会在[知乎](https://www.zhihu.com/people/deepspeed)上发布最新中文博客及动态。你还可以关注我们的[英文 Twitter](https://twitter.com/DeepSpeedAI) 和[日文 Twitter](https://twitter.com/DeepSpeedAI_JP)。
 
 
-DeepSpeed 欢迎你的贡献！我们鼓励你在 [DeepSpeed GitHub](https://github.com/microsoft/DeepSpeed/) 页面报告问题、贡献 PR 并参与讨论。请参阅我们的[贡献指南](https://github.com/microsoft/DeepSpeed/blob/master/CONTRIBUTING.md)了解更多详情。我们愿意与大学、研究实验室、公司等进行合作，共同开展深度学习研究，将 DeepSpeed 应用于赋能现实世界的 AI 模型和应用等。对于此类需求（以及其他不适合在 GitHub 上提出的需求），请直接发送电子邮件至 deepspeed-info@microsoft.com。
+DeepSpeed 欢迎你的贡献！我们鼓励你在 [DeepSpeed GitHub](https://github.com/deepspeedai/DeepSpeed/) 页面报告问题、贡献 PR 并参与讨论。请参阅我们的[贡献指南](https://github.com/deepspeedai/DeepSpeed/blob/master/CONTRIBUTING.md)了解更多详情。我们愿意与大学、研究实验室、公司等进行合作，共同开展深度学习研究，将 DeepSpeed 应用于赋能现实世界的 AI 模型和应用等。对于此类需求（以及其他不适合在 GitHub 上提出的需求），请直接发送电子邮件至 deepspeed-info@microsoft.com。

@@ -27,9 +27,9 @@ class TensorMetadata(DeepSpeedConfigModel):
     """
     A class to represent a tensor specification.
     """
-    dtype: Optional[str]
-    shape: Optional[Tuple[int, ...]]
-    strides: Optional[Tuple[int, ...]]
+    dtype: Optional[str] = None
+    shape: Optional[Tuple[int, ...]] = None
+    strides: Optional[Tuple[int, ...]] = None
     offset: int
 
 
@@ -37,7 +37,7 @@ class ParameterMetadata(DeepSpeedConfigModel):
     """
     A class to represent a parameter specification.
     """
-    core_param: TensorMetadata = None
+    core_param: Optional[TensorMetadata] = None
     aux_params: Dict[str, TensorMetadata] = {}
 
 
@@ -164,7 +164,7 @@ def flatten_inference_model(
                                                                    strides=tensor.stride(),
                                                                    offset=cur_offset)
 
-                cur_offset += pad_to_aligned_offset(elem_size(param.dtype) * param.numel())
+                cur_offset += pad_to_aligned_offset(elem_size(tensor.dtype) * tensor.numel())
 
             layer_metadata.params[p_name] = param_metadata
 

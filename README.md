@@ -8,7 +8,7 @@
 
 ## DeeperSpeed
 
-DeeperSpeed is a fork of Microsoft's [Deepspeed](https://github.com/microsoft/DeepSpeed) library that is tailor-made for the [GPT-NeoX](https://github.com/EleutherAI/gpt-neox) by [EleutherAI](https://www.eleuther.ai/). 
+DeeperSpeed is a fork of the [Deepspeed](https://github.com/microsoft/DeepSpeed) library that is tailor-made for the [GPT-NeoX](https://github.com/EleutherAI/gpt-neox) by [EleutherAI](https://www.eleuther.ai/). 
 
 Prior to 3/9/2023, DeeperSpeed was based on an old version of DeepSpeed (0.3.15). In order to migrate to the latest upstream DeepSpeed version while allowing users to access the old versions of GPT-NeoX and DeeperSpeed, we have introduced two versioned releases for both libraries:
 

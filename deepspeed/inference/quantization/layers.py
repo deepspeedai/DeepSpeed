@@ -86,7 +86,7 @@ class QuantizedEmbedding(nn.Embedding):
                                                  device=pre_quant_layer.weight.device,
                                                  dtype=pre_quant_layer.weight.dtype)
 
-        assert pre_quant_layer.max_norm == None, 'Not supported'
+        assert pre_quant_layer.max_norm is None, 'Not supported'
         assert pre_quant_layer.norm_type == 2, 'Not supported'
         assert pre_quant_layer.scale_grad_by_freq == False, 'Not supported'
         assert pre_quant_layer.sparse == False, 'Not supported'

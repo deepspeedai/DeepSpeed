@@ -5,7 +5,7 @@ repos:
     -   id: check-useless-excludes
 
 -   repo: https://github.com/pre-commit/pre-commit-hooks
-    rev: v4.0.1
+    rev: v5.0.0
     hooks:
     -   id: check-case-conflict
     -   id: check-json
@@ -23,7 +23,7 @@ repos:
     -   id: trailing-whitespace
 
 -   repo: https://github.com/google/yapf
-    rev: v0.32.0
+    rev: v0.40.0
     hooks:
     -   id: yapf
 
@@ -59,13 +59,13 @@ repos:
             # Do not check files that are automatically generated
             '--skip=docs/Gemfile.lock,tests/unit/gpt2-merges.txt,tests/unit/gpt2-vocab.json',
             '--ignore-regex=\\n',  # Do not count the 'n' in an escaped newline as part of a word
-            '--ignore-words-list=youn,unsupport,noe',  # Word used in error messages that need rewording
+            '--ignore-words-list=youn,unsupport,noe,cann',  # Word used in error messages that need rewording
             --check-filenames,
             --check-hidden
         ]
 
 -   repo: https://github.com/pycqa/flake8
-    rev: 4.0.1
+    rev: 5.0.4
     hooks:
     -   id: flake8
         args: ['--config=.flake8']
@@ -76,5 +76,14 @@ repos:
         name: check-torchcuda
         entry: ./scripts/check-torchcuda.py
         language: python
-        exclude: ^(.github/workflows/|scripts/check-torchcuda.py|docs/_tutorials/accelerator-abstraction-interface.md|accelerator/cuda_accelerator.py|deepspeed/inference/engine.py|deepspeed/model_implementations/transformers/clip_encoder.py|deepspeed/model_implementations/diffusers/vae.py|deepspeed/model_implementations/diffusers/unet.py|op_builder/spatial_inference.py|op_builder/transformer_inference.py|op_builder/builder.py|setup.py|tests/unit/ops/sparse_attention/test_sparse_attention.py)
+        exclude: ^(.github/workflows/|scripts/check-torchcuda.py|docs/_tutorials/accelerator-abstraction-interface.md|docs/_tutorials/deepnvme.md|accelerator/cuda_accelerator.py|deepspeed/inference/engine.py|deepspeed/model_implementations/transformers/clip_encoder.py|deepspeed/model_implementations/diffusers/vae.py|deepspeed/model_implementations/diffusers/unet.py|op_builder/spatial_inference.py|op_builder/transformer_inference.py|op_builder/builder.py|setup.py|tests/unit/ops/sparse_attention/test_sparse_attention.py)
         # Specific deepspeed/ files are excluded for now until we wrap ProcessGroup in deepspeed.comm
+
+-   repo: local
+    hooks:
+    -   id: check-extraindexurl
+        name: check-extraindexurl
+        entry: ./scripts/check-extraindexurl.py
+        language: python
+        files: \.(yml|yaml|sh|py)$
+        exclude: ^(scripts/check-extraindexurl.py)

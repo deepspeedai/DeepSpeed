@@ -1,0 +1,65 @@
+name: xpu-compile
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 0 * * *"
+  pull_request:
+    paths:
+      - ".github/workflows/xpu-compile.yml"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  compile-tests:
+    runs-on: [self-hosted, intel, xpu]
+    container:
+      image: intel/oneapi-basekit:2024.2.1-0-devel-ubuntu22.04
+      ports:
+        - 80
+      options: --privileged -it --rm --device /dev/dri:/dev/dri -v /dev/dri/by-path:/dev/dri/by-path --ipc=host --cap-add=ALL
+
+    steps:
+    - uses: actions/checkout@v4
+    - name: Install prerequisite
+      run: |
+        apt-get update
+        apt-get install clinfo libaio-dev python3-pip -y
+        pip install torch==2.3.1 -f https://pytorch-extension.intel.com/release-whl/stable/xpu/cn/torch/
+        pip install intel-extension-for-pytorch==2.3.110+xpu -f https://pytorch-extension.intel.com/release-whl/stable/xpu/cn/intel-extension-for-pytorch/
+        pip install oneccl_bind_pt==2.3.100+xpu -f https://pytorch-extension.intel.com/release-whl/stable/xpu/cn/oneccl-bind-pt/
+        pip install torchvision==0.18.1 -f https://pytorch-extension.intel.com/release-whl/stable/xpu/cn/torchvision/
+        pip install https://github.com/intel/intel-xpu-backend-for-triton/releases/download/v3.0.0b2/triton_xpu-3.0.0b2-cp310-cp310-linux_x86_64.whl
+        pip install py-cpuinfo numpy
+        pip install .[dev,autotuning]
+
+    - name: Check container state
+      run: |
+        ldd --version
+        ds_report
+        python3 -c "import torch; print('torch:', torch.__version__, torch)"
+        python3 -c "import torch; import intel_extension_for_pytorch; print('XPU available:', torch.xpu.is_available())"
+        python3 -c "from deepspeed.accelerator import get_accelerator; print('accelerator:', get_accelerator()._name)"
+        pip list
+
+    - name: Compile Status
+      shell: bash
+      run: |
+        echo "# torch.compile graph breaks" >> $GITHUB_STEP_SUMMARY
+        export FI_HMEM=system
+        ulimit -n 1048575
+        cd tests/torch_compile
+        export ZE_AFFINITY_MASK=0,1
+        echo "## ZeRO stage 3" >> $GITHUB_STEP_SUMMARY
+        deepspeed test_compile.py --deepspeed_config ds_config_z3.json 2>&1 | tee log_z3.txt
+        # for each line start with 'dynamo_output', extract the second field and following fields and append to GITHUB_STEP_SUMMARY using awk
+        cat log_z3.txt | awk '/^dynamo_output/ {$1=""; print $0}' >> $GITHUB_STEP_SUMMARY
+        echo "## ZeRO stage 2" >> $GITHUB_STEP_SUMMARY
+        deepspeed test_compile.py --deepspeed_config ds_config_z2.json 2>&1 | tee log_z2.txt
+        cat log_z2.txt | awk '/^dynamo_output/ {$1=""; print $0}' >> $GITHUB_STEP_SUMMARY

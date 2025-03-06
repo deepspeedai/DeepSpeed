@@ -10,6 +10,7 @@ import pytest
 from unit.common import DistributedTest
 from unit.simple_model import SimpleModel, random_dataloader
 from mup.shape import set_base_shapes
+from deepspeed.accelerator import get_accelerator
 
 
 @pytest.mark.parametrize("optimizer, expected_opt_class", [("MuAdam", torch.optim.Adam),
@@ -31,14 +32,15 @@ class TestMuPOptimizers(DistributedTest):
                 }
             },
             "gradient_clipping": 1.0,
-            "fp16": {
-                "enabled": True
-            },
             "zero_optimization": {
                 "stage": 2,
                 "cpu_offload": zero_offload
             }
         }
+        if get_accelerator().is_fp16_supported():
+            config_dict["fp16"] = {"enabled": True}
+        elif get_accelerator().is_bf16_supported():
+            config_dict["bf16"] = {"enabled": True}
         hidden_dim = 10
         model = SimpleModel(hidden_dim)
         set_base_shapes(model, None)

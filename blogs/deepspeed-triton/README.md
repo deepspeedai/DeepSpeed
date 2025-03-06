@@ -19,7 +19,7 @@ Table 1. The average speedup (see NOTE below for more detail)
 
 For those transformer operators in float16, we have implemented kernels written in Triton language that replace ordinary CUDA kernels or torch operators.
 The Triton kernels we implemented include softmax, layer-normalization, residual-addition and all the matrix multiplications except MLP layers (see NOTE below for details).
-In our experiments, Triton kernels help to reduce the average latecy (over difference sequence lengths) by 6\~24% (depending on model and hardware) when compared to the latency with CUDA-only kernels.
+In our experiments, Triton kernels help to reduce the average latency (over difference sequence lengths) by 6\~24% (depending on model and hardware) when compared to the latency with CUDA-only kernels.
 
 
 Figures below show the latency reduction in more detail.
@@ -65,7 +65,7 @@ We use an example of Bert-base here.
 ```python
 pip install deepspeed[triton]
 
-git clone https://github.com/microsoft/DeepSpeedExamples.git
+git clone https://github.com/deepspeedai/DeepSpeedExamples.git
 cd DeepSpeedExamples/inference/huggingface/fill-mask
 
 deepspeed --num_gpus 1 test-bert.py --triton
@@ -76,7 +76,7 @@ To run a performance benchmark, you can use the following command:
 ```python
 pip install deepspeed[triton]
 
-git clone https://github.com/microsoft/DeepSpeedExamples.git
+git clone https://github.com/deepspeedai/DeepSpeedExamples.git
 cd DeepSpeedExamples/benchmarks/inference
 
 deepspeed --num_gpus 1 triton-bert-benchmark.py --model bert-base-cased --dtype fp16 --kernel-inject --deepspeed --graphs --triton
@@ -84,7 +84,7 @@ deepspeed --num_gpus 1 triton-bert-benchmark.py --model bert-base-cased --dtype 
 
 # NOTE
 <!-- **_NOTE:_** -->
-* For more information on how to use DeepSpeed, please visit our [GitHub Page](https://github.com/microsoft/DeepSpeedExamples) and our [website](https://www.deepspeed.ai/), where you can find blog posts, tutorials, and documentation.
+* For more information on how to use DeepSpeed, please visit our [GitHub Page](https://github.com/deepspeedai/DeepSpeedExamples) and our [website](https://www.deepspeed.ai/), where you can find blog posts, tutorials, and documentation.
 
 * This feature is currently only supported for BERT, Roberta and other BERT-like models, and not for text-generation models yet.
 

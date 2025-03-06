@@ -14,6 +14,7 @@ from deepspeed.moe.layer import MoE
 from deepspeed.accelerator import get_accelerator
 
 import deepspeed.comm as dist
+from .common import preferred_dtype
 
 
 class SimpleModel(torch.nn.Module):
@@ -78,7 +79,7 @@ class Curriculum_SimpleModel(SimpleModel):
 
 class SimpleMoEModel(torch.nn.Module):
 
-    def __init__(self, hidden_dim, num_experts=4, ep_size=1, use_residual=False):
+    def __init__(self, hidden_dim, num_experts=4, ep_size=1, use_residual=False, use_rts=True):
         super(SimpleMoEModel, self).__init__()
         self.linear1 = torch.nn.Linear(hidden_dim, hidden_dim)
         expert = torch.nn.Sequential(torch.nn.Linear(hidden_dim, hidden_dim), torch.nn.Linear(hidden_dim, hidden_dim))
@@ -88,7 +89,8 @@ class SimpleMoEModel(torch.nn.Module):
                          ep_size=ep_size,
                          use_residual=use_residual,
                          num_experts=num_experts,
-                         k=1)
+                         k=1,
+                         use_rts=use_rts)
         # interleaving MoE modules with dense to create an opportunity
         # for gradients to be merged in ZeRO stage 2 average_tensor reduce bucket
         self.linear2 = torch.nn.Linear(hidden_dim, hidden_dim)
@@ -97,7 +99,8 @@ class SimpleMoEModel(torch.nn.Module):
                          ep_size=ep_size,
                          use_residual=use_residual,
                          num_experts=num_experts,
-                         k=1)
+                         k=1,
+                         use_rts=use_rts)
         self.linear3 = torch.nn.Linear(hidden_dim, hidden_dim)
         self.cross_entropy_loss = torch.nn.CrossEntropyLoss()
 
@@ -262,21 +265,21 @@ class PLD_SimpleModel(SimpleModel):
         return hidden_dim
 
 
-def random_dataset(total_samples, hidden_dim, device, dtype=torch.half):
+def random_dataset(total_samples, hidden_dim, device, dtype=preferred_dtype()):
     train_data = torch.randn(total_samples, hidden_dim, device=device, dtype=dtype)
     train_label = torch.empty(total_samples, dtype=torch.long, device=device).random_(hidden_dim)
     train_dataset = torch.utils.data.TensorDataset(train_data, train_label)
     return train_dataset
 
 
-def random_dataloader(model, total_samples, hidden_dim, device, dtype=torch.half):
+def random_dataloader(model, total_samples, hidden_dim, device, dtype=preferred_dtype()):
     batch_size = model.train_micro_batch_size_per_gpu()
     train_dataset = random_dataset(total_samples, hidden_dim, device, dtype=dtype)
     train_loader = torch.utils.data.DataLoader(train_dataset, batch_size=batch_size)
     return train_loader
 
 
-def sequence_dataloader(model, total_samples, hidden_dim, device, seq_len: int = 32, dtype=torch.half):
+def sequence_dataloader(model, total_samples, hidden_dim, device, seq_len: int = 32, dtype=preferred_dtype()):
     batch_size = model.train_micro_batch_size_per_gpu()
     train_data = torch.randn(total_samples, seq_len, hidden_dim, device=device, dtype=dtype)
     train_label = torch.empty(total_samples, dtype=torch.long, device=device).random_(hidden_dim)

@@ -4,6 +4,7 @@
 # DeepSpeed Team
 
 import torch
+from deepspeed.accelerator import get_accelerator
 from ..features.cuda_graph import CUDAGraph
 
 
@@ -27,7 +28,7 @@ class DSVAE(CUDAGraph, torch.nn.Module):
         for k in kwargs:
             if torch.is_tensor(kwargs[k]):
                 self.static_decoder_kwargs[k].copy_(kwargs[k])
-        self._decoder_cuda_graph.replay()
+        get_accelerator().replay_graph(self._decoder_cuda_graph)
         return self.static_decoder_output
 
     def _decode(self, x, return_dict=True, generator=None):
@@ -43,11 +44,11 @@ class DSVAE(CUDAGraph, torch.nn.Module):
         torch.cuda.current_stream().wait_stream(cuda_stream)
 
         # create cuda_graph and assign static_inputs and static_outputs
-        self._decoder_cuda_graph = torch.cuda.CUDAGraph()
+        self._decoder_cuda_graph = get_accelerator().create_graph()
         self.static_decoder_inputs = inputs
         self.static_decoder_kwargs = kwargs
 
-        with torch.cuda.graph(self._decoder_cuda_graph):
+        with get_accelerator().capture_to_graph(self._decoder_cuda_graph):
             self.static_decoder_output = self._decode(*self.static_decoder_inputs, **self.static_decoder_kwargs)
 
         self.decoder_cuda_graph_created = True
@@ -70,7 +71,7 @@ class DSVAE(CUDAGraph, torch.nn.Module):
         for k in kwargs:
             if torch.is_tensor(kwargs[k]):
                 self.static_encoder_kwargs[k].copy_(kwargs[k])
-        self._encoder_cuda_graph.replay()
+        get_accelerator().replay_graph(self._encoder_cuda_graph)
         return self.static_encoder_output
 
     def _encode(self, x, return_dict=True):
@@ -86,11 +87,11 @@ class DSVAE(CUDAGraph, torch.nn.Module):
         torch.cuda.current_stream().wait_stream(cuda_stream)
 
         # create cuda_graph and assign static_inputs and static_outputs
-        self._encoder_cuda_graph = torch.cuda.CUDAGraph()
+        self._encoder_cuda_graph = get_accelerator().create_graph()
         self.static_encoder_inputs = inputs
         self.static_encoder_kwargs = kwargs
 
-        with torch.cuda.graph(self._encoder_cuda_graph):
+        with get_accelerator().capture_to_graph(self._encoder_cuda_graph):
             self.static_encoder_output = self._encode(*self.static_encoder_inputs, **self.static_encoder_kwargs)
 
         self.encoder_cuda_graph_created = True
@@ -113,7 +114,7 @@ class DSVAE(CUDAGraph, torch.nn.Module):
         for k in kwargs:
             if torch.is_tensor(kwargs[k]):
                 self.static_kwargs[k].copy_(kwargs[k])
-        self._all_cuda_graph.replay()
+        get_accelerator().replay_graph(self._all_cuda_graph)
         return self.static_output
 
     def forward(self, *inputs, **kwargs):
@@ -137,11 +138,11 @@ class DSVAE(CUDAGraph, torch.nn.Module):
         torch.cuda.current_stream().wait_stream(cuda_stream)
 
         # create cuda_graph and assign static_inputs and static_outputs
-        self._all_cuda_graph = torch.cuda.CUDAGraph()
+        self._all_cuda_graph = get_accelerator().create_graph()
         self.static_inputs = inputs
         self.static_kwargs = kwargs
 
-        with torch.cuda.graph(self._all_cuda_graph):
+        with get_accelerator().capture_to_graph(self._all_cuda_graph):
             self.static_output = self._forward(*self.static_inputs, **self.static_kwargs)
 
         self.all_cuda_graph_created = True

@@ -8,9 +8,10 @@ tags: getting-started
 ## Installation
 
 * Installing is as simple as `pip install deepspeed`, [see more details](/tutorials/advanced-install/).
-* To get started with DeepSpeed on AzureML, please see the [AzureML Examples GitHub](https://github.com/Azure/azureml-examples/tree/main/python-sdk/workflows/train/deepspeed)
-* DeepSpeed has direct integrations with [HuggingFace Transformers](https://github.com/huggingface/transformers) and [PyTorch Lightning](https://github.com/PyTorchLightning/pytorch-lightning). HuggingFace Transformers users can now easily accelerate their models with DeepSpeed through a simple ``--deepspeed`` flag + config file [See more details](https://huggingface.co/docs/transformers/main_classes/deepspeed). PyTorch Lightning provides easy access to DeepSpeed through the Lightning Trainer [See more details](https://pytorch-lightning.readthedocs.io/en/stable/advanced/multi_gpu.html?highlight=deepspeed#deepspeed).
+* To get started with DeepSpeed on AzureML, please see the [AzureML Examples GitHub](https://github.com/Azure/azureml-examples/tree/main/cli/jobs/deepspeed)
+* DeepSpeed has direct integrations with [HuggingFace Transformers](https://github.com/huggingface/transformers) and [PyTorch Lightning](https://github.com/PyTorchLightning/pytorch-lightning). HuggingFace Transformers users can now easily accelerate their models with DeepSpeed through a simple ``--deepspeed`` flag + config file [See more details](https://huggingface.co/docs/transformers/deepspeed). PyTorch Lightning provides easy access to DeepSpeed through the Lightning Trainer [See more details](https://pytorch-lightning.readthedocs.io/en/stable/advanced/multi_gpu.html?highlight=deepspeed#deepspeed).
 * DeepSpeed on AMD can be used via our [ROCm images](https://hub.docker.com/r/deepspeed/rocm501/tags), e.g., `docker pull deepspeed/rocm501:ds060_pytorch110`.
+* DeepSpeed also supports Intel Xeon CPU, Intel Data Center Max Series XPU, Intel Gaudi HPU, Huawei Ascend NPU etc, please refer to the [accelerator setup guide](/tutorials/accelerator-setup-guide/)
 
 
 
@@ -226,6 +227,36 @@ deepspeed --include="worker-2:0,1" \
 	<client_entry.py> <client args> \
 	--deepspeed --deepspeed_config ds_config.json
 ```
+### Launching without passwordless SSH
+
+DeepSpeed now supports launching training jobs without the need for passwordless SSH. This mode is
+particularly useful in cloud environments such as Kubernetes, where flexible container orchestration
+is possible, and setting up a leader-worker architecture with passwordless SSH adds unnecessary
+complexity.
+
+To use this mode, you need to run the DeepSpeed command separately on all nodes. The command should
+be structured as follows:
+
+```bash
+deepspeed --hostfile=myhostfile --no_ssh --node_rank=<n> \
+    --master_addr=<addr> --master_port=<port> \
+    <client_entry.py> <client args> \
+    --deepspeed --deepspeed_config ds_config.json
+```
+
+- `--hostfile=myhostfile`: Specifies the hostfile that contains information about the nodes and GPUs.
+- `--no_ssh`: Enables the no-SSH mode.
+- `--node_rank=<n>`: Specifies the rank of the node. This should be a unique integer from 0 to n - 1.
+- `--master_addr=<addr>`: The address of the leader node (rank 0).
+- `--master_port=<port>`: The port of the leader node.
+
+In this setup, the hostnames in the hostfile do not need to be reachable via passwordless SSH.
+However, the hostfile is still required for the launcher to collect information about the environment,
+such as the number of nodes and the number of GPUs per node.
+
+Each node must be launched with a unique `node_rank`, and all nodes must be provided with the address
+and port of the leader node (rank 0). This mode causes the launcher to act similarly to the `torchrun`
+launcher, as described in the [PyTorch documentation](https://pytorch.org/docs/stable/elastic/run.html).
 
 ## Multi-Node Environment Variables
 
@@ -285,10 +316,14 @@ local machine to discover the number of slots available. The `--include` and
 `--exclude` arguments work as normal, but the user should specify 'localhost'
 as the hostname.
 
-Also note that `CUDA_VISIBLE_DEVICES` can't be used with DeepSpeed to control
-which devices should be used. For example, to use only gpu1 of the current
-node, do:
+Also note that `CUDA_VISIBLE_DEVICES` can be used with `deepspeed` to control
+which devices should be used on a single node. So either of these would work
+to launch just on devices 0 and 1 of the current node:
 
 ```bash
-deepspeed --include localhost:1 ...
+deepspeed --include localhost:0,1 ...
+```
+
+```bash
+CUDA_VISIBLE_DEVICES=0,1 deepspeed ...
 ```

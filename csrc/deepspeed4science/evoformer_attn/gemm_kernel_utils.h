@@ -125,11 +125,10 @@ struct CheckArch {
         std::cerr << #PTR " is not correctly aligned\n"; \
         return false;                                    \
     }
-#define EVOFORMER_CHECK(COND, ERR)                          \
-    if (!(COND)) {                                          \
-        std::cerr << "[Evoformer Attention]"                \
-                  << "'" #COND "' failed: " << ERR << "\n"; \
-        return false;                                       \
+#define EVOFORMER_CHECK(COND, ERR)                                                     \
+    if (!(COND)) {                                                                     \
+        std::cerr << "[Evoformer Attention]" << "'" #COND "' failed: " << ERR << "\n"; \
+        return false;                                                                  \
     }
 #endif
 

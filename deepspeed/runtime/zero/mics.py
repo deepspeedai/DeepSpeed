@@ -12,11 +12,12 @@ from typing import List
 import deepspeed
 import torch
 from deepspeed import comm as dist
+from deepspeed.runtime.zero.utils import is_zero_param
 from deepspeed.runtime.zero.mics_utils import (MiCS_CommGroups, create_mics_comm_groups, scale_tensors)
-from deepspeed.runtime.zero.parameter_offload import (DeepSpeedZeRoOffload, is_zero_param)
+from deepspeed.runtime.zero.parameter_offload import DeepSpeedZeRoOffload
 from deepspeed.runtime.zero.partition_parameters import Init, AllGatherCoalescedHandle, ZeroParamStatus
 from deepspeed.runtime.zero.stage3 import DeepSpeedZeroOptimizer_Stage3
-from deepspeed.utils import instrument_w_nvtx, log_dist
+from deepspeed.utils import instrument_w_nvtx, log_dist, logger
 from deepspeed.accelerator import get_accelerator
 from torch import Tensor
 from torch.nn import Parameter
@@ -37,11 +38,19 @@ class MiCS_AllGatherCoalescedHandle(AllGatherCoalescedHandle):
     def __init__(self, allgather_handle, params: List[Parameter], partitions: List[Tensor], world_size: int) -> None:
         super().__init__(allgather_handle, params, partitions, world_size)
 
-    def wait(self) -> None:
+    def wait(self, **kwargs) -> None:
         """
         """
         # let the current stream to op
-        instrument_w_nvtx(self.allgather_handle.wait)()
+        try:
+            # print("HANDLE", self.allgather_handle)
+            instrument_w_nvtx(self.allgather_handle.wait)()
+        except (ValueError, RuntimeError) as e:
+            log_dist(
+                f"WARNING: Runtime Error while waiting the collective all-gather, possibly due to the _IllegalWork",
+                ranks=[0])
+            log_dist(f"Error message: {e}", ranks=[0])
+
         if self.complete:
             return
 
@@ -57,6 +66,7 @@ class MiCS_Init(Init):
     def __init__(self,
                  module=None,
                  data_parallel_group=None,
+                 sequence_data_parallel_group=None,
                  mem_efficient_linear=True,
                  remote_device=None,
                  pin_memory=False,
@@ -78,6 +88,8 @@ class MiCS_Init(Init):
                 if it was constructed in the context.
             data_parallel_group (``deepspeed.comm`` process group, optional):
                 The group of processes to partition among. Defaults to all processes.
+                Synonymous with sequence data parallel group for param partitioning
+                across both sequence and data parallel groups.
             mem_efficient_linear (bool, optional): Replace
                 torch.nn.functional.linear with an implementation that allows
                 DeepSpeed to partition parameters. Defaults to ``True``.
@@ -138,9 +150,24 @@ class MiCS_Init(Init):
         if not dist.is_initialized():
             dist.init_distributed()
             assert dist.is_initialized(), "Parameters cannot be scattered without initializing deepspeed.comm"
+
+        if data_parallel_group is None:
+            ds_process_group = dist.get_world_group()
+        else:
+            ds_process_group = data_parallel_group
+
+        if sequence_data_parallel_group is not None:
+            logger.warning(
+                f"sequence_data_parallel_group' is deprecated and will be removed. Use 'data_parallel_group' instead.")
+            if data_parallel_group is not None:
+                raise ValueError(
+                    "Both 'data_parallel_group' and 'sequence_data_parallel_group' were specified. Please provide only one of these arguments."
+                )
+            self.ds_process_group = sequence_data_parallel_group
+
         self.mics_comm_groups = create_mics_comm_groups(
             _ds_config.mics_shard_size,
-            data_parallel_group,
+            ds_process_group,
             hierarchical_allgather=_ds_config.mics_hierarchial_params_gather,
             mpu=mpu)
 
@@ -359,6 +386,7 @@ class MiCS_Optimizer(DeepSpeedZeroOptimizer_Stage3):
                  offload_optimizer_config=None,
                  offload_param_config=None,
                  sub_group_size=1000000000000,
+                 offload_ratio=0.0,
                  mpu=None,
                  clip_grad=0,
                  gradient_accumulation_dtype=torch.float16,
@@ -374,7 +402,7 @@ class MiCS_Optimizer(DeepSpeedZeroOptimizer_Stage3):
                          dynamic_loss_args, verbose, contiguous_gradients, reduce_bucket_size, prefetch_bucket_size,
                          max_reuse_distance, max_live_parameters, param_persistence_threshold,
                          model_persistence_threshold, dp_process_group, reduce_scatter, overlap_comm,
-                         offload_optimizer_config, offload_param_config, sub_group_size, mpu, clip_grad,
+                         offload_optimizer_config, offload_param_config, sub_group_size, offload_ratio, mpu, clip_grad,
                          gradient_accumulation_dtype, communication_data_type, postscale_gradients,
                          gradient_predivide_factor, gradient_accumulation_steps, elastic_checkpoint, aio_config)
         first_param = next(module.parameters())

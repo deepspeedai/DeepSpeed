@@ -22,6 +22,7 @@ import psutil
 from collections import defaultdict
 from typing import Dict
 from argparse import ArgumentParser, REMAINDER
+from deepspeed.accelerator import get_accelerator
 from ..constants import TORCH_DISTRIBUTED_DEFAULT_PORT
 from ..nebula.constants import DLTS_POD_ENV_PATH
 from ..utils import logger, get_numactl_cmd
@@ -146,8 +147,8 @@ def main():
     node_list = list(world_info.keys())
     args.nnodes = len(node_list)
     local_node = node_list[args.node_rank]
-    local_gpu_ids = world_info[local_node]
-    num_local_procs = len(local_gpu_ids)
+    local_accelerator_ids = world_info[local_node]
+    num_local_procs = len(local_accelerator_ids)
     logger.info(f"nnodes={args.nnodes}, num_local_procs={num_local_procs}, node_rank={args.node_rank}")
 
     global_rank_mapping = defaultdict(list)
@@ -161,8 +162,10 @@ def main():
             curr_global_rank += 1
     logger.info(f"global_rank_mapping={global_rank_mapping}")
     logger.info(f"dist_world_size={dist_world_size}")
-    current_env["CUDA_VISIBLE_DEVICES"] = ",".join(map(str, local_gpu_ids))
-    logger.info(f"Setting CUDA_VISIBLE_DEVICES={current_env['CUDA_VISIBLE_DEVICES']}")
+
+    get_accelerator().set_visible_devices_envs(current_env, local_accelerator_ids)
+    for env in get_accelerator().visible_devices_envs():
+        logger.info(f"Setting {env}={current_env[env]}")
 
     # set PyTorch distributed related environmental variables
     current_env["MASTER_ADDR"] = args.master_addr
@@ -249,7 +252,8 @@ def main():
                 process = subprocess.Popen(cmd, env=current_env, stdout=log_fd, stderr=log_fd)
             else:
                 process = subprocess.Popen(cmd, env=current_env)
-
+            # logs the command from processes
+            logger.info(f"process {process.pid} spawned with command: {cmd}")
             processes.append(process)
     else:
         from ..elasticity import DSElasticAgent

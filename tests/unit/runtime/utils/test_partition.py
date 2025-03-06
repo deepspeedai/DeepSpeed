@@ -22,7 +22,6 @@ class TestPartitionedTensor(DistributedTest):
 
     def test(self):
         world = dist.get_world_size()
-        rank = dist.get_rank()
 
         group = dist.new_group(ranks=list(range(world)))
 
@@ -40,12 +39,32 @@ class TestPartitionedTensor(DistributedTest):
         assert torch.equal(full, reconstructed)
 
 
+class TestPartitionedTensorUnEven(DistributedTest):
+    world_size = 4
+
+    def test(self):
+        world = dist.get_world_size()
+
+        group = dist.new_group(ranks=list(range(world)))
+
+        rows = world * 4 - 1
+        cols = world + 1
+
+        full = torch.rand(rows, cols).to(get_accelerator().device_name())
+        dist.broadcast(full, src=0, group=group)
+        part = PartitionedTensor(full, group=group)
+
+        assert len(part.local_size()) == 1
+
+        reconstructed = part.full()
+        assert torch.equal(full, reconstructed)
+
+
 class TestPartitionedTensorMeta(DistributedTest):
     world_size = 4
 
     def test(self):
         world = dist.get_world_size()
-        rank = dist.get_rank()
 
         group = dist.new_group(ranks=list(range(world)))
 

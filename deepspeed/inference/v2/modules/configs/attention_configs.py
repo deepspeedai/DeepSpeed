@@ -4,10 +4,11 @@
 # DeepSpeed Team
 
 from enum import Enum
-from typing import Dict
+from typing import Dict, Optional
 
 from ...inference_utils import DtypeEnum
 from ...modules.ds_module import DSModuleConfig
+from deepspeed.runtime.config_utils import DeepSpeedConfigModel
 
 
 class PositionalEmbeddingType(Enum):
@@ -23,6 +24,28 @@ class PositionalEmbeddingType(Enum):
 
     # Alibi
     alibi = "alibi"
+
+
+class RotateHalfConfig(DeepSpeedConfigModel):
+
+    use_trained_freqs: bool = False
+    """
+    Whether to use a passed `trained_freqs` tensor for the attention implementation
+    or to use default synthesized frequencies.
+    """
+
+    theta_base: float = 10_000.0
+    """
+    Base for theta. This will only be used if `use_trained_freqs` is False.
+    """
+
+    rotate_dim: Optional[int] = None
+    """
+    How many neurons to rotate. If None, then all neurons will be rotated. Many external configs
+    will set this number to half the head dimension and then internally multiply by 2. To make it
+    more clear to understand what is happening (rotate_dim < head_dim -> then only partial rotation),
+    we do not do this multiplication internally.
+    """
 
 
 class MaskingType(Enum):
@@ -79,4 +102,9 @@ class DSSelfAttentionConfig(DSModuleConfig):
     positional_embedding_type: PositionalEmbeddingType = PositionalEmbeddingType.none
 
     # Positional embedding args
-    positional_embedding_args: Dict = {}
+    positional_embedding_config: Optional[RotateHalfConfig] = None
+    """
+    To extend this for the other positional embedding types, we would need to add
+    new configs for each type (as necessary) and annotate this with the
+    Union[RotateHalfConfig, OtherConfig, ...] type.
+    """

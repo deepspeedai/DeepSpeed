@@ -193,7 +193,7 @@ class ContiguousMemoryAllocator(object):
             tensor = self.tensor_map[self.tensor_ids[tensor_addr]]
 
             assert tensor_size == tensor.numel(), \
-                "Size mismatch. {tensor_size} is allocated at addr {tensor_addr} but tensor size is {tensor.numel()} "
+                f"Size mismatch. {tensor_size} is allocated at addr {tensor_addr} but tensor size is {tensor.numel()} "
 
             assert empty_addr != tensor_addr, \
                 f"Cannot have same empty address {empty_addr} and tensor address {tensor_addr}"

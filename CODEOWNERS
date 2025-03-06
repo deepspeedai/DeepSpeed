@@ -7,50 +7,53 @@
 
 
 # top-level repo folders
-/.github/ @jeffra @mrwyattii @loadams
-/azure/ @jeffra @awan-10
-/benchmarks/ @jeffra @awan-10 @mrwyattii @molly-smith
-/bin/ @jeffra
-/csrc/ @RezaYazdaniAminabadi @awan-10 @jeffra @cmikeh2 @arashb
-/deepspeed/ @jeffra
-/docker/ @jeffra @awan-10
-/docs/ @jeffra @mrwyattii
-/examples/ @jeffra @awan-10 @mrwyattii
-/op_builder/ @jeffra @RezaYazdaniAminabadi @cmikeh2
-/release/ @jeffra @mrwyattii
-/requirements/ @jeffra @mrwyattii
-/scripts/ @jeffra @awan-10
-/tests/ @jeffra @mrwyattii @tjruwase
+/.github/ @loadams
+/azure/ @loadams
+/benchmarks/ @guanhuawang @tjruwase
+/bin/ @loadams
+/csrc/ @tjruwase
+/deepspeed/ @loadams @tjruwase
+/docker/ @loadams @guanhuawang
+/docs/ @loadams @tjruwase
+/examples/ @jomayeri @tohtana
+/op_builder/ @loadams @tjruwase @jomayeri
+/release/ @loadams @jomayeri
+/requirements/ @loadams
+/scripts/ @loadams @tjruwase
+/tests/ @tjruwase @loadams @tohtana
 
 # deepspeed
-/deepspeed/autotuning/ @cli99
+/deepspeed/autotuning/ @loadams
 /deepspeed/checkpoint/ @tjruwase
-/deepspeed/comm/ @awan-10
-/deepspeed/compression/ @yaozhewei @minjiaz @xiaoxiawu-microsoft @conglongli
-/deepspeed/elasticity/ @jeffra @awan-10
-/deepspeed/launcher/ @jeffra @awan-10
-/deepspeed/module_inject/ @RezaYazdaniAminabadi @jeffra @mrwyattii @awan-10 @cmikeh2 @arashb
-/deepspeed/moe/ @awan-10
-/deepspeed/monitor/ @awan-10 @jeffra
-/deepspeed/nebula/ @tjruwase @jeffra
-/deepspeed/ops/ @RezaYazdaniAminabadi @jeffra @mrwyattii @awan-10 @cmikeh2 @arashb
-/deepspeed/pipe/ @ShadenSmith @duli2012
-/deepspeed/profiling/ @cli99
-/deepspeed/utils/ @jeffra @tjruwase @awan-10
+/deepspeed/comm/ @guanhuawang
+/deepspeed/compression/ @tjruwase
+/deepspeed/elasticity/ @tjruwase
+/deepspeed/launcher/ @loadams
+/deepspeed/module_inject/ @hwchen2017 @loadams
+/deepspeed/moe/ @tohtana
+/deepspeed/monitor/ @tjruwase
+/deepspeed/nebula/ @tjruwase
+/deepspeed/nvme/ @tjruwase @jomayeri
+/deepspeed/ops/ @tohtana
+/deepspeed/pipe/ @tohtana @loadams
+/deepspeed/profiling/ @loadams
+/deepspeed/sequence/ @tohtana
+/deepspeed/utils/ @tjruwase @tohtana
 
 # inference
-/deepspeed/inference/ @RezaYazdaniAminabadi @jeffra @mrwyattii @awan-10 @cmikeh2 @arashb
-/deepspeed/model_implementations/ @RezaYazdaniAminabadi @jeffra @mrwyattii @awan-10 @cmikeh2 @arashb
+/deepspeed/inference/ @hwchen2017 @tohtana
+/deepspeed/model_implementations/@tohtana @loadams
 
 # training
-/deepspeed/runtime/ @jeffra @tjruwase
-/deepspeed/runtime/activation_checkpointing/ @jeffra @tjruwase
-/deepspeed/runtime/checkpoint_engine/ @tjruwase @jeffra
-/deepspeed/runtime/comm/ @awan-10
-/deepspeed/runtime/compression/ @awan-10 @conglongli
-/deepspeed/runtime/data_pipeline/ @conglongli
-/deepspeed/runtime/fp16/ @jeffra @tjruwase
-/deepspeed/runtime/fp16/onebit/ @conglongli @awan-10
-/deepspeed/runtime/pipe/ @ShadenSmith @duli2012
-/deepspeed/runtime/swap_tensor/ @tjruwase @mrwyattii
-/deepspeed/runtime/zero/ @jeffra @tjruwase @samyam @mrwyattii
+/deepspeed/runtime/ @tjruwase @tohtana
+/deepspeed/runtime/activation_checkpointing/ @tjruwase
+/deepspeed/runtime/checkpoint_engine/ @tjruwase
+/deepspeed/runtime/comm/ @guanhuawang
+/deepspeed/runtime/compression/ @tjruwase
+/deepspeed/runtime/data_pipeline/ @tjruwase
+/deepspeed/runtime/domino/ @guanhuawang @hwchen2017
+/deepspeed/runtime/fp16/ @tjruwase @tohtana
+/deepspeed/runtime/fp16/onebit/ @tjruwase
+/deepspeed/runtime/pipe/ @loadams @tohtana
+/deepspeed/runtime/swap_tensor/ @tjruwase @jomayeri
+/deepspeed/runtime/zero/ @tjruwase @tohtana

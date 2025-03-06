@@ -9,29 +9,28 @@ Helper functions and classes from multiple sources.
 """
 
 from collections.abc import Iterable
-from deepspeed.moe.utils import is_moe_param
 import os
 import psutil
 import gc
 from math import sqrt
-from bisect import bisect_left
-from packaging import version as pkg_version
+
+from numpy import prod
 
 import torch
-from deepspeed import comm as dist
-
+from torch.nn import functional as F
 try:
     from torch._six import inf
 except ModuleNotFoundError:
     from torch import inf
-
+from typing import Union, List, Dict
+from deepspeed import comm as dist
+from deepspeed.moe.utils import is_moe_param
 from deepspeed.utils import groups, logger
+from deepspeed.utils.bwc import (bwc_tensor_model_parallel_rank, bwc_pipeline_parallel_world_size,
+                                 bwc_pipeline_parallel_group)
 from deepspeed.runtime.constants import PIPE_REPLICATED
-from numpy import prod
 from deepspeed.accelerator import get_accelerator
-
 from deepspeed.module_inject.policy import transpose
-from torch.nn import functional as F
 
 torch_memory_reserved = get_accelerator().memory_reserved
 torch_max_memory_reserved = get_accelerator().max_memory_reserved
@@ -46,6 +45,27 @@ class DummyOptim():
     def __init__(self, params):
         self.param_groups = []
         self.param_groups.append({'params': params})
+
+
+graph_cache = {}
+
+
+def graph_process(replay_first_step, func, *args, **kwargs):
+    # `func` should only contain operations on the GPU
+    # Please ensure that the memory address of the data required by 'func' remains constant
+    if func.__name__ not in graph_cache:
+        cuda_stream = get_accelerator().Stream()
+        cuda_stream.wait_stream(get_accelerator().current_stream())
+        with get_accelerator().stream(cuda_stream):
+            func(*args, **kwargs)
+        get_accelerator().current_stream().wait_stream(cuda_stream)
+        graph_cache[func.__name__] = get_accelerator().create_graph()
+        with get_accelerator().capture_to_graph(graph_cache[func.__name__]):
+            func(*args, **kwargs)
+        if replay_first_step:
+            get_accelerator().replay_graph(graph_cache[func.__name__])
+    else:
+        get_accelerator().replay_graph(graph_cache[func.__name__])
 
 
 def noop_decorator(func):
@@ -97,44 +117,6 @@ def is_model_parallel_parameter(p) -> bool:
     return False
 
 
-def bwc_tensor_model_parallel_rank(mpu=None):
-    """Backwards-compatible way of querying the tensor model parallel rank from
-    an ``mpu`` object.
-
-    *Tensor* model parallelism means that tensors are physically split across
-    processes. This contrasts with *pipeline* model parallelism, in which the
-    layers are partitioned but tensors left intact.
-
-    The API for tensor model parallelism has changed across versions and this
-    helper provides a best-effort implementation across versions of ``mpu``
-    objects.  The preferred mechanism is
-    ``mpu.get_tensor_model_parallel_rank()``.
-
-    This should "just work" with both Megatron-LM and DeepSpeed's pipeline
-    parallelism.
-
-    Args:
-        mpu (model parallel unit, optional): The tensor model parallel rank.
-            If ``mpu=None``, returns 0. Defaults to ``None``.
-
-    Returns:
-        int: the rank
-    """
-    if mpu is None:
-        # No model parallelism in easy :)
-        return 0
-
-    if hasattr(mpu, 'get_tensor_model_parallel_rank'):
-        # New Megatron and DeepSpeed convention (post pipeline-parallelism release)
-        return mpu.get_tensor_model_parallel_rank()
-    elif hasattr(mpu, 'get_slice_parallel_rank'):
-        # Some DeepSpeed + pipeline parallelism versions
-        return mpu.get_slice_parallel_rank()
-    else:
-        # Deprecated Megatron and DeepSpeed convention
-        return mpu.get_model_parallel_rank()
-
-
 def copy_to_device(item, device, criterion_func):
     """
     Return a copy of tensor on specified device.
@@ -183,6 +165,17 @@ def move_to_device(item, device, criterion_func):
         return {k: move_to_device(v, device, criterion_func) for k, v in item.items()}
     else:
         return item
+
+
+def get_norm_with_moe_layers_fast(all_groups_norm, group):
+    # This implementation standardizes the grad_norm across ranks. A more precise implementation can be found in 'get_norm_with_moe_layers'.
+    # Need to allreduce (avg) the norms across different ranks because moe params will not be synced during allreduce
+    scaled_norm = all_groups_norm * 1.0 / float(dist.get_world_size(group=group))
+    scaled_norm_tensor = torch.tensor(scaled_norm, device=get_accelerator().current_device_name(), dtype=torch.float)
+    dist.all_reduce(scaled_norm_tensor, group=group)
+    all_groups_norm = scaled_norm_tensor.item()
+    #print(f"old = {all_groups_norm_old} and new = {all_groups_norm} at rank: {deepspeed.comm.get_rank()}")
+    return all_groups_norm
 
 
 class CheckOverflow(object):
@@ -264,8 +257,8 @@ class CheckOverflow(object):
         elif self.mpu is not None:
             if self.deepspeed is not None:
                 using_pipeline = hasattr(self.deepspeed, 'pipeline_enable_backward_allreduce')
-                if (using_pipeline and self.deepspeed.pipeline_enable_backward_allreduce is False) or (
-                        not using_pipeline and self.deepspeed.enable_backward_allreduce is False):
+                if (using_pipeline and self.deepspeed.pipeline_enable_backward_allreduce
+                        is False) or (not using_pipeline and self.deepspeed.enable_backward_allreduce is False):
                     dist.all_reduce(overflow_gpu, op=dist.ReduceOp.MAX, group=self.mpu.get_data_parallel_group())
             dist.all_reduce(overflow_gpu, op=dist.ReduceOp.MAX, group=self.mpu.get_model_parallel_group())
         elif self.deepspeed is not None and self.deepspeed.enable_backward_allreduce is False:
@@ -343,48 +336,55 @@ def clip_grad_norm_(parameters, max_norm, norm_type=2, mpu=None):
     if isinstance(parameters, torch.Tensor):
         parameters = [parameters]
     parameters = list(filter(lambda p: p.grad is not None, parameters))
-    max_norm = float(max_norm)
     norm_type = float(norm_type)
+    all_norms = []
     if norm_type == inf:
-        total_norm = max(p.grad.data.abs().max() for p in parameters)
-        total_norm_cuda = get_accelerator().FloatTensor([float(total_norm)])
+        for p in parameters:
+            all_norms.append(p.grad.data.abs().max().float())
+        total_norm = torch.stack(all_norms).max()
+        total_norm = total_norm.to(get_accelerator().current_device_name())
         # Take max across all GPUs.
         if mpu is not None:
-            dist.all_reduce(total_norm_cuda, op=dist.ReduceOp.MAX, group=mpu.get_model_parallel_group())
-        total_norm = total_norm_cuda[0].item()
+            dist.all_reduce(total_norm, op=dist.ReduceOp.MAX, group=mpu.get_model_parallel_group())
     else:
         total_norm = 0
         for p in parameters:
             if mpu is not None:
                 if (mpu.get_model_parallel_rank() == 0) or is_model_parallel_parameter(p):
-                    param_norm = p.grad.data.norm(norm_type)
-                    total_norm += param_norm.item()**norm_type
+                    param_norm = p.grad.data.detach().float().norm(norm_type)
+                    all_norms.append(param_norm)
             else:
-                param_norm = p.grad.data.float().norm(norm_type)
-                total_norm += param_norm.item()**norm_type
-
+                param_norm = p.grad.data.detach().float().norm(norm_type)
+                all_norms.append(param_norm)
+        if len(all_norms) > 0:
+            total_norm = torch.stack(all_norms).square().sum().float()
+        else:
+            total_norm = get_accelerator().FloatTensor([0.0])
+        total_norm = total_norm.to(get_accelerator().current_device_name())
         # Sum across all model parallel GPUs.
-        total_norm_cuda = get_accelerator().FloatTensor([float(total_norm)])
         if mpu is not None:
-            dist.all_reduce(total_norm_cuda, op=dist.ReduceOp.SUM, group=mpu.get_model_parallel_group())
-        total_norm = total_norm_cuda[0].item()**(1. / norm_type)
+            dist.all_reduce(total_norm, op=dist.ReduceOp.SUM, group=mpu.get_model_parallel_group())
+        total_norm = total_norm.pow(1. / norm_type)
 
     # Need to average total_norm across different GPUs due to the presence of moe params
     pg = groups._get_data_parallel_group()
     scaled_norm = total_norm * 1.0 / float(dist.get_world_size(group=pg))
+    scaled_norm_tensor = scaled_norm
 
-    scaled_norm_tensor = get_accelerator().FloatTensor([float(scaled_norm)])
     dist.all_reduce(scaled_norm_tensor, group=pg)
-    total_norm = scaled_norm_tensor.item()
+    total_norm = scaled_norm_tensor
+    total_norm = total_norm.to(parameters[0].device)
 
+    max_norm = torch.tensor([float(max_norm)], device=total_norm.device)
     clip_coef = max_norm / (total_norm + 1e-6)
-    if clip_coef < 1:
-        for p in parameters:
-            p.grad.data.mul_(clip_coef)
+    tmp_tensor = torch.tensor([1.0], device=clip_coef.device)
+    clip_coef = torch.min(tmp_tensor, clip_coef)
+    for p in parameters:
+        p.grad.data.mul_(clip_coef)
     return total_norm
 
 
-def get_grad_norm(parameters, norm_type=2, mpu=None):
+def get_flattened_grad_norm(parameters, norm_type=2, mpu=None, grad_norm_mask=None):
     """Get grad norm of an iterable of parameters.
 
     This is adapted from torch.nn.utils.clip_grad.clip_grad_norm_ and
@@ -396,7 +396,8 @@ def get_grad_norm(parameters, norm_type=2, mpu=None):
             single Tensor that will have gradients normalized
         norm_type (float or int): type of the used p-norm. Can be ``'inf'`` for
             infinity norm.
-
+        grad_norm_mask (List[Tensor]): A list of Tensor, where
+            each Tensor is a 2D Tensor containing ranges of [start_index, end_index].
     Returns:
         Total norm of the parameters (viewed as a single vector).
     """
@@ -414,18 +415,27 @@ def get_grad_norm(parameters, norm_type=2, mpu=None):
         total_norm = total_norm_cuda[0].item()
     else:
         total_norm = 0.
-        tensor_mp_rank = bwc_tensor_model_parallel_rank(mpu=mpu)
-        for p in parameters:
-            # Pipeline parallelism may replicate parameters. Avoid multi-counting.
-            if hasattr(p, PIPE_REPLICATED) and p.ds_pipe_replicated:
-                continue
+        for idx, p in enumerate(parameters):
+            # Use grad_norm_mask to avoid redundant computation of flattened gradient norm
+            if grad_norm_mask is not None and len(grad_norm_mask[idx]) > 0:
 
-            # Filter to avoid over-counting replicated tensors from tensor
-            # model parallelism
-            if (tensor_mp_rank > 0) and not is_model_parallel_parameter(p):
-                continue
+                # A loop-free implementation to create a mask tensor based on a range list
+                # which is logically equivalent to the following implementation.
+                # # mask_tensor_ = torch.zeros_like(p, device=p.device, dtype=bool)
+                # # for mask_idx in grad_norm_mask[idx]:
+                # #   mask_tensor_[mask_idx[0]:mask_idx[1]] = True
+                cum_sum_pairs = torch.tensor([1, -1], device=get_accelerator().current_device_name(),
+                                             dtype=p.dtype).repeat(grad_norm_mask[idx].shape[0], 1)
+                mask_tensor = torch.zeros(p.shape[0] + 1,
+                                          device=get_accelerator().current_device_name(),
+                                          dtype=p.dtype)
+                mask_tensor = mask_tensor.scatter_(0, grad_norm_mask[idx].view(-1),
+                                                   cum_sum_pairs.view(-1)).cumsum(0).bool()[:-1]
 
-            param_norm = p.grad.data.float().norm(norm_type)
+                param_norm = torch.masked_fill(p.grad.data, mask_tensor, 0).float().norm(norm_type)
+
+            else:
+                param_norm = p.grad.data.float().norm(norm_type)
             total_norm += param_norm.item()**norm_type
 
         # Sum across all model parallel GPUs.
@@ -570,67 +580,43 @@ def partition_uniform(num_items, num_parts):
     return parts
 
 
-def _lprobe(weights, num_parts, bottleneck):
-    num_items = len(weights)
-    total_weight = weights[-1]
+def partition_balanced(weights, num_parts):
+    """
+    use dynamic programming solve `The Linear Partition Problem`.
+    see https://www8.cs.umu.se/kurser/TDBAfl/VT06/algorithms/BOOK/BOOK2/NODE45.HTM
+    """
+    import numpy as np
+    n = len(weights)
+    m = num_parts
 
-    # initialize partitioning
-    parts = [0] * (num_parts + 1)
-    for p in range(1, num_parts + 1):
-        parts[p] = num_items
+    if n <= m:
+        return partition_uniform(n, m)
 
-    bsum = bottleneck  # running sum of target weight for pth partition
-    chunksize = num_items // num_parts
-    step = chunksize
-    for p in range(1, num_parts):
-        # Jump to the next bucket
-        while (step < num_items) and (weights[step] < bsum):
-            step += chunksize
+    dp_max = np.full((n + 1, m + 1), np.inf)
+    dp_min = np.full((n + 1, m + 1), np.inf)
+    dp_cost = np.full((n + 1, m + 1), np.inf)
+    position = np.zeros((n + 1, m + 1), dtype=int)
+    prefix_sum = np.zeros((n + 1))
+    prefix_sum[1:] = np.cumsum(weights)
 
-        # Find the end index of partition p
-        parts[p] = bisect_left(weights, bsum, lo=step - chunksize, hi=min(step, num_items))
-        # Nothing more to partition, return early
-        if parts[p] == num_items:
-            # See if the current partition is overweight.
-            part_size = weights[-1] - weights[parts[p - 1]]
-            return parts, part_size < bottleneck
+    dp_max[0, 0] = 0
+    dp_cost[0, 0] = 0
+    for i in range(1, n + 1):
+        for j in range(1, min(i, m) + 1):
+            for k in range(i):
+                max_sum = max(dp_max[k, j - 1], prefix_sum[i] - prefix_sum[k])
+                min_sum = min(dp_min[k, j - 1], prefix_sum[i] - prefix_sum[k])
+                cost = max_sum - min_sum
+                if dp_cost[i, j] >= cost:
+                    dp_cost[i, j] = cost
+                    dp_max[i, j] = max_sum
+                    dp_min[i, j] = min_sum
+                    position[i, j] = k
 
-        # Next partition target
-        bsum = weights[parts[p] - 1] + bottleneck
-
-    return parts, bsum >= total_weight
-
-
-def _rb_partition_balanced(weights, num_parts, eps):
-    total_weight = weights[-1]
-    lower = total_weight / num_parts  # best case heaviest partition
-    upper = total_weight  # worst case heaviest partition
-
-    # Do a binary search for the best partitioning
-    while upper > lower + eps:
-        mid = lower + ((upper - lower) / 2)
-        parts, success = _lprobe(weights, num_parts, mid)
-        if success:
-            upper = mid
-        else:
-            lower = mid + eps
-    return upper
-
-
-def partition_balanced(weights, num_parts, eps=1e-3):
-    num_items = len(weights)
-    # First check for the trivial edge case
-    if num_items <= num_parts:
-        return partition_uniform(num_items, num_parts)
-
-    weights_ = prefix_sum_inc(weights)
-
-    # Find the smallest bottleneck (weight of heaviest partition)
-    bottleneck = _rb_partition_balanced(weights_, num_parts, eps=eps)
-
-    # Now compute that partitioning
-    parts, success = _lprobe(weights_, num_parts, bottleneck)
-    assert success
+    parts = [n]
+    for i in reversed(range(1, m + 1)):
+        parts.append(position[parts[-1], i])
+    parts.reverse()
 
     return parts
 
@@ -643,10 +629,10 @@ class PartitionedTensor:
         self.group = group
         self.num_parts = dist.get_world_size(group=self.group)
         self.rank = dist.get_rank(group=self.group)
-
         self.orig_size = list(tensor.size())
         self.orig_device = tensor.device
         self.local_data, self.partition = self._partition_tensor(tensor)
+        self.even_split = tensor.numel() % self.num_parts == 0
 
     @classmethod
     def from_meta(cls, meta, local_part, group, device=get_accelerator().device_name()):
@@ -689,23 +675,16 @@ class PartitionedTensor:
         # Allocate the full tensor as a flat buffer.
         full_numel = prod(self.full_size())
         flat_tensor = torch.zeros([full_numel], dtype=self.local_data.dtype, device=device)
-
-        # Prepare all-gather buffer
-        partition_tensors = []
-        for part_id in range(self.num_parts):
-            part_size = self.partition[part_id + 1] - self.partition[part_id]
-            buf = flat_tensor.narrow(0, start=self.partition[part_id], length=part_size)
-            if part_id == self.rank:
-                buf.copy_(self.local_data)
-            partition_tensors.append(buf)
-
-        # Collect the full tensor
-        dist.all_gather(partition_tensors, partition_tensors[self.rank], group=self.group)
-
-        for i in range(len(partition_tensors)):
-            partition_tensors[i].data = torch.zeros(1)
-            partition_tensors[i] = None
-
+        if self.even_split:
+            # Collect the full tensor
+            dist.all_gather_into_tensor(flat_tensor, self.local_data, group=self.group)
+        else:
+            for part_id in range(self.num_parts):
+                part_size = self.partition[part_id + 1] - self.partition[part_id]
+                buf = flat_tensor.narrow(0, start=self.partition[part_id], length=part_size)
+                if part_id == self.rank:
+                    buf.copy_(self.local_data)
+                dist.broadcast(buf, part_id, self.group)
         return flat_tensor.view(self.full_size()).clone().detach()
 
     def to_meta(self):
@@ -844,26 +823,7 @@ def get_only_unique_item(items):
     return unique_item
 
 
-def clip_gradients(parameters, max_norm=1.0, global_grad_norm=None, mpu=None, eps=1e-6):
-    """Clip the gradient of a list of parameters.
-    Args:
-        parameters: List of parameters whose .grad will be clipped.
-        global_grad_norm (float, optional): Precomputed gradient norm. Defaults to None.
-        mpu (optional): model parallelism unit. Defaults to None.
-        eps (float, optional): epsilon value added to grad norm. Defaults to 1e-6
-    Returns:
-        float: the global gradient norm
-    """
-    if global_grad_norm is None:
-        global_grad_norm = get_grad_norm(parameters, mpu=mpu)
-    clip_coef = max_norm / (global_grad_norm + eps)
-    if clip_coef < 1:
-        for p in parameters:
-            p.grad.detach().mul_(clip_coef)
-    return global_grad_norm
-
-
-def get_global_norm_of_tensors(input_tensors, norm_type=2, mpu=None):
+def get_global_norm_of_tensors(input_tensors, norm_type=2, mpu=None, use_graph=False, moe_ep_group=None):
     """Get norm of an iterable of tensors.
 
     This is adapted from torch.nn.utils.clip_grad.clip_grad_norm_ and
@@ -877,31 +837,73 @@ def get_global_norm_of_tensors(input_tensors, norm_type=2, mpu=None):
     Returns:
         Total norm of the tensors (viewed as a single vector).
     """
-
     assert isinstance(input_tensors, Iterable), f'expected Iterable type not {type(input_tensors)}'
     assert all([torch.is_tensor(t) for t in input_tensors]), f'expected list of only tensors'
 
     norm_type = float(norm_type)
+    all_norms = []
     if norm_type == inf:
-        total_norm = max(t.data.abs().max() for t in input_tensors)
-        total_norm_cuda = get_accelerator().FloatTensor([float(total_norm)])
+        for t in input_tensors:
+            all_norms.append(t.data.abs().max().float())
+        total_norm = torch.stack(all_norms).max()
+        device_total_norm = total_norm.to(get_accelerator().current_device_name())
+        # Max across model parallel
         if mpu is not None:
-            dist.all_reduce(total_norm_cuda, op=dist.ReduceOp.MAX, group=mpu.get_model_parallel_group())
-            total_norm = total_norm_cuda[0].item()
-    else:
-        total_norm = sum([t.data.float().norm(norm_type).item()**norm_type for t in input_tensors])
-        total_norm_cuda = get_accelerator().FloatTensor([float(total_norm)])
-        if mpu is not None:
-            dist.all_reduce(total_norm_cuda, op=dist.ReduceOp.SUM, group=mpu.get_model_parallel_group())
-        total_norm = total_norm_cuda[0].item()**(1. / norm_type)
+            # For MoE grads, max over model parallel only if MoE-TP is enabled
+            if moe_ep_group is None or groups._get_expert_model_parallel_world_size() > 1:
+                dist.all_reduce(device_total_norm, op=dist.ReduceOp.MAX, group=mpu.get_model_parallel_group())
+            # If MoE grads and MoE-TP disabled, max over pipeline parallel
+            elif bwc_pipeline_parallel_world_size(mpu) > 1:
+                dist.all_reduce(device_total_norm, op=dist.ReduceOp.MAX, group=bwc_pipeline_parallel_group(mpu))
 
-    if total_norm == float('inf') or total_norm == -float('inf') or total_norm != total_norm:
-        total_norm = -1
+        # MoE grads: max across expert parallel group
+        if moe_ep_group is not None:
+            dist.all_reduce(device_total_norm, op=dist.ReduceOp.MAX, group=moe_ep_group)
+        total_norm = device_total_norm.to(input_tensors[0].device)
+    else:
+
+        if 'norm_tensors_compute_buffer' not in graph_cache or len(
+                graph_cache['norm_tensors_compute_buffer']) != len(input_tensors):
+            graph_cache['norm_tensors_compute_buffer'] = [
+                torch.empty([], dtype=torch.float, device=get_accelerator().current_device_name())
+                for t in input_tensors
+            ]
+        compute_buffer = graph_cache['norm_tensors_compute_buffer']
+
+        def _norm_tensors(tensor_list, _compute_buffer, _norm_type):
+            for i, t in enumerate(tensor_list):
+                _compute_buffer[i].data.copy_(t.data.float().norm(_norm_type)**_norm_type)
+                if i != 0:
+                    _compute_buffer[0].data.add_(_compute_buffer[i].data)
+
+        if use_graph:
+            graph_process(False, _norm_tensors, input_tensors, compute_buffer, norm_type)
+        else:
+            _norm_tensors(input_tensors, compute_buffer, norm_type)
+
+        device_total_norm = compute_buffer[0].float().detach()
+
+        # Sum across model parallel
+        if mpu is not None:
+            # For MoE grads, sum over model parallel only if MoE-TP is enabled
+            if moe_ep_group is None or groups._get_expert_model_parallel_world_size() > 1:
+                dist.all_reduce(device_total_norm, op=dist.ReduceOp.SUM, group=mpu.get_model_parallel_group())
+            # If MoE grads and MoE-TP disabled, sum over pipeline parallel
+            elif bwc_pipeline_parallel_world_size(mpu) > 1:
+                dist.all_reduce(device_total_norm, op=dist.ReduceOp.SUM, group=bwc_pipeline_parallel_group(mpu))
+
+        # MoE grads: sum across expert parallel group
+        if moe_ep_group is not None:
+            dist.all_reduce(device_total_norm, op=dist.ReduceOp.SUM, group=moe_ep_group)
+        total_norm = device_total_norm.to(input_tensors[0].device).pow(1. / norm_type)
+
+    inf_or_nan = total_norm.isinf().logical_or(total_norm.isnan())
+    total_norm.masked_fill_(inf_or_nan, -1)
 
     return total_norm
 
 
-def clip_tensors_by_global_norm(input_tensors, max_norm=1.0, global_norm=None, mpu=None, eps=1e-6):
+def clip_tensors_by_global_norm(input_tensors, max_norm=1.0, global_norm=None, mpu=None, eps=1e-6, use_graph=False):
     """Clip list of tensors by global norm.
     Args:
         input_tensors: List of tensors to be clipped
@@ -912,14 +914,26 @@ def clip_tensors_by_global_norm(input_tensors, max_norm=1.0, global_norm=None, m
         float: the global norm
     """
     if global_norm is None:
-        global_norm = get_global_norm_of_tensors(input_tensors, mpu=mpu)
-
+        global_norm = get_global_norm_of_tensors(input_tensors, mpu=mpu, use_graph=use_graph)
     clip_coef = max_norm / (global_norm + eps)
-
     if clip_coef < 1:
-        for t in input_tensors:
-            t.detach().mul_(clip_coef)
+        if use_graph:
 
+            def clip_tensors(_tensor_list, _clip_coef_tensor):
+                for t in _tensor_list:
+                    t.detach().mul_(_clip_coef_tensor)
+
+            if 'clip_coef_tensor' not in graph_cache:
+                # Alloc memory
+                graph_cache['clip_coef_tensor'] = torch.tensor(clip_coef,
+                                                               dtype=torch.float32).to(get_accelerator().device_name())
+            clip_coef_tensor = graph_cache['clip_coef_tensor']
+            clip_coef_tensor.copy_(torch.tensor(clip_coef, dtype=torch.float32))
+            graph_process(False, clip_tensors, input_tensors, clip_coef_tensor)
+
+        else:
+            for t in input_tensors:
+                t.detach().mul_(clip_coef)
     return global_norm
 
 
@@ -937,16 +951,22 @@ def align_dense_tensors(tensor_list, alignment):
     return padded_tensor_list
 
 
-def all_gather_all_partitions(global_flatten_group, partitioned_param_groups, dp_process_group):
-    for group_id, partitioned_params in enumerate(partitioned_param_groups):
-        # Sequential AllGather Best of both worlds
+def all_gather_into_tensor_dp_groups(groups_flat, partitioned_param_groups, dp_process_group):
+    for group_id, (group_flat, partitioned_params) in enumerate(zip(groups_flat, partitioned_param_groups)):
         partition_id = dist.get_rank(group=dp_process_group[group_id])
         dp_world_size = dist.get_world_size(group=dp_process_group[group_id])
-        dist.all_gather_into_tensor(global_flatten_group[group_id], partitioned_params[partition_id],
-                                    dp_process_group[group_id])
+        if dp_world_size == 1:
+            # no groups share optimizer states
+            # pipeline parallel with bf16 will default call this even if dp size = 1.
+            continue
+        dist.all_gather_into_tensor(group_flat, partitioned_params[partition_id], dp_process_group[group_id])
 
 
-def all_gather_dp_groups(partitioned_param_groups, dp_process_group, start_alignment_factor, allgather_bucket_size):
+def all_gather_dp_groups(groups_flat, partitioned_param_groups, dp_process_group, start_alignment_factor,
+                         allgather_bucket_size):
+    if dist.has_all_gather_into_tensor():
+        return all_gather_into_tensor_dp_groups(groups_flat, partitioned_param_groups, dp_process_group)
+
     for group_id, partitioned_params in enumerate(partitioned_param_groups):
         # Sequential AllGather Best of both worlds
         partition_id = dist.get_rank(group=dp_process_group[group_id])
@@ -1005,15 +1025,123 @@ def get_inactive_params(param_list):
                             param.ds_status == ZeroParamStatus.NOT_AVAILABLE)]
 
 
-def required_torch_version(min_version=None, max_version=None):
-    assert min_version or max_version, "Must provide a min_version or max_version argument"
+def get_norm_with_moe_layers(non_expert_norm, mpu, expert_tensors, norm_type=2):
+    """ Compute the global norm with MoE experts
 
-    torch_version = pkg_version.parse(torch.__version__)
+    Inputs:
+    non_expert_norm (float) : the calculated norm of the non-expert params
+    expert_tensors (Dict[ep_name, List[Tensor]): Dictionary of expert group name to list of grad tensors
+    norm_type (int): the norm to use
 
-    if min_version and pkg_version.parse(str(min_version)) > torch_version:
+    Returns:
+        if norm is (-/+) inf, returns -1
+        otherwise the global norm (float)
+    """
+
+    def to_tensor(v):
+        return get_accelerator().FloatTensor(float(v)).detach()
+
+    group_norms = [non_expert_norm]
+    for exp_name, tensors in expert_tensors.items():
+        group_norm = get_global_norm_of_tensors(input_tensors=tensors,
+                                                mpu=mpu,
+                                                norm_type=norm_type,
+                                                use_graph=False,
+                                                moe_ep_group=groups._get_expert_parallel_group(exp_name))
+        group_norms.append(group_norm)
+
+    # check if all norms are valid
+    group_norms = torch.stack([to_tensor(norm) for norm in group_norms])
+    if group_norms.eq(-1).any():
+        return -1
+
+    # combine norms
+    if norm_type == inf:
+        total_norm = group_norms.max().item()
+    else:
+        total_norm = group_norms.pow(norm_type).sum()
+        total_norm = total_norm.item()**(1. / norm_type)
+        if total_norm == float('inf') or total_norm == -float('inf'):
+            total_norm = -1
+
+    return total_norm
+
+
+def _make_offload_state_key(key):
+    return f"{key}_offload_buffer"
+
+
+def offload_adam_states(optimizer, device, pin_memory: bool = False, non_blocking: bool = False):
+    """Move optimizer states to device. Note that this assumes the state structure of DeepSpeed Adam."""
+
+    def move_key(state, key):
+        offload_buf_key = _make_offload_state_key(key)
+        if offload_buf_key not in state:
+            state[offload_buf_key] = torch.empty_like(state[key], device=device)
+            if pin_memory:
+                state[offload_buf_key] = get_accelerator().pin_memory(state[offload_buf_key])
+        state[offload_buf_key].copy_(state[key], non_blocking=non_blocking)
+        state[key].data = state[offload_buf_key]
+
+    for _, state in optimizer.state.items():
+        if "exp_avg" in state:
+            move_key(state, "exp_avg")
+        if "exp_avg_sq" in state:
+            move_key(state, "exp_avg_sq")
+
+
+def reload_adam_states(optimizer, device, non_blocking: bool = False):
+    """Move optimizer states to device. Note that this assumes the state structure of DeepSpeed Adam."""
+
+    def move_back_key(state, key):
+        state[key].data = state[_make_offload_state_key(key)].to(device, non_blocking=non_blocking)
+
+    for _, state in optimizer.state.items():
+        if "exp_avg" in state:
+            move_back_key(state, "exp_avg")
+        if "exp_avg_sq" in state:
+            move_back_key(state, "exp_avg_sq")
+
+
+def compare_tensors_in_structures(inputs1: Union[List, Dict], inputs2: Union[List, Dict]) -> bool:
+    """
+    Compare two lists or dictionaries for equality, including any tensors they may contain.
+
+    Args:
+        inputs1: First input, either a list or a dictionary.
+        inputs2: Second input, either a list or a dictionary.
+
+    Returns:
+        True if inputs1 and inputs2 are equal; False otherwise.
+    """
+    if type(inputs1) != type(inputs2):  # Ensure types match
         return False
 
-    if max_version and pkg_version.parse(str(max_version)) < torch_version:
-        return False
+    if isinstance(inputs1, list) and isinstance(inputs2, list):
+        if len(inputs1) != len(inputs2):
+            return False
+        for val1, val2 in zip(inputs1, inputs2):
+            if isinstance(val1, torch.Tensor) and isinstance(val2, torch.Tensor):
+                val1 = val1.to(get_accelerator().current_device())
+                val2 = val2.to(get_accelerator().current_device())
+                if not torch.equal(val1, val2):
+                    return False
+            elif val1 != val2:
+                return False
+        return True
 
-    return True
+    elif isinstance(inputs1, dict) and isinstance(inputs2, dict):
+        if inputs1.keys() != inputs2.keys():
+            return False
+        for key in inputs1:
+            val1, val2 = inputs1[key], inputs2[key]
+            if isinstance(val1, torch.Tensor) and isinstance(val2, torch.Tensor):
+                val1 = val1.to(get_accelerator().current_device())
+                val2 = val2.to(get_accelerator().current_device())
+                if not torch.equal(val1, val2):
+                    return False
+            elif val1 != val2:
+                return False
+        return True
+
+    return False

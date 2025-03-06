@@ -15,6 +15,7 @@ class SparseTensor(object):
 
     def __init__(self, dense_tensor=None):
         self.orig_dense_tensor = dense_tensor
+        self.dtype = self.orig_dense_tensor.dtype
         self.is_sparse = dense_tensor.is_sparse
         if dense_tensor is not None:
             if dense_tensor.is_sparse:

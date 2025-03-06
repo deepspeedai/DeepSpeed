@@ -1,0 +1,63 @@
+name: cpu-torch-latest
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths-ignore:
+      - 'docs/**'
+      - 'blogs/**'
+      - 'deepspeed/inference/v2/**'
+      - 'tests/unit/inference/v2/**'
+  merge_group:
+    branches: [ master ]
+  schedule:
+    - cron: "0 0 * * *"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  unit-tests:
+    runs-on: ubuntu-24.04
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - id: setup-venv
+        uses: ./.github/workflows/setup-venv
+
+      - name: Install system packages
+        run: |
+          sudo apt-get install -y numactl pdsh
+
+      - name: Install pytorch
+        run: |
+          pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
+          python -c "import torch; print('torch:', torch.__version__, torch)"
+          python -c "import torch; print('CUDA available:', torch.cuda.is_available())"
+
+      - name: Install transformers
+        run: |
+          git clone https://github.com/huggingface/transformers
+          cd transformers
+          # if needed switch to the last known good SHA until transformers@master is fixed
+          git checkout 981c276
+          git rev-parse --short HEAD
+          pip install .
+
+      - name: Install deepspeed
+        run: |
+          pip install .[dev,autotuning]
+          ds_report
+
+      - name: Python environment
+        run: |
+          pip list
+
+      - name: Unit tests
+        run: |
+          unset TORCH_CUDA_ARCH_LIST # only jit compile for current arch
+          cd tests
+          HF_HOME=/tmp/hf_home/ pytest $PYTEST_OPTS -n 4 unit/ --torch_ver="2.6"
+          HF_HOME=/tmp/hf_home/ pytest $PYTEST_OPTS -m 'sequential' unit/ --torch_ver="2.6"
