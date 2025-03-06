@@ -95,6 +95,35 @@ class RowParallel(torch.autograd.Function):
         return None, grad_output, None
 
 
+class AsyncColumnParallel(torch.autograd.Function):
+
+    @staticmethod
+    def forward(ctx: Any, group: dist.ProcessGroup, input: torch.Tensor, weight, bias) -> torch.Tensor:
+        """
+        Forward pass.
+        """
+        ctx.use_bias = bias is not None
+        ctx.group = group
+        output = torch.matmul(input, weight.transpose(-1, -2))
+        if bias is not None:
+            output+=bias
+        
+        ctx.save_for_backward(input, weight)
+
+        return output
+    @staticmethod
+    def backward(ctx: Any, grad_output: torch.Tensor) -> Tuple[None, torch.Tensor]:
+        
+ 
+        input, weight = ctx.saved_tensors                                  
+        grad_input = grad_output.matmul(weight)
+        handle=dist.all_reduce(grad_input.contiguous(), group=ctx.group, async_op=True)
+        grad_weight = grad_output.view(-1,grad_output.shape[-1]).t().matmul(input.view(-1, input.shape[-1]))
+        grad_bias = grad_output.sum(0) if ctx.use_bias else None
+        handle.wait()
+        return None, grad_input, grad_weight, grad_bias
+        
+    
 class ColumnParallel(torch.autograd.Function):
     """
     Custom autograd function for column-wise parallelism.
@@ -382,11 +411,15 @@ class LinearLayer(TensorParallel_Layer):
             self.config_tp_params(self.bias)
 
     def forward(self, input):
-        if getattr(self, 'mp_group', None) is not None:
-            input = ColumnParallel.apply(self.mp_group, input)
-        output = torch.matmul(input, self.weight.transpose(-1, -2))
-        if self.bias is not None:
-            output += self.bias
+        if True:
+            if getattr(self, 'mp_group', None) is not None:
+                input = ColumnParallel.apply(self.mp_group, input)
+            output = torch.matmul(input, self.weight.transpose(-1, -2))
+            if self.bias is not None:
+                output += self.bias
+        else:
+            output = AsyncColumnParallel.apply(self.mp_group,input, self.weight, self.bias)
+            
         return output
 
     @torch.no_grad()
