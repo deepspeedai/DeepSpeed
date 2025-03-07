@@ -211,8 +211,7 @@ class AutoTP():
         self.orig_layer_impl = orig_layer_impl
         self.linear_policies = None
         self.conv_linear_layer = False
-        self.keep_module_on_host = keep_module_on_host
-        TensorParallel_Layer.set_keep_module_on_host(self.keep_module_on_host)
+        TensorParallel_Layer.set_keep_module_on_host(keep_module_on_host)
 
     def in_module_list(module, module_list):
         for item in module_list:
