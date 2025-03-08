@@ -862,8 +862,13 @@ def test_compare_both_data_analyzers(dataset):
         for path in output_paths:
             with open(os.path.join(da.save_path, path), 'rb') as f1, \
                 open(os.path.join(dda.save_path, path), 'rb') as f2:
-                if f1.read() != f2.read():
+                # if files have suffix .bin, they should be identical
+                if path.endswith(".bin"):
+                    assert f1.read() == f2.read(), f"files {path} are not identical."
+                elif f1.read() != f2.read():
                     print(f"files {path} are not identical.")
+    dist.barrier()
+    dist.destroy_process_group()
 
 
 if __name__ == "__main__":
