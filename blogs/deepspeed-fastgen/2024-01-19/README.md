@@ -176,7 +176,7 @@ We are very excited to share this DeepSpeed-FastGen release.
 DeepSpeed-FastGen is part of the bigger DeepSpeed ecosystem comprising a multitude of Deep Learning systems and modeling technologies. To learn more,
 
 * Please visit our [website](https://www.deepspeed.ai/) for detailed blog posts, tutorials, and helpful documentation.
-* You can also follow us on our [English Twitter](https://twitter.com/MSFTDeepSpeed), [Japanese Twitter](https://twitter.com/MSFTDeepSpeedJP), and [Chinese Zhihu](https://www.zhihu.com/people/deepspeed) for latest news on DeepSpeed.
+* You can also follow us on our [English Twitter](https://twitter.com/DeepSpeedAI), [Japanese Twitter](https://twitter.com/DeepSpeedAI_JP), and [Chinese Zhihu](https://www.zhihu.com/people/deepspeed) for latest news on DeepSpeed.
 
 The following items are on our roadmap and we plan to engage with our community on these through our GitHub issues and PRs:
 
