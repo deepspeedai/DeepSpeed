@@ -189,7 +189,6 @@ class OpenMPIRunner(MultiNodeRunner):
             'coll_hcoll_enable 0',
             '-mca',
             'plm_rsh_args "-p 2222"',
-            '^openib',
             '-x',
             'PATH',
             '-x',
