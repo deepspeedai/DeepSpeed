@@ -174,15 +174,37 @@ class OpenMPIRunner(MultiNodeRunner):
                     btl_tcp_opt = []
                     break
 
+        # TODO:  mpirun --allow-run-as-root -np 32 -x PATH -x LD_LIBRARY_PATH --bind-to none -mca btl tcp,self -mca coll_hcoll_enable 0 -x NCCL_IB_AR_THRESHOLD=0 -x NCCL_IB_PCI_RELAXED_ORDERING=1 -x NCCL_IB_SPLIT_DATA_ON_QPS=0 -x NCCL_IB_QPS_PER_CONNECTION=2 -x CUDA_DEVICE_ORDER=PCI_BUS_ID -mca plm_rsh_args "-p 2222" --hostfile /root/hostfile ./build/all_reduce_perf -b 8 -e 8G -f 2 -g 1
         mpirun_cmd = [
             'mpirun',
-            '-n',
+            '--allow-run-as-root',
+            '-np',
             f'{total_process_count}',
             '-hostfile',
             f'{self.args.hostfile}',
-            '--mca',
-            'btl',
+            '-mca',
+            'btl tcp,self',
+            '-mca',
+            'coll_hcoll_enable 0',
+            '-mca',
+            'plm_rsh_args "-p 2222"'
             '^openib',
+            '-x',
+            'PATH',
+            '-x',
+            'LD_LIBRARY_PATH',
+            '-x',
+            'NCCL_IB_AR_THRESHOLD=0',
+            '-x',
+            'NCCL_IB_PCI_RELAXED_ORDERING=1',
+            '-x',
+            'NCCL_IB_SPLIT_DATA_ON_QPS=0',
+            '-x',
+            'NCCL_IB_QPS_PER_CONNECTION=2',
+            '-x',
+            'CUDA_DEVICE_ORDER=PCI_BUS_ID',
+            '--bind-to',
+            'none',
         ] + btl_tcp_opt + launcher_args
 
         export_cmd = []
@@ -470,7 +492,7 @@ class SlurmRunner(MultiNodeRunner):
 
         if self.args.include != "":
             srun_cmd.append('--nodelist')
-            srun_cmd.append(self._pdsh_include_to_nodelist(self.args.include)) 
+            srun_cmd.append(self._pdsh_include_to_nodelist(self.args.include))
 
         if self.args.num_nodes > 0:
             srun_cmd.append('--nodes')
