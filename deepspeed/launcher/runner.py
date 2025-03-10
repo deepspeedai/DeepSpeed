@@ -219,7 +219,7 @@ def parse_args(args=None):
                         "numbers and range. i.e. 1,3-5,7 => [1,3,4,5,7].  When not "
                         "specified, all cores on system would be used rank binding")
 
-    parser.add_argument("--ssh_port", type=int, default=None, help="SSH port to use for remote connections")
+    parser.add_argument("--ssh_port", type=int, default=2222, help="SSH port to use for remote connections")
 
     return parser.parse_args(args=args)
 
