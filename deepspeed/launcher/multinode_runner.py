@@ -137,7 +137,8 @@ class OpenMPIRunner(MultiNodeRunner):
         super().validate_args()
 
         # Validate and set MPI environment variables
-        self._setup_mpi_environment()
+        # Quentin suggestion
+        # self._setup_mpi_environment()
 
         #TODO: Allow for include/exclude at node-level but not gpu-level
         if self.args.include != "" or self.args.exclude != "":
