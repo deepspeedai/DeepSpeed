@@ -337,7 +337,7 @@ DeepSpeedは、Microsoftの[AI at Scale initiative](https://www.microsoft.com/en
 DeepSpeedについてのより詳しい情報は、以下をご覧ください。
 
 * [DeepSpeedのWebサイト](https://www.deepspeed.ai/) には、DeepSpeedの技術に関する詳細なブログ記事、チュートリアル、ドキュメントなどが掲載されています。
-* [DeepSpeedのTwitterアカウント (英語)](https://twitter.com/MSFTDeepSpeed) では、DeepSpeedの最新情報を発信していますので、ぜひフォローください。[日本語版のTwitterアカウント](https://twitter.com/MSFTDeepSpeedJP)もあり、最新の情報を日本語で発信しています。
+* [DeepSpeedのTwitterアカウント (英語)](https://twitter.com/DeepSpeedAI) では、DeepSpeedの最新情報を発信していますので、ぜひフォローください。[日本語版のTwitterアカウント](https://twitter.com/DeepSpeedAI_JP)もあり、最新の情報を日本語で発信しています。
 
 DeepSpeedチームは、ユーザの方々からのフィードバックやご連絡を受け付けています。
 

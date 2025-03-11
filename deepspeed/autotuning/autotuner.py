@@ -71,7 +71,7 @@ class Autotuner:
                 logger.info(f"Created autotuning experiments directory: {self.exps_dir}")
             except:
                 logger.error(
-                    f"Failed to create {self.exps_dir}, please check `exps_dir` in the autotuning config file is accessible by all the nodes in the job."
+                    f"Failed to create {self.exps_dir}, please check exps_dir in the autotuning config file is accessible by all the nodes in the job."
                 )
                 exit(-1)
 
@@ -84,7 +84,7 @@ class Autotuner:
                 logger.info(f"Created autotuning results directory: {self.exps_dir}")
             except:
                 logger.error(
-                    f"Failed to create {self.results_dir}, please check `results_dir` in the autotuning config file is accessible by all the nodes in the job."
+                    f"Failed to create {self.results_dir}, please check results_dir in the autotuning config file is accessible by all the nodes in the job."
                 )
                 exit(-1)
 
