@@ -21,18 +21,22 @@ if args.pre_load_checkpoint:
     model = model_class.from_pretrained(args.model_name_or_path)
 else:
     model = model_class()
+
+# create the tokenizer
+tokenizer = model_class.from_pretrained(args.model_name_or_path)
 ...
 
 import deepspeed
 
 # Initialize the DeepSpeed-Inference engine
 ds_engine = deepspeed.init_inference(model,
-                                 tensor_parallel={"tp_size": 2},
-                                 dtype=torch.half,
-                                 checkpoint=None if args.pre_load_checkpoint else args.checkpoint_json,
-                                 replace_with_kernel_inject=True)
+                                     tensor_parallel={"tp_size": world_size},
+                                     dtype=torch.half,
+                                     checkpoint=None if args.pre_load_checkpoint else args.checkpoint_json,
+                                     replace_with_kernel_inject=True)
 model = ds_engine.module
-output = model('Input String')
+pipe = pipeline("text-generation", model=model, tokenizer=tokenizer)
+output = pipe('Input String')
 ```
 
 To run inference with only model-parallelism for the models that we don't support kernels, you can pass an injection policy that shows the two specific linear layers on a Transformer Encoder/Decoder layer: 1) the attention output GeMM and 2) layer output GeMM. We need these part of the layer to add the required all-reduce communication between GPUs to merge the partial results across model-parallel ranks. Below, we bring an example that shows how you can use deepspeed-inference with a T5 model:
