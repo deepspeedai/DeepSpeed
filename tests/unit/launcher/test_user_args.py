@@ -11,13 +11,16 @@ from types import SimpleNamespace
 from deepspeed.accelerator import get_accelerator
 from deepspeed.launcher.multinode_runner import MultiNodeRunner
 
+
 class DummyRunner(MultiNodeRunner):
+
     def backend_exists(self):
         return True
 
     def get_cmd(self, environment, active_resources):
         return []
-    
+
+
 if not get_accelerator().is_available():
     pytest.skip("only supported in accelerator environments.", allow_module_level=True)
 
@@ -46,6 +49,7 @@ def cmd(user_script_fp, prompt, multi_node):
     else:
         cmd = ("deepspeed", "--num_nodes", "1", "--num_gpus", "1", user_script_fp, "--prompt", prompt)
     return cmd
+
 
 @pytest.fixture
 def dummy_runner():
