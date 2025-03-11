@@ -55,5 +55,5 @@ jobs:
         run: |
           unset TORCH_CUDA_ARCH_LIST # only jit compile for current arch
           cd tests
-          pytest $PYTEST_OPTS --forked --debug -x -n 8 unit/ --torch_ver="2.6" --cuda_ver="12.4" --timeout=240
-          pytest $PYTEST_OPTS --forked --debug -x -m 'sequential' unit/ --torch_ver="2.6" --cuda_ver="12.4" --timeout=240
+          pytest $PYTEST_OPTS --forked --debug -v -x -n 8 unit/ --torch_ver="2.6" --cuda_ver="12.4" --timeout=240
+          pytest $PYTEST_OPTS --forked --debug -v -x -m 'sequential' unit/ --torch_ver="2.6" --cuda_ver="12.4" --timeout=240
