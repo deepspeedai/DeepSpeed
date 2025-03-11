@@ -17,6 +17,7 @@ from deepspeed.runtime.zero.partition_parameters import Init
 from deepspeed.ops.aio import AsyncIOBuilder
 from deepspeed.accelerator import get_accelerator
 
+
 @pytest.mark.sequential
 class TestNVMeCheckpointing(DistributedTest):
     world_size = 1
