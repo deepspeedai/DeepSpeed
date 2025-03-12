@@ -50,12 +50,16 @@ class MPU():
         return self.tp_group
 
 
+@pytest.mark.parametrize('dtype', [torch.bfloat16, torch.float16])
 class TestDataEfficiency(DistributedTest):
     world_size = 2
 
-    def test_curriculum_learning(self):
+    def test_curriculum_learning(self, dtype):
         if get_accelerator().device_name() == "cpu":
             pytest.skip("CPU accelerator does not support this test yet")
+        if not dtype in get_accelerator().supported_dtypes():
+            pytest.skip(f"This test does not support {dtype=}.")
+
         config_dict = {
             "train_batch_size": 2,
             "steps_per_print": 1,
@@ -96,9 +100,10 @@ class TestDataEfficiency(DistributedTest):
                 }
             }
         }
-        if get_accelerator().is_fp16_supported():
-            config_dict["fp16"] = {"enabled": True, "loss_scale": 0, "initial_scale_power": 16}
-        elif get_accelerator().is_bf16_supported():
+
+        if dtype == torch.float16:
+            config_dict["fp16"] = {"enabled": True, "loss_scale": 0, "initial_scale_power": 8}
+        else:
             config_dict["bf16"] = {"enabled": True}
 
         def data_post_process(data, data_sampler_state_dict):
@@ -107,7 +112,7 @@ class TestDataEfficiency(DistributedTest):
 
         hidden_dim = 10
         model = SimpleModel(hidden_dim)
-        dataset = random_dataset(20, hidden_dim, torch.device('cpu'))
+        dataset = random_dataset(20, hidden_dim, torch.device('cpu'), dtype=dtype)
         model, _, data_loader, _ = deepspeed.initialize(config=config_dict,
                                                         model=model,
                                                         training_data=dataset,
@@ -126,12 +131,16 @@ class TestDataEfficiency(DistributedTest):
                 break
 
 
+@pytest.mark.parametrize('dtype', [torch.bfloat16, torch.float16])
 class TestLegacyCurriculumScheduler(DistributedTest):
     world_size = 2
 
-    def test_fixed_discrete(self):
+    def test_fixed_discrete(self, dtype):
         if get_accelerator().device_name() == "cpu":
             pytest.skip("CPU accelerator does not support this test yet")
+        if not dtype in get_accelerator().supported_dtypes():
+            pytest.skip(f"This test does not support {dtype=}.")
+
         config_dict = {
             "train_batch_size": 2,
             "steps_per_print": 1,
@@ -155,16 +164,20 @@ class TestLegacyCurriculumScheduler(DistributedTest):
                 }
             }
         }
-        if get_accelerator().is_fp16_supported():
-            config_dict["fp16"] = {"enabled": True, "loss_scale": 0, "initial_scale_power": 16}
-        elif get_accelerator().is_bf16_supported():
+        if dtype == torch.float16:
+            config_dict["fp16"] = {"enabled": True, "loss_scale": 0, "initial_scale_power": 8}
+        else:
             config_dict["bf16"] = {"enabled": True}
         hidden_dim = 10
         ground_truths = {1: 1, 2: 1, 3: 2, 4: 2, 5: 3, 6: 3, 7: 4, 8: 4}
 
         model = Curriculum_SimpleModel(hidden_dim)
         model, _, _, _ = deepspeed.initialize(config=config_dict, model=model, model_parameters=model.parameters())
-        data_loader = random_dataloader(model=model, total_samples=20, hidden_dim=hidden_dim, device=model.device)
+        data_loader = random_dataloader(model=model,
+                                        total_samples=20,
+                                        hidden_dim=hidden_dim,
+                                        device=model.device,
+                                        dtype=dtype)
         for n, batch in enumerate(data_loader):
             loss, seqlen = model(batch[0], batch[1])
             model.backward(loss)
@@ -172,11 +185,14 @@ class TestLegacyCurriculumScheduler(DistributedTest):
             true_seqlen = 5
             if n + 1 in ground_truths:
                 true_seqlen = ground_truths[n + 1]
-            assert seqlen == true_seqlen, f"Incorrect curriculum schedule"
+            assert seqlen == true_seqlen, f"Incorrect curriculum schedule {n=}, {seqlen=}, {true_seqlen=}"
 
-    def test_fixed_linear(self):
+    def test_fixed_linear(self, dtype):
         if get_accelerator().device_name() == "cpu":
             pytest.skip("CPU accelerator does not support this test yet")
+        if not dtype in get_accelerator().supported_dtypes():
+            pytest.skip(f"This test does not support {dtype=}.")
+
         config_dict = {
             "train_batch_size": 2,
             "steps_per_print": 1,
@@ -200,16 +216,20 @@ class TestLegacyCurriculumScheduler(DistributedTest):
                 }
             }
         }
-        if get_accelerator().is_fp16_supported():
-            config_dict["fp16"] = {"enabled": True, "loss_scale": 0, "initial_scale_power": 16}
-        elif get_accelerator().is_bf16_supported():
+        if dtype == torch.float16:
+            config_dict["fp16"] = {"enabled": True, "loss_scale": 0, "initial_scale_power": 8}
+        else:
             config_dict["bf16"] = {"enabled": True}
         hidden_dim = 10
         ground_truths = {1: 2, 2: 4, 3: 4, 4: 6, 5: 6, 6: 8, 7: 8, 8: 10, 9: 10, 10: 10}
 
         model = Curriculum_SimpleModel(hidden_dim)
         model, _, _, _ = deepspeed.initialize(config=config_dict, model=model, model_parameters=model.parameters())
-        data_loader = random_dataloader(model=model, total_samples=20, hidden_dim=hidden_dim, device=model.device)
+        data_loader = random_dataloader(model=model,
+                                        total_samples=20,
+                                        hidden_dim=hidden_dim,
+                                        device=model.device,
+                                        dtype=dtype)
         for n, batch in enumerate(data_loader):
             loss, seqlen = model(batch[0], batch[1])
             model.backward(loss)
