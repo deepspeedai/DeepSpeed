@@ -382,7 +382,12 @@ class AutoTP():
             if self.conv_linear_layer:
                 return Conv_LinearALlreduce(child, self.mp_group, name=name)
             elif name == "lm_head" or name == 'embed_out':
-                return LmHeadLinearAllreduce(child, self.mp_group)
+                if is_autotp_training_mode():
+                    # pass
+                    # return child
+                    return LinearLayer(child, self.mp_group, name=name, gather_output=True)
+                else:
+                    return LmHeadLinearAllreduce(child, self.mp_group)
 
             return LinearAllreduce(child, self.mp_group, name=name)
         else:
