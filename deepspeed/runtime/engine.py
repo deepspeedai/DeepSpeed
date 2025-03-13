@@ -37,8 +37,7 @@ from deepspeed.runtime.fp16.unfused_optimizer import FP16_UnfusedOptimizer
 from deepspeed.runtime.bf16_optimizer import BF16_Optimizer
 
 from deepspeed.linear.optimized_linear import LoRAOptimizedLinear
-from deepspeed.module_inject.layers import GatherReplacedLayerParams
-
+from deepspeed.module_inject.layers import GatherReplacedLayerParams, configure_tensor_parallel_runtime
 from deepspeed.runtime.config import DEEPSPEED_OPTIMIZERS, \
     ADAGRAD_OPTIMIZER, ADAM_OPTIMIZER, ADAMW_OPTIMIZER, LAMB_OPTIMIZER, ONEBIT_ADAM_OPTIMIZER, ONEBIT_LAMB_OPTIMIZER, \
     TORCH_ADAM_PARAM, ADAM_W_MODE, ADAM_W_MODE_DEFAULT, ZERO_ONE_ADAM_OPTIMIZER, MUADAM_OPTIMIZER, MUADAMW_OPTIMIZER, \
@@ -248,7 +247,7 @@ class DeepSpeedEngine(Module):
         self._configure_with_arguments(args, mpu)
         self._do_sanity_check()
         if self.autotp_size() > 1:
-            self._configure_tensor_parallel_states(model)
+            self._configure_tensor_parallel(model, self.tensor_parallel_config())
         see_memory_usage(f"DeepSpeed Engine: After args sanity test", force=self.memory_breakdown())
         if mpu is not None:
             if self.elasticity_enabled():
@@ -416,6 +415,10 @@ class DeepSpeedEngine(Module):
                 else:
                     p.ds_offload = False
 
+    def _configure_tensor_parallel(self, model, tp_config):
+        self._configure_tensor_parallel_states(model)
+        configure_tensor_parallel_runtime(tp_config)
+
     def _configure_tensor_parallel_states(self, model):
         """
         Configures the tensor parallel states for the model.
@@ -423,7 +426,6 @@ class DeepSpeedEngine(Module):
         and registering a pre-hook to ensure that the Dataloader inputs are consistent across ranks.
         """
         self._set_client_model(model)
-
         # sanity check
         # currently, the compatibility between 'autotp' and 'zero > 1' has not been validated
         assert self.zero_optimization_stage(
@@ -901,6 +903,9 @@ class DeepSpeedEngine(Module):
 
     def zero_ignore_unused_parameters(self):
         return self._config.zero_config.ignore_unused_parameters
+
+    def tensor_parallel_config(self):
+        return self._config.tensor_parallel_config
 
     def autotp_size(self):
         return self._config.tensor_parallel_config.autotp_size
