@@ -56,6 +56,8 @@ require commits to be signed off with a [Developer Certificate of Origin](https:
 When you submit a pull request, the DCO app will check for the presence of signed commits.
 Information about how this check works is here: https://github.com/dcoapp/app?tab=readme-ov-file#how-it-works
 
+To sign commits, you will need to include `-s` when running `git commit`. For example, `git commit -s -m "Commit message"`. One note, creating PRs via the GitHub interface do not appear to include this option.
+
 ## Code of Conduct
 This project has adopted the [Microsoft Open Source Code of
 Conduct](https://opensource.microsoft.com/codeofconduct/). For more information see the
