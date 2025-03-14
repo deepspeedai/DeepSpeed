@@ -66,7 +66,7 @@ class PartitionedParameterCoordinator:
     FORWARD_PREFETCH_SUBMIT = 'forward_prefetch_submit'
     BACKWARD_FETCH_SUBMIT = 'backward_fetch_submit'
     BACKWARD_FETCH_WAIT = 'backward_fetch_wait'
-    BACKWARD_PREFETCH_SUBMIT = 'backward_prefetch_wait'
+    BACKWARD_PREFETCH_SUBMIT = 'backward_prefetch_submit'
     FORWARD_ALL_GATHER = 'forward_all_gather'
     BACKWARD_ALL_GATHER = 'backward_all_gather'
     """Handles partitioning and gathering of parameters."""
