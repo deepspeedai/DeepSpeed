@@ -483,7 +483,7 @@ def main(args=None):
             result = subprocess.check_output(hostname_cmd)
         except subprocess.CalledProcessError as err:
             logger.error(
-                "Unable to detect suitable master address via `hostname -I`, please manually specify one via --master_addr"
+                "Unable to detect suitable master address via 'hostname -I', please manually specify one via --master_addr"
             )
             raise err
         args.master_addr = result.decode('utf-8').split()[0]
