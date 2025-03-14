@@ -462,10 +462,8 @@ def main(args=None):
     if multi_node_exec and not args.no_ssh_check and not args.no_ssh:
         first_host = list(active_resources.keys())[0]
         try:
-            ssh_check_cmd = "ssh -o PasswordAuthentication=no "
-            if args.ssh_port is not None:
-                ssh_check_cmd += f"-p {args.ssh_port} "
-            ssh_check_cmd += f"{first_host} hostname"
+            ssh_check_cmd = ("ssh -o PasswordAuthentication=no " +
+                             (f"-p {args.ssh_port} " if args.ssh_port is not None else "") + f"{first_host} hostname")
             safe_ssh_cmd = shlex.split(ssh_check_cmd)
             subprocess.check_call(safe_ssh_cmd, stderr=subprocess.DEVNULL, stdout=subprocess.DEVNULL)
         except subprocess.CalledProcessError:
