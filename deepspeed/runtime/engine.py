@@ -3041,7 +3041,7 @@ class DeepSpeedEngine(Module):
         optim_checkpoint = None
         if load_module_only:
             deepspeed_states = ['module']
-            if self.optimizer is not None:
+            if self.optimizer is not None and hasattr(self.optimizer, 'refresh_fp32_params'):
                 self.optimizer.refresh_fp32_params()
         else:
             has_zero_optimizer_state = self.zero_optimization() or self.bfloat16_enabled()
