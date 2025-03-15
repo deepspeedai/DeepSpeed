@@ -20,6 +20,11 @@ concurrency:
 jobs:
   unit-tests:
     runs-on: ubuntu-24.04
+    env:
+      ACTIONS_RUNNER_DEBUG: true
+      ACTIONS_STEP_DEBUG: true
+
+
 
     steps:
       - uses: actions/checkout@v4
@@ -54,6 +59,11 @@ jobs:
       - name: Python environment
         run: |
           pip list
+
+      - name: System Status
+        run: |
+          df -h
+          free -m
 
       - name: Unit tests
         run: |
