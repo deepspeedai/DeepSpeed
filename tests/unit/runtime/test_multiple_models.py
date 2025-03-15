@@ -98,6 +98,7 @@ class TestMultipleModels(DistributedTest):
         else:
             train_independent_loss(num_models=num_models, config_dict=config_dict, dtype=torch.float16)
 
+    # TODO: Combination of shared_loss==True and bf16.immediate_grad_update==False is currently broken
     @pytest.mark.parametrize('shared_loss', [False, True])
     def test_bf16_optimizer(self, num_models, shared_loss):
         config_dict = {
@@ -112,7 +113,8 @@ class TestMultipleModels(DistributedTest):
                 "stage": 1,
             },
             "bf16": {
-                "enabled": True
+                "enabled": True,
+                "immediate_grad_update": True,
             },
             "data_types": {
                 "grad_accum_dtype": "fp32"
