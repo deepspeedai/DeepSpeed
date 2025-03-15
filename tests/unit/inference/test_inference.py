@@ -424,8 +424,8 @@ class TestModelTask(DistributedTest):
 
         # facebook/opt* and some bigscient/bloom* models are not matching
         # baseline exactly, adding an exception to them for now
-        if ("opt" in model) or ("bloom" in model):
-            bs_output = pipe(query, **inf_kwargs)
+        #if "bloom" in model:
+        #    bs_output = pipe(query, **inf_kwargs)
 
         # These performance tests are only measuring the time for a single
         # inference request, we just want to check that performance isn't terrible
