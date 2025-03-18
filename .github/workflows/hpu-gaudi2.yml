@@ -94,6 +94,8 @@ jobs:
         test_zero_nesting_init.py
         test_zeropp.py
         (test_zero.py and (TestZero3ParamPartitioningLargeParam or TestZero3ParamPartitioningLargeParam))
+        (test_linear.py and (TestLoRALinear or TestBasicLinear))
+        (test_ctx.py and TestEngine)
 
     # Steps represent a sequence of tasks that will be executed as part of the job
     steps:
