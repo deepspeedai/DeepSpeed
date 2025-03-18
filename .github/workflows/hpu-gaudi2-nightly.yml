@@ -45,6 +45,8 @@ jobs:
         test_zero_leaf_module.py
         test_zero_offloadpp.py
         test_zero_tiled.py
+        test_autotp_training.py
+        test_ulysses.py
 
     # Steps represent a sequence of tasks that will be executed as part of the job
     steps:
