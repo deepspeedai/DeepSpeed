@@ -23,7 +23,7 @@ jobs:
   unit-tests:
     runs-on: [self-hosted, nvidia, a6000]
     container:
-      image: nvcr.io/nvidia/pytorch:24.09-py3
+      image: nvcr.io/nvidia/pytorch:24.12-py3
       ports:
         - 80
       options: --gpus all --shm-size "8G"
@@ -58,8 +58,8 @@ jobs:
         run: |
           unset TORCH_CUDA_ARCH_LIST # only jit compile for current arch
           cd tests
-          python -m pytest --color=yes --durations=0 --verbose -rF -m 'inference_v2' unit/ --torch_ver="2.5" --cuda_ver="12"
-          python -m pytest --color=yes --durations=0 --verbose -rF -m 'inference_v2_ops' unit/ --torch_ver="2.5" --cuda_ver="12"
+          python -m pytest --color=yes --durations=0 --verbose -rF -m 'inference_v2' unit/ --torch_ver="2.6" --cuda_ver="12"
+          python -m pytest --color=yes --durations=0 --verbose -rF -m 'inference_v2_ops' unit/ --torch_ver="2.6" --cuda_ver="12"
       - name: MII unit tests
         run: |
           BRANCH="main"
