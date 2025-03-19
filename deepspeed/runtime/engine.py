@@ -1865,7 +1865,7 @@ class DeepSpeedEngine(Module):
                 dataset,
                 num_replicas=data_parallel_world_size,
                 rank=data_parallel_rank,
-                shuffle=False,
+                shuffle=True,
             )
 
         deepspeed_dataloader_config = {}
