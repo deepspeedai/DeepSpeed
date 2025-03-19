@@ -23,7 +23,7 @@ jobs:
   unit-tests:
     runs-on: [self-hosted, nvidia, a6000]
     container:
-      image: nvcr.io/nvidia/pytorch:24.09-py3
+      image: nvcr.io/nvidia/pytorch:24.12-py3
       ports:
         - 80
       options: --gpus all --shm-size "8G"
