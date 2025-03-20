@@ -9,7 +9,7 @@
 
 Tensor parallelism (TP) is an important memory optimization for training large-scale deep learning models. Despite the popularity of training Hugging Face (HF) [models](https://huggingface.co/models), the model scaling options for **[HF trainer](https://huggingface.co/docs/transformers/main_classes/trainer)** was previously limited to sharded data parallelism through [ZeRO](https://huggingface.co/docs/accelerate/usage_guides/deepspeed)/[FSDP](https://huggingface.co/docs/accelerate/usage_guides/fsdp). While ZeRO3 offers superior memory efficiency, it incurs significant communication costs. ZeRO (1/2) has lower communication overhead, but in the case of very large models, it cannot be used directly due to memory limitations. Therefore, combining TP with ZeRO (1/2) offers more balanced options for memory and performance. Moreover, through TP, we can alleviate the batch scaling limitations imposed by ZeRO/FSDP.
 
-We are pleased to announce that DeepSpeed now provides native automatic tensor parallel training for Hugging Face (HF) transformers. This new feature builds on DeepSpeed's [AutoTP](https://www.deepspeed.ai/tutorials/automatic-tensor-parallelism/) mechanism, which was previously restricted to inference. AutoTP training can be combined with ZeRO to unlock unprecented efficiency benefits for HF model post-training, including: 
+We are pleased to announce that DeepSpeed now provides native automatic tensor parallel training for Hugging Face (HF) transformers. This new feature builds on DeepSpeed's [AutoTP](https://www.deepspeed.ai/tutorials/automatic-tensor-parallelism/) mechanism, which was previously restricted to inference. AutoTP training can be combined with ZeRO to unlock unprecented efficiency benefits for HF model post-training, including:
 
 **1**. Model scaling with lower communication costs than FSDP/ZeRO3 (e.g., use AutoTP + ZeRO1 to achieve ZeRO3 memory savings).
 
@@ -49,10 +49,10 @@ Figure 2 illustrates the basic flowchart, The division of TP and ZeRO is impleme
 # Usage
 
 Although we evaluated AutoTP training with Llama2 & Llama3 models in this blog, we expect compatibility with other Hugging Face models, especially [those](https://www.deepspeed.ai/tutorials/automatic-tensor-parallelism/) previously validated with AutoTP inference. Please upgrade accelerate and transformers to the master branch. We will add their minimum version once they have release tag.
- 
+
 
  **Enable TP training**
- 
+
 Similar to ZeRO, AutoTP training is enabled using the [deepspeed configuration file](https://www.deepspeed.ai/docs/config-json/) by specifying ```[tensor_parallel][autotp_size]```.
 ```
     "ZeRO_optimization": {
@@ -75,9 +75,9 @@ dp_size = num_gpus / tp_size
 
 Note that the global_batch_size (gbs) changes with different TP settings:
 ```
-gbs (only dp) = per_device_batch_size * n_gpus * gradient_accumulation_steps 
+gbs (only dp) = per_device_batch_size * n_gpus * gradient_accumulation_steps
 
-gbs (dp with tp) = per_device_batch_size * n_gpus / tp_size * gradient_accumulation_steps 
+gbs (dp with tp) = per_device_batch_size * n_gpus / tp_size * gradient_accumulation_steps
 ```
 
 
@@ -92,7 +92,7 @@ gbs (dp with tp) = per_device_batch_size * n_gpus / tp_size * gradient_accumulat
 
 
 Saving checkpoints and model files is fully compatible with HF transformers. The [trainer.save_model()](https://huggingface.co/docs/transformers/v4.49.0/en/main_classes/trainer#transformers.Trainer.save_model) method saves the original model. Ensure ```gather_16bit_weights_on_model_save``` is set to ```true```in the [deepspeed configuration file](https://www.deepspeed.ai/docs/config-json/).
-```gather_16bit_weights_on_model_save=ture in config.
+```gather_16bit_weights_on_model_save=true in config.
     "ZeRO_optimization": {
       ...
       "gather_16bit_weights_on_model_save": true,
@@ -127,13 +127,13 @@ We validated AutoTP training using supervised finetune training (SFT) task: [sta
 
 The following loss curves depict SFT training, where gbs is uniformly set to 32, and other configurations match the default experiment settings from ([stanford_alpaca](https://github.com/tatsu-lab/stanford_alpaca)). The loss curves are largely consistent across the following setups:
 
- - ZeRO3 
+ - ZeRO3
  - TP + disable ZeRO
  - ZeRO1 and ZeRO1 + AutoTP
  - ZeRO2 and ZeRO2 + AutoTP
 
 
- 
+
 
 
 <div align="center">
@@ -191,7 +191,7 @@ The following loss curves depict SFT training, where gbs is uniformly set to 32,
  **Model Evaluation**
 
 
-  We conducted inference evaluations for the [MMLU task](https://github.com/EleutherAI/lm-evaluation-harness). 
+  We conducted inference evaluations for the [MMLU task](https://github.com/EleutherAI/lm-evaluation-harness).
   In MMLU, the scores for AutoTP + ZeRO1 and ZeRO1, as well as AutoTP + ZeRO2 and ZeRO2, are consistent, showing a fixed improvement over the pre-training model before SFT.
 
 
@@ -218,15 +218,15 @@ The following loss curves depict SFT training, where gbs is uniformly set to 32,
 
 If users define their own dataloader, please ensure data consistency within ```deepspeed.utils.get_tensor_model_parallel_group()```. DeepSpeed provides basic validation functions to assist with this.
 
-Furthermore, if users are not using transformers library, you can replace the ```TensorParallel_Layer``` layer and its subclasses as needed. See ```prepare_tp_model``` fucntion in ```unit/model_parallelism/test_autotp_training.py```. Users can also define different shard and gather for subclasses of ```TensorParallel_Layer.```
+Furthermore, if users are not using transformers library, you can replace the ```TensorParallel_Layer``` layer and its subclasses as needed. See ```prepare_tp_model``` function in ```unit/model_parallelism/test_autotp_training.py```. Users can also define different shard and gather for subclasses of ```TensorParallel_Layer.```
 
 
 
- 
+
 
 # Ongoing Work
 - **Optimization**: Communication/Activation optimization.
-- **Usability**: Support [Transformers TP plan](https://github.com/huggingface/transformers/blob/336dc69d63d56f232a183a3e7f52790429b871ef/src/transformers/models/llama/configuration_llama.py#L145), decouple AutoTP parser and more model testing, 
+- **Usability**: Support [Transformers TP plan](https://github.com/huggingface/transformers/blob/336dc69d63d56f232a183a3e7f52790429b871ef/src/transformers/models/llama/configuration_llama.py#L145), decouple AutoTP parser and more model testing,
 
 
 Theoretically, features supported by ZeRO should also be supported, though extensive testing is pending.
