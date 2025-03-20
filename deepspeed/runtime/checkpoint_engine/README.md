@@ -44,7 +44,7 @@ DataStates-LLM is an asynchrnous checkpointing approach optimized for LLM pre-tr
 {
     ... other deepspeed config options,
     "datastates_ckpt": {
-		"host_cache_size": 16,
+        "host_cache_size": 16,
         "parser_threads": 8
 	}
 }
