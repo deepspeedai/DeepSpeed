@@ -234,5 +234,5 @@ Theoretically, features supported by ZeRO should also be supported, though exten
 Welcome bug reports, enhancement, and additional model training examples.
 
 
-## Contributors
+# Contributors
 This work was made possible through a deep collaboration between Intel and Microsoft. The contributors include Mingzhi Liu, Guokai Ma, Kiefer Kuah, Yejing Lai, Kurt Chen, Yejun Guo, Guangxin Xu, Xiaofei Feng, and Yang Wang from Intel; Guanhua Wang and Olatunji Ruwase from Microsoft.
