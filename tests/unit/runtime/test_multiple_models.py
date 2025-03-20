@@ -42,6 +42,9 @@ def train_shared_loss(num_models, config_dict, dtype):
         for m in models:
             m.optimizer.zero_grad()
 
+    for m in models:
+        m.destroy()
+
 
 def train_independent_loss(num_models, config_dict, dtype):
     hidden_dim = 64
@@ -58,6 +61,9 @@ def train_independent_loss(num_models, config_dict, dtype):
         for m, loss in zip(models, losses):
             m.backward(loss)
             m.step()
+
+    for m in models:
+        m.destroy()
 
 
 @pytest.mark.parametrize('num_models', [1, 2, 3])

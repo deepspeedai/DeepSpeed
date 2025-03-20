@@ -94,6 +94,8 @@ jobs:
         test_zero_nesting_init.py
         test_zeropp.py
         (test_zero.py and (TestZero3ParamPartitioningLargeParam or TestZero3ParamPartitioningLargeParam))
+        (test_linear.py and (TestLoRALinear or TestBasicLinear))
+        (test_ctx.py and TestEngine)
 
     # Steps represent a sequence of tasks that will be executed as part of the job
     steps:
@@ -112,7 +114,7 @@ jobs:
           git clone https://github.com/huggingface/transformers
           cd transformers
           # if needed switch to the last known good SHA until transformers@master is fixed
-          git checkout 981c276
+          # git checkout 981c276
           git rev-parse --short HEAD
           pip install .
 

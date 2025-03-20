@@ -448,7 +448,7 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
         for hook in self._leaf_module_hooks:
             hook.remove()
         print_rank_0("Removed grad acc hooks", force=False)
-        del self.__ipg_bucket_flat_buffer
+        self._release_ipg_buffers()
 
     def initialize_ds_offload(
         self,
@@ -967,7 +967,7 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
 
     def _release_ipg_buffers(self):
         if self.contiguous_gradients:
-            self.ipg_buffer = None
+            self.__ipg_bucket_flat_buffer = None
 
     def _optimizer_step(self, sub_group_id):
         param_group_id = self.sub_group_to_group_id[sub_group_id]
