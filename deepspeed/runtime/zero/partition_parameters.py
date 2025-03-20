@@ -1969,7 +1969,7 @@ class Init(InsertPostInitMethodToModuleSubClasses):
     def _allgather_params(self, param_list, hierarchy=0):
         if len(param_list) == 0:
             return
- 
+
         partition_size = sum([param.ds_tensor.ds_numel for param in param_list])
 
         tensor_size = partition_size * self.num_partitions
