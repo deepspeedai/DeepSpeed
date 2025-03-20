@@ -195,10 +195,8 @@ class DeepSpeedZeroConfig(DeepSpeedConfigModel):
     cpu_offload: Optional[bool] = Field(
         None,
         json_schema_extra={
-            "deprecated":
-            True,
-            "new_param":
-            "offload_optimizer",
+            "deprecated": True,
+            "new_param":  "offload_optimizer",
             "new_param_fn": (lambda val: DeepSpeedZeroOffloadOptimizerConfig(device=OffloadDeviceEnum.cpu)
                              if val else None)
         },
