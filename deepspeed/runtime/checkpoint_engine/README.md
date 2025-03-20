@@ -14,19 +14,6 @@ Basically, for checkpoint management(save/load by deepspeed with the given tag),
 	3. When all the files for a tag are ready, deepspeed engine will call `commit()` to tell the checkpoint engine current checkpoint is complete. For original torch, it also plays the role of logger.
 
 
-### Asynchronous Lazy Checkpointing using DataStates-LLM
-
-DataStates-LLM is an asynchrnous checkpointing approach optimized for LLM pre-training and can be obtained at https://github.com/DataStates/datastates-llm. To enable datastates-llm checkpointing, specify the `host_cache_size` (in gigabytes) which reserves pinned host memory for asynchronous checkpoint flushing, and `parser_threads` to parse multiple checkpoint file requests in parallel using the following lines in config.json supplied during the launch:
-```
-{
-    ... other deepspeed config options,
-    "datastates_ckpt": {
-		"host_cache_size": 16,
-        "parser_threads": 8
-	}
-}
-```
-
 
 ```python
 class CheckpointEngine(object):
@@ -48,4 +35,18 @@ class CheckpointEngine(object):
         # to tell checkpoint services if all files are ready.
         pass
 
+```
+
+
+### Asynchronous Lazy Checkpointing using DataStates-LLM
+
+DataStates-LLM is an asynchrnous checkpointing approach optimized for LLM pre-training and can be obtained at https://github.com/DataStates/datastates-llm. To enable datastates-llm checkpointing, specify the `host_cache_size` (in gigabytes) which reserves pinned host memory for asynchronous checkpoint flushing, and `parser_threads` to parse multiple checkpoint file requests in parallel using the following lines in config.json supplied during the launch:
+```
+{
+    ... other deepspeed config options,
+    "datastates_ckpt": {
+		"host_cache_size": 16,
+        "parser_threads": 8
+	}
+}
 ```
