@@ -89,14 +89,16 @@ class TestMoE(DistributedTest):
 
         data_loader = sequence_dataloader(model=model, total_samples=50, hidden_dim=hidden_dim, device=model.device)
 
-        def strict_average_tensor(tensor):
+        def strict_average_tensor(tensor, communication_data_type: torch.dtype):
             process_group = optimizer.dp_process_group
             curr_size = 0
             pg_offsets = []
-            for i, param_idx, param_id in optimizer.params_in_ipg_bucket:
+
+            ipg_bucket = optimizer.ipg_buckets[communication_data_type]
+            for i, param_idx, param_id in ipg_bucket.params:
                 param = optimizer.bit16_groups[i][param_idx]
                 process_group = optimizer.dp_process_group
-                if optimizer.ipg_bucket_has_moe_params:
+                if ipg_bucket.has_moe_params:
                     process_group = optimizer.expert_dp_process_group[param.group_name] if is_moe_param(
                         param) else optimizer.dp_process_group
                 partition_ids = optimizer.param_to_partition_ids[i][param_id]
@@ -134,7 +136,7 @@ class TestMoE(DistributedTest):
                 return orig_narrow(dim, start, length)  # real call
 
             orig_narrow, tensor.narrow = tensor.narrow, strict_narrow
-            type(optimizer).average_tensor(optimizer, tensor)  # real call
+            type(optimizer).average_tensor(optimizer, tensor, communication_data_type)  # real call
             tensor.narrow = orig_narrow
 
         if "average_tensor" in dir(optimizer):
