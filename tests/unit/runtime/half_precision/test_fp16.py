@@ -357,6 +357,8 @@ class TestAdamFP16ZeroOneCycleCompatibility(DistributedTest):
             model.backward(loss)
             model.step()
 
+        model.destroy()
+
 
 @pytest.mark.parametrize("zero_stage", [1, 2, 3])
 @pytest.mark.parametrize("use_cpu_offload", [True, False])
@@ -402,6 +404,8 @@ class TestZeroStaticScale(DistributedTest):
             model.backward(loss)
             model.step()
 
+        model.destroy()
+
 
 @pytest.mark.parametrize("zero_stage", [1, 2, 3])
 @pytest.mark.parametrize("use_cpu_offload", [True, False])
@@ -436,6 +440,7 @@ class TestZeroAllowUntestedOptimizer(DistributedTest):
                                                       model=model,
                                                       optimizer=optimizer,
                                                       model_parameters=model.parameters())
+            model.destroy()
 
 
 @pytest.mark.parametrize("zero_stage", [1, 2, 3])
@@ -485,6 +490,8 @@ class TestZeroEmptyPartition(DistributedTest):
             loss = model(batch[0], batch[1])
             model.backward(loss)
             model.step()
+
+        model.destroy()
 
 
 @amp_available
@@ -615,6 +622,7 @@ class TestZeroSupportedClientOptimizer(DistributedTest):
         model = SimpleModel(hidden_dim)
         client_optimizer = optimizer_constructor(params=model.parameters())
         model, _, _, _ = deepspeed.initialize(config=config_dict, model=model, optimizer=client_optimizer)
+        model.destroy()
 
 
 class TestZero2ReduceScatterOff(DistributedTest):
@@ -727,6 +735,8 @@ class TestZero3LazyScatter(DistributedTest):
             model.backward(loss)
             model.step()
 
+        model.destroy()
+
 
 @pytest.mark.parametrize('stage', [1, 2, 3])
 class TestZeroEmptyGrad(DistributedTest):
@@ -755,3 +765,5 @@ class TestZeroEmptyGrad(DistributedTest):
             loss = model(batch[0], batch[1])
             model.backward(loss)
             model.step()
+
+        model.destroy()
