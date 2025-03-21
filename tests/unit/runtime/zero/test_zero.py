@@ -83,6 +83,7 @@ class TestZeroUnbalancedGradients(DistributedTest):
         data_loader = random_dataloader(model=model, total_samples=16, hidden_dim=hidden_dim, device=model.device)
 
         run_unbalanced_gradients(model, data_loader)
+        model.destroy()
 
 
 # testing the fix https://github.com/deepspeedai/DeepSpeed/pull/1227
@@ -142,6 +143,8 @@ class TestZero3RepeatForwardLoop(DistributedTest):
             loss = model(batch[0], batch[1])
             model.backward(loss)
             model.step()
+
+        model.destroy()
 
 
 # testing the fix https://github.com/deepspeedai/DeepSpeed/pull/1227
@@ -242,6 +245,8 @@ class TestZeroToFP32(DistributedTest):
             for name in orig_state_dict.keys():
                 # float() workaround for torch<1.6
                 assert torch.allclose(orig_state_dict[name].float(), fp32_state_dict[name].float())
+
+        model.destroy()
 
     def test_2_param_groups(self, tmpdir, zero_stage, freeze_params):
         # TODO:
@@ -347,6 +352,8 @@ class TestZeroToFP32(DistributedTest):
             for name in orig_state_dict.keys():
                 # float() workaround for torch<1.6
                 assert torch.allclose(orig_state_dict[name].float(), fp32_state_dict[name].float())
+
+        model.destroy()
 
 
 @pytest.mark.parametrize("allgather_bucket_size", [1000, 1001])
@@ -821,6 +828,8 @@ class TestZero3ParamPartitioningBase(DistributedTest):
         _assert_partition_status(ds_engine, {ZeroParamStatus.NOT_AVAILABLE})
         assert not math.isclose(ds_engine.optimizer._global_grad_norm, 0.0)
 
+        ds_engine.destroy()
+
 
 @pytest.mark.parametrize("init_context_manager", [True, False])
 @pytest.mark.parametrize("reduce_scatter", [True, False])
@@ -892,6 +901,8 @@ class TestZero3ParamPartitioningLargeParam(DistributedTest):
             expected_weight_gradient = (train_iter + 1) * torch.full_like(weight_gradient, 1)
 
             assert torch.allclose(weight_gradient, expected_weight_gradient)
+
+        ds_engine.destroy()
 
 
 @pytest.mark.parametrize("init_context_manager", [True, False])
@@ -976,6 +987,8 @@ class TestZero3ParamPartitioningManyParams(DistributedTest):
 
             for layer_num, activation in enumerate(weight_gradients):
                 pass
+
+        ds_engine.destroy()
 
 
 class TestZero3InitForParentWeightInitialization(DistributedTest):
@@ -1197,6 +1210,8 @@ class TestZero3ParamPartitioningBaseBF16(DistributedTest):
         ds_engine.optimizer.step()
         _assert_partition_status(ds_engine, {ZeroParamStatus.NOT_AVAILABLE})
 
+        ds_engine.destroy()
+
 
 class TestParamPartitioningSkipInit(DistributedTest):
     world_size = 2
@@ -1274,6 +1289,8 @@ class TestParamPartitioningSkipInit(DistributedTest):
             model.backward(loss)
             model.step()
 
+        model.destroy()
+
 
 class TestZeroOffloadStage1(DistributedTest):
     world_size = 2
@@ -1310,6 +1327,8 @@ class TestZeroOffloadStage1(DistributedTest):
             loss = model(batch[0], batch[1])
             model.backward(loss)
             model.step()
+
+        model.destroy()
 
 
 @pytest.mark.parametrize("return_type", [tuple, list, dict])
@@ -1372,6 +1391,8 @@ class TestZero3DictFwd(DistributedTest):
                 loss = loss[1]
             model.backward(loss)
             model.step()
+
+        model.destroy()
 
 
 @pytest.mark.parametrize("zero_stage", [1, 2, 3])
@@ -1439,6 +1460,8 @@ class TestZeroAdamOptimizerStepCount(DistributedTest):
                 assert all(step == step_counts[0] for step in step_counts)
                 assert model.global_steps == step_counts[0]
 
+        model.destroy()
+
 
 @pytest.mark.parametrize("zero_stage", [1, 2, 3])
 class TestZeroFrozenWeights(DistributedTest):
@@ -1496,6 +1519,8 @@ class TestZeroFrozenWeights(DistributedTest):
             loss = loss[1]
             model.backward(loss)
             model.step()
+
+        model.destroy()
 
 
 @pytest.mark.parametrize("force_ds_optim", [True, False])
@@ -1577,6 +1602,8 @@ class TestZeroPartitionCache(DistributedTest):
         model.empty_partition_cache()
         assert sum([p.numel() for p in model.parameters()]) == 0
 
+        model.destroy()
+
 
 @pytest.mark.parametrize("use_client_optimizer", [True, False])
 @pytest.mark.parametrize("empty_weight_group", [True, False])
@@ -1629,6 +1656,8 @@ class TestEmptyParameterGroup(DistributedTest):
             config=config_dict,
         )
 
+        model.destroy()
+
 
 class TestZero3SwitchModes(DistributedTest):
     world_size = 2
@@ -1674,6 +1703,8 @@ class TestZero3SwitchModes(DistributedTest):
                 for batch in data_loader:
                     loss = model(batch[0], batch[1])
 
+        model.destroy()
+
 
 # Avoid overwriting client module id
 # https://github.com/deepspeedai/DeepSpeed/issues/6772
@@ -1707,3 +1738,4 @@ class TestZero3ClientModuleID(DistributedTest):
         model, _, _, _ = deepspeed.initialize(model=model, model_parameters=model.parameters(), config=config_dict)
         post_init_m_id = model.id
         assert pre_init_m_id == post_init_m_id
+        model.destroy()
