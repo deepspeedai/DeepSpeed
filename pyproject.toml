@@ -1,0 +1,10 @@
+[build-system]
+requires = [
+    "setuptools>=64",
+    "wheel",
+    "ninja",
+    "typing-extensions>=4.10.0",
+    "torch"
+]
+# Use legacy backend to import local packages in setup.py
+build-backend = "setuptools.build_meta:__legacy__"
