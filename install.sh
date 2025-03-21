@@ -152,7 +152,7 @@ if [ ! -f $hostfile ]; then
 fi
 
 echo "Building deepspeed wheel"
-python setup.py $VERBOSE bdist_wheel
+python -m build $VERBOSE --wheel --no-isolation
 
 if [ "$local_only" == "1" ]; then
     echo "Installing deepspeed"

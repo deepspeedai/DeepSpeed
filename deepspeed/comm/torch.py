@@ -145,22 +145,11 @@ class TorchBackend(Backend):
 
     def init_process_group(self, backend, timeout, init_method, rank, world_size):
         if not torch.distributed.is_initialized():
-            if not required_torch_version(min_version=2.4):
-                # Windows torch builds do not come with lib_uv by default.
-                # More information here: https://pytorch.org/tutorials/intermediate/TCPStore_libuv_backend.html
-                use_libuv = False if os.name == "nt" else True
-                torch.distributed.init_process_group(backend,
-                                                     timeout=timeout,
-                                                     init_method=init_method,
-                                                     rank=rank,
-                                                     world_size=world_size,
-                                                     use_libuv=use_libuv)
-            else:
-                torch.distributed.init_process_group(backend,
-                                                     timeout=timeout,
-                                                     init_method=init_method,
-                                                     rank=rank,
-                                                     world_size=world_size)
+            torch.distributed.init_process_group(backend,
+                                                 timeout=timeout,
+                                                 init_method=init_method,
+                                                 rank=rank,
+                                                 world_size=world_size)
         self.using_mpi = torch.distributed.get_backend() == 'mpi'
 
     @disable_compiler_collective

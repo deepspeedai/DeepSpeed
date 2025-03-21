@@ -66,7 +66,7 @@ class PartitionedParameterCoordinator:
     FORWARD_PREFETCH_SUBMIT = 'forward_prefetch_submit'
     BACKWARD_FETCH_SUBMIT = 'backward_fetch_submit'
     BACKWARD_FETCH_WAIT = 'backward_fetch_wait'
-    BACKWARD_PREFETCH_SUBMIT = 'backward_prefetch_wait'
+    BACKWARD_PREFETCH_SUBMIT = 'backward_prefetch_submit'
     FORWARD_ALL_GATHER = 'forward_all_gather'
     BACKWARD_ALL_GATHER = 'backward_all_gather'
     """Handles partitioning and gathering of parameters."""
@@ -297,7 +297,7 @@ class PartitionedParameterCoordinator:
                     "inflight": [p.ds_id for p in self.__inflight_param_registry],
                 }))
 
-        params_to_fetch = frozenset(iter_params(current_submodule, recurse=z3_leaf_module(current_submodule)))
+        params_to_fetch = set(iter_params(current_submodule, recurse=z3_leaf_module(current_submodule)))
         fetch_numel = sum(
             [p.partition_numel() for p in params_to_fetch if p.ds_status == ZeroParamStatus.NOT_AVAILABLE])
 
