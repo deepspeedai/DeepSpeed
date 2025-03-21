@@ -621,6 +621,17 @@ def initialize_mesh_device(mesh_shape, mesh_dim_names):
     return mesh_device
 
 
+def enable_symm_mem_for_group(group_name: str):
+    global cdb
+    assert cdb is not None and cdb.is_initialized(
+    ), 'DeepSpeed backend not set, please initialize it using init_process_group()'
+
+    if hasattr(cdb, 'enable_symm_mem_for_group'):
+        cdb.enable_symm_mem_for_group(group_name)
+    else:
+        raise RuntimeError(f"Backend {cdb.name} does not support symmetric memory initialization")
+
+
 # Main DeepSpeed Comms. public API.
 def init_distributed(dist_backend=None,
                      auto_mpi_discovery=True,
