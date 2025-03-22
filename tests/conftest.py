@@ -70,13 +70,47 @@ def pytest_runtest_call(item):
         item.runtest = lambda: True  # Dummy function so test is not run twice
 
 
+def write_to_log_with_lock(log_file_path: str, header: str, msg: str):
+    import fcntl
+    with open(log_file_path, 'a+') as f:
+        try:
+            fcntl.flock(f, fcntl.LOCK_EX)
+            f.write(f"{header} {msg}\n")
+            f.flush()
+        finally:
+            fcntl.flock(f, fcntl.LOCK_UN)
+
+
+dist_test_class = None
+
+
 # We allow DistributedTest to reuse distributed environments. When the last
 # test for a class is run, we want to make sure those distributed environments
 # are destroyed.
 def pytest_runtest_teardown(item, nextitem):
-    if getattr(item.cls, "reuse_dist_env", False) and not nextitem:
+    RUNNING_TEST_LOG_FILE = os.environ.get("RUNNING_TEST_LOG_FILE", "/tmp/running_test.log")
+
+    global dist_test_class
+    # Last test might not have .cls. So we record the pool_cache here
+    if item.cls is not None:
         dist_test_class = item.cls()
+
+    def get_xdist_worker_id():
+        xdist_worker = os.environ.get('PYTEST_XDIST_WORKER', None)
+        if xdist_worker is not None:
+            xdist_worker_id = xdist_worker.replace('gw', '')
+            return int(xdist_worker_id)
+        return None
+
+    if RUNNING_TEST_LOG_FILE:
+        reuse_dist_env = getattr(item.cls, "reuse_dist_env", False)
+        write_to_log_with_lock(RUNNING_TEST_LOG_FILE, f"pytest_runtest_teardown,xdist={get_xdist_worker_id()}",
+                               f"reuse_dist_env={reuse_dist_env} nextitem={nextitem}")
+
+    if not nextitem and dist_test_class is not None and dist_test_class._pool_cache is not None:
         for num_procs, pool in dist_test_class._pool_cache.items():
+            write_to_log_with_lock(RUNNING_TEST_LOG_FILE, f"pytest_runtest_teardown,xdist={get_xdist_worker_id()}",
+                                   f"closing pool num_procs={num_procs} nextitem={nextitem}")
             dist_test_class._close_pool(pool, num_procs, force=True)
 
 
