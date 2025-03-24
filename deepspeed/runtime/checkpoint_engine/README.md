@@ -39,7 +39,7 @@ class CheckpointEngine(object):
 
 ### Asynchronous Lazy Checkpointing using DataStates-LLM
 
-DataStates-LLM is an asynchrnous checkpointing approach optimized for LLM pre-training and can be obtained at https://github.com/DataStates/datastates-llm. To enable datastates-llm checkpointing, specify the `host_cache_size` (in gigabytes) which reserves pinned host memory for asynchronous checkpoint flushing, and `parser_threads` to parse multiple checkpoint file requests in parallel using the following lines in config.json supplied during the launch:
+DataStates-LLM is an asynchronous checkpointing approach optimized for LLM pre-training and can be obtained at https://github.com/DataStates/datastates-llm. To enable datastates-llm checkpointing, specify the `host_cache_size` (in gigabytes) which reserves pinned host memory for asynchronous checkpoint flushing, and `parser_threads` to parse multiple checkpoint file requests in parallel using the following lines in config.json supplied during the launch:
 ```
 {
     ... other deepspeed config options,

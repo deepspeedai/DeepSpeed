@@ -1066,6 +1066,16 @@ class DeepSpeedEngine(Module):
                 logger.error(f"No torch_nebula was found! Will fall back to torch.save. Details: {err}")
                 self.checkpoint_engine = TorchCheckpointEngine()
 
+        if self._config is not None and self._config.datastates_config.enabled:
+            try:
+                from deepspeed.runtime.checkpoint_engine.datastates_checkpoint_engine import DataStatesCheckpointEngine
+                self.checkpoint_engine = DataStatesCheckpointEngine(deepspeed_config=self._config,
+                                                                    rank=dist.get_rank())
+            except ImportError as err:
+                raise Exception(
+                    f"The datastates-llm checkpoint engine was not found! Will fall back to torch.save. Details: {err}"
+                )
+
         dp_rank = groups._get_sequence_data_parallel_rank()
 
         rank = self.local_rank if self.use_node_local_storage() else dp_rank
