@@ -1,8 +1,15 @@
-# Copyright DataStates Team (Argonne National Laboratory): https://github.com/DataStates/
-# Maintained by DataStates Team (Argonne National Laboratory): https://github.com/DataStates/
+# Copyright (c) Microsoft Corporation.
+# SPDX-License-Identifier: Apache-2.0
+
+# MIT License Copyright (c) UChicago Argonne LLC, operator of Argonne National Laboratory.
+
+# DeepSpeed Team
 
 from deepspeed.runtime.config_utils import DeepSpeedConfigObject
+
+
 class DeepSpeedDataStatesConfig(DeepSpeedConfigObject):
+
     def __init__(self, param_dict):
         super(DeepSpeedDataStatesConfig, self).__init__()
 

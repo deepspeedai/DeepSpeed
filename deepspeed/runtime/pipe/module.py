@@ -22,6 +22,7 @@ from deepspeed.runtime.state_dict_factory import SDLoaderFactory
 from deepspeed.accelerator import get_accelerator
 from deepspeed.checkpoint.utils import clone_tensors_for_torch_save
 
+
 class PipelineError(Exception):
     """Errors related to the use of deepspeed.PipelineModule """
 
@@ -617,7 +618,7 @@ class PipelineModule(nn.Module):
             if exclude_frozen_params:
                 for n in self._get_frozen_parameter_names(layer):
                     del orig_state_dict[n]
-                
+
             if debloat_memory:
                 final_state_dict = clone_tensors_for_torch_save(orig_state_dict)
             else:

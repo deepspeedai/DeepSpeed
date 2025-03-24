@@ -1,2 +1,6 @@
-# Copyright by DataStates Team (Argonne National Laboratory): https://github.com/DataStates/
-# Maintained by DataStates Team (Argonne National Laboratory): https://github.com/DataStates/
+# Copyright (c) Microsoft Corporation.
+# SPDX-License-Identifier: Apache-2.0
+
+# MIT License Copyright (c) UChicago Argonne LLC, operator of Argonne National Laboratory.
+
+# DeepSpeed Team

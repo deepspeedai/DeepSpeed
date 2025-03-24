@@ -1064,9 +1064,12 @@ class DeepSpeedEngine(Module):
         if self._config is not None and self._config.datastates_config.enabled:
             try:
                 from deepspeed.runtime.checkpoint_engine.datastates_checkpoint_engine import DataStatesCheckpointEngine
-                self.checkpoint_engine = DataStatesCheckpointEngine(deepspeed_config=self._config, rank=dist.get_rank())
+                self.checkpoint_engine = DataStatesCheckpointEngine(deepspeed_config=self._config,
+                                                                    rank=dist.get_rank())
             except ImportError as err:
-                raise Exception(f"The datastates-llm checkpoint engine was not found! Will fall back to torch.save. Details: {err}")
+                raise Exception(
+                    f"The datastates-llm checkpoint engine was not found! Will fall back to torch.save. Details: {err}"
+                )
 
         dp_rank = groups._get_sequence_data_parallel_rank()
 
