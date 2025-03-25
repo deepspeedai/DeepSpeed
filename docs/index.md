@@ -7,6 +7,8 @@ title: "Latest News"
 ---
 <b> <span style="color:orange" > DeepSpeed empowers ChatGPT-like model training with a single click, offering 15x speedup over SOTA RLHF systems with unprecedented cost reduction at all scales; [learn how](https://github.com/deepspeedai/DeepSpeed/tree/master/blogs/deepspeed-chat)</span>.</b>
 
+* [2025/03] [DeepSpeed AutoTP: Automatic Tensor Parallel Training of Hugging Face models](https://github.com/deepspeedai/DeepSpeed/blob/master/blogs/huggingface-tp/README.md)
+
 * [2024/12] [DeepSpeed Domino: Communication-Free LLM Training Engine](https://github.com/deepspeedai/DeepSpeed/blob/master/blogs/deepspeed-domino/README.md)
 
 * [2024/08] [DeepSpeed on Windows](https://github.com/deepspeedai/DeepSpeed/blob/master/blogs/windows/08-2024/README.md)[[日本語](https://github.com/deepspeedai/DeepSpeed/blob/master/blogs/windows/08-2024/japanese/README.md)] [[中文](https://github.com/deepspeedai/DeepSpeed/blob/master/blogs/windows/08-2024/chinese/README.md)]
