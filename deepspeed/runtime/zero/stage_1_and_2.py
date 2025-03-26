@@ -1987,8 +1987,10 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
         if self.clip_grad > 0.:
             # norm is in fact norm*scale
             clip = ((total_norm / self.loss_scale) + 1e-6) / self.clip_grad
-            clip = torch.clamp(clip, min=1.0)
-            combined_scale = clip * self.loss_scale
+
+            # handle total_norm invalid value -1
+            if clip > 1:
+                combined_scale = clip * self.loss_scale
 
         for grad in grad_groups_flat:
             if isinstance(grad, list):
