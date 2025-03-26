@@ -1725,8 +1725,11 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
 
             total_norm = total_norm.pow(1. / norm_type)
 
-        if total_norm.isinf() or total_norm.isnan():
-             total_norm = torch.tensor(-1.0, device=self.device, dtype=torch.float)
+        norm_is_inf = total_norm.isinf()
+        norm_is_nan = total_norm.isnan()
+
+        if norm_is_inf or norm_is_nan:
+            total_norm = torch.tensor(-1.0, device=self.device, dtype=torch.float)
 
         return total_norm
 
