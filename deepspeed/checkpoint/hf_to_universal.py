@@ -9,7 +9,7 @@ from typing import List
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Constants for parameter patterns
+# Hard-coded constants for parameter patterns
 VOCAB_PARAMETER_PATTERNS = [
     'word_embeddings',
     'embed_tokens',
@@ -18,15 +18,6 @@ VOCAB_PARAMETER_PATTERNS = [
     'lm_head'  # Often tied with embeddings
 ]
 
-ROW_PARALLEL_PATTERNS = [
-    'dense_h_to_4h',
-    'fc1',
-    'k_proj',
-    'v_proj',
-    'q_proj',
-    'gate_proj',
-    'up_proj'
-]
 
 def get_parameter_type(name: str) -> dict:
     """Determine parameter type and required fields based on name."""
@@ -38,11 +29,7 @@ def get_parameter_type(name: str) -> dict:
     if any(pattern in name.lower() for pattern in VOCAB_PARAMETER_PATTERNS):
         param_info['vocab_tensor'] = True
     
-    # TODO: figure out if this is needed
-    # # Check for row-parallel parameters
-    # if any(pattern in name.lower() for pattern in ROW_PARALLEL_PATTERNS):
-    #     param_info['cat_dim'] = 1  # Use dimension 1 for row-parallel parameters
-    
+    # TODO: figure out if we need to check for row-parallel parameters
     return param_info
 
 if __name__ == '__main__':
@@ -75,7 +62,8 @@ if __name__ == '__main__':
         }
         torch.save(param_dict, param_path)
         
-        # Initialize optimizer states with zeros
+        # Since HuggingFace checkpoints do not have optimizer states, 
+        # we initialize them with zeros
         for state in ("exp_avg", "exp_avg_sq"):
             state_path = os.path.join(param_dir, f"{state}.pt")
             state_dict = {
