@@ -212,6 +212,12 @@ def get_initial_dynamic_scale(param_dict):
     return 2**initial_scale_power
 
 
+def get_fp16_fused_mode(param_dict):
+    if get_fp16_enabled(param_dict):
+        return get_scalar_param(param_dict[FP16], FP16_FUSED_MODE, FP16_FUSED_MODE_DEFAULT)
+    return FP16_FUSED_MODE_DEFAULT
+
+
 def get_dynamic_loss_scale_args(param_dict):
     loss_scale_args = None
     if get_fp16_enabled(param_dict):
@@ -839,6 +845,7 @@ class DeepSpeedConfig(object):
         self.loss_scale = get_loss_scale(param_dict)
         self.initial_dynamic_scale = get_initial_dynamic_scale(param_dict)
         self.dynamic_loss_scale_args = get_dynamic_loss_scale_args(param_dict)
+        self.fp16_fused_mode = get_fp16_fused_mode(param_dict)
 
         self.compression_config = get_compression_config(param_dict)
         self.graph_harvesting = get_graph_harvesting(param_dict)
