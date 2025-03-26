@@ -44,7 +44,7 @@ class BF16_Optimizer(ZeROOptimizer):
                  timers=None,
                  grad_acc_dtype=None,
                  graph_harvesting=False,
-                 immediate_grad_update=False,
+                 immediate_grad_update=True,
                  has_moe_layers=False):
         super().__init__()
         see_memory_usage('begin bf16_optimizer', force=True)
@@ -313,7 +313,7 @@ class BF16_Optimizer(ZeROOptimizer):
 
         self.clear_hp_grads()
 
-    def backward(self, loss, update_hp_grads=True, clear_lp_grads=False, **bwd_kwargs):
+    def backward(self, loss, retain_graph=False, update_hp_grads=True, clear_lp_grads=False, **bwd_kwargs):
         """Perform a backward pass and copy the low-precision gradients to the
         high-precision copy.
 
@@ -323,7 +323,7 @@ class BF16_Optimizer(ZeROOptimizer):
         The low-precision grads are deallocated during this procedure.
         """
         self.clear_lp_grads()
-        loss.backward(**bwd_kwargs)
+        loss.backward(retain_graph=retain_graph, **bwd_kwargs)
 
         if update_hp_grads:
             self.update_hp_grads(clear_lp_grads=clear_lp_grads)
@@ -425,9 +425,6 @@ class BF16_Optimizer(ZeROOptimizer):
                 fp32_partition) in enumerate(zip(self.bf16_partitioned_groups, self.fp32_groups_flat_partition)):
             partition_id = dist.get_rank(group=self.real_dp_process_group[i])
             bf16_partitions[partition_id].data.copy_(fp32_partition.data)
-            # print_rank_0(f'update_lp_params {i=} {partition_id=}', force=True)
-            # if i == 0:
-            #     print_rank_0(f'{fp32_partition[:10]=}', force=True)
 
         all_gather_dp_groups(groups_flat=self.bf16_groups_flat,
                              partitioned_param_groups=self.bf16_partitioned_groups,
@@ -442,10 +439,12 @@ class BF16_Optimizer(ZeROOptimizer):
         for i, group in enumerate(self.fp32_groups_gradients):
             self.fp32_groups_has_gradients[i] = [False] * len(group)
 
-    def clear_lp_grads(self):
+    def clear_lp_grads(self, set_to_none=False):
 
         # using zero_() fixed memory address for graph replay
-        set_to_none = False if self.graph_harvesting else True
+        if self.graph_harvesting:
+            assert not set_to_none, "graph harvesting is incompatible with setting lp grads to None"
+
         zero_grads_list = []
         for group in self.bf16_groups:
             for param in group:
@@ -457,6 +456,10 @@ class BF16_Optimizer(ZeROOptimizer):
                     zero_grads_list.append(param.grad)
         if not set_to_none and len(zero_grads_list) > 0:
             torch._foreach_zero_(zero_grads_list)
+
+    def zero_grad(self, set_to_none=True):
+        self.clear_lp_grads(set_to_none)
+        self.clear_hp_grads()
 
     def state_dict(self):
         state_dict = {}
