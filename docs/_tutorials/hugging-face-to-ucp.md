@@ -9,23 +9,19 @@ Universal Checkpointing in DeepSpeed abstracts away the complexities of saving a
 
 See more: https://www.deepspeed.ai/tutorials/universal-checkpointing/
 
-## Converting a Hugging Face checkpoint to Universal Checkpointing format
+## Converting a pretrained Hugging Face checkpoint to Universal Checkpointing format
 
-### Step 1: Download a Hugging Face checkpoint
+### Step 1: Download a pretrained Hugging Face checkpoint
+Download a pretrained Hugging Face checkpoint from the Hugging Face Hub using [snapshot_download](https://huggingface.co/docs/huggingface_hub/en/guides/download)
 
-You can download a Hugging Face checkpoint from the Hugging Face Hub. For example, you can download the `openai-community/gpt2` checkpoint using the following script
-
-```python
-from huggingface_hub import snapshot_download
-local_dir = snapshot_download(repo_id="openai-community/gpt2")
-```
+Hugging Face checkpoints are one or many files in the pytorch_model.bin or safetensors format.
 
 ### Step 2: Convert Hugging Face checkpoint to Universal Checkpointing format
 
 To convert a Hugging Face checkpoint to Universal Checkpointing format, you can use the `hf_to_universal.py` script provided in the DeepSpeed repository. This script will take a Hugging Face checkpoint directory and convert it to a Universal Checkpointing format.
 
 ```bash
-python hf_to_universal.py --hf_checkpoint_dir /path/to/huggingface/checkpoint --save_dir /path/to/universal/checkpoint
+python deepspeed/checkpoint/hf_to_universal.py --hf_checkpoint_dir /path/to/huggingface/checkpoint --save_dir /path/to/universal/checkpoint
 ```
 
 This script will process the Hugging Face checkpoint and generate a new checkpoint in the Universal Checkpointing format. Note that `hf_to_universal.py` script supports both safetensors and pytorch.bin checkpoint format.
