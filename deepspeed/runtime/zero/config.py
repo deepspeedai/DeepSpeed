@@ -272,7 +272,7 @@ class DeepSpeedZeroConfig(DeepSpeedConfigModel):
     ignore_unused_parameters: bool = True
     """
     Unused parameters in modules may be unexpected in static networks, but
-    could be normal in dynamic networks. This controls whether or not training
+  could be normal in dynamic networks. This controls whether or not training
     should terminate with an error message when unused parameters are detected.
     This is set to ``True`` by default, which means unused parameters are
     ignored and training continues. Now is just used in stage 2.
@@ -344,6 +344,11 @@ class DeepSpeedZeroConfig(DeepSpeedConfigModel):
     log_trace_cache_warnings: bool = False
     """
     Whether to log warnings from trace cache, such as invalidation events.
+    """
+    
+    ignore_missing_optim_state: bool = False
+    """
+    Ignore missing optimizer states when loading checkpoint
     """
 
     # Validators
