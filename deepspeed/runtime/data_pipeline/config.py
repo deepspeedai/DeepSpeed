@@ -39,14 +39,20 @@ def get_data_efficiency_seed(param_dict):
 
 def get_data_sampling(param_dict):
     output = {}
+    param_dict[DATA_SAMPLING] = param_dict.get(DATA_SAMPLING, {})
+    sub_param_dict = param_dict[DATA_SAMPLING]
+    sub_param_dict[DATA_SAMPLING_ENABLED] = \
+        bool(sub_param_dict.get(DATA_SAMPLING_ENABLED, DATA_SAMPLING_ENABLED_DEFAULT))
+    sub_param_dict[DATA_SAMPLING_NUM_EPOCHS] = \
+        int(sub_param_dict.get(DATA_SAMPLING_NUM_EPOCHS, DATA_SAMPLING_NUM_EPOCHS_DEFAULT))
+    sub_param_dict[DATA_SAMPLING_NUM_WORKERS] = \
+        int(sub_param_dict.get(DATA_SAMPLING_NUM_WORKERS, DATA_SAMPLING_NUM_WORKERS_DEFAULT))
+    sub_param_dict[DATA_SAMPLING_PIN_MEMORY] = \
+        bool(sub_param_dict.get(DATA_SAMPLING_PIN_MEMORY, DATA_SAMPLING_PIN_MEMORY_DEFAULT))
+    output[DATA_SAMPLING] = sub_param_dict
     output[DATA_SAMPLING_ENABLED] = get_data_sampling_enabled(param_dict)
     output[DATA_SAMPLING_NUM_EPOCHS] = get_data_sampling_num_epochs(param_dict)
     output[DATA_SAMPLING_NUM_WORKERS] = get_data_sampling_num_workers(param_dict)
-    output[DATA_SAMPLING_PIN_MEMORY] = bool(
-        output.get(param_dict[DATA_SAMPLING][DATA_SAMPLING_PIN_MEMORY], DATA_SAMPLING_PIN_MEMORY_DEFAULT))
-    if DATA_SAMPLING not in param_dict.keys():
-        param_dict[DATA_SAMPLING] = {}
-    sub_param_dict = param_dict[DATA_SAMPLING]
     output[CURRICULUM_LEARNING] = get_curriculum_learning(sub_param_dict)
     output[DYNAMIC_BATCHING] = get_dynamic_batching(sub_param_dict)
     return output
