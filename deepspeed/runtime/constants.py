@@ -128,7 +128,7 @@ BFLOAT16_ENABLED_DEFAULT = False
 
 # BFLOAT16 optimizer immediate gradient update
 BFLOAT16_IMMEDIATE_GRAD_UPDATE = "immediate_grad_update"
-BFLOAT16_IMMEDIATE_GRAD_UPDATE_DEFAULT = False
+BFLOAT16_IMMEDIATE_GRAD_UPDATE_DEFAULT = True
 
 #########################################
 # FP16 support
@@ -249,7 +249,7 @@ SEQ_PARALLEL_COMMUNICATION_DATA_TYPE_FORMAT = '''
 Optional comm data type for seq paralleism should be set as:
 "seq_parallel_communication_data_type": "fp32"
 '''
-SEQ_PARALLEL_COMMUNICATION_DATA_TYPE = "seq_parallel_comm_data_type"
+SEQ_PARALLEL_COMMUNICATION_DATA_TYPE = "seq_parallel_communication_data_type"
 SEQ_PARALLEL_COMMUNICATION_DATA_TYPE_DEFAULT = "fp32"
 
 #########################################
