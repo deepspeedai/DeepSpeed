@@ -112,10 +112,6 @@ class ColumnParallel(torch.autograd.Function):
 class GatherTensor(torch.autograd.Function):
     """Gather the input from model parallel region and concatinate."""
 
-    # @staticmethod
-    # def symbolic(graph, input_):
-    #     """Symbolic function for tracing."""
-    #     return _gather_along_last_dim(input_)
 
     @staticmethod
     def forward(ctx, group, input_):
@@ -431,8 +427,7 @@ class LinearLayer(TensorParallel_Layer):
         super(LinearLayer, self).__init__(mp_group, **kwargs)
         self.weight = module.weight
         self.bias = module.bias
-        if gather_output:
-            b=0
+
         if not skip_partition:
             self._tp_partition([self.weight, self.bias])
         self.support_training = True
@@ -639,7 +634,6 @@ class LmHeadLinearAllreduce(LinearAllreduce):
     def forward(self, input):
         input_shard_size = get_shard_size(input.shape[-1], self.tp_world_size, "lm_head")
         input_shard_offset = sum(get_shard_size_list(input.shape[-1], self.tp_world_size, "lm_head")[0:self.tp_index])
-        input= input[:, :, input_shard_offset:input_shard_offset + input_shard_size]
         
         output = torch.matmul(input[:, :, input_shard_offset:input_shard_offset + input_shard_size],
                               self.weight.transpose(-1, -2))
