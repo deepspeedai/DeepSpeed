@@ -32,3 +32,6 @@ class DataStatesCheckpointEngine(CheckpointEngine):
 
     def wait(self):
         return self.ckpt_engine.wait()
+
+    def preserves_storage_sharing(self):
+        return True
