@@ -161,7 +161,7 @@ class TensorParallel_Layer(nn.Module, ABC):
     keep_module_on_host: bool = False
 
     ##### Runtime Parameter List #####
-    overlap_comm: bool = False
+    tp_overlap_comm: bool = False
     """ Whether to overlap communication with computation. Currently, only allreduce supports overlap. """
 
     def __init__(self, mp_group: Optional[dist.ProcessGroup], **kwargs: Any):
@@ -296,7 +296,7 @@ class TensorParallel_Layer(nn.Module, ABC):
 
 
 def configure_tensor_parallel_runtime(config):
-    runtime_keys = ['overlap_comm']
+    runtime_keys = ['tp_overlap_comm']
     for key in runtime_keys:
         if hasattr(config, key):
             setattr(TensorParallel_Layer, key, getattr(config, key))
@@ -448,7 +448,7 @@ class LinearLayer(TensorParallel_Layer):
             self.config_tp_params(self.bias)
 
     def forward(self, input):
-        if not self.__class__.overlap_comm:
+        if not self.__class__.tp_overlap_comm:
             if getattr(self, 'mp_group', None) is not None:
                 input = ColumnParallel.apply(self.mp_group, input)
             output = torch.matmul(input, self.weight.transpose(-1, -2))

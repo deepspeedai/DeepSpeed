@@ -163,12 +163,12 @@ def process_linear_layer(hidden_dim, input):
 
 @pytest.mark.sequential
 @pytest.mark.parametrize("tp_size", [2, 4])
-@pytest.mark.parametrize("overlap_comm", [True, False])
+@pytest.mark.parametrize("tp_overlap_comm", [True, False])
 class TestTpLayerFwdBwd(DistributedTest):
     world_size = 4
     reuse_dist_env = True
 
-    def testRowParallel(self, tp_size: int, overlap_comm: bool):
+    def testRowParallel(self, tp_size: int, tp_overlap_comm: bool):
         skip_on_device()
         hidden_dim = 128
         batch_size_per_device = 1
@@ -184,7 +184,7 @@ class TestTpLayerFwdBwd(DistributedTest):
             },
             "tensor_parallel": {
                 "autotp_size": tp_size,
-                "overlap_comm": overlap_comm
+                "tp_overlap_comm": tp_overlap_comm
             },
             "zero_optimization": {
                 "stage": 0,
@@ -218,7 +218,7 @@ class TestTpLayerFwdBwd(DistributedTest):
         assert torch.allclose(linear.weight.grad, torch_grad.to(get_accelerator().current_device()), atol=1e-3)
         assert torch.allclose(out, torch_out.to(get_accelerator().current_device()), atol=1e-2)
 
-    def testColumnParallel(self, tp_size: int, overlap_comm: bool):
+    def testColumnParallel(self, tp_size: int, tp_overlap_comm: bool):
         skip_on_device()
         hidden_dim = 128
         batch_size_per_device = 1
@@ -234,7 +234,7 @@ class TestTpLayerFwdBwd(DistributedTest):
             },
             "tensor_parallel": {
                 "autotp_size": tp_size,
-                "overlap_comm": overlap_comm
+                "tp_overlap_comm": tp_overlap_comm
             },
             "zero_optimization": {
                 "stage": 0,
