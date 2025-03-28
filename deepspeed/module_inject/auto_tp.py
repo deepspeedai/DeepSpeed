@@ -384,7 +384,7 @@ class AutoTP():
             elif name == "lm_head" or name == 'embed_out':
                 if is_autotp_training_mode():
                     return child
-                    
+
                     ## gather output column parallel
                     ## return LinearLayer(child, self.mp_group, name=name, gather_output=True)
                 else:

@@ -109,23 +109,23 @@ class ColumnParallel(torch.autograd.Function):
         dist.all_reduce(grad_output.contiguous(), group=ctx.group)
         return None, grad_output
 
+
 class GatherTensor(torch.autograd.Function):
     """Gather the input from model parallel region and concatinate."""
-
 
     @staticmethod
     def forward(ctx, group, input_):
         """Forward function."""
         # gather along last dim
-        world_size=dist.get_world_size(group)
-        if world_size==1:
-            return 
-        ctx.group=group
-        ctx.world_size=world_size
+        world_size = dist.get_world_size(group)
+        if world_size == 1:
+            return
+        ctx.group = group
+        ctx.world_size = world_size
 
-        gather_shape = (world_size,) + input_.shape
-        output =torch.empty(gather_shape, dtype=input_.dtype, device=get_accelerator().current_device_name()  )
-        dist.all_gather_into_tensor(output, input_.contiguous(),  group)
+        gather_shape = (world_size, ) + input_.shape
+        output = torch.empty(gather_shape, dtype=input_.dtype, device=get_accelerator().current_device_name())
+        dist.all_gather_into_tensor(output, input_.contiguous(), group)
         tensor_list = output.chunk(world_size, dim=0)
         output = torch.cat(tensor_list, dim=-1).squeeze(0).contiguous()
         return output
@@ -138,6 +138,7 @@ class GatherTensor(torch.autograd.Function):
         input_list = torch.chunk(grad_output, ctx.world_size, -1)
         grad_output = input_list[rank].contiguous()
         return None, grad_output
+
 
 class TensorParallel_Layer(nn.Module, ABC):
     """
@@ -434,8 +435,7 @@ class LinearLayer(TensorParallel_Layer):
         self.config_tp_params(self.weight)
         if self.bias is not None:
             self.config_tp_params(self.bias)
-        self.gather_output=gather_output
-     
+        self.gather_output = gather_output
 
     def forward(self, input):
         if getattr(self, 'mp_group', None) is not None:
@@ -443,10 +443,10 @@ class LinearLayer(TensorParallel_Layer):
         output = torch.matmul(input, self.weight.transpose(-1, -2))
         if self.bias is not None:
             output += self.bias
-            
+
         if self.gather_output:
-            output = GatherTensor.apply(self.mp_group,output)
-            
+            output = GatherTensor.apply(self.mp_group, output)
+
         return output
 
     @torch.no_grad()
@@ -634,7 +634,7 @@ class LmHeadLinearAllreduce(LinearAllreduce):
     def forward(self, input):
         input_shard_size = get_shard_size(input.shape[-1], self.tp_world_size, "lm_head")
         input_shard_offset = sum(get_shard_size_list(input.shape[-1], self.tp_world_size, "lm_head")[0:self.tp_index])
-        
+
         output = torch.matmul(input[:, :, input_shard_offset:input_shard_offset + input_shard_size],
                               self.weight.transpose(-1, -2))
         if self.mp_group is not None:
