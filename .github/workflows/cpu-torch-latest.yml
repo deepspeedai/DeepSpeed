@@ -57,7 +57,8 @@ jobs:
 
       - name: Unit tests
         run: |
+          TEST_LOG_FILE="/tmp/test_log_cpu_${GITHUB_RUN_ID}.log"
           unset TORCH_CUDA_ARCH_LIST # only jit compile for current arch
           cd tests
-          HF_HOME=/tmp/hf_home/ pytest $PYTEST_OPTS -n 4 unit/ --torch_ver="2.6"
+          RUNNING_TEST_LOG_FILE=${TEST_LOG_FILE} DS_UNITTEST_FILE_STORE_DIR=/dev/shm HF_HOME=/tmp/hf_home/ pytest $PYTEST_OPTS -n 4 unit/ --torch_ver="2.6"
           HF_HOME=/tmp/hf_home/ pytest $PYTEST_OPTS -m 'sequential' unit/ --torch_ver="2.6"
