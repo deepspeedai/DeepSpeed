@@ -617,7 +617,12 @@ class PipelineModule(nn.Module):
             if exclude_frozen_params:
                 for n in self._get_frozen_parameter_names(layer):
                     del orig_state_dict[n]
-            final_state_dict = clone_tensors_for_torch_save(orig_state_dict)
+
+            if checkpoint_engine.preserves_storage_sharing():
+                final_state_dict = orig_state_dict
+            else:
+                final_state_dict = clone_tensors_for_torch_save(orig_state_dict)
+
             checkpoint_engine.save(final_state_dict, model_ckpt_path)
 
     def load_state_dir(self, load_dir, checkpoint_engine, strict=True):
