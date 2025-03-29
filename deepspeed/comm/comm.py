@@ -52,6 +52,9 @@ mpi_backend = None
 ccl_backend = None
 hccl_backend = None
 
+# Cache of previously created comms
+comms_cache = {}
+
 # This should be set here so all rank/size information from the launcher can be propagated
 from deepspeed.comm.utils import *
 
@@ -182,7 +185,15 @@ def new_group(ranks):
     global cdb
     assert cdb is not None and cdb.is_initialized(
     ), 'DeepSpeed backend not set, please initialize it using init_process_group()'
-    return cdb.new_group(ranks)
+
+    key = (cdb, tuple(ranks))
+
+    if key in comms_cache:
+        return comms_cache[key]
+    else:
+        new_group = cdb.new_group(ranks)
+        comms_cache[key] = new_group
+        return new_group
 
 
 def is_available() -> bool:
