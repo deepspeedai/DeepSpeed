@@ -1730,7 +1730,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
         inf_or_nan = norm_is_nan.logical_or(norm_is_inf)
 
         err = torch.tensor(-1.0, device=self.device, dtype=torch.float)
-        total_norm = inf_or_nan * err + inf_or_nan.logical_not() * total_norm
+        total_norm = torch.where(inf_or_nan, err, total_norm)
         return total_norm
 
     # creates a flat fused tensor from the tensor list starting at the first_offset
