@@ -1727,10 +1727,10 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
 
         norm_is_inf = total_norm.isinf()
         norm_is_nan = total_norm.isnan()
-        inf_or_nan = norm_is_nan.logical_or(norm_is_inf)
 
-        err = torch.tensor(-1.0, device=self.device, dtype=torch.float)
-        total_norm = inf_or_nan * err + inf_or_nan.logical_not() * total_norm
+        if norm_is_inf or norm_is_nan:
+            total_norm = torch.tensor(-1.0, device=self.device, dtype=torch.float)
+
         return total_norm
 
     # creates a flat fused tensor from the tensor list starting at the first_offset
@@ -1987,8 +1987,10 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
         if self.clip_grad > 0.:
             # norm is in fact norm*scale
             clip = ((total_norm / self.loss_scale) + 1e-6) / self.clip_grad
-            clip = torch.clamp(clip, min=1.0)
-            combined_scale = clip * self.loss_scale
+
+            # handle total_norm invalid value -1
+            if clip > 1:
+                combined_scale = clip * self.loss_scale
 
         for grad in grad_groups_flat:
             if isinstance(grad, list):
