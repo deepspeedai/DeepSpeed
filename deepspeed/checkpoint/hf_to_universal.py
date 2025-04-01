@@ -14,8 +14,8 @@ VOCAB_PARAMETER_PATTERNS = [
     'word_embeddings',
     'embed_tokens',
     'embedding',
-    'wte',  # GPT style embeddings
-    'lm_head'  # Often tied with embeddings
+    'wte',              # GPT style embeddings
+    'lm_head'           # Language model head, often tied with embeddings
 ]
 
 
@@ -35,8 +35,8 @@ def get_parameter_type(name: str) -> dict:
 if __name__ == '__main__':
     import argparse
     
-    parser = argparse.ArgumentParser(description='Load a HuggingFace model')
-    parser.add_argument('--hf_checkpoint_dir', type=str, help='Path to the HuggingFace checkpoint directory')
+    parser = argparse.ArgumentParser(description='Convert HuggingFace checkpoint to Universal Checkpoint format')
+    parser.add_argument('--hf_checkpoint_dir', type=str, required=True, help='Path to the HuggingFace checkpoint directory')
     parser.add_argument('--safe_serialization', action='store_true', default=False, help='Use safetensors for serialization')
     parser.add_argument('--num_workers', type=int, default=4, help='Number of workers to use for saving checkpoints')
     parser.add_argument('--save_dir', type=str, required=True, help='Directory to save checkpoints')
@@ -119,10 +119,12 @@ if __name__ == '__main__':
             return list(set(index['weight_map'].values()))
         else:
             # Handle single file case
-            if args.safe_serialization:
+            if args.safe_serialization and os.path.exists(os.path.join(checkpoint_dir, "model.safetensors")):
                 return ["model.safetensors"]
-            else:
+            elif os.path.exists(os.path.join(checkpoint_dir, "pytorch_model.bin")):
                 return ["pytorch_model.bin"]
+            else:
+                raise FileNotFoundError(f"No checkpoint files found in {checkpoint_dir}")
 
     def process_shard_batch(shard_files: List[str], checkpoint_dir: str, save_dir: str, safe_serialization: bool):
         """Process a batch of shards in parallel."""
