@@ -822,12 +822,14 @@ def get_only_unique_item(items):
 
     return unique_item
 
+
 def mask_nan_or_inf_with_val_inplace(input, device=None, val=-1.):
-        norm_is_inf = input.isinf()
-        norm_is_nan = input.isnan()
-        inf_or_nan = norm_is_nan.logical_or(norm_is_inf)
-        err = torch.tensor(-1.0, device=device, dtype=torch.float)   
-        input.masked_fill_(inf_or_nan, err)
+    norm_is_inf = input.isinf()
+    norm_is_nan = input.isnan()
+    inf_or_nan = norm_is_nan.logical_or(norm_is_inf)
+    err = torch.tensor(-1.0, device=device, dtype=torch.float)
+    input.masked_fill_(inf_or_nan, err)
+
 
 def get_global_norm_of_tensors(input_tensors, norm_type=2, mpu=None, use_graph=False, moe_ep_group=None):
     """Get norm of an iterable of tensors.
