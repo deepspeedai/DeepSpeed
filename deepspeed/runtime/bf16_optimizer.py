@@ -18,6 +18,7 @@ from deepspeed.runtime.utils import (get_global_norm_of_tensors, clip_tensors_by
 from deepspeed.utils import link_hp_params, lazy_init_hp_params_optimizer_state, fragment_address, groups
 from deepspeed.moe.utils import is_moe_param, is_moe_param_group
 from deepspeed.utils.bwc import bwc_tensor_model_parallel_rank
+from deepspeed.utils.torch import register_grad_hook
 from deepspeed.checkpoint import enable_universal_checkpoint
 from deepspeed.checkpoint.constants import (DS_VERSION, PARTITION_COUNT, BASE_OPTIMIZER_STATE,
                                             SINGLE_PARTITION_OF_FP32_GROUPS, CLIP_GRAD, GROUP_PADDINGS,
@@ -540,20 +541,16 @@ class BF16_Optimizer(ZeROOptimizer):
         self._update_hp_grad(lp_param, group_idx, param_idx, clear_lp_grads=False)
 
     def create_grad_acc_hooks(self):
-        self.grad_accs = []
         for i, param_group in enumerate(self.bf16_groups):
             for j, param in enumerate(param_group):
                 if param.requires_grad:
 
                     def wrapper(param, i, j):
-                        param_tmp = param.expand_as(param)
-                        grad_acc = param_tmp.grad_fn.next_functions[0][0]
 
                         def accumulate_hp_grads_and_remove_lp(*notneeded):
                             self.accumulate_hp_grads_and_remove_lp(param, i, j)
 
-                        self._grad_acc_hooks.append(grad_acc.register_hook(accumulate_hp_grads_and_remove_lp))
-                        self.grad_accs.append(grad_acc)
+                        self._grad_acc_hooks.append(register_grad_hook(param, accumulate_hp_grads_and_remove_lp))
 
                     wrapper(param, i, j)
 
