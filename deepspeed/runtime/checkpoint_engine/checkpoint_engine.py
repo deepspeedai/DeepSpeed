@@ -32,8 +32,3 @@ class CheckpointEngine(object):
     def wait(self):
         # To wait in asynchronous checkpoint engines (e.g. DataStates-LLM) for the previous snapshot to finish
         pass
-
-    def preserves_storage_sharing(self):
-        # Check if the checkpoint engine preserves storage sharing
-        # (set to false if cloning is required to get actual tensor sizes)
-        return False
