@@ -1,7 +1,7 @@
 # Copyright (c) Microsoft Corporation.
 # SPDX-License-Identifier: Apache-2.0
 
-# MIT License Copyright (c) UChicago Argonne LLC, operator of Argonne National Laboratory.
+# Apache-2.0 License Copyright (c) UChicago Argonne LLC, operator of Argonne National Laboratory.
 
 # DeepSpeed Team
 
@@ -32,6 +32,3 @@ class DataStatesCheckpointEngine(CheckpointEngine):
 
     def wait(self):
         return self.ckpt_engine.wait()
-
-    def preserves_storage_sharing(self):
-        return True

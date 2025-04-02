@@ -7,6 +7,7 @@ import torch
 from deepspeed.utils import logger, log_dist
 from deepspeed.runtime.checkpoint_engine.checkpoint_engine import \
     CheckpointEngine
+from deepspeed.checkpoint.utils import clone_tensors_for_torch_save
 
 
 class TorchCheckpointEngine(CheckpointEngine):
@@ -19,7 +20,8 @@ class TorchCheckpointEngine(CheckpointEngine):
 
     def save(self, state_dict, path: str):
         logger.info(f"[Torch] Saving {path}...")
-        torch.save(state_dict, path)
+        debloated_state_dict = clone_tensors_for_torch_save(state_dict)
+        torch.save(debloated_state_dict, path)
         logger.info(f"[Torch] Saved {path}.")
         return None
 

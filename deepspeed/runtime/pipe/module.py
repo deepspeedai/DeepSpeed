@@ -20,7 +20,6 @@ from ..activation_checkpointing import checkpointing
 from .topology import PipeDataParallelTopology, PipelineParallelGrid
 from deepspeed.runtime.state_dict_factory import SDLoaderFactory
 from deepspeed.accelerator import get_accelerator
-from deepspeed.checkpoint.utils import clone_tensors_for_torch_save
 
 
 class PipelineError(Exception):
@@ -618,12 +617,7 @@ class PipelineModule(nn.Module):
                 for n in self._get_frozen_parameter_names(layer):
                     del orig_state_dict[n]
 
-            if checkpoint_engine.preserves_storage_sharing():
-                final_state_dict = orig_state_dict
-            else:
-                final_state_dict = clone_tensors_for_torch_save(orig_state_dict)
-
-            checkpoint_engine.save(final_state_dict, model_ckpt_path)
+            checkpoint_engine.save(orig_state_dict, model_ckpt_path)
 
     def load_state_dir(self, load_dir, checkpoint_engine, strict=True):
         for idx, layer in enumerate(self.forward_funcs):
