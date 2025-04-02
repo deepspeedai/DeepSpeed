@@ -17,6 +17,7 @@ from deepspeed.runtime.zero.config import ZeroStageEnum
 from deepspeed.runtime.zero.offload_config import OffloadDeviceEnum
 from deepspeed.ops.adam import DeepSpeedCPUAdam
 from deepspeed.utils import logger
+from deepspeed.utils.torch import register_grad_hook
 from deepspeed.utils.bwc import bwc_tensor_model_parallel_rank
 from deepspeed.moe.utils import is_moe_param
 from deepspeed.git_version_info import version
@@ -911,20 +912,16 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
             param.grad = None
 
     def create_gradient_handling_hooks(self):
-        self.grad_accs = []
         for i, param_group in enumerate(self.bit16_groups):
             for param in param_group:
                 if param.requires_grad:
 
                     def wrapper(param, i):
-                        param_tmp = param.expand_as(param)
-                        grad_acc = param_tmp.grad_fn.next_functions[0][0]
 
                         def grad_handling_hook(*notneeded):
                             self.process_gradients(param, i)
 
-                        self._grad_acc_hooks.append(grad_acc.register_hook(grad_handling_hook))
-                        self.grad_accs.append(grad_acc)
+                        self._grad_acc_hooks.append(register_grad_hook(param, grad_handling_hook))
 
                     wrapper(param, i)
 
