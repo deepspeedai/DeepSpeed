@@ -12,11 +12,12 @@ from torch._utils import _flatten_dense_tensors, _unflatten_dense_tensors
 from deepspeed.runtime.base_optimizer import ZeROOptimizer
 from deepspeed.runtime.fp16.loss_scaler import CreateLossScaler
 from deepspeed.runtime.utils import (empty_cache, see_memory_usage, inf, is_model_parallel_parameter,
-                                     align_dense_tensors, all_gather_dp_groups)
+                                     align_dense_tensors, all_gather_dp_groups, mask_nan_or_inf_with_val_inplace)
 from deepspeed.runtime.zero.config import ZeroStageEnum
 from deepspeed.runtime.zero.offload_config import OffloadDeviceEnum
 from deepspeed.ops.adam import DeepSpeedCPUAdam
 from deepspeed.utils import logger
+from deepspeed.utils.torch import register_grad_hook
 from deepspeed.utils.bwc import bwc_tensor_model_parallel_rank
 from deepspeed.moe.utils import is_moe_param
 from deepspeed.git_version_info import version
@@ -911,20 +912,16 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
             param.grad = None
 
     def create_gradient_handling_hooks(self):
-        self.grad_accs = []
         for i, param_group in enumerate(self.bit16_groups):
             for param in param_group:
                 if param.requires_grad:
 
                     def wrapper(param, i):
-                        param_tmp = param.expand_as(param)
-                        grad_acc = param_tmp.grad_fn.next_functions[0][0]
 
                         def grad_handling_hook(*notneeded):
                             self.process_gradients(param, i)
 
-                        self._grad_acc_hooks.append(grad_acc.register_hook(grad_handling_hook))
-                        self.grad_accs.append(grad_acc)
+                        self._grad_acc_hooks.append(register_grad_hook(param, grad_handling_hook))
 
                     wrapper(param, i)
 
@@ -1725,12 +1722,8 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
 
             total_norm = total_norm.pow(1. / norm_type)
 
-        norm_is_inf = total_norm.isinf()
-        norm_is_nan = total_norm.isnan()
-        inf_or_nan = norm_is_nan.logical_or(norm_is_inf)
+        mask_nan_or_inf_with_val_inplace(total_norm, device=self.device)
 
-        err = torch.tensor(-1.0, device=self.device, dtype=torch.float)
-        total_norm = inf_or_nan * err + inf_or_nan.logical_not() * total_norm
         return total_norm
 
     # creates a flat fused tensor from the tensor list starting at the first_offset

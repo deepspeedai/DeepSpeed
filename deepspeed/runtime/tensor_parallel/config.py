@@ -47,6 +47,9 @@ class TPTrainingConfig(DeepSpeedConfigModel):
     In automatic tensor-parallelism training, 'tensor_parallel_size'
     When set to 0, indicates that it is disabled.
     """
+    tp_overlap_comm: bool = False
+    """ Whether to overlap communication with computation. Currently, only allreduce supports overlap. """
+
     tensor_parallel: TPConfig = Field({}, alias="tp")
     """
     Configuration for tensor parallelism used to split the model across several

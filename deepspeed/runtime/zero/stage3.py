@@ -19,7 +19,7 @@ from deepspeed.utils import logger
 from deepspeed.utils.torch import register_grad_hook
 from deepspeed.runtime.fp16.loss_scaler import CreateLossScaler
 from deepspeed.runtime.comm.coalesced_collectives import reduce_scatter_coalesced, all_to_all_quant_reduce, all_to_all_loco_quant_reduce
-from deepspeed.runtime.utils import inf, is_model_parallel_parameter, get_only_unique_item
+from deepspeed.runtime.utils import inf, is_model_parallel_parameter, get_only_unique_item, mask_nan_or_inf_with_val_inplace
 from deepspeed.runtime.zero.partition_parameters import *
 from deepspeed.runtime.zero.config import ZeroStageEnum
 from deepspeed.runtime.zero.offload_config import OffloadDeviceEnum, OffloadStateTypeEnum
@@ -1453,12 +1453,7 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
 
         total_norm = total_norm_cuda[0]**(1. / norm_type)
 
-        norm_is_inf = total_norm.isinf()
-        norm_is_nan = total_norm.isnan()
-        inf_or_nan = norm_is_nan.logical_or(norm_is_inf)
-
-        err = torch.tensor(-1.0, device=inf_or_nan.device, dtype=torch.float)
-        total_norm = inf_or_nan * err + inf_or_nan.logical_not() * total_norm
+        mask_nan_or_inf_with_val_inplace(total_norm, device=total_norm.device)
 
         return total_norm.cpu()
 
@@ -1815,7 +1810,7 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
         inf_or_nan = norm_is_nan.logical_or(norm_is_inf)
 
         err = torch.tensor(-1.0, device=self.device, dtype=torch.float)
-        total_norm = inf_or_nan * err + inf_or_nan.logical_not() * total_norm
+        total_norm = torch.where(inf_or_nan, err, total_norm)
 
         return total_norm
 
