@@ -107,6 +107,12 @@ from deepspeed.accelerator import get_accelerator
 
 from deepspeed.runtime.config import DtypeEnum
 
+from deepspeed.compile.util import is_deepcompile_supported, get_deepcompile_handle, deepcompile_backward_prologue
+from deepspeed.compile.backend import register_compile_pass, opt_passes
+from deepspeed.compile.passes import zero3_compile, prefetch, selective_gather, offload_adam_states
+from deepspeed.compile.init_z1 import init_z1
+from deepspeed.compile.init_z3 import init_z3
+
 MEMORY_OPT_ALLREDUCE_SIZE = 500000000
 
 DeepSpeedOptimizerCallable = \
@@ -271,8 +277,9 @@ class DeepSpeedEngine(Module):
         # Configure distributed model
         self._configure_distributed_model(model)
 
-        self.module_forward_pre_hook = self._create_module_forward_pre_hook()
-        self.module_forward_post_hook = self._create_module_forward_post_hook()
+        if not self.is_deepcompile_enabled():
+            self.module_forward_pre_hook = self._create_module_forward_pre_hook()
+            self.module_forward_post_hook = self._create_module_forward_post_hook()
 
         # needed for zero_to_fp32 weights reconstruction to remap nameless data to state_dict
         self.param_names = {param: name for name, param in model.named_parameters()}
@@ -377,6 +384,12 @@ class DeepSpeedEngine(Module):
         self.unflatten = _unflatten_dense_tensors
 
         self._is_compiled = False
+        if is_deepcompile_supported():
+            # Predefined compile passes
+            self.register_compile_pass(zero3_compile.NAME, zero3_compile.add_z3_gather_release)
+            self.register_compile_pass(prefetch.NAME, prefetch.schedule_prefetch)
+            self.register_compile_pass(selective_gather.NAME, selective_gather.selective_gather)
+            self.register_compile_pass(offload_adam_states.NAME, offload_adam_states.move_opt_states)
 
     def _optimized_linear_offload_setup(self):
         self.optimized_linear_base_weight_sharding = False
@@ -486,6 +499,8 @@ class DeepSpeedEngine(Module):
     def destroy(self):
         if self.optimizer is not None and hasattr(self.optimizer, 'destroy'):
             self.optimizer.destroy()
+        if self.is_deepcompile_enabled():
+            get_deepcompile_handle().cleanup()
         debug_clear_module_and_param_names()
 
     def _get_model_parameters(self):
@@ -2032,6 +2047,10 @@ class DeepSpeedEngine(Module):
         if self.autotuning_profile_model_info():
             ma = get_ma_status()
 
+        if self.is_deepcompile_enabled() and hasattr(self, "launch_compile_passes"):
+            # We can't have this in forward prologue as the compiler compiles hooks including the forward prologue.
+            self.launch_compile_passes(self.global_steps)
+
         loss = self.module(*inputs, **kwargs)
 
         if self.autotuning_profile_model_info():
@@ -2104,7 +2123,8 @@ class DeepSpeedEngine(Module):
             scale_wrt_gas = self.scale_wrt_gas
 
         # scale loss w.r.t. gradient accumulation if reduction is not disabled
-        do_gradient_reduction = self.enable_backward_allreduce and not self.inside_no_sync_ctxt
+        do_gradient_reduction = self.enable_backward_allreduce and not self.inside_no_sync_ctxt and not self.is_deepcompile_enabled(
+        )
         if do_gradient_reduction and self.gradient_accumulation_steps() > 1 and scale_wrt_gas:
             loss = self._scale_loss_by_gas(loss.float())
 
@@ -2121,6 +2141,9 @@ class DeepSpeedEngine(Module):
                     )]
                     self.monitor.write_events(self.summary_events)
 
+        if self.is_deepcompile_enabled():
+            deepcompile_backward_prologue(self.is_gradient_accumulation_boundary())
+
         return loss
 
     def _backward_epilogue(self):
@@ -2128,6 +2151,7 @@ class DeepSpeedEngine(Module):
         if self.enable_backward_allreduce and not self.inside_no_sync_ctxt:
             # Traditional code path that allreduces the module parameter grads
             self.allreduce_gradients()
+
         self._stop_timers(self.engine_timers.backward_reduce_timers)
         see_memory_usage("Engine after backward", force=self.memory_breakdown())
 
@@ -3849,7 +3873,7 @@ class DeepSpeedEngine(Module):
             gc.collect()
             get_accelerator().empty_cache()
 
-    def compile(self, backend=get_accelerator().get_compile_backend(), compile_kwargs={}) -> None:
+    def compile(self, backend=get_accelerator().get_compile_backend(), compile_kwargs={}, schedule=None) -> None:
         """Compile the module using the specified backend and kwargs.
         If a compiler_fn is set, it will be used instead of torch.compile().
         """
@@ -3865,9 +3889,49 @@ class DeepSpeedEngine(Module):
         if 'backend' in compile_kwargs:
             logger.warning("The `backend` in `compile_kwargs` will be overridden. Use the `backend` argument instead.")
 
+        print(f"Compiling deepcompile={self.is_deepcompile_enabled()} backend={backend}")
+
+        if self.is_deepcompile_enabled():
+            assert self.zero_optimization_stage() == ZeroStageEnum.optimizer_states \
+                or self.zero_optimization_stage() == ZeroStageEnum.weights \
+                , "Currently DeepCompile supports stage 1 or 3 only."
+
+            if schedule is not None:
+
+                def passes_name_to_fn(passes):
+                    for p in passes:
+                        assert callable(p) or p in opt_passes, f"Unknown pass {p}"
+                    return [p if callable(p) else opt_passes[p] for p in passes]
+
+                schedule = [(step, passes_name_to_fn(passes)) for step, passes in schedule]
+
+            assert backend in ['inductor', 'eager'], f"Backend {backend} is not supported for DeepCompile."
+
+            compile_config = self._config.compile_config
+            if (("zero_optimization" in self.config and "offload_optimizer" in self.config["zero_optimization"]
+                 and "offload_param" in self.config["zero_optimization"])
+                    and self._config.zero_config.offload_param.device == "cpu"
+                    and self._config.zero_config.offload_optimizer.device == "cpu"):
+                compile_config.offload_parameters = True
+            if self.zero_optimization_stage() == ZeroStageEnum.optimizer_states:
+                backend = init_z1(self, backend, compile_config, compile_kwargs, schedule)
+            elif self.zero_optimization_stage() == ZeroStageEnum.weights:
+                backend = init_z3(self, backend, compile_config, compile_kwargs, schedule)
+
         # create new dict to avoid modifying original dict
         self.module.compile(**{**compile_kwargs, 'backend': backend})
+
         self._is_compiled = True
+
+    def get_compile_time(self):
+        from deepspeed.compile.backend import opt_pass_times
+        return opt_pass_times
+
+    def register_compile_pass(self, pass_name: str, pass_fn: Callable) -> None:
+        register_compile_pass(pass_name, pass_fn)
+
+    def is_deepcompile_enabled(self):
+        return self._config.compile_config.deepcompile
 
     @property
     def is_compiled(self) -> bool:
