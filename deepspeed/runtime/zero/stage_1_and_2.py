@@ -2309,15 +2309,14 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
                         load_from_fp32_weights=False,
                         checkpoint_folder=None,
                         load_serial=None,
-                        param_shapes=None,
-                        ignore_missing_optim_state: bool = False):
+                        param_shapes=None):
         if checkpoint_folder:
-            self._load_universal_checkpoint(checkpoint_folder, load_optimizer_states, load_from_fp32_weights, ignore_missing_optim_state=ignore_missing_optim_state)
+            self._load_universal_checkpoint(checkpoint_folder, load_optimizer_states, load_from_fp32_weights)
         else:
             self._load_legacy_checkpoint(state_dict_list, load_optimizer_states, load_from_fp32_weights)
 
-    def _load_universal_checkpoint(self, checkpoint_folder, load_optimizer_states, load_from_fp32_weights, ignore_missing_optim_state: bool = False):
-        self.load_hp_checkpoint_state_from_checkpoint_dir("bit16_groups", checkpoint_folder, ignore_missing_optim_state=ignore_missing_optim_state)
+    def _load_universal_checkpoint(self, checkpoint_folder, load_optimizer_states, load_from_fp32_weights):
+        self.load_hp_checkpoint_state_from_checkpoint_dir("bit16_groups", checkpoint_folder)
 
     def _load_global_state(self, sd):
         self.loss_scaler = sd.get(LOSS_SCALER, self.loss_scaler)

@@ -2692,8 +2692,7 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
                         load_from_fp32_weights=False,
                         checkpoint_folder=None,
                         load_serial=None,
-                        param_shapes=None,
-                        ignore_missing_optim_state: bool = False):
+                        param_shapes=None):
         r"""Loading a ZeRO checkpoint
         Arguments:
             state_dict_list: List of all saved ZeRO checkpoints, one for each saved partition.
@@ -2724,7 +2723,7 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
 
         if checkpoint_folder:
             self._load_universal_checkpoint(checkpoint_folder, load_optimizer_states, load_from_fp32_weights,
-                                            param_shapes, ignore_missing_optim_state=ignore_missing_optim_state)
+                                            param_shapes)
         else:
             self._rigid_load_state_dict(state_dict_list[dist.get_rank(group=self.dp_process_group)],
                                         load_optimizer_states=load_optimizer_states)
@@ -2746,19 +2745,20 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
                 # self.persistent_parameters[0].all_gather(self.persistent_parameters) # this will be done in checkpoint_event_epilogue() so remove it to prevent double all_gather
 
     def _load_universal_checkpoint(self, checkpoint_folder, load_optimizer_states, load_from_fp32_weights,
-                                   param_shapes, ignore_missing_optim_state):
-        self.load_hp_checkpoint_state_from_checkpoint_dir_stage3(checkpoint_folder, param_shapes, ignore_missing_optim_state)
+                                   param_shapes):
+        self.load_hp_checkpoint_state_from_checkpoint_dir_stage3(checkpoint_folder, param_shapes)
 
-    def load_hp_checkpoint_state_from_checkpoint_dir_stage3(self, checkpoint_dir, param_shapes, ignore_missing_optim_state):
+    def load_hp_checkpoint_state_from_checkpoint_dir_stage3(self, checkpoint_dir, param_shapes):
         """ Load optimizer and model states from the checkpoint directory. """
         checkpoint_dir = os.path.join(checkpoint_dir, "zero")
         optim_state_path = os.path.join(checkpoint_dir, "optimizer_state.pt")
-        if not ignore_missing_optim_state:
-            assert os.path.isfile(
-                optim_state_path), f'{optim_state_path} containing optimizer global state is missing! Cannot proceed.'
-
+        if os.path.isfile(optim_state_path):
+            ignore_missing_optim_state = False
             optim_sd = torch.load(optim_state_path, weights_only=False)
             self._load_global_state_stage3(optim_sd)
+        else:
+            logger.warning(f'{optim_state_path} containing optimizer global state is missing!')
+            ignore_missing_optim_state = True
 
         key_list = ["fp32", "exp_avg", "exp_avg_sq"]
 
@@ -2777,6 +2777,7 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
             # Purge the swapped optimizer state, it was initialized to the freshly created model and not the checkpoint
             self.optimizer_swapper.purge_state()
 
+        if self.swap_optimizer:
             # Touch all parameters to synchronize all buffers
             timer_names = set()
             self._partition_all_parameters()
@@ -2813,7 +2814,6 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
         local_rank = dist.get_local_rank()
 
         # Load tensors from files and reshape them to flat vectors
-         
         loaded_state = torch.load(os.path.join(folder, f"{key}.pt"), weights_only=False)
         if isinstance(loaded_state, dict):
             loaded_checkpoint_state = loaded_state['param'].view(-1)
