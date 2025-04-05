@@ -17,16 +17,16 @@ class DeepSpeedOptimizer(object):
 
 class ZeROOptimizer(DeepSpeedOptimizer):
 
-    def load_hp_checkpoint_state_from_checkpoint_dir(self, lp_groups_name: str, checkpoint_dir: str, ignore_missing_optim_state: bool = False) -> None:
+    def load_hp_checkpoint_state_from_checkpoint_dir(self, lp_groups_name: str, checkpoint_dir: str) -> None:
         checkpoint_dir = os.path.join(checkpoint_dir, "zero")
-        optim_state_path = os.path.join(checkpoint_dir, "optimizer_state.pt")            
-        if not ignore_missing_optim_state:
-            assert os.path.isfile(
-                optim_state_path), f'{optim_state_path} containing optimizer global state is missing! Cannot proceed.'
-                
+        optim_state_path = os.path.join(checkpoint_dir, "optimizer_state.pt")
+        if os.path.isfile(optim_state_path):
+            ignore_missing_optim_state = False
             optim_sd = torch.load(optim_state_path, weights_only=False)
             self._load_global_state(optim_sd)
         else:
+            logger.warning(f'{optim_state_path} containing optimizer global state is missing!')
+            ignore_missing_optim_state = True
             optim_sd = {}
 
         tp_rank = bwc_tensor_model_parallel_rank(mpu=self.mpu)

@@ -902,10 +902,6 @@ class DeepSpeedEngine(Module):
     def zero_ignore_unused_parameters(self):
         return self._config.zero_config.ignore_unused_parameters
 
-    # TODO rename for less confusion
-    def zero_ignore_missing_optim_state(self):
-        return self._config.zero_config.ignore_missing_optim_state
-
     def autotp_size(self):
         return self._config.tensor_parallel_config.autotp_size
 
@@ -2951,24 +2947,16 @@ class DeepSpeedEngine(Module):
         if self._optimizer_has_ckpt_event_prologue():
             # Prepare for checkpoint load by ensuring all parameters are partitioned
             self.optimizer.checkpoint_event_prologue()
-        
-        if not self.zero_ignore_missing_optim_state():
-            # Temporary skip this path for HF-based UCP
-            load_path, client_states = self._load_checkpoint(load_dir,
-                                                            tag,
-                                                            load_module_strict=load_module_strict,
-                                                            load_optimizer_states=load_optimizer_states,
-                                                            load_lr_scheduler_states=load_lr_scheduler_states,
-                                                            load_module_only=load_module_only,
-                                                            custom_load_fn=custom_load_fn)
-            
-            load_zero_checkpoint = load_path is not None and (self.zero_optimization() or self.bfloat16_enabled())
-        
-        else:
-            # What should load_path and client_states be?
-            load_path, client_states = None, {}
-            load_zero_checkpoint = (self.zero_optimization() or self.bfloat16_enabled())
-        
+
+        load_path, client_states = self._load_checkpoint(load_dir,
+                                                         tag,
+                                                         load_module_strict=load_module_strict,
+                                                         load_optimizer_states=load_optimizer_states,
+                                                         load_lr_scheduler_states=load_lr_scheduler_states,
+                                                         load_module_only=load_module_only,
+                                                         custom_load_fn=custom_load_fn)
+
+        load_zero_checkpoint = load_path is not None and (self.zero_optimization() or self.bfloat16_enabled())
         if load_zero_checkpoint:
             if (load_optimizer_states and not load_module_only) or self.load_universal_checkpoint():
                 success = self._load_zero_checkpoint(load_dir, tag, load_optimizer_states=load_optimizer_states)
@@ -3008,7 +2996,7 @@ class DeepSpeedEngine(Module):
                          custom_load_fn=None):
 
         from deepspeed.runtime.state_dict_factory import SDLoaderFactory
-        logger.info(f"Loading checkpoint from {load_dir} with tag {tag}")
+
         ckpt_list = self._get_all_ckpt_names(load_dir, tag)
         sd_loader = SDLoaderFactory.get_sd_loader(ckpt_list, checkpoint_engine=self.checkpoint_engine)
 
@@ -3166,8 +3154,7 @@ class DeepSpeedEngine(Module):
                                        load_from_fp32_weights=self.zero_load_from_fp32_weights(),
                                        checkpoint_folder=checkpoint_folder,
                                        load_serial=load_serial,
-                                       param_shapes=param_shapes,
-                                       ignore_missing_optim_state=self.zero_ignore_missing_optim_state())
+                                       param_shapes=param_shapes)
 
         if self.load_universal_checkpoint():
             logger.info(f'loaded universal zero checkpoints from {checkpoint_folder} for rank {self.global_rank}')
