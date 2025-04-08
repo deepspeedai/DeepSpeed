@@ -12,7 +12,7 @@ from torch._utils import _flatten_dense_tensors, _unflatten_dense_tensors
 from deepspeed.runtime.base_optimizer import ZeROOptimizer
 from deepspeed.runtime.fp16.loss_scaler import CreateLossScaler
 from deepspeed.runtime.utils import (empty_cache, see_memory_usage, inf, is_model_parallel_parameter,
-                                     align_dense_tensors, all_gather_dp_groups)
+                                     align_dense_tensors, all_gather_dp_groups, mask_nan_or_inf_with_val_inplace)
 from deepspeed.runtime.zero.config import ZeroStageEnum
 from deepspeed.runtime.zero.offload_config import OffloadDeviceEnum
 from deepspeed.ops.adam import DeepSpeedCPUAdam
@@ -1722,11 +1722,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
 
             total_norm = total_norm.pow(1. / norm_type)
 
-        norm_is_inf = total_norm.isinf()
-        norm_is_nan = total_norm.isnan()
-
-        if norm_is_inf or norm_is_nan:
-            total_norm = torch.tensor(-1.0, device=self.device, dtype=torch.float)
+        mask_nan_or_inf_with_val_inplace(total_norm, device=self.device)
 
         return total_norm
 
@@ -1984,10 +1980,8 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
         if self.clip_grad > 0.:
             # norm is in fact norm*scale
             clip = ((total_norm / self.loss_scale) + 1e-6) / self.clip_grad
-
-            # handle total_norm invalid value -1
-            if clip > 1:
-                combined_scale = clip * self.loss_scale
+            clip = torch.clamp(clip, min=1.0)
+            combined_scale = clip * self.loss_scale
 
         for grad in grad_groups_flat:
             if isinstance(grad, list):
