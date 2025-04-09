@@ -48,8 +48,14 @@ Figure 2 illustrates the basic flowchart, The division of TP and ZeRO is impleme
 
 # Usage
 
-Although we evaluated AutoTP training with Llama2 & Llama3 models in this blog, we expect compatibility with other Hugging Face models, especially [those](https://www.deepspeed.ai/tutorials/automatic-tensor-parallelism/) previously validated with AutoTP inference. Please upgrade accelerate and transformers to the master branch. We will add their minimum version once they have release tag.
 
+
+Although we evaluated AutoTP training with Llama2 & Llama3 models in this blog, we expect compatibility with other Hugging Face models, especially [those](https://www.deepspeed.ai/tutorials/automatic-tensor-parallelism/) previously validated with AutoTP inference.
+
+**Requirements**
+- `deepspeed >= 0.16.4`
+- `transformers >= 4.50.1`
+- `accelerate >= 1.6.0`
 
  **Enable TP training**
 
@@ -113,12 +119,10 @@ Models saved this way can be directly used for HF format inference without inter
 Saving Checkpoints remains compatible with HF transformers. Use [trainer.save_state()](https://huggingface.co/docs/transformers/v4.49.0/en/main_classes/trainer#transformers.Trainer.save_state) or set the save interval for automatic saving, which can be used to resume training.
 ```
 trainer.train(resume_from_checkpoint="your_saved_path/checkpoint-1200")
-)
 ```
 
 # Example
-We validated AutoTP training using supervised finetune training (SFT) task: [stanford_alpaca](https://github.com/tatsu-lab/stanford_alpaca). The original benchmark model used in this project is Llama2-7B.
-
+We validated AutoTP training using supervised finetune training (SFT) task: [stanford_alpaca](https://github.com/tatsu-lab/stanford_alpaca). The original benchmark model used in this project is Llama2-7B. The example code is also available [here](https://github.com/deepspeedai/DeepSpeedExamples/tree/master/training/tensor_parallel)
 
 
 **Training Loss curve**
@@ -216,7 +220,7 @@ The following loss curves depict SFT training, where gbs is uniformly set to 32,
 
 # Miscellaneous
 
-If users define their own dataloader, please ensure data consistency within ```deepspeed.utils.get_tensor_model_parallel_group()```. DeepSpeed provides basic validation functions to assist with this.
+If users define their own dataloader, please ensure data consistency within ```deepspeed.utils.groups.get_tensor_model_parallel_group()```. DeepSpeed provides basic validation functions to assist with this.
 
 Furthermore, if users are not using transformers library, you can replace the ```TensorParallel_Layer``` layer and its subclasses as needed. See ```prepare_tp_model``` function in ```unit/model_parallelism/test_autotp_training.py```. Users can also define different shard and gather for subclasses of ```TensorParallel_Layer.```
 
