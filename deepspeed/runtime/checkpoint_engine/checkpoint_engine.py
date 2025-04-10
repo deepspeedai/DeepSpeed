@@ -28,3 +28,7 @@ class CheckpointEngine(object):
     def commit(self, tag):
         # to tell checkpoint services if all files are ready.
         pass
+
+    def wait(self):
+        # To wait in asynchronous checkpoint engines (e.g. DataStates-LLM) for the previous snapshot to finish
+        pass
