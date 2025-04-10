@@ -1,0 +1,32 @@
+# Copyright (c) Microsoft Corporation.
+# SPDX-License-Identifier: Apache-2.0
+
+# DeepSpeed Team
+
+from .builder import TorchCPUOpBuilder
+
+
+class DeepCompileBuilder(TorchCPUOpBuilder):
+    BUILD_VAR = "DS_BUILD_DEEP_COMPILE"
+    NAME = "dc"
+
+    def __init__(self):
+        super().__init__(name=self.NAME)
+
+    def absolute_name(self):
+        return f'deepspeed.ops.{self.NAME}_op'
+
+    def sources(self):
+        return [
+            'csrc/compile/deepcompile.cpp', 'csrc/compile/init.cpp', 'csrc/compile/z1.cpp', 'csrc/compile/z3.cpp',
+            'csrc/compile/util.cpp'
+        ]
+
+    def libraries_args(self):
+        args = super().libraries_args()
+        return args
+
+    def include_paths(self):
+        import os
+        import torch
+        return ['csrc/includes', os.path.join(torch.utils.cpp_extension.CUDA_HOME, "include")]
