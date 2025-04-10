@@ -11,7 +11,7 @@ from deepspeed.utils.torch import required_torch_version
 from deepspeed.checkpoint import UNIVERSAL_CHECKPOINT_INFO
 from deepspeed.checkpoint.ds_to_universal import main as convert_to_universal
 
-from unit.common import DistributedTest, DistributedFixture
+edFixture
 from unit.simple_model import *
 from unit.util import bf16_required_version_check
 
