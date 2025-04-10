@@ -14,6 +14,7 @@ from deepspeed import comm as dist
 
 MIN_AIO_BYTES = 1024**2
 AIO_ALIGNED_BYTES = 1024
+MIN_SWAPPABLE_BYTES = MIN_AIO_BYTES
 
 
 def swap_in_tensors(swap_handle, tensor_buffers, swap_paths):
