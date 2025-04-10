@@ -2777,7 +2777,6 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
             # Purge the swapped optimizer state, it was initialized to the freshly created model and not the checkpoint
             self.optimizer_swapper.purge_state()
 
-        if self.swap_optimizer:
             # Touch all parameters to synchronize all buffers
             timer_names = set()
             self._partition_all_parameters()
@@ -2812,7 +2811,7 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
 
     def load_hp_checkpoint_state(self, folder, key):
         local_rank = dist.get_local_rank()
-
+        
         # Load tensors from files and reshape them to flat vectors
         loaded_state = torch.load(os.path.join(folder, f"{key}.pt"), weights_only=False)
         if isinstance(loaded_state, dict):
