@@ -1207,7 +1207,8 @@ template <typename WarpShape,
           typename RegularWarpIterator,
           typename Policy,
           typename Enable = void>
-struct DefaultWarpIteratorAFromSharedMemory {};
+struct DefaultWarpIteratorAFromSharedMemory {
+};
 
 // TensorOp - Ampere half
 template <typename RegularWarpIterator, typename Policy>
