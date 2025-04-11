@@ -232,7 +232,7 @@ class CPU_Accelerator(DeepSpeedAccelerator):
         return False
 
     def supported_dtypes(self):
-        return [torch.float, torch.bfloat16]
+        return [torch.float, torch.bfloat16, torch.float16]
 
     # Graph operations
     def create_graph(self):
