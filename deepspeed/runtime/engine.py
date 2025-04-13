@@ -2962,7 +2962,6 @@ class DeepSpeedEngine(Module):
                                                          custom_load_fn=custom_load_fn)
 
         load_zero_checkpoint = load_path is not None and (self.zero_optimization() or self.bfloat16_enabled())
-        # import pdb; pdb.set_trace()
         if self.load_universal_checkpoint():
             ucp_ckpt_folder = os.path.join(load_dir, tag)
             # UCP load can ignore '*mp' files or '*model_states.pt' but ucp_ckpt_folder must exist
