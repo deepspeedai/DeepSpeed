@@ -166,18 +166,17 @@ if __name__ == '__main__':
         shard_files = get_shard_list(args.hf_checkpoint_dir)
         total_shards = len(shard_files)
         logger.info(f"Found {total_shards} shards to process")
-
-        # Process shards in batches equal to number of workers
+        # Process shards in batches equal to the number of workers
         batch_size = args.num_workers
         for i in range(0, total_shards, batch_size):
             batch_shards = shard_files[i:i + batch_size]
             logger.info(f"Processing batch of {len(batch_shards)} shards ({i+1}-{min(i+batch_size, total_shards)} of {total_shards})")
             process_shard_batch(batch_shards, 
-                              args.hf_checkpoint_dir, 
-                              temp_zero_dir,  # Changed from temp_save_dir to temp_zero_dir
-                              args.safe_serialization)
+                                args.hf_checkpoint_dir, 
+                                temp_zero_dir,  # Changed from temp_save_dir to temp_zero_dir
+                                args.safe_serialization)
             
-            # Force garbage collection after each batch
+            # Clear CUDA cache after each batch to free up memory
             torch.cuda.empty_cache()
         
         logger.info("All shard batches processed successfully")
