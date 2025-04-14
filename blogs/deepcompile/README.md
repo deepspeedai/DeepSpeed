@@ -85,7 +85,8 @@ We compare DeepCompile against two baselines: DeepSpeed ZeRO-3 and ZeRO-3 with c
 For DeepCompile, we enabled both proactive prefetching and selective unsharding during training, demonstrating the combined effect of these optimization passes.
 
 <div align="center"> <img src="media/perf_zero3.png" width="800">
-Figure 3. Throughputs resulting from Llama-3 70B and Mixtral 8x7B models (ZeRO3)
+
+*Figure 3. Throughputs resulting from Llama-3 70B and Mixtral 8x7B models (ZeRO3)*
 
 </div>
 Across both models, DeepCompile consistently delivers higher throughput. The benefit becomes more pronounced at higher accumulation steps, where the reduced frequency of parameter updates makes selective unsharding more effective. DeepCompile with proactive prefetching and selective unsharding achieves up to 1.28× speedup over ZeRO-3 on Llama-3-70B and 1.54× on Mixtral 8x7B.
