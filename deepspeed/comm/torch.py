@@ -411,8 +411,8 @@ class TorchBackend(Backend):
 
     def enable_symm_mem_for_group(self, group_name):
         if not required_torch_version(min_version=2.5):
-            raise RuntimeError(f"Current torch version does not have enable_symm_mem_for_group"
-                               f"api (torch.__version__: {torch.__version__})")
+            raise RuntimeError(f"Torch version must be 2.5 or higher to use symmetric memory. "
+                               f"Current version: {torch.__version__}")
         from torch.distributed._symmetric_memory import enable_symm_mem_for_group
         return enable_symm_mem_for_group(group_name)
 
