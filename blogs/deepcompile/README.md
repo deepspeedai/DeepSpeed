@@ -136,7 +136,7 @@ In contrast, DeepCompile inserts communication operators directly into the compu
 
 ## Additional Results and Analysis
 
-Please refer to our [arXiv paper](https://placeholder) for additional results, such as detailed comparisons across different batch sizes, sequence lengths, and memory usage.
+Please refer to our [arXiv paper](https://arxiv.org/abs/2504.09983) for additional results, such as detailed comparisons across different batch sizes, sequence lengths, and memory usage.
 
 # Looking Ahead
 
