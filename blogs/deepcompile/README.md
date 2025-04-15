@@ -17,7 +17,7 @@ Existing distributed training frameworks such as DeepSpeed and FSDP have made la
 
 DeepCompile addresses this gap by enabling compiler-level optimizations for distributed training. It takes a standard single-GPU model implementation and transforms it into an optimized multi-GPU training graph without requiring changes to the model code. Unlike existing approaches, DeepCompile automatically applies parameter sharding, communication scheduling, and memory-aware execution at the compiler IR level, enabling global analysis and optimization that are difficult to express in traditional frameworks. Furthermore, during training, DeepCompile employs profile-guided optimization techniques to dynamically tune these parallelization strategies and improve training performance.
 
-Our evaluation demonstrates that DeepCompile improves training performance over ZeRO-3 baselines, achieving up to 1.5x speedup when sufficient GPU resources are available, and up to 7x speedup in GPU-constrained settings that require offloading. 
+Our evaluation demonstrates that DeepCompile improves training performance over ZeRO-3 baselines, achieving up to 1.5x speedup when sufficient GPU resources are available, and up to 7x speedup in GPU-constrained settings that require offloading.
 
 # Design Overview
 
@@ -81,7 +81,7 @@ DeepCompile implements ZeRO-1-style optimization by inserting reduce-scatter ope
 
 We evaluated DeepCompile on Llama-3-70B and Mixtral 8x7B using parameter sharding on top of Hugging Face model implementations.
 Figure 3 shows training throughput (TFLOPs/GPU) across different gradient accumulation steps, using 32 H100 GPUs with a sequence length of 1024.
-We compare DeepCompile against two DeepSpeed ZeRO-3 baselines: (i) an eager-mode version without compiler support (labelled ZeRO3 (Eager)), and (ii) a compiled version using PyTorch compiler (labelled ZeRO3 (Compile)). For DeepCompile, we enabled both proactive prefetching and selective unsharding to demonstrate the combined effect of these optimization passes.
+We compare DeepCompile against two DeepSpeed ZeRO-3 baselines: (i) an eager-mode version without compiler support (labelled ZeRO3+Eager), and (ii) a compiled version using PyTorch compiler (labelled ZeRO3+Compile). For DeepCompile, we enabled both proactive prefetching and selective unsharding to demonstrate the combined effect of these optimization passes.
 
 <div align="center"> <img src="media/perf_zero3.png" width="800">
 
@@ -90,7 +90,7 @@ We compare DeepCompile against two DeepSpeed ZeRO-3 baselines: (i) an eager-mode
 </div>
 Across both models, DeepCompile consistently delivers higher throughput. The benefit becomes more pronounced at higher accumulation steps, where the reduced frequency of parameter updates makes selective unsharding more effective. DeepCompile with proactive prefetching and selective unsharding achieves up to 1.28× speedup over ZeRO-3 on Llama-3-70B and 1.54× on Mixtral 8x7B.
 
-Meanwhile, enabling the PyTorch compiler with ZeRO-3, i.e., ZeRO3 (Compile) introduces minor overheads in some settings. This is because ZeRO-3 includes many conditional branches for runtime features such as prefetching. When the compiler encounters branches that cannot be statically resolved, it splits the computation into multiple graph segments. These fragmented segments can reduce optimization opportunities and introduce additional overheads during execution.
+Meanwhile, enabling the PyTorch compiler with ZeRO-3, i.e., ZeRO3+Compile introduces minor overheads in some settings. This is because ZeRO-3 includes many conditional branches for runtime features such as prefetching. When the compiler encounters branches that cannot be statically resolved, it splits the computation into multiple graph segments. These fragmented segments can reduce optimization opportunities and introduce additional overheads during execution.
 
 ## Offloading
 
@@ -110,11 +110,11 @@ We evaluated DeepCompile's offloading using Llama-3 70B on 16xH100-80GB (half th
 
 </div>
 
-We compare against two ZeRO-3 offloading baselines: (i) an eager-mode version without compiler support (ZeRO3 (Eager)), and (ii) a compiled version using PyTorch compiler (ZeRO3 (Compile)). As shown by the results, DeepCompile provides up to 7× speedup over ZeRO3 (Eager) in this resource-constrained setting. In contrast, we see that ZeRO3 (Compile) achieves similar performance as ZeRO3 (Eager). 
+We compare against two ZeRO-3 offloading baselines: (i) an eager-mode version without compiler support (ZeRO3+Eager), and (ii) a compiled version using PyTorch compiler (ZeRO3+Compile). As shown by the results, DeepCompile provides up to 7× speedup over ZeRO3+Eager in this resource-constrained setting. In contrast, we see that ZeRO3+Compile achieves similar performance as ZeRO3+Eager.
 
 ## ZeRO-1
 
-We also evaluated DeepCompile with ZeRO-1 using the Llama-3-8B model. We compare DeepCompile against two ZeRO-1 baselines: (i) an eager-mode version without compiler support (ZeRO1 (Eager)), and (ii) a compiled version using PyTorch compiler (ZeRO1 (Compile)). In our experiment with 8 GPUs and a batch size of 2, DeepCompile achieved consistent throughput improvements across different sequence lengths, as shown in Figure 5.
+We also evaluated DeepCompile with ZeRO-1 using the Llama-3-8B model. We compare DeepCompile against two ZeRO-1 baselines: (i) an eager-mode version without compiler support (ZeRO1+Eager), and (ii) a compiled version using PyTorch compiler (ZeRO1+Compile). In our experiment with 8 GPUs and a batch size of 2, DeepCompile achieved consistent throughput improvements across different sequence lengths, as shown in Figure 5.
 
 <div align="center">
 
@@ -124,7 +124,7 @@ We also evaluated DeepCompile with ZeRO-1 using the Llama-3-8B model. We compare
 
 </div>
 
-The most significant speedup was observed with batch size 1 and sequence length 512, where DeepCompile outperformed ZeRO1 (Eager) by up to 1.9×, and ZeRO1 (Compile) by up to 2.5×.
+The most significant speedup was observed with batch size 1 and sequence length 512, where DeepCompile outperformed ZeRO1+Eager by up to 1.9×, and ZeRO1+Compile by up to 2.5×.
 
 While compiler-based approaches can be effective for large batch sizes and long sequences by replacing suboptimal operations with more efficient kernels, they may also introduce overheads in ZeRO-1-style training in the form of *graph breaks* around the communication operations. These overheads become more pronounced with smaller batch sizes and sequence lengths, thus hurting performance compared to the non-compiled execution. In contrast, DeepCompile inserts communication operators directly into the computation graph during compilation, avoiding graph fragmentation and minimizing associated overhead. This makes DeepCompile more robust to small-scale workloads, while still benefiting from compiler-level optimizations.
 
