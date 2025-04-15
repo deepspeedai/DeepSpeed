@@ -125,7 +125,7 @@ In our experiment with 8 GPUs and a batch size of 2, DeepCompile achieved consis
 
 <img src="media/perf_zero1.png" width="800">
 
-*Figure 5. Throughputs resulting from Llama-3 8B and Mixtral 8x7B models (ZeRO1)*
+*Figure 5. Throughputs resulting from Llama-3 8B (ZeRO1)*
 
 </div>
 
