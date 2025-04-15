@@ -2264,6 +2264,12 @@ class DeepSpeedEngine(Module):
                 # https://nvidia.github.io/apex/advanced.html#gradient-clipping
                 master_params = amp.master_params(self.optimizer)
                 clip_grad_norm_(parameters=master_params, max_norm=self.gradient_clipping(), mpu=self.mpu)
+
+        try:
+            self.checkpoint_engine.wait()
+        except Exception as exc:
+            logger.error(f"Error during optimizer wait step: {exc}")
+
         self.optimizer.step()
 
         if hasattr(self.optimizer, '_global_grad_norm'):
