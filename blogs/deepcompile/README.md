@@ -141,6 +141,12 @@ This release is just the beginning. We’re actively working on expanding the se
 
 We invite the community to try DeepCompile, explore its capabilities, and contribute to its evolution. Let’s build the next generation of scalable deep learning together.
 
+# Acknowledgments
+
+We would like to thank everyone who supported this project.
+
+This project would not have been possible without the PyTorch Compiler—a platform that is not only powerful and flexible, but also a pleasure to work with. We are especially grateful to the developers and researchers behind PyTorch Compiler for making such an excellent foundation available to the community.
+
 # Contributors
 
 This project is the result of a close collaboration between Microsoft and the University of Virginia. The contributors are: Masahiro Tanaka, Du Li, and Umesh Chand, Olatunji Ruwase (Microsoft); and Ali Zafar and Haiying Shen (University of Virginia).
