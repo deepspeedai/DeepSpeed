@@ -55,7 +55,7 @@ class FP16_Optimizer(DeepSpeedOptimizer):
         self.timers = timers
         self.deepspeed = deepspeed
         self.has_moe_layers = has_moe_layers
-        self.using_pipeline = self.deepspeed.pipeline_parallelism
+        self.using_pipeline = getattr(self.deepspeed, 'pipeline_parallelism', False)
         if not get_accelerator().is_available():
             raise SystemError("Cannot use fp16 without accelerator.")
         self.optimizer = init_optimizer
@@ -252,12 +252,14 @@ class FP16_Optimizer(DeepSpeedOptimizer):
             return self.step_fused_adam()
 
         # First determine if there is overflow.
-        self.timers(OVERFLOW_CHECK_TIMER).start()
+        if self.timers:
+            self.timers(OVERFLOW_CHECK_TIMER).start()
         fp16_params = []
         for i, group in enumerate(self.fp16_groups):
             fp16_params.extend([p for p in group if p.grad is not None])
         self.overflow = self.overflow_checker.has_overflow(fp16_params)
-        self.timers(OVERFLOW_CHECK_TIMER).stop()
+        if self.timers:
+            self.timers(OVERFLOW_CHECK_TIMER).stop()
         prev_scale = self.cur_scale
         self._update_scale(self.overflow)
         if self.overflow:
@@ -271,7 +273,8 @@ class FP16_Optimizer(DeepSpeedOptimizer):
                 for p in group:
                     p.grad = None
 
-            self.timers.log(OVERFLOW_TIMERS)
+            if self.timers:
+                self.timers.log(OVERFLOW_TIMERS)
             return self.overflow
 
         grads_groups_flat = []
@@ -309,7 +312,8 @@ class FP16_Optimizer(DeepSpeedOptimizer):
             for p in group:
                 p.grad = None
 
-        self.timers(COMPUTE_NORM_TIMER).start()
+        if self.timers:
+            self.timers(COMPUTE_NORM_TIMER).start()
 
         all_groups_norm = get_flattened_grad_norm(non_experts_grads_for_norm,
                                                   mpu=self.mpu,
@@ -322,33 +326,41 @@ class FP16_Optimizer(DeepSpeedOptimizer):
                                                        norm_type=self.norm_type)
 
         scaled_global_grad_norm = get_global_norm(norm_list=[all_groups_norm])
-        self.timers(COMPUTE_NORM_TIMER).stop()
+        if self.timers:
+            self.timers(COMPUTE_NORM_TIMER).stop()
 
         # Stash unscaled gradient norm
         self._global_grad_norm = scaled_global_grad_norm / self.cur_scale
 
-        self.timers(UNSCALE_AND_CLIP_TIMER).start()
+        if self.timers:
+            self.timers(UNSCALE_AND_CLIP_TIMER).start()
         self.unscale_and_clip_grads(grads_groups_flat, scaled_global_grad_norm)
-        self.timers(UNSCALE_AND_CLIP_TIMER).stop()
+        if self.timers:
+            self.timers(UNSCALE_AND_CLIP_TIMER).stop()
 
-        self.timers(BASIC_STEP_TIMER).start()
+        if self.timers:
+            self.timers(BASIC_STEP_TIMER).start()
         self.optimizer.step()
-        self.timers(BASIC_STEP_TIMER).stop()
+        if self.timers:
+            self.timers(BASIC_STEP_TIMER).stop()
 
         #get rid of the fp32 gradients. Not needed anymore
         for group in self.fp32_groups_flat:
             group.grad = None
 
-        self.timers(UPDATE_FP16_TIMER).start()
+        if self.timers:
+            self.timers(UPDATE_FP16_TIMER).start()
 
         for i in range(len(self.fp16_groups)):
             updated_params = _unflatten_dense_tensors(self.fp32_groups_flat[i], self.fp16_groups[i])
             for p, q in zip(self.fp16_groups[i], updated_params):
                 p.data.copy_(q.data)
         self.has_executed_step = True
-        self.timers(UPDATE_FP16_TIMER).stop()
+        if self.timers:
+            self.timers(UPDATE_FP16_TIMER).stop()
 
-        self.timers.log(STEP_TIMERS)
+        if self.timers:
+            self.timers.log(STEP_TIMERS)
 
         return self.overflow
 

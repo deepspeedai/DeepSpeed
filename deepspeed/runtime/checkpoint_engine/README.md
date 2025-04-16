@@ -20,18 +20,18 @@ class CheckpointEngine(object):
     def __init__(self, config_params=None):
         pass
 
-    def create(self, tag):
+    def create(self, info:CheckpointCommitInfo):
         # create checkpoint on give tag for save/load.
         pass
 
-    def save(self, state_dict, path: str):
+    def save(self, state_dict, path: str, data_parallel_state: bool = False):
         pass
 
     def load(self, path: str, map_location=None):
         pass
 
-    def commit(self, tag):
-        # to tell checkpoint services if all files are ready.
+    def commit(self, info:CheckpointCommitInfo):
+        # to tell checkpoint services if all files are readys.
         pass
 
 ```
