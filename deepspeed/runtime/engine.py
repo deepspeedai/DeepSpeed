@@ -3896,9 +3896,8 @@ class DeepSpeedEngine(Module):
                 or self.zero_optimization_stage() == ZeroStageEnum.weights \
                 , "Currently DeepCompile supports stage 1 or 3 only."
 
-            assert not isinstance(
-                self.optimizer,
-                DeepSpeedZeRoOffload), "Currently DeepCompile is not supported without an optimizer."
+            assert not isinstance(self.optimizer,
+                                  DeepSpeedZeRoOffload), "Currently DeepCompile is not supported without an optimizer."
 
             if schedule is not None:
 
