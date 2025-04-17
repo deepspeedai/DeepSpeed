@@ -590,6 +590,7 @@ class OpBuilder(ABC):
                          extra_cflags=cxx_args,
                          extra_cuda_cflags=nvcc_args,
                          extra_ldflags=self.strip_empty_entries(self.extra_ldflags()),
+                         with_cuda=True if (isinstance(self, CUDAOpBuilder) and not self.build_for_cpu) else None,
                          verbose=verbose)
 
         build_duration = time.time() - start_build
