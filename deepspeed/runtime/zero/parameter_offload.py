@@ -73,6 +73,8 @@ class ZeROOrderedDict(OrderedDict):
 
 def _inject_parameters(module, cls):
     for module in module.modules():
+        module._original_parameters = module._parameters
+
         if cls == ZeROOrderedDict:
             new_param = cls(parent_module=module)
         else:
@@ -80,6 +82,7 @@ def _inject_parameters(module, cls):
 
         for key, param in module._parameters.items():
             new_param[key] = param
+
         module._parameters = new_param
 
 
@@ -232,6 +235,8 @@ class DeepSpeedZeRoOffload(object):
         for hook in self.backward_hooks:
             hook.remove()
 
+        self.fwd_pre_hook.remove()
+
         print_rank_0(f'Deleted module hooks: forward = {num_forward_hooks}, backward = {num_backward_hooks}',
                      force=False)
 
@@ -244,7 +249,7 @@ class DeepSpeedZeRoOffload(object):
 
             self.get_param_coordinator().reset_step()
 
-        self.module.register_forward_pre_hook(_start_of_forward_hook)
+        self.fwd_pre_hook = self.module.register_forward_pre_hook(_start_of_forward_hook)
 
         #likely one of them should be enough but just to be safe
         self._register_deepspeed_module(self.module)
@@ -287,7 +292,7 @@ class DeepSpeedZeRoOffload(object):
                 count[0] = count[0] + 1
                 self._register_deepspeed_module(child, count=count)
 
-        @instrument_w_nvtx
+        @torch.compiler.disable
         def _pre_forward_module_hook(module, *args):
             self.pre_sub_module_forward_function(module)
 
@@ -365,6 +370,7 @@ class DeepSpeedZeRoOffload(object):
             return _apply_forward_and_backward_to_tensors_only(module, _run_before_forward_function,
                                                                _run_after_backward_hook, inputs)
 
+        @torch.compiler.disable
         def _post_backward_module_hook(module, inputs):
             if not hasattr(module, "ds_grads_remaining"):
                 module.ds_grads_remaining = 0

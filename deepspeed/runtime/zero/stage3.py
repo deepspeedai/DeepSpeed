@@ -1511,7 +1511,8 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
 
             # free the gradient
             if not get_accelerator().is_synchronized_device():
-                param.grad.record_stream(get_accelerator().current_stream())
+                if param.grad is not None:
+                    param.grad.record_stream(get_accelerator().current_stream())
             param.grad = None
 
         if self.offload_optimizer and self.swap_optimizer:
