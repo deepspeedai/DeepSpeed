@@ -21,7 +21,7 @@ jobs:
   unit-tests:
     strategy:
       matrix:
-        pyVersion: ["3.8", "3.9", "3.10"]
+        pyVersion: ["3.8", "3.9", "3.10", "3.11", "3.12"]
       fail-fast: false
 
     runs-on: ubuntu-24.04
@@ -31,6 +31,11 @@ jobs:
     steps:
         - uses: actions/checkout@v4
 
+        - name: clean environment
+          run: |
+            sudo rm -rf /usr/share/dotnet
+            sudo rm -rf /opt/ghc
+            python --version
         - name: environment
           run: |
             which python
