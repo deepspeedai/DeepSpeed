@@ -163,7 +163,12 @@ def add_z3_gather_release_bw(gm: GraphModule,
     if rank == 0 and debug_log:
         print(f"Bwd before scheduling graph {graph_index} graph_id={graph_id} {gm.graph}")
 
-    # gm.graph = fast_free_schedule(gm.graph, get_accelerator().available_memory(), 0, debug_log=debug_log)
+    gm.graph = fast_free_schedule(
+        gm.graph,
+        get_accelerator().available_memory(),
+        0,  # unused
+        debug_log=debug_log)
+
     return gm
 
 

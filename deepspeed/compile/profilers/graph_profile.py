@@ -117,7 +117,7 @@ class ProfilingInterpreter(Interpreter):
         if n.op in {"placeholder", "output"}:
             n.meta["device_time"] = 0.0
             n.meta["wall_time"] = 0.0
-            n.meta["memory"] = 0
+            n.meta["alloc_mem"] = 0
             n.meta["max_memory"] = 0
             n.meta["tensor_size"] = _node_size(n)
             return super().run_node(n)
@@ -148,8 +148,8 @@ class ProfilingInterpreter(Interpreter):
             device_time, wall_time, alloc_mem, max_mem, tensor_size = self.cache[cache_key]
             n.meta["device_time"] = device_time
             n.meta["wall_time"] = wall_time
-            n.meta["alloc_memory"] = alloc_mem
-            n.meta["max_memory"] = max_mem
+            n.meta["alloc_mem"] = alloc_mem
+            n.meta["max_mem"] = max_mem
             n.meta["tensor_size"] = tensor_size
 
         is_release_op = is_release_node(n)
