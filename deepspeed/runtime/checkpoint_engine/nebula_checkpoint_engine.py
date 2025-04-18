@@ -11,6 +11,7 @@ from deepspeed.runtime.checkpoint_engine.checkpoint_engine import \
     CheckpointEngine
 from deepspeed.utils import logger, log_dist
 from deepspeed.nebula.constants import *
+from deepspeed.checkpoint.utils import clone_tensors_for_torch_save
 
 
 def _get_tag_from_path(path):
@@ -48,7 +49,8 @@ class NebulaCheckpointEngine(CheckpointEngine):
         tag = _get_tag_from_path(path)
         partition_name = os.path.basename(path)
         logger.info(f"[Nebula] Saving {partition_name} under tag {tag}...")
-        self.checkpoint.save(partition_name, state_dict)
+        debloated_state_dict = clone_tensors_for_torch_save(state_dict)
+        self.checkpoint.save(partition_name, debloated_state_dict)
         logger.info(f"[Nebula] Saved {partition_name} under tag {tag}.")
         return None
 
