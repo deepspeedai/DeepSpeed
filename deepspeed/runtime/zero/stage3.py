@@ -1511,7 +1511,8 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
 
             # free the gradient
             if not get_accelerator().is_synchronized_device():
-                param.grad.record_stream(get_accelerator().current_stream())
+                if param.grad is not None:
+                    param.grad.record_stream(get_accelerator().current_stream())
             param.grad = None
 
         if self.offload_optimizer and self.swap_optimizer:
@@ -2914,7 +2915,8 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
 
         # contiguous bucket
         if needs_offload(OffloadStateTypeEnum.contiguous_grad_buffer):
-            if hasattr(self, "_DeepSpeedZeroOptimizer_Stage3__ipg_bucket_flat_buffer"):
+            if hasattr(self, "_DeepSpeedZeroOptimizer_Stage3__ipg_bucket_flat_buffer"
+                       ) and self.__ipg_bucket_flat_buffer is not None:
                 # Record properties like shape, strides, etc. as a meta tensor
                 self.grad_buffer_meta = self.__ipg_bucket_flat_buffer.to("meta")
                 self.__ipg_bucket_flat_buffer = None

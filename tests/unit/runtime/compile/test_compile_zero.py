@@ -66,3 +66,49 @@ class TestZeRO(DistributedTest):
             config_dict["bf16"] = {"enabled": True}
 
         compare_loss(self, config_dict, dtype)
+
+
+class TestDeepCompile(DistributedTest):
+    world_size = 2
+    non_daemonic_procs = True
+
+    @pytest.mark.parametrize('dtype', [torch.bfloat16, torch.float16, torch.float32])
+    @pytest.mark.parametrize('zero_stage', [1, 3])
+    @pytest.mark.parametrize('deepcompile', [True])  # deepcompile==False is included in test_compile_zero
+    def test(self, zero_stage, dtype, deepcompile):
+        if not required_torch_version(min_version=2.6):
+            pytest.skip("DeepCompile requires PyTorch >= v2.6")
+
+        if dtype == torch.bfloat16:
+            skip_on_arch(min_arch=8)
+        if dtype == torch.bfloat16 and not bf16_required_version_check():
+            pytest.skip(
+                "DeepSpeed BFloat16 tests need NCCL >= 2.10.3, CUDA >=11.0, and HW support for BFloat16 to run correctly"
+            )
+        if get_accelerator().device_name() == "cpu":
+            pytest.skip("CPU does not support this test yet")
+
+        config_dict = {
+            "train_micro_batch_size_per_gpu": 1,
+            "steps_per_print": 1,
+            "optimizer": {
+                "type": "Adam",
+                "params": {
+                    "lr": 0.00015
+                }
+            },
+            "zero_optimization": {
+                "stage": zero_stage,
+            },
+            "compile": {
+                "deepcompile": deepcompile
+            }
+        }
+
+        if dtype == torch.float16:
+            config_dict["fp16"] = {"enabled": True, "initial_scale_power": 8}
+        elif dtype == torch.bfloat16:
+            config_dict["bf16"] = {"enabled": True}
+
+        # Need warmup steps
+        compare_loss(self, config_dict, dtype, iteration=10)
