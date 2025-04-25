@@ -10,11 +10,6 @@
 #include "inference_cuda_layers.h"
 namespace cg = cooperative_groups;
 
-// only used to avoid compilation error due to lack of definition.
-#ifndef BF16_AVAILABLE
-using __nv_bfloat162 = __half2;
-#endif
-
 // Bias add
 
 __global__ void bias_add_transform_0213(float* output,
