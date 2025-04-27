@@ -4,7 +4,7 @@
 # DeepSpeed Team
 
 try:
-    #  This is populated by setup.py
+    #  This is populated by setup.py/pyproject.toml
     from .git_version_info_installed import *  # noqa: F401 # type: ignore
 except ModuleNotFoundError:
     import os
