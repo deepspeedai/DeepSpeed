@@ -30,10 +30,9 @@ class SequentialLinearModel(torch.nn.Module):
 
     def __init__(self, hidden_dim, empty_grad=False, nlayers=1):
         super(SequentialLinearModel, self).__init__()
-        self.linears = torch.nn.ModuleList(
-            [torch.nn.Linear(hidden_dim, hidden_dim, bias=None) for i in range(nlayers)])
+        self.linears = torch.nn.ModuleList([torch.nn.Linear(hidden_dim, hidden_dim) for _ in range(nlayers)])
         if empty_grad:
-            self.linear2 = torch.nn.Linear(hidden_dim, hidden_dim, bias=None)
+            self.linear2 = torch.nn.Linear(hidden_dim, hidden_dim)
         self.cross_entropy_loss = torch.nn.CrossEntropyLoss()
         self.empty_grad = empty_grad
 
@@ -153,8 +152,7 @@ def process_linear_layer(hidden_dim, input):
     torch_linear = nn.Linear(hidden_dim,
                              hidden_dim,
                              dtype=preferred_dtype(),
-                             device=get_accelerator().current_device(),
-                             bias=None)
+                             device=get_accelerator().current_device())
     torch_out = torch_linear(input)
     torch_loss = torch_out.sum()
     torch_loss.backward()
@@ -307,7 +305,7 @@ class TestParamsGather(DistributedTest):
         model = SequentialLinearModel(hidden_dim=hidden_dim)
         model, _, _, _ = deepspeed.initialize(model=model, model_parameters=model.parameters(), config=config_dict)
 
-        torch_linear = nn.Linear(hidden_dim, hidden_dim, dtype=preferred_dtype(), device="cpu", bias=None)
+        torch_linear = nn.Linear(hidden_dim, hidden_dim, dtype=preferred_dtype(), device="cpu")
         total_params = sum(p.numel() for p in torch_linear.parameters())
 
         tp_layer = None
@@ -571,7 +569,7 @@ class TestTpGradNorm(DistributedTest):
 
         tp_norm = tp_optimizer._global_grad_norm
 
-        assert math.isclose(base_norm, tp_norm, abs_tol=1e-3)
+        assert math.isclose(base_norm, tp_norm, abs_tol=1e-3), f"base_norm: {base_norm}, tp_norm: {tp_norm}"
         tp_params_numel = sum(p.numel() for p in tp_model.parameters())
         base_params_numel = sum(p.numel() for p in base_model.parameters())
-        assert tp_params_numel < base_params_numel
+        assert tp_params_numel < base_params_numel, f"tp_params_numel: {tp_params_numel}, base_params_numel: {base_params_numel}"

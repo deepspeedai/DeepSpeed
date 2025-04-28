@@ -381,7 +381,7 @@ class LinearAllreduce(TensorParallel_Layer):
 
     def forward(self, input):
         output = torch.matmul(input, self.weight.transpose(-1, -2))
-        output = RowParallel.apply(self.mp_group, output, not self.is_training_mode())
+        output = RowParallel.apply(self.mp_group, output, not self.is_training_mode()).clone()
         if self.bias is not None:
             output += self.bias
         return output
@@ -467,8 +467,7 @@ class LinearLayer(TensorParallel_Layer):
         for idx, param in enumerate(params_list):
 
             params_list[idx].data_partition = param.data
-            output_param = torch.empty(self.tp_world_size * param.shape[0],
-                                       param.shape[1],
+            output_param = torch.empty((self.tp_world_size * param.shape[0], *param.shape[1:]),
                                        dtype=param.dtype,
                                        device=param.device)
             dist.all_gather_into_tensor(output_param, param, group=self.mp_group)
