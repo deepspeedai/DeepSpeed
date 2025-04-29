@@ -556,8 +556,9 @@ class InsertPostInitMethodToModuleSubClasses(object):
             print_rank_0(
                 "nn.functional.linear has been overridden with a more memory efficient version. This will persist unless manually reset.",
                 force=False)
-            self.linear_bk = torch.nn.functional.linear
-            torch.nn.functional.linear = zero3_linear_wrap
+            if not hasattr(InsertPostInitMethodToModuleSubClasses, "linear_bk"):
+                InsertPostInitMethodToModuleSubClasses.linear_bk = torch.nn.functional.linear
+                torch.nn.functional.linear = zero3_linear_wrap
 
             if self.quantized_initialization:
                 print_rank_0("nn.functional.linear has been overridden with quantized linear version.", force=False)
