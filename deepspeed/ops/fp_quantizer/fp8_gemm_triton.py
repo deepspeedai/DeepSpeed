@@ -45,7 +45,7 @@ def matmul_kernel_fp8_bf16(inp_ptr, weight_ptr, out_ptr, scale_ptr, M, N, K, str
         weight = tl.load(weight_data, mask=offs_k[:, None] < K, other=0.0)
         scale = tl.load(scale_ptr + weight_ptrs_offset + ((k * BLOCK_SIZE_K * stride_bk) // quantization_group_size))
         # Dequantize weight (fp8 -> bf16)
-        w = (weight & 0x80).to(tl.uint16) << 8 
+        w = (weight & 0x80).to(tl.uint16) << 8
         w = w | ((weight & 0x7f).to(tl.uint16) << 4)
         w = (w + 0x3C00).to(tl.uint16)
         w = (w.to(tl.bfloat16, bitcast=True).to(tl.float32) * scale).to(tl.bfloat16)
