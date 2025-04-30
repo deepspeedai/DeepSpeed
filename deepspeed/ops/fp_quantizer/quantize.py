@@ -16,7 +16,7 @@ fp_quant_module = None
 
 class Quantizer(ABC):
     """
-    Abstract Quantizer class that implmenents quantize/dequantize methods.
+    Abstract Quantizer class that implements quantize/dequantize methods.
 
     Arguments:
         group_size (int, optional): number of values or elements that are grouped
