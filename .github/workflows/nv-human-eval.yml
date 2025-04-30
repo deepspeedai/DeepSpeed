@@ -11,7 +11,7 @@ jobs:
   unit-tests:
     runs-on: [self-hosted, nvidia, a6000]
     container:
-      image: nvcr.io/nvidia/pytorch:24.03-py3
+      image: nvcr.io/nvidia/pytorch:24.12-py3
       ports:
         - 80
       options: --gpus all --shm-size "8G"
@@ -50,4 +50,4 @@ jobs:
         run: |
           unset TORCH_CUDA_ARCH_LIST # only jit compile for current arch
           cd tests
-          python -m pytest --color=yes --durations=0 --verbose -rF -m 'evaluation' -k "test_human_eval" unit/ --torch_ver="2.3" --cuda_ver="12"
+          python -m pytest --color=yes --durations=0 --verbose -rF -m 'evaluation' -k "test_human_eval" unit/ --torch_ver="2.6" --cuda_ver="12"

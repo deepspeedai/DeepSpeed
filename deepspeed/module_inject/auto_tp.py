@@ -11,20 +11,22 @@ from .replace_policy import replace_policies
 from typing import Optional
 import torch
 from deepspeed import comm as dist
-from .layers import LinearAllreduce, LinearLayer, LmHeadLinearAllreduce
+from .layers import *
 from deepspeed.accelerator import get_accelerator
-from .fusedqkv_utils import require_tp_fused_qkvw, prepare_tp_fused_qkvw, shard_value_with_share_qk, shard_chunk_mlp
+from .fusedqkv_utils import require_tp_fused_qkvw
 from deepspeed.module_inject.tp_shard import get_shard_size, get_shard_size_list
+from deepspeed.utils import groups
+from deepspeed.module_inject.layers import is_autotp_training_mode
 
 
-def move(tensor, device):
+def move(tensor, device, copy=True):
     if tensor.is_meta:
         return torch.empty_like(tensor, device=device)
     else:
         # Using new tensors help in freeing memory (after split for example) was done before by calling clone().
         # Using copy=True instead of clone() will help in case of cpu --> cpu.
         # Otherwise to() will not create a new copy for the view of the full tensor, and it will not be de-referenced.
-        return tensor.to(device, copy=True)
+        return tensor.to(device, copy=copy)
 
 
 class ReplaceWithTensorSlicing:
@@ -134,7 +136,9 @@ class Loading():
         load_layer_names = [
             "LPLayerNorm", "SharedEmbedding", "OPTLearnedPositionalEmbedding", "LlamaRMSNorm", "FalconLinear",
             "MistralRMSNorm", "T5LayerNorm", "MixtralRMSNorm", "Phi3RotaryEmbedding", "Phi3SuScaledRotaryEmbedding",
-            "Phi3RMSNorm", "YuanRMSNorm", "YuanRotaryEmbedding", "Phi3LongRoPEScaledRotaryEmbedding", "Qwen2RMSNorm"
+            "Phi3RMSNorm", "YuanRMSNorm", "YuanRotaryEmbedding", "Phi3LongRoPEScaledRotaryEmbedding", "Qwen2RMSNorm",
+            "DeepseekV2RMSNorm", "DeepseekV3RMSNorm", "DeepseekV2YarnRotaryEmbedding", "DeepseekV3YarnRotaryEmbedding",
+            "MoEGate"
         ]
         return module.__class__ in load_layers or module._get_name() in load_layer_names
 
@@ -188,7 +192,14 @@ class Loading():
 
 class AutoTP():
 
-    def __init__(self, module, all_reduce_linears, prefix, state_dict, linear_layer_setting, orig_layer_impl):
+    def __init__(self,
+                 module,
+                 all_reduce_linears,
+                 prefix,
+                 state_dict,
+                 linear_layer_setting,
+                 orig_layer_impl,
+                 keep_module_on_host=False):
         self.module = module
         self.all_reduce_linears = all_reduce_linears
         self.prefix = prefix
@@ -200,6 +211,7 @@ class AutoTP():
         self.orig_layer_impl = orig_layer_impl
         self.linear_policies = None
         self.conv_linear_layer = False
+        TensorParallel_Layer.set_keep_module_on_host(keep_module_on_host)
 
     def in_module_list(module, module_list):
         for item in module_list:
@@ -324,88 +336,65 @@ class AutoTP():
         return policy_list
 
     def set_tensor_parallel_config(self, mp_size, mp_group):
+
+        if is_autotp_training_mode():
+            self.mp_group = groups.get_tensor_model_parallel_group()
+            self.mp_size = groups.get_tensor_model_parallel_world_size()
+            return
+
         self.mp_size = mp_size
         self.mp_group = mp_group
 
     def _replace(self, child, name, conv_linear_layer):
+        # This function should clearly define the routing rules for specific layers
+        # and avoid any complex shard-related logic.
         if getattr(child, "replaced", False) == True:
             return
+
         weight_shape = child.weight.shape
         mp_replace = ReplaceWithTensorSlicing(mp_group=self.mp_group)
-        # For mixtral-7x8b, need to skip MoE gate linear replace.
-        if name == "block_sparse_moe.gate" or (('mlp.shared_expert_gate' == name or 'mlp.gate' == name)
-                                               and 'qwen2_moe' in str(type(self.module))):
+        # For TP layer skip, e.g., MoE gate, deepseek low rank layer skip
+        if "mlp.gate" == name or "q_a_proj" in name or "kv_a_proj_with_mqa" in name or name == "block_sparse_moe.gate" or (
+            ('mlp.shared_expert_gate' == name or 'mlp.gate' == name) and 'qwen2_moe' in str(type(self.module))):
             return child
         # For Yuan model
         if 'Yuan' in str(self.module):
             if 'v_proj' in name:
-                weight, bias = shard_value_with_share_qk(child.weight.data, child.bias, dist.get_rank(),
-                                                         dist.get_world_size(), True)
-                return LinearLayer(weight=weight, bias=bias)
+                return Yuan_LinearLayer(child, self.mp_group)
+
             elif 'o_proj' in name:
-                weight, bias = shard_value_with_share_qk(child.weight.data, child.bias, dist.get_rank(),
-                                                         dist.get_world_size(), False)
-                return LinearAllreduce(weight, bias, self.mp_group)
+                return Yuan_LinearAllreduce(child, self.mp_group)
+
         # For MLP including chunk layer.
         if 'gate_up_proj' in name or ('dense_h_to_4h' in name and 'GLM' in str(self.module)):
-            weight, bias = shard_chunk_mlp(child.weight.data, child.bias, dist.get_rank(), dist.get_world_size())
-            return LinearLayer(weight=weight, bias=bias)
-        if name in self.all_reduce_linears:
-            # if conv_linear_layer [weight_shape[1], weight_shape[0] // mp_size]
-            # else [weight_shape[0], weight_shape[1] // mp_size]
-
-            if self.conv_linear_layer:
-                child.weight.data = child.weight.data.transpose(-1, -2).contiguous()
-            data = child.weight.data.split(get_shard_size_list(
-                weight_shape[0] if self.conv_linear_layer else weight_shape[1], self.mp_size, name),
-                                           dim=1)
-            data_dc = move(data[mp_replace.gpu_index], get_accelerator().current_device_name()).detach()
-            del data
+            return GateUpPack_LinearLayer(child, self.mp_group)
+            # For Arctic model, bypass to all_reduce replacement for w2 weights
+        arctic_w2_all_reduce_linear = False
+        if 'Arctic' in str(self.module) and 'w2' in name:
+            arctic_w2_all_reduce_linear = True
+        # For MoE MLP model, e.g., deepseek and jamba
+        down_proj = False
+        if 'down_proj' in name:
+            down_proj = True
+        if name in self.all_reduce_linears or arctic_w2_all_reduce_linear or down_proj:
 
             setattr(child, "replaced", True)
-            if name == "lm_head" or name == 'embed_out':
-                return LmHeadLinearAllreduce(
-                    torch.nn.parameter.Parameter(data_dc, requires_grad=False), dist.get_rank(), dist.get_world_size(),
-                    child.bias if child.bias is None else torch.nn.parameter.Parameter(
-                        move(child.bias,
-                             get_accelerator().current_device_name())), self.mp_group)
-            return LinearAllreduce(torch.nn.parameter.Parameter(data_dc, requires_grad=False), child.bias if child.bias is None else \
-                        torch.nn.parameter.Parameter(move(child.bias, get_accelerator().current_device_name())), self.mp_group)
+            if self.conv_linear_layer:
+                return Conv_LinearALlreduce(child, self.mp_group, name=name)
+            elif name == "lm_head" or name == 'embed_out':
+                return LmHeadLinearAllreduce(child, self.mp_group)
+
+            return LinearAllreduce(child, self.mp_group, name=name)
         else:
 
-            # if conv_linear_layer [weight_shape[1], weight_shape[0] // mp_size]
-            # else [weight_shape[0] // mp_size, weight_shape[1]]
-            if self.conv_linear_layer:
-                child.weight.data = child.weight.data.transpose(-1, -2).contiguous()
-
-            if require_tp_fused_qkvw(name, self.mp_size):
-                #Check and handle fused qkv for TP
-                #The copy is a regular copy, The shape of dst and src is the same
-                data_dc = move(
-                    prepare_tp_fused_qkvw(self.module, child.weight.data, self.mp_size, mp_replace.gpu_index),
-                    get_accelerator().current_device_name())
-
-                bias_data_dc = None if child.bias is None else move(
-                    prepare_tp_fused_qkvw(self.module, child.bias.data, self.mp_size, mp_replace.gpu_index),
-                    get_accelerator().current_device_name())
-            else:
-                data = child.weight.data.split(get_shard_size_list(weight_shape[0], self.mp_size, name),
-                                               dim=1 if self.conv_linear_layer else 0)
-                data_dc = move(data[mp_replace.gpu_index], get_accelerator().current_device_name()).detach()
-                del data
-
-                if child.bias is not None:
-                    bias_data = child.bias.data.split(get_shard_size_list(
-                        weight_shape[1] if self.conv_linear_layer else weight_shape[0], self.mp_size, name),
-                                                      dim=0)
-                    bias_data = move(bias_data[mp_replace.gpu_index], get_accelerator().current_device_name())
-                    bias_data_dc = torch.nn.parameter.Parameter(bias_data, requires_grad=False)
-                    del bias_data
-                else:
-                    bias_data_dc = None
-
             setattr(child, "replaced", True)
-            return LinearLayer(weight=torch.nn.parameter.Parameter(data_dc, requires_grad=False), bias=bias_data_dc)
+            if self.conv_linear_layer:
+                conv_LinearLayer(child, self.mp_group)
+            elif require_tp_fused_qkvw(name, self.mp_size):
+                #Check and handle fused qkv for TP
+                return fused_LinearLayer(child, self.mp_group, fused_module=self.module)
+
+            return LinearLayer(child, self.mp_group, name=name)
 
     def _slice_embedding(self, child, name, conv_linear_layer):
         if getattr(child, "replaced", False) == True:

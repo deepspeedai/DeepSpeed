@@ -371,11 +371,12 @@ Enabling and configuring ZeRO memory optimizations
     "sub_group_size" : 1e12,
     "elastic_checkpoint" : [true|false],
     "stage3_gather_16bit_weights_on_model_save": [true|false],
-    "ignore_unused_parameters": [true|false]
-    "round_robin_gradients": [true|false]
-    "zero_hpz_partition_size": 1
-    "zero_quantized_weights": [true|false]
-    "zero_quantized_gradients": [true|false]
+    "ignore_unused_parameters": [true|false],
+    "round_robin_gradients": [true|false],
+    "zero_hpz_partition_size": 1,
+    "zero_quantized_weights": [true|false],
+    "zero_quantized_gradients": [true|false],
+    "log_trace_cache_warnings": [true|false],
     }
 ```
 
@@ -489,6 +490,11 @@ Enabling and configuring ZeRO memory optimizations
 |--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------| ------- |
 | Consolidate the weights before saving the model by `save_16bit_model()`. Since the weights are partitioned across GPUs, they aren't part of `state_dict`, so this function automatically gathers the weights when this option is enabled and then saves the fp16 model weights. | `False` |
 
+***stage3_module_granularity_threshold***: [integer]
+| Description                                                                                                                                                                                                                                                                    | Default |
+|--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------| ------- |
+| The granularity of a module is determined by the ratio of `parameter_count` / `(1 + descendant_count)`. ZeRO3 classifies modules with a granularity below the threshold as fine-grained, treating them as integral units during parameter fetching. This reduces host and communication overhead from separate hooks. | `0` |
+
 ***zero_hpz_partition_size***: [integer]
 
 | Description                                                                                                                         | Default |
@@ -506,6 +512,12 @@ Enabling and configuring ZeRO memory optimizations
 | Description                                                                                                                         | Default |
 | ----------------------------------------------------------------------------------------------------------------------------------- | ------- |
 |Boolean indicating whether to enable communication efficient quantized gradients of ZeRO++. | `False`   |
+
+<i>**log_trace_cache_warnings**</i>: [boolean]
+
+| Description                                                                                                         | Default |
+| ------------------------------------------------------------------------------------------------------------------- | ------- |
+| Log warnings from trace cache optimization of parameter sharding, such as cache invalidation events. | `False`  |
 
 ***cpu_offload***: [boolean]
 

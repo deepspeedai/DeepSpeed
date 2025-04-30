@@ -8,6 +8,7 @@ import sys
 import shutil
 import subprocess
 import warnings
+import re
 from shlex import split
 from abc import ABC, abstractmethod
 from deepspeed.accelerator import get_accelerator
@@ -34,7 +35,10 @@ class MultiNodeRunner(ABC):
         """Return the command to execute on node"""
 
     def add_export(self, key, var):
-        self.exports[key.strip()] = f"\"{var.strip()}\""
+        var = var.strip()
+        if re.search(r'[^\w@%+=:,./-]', var):
+            var = f"\"{var}\""
+        self.exports[key.strip()] = var
 
     def parse_user_args(self):
         return self.args.user_args
@@ -104,6 +108,8 @@ class PDSHRunner(MultiNodeRunner):
             deepspeed_launch.append("--no_local_rank")
         if self.args.save_pid:
             deepspeed_launch += ["--save_pid", f"{os.getpid()}"]
+        if self.args.enable_each_rank_log:
+            deepspeed_launch.append(f"--enable_each_rank_log={self.args.enable_each_rank_log}")
         if self.args.elastic_training:
             deepspeed_launch.append("--enable_elastic_training")
             deepspeed_launch.append(f"--max_elastic_nodes={self.args.max_elastic_nodes}")
@@ -132,11 +138,30 @@ class OpenMPIRunner(MultiNodeRunner):
 
     def validate_args(self):
         super().validate_args()
+
+        # Validate and set MPI environment variables
+        self._setup_mpi_environment()
+
         #TODO: Allow for include/exclude at node-level but not gpu-level
         if self.args.include != "" or self.args.exclude != "":
             raise ValueError(f"{self.name} backend does not support worker include/exclusion")
         if self.args.num_nodes != -1 or self.args.num_gpus != -1:
             raise ValueError(f"{self.name} backend does not support limiting num nodes/gpus")
+
+    def _setup_mpi_environment(self):
+        """Sets up MPI-related environment variables or raises an error if they're missing."""
+
+        required_vars = ['OMPI_COMM_WORLD_LOCAL_RANK', 'OMPI_COMM_WORLD_RANK', 'OMPI_COMM_WORLD_SIZE']
+
+        # Check if all these are present
+        if not all(var in os.environ for var in required_vars):
+            raise EnvironmentError("MPI environment variables are not set. "
+                                   "Ensure you are running the script with an MPI-compatible launcher.")
+
+        # Now safe to read all
+        os.environ['LOCAL_RANK'] = os.environ['OMPI_COMM_WORLD_LOCAL_RANK']
+        os.environ['RANK'] = os.environ['OMPI_COMM_WORLD_RANK']
+        os.environ['WORLD_SIZE'] = os.environ['OMPI_COMM_WORLD_SIZE']
 
     def get_cmd(self, environment, active_resources):
         total_process_count = sum(self.resource_pool.values())

@@ -31,7 +31,7 @@ validate_folder() {
 
 # Validate path to BingBertSquad script
 if [ -z "${BingBertSquad_DIR+x}" ]; then
-  export BingBertSquad_DIR=../../../DeepSpeedExamples/BingBertSquad
+  export BingBertSquad_DIR=../../../DeepSpeedExamples/training/BingBertSquad
   echo "BingBertSquad_DIR environment variable not set; trying default: ${BingBertSquad_DIR}"
 fi
 validate_folder ${BingBertSquad_DIR} "BingBertSquad_DIR"

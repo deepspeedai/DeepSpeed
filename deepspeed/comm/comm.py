@@ -225,6 +225,12 @@ def broadcast(tensor, src, group=None, async_op=False, prof=False, log_name='bro
 
 
 @timed_op
+def broadcast_object_list(object_list, src, group=None, device=None):
+    global cdb
+    return cdb.broadcast_object_list(object_list=object_list, src=src, group=group, device=device)
+
+
+@timed_op
 def all_gather(tensor_list,
                tensor,
                group=None,
@@ -615,6 +621,17 @@ def initialize_mesh_device(mesh_shape, mesh_dim_names):
     return mesh_device
 
 
+def enable_symm_mem_for_group(group_name: str):
+    global cdb
+    assert cdb is not None and cdb.is_initialized(
+    ), 'DeepSpeed backend not set, please initialize it using init_process_group()'
+
+    if hasattr(cdb, 'enable_symm_mem_for_group'):
+        cdb.enable_symm_mem_for_group(group_name)
+    else:
+        raise RuntimeError(f"Backend {cdb.name} does not support symmetric memory initialization")
+
+
 # Main DeepSpeed Comms. public API.
 def init_distributed(dist_backend=None,
                      auto_mpi_discovery=True,
@@ -698,9 +715,13 @@ def mpi_discovery(distributed_port=TORCH_DISTRIBUTED_DEFAULT_PORT, verbose=True)
     master_addr = None
     if rank == 0:
         import shlex
-        hostname_cmd = shlex.split("hostname -I")
-        result = subprocess.check_output(hostname_cmd)
-        master_addr = result.decode('utf-8').split()[0]
+        try:
+            hostname_cmd = shlex.split("hostname -I")
+            result = subprocess.check_output(hostname_cmd)
+            master_addr = result.decode('utf-8').split()[0]
+        except subprocess.CalledProcessError:  # hostname -I not available (e.g. on macOS)
+            import socket
+            master_addr = socket.gethostbyname(socket.gethostname())
     master_addr = comm.bcast(master_addr, root=0)
 
     # Determine local rank by assuming hostnames are unique

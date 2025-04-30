@@ -20,7 +20,7 @@ try:
 except ImportError as e:
     dsa2 = None
 
-SUPPORTED_ACCELERATOR_LIST = ['cuda', 'cpu', 'xpu', 'xpu.external', 'npu', 'mps', 'hpu', 'mlu']
+SUPPORTED_ACCELERATOR_LIST = ['cuda', 'cpu', 'xpu', 'xpu.external', 'npu', 'mps', 'hpu', 'mlu', 'sdaa']
 
 ds_accelerator = None
 
@@ -80,6 +80,12 @@ def get_accelerator():
             except ImportError as e:
                 raise ValueError(f"NPU_Accelerator requires torch_npu, which is not installed on this system.")
             pass
+        elif accelerator_name == "sdaa":
+            try:
+                import torch_sdaa  # noqa: F401 # type: ignore
+            except ImportError as e:
+                raise ValueError(f"SDAA_Accelerator requires torch_sdaa, which is not installed on this system.")
+            pass
         elif accelerator_name == "mps":
             try:
                 import torch.mps
@@ -125,10 +131,9 @@ def get_accelerator():
         if accelerator_name is None:
             try:
                 import intel_extension_for_pytorch as ipex
+
                 if ipex._C._has_xpu():
                     accelerator_name = "xpu"
-                else:
-                    accelerator_name = "cpu"
             except ImportError as e:
                 pass
         if accelerator_name is None:
@@ -136,6 +141,13 @@ def get_accelerator():
                 import torch_npu  # noqa: F401,F811 # type: ignore
 
                 accelerator_name = "npu"
+            except ImportError as e:
+                pass
+        if accelerator_name is None:
+            try:
+                import torch_sdaa  # noqa: F401,F811 # type: ignore
+
+                accelerator_name = "sdaa"
             except ImportError as e:
                 pass
         if accelerator_name is None:
@@ -162,23 +174,27 @@ def get_accelerator():
             except ImportError as e:
                 pass
         if accelerator_name is None:
-            # borrow this log from PR#5084
             try:
                 import torch
 
                 # Determine if we are on a GPU or x86 CPU with torch.
-                if torch.cuda.is_available():  #ignore-cuda
+                # "torch.cuda.is_available()" provides a stronger guarantee,     #ignore-cuda
+                # ensuring that we are free from CUDA initialization errors.
+                # While "torch.cuda.device_count() > 0" check ensures that       #ignore-cuda
+                # we won't try to do any CUDA calls when no device is available
+                # For reference: https://github.com/deepspeedai/DeepSpeed/pull/6810
+                if torch.cuda.device_count() > 0 and torch.cuda.is_available():  #ignore-cuda
                     accelerator_name = "cuda"
-                else:
-                    if accel_logger is not None:
-                        accel_logger.warn(
-                            "Setting accelerator to CPU. If you have GPU or other accelerator, we were unable to detect it."
-                        )
-                    accelerator_name = "cpu"
             except (RuntimeError, ImportError) as e:
                 # TODO need a more decent way to detect which accelerator to use, consider using nvidia-smi command for detection
-                accelerator_name = "cuda"
                 pass
+        if accelerator_name is None:
+            # borrow this log from PR#5084
+            if accel_logger is not None:
+                accel_logger.warning(
+                    "Setting accelerator to CPU. If you have GPU or other accelerator, we were unable to detect it.")
+            # cpu added as catch-all when accelerator detection fails
+            accelerator_name = "cpu"
 
         ds_set_method = "auto detect"
 
@@ -202,6 +218,10 @@ def get_accelerator():
         from .npu_accelerator import NPU_Accelerator
 
         ds_accelerator = NPU_Accelerator()
+    elif accelerator_name == "sdaa":
+        from .sdaa_accelerator import SDAA_Accelerator
+
+        ds_accelerator = SDAA_Accelerator()
     elif accelerator_name == "mps":
         from .mps_accelerator import MPS_Accelerator
 

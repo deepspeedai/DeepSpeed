@@ -22,6 +22,8 @@ DATA_SAMPLING_NUM_EPOCHS = "num_epochs"
 DATA_SAMPLING_NUM_EPOCHS_DEFAULT = 1000
 DATA_SAMPLING_NUM_WORKERS = "num_workers"
 DATA_SAMPLING_NUM_WORKERS_DEFAULT = 0
+DATA_SAMPLING_PIN_MEMORY = "pin_memory"
+DATA_SAMPLING_PIN_MEMORY_DEFAULT = False
 
 #########################################
 # Data efficiency - Data Sampling - Curriculum Learning
@@ -61,6 +63,24 @@ CURRICULUM_LEARNING_CURRENT_DIFFICULTIES = "current_difficulties"
 CURRICULUM_LEARNING_DATA_CLUSTER_PATHS = "data_cluster_paths"
 CURRICULUM_LEARNING_DATA_CLUSTER_CURRENT_POSITION = "data_cluster_current_position"
 CURRICULUM_LEARNING_NP_RNG_STATE = "np_rng_state"
+
+#########################################
+# Data efficiency - Dynamic batching and LR scaling
+#########################################
+DYNAMIC_BATCHING = "dynamic_batching"
+DYNAMIC_BATCHING_ENABLED = "enabled"
+DYNAMIC_BATCHING_ENABLED_DEFAULT = False
+DYNAMIC_BATCHING_METRICS_PATH = "metrics_path"
+DYNAMIC_BATCHING_LR_SCALING_METHOD = "lr_scaling_method"  # "linear" / "sqrt" / "none"
+DYNAMIC_BATCHING_LR_SCALING_METHOD_DEFAULT = "linear"
+DYNAMIC_BATCHING_MIN_BATCH_SIZE = "min_batch_size"
+DYNAMIC_BATCHING_MIN_BATCH_SIZE_DEFAULT = 1
+DYNAMIC_BATCHING_MAX_BATCH_SIZE = "max_batch_size"
+DYNAMIC_BATCHING_MAX_BATCH_SIZE_DEFAULT = None
+DYNAMIC_BATCHING_SEQUENCE_PICKING_ORDER = "sequence_picking_order"  # "random" / "seqlen" / "dataloader"
+DYNAMIC_BATCHING_SEQUENCE_PICKING_ORDER_DEFAULT = "dataloader"  # "random" / "seqlen" / "dataloader"
+DYNAMIC_BATCHING_MAX_TOKENS = "max_tokens"
+DYNAMIC_BATCHING_VERBOSE = "verbose"
 
 #########################################
 # Curriculum Learning legacy implementation

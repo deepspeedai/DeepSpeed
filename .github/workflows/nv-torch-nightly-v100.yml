@@ -4,6 +4,9 @@ on:
   workflow_dispatch:
   schedule:
     - cron: "0 0 * * *"
+  pull_request:
+    paths:
+      - '.github/workflows/nv-torch-nightly-v100.yml'
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -15,7 +18,7 @@ permissions:
 
 jobs:
   unit-tests:
-    runs-on: [self-hosted, nvidia, cu121, v100]
+    runs-on: [self-hosted, nvidia, cu124, v100]
 
     steps:
       - uses: actions/checkout@v4
@@ -25,7 +28,7 @@ jobs:
 
       - name: Install pytorch
         run: |
-          pip install --pre torch torchvision --index-url https://download.pytorch.org/whl/nightly/cu121
+          pip install --pre torch torchvision --index-url https://download.pytorch.org/whl/nightly/cu124
           python -c "import torch; print('torch:', torch.__version__, torch)"
           python -c "import torch; print('CUDA available:', torch.cuda.is_available())"
 
@@ -34,7 +37,7 @@ jobs:
           git clone https://github.com/huggingface/transformers
           cd transformers
           # if needed switch to the last known good SHA until transformers@master is fixed
-          # git checkout 1cc453d33
+          # git checkout 981c276
           git rev-parse --short HEAD
           pip install .
 
@@ -51,7 +54,7 @@ jobs:
         run: |
           unset TORCH_CUDA_ARCH_LIST # only jit compile for current arch
           cd tests
-          pytest $PYTEST_OPTS --forked -n 4 unit/
+          pytest $PYTEST_OPTS --forked -n 8 unit/
           pytest $PYTEST_OPTS --forked -m 'sequential' unit/
 
       - name: Open GitHub issue if nightly CI fails

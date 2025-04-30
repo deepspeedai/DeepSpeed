@@ -11,8 +11,6 @@ from deepspeed.ops.op_builder import InferenceBuilder
 if not deepspeed.ops.__compatible_ops__[InferenceBuilder.NAME]:
     pytest.skip("Inference ops are not available on this system", allow_module_level=True)
 
-torch_minor_version = None
-
 
 def allclose(x, y):
     assert x.dtype == y.dtype
@@ -40,8 +38,8 @@ def run_softmax_ds(input, use_triton_ops=False):
 @pytest.mark.parametrize("dtype", [torch.float16, torch.float32])
 @pytest.mark.parametrize("use_triton_ops", [True])
 def test_softmax(batch, sequence, channels, dtype, use_triton_ops):
-    if not deepspeed.HAS_TRITON and use_triton_ops:
-        pytest.skip("triton has to be installed for the test")
+    if not deepspeed.get_accelerator().is_triton_supported():
+        pytest.skip("triton is not supported on this system")
 
     device = deepspeed.accelerator.get_accelerator().device_name()
     input_ds = torch.randn((batch, sequence, channels), dtype=dtype, device=device)

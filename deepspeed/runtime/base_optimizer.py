@@ -22,13 +22,13 @@ class ZeROOptimizer(DeepSpeedOptimizer):
         optim_state_path = os.path.join(checkpoint_dir, "optimizer_state.pt")
         assert os.path.isfile(
             optim_state_path), f'{optim_state_path} containing optimizer global state is missing! Cannot proceed.'
-        optim_sd = torch.load(optim_state_path)
+        optim_sd = torch.load(optim_state_path, weights_only=False)
 
         self._load_global_state(optim_sd)
 
         tp_rank = bwc_tensor_model_parallel_rank(mpu=self.mpu)
         if self.mpu is None:
-            logger.warn("MPU is not provided, setting tp size to 1 in checkpoint loading.")
+            logger.warning("MPU is not provided, setting tp size to 1 in checkpoint loading.")
             tp_world_size = 1
         else:
             tp_world_size = self.mpu.get_slice_parallel_world_size() if hasattr(self.mpu, "get_slice_parallel_world_size") \

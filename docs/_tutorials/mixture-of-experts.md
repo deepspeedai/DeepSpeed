@@ -13,7 +13,7 @@ For more details on results and further discussion, please see our press release
 {: .notice--info}
 
 As a simple starting point we will show how to apply DeepSpeed MoE to a cifar10 example. Please refer to
-our [cifar10 example](https://github.com/microsoft/DeepSpeedExamples/tree/master/cifar) going forward.
+our [cifar10 example](https://github.com/deepspeedai/DeepSpeedExamples/tree/master/cifar) going forward.
 
 If you are adding MoE to an existing model you can use the snippet below to help guide you:
 
@@ -104,11 +104,11 @@ fc4 = torch.nn.Linear(84, 10)
 
 ```
 
-For a runnable end-to-end example that covers both the standard MoE architecture as well as the PR-MoE model , please look at the [cifar10 example](https://github.com/microsoft/DeepSpeedExamples/tree/master/cifar). In addition, see the advanced usage section of this tutorial that links to a more comprehensive example for NLG models.
+For a runnable end-to-end example that covers both the standard MoE architecture as well as the PR-MoE model , please look at the [cifar10 example](https://github.com/deepspeedai/DeepSpeedExamples/tree/master/cifar). In addition, see the advanced usage section of this tutorial that links to a more comprehensive example for NLG models.
 
 ### Combining ZeRO-Offload and DeepSpeed MoE for very large models
 
-To use MoE Layers in DeepSpeed, we rely on two parameter groups that are passed to an optimizer. A concrete example to create such groups is available from the [cifar10 example](https://github.com/microsoft/DeepSpeedExamples/tree/master/cifar).
+To use MoE Layers in DeepSpeed, we rely on two parameter groups that are passed to an optimizer. A concrete example to create such groups is available from the [cifar10 example](https://github.com/deepspeedai/DeepSpeedExamples/tree/master/cifar).
 
 The relevant function that creates these param groups is as follows.
 
@@ -134,7 +134,7 @@ model_engine, optimizer, trainloader, __ = deepspeed.initialize(
 
 We are working on automating this functionality in the DeepSpeed ZeRO optimizer so the model training code can be simplified further.
 
-To run the [cifar10 example](https://github.com/microsoft/DeepSpeedExamples/tree/master/cifar) with ZeRO-Offload (stage 2) and MoE, please set the ds_config flags
+To run the [cifar10 example](https://github.com/deepspeedai/DeepSpeedExamples/tree/master/cifar) with ZeRO-Offload (stage 2) and MoE, please set the ds_config flags
 
 ```json
 "zero_optimization": {

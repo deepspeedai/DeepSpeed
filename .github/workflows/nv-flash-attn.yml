@@ -1,7 +1,12 @@
-name: nv-torch110-p40
+name: nv-flash-attn
 
 on:
   workflow_dispatch:
+  pull_request:
+    paths:
+      - 'deepspeed/sequence/**'
+      - 'tests/unit/sequence_parallelism/**'
+      - '.github/workflows/nv-flash-attn.yml'
   schedule:
     - cron: "0 0 * * *"
 
@@ -9,52 +14,46 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
-permissions:
-    contents: read
-    issues: write
-
 jobs:
   unit-tests:
-    runs-on: [self-hosted, nvidia, cu111, p40]
-
-    env: {ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION: true} # Allow using Node16 actions
+    runs-on: [self-hosted, nvidia, a6000]
+    container:
+      image: nvcr.io/nvidia/pytorch:24.12-py3
+      ports:
+        - 80
+      options: --gpus all --shm-size "8G"
 
     steps:
       - uses: actions/checkout@v4
 
-      - id: setup-venv
-        uses: ./.github/workflows/setup-venv
-
-      - name: Install pytorch
+      - name: Check container state
         run: |
-          pip install -U --cache-dir $TORCH_CACHE torch==1.10.0+cu111 torchvision==0.11.0+cu111 -f https://download.pytorch.org/whl/torch_stable.html
+          ldd --version
+          nvcc --version
+          nvidia-smi
           python -c "import torch; print('torch:', torch.__version__, torch)"
           python -c "import torch; print('CUDA available:', torch.cuda.is_available())"
-
       - name: Install transformers
         run: |
-          git clone https://github.com/huggingface/transformers
+          git clone --depth=1 https://github.com/huggingface/transformers
           cd transformers
-          # if needed switch to the last known good SHA until transformers@master is fixed
-          # git checkout 1cc453d33
           git rev-parse --short HEAD
-          pip install .
-
+          python -m pip install .
       - name: Install deepspeed
         run: |
-          pip install .[dev,1bit,autotuning] --no-build-isolation
+          python -m pip install .[dev]
           ds_report
-
+      - name: Install FlashAttention
+        run: |
+          python -m pip install flash-attn
       - name: Python environment
         run: |
-          pip list
-
+          python -m pip list
       - name: Unit tests
         run: |
           unset TORCH_CUDA_ARCH_LIST # only jit compile for current arch
           cd tests
-          DS_ALLOW_DEPRECATED_FP16=1 pytest $PYTEST_OPTS --forked -n 4 unit/ --torch_ver="1.10" --cuda_ver="11.1"
-
+          python -m pytest --color=yes --durations=0 --verbose -rF unit/sequence_parallelism/test_ulysses.py --torch_ver="2.6" --cuda_ver="12"
       - name: Open GitHub issue if nightly CI fails
         if: ${{ failure() && (github.event_name == 'schedule') }}
         uses: JasonEtco/create-an-issue@v2

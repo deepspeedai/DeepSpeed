@@ -245,8 +245,8 @@ iteration 501 with a new Target TP=PP=DP=2.
 
 We are excited to release DeepSpeed Universal Checkpoint. DeepSpeed
 Universal Checkpoint is available in DeepSpeed versions >=
-[0.14.4](https://github.com/microsoft/DeepSpeed/releases/tag/v0.14.4),
-has been fully integrated with [Megatron-DeepSpeed](https://github.com/microsoft/Megatron-DeepSpeed) ([commit c3a13be](https://github.com/microsoft/Megatron-DeepSpeed/commit/c3a13be721da0d0de16c338d0d665b0f7d13d14f)).
+[0.14.4](https://github.com/deepspeedai/DeepSpeed/releases/tag/v0.14.4),
+has been fully integrated with [Megatron-DeepSpeed](https://github.com/deepspeedai/Megatron-DeepSpeed) ([commit c3a13be](https://github.com/deepspeedai/Megatron-DeepSpeed/commit/c3a13be721da0d0de16c338d0d665b0f7d13d14f)).
 Detailed tutorial on usage is available on
 [DeepSpeed tutorial page](https://www.deepspeed.ai/tutorials/universal-checkpointing/).
 
@@ -255,8 +255,8 @@ community. DeepSpeed Universal Checkpoint is part of the bigger
 DeepSpeed ecosystem of large-scale AI training and inference. For more
 details on all DeepSpeed technologies and innovations, please visit our
 [website]((https://www.deepspeed.ai/)) and follow us
-on X, formerly Twitter, ([English](https://twitter.com/MSFTDeepSpeed),
-[Japanese](https://twitter.com/MSFTDeepSpeedJP))
+on X, formerly Twitter, ([English](https://twitter.com/DeepSpeedAI),
+[Japanese](https://twitter.com/DeepSpeedAI_JP))
 and [Chinese Zhihu](https://www.zhihu.com/people/deepspeed).
 
 # Acknowledgements and Contributions

@@ -42,7 +42,8 @@ struct deepspeed_gds_handle_t : deepspeed_io_handle_t {
                                                             const int fd,
                                                             const char* filename,
                                                             const int64_t file_num_bytes,
-                                                            const bool validate);
+                                                            const bool validate,
+                                                            const int64_t file_offset);
 
     static int s_cuFile_init;
 };

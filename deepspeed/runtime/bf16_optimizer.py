@@ -18,6 +18,7 @@ from deepspeed.runtime.utils import (get_global_norm_of_tensors, clip_tensors_by
 from deepspeed.utils import link_hp_params, lazy_init_hp_params_optimizer_state, fragment_address, groups
 from deepspeed.moe.utils import is_moe_param, is_moe_param_group
 from deepspeed.utils.bwc import bwc_tensor_model_parallel_rank
+from deepspeed.utils.torch import register_grad_hook
 from deepspeed.checkpoint import enable_universal_checkpoint
 from deepspeed.checkpoint.constants import (DS_VERSION, PARTITION_COUNT, BASE_OPTIMIZER_STATE,
                                             SINGLE_PARTITION_OF_FP32_GROUPS, CLIP_GRAD, GROUP_PADDINGS,
@@ -44,7 +45,7 @@ class BF16_Optimizer(ZeROOptimizer):
                  timers=None,
                  grad_acc_dtype=None,
                  graph_harvesting=False,
-                 immediate_grad_update=False,
+                 immediate_grad_update=True,
                  has_moe_layers=False):
         super().__init__()
         see_memory_usage('begin bf16_optimizer', force=True)
@@ -313,7 +314,7 @@ class BF16_Optimizer(ZeROOptimizer):
 
         self.clear_hp_grads()
 
-    def backward(self, loss, update_hp_grads=True, clear_lp_grads=False, **bwd_kwargs):
+    def backward(self, loss, retain_graph=False, update_hp_grads=True, clear_lp_grads=False, **bwd_kwargs):
         """Perform a backward pass and copy the low-precision gradients to the
         high-precision copy.
 
@@ -323,7 +324,7 @@ class BF16_Optimizer(ZeROOptimizer):
         The low-precision grads are deallocated during this procedure.
         """
         self.clear_lp_grads()
-        loss.backward(**bwd_kwargs)
+        loss.backward(retain_graph=retain_graph, **bwd_kwargs)
 
         if update_hp_grads:
             self.update_hp_grads(clear_lp_grads=clear_lp_grads)
@@ -425,9 +426,6 @@ class BF16_Optimizer(ZeROOptimizer):
                 fp32_partition) in enumerate(zip(self.bf16_partitioned_groups, self.fp32_groups_flat_partition)):
             partition_id = dist.get_rank(group=self.real_dp_process_group[i])
             bf16_partitions[partition_id].data.copy_(fp32_partition.data)
-            # print_rank_0(f'update_lp_params {i=} {partition_id=}', force=True)
-            # if i == 0:
-            #     print_rank_0(f'{fp32_partition[:10]=}', force=True)
 
         all_gather_dp_groups(groups_flat=self.bf16_groups_flat,
                              partitioned_param_groups=self.bf16_partitioned_groups,
@@ -442,10 +440,12 @@ class BF16_Optimizer(ZeROOptimizer):
         for i, group in enumerate(self.fp32_groups_gradients):
             self.fp32_groups_has_gradients[i] = [False] * len(group)
 
-    def clear_lp_grads(self):
+    def clear_lp_grads(self, set_to_none=False):
 
         # using zero_() fixed memory address for graph replay
-        set_to_none = False if self.graph_harvesting else True
+        if self.graph_harvesting:
+            assert not set_to_none, "graph harvesting is incompatible with setting lp grads to None"
+
         zero_grads_list = []
         for group in self.bf16_groups:
             for param in group:
@@ -457,6 +457,10 @@ class BF16_Optimizer(ZeROOptimizer):
                     zero_grads_list.append(param.grad)
         if not set_to_none and len(zero_grads_list) > 0:
             torch._foreach_zero_(zero_grads_list)
+
+    def zero_grad(self, set_to_none=True):
+        self.clear_lp_grads(set_to_none)
+        self.clear_hp_grads()
 
     def state_dict(self):
         state_dict = {}
@@ -472,10 +476,10 @@ class BF16_Optimizer(ZeROOptimizer):
 
     # Restore base optimizer fp32 weights bfloat16 weights
     def _restore_from_bit16_weights(self):
-        for i, group in enumerate(self.bf16_groups):
+        for i, (bf16_partitions,
+                fp32_partition) in enumerate(zip(self.bf16_partitioned_groups, self.fp32_groups_flat_partition)):
             partition_id = dist.get_rank(group=self.real_dp_process_group[i])
-            for bf16_partitions, fp32_partition in zip(self.bf16_partitioned_groups, self.fp32_groups_flat_partition):
-                fp32_partition.data.copy_(bf16_partitions[partition_id].data)
+            fp32_partition.data.copy_(bf16_partitions[partition_id].data)
 
     def refresh_fp32_params(self):
         self._restore_from_bit16_weights()
@@ -537,20 +541,16 @@ class BF16_Optimizer(ZeROOptimizer):
         self._update_hp_grad(lp_param, group_idx, param_idx, clear_lp_grads=False)
 
     def create_grad_acc_hooks(self):
-        self.grad_accs = []
         for i, param_group in enumerate(self.bf16_groups):
             for j, param in enumerate(param_group):
                 if param.requires_grad:
 
                     def wrapper(param, i, j):
-                        param_tmp = param.expand_as(param)
-                        grad_acc = param_tmp.grad_fn.next_functions[0][0]
 
                         def accumulate_hp_grads_and_remove_lp(*notneeded):
                             self.accumulate_hp_grads_and_remove_lp(param, i, j)
 
-                        self._grad_acc_hooks.append(grad_acc.register_hook(accumulate_hp_grads_and_remove_lp))
-                        self.grad_accs.append(grad_acc)
+                        self._grad_acc_hooks.append(register_grad_hook(param, accumulate_hp_grads_and_remove_lp))
 
                     wrapper(param, i, j)
 

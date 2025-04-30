@@ -8,7 +8,7 @@ main:
   - title: 'Documentation'
     url: https://deepspeed.readthedocs.io/
   - title: 'GitHub'
-    url: https://github.com/microsoft/DeepSpeed
+    url: https://github.com/deepspeedai/DeepSpeed
 
 lnav:
   - title: 'Training'
@@ -75,6 +75,8 @@ lnav:
         url: /tutorials/data-efficiency/
       - title: 'DeepNVMe'
         url: /tutorials/deepnvme/
+      - title: 'Domino'
+        url: /tutorials/domino/
       - title: 'DS4Sci_EvoformerAttention'
         url: /tutorials/ds4sci_evoformerattention/
       - title: 'Flops Profiler'

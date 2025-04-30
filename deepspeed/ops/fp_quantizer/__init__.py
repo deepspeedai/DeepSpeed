@@ -4,9 +4,4 @@
 # DeepSpeed Team
 
 from .quantize import FP_Quantize, Quantizer
-
-try:
-    import triton
-    from .fp8_gemm import matmul_fp8
-except ImportError:
-    pass
+from .fp8_gemm import matmul_fp8

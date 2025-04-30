@@ -55,7 +55,7 @@ class NoGatherHandle:
                                                  non_blocking=True).view(param.ds_shape)
         self.__param = param
 
-    def wait(self) -> None:
+    def wait(self, **kwargs) -> None:
         if not get_accelerator().resolves_data_dependency():
             get_accelerator().current_stream().synchronize()
         self.__param.ds_status = ZeroParamStatus.AVAILABLE
@@ -78,7 +78,7 @@ class NoGatherCoalescedHandle:
                                                      non_blocking=True).view(param.ds_shape)
 
     @instrument_w_nvtx
-    def wait(self) -> None:
+    def wait(self, **kwargs) -> None:
         if self.__complete:
             return
 
@@ -556,8 +556,9 @@ class InsertPostInitMethodToModuleSubClasses(object):
             print_rank_0(
                 "nn.functional.linear has been overridden with a more memory efficient version. This will persist unless manually reset.",
                 force=False)
-            self.linear_bk = torch.nn.functional.linear
-            torch.nn.functional.linear = zero3_linear_wrap
+            if not hasattr(InsertPostInitMethodToModuleSubClasses, "linear_bk"):
+                InsertPostInitMethodToModuleSubClasses.linear_bk = torch.nn.functional.linear
+                torch.nn.functional.linear = zero3_linear_wrap
 
             if self.quantized_initialization:
                 print_rank_0("nn.functional.linear has been overridden with quantized linear version.", force=False)
@@ -639,7 +640,7 @@ class AllGatherHandle:
         self.__param = param
         self.__quantization = quantization
 
-    def wait(self) -> None:
+    def wait(self, handle_dependency=True) -> None:
         instrument_w_nvtx(self.__handle.wait)()
         if self.__quantization:
             instrument_w_nvtx(self.__quantization.quant_handle.wait)()
@@ -649,6 +650,8 @@ class AllGatherHandle:
 
 
 class AllGatherCoalescedHandle:
+
+    data_buffer = []
 
     def __init__(
         self,
@@ -672,7 +675,7 @@ class AllGatherCoalescedHandle:
                 raise RuntimeError(f"expected param {param.ds_summary()} to not be available")
 
     @instrument_w_nvtx
-    def wait(self) -> None:
+    def wait(self, handle_dependency=True) -> None:
         if self.complete:
             return
 
@@ -704,14 +707,20 @@ class AllGatherCoalescedHandle:
                     partitions.append(part_to_copy)
             param.data = instrument_w_nvtx(torch.cat)(partitions).view(param.ds_shape)
             param.ds_status = ZeroParamStatus.AVAILABLE
-
-            for part_to_copy in partitions:
-                if not get_accelerator().is_synchronized_device():
+            if not get_accelerator().is_synchronized_device() and handle_dependency:
+                for part_to_copy in partitions:
                     part_to_copy.record_stream(get_accelerator().current_stream())
 
             param_offset += ds_tensor_numel
 
         self.complete = True
+        if not get_accelerator().is_synchronized_device() and not handle_dependency:
+            # if the device needs to handle dependencies and opts for explicit processing outside the function.
+            AllGatherCoalescedHandle.data_buffer.append(partitions)
+
+    @staticmethod
+    def free_buffer():
+        AllGatherCoalescedHandle.data_buffer = []
 
 
 class MultipleAllGatherHandles:
@@ -719,9 +728,9 @@ class MultipleAllGatherHandles:
     def __init__(self, handles: List[AllGatherCoalescedHandle]):
         self.handles = handles
 
-    def wait(self) -> None:
+    def wait(self, handle_dependency=True) -> None:
         for handle in self.handles:
-            handle.wait()
+            handle.wait(handle_dependency)
 
 
 class AllReduceCoalescedHandle:
@@ -936,8 +945,7 @@ class Init(InsertPostInitMethodToModuleSubClasses):
         """
         if config is not None:
             config_dict_or_path = config
-            logger.warning(
-                f'zero.Init: the `config` argument is deprecated. Please use `config_dict_or_path` instead.')
+            logger.warning('zero.Init: the `config` argument is deprecated. Please use `config_dict_or_path` instead.')
         _ds_config = deepspeed.runtime.config.DeepSpeedConfig(config_dict_or_path,
                                                               mpu) if config_dict_or_path is not None else None
         if _ds_config is not None:
@@ -1377,13 +1385,13 @@ class Init(InsertPostInitMethodToModuleSubClasses):
                             quantization=quant_info,
                         )
 
-        def partition(param_list=None, hierarchy=0, has_been_updated=False):
+        def partition(param_list=None, hierarchy=0, has_been_updated=False, free_data=True):
             cls = param
             print_rank_0(f"{'--'*hierarchy}----Partitioning param {debug_param2name_id_shape_device(cls)}",
                          force=False)
             if param_list is None:
                 param_list = [cls]
-            self._partition(param_list, has_been_updated=has_been_updated)
+            self._partition(param_list, has_been_updated=has_been_updated, free_data=True)
 
         def reduce_gradients_at_owner(param_list=None, hierarchy=0):
             cls = param
@@ -1527,12 +1535,12 @@ class Init(InsertPostInitMethodToModuleSubClasses):
 
         return handles
 
-    def _partition(self, param_list, force=False, has_been_updated=False):
+    def _partition(self, param_list, force=False, has_been_updated=False, free_data=True):
         for param in param_list:
             print_rank_0(f"Before Partitioning Param {param.ds_id}", force=False)
             if self.zero_param_process_group is not None:
                 self._partition_param_sec(param)
-            self._partition_param(param, has_been_updated=has_been_updated)
+            self._partition_param(param, has_been_updated=has_been_updated, free_data=True)
 
             param.ds_status = ZeroParamStatus.NOT_AVAILABLE
             # if param.ds_tensor is not None:
@@ -1540,7 +1548,7 @@ class Init(InsertPostInitMethodToModuleSubClasses):
             #    "After the parameters are initially partitioned, make sure we are not recreating the partition."
             #print_rank_0(f"After Partitioning Param {param.ds_id} {param.ds_tensor.size()} {param.ds_tensor}",force=False)
     @instrument_w_nvtx
-    def _partition_param(self, param, buffer=None, has_been_updated=False):
+    def _partition_param(self, param, buffer=None, has_been_updated=False, free_data=True):
         assert param.ds_status is not ZeroParamStatus.INFLIGHT, f" {param} Cannot partition a param in flight"
         global reuse_buffers
         print_rank_0(f"Param id {param.ds_id} status is {param.ds_status}", force=False)
@@ -1565,7 +1573,8 @@ class Init(InsertPostInitMethodToModuleSubClasses):
 
                 see_memory_usage(f'Before partitioning param {param.ds_id} {param.shape}', force=False)
                 # param.data does not store anything meaningful in partitioned state
-                free_param(param)
+                if free_data:
+                    free_param(param)
                 see_memory_usage(f'After partitioning param {param.ds_id} {param.shape}', force=False)
 
                 if param.ds_tensor.final_location == OffloadDeviceEnum.nvme:
@@ -1882,6 +1891,7 @@ class Init(InsertPostInitMethodToModuleSubClasses):
 
         return None
 
+    @torch.no_grad()
     def _allgather_params(self, param_list, hierarchy=0):
         if len(param_list) == 0:
             return
@@ -1890,7 +1900,6 @@ class Init(InsertPostInitMethodToModuleSubClasses):
 
         tensor_size = partition_size * self.num_partitions
         flat_tensor = torch.empty(tensor_size, dtype=param_list[0].ds_tensor.dtype, device=self.local_device)
-        flat_tensor.requires_grad = False
         partitions = []
         for i in range(self.num_partitions):
             start = partition_size * i

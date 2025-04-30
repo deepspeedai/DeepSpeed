@@ -8,49 +8,52 @@
 
 # top-level repo folders
 /.github/ @loadams
-/azure/ @awan-10
-/benchmarks/ @awan-10 @tjruwase
+/azure/ @loadams
+/benchmarks/ @guanhuawang @tjruwase
 /bin/ @loadams
-/csrc/ @awan-10
+/csrc/ @tjruwase
 /deepspeed/ @loadams @tjruwase
-/docker/ @awan-10
+/docker/ @loadams @guanhuawang
 /docs/ @loadams @tjruwase
-/examples/ @awan-10 @tohtana
+/examples/ @jomayeri @tohtana
 /op_builder/ @loadams @tjruwase @jomayeri
-/release/ @loadams
+/release/ @loadams @jomayeri
 /requirements/ @loadams
-/scripts/ @awan-10
+/scripts/ @loadams @tjruwase
 /tests/ @tjruwase @loadams @tohtana
 
 # deepspeed
 /deepspeed/autotuning/ @loadams
 /deepspeed/checkpoint/ @tjruwase
-/deepspeed/comm/ @awan-10
+/deepspeed/comm/ @guanhuawang
 /deepspeed/compression/ @tjruwase
-/deepspeed/elasticity/ @awan-10
+/deepspeed/elasticity/ @tjruwase
 /deepspeed/launcher/ @loadams
-/deepspeed/module_inject/ @awan-10
+/deepspeed/module_inject/ @hwchen2017 @loadams
 /deepspeed/moe/ @tohtana
-/deepspeed/monitor/ @awan-10
+/deepspeed/monitor/ @tjruwase
 /deepspeed/nebula/ @tjruwase
+/deepspeed/nvme/ @tjruwase @jomayeri
 /deepspeed/ops/ @tohtana
 /deepspeed/pipe/ @tohtana @loadams
 /deepspeed/profiling/ @loadams
-/deepspeed/utils/ @tjruwase @awan-10
+/deepspeed/sequence/ @tohtana
+/deepspeed/utils/ @tjruwase @tohtana
 
 # inference
-/deepspeed/inference/ @awan-10
-/deepspeed/model_implementations/ @awan-10
+/deepspeed/inference/ @hwchen2017 @tohtana
+/deepspeed/model_implementations/@tohtana @loadams
 
 # training
 /deepspeed/runtime/ @tjruwase @tohtana
 /deepspeed/runtime/activation_checkpointing/ @tjruwase
 /deepspeed/runtime/checkpoint_engine/ @tjruwase
-/deepspeed/runtime/comm/ @awan-10
-/deepspeed/runtime/compression/ @awan-10
+/deepspeed/runtime/comm/ @guanhuawang
+/deepspeed/runtime/compression/ @tjruwase
 /deepspeed/runtime/data_pipeline/ @tjruwase
-/deepspeed/runtime/fp16/ @tjruwase
-/deepspeed/runtime/fp16/onebit/ @awan-10
-/deepspeed/runtime/pipe/ @loadams
-/deepspeed/runtime/swap_tensor/ @tjruwase
-/deepspeed/runtime/zero/ @tjruwase
+/deepspeed/runtime/domino/ @guanhuawang @hwchen2017
+/deepspeed/runtime/fp16/ @tjruwase @tohtana
+/deepspeed/runtime/fp16/onebit/ @tjruwase
+/deepspeed/runtime/pipe/ @loadams @tohtana
+/deepspeed/runtime/swap_tensor/ @tjruwase @jomayeri
+/deepspeed/runtime/zero/ @tjruwase @tohtana

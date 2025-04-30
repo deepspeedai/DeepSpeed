@@ -274,7 +274,7 @@ class LRRangeTest(object):
     """Sets the learning rate of each parameter group according to
     learning rate range test (LRRT) policy. The policy increases learning
     rate starting from a base value with a constant frequency, as detailed in
-    the paper `A disciplined approach to neural network hyper-parameters: Part1`_.
+    the paper `A disciplined approach to neural network hyper-parameters: Part 1 <https://arxiv.org/abs/1803.09820>`_
 
     LRRT policy is used for finding maximum LR that trains a model without divergence, and can be used to
     configure the LR boundaries for Cyclic LR schedules.
@@ -379,7 +379,7 @@ class OneCycle(object):
     1CLR policy changes the learning rate after every batch.
     `step` should be called after a batch has been used for training.
 
-    This implementation was adapted from the github repo: `pytorch/pytorch`_
+    This implementation was adapted from the github repo: `PyTorch <https://github.com/pytorch/pytorch>`_.
 
     Args:
         optimizer (Optimizer): Wrapped optimizer.
@@ -508,7 +508,7 @@ class OneCycle(object):
     def _initialize_momentum(self, optimizer, cycle_min_mom, cycle_max_mom, decay_mom_rate, last_batch_iteration):
         if 'betas' not in optimizer.defaults:
             optimizer_name = type(optimizer).__name__
-            logger.warn(
+            logger.warning(
                 f"cycle_momentum is disabled because optimizer {optimizer_name} does not support momentum, no betas attribute in defaults"
             )
             self.cycle_momentum = False

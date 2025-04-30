@@ -22,7 +22,7 @@ try:
     from torch._six import inf
 except ModuleNotFoundError:
     from torch import inf
-
+from typing import Union, List, Dict
 from deepspeed import comm as dist
 from deepspeed.moe.utils import is_moe_param
 from deepspeed.utils import groups, logger
@@ -257,8 +257,8 @@ class CheckOverflow(object):
         elif self.mpu is not None:
             if self.deepspeed is not None:
                 using_pipeline = hasattr(self.deepspeed, 'pipeline_enable_backward_allreduce')
-                if (using_pipeline and self.deepspeed.pipeline_enable_backward_allreduce is False) or (
-                        not using_pipeline and self.deepspeed.enable_backward_allreduce is False):
+                if (using_pipeline and self.deepspeed.pipeline_enable_backward_allreduce
+                        is False) or (not using_pipeline and self.deepspeed.enable_backward_allreduce is False):
                     dist.all_reduce(overflow_gpu, op=dist.ReduceOp.MAX, group=self.mpu.get_data_parallel_group())
             dist.all_reduce(overflow_gpu, op=dist.ReduceOp.MAX, group=self.mpu.get_model_parallel_group())
         elif self.deepspeed is not None and self.deepspeed.enable_backward_allreduce is False:
@@ -823,6 +823,14 @@ def get_only_unique_item(items):
     return unique_item
 
 
+def mask_nan_or_inf_with_val_inplace(input, device=None, val=-1.):
+    norm_is_inf = input.isinf()
+    norm_is_nan = input.isnan()
+    inf_or_nan = norm_is_nan.logical_or(norm_is_inf)
+    err = torch.tensor(-1.0, device=device, dtype=torch.float)
+    input.masked_fill_(inf_or_nan, err)
+
+
 def get_global_norm_of_tensors(input_tensors, norm_type=2, mpu=None, use_graph=False, moe_ep_group=None):
     """Get norm of an iterable of tensors.
 
@@ -897,8 +905,7 @@ def get_global_norm_of_tensors(input_tensors, norm_type=2, mpu=None, use_graph=F
             dist.all_reduce(device_total_norm, op=dist.ReduceOp.SUM, group=moe_ep_group)
         total_norm = device_total_norm.to(input_tensors[0].device).pow(1. / norm_type)
 
-    inf_or_nan = total_norm.isinf().logical_or(total_norm.isnan())
-    total_norm.masked_fill_(inf_or_nan, -1)
+    mask_nan_or_inf_with_val_inplace(total_norm, device=total_norm.device)
 
     return total_norm
 
@@ -1101,3 +1108,47 @@ def reload_adam_states(optimizer, device, non_blocking: bool = False):
             move_back_key(state, "exp_avg")
         if "exp_avg_sq" in state:
             move_back_key(state, "exp_avg_sq")
+
+
+def compare_tensors_in_structures(inputs1: Union[List, Dict], inputs2: Union[List, Dict]) -> bool:
+    """
+    Compare two lists or dictionaries for equality, including any tensors they may contain.
+
+    Args:
+        inputs1: First input, either a list or a dictionary.
+        inputs2: Second input, either a list or a dictionary.
+
+    Returns:
+        True if inputs1 and inputs2 are equal; False otherwise.
+    """
+    if type(inputs1) != type(inputs2):  # Ensure types match
+        return False
+
+    if isinstance(inputs1, list) and isinstance(inputs2, list):
+        if len(inputs1) != len(inputs2):
+            return False
+        for val1, val2 in zip(inputs1, inputs2):
+            if isinstance(val1, torch.Tensor) and isinstance(val2, torch.Tensor):
+                val1 = val1.to(get_accelerator().current_device())
+                val2 = val2.to(get_accelerator().current_device())
+                if not torch.equal(val1, val2):
+                    return False
+            elif val1 != val2:
+                return False
+        return True
+
+    elif isinstance(inputs1, dict) and isinstance(inputs2, dict):
+        if inputs1.keys() != inputs2.keys():
+            return False
+        for key in inputs1:
+            val1, val2 = inputs1[key], inputs2[key]
+            if isinstance(val1, torch.Tensor) and isinstance(val2, torch.Tensor):
+                val1 = val1.to(get_accelerator().current_device())
+                val2 = val2.to(get_accelerator().current_device())
+                if not torch.equal(val1, val2):
+                    return False
+            elif val1 != val2:
+                return False
+        return True
+
+    return False

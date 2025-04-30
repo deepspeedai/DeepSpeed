@@ -68,7 +68,7 @@ class SparseAttnBuilder(OpBuilder):
             import triton
         except ImportError:
             # auto-install of triton is broken on some systems, reverting to manual install for now
-            # see this issue: https://github.com/microsoft/DeepSpeed/issues/1710
+            # see this issue: https://github.com/deepspeedai/DeepSpeed/issues/1710
             if verbose:
                 self.warning(f"please install triton==1.0.0 if you want to use sparse attention")
             return False

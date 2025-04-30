@@ -40,6 +40,9 @@ class DeepSpeedTPConfig(DeepSpeedConfigModel):
     tp_size: int = 1
     """ Number of devices to split the model across using tensor parallelism. """
 
+    tp_grain_size: int = 64
+    "Desired MLP/lm_head tp size granularity. DNN library favors tensor size in granularity of power of 2, we pick 64 as a default size."
+
     mpu: object = None
     """
     A model parallelism unit object that implements
@@ -169,6 +172,15 @@ class DeepSpeedInferenceConfig(DeepSpeedConfigModel):
     """
     Specify if the type of Transformer is MoE. Expects a dictionary containing
     values for :any:`DeepSpeedMoEConfig`.
+    """
+
+    keep_module_on_host: bool = False
+    """
+    When loading checkpoints to model parameters, they are moved to the device. In very large models
+    this might fill the device and cause OOM. Setting this flag to true, will keep checkpoints on
+    host and not move them directly to the device (giving an option to quantize checkpoint data before
+    moving it to the device for example).
+    Set only for models with injection policies and auto TP.
     """
 
     quant: QuantizationConfig = {}

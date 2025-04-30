@@ -20,7 +20,7 @@ If you don't already have a copy of the DeepSpeed repository, please clone it
 now and checkout the DeepSpeedExamples submodule that contains the BERT Pre-training example.
 
 ```shell
-git clone https://github.com/microsoft/DeepSpeed
+git clone https://github.com/deepspeedai/DeepSpeed
 cd DeepSpeed
 git submodule update --init --recursive
 cd DeepSpeedExamples/
@@ -114,7 +114,7 @@ The learning rate policy is the default policy used in 0/1 Adam, and the value o
 `comm_backend_name` is used to indicate which backend implementation to use. You can choose between NCCL, MPI-based and compressed implementations by setting `comm_backend_name` to "nccl", "mpi" or "compressed". When using NCCL-based implementation, there is no need to set `cuda_aware`.
 
 #### 1.4.1 Momentum masks for parameters with constant zero gradients
-Because 1-bit compression cannot represent exact zero, the compression error would keep accumulating in the momentum if a parameter have constant zero gradients during training. For example, for BERT pre-training seq length 128, `bert.embeddings.position_embeddings.weight` has constant zeros in its gradient and momentum for row 129 to 512, because it only learns up to seq length 128 while the model supports up to seq length 512. Thus in 0/1 Adam we added support of a momentum mask for users to specify those params that have constant exact zeros in their gradients. See [example script](https://github.com/microsoft/DeepSpeedExamples/blob/master/bing_bert/deepspeed_train.py) for how to configure this momentum mask. One thing to note is that we don't use momentum mask saved in checkpoints since this mask could change during training (e.g., BERT seqlen 128 and 512 require different masks). So you have to provide this mask every time in your training script.
+Because 1-bit compression cannot represent exact zero, the compression error would keep accumulating in the momentum if a parameter have constant zero gradients during training. For example, for BERT pre-training seq length 128, `bert.embeddings.position_embeddings.weight` has constant zeros in its gradient and momentum for row 129 to 512, because it only learns up to seq length 128 while the model supports up to seq length 512. Thus in 0/1 Adam we added support of a momentum mask for users to specify those params that have constant exact zeros in their gradients. See [example script](https://github.com/deepspeedai/DeepSpeedExamples/blob/master/bing_bert/deepspeed_train.py) for how to configure this momentum mask. One thing to note is that we don't use momentum mask saved in checkpoints since this mask could change during training (e.g., BERT seqlen 128 and 512 require different masks). So you have to provide this mask every time in your training script.
 
 **Watch out!**
 0/1 Adam relies on an compression error compensation mechanism to maintain the convergence speed at compression stage. When loading checkpoints, aside from resetting the compression errors as 1-bit Adam, we additionally need to reset the local step buffer. Since the local step buffer can potentially fail to capture the training dynamics if the checkpoints are loaded by different number of nodes (GPUs).
@@ -125,7 +125,7 @@ For data downloading and pre-processing, please refer to the [BERT Pre-training 
 
 ### 2.1 Running Pre-training with DeepSpeed and 0/1 Adam
 
-We provide example scripts under [DeepSpeedExamples/bing_bert/01_adam/](https://github.com/microsoft/DeepSpeedExamples/tree/master/bing_bert/01_adam). There are 3 sets of scripts corresponding to NCCL-based implementation, MPI-based implementation on Ethernet systems, and MPI-based implementation on InfiniBand systems. For MPI-based implementation, we provide both example scripts when launching with deepspeed or mpirun.
+We provide example scripts under [DeepSpeedExamples/bing_bert/01_adam/](https://github.com/deepspeedai/DeepSpeedExamples/tree/master/bing_bert/01_adam). There are 3 sets of scripts corresponding to NCCL-based implementation, MPI-based implementation on Ethernet systems, and MPI-based implementation on InfiniBand systems. For MPI-based implementation, we provide both example scripts when launching with deepspeed or mpirun.
 
 ### 2.2 Configuration for BERT Pre-training with DeepSpeed and 0/1 Adam enabled
 
@@ -137,7 +137,7 @@ options in terms of batch size, micro batch size, optimizer, learning rate, and 
 Performance results can be seen in our [paper](https://arxiv.org/abs/2202.06009).
 
 ### 2.4 GLUE Fine-tuning
-We additionally provide the fine-tuning scripts for BERT pre-training checkpoints over [GLUE tasks](https://gluebenchmark.com/). The scripts are available at [DeepSpeedExamples/BingBertGlue](https://github.com/microsoft/DeepSpeedExamples/tree/master/BingBertGlue). The `glue_bert_base.json` and `glue_bert_large.json` files give the user the ability to specify DeepSpeed
+We additionally provide the fine-tuning scripts for BERT pre-training checkpoints over [GLUE tasks](https://gluebenchmark.com/). The scripts are available at [DeepSpeedExamples/BingBertGlue](https://github.com/deepspeedai/DeepSpeedExamples/tree/master/BingBertGlue). The `glue_bert_base.json` and `glue_bert_large.json` files give the user the ability to specify DeepSpeed
 options/parameters like micro batch size over BERT-base and BERT-large checkpoints, respectively. Currently we use Adam as the default optimizer for GLUE fine-tuning since the fine-tuning tasks usually use small batch size (~32) and do not require large-scale systems. `run_glue_bert_base_finetune.sh` and `run_glue_bert_large_finetune.sh` give the scripts for launching fine-tuning tasks, where we can modify variables like task name, number of epochs, model, etc. Note that to launch the fine-tuning, we must specify the path for checkpoint, for instance,
 ```
 bash run_glue_bert_base_finetune.sh <path to checkpoint>

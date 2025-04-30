@@ -83,9 +83,10 @@ class TestZeroUnbalancedGradients(DistributedTest):
         data_loader = random_dataloader(model=model, total_samples=16, hidden_dim=hidden_dim, device=model.device)
 
         run_unbalanced_gradients(model, data_loader)
+        model.destroy()
 
 
-# testing the fix https://github.com/microsoft/DeepSpeed/pull/1227
+# testing the fix https://github.com/deepspeedai/DeepSpeed/pull/1227
 @pytest.mark.parametrize("mics_enabled", [True, False])
 class TestZero3RepeatForwardLoop(DistributedTest):
     world_size = 1
@@ -143,9 +144,11 @@ class TestZero3RepeatForwardLoop(DistributedTest):
             model.backward(loss)
             model.step()
 
+        model.destroy()
 
-# testing the fix https://github.com/microsoft/DeepSpeed/pull/1227
-# also reproduces the https://github.com/microsoft/DeepSpeed/pull/1372
+
+# testing the fix https://github.com/deepspeedai/DeepSpeed/pull/1227
+# also reproduces the https://github.com/deepspeedai/DeepSpeed/pull/1372
 @pytest.mark.parametrize("zero_stage", [2, 3])
 @pytest.mark.parametrize("freeze_params", [True, False])
 class TestZeroToFP32(DistributedTest):
@@ -178,7 +181,7 @@ class TestZeroToFP32(DistributedTest):
 
             def __init__(self, hidden_dim, n_layers, freeze_params):
                 super().__init__()
-                # to reproduce https://github.com/microsoft/DeepSpeed/pull/1372 it is important that
+                # to reproduce https://github.com/deepspeedai/DeepSpeed/pull/1372 it is important that
                 # the number of total elements is uneven:
                 # (1) 4 layers of 3*(3+1)=12 elements each, 48 in total
                 self.ll = torch.nn.ModuleList(torch.nn.Linear(hidden_dim, hidden_dim) for i in range(n_layers))
@@ -242,6 +245,8 @@ class TestZeroToFP32(DistributedTest):
             for name in orig_state_dict.keys():
                 # float() workaround for torch<1.6
                 assert torch.allclose(orig_state_dict[name].float(), fp32_state_dict[name].float())
+
+        model.destroy()
 
     def test_2_param_groups(self, tmpdir, zero_stage, freeze_params):
         # TODO:
@@ -347,6 +352,8 @@ class TestZeroToFP32(DistributedTest):
             for name in orig_state_dict.keys():
                 # float() workaround for torch<1.6
                 assert torch.allclose(orig_state_dict[name].float(), fp32_state_dict[name].float())
+
+        model.destroy()
 
 
 @pytest.mark.parametrize("allgather_bucket_size", [1000, 1001])
@@ -821,6 +828,8 @@ class TestZero3ParamPartitioningBase(DistributedTest):
         _assert_partition_status(ds_engine, {ZeroParamStatus.NOT_AVAILABLE})
         assert not math.isclose(ds_engine.optimizer._global_grad_norm, 0.0)
 
+        ds_engine.destroy()
+
 
 @pytest.mark.parametrize("init_context_manager", [True, False])
 @pytest.mark.parametrize("reduce_scatter", [True, False])
@@ -892,6 +901,8 @@ class TestZero3ParamPartitioningLargeParam(DistributedTest):
             expected_weight_gradient = (train_iter + 1) * torch.full_like(weight_gradient, 1)
 
             assert torch.allclose(weight_gradient, expected_weight_gradient)
+
+        ds_engine.destroy()
 
 
 @pytest.mark.parametrize("init_context_manager", [True, False])
@@ -976,6 +987,8 @@ class TestZero3ParamPartitioningManyParams(DistributedTest):
 
             for layer_num, activation in enumerate(weight_gradients):
                 pass
+
+        ds_engine.destroy()
 
 
 class TestZero3InitForParentWeightInitialization(DistributedTest):
@@ -1197,6 +1210,8 @@ class TestZero3ParamPartitioningBaseBF16(DistributedTest):
         ds_engine.optimizer.step()
         _assert_partition_status(ds_engine, {ZeroParamStatus.NOT_AVAILABLE})
 
+        ds_engine.destroy()
+
 
 class TestParamPartitioningSkipInit(DistributedTest):
     world_size = 2
@@ -1274,6 +1289,8 @@ class TestParamPartitioningSkipInit(DistributedTest):
             model.backward(loss)
             model.step()
 
+        model.destroy()
+
 
 class TestZeroOffloadStage1(DistributedTest):
     world_size = 2
@@ -1310,6 +1327,8 @@ class TestZeroOffloadStage1(DistributedTest):
             loss = model(batch[0], batch[1])
             model.backward(loss)
             model.step()
+
+        model.destroy()
 
 
 @pytest.mark.parametrize("return_type", [tuple, list, dict])
@@ -1372,6 +1391,8 @@ class TestZero3DictFwd(DistributedTest):
                 loss = loss[1]
             model.backward(loss)
             model.step()
+
+        model.destroy()
 
 
 @pytest.mark.parametrize("zero_stage", [1, 2, 3])
@@ -1439,6 +1460,8 @@ class TestZeroAdamOptimizerStepCount(DistributedTest):
                 assert all(step == step_counts[0] for step in step_counts)
                 assert model.global_steps == step_counts[0]
 
+        model.destroy()
+
 
 @pytest.mark.parametrize("zero_stage", [1, 2, 3])
 class TestZeroFrozenWeights(DistributedTest):
@@ -1496,6 +1519,8 @@ class TestZeroFrozenWeights(DistributedTest):
             loss = loss[1]
             model.backward(loss)
             model.step()
+
+        model.destroy()
 
 
 @pytest.mark.parametrize("force_ds_optim", [True, False])
@@ -1577,6 +1602,8 @@ class TestZeroPartitionCache(DistributedTest):
         model.empty_partition_cache()
         assert sum([p.numel() for p in model.parameters()]) == 0
 
+        model.destroy()
+
 
 @pytest.mark.parametrize("use_client_optimizer", [True, False])
 @pytest.mark.parametrize("empty_weight_group", [True, False])
@@ -1628,3 +1655,87 @@ class TestEmptyParameterGroup(DistributedTest):
             optimizer=optimizer,
             config=config_dict,
         )
+
+        model.destroy()
+
+
+class TestZero3SwitchModes(DistributedTest):
+    world_size = 2
+
+    @pytest.mark.parametrize("prefetch_ratio", [0.0, 0.5, 1.0])
+    def test(self, prefetch_ratio, zero_stage=3):
+
+        hidden_dim = 10
+        model = SimpleModel(hidden_dim)
+
+        prefetch_bucket_size = int(sum([p.numel() for p in model.parameters(recurse=True)]) * prefetch_ratio)
+        config_dict = {
+            "train_micro_batch_size_per_gpu": 2,
+            "gradient_accumulation_steps": 2,
+            "zero_optimization": {
+                "stage": zero_stage,
+                "stage3_prefetch_bucket_size": prefetch_bucket_size
+            },
+            "optimizer": {
+                "type": "Adam",
+                "params": {
+                    "lr": 1e-3
+                }
+            },
+            "fp16": {
+                "enabled": True,
+                "initial_scale_power": 8
+            }
+        }
+
+        model, _, _, _ = deepspeed.initialize(config=config_dict, model=model, model_parameters=model.parameters())
+        data_loader = random_dataloader(model=model, total_samples=16, hidden_dim=hidden_dim, device=model.device)
+
+        for _ in range(3):
+            model.train()
+            for batch in data_loader:
+                loss = model(batch[0], batch[1])
+                model.backward(loss)
+                model.step()
+
+            model.eval()
+            with torch.no_grad():
+                for batch in data_loader:
+                    loss = model(batch[0], batch[1])
+
+        model.destroy()
+
+
+# Avoid overwriting client module id
+# https://github.com/deepspeedai/DeepSpeed/issues/6772
+class TestZero3ClientModuleID(DistributedTest):
+    world_size = 2
+
+    def test_client_module_id(self):
+        config_dict = {
+            "train_micro_batch_size_per_gpu": 1,
+            "steps_per_print": 1,
+            "optimizer": {
+                "type": "Adam",
+            },
+            "zero_optimization": {
+                "stage": 3
+            },
+        }
+
+        class MyModel(torch.nn.Module):
+
+            def __init__(self):
+                super().__init__()
+                self.id = 3  # ID arbitrary client usage, e.g. GPU placement
+                self.fc = Linear(128, 128)
+
+            def forward(self, x):
+                return self.fc(x)
+
+        model = MyModel()
+        pre_init_m_id = model.id
+        model, _, _, _ = deepspeed.initialize(model=model, model_parameters=model.parameters(), config=config_dict)
+        post_init_m_id = model.id
+        assert pre_init_m_id == post_init_m_id
+        model.destroy()

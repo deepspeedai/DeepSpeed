@@ -24,6 +24,7 @@ constexpr int max_threads = 1024;
 Class to hold the quantization parameters for a given tensor.
 Holds the implementation of the quantization operation.
 */
+
 template <Type qType, int numBits>
 class Params {
 public:

@@ -1,0 +1,87 @@
+name: hpu-gaudi2-nightly
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 0 * * *"
+  pull_request:
+    paths:
+      - ".github/workflows/hpu-gaudi2-nightly.yml"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  unit-tests:
+    # The type of runner that the job will run on
+    runs-on: [self-hosted, intel, gaudi2]
+    container:
+      image: vault.habana.ai/gaudi-docker/1.20.0/ubuntu22.04/habanalabs/pytorch-installer-2.6.0:latest
+      ports:
+        - 80
+      options: --runtime=habana -e HABANA_VISIBLE_DEVICES=all -e OMPI_MCA_btl_vader_single_copy_mechanism=none --cap-add=sys_nice
+
+    env:
+      PT_HPU_LAZY_MODE: 0
+      TORCHINDUCTOR_COMPILE_THREADS: 1
+      TEST_LIST: |
+        test_adamw.py
+        test_bf16.py
+        test_ds_config_dict.py
+        test_dynamic_loss_scale.py
+        test_latest_checkpoint.py
+        test_moe_checkpoint.py
+        test_multi_output_model.py
+        test_other_optimizer.py
+        test_pipe.py
+        test_pipeline.py
+        test_universal_checkpoint.py
+        test_zero_context_return.py
+        test_zero_leaf_module.py
+        test_zero_offloadpp.py
+        test_zero_tiled.py
+        test_autotp_training.py
+        test_ulysses.py
+
+    # Steps represent a sequence of tasks that will be executed as part of the job
+    steps:
+      # Checks-out your repository under $GITHUB_WORKSPACE, so your job can access it
+      - uses: actions/checkout@v4
+
+      - name: Check container state
+        run: |
+          ldd --version
+          hl-smi -L
+          python -c "import torch; print('torch:', torch.__version__, torch)"
+          python -c "import torch; print('CUDA available:', torch.cuda.is_available())"
+
+      - name: Install transformers
+        run: |
+          git clone https://github.com/huggingface/transformers
+          cd transformers
+          git rev-parse --short HEAD
+          pip install .
+
+      - name: Install deepspeed
+        run: |
+          pip install .[dev,autotuning]
+          ds_report
+
+      - name: Python environment
+        run: |
+          pip list
+
+      - name: Unit tests
+        run: |
+          unset TORCH_CUDA_ARCH_LIST # only jit compile for current arch
+          cd tests
+          export PT_HPU_LAZY_MODE=${PT_HPU_LAZY_MODE}
+          export TORCHINDUCTOR_COMPILE_THREADS=${TORCHINDUCTOR_COMPILE_THREADS}
+          TEST_LIST=$(echo "$TEST_LIST" | awk 'NF{printf "%s%s", (NR>1 ? " or " : ""), $0} END{if (NR>1) print ""}')
+          echo "TEST_LIST ${TEST_LIST}"
+          pytest --verbose unit/ -k "${TEST_LIST}"
