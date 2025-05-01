@@ -3035,7 +3035,7 @@ class DeepSpeedEngine(Module):
         if self.load_universal_checkpoint() and len(ckpt_list) == 0:
             logger.warning(f"Unable to find {ckpt_file_pattern} files in UCP folder {load_dir}")
             return None, {}
-        
+
         sd_loader = SDLoaderFactory.get_sd_loader(ckpt_list, checkpoint_engine=self.checkpoint_engine)
 
         is_pipe_parallel = isinstance(self.module, PipelineModule)
