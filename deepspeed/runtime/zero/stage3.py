@@ -291,7 +291,7 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
 
         self.zeropp_loco_param = zeropp_loco_param
 
-        if mpu is None:
+        if mpu is None or hasattr(mpu, 'initialize_sequence_parallel'):
             self.model_parallel_group = None
             self.model_parallel_rank = 0
         else:

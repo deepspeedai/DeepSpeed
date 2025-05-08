@@ -211,7 +211,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
             self._configure_moe_settings()
         self._global_grad_norm = 0.
 
-        if mpu is None:
+        if mpu is None or hasattr(mpu, 'initialize_sequence_parallel'):
             self.model_parallel_group = None
             self.model_parallel_world_size = 1
             self.model_parallel_rank = 0
