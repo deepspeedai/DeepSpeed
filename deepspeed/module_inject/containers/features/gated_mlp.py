@@ -37,16 +37,19 @@ class HybridGatedMLPContainer(HybridEngineContainer):
         # Only need to alter behavior if we can't do the normal destructive copy
         if self.module.mlp.inter_w is None:
             params = [
-                (self.module.mlp.inter_up_w, self.inter_up_w),
-                (self.module.mlp.inter_up_b, self.inter_up_b),
-                (self.module.mlp.inter_gate_w, self.inter_gate_w),
-                (self.module.mlp.inter_gate_b, self.inter_gate_b),
+                (self.module.mlp, 'inter_up_w', self.inter_up_w),
+                (self.module.mlp, 'inter_up_b', self.inter_up_b),
+                (self.module.mlp, 'inter_gate_w', self.inter_gate_w),
+                (self.module.mlp, 'inter_gate_b', self.inter_gate_b),
             ]
-            for dst, src in params:
-                dst = mp_replace.copy(dst[:self.inter_up_w.shape[0] // mp_replace.mp_size],
-                                      src,
-                                      int8=reversed_dim,
-                                      allocate_tensor=reversed_dim) if src is not None else None
+            for mod, dst_name, src in params:
+                dst_orig = getattr(mod, dst_name)
+                setattr(
+                    mod, dst_name,
+                    mp_replace.copy(dst_orig[:self.inter_up_w.shape[0] // mp_replace.mp_size],
+                                    src,
+                                    int8=reversed_dim,
+                                    allocate_tensor=reversed_dim) if src is not None else None)
         else:
             self.module.mlp.inter_w = mp_replace.strided_copy(self.module.mlp.inter_w,
                                                               self._h4h_w,
@@ -60,10 +63,10 @@ class HybridGatedMLPContainer(HybridEngineContainer):
     def release_mlp(self):
         super().release_mlp()
         gated_mlp_params = [
-            (self.module.mlp.inter_up_w, self.inter_up_w),
-            (self.module.mlp.inter_up_b, self.inter_up_b),
-            (self.module.mlp.inter_gate_w, self.inter_gate_w),
-            (self.module.mlp.inter_gate_b, self.inter_gate_b),
+            (self.module.mlp, 'inter_up_w', self.inter_up_w),
+            (self.module.mlp, 'inter_up_b', self.inter_up_b),
+            (self.module.mlp, 'inter_gate_w', self.inter_gate_w),
+            (self.module.mlp, 'inter_gate_b', self.inter_gate_b),
         ]
 
         self._release_params(gated_mlp_params)
