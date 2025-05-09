@@ -309,6 +309,7 @@ class DeepSpeedEngine(Module):
         # Configure optimizer and scheduler
         self.optimizer = None
         self.basic_optimizer = None
+        self.full_basic_optimizer_name = None
         self.lr_scheduler = None
         has_optimizer = False
 
@@ -1400,7 +1401,15 @@ class DeepSpeedEngine(Module):
         self._check_for_duplicates(basic_optimizer)
 
         self.basic_optimizer = basic_optimizer
-        log_dist("DeepSpeed Basic Optimizer = {}".format(basic_optimizer.__class__.__name__), ranks=[0])
+        provider_name = type(basic_optimizer).__module__.split('.')[0]
+        optimizer_name = basic_optimizer.__class__.__name__
+
+        if 'Fuse' or 'fuse' in optimizer_name:
+            fuse_status = 'Fused'
+        else:
+            fuse_status = 'NonFused'
+        self.full_basic_optimizer_name = f'{provider_name}_{optimizer_name}_{fuse_status}'
+        log_dist("Detailed Optimizer Information: {}".format(self.full_basic_optimizer_name), ranks=[0])
 
         optimizer_wrapper = self._do_optimizer_sanity_check(basic_optimizer)
 
