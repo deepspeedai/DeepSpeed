@@ -145,11 +145,13 @@ class TorchBackend(Backend):
 
     def init_process_group(self, backend, timeout, init_method, rank, world_size):
         if not torch.distributed.is_initialized():
+            local_rank = int(os.environ.get('LOCAL_RANK', 0))
             torch.distributed.init_process_group(backend,
                                                  timeout=timeout,
                                                  init_method=init_method,
                                                  rank=rank,
-                                                 world_size=world_size)
+                                                 world_size=world_size,
+                                                 device_id=torch.device('cuda', local_rank))
         self.using_mpi = torch.distributed.get_backend() == 'mpi'
 
     @disable_compiler_collective
