@@ -10,6 +10,7 @@ from torch.nn import functional as F
 from torch.nn.parameter import Parameter
 from deepspeed.accelerator import get_accelerator
 from deepspeed.module_inject.tp_shard import get_shard_size, get_shard_size_list
+from deepspeed.runtime.zero.utils import is_zero_param
 from abc import ABC, abstractmethod
 from typing import Iterable, Any, Optional, List, Tuple
 from .fusedqkv_utils import shard_value_with_share_qk, shard_chunk_mlp, prepare_tp_fused_qkvw
@@ -262,12 +263,13 @@ class TensorParallel_Layer(nn.Module, ABC):
         return new_obj
 
     def extra_repr(self):
+        out_features, in_features = None, None
         if self.weight is not None:
-            out_features, in_features = self.weight.shape[-2:] if self.weight is not None else (None, None)
-            dtype = self.weight.dtype if self.weight is not None else None
-            extra_repr_str = "in_features={}, out_features={}, bias={}, dtype={}".format(
-                in_features, out_features, self.bias is not None, dtype)
-        return extra_repr_str
+            out_features, in_features = self.weight.ds_shape[-2:] if is_zero_param(
+                self.weight) else self.weight.shape[-2:]
+        dtype = self.weight.dtype if self.weight is not None else None
+        return "in_features={}, out_features={}, bias={}, dtype={}".format(in_features, out_features, self.bias
+                                                                           is not None, dtype)
 
     def move(self, tensor):
         # TODO: consider the timing of deletion
