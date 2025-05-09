@@ -2,7 +2,7 @@ einops
 hjson
 msgpack
 ninja
-numpy
+numpy<=1.26.4
 packaging>=20.0
 psutil
 py-cpuinfo
