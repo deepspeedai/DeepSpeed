@@ -372,8 +372,7 @@ class DeepSpeedZeRoOffload(object):
 
         @torch.compiler.disable
         def _post_backward_module_hook(module, inputs):
-            if not hasattr(module, "ds_grads_remaining"):
-                module.ds_grads_remaining = 0
+            module.ds_grads_remaining = 0
 
             return apply_to_tensors_only(module.post_bwd_fn.apply,
                                          inputs,

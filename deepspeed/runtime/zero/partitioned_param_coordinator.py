@@ -261,6 +261,7 @@ class PartitionedParameterCoordinator:
         self.__most_recent_step_id_param_fetched_for = collections.defaultdict(lambda: int(-1e10))
         self.__step_id_module_fetched_for = collections.defaultdict(lambda: collections.deque())
         self.__step_id = 0
+        self.__n_available_params = 0
         self.__profiler.reset_events()
 
     def _dump_params(self, tag, sub_module, params, step_id=None):
@@ -451,7 +452,7 @@ class PartitionedParameterCoordinator:
             # there's a hook execution issue
             param.ds_active_sub_modules.clear()
             self.__release_param(param)
-        self.__n_available_params = 0
+
         for param in iter_params(module, recurse=True):
             if param.ds_status != ZeroParamStatus.NOT_AVAILABLE:
                 raise RuntimeError(f"{param.ds_summary()} expected to be released")
