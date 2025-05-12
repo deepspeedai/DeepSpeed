@@ -366,8 +366,9 @@ class DeepSpeedZeRoOffload(object):
                                                                _run_after_backward_hook, inputs)
 
         def _post_backward_module_hook(module, inputs):
-            if not hasattr(module, "ds_grads_remaining"):
-                module.ds_grads_remaining = 0
+            # if not hasattr(module, "ds_grads_remaining"):
+            #     module.ds_grads_remaining = 0
+            module.ds_grads_remaining = 0
 
             return apply_to_tensors_only(module.post_bwd_fn.apply,
                                          inputs,
@@ -475,7 +476,7 @@ class DeepSpeedZeRoOffload(object):
             force=False)
 
         param_coordinator = self.get_param_coordinator()
-        param_coordinator.release_sub_module(sub_module)
+        param_coordinator.release_sub_module(sub_module, forward=True)
 
         see_memory_usage(
             f"After sub module function {sub_module.__class__.__name__}  {sub_module.ds_id} after release",
@@ -497,7 +498,7 @@ class DeepSpeedZeRoOffload(object):
             f"After sub module backward function {sub_module.__class__.__name__} {sub_module.ds_id} before release",
             force=False)
 
-        self.get_param_coordinator().release_sub_module(sub_module)
+        self.get_param_coordinator().release_sub_module(sub_module, forward=False)
 
         see_memory_usage(
             f"After sub module backward function {sub_module.__class__.__name__} {sub_module.ds_id} after release",

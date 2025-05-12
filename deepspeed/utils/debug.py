@@ -35,7 +35,7 @@ def debug_module2name(module):
 
 
 def debug_module2name_id(module):
-    return f"name={debug_module2name(module)} id={module.id}"
+    return f"name={debug_module2name(module)}"
 
 
 def debug_module2name_class(module):
@@ -54,11 +54,11 @@ def debug_param2name_id(param):
 
 
 def debug_param2name_id_shape(param):
-    return f"name={debug_param2name(param)} id={param.ds_id} shape={param.data.shape}"
+    return f"name={debug_param2name(param)} id={param.ds_id} shape={param.ds_shape}"
 
 
 def debug_param2name_id_shape_device(param):
-    return f"name={debug_param2name(param)} id={param.ds_id} shape={param.data.shape} device={param.device}"
+    return f"name={debug_param2name(param)} id={param.ds_id} shape={param.ds_shape} device={param.device}"
 
 
 def debug_param2name_id_numel(param):
@@ -66,7 +66,7 @@ def debug_param2name_id_numel(param):
 
 
 def debug_param2name_id_shape_status(param):
-    return f"name={debug_param2name(param)} id={param.ds_id} shape={param.data.shape} status={param.ds_status}"
+    return f"name={debug_param2name(param)} id={param.ds_id} shape={param.ds_shape} status={param.ds_status}"
 
 
 def printflock(*msgs):
