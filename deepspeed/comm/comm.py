@@ -242,6 +242,12 @@ def all_gather(tensor_list,
     return cdb.all_gather(tensor_list=tensor_list, tensor=tensor, group=group, async_op=async_op)
 
 
+@timed_op
+def all_gather_object(object_list, obj, group=None, prof=False, log_name='all_gather_object', debug=get_caller_func()):
+    global cdb
+    return cdb.all_gather_object(object_list=object_list, obj=obj, group=group)
+
+
 def has_reduce_scatter_tensor():
     global cdb
     assert cdb is not None and cdb.is_initialized(
