@@ -34,7 +34,7 @@ permissions:
 
 jobs:
   unit-tests:
-    runs-on: [self-hosted, intel, xpu]
+    runs-on: [self-hosted, my787]
     container:
       image: intel/oneapi-basekit:2025.0.2-0-devel-ubuntu22.04
       ports:
