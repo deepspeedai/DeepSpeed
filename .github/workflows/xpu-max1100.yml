@@ -39,15 +39,13 @@ jobs:
       image: intel/oneapi-basekit:2025.0.2-0-devel-ubuntu22.04
       ports:
         - 80
-      options: --privileged -it --rm --device /dev/dri:/dev/dri -v /dev/dri/by-path:/dev/dri/by-path --ipc=host --cap-add=ALL
+      options: --privileged -it --rm --device /dev/dri:/dev/dri -v /dev/dri/by-path:/dev/dri/by-path --ipc=host --cap-add=ALL -e HTTP_PROXY=http://10.7.105.237:44333 -e HTTPS_PROXY=http://10.7.105.237:44333
 
     steps:
     - uses: actions/checkout@v4
     - name: Install prerequisite
       shell: bash
       run: |
-        export http_proxy='http://10.7.105.237:44333'
-        export https_proxy='http://10.7.105.237:44333'
         apt-get update
         apt-get install -y python3.11 python3.11-dev python3-pip clinfo libaio-dev
         pip install --upgrade pip
