@@ -46,6 +46,8 @@ jobs:
     - name: Install prerequisite
       shell: bash
       run: |
+        export http_proxy='http://10.7.105.237:44333'
+        export https_proxy='http://10.7.105.237:44333'
         apt-get update
         apt-get install -y python3.11 python3.11-dev python3-pip clinfo libaio-dev
         pip install --upgrade pip
