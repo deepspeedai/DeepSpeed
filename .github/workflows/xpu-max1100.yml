@@ -39,7 +39,7 @@ jobs:
       image: intel/oneapi-basekit:2025.0.2-0-devel-ubuntu22.04
       ports:
         - 80
-      options: --privileged -it --rm --device /dev/dri:/dev/dri -v /dev/dri/by-path:/dev/dri/by-path --ipc=host --cap-add=ALL -e HTTP_PROXY='http://child-prc.intel.com:913' -e HTTPS_PROXY='http://child-prc.intel.com:913'
+      options: --privileged -it --rm --device /dev/dri:/dev/dri -v /dev/dri/by-path:/dev/dri/by-path --ipc=host --cap-add=ALL -e HTTP_PROXY=http://proxy-dmz.intel.com:911 -e HTTPS_PROXY=http://proxy-dmz.intel.com:911
 
     steps:
     - uses: actions/checkout@v4
