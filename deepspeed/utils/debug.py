@@ -3,6 +3,8 @@
 
 # DeepSpeed Team
 
+import deepspeed.comm as dist
+
 # For lazy import with printflock()
 fcntl = None
 
@@ -151,3 +153,21 @@ def print_backward_tensors(tensor):
 
     if hasattr(tensor, 'grad_fn'):
         _print_bwd_tensors(tensor.grad_fn)
+
+
+def print_rank(*msg, force=False):
+    """print something on all global ranks with [rank] prefix.
+    """
+    if not force:
+        return
+    global_rank = dist.get_rank()
+    print(f"[{global_rank}]", *msg)
+
+
+def print_rank0(*msg, force=False):
+    """print something only on rank 0"""
+    if not force:
+        return
+    global_rank = dist.get_rank()
+    if global_rank == 0:
+        print(f"[{global_rank}]", *msg)
