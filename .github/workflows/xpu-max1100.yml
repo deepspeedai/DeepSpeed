@@ -68,6 +68,8 @@ jobs:
       shell: bash
       run: |
         cd tests/unit
+        export FI_PROVIDER="tcp"
+        export I_MPI_SHM=off
         pytest --verbose accelerator/*
         pytest --verbose autotuning/*
         pytest --verbose checkpoint/test_reshape_checkpoint.py
