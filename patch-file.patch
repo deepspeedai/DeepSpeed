@@ -1,0 +1,13 @@
+diff --git a/csrc/includes/quantization_utils.h b/csrc/includes/quantization_utils.h
+index 61630d0a..94958fb4 100644
+--- a/csrc/includes/quantization_utils.h
++++ b/csrc/includes/quantization_utils.h
+@@ -123,7 +123,7 @@ public:
+     DS_D_INLINE T dequantize(int8_t val)
+     {
+         const float val_deq_f = ((conversion::to<float>(val)) * scale) + offset;
+-        return conversion::to<__half>(val_deq_f);
++        return conversion::to<T>(val_deq_f);
+     }
+ 
+     DS_D_INLINE void store(float* params, int group_index)
