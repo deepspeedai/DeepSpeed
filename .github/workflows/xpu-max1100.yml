@@ -57,7 +57,6 @@ jobs:
     - name: Check container state
       shell: bash
       run: |
-        ldd --version
         ds_report
         python3 -c "import torch; print('torch:', torch.__version__, torch)"
         python3 -c "import torch; import intel_extension_for_pytorch; print('XPU available:', torch.xpu.is_available())"
