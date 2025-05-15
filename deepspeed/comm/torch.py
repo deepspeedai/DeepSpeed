@@ -151,7 +151,7 @@ class TorchBackend(Backend):
                                                  init_method=init_method,
                                                  rank=rank,
                                                  world_size=world_size,
-                                                 device_id=torch.device('cuda', local_rank))
+                                                 device_id=get_accelerator().device(local_rank))
         self.using_mpi = torch.distributed.get_backend() == 'mpi'
 
     @disable_compiler_collective
