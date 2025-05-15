@@ -5,6 +5,7 @@
 
 import deepspeed
 from deepspeed import utils
+import inspect
 
 from .utils import *
 from .backend import *
@@ -145,13 +146,18 @@ class TorchBackend(Backend):
 
     def init_process_group(self, backend, timeout, init_method, rank, world_size):
         if not torch.distributed.is_initialized():
-            local_rank = int(os.environ.get('LOCAL_RANK', 0))
-            torch.distributed.init_process_group(backend,
-                                                 timeout=timeout,
-                                                 init_method=init_method,
-                                                 rank=rank,
-                                                 world_size=world_size,
-                                                 device_id=get_accelerator().device(local_rank))
+            kwargs = dict(
+                timeout=timeout,
+                init_method=init_method,
+                rank=rank,
+                world_size=world_size,
+            )
+            # device_id arg was added in torch==2.3
+            if 'device_id' in inspect.signature(torch.distributed.init_process_group).parameters:
+                local_rank = int(os.environ.get('LOCAL_RANK', 0))
+                kwargs.update(device_id=get_accelerator().device(local_rank))
+            torch.distributed.init_process_group(backend, **kwargs)
+
         self.using_mpi = torch.distributed.get_backend() == 'mpi'
 
     @disable_compiler_collective
