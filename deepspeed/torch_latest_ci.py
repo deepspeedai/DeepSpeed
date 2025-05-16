@@ -2,7 +2,7 @@ from pathlib import Path
 
 import modal
 
-ROOT_PATH = Path(__file__).parent
+ROOT_PATH = Path(__file__).parent.parent
 
 image = (modal.Image.from_registry(
     "pytorch/pytorch:2.3.0-cuda12.1-cudnn8-devel",
