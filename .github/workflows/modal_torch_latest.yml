@@ -45,15 +45,15 @@ jobs:
         with:
           lfs: true
 
-      # - name: Filter changed files
-      #   uses: dorny/paths-filter@v2
-      #   id: filter
-      #   with:
-      #     token: ${{ secrets.GITHUB_TOKEN }}
-      #     filters: |
-      #       deepspeed:
-      #         - 'deepspeed/**/*.py'
-      #         - '.github/workflows/deepspeed.yml'
+      - name: Filter changed files
+        uses: dorny/paths-filter@v2
+        id: filter
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          filters: |
+            deepspeed:
+              - 'deepspeed/**/*.py'
+              - '.github/workflows/deepspeed.yml'
 
   deploy:
     name: DeepSpeedAI CI
