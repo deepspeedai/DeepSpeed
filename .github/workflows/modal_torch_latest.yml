@@ -85,7 +85,7 @@ jobs:
         run: |
           pip install uv==0.4.0 # much faster than pip
           uv pip install --system modal
-          uv pip install .[dev,1bit,autotuning,deepcompile]
+          uv pip install --system .[dev,1bit,autotuning,deepcompile]
           ds_report
           # time uv pip compile arctic_training/setup.py --extra all -o arctic_training/ci-requirements.txt
           # # add vllm manually to deps since it fails pip compile w/o CUDA_HOME being set in github actions
