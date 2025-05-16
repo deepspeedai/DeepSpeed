@@ -19,6 +19,12 @@ If a formatting test fails, it will fix the modified code in place and abort
 the `git commit`. After looking over the changes, you can `git add <modified files>`
 and then repeat the previous `git commit` command.
 
+You can also run:
+```
+make format
+```
+which will do the same as above, and it'll also automatically build a `venv` python environment if you
+don't already have one, which will isolate the requirements of this project from requirements of other projects.
 
 ## Testing
 DeepSpeed tracks two types of tests: unit tests and more costly model convergence tests.
@@ -37,6 +43,11 @@ pytest --forked tests/unit/
 You can also provide the `-v` flag to `pytest` to see additional information about the
 tests. Note that [pytest-forked](https://github.com/pytest-dev/pytest-forked) and the
 `--forked` flag are required to test CUDA functionality in distributed tests.
+
+You can also run:
+```
+make test
+```
 
 ### Model Tests
 To execute model tests, first [install DeepSpeed](#installation). The

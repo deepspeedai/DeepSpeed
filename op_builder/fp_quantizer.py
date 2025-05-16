@@ -54,7 +54,7 @@ class FPQuantizerBuilder(CUDAOpBuilder):
             return False
 
         # triton 2.3.{0,1} and 3.0.0 are ok.
-        allowed_versions = ("2.3", "3.0")
+        allowed_versions = ("2.3", "3.0", "3.1", "3.2")
         if pkg_version:
             allowed = (pkg_version.parse(v) for v in allowed_versions)
             installed_triton = pkg_version.parse(triton.__version__)
