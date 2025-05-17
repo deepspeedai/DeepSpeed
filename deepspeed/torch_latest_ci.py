@@ -1,3 +1,8 @@
+# Copyright (c) Snowflake.
+# SPDX-License-Identifier: Apache-2.0
+
+# DeepSpeed Team
+
 from pathlib import Path
 
 import modal
@@ -5,9 +10,10 @@ import modal
 ROOT_PATH = Path(__file__).parent.parent
 
 image = (modal.Image.from_registry(
-    "pytorch/pytorch:2.3.0-cuda12.1-cudnn8-devel",
+    "pytorch/pytorch:2.6.0-cuda12.4-cudnn9-devel",
     add_python="3.10")
     .run_commands("apt update && apt install -y libaio-dev")
+    .run_commands("pip list")
     .pip_install_from_requirements(ROOT_PATH / "requirements/requirements.txt", gpu="any")
     .pip_install_from_requirements(ROOT_PATH / "requirements/requirements-dev.txt", gpu="any")
     .add_local_dir(ROOT_PATH / "accelerator", remote_path="/root/accelerator")
@@ -31,7 +37,7 @@ app = modal.App("deepspeedai-ci", image=image)
 def pytest():
     import subprocess
     subprocess.run(
-        "pytest -sv tests/unit/runtime/test_data.py".split(),
+        "pytest -sv tests/unit/runtime/test_data.py --torch_ver=2.6".split(),
         check=True,
         cwd=ROOT_PATH / ".",
     )

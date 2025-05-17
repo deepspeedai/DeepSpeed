@@ -85,6 +85,7 @@ jobs:
         run: |
           pip install uv==0.4.0 # much faster than pip
           uv pip install --system modal
+          pwd
           uv pip install --system .[dev,1bit,autotuning,deepcompile]
           ds_report
           # time uv pip compile arctic_training/setup.py --extra all -o arctic_training/ci-requirements.txt
@@ -95,4 +96,3 @@ jobs:
       - name: Run tests
         run: |
           modal run -m deepspeed.torch_latest_ci
-
