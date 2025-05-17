@@ -29,7 +29,10 @@ print(*sys.argv[1:])
 #    Linux, git grep is always the same.
 excluded_file = ".github/workflows/xpu-max1100.yml"
 res = subprocess.run(
-    ["git", "grep", "-Hn", "--no-index", "-e", r"--extra-index-url", "--", f":(exclude){excluded_file}", *sys.argv[1:]],
+    [
+        "git", "grep", "-Hn", "--no-index", "-e", r"--extra-index-url", "--", f":(exclude){excluded_file}",
+        *sys.argv[1:]
+    ],
     capture_output=True,
 )
 if res.returncode == 0:
