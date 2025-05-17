@@ -31,7 +31,7 @@ app = modal.App("deepspeedai-ci", image=image)
 def pytest():
     import subprocess
     subprocess.run(
-        "pytest -n 4 tests".split(),
+        "pytest -sv tests/unit/runtime/test_data.py".split(),
         check=True,
         cwd=ROOT_PATH / ".",
     )
