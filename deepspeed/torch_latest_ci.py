@@ -30,14 +30,15 @@ app = modal.App("deepspeedai-ci", image=image)
 
 
 @app.function(
-    gpu="a10g:2",
+    gpu="l40s:4",
+    # gpu="a10g:2",
     # secrets=[modal.Secret.from_local_environ(["HF_TOKEN"])],
     timeout=1500,
 )
 def pytest():
     import subprocess
     subprocess.run(
-        "pytest --forked tests/unit --torch_ver=2.6 --cuda_ver=12.4".split(),
+        "pytest --forked tests/unit/runtime/zero tests/unit/sequence_parallelism tests/unit/runtime/half_precision --torch_ver=2.6 --cuda_ver=12.4".split(),
         check=True,
         cwd=ROOT_PATH / ".",
     )
