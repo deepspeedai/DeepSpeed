@@ -31,7 +31,7 @@ app = modal.App("deepspeedai-ci", image=image)
 def pytest():
     import subprocess
     subprocess.run(
-        "pytest --disable-warnings --instafail -n 4 tests".split(),
+        "pytest -n 4 tests".split(),
         check=True,
         cwd=ROOT_PATH / ".",
     )
