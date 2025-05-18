@@ -38,7 +38,7 @@ app = modal.App("deepspeedai-ci", image=image)
 def pytest():
     import subprocess
     subprocess.run(
-        "pytest --forked tests/unit/runtime/zero tests/unit/sequence_parallelism tests/unit/runtime/half_precision --torch_ver=2.6 --cuda_ver=12.4".split(),
+        "pytest --forked tests/unit/ops/aio --torch_ver=2.6 --cuda_ver=12.4".split(),
         check=True,
         cwd=ROOT_PATH / ".",
     )
