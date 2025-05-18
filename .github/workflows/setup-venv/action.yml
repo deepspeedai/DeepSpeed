@@ -8,6 +8,7 @@ runs:
         sudo apt-get update
         # Temporary disable nvme UTs
         # sudo apt-get install -y libaio-dev
+        sudo apt remove -y libaio-dev
         python -m pip install --user --upgrade pip
         python -m pip install --user --upgrade virtualenv
       shell: bash
