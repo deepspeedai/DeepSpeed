@@ -1952,7 +1952,6 @@ class Init(InsertPostInitMethodToModuleSubClasses):
             flat_scale_tensor = torch.empty(scale_tensor_size,
                                             dtype=param_list[0].ds_tensor.ds_quant_scale.dtype,
                                             device=self.local_device)
-            flat_scale_tensor.requires_grad = False
             scale_partitions = []
             for i in range(self.world_size):
                 start = scale_tensor_size * i
