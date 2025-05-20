@@ -1277,7 +1277,7 @@ class SequenceTiledCompute(torch.autograd.Function):
 
         XXX: currently assuming that all kwargs_to_shard values have a shape of `[bs, seqlen, ...]` and we shard on seqlen dimension
         """
-        see_memory_usage("forward enter", a=True)
+        see_memory_usage("forward enter", force=False)
         # print(f"SequenceTiledCompute.forward")
         ctx.fn = fn
         ctx.seqlen = seqlen
@@ -1326,7 +1326,7 @@ class SequenceTiledCompute(torch.autograd.Function):
                 )
                 # print(f"{output.shape=}")
                 output_shards.append(output)
-            see_memory_usage("forward end 1", a=True)
+            see_memory_usage("forward end 1", force=False)
 
             if output_unshard_dimension == 0:
                 # this is just the shape=[1] loss use-case, not sure if it's generic enough
@@ -1340,7 +1340,7 @@ class SequenceTiledCompute(torch.autograd.Function):
 
             # print(f"{output_unsharded.shape=}")
             # print(f"{output_unsharded.grad=}")
-            see_memory_usage("forward end 2", a=True)
+            see_memory_usage("forward end 2", force=False)
 
             if output_reduction is None:
                 return output_unsharded
@@ -1355,7 +1355,7 @@ class SequenceTiledCompute(torch.autograd.Function):
     def backward(ctx, *grads) -> torch.Tensor:
         # print(f"SequenceTiledCompute.backward")
 
-        see_memory_usage("backward enter", a=True)
+        see_memory_usage("backward enter", force=False)
         fn = ctx.fn
         shards = ctx.shards
         kwargs_to_shard = ctx.kwargs_to_shard
@@ -1467,7 +1467,7 @@ class SequenceTiledCompute(torch.autograd.Function):
         # grad_requiring_tensor.requires_grad_(False)
         # grad_requiring_tensor_grad.requires_grad_(False)
 
-        see_memory_usage("backward end", a=True)
+        see_memory_usage("backward end", force=False)
 
         return tuple(grad_outputs + arg_outputs)
 
@@ -1488,7 +1488,7 @@ class SequenceTiledCompute2(torch.autograd.Function):
         output_reduction,
         *args,
     ) -> torch.Tensor:
-        see_memory_usage("forward enter", a=True)
+        see_memory_usage("forward enter", force=False)
         # print(f"SequenceTiledCompute.forward")
         ctx.fn = fn
         ctx.seqlen = seqlen
