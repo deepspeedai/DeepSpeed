@@ -79,27 +79,15 @@ class FP_Quantize(Quantizer):
         else:
             assert (0), \
                 f"Missing {q_bits}-quantization, please add the template arguments for the kernel to support this precision!"
-
-        # Adding (group_size - 1) is for padding
-        self.num_groups = (input.numel() + self.q_config.group_size - 1) // self.q_config.group_size
-        # group_size should be the minimal number between the defined group size and number of elements in tensor.
-        group_size = int(min(self.q_config.group_size, input.numel()) * q_bits) // 8
-        # CUDA quantization kernel saves the scale as (fp32) inside the quantized tensor for each group
-        if self.cuda_impl:
-            group_size += 4
-        # CUDA quantization kernel allocates tensors as uint8, but handles them as fp8 inside the kernel.
-        self.input_q = torch.ones(self.num_groups, group_size, dtype=self.q_config.q_dtype, device=input.device)
-        # CUDA quantization kernel attaches scales to quantized result, in python implementation it can't be done
-        # because they are of different types.
-        self.scale = torch.ones(self.num_groups, 1, device=input.device)
-        out = fp_quant_module.quantize(self.input_q, input, self.scale, group_size, stochastic_mode, q_bits,
-                                       q_mantisa_bits)
+        self.num_groups = input.numel() // self.group_size
+        self.input_q = torch.ones(self.num_groups,
+                                  int(self.group_size * q_bits) // 8 + 4,
+                                  dtype=torch.uint8,
+                                  device=input.device)
+        out = fp_quant_module.quantize(self.input_q, input, self.group_size, stochastic_mode, q_bits, q_mantisa_bits)
         if return_meta_tensor:
-            if self.cuda_impl:
-                data, self.scale = out.split(group_size, dim=-1)
-                data = data.contiguous().reshape(input.shape)
-            else:
-                data = out.contiguous().reshape(input.shape)
+            data, self.scale = out.split(self.group_size, dim=-1)
+            data = data.contiguous().reshape(input.shape)
             self.scale = self.scale.contiguous()
             del self.input_q
             del out
@@ -111,9 +99,9 @@ class FP_Quantize(Quantizer):
 
     def to(self, *args, **kwargs):
         # Intermediate tensors may need to be moved to different devices
-        if hasattr(self, 'input_q') and self.input_q is not None:
+        if hasattr(self, 'input_q'):
             self.input_q = self.input_q.to(*args, **kwargs)
-        if hasattr(self, 'scale') and self.scale is not None:
+        if hasattr(self, 'scale'):
             self.scale = self.scale.to(*args, **kwargs)
 
     def get_scales(self):
@@ -136,16 +124,11 @@ class FP_Quantize(Quantizer):
             assert (0), \
                 f"Missing {q_bits}-dequantization, please add the template arguments for the kernel to support this precision!"
 
-        if scale is not None and self.cuda_impl:
+        if scale is not None:
             assert input_q.numel() == fp_out.numel(), \
             f'[De-quantization Error]: quantized data should have the same size as original tensor when scale is not None!'
-            input_q = torch.cat([input_q.reshape(-1, self.q_config.group_size), scale], dim=-1).contiguous()
-        elif scale is not None and not self.cuda_impl:
-            group_size = int(min(self.q_config.group_size, input_q.numel()) * q_bits) // 8
-            input_q = input_q.reshape(-1, group_size)
-
-        fp_quant_module.dequantize(fp_out, input_q, self.scale, self.q_config.group_size, q_mantisa_bits,
-                                   q_bits - q_mantisa_bits - 1)
+            input_q = torch.cat([input_q.reshape(-1, self.group_size), scale], dim=-1).contiguous()
+        fp_quant_module.dequantize(fp_out, input_q, self.group_size, q_mantisa_bits, q_bits - q_mantisa_bits - 1)
         return fp_out
 
     def selective_dequantize(self,
@@ -174,11 +157,11 @@ class FP_Quantize(Quantizer):
             assert (0), \
                 f"Missing {q_bits}-dequantization, please add the template arguments for the kernel to support this precision!"
 
-        if scale is not None and self.cuda_impl:
+        if scale is not None:
             assert input_q.numel() == fp_out.numel(), \
             f'[De-quantization Error]: quantized data should have the same size as original tensor when scale is not None!'
-            input_q = torch.cat([input_q.reshape(-1, self.q_config.group_size), scale], dim=-1).contiguous()
+            input_q = torch.cat([input_q.reshape(-1, self.group_size), scale], dim=-1).contiguous()
 
-        fp_quant_module.selective_dequantize(fp_out, input_q, indexes, self.q_config.group_size, q_mantisa_bits,
+        fp_quant_module.selective_dequantize(fp_out, input_q, indexes, self.group_size, q_mantisa_bits,
                                              q_bits - q_mantisa_bits - 1)
         return fp_out

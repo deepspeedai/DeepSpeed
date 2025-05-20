@@ -31,6 +31,7 @@ from .activation_checkpointing.config import DeepSpeedActivationCheckpointingCon
 from ..comm.config import DeepSpeedCommsConfig
 from ..monitor.config import get_monitor_config
 from ..inference.config import WeightQuantConfig
+from ..compile.config import CompileConfig
 
 from deepspeed import comm as dist
 from deepspeed.runtime.config_utils import DeepSpeedConfigModel
@@ -801,7 +802,6 @@ class DeepSpeedConfig(object):
 
     def _initialize_params(self, param_dict):
         self.train_batch_size = get_train_batch_size(param_dict)
-        #print(f"beginning get_train_batch_size = {get_train_batch_size}")
         self.train_micro_batch_size_per_gpu = get_train_micro_batch_size_per_gpu(param_dict)
         self.gradient_accumulation_steps = get_gradient_accumulation_steps(param_dict)
         self.steps_per_print = get_steps_per_print(param_dict)
@@ -912,6 +912,8 @@ class DeepSpeedConfig(object):
 
         self.weight_quantization_config = WeightQuantConfig(
             **param_dict['weight_quantization']) if 'weight_quantization' in param_dict else None
+
+        self.compile_config = CompileConfig(**param_dict.get('compile', {}))
 
         self.timers_config = get_timers_config(param_dict)
         self.tensor_parallel_config = get_tensor_parallel_config(param_dict)

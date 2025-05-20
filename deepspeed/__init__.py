@@ -411,7 +411,7 @@ def init_inference(model, config=None, **kwargs):
     return engine
 
 
-def tp_model_init(model, tp_size, dtype):
+def tp_model_init(model, tp_size, dtype, config=None, **kwargs):
     """
     Initialize the model for tensor parallelism.
 
@@ -424,8 +424,9 @@ def tp_model_init(model, tp_size, dtype):
         torch.nn.Module: The initialized model with tensor parallelism.
     """
     # avoid re-entry
-    assert not hasattr(
-        model, 'ds_autotp_parsed'), "ds_autotp_parsed' attribute already exists in the model, re-entry is not allowed."
+    if hasattr(model, 'ds_autotp_parsed'):
+        logger.warning("ds_autotp_parsed' attribute already exists in the model, re-entry is not allowed.")
+        return
 
     set_autotp_mode(training=True)
 

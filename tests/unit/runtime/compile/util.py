@@ -70,8 +70,7 @@ def enable_determinism(seed: int):
 
 
 @enable_determinism(123)
-def compare_loss(self, config, dtype):
-    iteration = 5
+def compare_loss(self, config, dtype, iteration=5):
     hidden_dim = 10
     RTOL = 5e-1
     ATOL = 1e-2
@@ -116,9 +115,12 @@ def compare_loss(self, config, dtype):
         baseline_engine.backward(baseline_loss)
         target_engine.backward(target_loss)
 
-        baseline_optimizer.step()
-        target_optimizer.step()
+        baseline_engine.step()
+        target_engine.step()
 
         with GatheredParameters(target_engine.parameters()):
             for p1, p2 in zip(baseline_engine.parameters(), target_engine.parameters()):
                 assert torch.allclose(p1.to(dtype), p2, rtol=RTOL, atol=ATOL)
+
+    baseline_engine.destroy()
+    target_engine.destroy()
