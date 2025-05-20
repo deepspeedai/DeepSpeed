@@ -455,7 +455,6 @@ class PartitionedParameterCoordinator:
             # there's a hook execution issue
             param.ds_active_sub_modules.clear()
             self.__release_param(param)
-        #self.__n_available_params = 0
         for param in iter_params(module, recurse=True):
             if param.ds_status != ZeroParamStatus.NOT_AVAILABLE:
                 raise RuntimeError(f"{param.ds_summary()} expected to be released")

@@ -12,7 +12,13 @@ namespace cg = cooperative_groups;
 
 // only used to avoid compilation error due to lack of definition.
 #ifndef BF16_AVAILABLE
+#if defined(__CUDA_BF16_H__)
+static_assert(sizeof(__nv_bfloat162) == sizeof(__half2),
+              "CUDA's __nv_bfloat162 doesn't match __half2 size");
+#else
+// Fallback to simple typedef only if CUDA doesn't provide it
 using __nv_bfloat162 = __half2;
+#endif
 #endif
 
 // Bias add
