@@ -18,45 +18,14 @@ from torch import Tensor
 
 from deepspeed.utils.debug import print_rank0, print_rank
 from deepspeed.runtime.utils import see_memory_usage
-
-## XXX: when creating a PR into deepspeed move _DimZeroAllToAll into deepspeed.sequence.layer
-# from deepspeed.sequence.layer import _DimZeroAllToAll, _SeqAllToAll
-"""Differentiable All2All across dimension 0."""
-
-
-class _DimZeroAllToAll(torch.autograd.Function):
-
-    @staticmethod
-    def forward(ctx: Any, group: dist.ProcessGroup, input: Tensor) -> Tensor:
-        world_size = dist.get_world_size(group)
-        assert input.shape[0] == world_size, f"Dim 0 {input.shape[0]} is not world size"
-
-        ctx.group = group
-
-        output = torch.empty_like(input).contiguous()
-        # torch.distributed.nn.functional.all_to_all_single(output, input.contiguous(), group=group)
-        dist.all_to_all_single(output, input.contiguous(), group=group)
-        return output
-
-    @staticmethod
-    def backward(ctx: Any, *grad_output: Tensor) -> Tuple[None, Tensor]:
-        return (None, _DimZeroAllToAll.apply(ctx.group, *grad_output))
-
-
-"""
-Some additional Ulysses docs that perhaps should go elsewhere:
-
-If you want to try to push the seqlen higher w/o using more gpus, try to add `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` (but measure the performance - it could be slower). This should help with minimizing fragmentation.
-
-"""
+from deepspeed.sequence.layer import _DimZeroAllToAll
 
 
 class UlyssesSPAttentionHF(torch.nn.Module):
-    """Re-Implementation of DistributedAttention. This implementation enforces the input shape
+    """Re-Implementation of deepspeed.sequence.layer.DistributedAttention. This implementation enforces the input shape
     to be standard [sl, bs, hc, hs] form. Any deviation from this shape will raise an error.
 
-    The primary reason for the re-implementation is to make this less error prone, and remove what seemed like
-    bugs in scenarios where batch size > 1 and when using different versions of
+    The primary reason for the re-implementation is to make this less error prone, and remove what seemed like bugs in scenarios where batch size > 1 and when using different versions of
     flash attention each of which takes different input shape. Those should be handled by
     the actual attn implementation, and not by this module.
 
