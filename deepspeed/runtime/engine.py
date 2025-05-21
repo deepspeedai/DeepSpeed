@@ -1309,7 +1309,7 @@ class DeepSpeedEngine(Module):
             summary += f"\t {self.mp_world_size=}\n"
             summary += f"\t {self.seq_dp_world_size=}\n"
             summary += f"\t {self.sequence_parallel_size=}\n"
-            summary += "********** distributed groups summary **********"
+            summary += "***********************************************"
             logger.info(summary)
 
         if not (self.amp_enabled() or is_zero_init_model):
