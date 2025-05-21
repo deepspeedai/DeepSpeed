@@ -144,7 +144,7 @@ def get_accelerator():
                 # Currently we can run on xpu device only using pytorch,
                 # also reserve the old path using ipex when the torch version is old.
                 if hasattr(torch, 'xpu'):
-                    if torch.xpu.device_count() > 0 and torch.xpu.is_available():
+                    if torch.cuda.device_count() == 0 and torch.xpu.device_count() > 0 and torch.xpu.is_available():    
                         accelerator_name = "xpu"
                     else:
                         pass
