@@ -34,7 +34,7 @@ repos:
         args: []
 
 # disabled until the new license situation has been sorted out:
-# 1. the old copyrights need to remain 
+# 1. the old copyrights need to remain
 # 2. probably need to modify the check to check for the new copyright's existence only
 # -   repo: local
 #     hooks:
