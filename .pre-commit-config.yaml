@@ -33,17 +33,14 @@ repos:
     -   id: clang-format  # formatter of C/C++ code based on a style guide: LLVM, Google, Chromium, Mozilla, and WebKit available
         args: []
 
-# disabled until the new license situation has been sorted out:
-# 1. the old copyrights need to remain
-# 2. probably need to modify the check to check for the new copyright's existence only
-# -   repo: local
-#     hooks:
-#     -   id: check-torchdist
-#         name: check-torchdist
-#         entry: ./scripts/check-torchdist.py
-#         language: python
-#         exclude: ^(deepspeed/comm/|docs/|benchmarks/|scripts/check-torchdist.py|deepspeed/moe/sharded_moe.py|deepspeed/runtime/comm/coalesced_collectives.py|deepspeed/elasticity/elastic_agent.py|deepspeed/launcher/launch.py|tests/unit/comm/test_dist.py)
-#         # Specific deepspeed/ files are excluded for now until we wrap ProcessGroup in deepspeed.comm
+-   repo: local
+    hooks:
+    -   id: check-torchdist
+        name: check-torchdist
+        entry: ./scripts/check-torchdist.py
+        language: python
+        exclude: ^(deepspeed/comm/|docs/|benchmarks/|scripts/check-torchdist.py|deepspeed/moe/sharded_moe.py|deepspeed/runtime/comm/coalesced_collectives.py|deepspeed/elasticity/elastic_agent.py|deepspeed/launcher/launch.py|tests/unit/comm/test_dist.py)
+        # Specific deepspeed/ files are excluded for now until we wrap ProcessGroup in deepspeed.comm
 
 -   repo: local
     hooks:
