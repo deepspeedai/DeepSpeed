@@ -5,20 +5,19 @@
 
 ### Ulysses ###
 
+from collections import defaultdict
+from deepspeed.runtime.utils import see_memory_usage
+from deepspeed.sequence.layer import _DimZeroAllToAll
+from deepspeed.utils.debug import print_rank0, print_rank
+from einops import rearrange
+from torch import Tensor
+from torch.utils.data import DataLoader
 from typing import Any
 from typing import Tuple
 
 import deepspeed.comm as dist
 import torch
 import torch.distributed.nn
-
-# from deepspeed.sequence.layer import UlyssesAttention
-from einops import rearrange
-from torch import Tensor
-
-from deepspeed.utils.debug import print_rank0, print_rank
-from deepspeed.runtime.utils import see_memory_usage
-from deepspeed.sequence.layer import _DimZeroAllToAll
 
 
 class UlyssesSPAttentionHF(torch.nn.Module):
@@ -100,25 +99,12 @@ class UlyssesSPAttentionHF(torch.nn.Module):
         else:
             self.local_kv_head_count = kv_head_count // self.world_size
 
-        print_rank0(f"{self.local_q_head_count=}", force=False)
-        print_rank0(f"{self.local_kv_head_count=}", force=False)
-        print_rank0(f"{self.kv_replication_factor=}", force=False)
-        # exit()
-
         if self.attn_head_count % self.world_size != 0:
             raise ValueError(f"Attention head count {attn_head_count} is not divisible by SP size {self.world_size}")
         if not (self.global_kv_head_count % self.world_size == 0 or self.world_size % self.global_kv_head_count == 0):
             raise ValueError(
                 f"KV attention head count {self.global_kv_head_count} is not divisible by SP size {self.world_size} or"
                 " vice versa")
-
-        # XXX: working on this feature MQA and some cases of GQA
-        # if self.global_kv_head_count < self.world_size:
-        #     raise ValueError(f"KV attention head count < sp size ({self.global_kv_head_count} < {self.world_size}) is currently not supported but it can be implemented by replicating heads")
-
-        # XXX: add more constraints (some might have to go outside of this module or change the API to add more arguments if they are needed here, or perhaps add a special class method that validates the outside things)
-        # - global_seq_length is divisible by SP? but probably has to be sorted out before this module
-        # - more?
 
         # [sl_l bs hc hs]
         self.required_query_shape = torch.Size([local_seq_length, batch_size, attn_head_count, attn_head_size])
@@ -137,10 +123,6 @@ class UlyssesSPAttentionHF(torch.nn.Module):
 
             local_head_count could be different for k,v vs q if it's not an MHA situation
             """
-
-            print_rank0("")
-            print_rank0(f"combine {head_type}: before reshape:  {input.shape=}", force=False)
-            # see_memory_usage(f"combine: 1", force=False)
             if head_type == "q":
                 local_head_count = self.local_q_head_count
             else:  # kv
@@ -151,32 +133,17 @@ class UlyssesSPAttentionHF(torch.nn.Module):
                     # local_head_count *= self.kv_replication_factor
                     # replicate heads to the kv_replication_factor on hc dimension [sl_l bs hc hs] - so dim=2
                     input = input.repeat_interleave(self.kv_replication_factor, dim=2)
-                    print_rank0(f"combine {head_type}: after repeat interleave:  {input.shape=}", force=False)
-            # see_memory_usage(f"combine: 2", force=False)
 
             # [sl_l bs hc hs] -> [sl_l bs ws hc_l hs]
             input = input.reshape(
                 [self.local_seq_length, self.batch_size, self.world_size, local_head_count, self.attn_head_size])
 
-            # see_memory_usage(f"combine: 3", force=False)
-
-            print_rank0(f"combine {head_type}: after reshape:   {input.shape=}", force=False)
-
             input = rearrange(input, "sl_l bs ws hc_l hs -> ws sl_l bs hc_l hs").contiguous()
-            # print_rank0(f"combine {head_type}: after rearrange: {input.shape=}", force=False)
-            # see_memory_usage(f"combine: 4", force=False)
 
             output = _DimZeroAllToAll.apply(self.process_group, input)
-            # direct pytorch version of the same
-            # output = torch.empty_like(input).contiguous()
-            # torch.distributed.nn.functional.all_to_all_single(output, input, group=self.process_group)
-            print_rank0(f"combine {head_type}: after all2all:   {output.shape=}", force=False)
-            # see_memory_usage(f"combine: 5", force=False)
 
             # [ws sl_l bs hc_l hs] -> [sl bs hc_l hs]
             output = output.reshape([self.global_seq_length, *output.shape[2:]]).contiguous()
-            print_rank0(f"combine {head_type}: after reshape:   {output.shape=}", force=False)
-            # see_memory_usage(f"combine: 6", force=False)
 
             # [sl bs hc_l hs]
             return output
@@ -193,8 +160,6 @@ class UlyssesSPAttentionHF(torch.nn.Module):
         returns output in shape: [sl_l bs em]
         """
 
-        # print_rank0(f"partition: before reshape:  {input.shape=}")
-
         # [sl bs em_l] -> [ws sl_l bs em_l]
         input = input.reshape([
             self.world_size,
@@ -203,17 +168,11 @@ class UlyssesSPAttentionHF(torch.nn.Module):
             self.attn_head_size * self.attn_head_count // self.world_size,
         ]).contiguous()
 
-        # print_rank0(f"partition: after reshape:   {input.shape=}", force=False)
         output = _DimZeroAllToAll.apply(self.process_group, input)
-        # output = input
-        # print_rank0(f"partition: after all2all:   {output.shape=}", force=False)
         output = rearrange(output, "ws sl_l bs em_l -> sl_l bs ws em_l")
-        # output = rearrange(output, 'ws sl_l bs ... -> sl_l bs ws ...')
-        # print_rank0(f"partition: after rearrange: {output.shape=}")
 
         # [sl_l bs ws em_l] -> [sl_l bs em]
         output = output.reshape([*output.shape[:2], -1]).contiguous()
-        # print_rank0(f"partition: after reshape:   {output.shape=}")
 
         # [sl_l bs em]
         return output
@@ -248,8 +207,6 @@ class UlyssesSPAttentionHF(torch.nn.Module):
         # print_rank0(f"{key.shape=}")
         # print_rank0(f"{value.shape=}")
         # print_rank0(f"{self.required_input_shape=}")
-        # print(f"XXXX {query.shape=}")
-        # die
         current_local_seq_length = query.shape[2]
         if self.seq_length_is_variable and current_local_seq_length != self.required_query_shape[0]:
             self.local_seq_length = current_local_seq_length
@@ -260,27 +217,24 @@ class UlyssesSPAttentionHF(torch.nn.Module):
                                                        list(self.required_key_value_shape)[1:])
             self.required_context_shape = torch.Size([self.global_seq_length] + list(self.required_context_shape)[1:])
 
-        # print_rank0(f"forward 1 {query.shape=}")
-        # print_rank0(f"forward 1 {key.shape=}")
-        # print_rank0(f"forward 1 {value.shape=}")
-
-        see_memory_usage(f"enter attn forward", force=False)
-
         # make the blocks contiguous as early as possible to minimize fragmentation
         query = rearrange(query, "bs hc sl hs -> sl bs hc hs")  # .contiguous()
         key = rearrange(key, "bs hc sl hs -> sl bs hc hs")  # .contiguous()
         value = rearrange(value, "bs hc sl hs -> sl bs hc hs")  # .contiguous()
 
-        # print_rank0(f"forward 2 {query.shape=}")
-        # print_rank0(f"forward 2 {key.shape=}")
-        # print_rank0(f"forward 2 {value.shape=}")
-        # print_rank0(f"forward 2 {self.required_query_shape=}")
-        # print_rank0(f"forward 2 {self.required_key_value_shape=}")
-
-        # core attn like FA2 expects an unsharded `position_ids` - without which packed samples will return loss=nan.
-        # XXX: need to figure out if we can do the same for SDPA - as it doesn't require this and wants an attention mask, so possibly doing this for FA2 only?
-        # XXX: ideally we would passing the original unsharded position_ids - but we have no way to pass it here as HF Transformers drops unexpected keys in `batch` - so either we need to stash it somewhere in the DataLoader wrapper and retrieve it here
-        # or we could gather it once per batch and stash it inside `module` arg - I already have a machinery to figure out which layer number is being called below in the  skip_all_but_last_attention_debug_mode code where rotating_layer_counter is used - so we could calculate it on the first layer and re-use on the remaining layers
+        # core attn like FA2 expects an unsharded `position_ids` - without which packed samples
+        # will return loss=nan.
+        #
+        # XXX: need to figure out if we can do the same for SDPA - as it doesn't require this and
+        # wants an attention mask, so possibly doing this for FA2 only?
+        #
+        # Ideally we would passing the original unsharded position_ids - but we have no way to pass
+        # it here as HF Transformers drops unexpected keys in `batch` - so either we need to stash
+        # it somewhere in UlyssesSPDataLoaderAdapter and retrieve it here or we could gather it once
+        # per batch and stash it inside `module` arg - I already have a machinery to figure out
+        # which layer number is being called below in the skip_all_but_last_attention_debug_mode
+        # code where rotating_layer_counter is used - so we could calculate it on the first layer
+        # and re-use on the remaining layers
         if "position_ids" in kwargs:
             position_ids_list = [torch.empty_like(kwargs["position_ids"]) for _ in range(self.world_size)]
             dist.all_gather(position_ids_list, kwargs["position_ids"], group=self.process_group)
@@ -294,62 +248,20 @@ class UlyssesSPAttentionHF(torch.nn.Module):
         assert key.shape == value.shape == self.required_key_value_shape, (
             f"[{dist.get_rank()}]: key or value input tensor does not match the required shape\n            "
             f" {self.required_key_value_shape}:\n {query.shape=}\n   {key.shape=}\n {value.shape=}")
-        # assert query.shape == key.shape == value.shape == self.required_input_shape, \
-        #     f"[{dist.get_rank()}]: One of the input tensors does not match the required shape\n             {self.required_input_shape}:\n {query.shape=}\n   {key.shape=}\n {value.shape=}"
-
-        see_memory_usage(f"before combine", force=False)
 
         # expects: [sl_l bs hc hs]
         query_layer, key_layer, value_layer = self._combine_local_sequences(query, key, value)
         # returns: [sl bs hc_l hs]
 
-        see_memory_usage(f"after combine", force=False)
-
         query_layer = rearrange(query_layer, "sl bs hc_l hs -> bs hc_l sl hs").contiguous()
         key_layer = rearrange(key_layer, "sl bs hc_l hs -> bs hc_l sl hs").contiguous()
         value_layer = rearrange(value_layer, "sl bs hc_l hs -> bs hc_l sl hs").contiguous()
-
-        # query_layer = query_layer.reshape(query_layer.shape).contiguous()
-
-        # print_rank0(f"{query_layer.shape=}")
-        # print_rank0(f"{key_layer.shape=}")
-        # print_rank0(f"{value_layer.shape=}")
-
-        # if attention_mask is not None:
-        #     print_rank0(f"{attention_mask.shape=}")
-        #     #print_rank0(f"{attention_mask=}")
-
-        # XXX: stick into the trainer object? but it's going to be a part of deepspeed
-        from deepspeed.utils import groups
-
-        sp_group = groups._get_sequence_parallel_group()
-        sp_world_size = groups._get_sequence_parallel_world_size()
-
-        print_rank0(f"HF before real attn: {query_layer.shape=}", force=False)
-        print_rank0(f"HF before real attn: {key_layer.shape=}", force=False)
-        print_rank0(f"HF before real attn: {value_layer.shape=}", force=False)
-        print_rank0(f"HF before real attn: {torch.norm(query_layer)=}")
-        print_rank0(f"HF before real attn: {torch.norm(key_layer)=}")
-        print_rank0(f"HF before real attn: {torch.norm(value_layer)=}")
-
-        # pr0(f"HF before real attn: {query_layer.shape=}", force=False)
-        # pr0(f"HF before real attn: {key_layer.shape=}", force=False)
-        # pr0(f"HF before real attn: {value_layer.shape=}", force=False)
-        # pr0(f"HF before real attn: {torch.norm(query_layer)=}", force=False)
-        # pr0(f"HF before real attn: {torch.norm(key_layer)=}", force=False)
-        # pr0(f"HF before real attn: {torch.norm(value_layer)=}", force=False)
-
-        # exit()
-
-        see_memory_usage(f"before core attn", force=False)
 
         # crucial in the case of MQA and some GQA cases we need to fix `module.num_key_value_groups`
         # see:
         # XXX: could move this somewhere to do it only once per run
         if self.kv_replication_factor > 1:
-            print_rank0(f"before: {module.num_key_value_groups=}", force=False)
             module.num_key_value_groups = query_layer.size(-3) // key_layer.size(-3)
-            print_rank0(f"after: {module.num_key_value_groups=}", force=False)
 
         if not self.skip_all_but_last_attention_debug_mode:
             # expects: [bs hc_l sl hs]
@@ -372,53 +284,21 @@ class UlyssesSPAttentionHF(torch.nn.Module):
                 context_layer = rearrange(query_layer, "bs hc_l sl ... -> bs sl hc_l ...")
                 attn_weights = None
 
-        # print(f"{context_layer.shape=}")
-        # if attn_weights is not None:
-        #     print(f"{attn_weights.shape=}")
-        # else:
-        #     print(f"attn_weights=None")
-
-        see_memory_usage(f"after core attn", force=False)
-
-        # debug_gathered_tensor(context_layer, sp_group, name="context_layer")
-
-        # print_rank0(f"HF after real attn: {context_layer.shape=}")
-        # print_rank0(f"HF after real attn: {torch.norm(context_layer)=}")
-
-        # print_rank0(f"1 {context_layer.shape=}")
         # [bs sl hc_l hs] -> [sl bs hc_l hs]'
         context_layer = rearrange(context_layer, "bs sl ... -> sl bs ...")
-        # print_rank0(f"2 {context_layer.shape=}")
         context_layer = context_layer.reshape([*context_layer.shape[:2], -1])
-        # print_rank0(f"3 {context_layer.shape=}")
-        # print_rank0(f"{self.required_context_shape=}")
 
         assert (
             context_layer.shape == self.required_context_shape
         ), f"The context shape {context_layer.shape} is not of the expected shape {self.required_context_shape}"
 
-        see_memory_usage(f"before partition", force=False)
-
         # expects: [sl bs em_l]
         output = self._partition_global_sequence(context_layer)
         # returns: [sl_l bs em]
 
-        see_memory_usage(f"after partition", force=False)
-
-        # print_rank0(f"1 {output.shape=}")
         output = rearrange(output, "sl_l bs ... -> bs sl_l ...")
-        # print_rank0(f"2 {output.shape=}")
 
         output = output.reshape([*output.shape[:2], -1])
-        # print_rank0(f"3 {output.shape=}")
-        # if attn_weights is not None:
-        #     print_rank0(f"{attn_weights.shape=}")
-
-        # debug_gathered_tensor(output, sp_group, name="output")
-
-        see_memory_usage(f"exit attn forward", force=False)
-
-        # exit()
 
         # expects [bs sl em]
         return output, attn_weights
@@ -448,24 +328,22 @@ class UlyssesSPAttentionHF(torch.nn.Module):
 
         mpu.initialize_sequence_parallel(sequence_parallel_size=sequence_parallel_size)
 
-        # see_memory_usage("ulysses: 1.2", force=True)
         # we don't have the model yet at this stage
         hf_model_config = AutoConfig.from_pretrained(model_name_or_path)
-        # see_memory_usage("ulysses: 1.3", force=True)
         if core_attn_implementation not in ["flash_attention_2", "sdpa"]:
+            # notes on the excluded ones:
             # - eager: The problem is that `eager` wants an attention_mask and it creates the wrong attention mask it seems if we don't provide one - it's possible that we could somehow solve this, but it's also unlikely someone will want to use the slow eager attention with sequence parallelism
             # - flex_attention: haven't tried
-            # - flash_attention_2: with some models leads to loss=nan when using packed samples - works fine w/o packed samples
 
             raise ValueError(
                 f"{core_attn_implementation} attn_implementation isn't currently supported by Ulysses sequence"
-                " parallelism. Set attn_implementation to either 'flash_attention_2' and 'sdpa'.")
+                " parallelism. Set core_attn_implementation arg to either 'flash_attention_2' or 'sdpa'.")
 
         if core_attn_implementation not in ALL_ATTENTION_FUNCTIONS:
-            raise ValueError(f"{core_attn_implementation} is not a valid attn_implementation. The choices are"
-                             f" {ALL_ATTENTION_FUNCTIONS.valid_keys()}")
+            raise ValueError(
+                f"{core_attn_implementation} is not a valid attn_implementation. The choices are {ALL_ATTENTION_FUNCTIONS.valid_keys()}"
+            )
         core_attn_function = ALL_ATTENTION_FUNCTIONS[core_attn_implementation]
-        # see_memory_usage("ulysses: 3", force=True)
         uattn = UlyssesSPAttentionHF(
             attn=core_attn_function,
             local_seq_length=max_length // mpu.get_sequence_parallel_world_size(),
@@ -474,10 +352,8 @@ class UlyssesSPAttentionHF(torch.nn.Module):
             attn_head_count=hf_model_config.num_attention_heads,
             attn_head_size=getattr(hf_model_config, "head_dim",
                                    hf_model_config.hidden_size // hf_model_config.num_attention_heads),
-            # attn_head_size=hf_model_config.hidden_size // hf_model_config.num_attention_heads,
             kv_head_count=hf_model_config.num_key_value_heads,
             num_hidden_layers=hf_model_config.num_hidden_layers,
-            # device=self.device,
             process_group=mpu.get_sequence_parallel_group(),
             seq_length_is_variable=seq_length_is_variable,
         )
@@ -492,7 +368,7 @@ class UlyssesSPAttentionHF(torch.nn.Module):
             **kwargs,
         ) -> Tuple[torch.Tensor, torch.Tensor]:
 
-            # XXX: we are relaying on position_ids for SP to work so attention_mask has to be None
+            # We are relaying on position_ids for SP to work so attention_mask has to be None
             # the problem is that HF currently doesn't know anything about ALL_ATTENTION_FUNCTIONS["ulysses"] so it doesn't make a special case like for "flash_attention_2" and "sdpa" and it creates an attention mask on the fly and it breaks things.
             attention_mask = None
 
@@ -508,33 +384,16 @@ class UlyssesSPAttentionHF(torch.nn.Module):
             )
             return attn_output, attn_weights
 
-        # ALL_ATTENTION_FUNCTIONS.register("ulysses", uattn_wrapper)
+        # We don't do: ALL_ATTENTION_FUNCTIONS.register("ulysses", uattn_wrapper)
         # The problem with this approach is that we are missing on all the special use cases in HF Transformers that do things like: if self.config._attn_implementation == "flash_attention_2": ...
         # So instead we hack `ALL_ATTENTION_FUNCTIONS` to override all existing keys with our implementation, since it only gets used at the point of calling the attention and that's what we want, all other code branches relying on the original core `attn_implementation` will still be executed. This is what we called "Being John Malkovich"
         for key in ALL_ATTENTION_FUNCTIONS.keys():
             ALL_ATTENTION_FUNCTIONS[key] = uattn_wrapper
 
-        # see_memory_usage("ulysses: 4", force=True)
-        # exit()
         return mpu
 
-    @classmethod
-    def validate_model(cls, model, sequence_parallel_size):
-        # XXX: no longer using it
-        return
-        if sequence_parallel_size > 1:
-            if model.config._attn_implementation != "ulysses":
-                raise ValueError(
-                    "sequence parallelism has been configured but the HF model isn't configured to run it - check"
-                    " whether the `register_with_transformers` method was called before the `model` has been created")
 
-
-from collections import defaultdict
-
-from torch.utils.data import DataLoader
-
-
-class UlyssesSPDataLoaderWrapper:
+class UlyssesSPDataLoaderAdapter:
 
     def __init__(
         self,
@@ -688,7 +547,7 @@ class UlyssesSPDataLoaderWrapper:
 import math
 #from collections import defaultdict
 
-# if we decide to keep UlyssesSPFwdLossBwdWithLogits way of doing UlyssesSP fwd/loss/bwd for those don't want to use UlyssesSPDataLoaderWrapper - here is how it should be installed into the sub-trainer class:
+# if we decide to keep UlyssesSPFwdLossBwdWithLogits way of doing UlyssesSP fwd/loss/bwd for those don't want to use UlyssesSPDataLoaderAdapter - here is how it should be installed into the sub-trainer class:
 # class SFTTrainer(Trainer):
 # def sp_fwd_loss_bwd(self, batch) -> torch.Tensor:
 #     batch = to_device(batch, self.device)
