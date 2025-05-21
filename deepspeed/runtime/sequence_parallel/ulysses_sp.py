@@ -8,7 +8,7 @@
 from collections import defaultdict
 from deepspeed.runtime.utils import see_memory_usage
 from deepspeed.sequence.layer import _DimZeroAllToAll
-from deepspeed.utils.debug import print_rank0, print_rank
+from deepspeed.utils.debug import print_rank
 from einops import rearrange
 from torch import Tensor
 from torch.utils.data import DataLoader
@@ -16,6 +16,7 @@ from typing import Any
 from typing import Tuple
 
 import deepspeed.comm as dist
+import math
 import torch
 import torch.distributed.nn
 
@@ -404,7 +405,7 @@ class UlyssesSPDataLoaderAdapter:
         device,
     ):
         """
-        Current assumptions on the input:
+        Here are the current assumptions on the inputs fetched by dl->iter->next
         - the batch is a dict with at least the keys: `input_ids`, `labels`, `position_ids` - but can have any additional keys necessary.
         - the tensor values get sharded, the non-tensor values are passed along as is
         """
@@ -438,7 +439,6 @@ class UlyssesSPDataLoaderAdapter:
 
         # we have batches of variable seqlen so in order to do all_gather on batches - we need to know the exact length of each tensor on each rank
         seqlen = torch.tensor(batch["input_ids"].shape[1], dtype=torch.int64, device=self.device)
-        # print(seqlen)
         seqlens = [torch.zeros(1, dtype=torch.int64, device=self.device) for _ in range(self.sp_world_size)]
         dist.all_gather(seqlens, seqlen, group=self.sp_group)
         seqlens = [x[0].item() for x in seqlens]
@@ -446,33 +446,18 @@ class UlyssesSPDataLoaderAdapter:
         for k in batch.keys():
             if torch.is_tensor(batch[k]):
                 batch[k] = batch[k].to(self.device)
-                # print_rank(f"before gather: {k}: {batch[k].shape=}", force=False)
-                # print_rank0(f"before gather: {k}: {batch[k]=}")
-                # print(f"before gather: {k}: {batch[k].shape=}")
                 with torch.no_grad():
                     tensor_list = [
                         torch.zeros((batch[k].shape[0], seqlens[i]), dtype=batch[k].dtype, device=batch[k].device)
                         for i in range(self.sp_world_size)
                     ]
-                    # # print(tensor_list)
-                    # # print(batch[k])
                     dist.all_gather(tensor_list, batch[k], group=self.sp_group)
             else:
                 tensor_list = [None for _ in range(self.sp_world_size)]
                 dist.all_gather_object(tensor_list, batch[k], group=self.sp_group)
 
-            # gathering on the data dimension
-            # will be concatenating and later splitting again for the more general case
-            # batch[k] = torch.cat(tensor_list, dim=1)
             for rank, tensor in enumerate(tensor_list):
                 micro_batches[rank][k] = tensor
-                # print_rank(f"after gather: {rank} {k}: {micro_batches[rank][k].shape=}", force=False)
-                # print_rank(f"after gather: {rank} {k}: {micro_batches[rank][k].device=}", force=False)
-                # print_rank(f"after gather: {rank} {k}: {micro_batches[rank][k]=}", force=False)
-                # if k == "input_ids":
-                #     print_rank0(f"{self.trainer.tokenizer.decode(micro_batches[rank][k][0])=}", force=False)
-
-            # see_memory_usage("mid-gathering", force=False)
 
         del tensor_list
         del batch
@@ -492,74 +477,15 @@ class UlyssesSPDataLoaderAdapter:
             # free up temp memory
             del labels
 
-            # XXX: do not delete this block for now
-            # if "position_ids" in batch:
-            #     ## we need both the sharded and non-sharded version of position_ids
-            #     # XXX: don't know how to pass it to ulysses attn - HF drops custom keys in batch
-            #     batch["position_ids_unsharded"] = copy.copy(batch["position_ids"])
-            #     # and when calculating FLOs one needs the length of each sequence because the compute is quadratic wrt sequence length
-            #     t = batch["position_ids"].flatten()
-            #     zero_positions = torch.where(t==0)[0].tolist() + [t.numel]
-            #     seqlens = [zero_positions[i+1]-zero_positions[i] for i in range(len(zero_positions)-1)]
-            #     # XXX: the last seqlens may include padding - need to figure out how to fix that
-            #     # XXX: Aurick is going to rework this for padding of pos ids to be 0..x, like normal sequences, so for now will just leave the padding in the last sample - the flops estimate would be still correct - when it'll be its own sample we still need to count it in as a sample because compute will still be done
-
-            #     print(seqlens)
-            #     batch["sample_sequence_lengths"] = seqlens
-            # if self.sp_rank == 0:
-            #    print(f'{batch["position_ids"].tolist()}\n\n')
-            # exit()
-            # batch["seqlens"] =
-
             # batch sharding
             for k in batch.keys():
                 # leave non-tensors alone
                 if not torch.is_tensor(batch[k]):
                     continue
-                # print_rank(f"SLICING {k} {chunk_len=}: {self.sp_rank=}", force=False)
                 # at seqlen>10M and 32+ gpus this can take GBs of memory so keep the prefill buffer on cpu
                 batch[k] = batch[k][:, chunk_len * self.sp_rank:chunk_len * (self.sp_rank + 1)].cpu()
-                # else:
-                #     print_rank(f"KEEPING {k} {batch[k].shape=}", force=False)
-                #     batch[k] = batch[k].to(self.device)
-
-                # print_rank0(f"after sp: {k}: {batch[k].shape=}")
-
-            # if len(self.micro_batches) == 0:
-            #     raise StopIteration
-
-            # print(batch)
-            # exit()
 
             self.micro_batches.append(batch)
-
-        # del micro_batches
-        # import gc; gc.collect()
-
-        # convert to list
-        # self.micro_batches = [micro_batches[i] for i in range(len(micro_batches))]
-
-
-# XXX: this class shouldn't depend on anything in AT (trainer, etc) - we can have a subclass if needed to support that
-# but can also accept kwargs that a customizer can use in methods
-
-# import torch
-import math
-#from collections import defaultdict
-
-# if we decide to keep UlyssesSPFwdLossBwdWithLogits way of doing UlyssesSP fwd/loss/bwd for those don't want to use UlyssesSPDataLoaderAdapter - here is how it should be installed into the sub-trainer class:
-# class SFTTrainer(Trainer):
-# def sp_fwd_loss_bwd(self, batch) -> torch.Tensor:
-#     batch = to_device(batch, self.device)
-#
-#     from arctic_training.trainer.trainer import UlyssesAttentionHFFwdLossBwdWithLogits
-#     ulysses = UlyssesAttentionHFFwdLossBwdWithLogits(
-#         model=self.model,
-#         model_unwrapped=self.model_unwrapped,
-#         device=self.device,
-#         num_loss_logit_shards="auto",
-#     )
-#     return ulysses.sp_fwd_loss_bwd(batch)
 
 
 class TiledLoss(torch.autograd.Function):
@@ -589,7 +515,7 @@ class TiledLoss(torch.autograd.Function):
             num_shards: Any = "auto"
             if num_shards == "auto":
                 # parameterize to about 1GB fp32 logits shards
-                slice_size_in_gb = 1  # XXX: make configurable?
+                slice_size_in_gb = 1
                 size_in_gb = logits.numel() * 4 / 2**30  # fp32
                 # the sp shard's seqlen sp shard can be easily not divisible by the derived number of chunked loss shards, so we use the uppper ceiling and allow the last chunk to be shorter than the rest
                 num_shards = math.ceil(size_in_gb / slice_size_in_gb)
@@ -645,12 +571,10 @@ class TiledLoss(torch.autograd.Function):
             total_loss = torch.cat([l.unsqueeze(0) for l in loss_shards], dim=0).sum()
             weighted_loss = total_loss / total_good_items
 
-        # weighted_loss.requires_grad = True
         return weighted_loss
 
     @staticmethod
     def backward(ctx, *grads) -> torch.Tensor:
-
         logits, shift_labels = ctx.saved_tensors
         loss_fn = ctx.loss_fn
         vocab_size = ctx.vocab_size
@@ -658,17 +582,8 @@ class TiledLoss(torch.autograd.Function):
 
         grad = grads[0]
         logits_grad = torch.zeros_like(logits)
-        # logits_grad = torch.zeros(logits.shape, device=logits.device, dtype=grad.dtype, requires_grad=logits.requires_grad)
-
         logits_shards = list(torch.chunk(logits, chunks=shards, dim=1))
         shift_labels_shards = list(torch.chunk(shift_labels, chunks=shards, dim=1))
-        del logits
-        del shift_labels
-        ctx.logits = None
-        ctx.shift_labels = None
-        ctx.loss_fn = None
-        ctx.vocab_size = None
-        ctx.shards = None
 
         # if seqlen is not exactly divisible by shards the last step will be shorter than shard_step
         shard_step = logits_shards[0].numel()
@@ -698,10 +613,23 @@ class TiledLoss(torch.autograd.Function):
 
         logits_grad /= shards
 
-        # print(f"returning {logits_grad.norm()=}")
-        # print(f"returning {logits_grad=}")
         # only logits (2nd arg) needs grads
         return None, logits_grad, None, None, None
+
+
+# if we decide to keep UlyssesSPFwdLossBwdWithLogits way of doing UlyssesSP fwd/loss/bwd for those don't want to use UlyssesSPDataLoaderAdapter - here is how it should be installed into the sub-trainer class:
+# class SFTTrainer(Trainer):
+# def sp_fwd_loss_bwd(self, batch) -> torch.Tensor:
+#     batch = to_device(batch, self.device)
+#
+#     from arctic_training.trainer.trainer import UlyssesAttentionHFFwdLossBwdWithLogits
+#     ulysses = UlyssesAttentionHFFwdLossBwdWithLogits(
+#         model=self.model,
+#         model_unwrapped=self.model_unwrapped,
+#         device=self.device,
+#         num_loss_logit_shards="auto",
+#     )
+#     return ulysses.sp_fwd_loss_bwd(batch)
 
 
 class UlyssesSPFwdLossBwdWithLogits:
@@ -742,13 +670,6 @@ class UlyssesSPFwdLossBwdWithLogits:
         # 3. use all_gather and post gathering truncate tensors to their intended length - another overhead of allocating and truncating tensors
         # using approach (1) for now but might want to benchmark later the other 2 approaches
 
-        see_memory_usage("before gathering", force=False)
-        # print_rank(f"{self.trainer.tokenizer.decode(batch['input_ids'][0])=}", force=False)
-        # exit()
-
-        # dist.barrier(group=self.sp_group)
-        # see_memory_usage("after barrier", force=False)
-
         # XXX: if using all_gather_object we can gather the whole batch at once and not per-key! so can drop the loop for that approach
 
         # we have batches of variable seqlen so in order to do all_gather on batches - we need to know the exact length of each tensor on each rank
@@ -757,8 +678,6 @@ class UlyssesSPFwdLossBwdWithLogits:
         seqlens = [torch.zeros(1, dtype=torch.int64, device=self.device) for _ in range(self.sp_world_size)]
         dist.all_gather(seqlens, seqlen, group=self.sp_group)
         seqlens = [x[0].item() for x in seqlens]
-        # print(seqlens)
-        # exit()
 
         for k in batch.keys():
             batch[k] = batch[k].to(self.device)
@@ -791,28 +710,13 @@ class UlyssesSPFwdLossBwdWithLogits:
 
         losses = []
         for sub_step_id in range(self.sp_world_size):
-            # print(f"{sub_step_id=}")
-            # if sub_step_id == 1:
-            #     continue
-            # if sub_step_id == 3:
-            #     break
-
             batch = micro_batches[sub_step_id]
-
-            see_memory_usage(f"{sub_step_id=} start", force=False)
-            # print_rank0(batch)
-
-            print_rank0(f"{sub_step_id}: {len(batch['input_ids'][0])=}")
             seq_length = len(batch["input_ids"][0])
-            # seq_length = self.config.data.max_length
 
             if seq_length % self.sp_world_size != 0:
                 raise ValueError(
                     f"{sub_step_id=}: batch's seqlen={seq_length} isn't divisible by sp-size={self.sp_world_size}")
-            ##chunk_len = math.ceil(seq_length / self.sp_world_size)
             chunk_len = int(seq_length / self.sp_world_size)
-            print_rank0(f"{sub_step_id=}: {seq_length=}")
-            print_rank0(f"{sub_step_id=}: {chunk_len=}")
 
             # to enable the correct mean calculation across shards before sharding the micro batch:
             # 1. count the number of non- `-100`` elements per shard
@@ -823,7 +727,6 @@ class UlyssesSPFwdLossBwdWithLogits:
                 if non_skipped > 1:
                     non_skipped -= 1
                 non_skipped_items[rank] = non_skipped
-            print_rank(f"{non_skipped_items=}", force=False)
 
             # because we have to gather logits from all sp ranks we have to do the loss function ourselves
             # therefore remove labels to avoid an attempt to calculate loss by transformers
@@ -835,148 +738,27 @@ class UlyssesSPFwdLossBwdWithLogits:
 
             # batch sharding
             for k in batch.keys():
-                print_rank(f"SLICING {k} {chunk_len=}: {self.sp_rank=}", force=False)
                 batch[k] = batch[k][:, chunk_len * self.sp_rank:chunk_len * (self.sp_rank + 1)].to(self.device)
-                # else:
-                #     print_rank(f"KEEPING {k} {batch[k].shape=}", force=False)
-                #     batch[k] = batch[k].to(self.device)
-
-                print_rank0(f"after sp: {k}: {batch[k].shape=}")
-                # print_rank0(f"after sp: {k}: {batch[k]=}")
-            # outputs = self.model(**batch, use_cache=False)
-            # loss = outputs.loss
-            see_memory_usage(f"{sub_step_id=} after chunking", force=False)
-
-            # print_rank(f"SLICE DECODE: {sub_step_id=} {self.trainer.tokenizer.decode(batch['input_ids'][0])=}", force=False)
-            # print_rank(f"SLICE DECODE: {sub_step_id=} {batch['position_ids'][0]=}", force=False)
 
             shift_labels = batch.pop("shift_labels")
-            # print_rank(f"{shift_labels=}", force=False)
-            see_memory_usage(f"{sub_step_id=} after shift labels", force=False)
 
             outputs = self.forward(batch)
-            # outputs = self.model(**batch, use_cache=False)
-            logits = outputs.logits
-
-            see_memory_usage(f"{sub_step_id=} after forward", force=False)
-
-            # print_rank(f"{labels=}", force=False)
-            # print_rank(f"{logits=}", force=False)
-            # print_rank(f"logit nans: {torch.isnan(logits).sum()}", force=False)
-            # print_rank(f"logit infs: {torch.isinf(logits).sum()}", force=False)
-            # see_memory_usage(f"{sub_step_id=} before loss", force=True)
             loss = self.compute_loss(labels=None, shift_labels=shift_labels)
-
-            # if all((shift_labels == -100).squeeze()):
-            #     # this is the case where all labels in the micro-batch are -100 (very common for SFT) - CE returns `nan` in this case, so we don't want to call loss and instead create a differentiable loss `0` which will also set all the grads to `0` in `backward` - the effect of this is akin to a perfect score where the model needs no adjustment since grads will be all zeros.
-            #     # XXX: should this be float and not the original dtype?
-            #     loss = (logits.sum() * 0.0).float()
-            #     #loss = FakeLoss.apply(logits)
-            # else:
-            #     #see_memory_usage(f"{sub_step_id=} before loss", force=True)
-            #     #loss = self.model_unwrapped.loss_function(logits=logits, labels=None, vocab_size=self.model_unwrapped.config.vocab_size, shift_labels=shift_labels)
-
-            #     shards = 8
-            #     loss = TiledLoss.apply(self.model_unwrapped.loss_function, logits, self.model_unwrapped.config.vocab_size, shift_labels, shards)
-
-            # see_memory_usage(f"{sub_step_id=} after loss", force=True)
-
-            # loss = outputs.loss
-            print_rank(f"LOSS local {loss=}", force=False)
 
             # free up temp mem (e.g. outputs.logits are huge)
             del outputs
 
-            see_memory_usage(f"{sub_step_id=} after loss", force=False)
-            # exit()
-
-            # if torch.isnan(loss):
-            #     break
-            #     #continue
-            #     #loss = torch.tensor(0.0).to(self.device).requires_grad_() + 0.0
-
             # differentiable loss aggregation across ranks
             losses_per_rank = torch.distributed.nn.functional.all_gather(loss, group=self.sp_group)
-            # print(f"LOSS {losses_per_rank=}")
-            print_rank(f"LOSS {losses_per_rank=}", force=False)
 
             # since each shard may have a variable number of skipped elemented - need to calculate a weighted mean depending on each rank's contribution - this will also take care of loss=0 when all elements are -100 in a shard
             # XXX: not expecting a total of 0-non-skipped items for div
             loss = sum(losses_per_rank[rank] * non_skipped_items[rank]
                        for rank in range(self.sp_world_size)) / sum(non_skipped_items.values())
-            # this is a much simpler version w/o weighting
-            # skip 0.0 entries when calculating total loss per batch
-            # loss = torch.stack(list(l for l in losses_per_rank if l != 0)).mean()
 
-            # loss = torch.cat([l.unsqueeze() for l in losses_per_rank], dim=0).mean()
-            # loss = sum(loss_per_rank) # / self.sp_world_size
-            # loss = sum(tensor_list)
-            # print_rank(f"LOSS averaged {loss=}", force=False)
-            # print("LOSS", loss)
-            see_memory_usage(f"{sub_step_id=} after gathered loss", force=False)
-
-            # exit()
-
-            # logits = outputs.logits
-            # print_rank(f"{sub_step_id=}: {torch.norm(logits)=}", force=False)
-            # print_rank(f"{sub_step_id=}: {logits.shape=}")
-            # print_rank(f"{logits.dtype=}")
-            # print_rank(f"{sub_step_id=}: {labels.shape=}")
-
-            # # XXX: stick into the trainer object
-            # #self.sp_group = groups._get_sequence_parallel_group()
-            # #self.sp_world_size = groups._get_sequence_parallel_world_size()
-            # # we need the differentiable all_gather, which is the functional version of it
-            # import torch.distributed.nn.functional
-            # tensor_list = torch.distributed.nn.functional.all_gather(logits, self.sp_group)
-            # # concatenate on the seqlen dimension
-            # logits = torch.cat(tensor_list, dim=1)
-            # del tensor_list
-            # print_rank(f"after cat: {logits.shape=}")
-            # see_memory_usage(f"{sub_step_id=} after cat", force=False)
-
-            # print_rank(f"LOSS {logits.shape=}: {labels.shape=}", force=False)
-
-            # loss = self.model_unwrapped.loss_function(logits=logits, labels=labels, vocab_size=self.model_unwrapped.config.vocab_size)
-            # #print_rank0(f"intermediary {loss.item()*self.sp_world_size=}")
-
-            # # optimize memory
-            # del logits
-            # del labels
-
-            # #loss = self.loss(batch)
-            # loss_aggregate += loss.item()*self.sp_world_size
-
-            # print_rank(f"{self.train_batch_idx}-{sub_step_id}: {loss.requires_grad=}")
-            # print_rank(f"{self.train_batch_idx}-{sub_step_id}: {loss=}")
-
-            see_memory_usage(f"{sub_step_id=} before backward", force=False)
-            # import gc; gc.collect()
-            # self.model.backward(loss)
             self.backward()
 
-            # print_rank(f"{labels[0][70:80]=}", force=False)
-            # print_rank(f"{logits[0][70:80]=}", force=False)
-            # print_rank(f'{batch["input_ids"][0][70:80]=}', force=False)
-            # print_rank(f'{batch["input_ids"].grad[0][70:80]=}', force=False)
-            # print_rank(f"{logits.grad[0][70:80]=}", force=False)
-            # exit()
-
-            print_rank0(f"zero loss: {loss}", force=False)
-            # print_rank0(f"zero loss: {avg_loss}", force=False)
-            see_memory_usage(f"{sub_step_id=} after backward", force=False)
-
             losses.append(loss.detach().item())
-
-            # from deepspeed.utils import safe_get_full_grad
-            # print_rank(f"{torch.norm(safe_get_full_grad(self.model.module.lm_head.weight))=}")
-            # print_rank(f"{torch.norm(safe_get_full_grad(self.model.module.model.layers[0].self_attn.q_proj.weight))=}")
-
-            # #w = self.model.module.model.layers[0].self_attn.q_proj.weight
-            # w = self.model.module.lm_head.weight
-            # from deepspeed.utils import safe_get_full_grad
-            # print_rank0(f"{torch.norm(safe_get_full_grad(self.model.module.lm_head.weight))=}")
-            # print_rank0(f"{torch.norm(safe_get_full_grad(self.model.module.model.layers[0].self_attn.q_proj.weight))=}")
 
         self.model.set_gradient_accumulation_boundary(True)
 
@@ -992,7 +774,6 @@ class UlyssesSPFwdLossBwdWithLogits:
         # critical: the labels shouldn't be in batch
         outputs = self.model(**batch, use_cache=False)
         self.logits = outputs.logits
-        # self.outputs = outputs
         return outputs
 
     def compute_loss(self, labels, shift_labels):
