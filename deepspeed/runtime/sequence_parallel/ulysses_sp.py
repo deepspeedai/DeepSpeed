@@ -10,7 +10,7 @@ Ulysses Plus features
 - `UlyssesSPAttentionHF` (port of UlyssesAttention from Megatron-Deepspeed plus modern MHA-variations)
 - `UlyssesSPDataLoaderAdapter` - DL adapter to shard the normal DL batches to be used by `UlyssesSPAttentionHF`
 - `SequenceTiledCompute` - generic autograd function to perform compute after tiling on the sequence dimension
-- `TiledMLP` - a specific autograd function to perform tiled MLP (easier to understand before SequenceTiledCompute)
+- `TiledMLP` - a specific autograd function to perform tiled MLP (it's much easier to understand before trying to grok `SequenceTiledCompute`)
 
 The other UlyssesPlus features live inside https://github.com/snowflakedb/ArcticTraining (XXX: where exactly?)
 

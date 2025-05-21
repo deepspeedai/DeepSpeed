@@ -15,7 +15,7 @@ from deepspeed.runtime.zero.offload_config import OffloadDeviceEnum
 from deepspeed.runtime.zero.partition_parameters import *
 from deepspeed.runtime.zero.partitioned_param_profiler import PartitionedParameterProfiler
 from deepspeed.runtime.swap_tensor.partitioned_param_swapper import PartitionedParamStatus
-#from deepspeed.utils.debug import debug_module2name_id, debug_param2name_id, debug_param2name_id_shape, debug_param2name_id_shape
+from deepspeed.utils.debug import debug_param2name_id_shape
 from deepspeed.accelerator import get_accelerator
 import deepspeed.runtime.compiler as compiler
 from deepspeed.runtime.compiler import is_compiling
@@ -455,6 +455,7 @@ class PartitionedParameterCoordinator:
             # there's a hook execution issue
             param.ds_active_sub_modules.clear()
             self.__release_param(param)
+
         for param in iter_params(module, recurse=True):
             if param.ds_status != ZeroParamStatus.NOT_AVAILABLE:
                 raise RuntimeError(f"{param.ds_summary()} expected to be released")
