@@ -5,11 +5,12 @@
 
 # XXX: the copyright above is wrong - needs to be either Snoflake or something else but not MSFT, but CI is requiring MSFT for now
 """
-Ulysses Plus:
+Ulysses Plus features
 
-- UlyssesSPAttentionHF (port of UlyssesAttention from Megatron-Deepspeed plus modern MHA-variations)
-- UlyssesSPDataLoaderAdapter - DL adapter to shard the normal DL batches to be used by UlyssesSPAttentionHF
-- SequenceTiledCompute - generic function to perform compute after tiling on the sequence dimension
+- `UlyssesSPAttentionHF` (port of UlyssesAttention from Megatron-Deepspeed plus modern MHA-variations)
+- `UlyssesSPDataLoaderAdapter` - DL adapter to shard the normal DL batches to be used by `UlyssesSPAttentionHF`
+- `SequenceTiledCompute` - generic autograd function to perform compute after tiling on the sequence dimension
+- `TiledMLP` - a specific autograd function to perform tiled MLP (easier to understand before SequenceTiledCompute)
 
 The other UlyssesPlus features live inside https://github.com/snowflakedb/ArcticTraining (XXX: where exactly?)
 
@@ -413,6 +414,40 @@ class UlyssesSPDataLoaderAdapter:
         device,
     ):
         """
+        This a DataLoader adapter which wraps around any existing DataLoader. It is used in conjunction with Ulysses to perform batch sharding on the sequence dimension.
+
+        It gathers 1 sample from each participating rank, using the DL it wraps, then shards each of them and sends back to the ranks. So that when dl->iter->next is called, we end up with:
+        - rank 0: getting batch 0 shard 0
+        - rank 1: getting batch 0 shard 1
+        ...
+        - rank n: getting batch 0 shard n
+        which is used to compute the batch (from rank0) using all SP ranks.
+
+        When the next iteration starts and dl->iter->next is called, we end up with:
+        - rank 0: getting batch 1 shard 0
+        - rank 1: getting batch 1 shard 1
+        ...
+        - rank n: getting batch 1 shard n
+        which is used to compute a second batch (from rank1) using all SP ranks.
+
+        This continues until SP iterations are performed. At this point we need to get more data and so the above repeats.
+
+        The key thing to understand is that all SP ranks participate in processing a single DL sample. So instead of normal DataParallel we perform a sort of SP over DP.
+
+        When SP number of iterations is completed it's an equivalent of performing a single iteration with normal DP.
+
+        If more tokens need to be consumed per step use the gradient accumulation feature.
+
+        Arguments:
+        - `dl`: an existing DataLoader object to wrap
+        - `sp_rank`: SP rank
+        - `sp_group`: SP group
+        - `sp_world_size`: SP world size
+        - `device`: cuda device
+
+        Returns:
+            Another DataLoader object
+
         Here are the current assumptions on the inputs fetched by dl->iter->next
         - the batch is a dict with at least the keys: `input_ids`, `labels`, `position_ids` - but can have any additional keys necessary.
         - the tensor values get sharded, the non-tensor values are passed along as is
@@ -549,6 +584,12 @@ def sequence_tiled_compute(
 
 
 class SequenceTiledCompute(torch.autograd.Function):
+    """
+        A generic autograd function to perform a tiled compute.
+
+        For an easier to understand example see TiledMLP - which is the same as this autograd function but without the generalization code
+
+    """
 
     @staticmethod
     def forward(
@@ -683,6 +724,112 @@ class SequenceTiledCompute(torch.autograd.Function):
         arg_outputs[grad_requiring_tensor_key_index] = grad_requiring_tensor_grad  # .detach()
 
         return tuple(grad_outputs + arg_outputs)
+
+
+class TiledMLP(torch.autograd.Function):
+    """
+    Perform a tiled MLP computation to massively reduce memory usage when using very long seqlen
+
+    For a general tiled compute implementation that can handle any `forward` see `SequenceTiledCompute`
+
+    Usage example:
+
+    def tiled_mlp_forward(self, x):
+        bs, seqlen, hidden = x.shape
+        num_shards = math.ceil(seqlen / hidden)
+        # to avoid deadlocks get all ranks to agree on the same num_shards by using the max value
+        tensor = torch.tensor(num_shards, device=x.device)
+        dist.all_reduce(tensor, op=dist.ReduceOp.MAX)
+        num_shards = tensor.item()
+        compute_params = [self.down_proj.weight, self.gate_proj.weight, self.up_proj.weight]
+        seqlen = x.shape[1]
+
+        def mlp_forward(self, x):
+            return self.down_proj(self.act_fn(self.gate_proj(x)) * self.up_proj(x))
+
+        return TiledMLP.apply(
+            mlp_forward,
+            self,
+            x,
+            seqlen,
+            num_shards,
+            compute_params,
+        )
+
+        from transformers.models.llama import modeling_llama
+        modeling_llama.LlamaMLP.forward = tiled_mlp_forward
+    """
+
+    @staticmethod
+    def forward(
+        ctx,
+        fn,
+        self,
+        x,
+        seqlen,
+        shards,
+        compute_params,
+    ) -> torch.Tensor:
+
+        ctx.fn = fn
+        ctx.self = self
+        ctx.shards = shards
+        ctx.compute_params = compute_params
+        ctx.save_for_backward(x)
+
+        with torch.no_grad():
+            shard_step = math.ceil(seqlen / shards)
+            output_shards = []
+
+            for i in range(shards):
+                output = fn(self, x[:, i * shard_step:(i + 1) * shard_step])
+                output_shards.append(output)
+            output_unsharded = torch.cat(output_shards, dim=1)
+
+            return output_unsharded
+
+    @staticmethod
+    def backward(ctx, *grads) -> torch.Tensor:
+        fn = ctx.fn
+        (x, ) = ctx.saved_tensors
+        self = ctx.self
+        shards = ctx.shards
+        compute_params = ctx.compute_params
+
+        x1 = x.detach()
+        x1.requires_grad = x.requires_grad
+        x = x1
+
+        incoming_grad = grads[0]
+        x_grad = torch.zeros_like(x)
+        x_shards = list(torch.chunk(x, chunks=shards, dim=1))
+
+        shard_step = x_shards[0].numel()
+        for i in range(shards):
+
+            if compute_params is not None:
+                if i + 1 < shards:
+                    for param in compute_params:
+                        param.ds_grad_is_ready = False
+                else:
+                    # last shard, can add the grad
+                    for param in compute_params:
+                        param.ds_grad_is_ready = True
+
+            x_shard = x_shards.pop(0)
+
+            shard_offset = i * shard_step
+            x_shard.grad = x_grad.view(-1).narrow(0, shard_offset, x_shard.numel()).view_as(x_shard)
+
+            with torch.enable_grad():
+                output = fn(self, x_shard)
+
+                incoming_grad_shard = incoming_grad.view(-1).narrow(0, shard_offset, x_shard.numel()).view_as(x_shard)
+                torch.autograd.backward(output, incoming_grad_shard)
+
+        x_grad /= shards
+
+        return (None, None, x.grad, None, None, None)
 
 
 class AutogradComputeMLP(torch.autograd.Function):
