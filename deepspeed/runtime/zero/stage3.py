@@ -1148,11 +1148,20 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
                     self.__param_id_to_grad_partition[param.ds_id]
                     if param.requires_grad else torch.zeros_like(param.ds_tensor) for param in sub_group
                 ]
-        # this method gets called after every backward. need to increment
-        # here because if it gets incremented in backward() the micro step
-        # id will be off by one when we do the reduce and partition at the.
-        # start of this method.
-        # TODO. make this less error prone
+        else:
+            # Update averaged_gradients to use the new fp32_partitioned_groups_flat
+            for i, sub_group in enumerate(self.fp16_groups):
+                self.averaged_gradients[i] = {}
+                for param in sub_group:
+                    if param.requires_grad:
+                        # Get the gradient from fp32_partitioned_groups_flat
+                        group_idx, dest_offset, num_elements = self.grad_position[param.ds_id]
+                        grad = self.fp32_partitioned_groups_flat[group_idx].grad.narrow(
+                            0, dest_offset, num_elements)
+                        # Store the gradient in averaged_gradients
+                        self.averaged_gradients[i][param.ds_id] = grad
+                    else:
+                        self.averaged_gradients[i][param.ds_id] = torch.zeros_like(param.ds_tensor)
         self.micro_step_id += 1
 
     def overlapping_partition_gradients_reduce_epilogue(self):
@@ -1434,15 +1443,31 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
             fp32_grad_tensor.copy_(src_tensor, non_blocking=True)
             param.grad = None
 
-    def complete_grad_norm_calculation_for_cpu_offload(self, params):
+    def complete_grad_norm_calculation_for_cpu_offload(self, idx, params):
         total_norm = 0.0
         norm_type = 2.0
-        for p in params:
-            if is_model_parallel_parameter(p) or (self.model_parallel_rank == 0):
-                param_id = self.get_param_id(p)
-                if param_id in self.norm_for_param_grads.keys():
-                    param_norm = self.norm_for_param_grads[param_id]
-                    total_norm += param_norm**2
+        
+        # First check if we have averaged gradients
+        if hasattr(self, 'averaged_gradients') and self.averaged_gradients:
+            param_grads_dict = self.averaged_gradients[idx]
+            for param in params:
+                if is_model_parallel_parameter(param) or (self.model_parallel_rank == 0):
+                    param_id = self.get_param_id(param)
+                    if param.requires_grad:
+                        param_id = self.get_param_id(param)
+                        grad_partition = param_grads_dict.get(param_id) # Get the FP32 grad partition
+
+                        if grad_partition is not None:
+                            param_norm = grad_partition.norm(norm_type)
+                            total_norm += param_norm**2
+        else:
+            # Fallback to original calculation if no averaged gradients
+            for p in params:
+                if is_model_parallel_parameter(p) or (self.model_parallel_rank == 0):
+                    param_id = self.get_param_id(p)
+                    if param_id in self.norm_for_param_grads.keys():
+                        param_norm = self.norm_for_param_grads[param_id]
+                        total_norm += param_norm**2
 
         # Sum across all model parallel GPUs.
         total_norm_cuda = get_accelerator().FloatTensor([float(total_norm)])
@@ -1882,7 +1907,7 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
         norm_groups = []
         for i, group in enumerate(self.fp16_groups):
             if self.offload_optimizer:
-                norm_groups.append(self.complete_grad_norm_calculation_for_cpu_offload(self.fp16_groups[i]))
+                norm_groups.append(self.complete_grad_norm_calculation_for_cpu_offload(i, self.fp16_groups[i]))
             else:
                 norm_groups.append(self.get_grad_norm_direct(self.averaged_gradients[i], self.fp16_groups[i]))
         return norm_groups
