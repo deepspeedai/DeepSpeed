@@ -23,6 +23,8 @@ class HPU_Accelerator(DeepSpeedAccelerator):
             import habana_frameworks.torch.hpu as hpu
             self.hpu = hpu
             torch.use_deterministic_algorithms(True)
+            # TODO: remove this WA when memory mapping break is resolved.
+            torch.utils.deterministic.fill_uninitialized_memory = False
         except ImportError as e:
             raise ValueError(
                 f"HPU_Accelerator requires habana_frameworks.torch.hpu, which is not installed on this system.")

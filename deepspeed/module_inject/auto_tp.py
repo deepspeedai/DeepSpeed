@@ -11,7 +11,7 @@ from .replace_policy import replace_policies
 from typing import Optional
 import torch
 from deepspeed import comm as dist
-from .layers import LinearAllreduce, LinearLayer, LmHeadLinearAllreduce, Yuan_LinearAllreduce, Yuan_LinearLayer, GateUpPack_LinearLayer, Conv_LinearALlreduce, fused_LinearLayer, conv_LinearLayer
+from .layers import *
 from deepspeed.accelerator import get_accelerator
 from .fusedqkv_utils import require_tp_fused_qkvw
 from deepspeed.module_inject.tp_shard import get_shard_size, get_shard_size_list
@@ -137,8 +137,8 @@ class Loading():
             "LPLayerNorm", "SharedEmbedding", "OPTLearnedPositionalEmbedding", "LlamaRMSNorm", "FalconLinear",
             "MistralRMSNorm", "T5LayerNorm", "MixtralRMSNorm", "Phi3RotaryEmbedding", "Phi3SuScaledRotaryEmbedding",
             "Phi3RMSNorm", "YuanRMSNorm", "YuanRotaryEmbedding", "Phi3LongRoPEScaledRotaryEmbedding", "Qwen2RMSNorm",
-            "DeepseekV2RMSNorm", "DeepseekV3RMSNorm", "DeepseekV2YarnRotaryEmbedding", "DeepseekV3YarnRotaryEmbedding",
-            "MoEGate"
+            "Qwen3RMSNorm", "Qwen3MoeRMSNorm", "DeepseekV2RMSNorm", "DeepseekV3RMSNorm",
+            "DeepseekV2YarnRotaryEmbedding", "DeepseekV3YarnRotaryEmbedding", "MoEGate"
         ]
         return module.__class__ in load_layers or module._get_name() in load_layer_names
 
@@ -211,7 +211,7 @@ class AutoTP():
         self.orig_layer_impl = orig_layer_impl
         self.linear_policies = None
         self.conv_linear_layer = False
-        self.keep_module_on_host = keep_module_on_host
+        TensorParallel_Layer.set_keep_module_on_host(keep_module_on_host)
 
     def in_module_list(module, module_list):
         for item in module_list:
@@ -350,14 +350,11 @@ class AutoTP():
         # and avoid any complex shard-related logic.
         if getattr(child, "replaced", False) == True:
             return
-        device_name = 'cpu' if self.keep_module_on_host else get_accelerator().current_device_name()
-        # keep_module_on_host is used to keep the module on the host. Checkpoints are loaded to the host first (in some
-        # cases it can be done from the disk even to prevent filling host's memory), thus no need to create a new copy.
-        return_new_copy = not self.keep_module_on_host
+
         weight_shape = child.weight.shape
         mp_replace = ReplaceWithTensorSlicing(mp_group=self.mp_group)
         # For TP layer skip, e.g., MoE gate, deepseek low rank layer skip
-        if "q_a_proj" in name or "kv_a_proj_with_mqa" in name or name == "block_sparse_moe.gate" or (
+        if "mlp.gate" == name or "q_a_proj" in name or "kv_a_proj_with_mqa" in name or name == "block_sparse_moe.gate" or (
             ('mlp.shared_expert_gate' == name or 'mlp.gate' == name) and 'qwen2_moe' in str(type(self.module))):
             return child
         # For Yuan model

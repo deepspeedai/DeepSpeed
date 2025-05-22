@@ -61,7 +61,7 @@ class DeepSpeedConfigModel(BaseModel):
         # Get information about the deprecated field
         pydantic_config = self
         fields_set = pydantic_config.model_fields_set
-        kwargs = pydantic_config.model_fields[dep_field].json_schema_extra
+        kwargs = type(pydantic_config).model_fields[dep_field].json_schema_extra
         new_param_fn = kwargs.get("new_param_fn", lambda x: x)
         param_value = new_param_fn(getattr(pydantic_config, dep_field))
         new_field = kwargs.get("new_param", "")

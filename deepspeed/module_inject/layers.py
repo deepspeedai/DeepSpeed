@@ -17,6 +17,11 @@ from deepspeed.runtime.tensor_parallel import AUTOTP_MODE
 from copy import deepcopy
 from typing import Union
 
+__all__ = [
+    "TensorParallel_Layer", "LinearAllreduce", "LinearLayer", "LmHeadLinearAllreduce", "Yuan_LinearAllreduce",
+    "Yuan_LinearLayer", "GateUpPack_LinearLayer", "Conv_LinearALlreduce", "fused_LinearLayer", "conv_LinearLayer"
+]
+
 DEEPSPEED_AUTOTP_MODE = AUTOTP_MODE.INFERENCE
 DS_IS_REPLACED_MODULE = 'ds_is_replaced_module'
 DS_TENSOR_MODEL_PARALLEL = 'tensor_model_parallel'
@@ -41,26 +46,6 @@ def set_autotp_mode(training=False):
         DEEPSPEED_AUTOTP_MODE = AUTOTP_MODE.TRAINING
     else:
         DEEPSPEED_AUTOTP_MODE = AUTOTP_MODE.INFERENCE
-
-
-def move(tensor, device):
-    # TODO: consider the timing of deletion
-    # to save host resources when DP > 1。
-
-    if tensor.is_meta:
-        # Keep tensor in meta device if tensor is meta.
-        return tensor
-    else:
-        # Using new tensors help in freeing memory (after split for example) was done before by calling clone().
-        # Using copy=True instead of clone() will help in case of cpu --> cpu.
-        # Otherwise to() will not create a new copy for the view of the full tensor, and it will not be de-referenced.
-        cloned_tensor = tensor.to(device, copy=True)
-
-        # free the memory of the original tensor to reduce memory peak
-        # Equivalent to directly deleting the tensor reference outside the function.
-        # see https://github.com/microsoft/DeepSpeed/pull/4353
-        tensor.data = torch.empty(0, device=tensor.device)
-        return cloned_tensor
 
 
 class RowParallel(torch.autograd.Function):
@@ -93,6 +78,35 @@ class RowParallel(torch.autograd.Function):
         Backward pass.
         """
         return None, grad_output, None
+
+
+class AsyncColumnParallel(torch.autograd.Function):
+
+    @staticmethod
+    def forward(ctx: Any, group: dist.ProcessGroup, input: torch.Tensor, weight, bias) -> torch.Tensor:
+        """
+        Forward pass.
+        """
+        ctx.use_bias = bias is not None
+        ctx.group = group
+        output = torch.matmul(input, weight.transpose(-1, -2))
+        if bias is not None:
+            output += bias
+
+        ctx.save_for_backward(input, weight)
+
+        return output
+
+    @staticmethod
+    def backward(ctx: Any, grad_output: torch.Tensor) -> Tuple[None, torch.Tensor]:
+
+        input, weight = ctx.saved_tensors
+        grad_input = grad_output.matmul(weight)
+        handle = dist.all_reduce(grad_input.contiguous(), group=ctx.group, async_op=True)
+        grad_weight = grad_output.view(-1, grad_output.shape[-1]).t().matmul(input.view(-1, input.shape[-1]))
+        grad_bias = grad_output.sum(0) if ctx.use_bias else None
+        handle.wait()
+        return None, grad_input, grad_weight, grad_bias
 
 
 class ColumnParallel(torch.autograd.Function):
@@ -139,6 +153,16 @@ class TensorParallel_Layer(nn.Module, ABC):
         support_training (bool): Flag indicating whether the layer supports training (default: False).
         name (Optional[str]): The name of the layer, if provided.
     """
+    ##### Initialize Parameter List #####
+
+    # keep_module_on_host determines whether to keep the module on the host.
+    # Checkpoints are first loaded to the host (sometimes directly from disk to avoid filling host memory),
+    # so an additional copy is unnecessary.
+    keep_module_on_host: bool = False
+
+    ##### Runtime Parameter List #####
+    tp_overlap_comm: bool = False
+    """ Whether to overlap communication with computation. Currently, only allreduce supports overlap. """
 
     def __init__(self, mp_group: Optional[dist.ProcessGroup], **kwargs: Any):
         """
@@ -162,6 +186,16 @@ class TensorParallel_Layer(nn.Module, ABC):
         self.name = getattr(self, 'name', None)
         if kwargs.get('name') is not None:
             self.name = kwargs.get('name')  # Set the layer name if provided.
+
+    @classmethod
+    def set_keep_module_on_host(cls, value: bool):
+        """
+        Set the static variable keep_module_on_host.
+
+        Args:
+            value (bool): The new value for keep_module_on_host.
+        """
+        cls.keep_module_on_host = value
 
     @abstractmethod
     def forward(self, input):
@@ -234,6 +268,38 @@ class TensorParallel_Layer(nn.Module, ABC):
             extra_repr_str = "in_features={}, out_features={}, bias={}, dtype={}".format(
                 in_features, out_features, self.bias is not None, dtype)
         return extra_repr_str
+
+    def move(self, tensor):
+        # TODO: consider the timing of deletion
+        # to save host resources when DP > 1。
+
+        # keep_module_on_host is used to keep the module on the host. Checkpoints are loaded to the host first (in some
+        # cases it can be done from the disk even to prevent filling host's memory), thus no need to create a new copy.
+        if tensor.is_meta:
+            # Keep tensor in meta device if tensor is meta.
+            return tensor
+        else:
+            device = 'cpu' if self.__class__.keep_module_on_host else get_accelerator().current_device_name()
+            return_new_copy = not self.__class__.keep_module_on_host
+
+            # Using new tensors help in freeing memory (after split for example) was done before by calling clone().
+            # Using copy=True instead of clone() will help in case of cpu --> cpu.
+            # Otherwise to() will not create a new copy for the view of the full tensor, and it will not be de-referenced.
+            cloned_tensor = tensor.to(device, copy=return_new_copy)
+
+            if return_new_copy:
+                # free the memory of the original tensor to reduce memory peak
+                # Equivalent to directly deleting the tensor reference outside the function.
+                # see https://github.com/microsoft/DeepSpeed/pull/4353
+                tensor.data = torch.empty(0, device=tensor.device)
+            return cloned_tensor
+
+
+def configure_tensor_parallel_runtime(config):
+    runtime_keys = ['tp_overlap_comm']
+    for key in runtime_keys:
+        if hasattr(config, key):
+            setattr(TensorParallel_Layer, key, getattr(config, key))
 
 
 class GatherReplacedLayerParams:
@@ -349,7 +415,7 @@ class LinearAllreduce(TensorParallel_Layer):
                     return
                 _partition = torch.chunk(param, self.tp_world_size, dim=-1)[self.tp_index]
 
-                _partition = move(_partition, get_accelerator().current_device_name()).detach()
+                _partition = self.move(_partition).detach()
 
                 params_list[idx].data = _partition
 
@@ -363,7 +429,7 @@ class LinearAllreduce(TensorParallel_Layer):
                                                                     self.name),
                                                 dim=1)[self.tp_index]
 
-            _partition = move(_partition, get_accelerator().current_device_name()).detach()
+            _partition = self.move(_partition).detach()
             params_list[idx].data = _partition
 
 
@@ -382,11 +448,15 @@ class LinearLayer(TensorParallel_Layer):
             self.config_tp_params(self.bias)
 
     def forward(self, input):
-        if getattr(self, 'mp_group', None) is not None:
-            input = ColumnParallel.apply(self.mp_group, input)
-        output = torch.matmul(input, self.weight.transpose(-1, -2))
-        if self.bias is not None:
-            output += self.bias
+        if not self.__class__.tp_overlap_comm:
+            if getattr(self, 'mp_group', None) is not None:
+                input = ColumnParallel.apply(self.mp_group, input)
+            output = torch.matmul(input, self.weight.transpose(-1, -2))
+            if self.bias is not None:
+                output += self.bias
+        else:
+            output = AsyncColumnParallel.apply(self.mp_group, input, self.weight, self.bias)
+
         return output
 
     @torch.no_grad()
@@ -414,7 +484,7 @@ class LinearLayer(TensorParallel_Layer):
             #split bias if provide
             _partition = torch.chunk(param, self.tp_world_size, dim=0)[self.tp_index]
 
-            _partition = move(_partition, get_accelerator().current_device_name()).detach()
+            _partition = self.move(_partition).detach()
 
             params_list[idx].data = _partition
 
@@ -429,7 +499,7 @@ class LinearLayer(TensorParallel_Layer):
                                                                     self.name),
                                                 dim=0)[self.tp_index]
 
-            _partition = move(_partition, get_accelerator().current_device_name()).detach()
+            _partition = self.move(_partition).detach()
 
             params_list[idx].data = _partition
 
@@ -475,7 +545,7 @@ class fused_LinearLayer(LinearLayer):
 
             _partition = prepare_tp_fused_qkvw(self.fused_module.module, param, self.tp_world_size, self.tp_index)
 
-            _partition = move(_partition, get_accelerator().current_device_name()).detach()
+            _partition = self.move(_partition).detach()
 
             params_list[idx].data = _partition
 
@@ -492,13 +562,13 @@ class conv_LinearLayer(LinearLayer):
             weight, bias = params_list[0], params_list[1]
         _partition = weight.data.split(get_shard_size_list(weight.shape[0], self.tp_world_size, self.name),
                                        dim=1)[self.tp_index]
-        _partition = move(_partition, get_accelerator().current_device_name()).detach()
+        _partition = self.move(_partition).detach()
         weight.data = _partition
 
         if bias is not None:
             _partition = bias.data.split(get_shard_size_list(weight.shape[1], self.tp_world_size, self.name),
                                          dim=0)[self.tp_index]
-            _partition = move(_partition, get_accelerator().current_device_name()).detach()
+            _partition = self.move(_partition).detach()
 
             bias.data = _partition
 
@@ -522,9 +592,9 @@ class Yuan_LinearLayer(LinearLayer):
     def _tp_partition(self, params_list):
         weight, bias = shard_value_with_share_qk(params_list[0].data, params_list[1], self.tp_index,
                                                  self.tp_world_size, True)
-        params_list[0].data = move(weight, get_accelerator().current_device_name()).detach()
+        params_list[0].data = self.move(weight).detach()
         if bias is not None:
-            params_list[1].data = move(bias, get_accelerator().current_device_name()).detach()
+            params_list[1].data = self.move(bias).detach()
 
 
 class GateUpPack_LinearLayer(LinearLayer):
@@ -532,9 +602,9 @@ class GateUpPack_LinearLayer(LinearLayer):
     @torch.no_grad()
     def _tp_partition(self, params_list):
         weight, bias = shard_chunk_mlp(params_list[0].data, params_list[1], self.tp_index, self.tp_world_size)
-        params_list[0].data = move(weight, device=get_accelerator().current_device_name()).detach()
+        params_list[0].data = self.move(weight).detach()
         if bias is not None:
-            params_list[1].data = move(bias, device=get_accelerator().current_device_name()).detach()
+            params_list[1].data = self.move(bias).detach()
 
 
 class Conv_LinearALlreduce(LinearAllreduce):
@@ -549,7 +619,7 @@ class Conv_LinearALlreduce(LinearAllreduce):
             _partition = param.split(get_shard_size_list(param.shape[0], self.tp_world_size, self.name),
                                      dim=1)[self.tp_index]
 
-            _partition = move(_partition, get_accelerator().current_device_name()).detach()
+            _partition = self.move(_partition).detach()
 
             params_list[idx].data = _partition
 

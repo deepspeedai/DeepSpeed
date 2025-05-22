@@ -39,7 +39,7 @@ jobs:
     # The type of runner that the job will run on
     runs-on: [self-hosted, intel, gaudi2]
     container:
-      image: vault.habana.ai/gaudi-docker/1.19.0/ubuntu22.04/habanalabs/pytorch-installer-2.5.1:latest
+      image: vault.habana.ai/gaudi-docker/1.20.0/ubuntu22.04/habanalabs/pytorch-installer-2.6.0:latest
       ports:
         - 80
       options: --runtime=habana -e HABANA_VISIBLE_DEVICES=all -e OMPI_MCA_btl_vader_single_copy_mechanism=none --cap-add=sys_nice
@@ -94,6 +94,8 @@ jobs:
         test_zero_nesting_init.py
         test_zeropp.py
         (test_zero.py and (TestZero3ParamPartitioningLargeParam or TestZero3ParamPartitioningLargeParam))
+        (test_linear.py and (TestLoRALinear or TestBasicLinear))
+        (test_ctx.py and TestEngine)
 
     # Steps represent a sequence of tasks that will be executed as part of the job
     steps:
@@ -112,7 +114,7 @@ jobs:
           git clone https://github.com/huggingface/transformers
           cd transformers
           # if needed switch to the last known good SHA until transformers@master is fixed
-          git checkout 981c276
+          # git checkout 981c276
           git rev-parse --short HEAD
           pip install .
 

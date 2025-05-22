@@ -409,6 +409,13 @@ class TorchBackend(Backend):
                                                                   mesh_shape,
                                                                   mesh_dim_names=mesh_dim_names)
 
+    def enable_symm_mem_for_group(self, group_name):
+        if not required_torch_version(min_version=2.5):
+            raise RuntimeError(f"Torch version must be 2.5 or higher to use symmetric memory. "
+                               f"Current version: {torch.__version__}")
+        from torch.distributed._symmetric_memory import enable_symm_mem_for_group
+        return enable_symm_mem_for_group(group_name)
+
 
 # This will become a light-weight wrapper around torch.distributed functions
 # TODO: create some example to show how this wrapper can help profile communication

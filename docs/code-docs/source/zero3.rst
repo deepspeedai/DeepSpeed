@@ -344,9 +344,13 @@ Debugging
 
 Debugging ZeRO training is complicated by the partitioning of parameters, gradients, and optimizer states. None of these 3 groups of tensors (model states) can be normally accessed because of that. To overcome that DeepSpeed provides the following routines for accessing individual model states in both their partitioned (local) and unpartitioned (full) forms.
 
-Important: Please note that, to access the unpartitioned (full) form, these utilities must be called by all processes participating in the training, even if you decide to do something with the result only in the main process. If all processes don't participate these utilities will hang waiting for all processes to send their contribution.
+Important notes:
 
-Additionally, you must be aware that these routines return correct data only in specific phases of the training. So for examples the gradients are valid after ``backward`` and before ``step``. The optimizer states are updated after ``step``. Same goes for fp32 master weights.
+# These APIs return tensors that are on accelerator device even if the corresponding model state is offloaded to CPU or NVMe.
+
+# To access the unpartitioned (full) form, these utilities must be called by all processes participating in the training, even if you decide to do something with the result only in the main process. If all processes don't participate these utilities will hang waiting for all processes to send their contribution.
+
+# You must be aware that these routines return correct data only in specific phases of the training. So for examples the gradients are valid after ``backward`` and before ``step``. The optimizer states are updated after ``step``. Same goes for fp32 master weights.
 
 .. autofunction:: deepspeed.utils.safe_get_full_fp32_param
 
@@ -410,6 +414,8 @@ Sometimes, a user may want to modify parameters, gradients, or optimizer states 
 .. autofunction:: deepspeed.utils.safe_set_local_grad
 
 .. autofunction:: deepspeed.utils.safe_set_local_optimizer_state
+
+.. autofunction:: deepspeed.utils.safe_update_full_grad_vectorized
 
 The routines for modifying parameters and optimizer states can be used at any point after initialization of the DeepSpeed engine (i.e., ``deepspeed.initialize()``) as shown in the following snippet.
 
