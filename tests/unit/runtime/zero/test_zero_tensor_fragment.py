@@ -6,8 +6,9 @@
 import pytest
 import deepspeed.comm as dist
 import torch
+import math
 
-from unit.common import DistributedTest, preferred_dtype
+from unit.common import DistributedTest
 from unit.simple_model import random_dataloader, SimpleModel
 from unit.util import bf16_required_version_check
 
@@ -16,9 +17,11 @@ from deepspeed.utils import safe_get_full_fp32_param, safe_get_full_grad, safe_g
 from deepspeed.utils import safe_set_full_fp32_param, safe_set_full_grad, safe_set_full_optimizer_state
 from deepspeed.utils import safe_get_local_fp32_param, safe_get_local_grad, safe_get_local_optimizer_state
 from deepspeed.utils import safe_set_local_fp32_param, safe_set_local_grad, safe_set_local_optimizer_state
+from deepspeed.utils import safe_update_full_grad_vectorized
 from deepspeed.runtime.zero.offload_config import OffloadDeviceEnum
 from deepspeed.ops.aio import AsyncIOBuilder
 from deepspeed.accelerator import get_accelerator
+from deepspeed.runtime.swap_tensor import MIN_SWAPPABLE_BYTES
 
 WEIGHT_KEY = 'weight'
 FIRST_ORDER_KEY = 'exp_avg'
@@ -92,10 +95,14 @@ class TestTensorFragmentGet(DistributedTest):
     world_size = 2
     reuse_dist_env = True
 
+    @pytest.mark.parametrize('dtype', [torch.bfloat16, torch.float16, torch.float32])
     @pytest.mark.parametrize('api_type', ['local', 'full'])
     @pytest.mark.parametrize('zero_stage', [1, 2, 3])
     @pytest.mark.parametrize('offload_device', [OffloadDeviceEnum.none, OffloadDeviceEnum.cpu, OffloadDeviceEnum.nvme])
-    def test_zero_fragments(self, tmpdir, api_type, zero_stage, offload_device, frozen_weights):
+    def test_zero_fragments(self, tmpdir, dtype, api_type, zero_stage, offload_device, frozen_weights):
+        if not dtype in get_accelerator().supported_dtypes():
+            pytest.skip(f"{get_accelerator()._name} does not support {dtype} data type")
+
         if offload_device == OffloadDeviceEnum.nvme:
             if zero_stage != 3:
                 pytest.skip(f"Nvme offload not supported for zero stage {zero_stage}")
@@ -118,9 +125,10 @@ class TestTensorFragmentGet(DistributedTest):
                 "stage": zero_stage,
             }
         }
-        if get_accelerator().is_fp16_supported():
+
+        if dtype == torch.half:
             config_dict["fp16"] = {"enabled": True, "initial_scale_power": 2}
-        elif get_accelerator().is_bf16_supported():
+        elif dtype == torch.bfloat16:
             config_dict["bf16"] = {"enabled": True}
 
         if offload_device == OffloadDeviceEnum.cpu:
@@ -131,7 +139,7 @@ class TestTensorFragmentGet(DistributedTest):
                 "nvme_path": str(tmpdir)
             }
 
-        hidden_dim = 128
+        hidden_dim = MIN_SWAPPABLE_BYTES
         if zero_stage == 3:
             with deepspeed.zero.Init(config_dict_or_path=config_dict):
                 model = MyModel(hidden_dim, frozen_weights)
@@ -141,10 +149,9 @@ class TestTensorFragmentGet(DistributedTest):
         validate_after_bwd = lambda model: validate_tensor(model, api_type, opt_states=False)
         validate_after_step = lambda model: validate_tensor(model, api_type, opt_states=True)
 
-        run_fragmented_model(model, config_dict, hidden_dim, preferred_dtype(), validate_after_bwd,
-                             validate_after_step)
+        run_fragmented_model(model, config_dict, hidden_dim, dtype, validate_after_bwd, validate_after_step)
 
-    def test_bf16_fragments(self, frozen_weights):
+    def test_bf16_optimizer_fragments(self, frozen_weights):
         if get_accelerator().device_name() == "cpu":
             pytest.skip("CPU accelerator does not support this test yet.")
         if frozen_weights:
@@ -181,7 +188,7 @@ class TestTensorFragmentGet(DistributedTest):
         run_fragmented_model(model, config_dict, hidden_dim, torch.bfloat16, validate_after_bwd, validate_after_step)
 
 
-def create_random_values(model, key_list, group, grad_dtype, use_cuda=True):
+def create_random_values(model, key_list, group, grad_dtype):
     param_values = {}
     for n, lp in model.named_parameters():
         param_shape = lp.ds_shape if hasattr(lp, 'ds_id') else lp.shape
@@ -205,6 +212,25 @@ def set_param_values_with_dict(model, value_dict):
                 safe_set_full_optimizer_state(lp, value_tensor, key)
 
 
+def update_param_values_with_dict(model, value_dict):
+    new_grad_values = {}
+    for n, lp in model.named_parameters():
+        if GRADIENT_KEY in value_dict[n]:
+            new_grad_values[id(lp)] = value_dict[n][GRADIENT_KEY]
+
+    def update_gradient_callback(old_value, param):
+        return new_grad_values[id(param)]
+
+    update_param_list = []
+    for n, lp in model.named_parameters():
+        for key, value_tensor in value_dict[n].items():
+            if key == GRADIENT_KEY:
+                update_param_list.append(lp)
+
+    if len(update_param_list) > 0:
+        safe_update_full_grad_vectorized(update_param_list, update_gradient_callback)
+
+
 def validate_param_values_with_dict(model, value_dict):
     for n, lp in model.named_parameters():
         for key, expected_tensor in value_dict[n].items():
@@ -218,16 +244,14 @@ def validate_param_values_with_dict(model, value_dict):
             assert torch.equal(expected_tensor, actual_tensor)
 
 
-def create_random_values_for_local(model, key_list, group, grad_dtype, use_cuda=True):
+def create_random_values_for_local(model, key_list, group, grad_dtype):
     param_values = {}
     for n, lp in model.named_parameters():
         param_shape = lp.ds_tensor.shape
         param_values[n] = {}
         for key in key_list:
-            device = model.device if use_cuda else "cpu"
             dtype = grad_dtype if key == GRADIENT_KEY else torch.float32
-            rand_value = torch.rand(param_shape, dtype=dtype, device=device)
-            # dist.broadcast(rand_value, src=0, group=group)
+            rand_value = torch.rand(param_shape, dtype=dtype, device=model.device)
             param_values[n][key] = rand_value
     return param_values
 
@@ -261,7 +285,8 @@ helper_funcs_mapping = {
     "full": {
         "create_random_values": create_random_values,
         "set_param_values_with_dict": set_param_values_with_dict,
-        "validate_param_values_with_dict": validate_param_values_with_dict
+        "update_param_values_with_dict": update_param_values_with_dict,
+        "validate_param_values_with_dict": validate_param_values_with_dict,
     },
     "local": {
         "create_random_values": create_random_values_for_local,
@@ -272,7 +297,7 @@ helper_funcs_mapping = {
 
 
 @pytest.mark.parametrize('dtype', [torch.bfloat16, torch.float16, torch.float32])
-class TestTensorFragmentUpdate(DistributedTest):
+class TestTensorFragmentSet(DistributedTest):
     # Need multiple gpus to test possible hanging
     world_size = 2
     reuse_dist_env = True
@@ -281,6 +306,8 @@ class TestTensorFragmentUpdate(DistributedTest):
     @pytest.mark.parametrize('zero_stage', [1, 2, 3])
     @pytest.mark.parametrize('offload_device', [OffloadDeviceEnum.none, OffloadDeviceEnum.cpu, OffloadDeviceEnum.nvme])
     def test_zero_fragments(self, tmpdir, api_type, zero_stage, offload_device, dtype):
+        if not dtype in get_accelerator().supported_dtypes():
+            pytest.skip(f"{get_accelerator()._name} does not support {dtype} data type")
 
         if dtype == torch.bfloat16 and not bf16_required_version_check(accelerator_check=False):
             pytest.skip(
@@ -319,13 +346,11 @@ class TestTensorFragmentUpdate(DistributedTest):
             }
 
         if dtype == torch.float16:
-            if not get_accelerator().is_fp16_supported():
-                pytest.skip("fp16 is not supported")
             config_dict["fp16"] = {"enabled": True, "initial_scale_power": 8}
         elif dtype == torch.bfloat16:
             config_dict["bf16"] = {"enabled": True}
 
-        hidden_dim = 128
+        hidden_dim = int(math.sqrt(MIN_SWAPPABLE_BYTES))
         if zero_stage == 3:
             config_dict["zero_optimization"]["param_persistence_threshold"] = hidden_dim
             with deepspeed.zero.Init(config_dict_or_path=config_dict):
@@ -341,17 +366,90 @@ class TestTensorFragmentUpdate(DistributedTest):
         def after_bwd_validate_func(model):
             state_keys = [WEIGHT_KEY, GRADIENT_KEY]
             helper_funcs = helper_funcs_mapping[api_type]
-            optim_state_values = helper_funcs["create_random_values"](
-                model, state_keys, group, grad_dtype=dtype, use_cuda=offload_device == OffloadDeviceEnum.none)
+            optim_state_values = helper_funcs["create_random_values"](model, state_keys, group, grad_dtype=dtype)
             helper_funcs["set_param_values_with_dict"](model, optim_state_values)
             helper_funcs["validate_param_values_with_dict"](model, optim_state_values)
 
         def after_step_validate_func(model):
             state_keys = [WEIGHT_KEY, FIRST_ORDER_KEY, SECOND_ORDER_KEY]
             helper_funcs = helper_funcs_mapping[api_type]
-            optim_state_values = helper_funcs["create_random_values"](
-                model, state_keys, group, grad_dtype=dtype, use_cuda=offload_device == OffloadDeviceEnum.none)
+            optim_state_values = helper_funcs["create_random_values"](model, state_keys, group, grad_dtype=dtype)
             helper_funcs["set_param_values_with_dict"](model, optim_state_values)
             helper_funcs["validate_param_values_with_dict"](model, optim_state_values)
+
+        run_fragmented_model(model, config_dict, hidden_dim, dtype, after_bwd_validate_func, after_step_validate_func)
+
+
+@pytest.mark.parametrize('dtype', [torch.bfloat16, torch.float16, torch.float32])
+class TestTensorFragmentUpdate(DistributedTest):
+    # Need multiple gpus to test possible hanging
+    world_size = 2
+    reuse_dist_env = True
+
+    @pytest.mark.parametrize('torch_adam', [False, True])
+    @pytest.mark.parametrize('zero_stage', [1, 2, 3])
+    @pytest.mark.parametrize('offload_device', [OffloadDeviceEnum.none, OffloadDeviceEnum.cpu, OffloadDeviceEnum.nvme])
+    def test_zero_fragments(self, tmpdir, torch_adam, zero_stage, offload_device, dtype):
+        if not dtype in get_accelerator().supported_dtypes():
+            pytest.skip(f"{get_accelerator()._name} does not support {dtype} data type")
+
+        if offload_device == OffloadDeviceEnum.nvme:
+            if zero_stage != 3:
+                pytest.skip(f"Nvme offload not supported for zero stage {zero_stage}")
+            if not deepspeed.ops.__compatible_ops__[AsyncIOBuilder.NAME]:
+                pytest.skip('Skip tests since async-io is not compatible')
+
+        config_dict = {
+            "train_micro_batch_size_per_gpu": 1,
+            "steps_per_print": 1,
+            "optimizer": {
+                "type": "Adam",
+                "params": {
+                    "lr": 1e-6,
+                    "torch_adam": torch_adam
+                }
+            },
+            "zero_optimization": {
+                "stage": zero_stage,
+            }
+        }
+
+        if offload_device == OffloadDeviceEnum.cpu:
+            config_dict["zero_optimization"]["offload_optimizer"] = {"device": offload_device}
+        elif offload_device == OffloadDeviceEnum.nvme:
+            config_dict["zero_optimization"]["offload_optimizer"] = {
+                "device": offload_device,
+                "nvme_path": str(tmpdir)
+            }
+
+        if dtype == torch.float16:
+            config_dict["fp16"] = {"enabled": True, "initial_scale_power": 8}
+        elif dtype == torch.bfloat16:
+            config_dict["bf16"] = {"enabled": True}
+
+        hidden_dim = int(math.sqrt(MIN_SWAPPABLE_BYTES))
+        if zero_stage == 3:
+            config_dict["zero_optimization"]["param_persistence_threshold"] = hidden_dim
+            with deepspeed.zero.Init(config_dict_or_path=config_dict):
+                model = SimpleModel(hidden_dim)
+        else:
+            model = SimpleModel(hidden_dim)
+
+        world = dist.get_world_size()
+        group = dist.new_group(ranks=list(range(world)))
+
+        dist.barrier()
+
+        api_type = "full"
+
+        def after_bwd_validate_func(model):
+            state_keys = [GRADIENT_KEY]
+            helper_funcs = helper_funcs_mapping[api_type]
+            optim_state_values = helper_funcs["create_random_values"](model, state_keys, group, grad_dtype=dtype)
+            helper_funcs["update_param_values_with_dict"](model, optim_state_values)
+            helper_funcs["validate_param_values_with_dict"](model, optim_state_values)
+
+        def after_step_validate_func(model):
+            pass
 
         run_fragmented_model(model, config_dict, hidden_dim, dtype, after_bwd_validate_func, after_step_validate_func)
