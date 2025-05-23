@@ -120,18 +120,15 @@ class AsyncPartitionedParameterSwapper(object):
                                                 overlap_events=self.aio_config[AIO_OVERLAP_EVENTS],
                                                 intra_op_parallelism=self.aio_config[AIO_INTRA_OP_PARALLELISM])
 
+        buffer_device = get_accelerator().device_name() if self.use_gds else "cpu"
+        self.buffers = torch.empty(int(self.aligned_elements_per_buffer * self.param_buffer_count),
+                                   dtype=self.dtype,
+                                   device=buffer_device,
+                                   requires_grad=False)
         if self.use_gds:
-            self.buffers = torch.empty(int(self.aligned_elements_per_buffer * self.param_buffer_count),
-                                       dtype=self.dtype,
-                                       device=get_accelerator().device_name(),
-                                       requires_grad=False)
             self.aio_read_handle.pin_device_tensor(self.buffers)
         else:
-            self.buffers = get_accelerator().pin_memory(torch.empty(int(self.aligned_elements_per_buffer *
-                                                                        self.param_buffer_count),
-                                                                    dtype=self.dtype,
-                                                                    requires_grad=False),
-                                                        align_bytes=0)
+            self.buffers = get_accelerator().pin_memory(self.buffers, align_bytes=0)
 
         self.swap_out_params = []
 
@@ -357,7 +354,7 @@ class AsyncPartitionedParameterSwapper(object):
 
         assert self.available_swap_in_buffers(
         ) > 0, f"No swap buffers to allocate for fp16 param {param_id} of numel = {numel}"
-        assert numel < self.elements_per_buffer, f"More elements {numel} than buffer size {self.elements_per_buffer}"
+        assert numel <= self.elements_per_buffer, f"More elements {numel} than buffer size {self.elements_per_buffer}"
 
         self.param_id_to_numel[param_id] = numel
         buffer_id = self.available_buffer_ids.pop()

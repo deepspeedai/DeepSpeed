@@ -273,7 +273,7 @@ class DeepSpeedZeRoOffload(object):
                 total_persistent_parameters += param.ds_numel
 
         print_rank_0(
-            f"Parameter Offload: Total persistent parameters: {total_persistent_parameters} in {params_count} params",
+            f"Parameter Offload - Persistent parameters statistics: param_count = {params_count}, numel = {total_persistent_parameters}",
             force=True)
 
         return persistent_params
