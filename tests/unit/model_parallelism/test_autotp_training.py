@@ -213,6 +213,9 @@ class TestTpLayerFwdBwd(DistributedTest):
         loss.backward()
 
         torch_grad = torch.chunk(torch_linear.weight.grad, tp_size, dim=1)[groups.get_tensor_model_parallel_rank()]
+        torch_bias_grad = torch_linear.bias.grad
+        assert torch.allclose(linear.bias.grad, torch_bias_grad.to(get_accelerator().current_device()), atol=1e-3)
+        # The gradient of the weight is not the same as the torch_linear.weight.grad
         assert torch.allclose(linear.weight.grad, torch_grad.to(get_accelerator().current_device()), atol=1e-3)
         assert torch.allclose(out, torch_out.to(get_accelerator().current_device()), atol=1e-2)
 
@@ -264,6 +267,10 @@ class TestTpLayerFwdBwd(DistributedTest):
 
         cur_device_out = torch.chunk(torch_out, tp_size, dim=-1)[groups.get_tensor_model_parallel_rank()]
         torch_grad = torch.chunk(torch_linear.weight.grad, tp_size, dim=0)[groups.get_tensor_model_parallel_rank()]
+
+        torch_bias_grad = torch.chunk(torch_linear.bias.grad, tp_size, dim=0)[groups.get_tensor_model_parallel_rank()]
+        assert torch.allclose(linear.bias.grad, torch_bias_grad.to(get_accelerator().current_device()), atol=1e-3)
+
         assert torch.allclose(linear.weight.grad, torch_grad.to(get_accelerator().current_device()), atol=1e-3)
         assert torch.allclose(cur_device_out.to(get_accelerator().current_device()).contiguous(),
                               out.contiguous(),
