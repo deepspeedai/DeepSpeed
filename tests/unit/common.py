@@ -497,11 +497,11 @@ def get_test_path(filename):
     return str(curr_path.joinpath(filename))
 
 
-# fp16 > bf16 > fp32
+# bf16 > fp16 > fp32
 def preferred_dtype():
-    if get_accelerator().is_fp16_supported():
-        return torch.float16
-    elif get_accelerator().is_bf16_supported():
+    if get_accelerator().is_bf16_supported():
         return torch.bfloat16
+    elif get_accelerator().is_fp16_supported():
+        return torch.float16
     else:
         return torch.float32
