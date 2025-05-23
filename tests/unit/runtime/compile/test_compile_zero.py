@@ -13,6 +13,8 @@ from deepspeed.accelerator import get_accelerator
 from unit.runtime.compile.util import compare_loss
 from unit.common import DistributedTest
 from unit.util import bf16_required_version_check, skip_on_arch
+import deepspeed
+from deepspeed.ops.aio import AsyncIOBuilder
 
 pytestmark = pytest.mark.skipif(not required_torch_version(min_version=2.1),
                                 reason="Compile tests requires Pytorch version 2.1 or above")
@@ -36,6 +38,8 @@ class TestZeRO(DistributedTest):
             pytest.skip("CPU does not support this test yet")
 
         if offload_device == OffloadDeviceEnum.nvme:
+            if not deepspeed.ops.__compatible_ops__[AsyncIOBuilder.NAME]:
+                pytest.skip('Skip tests since async-io is not compatible')
             if zero_stage != 3:
                 pytest.skip(f"Nvme offload not supported for zero stage {zero_stage}")
 
