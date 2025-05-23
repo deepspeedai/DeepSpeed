@@ -7,7 +7,6 @@ from unit.common import DistributedTest
 from unit.simple_model import SimpleModel
 
 def get_config(precision, clip_value, offload_device="cpu"):
-    """Helper function to create DeepSpeed config."""
     config = {
         "train_batch_size": 8,
         "steps_per_print": 1,
@@ -47,7 +46,7 @@ class TestZeroGradClip():
     world_size = 1 
 
     def test_grad_clip_and_norm_update(self, precision, clip_value, offload_device):
-        """Test custom gradient clipping with different precisions and configurations."""
+        """Test custom gradient clipping with configurations and to check if the norm_groups are updated correctly"""
         print(f"\nDEBUG: Starting test with {precision}, clip_value={clip_value}, offload={offload_device}")
         
         config_dict = get_config(precision, clip_value, offload_device)
@@ -88,12 +87,11 @@ class TestZeroGradClip():
             grad = safe_get_local_grad(param)
             if grad is not None:
                 pre_clip_norm = grad.norm().item()
-                # Apply clipping
                 clamped_grad = torch.clamp(grad, -clip_value, clip_value)
                 post_clip_norm = clamped_grad.norm().item()
                 
                 if pre_clip_norm > clip_value:
-                    print(f"DEBUG: Param {param.ds_id} - Pre-clip norm: {pre_clip_norm:.6f}, Post-clip norm: {post_clip_norm:.6f}")
+                    # Checks if the post-clip norm is less than or equal to the pre-clip norm
                     assert post_clip_norm <= pre_clip_norm, f"Post-clip norm should be <= pre-clip norm for param {param.ds_id}"
                 
                 safe_set_local_grad(param, clamped_grad)
@@ -103,15 +101,11 @@ class TestZeroGradClip():
         post_clip_norm_groups = optimizer._get_norm_groups()
         post_clip_global_norm = torch.linalg.vector_norm(torch.stack(post_clip_norm_groups))
 
-        print(f"DEBUG: Pre-clip global norm: {pre_clip_global_norm.item():.6f}")
-        print(f"DEBUG: Post-clip global norm: {post_clip_global_norm.item():.6f}")
         assert modified_count > 0, "No parameters were modified during clipping"
-        assert post_clip_global_norm.item() < pre_clip_global_norm.item(), \
-            f"Post-clip norm {post_clip_global_norm.item():.6f} should be < pre-clip norm {pre_clip_global_norm.item():.6f}"
+        assert post_clip_global_norm.item() < pre_clip_global_norm.item(), f"Post-clip norm {post_clip_global_norm.item():.6f} should be < pre-clip norm {pre_clip_global_norm.item():.6f}"
 
         model_engine.step()
         
         final_norm = optimizer._global_grad_norm
         if pre_clip_global_norm.item() > clip_value:
-            assert post_clip_global_norm.item() < pre_clip_global_norm.item(), \
-                "Global norm should be reduced after clipping when pre-clip norm > clip_value"
+            assert post_clip_global_norm.item() < pre_clip_global_norm.item(), "Global norm should be reduced after clipping when pre-clip norm > clip_value"
