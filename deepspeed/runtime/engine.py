@@ -1303,6 +1303,15 @@ class DeepSpeedEngine(Module):
             self.communication_data_type = self._config.seq_parallel_communication_data_type
             self.seq_parallel_group = groups._get_sequence_parallel_group()
 
+        if dist.get_rank() == 0:
+            summary = "********** distributed groups summary **********\n"
+            summary += f"\t {self.dp_world_size=}\n"
+            summary += f"\t {self.mp_world_size=}\n"
+            summary += f"\t {self.seq_dp_world_size=}\n"
+            summary += f"\t {self.sequence_parallel_size=}\n"
+            summary += "***********************************************"
+            logger.info(summary)
+
         if not (self.amp_enabled() or is_zero_init_model):
             self._broadcast_model()
 

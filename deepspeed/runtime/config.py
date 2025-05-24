@@ -721,14 +721,23 @@ class DeepSpeedConfig(object):
                 raise ValueError(
                     f"Expected a string path to an existing deepspeed config, or a dictionary or a valid base64. Received: {config}"
                 )
+
         try:
             self.global_rank = dist.get_rank()
             if mpu is not None:
-                self.world_size = mpu.get_data_parallel_world_size()
+                # Ulysses SP
+                if not hasattr(mpu, "get_data_parallel_world_size"):
+                    self.world_size = dist.get_world_size() / mpu.get_sequence_parallel_world_size()
+                else:
+                    self.world_size = mpu.get_data_parallel_world_size()
             elif mesh_device is not None:
                 self.world_size = dist.get_world_size(mesh_device.get_group(mesh_dim="data_parallel"))
             else:
-                self.world_size = dist.get_world_size()
+                # HF zero.init case where there is no mpu
+                if "sequence_parallel_size" in config:
+                    self.world_size = dist.get_world_size() / config["sequence_parallel_size"]
+                else:
+                    self.world_size = dist.get_world_size()
         except:
             self.global_rank = 0
             self.world_size = 1
@@ -941,7 +950,7 @@ class DeepSpeedConfig(object):
         micro_batch = self.train_micro_batch_size_per_gpu
         grad_acc = self.gradient_accumulation_steps
 
-        #print(f"train_batch = {train_batch}, micro_batch={micro_batch}")
+        #print(f"in: train_batch = {train_batch}, micro_batch={micro_batch}")
 
         # all values are provided nothing needs to be set
         if train_batch is not None and micro_batch is not None and grad_acc is not None:
@@ -979,6 +988,8 @@ class DeepSpeedConfig(object):
         else:
             assert False, \
                 'Either train_batch_size or train_micro_batch_size_per_gpu needs to be provided'
+
+        #print(f"final: {self.train_batch_size=} {self.train_micro_batch_size_per_gpu=} {self.gradient_accumulation_steps=}")
 
     def _configure_train_batch_size(self):
         self._set_batch_related_parameters()

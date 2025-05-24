@@ -3,6 +3,8 @@
 
 # DeepSpeed Team
 
+import deepspeed.comm as dist
+
 # For lazy import with printflock()
 fcntl = None
 
@@ -35,7 +37,7 @@ def debug_module2name(module):
 
 
 def debug_module2name_id(module):
-    return f"name={debug_module2name(module)} id={module.id}"
+    return f"name={debug_module2name(module)}"
 
 
 def debug_module2name_class(module):
@@ -54,11 +56,11 @@ def debug_param2name_id(param):
 
 
 def debug_param2name_id_shape(param):
-    return f"name={debug_param2name(param)} id={param.ds_id} shape={param.data.shape}"
+    return f"name={debug_param2name(param)} id={param.ds_id} shape={param.ds_shape}"
 
 
 def debug_param2name_id_shape_device(param):
-    return f"name={debug_param2name(param)} id={param.ds_id} shape={param.data.shape} device={param.device}"
+    return f"name={debug_param2name(param)} id={param.ds_id} shape={param.ds_shape} device={param.device}"
 
 
 def debug_param2name_id_numel(param):
@@ -66,7 +68,7 @@ def debug_param2name_id_numel(param):
 
 
 def debug_param2name_id_shape_status(param):
-    return f"name={debug_param2name(param)} id={param.ds_id} shape={param.data.shape} status={param.ds_status}"
+    return f"name={debug_param2name(param)} id={param.ds_id} shape={param.ds_shape} status={param.ds_status}"
 
 
 def printflock(*msgs):
@@ -151,3 +153,21 @@ def print_backward_tensors(tensor):
 
     if hasattr(tensor, 'grad_fn'):
         _print_bwd_tensors(tensor.grad_fn)
+
+
+def print_rank(*msg, force=False):
+    """print something on all global ranks with [rank] prefix.
+    """
+    if not force:
+        return
+    global_rank = dist.get_rank()
+    print(f"[{global_rank}]", *msg)
+
+
+def print_rank0(*msg, force=False):
+    """print something only on rank 0"""
+    if not force:
+        return
+    global_rank = dist.get_rank()
+    if global_rank == 0:
+        print(f"[{global_rank}]", *msg)

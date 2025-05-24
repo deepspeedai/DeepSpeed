@@ -1264,6 +1264,9 @@ class Init(InsertPostInitMethodToModuleSubClasses):
                         ds_process_group,
                     )
                     param.data = param_buffer.narrow(0, 0, param.ds_numel).view(param.ds_shape).to(param.device)
+                    #print_rank_0(f"{param.shape=}", force=True)
+                    #print_rank_0(f"{param_buffer.shape=}", force=True)
+
                     return AllGatherHandle(handles, param)
                 else:
                     if hasattr(param_ds_tensor, "ds_quant_scale"):
