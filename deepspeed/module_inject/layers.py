@@ -253,12 +253,11 @@ class TensorParallel_Layer(nn.Module, ABC):
         if self.is_training_mode():
             assert self.support_training, "No implementation of backward."
         if weight is not None:
-
             self.config_requires_grad(weight)
-            setattr(weight, DS_TENSOR_MODEL_PARALLEL, True)
-            setattr(weight, DS_IS_REPLACED_MODULE, True)
             weight.gather_params = self.gather_params
             weight._tp_partition = self._tp_partition
+            setattr(weight, DS_TENSOR_MODEL_PARALLEL, True)
+            setattr(weight, DS_IS_REPLACED_MODULE, True)
 
     def is_training_mode(self):
         global DEEPSPEED_AUTOTP_MODE
@@ -431,9 +430,14 @@ class LinearAllreduce(TensorParallel_Layer):
 
         else:
             for idx, param in enumerate(params_list):
-                if param is None or idx > 0:
+                if param is None:
                     # don't slipt bias
                     return
+                if idx > 0:  # move bias to device at initialization
+                    _partition = self.move(param).detach()
+                    params_list[idx].data = _partition
+                    return
+
                 _partition = torch.chunk(param, self.tp_world_size, dim=-1)[self.tp_index]
 
                 _partition = self.move(_partition).detach()

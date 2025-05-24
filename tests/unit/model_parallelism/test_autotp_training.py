@@ -19,6 +19,7 @@ from torch import nn
 from deepspeed.module_inject.layers import LinearAllreduce, LinearLayer, set_autotp_mode
 from unit.checkpoint.common import compare_lr_scheduler_states, compare_optimizer_states
 import os
+from deepspeed.runtime.utils import is_model_parallel_parameter
 
 
 def skip_on_device():
@@ -314,17 +315,17 @@ class TestParamsGather(DistributedTest):
 
         torch_linear = nn.Linear(hidden_dim, hidden_dim, dtype=preferred_dtype(), device="cpu")
         total_params = sum(p.numel() for p in torch_linear.parameters())
-
         tp_layer = None
         if layer_type == "linear":
-            tp_layer = LinearLayer(torch_linear, groups.get_tensor_model_parallel_group())
+            tp_layer = LinearLayer(deepcopy(torch_linear), groups.get_tensor_model_parallel_group())
         elif layer_type == "linearallreduce":
-            tp_layer = LinearAllreduce(torch_linear, groups.get_tensor_model_parallel_group())
+            tp_layer = LinearAllreduce(deepcopy(torch_linear), groups.get_tensor_model_parallel_group())
         else:
             raise ValueError(f"Invalid linear type: {config_dict['linear_type']}")
 
         tp_params = sum(p.numel() for p in tp_layer.parameters())
 
+        expected_tp_params = 0
         # compute expected TP params:
         # - column-parallel (LinearLayer): weight & bias both split => total // tp_size
         # - row-parallel    (LinearAllreduce): weight split, bias (1d tensors) replicated
@@ -334,13 +335,14 @@ class TestParamsGather(DistributedTest):
             expected_tp_params = weight_params // tp_size + bias_params
         else:
             expected_tp_params = total_params // tp_size
-
         assert expected_tp_params == tp_params, (
             f"{layer_type}: expected {expected_tp_params} tp params, got {tp_params}")
 
         for name, param in tp_layer.named_parameters(recurse=False):
-            param.gather_params([param])
+            if is_model_parallel_parameter(param):
+                param.gather_params([param])
 
+        torch_linear = torch_linear.to(get_accelerator().current_device())
         is_same_weights = all(
             torch.equal(param1, param2) for param1, param2 in zip(tp_layer.parameters(), torch_linear.parameters()))
 
@@ -350,11 +352,12 @@ class TestParamsGather(DistributedTest):
         assert total_params == params1
 
         for name, param in tp_layer.named_parameters(recurse=False):
-            param._tp_partition([param])
+            if is_model_parallel_parameter(param):
+                param._tp_partition([param])
 
         tp_params2 = sum(p.numel() for p in tp_layer.parameters())
 
-        assert total_params // tp_size == tp_params2
+        assert expected_tp_params == tp_params2
 
 
 def dummy_init_engine(config):
