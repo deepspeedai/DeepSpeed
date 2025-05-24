@@ -19,6 +19,7 @@ from torch import nn
 from deepspeed.module_inject.layers import LinearAllreduce, LinearLayer, set_autotp_mode
 from unit.checkpoint.common import compare_lr_scheduler_states, compare_optimizer_states
 import os
+from deepspeed.runtime.utils import is_model_parallel_parameter
 
 
 def skip_on_device():
@@ -30,10 +31,9 @@ class SequentialLinearModel(torch.nn.Module):
 
     def __init__(self, hidden_dim, empty_grad=False, nlayers=1):
         super(SequentialLinearModel, self).__init__()
-        self.linears = torch.nn.ModuleList(
-            [torch.nn.Linear(hidden_dim, hidden_dim, bias=None) for i in range(nlayers)])
+        self.linears = torch.nn.ModuleList([torch.nn.Linear(hidden_dim, hidden_dim) for _ in range(nlayers)])
         if empty_grad:
-            self.linear2 = torch.nn.Linear(hidden_dim, hidden_dim, bias=None)
+            self.linear2 = torch.nn.Linear(hidden_dim, hidden_dim)
         self.cross_entropy_loss = torch.nn.CrossEntropyLoss()
         self.empty_grad = empty_grad
 
@@ -153,8 +153,7 @@ def process_linear_layer(hidden_dim, input):
     torch_linear = nn.Linear(hidden_dim,
                              hidden_dim,
                              dtype=preferred_dtype(),
-                             device=get_accelerator().current_device(),
-                             bias=None)
+                             device=get_accelerator().current_device())
     torch_out = torch_linear(input)
     torch_loss = torch_out.sum()
     torch_loss.backward()
@@ -215,6 +214,9 @@ class TestTpLayerFwdBwd(DistributedTest):
         loss.backward()
 
         torch_grad = torch.chunk(torch_linear.weight.grad, tp_size, dim=1)[groups.get_tensor_model_parallel_rank()]
+        torch_bias_grad = torch_linear.bias.grad
+        assert torch.allclose(linear.bias.grad, torch_bias_grad.to(get_accelerator().current_device()), atol=1e-3)
+        # The gradient of the weight is not the same as the torch_linear.weight.grad
         assert torch.allclose(linear.weight.grad, torch_grad.to(get_accelerator().current_device()), atol=1e-3)
         assert torch.allclose(out, torch_out.to(get_accelerator().current_device()), atol=1e-2)
 
@@ -266,6 +268,10 @@ class TestTpLayerFwdBwd(DistributedTest):
 
         cur_device_out = torch.chunk(torch_out, tp_size, dim=-1)[groups.get_tensor_model_parallel_rank()]
         torch_grad = torch.chunk(torch_linear.weight.grad, tp_size, dim=0)[groups.get_tensor_model_parallel_rank()]
+
+        torch_bias_grad = torch.chunk(torch_linear.bias.grad, tp_size, dim=0)[groups.get_tensor_model_parallel_rank()]
+        assert torch.allclose(linear.bias.grad, torch_bias_grad.to(get_accelerator().current_device()), atol=1e-3)
+
         assert torch.allclose(linear.weight.grad, torch_grad.to(get_accelerator().current_device()), atol=1e-3)
         assert torch.allclose(cur_device_out.to(get_accelerator().current_device()).contiguous(),
                               out.contiguous(),
@@ -307,23 +313,36 @@ class TestParamsGather(DistributedTest):
         model = SequentialLinearModel(hidden_dim=hidden_dim)
         model, _, _, _ = deepspeed.initialize(model=model, model_parameters=model.parameters(), config=config_dict)
 
-        torch_linear = nn.Linear(hidden_dim, hidden_dim, dtype=preferred_dtype(), device="cpu", bias=None)
+        torch_linear = nn.Linear(hidden_dim, hidden_dim, dtype=preferred_dtype(), device="cpu")
         total_params = sum(p.numel() for p in torch_linear.parameters())
-
         tp_layer = None
         if layer_type == "linear":
-            tp_layer = LinearLayer(torch_linear, groups.get_tensor_model_parallel_group())
+            tp_layer = LinearLayer(deepcopy(torch_linear), groups.get_tensor_model_parallel_group())
         elif layer_type == "linearallreduce":
-            tp_layer = LinearAllreduce(torch_linear, groups.get_tensor_model_parallel_group())
+            tp_layer = LinearAllreduce(deepcopy(torch_linear), groups.get_tensor_model_parallel_group())
         else:
             raise ValueError(f"Invalid linear type: {config_dict['linear_type']}")
 
         tp_params = sum(p.numel() for p in tp_layer.parameters())
 
-        assert total_params // tp_size == tp_params
-        for name, param in tp_layer.named_parameters(recurse=False):
-            param.gather_params([param])
+        expected_tp_params = 0
+        # compute expected TP params:
+        # - column-parallel (LinearLayer): weight & bias both split => total // tp_size
+        # - row-parallel    (LinearAllreduce): weight split, bias (1d tensors) replicated
+        if layer_type == "linearallreduce":
+            weight_params = torch_linear.weight.numel()
+            bias_params = torch_linear.bias.numel()
+            expected_tp_params = weight_params // tp_size + bias_params
+        else:
+            expected_tp_params = total_params // tp_size
+        assert expected_tp_params == tp_params, (
+            f"{layer_type}: expected {expected_tp_params} tp params, got {tp_params}")
 
+        for name, param in tp_layer.named_parameters(recurse=False):
+            if is_model_parallel_parameter(param):
+                param.gather_params([param])
+
+        torch_linear = torch_linear.to(get_accelerator().current_device())
         is_same_weights = all(
             torch.equal(param1, param2) for param1, param2 in zip(tp_layer.parameters(), torch_linear.parameters()))
 
@@ -333,11 +352,12 @@ class TestParamsGather(DistributedTest):
         assert total_params == params1
 
         for name, param in tp_layer.named_parameters(recurse=False):
-            param._tp_partition([param])
+            if is_model_parallel_parameter(param):
+                param._tp_partition([param])
 
         tp_params2 = sum(p.numel() for p in tp_layer.parameters())
 
-        assert total_params // tp_size == tp_params2
+        assert expected_tp_params == tp_params2
 
 
 def dummy_init_engine(config):
@@ -571,7 +591,7 @@ class TestTpGradNorm(DistributedTest):
 
         tp_norm = tp_optimizer._global_grad_norm
 
-        assert math.isclose(base_norm, tp_norm, abs_tol=1e-3)
+        assert math.isclose(base_norm, tp_norm, abs_tol=1e-3), f"base_norm: {base_norm}, tp_norm: {tp_norm}"
         tp_params_numel = sum(p.numel() for p in tp_model.parameters())
         base_params_numel = sum(p.numel() for p in base_model.parameters())
-        assert tp_params_numel < base_params_numel
+        assert tp_params_numel < base_params_numel, f"tp_params_numel: {tp_params_numel}, base_params_numel: {base_params_numel}"

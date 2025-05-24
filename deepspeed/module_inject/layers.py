@@ -49,6 +49,18 @@ def set_autotp_mode(training=False):
         DEEPSPEED_AUTOTP_MODE = AUTOTP_MODE.INFERENCE
 
 
+def add_bias(input, bias):
+    if bias is None:
+        return input
+    if is_autotp_training_mode():
+        # Training mode - avoid inplace to ensure correct autograd
+        input = input + bias
+        return input
+    else:
+        input += bias
+        return input
+
+
 class RowParallel(torch.autograd.Function):
     """
     A custom autograd function for performing row-wise parallelism.
@@ -92,7 +104,7 @@ class AsyncColumnParallel(torch.autograd.Function):
         ctx.group = group
         output = torch.matmul(input, weight.transpose(-1, -2))
         if bias is not None:
-            output += bias
+            output = add_bias(output, bias)
 
         ctx.save_for_backward(input, weight)
 
@@ -220,6 +232,14 @@ class TensorParallel_Layer(nn.Module, ABC):
         """
         pass
 
+    def config_requires_grad(self, weight):
+        if weight is not None:
+            if self.is_training_mode():
+                if weight.requires_grad is None:
+                    weight.requires_grad = True
+            else:
+                weight.requires_grad = False
+
     def config_tp_params(self, weight):
         """
         Configures the weight tensor for training with tensor parallelism. This includes enabling gradients
@@ -233,15 +253,11 @@ class TensorParallel_Layer(nn.Module, ABC):
         if self.is_training_mode():
             assert self.support_training, "No implementation of backward."
         if weight is not None:
-            if self.is_training_mode():
-                if weight.requires_grad is None:
-                    weight.requires_grad = True
-            else:
-                weight.requires_grad = False
-            setattr(weight, DS_TENSOR_MODEL_PARALLEL, True)
-            setattr(weight, DS_IS_REPLACED_MODULE, True)
+            self.config_requires_grad(weight)
             weight.gather_params = self.gather_params
             weight._tp_partition = self._tp_partition
+            setattr(weight, DS_TENSOR_MODEL_PARALLEL, True)
+            setattr(weight, DS_IS_REPLACED_MODULE, True)
 
     def is_training_mode(self):
         global DEEPSPEED_AUTOTP_MODE
@@ -377,13 +393,14 @@ class LinearAllreduce(TensorParallel_Layer):
         self.support_training = True
         self.config_tp_params(self.weight)
         if self.bias is not None:
-            self.config_tp_params(self.bias)
+            # bias here is not tp params
+            self.config_requires_grad(self.bias)
 
     def forward(self, input):
         output = torch.matmul(input, self.weight.transpose(-1, -2))
         output = RowParallel.apply(self.mp_group, output, not self.is_training_mode())
         if self.bias is not None:
-            output += self.bias
+            output = add_bias(output, self.bias)
         return output
 
     @torch.no_grad()
@@ -395,6 +412,7 @@ class LinearAllreduce(TensorParallel_Layer):
                 return
             params_list[idx].data_partition = param.data
             param = param.transpose(0, 1).contiguous()
+
             output_param = torch.empty(self.tp_world_size * param.shape[0],
                                        param.shape[1],
                                        dtype=param.dtype,
@@ -412,9 +430,14 @@ class LinearAllreduce(TensorParallel_Layer):
 
         else:
             for idx, param in enumerate(params_list):
-                if param is None or idx > 0:
+                if param is None:
                     # don't slipt bias
                     return
+                if idx > 0:  # move bias to device at initialization
+                    _partition = self.move(param).detach()
+                    params_list[idx].data = _partition
+                    return
+
                 _partition = torch.chunk(param, self.tp_world_size, dim=-1)[self.tp_index]
 
                 _partition = self.move(_partition).detach()
@@ -455,7 +478,7 @@ class LinearLayer(TensorParallel_Layer):
                 input = ColumnParallel.apply(self.mp_group, input)
             output = torch.matmul(input, self.weight.transpose(-1, -2))
             if self.bias is not None:
-                output += self.bias
+                output = add_bias(output, self.bias)
         else:
             output = AsyncColumnParallel.apply(self.mp_group, input, self.weight, self.bias)
 
@@ -467,8 +490,7 @@ class LinearLayer(TensorParallel_Layer):
         for idx, param in enumerate(params_list):
 
             params_list[idx].data_partition = param.data
-            output_param = torch.empty(self.tp_world_size * param.shape[0],
-                                       param.shape[1],
+            output_param = torch.empty((self.tp_world_size * param.shape[0], *param.shape[1:]),
                                        dtype=param.dtype,
                                        device=param.device)
             dist.all_gather_into_tensor(output_param, param, group=self.mp_group)
@@ -651,7 +673,7 @@ class LmHeadLinearAllreduce(LinearAllreduce):
         if self.mp_group is not None:
             dist.inference_all_reduce(output, group=self.mp_group)
         if self.bias is not None:
-            output += self.bias
+            output = add_bias(output, self.bias)
         return output
 
 
