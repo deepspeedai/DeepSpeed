@@ -1,4 +1,4 @@
-# Copyright (c) Microsoft Corporation.
+# Copyright (c) The DeepSpeed Contributors
 # SPDX-License-Identifier: Apache-2.0
 
 # DeepSpeed Team
@@ -546,21 +546,23 @@ def sequence_tiled_compute(
     This is a wrapper for SequenceTiledCompute which we need since torch.autograd.Function can't work with dicts of tensors (in backward it has to return a grad value and not a dict that may have a non-None grad value). It's also useful for setting default values which we can't do either in torch.autograd.Function.
 
     Args:
-    - fn: the function to call on sharded inputs
-    - seqlen: total seqlen of the seqlen dimension
-    - shards: how many shards to use
-    - kwargs_to_shard: this dict will be passed to `fn` as `**kwargs` after sharding on seqlen dimension
-    - kwargs_to_pass: this dict will be passed to `fn` as is, as `**kwargs`
-    - grad_requiring_tensor_key: which main key requires grads
-    - compute_params: a list of weights engaged in the compute Default: `None`
-    - output_reduction: None, "mean" or "sum": Default: "mean"
-    - output_unshard_dimension: the dimension to concat the outputs on: Default: 1 (seqlen dim)
+    - `fn`: the function to call on sharded inputs
+    - `seqlen`: total seqlen of the seqlen dimension
+    - `shards`: how many shards to use
+    - `kwargs_to_shard`: this dict will be passed to `fn` as `**kwargs` after sharding on seqlen dimension
+    - `kwargs_to_pass`: this dict will be passed to `fn` as is, as `**kwargs`
+    - `grad_requiring_tensor_key`: which main key requires grads
+    - `compute_params`: a list of weights engaged in the compute. Default: `None` (only needed when using DeepSpeed ZeRO)
+    - `output_reduction`: None, "mean" or "sum": Default: "mean"
+    - `output_unshard_dimension`: the dimension to concat the outputs on: Default: 1 (seqlen dim)
 
     Returns:
     - unsharded output with an optional reduction applied, depending on the `output_reduction` value:
-        None - return the unsharded output tensor
-        "mean" - apply mean
-        "sum" - apply sum
+        `None` - return the unsharded output tensor
+        `"mean"` - apply mean
+        `"sum"` - apply sum
+
+    Please note that this implementation doesn't require DeepSpeed and can work without it. `compute_params` can remain `None` in such a case.
 
     """
     args_to_shard = kwargs_to_shard.values()
@@ -585,10 +587,11 @@ def sequence_tiled_compute(
 
 class SequenceTiledCompute(torch.autograd.Function):
     """
-        A generic autograd function to perform a tiled compute.
+    A generic autograd function to perform a tiled compute.
 
-        For an easier to understand example see TiledMLP - which is the same as this autograd function but without the generalization code
+    Please note that this implementation doesn't require DeepSpeed and can work without it. `compute_params` can remain `None` in such a case.
 
+    For an easier to understand example see TiledMLP - which is the same as this autograd function but without the generalization code.
     """
 
     @staticmethod
@@ -723,16 +726,28 @@ class SequenceTiledCompute(torch.autograd.Function):
         arg_outputs = [None] * ctx.total_args
         arg_outputs[grad_requiring_tensor_key_index] = grad_requiring_tensor_grad  # .detach()
 
+        print(f"{grad_requiring_tensor_grad=}")
+
         return tuple(grad_outputs + arg_outputs)
 
 
 class TiledMLP(torch.autograd.Function):
     """
-    Perform a tiled MLP computation to massively reduce memory usage when using very long seqlen
+    Perform a tiled MLP computation to massively reduce memory usage needed to compute MLP when using very long sequence lengths
 
     For a general tiled compute implementation that can handle any `forward` see `SequenceTiledCompute`
 
-    Usage example:
+    Args:
+    - fn: the function to call on sharded inputs
+    - `self`: the MLP nn.Module object
+    - `x`: the input to MLP.forward (`hidden_states`)
+    - `shards`: how many shards to use
+    - compute_params: a list of weights engaged in the compute Default: `None` (only needed when using DeepSpeed ZeRO)
+
+    Returns:
+    - the computed `hidden_states`
+
+    Here is an example that monkey patches HF Transformers' LLamaMLP:
 
     def tiled_mlp_forward(self, x):
         bs, seqlen, hidden = x.shape
@@ -742,7 +757,6 @@ class TiledMLP(torch.autograd.Function):
         dist.all_reduce(tensor, op=dist.ReduceOp.MAX)
         num_shards = tensor.item()
         compute_params = [self.down_proj.weight, self.gate_proj.weight, self.up_proj.weight]
-        seqlen = x.shape[1]
 
         def mlp_forward(self, x):
             return self.down_proj(self.act_fn(self.gate_proj(x)) * self.up_proj(x))
@@ -751,11 +765,11 @@ class TiledMLP(torch.autograd.Function):
             mlp_forward,
             self,
             x,
-            seqlen,
             num_shards,
             compute_params,
         )
 
+        # This Needs To Be Done Before The Model Is Instantiated
         from transformers.models.llama import modeling_llama
         modeling_llama.LlamaMLP.forward = tiled_mlp_forward
     """
@@ -766,27 +780,22 @@ class TiledMLP(torch.autograd.Function):
         fn,
         self,
         x,
-        seqlen,
         shards,
         compute_params,
     ) -> torch.Tensor:
-
+        #shards=1
         ctx.fn = fn
         ctx.self = self
         ctx.shards = shards
         ctx.compute_params = compute_params
         ctx.save_for_backward(x)
 
+        x_shards = list(torch.chunk(x, chunks=shards, dim=1))
         with torch.no_grad():
-            shard_step = math.ceil(seqlen / shards)
-            output_shards = []
+            output_shards = [fn(self, x_shard) for x_shard in x_shards]
+        output_unsharded = torch.cat(output_shards, dim=1)
 
-            for i in range(shards):
-                output = fn(self, x[:, i * shard_step:(i + 1) * shard_step])
-                output_shards.append(output)
-            output_unsharded = torch.cat(output_shards, dim=1)
-
-            return output_unsharded
+        return output_unsharded
 
     @staticmethod
     def backward(ctx, *grads) -> torch.Tensor:
@@ -796,17 +805,17 @@ class TiledMLP(torch.autograd.Function):
         shards = ctx.shards
         compute_params = ctx.compute_params
 
-        x1 = x.detach()
-        x1.requires_grad = x.requires_grad
-        x = x1
+        x = x.detach()
+        x.requires_grad_(True)
 
         incoming_grad = grads[0]
         x_grad = torch.zeros_like(x)
         x_shards = list(torch.chunk(x, chunks=shards, dim=1))
 
         shard_step = x_shards[0].numel()
-        for i in range(shards):
+        for i, x_shard in enumerate(x_shards):
 
+            # Tell deepspeed not to add a new grad to ipg bucket until the last shard is run
             if compute_params is not None:
                 if i + 1 < shards:
                     for param in compute_params:
@@ -816,20 +825,26 @@ class TiledMLP(torch.autograd.Function):
                     for param in compute_params:
                         param.ds_grad_is_ready = True
 
-            x_shard = x_shards.pop(0)
+            x_shard.requires_grad_(True)
 
             shard_offset = i * shard_step
             x_shard.grad = x_grad.view(-1).narrow(0, shard_offset, x_shard.numel()).view_as(x_shard)
+            incoming_grad_shard = incoming_grad.view(-1).narrow(0, shard_offset, x_shard.numel()).view_as(x_shard)
 
             with torch.enable_grad():
                 output = fn(self, x_shard)
+            torch.autograd.backward(output, incoming_grad_shard)
+            print(f"{output.requires_grad=}")
+            print(f"{output.grad=}")
+            #print(f"{x_grad=}")
+            print(f"{x_shard.grad=}")
+            # for param in compute_params:
+            #     print(f"{param.grad=}")
 
-                incoming_grad_shard = incoming_grad.view(-1).narrow(0, shard_offset, x_shard.numel()).view_as(x_shard)
-                torch.autograd.backward(output, incoming_grad_shard)
-
+        print(f"{x_grad=}")
         x_grad /= shards
 
-        return (None, None, x.grad, None, None, None)
+        return (None, None, x_grad, None, None)
 
 
 class AutogradComputeMLP(torch.autograd.Function):

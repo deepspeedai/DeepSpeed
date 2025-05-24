@@ -208,7 +208,8 @@ class DeepSpeedZeRoOffload(object):
                 zero_params[0].convert_to_zero_parameters(param_list=non_zero_params)
             else:
                 group = None
-                if mpu:
+                # parallel_state_sp doesn't have get_data_parallel_group
+                if mpu and hasattr(mpu, "get_data_parallel_group"):
                     group = mpu.get_data_parallel_group()
 
                 Init(module=module,
