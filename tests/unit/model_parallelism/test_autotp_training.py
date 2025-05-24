@@ -325,7 +325,19 @@ class TestParamsGather(DistributedTest):
 
         tp_params = sum(p.numel() for p in tp_layer.parameters())
 
-        assert total_params // tp_size == tp_params
+        # compute expected TP params:
+        # - column-parallel (LinearLayer): weight & bias both split => total // tp_size
+        # - row-parallel    (LinearAllreduce): weight split, bias (1d tensors) replicated
+        if layer_type == "linearallreduce":
+            weight_params = torch_linear.weight.numel()
+            bias_params = torch_linear.bias.numel()
+            expected_tp_params = weight_params // tp_size + bias_params
+        else:
+            expected_tp_params = total_params // tp_size
+
+        assert expected_tp_params == tp_params, (
+            f"{layer_type}: expected {expected_tp_params} tp params, got {tp_params}")
+
         for name, param in tp_layer.named_parameters(recurse=False):
             param.gather_params([param])
 
