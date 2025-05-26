@@ -1904,7 +1904,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
                 bit16_partition_buffer = self.param_buffer_of_bit16_for_cpu_offload_groups[i]
                 bit16_partition_buffer.data.copy_(fp32_partition.data)
                 bit16_partitions[partition_id].data.copy_(
-                  bit16_partition_buffer.data, non_blocking=True)
+                    bit16_partition_buffer.data, non_blocking=True)
 
                 self.timers(OPTIMIZER_STEP_TIMER).stop()
             else:
