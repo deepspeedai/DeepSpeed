@@ -415,8 +415,8 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
                                                fill_value=0.0,
                                                dtype=temp_dtype,
                                                device=weights_partition.device)
-                temp_pinned = get_accelerator().pin_memory(temp_buffer_bit16)
                 if self.cpu_offload_pin_memory:
+                    temp_pinned = get_accelerator().pin_memory(temp_buffer_bit16)
                     self.param_buffer_of_bit16_for_cpu_offload_groups.append(temp_pinned)
                 else:
                     self.param_buffer_of_bit16_for_cpu_offload_groups.append(temp_buffer_bit16)
