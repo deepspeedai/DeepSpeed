@@ -702,10 +702,11 @@ class TestZero3ParamPartitioningBase(DistributedTest):
                 }
             },
         }
-        if get_accelerator().is_bf16_supported():
-            config_dict["bf16"] = {"enabled": True}
-        elif get_accelerator().is_fp16_supported():
+
+        if fp16_enabled:
             config_dict["fp16"] = {"enabled": True, "loss_scale": 1.0}
+        elif get_accelerator().is_bf16_supported():
+            config_dict["bf16"] = {"enabled": True}
 
         if offload_optimizer:
             config_dict["zero_optimization"]["offload_optimizer"] = {
