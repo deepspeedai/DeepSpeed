@@ -1682,11 +1682,11 @@ class TestZero3SwitchModes(DistributedTest):
                     "lr": 1e-3
                 }
             },
-            "fp16": {
-                "enabled": True,
-                "initial_scale_power": 8
-            }
         }
+        if get_accelerator().is_bf16_supported():
+            config_dict["bf16"] = {"enabled": True}
+        elif get_accelerator().is_fp16_supported():
+            config_dict["fp16"] = {"enabled": True, "initial_scale_power": 8}
 
         model, _, _, _ = deepspeed.initialize(config=config_dict, model=model, model_parameters=model.parameters())
         data_loader = random_dataloader(model=model, total_samples=16, hidden_dim=hidden_dim, device=model.device)

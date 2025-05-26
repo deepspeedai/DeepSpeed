@@ -38,10 +38,10 @@ class TestStage2IgnoreUnusedParameters(DistributedTest):
                 }
             },
         }
-        if get_accelerator().is_fp16_supported():
-            config_dict["fp16"] = {"enabled": True, "initial_scale_power": 8}
-        else:
+        if get_accelerator().is_bf16_supported():
             config_dict["bf16"] = {"enabled": True}
+        elif get_accelerator().is_fp16_supported():
+            config_dict["fp16"] = {"enabled": True, "initial_scale_power": 8}
         hidden_dim = 4
 
         model = UnusedParametersModel(hidden_dim=hidden_dim)
