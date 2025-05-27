@@ -86,7 +86,11 @@ class TestLambFP16(DistributedTest):
 
         model = SimpleModel(hidden_dim)
         model, _, _, _ = deepspeed.initialize(config=config_dict, model=model, model_parameters=model.parameters())
-        data_loader = random_dataloader(model=model, total_samples=50, hidden_dim=hidden_dim, device=model.device)
+        data_loader = random_dataloader(model=model,
+                                        total_samples=50,
+                                        hidden_dim=hidden_dim,
+                                        device=model.device,
+                                        dtype=torch.float16)
         for n, batch in enumerate(data_loader):
             loss = model(batch[0], batch[1])
             model.backward(loss)
