@@ -25,6 +25,7 @@ from ..comm.config import DeepSpeedCommsConfig
 from ..monitor.config import get_monitor_config
 from ..inference.config import WeightQuantConfig
 from .precision_config import get_bfloat16_config, get_float16_config
+from ..compile.config import CompileConfig
 
 from deepspeed import comm as dist
 from deepspeed.runtime.config_utils import DeepSpeedConfigModel
@@ -816,6 +817,8 @@ class DeepSpeedConfig(object):
 
         self.weight_quantization_config = WeightQuantConfig(
             **param_dict['weight_quantization']) if 'weight_quantization' in param_dict else None
+
+        self.compile_config = CompileConfig(**param_dict.get('compile', {}))
 
         self.timers_config = get_timers_config(param_dict)
         self.tensor_parallel_config = get_tensor_parallel_config(param_dict)
