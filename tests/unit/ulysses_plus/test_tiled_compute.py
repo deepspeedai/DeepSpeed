@@ -10,38 +10,19 @@ from deepspeed.runtime.sequence_parallel.ulysses_sp import TiledMLP, sequence_ti
 from deepspeed.utils import safe_get_full_grad
 from torch.nn import Linear, Module
 from unit.common import DistributedTest, preferred_dtype
+from unit.util import torch_assert_equal, torch_assert_close
 import deepspeed
 import pytest
 import torch
 
 
-def torch_assert_equal(actual, expected, **kwargs):
-    """
-    Compare two tensors or non-tensor numbers for their equality.
-    Add msg=blah to add an additional comment to when assert fails.
-    """
-    return torch.testing.assert_close(actual, expected, rtol=0.0, atol=0.0, **kwargs)
-
-
-def torch_assert_close(actual, expected, **kwargs):
-    """
-    Compare two tensors or non-tensor numbers for their closeness.
-
-    Add msg=blah to add an additional comment to when assert fails.
-
-    For default values of `rtol` and `atol` which are dtype dependent, see the table at https://docs.pytorch.org/docs/stable/testing.html#torch.testing.assert_close
-    For example for bf16 it is `rtol=1.6e-2` and `atol=1e-5`.
-
-    The check doesn't assert when `|a - b| <= (atol + rtol * |b|)`
-    """
-    return torch.testing.assert_close(actual, expected, **kwargs)
-
-
 def get_grad(param, zero_stage):
-    if zero_stage == 1:
-        return param.grad
-    else:
-        return safe_get_full_grad(param)
+    return safe_get_full_grad(param)
+    # z1 now has contiguous_gradients enabled by default so `param.grad is None` even under z1
+    # if zero_stage == 1:
+    #     return param.grad
+    # else:
+    #     return safe_get_full_grad(param)
 
 
 class SimpleMLP(Module):
@@ -129,10 +110,10 @@ class TestTiledCompute(DistributedTest):
             },
         }
         dtype = preferred_dtype()
-        if dtype == torch.float16:
-            config_dict["fp16"] = {"enabled": True, "loss_scale": 1.0}
-        elif dtype == torch.bfloat16:
+        if dtype == torch.bfloat16:
             config_dict["bf16"] = {"enabled": True}
+        elif dtype == torch.float16:
+            config_dict["fp16"] = {"enabled": True, "loss_scale": 1.0}
 
         #dtype = torch.float
         torch.set_printoptions(precision=8, sci_mode=True)

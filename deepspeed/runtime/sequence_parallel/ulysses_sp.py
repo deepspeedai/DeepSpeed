@@ -805,8 +805,9 @@ class TiledMLP(torch.autograd.Function):
         shards = ctx.shards
         compute_params = ctx.compute_params
 
-        x = x.detach()
-        x.requires_grad_(True)
+        x1 = x.detach()
+        x1.requires_grad = x.requires_grad
+        x = x1
 
         incoming_grad = grads[0]
         x_grad = torch.zeros_like(x)
@@ -825,8 +826,6 @@ class TiledMLP(torch.autograd.Function):
                     for param in compute_params:
                         param.ds_grad_is_ready = True
 
-            x_shard.requires_grad_(True)
-
             shard_offset = i * shard_step
             x_shard.grad = x_grad.view(-1).narrow(0, shard_offset, x_shard.numel()).view_as(x_shard)
             incoming_grad_shard = incoming_grad.view(-1).narrow(0, shard_offset, x_shard.numel()).view_as(x_shard)
@@ -834,14 +833,14 @@ class TiledMLP(torch.autograd.Function):
             with torch.enable_grad():
                 output = fn(self, x_shard)
             torch.autograd.backward(output, incoming_grad_shard)
-            print(f"{output.requires_grad=}")
-            print(f"{output.grad=}")
+            #print(f"{output.requires_grad=}")
+            #print(f"{output.grad=}")
             #print(f"{x_grad=}")
-            print(f"{x_shard.grad=}")
+            #print(f"{x_shard.grad=}")
             # for param in compute_params:
             #     print(f"{param.grad=}")
 
-        print(f"{x_grad=}")
+        #print(f"{x_grad=}")
         x_grad /= shards
 
         return (None, None, x_grad, None, None)
