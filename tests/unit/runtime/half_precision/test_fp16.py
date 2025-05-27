@@ -119,7 +119,11 @@ class TestLambFP16(DistributedTest):
 
         model = SimpleModel(hidden_dim, empty_grad=True)
         model, _, _, _ = deepspeed.initialize(config=config_dict, model=model, model_parameters=model.parameters())
-        data_loader = random_dataloader(model=model, total_samples=50, hidden_dim=hidden_dim, device=model.device)
+        data_loader = random_dataloader(model=model,
+                                        total_samples=50,
+                                        hidden_dim=hidden_dim,
+                                        device=model.device,
+                                        dtype=torch.float16)
         for n, batch in enumerate(data_loader):
             loss = model(batch[0], batch[1])
             model.backward(loss)
@@ -209,7 +213,11 @@ class TestFP16OptimizerForMoE(DistributedTest):
                                                        optimizer=optimizer,
                                                        dist_init_required=False)
         monkeypatch.setattr(optimizer, 'unscale_and_clip_grads', mock_unscale_and_clip_grads)
-        data_loader = sequence_dataloader(model=engine, total_samples=50, hidden_dim=hidden_dim, device=engine.device)
+        data_loader = sequence_dataloader(model=engine,
+                                          total_samples=50,
+                                          hidden_dim=hidden_dim,
+                                          device=engine.device,
+                                          dtype=torch.float16)
         for n, batch in enumerate(data_loader):
             loss = engine(batch[0], batch[1])
             engine.backward(loss)
@@ -242,7 +250,11 @@ class TestFP16OptimizerForMoE(DistributedTest):
                                                        optimizer=optimizer,
                                                        dist_init_required=False)
         monkeypatch.setattr(optimizer, 'unscale_and_clip_grads', mock_unscale_and_clip_grads)
-        data_loader = sequence_dataloader(model=engine, total_samples=50, hidden_dim=hidden_dim, device=engine.device)
+        data_loader = sequence_dataloader(model=engine,
+                                          total_samples=50,
+                                          hidden_dim=hidden_dim,
+                                          device=engine.device,
+                                          dtype=torch.float16)
         for n, batch in enumerate(data_loader):
             loss = engine(batch[0], batch[1])
             engine.backward(loss)
