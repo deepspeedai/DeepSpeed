@@ -107,7 +107,7 @@ class TestLRSchedulerCheckpoint(DistributedTest):
         hidden_dim = 10
 
         if zero_stage == 3:
-            with deepspeed.zero.Init():
+            with deepspeed.zero.Init(config_dict_or_path=config_dict):
                 models = [SimpleModel(hidden_dim, empty_grad=False) for _ in range(2)]
         else:
             models = [SimpleModel(hidden_dim, empty_grad=False) for _ in range(2)]
