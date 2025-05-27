@@ -60,7 +60,7 @@ class TestLRSchedulerCheckpoint(DistributedTest):
         if zero_stage == 3:
             global DeepSpeedZeroOptimizer_Stage3
             from deepspeed.runtime.zero.stage3 import DeepSpeedZeroOptimizer_Stage3
-            with deepspeed.zero.Init(config=config_dict):
+            with deepspeed.zero.Init(config_dict_or_path=config_dict):
                 models = [SimpleModel(hidden_dim, empty_grad=False) for _ in range(2)]
         else:
             models = [SimpleModel(hidden_dim, empty_grad=False) for _ in range(2)]

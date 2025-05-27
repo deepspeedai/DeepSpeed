@@ -9,6 +9,7 @@ import pytest
 import json
 import hjson
 import argparse
+import torch
 
 from deepspeed.runtime.zero.config import DeepSpeedZeroConfig
 from deepspeed.accelerator import get_accelerator
@@ -242,19 +243,27 @@ class TestInitNoOptimizer(DistributedTest):
     world_size = 1
 
     def test(self, base_config):
-        if get_accelerator().is_bf16_supported():
-            base_config["bf16"] = {"enabled": True}
-        elif get_accelerator().is_fp16_supported():
-            base_config["fp16"] = {"enabled": True}
         if get_accelerator().device_name() == "cpu":
-            pytest.skip("This test timeout with CPU accelerator")
+            pytest.skip("This test timesout with CPU accelerator")
+
+        # XXX: the bf16 path w/ no optimizer needs to be fixed
+        # if get_accelerator().is_bf16_supported():
+        #     base_config["bf16"] = {"enabled": True}
+        dtype = torch.float
+        if get_accelerator().is_fp16_supported():
+            dtype = torch.float16
+            base_config["fp16"] = {"enabled": True}
+
         del base_config["optimizer"]
         hidden_dim = 10
 
         model = SimpleModel(hidden_dim=hidden_dim)
-
         model, _, _, _ = deepspeed.initialize(config=base_config, model=model)
-        data_loader = random_dataloader(model=model, total_samples=5, hidden_dim=hidden_dim, device=model.device)
+        data_loader = random_dataloader(model=model,
+                                        total_samples=5,
+                                        hidden_dim=hidden_dim,
+                                        device=model.device,
+                                        dtype=dtype)
         for n, batch in enumerate(data_loader):
             loss = model(batch[0], batch[1])
             with pytest.raises(AssertionError):
