@@ -402,7 +402,11 @@ class TestZeroStaticScale(DistributedTest):
         assert optim.loss_scaler.loss_scale == 138.
 
         # Now make sure things work..
-        data_loader = random_dataloader(model=model, total_samples=10, hidden_dim=hidden_dim, device=model.device)
+        data_loader = random_dataloader(model=model,
+                                        total_samples=10,
+                                        hidden_dim=hidden_dim,
+                                        device=model.device,
+                                        dtype=torch.float16)
         for n, batch in enumerate(data_loader):
             loss = model(batch[0], batch[1])
             model.backward(loss)
