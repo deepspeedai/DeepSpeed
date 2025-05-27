@@ -672,6 +672,10 @@ class SequenceTiledCompute(torch.autograd.Function):
         output_unshard_dimension = ctx.output_unshard_dimension
         grad_requiring_tensor = kwargs_to_shard[grad_requiring_tensor_key]
 
+        grad_requiring_tensor_requires_grad = grad_requiring_tensor.requires_grad
+        grad_requiring_tensor = grad_requiring_tensor.detach()
+        grad_requiring_tensor.requires_grad_(grad_requiring_tensor_requires_grad)
+
         incoming_grad = grads[0]
         grad_requiring_tensor_grad = torch.zeros_like(grad_requiring_tensor)
 
@@ -701,6 +705,8 @@ class SequenceTiledCompute(torch.autograd.Function):
             kwargs_to_shard_shard = {k: kwargs_to_shard_shards[k].pop(0) for k in kwargs_to_shard_shards.keys()}
             grad_requiring_tensor_shard = kwargs_to_shard_shard[grad_requiring_tensor_key]
 
+            grad_requiring_tensor_shard.requires_grad_(grad_requiring_tensor_requires_grad)
+
             shard_offset = i * shard_step
             # this will enable gradual population of the pre-allocated
             # `grad_requiring_tensor_shard.grad` during `torch.autograd.backward` calls
@@ -718,13 +724,13 @@ class SequenceTiledCompute(torch.autograd.Function):
                     0, shard_offset, grad_requiring_tensor_shard.numel()).view_as(grad_requiring_tensor_shard))
                 torch.autograd.backward(output, incoming_grad_shard)
 
-        grad_requiring_tensor_grad /= shards
+        #grad_requiring_tensor_grad /= shards
 
         # positional args
         grad_outputs = [None] * 9
         # inject the grad for the position of forward input that is grad-requiring
         arg_outputs = [None] * ctx.total_args
-        arg_outputs[grad_requiring_tensor_key_index] = grad_requiring_tensor_grad  # .detach()
+        arg_outputs[grad_requiring_tensor_key_index] = grad_requiring_tensor_grad
 
         print(f"{grad_requiring_tensor_grad=}")
 
@@ -805,9 +811,10 @@ class TiledMLP(torch.autograd.Function):
         shards = ctx.shards
         compute_params = ctx.compute_params
 
-        x1 = x.detach()
-        x1.requires_grad = x.requires_grad
-        x = x1
+        x_requires_grad = x.requires_grad
+        x = x.detach()
+        x.requires_grad_(x_requires_grad)
+        print(f"{x.requires_grad=}")
 
         incoming_grad = grads[0]
         x_grad = torch.zeros_like(x)
@@ -826,6 +833,9 @@ class TiledMLP(torch.autograd.Function):
                     for param in compute_params:
                         param.ds_grad_is_ready = True
 
+            #x_shard.requires_grad_(True)
+            x_shard.requires_grad_(x_requires_grad)
+
             shard_offset = i * shard_step
             x_shard.grad = x_grad.view(-1).narrow(0, shard_offset, x_shard.numel()).view_as(x_shard)
             incoming_grad_shard = incoming_grad.view(-1).narrow(0, shard_offset, x_shard.numel()).view_as(x_shard)
@@ -840,8 +850,8 @@ class TiledMLP(torch.autograd.Function):
             # for param in compute_params:
             #     print(f"{param.grad=}")
 
-        #print(f"{x_grad=}")
-        x_grad /= shards
+        #x_grad /= shards
+        print(f"{x_grad=}")
 
         return (None, None, x_grad, None, None)
 

@@ -45,11 +45,14 @@ class MyModel(Module):
 
     def __init__(self, hidden_dim):
         super().__init__()
-        self.mlp = SimpleMLP(hidden_dim)
+        # Critical - need to use a stack of at least 2 mlps to validate that the backward of the last mlp sends the correct gradients to the previous mlp in the stack
+        self.mlp1 = SimpleMLP(hidden_dim)
+        self.mlp2 = SimpleMLP(hidden_dim)
         self.cross_entropy_loss = torch.nn.CrossEntropyLoss()
 
     def forward(self, x, y):
-        x = self.mlp(x)
+        x = self.mlp1(x)
+        x = self.mlp2(x)
         return self.cross_entropy_loss(x, y)
 
 
@@ -141,8 +144,10 @@ class TestTiledCompute(DistributedTest):
 
         loss_a = model_a(x_a, y_a)
         model_a.backward(loss_a)
-        grad_a = get_grad(model_a.module.mlp.up_proj.weight, zero_stage)
-        assert grad_a is not None
+        grad_a1 = get_grad(model_a.module.mlp1.up_proj.weight, zero_stage)
+        grad_a2 = get_grad(model_a.module.mlp2.up_proj.weight, zero_stage)
+        assert grad_a1 is not None
+        assert grad_a2 is not None
 
         # B. model with tiled MLP using TiledMLP
         torch.manual_seed(seed)
@@ -156,13 +161,17 @@ class TestTiledCompute(DistributedTest):
         y_b = y.clone().detach()
         loss_b = model_b(x_b, y_b)
         model_b.backward(loss_b)
-        grad_b = get_grad(model_b.module.mlp.up_proj.weight, zero_stage)
-        assert grad_b is not None
+        grad_b1 = get_grad(model_b.module.mlp1.up_proj.weight, zero_stage)
+        grad_b2 = get_grad(model_b.module.mlp2.up_proj.weight, zero_stage)
+        assert grad_b1 is not None
+        assert grad_b2 is not None
 
-        print(f"{loss_a=}")
-        print(f"{loss_b=}")
-        print(f"{grad_a=}")
-        print(f"{grad_b=}")
+        # print(f"{loss_a=}")
+        # print(f"{loss_b=}")
+        # print(f"{grad_a1=}")
+        # print(f"{grad_b1=}")
+        # print(f"{grad_a2=}")
+        # print(f"{grad_b2=}")
         torch_assert_equal(loss_a, loss_b)
 
         # Gradient will not be exactly the same, especially under half-precision. And bf16 is
@@ -170,11 +179,10 @@ class TestTiledCompute(DistributedTest):
         # dtype torch.float or even torch.double to see that the diff is tiny - so the math is
         # correct, but accumulation error adds up. Alternatively making hidden_dim bigger makes the
         # divergence much smaller as well.
-        torch_assert_close(grad_a, grad_b, rtol=1e-03, atol=1e-04)
+        torch_assert_close(grad_a1, grad_b1)  #, rtol=1e-03, atol=1e-04)
+        torch_assert_close(grad_a2, grad_b2)  #, rtol=1e-03, atol=1e-04)
 
-        #die
-
-        # C. model with tiled MLP using sequence_tiled_compute + SequenceTiledCompute
+        # C. model with tiled MLP using the generic version of the same via sequence_tiled_compute + SequenceTiledCompute
         torch.manual_seed(seed)
         SimpleMLP.forward = mlp_forward_sequence_tiled_compute
         model_c = MyModel(hidden_dim=hidden_dim).to(dtype)
@@ -186,15 +194,16 @@ class TestTiledCompute(DistributedTest):
         y_c = y.clone().detach()
         loss_c = model_c(x_c, y_c)
         model_c.backward(loss_c)
-        grad_c = get_grad(model_c.module.mlp.up_proj.weight, zero_stage)
-        assert grad_c is not None
+        grad_c1 = get_grad(model_c.module.mlp1.up_proj.weight, zero_stage)
+        grad_c2 = get_grad(model_c.module.mlp2.up_proj.weight, zero_stage)
+        assert grad_c1 is not None
+        assert grad_c2 is not None
 
-        print(f"{loss_a=}")
-        print(f"{loss_c=}")
-        print(f"{grad_a=}")
-        print(f"{grad_c=}")
+        # print(f"{loss_a=}")
+        # print(f"{loss_c=}")
+        # print(f"{grad_a1=}")
+        # print(f"{grad_c1=}")
         # see notes for B
         torch_assert_equal(loss_a, loss_c)
-        torch_assert_close(grad_a, grad_c, rtol=1e-03, atol=1e-04)
-
-        #die
+        torch_assert_close(grad_a1, grad_c1)  #, rtol=1e-03, atol=1e-04)
+        torch_assert_close(grad_a2, grad_c2)  #, rtol=1e-03, atol=1e-04)
