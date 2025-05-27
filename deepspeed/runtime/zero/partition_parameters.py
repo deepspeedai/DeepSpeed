@@ -358,12 +358,12 @@ class InsertPostInitMethodToModuleSubClasses(object):
 
     def _set_dtype(self, ds_config, dtype):
         if ds_config is not None and dtype is None:
-            if ds_config.bfloat16_enabled and ds_config.fp16_enabled:
+            if ds_config.bfloat16_config.enabled and ds_config.float16_config.enabled:
                 raise RuntimeError("bfloat16 and fp16 cannot be enabled at once")
 
-            if ds_config.bfloat16_enabled:
+            if ds_config.bfloat16_config.enabled:
                 self.dtype = torch.bfloat16
-            elif ds_config.fp16_enabled:
+            elif ds_config.float16_config.enabled:
                 self.dtype = torch.half
             else:
                 self.dtype = torch.float
