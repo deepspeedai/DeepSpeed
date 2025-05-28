@@ -8,7 +8,7 @@
 import sys
 import pytest
 import os
-from os.path import abspath, dirname, join
+from os.path import abspath, dirname
 import torch
 import warnings
 
