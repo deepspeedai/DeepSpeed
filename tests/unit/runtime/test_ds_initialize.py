@@ -40,10 +40,10 @@ class TestNoOptim(DistributedTest):
                 }
             }
         }
-        if get_accelerator().is_fp16_supported():
-            ds_config["fp16"] = {"enabled": True}
-        elif get_accelerator().is_bf16_supported():
+        if get_accelerator().is_bf16_supported():
             ds_config["bf16"] = {"enabled": True}
+        elif get_accelerator().is_fp16_supported():
+            ds_config["fp16"] = {"enabled": True}
         # 20B test
         #hidden_dim = 16 * 1024
         hidden_dim = 4
