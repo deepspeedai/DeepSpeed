@@ -20,12 +20,13 @@ from collections import defaultdict
 from deepspeed.runtime.utils import see_memory_usage
 from deepspeed.sequence.layer import _DimZeroAllToAll
 from einops import rearrange
+from packaging import version
 from torch import Tensor
 from torch.utils.data import DataLoader
 from typing import Any
 from typing import Tuple
-
 import deepspeed.comm as dist
+import importlib.metadata
 import math
 import torch
 import torch.distributed.nn
@@ -109,6 +110,13 @@ class UlyssesSPAttentionHF(torch.nn.Module):
             self.local_kv_head_count = 1
         else:
             self.local_kv_head_count = kv_head_count // self.world_size
+
+        transformers_version_min = "4.51.3"
+        transformers_version_have = importlib.metadata.version("transformers")
+        if version.parse(transformers_version_have) < version.parse(transformers_version_min):
+            raise ValueError(
+                f"transformers>={transformers_version_min} is required, but you have transformers=={transformers_version_have}"
+            )
 
         if self.attn_head_count % self.world_size != 0:
             raise ValueError(f"Attention head count {attn_head_count} is not divisible by SP size {self.world_size}")
@@ -724,15 +732,11 @@ class SequenceTiledCompute(torch.autograd.Function):
                     0, shard_offset, grad_requiring_tensor_shard.numel()).view_as(grad_requiring_tensor_shard))
                 torch.autograd.backward(output, incoming_grad_shard)
 
-        #grad_requiring_tensor_grad /= shards
-
         # positional args
         grad_outputs = [None] * 9
         # inject the grad for the position of forward input that is grad-requiring
         arg_outputs = [None] * ctx.total_args
         arg_outputs[grad_requiring_tensor_key_index] = grad_requiring_tensor_grad
-
-        print(f"{grad_requiring_tensor_grad=}")
 
         return tuple(grad_outputs + arg_outputs)
 
@@ -775,7 +779,7 @@ class TiledMLP(torch.autograd.Function):
             compute_params,
         )
 
-        # This Needs To Be Done Before The Model Is Instantiated
+        # this needs to be done before the model is instantiated
         from transformers.models.llama import modeling_llama
         modeling_llama.LlamaMLP.forward = tiled_mlp_forward
     """
@@ -789,7 +793,6 @@ class TiledMLP(torch.autograd.Function):
         shards,
         compute_params,
     ) -> torch.Tensor:
-        #shards=1
         ctx.fn = fn
         ctx.self = self
         ctx.shards = shards
@@ -810,11 +813,9 @@ class TiledMLP(torch.autograd.Function):
         self = ctx.self
         shards = ctx.shards
         compute_params = ctx.compute_params
-
         x_requires_grad = x.requires_grad
         x = x.detach()
         x.requires_grad_(x_requires_grad)
-        print(f"{x.requires_grad=}")
 
         incoming_grad = grads[0]
         x_grad = torch.zeros_like(x)
@@ -823,7 +824,7 @@ class TiledMLP(torch.autograd.Function):
         shard_step = x_shards[0].numel()
         for i, x_shard in enumerate(x_shards):
 
-            # Tell deepspeed not to add a new grad to ipg bucket until the last shard is run
+            # Tell deepspeed not to add a new grad to its ipg bucket until the last shard is run
             if compute_params is not None:
                 if i + 1 < shards:
                     for param in compute_params:
@@ -833,25 +834,14 @@ class TiledMLP(torch.autograd.Function):
                     for param in compute_params:
                         param.ds_grad_is_ready = True
 
-            #x_shard.requires_grad_(True)
             x_shard.requires_grad_(x_requires_grad)
 
             shard_offset = i * shard_step
             x_shard.grad = x_grad.view(-1).narrow(0, shard_offset, x_shard.numel()).view_as(x_shard)
             incoming_grad_shard = incoming_grad.view(-1).narrow(0, shard_offset, x_shard.numel()).view_as(x_shard)
-
             with torch.enable_grad():
                 output = fn(self, x_shard)
             torch.autograd.backward(output, incoming_grad_shard)
-            #print(f"{output.requires_grad=}")
-            #print(f"{output.grad=}")
-            #print(f"{x_grad=}")
-            #print(f"{x_shard.grad=}")
-            # for param in compute_params:
-            #     print(f"{param.grad=}")
-
-        #x_grad /= shards
-        print(f"{x_grad=}")
 
         return (None, None, x_grad, None, None)
 

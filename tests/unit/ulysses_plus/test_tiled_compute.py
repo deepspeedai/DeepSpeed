@@ -118,8 +118,8 @@ class TestTiledCompute(DistributedTest):
         elif dtype == torch.float16:
             config_dict["fp16"] = {"enabled": True, "loss_scale": 1.0}
 
-        #dtype = torch.float
-        torch.set_printoptions(precision=8, sci_mode=True)
+        # for debug
+        # torch.set_printoptions(precision=8, sci_mode=True)
 
         seed = 42
         hidden_dim = 100

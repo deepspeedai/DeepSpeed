@@ -9,4 +9,3 @@ py-cpuinfo
 pydantic>=2.0.0
 torch
 tqdm
-transformers>=4.51.3
