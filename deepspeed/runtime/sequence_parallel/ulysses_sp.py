@@ -2,8 +2,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
 # DeepSpeed Team
-
-# XXX: the copyright above is wrong - needs to be either Snoflake or something else but not MSFT, but CI is requiring MSFT for now
 """
 Ulysses Plus features
 
