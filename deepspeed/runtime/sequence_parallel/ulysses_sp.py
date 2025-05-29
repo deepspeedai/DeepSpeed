@@ -623,7 +623,7 @@ class SequenceTiledCompute(torch.autograd.Function):
         ctx.seqlen = seqlen
         ctx.shards = shards
         ctx.grad_requiring_tensor_key = grad_requiring_tensor_key
-        ctx.compute_params = compute_params
+        ctx.compute_params = [p for p in compute_params if p.requires_grad]
         ctx.output_unshard_dimension = output_unshard_dimension
 
         with torch.no_grad():
