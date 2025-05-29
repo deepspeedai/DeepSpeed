@@ -44,7 +44,8 @@ jobs:
 
       - name: Install deepspeed
         run: |
-          pip install .[dev,1bit,autotuning]
+          pip install .[dev,1bit,autotuning,deepcompile]
+          pip install pytest-timeout pytest-instafail
           ds_report
 
       - name: Python environment
@@ -55,5 +56,5 @@ jobs:
         run: |
           unset TORCH_CUDA_ARCH_LIST # only jit compile for current arch
           cd tests
-          pytest $PYTEST_OPTS --forked -n 8 unit/ --torch_ver="2.6" --cuda_ver="12.4"
-          pytest $PYTEST_OPTS --forked -m 'sequential' unit/ --torch_ver="2.6" --cuda_ver="12.4"
+          pytest -x $PYTEST_OPTS --instafail --timeout 600 --forked -n 8 unit/ --torch_ver="2.6" --cuda_ver="12.4"
+          pytest $PYTEST_OPTS --instafail --timeout 600 --forked -m 'sequential' unit/ --torch_ver="2.6" --cuda_ver="12.4"

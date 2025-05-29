@@ -33,13 +33,13 @@ class TestZeROCheckpoint(DistributedTest):
                 "pipeline_loading_checkpoint": True,
             }
         }
-        if get_accelerator().is_fp16_supported():
-            config_dict["fp16"] = {"enabled": True, "initial_scale_power": 8}
-        elif get_accelerator().is_bf16_supported():
+        if get_accelerator().is_bf16_supported():
             config_dict["bf16"] = {"enabled": True}
+        elif get_accelerator().is_fp16_supported():
+            config_dict["fp16"] = {"enabled": True, "initial_scale_power": 8}
         hidden_dim = 10
 
-        with deepspeed.zero.Init():
+        with deepspeed.zero.Init(config_dict_or_path=config_dict):
             models = [SimpleModel(hidden_dim, empty_grad=False) for _ in range(2)]
 
         checkpoint_correctness_verification(config_dict, models, hidden_dim, tmpdir, load_module_only=True)
@@ -70,14 +70,14 @@ class TestZeROCheckpoint(DistributedTest):
                 "cpu_offload": use_cpu_offload
             }
         }
-        if get_accelerator().is_fp16_supported():
-            config_dict["fp16"] = {"enabled": True, "initial_scale_power": 8}
-        elif get_accelerator().is_bf16_supported():
+        if get_accelerator().is_bf16_supported():
             config_dict["bf16"] = {"enabled": True}
+        elif get_accelerator().is_fp16_supported():
+            config_dict["fp16"] = {"enabled": True, "initial_scale_power": 8}
         hidden_dim = 10
 
         if zero_stage == 3:
-            with deepspeed.zero.Init():
+            with deepspeed.zero.Init(config_dict_or_path=config_dict):
                 models = [SimpleModel(hidden_dim, empty_grad=False) for _ in range(2)]
         else:
             models = [SimpleModel(hidden_dim, empty_grad=False) for _ in range(2)]
@@ -109,16 +109,16 @@ class TestZeROCheckpoint(DistributedTest):
                 "cpu_offload": use_cpu_offload
             }
         }
-        if get_accelerator().is_fp16_supported():
-            config_dict["fp16"] = {"enabled": True}
-        elif get_accelerator().is_bf16_supported():
+        if get_accelerator().is_bf16_supported():
             config_dict["bf16"] = {"enabled": True}
+        elif get_accelerator().is_fp16_supported():
+            config_dict["fp16"] = {"enabled": True, "initial_scale_power": 8}
         hidden_dim = 10
 
         if zero_stage == 3:
             global DeepSpeedZeroOptimizer_Stage3
             from deepspeed.runtime.zero.stage3 import DeepSpeedZeroOptimizer_Stage3
-            with deepspeed.zero.Init():
+            with deepspeed.zero.Init(config_dict_or_path=config_dict):
                 models = [SimpleModel(hidden_dim, empty_grad=False) for _ in range(2)]
         else:
             models = [SimpleModel(hidden_dim, empty_grad=False) for _ in range(2)]
@@ -136,10 +136,10 @@ class TestZeROCheckpoint(DistributedTest):
             },
             "zero_allow_untested_optimizer": True,
         }
-        if get_accelerator().is_fp16_supported():
-            config_dict["fp16"] = {"enabled": True, "initial_scale_power": 8}
-        elif get_accelerator().is_bf16_supported():
+        if get_accelerator().is_bf16_supported():
             config_dict["bf16"] = {"enabled": True}
+        elif get_accelerator().is_fp16_supported():
+            config_dict["fp16"] = {"enabled": True, "initial_scale_power": 8}
         hidden_dim = 10
         models = [SimpleModel(hidden_dim=hidden_dim) for _ in range(2)]
         optimizers = [HybridStateOptimizer(model.parameters()) for model in models]
@@ -164,14 +164,14 @@ class TestZeROCheckpoint(DistributedTest):
                 "stage": zero_stage,
             }
         }
-        if get_accelerator().is_fp16_supported():
-            config_dict["fp16"] = {"enabled": True, "initial_scale_power": 8}
-        elif get_accelerator().is_bf16_supported():
+        if get_accelerator().is_bf16_supported():
             config_dict["bf16"] = {"enabled": True}
+        elif get_accelerator().is_fp16_supported():
+            config_dict["fp16"] = {"enabled": True, "initial_scale_power": 8}
         hidden_dim = 10
 
         if zero_stage == 3:
-            with deepspeed.zero.Init():
+            with deepspeed.zero.Init(config_dict_or_path=config_dict):
                 models = [SimpleModel(hidden_dim, empty_grad=False) for _ in range(2)]
         else:
             models = [SimpleModel(hidden_dim, empty_grad=False) for _ in range(2)]
@@ -183,7 +183,7 @@ class ws4_model_checkpoint(DistributedFixture):
     world_size = 4
 
     def run(self, class_tmpdir, elastic_save, load_optim):
-        ds_config = {
+        config_dict = {
             "train_batch_size": 4,
             "optimizer": {
                 "type": 'Adam'
@@ -193,14 +193,14 @@ class ws4_model_checkpoint(DistributedFixture):
                 "elastic_checkpoint": elastic_save
             }
         }
-        if get_accelerator().is_fp16_supported():
-            ds_config["fp16"] = {"enabled": True, "initial_scale_power": 8}
-        elif get_accelerator().is_bf16_supported():
-            ds_config["bf16"] = {"enabled": True}
+        if get_accelerator().is_bf16_supported():
+            config_dict["bf16"] = {"enabled": True}
+        elif get_accelerator().is_fp16_supported():
+            config_dict["fp16"] = {"enabled": True, "initial_scale_power": 8}
         hidden_dim = 10
         model = SimpleModel(hidden_dim)
 
-        model, _, _, _ = deepspeed.initialize(config=ds_config, model=model, model_parameters=model.parameters())
+        model, _, _, _ = deepspeed.initialize(config=config_dict, model=model, model_parameters=model.parameters())
         data_loader = random_dataloader(model=model, total_samples=8, hidden_dim=hidden_dim, device=model.device)
         for n, batch in enumerate(data_loader):
             loss = model(batch[0], batch[1])
@@ -219,7 +219,7 @@ class TestZeROElasticCheckpoint(DistributedTest):
     world_size = 2
 
     def test_elastic_checkpoint_fixed_dp(self, tmpdir, elastic_save, elastic_load, load_optim):
-        ds_config = {
+        config_dict = {
             "train_batch_size": 2,
             "optimizer": {
                 "type": 'Adam'
@@ -229,10 +229,10 @@ class TestZeROElasticCheckpoint(DistributedTest):
                 "elastic_checkpoint": elastic_save
             }
         }
-        if get_accelerator().is_fp16_supported():
-            ds_config["fp16"] = {"enabled": True, "initial_scale_power": 8}
-        elif get_accelerator().is_bf16_supported():
-            ds_config["bf16"] = {"enabled": True}
+        if get_accelerator().is_bf16_supported():
+            config_dict["bf16"] = {"enabled": True}
+        elif get_accelerator().is_fp16_supported():
+            config_dict["fp16"] = {"enabled": True, "initial_scale_power": 8}
         hidden_dim = 10
 
         # torch 1.2.* stores raw tensor id numbers in checkpoint state which leads to
@@ -240,7 +240,7 @@ class TestZeROElasticCheckpoint(DistributedTest):
         # Newer torch versions store tensor ids as 0, 1, 2, ...
         expected_mismatch_keys = [] if required_torch_version(min_version=1.4) else ['params']
         models = [SimpleModel(hidden_dim) for _ in range(2)]
-        model, _, _, _ = deepspeed.initialize(config=ds_config,
+        model, _, _, _ = deepspeed.initialize(config=config_dict,
                                               model=models[0],
                                               model_parameters=models[0].parameters())
         run_steps = 8
@@ -257,8 +257,8 @@ class TestZeROElasticCheckpoint(DistributedTest):
             torch.save(model.optimizer.optimizer.state_dict(), os.path.join(tmpdir, opt_state_dict_file))
         model.save_checkpoint(tmpdir)
 
-        ds_config["zero_optimization"]["elastic_checkpoint"] = elastic_load
-        model, _, _, _ = deepspeed.initialize(config=ds_config,
+        config_dict["zero_optimization"]["elastic_checkpoint"] = elastic_load
+        model, _, _, _ = deepspeed.initialize(config=config_dict,
                                               model=models[1],
                                               model_parameters=models[1].parameters())
         model.load_checkpoint(tmpdir, load_optimizer_states=load_optim)
@@ -276,7 +276,7 @@ class TestZeROElasticCheckpoint(DistributedTest):
 
     def test_elastic_checkpoint_change_dp(self, ws4_model_checkpoint, class_tmpdir, elastic_save, elastic_load,
                                           load_optim):
-        ds_config = {
+        config_dict = {
             "train_batch_size": 4,
             "optimizer": {
                 "type": 'Adam'
@@ -286,15 +286,15 @@ class TestZeROElasticCheckpoint(DistributedTest):
                 "elastic_checkpoint": elastic_load
             }
         }
-        if get_accelerator().is_fp16_supported():
-            ds_config["fp16"] = {"enabled": True, "initial_scale_power": 8}
-        elif get_accelerator().is_bf16_supported():
-            ds_config["bf16"] = {"enabled": True}
+        if get_accelerator().is_bf16_supported():
+            config_dict["bf16"] = {"enabled": True}
+        elif get_accelerator().is_fp16_supported():
+            config_dict["fp16"] = {"enabled": True, "initial_scale_power": 8}
         hidden_dim = 10
         model = SimpleModel(hidden_dim)
 
         # Load checkpoint with dp world size = 2
-        model, _, _, _ = deepspeed.initialize(config=ds_config, model=model, model_parameters=model.parameters())
+        model, _, _, _ = deepspeed.initialize(config=config_dict, model=model, model_parameters=model.parameters())
         if load_optim:
             with pytest.raises(deepspeed.runtime.zero.utils.ZeRORuntimeException):
                 model.load_checkpoint(class_tmpdir, load_optimizer_states=load_optim)
@@ -316,10 +316,10 @@ class TestZeROSaveLoadEdgeCase(DistributedTest):
                 "stage": zero_stage,
             }
         }
-        if get_accelerator().is_fp16_supported():
-            config_dict["fp16"] = {"enabled": True, "initial_scale_power": 8}
-        elif get_accelerator().is_bf16_supported():
+        if get_accelerator().is_bf16_supported():
             config_dict["bf16"] = {"enabled": True}
+        elif get_accelerator().is_fp16_supported():
+            config_dict["fp16"] = {"enabled": True, "initial_scale_power": 8}
         hidden_dim = 10
         model = SimpleModel(hidden_dim)
 
@@ -343,10 +343,10 @@ class TestZeROSaveLoadEdgeCase(DistributedTest):
                 "stage": zero_stage,
             }
         }
-        if get_accelerator().is_fp16_supported():
-            config_dict["fp16"] = {"enabled": True, "initial_scale_power": 8}
-        elif get_accelerator().is_bf16_supported():
+        if get_accelerator().is_bf16_supported():
             config_dict["bf16"] = {"enabled": True}
+        elif get_accelerator().is_fp16_supported():
+            config_dict["fp16"] = {"enabled": True, "initial_scale_power": 8}
         hidden_dim = 10
         model = SimpleModel(hidden_dim)
 
@@ -383,10 +383,10 @@ class TestZeROSaveLoadEdgeCase(DistributedTest):
             "train_micro_batch_size_per_gpu": 1,
             "train_batch_size": 4,
         }
-        if get_accelerator().is_fp16_supported():
-            config_dict["fp16"] = {"enabled": True, "initial_scale_power": 8}
-        elif get_accelerator().is_bf16_supported():
+        if get_accelerator().is_bf16_supported():
             config_dict["bf16"] = {"enabled": True}
+        elif get_accelerator().is_fp16_supported():
+            config_dict["fp16"] = {"enabled": True, "initial_scale_power": 8}
         hidden_dim = 10
         model = SimpleModel(hidden_dim)
 
@@ -434,13 +434,13 @@ class TestZeROCheckpointFrozenWeights(DistributedTest):
                 "stage": zero_stage
             }
         }
-        if get_accelerator().is_fp16_supported():
-            config_dict["fp16"] = {"enabled": True, "initial_scale_power": 8}
-        elif get_accelerator().is_bf16_supported():
+        if get_accelerator().is_bf16_supported():
             config_dict["bf16"] = {"enabled": True}
+        elif get_accelerator().is_fp16_supported():
+            config_dict["fp16"] = {"enabled": True, "initial_scale_power": 8}
         hidden_dim = 10
 
-        with deepspeed.zero.Init(enabled=zero_stage == 3):
+        with deepspeed.zero.Init(enabled=zero_stage == 3, config_dict_or_path=config_dict):
             models = [SimpleFrozenModel(hidden_dim, empty_grad=False) for _ in range(2)]
 
         checkpoint_correctness_verification(config_dict, models, hidden_dim, tmpdir, load_optimizer_states=True)
@@ -464,13 +464,13 @@ class TestZeROCheckpointFrozenWeights(DistributedTest):
                 "stage": zero_stage
             }
         }
-        if get_accelerator().is_fp16_supported():
-            config_dict["fp16"] = {"enabled": True}
-        elif get_accelerator().is_bf16_supported():
+        if get_accelerator().is_bf16_supported():
             config_dict["bf16"] = {"enabled": True}
+        elif get_accelerator().is_fp16_supported():
+            config_dict["fp16"] = {"enabled": True}
         hidden_dim = 10
 
-        with deepspeed.zero.Init(enabled=zero_stage == 3):
+        with deepspeed.zero.Init(enabled=zero_stage == 3, config_dict_or_path=config_dict):
             models = [SimpleFrozenModel(hidden_dim, empty_grad=False) for _ in range(2)]
 
         checkpoint_correctness_verification(config_dict, models, hidden_dim, tmpdir, load_optimizer_states=False)
@@ -486,13 +486,13 @@ class TestZeROCheckpointFrozenWeights(DistributedTest):
                 "stage": zero_stage,
             }
         }
-        if get_accelerator().is_fp16_supported():
-            config_dict["fp16"] = {"enabled": True, "initial_scale_power": 8}
-        elif get_accelerator().is_bf16_supported():
+        if get_accelerator().is_bf16_supported():
             config_dict["bf16"] = {"enabled": True}
+        elif get_accelerator().is_fp16_supported():
+            config_dict["fp16"] = {"enabled": True, "initial_scale_power": 8}
         hidden_dim = 10
 
-        with deepspeed.zero.Init(enabled=zero_stage == 3):
+        with deepspeed.zero.Init(enabled=zero_stage == 3, config_dict_or_path=config_dict):
             models = [SimpleFrozenModel(hidden_dim, empty_grad=False) for _ in range(2)]
 
         checkpoint_correctness_verification(config_dict, models, hidden_dim, tmpdir, load_module_only=True)
@@ -509,10 +509,10 @@ class TestZeROCheckpointFrozenWeights(DistributedTest):
                 "stage": zero_stage,
             }
         }
-        if get_accelerator().is_fp16_supported():
-            config_dict["fp16"] = {"enabled": True, "initial_scale_power": 8}
-        elif get_accelerator().is_bf16_supported():
+        if get_accelerator().is_bf16_supported():
             config_dict["bf16"] = {"enabled": True}
+        elif get_accelerator().is_fp16_supported():
+            config_dict["fp16"] = {"enabled": True, "initial_scale_power": 8}
         hidden_dim = 10
 
         model = SimpleFrozenModel(hidden_dim, empty_grad=False)
@@ -557,10 +557,10 @@ class TestZeROCheckpointFrozenWeights(DistributedTest):
                 "stage": zero_stage,
             }
         }
-        if get_accelerator().is_fp16_supported():
-            config_dict["fp16"] = {"enabled": True, "initial_scale_power": 8}
-        elif get_accelerator().is_bf16_supported():
+        if get_accelerator().is_bf16_supported():
             config_dict["bf16"] = {"enabled": True}
+        elif get_accelerator().is_fp16_supported():
+            config_dict["fp16"] = {"enabled": True, "initial_scale_power": 8}
         hidden_dim = 10
 
         model = SimpleFrozenModel(hidden_dim, empty_grad=False)
@@ -594,7 +594,7 @@ class TestSaveTensorClone(DistributedTest):
     @pytest.mark.parametrize('use_cpu_device', [True, False])
     def test_save_tensor_clone(self, tmpdir, zero_stage, use_cpu_device):
 
-        ds_config = {
+        config_dict = {
             "optimizer": {
                 "type": "AdamW",
             },
@@ -608,7 +608,7 @@ class TestSaveTensorClone(DistributedTest):
         model = SimpleModel(hidden_dim, nlayers=4).half()
         ref_model_state_dict = model.state_dict()
 
-        ds_engine, _, _, _ = deepspeed.initialize(model=model, config_params=ds_config)
+        ds_engine, _, _, _ = deepspeed.initialize(model=model, config_params=config_dict)
         clone_device = torch.device('cpu') if use_cpu_device else get_accelerator().current_device()
         clone_state_dict = clone_tensors_for_torch_save(ds_engine.module.state_dict())
         compare_state_dicts(ref_model_state_dict, clone_state_dict)

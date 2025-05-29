@@ -45,7 +45,11 @@ class TestSimpleMoE(DistributedTest):
         hidden_dim = 16
         model = SimpleMoEModel(hidden_dim=hidden_dim, ep_size=1)
         model, optimizer, _, _ = deepspeed.initialize(config=config_dict, model=model)
-        data_loader = sequence_dataloader(model=model, total_samples=50, hidden_dim=hidden_dim, device=model.device)
+        data_loader = sequence_dataloader(model=model,
+                                          total_samples=50,
+                                          hidden_dim=hidden_dim,
+                                          device=model.device,
+                                          dtype=torch.float16)
 
         for n, batch in enumerate(data_loader):
             loss = model(batch[0], batch[1])
@@ -87,7 +91,11 @@ class TestMoE(DistributedTest):
                                                       dist_init_required=False)
         #dist_init_required=False -- parameterize to True/False?
 
-        data_loader = sequence_dataloader(model=model, total_samples=50, hidden_dim=hidden_dim, device=model.device)
+        data_loader = sequence_dataloader(model=model,
+                                          total_samples=50,
+                                          hidden_dim=hidden_dim,
+                                          device=model.device,
+                                          dtype=torch.float16)
 
         def strict_average_tensor(tensor):
             process_group = optimizer.dp_process_group
@@ -167,7 +175,11 @@ class TestPRMoE(DistributedTest):
                                               optimizer=optimizer,
                                               dist_init_required=False)
 
-        data_loader = sequence_dataloader(model=model, total_samples=50, hidden_dim=hidden_dim, device=model.device)
+        data_loader = sequence_dataloader(model=model,
+                                          total_samples=50,
+                                          hidden_dim=hidden_dim,
+                                          device=model.device,
+                                          dtype=torch.float16)
 
         for n, batch in enumerate(data_loader):
             loss = model(batch[0], batch[1])
