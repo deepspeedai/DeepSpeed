@@ -796,7 +796,7 @@ class TiledMLP(torch.autograd.Function):
         ctx.fn = fn
         ctx.self = self
         ctx.shards = shards
-        ctx.compute_params = compute_params
+        ctx.compute_params = [p for p in compute_params if p.requires_grad]
         ctx.save_for_backward(x)
 
         x_shards = list(torch.chunk(x, chunks=shards, dim=1))
