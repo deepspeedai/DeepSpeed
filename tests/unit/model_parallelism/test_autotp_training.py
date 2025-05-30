@@ -59,10 +59,8 @@ def should_assert_with_msg(expected_message):
         else:
             raise e
     else:
-        raise AssertionError(
-            f"Expected AssertionError with message '{expected_message}' "
-            "but no exception was raised."
-        )
+        raise AssertionError(f"Expected AssertionError with message '{expected_message}' "
+                             "but no exception was raised.")
 
 
 @pytest.mark.parametrize("tp_size", [2, 4])
@@ -130,7 +128,7 @@ class TestTpDataloaderCorrectness(DistributedTest):
                                         device=model.device,
                                         dtype=preferred_dtype())
         dist.barrier()
-        
+
         with should_assert_with_msg(
                 "Data inconsistency within the TP group. Please check the Dataloader implementation to ensure consistency."
         ):
