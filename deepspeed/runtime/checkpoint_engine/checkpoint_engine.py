@@ -29,7 +29,7 @@ class CheckpointEngine(ABC):
         ...
 
     @abc.abstractmethod
-    def save(self, state_dict, path: str, data_parallel_state: bool = False):
+    def save(self, state_dict, path: str):
         ...
 
     def makedirs(self, path, exist_ok=False):

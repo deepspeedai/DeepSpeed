@@ -23,8 +23,8 @@ DEFAULT_SWEEP_CONFIG = {
     "block_size": ["1M", "8M"],
     "queue_depth": [32, 128],
     "sequential_requests": [True, False],
-    "single_submit": [False],
-    "io_parallel": [1, 2, 8],
+    "single_submit": [False, True],
+    "io_parallel": [1, 2, 4, 8],
 }
 
 

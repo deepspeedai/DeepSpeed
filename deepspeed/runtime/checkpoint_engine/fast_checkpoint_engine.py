@@ -15,10 +15,11 @@ from deepspeed.runtime.model_checkpointing import (
 
 class FastCheckpointEngine(CheckpointEngine):
 
-    def __init__(self, config_params, dp_writer_config):
+    def __init__(self, config_params, dp_writer_config, optimize_dp_state):
         super().__init__(config_params)
         self.name = 'FastCheckpointEngine'
         self.serialization_enabled = config_params.checkpoint_config[CHECKPOINT_SERIALIZATION]
+        self.optimize_dp_state = optimize_dp_state
         if dp_writer_config is None:
             self._writer = None
         else:
@@ -29,12 +30,12 @@ class FastCheckpointEngine(CheckpointEngine):
     def create(self, info: CheckpointCommitInfo):
         pass
 
-    def save(self, state_dict, path: str, data_parallel_state: bool = False):
+    def save(self, state_dict, path: str):
         if self._writer is None:
             return
 
         torch.save(obj=state_dict,
-                   f=self._writer.create_writer(path, data_parallel_state),
+                   f=self._writer.create_writer(path, self.optimize_dp_state),
                    _use_new_zipfile_serialization=self.serialization_enabled)
         self._writer.release_writer()
 

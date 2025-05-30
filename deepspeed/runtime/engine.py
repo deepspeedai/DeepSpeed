@@ -1087,10 +1087,13 @@ class DeepSpeedEngine(Module):
         log_dist(f'DeepSpeed LR Scheduler = {self.lr_scheduler}', ranks=[0])
 
     def _configure_checkpointing(self):
+        # Enable optimization to parallelize checkpointing of DP state
+        optimize_dp_state = not self.zero_optimization_partition_weights()
         self.checkpoint_engine = create_checkpoint_engine(config_params=self._config,
                                                           groups=groups,
                                                           zero_stage=self.zero_optimization_stage(),
-                                                          has_moe_layers=self.has_moe_layers)
+                                                          has_moe_layers=self.has_moe_layers,
+                                                          optimize_dp_state=optimize_dp_state)
 
         dp_rank = groups._get_sequence_data_parallel_rank()
         rank = self.local_rank if self.use_node_local_storage() else dp_rank
@@ -3522,7 +3525,6 @@ class DeepSpeedEngine(Module):
             logger.info(f'Saving model checkpoint: {save_path}')
             saveable_state_dict = clone_tensors_for_torch_save(state)
             self.checkpoint_engine.save(saveable_state_dict, save_path)
-        self._curr_save_path = None
 
     def _create_checkpoint_file(self, save_dir, tag, zero_checkpoint):
         name_function = (self._get_zero_ckpt_name if zero_checkpoint else self._get_ckpt_name)
@@ -3585,9 +3587,8 @@ class DeepSpeedEngine(Module):
         state.update(client_state)
         log_dist(message=f'Saving model checkpoint: {save_path}', ranks=[0])
 
-        data_parallel_state = not (self.pipeline_parallelism or self.zero_optimization_partition_weights())
-        self.checkpoint_engine.save(state_dict=state, path=save_path, data_parallel_state=data_parallel_state)
-        self._curr_save_path = None
+        if self.save_non_zero_checkpoint:
+            self.checkpoint_engine.save(state_dict=state, path=save_path)
 
     def _get_buffer_names(self):
         buffer_names = []

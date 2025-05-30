@@ -38,7 +38,7 @@ class CheckpointWriterFactory(object):
             f'WriterFactory: self._data_parallel_writer={self._data_parallel_writer} self._show_statistics={self._show_statistics}'
         )
 
-    def create_writer(self, file_path, data_parallel_state):
+    def create_writer(self, file_path, optimize_dp_state):
         assert self._writer is None, \
             f'Cannot create checkpoint writer for {file_path} because writer is currently used for {self._writer.file_path()}.\
             Must call writer.release() before reusing to avoid this error.'
@@ -48,7 +48,7 @@ class CheckpointWriterFactory(object):
         elif self._type == CheckpointWriterType.PYTHON:
             self._writer = PyFileWriter(file_path)
         else:
-            if data_parallel_state:
+            if optimize_dp_state:
                 num_parallel_writers = self._data_parallel_writer.world_size * self._io_multiplier
                 writer_rank = self._data_parallel_writer.rank
                 file_path = f'{file_path}-{writer_rank}.{num_parallel_writers}'

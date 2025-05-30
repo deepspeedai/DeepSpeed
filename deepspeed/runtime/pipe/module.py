@@ -631,7 +631,7 @@ class PipelineModule(nn.Module):
                 for n in self._get_frozen_parameter_names(layer):
                     del orig_state_dict[n]
             final_state_dict = clone_tensors_for_torch_save(orig_state_dict)
-            checkpoint_engine.save(state_dict=final_state_dict, path=model_ckpt_path, data_parallel_state=True)
+            checkpoint_engine.save(state_dict=final_state_dict, path=model_ckpt_path)
 
     def load_state_dir(self, load_dir, checkpoint_engine, strict=True):
         for idx, layer in enumerate(self.forward_funcs):

@@ -42,7 +42,7 @@ class NebulaCheckpointEngine(CheckpointEngine):
         # current checkpoint is complete by commit methond.
         self.checkpoint = torch_nebula.Checkpoint(info.tag, -2)
 
-    def save(self, state_dict, path: str, data_parallel_state: bool = False):
+    def save(self, state_dict, path: str):
         log_dist(f"[Nebula] Create dummy files for loading.")
         torch.save("", path)
 

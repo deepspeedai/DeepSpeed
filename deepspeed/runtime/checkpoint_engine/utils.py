@@ -12,7 +12,7 @@ from .fast_checkpoint_engine import FastCheckpointEngine
 from .torch_checkpoint_engine import TorchCheckpointEngine
 
 
-def create_checkpoint_engine(config_params, groups, zero_stage, has_moe_layers):
+def create_checkpoint_engine(config_params, groups, zero_stage, has_moe_layers, optimize_dp_state):
     if config_params is not None:
         if config_params.checkpoint_config[CHECKPOINT_WRITER] is not None:
             writer_config = config_params.checkpoint_config[CHECKPOINT_WRITER]
@@ -22,9 +22,9 @@ def create_checkpoint_engine(config_params, groups, zero_stage, has_moe_layers):
                 zero_stage=zero_stage,
                 has_moe_layers=has_moe_layers)
             if writer_config[CHECKPOINT_WRITER_DECOUPLED]:
-                return DecoupledCheckpointEngine(config_params, dp_writer_config)
+                return DecoupledCheckpointEngine(config_params, dp_writer_config, optimize_dp_state)
             else:
-                return FastCheckpointEngine(config_params, dp_writer_config)
+                return FastCheckpointEngine(config_params, dp_writer_config, optimize_dp_state)
 
         if config_params is not None and config_params.nebula_config.enabled:
             try:

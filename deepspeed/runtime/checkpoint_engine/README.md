@@ -24,7 +24,7 @@ class CheckpointEngine(object):
         # create checkpoint on give tag for save/load.
         pass
 
-    def save(self, state_dict, path: str, data_parallel_state: bool = False):
+    def save(self, state_dict, path: str):
         pass
 
     def load(self, path: str, map_location=None):

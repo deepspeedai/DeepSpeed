@@ -41,17 +41,17 @@ class CheckpointSize(object):
 mp.set_start_method('spawn', force=True)
 
 
-def init_decoupled_checkpoint(config_params, dp_writer_config, save_event, save_queue):
-    checkpoint_engine = FastCheckpointEngine(config_params, dp_writer_config)
+def init_decoupled_checkpoint(config_params, dp_writer_config, save_event, save_queue, optimize_dp_state):
+    checkpoint_engine = FastCheckpointEngine(config_params, dp_writer_config, optimize_dp_state)
     print(f'Created FastCheckpointEngine for Decoupled Checkpointing')
     save_path_list = []
     while True:
         (save_info, event_type) = save_queue.get()
         if event_type == DecoupledEvent.SAVE_EVENT and save_info is not None:
-            state_dict, save_path, data_parallel = save_info
+            state_dict, save_path = save_info
             # print(f'Received decoupled checkpoint request for {save_path=}')
             save_path_list.append(save_path)
-            checkpoint_engine.save(state_dict, save_path, data_parallel)
+            checkpoint_engine.save(state_dict, save_path)
             del state_dict
             # print(f'Completed decoupled checkpoint request for {save_path=}')
 
@@ -70,13 +70,14 @@ ENGINE_NAME = "DecoupledCheckpointEngine"
 
 class DecoupledCheckpointEngine(CheckpointEngine):
 
-    def __init__(self, config_params, dp_writer_config):
+    def __init__(self, config_params, dp_writer_config, optimize_dp_state):
         super().__init__(config_params)
         self.name = ENGINE_NAME
         self.dp_writer_config = dp_writer_config
         self.commit_info = None
         self.checkpoint_size = CheckpointSize()
         self.global_rank = dist.get_rank()
+        self.optimize_dp_state = optimize_dp_state
         if dp_writer_config is None:
             self.save_event = None
             self.save_queue = None
@@ -88,7 +89,7 @@ class DecoupledCheckpointEngine(CheckpointEngine):
         else:
             self.save_event = mp.Event()
             self.save_queue = mp.SimpleQueue()
-            engine_args = (config_params, dp_writer_config, self.save_event, self.save_queue)
+            engine_args = (config_params, dp_writer_config, self.save_event, self.save_queue, self.optimize_dp_state)
             self.ckpt_process = mp.Process(target=init_decoupled_checkpoint, args=engine_args)
             self.ckpt_process.start()
             self.local_rank = dp_writer_config.local_rank
@@ -109,10 +110,10 @@ class DecoupledCheckpointEngine(CheckpointEngine):
         sd = torch.load(path, map_location=map_location)
         return sd
 
-    def save(self, state_dict, path: str, data_parallel_state: bool = False):
+    def save(self, state_dict, path: str):
         if self.ckpt_process is None:
             return
-        save_info = (state_dict, path, data_parallel_state)
+        save_info = (state_dict, path)
         self.save_queue.put((save_info, DecoupledEvent.SAVE_EVENT))
 
     def commit(self, info: CheckpointCommitInfo):
