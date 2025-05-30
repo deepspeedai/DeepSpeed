@@ -680,6 +680,7 @@ class SequenceTiledCompute(torch.autograd.Function):
 
         grad_requiring_tensor_requires_grad = grad_requiring_tensor.requires_grad
         grad_requiring_tensor = grad_requiring_tensor.detach()
+        # detach() unsets `grad_requiring_tensor.requires_grad`, so restore it
         grad_requiring_tensor.requires_grad_(grad_requiring_tensor_requires_grad)
 
         incoming_grad = grads[0]
@@ -811,8 +812,10 @@ class TiledMLP(torch.autograd.Function):
         self = ctx.self
         shards = ctx.shards
         compute_params = ctx.compute_params
+
         x_requires_grad = x.requires_grad
         x = x.detach()
+        # detach() unsets `x.requires_grad`, so restore it
         x.requires_grad_(x_requires_grad)
 
         incoming_grad = grads[0]
