@@ -7,5 +7,5 @@ packaging>=20.0
 psutil
 py-cpuinfo
 pydantic>=2.0.0
-torch
+torch<2.7.0
 tqdm
