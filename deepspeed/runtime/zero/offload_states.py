@@ -67,6 +67,5 @@ def get_state_devices(model, state: OffloadStateTypeEnum) -> Set[torch.device]:
         return set(model.optimizer.get_hp_param_device(p, "exp_avg") for p in model.parameters()) | \
                set(model.optimizer.get_hp_param_device(p, "exp_avg_sq") for p in model.parameters())
     elif state == OffloadStateTypeEnum.contiguous_grad_buffer:
-        if model.optimizer._DeepSpeedZeroOptimizer_Stage3__ipg_bucket_flat_buffer == None:
-            return {}
-        return {model.optimizer._DeepSpeedZeroOptimizer_Stage3__ipg_bucket_flat_buffer.device}
+        return set(bucket.buffer.device for bucket in model.optimizer.ipg_buckets.values()
+                   if bucket.buffer is not None)

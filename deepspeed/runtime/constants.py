@@ -203,6 +203,27 @@ AMP_ENABLED = "enabled"
 AMP_ENABLED_DEFAULT = False
 
 #########################################
+# Torch AMP support
+#########################################
+TORCH_AUTOCAST_FORMAT = '''
+PyTorch autocast config should be of the format:
+"torch_autocast": {
+  "enabled": true,
+  "dtype": "bfloat16",
+  "lower_precision_safe_modules": [
+    "torch.nn.modules.linear.Linear",
+    "torch.nn.modules.conv.Conv2d"
+  ]
+}
+'''
+TORCH_AUTOCAST = "torch_autocast"
+
+TORCH_AUTOCAST_ENABLED = "enabled"
+TORCH_AUTOCAST_ENABLED_DEFAULT = False
+TORCH_AUTOCAST_DTYPE = "dtype"
+TORCH_AUTOCAST_LOWER_PRECISION_SAFE_MODULES = "lower_precision_safe_modules"
+
+#########################################
 # Gradient clipping
 #########################################
 # Gradient clipping. By default, this feature is not enabled.
