@@ -17,5 +17,5 @@ sphinx
 sphinx-rtd-theme
 tensorboard
 torchvision
-transformers>=4.39.0
+transformers>=4.51.3
 wandb
