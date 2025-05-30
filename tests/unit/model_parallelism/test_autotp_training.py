@@ -127,7 +127,6 @@ class TestTpDataloaderCorrectness(DistributedTest):
                                         device=model.device,
                                         dtype=preferred_dtype())
         dist.barrier()
-
         with should_assert_with_msg(
                 "Data inconsistency within the TP group. Please check the Dataloader implementation to ensure consistency."
         ):
