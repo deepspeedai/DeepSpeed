@@ -70,7 +70,6 @@ class TestTpParallelStates(DistributedTest):
     def test(self, tp_size: int):
         skip_on_device()
         set_autotp_mode(training=True)
-        # set_autotp_mode(training=False)
         dp_size = 4 / tp_size
         hidden_dim = 128
         config_dict = {
