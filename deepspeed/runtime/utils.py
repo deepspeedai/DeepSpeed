@@ -141,19 +141,19 @@ def copy_to_device(item, device, criterion_func):
         return item
 
 
-def move_to_device(item, device, criterion_func):
+def move_to_device(item, device, criterion_func=None):
     """
     Move tensor on to specified device by changing the storage.
     Works on individual tensors, and tensors contained/nested in lists, tuples, and dicts.
     Parameters:
         item: tensor to move or (possibly nested) container of tensors to move.
         device: target device
-        criterion_func: Function to restrict move operation to items meet criterion
+        criterion_func: Function to restrict move operation to items meet criterion, defaults to `None` which is an equivalent to always move
 
     Returns:
         None
     """
-    if criterion_func(item):
+    if (criterion_func is not None and criterion_func(item)):
         device_copy = item.to(device)
         item.data = device_copy.data
         return item
@@ -164,7 +164,7 @@ def move_to_device(item, device, criterion_func):
     elif isinstance(item, dict):
         return {k: move_to_device(v, device, criterion_func) for k, v in item.items()}
     else:
-        return item
+        return item.to(device)
 
 
 def get_norm_with_moe_layers_fast(all_groups_norm, group):
