@@ -427,3 +427,43 @@ def get_index_by_graph_id(graph_order, target_graph_id):
         if graph_id == target_graph_id:
             return index
     return -1
+
+
+def pad_tensors(specs: List[Tuple[torch.Tensor, int, int]]) -> List[torch.Tensor]:
+    """
+    specs = [
+        (input_ids,     1, pad_token_id),   # Example: Pad the right side with <pad>
+        (attention_mask, 1, 0),             # Example: Pad the right side with 0
+        ...
+    ]
+
+    - Share the "maximum length of the dim dimension" across ranks for all specs
+    - Pad the right side for the missing parts and return
+    - Communication (`all_reduce`) happens only once
+    """
+    assert len(specs) > 0, "specs is empty"
+
+    device = specs[0][0].device
+    # Vectorize local lengths
+    local_sizes = torch.tensor(
+        [tensor.size(dim) for tensor, dim, _ in specs],
+        dtype=torch.long,
+        device=device,
+    )
+
+    # Element-wise MAX across ranks
+    dist.all_reduce(local_sizes, op=dist.ReduceOp.MAX)
+    max_sizes = local_sizes.tolist()
+
+    # Pad each tensor as needed
+    padded: List[torch.Tensor] = []
+    for (tensor, dim, pad_val), max_len in zip(specs, max_sizes):
+        cur_len = tensor.size(dim)
+        if cur_len < max_len:
+            pad_len = max_len - cur_len
+            pad_shape = [0] * (tensor.dim() * 2)  # F.pad specification
+            pad_shape[-(2 * dim + 1)] = pad_len  # Pad the right side
+            tensor = torch.nn.functional.pad(tensor, pad_shape, value=pad_val)
+        padded.append(tensor)
+
+    return padded
