@@ -15,7 +15,7 @@ from deepspeed.runtime.zero.offload_config import OffloadDeviceEnum
 from deepspeed.runtime.zero.partition_parameters import *
 from deepspeed.runtime.zero.partitioned_param_profiler import PartitionedParameterProfiler
 from deepspeed.runtime.swap_tensor.partitioned_param_swapper import PartitionedParamStatus
-from deepspeed.utils.debug import debug_module2name_id, debug_param2name_id
+from deepspeed.utils.debug import debug_param2name_id_shape
 from deepspeed.accelerator import get_accelerator
 import deepspeed.runtime.compiler as compiler
 from deepspeed.runtime.compiler import is_compiling
@@ -267,9 +267,8 @@ class PartitionedParameterCoordinator:
     def _dump_params(self, tag, sub_module, params, step_id=None):
         if step_id is None:
             step_id = self.__step_id
-        param_names = [debug_param2name_id(p) for p in params]
-        print_rank_0(f'{tag} step = {step_id} mod = {debug_module2name_id(sub_module)} p_names = {param_names}',
-                     force=False)
+        param_names = [debug_param2name_id_shape(p) for p in params]
+        print_rank_0(f'{tag} step = {step_id} p_names = {param_names}', force=False)
 
     def _dump_param_ids(self, tag, mod_id, p_ids, step_id=None):
         if step_id is None:
@@ -305,7 +304,10 @@ class PartitionedParameterCoordinator:
         if fetch_numel > 0:
             event_name = __class__.FORWARD_FETCH_SUBMIT if forward else __class__.BACKWARD_FETCH_SUBMIT
             self._dump_param_ids(event_name, current_submodule.ds_id,
-                                 [p.ds_id for p in params_to_fetch if p.ds_status == ZeroParamStatus.NOT_AVAILABLE])
+                                 [(p.ds_id, p.ds_shape)
+                                  for p in params_to_fetch if p.ds_status == ZeroParamStatus.NOT_AVAILABLE])
+            # self._dump_params(event_name, current_submodule, [p for p in params_to_fetch if p.ds_status == ZeroParamStatus.NOT_AVAILABLE])
+
             self.__profiler.start_event(event_name)
             # kick off all gather for params in the immediately required submodule
             #for param in params_to_fetch:
@@ -420,9 +422,10 @@ class PartitionedParameterCoordinator:
 
     @instrument_w_nvtx
     @torch.no_grad()
-    def release_sub_module(self, submodule: Module) -> None:
+    def release_sub_module(self, submodule: Module, forward=False) -> None:
         """release the parameters of a sub module, assuming they meet conditions to
         be released."""
+        #print_rank_0(f"release_sub_module {'fwd' if forward else 'bwd'}: {debug_module2name_id(submodule)}", force=False)
         params_to_release = (self.__params_to_release(submodule, self.__step_id) if self.is_complete_trace() else set(
             p.ds_id for p in iter_params(submodule, recurse=z3_leaf_module(submodule))))
 
@@ -517,6 +520,7 @@ class PartitionedParameterCoordinator:
         if param.ds_status == ZeroParamStatus.AVAILABLE and not param.ds_active_sub_modules:
             if logger.isEnabledFor(logging.DEBUG):
                 debug_rank0(f"-release: {param.ds_summary()}")
+                print_rank_0(f"release: {debug_param2name_id_shape(param)}", force=False)
             param.partition(free_data=free_data)
             self.__n_available_params -= param.ds_numel
 

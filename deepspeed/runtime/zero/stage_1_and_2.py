@@ -211,7 +211,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
             self._configure_moe_settings()
         self._global_grad_norm = 0.
 
-        if mpu is None:
+        if mpu is None or hasattr(mpu, 'initialize_sequence_parallel'):
             self.model_parallel_group = None
             self.model_parallel_world_size = 1
             self.model_parallel_rank = 0
@@ -986,8 +986,10 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
 
         assert grad_reduc is not None, f"rank {dist.get_rank()} - Invalid to reduce Param {param_id} with None gradient"
 
-        self.grads_in_ipg_bucket.append(grad_reduc)
-        self.params_in_ipg_bucket.append((i, param.param_idx_in_group, param_id))
+        # deal with a use-case of transient grads that will be generated in a loop for the same computation involving some model params - e.g. when performing a tiled memory calculation that shards the normal single sub-module call into a loop over a shards.
+        if getattr(param, "ds_grad_is_ready", True):
+            self.grads_in_ipg_bucket.append(grad_reduc)
+            self.params_in_ipg_bucket.append((i, param.param_idx_in_group, param_id))
 
         #make sure the average tensor function knows how to average the gradients
         if is_moe_param(param):
