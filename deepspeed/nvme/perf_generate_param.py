@@ -52,8 +52,12 @@ def convert_to_param(key):
 def generate_aio_param(read_log_dir, write_log_dir):
     _, read_results = get_sorted_results(read_log_dir, READ_SPEED)
     _, write_results = get_sorted_results(write_log_dir, WRITE_SPEED)
-    combined_perf = {key[1:]: value for key, value in read_results.items()}
 
+    read_results_count = len(read_results.items())
+    write_results_count = len(write_results.items())
+    assert read_results_count == write_results_count, f"Mismatch in number of read & write results: {read_results_count=} != {write_results_count=}"
+
+    combined_perf = {key[1:]: value for key, value in read_results.items()}
     for key, value in write_results.items():
         new_key = key[1:]
         if new_key in combined_perf:

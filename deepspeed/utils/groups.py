@@ -33,8 +33,12 @@ from deepspeed.accelerator import get_accelerator
 
 # Expert parallel group that the current rank belongs to.
 _EXPERT_PARALLEL_GROUP = {}
+# Mapping of expert parallel group to ranks
+_EXPERT_PARALLEL_GROUP_RANKS = {}
 # Expert data parallel group that the current rank belongs to.
 _EXPERT_DATA_PARALLEL_GROUP = {}
+# Mapping of expert data parallel group to ranks
+_EXPERT_DATA_PARALLEL_GROUP_RANKS = {}
 # dist world group needs to be cloned for some cases
 _WORLD_GROUP = None
 # ZeRO parameter  partitioning group that the current rank belongs to.
@@ -261,6 +265,7 @@ def _create_expert_and_data_parallel(expert_parallel_size_, use_data_before_expe
 
     # Build the expert data parallel groups.
     global _EXPERT_DATA_PARALLEL_GROUP
+    global _EXPERT_DATA_PARALLEL_GROUP_RANKS
 
     ep_stride = pp_stride // expert_parallel_size_
 
@@ -273,14 +278,15 @@ def _create_expert_and_data_parallel(expert_parallel_size_, use_data_before_expe
                 else:
                     ranks = range(pp_stage_start + i, pp_stage_start + pp_stride, expert_parallel_size_)
                 group = dist.new_group(ranks)
-                log_dist(
-                    f'Creating expert data parallel process group named {group_name} '
-                    f'with ranks: {list(ranks)}', [0])
+                log_dist(f'Creating expert data parallel process group named {group_name} with ranks: {list(ranks)}',
+                         [0])
                 if rank in ranks:
                     _EXPERT_DATA_PARALLEL_GROUP[group_name] = group
+                    _EXPERT_DATA_PARALLEL_GROUP_RANKS[group_name] = ranks
 
     # Build the expert parallel groups.
     global _EXPERT_PARALLEL_GROUP
+    global _EXPERT_PARALLEL_GROUP_RANKS
 
     # Only create group if it does not already exist
     if group_name not in _EXPERT_PARALLEL_GROUP:
@@ -294,6 +300,7 @@ def _create_expert_and_data_parallel(expert_parallel_size_, use_data_before_expe
                         f'with ranks: {list(ranks)}', [0])
                     if rank in ranks:
                         _EXPERT_PARALLEL_GROUP[group_name] = group
+                        _EXPERT_PARALLEL_GROUP_RANKS[group_name] = ranks
         else:
             for i in range(world_size // expert_parallel_size_):
                 ranks = range(i * expert_parallel_size_, (i + 1) * expert_parallel_size_)
@@ -302,6 +309,7 @@ def _create_expert_and_data_parallel(expert_parallel_size_, use_data_before_expe
                          f'with ranks: {list(ranks)}', [0])
                 if rank in ranks:
                     _EXPERT_PARALLEL_GROUP[group_name] = group
+                    _EXPERT_PARALLEL_GROUP_RANKS[group_name] = ranks
 
 
 def _get_expert_parallel_ranks(world_size,
@@ -408,6 +416,7 @@ def _create_expert_data_and_model_parallel(expert_parallel_size_, mpu, use_data_
         f"world size {world_size}, dp world size {dp_world_size}", [0])
 
     global _EXPERT_PARALLEL_GROUP, _EXPERT_DATA_PARALLEL_GROUP
+    global _EXPERT_PARALLEL_GROUP_RANKS, _EXPERT_DATA_PARALLEL_GROUP_RANKS
 
     group_name = f"ep_size_{expert_parallel_size_}"
 
@@ -420,11 +429,13 @@ def _create_expert_data_and_model_parallel(expert_parallel_size_, mpu, use_data_
             group = dist.new_group(ranks)
             if rank in list(ranks):
                 _EXPERT_PARALLEL_GROUP[group_name] = group
+                _EXPERT_PARALLEL_GROUP_RANKS[group_name] = ranks
 
         for ranks in expert_data_parallel_groups:
             group = dist.new_group(ranks)
             if rank in list(ranks):
                 _EXPERT_DATA_PARALLEL_GROUP[group_name] = group
+                _EXPERT_DATA_PARALLEL_GROUP_RANKS[group_name] = ranks
 
 
 def _get_max_expert_size():
@@ -455,6 +466,13 @@ def _get_expert_parallel_group(group_name):
     return _EXPERT_PARALLEL_GROUP[group_name]
 
 
+def _get_expert_parallel_group_ranks(group_name):
+    """Get the ranks of the expert parallel group the caller rank belongs to."""
+    assert group_name in _EXPERT_PARALLEL_GROUP_RANKS, \
+        'expert parallel group is not initialized'
+    return _EXPERT_PARALLEL_GROUP_RANKS[group_name]
+
+
 def _get_expert_parallel_group_dict():
     """Get the expert parallel group dict."""
     return _EXPERT_PARALLEL_GROUP
@@ -465,6 +483,13 @@ def _get_expert_data_parallel_group(group_name):
     assert group_name in _EXPERT_DATA_PARALLEL_GROUP, \
         'expert data parallel group is not initialized'
     return _EXPERT_DATA_PARALLEL_GROUP[group_name]
+
+
+def _get_expert_data_parallel_group_ranks(group_name):
+    """Get the ranks of the expert data parallel group the caller rank belongs to."""
+    assert group_name in _EXPERT_DATA_PARALLEL_GROUP_RANKS, \
+        'expert data parallel group is not initialized'
+    return _EXPERT_DATA_PARALLEL_GROUP_RANKS[group_name]
 
 
 def _get_expert_data_parallel_group_dict():
@@ -530,6 +555,17 @@ def _get_data_parallel_group():
 
     # Return the clone of dist world group
     return _clone_world_group()
+
+
+def _get_data_parallel_group_ranks():
+    """Get the ranks of data parallel group the caller rank belongs to."""
+    assert dist.is_initialized(), \
+        'dist is not initialized'
+    global mpu
+    if mpu is not None:
+        return mpu.get_data_parallel_group_ranks()
+    # Return all ranks
+    return range(dist.get_world_size())
 
 
 def _get_broadcast_src_rank():

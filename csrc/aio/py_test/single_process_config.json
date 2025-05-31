@@ -2,12 +2,17 @@
     "block_size": [
         "128K",
         "256K",
-        "1M"
+        "1M",
+        "2M",
+        "4M",
+        "8M",
+        "16M"
     ],
     "queue_depth": [
-        4,
+        8,
         16,
-        32
+        32,
+        64
     ],
     "io_parallel": [
         1,
@@ -19,7 +24,7 @@
         true,
         false
     ],
-    "overlap_events": [
+    "sequential_requests": [
         true,
         false
     ],

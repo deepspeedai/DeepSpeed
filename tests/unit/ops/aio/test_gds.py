@@ -279,7 +279,8 @@ class TestLockDeviceTensor(DistributedTest):
 class TestAsyncFileOffset(DistributedTest):
     world_size = 1
 
-    def test_offset_write(self, tmpdir, file_partitions):
+    @pytest.mark.parametrize('use_fd', [False, True])
+    def test_offset_write(self, tmpdir, use_fd, file_partitions):
         ref_file = _get_file_path(tmpdir, '_py_random')
         aio_file = _get_file_path(tmpdir, '_aio_random')
         partition_unit_size = IO_SIZE
@@ -304,7 +305,19 @@ class TestAsyncFileOffset(DistributedTest):
             ref_fd.write(src_buffer.numpy().tobytes())
             ref_fd.flush()
 
-            assert 1 == h.sync_pwrite(buffer=src_buffer, filename=aio_file, file_offset=file_offsets[i])
+            if use_fd:
+                aio_fd = os.open(aio_file, flags=os.O_DIRECT | os.O_CREAT | os.O_WRONLY)
+                write_status = h.async_pwrite(buffer=src_buffer, fd=aio_fd, file_offset=file_offsets[i])
+            else:
+                write_status = h.async_pwrite(buffer=src_buffer, filename=aio_file, file_offset=file_offsets[i])
+
+            assert write_status == 0
+            wait_status = h.wait()
+            assert wait_status == 1
+
+            if use_fd:
+                assert os.path.isfile(aio_fd)
+                os.close(aio_fd)
 
             filecmp.clear_cache()
             assert filecmp.cmp(ref_file, aio_file, shallow=False)
@@ -335,7 +348,10 @@ class TestAsyncFileOffset(DistributedTest):
                 ref_buf = list(ref_fd.read(bytes_to_read))
 
                 dst_tensor = torch.narrow(gds_buffer, 0, 0, bytes_to_read)
-                assert 1 == h.sync_pread(dst_tensor, ref_file, file_offsets[i])
+                read_status = h.async_pread(dst_tensor, ref_file, file_offsets[i])
+                assert read_status == 0
+                wait_status = h.wait()
+                assert wait_status == 1
                 assert dst_tensor.tolist() == ref_buf
 
         h.unpin_device_tensor(gds_buffer)

@@ -41,6 +41,14 @@ zero_init_context = 0
 top_level_context = None
 
 
+class DeepSpeedTensorOverride(Enum):
+    dtype = 1
+    device = 2
+
+
+DEFAULT_TENSOR_OVERRIDES = [DeepSpeedTensorOverride.dtype, DeepSpeedTensorOverride.device]
+
+
 class NoGatherHandle:
 
     def __init__(self, param: Parameter) -> None:
@@ -232,13 +240,14 @@ _orig_torch_eye = torch.eye
 _orig_torch_randn = torch.randn
 
 
-def zero_wrapper_for_fp_tensor_constructor(fn: Callable, target_fp_dtype: torch.dtype) -> Callable:
+def zero_wrapper_for_fp_tensor_constructor(fn: Callable, target_fp_dtype: torch.dtype,
+                                           target_device: torch.device) -> Callable:
 
     def wrapped_fn(*args, **kwargs) -> Tensor:
-        if kwargs.get("device", None) is None:
-            kwargs['device'] = torch.device(get_accelerator().device_name(os.environ["LOCAL_RANK"]))
+        if kwargs.get("device", None) is None and target_device is not None:
+            kwargs['device'] = target_device
         tensor: Tensor = fn(*args, **kwargs)
-        if tensor.is_floating_point():
+        if target_fp_dtype is not None and tensor.is_floating_point():
             tensor.data = tensor.data.to(target_fp_dtype)
 
         return tensor
@@ -246,15 +255,18 @@ def zero_wrapper_for_fp_tensor_constructor(fn: Callable, target_fp_dtype: torch.
     return wrapped_fn
 
 
-def get_new_tensor_fn_for_dtype(dtype: torch.dtype) -> Callable:
+def get_new_tensor_fn_for_dtype(target_fp_dtype: torch.dtype, target_device: torch.device) -> Callable:
 
     def new_tensor(cls, *args, **kwargs) -> Tensor:
-        device = torch.device(get_accelerator().device_name(os.environ["LOCAL_RANK"]))
         if not args:
             args = (0, )
-        tensor = _orig_torch_empty(0, device=device).new_empty(*args, **kwargs)
-        if tensor.is_floating_point():
-            tensor = tensor.to(dtype)
+        if target_device is None:
+            tensor = _orig_torch_empty(0).new_empty(*args, **kwargs)
+        else:
+            tensor = _orig_torch_empty(0, device=target_device).new_empty(*args, **kwargs)
+
+        if tensor.is_floating_point() and target_fp_dtype is not None:
+            tensor = tensor.to(target_fp_dtype)
 
         return tensor
 
@@ -550,7 +562,8 @@ class InsertPostInitMethodToModuleSubClasses(object):
         if Init.override_module_apply:
             torch.nn.modules.module.Module.apply = apply_with_gather(torch.nn.modules.module.Module._old_apply)
 
-        self._add_tensor_creation_wrappers()
+        if self.tensor_overrides:
+            self._add_tensor_creation_wrappers()
 
         if self.mem_efficient_linear:
             print_rank_0(
@@ -586,20 +599,47 @@ class InsertPostInitMethodToModuleSubClasses(object):
             if Init.override_module_apply:
                 torch.nn.modules.module.Module.apply = torch.nn.modules.module.Module._old_apply
 
-            self._remove_tensor_creation_wrappers()
+            if self.tensor_overrides:
+                self._remove_tensor_creation_wrappers()
 
             self.patched = False
 
     def _add_tensor_creation_wrappers(self):
-        torch.Tensor.__new__ = get_new_tensor_fn_for_dtype(self.dtype)
-        torch.tensor = zero_wrapper_for_fp_tensor_constructor(_orig_torch_tensor, self.dtype)
-        torch.empty = zero_wrapper_for_fp_tensor_constructor(_orig_torch_empty, self.dtype)
-        torch.zeros = zero_wrapper_for_fp_tensor_constructor(_orig_torch_zeros, self.dtype)
-        torch.ones = zero_wrapper_for_fp_tensor_constructor(_orig_torch_ones, self.dtype)
-        torch.full = zero_wrapper_for_fp_tensor_constructor(_orig_torch_full, self.dtype)
-        torch.arange = zero_wrapper_for_fp_tensor_constructor(_orig_torch_arange, self.dtype)
-        torch.eye = zero_wrapper_for_fp_tensor_constructor(_orig_torch_eye, self.dtype)
-        torch.randn = zero_wrapper_for_fp_tensor_constructor(_orig_torch_randn, self.dtype)
+        if DeepSpeedTensorOverride.dtype in self.tensor_overrides:
+            target_fp_dtype = self.dtype
+        else:
+            target_fp_dtype = None
+        if DeepSpeedTensorOverride.device in self.tensor_overrides:
+            target_device = self.local_device
+        else:
+            target_device = None
+
+        torch.Tensor.__new__ = get_new_tensor_fn_for_dtype(target_fp_dtype=target_fp_dtype,
+                                                           target_device=target_device)
+        torch.tensor = zero_wrapper_for_fp_tensor_constructor(_orig_torch_tensor,
+                                                              target_fp_dtype=target_fp_dtype,
+                                                              target_device=target_device)
+        torch.empty = zero_wrapper_for_fp_tensor_constructor(_orig_torch_empty,
+                                                             target_fp_dtype=target_fp_dtype,
+                                                             target_device=target_device)
+        torch.zeros = zero_wrapper_for_fp_tensor_constructor(_orig_torch_zeros,
+                                                             target_fp_dtype=target_fp_dtype,
+                                                             target_device=target_device)
+        torch.ones = zero_wrapper_for_fp_tensor_constructor(_orig_torch_ones,
+                                                            target_fp_dtype=target_fp_dtype,
+                                                            target_device=target_device)
+        torch.full = zero_wrapper_for_fp_tensor_constructor(_orig_torch_full,
+                                                            target_fp_dtype=target_fp_dtype,
+                                                            target_device=target_device)
+        torch.arange = zero_wrapper_for_fp_tensor_constructor(_orig_torch_arange,
+                                                              target_fp_dtype=target_fp_dtype,
+                                                              target_device=target_device)
+        torch.eye = zero_wrapper_for_fp_tensor_constructor(_orig_torch_eye,
+                                                           target_fp_dtype=target_fp_dtype,
+                                                           target_device=target_device)
+        torch.randn = zero_wrapper_for_fp_tensor_constructor(_orig_torch_randn,
+                                                             target_fp_dtype=target_fp_dtype,
+                                                             target_device=target_device)
 
     def _remove_tensor_creation_wrappers(self):
         torch.Tensor.__new__ = torch.Tensor.__old_new__
@@ -846,7 +886,8 @@ class Init(InsertPostInitMethodToModuleSubClasses):
                  zero_quantized_weights=False,
                  zero_quantized_nontrainable_weights=False,
                  sequence_data_parallel_group=None,
-                 param_swapper=None):
+                 param_swapper=None,
+                 tensor_overrides=DEFAULT_TENSOR_OVERRIDES):
         """A context to enable massive model construction for training with
         ZeRO-3. Models are automatically partitioned (or, sharded) across the
         system and converted to half precision.
@@ -882,6 +923,7 @@ class Init(InsertPostInitMethodToModuleSubClasses):
             zero_quantized_nontrainable_weights (bool, optional): If ``True``, nontrainable weights will be stored in quantized format. Default is ``False``
             param_swapper (``deepspeed.runtime.swap_tensor.partitioned_param_swapper.AsyncPartitionedParameterSwapper``, optional): [Experimental] Use existing parameter swapper. Defaults to ``None``.
                 This argument will be removed in the near future.
+            tensor_overrides ([`deepspeed.runtime.zero.DeepSpeedTensorOverride`], optional): Tensor attributes to override. Defaults to overriding dtype and device.
 
         This context accelerates model initialization and enables models that
         are too large to allocate in their entirety in CPU memory. It has the
@@ -951,6 +993,7 @@ class Init(InsertPostInitMethodToModuleSubClasses):
         if _ds_config is not None:
             mem_efficient_linear = _ds_config.zero_config.memory_efficient_linear
 
+        self.tensor_overrides = tensor_overrides
         super().__init__(enabled=enabled, mem_efficient_linear=mem_efficient_linear, ds_config=_ds_config, dtype=dtype)
         if not dist.is_initialized():
             init_distributed()

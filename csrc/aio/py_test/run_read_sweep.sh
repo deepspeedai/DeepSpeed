@@ -79,9 +79,9 @@ for xtype in cpu gpu gds; do
         gpu_opt="--gpu"
         gds_opt="--use_gds"
     fi
-    for sub in single block; do
-        if [[ $sub == "single" ]]; then
-            sub_opt="--single_submit"
+    for ov in overlap sequential; do
+        if [[ $ov == "sequential" ]]; then
+            ov_opt="--sequential_requests"
         else
             sub_opt=""
         fi
