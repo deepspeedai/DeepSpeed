@@ -5,12 +5,13 @@
 
 import pytest
 import torch
+import deepspeed
 from deepspeed.ops.op_builder import UtilsBuilder
 from deepspeed.accelerator import get_accelerator
 from unit.common import DistributedTest
 
-if get_accelerator().device_name() == 'cpu':
-    pytest.skip(f"fp16 not supported, valid dtype: {get_accelerator().supported_dtypes()}", allow_module_level=True)
+if not deepspeed.ops.__compatible_ops__[UtilsBuilder.NAME]:
+    pytest.skip(f'Skip tests since {UtilsBuilder.NAME} is not compatible', allow_module_level=True)
 
 
 def _validate_tensor_cast_properties(typed_tensor, byte_tensor):
@@ -38,17 +39,16 @@ def _byte_cast_multiple_tensors(typed_tensor_list):
 
 @pytest.mark.parametrize(
     'dtype',
-    [torch.float32, torch.half, torch.float64, torch.int32, torch.short, torch.int64],
+    [torch.float32, torch.half, torch.bfloat16, torch.float64, torch.int32, torch.short, torch.int64],
 )
 class TestCastSingleTensor(DistributedTest):
     world_size = 1
 
-    def test_byte_cast_cuda_tensor(self, dtype):
+    def test_byte_cast_accelerator_tensor(self, dtype):
         numel = 1024
         typed_tensor = torch.empty(numel, dtype=dtype).to(get_accelerator().device_name())
         _byte_cast_single_tensor(typed_tensor)
 
-    # TODO: Add support in non-CUDA environment.
     @pytest.mark.parametrize("pinned_memory", [True, False])
     def test_byte_cast_cpu_tensor(self, dtype, pinned_memory):
         numel = 1024
@@ -63,7 +63,7 @@ class TestCastSingleTensor(DistributedTest):
 class TestCastTensorList(DistributedTest):
     world_size = 1
 
-    def test_byte_cast_cuda_tensor_list(self, tensor_count):
+    def test_byte_cast_accelerator_tensor_list(self, tensor_count):
         typed_tensor_list = [torch.empty(1024, dtype=torch.half).to(get_accelerator().device_name())] * tensor_count
         _byte_cast_multiple_tensors(typed_tensor_list)
 
