@@ -3462,7 +3462,7 @@ class DeepSpeedEngine(Module):
                     if self.random_ltd_enabled():
                         expert_state_dict = remove_random_ltd_state_dict(expert_state_dict)
                     saveable_state_dict = clone_tensors_for_torch_save(expert_state_dict)
-                    self.checkpoint_engine.save(saveable_state_dict, moe_save_path, True)
+                    self.checkpoint_engine.save(saveable_state_dict, moe_save_path)
                 moe_layer_id += 1
 
         self._curr_ckpt_path = os.path.join(save_dir, tag)
@@ -3484,7 +3484,7 @@ class DeepSpeedEngine(Module):
         # TODO: why use BufferedWriter not the path
         file_path = self._get_optimizer_ckpt_name(save_dir, tag, expp_rank)
         saveable_state_dict = clone_tensors_for_torch_save(optimizer_state)
-        self.checkpoint_engine.save(saveable_state_dict, file_path, True)
+        self.checkpoint_engine.save(saveable_state_dict, file_path)
 
         # Load flow uses below saved file for model parameters, RNG and more
         if groups._get_data_parallel_rank() == 0:
