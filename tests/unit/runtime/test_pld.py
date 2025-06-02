@@ -46,10 +46,10 @@ class TestPLDModel(DistributedTest):
                 "gamma": gamma
             }
         }
-        if get_accelerator().is_fp16_supported():
-            config_dict["fp16"] = {"enabled": True}
-        elif get_accelerator().is_bf16_supported():
+        if get_accelerator().is_bf16_supported():
             config_dict["bf16"] = {"enabled": True}
+        elif get_accelerator().is_fp16_supported():
+            config_dict["fp16"] = {"enabled": True}
         hidden_dim = 10
 
         model = PLD_SimpleModel(hidden_dim, empty_grad=False)
@@ -88,10 +88,10 @@ class TestNonPLDModel(DistributedTest):
                 "gamma": gamma
             }
         }
-        if get_accelerator().is_fp16_supported():
-            config_dict["fp16"] = {"enabled": True}
-        elif get_accelerator().is_bf16_supported():
+        if get_accelerator().is_bf16_supported():
             config_dict["bf16"] = {"enabled": True}
+        elif get_accelerator().is_fp16_supported():
+            config_dict["fp16"] = {"enabled": True}
         hidden_dim = 10
 
         model = SimpleModel(hidden_dim, empty_grad=False)

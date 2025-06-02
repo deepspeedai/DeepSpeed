@@ -233,7 +233,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
             self._configure_moe_settings()
         self._global_grad_norm = 0.
 
-        if mpu is None:
+        if mpu is None or hasattr(mpu, 'initialize_sequence_parallel'):
             self.model_parallel_group = None
             self.model_parallel_world_size = 1
             self.model_parallel_rank = 0
@@ -279,6 +279,10 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
         # a single 32-bit partition of the parallel partitioned parameters
         # that this process will update
         self.single_partition_of_fp32_groups = []
+
+        # a 16-bit CPU param buffer for cpu offload
+        if self.cpu_offload:
+            self.param_buffer_of_bit16_for_cpu_offload_groups = []
 
         # param partition info
 
@@ -428,6 +432,16 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
 
             if self.cpu_offload:
                 weights_partition = get_accelerator().pin_memory(weights_partition)
+                temp_dtype = self.parallel_partitioned_bit16_groups[i][partition_id].dtype
+                temp_buffer_bit16 = torch.full(weights_partition.shape,
+                                               fill_value=0.0,
+                                               dtype=temp_dtype,
+                                               device=weights_partition.device)
+                if self.cpu_offload_pin_memory:
+                    temp_pinned = get_accelerator().pin_memory(temp_buffer_bit16)
+                    self.param_buffer_of_bit16_for_cpu_offload_groups.append(temp_pinned)
+                else:
+                    self.param_buffer_of_bit16_for_cpu_offload_groups.append(temp_buffer_bit16)
 
             self.single_partition_of_fp32_groups.append(weights_partition)
 
@@ -995,8 +1009,10 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
 
         assert grad_reduc is not None, f"rank {dist.get_rank()} - Invalid to reduce Param {param_id} with None gradient"
 
-        bucket.grads.append(grad_reduc)
-        bucket.params.append((i, param.param_idx_in_group, param_id))
+        # deal with a use-case of transient grads that will be generated in a loop for the same computation involving some model params - e.g. when performing a tiled memory calculation that shards the normal single sub-module call into a loop over a shards.
+        if getattr(param, "ds_grad_is_ready", True):
+            bucket.grads.append(grad_reduc)
+            bucket.params.append((i, param.param_idx_in_group, param_id))
 
         #make sure the average tensor function knows how to average the gradients
         if is_moe_param(param):
@@ -1960,8 +1976,9 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
                 #    bit16_partitions[partition_id].data.copy_(fp32_partition.data)
                 bit16_partitions = self.parallel_partitioned_bit16_groups[i]
                 fp32_partition = self.single_partition_of_fp32_groups[i]
-                bit16_partitions[partition_id].data.copy_(
-                    fp32_partition.to(get_accelerator().current_device_name()).data)
+                bit16_partition_buffer = self.param_buffer_of_bit16_for_cpu_offload_groups[i]
+                bit16_partition_buffer.data.copy_(fp32_partition.data)
+                bit16_partitions[partition_id].data.copy_(bit16_partition_buffer.data, non_blocking=True)
 
                 self.timers(OPTIMIZER_STEP_TIMER).stop()
             else:
