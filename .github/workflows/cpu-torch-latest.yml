@@ -48,7 +48,6 @@ jobs:
 
       - name: Install deepspeed
         run: |
-          pip install pytest==8.3.5
           pip install .[dev,autotuning]
           ds_report
 
