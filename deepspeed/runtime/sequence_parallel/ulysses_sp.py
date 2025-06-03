@@ -3,14 +3,26 @@
 
 # DeepSpeed Team
 """
-Ulysses Plus features
+*** Ulysses Plus Sequence Parallelism for HF Transformers ***
 
-- `UlyssesSPAttentionHF` (port of UlyssesAttention from Megatron-Deepspeed plus modern MHA-variations)
+1. Ulysses Sequence Parallelism for HF Transformers implements an efficient way of training on long sequences by employing sequence parallelism and attention head parallelism.
+2. Ulysses Plus enables even longer sequence lengths using a bag of tricks:
+- Activation checkpoint offload to CPU
+- Tiled MLP compute
+- Liger-kernel
+- PYTORCH_CUDA_ALLOC_CONF
+
+Ulysses Plus features found in this module:
+
+- `UlyssesSPAttentionHF` - port of UlyssesAttention from Megatron-Deepspeed plus modern MHA-variations
 - `UlyssesSPDataLoaderAdapter` - DL adapter to shard the normal DL batches to be used by `UlyssesSPAttentionHF`
 - `SequenceTiledCompute` - generic autograd function to perform compute after tiling on the sequence dimension
 - `TiledMLP` - a specific autograd function to perform tiled MLP (it's much easier to understand before trying to grok `SequenceTiledCompute`)
 
-The other UlyssesPlus features live inside https://github.com/snowflakedb/ArcticTraining (XXX: where exactly?)
+For integration docs see: https://www.deepspeed.ai/tutorials/ulysses-plus-sequence-pallellism
+
+The other UlyssesPlus features live inside
+https://github.com/snowflakedb/ArcticTraining/blob/main/projects/sequence-parallelism/
 
 """
 
