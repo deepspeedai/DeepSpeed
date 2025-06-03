@@ -16,7 +16,7 @@ It's already fully integrated into Arctic Training, see [this guide](https://git
 
 The rest of the document explains how to integrate it into other frameworks or your own training loop.
 
-There is another older version of UlyssesSP which only works with Megatron-Deepspeed and can be found [here](https://www.deepspeed.ai/tutorials/ds-sequence/)
+There is another older version of UlyssesSP which only works with Megatron-Deepspeed and can be found [here](https://www.deepspeed.ai/tutorials/ds-sequence/).
 
 ## Part 1: Ulysses Sequence Parallelism for HF Transformers
 
