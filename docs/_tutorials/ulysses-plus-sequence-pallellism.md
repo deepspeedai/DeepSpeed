@@ -12,11 +12,11 @@ tags: training, sequence-parallelism
 
 It enables training on 0.5M long sequences on a single H100 CPU and a 15M-long sequences on LLama-8B on four 8x H100 nodes.
 
-It's already fully integrated into Arctic Training, see: https://github.com/snowflakedb/ArcticTraining/blob/main/projects/sequence-parallelism/
+It's already fully integrated into Arctic Training, see [this guide](https://github.com/snowflakedb/ArcticTraining/blob/main/projects/sequence-parallelism/).
 
-The rest of the document explains how to integrated it into other frameworks or your own training loop.
+The rest of the document explains how to integrate it into other frameworks or your own training loop.
 
-There is another older version of UlyssesSP which only works with Megatron-Deepspeed and can be found here https://www.deepspeed.ai/tutorials/ds-sequence/
+There is another older version of UlyssesSP which only works with Megatron-Deepspeed and can be found [here](https://www.deepspeed.ai/tutorials/ds-sequence/).
 
 ## Part 1: Ulysses Sequence Parallelism for HF Transformers
 
