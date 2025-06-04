@@ -144,6 +144,8 @@ FP16 parameters should be of the format:
   "initial_scale_power": 16,
   "loss_scale_window": 1000,
   "hysteresis": 2,
+  "min_loss_scale": 1,
+  "fused_mode": true,
   "consecutive_hysteresis": false,
   "min_loss_scale": 1
 }
@@ -179,6 +181,10 @@ FP16_CONSECUTIVE_HYSTERESIS_DEFAULT = False
 # FP16 min loss scale
 FP16_MIN_LOSS_SCALE = "min_loss_scale"
 FP16_MIN_LOSS_SCALE_DEFAULT = 1
+
+# Fused FP16
+FP16_FUSED_MODE = "fused_mode"
+FP16_FUSED_MODE_DEFAULT = True
 
 # FP16 master and grads
 FP16_MASTER_WEIGHTS_AND_GRADS = "fp16_master_weights_and_grads"
