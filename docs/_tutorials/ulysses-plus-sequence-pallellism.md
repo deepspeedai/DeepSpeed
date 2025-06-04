@@ -3,14 +3,14 @@ title: Ulysses Sequence Parallelism Plus for HF Transformers integration
 tags: training, sequence-parallelism
 ---
 
-1. Ulysses Sequence Parallelism for HF Transformers implements an efficient way of training on long sequences by employing sequence parallelism and attention head parallelism.
+1. Ulysses Sequence Parallelism for Hugging Face (HF) Transformers implements an efficient way of training on long sequences by employing sequence parallelism and attention head parallelism.
 2. Ulysses Plus enables even longer sequence lengths using a bag of tricks:
-- Activation checkpoint offload to CPU
-- Tiled MLP compute
-- Liger-kernel
-- PYTORCH_CUDA_ALLOC_CONF
+    - Activation checkpoint offload to CPU
+    - Tiled MLP compute
+    - Liger-kernel
+    - PYTORCH_CUDA_ALLOC_CONF
 
-It enables training on 0.5M long sequences on a single H100 CPU and a 15M-long sequences on LLama-8B on four 8x H100 nodes.
+It enables training on 0.5M long sequences on a single H100 GPU and a 15M-long sequences on LLama-8B on four 8x H100 nodes.
 
 It's already fully integrated into Arctic Training, see [this guide](https://github.com/snowflakedb/ArcticTraining/blob/main/projects/sequence-parallelism/).
 
@@ -127,6 +127,7 @@ for iter, batch in enumerate(dl):
 ```
 
 Now to train:
+
 ```bash
 $ deepspeed --num_gpus 2 train.py
 0: loss=tensor(10.4248, device='cuda:0', grad_fn=<DivBackward0>)
@@ -135,63 +136,63 @@ $ deepspeed --num_gpus 2 train.py
 3: loss=tensor(10.3818, device='cuda:0', grad_fn=<DivBackward0>)
 ```
 
-
 This example has been derived from the [UlyssesSP unit test](https://github.com/deepspeedai/DeepSpeed/blob/master/tests/unit/ulysses_plus/test_ulysses_sp_hf.py).
 
 Let's study the parts not normally present in the vanilla training loop:
 
 1. `UlyssesSPAttentionHF.register_with_transformers` injects Ulysses Attention adapter into HF Transformers.
 
-```python
-mpu = UlyssesSPAttentionHF.register_with_transformers(
-    model_name_or_path=model_name_or_path,
-    core_attn_implementation="sdpa",
-    sequence_parallel_size=sequence_parallel_size,
-    max_length=max_length,
-    micro_batch_size=micro_batch_size,
-    seq_length_is_variable=True,
-)
-```
+    ```python
+    mpu = UlyssesSPAttentionHF.register_with_transformers(
+        model_name_or_path=model_name_or_path,
+        core_attn_implementation="sdpa",
+        sequence_parallel_size=sequence_parallel_size,
+        max_length=max_length,
+        micro_batch_size=micro_batch_size,
+        seq_length_is_variable=True,
+    )
+    ```
 
-It also creates nccl process groups encapsulated by the `mpu` object it returns.
+    It also creates nccl process groups encapsulated by the `mpu` object it returns.
 
-`UlyssesSPAttentionHF.register_with_transformers` has to be called before `from_pretrained` is called.
+    `UlyssesSPAttentionHF.register_with_transformers` has to be called before `from_pretrained` is called.
 
 2. UlyssesSPDataLoaderAdapter
-```python
-dl = UlyssesSPDataLoaderAdapter(
-    dl,
-    sp_rank=sp_rank,
-    sp_group=sp_group,
-    sp_world_size=sp_world_size,
-    device=model.device,
-)
-```
-This takes an existing DataLoader object and returns a new one that will shard the batches on the sequence dimension and synchronize all GPUs of the replica to return only its corresponding shard.
 
-It also takes care of pre-shifting labels and replacing `labels` with `shift_labels` in the batch.
+    ```python
+    dl = UlyssesSPDataLoaderAdapter(
+        dl,
+        sp_rank=sp_rank,
+        sp_group=sp_group,
+        sp_world_size=sp_world_size,
+        device=model.device,
+    )
+    ```
+
+    This takes an existing DataLoader object and returns a new one that will shard the batches on the sequence dimension and synchronize all GPUs of the replica to return only its corresponding shard.
+
+    It also takes care of pre-shifting labels and replacing `labels` with `shift_labels` in the batch.
 
 3. Loss averaging
 
-Since each rank processes a segment we need to average loss. To get the gradients right we need to use a differentiable `all_gather`
+    Since each rank processes a segment we need to average loss. To get the gradients right we need to use a differentiable `all_gather`
 
-```python
-    # differentiable weighted per-shard-loss aggregation across ranks
-    losses_per_rank = torch.distributed.nn.functional.all_gather(loss, group=sp_group)
-    # special dealing with SFT that has prompt tokens that aren't used in loss computation
-    good_tokens = sum((shift_labels != -100).view(-1))
-    good_tokens_per_rank = torch.distributed.nn.functional.all_gather(good_tokens, group=sp_group)
-    total_loss = sum(losses_per_rank[rank] * good_tokens_per_rank[rank] for rank in range(sp_world_size))
-    total_good_tokens = sum(good_tokens_per_rank)
-    loss = total_loss / total_good_tokens
-```
+    ```python
+        # differentiable weighted per-shard-loss aggregation across ranks
+        losses_per_rank = torch.distributed.nn.functional.all_gather(loss, group=sp_group)
+        # special dealing with SFT that has prompt tokens that aren't used in loss computation
+        good_tokens = sum((shift_labels != -100).view(-1))
+        good_tokens_per_rank = torch.distributed.nn.functional.all_gather(good_tokens, group=sp_group)
+        total_loss = sum(losses_per_rank[rank] * good_tokens_per_rank[rank] for rank in range(sp_world_size))
+        total_good_tokens = sum(good_tokens_per_rank)
+        loss = total_loss / total_good_tokens
+    ```
 
-In theory you could just average `losses_per_rank`, but the system supports variable sequence length so the last rank is likely to have a shorter sequence length and also use cases like SFT may have a variable number of tokens that contribute to the loss calculation, so it's best to compute a weighted loss.
-
+    In theory you could just average `losses_per_rank`, but the system supports variable sequence length so the last rank is likely to have a shorter sequence length and also use cases like SFT may have a variable number of tokens that contribute to the loss calculation, so it's best to compute a weighted loss.
 
 ## Nuances
 
-### why do labels need to be pre-shifted
+### Why do labels need to be pre-shifted?
 
 When using batch sharding one can't let the upstream `loss` function do the labels shifting. Here is why:
 
@@ -269,7 +270,6 @@ If your model isn't supported by Liger-kernel you can use our implementation, wh
 
 You can see the full version [here](https://github.com/snowflakedb/ArcticTraining/blob/stas/sp/arctic_training/trainer/sft_trainer.py#L45).
 
-
 ### Tiled MLP computation
 
 If you want to use Tiled MLP computation you'd need to monkey patch the model you work with, for a full example see this [unit test](https://github.com/deepspeedai/DeepSpeed/blob/master/tests/unit/ulysses_plus/test_tiled_compute.py).
@@ -327,11 +327,12 @@ We hope PyTorch core will provide an internal support for offloading. If not we 
 
 This currently implementation isn't yet efficient (blocking), but it barely makes any difference for very long sequence lengths where `matmuls` dominate the compute.
 
-
 ### PYTORCH_CUDA_ALLOC_CONF
 
 Before launching your script add:
+
 ```bash
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 ```
+
 This will help with minimizing memory fragmentation and will allow a longer sequence length.
