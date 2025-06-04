@@ -6,7 +6,6 @@
 from typing import Dict, List, Callable
 import time
 import gc
-import copy
 
 import torch
 from torch.fx import Graph, GraphModule
@@ -238,19 +237,17 @@ def make_backend(backend, compile_kwargs={}, free_activation=False, debug_log=Fa
             profiling_results[graph_id].needs_backward = needs_backward
 
         def make_fw_graph(gm, sample_inputs):
-            new_graph = copy.deepcopy(gm.graph)
-            new_gm = GraphModule(gm, new_graph)
             time_start = time.time()
             graph_index = len(graph_order) - 1
             real_inputs = fwd_real_inputs.pop(0)
             real_inputs = set_example_values_to_symints(real_inputs)
 
-            param_manager[graph_id] = DSGraphParamManager(new_graph, real_inputs, param_indices)
+            param_manager[graph_id] = DSGraphParamManager(gm.graph, real_inputs, param_indices)
 
             real_inputs_with_rng = real_inputs + tuple(sample_inputs[len(real_inputs):])
             run_opt_passes(
                 opt_passes=next_passes,
-                gm=new_gm,
+                gm=gm,
                 graph_id=graph_id,
                 graph_order=graph_order,
                 profiling_results=profiling_results,
@@ -262,21 +259,17 @@ def make_backend(backend, compile_kwargs={}, free_activation=False, debug_log=Fa
 
             opt_pass_times.append(("fwd", graph_index, graph_id, time.time() - time_start))
 
-            log_rank0(
-                f"Fwd end {graph_index} graph_id={graph_id} alloc_mem={get_accelerator().memory_allocated()} graph={new_gm.graph}",
-                enable=debug_log)
+            log_rank0(f"Fwd end {graph_index} graph_id={graph_id} alloc_mem={get_accelerator().memory_allocated()}",
+                      enable=debug_log)
 
-            new_gm.recompile()
-            return new_gm.graph
+            return gm.graph
 
         def make_bw_graph(gm, sample_inputs):
             time_start = time.time()
-            new_graph = copy.deepcopy(gm.graph)
-            new_gm = GraphModule(gm, new_graph)
 
             graph_index = get_index_by_graph_id(graph_order, graph_id)
             log_rank0(
-                f"Bwd start {graph_index} graph_id={graph_id} alloc_mem={get_accelerator().memory_allocated()} graph={new_gm.graph}",
+                f"Bwd start {graph_index} graph_id={graph_id} alloc_mem={get_accelerator().memory_allocated()} graph={gm.graph}",
                 enable=debug_log)
 
             bwd_inputs_stack = get_backward_inputs()
@@ -290,7 +283,7 @@ def make_backend(backend, compile_kwargs={}, free_activation=False, debug_log=Fa
 
             run_opt_passes(
                 opt_passes=next_passes,
-                gm=new_gm,
+                gm=gm,
                 graph_id=graph_id,
                 graph_order=graph_order,
                 profiling_results=profiling_results,
@@ -303,24 +296,23 @@ def make_backend(backend, compile_kwargs={}, free_activation=False, debug_log=Fa
             # assert graph_id in param_manager, f"Graph {graph_id} not found in param_manager"
 
             if free_activation:
-                param_nodes_bw, _ = param_manager[graph_id].get_bwd_mapping(new_gm.graph)
+                param_nodes_bw, _ = param_manager[graph_id].get_bwd_mapping(gm.graph)
                 param_names = [n.name for n in param_nodes_bw]
-                non_param_input_names = [n.name for n in get_input_nodes(new_gm.graph) if n.name not in param_names]
-                add_free_activations(graph_id, new_gm.graph,
-                                     get_activation_node_names(new_gm.graph, param_nodes_bw, non_param_input_names))
+                non_param_input_names = [n.name for n in get_input_nodes(gm.graph) if n.name not in param_names]
+                add_free_activations(graph_id, gm.graph,
+                                     get_activation_node_names(gm.graph, param_nodes_bw, non_param_input_names))
 
             frames_needing_bwd.remove(frame_id)
             if len(frames_needing_bwd) == 0:
                 unpatch_compiled_func()
 
             log_rank0(
-                f"Bwd end {graph_index} graph_id={graph_id} alloc_mem={get_accelerator().memory_allocated()} graph={new_gm.graph}",
+                f"Bwd end {graph_index} graph_id={graph_id} alloc_mem={get_accelerator().memory_allocated()} graph={gm.graph}",
                 enable=debug_log)
 
-            new_gm.recompile()
             opt_pass_times.append(("bwd", graph_index, graph_id, time.time() - time_start))
 
-            return new_gm.graph
+            return gm.graph
 
         if backend == "eager":
 
