@@ -5,10 +5,10 @@ tags: training, sequence-parallelism
 
 1. Ulysses Sequence Parallelism for Hugging Face (HF) Transformers implements an efficient way of training on long sequences by employing sequence parallelism and attention head parallelism.
 2. Ulysses Plus enables even longer sequence lengths using a bag of tricks:
-    - Activation checkpoint offload to CPU
-    - Tiled MLP compute
-    - Liger-kernel
-    - PYTORCH_CUDA_ALLOC_CONF
+- Activation checkpoint offload to CPU
+- Tiled MLP compute
+- Liger-kernel
+- PYTORCH_CUDA_ALLOC_CONF
 
 It enables training on 0.5M long sequences on a single H100 GPU and a 15M-long sequences on LLama-8B on four 8x H100 nodes.
 
@@ -140,55 +140,55 @@ This example has been derived from the [UlyssesSP unit test](https://github.com/
 
 Let's study the parts not normally present in the vanilla training loop:
 
-1. `UlyssesSPAttentionHF.register_with_transformers` injects Ulysses Attention adapter into HF Transformers.
+### `UlyssesSPAttentionHF.register_with_transformers` injects Ulysses Attention adapter into HF Transformers.
 
-    ```python
-    mpu = UlyssesSPAttentionHF.register_with_transformers(
-        model_name_or_path=model_name_or_path,
-        core_attn_implementation="sdpa",
-        sequence_parallel_size=sequence_parallel_size,
-        max_length=max_length,
-        micro_batch_size=micro_batch_size,
-        seq_length_is_variable=True,
-    )
-    ```
+```python
+mpu = UlyssesSPAttentionHF.register_with_transformers(
+    model_name_or_path=model_name_or_path,
+    core_attn_implementation="sdpa",
+    sequence_parallel_size=sequence_parallel_size,
+    max_length=max_length,
+    micro_batch_size=micro_batch_size,
+    seq_length_is_variable=True,
+)
+```
 
-    It also creates nccl process groups encapsulated by the `mpu` object it returns.
+It also creates nccl process groups encapsulated by the `mpu` object it returns.
 
-    `UlyssesSPAttentionHF.register_with_transformers` has to be called before `from_pretrained` is called.
+`UlyssesSPAttentionHF.register_with_transformers` has to be called before `from_pretrained` is called.
 
-2. UlyssesSPDataLoaderAdapter
+### UlyssesSPDataLoaderAdapter
 
-    ```python
-    dl = UlyssesSPDataLoaderAdapter(
-        dl,
-        sp_rank=sp_rank,
-        sp_group=sp_group,
-        sp_world_size=sp_world_size,
-        device=model.device,
-    )
-    ```
+```python
+dl = UlyssesSPDataLoaderAdapter(
+    dl,
+    sp_rank=sp_rank,
+    sp_group=sp_group,
+    sp_world_size=sp_world_size,
+    device=model.device,
+)
+```
 
-    This takes an existing DataLoader object and returns a new one that will shard the batches on the sequence dimension and synchronize all GPUs of the replica to return only its corresponding shard.
+This takes an existing DataLoader object and returns a new one that will shard the batches on the sequence dimension and synchronize all GPUs of the replica to return only its corresponding shard.
 
-    It also takes care of pre-shifting labels and replacing `labels` with `shift_labels` in the batch.
+It also takes care of pre-shifting labels and replacing `labels` with `shift_labels` in the batch.
 
-3. Loss averaging
+### Loss averaging
 
-    Since each rank processes a segment we need to average loss. To get the gradients right we need to use a differentiable `all_gather`
+Since each rank processes a segment we need to average loss. To get the gradients right we need to use a differentiable `all_gather`
 
-    ```python
-        # differentiable weighted per-shard-loss aggregation across ranks
-        losses_per_rank = torch.distributed.nn.functional.all_gather(loss, group=sp_group)
-        # special dealing with SFT that has prompt tokens that aren't used in loss computation
-        good_tokens = sum((shift_labels != -100).view(-1))
-        good_tokens_per_rank = torch.distributed.nn.functional.all_gather(good_tokens, group=sp_group)
-        total_loss = sum(losses_per_rank[rank] * good_tokens_per_rank[rank] for rank in range(sp_world_size))
-        total_good_tokens = sum(good_tokens_per_rank)
-        loss = total_loss / total_good_tokens
-    ```
+```python
+    # differentiable weighted per-shard-loss aggregation across ranks
+    losses_per_rank = torch.distributed.nn.functional.all_gather(loss, group=sp_group)
+    # special dealing with SFT that has prompt tokens that aren't used in loss computation
+    good_tokens = sum((shift_labels != -100).view(-1))
+    good_tokens_per_rank = torch.distributed.nn.functional.all_gather(good_tokens, group=sp_group)
+    total_loss = sum(losses_per_rank[rank] * good_tokens_per_rank[rank] for rank in range(sp_world_size))
+    total_good_tokens = sum(good_tokens_per_rank)
+    loss = total_loss / total_good_tokens
+```
 
-    In theory you could just average `losses_per_rank`, but the system supports variable sequence length so the last rank is likely to have a shorter sequence length and also use cases like SFT may have a variable number of tokens that contribute to the loss calculation, so it's best to compute a weighted loss.
+In theory you could just average `losses_per_rank`, but the system supports variable sequence length so the last rank is likely to have a shorter sequence length and also use cases like SFT may have a variable number of tokens that contribute to the loss calculation, so it's best to compute a weighted loss.
 
 ## Nuances
 
