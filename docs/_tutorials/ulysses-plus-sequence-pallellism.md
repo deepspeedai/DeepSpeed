@@ -140,7 +140,9 @@ This example has been derived from the [UlyssesSP unit test](https://github.com/
 
 Let's study the parts not normally present in the vanilla training loop:
 
-### `UlyssesSPAttentionHF.register_with_transformers` injects Ulysses Attention adapter into HF Transformers.
+### UlyssesSPAttentionHF.register_with_transformers
+
+`UlyssesSPAttentionHF.register_with_transformers` injects Ulysses Attention adapter into HF Transformers.
 
 ```python
 mpu = UlyssesSPAttentionHF.register_with_transformers(
