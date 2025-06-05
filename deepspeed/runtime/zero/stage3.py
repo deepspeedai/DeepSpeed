@@ -291,7 +291,7 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
 
         self.zeropp_loco_param = zeropp_loco_param
 
-        if mpu is None:
+        if mpu is None or hasattr(mpu, 'initialize_sequence_parallel'):
             self.model_parallel_group = None
             self.model_parallel_rank = 0
         else:
@@ -1268,7 +1268,9 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
 
             self.__reduce_and_partition_ipg_grads()
 
-        self.__add_grad_to_ipg_bucket(param)
+        # deal with a use-case of transient grads that will be generated in a loop for the same computation involving some model params - e.g. when performing a tiled memory calculation that shards the normal single sub-module call into a loop over a shards.
+        if getattr(param, "ds_grad_is_ready", True):
+            self.__add_grad_to_ipg_bucket(param)
 
     @instrument_w_nvtx
     @torch.no_grad()
@@ -2451,6 +2453,10 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
         #     fp32_grad = self.fp32_partitioned_groups_flat[group_idx].grad.narrow(0, dest_offset, num_elements)
         # else:
         #     fp32_grad = self.__param_id_to_grad_partition[param.ds_id]
+
+        if self.offload_optimizer:
+            self.norm_for_param_grads[self.get_param_id(param)] = self._constant_buffered_norm2(value)
+
         fp32_grad, group_idx = self._get_fp32_grad_state_partition(param=param, release_swap_buffers=False)
         fp32_grad.data.copy_(value.flatten().data)
 

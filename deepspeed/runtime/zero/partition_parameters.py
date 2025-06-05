@@ -870,7 +870,7 @@ class Init(InsertPostInitMethodToModuleSubClasses):
                 using pinned memory for model weights. ``remote_device`` must be
                 ``"cpu"``. Defaults to pin_memory value in config, otherwise ``False``.
             config_dict_or_path (dict or ``json file``, optional): If provided, provides configuration
-                for swapping fp16 params to NVMe.
+                for swapping fp16 params to NVMe and other things like ``dtype``.
             config (dict or ``json file``, optional): Deprecated, use config_dict_or_path instead.
             enabled (bool, optional): If ``False``, this context has no
                 effect. Defaults to ``True``.
@@ -1264,6 +1264,9 @@ class Init(InsertPostInitMethodToModuleSubClasses):
                         ds_process_group,
                     )
                     param.data = param_buffer.narrow(0, 0, param.ds_numel).view(param.ds_shape).to(param.device)
+                    #print_rank_0(f"{param.shape=}", force=True)
+                    #print_rank_0(f"{param_buffer.shape=}", force=True)
+
                     return AllGatherHandle(handles, param)
                 else:
                     if hasattr(param_ds_tensor, "ds_quant_scale"):

@@ -208,7 +208,8 @@ class DeepSpeedZeRoOffload(object):
                 zero_params[0].convert_to_zero_parameters(param_list=non_zero_params)
             else:
                 group = None
-                if mpu:
+                # parallel_state_sp doesn't have get_data_parallel_group
+                if mpu and hasattr(mpu, "get_data_parallel_group"):
                     group = mpu.get_data_parallel_group()
 
                 Init(module=module,
@@ -480,7 +481,7 @@ class DeepSpeedZeRoOffload(object):
             force=False)
 
         param_coordinator = self.get_param_coordinator()
-        param_coordinator.release_sub_module(sub_module)
+        param_coordinator.release_sub_module(sub_module, forward=True)
 
         see_memory_usage(
             f"After sub module function {sub_module.__class__.__name__}  {sub_module.ds_id} after release",
@@ -502,7 +503,7 @@ class DeepSpeedZeRoOffload(object):
             f"After sub module backward function {sub_module.__class__.__name__} {sub_module.ds_id} before release",
             force=False)
 
-        self.get_param_coordinator().release_sub_module(sub_module)
+        self.get_param_coordinator().release_sub_module(sub_module, forward=False)
 
         see_memory_usage(
             f"After sub module backward function {sub_module.__class__.__name__} {sub_module.ds_id} after release",

@@ -133,7 +133,11 @@ class TestOneBitAdamExpAvgMask(DistributedTest):
             model=model,
             model_parameters=optimizer_grouped_parameters,
         )
-        data_loader = random_dataloader(model=model, total_samples=50, hidden_dim=hidden_dim, device=model.device)
+        data_loader = random_dataloader(model=model,
+                                        total_samples=50,
+                                        hidden_dim=hidden_dim,
+                                        device=model.device,
+                                        dtype=torch.float16)
         for n, batch in enumerate(data_loader):
             loss = model(batch[0], batch[1])
             model.backward(loss)
@@ -221,17 +225,14 @@ class TestOneBitAdamCheckpointing(DistributedTest):
             },
         ]
 
-        model_1, optimizer_1, _, _ = deepspeed.initialize(
-            config=config_dict,
-            model=model,
-            model_parameters=optimizer_grouped_parameters_1,
-        )
-        data_loader = random_dataloader(
-            model=model_1,
-            total_samples=10,
-            hidden_dim=hidden_dim,
-            device=model_1.device,
-        )
+        model_1, optimizer_1, _, _ = deepspeed.initialize(config=config_dict,
+                                                          model=model,
+                                                          model_parameters=optimizer_grouped_parameters_1)
+        data_loader = random_dataloader(model=model_1,
+                                        total_samples=10,
+                                        hidden_dim=hidden_dim,
+                                        device=model_1.device,
+                                        dtype=torch.float16)
         for n, batch in enumerate(data_loader):
             loss = model_1(batch[0], batch[1])
             model_1.backward(loss)
@@ -275,12 +276,11 @@ class TestOneBitAdamCheckpointing(DistributedTest):
             model_parameters=optimizer_grouped_parameters_3,
         )
         optimizer_3.optimizer.freeze_step = 20
-        data_loader = random_dataloader(
-            model=model_3,
-            total_samples=50,
-            hidden_dim=hidden_dim,
-            device=model_3.device,
-        )
+        data_loader = random_dataloader(model=model_3,
+                                        total_samples=50,
+                                        hidden_dim=hidden_dim,
+                                        device=model_3.device,
+                                        dtype=torch.float16)
         for n, batch in enumerate(data_loader):
             loss = model_3(batch[0], batch[1])
             model_3.backward(loss)
@@ -329,7 +329,11 @@ class TestOneBitAdamCheckpointing(DistributedTest):
 
         model = SimpleModel(hidden_dim)
         model, _, _, _ = deepspeed.initialize(config=config_dict, model=model, model_parameters=model.parameters())
-        data_loader = random_dataloader(model=model, total_samples=100, hidden_dim=hidden_dim, device=model.device)
+        data_loader = random_dataloader(model=model,
+                                        total_samples=100,
+                                        hidden_dim=hidden_dim,
+                                        device=model.device,
+                                        dtype=torch.float16)
         save_folder = os.path.join(tmpdir, "saved_checkpoint")
         for n, batch in enumerate(data_loader):
             loss = model(batch[0], batch[1])
@@ -498,7 +502,11 @@ class TestZeroOneAdamExpAvgMask(DistributedTest):
             model=model,
             model_parameters=optimizer_grouped_parameters,
         )
-        data_loader = random_dataloader(model=model, total_samples=50, hidden_dim=hidden_dim, device=model.device)
+        data_loader = random_dataloader(model=model,
+                                        total_samples=50,
+                                        hidden_dim=hidden_dim,
+                                        device=model.device,
+                                        dtype=torch.float16)
         for n, batch in enumerate(data_loader):
             loss = model(batch[0], batch[1])
             model.backward(loss)
@@ -594,12 +602,11 @@ class TestZeroOneAdamCheckpointing(DistributedTest):
             model=model,
             model_parameters=optimizer_grouped_parameters_1,
         )
-        data_loader = random_dataloader(
-            model=model_1,
-            total_samples=10,
-            hidden_dim=hidden_dim,
-            device=model_1.device,
-        )
+        data_loader = random_dataloader(model=model_1,
+                                        total_samples=10,
+                                        hidden_dim=hidden_dim,
+                                        device=model_1.device,
+                                        dtype=torch.float16)
         for n, batch in enumerate(data_loader):
             loss = model_1(batch[0], batch[1])
             model_1.backward(loss)
@@ -641,12 +648,11 @@ class TestZeroOneAdamCheckpointing(DistributedTest):
             model_parameters=optimizer_grouped_parameters_3,
         )
         optimizer_3.optimizer.freeze_step = 20
-        data_loader = random_dataloader(
-            model=model_3,
-            total_samples=50,
-            hidden_dim=hidden_dim,
-            device=model_3.device,
-        )
+        data_loader = random_dataloader(model=model_3,
+                                        total_samples=50,
+                                        hidden_dim=hidden_dim,
+                                        device=model_3.device,
+                                        dtype=torch.float16)
         for n, batch in enumerate(data_loader):
             loss = model_3(batch[0], batch[1])
             model_3.backward(loss)
@@ -696,7 +702,11 @@ class TestZeroOneAdamCheckpointing(DistributedTest):
 
         model = SimpleModel(hidden_dim)
         model, _, _, _ = deepspeed.initialize(config=config_dict, model=model, model_parameters=model.parameters())
-        data_loader = random_dataloader(model=model, total_samples=100, hidden_dim=hidden_dim, device=model.device)
+        data_loader = random_dataloader(model=model,
+                                        total_samples=100,
+                                        hidden_dim=hidden_dim,
+                                        device=model.device,
+                                        dtype=torch.float16)
         save_folder = os.path.join(tmpdir, "saved_checkpoint")
         for n, batch in enumerate(data_loader):
             loss = model(batch[0], batch[1])
@@ -873,7 +883,11 @@ class TestOneBitLampExpAvgMask(DistributedTest):
             model=model,
             model_parameters=optimizer_grouped_parameters,
         )
-        data_loader = random_dataloader(model=model, total_samples=50, hidden_dim=hidden_dim, device=model.device)
+        data_loader = random_dataloader(model=model,
+                                        total_samples=50,
+                                        hidden_dim=hidden_dim,
+                                        device=model.device,
+                                        dtype=torch.float16)
         for n, batch in enumerate(data_loader):
             loss = model(batch[0], batch[1])
             model.backward(loss)
@@ -970,12 +984,11 @@ class TestOneBitLambCheckpointing(DistributedTest):
             model=model,
             model_parameters=optimizer_grouped_parameters_1,
         )
-        data_loader = random_dataloader(
-            model=model_1,
-            total_samples=10,
-            hidden_dim=hidden_dim,
-            device=model_1.device,
-        )
+        data_loader = random_dataloader(model=model_1,
+                                        total_samples=10,
+                                        hidden_dim=hidden_dim,
+                                        device=model_1.device,
+                                        dtype=torch.float16)
         for n, batch in enumerate(data_loader):
             loss = model_1(batch[0], batch[1])
             model_1.backward(loss)
@@ -1028,12 +1041,11 @@ class TestOneBitLambCheckpointing(DistributedTest):
             model_parameters=optimizer_grouped_parameters_3,
         )
         optimizer_3.optimizer.freeze_step = 20
-        data_loader = random_dataloader(
-            model=model_3,
-            total_samples=50,
-            hidden_dim=hidden_dim,
-            device=model_3.device,
-        )
+        data_loader = random_dataloader(model=model_3,
+                                        total_samples=50,
+                                        hidden_dim=hidden_dim,
+                                        device=model_3.device,
+                                        dtype=torch.float16)
         for n, batch in enumerate(data_loader):
             loss = model_3(batch[0], batch[1])
             model_3.backward(loss)
@@ -1092,7 +1104,11 @@ class TestOneBitLambCheckpointing(DistributedTest):
 
         model = SimpleModel(hidden_dim)
         model, _, _, _ = deepspeed.initialize(config=config_dict, model=model, model_parameters=model.parameters())
-        data_loader = random_dataloader(model=model, total_samples=100, hidden_dim=hidden_dim, device=model.device)
+        data_loader = random_dataloader(model=model,
+                                        total_samples=100,
+                                        hidden_dim=hidden_dim,
+                                        device=model.device,
+                                        dtype=torch.float16)
         save_folder = os.path.join(tmpdir, "saved_checkpoint")
         for n, batch in enumerate(data_loader):
             loss = model(batch[0], batch[1])
