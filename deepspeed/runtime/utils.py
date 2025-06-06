@@ -1007,6 +1007,37 @@ def all_gather_dp_groups(groups_flat, partitioned_param_groups, dp_process_group
             dist.all_gather(shard_list, shard_list[partition_id], dp_process_group[group_id])
 
 
+def get_tensor_bytes(item):
+    if torch.is_tensor(item):
+        return item.numel() * item.element_size()
+    elif isinstance(item, list):
+        return sum([get_tensor_bytes(v) for v in item])
+    elif isinstance(item, tuple):
+        return sum([get_tensor_bytes(v) for v in item])
+    elif isinstance(item, dict):
+        return sum([get_tensor_bytes(v) for v in item.values()])
+    else:
+        return 0
+
+
+def _get_folder_size(folder):
+    size = 0
+    for path, _, files in os.walk(folder):
+        size += sum([os.path.getsize(os.path.join(path, f)) for f in files])
+    return size
+
+
+def get_checkpoint_folder_size(save_dir, tag, local_rank=None):
+    if local_rank == 0:
+        folder = os.path.join(save_dir, tag)
+        size_tensor = torch.tensor(_get_folder_size(folder)).to(get_accelerator().device_name())
+    else:
+        size_tensor = torch.tensor(0).to(get_accelerator().device_name())
+
+    dist.reduce(tensor=size_tensor, dst=0)
+    return int(size_tensor)
+
+
 class TLinear(torch.nn.Linear):
 
     def __init__(self, orig_layer, name=""):

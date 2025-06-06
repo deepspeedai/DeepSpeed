@@ -6,129 +6,59 @@
 Functionality of swapping optimizer tensors to/from (NVMe) storage devices.
 """
 
-import torch
 import os
 import time
 from deepspeed.ops.aio import AsyncIOBuilder
-from multiprocessing import Pool, Barrier
-from test_ds_aio_utils import report_results, task_log, task_barrier
+from test_ds_aio_utils import task_log, create_filename, create_file, create_page_locked_tensor
+from ds_aio_constants import *
 
 
-def pre_basic(args, tid, read_op):
-    io_string = "Read" if read_op else "Write"
-    num_bytes = os.path.getsize(args.read_file) if read_op else args.write_size
-    file = args.read_file if read_op else f'{args.write_file}.{tid}'
+class AIOBasic_Engine(object):
 
-    task_log(tid, f'Allocate tensor of size {num_bytes} bytes')
-    buffer = torch.empty(num_bytes, dtype=torch.uint8, device='cpu').pin_memory()
-    task_log(tid, f'{io_string} file {file} of size {num_bytes} bytes from buffer on device {buffer.device}')
+    def __init__(self, args, tid, read_op):
+        self.ctxt = self._create_context(args, tid, read_op)
 
-    ctxt = {}
-    ctxt['file'] = file
-    ctxt['num_bytes'] = num_bytes
-    ctxt['buffer'] = buffer
-    ctxt['elapsed_sec'] = 0
+    def fini(self):
+        self.ctxt[BUFFER].detach()
+        self.ctxt[BUFFER] = None
 
-    return ctxt
-
-
-def pre_basic_read(pool_params):
-    args, tid = pool_params
-    ctxt = pre_basic(args, tid, True)
-    return ctxt
-
-
-def pre_basic_write(pool_params):
-    args, tid = pool_params
-    ctxt = pre_basic(args, tid, False)
-    return ctxt
-
-
-def post_basic(pool_params):
-    _, _, ctxt = pool_params
-    ctxt["buffer"].detach()
-    ctxt["buffer"] = None
-    return ctxt
-
-
-def main_basic_read(pool_params):
-    args, tid, ctxt = pool_params
-    start_time = time.time()
-    AsyncIOBuilder().load().aio_read(ctxt['buffer'], ctxt['file'], args.block_size, args.queue_depth,
-                                     args.single_submit, not args.sequential_requests, args.validate)
-    end_time = time.time()
-    ctxt['elapsed_sec'] += end_time - start_time
-
-    return ctxt
-
-
-def main_basic_write(pool_params):
-    args, tid, ctxt = pool_params
-    start_time = time.time()
-    AsyncIOBuilder().load().aio_write(ctxt['buffer'], ctxt['file'], args.block_size, args.queue_depth,
-                                      args.single_submit, not args.sequential_requests, args.validate)
-    end_time = time.time()
-    ctxt['elapsed_sec'] += end_time - start_time
-
-    return ctxt
-
-
-def get_schedule(args, read_op):
-    schedule = {}
-    if read_op:
-        schedule['pre'] = pre_basic_read
-        schedule['post'] = post_basic
-        schedule['main'] = main_basic_read
-    else:
-        schedule['pre'] = pre_basic_write
-        schedule['post'] = post_basic
-        schedule['main'] = main_basic_write
-
-    return schedule
-
-
-def _aio_handle_tasklet(pool_params):
-    args, tid, read_op = pool_params
-    num_processes = len(args.mapping_dict)
-
-    # Create schedule
-    schedule = get_schedule(args, read_op)
-    task_log(tid, f'schedule = {schedule}')
-    task_barrier(aio_barrier, num_processes)
-
-    # Run pre task
-    task_log(tid, f'running pre-task')
-    ctxt = schedule["pre"]((args, tid))
-    task_barrier(aio_barrier, num_processes)
-
-    # Run main tasks in a loop
-    ctxt["main_task_sec"] = 0
-    for i in range(args.loops):
-        task_log(tid, f'running main task {i}')
+    def read(self, args, tid, loop_id):
         start_time = time.time()
-        ctxt = schedule["main"]((args, tid, ctxt))
-        task_barrier(aio_barrier, num_processes)
-        stop_time = time.time()
-        ctxt["main_task_sec"] += stop_time - start_time
+        AsyncIOBuilder().load().aio_read(self.ctxt[BUFFER], self.ctxt[FILE], args.block_size, args.queue_depth,
+                                         args.single_submit, not args.sequential_requests, args.validate)
+        end_time = time.time()
+        self.ctxt[ELAPSED_SEC] += end_time - start_time
 
-    # Run post task
-    task_log(tid, f'running post-task')
-    ctxt = schedule["post"]((args, tid, ctxt))
-    task_barrier(aio_barrier, num_processes)
+    def write(self, args, tid, loop_id):
+        # Avoid overwriting existing files as it could be artificially faster
+        if os.path.isfile(self.ctxt[FILE]):
+            os.remove(self.ctxt[FILE])
 
-    return ctxt["main_task_sec"], ctxt["elapsed_sec"], ctxt["num_bytes"] * args.loops
+        start_time = time.time()
+        AsyncIOBuilder().load().aio_write(self.ctxt[BUFFER], self.ctxt[FILE], args.block_size, args.queue_depth,
+                                          args.single_submit, not args.sequential_requests, args.validate)
+        end_time = time.time()
+        self.ctxt[ELAPSED_SEC] += end_time - start_time
 
+    def _create_context(self, args, tid, read_op):
+        io_string = "Read" if read_op else "Write"
+        device_id, folder = args.mapping_list[tid]
+        filename = create_filename(folder, args.read, args.io_size, tid)
+        if args.read and not (os.path.isfile(filename) and os.path.getsize(filename) == args.io_size):
+            create_file(filename, args.io_size)
 
-def _init_tasklet(b):
-    global aio_barrier
-    aio_barrier = b
+        task_log(tid, f'Allocate tensor of size {args.io_size} bytes')
 
+        buffer = create_page_locked_tensor(args.io_size, True)
 
-def aio_basic_multiprocessing(args, read_op):
-    num_processes = len(args.mapping_dict)
-    b = Barrier(num_processes)
-    pool_params = [(args, p, read_op) for p in range(num_processes)]
-    with Pool(processes=num_processes, initializer=_init_tasklet, initargs=(b, )) as p:
-        pool_results = p.map(_aio_handle_tasklet, pool_params)
+        task_log(tid,
+                 f'{io_string} file {filename} of size {args.io_size} bytes from buffer on device {buffer.device}')
 
-    report_results(args, read_op, pool_results)
+        task_log(tid, f'created deepspeed aio basic engine')
+
+        ctxt = {}
+        ctxt[FILE] = filename
+        ctxt[NUM_BYTES] = args.io_size
+        ctxt[BUFFER] = buffer
+        ctxt[ELAPSED_SEC] = 0
+        return ctxt
