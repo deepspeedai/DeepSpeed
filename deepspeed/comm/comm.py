@@ -242,6 +242,12 @@ def all_gather(tensor_list,
     return cdb.all_gather(tensor_list=tensor_list, tensor=tensor, group=group, async_op=async_op)
 
 
+@timed_op
+def all_gather_object(object_list, obj, group=None, prof=False, log_name='all_gather_object', debug=get_caller_func()):
+    global cdb
+    return cdb.all_gather_object(object_list=object_list, obj=obj, group=group)
+
+
 def has_reduce_scatter_tensor():
     global cdb
     assert cdb is not None and cdb.is_initialized(
@@ -619,6 +625,17 @@ def initialize_mesh_device(mesh_shape, mesh_dim_names):
         if get_rank() == 0:
             utils.logger.warning_once(f"Backend {cdb.name} does not support mesh device initialization")
     return mesh_device
+
+
+def enable_symm_mem_for_group(group_name: str):
+    global cdb
+    assert cdb is not None and cdb.is_initialized(
+    ), 'DeepSpeed backend not set, please initialize it using init_process_group()'
+
+    if hasattr(cdb, 'enable_symm_mem_for_group'):
+        cdb.enable_symm_mem_for_group(group_name)
+    else:
+        raise RuntimeError(f"Backend {cdb.name} does not support symmetric memory initialization")
 
 
 # Main DeepSpeed Comms. public API.

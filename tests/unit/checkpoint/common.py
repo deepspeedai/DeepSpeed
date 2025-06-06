@@ -175,7 +175,7 @@ def checkpoint_correctness_verification(config_dict,
                                         seq_dataloader=False,
                                         load_module_only=False,
                                         dtype=None):
-    if dtype == None:
+    if dtype is None:
         dtype = preferred_dtype()
 
     ds_model = create_deepspeed_model(config_dict=config_dict, model=models[0], base_optimizer=base_optimizers[0])

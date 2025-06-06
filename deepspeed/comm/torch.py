@@ -269,6 +269,10 @@ class TorchBackend(Backend):
                 reqs[-1].wait()
 
     @disable_compiler_collective
+    def all_gather_object(self, object_list, obj, group=None):
+        return torch.distributed.all_gather_object(object_list=object_list, obj=obj, group=group)
+
+    @disable_compiler_collective
     def reduce_scatter_tensor(self, output_tensor, input_tensor, op=ReduceOp.SUM, group=None, async_op=False):
         if self.has_reduce_scatter_tensor():
             return self.reduce_scatter_function(output_tensor,
@@ -408,6 +412,13 @@ class TorchBackend(Backend):
             return torch.distributed.device_mesh.init_device_mesh(get_accelerator().current_device_name(),
                                                                   mesh_shape,
                                                                   mesh_dim_names=mesh_dim_names)
+
+    def enable_symm_mem_for_group(self, group_name):
+        if not required_torch_version(min_version=2.5):
+            raise RuntimeError(f"Torch version must be 2.5 or higher to use symmetric memory. "
+                               f"Current version: {torch.__version__}")
+        from torch.distributed._symmetric_memory import enable_symm_mem_for_group
+        return enable_symm_mem_for_group(group_name)
 
 
 # This will become a light-weight wrapper around torch.distributed functions

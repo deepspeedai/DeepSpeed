@@ -556,8 +556,9 @@ class InsertPostInitMethodToModuleSubClasses(object):
             print_rank_0(
                 "nn.functional.linear has been overridden with a more memory efficient version. This will persist unless manually reset.",
                 force=False)
-            self.linear_bk = torch.nn.functional.linear
-            torch.nn.functional.linear = zero3_linear_wrap
+            if not hasattr(InsertPostInitMethodToModuleSubClasses, "linear_bk"):
+                InsertPostInitMethodToModuleSubClasses.linear_bk = torch.nn.functional.linear
+                torch.nn.functional.linear = zero3_linear_wrap
 
             if self.quantized_initialization:
                 print_rank_0("nn.functional.linear has been overridden with quantized linear version.", force=False)
@@ -869,7 +870,7 @@ class Init(InsertPostInitMethodToModuleSubClasses):
                 using pinned memory for model weights. ``remote_device`` must be
                 ``"cpu"``. Defaults to pin_memory value in config, otherwise ``False``.
             config_dict_or_path (dict or ``json file``, optional): If provided, provides configuration
-                for swapping fp16 params to NVMe.
+                for swapping fp16 params to NVMe and other things like ``dtype``.
             config (dict or ``json file``, optional): Deprecated, use config_dict_or_path instead.
             enabled (bool, optional): If ``False``, this context has no
                 effect. Defaults to ``True``.
@@ -1263,6 +1264,9 @@ class Init(InsertPostInitMethodToModuleSubClasses):
                         ds_process_group,
                     )
                     param.data = param_buffer.narrow(0, 0, param.ds_numel).view(param.ds_shape).to(param.device)
+                    #print_rank_0(f"{param.shape=}", force=True)
+                    #print_rank_0(f"{param_buffer.shape=}", force=True)
+
                     return AllGatherHandle(handles, param)
                 else:
                     if hasattr(param_ds_tensor, "ds_quant_scale"):
@@ -1920,7 +1924,6 @@ class Init(InsertPostInitMethodToModuleSubClasses):
             flat_scale_tensor = torch.empty(scale_tensor_size,
                                             dtype=param_list[0].ds_tensor.ds_quant_scale.dtype,
                                             device=self.local_device)
-            flat_scale_tensor.requires_grad = False
             scale_partitions = []
             for i in range(self.world_size):
                 start = scale_tensor_size * i

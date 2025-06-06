@@ -12,11 +12,12 @@ from torch._utils import _flatten_dense_tensors, _unflatten_dense_tensors
 from deepspeed.runtime.base_optimizer import ZeROOptimizer
 from deepspeed.runtime.fp16.loss_scaler import CreateLossScaler
 from deepspeed.runtime.utils import (empty_cache, see_memory_usage, inf, is_model_parallel_parameter,
-                                     align_dense_tensors, all_gather_dp_groups)
+                                     align_dense_tensors, all_gather_dp_groups, mask_nan_or_inf_with_val_inplace)
 from deepspeed.runtime.zero.config import ZeroStageEnum
 from deepspeed.runtime.zero.offload_config import OffloadDeviceEnum
 from deepspeed.ops.adam import DeepSpeedCPUAdam
 from deepspeed.utils import logger
+from deepspeed.utils.torch import register_grad_hook
 from deepspeed.utils.bwc import bwc_tensor_model_parallel_rank
 from deepspeed.moe.utils import is_moe_param
 from deepspeed.git_version_info import version
@@ -210,7 +211,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
             self._configure_moe_settings()
         self._global_grad_norm = 0.
 
-        if mpu is None:
+        if mpu is None or hasattr(mpu, 'initialize_sequence_parallel'):
             self.model_parallel_group = None
             self.model_parallel_world_size = 1
             self.model_parallel_rank = 0
@@ -256,6 +257,10 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
         # a single 32-bit partition of the parallel partitioned parameters
         # that this process will update
         self.single_partition_of_fp32_groups = []
+
+        # a 16-bit CPU param buffer for cpu offload
+        if self.cpu_offload:
+            self.param_buffer_of_bit16_for_cpu_offload_groups = []
 
         # param partition info
 
@@ -405,6 +410,16 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
 
             if self.cpu_offload:
                 weights_partition = get_accelerator().pin_memory(weights_partition)
+                temp_dtype = self.parallel_partitioned_bit16_groups[i][partition_id].dtype
+                temp_buffer_bit16 = torch.full(weights_partition.shape,
+                                               fill_value=0.0,
+                                               dtype=temp_dtype,
+                                               device=weights_partition.device)
+                if self.cpu_offload_pin_memory:
+                    temp_pinned = get_accelerator().pin_memory(temp_buffer_bit16)
+                    self.param_buffer_of_bit16_for_cpu_offload_groups.append(temp_pinned)
+                else:
+                    self.param_buffer_of_bit16_for_cpu_offload_groups.append(temp_buffer_bit16)
 
             self.single_partition_of_fp32_groups.append(weights_partition)
 
@@ -911,20 +926,16 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
             param.grad = None
 
     def create_gradient_handling_hooks(self):
-        self.grad_accs = []
         for i, param_group in enumerate(self.bit16_groups):
             for param in param_group:
                 if param.requires_grad:
 
                     def wrapper(param, i):
-                        param_tmp = param.expand_as(param)
-                        grad_acc = param_tmp.grad_fn.next_functions[0][0]
 
                         def grad_handling_hook(*notneeded):
                             self.process_gradients(param, i)
 
-                        self._grad_acc_hooks.append(grad_acc.register_hook(grad_handling_hook))
-                        self.grad_accs.append(grad_acc)
+                        self._grad_acc_hooks.append(register_grad_hook(param, grad_handling_hook))
 
                     wrapper(param, i)
 
@@ -975,8 +986,10 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
 
         assert grad_reduc is not None, f"rank {dist.get_rank()} - Invalid to reduce Param {param_id} with None gradient"
 
-        self.grads_in_ipg_bucket.append(grad_reduc)
-        self.params_in_ipg_bucket.append((i, param.param_idx_in_group, param_id))
+        # deal with a use-case of transient grads that will be generated in a loop for the same computation involving some model params - e.g. when performing a tiled memory calculation that shards the normal single sub-module call into a loop over a shards.
+        if getattr(param, "ds_grad_is_ready", True):
+            self.grads_in_ipg_bucket.append(grad_reduc)
+            self.params_in_ipg_bucket.append((i, param.param_idx_in_group, param_id))
 
         #make sure the average tensor function knows how to average the gradients
         if is_moe_param(param):
@@ -1725,12 +1738,8 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
 
             total_norm = total_norm.pow(1. / norm_type)
 
-        norm_is_inf = total_norm.isinf()
-        norm_is_nan = total_norm.isnan()
-        inf_or_nan = norm_is_nan.logical_or(norm_is_inf)
+        mask_nan_or_inf_with_val_inplace(total_norm, device=self.device)
 
-        err = torch.tensor(-1.0, device=self.device, dtype=torch.float)
-        total_norm = inf_or_nan * err + inf_or_nan.logical_not() * total_norm
         return total_norm
 
     # creates a flat fused tensor from the tensor list starting at the first_offset
@@ -1894,8 +1903,9 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
                 #    bit16_partitions[partition_id].data.copy_(fp32_partition.data)
                 bit16_partitions = self.parallel_partitioned_bit16_groups[i]
                 fp32_partition = self.single_partition_of_fp32_groups[i]
-                bit16_partitions[partition_id].data.copy_(
-                    fp32_partition.to(get_accelerator().current_device_name()).data)
+                bit16_partition_buffer = self.param_buffer_of_bit16_for_cpu_offload_groups[i]
+                bit16_partition_buffer.data.copy_(fp32_partition.data)
+                bit16_partitions[partition_id].data.copy_(bit16_partition_buffer.data, non_blocking=True)
 
                 self.timers(OPTIMIZER_STEP_TIMER).stop()
             else:

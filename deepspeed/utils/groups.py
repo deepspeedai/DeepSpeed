@@ -523,7 +523,10 @@ def _get_data_parallel_group():
     if mesh_device is not None:
         return mesh_device.get_group(mesh_dim="data_parallel")
     if mpu is not None:
-        return mpu.get_data_parallel_group()
+        if hasattr(mpu, 'initialize_sequence_parallel'):
+            return None
+        else:
+            return mpu.get_data_parallel_group()
 
     # Return the clone of dist world group
     return _clone_world_group()
@@ -571,16 +574,19 @@ def _get_data_parallel_world_size():
         return dist.get_world_size(mesh_device.get_group(mesh_dim="data_parallel"))
     global mpu
     if mpu is not None:
-        return mpu.get_data_parallel_world_size()
+        if hasattr(mpu, 'initialize_sequence_parallel'):
+            return None
+        else:
+            return mpu.get_data_parallel_world_size()
     return dist.get_world_size(group=_get_data_parallel_group())
 
 
 def _get_model_parallel_world_size():
     """Return world size for the model parallel group."""
     global mpu
-    if mpu is not None:
-        return mpu.get_model_parallel_world_size()
-    return 1
+    if mpu is None or hasattr(mpu, 'initialize_sequence_parallel'):
+        return 1
+    return mpu.get_model_parallel_world_size()
 
 
 def _get_data_parallel_rank():
@@ -589,7 +595,7 @@ def _get_data_parallel_rank():
 
 
 def _get_sequence_parallel_world_size():
-    """Return world size for the model parallel group."""
+    """Return world size for the sequence parallel group."""
     global mpu
     if mesh_device is not None:
         return dist.get_world_size(mesh_device.get_group(mesh_dim="sequence_parallel"))
@@ -599,7 +605,7 @@ def _get_sequence_parallel_world_size():
 
 
 def _get_sequence_parallel_rank():
-    """Return my rank for the data parallel group."""
+    """Return my rank for the sequence parallel group."""
     global mpu
     if mpu is not None and hasattr(mpu, 'get_sequence_parallel_rank'):
         return mpu.get_sequence_parallel_rank()

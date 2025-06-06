@@ -26,35 +26,53 @@ class FlattenedTensorSwapInfo(object):
         self.length = length
 
 
+class SwapTensorContext(object):
+
+    def __init__(self, tensor, swap_folder):
+        self.compute_tensor = tensor
+        self.swap_tensor = torch.Tensor()
+        self.swap_path = os.path.join(swap_folder, f'{OptimizerSwapper.parameter_id(tensor)}.tensor.swp')
+
+    def release_memory(self):
+        self.compute_tensor.data = torch.Tensor()
+        self.swap_tensor.data = torch.Tensor()
+
+    def set_buffers(self, compute_buffer, swap_buffer):
+        self.compute_tensor.data = compute_buffer.data
+        self.swap_tensor.data = swap_buffer.data
+
+
 class OptimizerStateSwapInfo(object):
 
     def __init__(self, parameter, numel, base_folder):
         self.tensors = []
         self.param_id = OptimizerSwapper.parameter_id(parameter)
         self.swap_folder = base_folder
-        self.swap_paths = []
         self.swapped_gradients = {}
         self.unswapped_gradients = {}
         self.tensor_numel = numel
         self.tensor_dtype = parameter.dtype
         self.tensor_device = parameter.device
         self.has_state_tensors = False
+        self.swap_buffers = []
         self._add_tensors([parameter])
 
     def numel(self):
         return self.tensor_numel
 
     def has_gradients(self):
-        return self.swapped_gradients or self.unswapped_gradients
+        return bool(self.swapped_gradients) or bool(self.unswapped_gradients)
 
     def _add_tensors(self, tensor_list):
         for t in tensor_list:
-            self.tensors.append(t)
-            self.swap_paths.append(os.path.join(self.swap_folder, f'{OptimizerSwapper.parameter_id(t)}.tensor.swp'))
+            self.tensors.append(SwapTensorContext(t, self.swap_folder))
 
     def add_state_tensors(self, tensor_list):
         self.has_state_tensors = True
         self._add_tensors(tensor_list)
+
+    def num_tensors(self):
+        return len(self.tensors)
 
     def device(self):
         return self.tensor_device
@@ -63,8 +81,23 @@ class OptimizerStateSwapInfo(object):
         return self.tensor_dtype
 
     def release_memory(self):
-        for tensor in self.tensors:
-            tensor.data = torch.Tensor()
+        for t in self.tensors:
+            t.release_memory()
+
+    def get_compute_tensors(self):
+        return [t.compute_tensor for t in self.tensors]
+
+    def get_swap_paths(self):
+        return [t.swap_path for t in self.tensors]
+
+    def get_swap_buffers_and_paths(self, pinned):
+        swap_buffers = []
+        swap_paths = []
+        select_tensors = [t for t in self.tensors if get_accelerator().is_pinned(t.compute_tensor) == pinned]
+        for t in select_tensors:
+            swap_buffers.append(t.swap_tensor if pinned else t.compute_tensor)
+            swap_paths.append(t.swap_path)
+        return swap_buffers, swap_paths
 
     def get_or_create_gradient_paths(self, offsets, lengths):
         gradient_paths = []
@@ -77,11 +110,15 @@ class OptimizerStateSwapInfo(object):
 
         return gradient_paths
 
-    def set_swap_buffers(self, buffers):
-        compute_lengths = [self.numel()] * len(self.tensors)
+    def set_swap_buffers(self, buffers, aligned_numel):
+        num_tensors = len(self.tensors)
+        compute_lengths = [self.numel()] * num_tensors
         compute_buffers = get_sized_buffers(buffers, compute_lengths)
-        for t, buffer in zip(self.tensors, compute_buffers):
-            t.data = buffer.data
+        swap_lengths = [aligned_numel] * num_tensors
+        swap_buffers = get_sized_buffers(buffers, swap_lengths)
+
+        for i, t in enumerate(self.tensors):
+            t.set_buffers(compute_buffer=compute_buffers[i], swap_buffer=swap_buffers[i])
 
     def get_swap_gradient_buffers(self, swap_buffer):
         assert self.numel() <= swap_buffer.numel()
@@ -91,13 +128,22 @@ class OptimizerStateSwapInfo(object):
         return [grad.path for grad in self.swapped_gradients.values()]
 
     def get_unpinned_state_tensors(self):
-        return [t for t in self.tensors if not get_accelerator().is_pinned(t)]
+        return [t.compute_tensor for t in self.tensors if not get_accelerator().is_pinned(t.compute_tensor)]
 
     def read_unswapped_gradients(self, dest_buffer):
         num_elem_count = 0
         for offset, grad_partition in self.unswapped_gradients.items():
             dst_tensor = dest_buffer.narrow(0, offset, grad_partition.numel())
             dst_tensor.data.copy_(grad_partition.data)
+            num_elem_count += grad_partition.numel()
+
+        return num_elem_count
+
+    def write_unswapped_gradients(self, src_buffer):
+        num_elem_count = 0
+        for offset, grad_partition in self.unswapped_gradients.items():
+            src_tensor = src_buffer.narrow(0, offset, grad_partition.numel())
+            grad_partition.data.copy_(src_tensor.data)
             num_elem_count += grad_partition.numel()
 
         return num_elem_count
@@ -158,10 +204,10 @@ class OptimizerSwapper(object):
             swap_info.tensors = [swap_info.tensors[0]]
             swap_info.has_state_tensors = False
 
-    def swappable_tensor(self, param=None, numel=None):
-        assert param is not None or numel is not None, "Either param or numel must be provided"
-        if param is not None:
-            return self.min_aio_bytes <= (param.numel() * self.swap_element_size)
+    def is_swappable_tensor(self, tensor=None, numel=None):
+        assert tensor is not None or numel is not None, "Either tensor or numel must be provided"
+        if tensor is not None:
+            return self.min_aio_bytes <= (tensor.numel() * self.swap_element_size)
         return self.min_aio_bytes <= (numel * self.swap_element_size)
 
     def init_timers(self):
@@ -201,7 +247,7 @@ class OptimizerSwapper(object):
 
         self._start_timer(SWAP_OUT_GRADIENT_TIMER)
         for tensor, offset in zip(aligned_gradients, aligned_offsets):
-            if not self.swappable_tensor(param=tensor):
+            if not self.is_swappable_tensor(tensor=tensor):
                 swap_info.unswapped_gradients[offset] = tensor
                 continue
 
@@ -355,7 +401,7 @@ class OptimizerSwapper(object):
         ]
         assert len(swap_info_list) == len(num_elems)
 
-        swap_paths = [info.swap_paths[0] for info in swap_info_list]
+        swap_paths = [info.tensors[0].swap_path for info in swap_info_list]
         return swap_paths
 
     def _swap_out_unpinned_tensors(self, aio_handle, unpinned_tensors, dest_paths, pinned_buffers):
@@ -386,7 +432,7 @@ class OptimizerSwapper(object):
         new_offsets = []
 
         for orig_tensor, orig_offset in zip(tensors, offsets):
-            if not self.swappable_tensor(param=orig_tensor):
+            if not self.is_swappable_tensor(tensor=orig_tensor):
                 new_tensors.append(orig_tensor)
                 new_offsets.append(orig_offset)
                 continue
@@ -430,7 +476,7 @@ class OptimizerSwapper(object):
 
         tensor_list = []
         for state_name, value in self.optimizer.state[parameter].items():
-            if torch.is_tensor(value):
+            if torch.is_tensor(value) and self.is_swappable_tensor(tensor=value):
                 value.ds_id = state_name + '-' + parameter.ds_id
                 tensor_list.append(value)
 
