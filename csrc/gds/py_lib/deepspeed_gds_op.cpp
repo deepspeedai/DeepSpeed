@@ -93,18 +93,10 @@ gds_op_desc_t::gds_op_desc_t(const bool read_op,
                              const torch::Tensor& buffer,
                              const int fd,
                              const char* filename,
-                             const int64_t file_num_bytes,
                              const int intra_op_parallelism,
                              const bool validate,
                              const int64_t file_offset)
-    : io_op_desc_t(read_op,
-                   buffer,
-                   fd,
-                   filename,
-                   file_num_bytes,
-                   intra_op_parallelism,
-                   validate,
-                   file_offset)
+    : io_op_desc_t(read_op, buffer, fd, filename, intra_op_parallelism, validate, file_offset)
 {
     _contiguous_buffer = _buffer.contiguous();
     const int64_t device = _buffer.get_device();
@@ -122,8 +114,9 @@ void gds_op_desc_t::validate()
 {
     check_cudaruntimecall(cudaSetDevice(_buffer.get_device()));
     const auto cpu_buffer = _buffer.to(torch::kCPU);
+    const auto num_io_bytes = static_cast<int64_t>(_contiguous_buffer.nbytes());
     validate_aio_operation(
-        _read_op, _filename.c_str(), (char*)(cpu_buffer.data_ptr()), _file_num_bytes);
+        _read_op, _filename.c_str(), (char*)(cpu_buffer.data_ptr()), num_io_bytes);
 }
 
 void gds_op_desc_t::run(const int tid,
@@ -155,7 +148,7 @@ void gds_op_desc_t::_report_error(const ssize_t return_code,
     const auto error_code = IS_CUFILE_ERR(return_code) ? cuFileGetErrorString(return_code)
                                                        : cuFileGetErrorString(error_num);
     std::cerr << op_string << error_string << error_code << " return code = " << return_code
-              << " filename = " << _filename.c_str() << " num bytes = " << _num_bytes_per_thread
+              << " filename = " << _filename << " num bytes = " << _num_bytes_per_thread
               << " offset = " << offset << std::endl;
     exit(EXIT_FAILURE);
 }
