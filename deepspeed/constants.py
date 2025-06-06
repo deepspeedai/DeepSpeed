@@ -19,3 +19,7 @@ TORCH_DISTRIBUTED_DEFAULT_PORT = 29500
 default_pg_timeout = timedelta(minutes=int(os.getenv("DEEPSPEED_TIMEOUT", default=30)))
 INFERENCE_GENERIC_MODE = 'generic'
 INFERENCE_SPECIALIZED_MODE = 'specialized'
+
+CROSS_RANK = "CROSS_RANK"
+CROSS_SIZE = "CROSS_SIZE"
+LOCAL_RANK = 'LOCAL_RANK'

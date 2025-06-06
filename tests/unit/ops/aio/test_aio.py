@@ -35,24 +35,22 @@ def _get_local_rank():
     return 0
 
 
-def _do_ref_write(tmpdir, index=0, file_size=IO_SIZE):
+def _get_file_path(tmpdir, file_prefix, index=0):
     file_suffix = f'{_get_local_rank()}_{index}'
-    ref_file = os.path.join(tmpdir, f'_py_random_{file_suffix}.pt')
-    ref_buffer = os.urandom(file_size)
+    return os.path.join(tmpdir, f'{file_prefix}_{file_suffix}.pt')
+
+
+def _do_ref_write(tmpdir, index=0, num_bytes=IO_SIZE):
+    ref_file = _get_file_path(tmpdir, '_py_random', index)
+    ref_buffer = os.urandom(num_bytes)
     with open(ref_file, 'wb') as f:
         f.write(ref_buffer)
 
     return ref_file, ref_buffer
 
 
-def _get_file_path(tmpdir, file_prefix, index=0):
-    file_suffix = f'{_get_local_rank()}_{index}'
-    return os.path.join(tmpdir, f'{file_prefix}_{file_suffix}.pt')
-
-
 def _get_test_write_file(tmpdir, index):
-    file_suffix = f'{_get_local_rank()}_{index}'
-    return os.path.join(tmpdir, f'_aio_write_random_{file_suffix}.pt')
+    return _get_file_path(tmpdir, '_aio_write_random', index)
 
 
 def _get_test_write_file_and_unpinned_tensor(tmpdir, ref_buffer, index=0):
@@ -332,7 +330,8 @@ class TestAsyncQueue(DistributedTest):
 class TestAsyncFileOffset(DistributedTest):
     world_size = 1
 
-    def test_offset_write(self, tmpdir, file_partitions, use_cuda_pinned_tensor):
+    @pytest.mark.parametrize('use_fd', [False, True])
+    def test_offset_write(self, tmpdir, file_partitions, use_cuda_pinned_tensor, use_fd):
 
         _skip_for_invalid_environment(use_cuda_pinned_tensor=use_cuda_pinned_tensor)
         ref_file = _get_file_path(tmpdir, '_py_random')
@@ -360,7 +359,18 @@ class TestAsyncFileOffset(DistributedTest):
             ref_fd.write(src_buffer.numpy().tobytes())
             ref_fd.flush()
 
-            assert 1 == h.sync_pwrite(buffer=src_buffer, filename=aio_file, file_offset=file_offsets[i])
+            if use_fd:
+                aio_fd = os.open(aio_file, flags=os.O_DIRECT | os.O_CREAT | os.O_WRONLY)
+                write_status = h.async_pwrite(buffer=src_buffer, fd=aio_fd, file_offset=file_offsets[i])
+            else:
+                write_status = h.async_pwrite(buffer=src_buffer, filename=aio_file, file_offset=file_offsets[i])
+            assert write_status == 0
+            wait_status = h.wait()
+            assert wait_status == 1
+
+            if use_fd:
+                os.path.isfile(aio_fd)
+                os.close(aio_fd)
 
             filecmp.clear_cache()
             assert filecmp.cmp(ref_file, aio_file, shallow=False)
