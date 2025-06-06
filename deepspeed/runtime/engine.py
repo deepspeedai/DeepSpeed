@@ -3898,15 +3898,17 @@ class DeepSpeedEngine(Module):
         if 'backend' in compile_kwargs:
             logger.warning("The `backend` in `compile_kwargs` will be overridden. Use the `backend` argument instead.")
 
-        print(f"Compiling deepcompile={self.is_deepcompile_enabled()} backend={backend}")
+        logger.info(f"Compiling deepcompile={self.is_deepcompile_enabled()} backend={backend}")
 
-        if self.is_deepcompile_enabled():
-            assert self.zero_optimization_stage() == ZeroStageEnum.optimizer_states \
-                or self.zero_optimization_stage() == ZeroStageEnum.weights \
-                , "Currently DeepCompile supports stage 1 or 3 only."
+        enable_deepcompile = self.is_deepcompile_enabled()
+        if enable_deepcompile and self.zero_optimization_stage() != ZeroStageEnum.optimizer_states \
+                and self.zero_optimization_stage() != ZeroStageEnum.weights:
+            logger.info(
+                f"Currently DeepCompile supports ZeRO stage 1 or 3 only, but ZeRO stage is set to {self.zero_optimization_stage()}. Falling back to the torch compiler."
+            )
+            enable_deepcompile = False
 
-            assert not isinstance(self.optimizer,
-                                  DeepSpeedZeRoOffload), "Currently DeepCompile is not supported without an optimizer."
+        if enable_deepcompile:
 
             if schedule is not None:
 
