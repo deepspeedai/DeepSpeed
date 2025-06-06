@@ -48,7 +48,7 @@ class FusedAdam(torch.optim.Optimizer):
         A previous version of :class:`FusedAdam` allowed a number of additional arguments to ``step``.  These additional arguments
         are now deprecated and unnecessary.
 
-    Adam was been proposed in `Adam: A Method for Stochastic Optimization`_.
+    Adam was proposed in `Adam: A Method for Stochastic Optimization`_.
 
     Arguments:
         params (iterable): iterable of parameters to optimize or dicts defining
@@ -67,7 +67,7 @@ class FusedAdam(torch.optim.Optimizer):
         set_grad_none (bool, optional): whether set grad to None when zero_grad()
             method is called. (default: True)
 
-    .. _Adam - A Method for Stochastic Optimization:
+    .. _Adam: A Method for Stochastic Optimization:
         https://arxiv.org/abs/1412.6980
     .. _On the Convergence of Adam and Beyond:
         https://openreview.net/forum?id=ryQu7f-RZ
