@@ -37,6 +37,7 @@ struct deepspeed_io_handle_t {
     const bool get_single_submit() const;
     const bool get_overlap_events() const;
     const int get_intra_op_parallelism() const;
+    const int get_alignment() const;
 
     int read(torch::Tensor& buffer,
              const char* filename,
@@ -67,6 +68,7 @@ struct deepspeed_io_handle_t {
     int async_pread(torch::Tensor& buffer, const char* filename, const int64_t file_offset);
 
     int async_pwrite(const torch::Tensor& buffer, const char* filename, const int64_t file_offset);
+    int async_pwrite(const torch::Tensor& buffer, const int fd, const int64_t file_offset);
 
     // TODO: Make API's args to be shape and dtype.
     torch::Tensor new_cpu_locked_tensor(const int64_t num_elem,
@@ -84,11 +86,24 @@ struct deepspeed_io_handle_t {
 
     bool _is_valid_parallel_aio_op(const bool read_op, const int64_t num_bytes);
 
+    int _pread(const torch::Tensor& buffer,
+               const int fd,
+               const char* filename,
+               const bool validate,
+               const bool async,
+               const int64_t file_offset);
+
+    int _pwrite(const torch::Tensor& buffer,
+                const int fd,
+                const char* filename,
+                const bool validate,
+                const bool async,
+                const int64_t file_offset);
+
     virtual std::shared_ptr<struct io_op_desc_t> _create_io_op_desc(const bool read_op,
                                                                     const torch::Tensor& buffer,
                                                                     const int fd,
                                                                     const char* filename,
-                                                                    const int64_t file_num_bytes,
                                                                     const bool validate,
                                                                     const int64_t file_offset);
 };

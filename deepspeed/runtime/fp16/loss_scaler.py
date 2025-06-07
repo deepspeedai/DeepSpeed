@@ -22,6 +22,7 @@ Commit: 93ab4bea59dc5cbf97c079d313741866af4deac9
 """
 
 import torch
+from deepspeed.runtime.config_utils import DeepSpeedConfigObject
 from deepspeed import comm as dist
 from deepspeed.utils import logger
 
@@ -39,12 +40,13 @@ def to_python_float(t):
     return t[0]
 
 
-class LossScalerBase:
+class LossScalerBase(DeepSpeedConfigObject):
     """LossScalarBase
     Base class for a loss scaler
     """
 
     def __init__(self, cur_scale):
+        super(LossScalerBase, self).__init__()
         self.cur_scale = cur_scale
         self.dynamic = False
 

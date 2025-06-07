@@ -43,6 +43,9 @@ from deepspeed.runtime.config import DEEPSPEED_OPTIMIZERS, \
     TORCH_ADAM_PARAM, ADAM_W_MODE, ADAM_W_MODE_DEFAULT, ZERO_ONE_ADAM_OPTIMIZER, MUADAM_OPTIMIZER, MUADAMW_OPTIMIZER, \
     MUSGD_OPTIMIZER, LION_OPTIMIZER
 
+from deepspeed.runtime.model_checkpointing.constants import ValidationMode, \
+    CHECKPOINT_TAG_VALIDATION, CHECKPOINT_WRITER, CHECKPOINT_SERIALIZATION
+
 from deepspeed.runtime.dataloader import DeepSpeedDataLoader
 from deepspeed.runtime.constants import \
     ROUTE_TRAIN, ROUTE_PREDICT, ROUTE_EVAL, \
@@ -62,6 +65,7 @@ from deepspeed.compression.constants import \
     WEIGHT_QUANTIZE_VERBOSE, \
     WEIGHT_QUANTIZE_KERNEL
 from deepspeed.checkpoint.constants import OPTIMIZER_STATE_DICT, FROZEN_PARAM_FRAGMENTS
+from deepspeed.checkpoint.utils import clone_tensors_for_torch_save
 from deepspeed.runtime.sparse_tensor import SparseTensor
 
 from deepspeed.runtime import lr_schedules
@@ -84,11 +88,12 @@ from deepspeed.runtime.data_pipeline.constants import DATA_SAMPLING, \
     RANDOM_LTD_LAYER_TOKEN_LR_SCHEDULE, RANDOM_LTD_LAYER_TOKEN_LR_ENABLED, \
     RANDOM_LTD_GLOBAL_BATCH_SIZE, RANDOM_LTD_MICRO_BATCH_SIZE, DATA_EFFICIENCY
 from deepspeed.runtime.data_pipeline.curriculum_scheduler import CurriculumScheduler
+from deepspeed.runtime.checkpoint_engine import (create_checkpoint_engine, TorchCheckpointEngine, CheckpointCommitInfo)
+
 from deepspeed.runtime.data_pipeline.data_routing.scheduler import RandomLTDScheduler
 from deepspeed.runtime.data_pipeline.data_routing.helper import remove_random_ltd_state_dict
 from deepspeed.runtime.data_pipeline.data_routing.basic_layer import RandomLayerTokenDrop
 
-from deepspeed.runtime.checkpoint_engine.torch_checkpoint_engine import TorchCheckpointEngine
 from deepspeed.utils.zero_to_fp32 import get_fp32_state_dict_from_zero_checkpoint
 
 from .pipe.module import PipelineModule
@@ -351,7 +356,7 @@ class DeepSpeedEngine(Module):
         self.save_non_zero_checkpoint = False
         self.save_zero_checkpoint = False
         if not isinstance(self.optimizer, DeepSpeedZeRoOffload):
-            self._configure_checkpointing(dist_init_required)
+            self._configure_checkpointing()
 
         if self.eigenvalue_enabled():
             self.eigenvalue = self._configure_eigenvalue()
@@ -496,12 +501,18 @@ class DeepSpeedEngine(Module):
                                                                             prepend=True,
                                                                             with_kwargs=True)
 
+    def __del__(self):
+        self.destroy()
+
     def destroy(self):
         if self.optimizer is not None and hasattr(self.optimizer, 'destroy'):
             self.optimizer.destroy()
         if self.is_deepcompile_enabled():
             get_deepcompile_handle().cleanup()
         debug_clear_module_and_param_names()
+
+        if self.checkpoint_engine is not None and self.checkpoint_engine.is_decoupled():
+            self.checkpoint_engine.cleanup()
 
     def _get_model_parameters(self):
         if self.autotuning_profile_model_info():
@@ -605,11 +616,17 @@ class DeepSpeedEngine(Module):
         else:
             raise AttributeError(f"'{type(self).__name__}' object has no attribute '{name}'")
 
+    def checkpoint_serialization_enabled(self):
+        return self._config.checkpoint_config[CHECKPOINT_SERIALIZATION]
+
+    def checkpoint_writer_enabled(self):
+        return self._config.checkpoint_config[CHECKPOINT_WRITER] is not None
+
     def checkpoint_tag_validation_enabled(self):
-        return self._config.checkpoint_tag_validation_enabled
+        return self._config.checkpoint_config[CHECKPOINT_TAG_VALIDATION] != ValidationMode.IGNORE
 
     def checkpoint_tag_validation_fail(self):
-        return self._config.checkpoint_tag_validation_fail
+        return self._config.checkpoint_config[CHECKPOINT_TAG_VALIDATION] == ValidationMode.FAIL
 
     def elasticity_enabled(self):
         return self._config.elasticity_enabled
@@ -1069,27 +1086,22 @@ class DeepSpeedEngine(Module):
 
         log_dist(f'DeepSpeed LR Scheduler = {self.lr_scheduler}', ranks=[0])
 
-    def _configure_checkpointing(self, dist_init_required):
-        self.checkpoint_engine = TorchCheckpointEngine()
-
-        if self._config is not None and self._config.nebula_config.enabled:
-            try:
-                from deepspeed.runtime.checkpoint_engine.nebula_checkpoint_engine import \
-                    NebulaCheckpointEngine
-                self.checkpoint_engine = NebulaCheckpointEngine(config_params=self._config.nebula_config)
-            except ImportError as err:
-                logger.error(f"No torch_nebula was found! Will fall back to torch.save. Details: {err}")
-                self.checkpoint_engine = TorchCheckpointEngine()
+    def _configure_checkpointing(self):
+        # Enable optimization to parallelize checkpointing of DP state
+        optimize_dp_state = not self.zero_optimization_partition_weights()
+        self.checkpoint_engine = create_checkpoint_engine(config_params=self._config,
+                                                          groups=groups,
+                                                          zero_stage=self.zero_optimization_stage(),
+                                                          has_moe_layers=self.has_moe_layers,
+                                                          optimize_dp_state=optimize_dp_state)
 
         dp_rank = groups._get_sequence_data_parallel_rank()
-
         rank = self.local_rank if self.use_node_local_storage() else dp_rank
 
-        # only the first data parallel process needs to store the model checkpoint
-        # if you want to use node local storage this must be done by rank 0 on each
-        # node
-        self.save_non_zero_checkpoint = (rank == 0) or (self.zero_optimization_partition_weights()
-                                                        and self.is_first_weights_partition_group())
+        # Determine if this data parallel process needs to store the model checkpoint
+        if self.checkpoint_engine.is_data_parallel_writer(rank) \
+            or (self.zero_optimization_partition_weights() and self.is_first_weights_partition_group()):
+            self.save_non_zero_checkpoint = True
 
         if self.zero_optimization() or self.bfloat16_enabled():
             param_rank = dist.get_rank(group=self.optimizer.dp_process_group)
@@ -1409,7 +1421,7 @@ class DeepSpeedEngine(Module):
         self._check_for_duplicates(basic_optimizer)
 
         self.basic_optimizer = basic_optimizer
-        log_dist("DeepSpeed Basic Optimizer = {}".format(basic_optimizer.__class__.__name__), ranks=[0])
+        log_dist(f"DeepSpeed Basic Optimizer = {basic_optimizer.__class__.__name__}", ranks=[0])
 
         optimizer_wrapper = self._do_optimizer_sanity_check(basic_optimizer)
 
@@ -1574,10 +1586,12 @@ class DeepSpeedEngine(Module):
         initial_dynamic_scale = self.initial_dynamic_scale()
         dynamic_loss_args = self.dynamic_loss_scale_args()
         clip_grad = self.gradient_clipping()
+
         if APEX_INSTALLED:
             fused_opts = (apex.optimizers.FusedAdam, FusedAdam)
         else:
             fused_opts = FusedAdam
+
         if isinstance(optimizer, fused_opts) \
                 or self.optimizer_name() in [ONEBIT_ADAM_OPTIMIZER, ZERO_ONE_ADAM_OPTIMIZER]:
             if self.dynamic_loss_scale():
@@ -2372,6 +2386,9 @@ class DeepSpeedEngine(Module):
         # Update the model when we reach gradient accumulation boundaries
         if self.is_gradient_accumulation_boundary():
             self.gas_boundary_ctr += 1
+
+            if self.checkpoint_engine.is_decoupled():
+                self._commit_decoupled_checkpoint()
 
             if (self.eigenvalue_enabled() and (self.gas_boundary_ctr % self.eigenvalue_gas_boundary_resolution() == 0)
                     and self.quantizer.any_precision_switch()):
@@ -3317,7 +3334,9 @@ class DeepSpeedEngine(Module):
 
         # Ensure tag is a string
         tag = str(tag)
-        self.checkpoint_engine.create(tag)
+        commit_info = CheckpointCommitInfo(tag=tag, save_dir=save_dir, save_latest=save_latest)
+
+        self.checkpoint_engine.create(commit_info)
 
         # Ensure checkpoint tag is consistent across ranks
         self._checkpoint_tag_validation(tag)
@@ -3364,14 +3383,31 @@ class DeepSpeedEngine(Module):
             self.optimizer.checkpoint_event_epilogue()
 
         # Save latest checkpoint tag
-        self.checkpoint_engine.commit(tag)
-        if save_latest and rank == 0:
-            with open(os.path.join(save_dir, 'latest'), 'w') as fd:
-                fd.write(tag)
+        if not self.checkpoint_engine.is_decoupled():
+            self.checkpoint_engine.commit(tag)
+            if save_latest and self.global_rank == 0:
+                with open(os.path.join(save_dir, 'latest'), 'w') as fd:
+                    fd.write(tag)
 
         dist.barrier()
 
         return True
+
+    def _commit_decoupled_checkpoint(self):
+        assert self.checkpoint_engine.is_decoupled(), \
+            f'{self.checkpoint_engine} is not a Decoupled Checkpoint Engine'
+
+        commit_info = self.checkpoint_engine.get_commit_info()
+        if commit_info is None:
+            return
+
+        self.checkpoint_engine.commit(commit_info)
+
+        if self.global_rank == 0 and commit_info.save_latest:
+            with open(os.path.join(commit_info.save_dir, 'latest'), 'w') as fd:
+                fd.write(commit_info.tag)
+
+        dist.barrier()
 
     def _get_non_moe_state_dict(self, full_state_dict):
         """
@@ -3385,6 +3421,7 @@ class DeepSpeedEngine(Module):
 
     def _save_moe_checkpoint(self, save_dir, tag, client_state={}, exclude_frozen_parameters=False):
         save_path = self._get_ckpt_name(save_dir, tag)
+
         # A hack to save the checkpointing directory. Pipeline parallelism overrides
         # module_state_dict() and uses this path to save the model. module_state_dict()
         # then instead just returns None.
@@ -3398,7 +3435,8 @@ class DeepSpeedEngine(Module):
                 expp_rank = groups._get_expert_parallel_rank(group_name)
                 exp_dp_rank = groups._get_expert_data_parallel_rank(group_name)
                 # print(expp_rank, exp_dp_rank)
-                if exp_dp_rank != 0:
+                # if exp_dp_rank != 0:
+                if not self.checkpoint_engine.is_data_parallel_writer(exp_dp_rank):
                     moe_layer_id += 1
                     continue
 
@@ -3434,7 +3472,8 @@ class DeepSpeedEngine(Module):
                     moe_save_path = self._get_expert_ckpt_name(save_dir, moe_layer_id, global_expert_id, tag, self.mpu)
                     if self.random_ltd_enabled():
                         expert_state_dict = remove_random_ltd_state_dict(expert_state_dict)
-                    self.checkpoint_engine.save(expert_state_dict, moe_save_path)
+                    saveable_state_dict = clone_tensors_for_torch_save(expert_state_dict)
+                    self.checkpoint_engine.save(saveable_state_dict, moe_save_path)
                 moe_layer_id += 1
 
         self._curr_ckpt_path = os.path.join(save_dir, tag)
@@ -3446,14 +3485,17 @@ class DeepSpeedEngine(Module):
         # In the case of E + D parallelism, only the
         # first expert parallel group should save the expert weights
         # since each expert parallel group is a copy of the model's experts
-        if exp_dp_rank == 0:
-            # Save optimizer states. They are different across each exp parallel rank.
-            optimizer_state = {
-                'optimizer': self.optimizer.state_dict() if self.optimizer and not self.zero_optimization() else None
-            }
-            # TODO: why use BufferedWriter not the path
-            file_path = self._get_optimizer_ckpt_name(save_dir, tag, expp_rank)
-            self.checkpoint_engine.save(optimizer_state, file_path)
+        if not self.checkpoint_engine.is_data_parallel_writer(exp_dp_rank):
+            return
+
+        # Save optimizer states. They are different across each exp parallel rank.
+        optimizer_state = {
+            'optimizer': self.optimizer.state_dict() if self.optimizer and not self.zero_optimization() else None
+        }
+        # TODO: why use BufferedWriter not the path
+        file_path = self._get_optimizer_ckpt_name(save_dir, tag, expp_rank)
+        saveable_state_dict = clone_tensors_for_torch_save(optimizer_state)
+        self.checkpoint_engine.save(saveable_state_dict, file_path)
 
         # Load flow uses below saved file for model parameters, RNG and more
         if groups._get_data_parallel_rank() == 0:
@@ -3492,7 +3534,8 @@ class DeepSpeedEngine(Module):
             }
             state.update(client_state)
             logger.info(f'Saving model checkpoint: {save_path}')
-            self.checkpoint_engine.save(state, save_path)
+            saveable_state_dict = clone_tensors_for_torch_save(state)
+            self.checkpoint_engine.save(saveable_state_dict, save_path)
 
     def _create_checkpoint_file(self, save_dir, tag, zero_checkpoint):
         name_function = (self._get_zero_ckpt_name if zero_checkpoint else self._get_ckpt_name)
@@ -3512,8 +3555,6 @@ class DeepSpeedEngine(Module):
         for rank in range(dist.get_world_size(self.optimizer.dp_process_group)):
             if rank == self.global_rank:
                 success = self._create_checkpoint_file(save_dir, tag, True)
-
-            dist.barrier(group=self.optimizer.dp_process_group)
 
         return success
 
@@ -3555,10 +3596,10 @@ class DeepSpeedEngine(Module):
                      ds_config=self.config,
                      ds_version=version)
         state.update(client_state)
+        log_dist(message=f'Saving model checkpoint: {save_path}', ranks=[0])
 
         if self.save_non_zero_checkpoint:
-            log_dist(message=f'Saving model checkpoint: {save_path}', ranks=[0, 1])
-            self.checkpoint_engine.save(state, save_path)
+            self.checkpoint_engine.save(state_dict=state, path=save_path)
 
     def _get_buffer_names(self):
         buffer_names = []
@@ -3709,7 +3750,7 @@ class DeepSpeedEngine(Module):
         if self.global_rank == 0:
             self._copy_recovery_script(save_path)
         ckpt_type = 'zero' if self.zero_optimization() else 'bf16_zero'
-        logger.info(f'{ckpt_type} checkpoint saved {zero_checkpoint_name}')
+        #logger.info(f'{ckpt_type} checkpoint saved {zero_checkpoint_name}')
 
     def _replace_module_consolidated_state_dict(self):
         """
@@ -3864,7 +3905,8 @@ class DeepSpeedEngine(Module):
 
         tag = f"global_step{self.global_steps}"
         tag = str(tag)
-        self.checkpoint_engine.create(tag)
+        commit_info = CheckpointCommitInfo(tag=tag, save_dir=save_dir, save_latest=False)
+        self.checkpoint_engine.create(commit_info)
 
         if dist.get_rank() == 0:
             self.checkpoint_engine.makedirs(save_dir, exist_ok=True)

@@ -17,7 +17,7 @@ from perf_sweep_utils import READ_OP_DESC, WRITE_OP_DESC, BENCH_LOG_DIR, \
     READ_LOG_DIR, WRITE_LOG_DIR
 from deepspeed.ops.op_builder import AsyncIOBuilder
 
-OTHER_OPTIONS = '--handle'
+OTHER_OPTIONS = '--engine aio_handle'
 PERF_SCRIPT = 'test_ds_aio.py'
 DEFAULT_SWEEP_CONFIG = {
     "block_size": ["128K", "1M"],
@@ -109,6 +109,20 @@ def get_sweep_config_dict(sweep_config_json):
     return sweep_config
 
 
+QUEUE_DEPTH = "--queue_depth"
+BLOCK_SIZE = "--block_size"
+SINGLE_SUBMIT = "--single_submit"
+SEQUENTIAL_REQUESTS = "--sequential_requests"
+THREAD_COUNT = "--threads"
+IO_PARALLEL = "--io_parallel"
+
+DEPRECATED_KEYS = {THREAD_COUNT: "multi_process"}
+
+
+def _handle_key_deprecation(key):
+    return DEPRECATED_KEYS.get(f'--{key}', key)
+
+
 def get_sweep_cmd_lines(sweep_config_dict):
 
     def flatten_options(key, value_list):
@@ -123,7 +137,7 @@ def get_sweep_cmd_lines(sweep_config_dict):
 
         return flat_list
 
-    flat_list = [flatten_options(key, value) for key, value in sweep_config_dict.items()]
+    flat_list = [flatten_options(_handle_key_deprecation(key), value) for key, value in sweep_config_dict.items()]
     cmd_list = list(itertools.product(*flat_list))
     cmd_list = [list(cmd) for cmd in cmd_list]
     #dump_cmd_lines(cmd_list)

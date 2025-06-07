@@ -62,6 +62,7 @@ from ..nebula.config import DeepSpeedNebulaConfig
 from ..compression.config import get_compression_config, get_quantize_enabled
 from ..compression.constants import *
 from .swap_tensor.aio_config import get_aio_config
+from .model_checkpointing.config import get_checkpoint_config
 
 from .tensor_parallel import get_tensor_parallel_config
 from .data_pipeline.config import get_data_efficiency_enabled, get_data_efficiency_config, get_curriculum_enabled_legacy, get_curriculum_params_legacy
@@ -918,6 +919,7 @@ class DeepSpeedConfig(object):
         self.dataloader_drop_last = get_dataloader_drop_last(param_dict)
 
         self.nebula_config = DeepSpeedNebulaConfig(param_dict)
+        self.checkpoint_config = get_checkpoint_config(param_dict)
 
         self.weight_quantization_config = WeightQuantConfig(
             **param_dict['weight_quantization']) if 'weight_quantization' in param_dict else None
