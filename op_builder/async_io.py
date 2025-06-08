@@ -6,6 +6,7 @@
 import os
 import shutil
 import subprocess
+import sys
 
 from .builder import TorchCPUOpBuilder
 
@@ -94,6 +95,12 @@ class AsyncIOBuilder(TorchCPUOpBuilder):
         return found
 
     def is_compatible(self, verbose=False):
+        # AIO is not supported on Windows
+        if sys.platform == "win32":
+            if verbose:
+                self.warning(f"{self.NAME} is not supported on Windows")
+            return False
+
         # Check for the existence of libaio by using distutils
         # to compile and link a test program that calls io_submit,
         # which is a function provided by libaio that is used in the async_io op.
