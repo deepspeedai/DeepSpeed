@@ -4,6 +4,7 @@
 # DeepSpeed Team
 
 import os
+import sys
 from .async_io import AsyncIOBuilder
 
 
@@ -36,6 +37,12 @@ class GDSBuilder(AsyncIOBuilder):
         return super().extra_ldflags() + ['-lcufile']
 
     def is_compatible(self, verbose=False):
+        # GDS is not supported on Windows
+        if sys.platform == "win32":
+            if verbose:
+                self.warning(f'{self.NAME} is not supported on Windows')
+            return False
+
         if self.is_rocm_pytorch():
             if verbose:
                 self.warning(f'{self.NAME} is not compatible with ROCM')
