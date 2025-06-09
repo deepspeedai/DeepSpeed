@@ -117,7 +117,9 @@ SPARSE_GRADIENTS_DEFAULT = False
 BFLOAT16_FORMAT = '''
 BFLOAT16 parameters should be of the format:
 "bf16": {
-  "enabled": true
+  "enabled": true,
+  "immediate_grad_update": false,
+  "check_overflow": false
 }
 '''
 BFLOAT16 = "bf16"
@@ -125,6 +127,9 @@ BFLOAT16_OLD = "bfloat16"  # keeping for backwards compatibility
 
 BFLOAT16_ENABLED = "enabled"
 BFLOAT16_ENABLED_DEFAULT = False
+
+CHECK_OVERFLOW = "check_overflow"
+BFLOAT16_CHECK_OVERFLOW_DEFAULT = False
 
 # BFLOAT16 optimizer immediate gradient update
 BFLOAT16_IMMEDIATE_GRAD_UPDATE = "immediate_grad_update"

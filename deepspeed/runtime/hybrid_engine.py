@@ -78,9 +78,9 @@ class DeepSpeedHybridEngine(DeepSpeedEngine):
     def new_inference_container(self, orig_layer, policy_cls, layer_id):
         policy = policy_cls(orig_layer, inference=True)
 
-        if self._config.fp16_enabled:
+        if self._config.float16_config.enabled:
             inference_dtype = torch.float16
-        elif self._config.bfloat16_enabled:
+        elif self._config.bfloat16_config.enabled:
             inference_dtype = torch.bfloat16
         else:
             inference_dtype = torch.float32

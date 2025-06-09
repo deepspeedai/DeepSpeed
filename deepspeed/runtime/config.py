@@ -14,13 +14,6 @@ import copy
 import base64
 
 from .constants import *
-from .fp16.loss_scaler import (
-    INITIAL_LOSS_SCALE,
-    SCALE_WINDOW,
-    DELAYED_SHIFT,
-    CONSECUTIVE_HYSTERESIS,
-    MIN_LOSS_SCALE,
-)
 from .config_utils import (
     get_scalar_param,
     dict_raise_error_on_duplicate_keys,
@@ -31,6 +24,7 @@ from .activation_checkpointing.config import DeepSpeedActivationCheckpointingCon
 from ..comm.config import DeepSpeedCommsConfig
 from ..monitor.config import get_monitor_config
 from ..inference.config import WeightQuantConfig
+from .precision_config import get_bfloat16_config, get_float16_config
 from ..compile.config import CompileConfig
 
 from deepspeed import comm as dist
@@ -157,90 +151,6 @@ def get_amp_params(param_dict):
         return amp_params
     else:
         return False
-
-
-def get_fp16_enabled(param_dict):
-    if FP16 in param_dict.keys():
-        return get_scalar_param(param_dict[FP16], FP16_ENABLED, FP16_ENABLED_DEFAULT)
-    else:
-        return False
-
-
-def get_bfloat16_enabled(param_dict):
-    for key in [BFLOAT16, BFLOAT16_OLD]:
-        if key in param_dict.keys():
-            return get_scalar_param(param_dict[key], BFLOAT16_ENABLED, BFLOAT16_ENABLED_DEFAULT)
-    return False
-
-
-def get_bfloat16_immediate_grad_update(param_dict):
-    for key in [BFLOAT16, BFLOAT16_OLD]:
-        if key in param_dict.keys():
-            return get_scalar_param(param_dict[key], BFLOAT16_IMMEDIATE_GRAD_UPDATE,
-                                    BFLOAT16_IMMEDIATE_GRAD_UPDATE_DEFAULT)
-    return False
-
-
-def get_fp16_master_weights_and_grads_enabled(param_dict):
-    if get_fp16_enabled(param_dict):
-        return get_scalar_param(param_dict[FP16], FP16_MASTER_WEIGHTS_AND_GRADS, FP16_MASTER_WEIGHTS_AND_GRADS_DEFAULT)
-    else:
-        return False
-
-
-def get_fp16_auto_cast(param_dict):
-    if get_fp16_enabled(param_dict):
-        return get_scalar_param(param_dict[FP16], FP16_AUTO_CAST, FP16_AUTO_CAST_DEFAULT)
-
-
-def get_loss_scale(param_dict):
-    if get_fp16_enabled(param_dict):
-        return get_scalar_param(param_dict[FP16], FP16_LOSS_SCALE, FP16_LOSS_SCALE_DEFAULT)
-    elif get_bfloat16_enabled(param_dict):
-        return 1.0
-    else:
-        return FP16_LOSS_SCALE_DEFAULT
-
-
-def get_initial_dynamic_scale(param_dict):
-    if get_fp16_enabled(param_dict):
-        initial_scale_power = get_scalar_param(param_dict[FP16], FP16_INITIAL_SCALE_POWER,
-                                               FP16_INITIAL_SCALE_POWER_DEFAULT)
-    elif get_bfloat16_enabled(param_dict):
-        initial_scale_power = 0
-    else:
-        initial_scale_power = FP16_INITIAL_SCALE_POWER_DEFAULT
-
-    return 2**initial_scale_power
-
-
-def get_dynamic_loss_scale_args(param_dict):
-    loss_scale_args = None
-    if get_fp16_enabled(param_dict):
-        fp16_dict = param_dict[FP16]
-        dynamic_loss_args = [
-            FP16_INITIAL_SCALE_POWER,
-            FP16_LOSS_SCALE_WINDOW,
-            FP16_MIN_LOSS_SCALE,
-            FP16_HYSTERESIS,
-            FP16_CONSECUTIVE_HYSTERESIS,
-        ]
-        if any(arg in list(fp16_dict.keys()) for arg in dynamic_loss_args):
-            init_scale = get_scalar_param(fp16_dict, FP16_INITIAL_SCALE_POWER, FP16_INITIAL_SCALE_POWER_DEFAULT)
-            scale_window = get_scalar_param(fp16_dict, FP16_LOSS_SCALE_WINDOW, FP16_LOSS_SCALE_WINDOW_DEFAULT)
-            delayed_shift = get_scalar_param(fp16_dict, FP16_HYSTERESIS, FP16_HYSTERESIS_DEFAULT)
-            consecutive_hysteresis = get_scalar_param(fp16_dict, FP16_CONSECUTIVE_HYSTERESIS,
-                                                      FP16_CONSECUTIVE_HYSTERESIS_DEFAULT)
-            min_loss_scale = get_scalar_param(fp16_dict, FP16_MIN_LOSS_SCALE, FP16_MIN_LOSS_SCALE_DEFAULT)
-            loss_scale_args = {
-                INITIAL_LOSS_SCALE: 2**init_scale,
-                SCALE_WINDOW: scale_window,
-                DELAYED_SHIFT: delayed_shift,
-                CONSECUTIVE_HYSTERESIS: consecutive_hysteresis,
-                MIN_LOSS_SCALE: min_loss_scale,
-            }
-
-    return loss_scale_args
 
 
 def get_gradient_accumulation_steps(param_dict):
@@ -837,18 +747,13 @@ class DeepSpeedConfig(object):
         self.monitor_config = get_monitor_config(param_dict)
 
         self.gradient_clipping = get_gradient_clipping(param_dict)
-        self.fp16_enabled = get_fp16_enabled(param_dict)
-        self.fp16_auto_cast = get_fp16_auto_cast(param_dict)
-        self.bfloat16_enabled = get_bfloat16_enabled(param_dict)
-        self.bfloat16_immediate_grad_update = get_bfloat16_immediate_grad_update(param_dict)
-        assert not (self.fp16_enabled
-                    and self.bfloat16_enabled), 'bfloat16 and fp16 modes cannot be simultaneously enabled'
-        self.fp16_master_weights_and_gradients = get_fp16_master_weights_and_grads_enabled(param_dict)
+        self.float16_config = get_float16_config(param_dict)
+        self.bfloat16_config = get_bfloat16_config(param_dict)
+        assert not (self.float16_config.enabled
+                    and self.bfloat16_config.enabled), 'bfloat16 and fp16 modes cannot be simultaneously enabled'
+
         self.amp_enabled = get_amp_enabled(param_dict)
         self.amp_params = get_amp_params(param_dict)
-        self.loss_scale = get_loss_scale(param_dict)
-        self.initial_dynamic_scale = get_initial_dynamic_scale(param_dict)
-        self.dynamic_loss_scale_args = get_dynamic_loss_scale_args(param_dict)
 
         self.compression_config = get_compression_config(param_dict)
         self.graph_harvesting = get_graph_harvesting(param_dict)
@@ -1033,11 +938,11 @@ class DeepSpeedConfig(object):
                     <= ZeroStageEnum.max_stage), "DeepSpeedConfig: Maximum supported ZeRO stage is {}".format(
                         ZeroStageEnum.max_stage)
 
-        if self.fp16_master_weights_and_gradients:
+        if self.float16_config.fp16_master_weights_and_grads:
             assert self.zero_enabled and self.zero_optimization_stage == ZeroStageEnum.gradients, "Fp16_master_weights_and_grads is only supported with ZeRO Stage 2 for now."
 
     def _do_warning_check(self):
-        fp16_enabled = self.fp16_enabled
+        fp16_enabled = self.float16_config.enabled
 
         vocabulary_size = self._param_dict.get(VOCABULARY_SIZE, VOCABULARY_SIZE_DEFAULT)
         if vocabulary_size and vocabulary_size % TENSOR_CORE_ALIGN_SIZE != 0:
