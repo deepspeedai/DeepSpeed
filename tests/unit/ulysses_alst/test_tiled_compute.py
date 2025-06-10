@@ -3,7 +3,7 @@
 
 # DeepSpeed Team
 """
-UlyssesPlus: Tiled compute tests
+Arctic Long Sequence Training (ALST) Tiled compute component tests
 """
 
 from deepspeed.runtime.sequence_parallel.ulysses_sp import TiledMLP, sequence_tiled_compute
