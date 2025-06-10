@@ -90,7 +90,7 @@ class TestTpParallelStates(DistributedTest):
 @pytest.mark.parametrize("tp_size", [2, 4])
 class TestTpDataloaderCorrectness(DistributedTest):
     world_size = 4
-    reuse_dist_env = False
+    reuse_dist_env = True
 
     def test(self, tp_size: int):
         skip_on_device()
@@ -169,7 +169,7 @@ def process_linear_layer(hidden_dim, input):
 @pytest.mark.parametrize("tp_overlap_comm", [True, False])
 class TestTpLayerFwdBwd(DistributedTest):
     world_size = 4
-    reuse_dist_env = False
+    reuse_dist_env = True
 
     def testRowParallel(self, tp_size: int, tp_overlap_comm: bool):
         skip_on_device()
@@ -285,7 +285,7 @@ class TestTpLayerFwdBwd(DistributedTest):
 # @pytest.mark.sequential
 class TestParamsGather(DistributedTest):
     world_size = 4
-    reuse_dist_env = False
+    reuse_dist_env = True
 
     @pytest.mark.parametrize("layer_type", ["linear", "linearallreduce"])
     def test(self, layer_type):
@@ -392,7 +392,7 @@ def prepare_tp_model(hidden_dim, nlayers, linear_indices, allreduce_indices, gro
 class TestSave(DistributedTest):
 
     world_size = 4
-    reuse_dist_env = False
+    reuse_dist_env = True
 
     def test_save_original_weight(self, tp_size: int, zero_stage: int):
         skip_on_device()
@@ -524,7 +524,7 @@ class TestSave(DistributedTest):
 class TestTpGradNorm(DistributedTest):
 
     world_size = 4
-    reuse_dist_env = False
+    reuse_dist_env = True
 
     def test(self, tp_size: int, zero_stage: int):
         skip_on_device()
