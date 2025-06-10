@@ -266,7 +266,7 @@ class DistributedExec(ABC):
 
         if get_accelerator().device_name() == 'xpu':
             self.non_daemonic_procs = True
-            self.reuse_dist_env = False
+            self.reuse_dist_env = True
 
         # Set start method to `forkserver` (or `fork`)
         mp.set_start_method('forkserver', force=True)
