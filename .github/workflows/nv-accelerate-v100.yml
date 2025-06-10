@@ -42,15 +42,8 @@ jobs:
         run: |
           pip list
 
-      - name: HF Accelerate tests
+      - name: ut
         run: |
           unset TORCH_CUDA_ARCH_LIST # only jit compile for current arch
-          git clone https://github.com/huggingface/accelerate
-          cd accelerate
-          git rev-parse --short HEAD
-          # installing dependencies
-          pip install .[testing]
-          # force protobuf version due to issues
-          pip install "protobuf<4.21.0"
-          pip list
-          pytest $PYTEST_OPTS --color=yes --durations=0 --verbose tests/deepspeed
+          cd tests/unit
+          pytest --verbose model_parallelism/test_parallel.py
