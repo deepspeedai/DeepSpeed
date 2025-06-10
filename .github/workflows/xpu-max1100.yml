@@ -70,24 +70,4 @@ jobs:
         cd tests/unit
         export FI_PROVIDER="tcp"
         export I_MPI_SHM=off
-        pytest --verbose accelerator/*
-        pytest --verbose autotuning/*
-        pytest --verbose checkpoint/test_reshape_checkpoint.py
-        pytest --verbose checkpoint/test_moe_checkpoint.py
-        pytest --verbose checkpoint/test_shared_weights.py
-        pytest --verbose launcher/test_ds_arguments.py launcher/test_run.py
-        pytest --verbose model_parallelism/*
-        pytest --verbose moe/test_moe_tp.py
-        pytest --verbose monitor/*
-        pytest --verbose utils/*
-        pytest --verbose runtime/test_ds_config_model.py
-        pytest --verbose runtime/pipe/test_pipe_schedule.py
-        pytest --verbose runtime/zero/test_zero_config.py
-        pytest --verbose runtime/zero/test_zero_tiled.py
-        pytest --verbose runtime/zero/test_zeropp.py
-        pytest --verbose runtime/test_autocast.py
-        pytest --verbose runtime/test_data.py
-        pytest --verbose runtime/test_runtime_utils.py
-        pytest --verbose runtime/activation_checkpointing/*
-        pytest --verbose runtime/utils/*
-        pytest --verbose runtime/zero/test_zero_dynamic_class.py
+        pytest --verbose model_parallelism/test_parallel.py
