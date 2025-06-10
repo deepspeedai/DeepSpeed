@@ -16,7 +16,7 @@ Please go through the [original tutorial](https://pytorch.org/tutorials/beginner
 
 ## Enabling DeepSpeed
 
-The codes may be obtained [here](https://github.com/microsoft/DeepSpeedExamples/tree/master/gan).
+The codes may be obtained [here](https://github.com/deepspeedai/DeepSpeedExamples/tree/master/gan).
 
 ### Argument Parsing
 

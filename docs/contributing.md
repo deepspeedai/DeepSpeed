@@ -27,7 +27,7 @@ and then repeat the previous `git commit` command.
 ## Testing
 DeepSpeed tracks two types of tests: unit tests and more costly model convergence tests.
 The model convergence tests train
-[DeepSpeedExamples](https://github.com/microsoft/DeepSpeedExamples/) and measure
+[DeepSpeedExamples](https://github.com/deepspeedai/DeepSpeedExamples/) and measure
 end-to-end convergence and related metrics. Unit tests are found in `tests/unit/` and
 the model convergence tests are found in `tests/model/`.
 
@@ -44,10 +44,10 @@ tests. Note that [pytest-forked](https://github.com/pytest-dev/pytest-forked) an
 
 ### Model Tests
 Model tests require four GPUs and training data downloaded for
-[DeepSpeedExamples](https://github.com/microsoft/DeepSpeedExamples/).
+[DeepSpeedExamples](https://github.com/deepspeedai/DeepSpeedExamples/).
 
 To execute model tests, first [install DeepSpeed](/getting-started/#installation). The
-[DeepSpeedExamples](https://github.com/microsoft/DeepSpeedExamples/) repository is cloned
+[DeepSpeedExamples](https://github.com/deepspeedai/DeepSpeedExamples/) repository is cloned
 as part of this process. Next, execute the model test driver:
 ```bash
 cd tests/model/

@@ -3,7 +3,7 @@
 
 # DeepSpeed Team
 
-import distutils.spawn
+import shutil
 import subprocess
 
 from .builder import OpBuilder
@@ -21,11 +21,18 @@ class AsyncIOBuilder(OpBuilder):
 
     def sources(self):
         return [
-            'csrc/aio/py_lib/deepspeed_py_copy.cpp', 'csrc/aio/py_lib/py_ds_aio.cpp',
-            'csrc/aio/py_lib/deepspeed_py_aio.cpp', 'csrc/aio/py_lib/deepspeed_py_aio_handle.cpp',
-            'csrc/aio/py_lib/deepspeed_aio_thread.cpp', 'csrc/aio/common/deepspeed_aio_utils.cpp',
-            'csrc/aio/common/deepspeed_aio_common.cpp', 'csrc/aio/common/deepspeed_aio_types.cpp',
-            'csrc/aio/py_lib/deepspeed_pin_tensor.cpp'
+            'csrc/aio/py_lib/deepspeed_py_copy.cpp',
+            'csrc/aio/py_lib/py_ds_aio.cpp',
+            'csrc/aio/py_lib/deepspeed_py_aio.cpp',
+            'csrc/aio/py_lib/deepspeed_py_aio_handle.cpp',
+            'csrc/aio/py_lib/deepspeed_aio_thread.cpp',
+            'csrc/aio/common/deepspeed_aio_utils.cpp',
+            'csrc/aio/common/deepspeed_aio_common.cpp',
+            'csrc/aio/common/deepspeed_aio_types.cpp',
+            'csrc/aio/py_lib/deepspeed_pin_tensor.cpp',
+            'csrc/aio/py_lib/deepspeed_py_io_handle.cpp',
+            'csrc/aio/py_lib/deepspeed_cpu_op.cpp',
+            'csrc/aio/py_lib/deepspeed_aio_op_desc.cpp',
         ]
 
     def include_paths(self):
@@ -68,7 +75,7 @@ class AsyncIOBuilder(OpBuilder):
         found = False
         for pkgmgr, data in libs.items():
             flag, lib, tool = data
-            path = distutils.spawn.find_executable(pkgmgr)
+            path = shutil.which(pkgmgr)
             if path is not None:
                 cmd = [pkgmgr, flag, lib]
                 result = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)

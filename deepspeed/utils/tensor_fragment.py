@@ -6,7 +6,7 @@
 import torch
 from dataclasses import dataclass
 from deepspeed import comm as dist
-from typing import Dict
+from typing import Dict, List, Callable
 
 
 @dataclass
@@ -57,6 +57,17 @@ class tensor_fragment:
             return self.hp_fragment
         return self.get_optim_state_fragment(optim_state_key)
 
+    def get_lp_grad_fragment(self, index_in_param_group):
+        if self.use_offload:
+            gradient_dict = self.offload_gradient_dict
+        else:
+            gradient_dict = self.gradient_dict
+
+        if self.param_group_index not in gradient_dict or gradient_dict[self.param_group_index] is None:
+            raise ValueError("Gradients are only available immediately after backward and before engine step")
+
+        return gradient_dict[self.param_group_index][index_in_param_group]
+
 
 def map_to_flat_opt_states(flat_hp_tensor, lp_tensors, optim_state, opt_keys):
     for key in opt_keys:
@@ -95,17 +106,7 @@ def set_full_hp_param(self, value, optim_state_key=None):
 def get_full_hp_grad(self):
     reduce_buffer = torch.zeros_like(self, dtype=torch.float32).flatten()
     if self._hp_mapping is not None:
-        hp_mapping = self._hp_mapping
-
-        if hp_mapping.use_offload:
-            gradient_dict = hp_mapping.offload_gradient_dict
-        else:
-            gradient_dict = hp_mapping.gradient_dict
-
-        if hp_mapping.param_group_index not in gradient_dict or gradient_dict[hp_mapping.param_group_index] is None:
-            raise ValueError("Gradients are only available immediately after backward and before engine step")
-
-        lp_grad_fragment = gradient_dict[hp_mapping.param_group_index][self._index_in_param_group]
+        lp_grad_fragment = self._hp_mapping.get_lp_grad_fragment(self._index_in_param_group)
         hp_grad_fragment = lp_grad_fragment.to(torch.float32).flatten()
 
         lp_frag_address = self._hp_mapping.lp_fragment_address
@@ -120,11 +121,24 @@ def get_full_hp_grad(self):
     return reduce_buffer.reshape_as(self)
 
 
+def set_full_hp_grad(self, value):
+    if self._hp_mapping is not None:
+        lp_grad_fragment = self._hp_mapping.get_lp_grad_fragment(self._index_in_param_group)
+        lp_frag_address = self._hp_mapping.lp_fragment_address
+        value_fragment = torch.narrow(value.flatten(), 0, lp_frag_address.start, lp_frag_address.numel)
+        lp_grad_fragment.data.copy_(value_fragment.data.reshape_as(lp_grad_fragment.data))
+        if hasattr(self, '_zero_optimizer'):
+            self._zero_optimizer.update_offload_overflow_tracker(value)
+
+
 def safe_get_full_fp32_param(param):
     """Assemble and return the fp32 parameter of a low-precision (e.g., fp16) parameter.
 
         Args:
             param (``torch.nn.Parameter``): A model parameter
+
+        Returns:
+            Union[torch.Tensor, None]: A tensor on accelerator device
     """
     # ZeRO stage 3 param
     if hasattr(param, 'ds_id'):
@@ -158,7 +172,10 @@ def safe_get_full_optimizer_state(param, optim_state_key):
         Args:
             param (``torch.nn.Parameter``): A model parameter
             optim_state_key (``string``): Key value of optimizer state (e.g., `exp_avg` in Adam optimizer)
-    """
+
+        Returns:
+            Union[torch.Tensor, None]: A tensor on accelerator device
+"""
     # ZeRO stage 3 param
     if hasattr(param, 'ds_id'):
         return param._z3_optimizer.get_full_hp_param(param, optim_state_key)
@@ -188,10 +205,16 @@ def safe_set_full_optimizer_state(param, value, optim_state_key):
 
 # TODO: Figure out the correct return dtype
 def safe_get_full_grad(param):
-    """Assemble and return the fp32 gradient of a low-precision (e.g., fp16) parameter.
+    """
+        Assemble and return the fp32 gradient of a low-precision (e.g., fp16) parameter.
+        The return data type is that used for gradient accumulation. This is usually the param data type,
+        but could also be different (e.g., bf16 param training with fp32 gradient accumulation).
 
         Args:
             param (``torch.nn.Parameter``): A model parameter
+
+        Returns:
+            Union[torch.Tensor, None]: A tensor on accelerator device
     """
     if param.grad is not None:
         return param.grad
@@ -207,73 +230,144 @@ def safe_get_full_grad(param):
     return None
 
 
-### Local API  START ###
-def safe_get_local_grad(param):
-    """Get the fp32 gradient of a partitioned parameter.
+def safe_set_full_grad(param, value):
+    """
+        Update the partitioned gradient of a low-precision (e.g., fp16) parameter.
+        To avoid precision issues, the update value should have the data type of
+        gradient accumulation.
+
         Args:
             param (``torch.nn.Parameter``): A model parameter
+            value (``torch.Tensor``): The un-partitioned new gradient value.
     """
     if param.grad is not None:
-        return param.grad
+        param.grad.copy_(value)
+    elif hasattr(param, 'ds_id'):
+        # ZeRO stage 3 param
+        param._z3_optimizer.set_fp32_grad_for_param(value, param)
+    elif hasattr(param, '_hp_mapping'):
+        # ZeRO stage 1, 2, and bf16_optimizer params
+        param.set_full_hp_grad(value)
 
-    # ZeRO stage 3 param
-    if hasattr(param, 'ds_id'):
-        return param._z3_optimizer.get_local_fp32_grad_for_param(param)
 
-    return None
+### Local API  START ###
+def safe_get_local_grad(param):
+    """
+        Get the local gradient partition of a ZeRO-3 partitioned parameter.
+        The return data type is that used for gradient accumulation. This is usually the param data type,
+        but could also be different (e.g., bf16 param training with fp32 gradient accumulation).
+
+        Args:
+            param (``torch.nn.Parameter``): A model parameter
+
+        Returns:
+            Union[torch.Tensor, None]: A tensor on accelerator device
+    """
+    assert hasattr(param, 'ds_id'), f'This API is only defined for ZeRO-3 partitioned parameters'
+    return param._z3_optimizer.get_local_fp32_grad_for_param(param)
+
+
+def safe_set_local_grad(param, value):
+    """
+        Update the local gradient partition of a ZeRO-3 partitioned parameter.
+        To avoid precision issues, the update value should have the data type of
+        gradient accumulation.
+
+        Args:
+            param (``torch.nn.Parameter``): A model parameter.
+            value (``torch.Tensor``): New value of local gradient partition.
+    """
+    assert hasattr(param, 'ds_id'), f'This API is only defined for ZeRO-3 partitioned parameters'
+    param._z3_optimizer.set_local_grad_for_param(value, param)
 
 
 def safe_get_local_fp32_param(param):
-    """Get the fp32 partitioned parameter.
-        Args:
-            param (``torch.nn.Parameter``): A model parameter
-    """
-    # ZeRO stage 3 param
-    if hasattr(param, 'ds_id'):
-        return param._z3_optimizer.get_local_fp32_param(param)
+    """Get the local partition of a ZeRO-3 partitioned parameter in fp32 precision.
 
-    return None
+        Args:
+            param (``torch.nn.Parameter``): A model parameter.
+
+        Returns:
+            Union[torch.Tensor, None]: A tensor on accelerator device
+    """
+    assert hasattr(param, 'ds_id'), f'This API is only defined for ZeRO-3 partitioned parameters'
+    return param._z3_optimizer.get_local_fp32_param(param)
 
 
 def safe_get_local_optimizer_state(param, optim_state_key):
-    """Get the fp32 optimizer state of a partitioned parameter.
+    """Get the local optimizer state partition of ZeRO-3 partitioned parameter in fp32 precision.
+
         Args:
             param (``torch.nn.Parameter``): A model parameter
             optim_state_key (``string``): Key value of optimizer state (e.g., `exp_avg` in Adam optimizer)
-    """
-    # ZeRO stage 3 param
-    if hasattr(param, 'ds_id'):
-        return param._z3_optimizer.get_local_fp32_param(param, optim_state_key)
 
-    return None
+        Returns:
+            Union[torch.Tensor, None]: A tensor on accelerator device
+    """
+    assert hasattr(param, 'ds_id'), f'This API is only defined for ZeRO-3 partitioned parameters'
+    return param._z3_optimizer.get_local_fp32_param(param, optim_state_key)
 
 
 def safe_set_local_optimizer_state(param, value, optim_state_key):
-    """Update the fp32 optimizer state of a partitioned parameter.
+    """Update the local optimizer state partition of a ZeRO-3 partitioned parameter.
+
         Args:
-            param (``torch.nn.Parameter``): A model parameter
-            value (``torch.Tensor``): New value
-            optim_state_key (``string``): Key value of optimizer state (e.g., `exp_avg` in Adam optimizer)
+            param (``torch.nn.Parameter``): A model parameter.
+            value (``torch.Tensor``): New value of local optimizer state partition.
+            optim_state_key (``string``): Key value of optimizer state (e.g., `exp_avg` in Adam optimizer).
     """
-    # ZeRO stage 3 param
-    if hasattr(param, 'ds_id'):
-        param._z3_optimizer.set_local_hp_param(value, param, optim_state_key)
+    assert hasattr(param, 'ds_id'), f'This API is only defined for ZeRO-3 partitioned parameters'
+    param._z3_optimizer.set_local_hp_param(value, param, optim_state_key)
 
 
 def safe_set_local_fp32_param(param, value):
-    """Update the partitioned fp32 parameter.
+    """Update the local partition of ZeRO-3 partitioned parameter.
+
         Args:
-            param (``torch.nn.Parameter``): A model parameter
-            value (``torch.Tensor``): New value
+            param (``torch.nn.Parameter``): A model parameter.
+            value (``torch.Tensor``): New value of local parameter partition.
     """
-    # ZeRO stage 3 param
-    if hasattr(param, 'ds_id'):
-        param._z3_optimizer.set_local_hp_param(value, param)
+    assert hasattr(param, 'ds_id'), f'This API is only defined for ZeRO-3 partitioned parameters'
+    param._z3_optimizer.set_local_hp_param(value, param)
 
 
 ### Local API  END ###
 
-# TODO: Implement API for setting ZeRO partitioned gradients
+
+### VECTORIZED API  BEGIN ###
+def safe_update_full_grad_vectorized(param_list: List[torch.nn.Parameter], update_func: Callable):
+    """
+        Vectorized update of the partitioned gradients of a list of low-precision (e.g., fp16) parameters.
+        To avoid precision issues, the update value should have the data type of
+        gradient accumulation.
+
+        Args:
+            param_list (``List[torch.nn.Parameter]``): List of model parameters
+            update_func (``torch.Tensor``): A function that takes current full gradient value and returns new one.
+    """
+    partitioned_grad_params = []
+    for p in param_list:
+        if p.grad is not None:
+            p.grad.copy_(update_func(p.grad, p))
+        elif p.requires_grad:
+            partitioned_grad_params.append(p)
+
+    if not partitioned_grad_params:
+        return
+
+    if hasattr(partitioned_grad_params[0], 'ds_id'):
+        # ZeRO stage 3 param
+        partitioned_grad_params[0]._z3_optimizer.update_fp32_grad_for_param_vectorized(
+            update_func, partitioned_grad_params)
+    elif hasattr(partitioned_grad_params[0], '_hp_mapping'):
+        # ZeRO stage 1, 2, and bf16_optimizer params
+        for p in partitioned_grad_params:
+            old_grad = safe_get_full_grad(p)
+            new_grad = update_func(old_grad, p)
+            p.set_full_hp_grad(new_grad)
+
+
+### VECTORIZED API  END ###
 
 
 def get_hp_fragment_mapping(lp_param, lp_start, flat_hp_partition, gradient_dict, offload_gradient_dict, use_offload,

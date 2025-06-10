@@ -116,7 +116,9 @@ class PipelineModule(nn.Module):
         partition_method (str, optional): The method upon which the layers are partitioned. Defaults to 'parameters'.
         activation_checkpoint_interval (int, optional): The granularity activation checkpointing in terms of number of layers. 0 disables activation checkpointing.
         activation_checkpoint_func (callable, optional): The function to use for activation checkpointing. Defaults to ``deepspeed.checkpointing.checkpoint``.
-        checkpointable_layers(list, optional): Checkpointable layers may not be checkpointed. Defaults to None which does not additional filtering.
+        checkpointable_layers (list[str], optional): List of layer class names that are eligible for checkpointing. For GPT models,
+            ParallelTransformerLayerPipe is always checkpointed regardless of this list. If None, all layers with parameters are
+            considered checkpointable. Defaults to None.
         dynamic_shape: Allows dynamic shapes of inputs. This might have a performance impact.
     """
 
@@ -441,18 +443,26 @@ class PipelineModule(nn.Module):
 
         self._set_bounds(start=self.parts[stage_id], stop=self.parts[stage_id + 1])
 
+    @staticmethod
+    def _recursive_getattr(module: torch.nn.Module, attr_name: str) -> torch.Tensor:
+        '''Allow getting an attribute like "linear.weight"'''
+        weight = module
+        for item in attr_name.split("."):
+            weight = getattr(weight, item)
+        return weight
+
     def allreduce_tied_weight_gradients(self):
         '''All reduce the gradients of the tied weights between tied stages'''
         for key, comm in self.tied_comms.items():
             for attr_name in comm['weight_attr']:
-                weight = getattr(self.tied_modules[key], attr_name)
+                weight = self._recursive_getattr(self.tied_modules[key], attr_name)
                 dist.all_reduce(weight.grad, group=comm['group'])
 
     def get_tied_weights_and_groups(self):
         weight_group_list = []
         for key, comm in self.tied_comms.items():
             for attr_name in comm['weight_attr']:
-                weight = getattr(self.tied_modules[key], attr_name)
+                weight = self._recursive_getattr(self.tied_modules[key], attr_name)
                 weight_group_list.append((weight, comm['group']))
         return weight_group_list
 
@@ -460,7 +470,7 @@ class PipelineModule(nn.Module):
         for key, comm in self.tied_comms.items():
             for attr_name in comm['weight_attr']:
                 dist.broadcast(
-                    getattr(comm['module'], attr_name),
+                    self._recursive_getattr(comm['module'], attr_name),
                     src=min(comm['ranks']),
                     group=comm['group'],
                 )
@@ -473,7 +483,10 @@ class PipelineModule(nn.Module):
 
         specs = self._layer_specs
         tie_keys = set(s.key for s in specs if isinstance(s, TiedLayerSpec))
-        for key in tie_keys:
+        # Since Python 3.7, "Dictionary order is guaranteed to be insertion order."
+        # Sort tie_keys here so that orders of self.tied_comms.items() are consistent
+        # among ranks.
+        for key in sorted(tie_keys):
             # Find the layers that the tied module appears in
             tied_layers = []
             for idx, layer in enumerate(specs):
@@ -586,6 +599,8 @@ class PipelineModule(nn.Module):
         return ckpt_files
 
     def save_state_dict(self, save_dir, checkpoint_engine, exclude_frozen_params=False):
+        # TODO: Need to validate interaction of checkpoint_parallel_write_pipeline and fastwriter
+
         # Processes having the same model parallel rank on different data parallel instances
         # have identical layer weights.  We can distribute the task of saving the layer weights
         # among the data parallel ranks.  For example, if a pipeline stage has 9 layers and
@@ -616,7 +631,7 @@ class PipelineModule(nn.Module):
                 for n in self._get_frozen_parameter_names(layer):
                     del orig_state_dict[n]
             final_state_dict = clone_tensors_for_torch_save(orig_state_dict)
-            checkpoint_engine.save(final_state_dict, model_ckpt_path)
+            checkpoint_engine.save(state_dict=final_state_dict, path=model_ckpt_path)
 
     def load_state_dir(self, load_dir, checkpoint_engine, strict=True):
         for idx, layer in enumerate(self.forward_funcs):
@@ -650,9 +665,17 @@ class PipelineModule(nn.Module):
             # because only non_reentrant_checkpoint can accept inputs with requires_grad=False
             # otherwise, the backward of the embedding layer won't receive gradients.
             if self.__class__.__name__ in ('GPTModelPipe', 'GPT2ModelPipe'):
-                return all('ParallelTransformerLayerPipe' in f.__class__.__name__ for f in funcs)
+                # For GPT models, checkpoint both transformer layers and any additional
+                # layers specified in checkpointable_layers (if provided)
+                return all('ParallelTransformerLayerPipe' in f.__class__.__name__ or (
+                    self.checkpointable_layers is not None and f.__class__.__name__ in self.checkpointable_layers)
+                           for f in funcs)
+
         if self.checkpointable_layers is not None:
+            # For non-GPT models, only checkpoint layers specified in checkpointable_layers
             return all(f.__class__.__name__ in self.checkpointable_layers for f in funcs)
+
+        # Default behavior: checkpoint any layer that has parameters
         params = [f.parameters() for f in funcs if isinstance(f, torch.nn.Module)]
         return any(len(list(p)) > 0 for p in params)
 
@@ -662,3 +685,11 @@ class PipelineModule(nn.Module):
          Return a dictionary of {"loss name": loss_value} or None if no additional losses.
         """
         return None
+
+    def compile(self, *args, **kwargs):
+        for idx, layer in enumerate(self.forward_funcs):
+            if isinstance(layer, nn.Module):
+                layer.compile(*args, **kwargs)
+            else:
+                new_layer = torch.compile(layer, *args, **kwargs)
+                self.forward_funcs[idx] = new_layer

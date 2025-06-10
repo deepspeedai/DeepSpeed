@@ -18,10 +18,15 @@ const int c_block_size = 128 * 1024;
 const int c_io_queue_depth = 8;
 
 io_xfer_ctxt::io_xfer_ctxt(const int fd,
-                           const long long int file_offset,
-                           const long long int num_bytes,
+                           const int64_t file_offset,
+                           const int64_t buffer_offset,
+                           const int64_t num_bytes,
                            const void* buffer)
-    : _fd(fd), _base_offset(file_offset), _mem_buffer(buffer), _num_bytes(num_bytes)
+    : _fd(fd),
+      _file_base_offset(file_offset),
+      _buffer_base_offset(buffer_offset),
+      _mem_buffer(buffer),
+      _num_bytes(num_bytes)
 {
 }
 
@@ -36,14 +41,15 @@ io_prep_context::io_prep_context(const bool read_op,
 void io_prep_context::prep_iocbs(const int n_iocbs,
                                  const size_t num_bytes,
                                  const void* start_buffer,
-                                 const long long int start_offset)
+                                 const int64_t start_offset)
 {
     assert(static_cast<size_t>(n_iocbs) <= _iocbs->size());
     for (auto i = 0; i < n_iocbs; ++i) {
         const auto shift = i * _block_size;
-        const auto xfer_buffer = (char*)start_buffer + _xfer_ctxt->_base_offset + shift;
-        const auto xfer_offset = _xfer_ctxt->_base_offset + start_offset + shift;
+        const auto xfer_buffer = (char*)start_buffer + _xfer_ctxt->_buffer_base_offset + shift;
+        const auto xfer_offset = _xfer_ctxt->_file_base_offset + start_offset + shift;
         auto byte_count = _block_size;
+
         if ((shift + _block_size) > num_bytes) { byte_count = num_bytes - shift; }
 
         if (_read_op) {
@@ -64,25 +70,25 @@ io_prep_generator::io_prep_generator(const bool read_op,
       _next_iocb_index(0)
 {
     _num_io_blocks =
-        static_cast<long long int>(ceil(static_cast<double>(xfer_ctxt->_num_bytes) / block_size));
+        static_cast<int64_t>(ceil(static_cast<double>(xfer_ctxt->_num_bytes) / block_size));
     _remaining_io_blocks = _num_io_blocks;
 }
 
 int io_prep_generator::prep_iocbs(const int n_iocbs, std::vector<struct iocb*>* iocbs)
 {
     if ((_remaining_bytes) == 0 || (_remaining_io_blocks == 0)) {
-        assert(static_cast<long long int>(_remaining_bytes) == _remaining_io_blocks);
+        assert(static_cast<int64_t>(_remaining_bytes) == _remaining_io_blocks);
         return 0;
     }
 
     assert(static_cast<size_t>(n_iocbs) <= iocbs->size());
 
-    auto actual_n_iocbs = min(static_cast<long long int>(n_iocbs), _remaining_io_blocks);
+    auto actual_n_iocbs = min(static_cast<int64_t>(n_iocbs), _remaining_io_blocks);
     for (auto i = 0; i < actual_n_iocbs; ++i, ++_next_iocb_index) {
-        const auto xfer_offset = _xfer_ctxt->_base_offset + (_next_iocb_index * _block_size);
-        const auto xfer_buffer = (char*)_xfer_ctxt->_mem_buffer + xfer_offset;
-        const auto num_bytes = min(static_cast<long long int>(_block_size), _remaining_bytes);
-
+        const auto xfer_buffer = (char*)_xfer_ctxt->_mem_buffer + _xfer_ctxt->_buffer_base_offset +
+                                 (_next_iocb_index * _block_size);
+        const auto xfer_offset = _xfer_ctxt->_file_base_offset + (_next_iocb_index * _block_size);
+        const auto num_bytes = min(static_cast<int64_t>(_block_size), _remaining_bytes);
         if (_read_op) {
             io_prep_pread(iocbs->at(i), _xfer_ctxt->_fd, xfer_buffer, num_bytes, xfer_offset);
         } else {
@@ -95,7 +101,7 @@ int io_prep_generator::prep_iocbs(const int n_iocbs, std::vector<struct iocb*>* 
     return actual_n_iocbs;
 }
 
-int get_file_size(const char* filename, long long int& size)
+int64_t get_file_size(const char* filename, int64_t& size)
 {
     struct stat st;
     if (stat(filename, &st) == -1) { return -1; }
@@ -103,7 +109,15 @@ int get_file_size(const char* filename, long long int& size)
     return 0;
 }
 
-void* ds_page_aligned_alloc(const size_t size, const bool lock)
+int64_t get_fd_file_size(const int fd, int64_t& size)
+{
+    struct stat st;
+    if (fstat(fd, &st) == -1) { return -1; }
+    size = st.st_size;
+    return 0;
+}
+
+void* ds_page_aligned_alloc(const int64_t size, const bool lock)
 {
     void* ptr;
     int retval;

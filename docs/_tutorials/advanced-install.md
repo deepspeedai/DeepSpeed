@@ -84,7 +84,7 @@ This should complete the full build 2-3 times faster. You can adjust `-j` to spe
 You can also build a binary wheel and install it on multiple machines that have the same type of GPUs and the same software environment (CUDA toolkit, PyTorch, Python, etc.)
 
 ```bash
-DS_BUILD_OPS=1 python setup.py build_ext -j8 bdist_wheel
+DS_BUILD_OPS=1 python -m build --wheel --no-isolation --config-setting="--build-option=build_ext" --config-setting="--build-option=-j8"
 ```
 
 This will create a pypi binary wheel under `dist`, e.g., ``dist/deepspeed-0.3.13+8cd046f-cp38-cp38-linux_x86_64.whl`` and then you can install it directly on multiple machines, in our example:
@@ -106,7 +106,7 @@ pip install .
 
 For installs spanning multiple nodes we find it useful to install DeepSpeed
 using the
-[install.sh](https://github.com/microsoft/DeepSpeed/blob/master/install.sh)
+[install.sh](https://github.com/deepspeedai/DeepSpeed/blob/master/install.sh)
 script in the repo. This will build a Python wheel locally and copy it to all
 the nodes listed in your hostfile (either given via `--hostfile`, or defaults to
 `/job/hostfile`).
@@ -195,7 +195,7 @@ DS_SKIP_CUDA_CHECK=1
 Some DeepSpeed features require specific dependencies outside the general dependencies of DeepSpeed.
 
 * Python package dependencies per feature/op please
-see our [requirements directory](https://github.com/microsoft/DeepSpeed/tree/master/requirements).
+see our [requirements directory](https://github.com/deepspeedai/DeepSpeed/tree/master/requirements).
 
 * We attempt to keep the system level dependencies to a minimum, however some features do require special system-level
 packages. Please see our `ds_report` tool output to see if you are missing any system-level packages for a given feature.

@@ -16,7 +16,7 @@ fp_quant_module = None
 
 class Quantizer(ABC):
     """
-    Abstract Quantizer class that implmenents quantize/dequantize methods.
+    Abstract Quantizer class that implements quantize/dequantize methods.
 
     Arguments:
         group_size (int, optional): number of values or elements that are grouped
@@ -42,12 +42,18 @@ class Quantizer(ABC):
 
 class FP_Quantize(Quantizer):
 
-    def __init__(self, group_size=512) -> None:
+    def __init__(self, quantization_config) -> None:
         global fp_quant_module
-        super().__init__(group_size=group_size)
+        super().__init__(group_size=quantization_config.group_size)
         if fp_quant_module is None:
             fp_quant_module = FPQuantizerBuilder().load()
+        self.cuda_impl = getattr(fp_quant_module, "CUDA_IMPL", True)
+        self.q_config = quantization_config
+
         self.orig_dtype = None
+        self.num_groups = None
+        self.input_q = None
+        self.scale = None
 
     def quantize(self,
                  input,

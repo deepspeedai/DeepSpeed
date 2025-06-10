@@ -100,7 +100,7 @@ def build_hf_engine(path: str,
         if model_config.model_type == "opt":
             if not model_config.do_layer_norm_before:
                 raise ValueError(
-                    "Detected OPT-350m model. This model is not currently supported. If this is not the 350m model, please open an issue: https://github.com/microsoft/DeepSpeed-MII/issues"
+                    "Detected OPT-350m model. This model is not currently supported. If this is not the 350m model, please open an issue: https://github.com/deepspeedai/DeepSpeed-MII/issues"
                 )
             policy = OPTPolicy(model_config, checkpoint_engine=checkpoint_engine)
         elif model_config.model_type == "llama":

@@ -58,7 +58,6 @@ void gds_op_desc_t::add_buffer_to_registry(const torch::Tensor& buffer)
     const int64_t device = buffer.get_device();
     void* reg_ptr = buffer.data_ptr();
 
-    // std::cout << "REG PTR " <<  reg_ptr << std::endl;
     // TODO: add checking to make sure pointer isn't already in set
     const auto it = base_ptr_registry.find(device);
     if (it == base_ptr_registry.end()) {
@@ -94,10 +93,10 @@ gds_op_desc_t::gds_op_desc_t(const bool read_op,
                              const torch::Tensor& buffer,
                              const int fd,
                              const char* filename,
-                             const long long int file_num_bytes,
-                             const int num_threads,
-                             const bool validate)
-    : io_op_desc_t(read_op, buffer, fd, filename, file_num_bytes, num_threads, validate)
+                             const int intra_op_parallelism,
+                             const bool validate,
+                             const int64_t file_offset)
+    : io_op_desc_t(read_op, buffer, fd, filename, intra_op_parallelism, validate, file_offset)
 {
     _contiguous_buffer = _buffer.contiguous();
     const int64_t device = _buffer.get_device();
@@ -115,27 +114,28 @@ void gds_op_desc_t::validate()
 {
     check_cudaruntimecall(cudaSetDevice(_buffer.get_device()));
     const auto cpu_buffer = _buffer.to(torch::kCPU);
+    const auto num_io_bytes = static_cast<int64_t>(_contiguous_buffer.nbytes());
     validate_aio_operation(
-        _read_op, _filename.c_str(), (char*)(cpu_buffer.data_ptr()), _file_num_bytes);
+        _read_op, _filename.c_str(), (char*)(cpu_buffer.data_ptr()), num_io_bytes);
 }
 
 void gds_op_desc_t::run(const int tid,
                         std::unique_ptr<aio_context>& aio_ctxt,
                         deepspeed_aio_config_t* aio_config)
 {
-    assert(tid < _num_threads);
+    assert(tid < _intra_op_parallelism);
     check_cudaruntimecall(cudaSetDevice(_buffer.get_device()));
-    int64_t buf_offset = data_ptr() + (_num_bytes_per_thread * tid) - (char*)_base_ptr;
-    const auto file_offset = _num_bytes_per_thread * tid;
+    const auto buf_offset = data_ptr() + (_num_bytes_per_thread * tid) - (char*)_base_ptr;
+    const auto tid_file_offset = _file_offset + (_num_bytes_per_thread * tid);
 
     if (_read_op) {
         auto ret =
-            cuFileRead(_cf_handle, _base_ptr, _num_bytes_per_thread, file_offset, buf_offset);
-        if (ret < 0) { _report_error(ret, errno, buf_offset); }
+            cuFileRead(_cf_handle, _base_ptr, _num_bytes_per_thread, tid_file_offset, buf_offset);
+        if (ret < 0) { _report_error(ret, errno, tid_file_offset); }
     } else {
         auto ret =
-            cuFileWrite(_cf_handle, _base_ptr, _num_bytes_per_thread, file_offset, buf_offset);
-        if (ret < 0) { _report_error(ret, errno, buf_offset); }
+            cuFileWrite(_cf_handle, _base_ptr, _num_bytes_per_thread, tid_file_offset, buf_offset);
+        if (ret < 0) { _report_error(ret, errno, tid_file_offset); }
     }
 }
 
@@ -148,7 +148,7 @@ void gds_op_desc_t::_report_error(const ssize_t return_code,
     const auto error_code = IS_CUFILE_ERR(return_code) ? cuFileGetErrorString(return_code)
                                                        : cuFileGetErrorString(error_num);
     std::cerr << op_string << error_string << error_code << " return code = " << return_code
-              << " filename = " << _filename.c_str() << " num bytes = " << _num_bytes_per_thread
+              << " filename = " << _filename << " num bytes = " << _num_bytes_per_thread
               << " offset = " << offset << std::endl;
     exit(EXIT_FAILURE);
 }

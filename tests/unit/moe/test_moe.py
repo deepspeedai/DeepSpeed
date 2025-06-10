@@ -7,6 +7,7 @@ import torch
 import deepspeed
 import pytest
 import gc
+import random
 from unit.common import DistributedTest
 from unit.simple_model import SimplePRMoEModel, SimpleMoEModel, sequence_dataloader
 import deepspeed.comm as dist
@@ -44,7 +45,11 @@ class TestSimpleMoE(DistributedTest):
         hidden_dim = 16
         model = SimpleMoEModel(hidden_dim=hidden_dim, ep_size=1)
         model, optimizer, _, _ = deepspeed.initialize(config=config_dict, model=model)
-        data_loader = sequence_dataloader(model=model, total_samples=50, hidden_dim=hidden_dim, device=model.device)
+        data_loader = sequence_dataloader(model=model,
+                                          total_samples=50,
+                                          hidden_dim=hidden_dim,
+                                          device=model.device,
+                                          dtype=torch.float16)
 
         for n, batch in enumerate(data_loader):
             loss = model(batch[0], batch[1])
@@ -86,13 +91,18 @@ class TestMoE(DistributedTest):
                                                       dist_init_required=False)
         #dist_init_required=False -- parameterize to True/False?
 
-        data_loader = sequence_dataloader(model=model, total_samples=50, hidden_dim=hidden_dim, device=model.device)
+        data_loader = sequence_dataloader(model=model,
+                                          total_samples=50,
+                                          hidden_dim=hidden_dim,
+                                          device=model.device,
+                                          dtype=torch.float16)
 
         def strict_average_tensor(tensor):
             process_group = optimizer.dp_process_group
             curr_size = 0
             pg_offsets = []
-            for i, param, param_id in optimizer.params_in_ipg_bucket:
+            for i, param_idx, param_id in optimizer.params_in_ipg_bucket:
+                param = optimizer.bit16_groups[i][param_idx]
                 process_group = optimizer.dp_process_group
                 if optimizer.ipg_bucket_has_moe_params:
                     process_group = optimizer.expert_dp_process_group[param.group_name] if is_moe_param(
@@ -165,7 +175,11 @@ class TestPRMoE(DistributedTest):
                                               optimizer=optimizer,
                                               dist_init_required=False)
 
-        data_loader = sequence_dataloader(model=model, total_samples=50, hidden_dim=hidden_dim, device=model.device)
+        data_loader = sequence_dataloader(model=model,
+                                          total_samples=50,
+                                          hidden_dim=hidden_dim,
+                                          device=model.device,
+                                          dtype=torch.float16)
 
         for n, batch in enumerate(data_loader):
             loss = model(batch[0], batch[1])
@@ -238,3 +252,123 @@ class TestTopkGate(DistributedTest):
                                             [2, 1, 1], [2, 2, 1], [2, 3, 1], [3, 0, 0]])
         position_dispatch_res = topkgating(logits2, 3, 1, min_capacity=1, drop_policy='position')[2]
         check_equal(logits2, 2, position_sec_sparse, position_dispatch_res)
+
+        #s=4   e=4  topk=2   drop_tokens=False
+        logits3 = torch.tensor([[0.95, 0.85, 0.90, 0.80], [0.70, 0.65, 0.75, 0.60], [0.50, 0.55, 0.45, 0.40],
+                                [0.35, 0.30, 0.25, 0.20]])
+        logits3 *= dist.get_rank() + 1
+        dispatch_res = topkgating(logits3, 2, 1, min_capacity=1, drop_tokens=False)[2]
+        sec_sparse = torch.tensor([[0, 0, 0], [0, 2, 0], [1, 0, 1], [1, 2, 1], [2, 0, 2], [2, 1, 0], [3, 0, 3],
+                                   [3, 1, 1]])
+        check_equal(logits3, 4, sec_sparse, dispatch_res)
+
+
+class TestExpertWeightGradWithZero(DistributedTest):
+    world_size = 2
+
+    @pytest.mark.parametrize("zero_stage", [0, 1, 2])
+    def test(self, zero_stage):
+
+        if not required_torch_version(min_version=1.8):
+            pytest.skip("DeepSpeed MoE tests need torch 1.8 or higher to run correctly")
+
+        def seed_everything(seed=11):
+            random.seed(seed)
+            torch.manual_seed(seed)
+            get_accelerator().manual_seed(seed)
+            get_accelerator().manual_seed_all(seed)
+            torch.backends.cudnn.deterministic = True
+            torch.backends.cudnn.benchmark = False
+
+        def get_state_dict_ep2(state_dict):
+            """
+            convert state_dict from EP=1 to EP=2
+            """
+            rank = int(deepspeed.comm.get_rank())
+            ep_state_dict = dict()
+            dst_sub_key = f"deepspeed_moe.experts.deepspeed_experts.0"
+            src_sub_key = f"deepspeed_moe.experts.deepspeed_experts.{rank}"
+            for moe_layer in ["moe_1", "moe_2"]:
+                for mlp_in_moe in [0, 1]:
+                    dst_key = f"{moe_layer}.{dst_sub_key}.{mlp_in_moe}"
+                    src_key = f"{moe_layer}.{src_sub_key}.{mlp_in_moe}"
+                    ep_state_dict[f"{dst_key}.weight"] = state_dict[f"{src_key}.weight"].detach().clone()
+                    ep_state_dict[f"{dst_key}.bias"] = state_dict[f"{src_key}.bias"].detach().clone()
+
+            for key in state_dict.keys():
+                if "deepspeed_moe.experts.deepspeed_experts" not in key:
+                    ep_state_dict[key] = state_dict[key].detach().clone()
+            return ep_state_dict
+
+        def get_models(hidden_dim):
+            model_ep1 = SimpleMoEModel(hidden_dim=hidden_dim, num_experts=2, ep_size=1, use_rts=False)
+            model_ep2 = SimpleMoEModel(hidden_dim=hidden_dim, num_experts=2, ep_size=2, use_rts=False)
+
+            state_dict_ep1 = model_ep1.state_dict()
+            state_dict_ep2 = get_state_dict_ep2(state_dict_ep1)
+            model_ep2.load_state_dict(state_dict_ep2)
+
+            model_ep1, _, _, _ = deepspeed.initialize(config=config_dict, model=model_ep1)
+            model_ep2, _, _, _ = deepspeed.initialize(config=config_dict, model=model_ep2)
+
+            return model_ep1, model_ep2
+
+        def extract_expert_grad(model, expert_id):
+
+            def _get_weight_bias(experts):
+                return ([deepspeed.utils.safe_get_full_grad(expert[0].weight)
+                         for expert in experts][expert_id].detach().clone(),
+                        [deepspeed.utils.safe_get_full_grad(expert[0].bias)
+                         for expert in experts][expert_id].detach().clone(),
+                        [deepspeed.utils.safe_get_full_grad(expert[1].weight)
+                         for expert in experts][expert_id].detach().clone(),
+                        [deepspeed.utils.safe_get_full_grad(expert[1].bias)
+                         for expert in experts][expert_id].detach().clone())
+
+            return (*_get_weight_bias(model.moe_1.deepspeed_moe.experts.deepspeed_experts),
+                    *_get_weight_bias(model.moe_2.deepspeed_moe.experts.deepspeed_experts))
+
+        seed_everything()
+
+        config_dict = {
+            "train_micro_batch_size_per_gpu": 1,
+            "steps_per_print": 1,
+            "optimizer": {
+                "type": "Adam",
+                "params": {
+                    "lr": 0.1,
+                }
+            },
+            "zero_optimization": {
+                "stage": zero_stage
+            }
+        }
+
+        hidden_dim = 4
+        total_samples = 2
+        rank = deepspeed.comm.get_rank()
+        model_ep1, model_ep2 = get_models(hidden_dim)
+
+        data_loader = sequence_dataloader(model=model_ep1,
+                                          total_samples=total_samples,
+                                          hidden_dim=hidden_dim,
+                                          device=model_ep1.device,
+                                          dtype=torch.float32)
+        expert_weight_grad_ep1 = []
+        expert_weight_grad_ep2 = []
+        for batch in data_loader:
+            loss_ep1 = model_ep1(batch[0], batch[1])
+            loss_ep2 = model_ep2(batch[0], batch[1])
+
+            model_ep1.backward(loss_ep1)
+            model_ep2.backward(loss_ep2)
+
+            expert_weight_grad_ep1.extend(extract_expert_grad(model_ep1, rank))
+            expert_weight_grad_ep2.extend(extract_expert_grad(model_ep2, 0))
+
+            model_ep1.step()
+            model_ep2.step()
+
+        assert len(expert_weight_grad_ep1) == len(expert_weight_grad_ep2)
+        for grad_from_ep1, grad_from_ep2 in zip(expert_weight_grad_ep1, expert_weight_grad_ep2):
+            assert torch.allclose(grad_from_ep1, grad_from_ep2, atol=0, rtol=1e-4)

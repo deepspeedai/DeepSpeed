@@ -12,9 +12,11 @@ from deepspeed import comm as dist
 
 
 class ZeroOneAdam(torch.optim.Optimizer):
-    """Implements the 0/1 Adam algorithm. Currently GPU-only.
+    """
+    Implements the 0/1 Adam algorithm. Currently GPU-only.
     For usage example please see https://www.deepspeed.ai/tutorials/zero-one-adam/
     For technical details please read https://arxiv.org/abs/2202.06009
+
     Arguments:
         params (iterable): iterable of parameters to optimize or dicts defining
             parameter groups.

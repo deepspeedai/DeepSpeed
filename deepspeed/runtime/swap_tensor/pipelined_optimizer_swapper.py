@@ -56,13 +56,17 @@ class PipelinedOptimizerSwapper(OptimizerSwapper):
                                                         device, dtype, timers)
 
         aio_op = AsyncIOBuilder().load()
-        self.write_aio_handle = aio_op.aio_handle(aio_config[AIO_BLOCK_SIZE], aio_config[AIO_QUEUE_DEPTH],
-                                                  aio_config[AIO_SINGLE_SUBMIT], aio_config[AIO_OVERLAP_EVENTS],
-                                                  aio_config[AIO_THREAD_COUNT])
+        self.write_aio_handle = aio_op.aio_handle(block_size=aio_config[AIO_BLOCK_SIZE],
+                                                  queue_depth=aio_config[AIO_QUEUE_DEPTH],
+                                                  single_submit=aio_config[AIO_SINGLE_SUBMIT],
+                                                  overlap_events=aio_config[AIO_OVERLAP_EVENTS],
+                                                  intra_op_parallelism=aio_config[AIO_INTRA_OP_PARALLELISM])
 
-        self.read_aio_handle = aio_op.aio_handle(aio_config[AIO_BLOCK_SIZE], aio_config[AIO_QUEUE_DEPTH],
-                                                 aio_config[AIO_SINGLE_SUBMIT], aio_config[AIO_OVERLAP_EVENTS],
-                                                 aio_config[AIO_THREAD_COUNT])
+        self.read_aio_handle = aio_op.aio_handle(block_size=aio_config[AIO_BLOCK_SIZE],
+                                                 queue_depth=aio_config[AIO_QUEUE_DEPTH],
+                                                 single_submit=aio_config[AIO_SINGLE_SUBMIT],
+                                                 overlap_events=aio_config[AIO_OVERLAP_EVENTS],
+                                                 intra_op_parallelism=aio_config[AIO_INTRA_OP_PARALLELISM])
 
         # Overlap gradient swap out
         self.gradient_swapper = AsyncTensorSwapper(aio_handle=self.write_aio_handle,
@@ -183,7 +187,7 @@ class PipelinedOptimizerSwapper(OptimizerSwapper):
                 dst = get_sized_buffer(pinned_dst, unpinned_src.numel())
                 dst.data.copy_(unpinned_src.data)
 
-        swap_paths = param_info.swap_paths.copy()
+        swap_paths = param_info.get_swap_paths()
         assert len(swap_paths) == len(swap_buffers)
 
         swap_out_tensors(aio_handle, swap_buffers, swap_paths)
@@ -202,7 +206,8 @@ class PipelinedOptimizerSwapper(OptimizerSwapper):
         if param_info is None:
             return None
 
-        required_buffer_count = len(param_info.tensors) + (1 if param_info.has_gradients() else 0)
+        num_swap_tensors = param_info.num_tensors()
+        required_buffer_count = num_swap_tensors + (1 if param_info.has_gradients() else 0)
         aligned_numel = self._io_aligned_numel(param_info.numel())
         allocated_buffers = self.swap_buffer_manager.allocate(num_elems=aligned_numel,
                                                               count=required_buffer_count,
@@ -210,11 +215,11 @@ class PipelinedOptimizerSwapper(OptimizerSwapper):
         assert allocated_buffers is not None, \
         f"PipelinedOptimizerSwapper ran out of swap buffers, try increasing 'buffer_count'"
 
-        state_buffers = allocated_buffers[:len(param_info.tensors)]
-        param_info.set_swap_buffers(state_buffers)
+        state_buffers = allocated_buffers[:num_swap_tensors]
+        param_info.set_swap_buffers(state_buffers, aligned_numel)
 
         swap_buffers = state_buffers.copy()
-        swap_paths = param_info.swap_paths.copy()
+        swap_paths = param_info.get_swap_paths()
 
         if param_info.has_gradients():
             parameter.grad = allocated_buffers[-1].narrow(0, 0, param_info.numel())

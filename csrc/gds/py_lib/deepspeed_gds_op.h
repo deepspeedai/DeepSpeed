@@ -22,9 +22,9 @@ struct gds_op_desc_t : io_op_desc_t {
                   const torch::Tensor& buffer,
                   const int fd,
                   const char* filename,
-                  const long long int file_num_bytes,
-                  const int num_threads,
-                  const bool validate);
+                  const int intra_op_parallelism,
+                  const bool validate,
+                  const int64_t file_offset);
 
     void run(const int tid,
              std::unique_ptr<aio_context>& aio_ctxt,

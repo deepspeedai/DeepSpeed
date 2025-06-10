@@ -8,6 +8,7 @@ import sys
 import shutil
 import subprocess
 import warnings
+import re
 from shlex import split
 from abc import ABC, abstractmethod
 from deepspeed.accelerator import get_accelerator
@@ -34,7 +35,10 @@ class MultiNodeRunner(ABC):
         """Return the command to execute on node"""
 
     def add_export(self, key, var):
-        self.exports[key.strip()] = var.strip()
+        var = var.strip()
+        if re.search(r'[^\w@%+=:,./-]', var):
+            var = f"\"{var}\""
+        self.exports[key.strip()] = var
 
     def parse_user_args(self):
         return self.args.user_args
@@ -96,6 +100,8 @@ class PDSHRunner(MultiNodeRunner):
             f'--world_info={self.world_info_base64}', "--node_rank=%n", f"--master_addr={self.args.master_addr}",
             f"--master_port={self.args.master_port}"
         ]
+        if self.args.venv_script is not None:
+            deepspeed_launch = [f"source {self.args.venv_script}"] + deepspeed_launch
         if self.args.no_python:
             deepspeed_launch.append("--no_python")
         if self.args.module:
@@ -104,6 +110,8 @@ class PDSHRunner(MultiNodeRunner):
             deepspeed_launch.append("--no_local_rank")
         if self.args.save_pid:
             deepspeed_launch += ["--save_pid", f"{os.getpid()}"]
+        if self.args.enable_each_rank_log:
+            deepspeed_launch.append(f"--enable_each_rank_log={self.args.enable_each_rank_log}")
         if self.args.elastic_training:
             deepspeed_launch.append("--enable_elastic_training")
             deepspeed_launch.append(f"--max_elastic_nodes={self.args.max_elastic_nodes}")
@@ -132,14 +140,44 @@ class OpenMPIRunner(MultiNodeRunner):
 
     def validate_args(self):
         super().validate_args()
+
+        # Validate and set MPI environment variables
+        self._setup_mpi_environment()
+
         #TODO: Allow for include/exclude at node-level but not gpu-level
         if self.args.include != "" or self.args.exclude != "":
             raise ValueError(f"{self.name} backend does not support worker include/exclusion")
         if self.args.num_nodes != -1 or self.args.num_gpus != -1:
             raise ValueError(f"{self.name} backend does not support limiting num nodes/gpus")
 
+    def _setup_mpi_environment(self):
+        """Sets up MPI-related environment variables or raises an error if they're missing."""
+
+        required_vars = ['OMPI_COMM_WORLD_LOCAL_RANK', 'OMPI_COMM_WORLD_RANK', 'OMPI_COMM_WORLD_SIZE']
+
+        # Check if all these are present
+        if not all(var in os.environ for var in required_vars):
+            raise EnvironmentError("MPI environment variables are not set. "
+                                   "Ensure you are running the script with an MPI-compatible launcher.")
+
+        # Now safe to read all
+        os.environ['LOCAL_RANK'] = os.environ['OMPI_COMM_WORLD_LOCAL_RANK']
+        os.environ['RANK'] = os.environ['OMPI_COMM_WORLD_RANK']
+        os.environ['WORLD_SIZE'] = os.environ['OMPI_COMM_WORLD_SIZE']
+
     def get_cmd(self, environment, active_resources):
         total_process_count = sum(self.resource_pool.values())
+
+        launcher_args = split(self.args.launcher_args)
+
+        # If btl_tcp_if_include option is provided through launcher_args, we use it. Otherwise, we add
+        # `--mca btl_tcp_if_include eth0` option as a default value for compatibility.
+        btl_tcp_opt = ['--mca', 'btl_tcp_if_include', 'eth0']
+        if len(launcher_args) >= 2:
+            for i in range(len(launcher_args) - 1):
+                if launcher_args[i] in ['-mca', '--mca'] and launcher_args[i + 1] == 'btl_tcp_if_include':
+                    btl_tcp_opt = []
+                    break
 
         mpirun_cmd = [
             'mpirun',
@@ -150,10 +188,7 @@ class OpenMPIRunner(MultiNodeRunner):
             '--mca',
             'btl',
             '^openib',
-            '--mca',
-            'btl_tcp_if_include',
-            'eth0',
-        ] + split(self.args.launcher_args)
+        ] + btl_tcp_opt + launcher_args
 
         export_cmd = []
         for k, v in self.exports.items():
@@ -406,7 +441,7 @@ class MVAPICHRunner(MultiNodeRunner):
         if not mpiname_exists:
             warnings.warn("mpiname does not exist, mvapich is not installed properly")
         else:
-            results = subprocess.check_output('mpiname', shell=True)
+            results = subprocess.check_output(['mpiname'])
             mpiname_results = results.decode('utf-8').strip()
             if "MVAPICH2-GDR" in mpiname_results:
                 exists = True

@@ -15,6 +15,8 @@ from deepspeed.accelerator import get_accelerator
 from deepspeed.utils import logger
 from deepspeed.moe.layer import MoE
 from deepspeed.utils.timer import FORWARD_GLOBAL_TIMER, BACKWARD_GLOBAL_TIMER, STEP_GLOBAL_TIMER
+from deepspeed.utils.torch import required_torch_version
+import einops
 
 Tensor = torch.Tensor
 
@@ -81,6 +83,7 @@ class FlopsProfiler(object):
         self.reset_profile()
         _patch_functionals()
         _patch_tensor_methods()
+        _patch_miscellaneous_operations()
 
         def register_module_hooks(module, ignore_list):
             if ignore_list and type(module) in ignore_list:
@@ -114,7 +117,7 @@ class FlopsProfiler(object):
                 get_accelerator().synchronize()
                 module.__start_time__ = time.time()
 
-            if not hasattr(module, "__start_time_hook_handle"):
+            if not hasattr(module, "__start_time_hook_handle__"):
                 module.__start_time_hook_handle__ = module.register_forward_pre_hook(start_time_hook)
 
             def end_time_hook(module, input, output):
@@ -136,6 +139,7 @@ class FlopsProfiler(object):
         if self.started and self.func_patched:
             _reload_functionals()
             _reload_tensor_methods()
+            _reload_miscellaneous_operations()
             self.func_patched = False
 
         def remove_profile_attrs(module):
@@ -786,6 +790,29 @@ def _einsum_flops_compute(equation, *operands):
     raise NotImplementedError("Unsupported einsum operation.")
 
 
+def _einops_einsum_flops_compute(*args):
+    """
+    Count flops for the einops.einsum operation.
+    """
+    *operands, equation = args
+    input_shapes = [o.shape for o in operands]
+
+    # Re-map equation so that same equation with different alphabet
+    # representations will look the same.
+    letter_order = OrderedDict((k, 0) for k in equation if k.isalpha()).keys()
+    mapping = {ord(x): 97 + i for i, x in enumerate(letter_order)}
+    equation = equation.translate(mapping)
+
+    np_arrs = [np.zeros(s) for s in input_shapes]
+    optim = np.einsum_path(equation, *np_arrs, optimize="optimal")[1]
+    for line in optim.split("\n"):
+        if "optimized flop" in line.lower():
+            flop = int(float(line.split(":")[-1]))
+            return flop, 0
+
+    raise NotImplementedError("Unsupported einops.einsum operation.")
+
+
 def _tensor_addmm_flops_compute(self, mat1, mat2, *, beta=1, alpha=1, out=None):
     """
     Count flops for the tensor addmm operation.
@@ -908,8 +935,9 @@ def _patch_functionals():
     # embedding
     F.embedding = wrapFunc(F.embedding, _embedding_flops_compute)
 
-    # attn
-    F.scaled_dot_product_attention = wrapFunc(F.scaled_dot_product_attention, _attn_flops_compute)
+    # attn - scaled_dot_product_attention added in torch 2.0+
+    if required_torch_version(min_version=2.0):
+        F.scaled_dot_product_attention = wrapFunc(F.scaled_dot_product_attention, _attn_flops_compute)
 
 
 def _patch_tensor_methods():
@@ -933,6 +961,10 @@ def _patch_tensor_methods():
     torch.einsum = wrapFunc(torch.einsum, _einsum_flops_compute)
 
     torch.baddbmm = wrapFunc(torch.baddbmm, _tensor_addmm_flops_compute)
+
+
+def _patch_miscellaneous_operations():
+    einops.einsum = wrapFunc(einops.einsum, _einops_einsum_flops_compute)
 
 
 def _reload_functionals():
@@ -991,6 +1023,10 @@ def _reload_tensor_methods():
     torch.einsum = old_functions[torch.einsum.__str__]
 
     torch.baddbmm = old_functions[torch.baddbmm.__str__]
+
+
+def _reload_miscellaneous_operations():
+    einops.einsum = old_functions[einops.einsum.__str__]
 
 
 def _rnn_flops(flops, rnn_module, w_ih, w_hh, input_size):

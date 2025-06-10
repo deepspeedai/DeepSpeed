@@ -8,7 +8,8 @@ import torch
 import pytest
 from deepspeed.accelerator import get_accelerator
 from deepspeed.ops.op_builder import InferenceBuilder
-from .inference_test_utils import allclose, get_dtypes, assert_almost_equal
+from deepspeed.ops.transformer.inference.op_binding.layer_norm import LayerNormOp
+from .inference_test_utils import allclose, get_dtypes
 try:
     import triton  # noqa: F401 # type: ignore
     from deepspeed.ops.transformer.inference.triton import (
@@ -21,8 +22,6 @@ except ImportError:
 if not deepspeed.ops.__compatible_ops__[InferenceBuilder.NAME]:
     pytest.skip("Inference ops are not available on this system", allow_module_level=True)
 
-inference_module = None
-
 
 def ref_implementation(vals, gamma, beta, epsilon, channels, dtype):
     vals_f = vals.to(torch.float32)
@@ -32,10 +31,7 @@ def ref_implementation(vals, gamma, beta, epsilon, channels, dtype):
 
 
 def ds_implementation(vals, gamma, beta, epsilon):
-    global inference_module
-    if inference_module is None:
-        inference_module = InferenceBuilder().load()
-    return inference_module.layer_norm(vals, gamma, beta, epsilon)
+    return LayerNormOp()(vals, gamma, beta, epsilon)
 
 
 def ds_triton_implementation(vals, gamma, beta, epsilon):
@@ -49,8 +45,8 @@ def ds_triton_implementation(vals, gamma, beta, epsilon):
 @pytest.mark.parametrize("dtype", get_dtypes())
 @pytest.mark.parametrize("use_triton_ops", [False, True])
 def test_layer_norm(batch, seq_len, channels, dtype, use_triton_ops):
-    if not deepspeed.HAS_TRITON and use_triton_ops:
-        pytest.skip("triton has to be installed for the test")
+    if not deepspeed.get_accelerator().is_triton_supported():
+        pytest.skip("triton is not supported on this system")
 
     vals = torch.randn((batch, seq_len, channels), dtype=dtype, device=get_accelerator().current_device_name())
     gamma = torch.randn((channels), dtype=dtype, device=get_accelerator().current_device_name())
@@ -83,10 +79,7 @@ def residual_ref_implementation(vals, bias, res, gamma, beta, epsilon, channels,
 
 
 def residual_ds_implementation(vals, bias, res, gamma, beta, epsilon):
-    global inference_module
-    if inference_module is None:
-        inference_module = InferenceBuilder().load()
-    return inference_module._layer_norm_residual(vals, bias, res, gamma, beta, epsilon)
+    return LayerNormOp.layer_norm_residual(vals, bias, res, gamma, beta, epsilon)
 
 
 def residual_ds_triton_implementation(vals, bias, res, gamma, beta, epsilon):
@@ -100,8 +93,8 @@ def residual_ds_triton_implementation(vals, bias, res, gamma, beta, epsilon):
 @pytest.mark.parametrize("dtype", get_dtypes())
 @pytest.mark.parametrize("use_triton_ops", [False, True])
 def test_layer_norm_residual(batch, seq_len, channels, dtype, use_triton_ops):
-    if not deepspeed.HAS_TRITON and use_triton_ops:
-        pytest.skip("triton has to be installed for the test")
+    if not deepspeed.get_accelerator().is_triton_supported():
+        pytest.skip("triton is not supported on this system")
 
     vals = torch.randn((batch, seq_len, channels), dtype=dtype, device=get_accelerator().current_device_name())
     residual = torch.randn((batch, seq_len, channels), dtype=dtype, device=get_accelerator().current_device_name())
@@ -137,10 +130,7 @@ def residual_store_ref_implementation(vals, bias, res, gamma, beta, epsilon, cha
 
 
 def residual_store_ds_implementation(vals, bias, res, gamma, beta, epsilon):
-    global inference_module
-    if inference_module is None:
-        inference_module = InferenceBuilder().load()
-    return inference_module.layer_norm_residual_store_pre_ln_res(vals, bias, res, gamma, beta, epsilon)
+    return LayerNormOp.layer_norm_residual_store_pre_ln_res(vals, bias, res, gamma, beta, epsilon)
 
 
 @pytest.mark.inference_ops
@@ -173,8 +163,8 @@ def test_layer_norm_residual_store_pre_ln_res(batch, seq_len, channels, dtype):
 @pytest.mark.parametrize("residual", [True, False])
 @pytest.mark.parametrize("input_bias", [True, False])
 def test_triton_layer_norm(M, N, dtype, residual, input_bias, eps=1e-5, device='cuda'):
-    if not deepspeed.HAS_TRITON:
-        pytest.skip("triton has to be installed for the test")
+    if not deepspeed.get_accelerator().is_triton_supported():
+        pytest.skip("triton is not supported on this system")
     dev = get_accelerator().device_name()
     torch.manual_seed(0)
     # create data
@@ -198,4 +188,4 @@ def test_triton_layer_norm(M, N, dtype, residual, input_bias, eps=1e-5, device='
     y_ref = torch.nn.functional.layer_norm(x + res + (x_bias if input_bias else 0), w_shape, weight, bias,
                                            eps).to(dtype)
     # compare
-    assert_almost_equal(y_tri, y_ref)
+    assert (allclose(y_tri, y_ref))

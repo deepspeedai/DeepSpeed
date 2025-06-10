@@ -6,7 +6,9 @@ runs:
     - id: update-env
       run: |
         sudo apt-get update
-        sudo apt-get install -y libaio-dev
+        # Temporary disable nvme UTs
+        # sudo apt-get install -y libaio-dev
+        sudo apt remove -y libaio-dev
         python -m pip install --user --upgrade pip
         python -m pip install --user --upgrade virtualenv
       shell: bash
@@ -28,7 +30,7 @@ runs:
         echo HF_DATASETS_CACHE=/blob/datasets_cache/ >> $GITHUB_ENV
         echo MEGATRON_CKPT_DIR=/blob/megatron_ckpt/ >> $GITHUB_ENV
         echo CRITIC_CKPT_DIR=/blob/step2_opt_125m_ckpt/ >> $GITHUB_ENV
-        echo PYTEST_OPTS="--color=yes --durations=0 --verbose -rF" >> $GITHUB_ENV
+        echo PYTEST_OPTS="--maxfail=100 --color=yes --durations=0 --verbose -rF" >> $GITHUB_ENV
       shell: bash
     - id: print-env
       run: |

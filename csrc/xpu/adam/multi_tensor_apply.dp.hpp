@@ -109,6 +109,12 @@ private:
     std::tuple<ArgTypes...> args;
 };
 
+// to make sure multi_tensor_apply_kernel can be used in sycl::buffer
+namespace sycl {
+template <typename T, typename U, typename... ArgTypes>
+struct is_device_copyable<multi_tensor_apply_kernel<T, U, ArgTypes...>> : std::true_type {};
+}  // namespace sycl
+
 template <int depth, typename T, typename... ArgTypes>
 void multi_tensor_apply(int block_size,
                         int chunk_size,

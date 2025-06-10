@@ -21,10 +21,10 @@ jobs:
   unit-tests:
     strategy:
       matrix:
-        pyVersion: ["3.7", "3.8", "3.9", "3.10"]
+        pyVersion: ["3.8", "3.9", "3.10"]
       fail-fast: false
 
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     container:
       image: deepspeed/gh-builder:py${{ matrix.pyVersion }}
 

@@ -46,7 +46,7 @@ class RaggedOpsBuilder(CUDAOpBuilder):
     def filter_ccs(self, ccs):
         ccs_retained = []
         ccs_pruned = []
-        for cc in ccs:
+        for cc in [cc.split('.') for cc in ccs]:
             if int(cc[0]) >= 8:
                 # Blocked flash has a dependency on Ampere + newer
                 ccs_retained.append(cc)

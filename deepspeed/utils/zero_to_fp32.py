@@ -10,7 +10,10 @@
 # the future. Once extracted, the weights don't require DeepSpeed and can be used in any
 # application.
 #
-# example: python zero_to_fp32.py . pytorch_model.bin
+# example:
+#   python zero_to_fp32.py . output_dir/
+#   or
+#   python zero_to_fp32.py . output_dir/ --safe_serialization
 
 import argparse
 import torch
@@ -18,6 +21,10 @@ import glob
 import math
 import os
 import re
+import gc
+import json
+import numpy as np
+from tqdm import tqdm
 from collections import OrderedDict
 from dataclasses import dataclass
 
@@ -95,7 +102,7 @@ def get_model_state_files(checkpoint_dir):
 def parse_model_states(files):
     zero_model_states = []
     for file in files:
-        state_dict = torch.load(file, map_location=device)
+        state_dict = torch.load(file, map_location=device, weights_only=False)
 
         if BUFFER_NAMES not in state_dict:
             raise ValueError(f"{file} is not a model state checkpoint")
@@ -139,11 +146,10 @@ def parse_model_states(files):
 
 
 def parse_optim_states(files, ds_checkpoint_dir):
-
     total_files = len(files)
     state_dicts = []
-    for f in files:
-        state_dict = torch.load(f, map_location=device)
+    for f in tqdm(files, desc='Loading checkpoint shards'):
+        state_dict = torch.load(f, map_location=device, mmap=True, weights_only=False)
         # immediately discard the potentially huge 2 optimizer states as we only care for fp32 master weights
         # and also handle the case where it was already removed by another helper script
         state_dict["optimizer_state_dict"].pop("optimizer_state_dict", None)
@@ -175,19 +181,7 @@ def parse_optim_states(files, ds_checkpoint_dir):
     else:
         raise ValueError(f"unknown zero stage {zero_stage}")
 
-    if zero_stage <= 2:
-        fp32_flat_groups = [state_dicts[i][OPTIMIZER_STATE_DICT][fp32_groups_key] for i in range(len(state_dicts))]
-    elif zero_stage == 3:
-        # if there is more than one param group, there will be multiple flattened tensors - one
-        # flattened tensor per group - for simplicity merge them into a single tensor
-        #
-        # XXX: could make the script more memory efficient for when there are multiple groups - it
-        # will require matching the sub-lists of param_shapes for each param group flattened tensor
-
-        fp32_flat_groups = [
-            torch.cat(state_dicts[i][OPTIMIZER_STATE_DICT][fp32_groups_key], 0) for i in range(len(state_dicts))
-        ]
-
+    fp32_flat_groups = [state_dicts[i][OPTIMIZER_STATE_DICT][fp32_groups_key] for i in range(len(state_dicts))]
     return zero_stage, world_size, fp32_flat_groups
 
 
@@ -394,9 +388,56 @@ def _zero3_merge_frozen_params(state_dict, world_size, zero_model_states):
     print(f"Reconstructed Frozen fp32 state dict with {total_params} params {total_numel} elements")
 
 
+class GatheredTensor:
+    """
+    A pseudo tensor that collects partitioned weights.
+    It is more memory efficient when there are multiple groups.
+    """
+
+    def __init__(self, flat_groups, flat_groups_offset, offset, partitioned_numel, shape):
+        self.flat_groups = flat_groups
+        self.flat_groups_offset = flat_groups_offset
+        self.offset = offset
+        self.partitioned_numel = partitioned_numel
+        self.shape = shape
+        self.dtype = self.flat_groups[0][0].dtype
+
+    def contiguous(self):
+        """
+        Merge partitioned weights from flat_groups into a single tensor.
+        """
+        end_idx = self.offset + self.partitioned_numel
+        world_size = len(self.flat_groups)
+        pad_flat_param_chunks = []
+
+        for rank_i in range(world_size):
+            # for each rank, we need to collect weights from related group/groups
+            flat_groups_at_rank_i = self.flat_groups[rank_i]
+            start_group_id = None
+            end_group_id = None
+            for group_id in range(len(self.flat_groups_offset)):
+                if self.flat_groups_offset[group_id] <= self.offset < self.flat_groups_offset[group_id + 1]:
+                    start_group_id = group_id
+                if self.flat_groups_offset[group_id] < end_idx <= self.flat_groups_offset[group_id + 1]:
+                    end_group_id = group_id
+                    break
+            # collect weights from related group/groups
+            for group_id in range(start_group_id, end_group_id + 1):
+                flat_tensor = flat_groups_at_rank_i[group_id]
+                start_offset = self.offset - self.flat_groups_offset[group_id]
+                end_offset = min(end_idx, self.flat_groups_offset[group_id + 1]) - self.flat_groups_offset[group_id]
+                pad_flat_param_chunks.append(flat_tensor[start_offset:end_offset])
+
+        # collect weights from all ranks
+        pad_flat_param = torch.cat(pad_flat_param_chunks, dim=0)
+        param = pad_flat_param[:self.shape.numel()].view(self.shape).contiguous()
+        return param
+
+
 def _zero3_merge_trainable_params(state_dict, world_size, fp32_flat_groups, zero_model_states):
     param_shapes = zero_model_states[0].param_shapes
-    avail_numel = fp32_flat_groups[0].numel() * world_size
+    avail_numel = sum([flat_group.numel() for flat_group in fp32_flat_groups[0]]) * world_size
+
     # Reconstruction protocol: For zero3 we need to zip the partitions together at boundary of each
     # param, re-consolidating each param, while dealing with padding if any
 
@@ -420,12 +461,11 @@ def _zero3_merge_trainable_params(state_dict, world_size, fp32_flat_groups, zero
     offset = 0
     total_numel = 0
     total_params = 0
-    for name, shape in param_shapes.items():
-
+    flat_groups_offset = [0] + list(np.cumsum([flat_tensor.numel() for flat_tensor in fp32_flat_groups[0]]))
+    for name, shape in tqdm(param_shapes.items(), desc='Gathering sharded weights'):
         unpartitioned_numel = shape.numel()
         total_numel += unpartitioned_numel
         total_params += 1
-
         partitioned_numel, partitioned_padding_numel = zero3_partitioned_param_info(unpartitioned_numel, world_size)
 
         if debug:
@@ -433,10 +473,9 @@ def _zero3_merge_trainable_params(state_dict, world_size, fp32_flat_groups, zero
                 f"Trainable params: {total_params} {name} full shape: {shape} partition0 numel={partitioned_numel} partitioned_padding_numel={partitioned_padding_numel}"
             )
 
-        # XXX: memory usage doubles here
-        state_dict[name] = torch.cat(
-            tuple(fp32_flat_groups[i].narrow(0, offset, partitioned_numel) for i in range(world_size)),
-            0).narrow(0, 0, unpartitioned_numel).view(shape)
+        # memory efficient tensor
+        tensor = GatheredTensor(fp32_flat_groups, flat_groups_offset, offset, partitioned_numel, shape)
+        state_dict[name] = tensor
         offset += partitioned_numel
 
     offset *= world_size
@@ -471,7 +510,30 @@ def _get_fp32_state_dict_from_zero3_checkpoint(world_size, fp32_flat_groups, zer
     return state_dict
 
 
-def get_fp32_state_dict_from_zero_checkpoint(checkpoint_dir, tag=None, exclude_frozen_parameters=False):
+def to_torch_tensor(state_dict, return_empty_tensor=False):
+    """
+    Convert state_dict of GatheredTensor to torch tensor
+    """
+    torch_state_dict = {}
+    converted_tensors = {}
+    for name, tensor in state_dict.items():
+        tensor_id = id(tensor)
+        if tensor_id in converted_tensors:  # shared tensors
+            shared_tensor = torch_state_dict[converted_tensors[tensor_id]]
+            torch_state_dict[name] = shared_tensor
+        else:
+            converted_tensors[tensor_id] = name
+            if return_empty_tensor:
+                torch_state_dict[name] = torch.empty(tensor.shape, dtype=tensor.dtype)
+            else:
+                torch_state_dict[name] = tensor.contiguous()
+    return torch_state_dict
+
+
+def get_fp32_state_dict_from_zero_checkpoint(checkpoint_dir,
+                                             tag=None,
+                                             exclude_frozen_parameters=False,
+                                             lazy_mode=False):
     """
     Convert ZeRO 2 or 3 checkpoint into a single fp32 consolidated state_dict that can be loaded with
     ``load_state_dict()`` and used for training without DeepSpeed or shared with others, for example
@@ -481,13 +543,11 @@ def get_fp32_state_dict_from_zero_checkpoint(checkpoint_dir, tag=None, exclude_f
         - ``checkpoint_dir``: path to the desired checkpoint folder
         - ``tag``: checkpoint tag used as a unique identifier for checkpoint. If not provided will attempt to load tag in 'latest' file. e.g., ``global_step14``
         - ``exclude_frozen_parameters``: exclude frozen parameters
+        - ``lazy_mode``: get state_dict in lazy mode. It returns a dict of pesduo tensor instead of torch tensor, which is more memory efficient.
+          Convert the pesduo tensor to torch tensor by ``.contiguous()``
 
     Returns:
         - pytorch ``state_dict``
-
-    Note: this approach may not work if your application doesn't have sufficient free CPU memory and
-    you may need to use the offline approach using the ``zero_to_fp32.py`` script that is saved with
-    the checkpoint.
 
     A typical usage might be ::
 
@@ -504,6 +564,16 @@ def get_fp32_state_dict_from_zero_checkpoint(checkpoint_dir, tag=None, exclude_f
 
     If you want it all done for you, use ``load_state_dict_from_zero_checkpoint`` instead.
 
+    Note: the above usage may not work if your application doesn't have sufficient free CPU memory.
+    You may need to use the offline approach using the ``zero_to_fp32.py`` script that is saved with
+    the checkpoint. Or you can load state_dict in lazy mode ::
+
+        from deepspeed.utils.zero_to_fp32 import get_fp32_state_dict_from_zero_checkpoint
+        state_dict = get_fp32_state_dict_from_zero_checkpoint(checkpoint_dir, lazy_mode=True) # not on cpu
+        for name, lazy_tensor in state_dict.item():
+            tensor = lazy_tensor.contiguous()  # to cpu
+            print(name, tensor)
+            # del tensor to release memory if it no longer in use
     """
     if tag is None:
         latest_path = os.path.join(checkpoint_dir, 'latest')
@@ -518,24 +588,96 @@ def get_fp32_state_dict_from_zero_checkpoint(checkpoint_dir, tag=None, exclude_f
     if not os.path.isdir(ds_checkpoint_dir):
         raise FileNotFoundError(f"Directory '{ds_checkpoint_dir}' doesn't exist")
 
-    return _get_fp32_state_dict_from_zero_checkpoint(ds_checkpoint_dir, exclude_frozen_parameters)
+    state_dict = _get_fp32_state_dict_from_zero_checkpoint(ds_checkpoint_dir, exclude_frozen_parameters)
+    if lazy_mode:
+        return state_dict
+    else:
+        return to_torch_tensor(state_dict)
 
 
-def convert_zero_checkpoint_to_fp32_state_dict(checkpoint_dir, output_file, tag=None, exclude_frozen_parameters=False):
+def convert_zero_checkpoint_to_fp32_state_dict(checkpoint_dir,
+                                               output_dir,
+                                               max_shard_size="5GB",
+                                               safe_serialization=False,
+                                               tag=None,
+                                               exclude_frozen_parameters=False):
     """
     Convert ZeRO 2 or 3 checkpoint into a single fp32 consolidated ``state_dict`` file that can be
     loaded with ``torch.load(file)`` + ``load_state_dict()`` and used for training without DeepSpeed.
 
     Args:
         - ``checkpoint_dir``: path to the desired checkpoint folder. (one that contains the tag-folder, like ``global_step14``)
-        - ``output_file``: path to the pytorch fp32 state_dict output file (e.g. path/pytorch_model.bin)
+        - ``output_dir``: directory to the pytorch fp32 state_dict output files
+        - ``max_shard_size``: the maximum size for a checkpoint before being sharded, default value is 5GB
+        - ``safe_serialization``:  whether to save the model using `safetensors` or the traditional PyTorch way (that uses `pickle`).
         - ``tag``: checkpoint tag used as a unique identifier for checkpoint. If not provided will attempt to load tag in the file named ``latest`` in the checkpoint folder, e.g., ``global_step14``
         - ``exclude_frozen_parameters``: exclude frozen parameters
     """
 
-    state_dict = get_fp32_state_dict_from_zero_checkpoint(checkpoint_dir, tag, exclude_frozen_parameters)
-    print(f"Saving fp32 state dict to {output_file}")
-    torch.save(state_dict, output_file)
+    # Dependency pre-check
+    if safe_serialization:
+        try:
+            from safetensors.torch import save_file
+        except ImportError:
+            print('If you want to use `safe_serialization`, please `pip install safetensors`')
+            raise
+    if max_shard_size is not None:
+        try:
+            from huggingface_hub import split_torch_state_dict_into_shards
+        except ImportError:
+            print('If you want to use `max_shard_size`, please `pip install huggingface_hub`')
+            raise
+
+    # Convert zero checkpoint to state_dict
+    state_dict = get_fp32_state_dict_from_zero_checkpoint(checkpoint_dir,
+                                                          tag,
+                                                          exclude_frozen_parameters,
+                                                          lazy_mode=True)
+
+    # Shard the model if it is too big.
+    weights_name = "model.safetensors" if safe_serialization else "pytorch_model.bin"
+    if max_shard_size is not None:
+        filename_pattern = weights_name.replace(".bin", "{suffix}.bin").replace(".safetensors", "{suffix}.safetensors")
+        # an memory-efficient approach for sharding
+        empty_state_dict = to_torch_tensor(state_dict, return_empty_tensor=True)
+        state_dict_split = split_torch_state_dict_into_shards(empty_state_dict,
+                                                              filename_pattern=filename_pattern,
+                                                              max_shard_size=max_shard_size)
+    else:
+        from collections import namedtuple
+        StateDictSplit = namedtuple("StateDictSplit", ["is_sharded", "filename_to_tensors"])
+        state_dict_split = StateDictSplit(is_sharded=False,
+                                          filename_to_tensors={weights_name: list(state_dict.keys())})
+
+    # Save the model by shard
+    os.makedirs(output_dir, exist_ok=True)
+    filename_to_tensors = state_dict_split.filename_to_tensors.items()
+    for shard_file, tensors in tqdm(filename_to_tensors, desc="Saving checkpoint shards"):
+        shard_state_dict = {tensor_name: state_dict[tensor_name] for tensor_name in tensors}
+        shard_state_dict = to_torch_tensor(shard_state_dict)
+        output_path = os.path.join(output_dir, shard_file)
+        if safe_serialization:
+            save_file(shard_state_dict, output_path, metadata={"format": "pt"})
+        else:
+            torch.save(shard_state_dict, output_path)
+        # release the memory of current shard
+        for tensor_name in list(shard_state_dict.keys()):
+            del state_dict[tensor_name]
+            del shard_state_dict[tensor_name]
+        del shard_state_dict
+        gc.collect()
+
+    # Save index if sharded
+    if state_dict_split.is_sharded:
+        index = {
+            "metadata": state_dict_split.metadata,
+            "weight_map": state_dict_split.tensor_to_filename,
+        }
+        save_index_file = "model.safetensors.index.json" if safe_serialization else "pytorch_model.bin.index.json"
+        save_index_file = os.path.join(output_dir, save_index_file)
+        with open(save_index_file, "w", encoding="utf-8") as f:
+            content = json.dumps(index, indent=2, sort_keys=True) + "\n"
+            f.write(content)
 
 
 def load_state_dict_from_zero_checkpoint(model, checkpoint_dir, tag=None):
@@ -578,15 +720,27 @@ def load_state_dict_from_zero_checkpoint(model, checkpoint_dir, tag=None):
 
 
 if __name__ == "__main__":
-
     parser = argparse.ArgumentParser()
     parser.add_argument("checkpoint_dir",
                         type=str,
                         help="path to the desired checkpoint folder, e.g., path/checkpoint-12")
+    parser.add_argument("output_dir",
+                        type=str,
+                        help="directory to the pytorch fp32 state_dict output files"
+                        "(e.g. path/checkpoint-12-output/)")
     parser.add_argument(
-        "output_file",
+        "--max_shard_size",
         type=str,
-        help="path to the pytorch fp32 state_dict output file (e.g. path/checkpoint-12/pytorch_model.bin)")
+        default="5GB",
+        help="The maximum size for a checkpoint before being sharded. Checkpoints shard will then be each of size"
+        "lower than this size. If expressed as a string, needs to be digits followed by a unit (like `5MB`"
+        "We default it to 5GB in order for models to be able to run easily on free-tier google colab instances"
+        "without CPU OOM issues.")
+    parser.add_argument(
+        "--safe_serialization",
+        default=False,
+        action='store_true',
+        help="Whether to save the model using `safetensors` or the traditional PyTorch way (that uses `pickle`).")
     parser.add_argument("-t",
                         "--tag",
                         type=str,
@@ -599,6 +753,8 @@ if __name__ == "__main__":
     debug = args.debug
 
     convert_zero_checkpoint_to_fp32_state_dict(args.checkpoint_dir,
-                                               args.output_file,
+                                               args.output_dir,
+                                               max_shard_size=args.max_shard_size,
+                                               safe_serialization=args.safe_serialization,
                                                tag=args.tag,
                                                exclude_frozen_parameters=args.exclude_frozen_parameters)

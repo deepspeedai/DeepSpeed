@@ -3,6 +3,8 @@
 
 # DeepSpeed Team
 
+from typing import Tuple
+
 import torch
 from deepspeed.accelerator import get_accelerator
 
@@ -23,38 +25,22 @@ def get_tolerances():
 DTYPES = None
 
 
-def get_dtypes():
+def get_dtypes(include_float=True):
     global DTYPES
     if DTYPES is None:
-        DTYPES = get_accelerator().supported_dtypes()
+        DTYPES = [torch.float16, torch.float32] if include_float else [torch.float16]
+        try:
+            if get_accelerator().is_bf16_supported():
+                DTYPES.append(torch.bfloat16)
+        except (AssertionError, AttributeError):
+            pass
     return DTYPES
 
 
-def allclose(x, y):
+def allclose(x, y, tolerances: Tuple[int, int] = None):
     assert x.dtype == y.dtype
-    rtol, atol = get_tolerances()[x.dtype]
+    if tolerances is None:
+        rtol, atol = get_tolerances()[x.dtype]
+    else:
+        rtol, atol = tolerances
     return torch.allclose(x, y, rtol=rtol, atol=atol)
-
-
-def assert_almost_equal(x, y, decimal=2, err_msg=''):
-    import numpy.testing as npt
-    if isinstance(x, torch.Tensor):
-        if x.dtype == torch.bfloat16:
-            x = x.float()
-        x = x.cpu().detach().numpy()
-    if isinstance(y, torch.Tensor):
-        if y.dtype == torch.bfloat16:
-            y = y.float()
-        y = y.cpu().detach().numpy()
-    npt.assert_array_almost_equal(x, y, err_msg=err_msg, decimal=decimal)
-
-
-def max_diff(a, b):
-    a = a.to(torch.float32).flatten()
-    b = b.to(torch.float32).flatten()
-    diff = torch.abs(a - b)
-    max_diff_indices = torch.argsort(diff)[-1]
-    print("Max difference indices:", max_diff_indices)
-    print("Max difference values:", diff[max_diff_indices])
-    print(f"{a[max_diff_indices]} vs {b[max_diff_indices]}")
-    return max_diff_indices

@@ -55,10 +55,10 @@ config = {
     }
 }
 
-if get_accelerator().is_fp16_supported():
-    config["fp16"] = {"enabled": True, "loss_scale": 138.}
-elif get_accelerator().is_bf16_supported():
+if get_accelerator().is_bf16_supported():
     config["bf16"] = {"enabled": True}
+elif get_accelerator().is_fp16_supported():
+    config["fp16"] = {"enabled": True, "loss_scale": 138.}
 
 
 class TestZeroGatheredParametersFree(DistributedTest):
@@ -218,9 +218,9 @@ class TestSerialContext(DistributedTest):
             engine.tput_timer.stop(global_step=global_step)
             duration = engine.tput_timer.end_time - engine.tput_timer.start_time
             # step elapsed time is reset after gradient accumulation steps
-            assert engine.tput_timer.step_elapsed_time == (
-                0 if engine.tput_timer.global_step_count != engine.tput_timer.start_step else current_duration +
-                duration)
+            assert engine.tput_timer.step_elapsed_time == (0 if engine.tput_timer.global_step_count
+                                                           != engine.tput_timer.start_step else current_duration +
+                                                           duration)
             assert engine.tput_timer.total_elapsed_time == total_duration + duration
 
     def test_ext_param_getattr(self):

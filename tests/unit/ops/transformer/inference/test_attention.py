@@ -7,7 +7,7 @@ import pytest
 import torch
 import deepspeed
 from deepspeed.accelerator import get_accelerator
-from .inference_test_utils import assert_almost_equal
+from .inference_test_utils import allclose
 
 
 # reference timplementation
@@ -27,8 +27,8 @@ def ref_torch_attention(q, k, v, mask, sm_scale):
 @pytest.mark.parametrize("causal", [True, False])
 @pytest.mark.parametrize("use_flash", [True, False])
 def test_attention(BATCH, H, N_CTX, D_HEAD, causal, use_flash, dtype=torch.float16):
-    if not deepspeed.HAS_TRITON:
-        pytest.skip("triton has to be installed for the test")
+    if not deepspeed.get_accelerator().is_triton_supported():
+        pytest.skip("triton is not supported on this system")
 
     minus_inf = -65504.0
     dev = deepspeed.accelerator.get_accelerator().device_name()
@@ -88,4 +88,4 @@ def test_attention(BATCH, H, N_CTX, D_HEAD, causal, use_flash, dtype=torch.float
                                     use_triton_flash=False,
                                     use_ds_attention=False)
     tri_out = tri_out.reshape((BATCH, N_CTX, H, D_HEAD)).permute(0, 2, 1, 3)
-    assert_almost_equal(ref_out, tri_out)
+    assert (allclose(ref_out, tri_out))

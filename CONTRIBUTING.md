@@ -13,17 +13,23 @@ pre-commit install
 Afterwards, our suite of formatting tests run automatically before each `git commit`. You
 can also run these manually:
 ```bash
-pre-commit run --all-files
+pre-commit run --files  $(git diff --name-only master)
 ```
 If a formatting test fails, it will fix the modified code in place and abort
 the `git commit`. After looking over the changes, you can `git add <modified files>`
 and then repeat the previous `git commit` command.
 
+You can also run:
+```
+make format
+```
+which will do the same as above, and it'll also automatically build a `venv` python environment if you
+don't already have one, which will isolate the requirements of this project from requirements of other projects.
 
 ## Testing
 DeepSpeed tracks two types of tests: unit tests and more costly model convergence tests.
 The model convergence tests train
-[DeepSpeedExamples](https://github.com/microsoft/DeepSpeedExamples/) and measure
+[DeepSpeedExamples](https://github.com/deepspeedai/DeepSpeedExamples/) and measure
 end-to-end convergence and related metrics. Unit tests are found in `tests/unit/` and
 the model convergence tests are found in `tests/model/`.
 
@@ -38,9 +44,14 @@ You can also provide the `-v` flag to `pytest` to see additional information abo
 tests. Note that [pytest-forked](https://github.com/pytest-dev/pytest-forked) and the
 `--forked` flag are required to test CUDA functionality in distributed tests.
 
+You can also run:
+```
+make test
+```
+
 ### Model Tests
 To execute model tests, first [install DeepSpeed](#installation). The
-[DeepSpeedExamples](https://github.com/microsoft/DeepSpeedExamples/) repository is cloned
+[DeepSpeedExamples](https://github.com/deepspeedai/DeepSpeedExamples/) repository is cloned
 as part of this process. Next, execute the model test driver:
 ```bash
 cd tests/model/
@@ -48,16 +59,15 @@ pytest run_sanity_check.py
 ```
 Note that the `--forked` flag is not necessary for the model tests.
 
-## Contributor License Agreement
-This project welcomes contributions and suggestions. Most contributions require you to
-agree to a Contributor License Agreement (CLA) declaring that you have the right to, and
-actually do, grant us the rights to use your contribution. For details, visit
-https://cla.opensource.microsoft.com.
+## Developer Certificate of Origin
+This project welcomes contributions and suggestions. All contributions to deepspeedai projects
+require commits to be signed off with a [Developer Certificate of Origin](https://en.wikipedia.org/wiki/Developer_Certificate_of_Origin)
+(DCO) declaring that you have the right to, and actually do, grant us the rights to use your contribution.
 
-When you submit a pull request, a CLA bot will automatically determine whether you need
-to provide a CLA and decorate the PR appropriately (e.g., status check, comment). Simply
-follow the instructions provided by the bot. You will only need to do this once across
-all repos using our CLA.
+When you submit a pull request, the DCO app will check for the presence of signed commits.
+Information about how this check works is here: https://github.com/dcoapp/app?tab=readme-ov-file#how-it-works
+
+To sign commits, you will need to include `-s` when running `git commit`. For example, `git commit -s -m "Commit message"`. One note, creating PRs via the GitHub interface do not appear to include this option.  If you forget this, clicking on the failing check in your PR will point you to commands you can run to rebase and sign previous commits.
 
 ## Code of Conduct
 This project has adopted the [Microsoft Open Source Code of
@@ -85,8 +95,8 @@ Based on the issue we shall discuss the merit of the new feature and decide whet
 ### Step 2: implementation and verification
 Contributor will go ahead and implement the feature, and the DeepSpeed team will provide guidance/helps as needed. The required deliverables include:
 
-* A PR to [microsoft/DeepSpeed](https://github.com/microsoft/DeepSpeed) including (1) the feature implementation (2) unit tests (3) documentation (4) tutorial
-* A PR to [microsoft/DeepSpeedExamples](https://github.com/microsoft/DeepSpeedExamples) or [microsoft/Megatron-DeepSpeed](https://github.com/microsoft/Megatron-DeepSpeed) including the examples of how to use the feature (this is related to the planned testing experiments in proposal)
+* A PR to [deepspeedai/DeepSpeed](https://github.com/deepspeedai/DeepSpeed) including (1) the feature implementation (2) unit tests (3) documentation (4) tutorial
+* A PR to [deepspeedai/DeepSpeedExamples](https://github.com/deepspeedai/DeepSpeedExamples) or [deepspeedai/Megatron-DeepSpeed](https://github.com/deepspeedai/Megatron-DeepSpeed) including the examples of how to use the feature (this is related to the planned testing experiments in proposal)
 * In the implementation (code, documentation, tutorial), we require the feature author to record their GitHub username as a contact method for future questions/maintenance.
 
 After receiving the PRs, we will review them and merge them after necessary tests/fixes.

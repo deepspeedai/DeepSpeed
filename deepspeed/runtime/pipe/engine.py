@@ -287,7 +287,8 @@ class PipelineEngine(DeepSpeedEngine):
         weight_group_list = self.module.get_tied_weights_and_groups()
         for weight, group in weight_group_list:
             grad = weight._hp_grad if self.using_bf16_optimizer else weight.grad
-            dist.all_reduce(grad, group=group)
+            if grad is not None:
+                dist.all_reduce(grad, group=group)
 
     def _exec_reduce_grads(self):
         self._force_grad_boundary = True
@@ -392,7 +393,7 @@ class PipelineEngine(DeepSpeedEngine):
 
         self.timers(TRAIN_BATCH_TIMER).stop()
 
-        if self.global_steps % self.steps_per_print() == 0:
+        if self.steps_per_print() is not None and self.global_steps % self.steps_per_print() == 0:
             if self.global_rank == 0:
                 elapsed = self.timers(TRAIN_BATCH_TIMER).elapsed(reset=True) / 1000.0
                 iter_time = elapsed / self.steps_per_print()
@@ -412,7 +413,8 @@ class PipelineEngine(DeepSpeedEngine):
                                     self.global_samples)]
             self.monitor.write_events(self.summary_events)
 
-        if self.wall_clock_breakdown() and self.global_steps % self.steps_per_print() == 0:
+        if self.steps_per_print() is not None and self.wall_clock_breakdown(
+        ) and self.global_steps % self.steps_per_print() == 0:
             self.timers.log([
                 PIPE_SEND_OUTPUT_TIMER,
                 PIPE_SEND_GRAD_TIMER,
@@ -639,9 +641,10 @@ class PipelineEngine(DeepSpeedEngine):
             self.dp_group_loss = losses[0].clone().detach()
             agg_loss = losses[1].clone().detach()
             if additional_losses is not None:
-                self.agg_additional_losses = OrderedDict(
-                    {name: losses[2 + i].clone().detach()
-                     for i, name in enumerate(additional_losses.keys())})
+                self.agg_additional_losses = OrderedDict({
+                    name: losses[2 + i].clone().detach()
+                    for i, name in enumerate(additional_losses.keys())
+                })
         return agg_loss
 
     def set_dataloader(self, loader):
@@ -861,7 +864,7 @@ class PipelineEngine(DeepSpeedEngine):
 
         if self.using_bf16_optimizer and not self.is_last_stage():
             # manually call because we don't call optimizer.backward()
-            if not self._config.bfloat16_immediate_grad_update:
+            if not self._config.bfloat16_config.immediate_grad_update:
                 self.optimizer.update_hp_grads(clear_lp_grads=False)
 
         # Free up the memory from the output of forward()

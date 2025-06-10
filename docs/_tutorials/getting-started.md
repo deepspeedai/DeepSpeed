@@ -9,7 +9,7 @@ tags: getting-started
 
 * Installing is as simple as `pip install deepspeed`, [see more details](/tutorials/advanced-install/).
 * To get started with DeepSpeed on AzureML, please see the [AzureML Examples GitHub](https://github.com/Azure/azureml-examples/tree/main/cli/jobs/deepspeed)
-* DeepSpeed has direct integrations with [HuggingFace Transformers](https://github.com/huggingface/transformers) and [PyTorch Lightning](https://github.com/PyTorchLightning/pytorch-lightning). HuggingFace Transformers users can now easily accelerate their models with DeepSpeed through a simple ``--deepspeed`` flag + config file [See more details](https://huggingface.co/docs/transformers/main_classes/deepspeed). PyTorch Lightning provides easy access to DeepSpeed through the Lightning Trainer [See more details](https://pytorch-lightning.readthedocs.io/en/stable/advanced/multi_gpu.html?highlight=deepspeed#deepspeed).
+* DeepSpeed has direct integrations with [HuggingFace Transformers](https://github.com/huggingface/transformers) and [PyTorch Lightning](https://github.com/PyTorchLightning/pytorch-lightning). HuggingFace Transformers users can now easily accelerate their models with DeepSpeed through a simple ``--deepspeed`` flag + config file [See more details](https://huggingface.co/docs/transformers/deepspeed). PyTorch Lightning provides easy access to DeepSpeed through the Lightning Trainer [See more details](https://pytorch-lightning.readthedocs.io/en/stable/advanced/multi_gpu.html?highlight=deepspeed#deepspeed).
 * DeepSpeed on AMD can be used via our [ROCm images](https://hub.docker.com/r/deepspeed/rocm501/tags), e.g., `docker pull deepspeed/rocm501:ds060_pytorch110`.
 * DeepSpeed also supports Intel Xeon CPU, Intel Data Center Max Series XPU, Intel Gaudi HPU, Huawei Ascend NPU etc, please refer to the [accelerator setup guide](/tutorials/accelerator-setup-guide/)
 
@@ -316,10 +316,14 @@ local machine to discover the number of slots available. The `--include` and
 `--exclude` arguments work as normal, but the user should specify 'localhost'
 as the hostname.
 
-Also note that `CUDA_VISIBLE_DEVICES` can't be used with DeepSpeed to control
-which devices should be used. For example, to use only gpu1 of the current
-node, do:
+Also note that `CUDA_VISIBLE_DEVICES` can be used with `deepspeed` to control
+which devices should be used on a single node. So either of these would work
+to launch just on devices 0 and 1 of the current node:
 
 ```bash
-deepspeed --include localhost:1 ...
+deepspeed --include localhost:0,1 ...
+```
+
+```bash
+CUDA_VISIBLE_DEVICES=0,1 deepspeed ...
 ```

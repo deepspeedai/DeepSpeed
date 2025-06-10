@@ -9,28 +9,28 @@ Helper functions and classes from multiple sources.
 """
 
 from collections.abc import Iterable
-from deepspeed.moe.utils import is_moe_param
 import os
 import psutil
 import gc
 from math import sqrt
 
+from numpy import prod
+
 import torch
-from deepspeed import comm as dist
+from torch.nn import functional as F
 try:
     from torch._six import inf
 except ModuleNotFoundError:
     from torch import inf
-
+from typing import Union, List, Dict
+from deepspeed import comm as dist
+from deepspeed.moe.utils import is_moe_param
 from deepspeed.utils import groups, logger
 from deepspeed.utils.bwc import (bwc_tensor_model_parallel_rank, bwc_pipeline_parallel_world_size,
                                  bwc_pipeline_parallel_group)
 from deepspeed.runtime.constants import PIPE_REPLICATED
-from numpy import prod
 from deepspeed.accelerator import get_accelerator
-
 from deepspeed.module_inject.policy import transpose
-from torch.nn import functional as F
 
 torch_memory_reserved = get_accelerator().memory_reserved
 torch_max_memory_reserved = get_accelerator().max_memory_reserved
@@ -141,19 +141,19 @@ def copy_to_device(item, device, criterion_func):
         return item
 
 
-def move_to_device(item, device, criterion_func):
+def move_to_device(item, device, criterion_func=None):
     """
     Move tensor on to specified device by changing the storage.
     Works on individual tensors, and tensors contained/nested in lists, tuples, and dicts.
     Parameters:
         item: tensor to move or (possibly nested) container of tensors to move.
         device: target device
-        criterion_func: Function to restrict move operation to items meet criterion
+        criterion_func: Function to restrict move operation to items meet criterion, defaults to `None` which is an equivalent to always move
 
     Returns:
         None
     """
-    if criterion_func(item):
+    if (criterion_func is not None and criterion_func(item)):
         device_copy = item.to(device)
         item.data = device_copy.data
         return item
@@ -164,7 +164,7 @@ def move_to_device(item, device, criterion_func):
     elif isinstance(item, dict):
         return {k: move_to_device(v, device, criterion_func) for k, v in item.items()}
     else:
-        return item
+        return item.to(device)
 
 
 def get_norm_with_moe_layers_fast(all_groups_norm, group):
@@ -257,8 +257,8 @@ class CheckOverflow(object):
         elif self.mpu is not None:
             if self.deepspeed is not None:
                 using_pipeline = hasattr(self.deepspeed, 'pipeline_enable_backward_allreduce')
-                if (using_pipeline and self.deepspeed.pipeline_enable_backward_allreduce is False) or (
-                        not using_pipeline and self.deepspeed.enable_backward_allreduce is False):
+                if (using_pipeline and self.deepspeed.pipeline_enable_backward_allreduce
+                        is False) or (not using_pipeline and self.deepspeed.enable_backward_allreduce is False):
                     dist.all_reduce(overflow_gpu, op=dist.ReduceOp.MAX, group=self.mpu.get_data_parallel_group())
             dist.all_reduce(overflow_gpu, op=dist.ReduceOp.MAX, group=self.mpu.get_model_parallel_group())
         elif self.deepspeed is not None and self.deepspeed.enable_backward_allreduce is False:
@@ -823,6 +823,14 @@ def get_only_unique_item(items):
     return unique_item
 
 
+def mask_nan_or_inf_with_val_inplace(input, device=None, val=-1.):
+    norm_is_inf = input.isinf()
+    norm_is_nan = input.isnan()
+    inf_or_nan = norm_is_nan.logical_or(norm_is_inf)
+    err = torch.tensor(-1.0, device=device, dtype=torch.float)
+    input.masked_fill_(inf_or_nan, err)
+
+
 def get_global_norm_of_tensors(input_tensors, norm_type=2, mpu=None, use_graph=False, moe_ep_group=None):
     """Get norm of an iterable of tensors.
 
@@ -897,8 +905,7 @@ def get_global_norm_of_tensors(input_tensors, norm_type=2, mpu=None, use_graph=F
             dist.all_reduce(device_total_norm, op=dist.ReduceOp.SUM, group=moe_ep_group)
         total_norm = device_total_norm.to(input_tensors[0].device).pow(1. / norm_type)
 
-    inf_or_nan = total_norm.isinf().logical_or(total_norm.isnan())
-    total_norm.masked_fill_(inf_or_nan, -1)
+    mask_nan_or_inf_with_val_inplace(total_norm, device=total_norm.device)
 
     return total_norm
 
@@ -1000,6 +1007,37 @@ def all_gather_dp_groups(groups_flat, partitioned_param_groups, dp_process_group
             dist.all_gather(shard_list, shard_list[partition_id], dp_process_group[group_id])
 
 
+def get_tensor_bytes(item):
+    if torch.is_tensor(item):
+        return item.numel() * item.element_size()
+    elif isinstance(item, list):
+        return sum([get_tensor_bytes(v) for v in item])
+    elif isinstance(item, tuple):
+        return sum([get_tensor_bytes(v) for v in item])
+    elif isinstance(item, dict):
+        return sum([get_tensor_bytes(v) for v in item.values()])
+    else:
+        return 0
+
+
+def _get_folder_size(folder):
+    size = 0
+    for path, _, files in os.walk(folder):
+        size += sum([os.path.getsize(os.path.join(path, f)) for f in files])
+    return size
+
+
+def get_checkpoint_folder_size(save_dir, tag, local_rank=None):
+    if local_rank == 0:
+        folder = os.path.join(save_dir, tag)
+        size_tensor = torch.tensor(_get_folder_size(folder)).to(get_accelerator().device_name())
+    else:
+        size_tensor = torch.tensor(0).to(get_accelerator().device_name())
+
+    dist.reduce(tensor=size_tensor, dst=0)
+    return int(size_tensor)
+
+
 class TLinear(torch.nn.Linear):
 
     def __init__(self, orig_layer, name=""):
@@ -1065,3 +1103,83 @@ def get_norm_with_moe_layers(non_expert_norm, mpu, expert_tensors, norm_type=2):
             total_norm = -1
 
     return total_norm
+
+
+def _make_offload_state_key(key):
+    return f"{key}_offload_buffer"
+
+
+def offload_adam_states(optimizer, device, pin_memory: bool = False, non_blocking: bool = False):
+    """Move optimizer states to device. Note that this assumes the state structure of DeepSpeed Adam."""
+
+    def move_key(state, key):
+        offload_buf_key = _make_offload_state_key(key)
+        if offload_buf_key not in state:
+            state[offload_buf_key] = torch.empty_like(state[key], device=device)
+            if pin_memory:
+                state[offload_buf_key] = get_accelerator().pin_memory(state[offload_buf_key])
+        state[offload_buf_key].copy_(state[key], non_blocking=non_blocking)
+        state[key].data = state[offload_buf_key]
+
+    for _, state in optimizer.state.items():
+        if "exp_avg" in state:
+            move_key(state, "exp_avg")
+        if "exp_avg_sq" in state:
+            move_key(state, "exp_avg_sq")
+
+
+def reload_adam_states(optimizer, device, non_blocking: bool = False):
+    """Move optimizer states to device. Note that this assumes the state structure of DeepSpeed Adam."""
+
+    def move_back_key(state, key):
+        state[key].data = state[_make_offload_state_key(key)].to(device, non_blocking=non_blocking)
+
+    for _, state in optimizer.state.items():
+        if "exp_avg" in state:
+            move_back_key(state, "exp_avg")
+        if "exp_avg_sq" in state:
+            move_back_key(state, "exp_avg_sq")
+
+
+def compare_tensors_in_structures(inputs1: Union[List, Dict], inputs2: Union[List, Dict]) -> bool:
+    """
+    Compare two lists or dictionaries for equality, including any tensors they may contain.
+
+    Args:
+        inputs1: First input, either a list or a dictionary.
+        inputs2: Second input, either a list or a dictionary.
+
+    Returns:
+        True if inputs1 and inputs2 are equal; False otherwise.
+    """
+    if type(inputs1) != type(inputs2):  # Ensure types match
+        return False
+
+    if isinstance(inputs1, list) and isinstance(inputs2, list):
+        if len(inputs1) != len(inputs2):
+            return False
+        for val1, val2 in zip(inputs1, inputs2):
+            if isinstance(val1, torch.Tensor) and isinstance(val2, torch.Tensor):
+                val1 = val1.to(get_accelerator().current_device())
+                val2 = val2.to(get_accelerator().current_device())
+                if not torch.equal(val1, val2):
+                    return False
+            elif val1 != val2:
+                return False
+        return True
+
+    elif isinstance(inputs1, dict) and isinstance(inputs2, dict):
+        if inputs1.keys() != inputs2.keys():
+            return False
+        for key in inputs1:
+            val1, val2 = inputs1[key], inputs2[key]
+            if isinstance(val1, torch.Tensor) and isinstance(val2, torch.Tensor):
+                val1 = val1.to(get_accelerator().current_device())
+                val2 = val2.to(get_accelerator().current_device())
+                if not torch.equal(val1, val2):
+                    return False
+            elif val1 != val2:
+                return False
+        return True
+
+    return False

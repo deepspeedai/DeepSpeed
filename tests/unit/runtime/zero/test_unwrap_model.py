@@ -29,10 +29,10 @@ config = {
     }
 }
 
-if get_accelerator().is_fp16_supported():
-    config["fp16"] = {"enabled": True, "loss_scale": 138.}
-elif get_accelerator().is_bf16_supported():
+if get_accelerator().is_bf16_supported():
     config["bf16"] = {"enabled": True}
+elif get_accelerator().is_fp16_supported():
+    config["fp16"] = {"enabled": True, "loss_scale": 138.}
 
 
 class TestUnwrapModel(DistributedTest):

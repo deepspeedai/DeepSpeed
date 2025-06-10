@@ -37,12 +37,12 @@ from .runtime.lr_schedules import add_tuning_arguments
 from .runtime.config import DeepSpeedConfig, DeepSpeedConfigError
 from .runtime.activation_checkpointing import checkpointing
 from .ops.transformer import DeepSpeedTransformerLayer, DeepSpeedTransformerConfig
-from .module_inject import replace_transformer_layer, revert_transformer_layer
+from .module_inject import replace_transformer_layer, revert_transformer_layer, set_autotp_mode
 
 from .utils import log_dist, OnDevice, logger
 from .comm.comm import init_distributed
 
-from .runtime import zero
+from .runtime import zero, domino
 from .runtime.compiler import is_compile_supported
 
 from .pipe import PipelineModule
@@ -165,8 +165,8 @@ def initialize(args=None,
     if hasattr(args, "deepscale_config") and args.deepscale_config is not None:
         logger.warning("************ --deepscale_config is deprecated, please use --deepspeed_config ************")
         if hasattr(args, "deepspeed_config"):
-            assert (args.deepspeed_config is
-                    None), "Not sure how to proceed, we were given both a deepscale_config and deepspeed_config"
+            assert (args.deepspeed_config
+                    is None), "Not sure how to proceed, we were given both a deepscale_config and deepspeed_config"
         args.deepspeed_config = args.deepscale_config
         args.deepscale_config = None
 
@@ -364,3 +364,35 @@ def init_inference(model, config=None, **kwargs):
     engine = InferenceEngine(model, config=ds_inference_config)
 
     return engine
+
+
+def tp_model_init(model, tp_size, dtype, config=None, **kwargs):
+    """
+    Initialize the model for tensor parallelism.
+
+    Args:
+        model (torch.nn.Module): The model to be initialized.
+        tp_size (int): The tensor parallelism size.
+        dtype (torch.dtype): The data type to be used for the model.
+
+    Returns:
+        torch.nn.Module: The initialized model with tensor parallelism.
+    """
+    # avoid re-entry
+    if hasattr(model, 'ds_autotp_parsed'):
+        logger.warning("ds_autotp_parsed' attribute already exists in the model, re-entry is not allowed.")
+        return
+
+    set_autotp_mode(training=True)
+
+    from deepspeed.runtime.tensor_parallel import TpTrainingManager
+    # The expected usage here is for it to be invoked by transformers package.
+
+    #TODO: We should provide a custom TP mapping solution without using autoTP
+    #as modifying the autoTP logic may be more difficult for users compared to configuring it
+
+    model = TpTrainingManager(model=model, tp_size=tp_size, dtype=dtype).module
+
+    setattr(model, 'ds_autotp_parsed', True)
+
+    return model

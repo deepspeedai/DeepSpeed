@@ -15,19 +15,26 @@ import deepspeed
 from deepspeed.runtime.zero.offload_config import OffloadDeviceEnum
 from deepspeed.runtime.zero.partition_parameters import Init
 from deepspeed.ops.aio import AsyncIOBuilder
+from deepspeed.accelerator import get_accelerator
 
 
+@pytest.mark.sequential
 class TestNVMeCheckpointing(DistributedTest):
     world_size = 1
 
     @pytest.mark.parametrize('param_offload_device, optim_offload_device',
-                             [(OffloadDeviceEnum.cpu, OffloadDeviceEnum.cpu),
+                             [(OffloadDeviceEnum.none, OffloadDeviceEnum.nvme),
                               (OffloadDeviceEnum.cpu, OffloadDeviceEnum.nvme),
+                              (OffloadDeviceEnum.nvme, OffloadDeviceEnum.none),
+                              (OffloadDeviceEnum.nvme, OffloadDeviceEnum.cpu),
                               (OffloadDeviceEnum.nvme, OffloadDeviceEnum.nvme)])
     def test_nvme_checkpointing(self, tmpdir, param_offload_device, optim_offload_device):
         zero_dir, ckpt_dir = os.path.join(tmpdir, "zero"), os.path.join(tmpdir, "checkpoint")
 
         first_stage_steps, second_stage_steps = 2, 2
+
+        if not get_accelerator().is_fp16_supported():
+            pytest.skip("fp16 is not supported")
 
         if not deepspeed.ops.__compatible_ops__[AsyncIOBuilder.NAME]:
             pytest.skip('Skip tests since async-io is not compatible')

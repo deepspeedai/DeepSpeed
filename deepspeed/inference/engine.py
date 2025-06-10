@@ -15,7 +15,6 @@ from packaging import version as pkg_version
 from deepspeed.runtime.checkpoint_engine.torch_checkpoint_engine import TorchCheckpointEngine
 from deepspeed.utils.timer import SynchronizedWallClockTimer
 from deepspeed.runtime.compiler import is_compile_supported
-
 from ..runtime.state_dict_factory import SDLoaderFactory
 from ..runtime.weight_quantizer import WeightQuantization
 from ..module_inject import replace_transformer_layer, generic_injection
@@ -53,12 +52,7 @@ class InferenceEngine(Module):
         DS_INFERENCE_ENABLED = True
 
         super().__init__()
-
-        # Have to import here because inference_module is a global, but python
-        # globals only work at the module level and will not be updated unless
-        # we import it each time we init a new inference engine.
-        from ..model_implementations.transformers.ds_transformer import inference_module
-        if inference_module is not None:
+        if DeepSpeedTransformerInference.workspace is not None:
             self.destroy()
 
         self.module = model
@@ -73,8 +67,9 @@ class InferenceEngine(Module):
         if hasattr(self.module, "config"):
             TransformerPolicy.hf_model_config = self.module.config
 
-        if config.dtype == torch.half and not get_accelerator().is_fp16_supported():
-            raise ValueError("Type fp16 is not supported.")
+        if config.dtype not in get_accelerator().supported_dtypes():
+            raise ValueError(
+                f"Data type {config.dtype} is not supported by {get_accelerator().device_name()} accelerator")
 
         # todo: keep this self.injection_dict because we don't use to change config.injection_policy API
         # todo: this will get changed when Molly's PR on auto injection dict is merged
@@ -84,7 +79,6 @@ class InferenceEngine(Module):
         self.mp_group = config.tensor_parallel.tp_group
         self.mpu = config.tensor_parallel.mpu
 
-        #self._validate_args(self.mpu, config.replace_with_kernel_inject)
         self.quantize_merge_count = 1
         self.quantization_scales = None
 
@@ -174,7 +168,7 @@ class InferenceEngine(Module):
         is_meta_device = hasattr(self.module, "device") and self.module.device.type == 'meta'
         if is_meta_device:
             self.module.to_empty(device=device)
-        else:
+        elif not config.keep_module_on_host:
             self.module.to(device)
 
         if config.tensor_parallel.tp_size > 1:
@@ -190,15 +184,11 @@ class InferenceEngine(Module):
         self._is_compiled = False
 
     def destroy(self):
-        # Have to import here because inference_module is a global, but python
-        # globals only work at the module level and will not be updated unless
-        # we import it each time we init a new inference engine.
-        from ..model_implementations.transformers.ds_transformer import inference_module
         DeepSpeedTransformerInference.layer_id = 0
         DeepSpeedSelfAttention.num_layers = 0
-        if inference_module is not None:
-            inference_module.release_workspace()
-            inference_module = None
+        if DeepSpeedTransformerInference.workspace.is_allocated():
+            DeepSpeedTransformerInference.workspace.release_workspace()
+        DeepSpeedTransformerInference.workspace = None
 
     def profile_model_time(self, use_cuda_events=True):
         if not self.model_profile_enabled and not self._config.enable_cuda_graph:
@@ -307,29 +297,6 @@ class InferenceEngine(Module):
             f"quantize_bits = {self.quantize_bits} "
             f"mlp_extra_grouping = {self.mlp_extra_grouping}, "
             f"quantize_groups = {self.quantize_groups}", [0])
-
-    # TODO: remove this function and add this functionality to pydantic config checking
-    def _validate_args(self, mpu, replace_with_kernel_inject):
-        # TODO: to support SD pipeline we need to avoid this check for now
-        if replace_with_kernel_inject and not isinstance(self.module, Module):
-            raise ValueError(f"model must be a torch.nn.Module, got {type(self.module)}")
-        if not isinstance(self._config.tensor_parallel.tp_size, int) or self._config.tensor_parallel.tp_size < 1:
-            raise ValueError(f"mp_size must be an int >= 1, got {self._config.tensor_parallel.tp_size}")
-
-        if mpu:
-            methods = ["get_model_parallel_group", "get_data_parallel_group"]
-            for method in methods:
-                if not hasattr(mpu, method):
-                    raise ValueError(f"mpu is missing {method}")
-        if self._config.checkpoint is not None and not isinstance(self._config.checkpoint, (str, dict)):
-            raise ValueError(f"checkpoint must be None, str or dict, got {type(self._config.checkpoint)}")
-
-        supported_dtypes = [None, torch.half, torch.int8, torch.float]
-        if self._config.dtype not in supported_dtypes:
-            raise ValueError(f"{self._config.dtype} not supported, valid dtype: {supported_dtypes}")
-
-        if self.injection_dict is not None and not isinstance(self.injection_dict, dict):
-            raise ValueError(f"injection_dict must be None or a dict, got: {self.injection_dict}")
 
     def load_model_with_checkpoint(self, r_module):
         self.mp_replace = ReplaceWithTensorSlicing(
@@ -460,7 +427,7 @@ class InferenceEngine(Module):
         checkpoint = sd_loader['checkpoints']
 
         if type(checkpoint) is list:
-            self.sd = torch.load(checkpoint[0], map_location='cpu')
+            self.sd = torch.load(checkpoint[0], map_location='cpu', weights_only=False)
             self.key_list = list(self.sd.keys())
 
             self.load_model_with_checkpoint(self.module)
@@ -468,7 +435,7 @@ class InferenceEngine(Module):
             for i in range(1, len(checkpoint)):
                 if not dist.is_initialized() or dist.get_rank() == 0:
                     print(f"loading checkpoint ({i})")
-                self.sd = torch.load(checkpoint[i], map_location=get_accelerator().device_name())
+                self.sd = torch.load(checkpoint[i], map_location=get_accelerator().device_name(), weights_only=False)
                 self.key_list = list(self.sd.keys())
                 self.load_model_with_checkpoint(self.module)
         else:
@@ -626,14 +593,14 @@ class InferenceEngine(Module):
 
         if num_beams > 1:
             raise NotImplementedError("DeepSpeed does not support `num_beams` > 1, if this is important to you please "
-                                      "add your request to: https://github.com/microsoft/DeepSpeed/issues/2506")
+                                      "add your request to: https://github.com/deepspeedai/DeepSpeed/issues/2506")
 
         if ("input_ids" in kwargs) and (kwargs["input_ids"].dim() == 2):
             for input_tensor in kwargs["input_ids"]:
                 tensor_length = input_tensor.shape[-1]
                 if tensor_length > self._config.max_out_tokens:
                     raise RuntimeError(
-                        f"Input with size {tensor_length} exceeds maximum length of {self._config.max_out_tokens}. Please increase `max_tokens` in the DeepSpeed Inference Config."
+                        f"Input with size {tensor_length} exceeds maximum length of {self._config.max_out_tokens}. Please increase max_tokens in the DeepSpeed Inference Config."
                     )
 
         return self.module.generate(*inputs, **kwargs)

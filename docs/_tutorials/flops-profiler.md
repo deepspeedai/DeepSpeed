@@ -184,7 +184,7 @@ When using DeepSpeed for model training, the profiler can be configured in the d
 
 #### Example: Megatron-LM
 
-For information on running Megatron-LM with DeepSpeed, please refer to our tutorial [Megatron-LM](https://github.com/microsoft/DeepSpeedExamples/tree/master/megatron/Megatron-LM).
+For information on running Megatron-LM with DeepSpeed, please refer to our tutorial [Megatron-LM](https://github.com/deepspeedai/DeepSpeedExamples/tree/master/megatron/Megatron-LM).
 
 An example output of 12-layer Megatron-LM model (`hidden_size = 8192, num_attention_heads = 32, batch_size = 1024, seq_length = 1024`) is shown below.
 

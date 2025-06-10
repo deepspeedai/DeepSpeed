@@ -24,6 +24,7 @@ constexpr int max_threads = 1024;
 Class to hold the quantization parameters for a given tensor.
 Holds the implementation of the quantization operation.
 */
+
 template <Type qType, int numBits>
 class Params {
 public:
@@ -122,7 +123,7 @@ public:
     DS_D_INLINE T dequantize(int8_t val)
     {
         const float val_deq_f = ((conversion::to<float>(val)) * scale) + offset;
-        return conversion::to<__half>(val_deq_f);
+        return conversion::to<T>(val_deq_f);
     }
 
     DS_D_INLINE void store(float* params, int group_index)

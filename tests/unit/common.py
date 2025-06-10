@@ -58,6 +58,20 @@ def get_master_port(base_port=29500, port_range_size=1000):
     raise IOError('no free ports')
 
 
+def _get_cpu_socket_count():
+    import shlex
+    p1 = subprocess.Popen(shlex.split("cat /proc/cpuinfo"), stdout=subprocess.PIPE)
+    p2 = subprocess.Popen(["grep", "physical id"], stdin=p1.stdout, stdout=subprocess.PIPE)
+    p1.stdout.close()
+    p3 = subprocess.Popen(shlex.split("sort -u"), stdin=p2.stdout, stdout=subprocess.PIPE)
+    p2.stdout.close()
+    p4 = subprocess.Popen(shlex.split("wc -l"), stdin=p3.stdout, stdout=subprocess.PIPE)
+    p3.stdout.close()
+    r = int(p4.communicate()[0])
+    p4.stdout.close()
+    return r
+
+
 def set_accelerator_visible():
     cuda_visible = os.environ.get("CUDA_VISIBLE_DEVICES", None)
     xdist_worker_id = get_xdist_worker_id()
@@ -95,9 +109,7 @@ def set_accelerator_visible():
             num_accelerators = int(npu_smi.decode('utf-8').strip().split('\n')[0].split(':')[1].strip())
         else:
             assert get_accelerator().device_name() == 'cpu'
-            cpu_sockets = int(
-                subprocess.check_output('cat /proc/cpuinfo | grep "physical id" | sort -u | wc -l', shell=True))
-            num_accelerators = cpu_sockets
+            num_accelerators = _get_cpu_socket_count()
 
         if isinstance(num_accelerators, list):
             cuda_visible = ",".join(num_accelerators)
@@ -133,16 +145,13 @@ class DistributedExec(ABC):
     def run(self):
         ...
 
-    def __call__(self, request=None):
+    def __call__(self, request):
         self._fixture_kwargs = self._get_fixture_kwargs(request, self.run)
         world_size = self.world_size
         if self.requires_cuda_env and not get_accelerator().is_available():
             pytest.skip("only supported in accelerator environments.")
 
-        if isinstance(world_size, int):
-            world_size = [world_size]
-        for procs in world_size:
-            self._launch_procs(procs)
+        self._launch_with_file_store(request, world_size)
 
     def _get_fixture_kwargs(self, request, func):
         if not request:
@@ -158,7 +167,7 @@ class DistributedExec(ABC):
                 pass  # test methods can have kwargs that are not fixtures
         return fixture_kwargs
 
-    def _launch_daemonic_procs(self, num_procs):
+    def _launch_daemonic_procs(self, num_procs, init_method):
         # Create process pool or use cached one
         master_port = None
 
@@ -177,7 +186,7 @@ class DistributedExec(ABC):
             master_port = get_master_port()
 
         # Run the test
-        args = [(local_rank, num_procs, master_port) for local_rank in range(num_procs)]
+        args = [(local_rank, num_procs, master_port, init_method) for local_rank in range(num_procs)]
         skip_msgs_async = pool.starmap_async(self._dist_run, args)
 
         try:
@@ -197,7 +206,7 @@ class DistributedExec(ABC):
             assert len(set(skip_msgs)) == 1, "Multiple different skip messages received"
             pytest.skip(skip_msgs[0])
 
-    def _launch_non_daemonic_procs(self, num_procs):
+    def _launch_non_daemonic_procs(self, num_procs, init_method):
         assert not self.reuse_dist_env, "Cannot reuse distributed environment with non-daemonic processes"
 
         master_port = get_master_port()
@@ -206,7 +215,7 @@ class DistributedExec(ABC):
         prev_start_method = mp.get_start_method()
         mp.set_start_method('spawn', force=True)
         for local_rank in range(num_procs):
-            p = mp.Process(target=self._dist_run, args=(local_rank, num_procs, master_port, skip_msg))
+            p = mp.Process(target=self._dist_run, args=(local_rank, num_procs, master_port, init_method, skip_msg))
             p.start()
             processes.append(p)
         mp.set_start_method(prev_start_method, force=True)
@@ -248,7 +257,7 @@ class DistributedExec(ABC):
             # add a check here to assert all exit messages are equal
             pytest.skip(skip_msg.get())
 
-    def _launch_procs(self, num_procs):
+    def _launch_procs(self, num_procs, init_method):
         # Verify we have enough accelerator devices to run this test
         if get_accelerator().is_available() and get_accelerator().device_count() < num_procs:
             pytest.skip(
@@ -263,12 +272,16 @@ class DistributedExec(ABC):
         mp.set_start_method('forkserver', force=True)
 
         if self.non_daemonic_procs:
-            self._launch_non_daemonic_procs(num_procs)
+            self._launch_non_daemonic_procs(num_procs, init_method)
         else:
-            self._launch_daemonic_procs(num_procs)
+            self._launch_daemonic_procs(num_procs, init_method)
 
-    def _dist_run(self, local_rank, num_procs, master_port, skip_msg=""):
-        if not dist.is_initialized():
+    def _dist_run(self, local_rank, num_procs, master_port, init_method, skip_msg=""):
+        if dist.is_initialized():
+            if get_accelerator().is_available():
+                # local_rank might not match the rank in the previous run if you are reusing the environment
+                get_accelerator().set_device(dist.get_rank())
+        else:
             """ Initialize deepspeed.comm and execute the user function. """
             if self.set_dist_env:
                 os.environ['MASTER_ADDR'] = '127.0.0.1'
@@ -291,7 +304,10 @@ class DistributedExec(ABC):
                 get_accelerator().set_device(local_rank)
 
             if self.init_distributed:
-                deepspeed.init_distributed(dist_backend=self.backend)
+                deepspeed.init_distributed(dist_backend=self.backend,
+                                           init_method=init_method,
+                                           rank=local_rank,
+                                           world_size=num_procs)
                 dist.barrier()
 
         try:
@@ -306,6 +322,22 @@ class DistributedExec(ABC):
                 raise e
 
         return skip_msg
+
+    def _launch_with_file_store(self, request, world_size):
+        tmpdir = request.getfixturevalue("tmpdir")
+        dist_file_store = tmpdir.join("dist_file_store")
+        assert not os.path.exists(dist_file_store)
+        init_method = f"file://{dist_file_store}"
+
+        if isinstance(world_size, int):
+            world_size = [world_size]
+        for procs in world_size:
+            try:
+                self._launch_procs(procs, init_method)
+            finally:
+                if os.path.exists(dist_file_store):
+                    os.remove(dist_file_store)
+            time.sleep(0.5)
 
     def _dist_destroy(self):
         if (dist is not None) and dist.is_initialized():
@@ -452,11 +484,7 @@ class DistributedTest(DistributedExec):
         else:
             world_size = self._fixture_kwargs.get("world_size", self.world_size)
 
-        if isinstance(world_size, int):
-            world_size = [world_size]
-        for procs in world_size:
-            self._launch_procs(procs)
-            time.sleep(0.5)
+        self._launch_with_file_store(request, world_size)
 
     def _get_current_test_func(self, request):
         # DistributedTest subclasses may have multiple test methods
@@ -469,11 +497,11 @@ def get_test_path(filename):
     return str(curr_path.joinpath(filename))
 
 
-# fp16 > bf16 > fp32
+# bf16 > fp16 > fp32
 def preferred_dtype():
-    if get_accelerator().is_fp16_supported():
-        return torch.float16
-    elif get_accelerator().is_bf16_supported():
+    if get_accelerator().is_bf16_supported():
         return torch.bfloat16
+    elif get_accelerator().is_fp16_supported():
+        return torch.float16
     else:
         return torch.float32

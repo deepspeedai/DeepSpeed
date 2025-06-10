@@ -77,7 +77,7 @@ ZERO_FORCE_DS_CPU_OPTIMIZER_DEFAULT = True
 
 # Steps
 STEPS_PER_PRINT = "steps_per_print"
-STEPS_PER_PRINT_DEFAULT = 10
+STEPS_PER_PRINT_DEFAULT = None
 
 #########################################
 # Training micro batch size per GPU
@@ -117,7 +117,9 @@ SPARSE_GRADIENTS_DEFAULT = False
 BFLOAT16_FORMAT = '''
 BFLOAT16 parameters should be of the format:
 "bf16": {
-  "enabled": true
+  "enabled": true,
+  "immediate_grad_update": false,
+  "check_overflow": false
 }
 '''
 BFLOAT16 = "bf16"
@@ -126,9 +128,12 @@ BFLOAT16_OLD = "bfloat16"  # keeping for backwards compatibility
 BFLOAT16_ENABLED = "enabled"
 BFLOAT16_ENABLED_DEFAULT = False
 
+CHECK_OVERFLOW = "check_overflow"
+BFLOAT16_CHECK_OVERFLOW_DEFAULT = False
+
 # BFLOAT16 optimizer immediate gradient update
 BFLOAT16_IMMEDIATE_GRAD_UPDATE = "immediate_grad_update"
-BFLOAT16_IMMEDIATE_GRAD_UPDATE_DEFAULT = False
+BFLOAT16_IMMEDIATE_GRAD_UPDATE_DEFAULT = True
 
 #########################################
 # FP16 support
@@ -249,7 +254,7 @@ SEQ_PARALLEL_COMMUNICATION_DATA_TYPE_FORMAT = '''
 Optional comm data type for seq paralleism should be set as:
 "seq_parallel_communication_data_type": "fp32"
 '''
-SEQ_PARALLEL_COMMUNICATION_DATA_TYPE = "seq_parallel_comm_data_type"
+SEQ_PARALLEL_COMMUNICATION_DATA_TYPE = "seq_parallel_communication_data_type"
 SEQ_PARALLEL_COMMUNICATION_DATA_TYPE_DEFAULT = "fp32"
 
 #########################################

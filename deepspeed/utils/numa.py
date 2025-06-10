@@ -9,9 +9,9 @@
 #     ...
 # ]
 
-import distutils
 import os
 import psutil
+import shutil
 import subprocess
 
 
@@ -23,7 +23,10 @@ import subprocess
 # ]
 def get_numa_cores():
     ret = []
-    output = subprocess.check_output(['numactl', '--hardware']).decode("utf-8")
+    try:
+        output = subprocess.check_output(['numactl', '--hardware']).decode("utf-8")
+    except:
+        return []
     lines = output.split('\n')
     for line in lines:
         if line.startswith('available:'):
@@ -47,7 +50,7 @@ def check_for_numactl_pkg():
     found = False
     for pkgmgr, data in libs.items():
         flag, lib, tool = data
-        path = distutils.spawn.find_executable(pkgmgr)
+        path = shutil.which(pkgmgr)
         if path is not None:
             cmd = [pkgmgr, flag, lib]
             result = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)

@@ -175,7 +175,7 @@ def checkpoint_correctness_verification(config_dict,
                                         seq_dataloader=False,
                                         load_module_only=False,
                                         dtype=None):
-    if dtype == None:
+    if dtype is None:
         dtype = preferred_dtype()
 
     ds_model = create_deepspeed_model(config_dict=config_dict, model=models[0], base_optimizer=base_optimizers[0])
@@ -218,7 +218,7 @@ def checkpoint_correctness_verification(config_dict,
     for root, _, files in os.walk(save_folder):
         for f in files:
             if "_expert_" in f and "_model_states" in f:
-                expert = torch.load(os.path.join(root, f))
+                expert = torch.load(os.path.join(root, f), weights_only=False)
                 needed, storages = 0, {}
                 for name, tensor in expert.items():
                     needed += tensor.size().numel()

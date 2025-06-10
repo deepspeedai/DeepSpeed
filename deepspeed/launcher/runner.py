@@ -20,6 +20,9 @@ import collections
 from copy import deepcopy
 import signal
 import time
+from typing import Tuple, List, Dict
+from collections import defaultdict
+import shlex
 
 from .multinode_runner import PDSHRunner, OpenMPIRunner, MVAPICHRunner, SlurmRunner, MPICHRunner, IMPIRunner
 from .constants import PDSH_LAUNCHER, OPENMPI_LAUNCHER, MVAPICH_LAUNCHER, SLURM_LAUNCHER, MPICH_LAUNCHER, IMPI_LAUNCHER
@@ -204,6 +207,11 @@ def parse_args(args=None):
 
     parser.add_argument("--ssh_port", type=int, default=None, help="SSH port to use for remote connections")
 
+    parser.add_argument("--venv_script",
+                        type=str,
+                        default=None,
+                        help="Python virtual environment activation script for job.")
+
     return parser.parse_args(args=args)
 
 
@@ -262,6 +270,31 @@ def _stable_remove_duplicates(data):
     return new_list
 
 
+def parse_node_config(node_config: str) -> Tuple[str, List[int]]:
+    SLOT_LIST_START = ':'
+    SLOT_SEP = ','
+
+    if SLOT_LIST_START not in node_config:
+        return node_config, []
+
+    hostname, slots = node_config.split(SLOT_LIST_START)
+    slots = [int(x) for x in slots.split(SLOT_SEP)]
+
+    return hostname, slots
+
+
+def parse_node_config_list(node_config_list: List[str]) -> Dict[str, List[int]]:
+    NODE_SEP = '@'
+
+    node_configs = defaultdict(list)
+
+    for node_config in node_config_list.split(NODE_SEP):
+        hostname, slots = parse_node_config(node_config)
+        node_configs[hostname] += slots
+
+    return {k: sorted(list(set(v))) for k, v in node_configs.items()}
+
+
 def parse_resource_filter(host_info, include_str="", exclude_str=""):
     '''Parse an inclusion or exclusion string and filter a hostfile dictionary.
 
@@ -275,11 +308,6 @@ def parse_resource_filter(host_info, include_str="", exclude_str=""):
         exclude_str="worker-1:0" will use all available resources except
           slot 0 on worker-1.
     '''
-
-    # Constants that define our syntax
-    NODE_SEP = '@'
-    SLOT_LIST_START = ':'
-    SLOT_SEP = ','
 
     # Ensure include/exclude are mutually exclusive
     if (include_str != "") and (exclude_str != ""):
@@ -298,12 +326,9 @@ def parse_resource_filter(host_info, include_str="", exclude_str=""):
         parse_str = exclude_str
 
     # foreach node in the list
-    for node_config in parse_str.split(NODE_SEP):
+    for hostname, slots in parse_node_config_list(parse_str).items():
         # Node can either be alone or node:slot,slot,slot
-        if SLOT_LIST_START in node_config:
-            hostname, slots = node_config.split(SLOT_LIST_START)
-            slots = [int(x) for x in slots.split(SLOT_SEP)]
-
+        if len(slots) > 0:
             # sanity checks
             if hostname not in host_info:
                 raise ValueError(f"Hostname '{hostname}' not found in hostfile")
@@ -321,7 +346,6 @@ def parse_resource_filter(host_info, include_str="", exclude_str=""):
 
         # User just specified the whole node
         else:
-            hostname = node_config
             # sanity check hostname
             if hostname not in host_info:
                 raise ValueError(f"Hostname '{hostname}' not found in hostfile")
@@ -354,8 +378,10 @@ def parse_resource_filter(host_info, include_str="", exclude_str=""):
 
 def parse_inclusion_exclusion(resource_pool, inclusion, exclusion):
     active_resources = collections.OrderedDict()
+    node_configs = parse_node_config_list(inclusion)
+
     for hostname, slots in resource_pool.items():
-        active_resources[hostname] = list(range(slots))
+        active_resources[hostname] = node_configs[hostname] if hostname in node_configs else list(range(slots))
 
     return parse_resource_filter(active_resources, include_str=inclusion, exclude_str=exclusion)
 
@@ -441,11 +467,10 @@ def main(args=None):
     if multi_node_exec and not args.no_ssh_check and not args.no_ssh:
         first_host = list(active_resources.keys())[0]
         try:
-            ssh_check_cmd = "ssh -o PasswordAuthentication=no "
-            if args.ssh_port is not None:
-                ssh_check_cmd += f"-p {args.ssh_port} "
-            ssh_check_cmd += f"{first_host} hostname"
-            subprocess.check_call(ssh_check_cmd, stderr=subprocess.DEVNULL, stdout=subprocess.DEVNULL, shell=True)
+            ssh_check_cmd = ("ssh -o PasswordAuthentication=no " +
+                             (f"-p {args.ssh_port} " if args.ssh_port is not None else "") + f"{first_host} hostname")
+            safe_ssh_cmd = shlex.split(ssh_check_cmd)
+            subprocess.check_call(safe_ssh_cmd, stderr=subprocess.DEVNULL, stdout=subprocess.DEVNULL)
         except subprocess.CalledProcessError:
             raise RuntimeError(
                 f"Using hostfile at {args.hostfile} but host={first_host} was not reachable via ssh. If you are running with a single node please remove {args.hostfile} or setup passwordless ssh."
@@ -458,18 +483,18 @@ def main(args=None):
         if args.ssh_port is not None:
             ssh_check_cmd += f" -p {args.ssh_port}"
         ssh_check_cmd += f" {first_host} hostname -I"
-        hostname_cmd = [ssh_check_cmd]
+        hostname_cmd = shlex.split(ssh_check_cmd)
         try:
-            result = subprocess.check_output(hostname_cmd, shell=True)
+            result = subprocess.check_output(hostname_cmd)
         except subprocess.CalledProcessError as err:
             logger.error(
-                "Unable to detect suitable master address via `hostname -I`, please manually specify one via --master_addr"
+                "Unable to detect suitable master address via 'hostname -I', please manually specify one via --master_addr"
             )
             raise err
         args.master_addr = result.decode('utf-8').split()[0]
         if not args.master_addr:
             raise RuntimeError(
-                f"Unable to detect suitable master address via `hostname -I`, please manually specify one via --master_addr"
+                "Unable to detect suitable master address via `hostname -I`, please manually specify one via --master_addr"
             )
         logger.info(f"Using IP address of {args.master_addr} for node {first_host}")
 

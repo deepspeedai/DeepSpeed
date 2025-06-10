@@ -3,8 +3,14 @@
 
 # DeepSpeed Team
 
-import torch
 from .abstract_accelerator import DeepSpeedAccelerator
+
+# During setup stage torch may not be installed, pass on no torch will
+# allow op builder related API to be executed.
+try:
+    import torch
+except ImportError as e:
+    pass
 
 try:
     import oneccl_bindings_for_pytorch  # noqa: F401 # type: ignore
@@ -71,6 +77,8 @@ class CPU_Accelerator(DeepSpeedAccelerator):
             # In flat mode, HBM is in separate NUMA node with no cores on this node.
             # Ignore these NUMA nodes with no cores.
             numa_core_lists = get_numa_cores()
+            if not numa_core_lists:
+                return 1
             numa_count = 0
             prev_core_list = []
             for core_list in numa_core_lists:
@@ -221,10 +229,17 @@ class CPU_Accelerator(DeepSpeedAccelerator):
         return True
 
     def is_fp16_supported(self):
-        return False
+        try:
+            if torch.ops.mkldnn._is_mkldnn_fp16_supported():
+                return True
+        except:
+            return False
 
     def supported_dtypes(self):
-        return [torch.float, torch.bfloat16]
+        supported_dtypes = [torch.float, torch.bfloat16]
+        if self.is_fp16_supported():
+            supported_dtypes.append(torch.float16)
+        return supported_dtypes
 
     # Graph operations
     def create_graph(self):
@@ -301,9 +316,9 @@ class CPU_Accelerator(DeepSpeedAccelerator):
             # is op_builder from deepspeed or a 3p version? this should only succeed if it's deepspeed
             # if successful this also means we're doing a local install and not JIT compile path
             from op_builder import __deepspeed__  # noqa: F401 # type: ignore
-            from op_builder.cpu import CCLCommBuilder, ShareMemCommBuilder, FusedAdamBuilder, CPUAdamBuilder, NotImplementedBuilder
+            from op_builder.cpu import AsyncIOBuilder, CCLCommBuilder, ShareMemCommBuilder, FusedAdamBuilder, CPUAdamBuilder, NotImplementedBuilder
         except ImportError:
-            from deepspeed.ops.op_builder.cpu import CCLCommBuilder, ShareMemCommBuilder, FusedAdamBuilder, CPUAdamBuilder, NotImplementedBuilder
+            from deepspeed.ops.op_builder.cpu import AsyncIOBuilder, CCLCommBuilder, ShareMemCommBuilder, FusedAdamBuilder, CPUAdamBuilder, NotImplementedBuilder
 
         if class_name == "CCLCommBuilder":
             return CCLCommBuilder
@@ -313,6 +328,8 @@ class CPU_Accelerator(DeepSpeedAccelerator):
             return FusedAdamBuilder
         elif class_name == "CPUAdamBuilder":
             return CPUAdamBuilder
+        elif class_name == "AsyncIOBuilder":
+            return AsyncIOBuilder
         else:
             # return a NotImplementedBuilder to avoid get NoneType[Name] in unit tests
             return NotImplementedBuilder
