@@ -1,4 +1,5 @@
-name: nv-torch-latest-v100
+# temporary used for debuging issue 7334
+name: nv-torch-2.7
 
 on:
   workflow_dispatch:
