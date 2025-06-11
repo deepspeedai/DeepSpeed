@@ -38,9 +38,6 @@ class CheckpointSize(object):
         self._gigabytes = (self._post - self._pre) / (1024**3)
 
 
-mp.set_start_method('spawn', force=True)
-
-
 def init_decoupled_checkpoint(config_params, dp_writer_config, save_event, save_queue, optimize_dp_state):
     checkpoint_engine = FastCheckpointEngine(config_params, dp_writer_config, optimize_dp_state)
     print(f'Created FastCheckpointEngine for Decoupled Checkpointing')
@@ -71,6 +68,8 @@ ENGINE_NAME = "DecoupledCheckpointEngine"
 class DecoupledCheckpointEngine(CheckpointEngine):
 
     def __init__(self, config_params, dp_writer_config, optimize_dp_state):
+        if mp.get_start_methods(allow_None=False) is None:
+            mp.set_start_method('spawn')
         super().__init__(config_params)
         self.name = ENGINE_NAME
         self.dp_writer_config = dp_writer_config

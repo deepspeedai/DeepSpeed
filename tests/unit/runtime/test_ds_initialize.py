@@ -23,6 +23,12 @@ from deepspeed.accelerator import get_accelerator
 from deepspeed.ops.op_builder import FusedAdamBuilder
 
 
+# Ensure client multiprocessing is not broken by deepspeed import
+def test_start_method_safety():
+    import torch.multiprocessing as mp
+    mp.set_start_method('spawn')
+
+
 @pytest.mark.parametrize('zero_stage', [0, 3])
 class TestNoOptim(DistributedTest):
     world_size = 1
