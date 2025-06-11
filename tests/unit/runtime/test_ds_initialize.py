@@ -24,9 +24,10 @@ from deepspeed.ops.op_builder import FusedAdamBuilder
 
 
 # Ensure client multiprocessing is not broken by deepspeed import
-def test_start_method_safety():
+@pytest.mark.parametrize('method', ['spawn', 'fork', 'forkserver'])
+def test_start_method_safety(method):
     import torch.multiprocessing as mp
-    mp.set_start_method('spawn')
+    mp.set_start_method(method)
 
 
 @pytest.mark.parametrize('zero_stage', [0, 3])
