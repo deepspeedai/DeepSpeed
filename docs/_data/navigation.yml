@@ -122,7 +122,7 @@ lnav:
       - title: 'Transformer Kernel'
         url: /tutorials/transformer_kernel/
       - title: Ulysses Sequence Parallelism Plus for HF Transformers
-        url: /tutorials/ulysses-plus-sequence-pallellism
+        url: /tutorials/ulysses-alst-sequence-pallellism
       - title: 'ZeRO-Offload'
         url: /tutorials/zero-offload/
       - title: 'ZeRO'
