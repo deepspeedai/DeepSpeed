@@ -725,10 +725,13 @@ def _upsample_flops_compute(*args, **kwargs):
     assert scale_factor is not None, "either size or scale_factor should be defined"
 
     flops = input.numel()
-    if isinstance(scale_factor, tuple) and len(scale_factor) == len(input):
+    if isinstance(scale_factor, (list, tuple)):
+        # see documention of `F.interpolate`
+        # the spatial dims are defined as the last `n-2` dims of the tensor
+        assert len(scale_factor) == input.ndim - 2
         flops *= int(_prod(scale_factor))
     else:
-        flops *= scale_factor**len(input)
+        flops *= scale_factor**(input.ndim - 2)
     return flops, 0
 
 
