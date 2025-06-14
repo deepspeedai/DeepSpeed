@@ -41,11 +41,20 @@ public:
     }
     ~Z1CustomOpExecutor() {}
 
-    void endBackward() override
+    at::Tensor reduceGrad(at::Tensor grad_tensor, long ds_id) override
     {
-        if (param_updated_) {
-            for (auto& it : has_acc_grad_) { it.second = false; }
+        if (!hasKey(grad_tensors_, ds_id)) {
+            grad_tensors_[ds_id] = grad_tensor;
+        } else {
+            grad_tensors_[ds_id].add_(grad_tensor);
         }
+
+        if (param_updated_) {
+            CustomOpExecutor::reduceGrad(grad_tensors_[ds_id], ds_id);
+            grad_tensors_.erase(ds_id);
+        }
+
+        return at::Tensor();
     }
 
     void flushReduceBucket(at::ScalarType scalar_type) override
@@ -92,12 +101,7 @@ public:
                 int64_t offset = param.getOffset();
                 auto recv_buf = t.getSendBuf().flatten().index(
                     {torch::indexing::Slice(offset, offset + grad_buf.numel())});
-                if (acc_grad) {
-                    grad_buf.add_(recv_buf);
-                } else {
-                    grad_buf.copy_(recv_buf);
-                }
-                has_acc_grad_[t.getDSId()] = true;
+                grad_buf.copy_(recv_buf);
             }
         }
 
@@ -112,6 +116,9 @@ public:
         }
         reduce_tasks_[scalar_type].clear();
     }
+
+protected:
+    std::unordered_map<long, at::Tensor> grad_tensors_;
 };
 
 static at::cuda::CUDAStream rs_stream = at::cuda::getStreamFromPool(true);
