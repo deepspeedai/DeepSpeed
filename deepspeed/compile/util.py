@@ -457,13 +457,25 @@ def pad_tensors(specs: List[Tuple[torch.Tensor, int, int]]) -> List[torch.Tensor
 
     # Pad each tensor as needed
     padded: List[torch.Tensor] = []
+
+    # Don't use F.pad here:
+    # If you don't need to pad only on a certain rank, it will lead to different strides across ranks.
+    # This will cause recompilation on only some ranks and get the communication collective stuck.
     for (tensor, dim, pad_val), max_len in zip(specs, max_sizes):
         cur_len = tensor.size(dim)
-        if cur_len < max_len:
-            pad_len = max_len - cur_len
-            pad_shape = [0] * (tensor.dim() * 2)  # F.pad specification
-            pad_shape[-(2 * dim + 1)] = pad_len  # Pad the right side
-            tensor = torch.nn.functional.pad(tensor, pad_shape, value=pad_val)
-        padded.append(tensor)
+
+        # --- (1) Always allocate a new buffer with 'row-major, contiguous memory' -------------
+        out_shape = list(tensor.shape)
+        out_shape[dim] = max_len
+        out = torch.full(out_shape, pad_val, dtype=tensor.dtype, device=tensor.device)
+
+        # --- (2) Copy original data using slicing ------------------------------
+        slc = [slice(None)] * tensor.dim()
+        slc[dim] = slice(0, cur_len)
+        out[tuple(slc)] = tensor
+
+        # out is always row-major: for example, if shape is (..., 1, L), then
+        #   stride = (..., L, 1)
+        padded.append(out)
 
     return padded
