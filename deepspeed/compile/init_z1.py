@@ -52,12 +52,12 @@ def init_z1(engine, backend, compile_config, compile_kwargs, schedule=None):
                 buf = grad_buffer[i][index_in_partition]
                 offset = optimizer.first_offset[i] if first_in_partition else 0
                 # print(f"[r{dist.get_rank()}] Registering group {i} param {param_id} in_partition={in_partition} p={p.shape} buf={buf.shape} partition_offset={offset}")
-                dc.register_z1_param(p.param_id, p.shape, p, buf, int(offset))
+                dc.register_param(p.param_id, p.shape, p, buf, int(offset))
                 index_in_partition += 1
                 first_in_partition = False
             else:
                 # print(f"[r{dist.get_rank()}] Registering group {i} param {param_id} in_partition={in_partition} p={p.shape} buf=None")
-                dc.register_z1_param(p.param_id, p.shape, p, torch.empty([0], dtype=p.dtype, device=p.device), 0)
+                dc.register_param(p.param_id, p.shape, p, torch.empty([0], dtype=p.dtype, device=p.device), 0)
 
     def set_grad_buffer():
         optimizer.averaged_gradients = copy.copy(grad_buffer)

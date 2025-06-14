@@ -59,8 +59,6 @@ public:
 
     void flushReduceBucket(at::ScalarType scalar_type) override
     {
-        int rank = process_group_->getRank();
-
         if (!hasKey(reduce_tasks_, scalar_type)) { return; }
 
         int64_t tmp_recv_numel = 0;
@@ -136,11 +134,11 @@ void register_graph_z1(long graph_id, const std::vector<long>& ds_ids)
                                                                pre_div_reduce);
 }
 
-void register_z1_param(long ds_id,
-                       const std::vector<int64_t>& ds_shape,
-                       at::Tensor ds_tensor,
-                       at::Tensor grad_buffer,
-                       int64_t offset)
+void register_param(long ds_id,
+                    const std::vector<int64_t>& ds_shape,
+                    at::Tensor ds_tensor,
+                    at::Tensor grad_buffer,
+                    int64_t offset)
 {
     param_registry->registerParam(ds_id, ds_shape, ds_tensor, grad_buffer, false, offset, false);
 }

@@ -453,7 +453,7 @@ public:
 
     virtual void endBackward() {}
 
-    at::Tensor reduceGrad(at::Tensor grad_tensor, long ds_id)
+    virtual at::Tensor reduceGrad(at::Tensor grad_tensor, long ds_id)
     {
         int world_size = process_group_->getSize();
         const DSParam& param = param_registry_->getParam(ds_id);
