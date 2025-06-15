@@ -15,7 +15,7 @@ from .util import get_deepcompile_handle, add_pre_backward_hook, is_backend_indu
 WARMUP = 5
 
 
-def init_z1(engine, backend, compile_config, compile_kwargs, schedule=None):
+def init_z1(engine, backend, compile_config, compile_kwargs, schedule=None, use_z2=False):
 
     optimizer = engine.optimizer
     optimizer.contiguous_gradients = False  # Avoid creating unnecessary buffer
@@ -66,7 +66,10 @@ def init_z1(engine, backend, compile_config, compile_kwargs, schedule=None):
 
     if schedule is None:
         schedule = []
-        schedule.append((0, [zero1_compile.add_z1_reduce]))
+        if use_z2:
+            schedule.append((0, [zero1_compile.add_z2_reduce]))
+        else:
+            schedule.append((0, [zero1_compile.add_z1_reduce]))
     else:
         for opt in schedule:
             # avoid typical misconfiguration

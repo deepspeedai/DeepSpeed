@@ -3,7 +3,7 @@
 
 // DeepSpeed Team
 
-#include "z1.h"
+#include "z2.h"
 #include "deepcompile.h"
 
 #define USE_C10D_NCCL
@@ -19,9 +19,9 @@
 
 namespace dc {
 
-class Z1CustomOpExecutor : public CustomOpExecutor {
+class Z2CustomOpExecutor : public CustomOpExecutor {
 public:
-    Z1CustomOpExecutor(c10::intrusive_ptr<c10d::ProcessGroup> process_group,
+    Z2CustomOpExecutor(c10::intrusive_ptr<c10d::ProcessGroup> process_group,
                        std::shared_ptr<DSParamRegistry> param_registry,
                        std::shared_ptr<DoubleBufferedReduceBucket> reduce_buckets,
                        std::vector<long> ds_ids,
@@ -39,22 +39,13 @@ public:
                            pre_div_reduce)
     {
     }
-    ~Z1CustomOpExecutor() {}
+    ~Z2CustomOpExecutor() {}
 
-    at::Tensor reduceGrad(at::Tensor grad_tensor, long ds_id) override
+    void endBackward() override
     {
-        if (!hasKey(grad_tensors_, ds_id)) {
-            grad_tensors_[ds_id] = grad_tensor;
-        } else {
-            grad_tensors_[ds_id].add_(grad_tensor);
-        }
-
         if (param_updated_) {
-            CustomOpExecutor::reduceGrad(grad_tensors_[ds_id], ds_id);
-            grad_tensors_.erase(ds_id);
+            for (auto& it : has_acc_grad_) { it.second = false; }
         }
-
-        return at::Tensor();
     }
 
     void flushReduceBucket(at::ScalarType scalar_type) override
@@ -78,10 +69,11 @@ public:
         }
         ncclGroupEnd();
 
-        // Copy results to gradient buffers
+        // Copy or accumulate results to gradient buffers
         {
             at::cuda::CUDAStreamGuard guard(rs_stream_);
             for (const ReduceTask& t : reduce_tasks_.at(scalar_type)) {
+                bool acc_grad = has_acc_grad_.at(t.getDSId());
                 auto param = param_registry_->getParam(t.getDSId());
                 auto grad_buf = param.getGradBuffer().flatten();
 
@@ -90,23 +82,25 @@ public:
                 int64_t offset = param.getOffset();
                 auto recv_buf = t.getSendBuf().flatten().index(
                     {torch::indexing::Slice(offset, offset + grad_buf.numel())});
-                grad_buf.copy_(recv_buf);
+                if (acc_grad) {
+                    grad_buf.add_(recv_buf);
+                } else {
+                    grad_buf.copy_(recv_buf);
+                }
+                has_acc_grad_[t.getDSId()] = true;
             }
         }
 
         performCleanup(scalar_type);
     }
-
-protected:
-    std::unordered_map<long, at::Tensor> grad_tensors_;
 };
 
 static at::cuda::CUDAStream rs_stream = at::cuda::getStreamFromPool(true);
 static at::cuda::CUDAStream copy_stream = at::cuda::getStreamFromPool(true);
 
-void register_graph_z1(long graph_id, const std::vector<long>& ds_ids)
+void register_graph_z2(long graph_id, const std::vector<long>& ds_ids)
 {
-    executors[graph_id] = std::make_shared<Z1CustomOpExecutor>(process_group,
+    executors[graph_id] = std::make_shared<Z2CustomOpExecutor>(process_group,
                                                                param_registry,
                                                                reduce_buckets,
                                                                ds_ids,
@@ -114,15 +108,6 @@ void register_graph_z1(long graph_id, const std::vector<long>& ds_ids)
                                                                rs_stream,
                                                                copy_stream,
                                                                pre_div_reduce);
-}
-
-void register_param(long ds_id,
-                    const std::vector<int64_t>& ds_shape,
-                    at::Tensor ds_tensor,
-                    at::Tensor grad_buffer,
-                    int64_t offset)
-{
-    param_registry->registerParam(ds_id, ds_shape, ds_tensor, grad_buffer, false, offset, false);
 }
 
 }  // namespace dc
