@@ -70,7 +70,6 @@ jobs:
       - name: Install deepspeed
         run: |
           pip install .[dev,autotuning]
-          pip install pytest==8.3.5 # pin pytest to avoid issues with pytest 8.4.0
           ds_report
 
       - name: Python environment
