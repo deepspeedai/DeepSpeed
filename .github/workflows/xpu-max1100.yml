@@ -36,7 +36,7 @@ jobs:
   unit-tests:
     runs-on: [self-hosted, intel, xpu]
     container:
-      image: intel/oneapi-basekit:2025.0.1-0-devel-ubuntu24.04
+      image: intel/oneapi-basekit:2025.0.2-0-devel-ubuntu22.04
       ports:
         - 80
       options: --privileged -it --rm --device /dev/dri:/dev/dri -v /dev/dri/by-path:/dev/dri/by-path --ipc=host --cap-add=ALL
@@ -47,20 +47,16 @@ jobs:
       shell: bash
       run: |
         apt-get update
-        apt-get install clinfo libaio-dev python3-pip python3.12-venv -y
-        python3 -m venv ~/ds_env
-        source ~/ds_env/bin/activate
-        pip install torch==2.5.1 -f https://pytorch-extension.intel.com/release-whl/stable/xpu/cn/torch/
-        pip install intel-extension-for-pytorch==2.5.10+xpu -f https://pytorch-extension.intel.com/release-whl/stable/xpu/cn/intel-extension-for-pytorch/
-        pip install oneccl_bind_pt==2.5.0+xpu -f https://pytorch-extension.intel.com/release-whl/stable/xpu/cn/oneccl-bind-pt/
-        pip install torchvision==0.20.1 -f https://pytorch-extension.intel.com/release-whl/stable/xpu/cn/torchvision/
-        pip install py-cpuinfo numpy
+        apt-get install -y python3.11 python3.11-dev python3-pip clinfo libaio-dev
+        pip install --upgrade pip
+        pip install py-cpuinfo
+        pip install torch==2.7.0 torchvision==0.22.0 torchaudio==2.7.0 --index-url https://download.pytorch.org/whl/xpu
+        pip install intel-extension-for-pytorch==2.7.10+xpu oneccl_bind_pt==2.7.0+xpu --extra-index-url https://pytorch-extension.intel.com/release-whl/stable/xpu/us
         pip install .[dev,autotuning]
 
     - name: Check container state
       shell: bash
       run: |
-        source ~/ds_env/bin/activate
         ldd --version
         ds_report
         python3 -c "import torch; print('torch:', torch.__version__, torch)"
@@ -71,8 +67,9 @@ jobs:
     - name: Unit tests
       shell: bash
       run: |
-        source ~/ds_env/bin/activate
         cd tests/unit
+        export FI_PROVIDER="tcp"
+        export I_MPI_SHM=off
         pytest --verbose accelerator/*
         pytest --verbose autotuning/*
         pytest --verbose checkpoint/test_reshape_checkpoint.py

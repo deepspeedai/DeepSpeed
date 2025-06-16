@@ -43,8 +43,8 @@ jobs:
 
       - name: Install deepspeed
         run: |
-          pip install transformers==4.48.3
           pip install .[dev]
+          pip install transformers==4.48.3
           ds_report
 
       - name: Install deepspeed-chat

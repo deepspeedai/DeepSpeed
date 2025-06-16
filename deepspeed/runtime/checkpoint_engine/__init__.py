@@ -3,3 +3,9 @@
 
 # DeepSpeed Team
 '''Copyright The Microsoft DeepSpeed Team'''
+
+from .fast_checkpoint_engine import FastCheckpointEngine
+from .torch_checkpoint_engine import TorchCheckpointEngine
+from .decoupled_checkpoint_engine import DecoupledCheckpointEngine
+from .checkpoint_engine import CheckpointCommitInfo
+from .utils import create_checkpoint_engine

@@ -96,6 +96,6 @@ sys.path.insert(0, os.path.abspath('../../../'))
 # Prepend module names to class descriptions?
 add_module_names = True
 
-autoclass_content = 'auto'
+autoclass_content = 'both'
 
-autodoc_mock_imports = ["apex", "mpi4py", "tensorboardX", "numpy", "cupy"]
+autodoc_mock_imports = ["apex", "mpi4py", "tensorboardX", "numpy", "cupy", "einops", "transformers", "msgpack"]

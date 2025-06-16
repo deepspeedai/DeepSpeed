@@ -24,7 +24,6 @@
 
 at::Tensor quantize(torch::Tensor& out,
                     torch::Tensor& val,
-                    torch::Tensor& scale,
                     int group_size,
                     int stochastic_rounding,
                     int q_bits,
@@ -60,7 +59,6 @@ at::Tensor quantize(torch::Tensor& out,
 
 void dequantize(torch::Tensor& val,
                 torch::Tensor& val_q,
-                torch::Tensor& scale,
                 int group_size,
                 int q_mantisa_bits,
                 int q_exponent_bits)

@@ -30,10 +30,10 @@ class TestTwoOutputModel(DistributedTest):
                 }
             },
         }
-        if get_accelerator().is_fp16_supported():
-            config_dict["fp16"] = {"enabled": True}
-        elif get_accelerator().is_bf16_supported():
+        if get_accelerator().is_bf16_supported():
             config_dict["bf16"] = {"enabled": True}
+        elif get_accelerator().is_fp16_supported():
+            config_dict["fp16"] = {"enabled": True}
 
         hidden_dim = 10
         weight_value = 0.1
@@ -87,10 +87,10 @@ class TestThreeOutputModel(DistributedTest):
                 }
             },
         }
-        if get_accelerator().is_fp16_supported():
-            config_dict["fp16"] = {"enabled": True}
-        elif get_accelerator().is_bf16_supported():
+        if get_accelerator().is_bf16_supported():
             config_dict["bf16"] = {"enabled": True}
+        elif get_accelerator().is_fp16_supported():
+            config_dict["fp16"] = {"enabled": True}
 
         hidden_dim = 10
         weight_value = 0.1

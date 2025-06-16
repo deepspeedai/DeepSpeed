@@ -33,16 +33,19 @@ jobs:
           nvidia-smi
           python -c "import torch; print('torch:', torch.__version__, torch)"
           python -c "import torch; print('CUDA available:', torch.cuda.is_available())"
-      - name: Install transformers
-        run: |
-          git clone --depth=1 https://github.com/huggingface/transformers
-          cd transformers
-          git rev-parse --short HEAD
-          python -m pip install .
+
+
+
       - name: Install deepspeed
         run: |
           python -m pip install .[dev]
           ds_report
+
+      # install transformers after deepspeed so that the right version of transformers is installed
+      - name: Install transformers
+        run: |
+          python -m pip install transformers==4.50.0
+
       - name: Install FlashAttention
         run: |
           python -m pip install flash-attn

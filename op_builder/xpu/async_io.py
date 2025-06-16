@@ -3,7 +3,7 @@
 
 # DeepSpeed Team
 
-import distutils.spawn
+import shutil
 import subprocess
 
 from .builder import OpBuilder
@@ -75,7 +75,7 @@ class AsyncIOBuilder(OpBuilder):
         found = False
         for pkgmgr, data in libs.items():
             flag, lib, tool = data
-            path = distutils.spawn.find_executable(pkgmgr)
+            path = shutil.which(pkgmgr)
             if path is not None:
                 cmd = [pkgmgr, flag, lib]
                 result = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)

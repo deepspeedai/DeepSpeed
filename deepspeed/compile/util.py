@@ -427,3 +427,55 @@ def get_index_by_graph_id(graph_order, target_graph_id):
         if graph_id == target_graph_id:
             return index
     return -1
+
+
+def pad_tensors(specs: List[Tuple[torch.Tensor, int, int]]) -> List[torch.Tensor]:
+    """
+    specs = [
+        (input_ids,     1, pad_token_id),   # Example: Pad the right side with <pad>
+        (attention_mask, 1, 0),             # Example: Pad the right side with 0
+        ...
+    ]
+
+    - Share the "maximum length of the dim dimension" across ranks for all specs
+    - Pad the right side for the missing parts and return
+    - Communication (`all_reduce`) happens only once
+    """
+    assert len(specs) > 0, "specs is empty"
+
+    device = specs[0][0].device
+    # Vectorize local lengths
+    local_sizes = torch.tensor(
+        [tensor.size(dim) for tensor, dim, _ in specs],
+        dtype=torch.long,
+        device=device,
+    )
+
+    # Element-wise MAX across ranks
+    dist.all_reduce(local_sizes, op=dist.ReduceOp.MAX)
+    max_sizes = local_sizes.tolist()
+
+    # Pad each tensor as needed
+    padded: List[torch.Tensor] = []
+
+    # Don't use F.pad here:
+    # If you don't need to pad only on a certain rank, it will lead to different strides across ranks.
+    # This will cause recompilation on only some ranks and get the communication collective stuck.
+    for (tensor, dim, pad_val), max_len in zip(specs, max_sizes):
+        cur_len = tensor.size(dim)
+
+        # --- (1) Always allocate a new buffer with 'row-major, contiguous memory' -------------
+        out_shape = list(tensor.shape)
+        out_shape[dim] = max_len
+        out = torch.full(out_shape, pad_val, dtype=tensor.dtype, device=tensor.device)
+
+        # --- (2) Copy original data using slicing ------------------------------
+        slc = [slice(None)] * tensor.dim()
+        slc[dim] = slice(0, cur_len)
+        out[tuple(slc)] = tensor
+
+        # out is always row-major: for example, if shape is (..., 1, L), then
+        #   stride = (..., L, 1)
+        padded.append(out)
+
+    return padded

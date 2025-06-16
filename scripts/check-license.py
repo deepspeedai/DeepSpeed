@@ -19,7 +19,7 @@ def err(s: str) -> None:
 
 
 COPYRIGHT = [
-    (r"^# Copyright (c) Microsoft Corporation.$", r"^\/\/ Copyright (c) Microsoft Corporation.$"),
+    # (r"^# Copyright (c) Microsoft Corporation.$", r"^\/\/ Copyright (c) Microsoft Corporation.$"),
     (r"^# SPDX-License-Identifier: Apache-2.0$", r"^\/\/ SPDX-License-Identifier: Apache-2.0$"),
     (r"^# DeepSpeed Team$", r"^\/\/ DeepSpeed Team$"),
 ]

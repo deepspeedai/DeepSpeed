@@ -94,7 +94,11 @@ class TestZeroPPConfigSweep(DistributedTest):
 
         model = NNModel(h_dim, n_layers)
         model, _, _, _ = deepspeed.initialize(model=model, model_parameters=model.parameters(), config=config_dict)
-        data_loader = random_dataloader(model=model, total_samples=20, hidden_dim=h_dim, device=model.device)
+        data_loader = random_dataloader(model=model,
+                                        total_samples=20,
+                                        hidden_dim=h_dim,
+                                        device=model.device,
+                                        dtype=torch.float16)
         dist.barrier()
         if zpg == 1:
             _assert_no_secondary_tensor_group(model)
@@ -131,7 +135,11 @@ class TestZeroPPConfigSweep(DistributedTest):
 
         model = NNModel(h_dim, n_layers)
         model, _, _, _ = deepspeed.initialize(model=model, model_parameters=model.parameters(), config=config_dict)
-        data_loader = random_dataloader(model=model, total_samples=20, hidden_dim=h_dim, device=model.device)
+        data_loader = random_dataloader(model=model,
+                                        total_samples=20,
+                                        hidden_dim=h_dim,
+                                        device=model.device,
+                                        dtype=torch.float16)
         dist.barrier()
         if zpg == 1:
             _assert_no_secondary_tensor_group(model)
@@ -170,7 +178,11 @@ class TestZeroPPConfigSweep(DistributedTest):
 
         model = NNModel(h_dim, n_layers)
         model, _, _, _ = deepspeed.initialize(model=model, model_parameters=model.parameters(), config=config_dict)
-        data_loader = random_dataloader(model=model, total_samples=20, hidden_dim=h_dim, device=model.device)
+        data_loader = random_dataloader(model=model,
+                                        total_samples=20,
+                                        hidden_dim=h_dim,
+                                        device=model.device,
+                                        dtype=torch.float16)
         dist.barrier()
         if zpg == 1:
             _assert_no_secondary_tensor_group(model)

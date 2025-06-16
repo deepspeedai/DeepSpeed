@@ -12,20 +12,19 @@ import json
 import itertools
 import shutil
 
-from deepspeed.ops.op_builder import AsyncIOBuilder
-from deepspeed.ops.op_builder import GDSBuilder
+from deepspeed.ops.op_builder import AsyncIOBuilder, GDSBuilder
 from .ds_aio_job import Job, run_job
 from .perf_sweep_utils import READ_OP_DESC, WRITE_OP_DESC, BENCH_LOG_DIR, \
     READ_LOG_DIR, WRITE_LOG_DIR
 
-OTHER_OPTIONS = '--handle'
+OTHER_OPTIONS = '--engine aio_handle'
 PERF_SCRIPT = 'ds_io'
 DEFAULT_SWEEP_CONFIG = {
     "block_size": ["1M", "8M"],
     "queue_depth": [32, 128],
-    "sequential_requests": [False],
-    "single_submit": [False],
-    "io_parallel": [1, 8],
+    "sequential_requests": [True, False],
+    "single_submit": [False, True],
+    "io_parallel": [1, 2, 4, 8],
 }
 
 

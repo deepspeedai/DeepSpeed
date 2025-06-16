@@ -25,8 +25,9 @@ def err(s: str) -> None:
 #  - we can reasonably assume it's available on all machines
 #  - unlike plain grep, which is slower and has different flags on MacOS versus
 #    Linux, git grep is always the same.
+# allowing `torch.distributed.nn`
 res = subprocess.run(
-    ["git", "grep", "-Hn", "--no-index", r"torch\.distributed", *sys.argv[1:]],
+    ["git", "grep", "-Hn", "--no-index", "-P", r"torch\.distributed |torch\.distributed(?!\.nn)", *sys.argv[1:]],
     capture_output=True,
 )
 if res.returncode == 0:

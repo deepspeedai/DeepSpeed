@@ -39,25 +39,19 @@ def matmul_kernel_fp8_bf16(inp_ptr, weight_ptr, out_ptr, scale_ptr, M, N, K, str
     weight_ptrs_offset = offs_k[:, None] * (stride_bk // quantization_group_size) + (
         (pid_n * BLOCK_SIZE_N) // quantization_group_size)
 
-    weight = tl.load(weight_data, mask=offs_k[:, None] < K, other=0.0)
-    scale = tl.load(scale_ptr + weight_ptrs_offset)
-
     accumulator = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
     for k in range(0, tl.cdiv(K, BLOCK_SIZE_K)):
         inp = tl.load(inp_data, mask=offs_k[None, :] < K - k * BLOCK_SIZE_K, other=0.0)
+        weight = tl.load(weight_data, mask=offs_k[:, None] < K, other=0.0)
+        scale = tl.load(scale_ptr + weight_ptrs_offset + ((k * BLOCK_SIZE_K * stride_bk) // quantization_group_size))
         # Dequantize weight (fp8 -> bf16)
-        w = (((weight & 0x80) << 8) | ((weight & 0x7f) << 4)).to(tl.uint16)
+        w = (weight & 0x80).to(tl.uint16) << 8
+        w = w | ((weight & 0x7f).to(tl.uint16) << 4)
         w = (w + 0x3C00).to(tl.uint16)
-        w = (w.to(tl.bfloat16, bitcast=True) * scale).to(tl.bfloat16)
+        w = (w.to(tl.bfloat16, bitcast=True).to(tl.float32) * scale).to(tl.bfloat16)
 
         inp_data += BLOCK_SIZE_K * stride_ak
         weight_data += BLOCK_SIZE_K * stride_bk
-        weight_mask = offs_k[:, None] < K - (k + 1) * BLOCK_SIZE_K
-        weight = tl.load(weight_data, mask=weight_mask, other=0.0)
-        scale = tl.load(scale_ptr + (weight_ptrs_offset +
-                                     (((k + 1) * BLOCK_SIZE_K * stride_bk) // quantization_group_size)),
-                        mask=weight_mask,
-                        other=0.0)
 
         accumulator += tl.dot(inp, w)
 

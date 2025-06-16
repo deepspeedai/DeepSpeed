@@ -88,3 +88,34 @@ class no_child_process_in_deepspeed_io:
 
     def __exit__(self, *_):
         deepspeed.runtime.engine.DeepSpeedEngine.deepspeed_io = self.old_method
+
+
+def torch_assert_equal(actual, expected, **kwargs):
+    """
+    Compare two tensors or non-tensor numbers for their equality.
+    Add msg=blah to add an additional comment to when assert fails.
+    """
+    return torch.testing.assert_close(actual, expected, rtol=0.0, atol=0.0, **kwargs)
+
+
+def torch_assert_close(actual, expected, **kwargs):
+    """
+    Compare two tensors or non-tensor numbers for their closeness.
+
+    Add msg=blah to add an additional comment to when assert fails.
+
+    For default values of `rtol` and `atol` which are dtype dependent, see the table at https://docs.pytorch.org/docs/stable/testing.html#torch.testing.assert_close
+    For example for bf16 it is `rtol=1.6e-2` and `atol=1e-5`.
+
+    The check doesn't assert when `|a - b| <= (atol + rtol * |b|)`
+    """
+    return torch.testing.assert_close(actual, expected, **kwargs)
+
+
+def torch_assert_dicts_of_tensors_equal(actual, expected, **kwargs):
+    """
+    Compare two dicts of tensors or non-tensor numbers for their equality.
+    Add msg=blah to add an additional comment to when assert fails.
+    """
+    for k in actual.keys():
+        torch.testing.assert_close(actual[k], expected[k], rtol=0.0, atol=0.0, **kwargs)

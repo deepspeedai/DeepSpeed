@@ -141,19 +141,19 @@ def copy_to_device(item, device, criterion_func):
         return item
 
 
-def move_to_device(item, device, criterion_func):
+def move_to_device(item, device, criterion_func=None):
     """
     Move tensor on to specified device by changing the storage.
     Works on individual tensors, and tensors contained/nested in lists, tuples, and dicts.
     Parameters:
         item: tensor to move or (possibly nested) container of tensors to move.
         device: target device
-        criterion_func: Function to restrict move operation to items meet criterion
+        criterion_func: Function to restrict move operation to items meet criterion, defaults to `None` which is an equivalent to always move
 
     Returns:
         None
     """
-    if criterion_func(item):
+    if (criterion_func is not None and criterion_func(item)):
         device_copy = item.to(device)
         item.data = device_copy.data
         return item
@@ -164,7 +164,7 @@ def move_to_device(item, device, criterion_func):
     elif isinstance(item, dict):
         return {k: move_to_device(v, device, criterion_func) for k, v in item.items()}
     else:
-        return item
+        return item.to(device)
 
 
 def get_norm_with_moe_layers_fast(all_groups_norm, group):
@@ -1005,6 +1005,37 @@ def all_gather_dp_groups(groups_flat, partitioned_param_groups, dp_process_group
                 shard_list.append(curr_shard)
 
             dist.all_gather(shard_list, shard_list[partition_id], dp_process_group[group_id])
+
+
+def get_tensor_bytes(item):
+    if torch.is_tensor(item):
+        return item.numel() * item.element_size()
+    elif isinstance(item, list):
+        return sum([get_tensor_bytes(v) for v in item])
+    elif isinstance(item, tuple):
+        return sum([get_tensor_bytes(v) for v in item])
+    elif isinstance(item, dict):
+        return sum([get_tensor_bytes(v) for v in item.values()])
+    else:
+        return 0
+
+
+def _get_folder_size(folder):
+    size = 0
+    for path, _, files in os.walk(folder):
+        size += sum([os.path.getsize(os.path.join(path, f)) for f in files])
+    return size
+
+
+def get_checkpoint_folder_size(save_dir, tag, local_rank=None):
+    if local_rank == 0:
+        folder = os.path.join(save_dir, tag)
+        size_tensor = torch.tensor(_get_folder_size(folder)).to(get_accelerator().device_name())
+    else:
+        size_tensor = torch.tensor(0).to(get_accelerator().device_name())
+
+    dist.reduce(tensor=size_tensor, dst=0)
+    return int(size_tensor)
 
 
 class TLinear(torch.nn.Linear):

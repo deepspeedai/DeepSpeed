@@ -9,3 +9,4 @@
 | Minjia Zhang    | [minjiazhang](https://github.com/minjiazhang)  | UIUC  |
 | Ashwin Aji      | [ashwinma](https://github.com/ashwinma)        | AMD   |
 | Sam Foreman     | [saforem2](https://github.com/saforem2)        | Argonne National Laboratory |
+| Zhipeng Wang    | [PKUWZP](https://github.com/PKUWZP)       | LinkedIn  |

@@ -101,10 +101,18 @@ int io_prep_generator::prep_iocbs(const int n_iocbs, std::vector<struct iocb*>* 
     return actual_n_iocbs;
 }
 
-int get_file_size(const char* filename, int64_t& size)
+int64_t get_file_size(const char* filename, int64_t& size)
 {
     struct stat st;
     if (stat(filename, &st) == -1) { return -1; }
+    size = st.st_size;
+    return 0;
+}
+
+int64_t get_fd_file_size(const int fd, int64_t& size)
+{
+    struct stat st;
+    if (fstat(fd, &st) == -1) { return -1; }
     size = st.st_size;
     return 0;
 }

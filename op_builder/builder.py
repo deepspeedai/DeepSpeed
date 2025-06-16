@@ -571,6 +571,8 @@ class OpBuilder(ABC):
         nvcc_args = self.strip_empty_entries(self.nvcc_args())
         cxx_args = self.strip_empty_entries(self.cxx_args())
 
+        cxx_args.append("-UC10_USE_GLOG")
+        nvcc_args.append("-UC10_USE_GLOG")
         if isinstance(self, CUDAOpBuilder):
             if not self.build_for_cpu and self.enable_bf16:
                 cxx_args.append("-DBF16_AVAILABLE")

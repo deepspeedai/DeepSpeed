@@ -197,6 +197,9 @@ class TestUnfused(DistributedTest):
     def test_all_overflow(self):
         if not get_accelerator().is_fp16_supported():
             pytest.skip("fp16 is not supported")
+
+        min_loss_scale_value = 2.0
+
         config_dict = {
             "train_batch_size": 1,
             "steps_per_print": 1,
@@ -211,7 +214,7 @@ class TestUnfused(DistributedTest):
                 "loss_scale": 0,
                 "initial_scale_power": 4,
                 "loss_scale_window": 2,
-                "min_loss_scale": 0.25
+                "min_loss_scale": min_loss_scale_value
             }
         }
         hidden_dim = 1
@@ -219,7 +222,7 @@ class TestUnfused(DistributedTest):
         model, optim, _, _ = deepspeed.initialize(config=config_dict, model=model, model_parameters=model.parameters())
 
         expected_loss_scale = 2**4
-        expected_min_loss_scale = 0.25
+        expected_min_loss_scale = min_loss_scale_value
         # Ensure the dynamic loss scaler is correctly configured.
         assert optim.dynamic_loss_scale == True
         assert optim.cur_scale == expected_loss_scale

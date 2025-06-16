@@ -18,14 +18,14 @@ from deepspeed.utils import safe_get_local_fp32_param, safe_get_local_optimizer_
 from deepspeed.runtime.zero.offload_states import get_state_devices
 
 
-def validate_device(model, device: torch.device, include) -> None:
+def validate_device(model, device: torch.device, offloaded_states) -> None:
 
     def compare_device(state) -> bool:
         devices = get_state_devices(model, state)
         return len(devices) == 1 and device in devices
 
     for state in OffloadStateTypeEnum:
-        if include is None or state in include:
+        if offloaded_states is None or state in offloaded_states:
             if state == OffloadStateTypeEnum.contiguous_grad_buffer and device == torch.device("cpu"):
                 assert len(get_state_devices(model,
                                              state)) == 0, f"State {state} must be removed after offload_states()"
@@ -33,7 +33,7 @@ def validate_device(model, device: torch.device, include) -> None:
                 assert compare_device(state), f"State {state} is not on device {device}"
 
 
-def run_model(model, param_groups, config_dict, hidden_dim, dtype, include, pin_memory, non_blocking):
+def run_model(model, param_groups, config_dict, hidden_dim, dtype, offloaded_states, pin_memory, non_blocking):
     # Currently we only support OffloadDeviceEnum.cpu
     offload_device = OffloadDeviceEnum.cpu
 
@@ -57,11 +57,14 @@ def run_model(model, param_groups, config_dict, hidden_dim, dtype, include, pin_
 
         # Start offloading
         alloc_before_offload = get_accelerator().memory_allocated()
-        model.offload_states(include=include, device=offload_device, pin_memory=pin_memory, non_blocking=non_blocking)
+        model.offload_states(include=offloaded_states,
+                             device=offload_device,
+                             pin_memory=pin_memory,
+                             non_blocking=non_blocking)
         alloc_after_offload = get_accelerator().memory_allocated()
         assert alloc_after_offload < alloc_before_offload, f"Allocated memory should decrease after offload"
 
-        validate_device(model, torch.device(offload_device.value), include)
+        validate_device(model, torch.device(offload_device.value), offloaded_states)
 
         # Reload states
         model.reload_states()
@@ -88,7 +91,7 @@ def run_model(model, param_groups, config_dict, hidden_dim, dtype, include, pin_
         for adam_exp_avg_sq_expected, adam_exp_avg_sq_restored in zip(adam_exp_avg_sq, adam_exp_avg_sq_restored):
             assert torch.equal(adam_exp_avg_sq_expected, adam_exp_avg_sq_restored)
 
-        validate_device(model, torch.device(get_accelerator().current_device_name()), include)
+        validate_device(model, torch.device(get_accelerator().current_device_name()), offloaded_states)
 
     # Needed in ZeRO 3. Not doing so can give memory leak
     model.destroy()
@@ -131,5 +134,6 @@ class TestOffloadStates(DistributedTest):
             "params": [p for n, p in model.named_parameters() if 'bias' in n],
             "weight_decay": 0.0
         }]
-        include = None if included_state is None else [included_state]
-        run_model(model, param_groups, config_dict, hidden_dim, torch.bfloat16, include, pin_memory, non_blocking)
+        offloaded_states = None if included_state is None else [included_state]
+        run_model(model, param_groups, config_dict, hidden_dim, torch.bfloat16, offloaded_states, pin_memory,
+                  non_blocking)

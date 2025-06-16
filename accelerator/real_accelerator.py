@@ -138,6 +138,21 @@ def get_accelerator():
                 pass
         if accelerator_name is None:
             try:
+                import torch
+
+                # torch.xpu will be supported in upstream pytorch-2.8.
+                # Currently we can run on xpu device only using pytorch,
+                # also reserve the old path using ipex when the torch version is old.
+                if hasattr(torch, 'xpu'):
+                    if torch.cuda.device_count() == 0:  #ignore-cuda
+                        if torch.xpu.device_count() > 0 and torch.xpu.is_available():
+                            accelerator_name = "xpu"
+                else:
+                    pass
+            except ImportError as e:
+                pass
+        if accelerator_name is None:
+            try:
                 import torch_npu  # noqa: F401,F811 # type: ignore
 
                 accelerator_name = "npu"

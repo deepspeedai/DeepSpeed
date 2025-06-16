@@ -17,6 +17,7 @@ from transformers import AutoConfig, OPTConfig, AutoModel
 import pytest
 from collections import OrderedDict
 from typing import Dict
+from deepspeed.ops.aio import AsyncIOBuilder
 
 device = get_accelerator().device_name() if get_accelerator().is_available() else 'cpu'
 
@@ -56,6 +57,9 @@ def quantization_test_helper(pre_quant_type: torch.dtype, num_bits: int):
 def zero3_post_init_quantization_test_helper(cpu_offload: bool, nvme_offload: bool, bits: int):
     import deepspeed
     from transformers.integrations.deepspeed import HfDeepSpeedConfig
+
+    if nvme_offload and not deepspeed.ops.__compatible_ops__[AsyncIOBuilder.NAME]:
+        pytest.skip('Skip tests since async-io is not compatible')
 
     def get_zero3_ds_config(hf_config: OPTConfig, cpu_offload: bool, nvme_offload: bool, bits: int) -> Dict:
         GB = 1 << 30
@@ -173,6 +177,9 @@ def zero3_post_init_quantization_test_helper(cpu_offload: bool, nvme_offload: bo
 def zero3_quantized_initialization_test_helper(cpu_offload: bool, nvme_offload: bool, bits: int):
     import deepspeed
     from transformers.integrations.deepspeed import HfDeepSpeedConfig
+
+    if nvme_offload and not deepspeed.ops.__compatible_ops__[AsyncIOBuilder.NAME]:
+        pytest.skip('Skip tests since async-io is not compatible')
 
     def get_zero3_ds_config(hf_config: OPTConfig, cpu_offload: bool, nvme_offload: bool, bits: int) -> Dict:
         GB = 1 << 30

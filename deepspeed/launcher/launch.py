@@ -22,8 +22,8 @@ import psutil
 from collections import defaultdict
 from typing import Dict
 from argparse import ArgumentParser, REMAINDER
+from ..constants import TORCH_DISTRIBUTED_DEFAULT_PORT, CROSS_RANK, CROSS_SIZE
 from deepspeed.accelerator import get_accelerator
-from ..constants import TORCH_DISTRIBUTED_DEFAULT_PORT
 from ..nebula.constants import DLTS_POD_ENV_PATH
 from ..utils import logger, get_numactl_cmd
 from ..elasticity import is_torch_elastic_compatible
@@ -171,8 +171,8 @@ def main():
     current_env["MASTER_ADDR"] = args.master_addr
     current_env["MASTER_PORT"] = str(args.master_port)
     current_env["WORLD_SIZE"] = str(dist_world_size)
-    current_env["CROSS_RANK"] = str(args.node_rank)
-    current_env["CROSS_SIZE"] = str(args.nnodes)
+    current_env[CROSS_RANK] = str(args.node_rank)
+    current_env[CROSS_SIZE] = str(args.nnodes)
     current_env["LOCAL_SIZE"] = str(num_local_procs)
 
     if args.save_pid:
