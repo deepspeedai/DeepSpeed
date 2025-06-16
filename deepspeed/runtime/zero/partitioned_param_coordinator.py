@@ -195,7 +195,6 @@ class PartitionedParameterCoordinator:
                     force=self.__log_trace_cache_warnings)
                 self._invalidate_trace()
 
-    @compiler.disable
     def record_module(self, sub_module: Module) -> None:
         """adds sub module to trace"""
         if is_compiling():
