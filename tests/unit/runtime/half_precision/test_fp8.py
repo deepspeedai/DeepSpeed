@@ -38,6 +38,10 @@ class TestFp8ComposabilityAcrossZero(DistributedTest):
             fp8_recipe = recipe.DelayedScaling(fp8_format=recipe.Format.HYBRID,
                                                amax_history_len=16,
                                                amax_compute_algo="max")
+            if torch.version.hip:
+                loss_scale = 0.04
+            else:
+                loss_scale = 0.1
             config = {
                 "train_batch_size": batch_size,
                 "gradient_accumulation_steps": 1,
@@ -52,7 +56,7 @@ class TestFp8ComposabilityAcrossZero(DistributedTest):
                 },
                 "fp16": {
                     "enabled": enable_fp16,
-                    "loss_scale": 0.1
+                    "loss_scale": loss_scale
                 },
                 "bf16": {
                     "enabled": enable_bf16
