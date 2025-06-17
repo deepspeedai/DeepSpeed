@@ -12,7 +12,7 @@ main:
 
 lnav:
   - title: 'Training'
-    url: /training/ulsyss
+    url: /training/
   - title: 'Inference'
     url: /inference/
   - title: 'Compression'
