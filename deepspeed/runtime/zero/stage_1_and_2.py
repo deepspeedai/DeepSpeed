@@ -972,7 +972,9 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
         if self.elements_in_ipg_bucket + param.numel() > self.reduce_bucket_size:
             self.report_ipg_memory_usage("In ipg_remove_grads before reduce_ipg_grads", param.numel())
             self.reduce_ipg_grads()
-            if self.contiguous_gradients and self.overlap_comm:
+            if self.contigoous_gradients and self.overlap_comm:
+                if not get_accelerator().resolves_data_dependency():  
+                    get_accelerator().synchronize()
                 # Swap ipg_index between 0 and 1
                 self.ipg_index = 1 - self.ipg_index
             self.report_ipg_memory_usage("In ipg_remove_grads after reduce_ipg_grads", param.numel())
