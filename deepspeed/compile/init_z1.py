@@ -76,7 +76,4 @@ def init_z1(engine, backend, compile_config, compile_kwargs, schedule=None):
     init_schedule(schedule)
 
     engine.launch_compile_passes = launch_compile_passes
-    return make_backend(backend,
-                        compile_kwargs=compile_kwargs,
-                        free_activation=False,
-                        debug_log=compile_config.debug_log)
+    return make_backend(backend, compile_config, compile_kwargs=compile_kwargs)

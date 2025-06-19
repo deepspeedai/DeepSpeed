@@ -93,11 +93,6 @@ def init_z3(engine, backend, compile_config, compile_kwargs, schedule=None):
     engine.launch_compile_passes = launch_compile_passes
 
     patch_fake_tensor()
-    free_activation = compile_config.free_activation and not is_backend_inductor(backend)
-
     torch._inductor.config.size_asserts = False
 
-    return make_backend(backend,
-                        compile_kwargs=compile_kwargs,
-                        free_activation=free_activation,
-                        debug_log=compile_config.debug_log)
+    return make_backend(backend, compile_config, compile_kwargs=compile_kwargs)
