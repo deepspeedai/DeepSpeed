@@ -3,7 +3,7 @@
 
 # DeepSpeed Team
 
-from typing import Any, Tuple
+from typing import Any, Tuple, Optional
 from dataclasses import dataclass
 
 import torch
@@ -20,14 +20,24 @@ class TensorMetadata:
     requires_grad: bool
     layout: torch.layout
     memory_format: torch.memory_format = torch.contiguous_format
+    real_data: Optional[torch.Tensor] = None  # Store actual tensor data when configured
 
 
 class InputStorage:
     """Storage class to keep real inputs in CPU memory with tensor metadata"""
 
-    def __init__(self):
+    def __init__(self, keep_int_input_tensors: bool = False, keep_all_input_tensors: bool = False):
         self._stored_inputs: Any = None
         self._has_data: bool = False
+        self._keep_int_input_tensors: bool = keep_int_input_tensors
+        self._keep_all_input_tensors: bool = keep_all_input_tensors
+
+    def _is_int_tensor(self, tensor: torch.Tensor) -> bool:
+        """Check if tensor has integer dtype"""
+        return tensor.dtype in [
+            torch.int8, torch.int16, torch.int32, torch.int64, torch.uint8, torch.uint16, torch.uint32, torch.uint64,
+            torch.bool
+        ]
 
     def _extract_tensor_metadata(self, tensor: torch.Tensor) -> TensorMetadata:
         """Extract metadata from a tensor"""
@@ -37,6 +47,12 @@ class InputStorage:
         except:
             memory_format = torch.contiguous_format
 
+        # Store real data for tensors if configured to do so
+        real_data = None
+        if self._keep_all_input_tensors or (self._keep_int_input_tensors and self._is_int_tensor(tensor)):
+            # Move to CPU to save GPU memory
+            real_data = tensor.detach().cpu()
+
         return TensorMetadata(shape=tuple(tensor.shape),
                               dtype=tensor.dtype,
                               device=tensor.device,
@@ -44,7 +60,8 @@ class InputStorage:
                               storage_offset=tensor.storage_offset(),
                               requires_grad=tensor.requires_grad,
                               layout=tensor.layout,
-                              memory_format=memory_format)
+                              memory_format=memory_format,
+                              real_data=real_data)
 
     def _store_value(self, value: Any) -> Any:
         """
@@ -66,7 +83,33 @@ class InputStorage:
         Recursively materialize a stored value, creating tensors from metadata and keeping non-tensors as-is
         """
         if isinstance(stored_value, TensorMetadata):
-            # Create a tensor with the stored metadata
+            # If we have real data stored, use it
+            if stored_value.real_data is not None:
+                try:
+                    # Use the stored real data
+                    tensor = stored_value.real_data.clone()
+
+                    # Set stride if different from default and tensor is contiguous
+                    if tensor.stride() != stored_value.stride and len(stored_value.shape) > 0:
+                        try:
+                            # Create tensor with specific stride
+                            tensor = torch.as_strided(tensor, stored_value.shape, stored_value.stride,
+                                                      stored_value.storage_offset)
+                        except RuntimeError:
+                            # If stride setting fails, use default stride
+                            pass
+
+                    # Move to target device and set requires_grad
+                    tensor = tensor.to(device=stored_value.device)
+                    tensor.requires_grad_(stored_value.requires_grad)
+
+                    return tensor
+
+                except Exception as e:
+                    # Fallback to dummy data if real data fails
+                    pass
+
+            # Create a tensor with the stored metadata (original behavior for non-int tensors)
             # Use CPU first to avoid GPU memory issues, then move to target device
             try:
                 tensor = torch.empty(stored_value.shape,

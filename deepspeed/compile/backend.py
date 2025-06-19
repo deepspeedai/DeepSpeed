@@ -27,7 +27,7 @@ from .graph_param import DSGraphParamManager
 from .profilers import ProfilingResult
 from .profilers.graph_profile import MemoryProfilingInterpreter
 from .patch_compiled_func import patch_compiled_func, unpatch_compiled_func, get_backward_inputs
-from .util import get_input_nodes, get_activation_node_names, get_index_by_graph_id, get_deepcompile_handle, log_rank0
+from .util import get_input_nodes, get_activation_node_names, get_index_by_graph_id, get_deepcompile_handle, log_rank0, is_backend_inductor
 from .partitioner import get_wrapped_partitioner
 from .inductor import register_custom_ops, patch_create_aot_dispatcher_function
 from .input_storage import InputStorage
@@ -200,9 +200,13 @@ def run_opt_passes(opt_passes: List[Callable],
             get_accelerator().empty_cache()
 
 
-def make_backend(backend, compile_kwargs={}, free_activation=False, debug_log=False):
+def make_backend(backend, compile_config, compile_kwargs={}):
 
     register_custom_ops()
+
+    # Extract values from compile_config
+    debug_log = compile_config.debug_log
+    free_activation = compile_config.free_activation and not is_backend_inductor(backend)
 
     def backend_fn(gm: GraphModule, real_inputs):
         graph_id = id(gm.graph)
@@ -227,7 +231,8 @@ def make_backend(backend, compile_kwargs={}, free_activation=False, debug_log=Fa
 
         # Create an InputStorage instance for this specific graph
         # It will be captured by the make_fw_graph closure, eliminating the need for graph ID management
-        input_storage = InputStorage()
+        input_storage = InputStorage(keep_int_input_tensors=compile_config.keep_int_input_tensors,
+                                     keep_all_input_tensors=compile_config.keep_all_input_tensors)
 
         # Store in both list (for backward compatibility) and storage (for persistence)
         # The input_storage keeps tensor metadata to handle cases where
