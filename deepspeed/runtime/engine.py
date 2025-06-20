@@ -3972,9 +3972,10 @@ class DeepSpeedEngine(Module):
 
         enable_deepcompile = self.is_deepcompile_enabled()
         if enable_deepcompile and self.zero_optimization_stage() != ZeroStageEnum.optimizer_states \
-                and self.zero_optimization_stage() != ZeroStageEnum.weights:
+                and self.zero_optimization_stage() != ZeroStageEnum.weights \
+                and self.zero_optimization_stage() != ZeroStageEnum.gradients:
             logger.info(
-                f"Currently DeepCompile supports ZeRO stage 1 or 3 only, but ZeRO stage is set to {self.zero_optimization_stage()}. Falling back to the torch compiler."
+                f"Currently DeepCompile supports ZeRO stage 1, 2, or 3 only, but ZeRO stage is set to {self.zero_optimization_stage()}. Falling back to the torch compiler."
             )
             enable_deepcompile = False
 
@@ -3999,6 +4000,8 @@ class DeepSpeedEngine(Module):
                 compile_config.offload_parameters = True
             if self.zero_optimization_stage() == ZeroStageEnum.optimizer_states:
                 backend = init_z1(self, backend, compile_config, compile_kwargs, schedule)
+            elif self.zero_optimization_stage() == ZeroStageEnum.gradients:
+                backend = init_z1(self, backend, compile_config, compile_kwargs, schedule, use_z2=True)
             elif self.zero_optimization_stage() == ZeroStageEnum.weights:
                 backend = init_z3(self, backend, compile_config, compile_kwargs, schedule)
 

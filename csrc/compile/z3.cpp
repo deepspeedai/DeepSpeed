@@ -198,16 +198,17 @@ public:
     {
         if (!hasKey(reduce_tasks_, scalar_type)) { return; }
 
+        blockCopyEvents(scalar_type);
+
+        // Calculate temporary buffer size for accumulated gradients
         int64_t tmp_recv_numel = 0;
         for (const ReduceTask& t : reduce_tasks_.at(scalar_type)) {
-            auto copy_done_event = rs_copy_done_events_.at(t.getDSId());
-            copy_done_event->block(rs_stream_);
-
             if (has_acc_grad_.at(t.getDSId())) {
                 tmp_recv_numel += param_registry_->getParam(t.getDSId()).getGradBuffer().numel();
             }
         }
 
+        // Allocate temporary buffer if needed
         at::Tensor tmp_recv_buf = at::Tensor();
         if (tmp_recv_numel > 0) {
             at::cuda::CUDAStreamGuard guard(rs_stream_);
@@ -215,11 +216,13 @@ public:
                                         at::TensorOptions().dtype(scalar_type).device(at::kCUDA));
         }
 
+        applyPreDivision(scalar_type);
+
+        // NCCL ReduceScatter operation
         ncclGroupStart();
         int64_t offset = 0;
         for (const ReduceTask& t : reduce_tasks_.at(scalar_type)) {
             auto recv_buf = param_registry_->getParam(t.getDSId()).getGradBuffer();
-
             bool acc_grad = has_acc_grad_.at(t.getDSId());
 
             if (acc_grad) {
@@ -227,16 +230,11 @@ public:
                     tmp_recv_buf.index({torch::indexing::Slice(offset, offset + recv_buf.numel())});
             }
 
-            ncclRedOp_t op = pre_div_reduce_ ? ncclSum : ncclAvg;
-            if (pre_div_reduce_) {
-                at::cuda::CUDAStreamGuard guard(rs_stream_);
-                t.getSendBuf().div_(process_group_->getSize());
-            }
             ncclResult_t result = ncclReduceScatter(t.getSendBuf().data_ptr(),
                                                     recv_buf.data_ptr(),
                                                     recv_buf.numel(),
                                                     get_nccl_data_type(scalar_type),
-                                                    op,
+                                                    getReductionOp(),
                                                     nccl_comm_,
                                                     rs_stream_);
             if (result != ncclSuccess) { throw std::runtime_error("NCCL ReduceScatter failed"); }
@@ -245,6 +243,7 @@ public:
         }
         ncclGroupEnd();
 
+        // Handle gradient accumulation with temporary buffer
         {
             at::cuda::CUDAStreamGuard guard(rs_stream_);
             int64_t offset = 0;
@@ -261,17 +260,9 @@ public:
             }
         }
 
-        reduce_buckets_->swap(scalar_type, rs_stream_, copy_stream_);
+        performCleanup(scalar_type);
 
-        // Not very sure if this is necessary
-        // Want to prevent grad tensor from being released before the copy is done
-        auto comp_stream = at::cuda::getCurrentCUDAStream();
-        for (const ReduceTask& t : reduce_tasks_.at(scalar_type)) {
-            auto copy_done_event = rs_copy_done_events_.at(t.getDSId());
-            copy_done_event->block(comp_stream);
-        }
-        reduce_tasks_[scalar_type].clear();
-
+        // Record stream for temporary buffer to prevent early deallocation
         if (tmp_recv_numel > 0) { tmp_recv_buf.record_stream(rs_stream_); }
     }
 
