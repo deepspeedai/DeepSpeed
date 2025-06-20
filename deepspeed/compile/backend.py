@@ -27,9 +27,10 @@ from .graph_param import DSGraphParamManager
 from .profilers import ProfilingResult
 from .profilers.graph_profile import MemoryProfilingInterpreter
 from .patch_compiled_func import patch_compiled_func, unpatch_compiled_func, get_backward_inputs
-from .util import get_input_nodes, get_activation_node_names, get_index_by_graph_id, get_deepcompile_handle, log_rank0
+from .util import get_input_nodes, get_activation_node_names, get_index_by_graph_id, get_deepcompile_handle, log_rank0, is_backend_inductor
 from .partitioner import get_wrapped_partitioner
 from .inductor import register_custom_ops, patch_create_aot_dispatcher_function
+from .input_storage import InputStorage
 
 remaining_schedule = None
 next_pass_step = -1
@@ -199,9 +200,13 @@ def run_opt_passes(opt_passes: List[Callable],
             get_accelerator().empty_cache()
 
 
-def make_backend(backend, compile_kwargs={}, free_activation=False, debug_log=False):
+def make_backend(backend, compile_config, compile_kwargs={}):
 
     register_custom_ops()
+
+    # Extract values from compile_config
+    debug_log = compile_config.debug_log
+    free_activation = compile_config.free_activation and not is_backend_inductor(backend)
 
     def backend_fn(gm: GraphModule, real_inputs):
         graph_id = id(gm.graph)
@@ -209,11 +214,6 @@ def make_backend(backend, compile_kwargs={}, free_activation=False, debug_log=Fa
         needs_backward = pytree.tree_any(lambda x: x.requires_grad if torch.is_tensor(x) else False, real_inputs)
         frame_id = gm.meta["dynamo_compile_id"].frame_id
         graph_order_with_frame_id.add_graph(graph_id, frame_id, needs_backward)
-
-        if needs_backward:
-            if len(frames_needing_bwd) == 0:
-                patch_compiled_func()
-            frames_needing_bwd.add(frame_id)
 
         graph_order = graph_order_with_frame_id.get_graph_order()
 
@@ -228,7 +228,17 @@ def make_backend(backend, compile_kwargs={}, free_activation=False, debug_log=Fa
                              if isinstance(input_val, torch.nn.Parameter)]
 
         global fwd_real_inputs
+
+        # Create an InputStorage instance for this specific graph
+        # It will be captured by the make_fw_graph closure, eliminating the need for graph ID management
+        input_storage = InputStorage(keep_int_input_tensors=compile_config.keep_int_input_tensors,
+                                     keep_all_input_tensors=compile_config.keep_all_input_tensors)
+
+        # Store in both list (for backward compatibility) and storage (for persistence)
+        # The input_storage keeps tensor metadata to handle cases where
+        # backend_fn is called once but make_fw_graph is called multiple times
         fwd_real_inputs.append(real_inputs)
+        input_storage.put(real_inputs)
 
         global profiling_results
         if graph_id not in profiling_results:
@@ -239,7 +249,24 @@ def make_backend(backend, compile_kwargs={}, free_activation=False, debug_log=Fa
         def make_fw_graph(gm, sample_inputs):
             time_start = time.time()
             graph_index = len(graph_order) - 1
-            real_inputs = fwd_real_inputs.pop(0)
+
+            if needs_backward:
+                if len(frames_needing_bwd) == 0:
+                    patch_compiled_func()
+                frames_needing_bwd.add(frame_id)
+
+            # Try to get real_inputs from the list first, then from storage
+            if fwd_real_inputs:
+                real_inputs = fwd_real_inputs.pop(0)
+            elif input_storage.has_data():
+                # Note: input_storage is captured from the enclosing backend_fn scope
+                # Materialize tensors from storage when list is empty
+                log_rank0(f"Retrieving real inputs from storage for graph_id={graph_id}", enable=debug_log)
+                real_inputs = input_storage.get()
+            else:
+                raise RuntimeError(f"No real inputs available for graph_id {graph_id}. "
+                                   f"List size: {len(fwd_real_inputs)}, Storage has data: {input_storage.has_data()}")
+
             real_inputs = set_example_values_to_symints(real_inputs)
 
             param_manager[graph_id] = DSGraphParamManager(gm.graph, real_inputs, param_indices)

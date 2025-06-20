@@ -121,7 +121,7 @@ lnav:
         url: /tutorials/sparse-attention/
       - title: 'Transformer Kernel'
         url: /tutorials/transformer_kernel/
-      - title: Ulysses Sequence Parallelism Plus for HF Transformers
+      - title: 'Arctic Long Sequence Training (ALST) for HF Transformers integration'
         url: /tutorials/ulysses-alst-sequence-pallellism
       - title: 'ZeRO-Offload'
         url: /tutorials/zero-offload/

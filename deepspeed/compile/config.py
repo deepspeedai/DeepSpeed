@@ -44,3 +44,9 @@ class CompileConfig(DeepSpeedConfigModel):
 
     sync_after_allgather: bool = False
     """ Turn on/off the sync after allgather """
+
+    keep_int_input_tensors: bool = True
+    """ Keep real values for int tensors in InputStorage instead of using dummy values """
+
+    keep_all_input_tensors: bool = False
+    """ Keep real values for all input tensors in InputStorage instead of using dummy values """

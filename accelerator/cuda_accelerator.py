@@ -60,6 +60,9 @@ class CUDA_Accelerator(DeepSpeedAccelerator):
             return 'cuda'
         return 'cuda:{}'.format(device_index)
 
+    def communication_backend_version(self):
+        return torch.cuda.nccl.version()
+
     def device(self, device_index=None):
         return torch.cuda.device(device_index)
 

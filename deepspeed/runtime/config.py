@@ -153,6 +153,35 @@ def get_amp_params(param_dict):
         return False
 
 
+def get_torch_autocast_enabled(param_dict):
+    if TORCH_AUTOCAST in param_dict.keys():
+        return get_scalar_param(param_dict[TORCH_AUTOCAST], TORCH_AUTOCAST_ENABLED, TORCH_AUTOCAST_ENABLED_DEFAULT)
+    else:
+        return False
+
+
+def get_torch_autocast_dtype(param_dict):
+    if TORCH_AUTOCAST in param_dict:
+        if TORCH_AUTOCAST_DTYPE in param_dict[TORCH_AUTOCAST]:
+            try:
+                return DtypeEnum(param_dict[TORCH_AUTOCAST][TORCH_AUTOCAST_DTYPE]).value
+            except KeyError:
+                raise ValueError(
+                    f"Invalid dtype for torch autocast: {param_dict[TORCH_AUTOCAST][TORCH_AUTOCAST_DTYPE]}")
+    return None
+
+
+def get_lower_precision_safe_modules(param_dict):
+    if TORCH_AUTOCAST in param_dict:
+        if TORCH_AUTOCAST_LOWER_PRECISION_SAFE_MODULES in param_dict[TORCH_AUTOCAST]:
+            module_names_with_package = param_dict[TORCH_AUTOCAST][TORCH_AUTOCAST_LOWER_PRECISION_SAFE_MODULES]
+            if not all(isinstance(module_name, str) for module_name in module_names_with_package):
+                raise ValueError(
+                    f"Invalid module names for torch autocast: {module_names_with_package}. Expected list of strings.")
+            return module_names_with_package
+    return None
+
+
 def get_gradient_accumulation_steps(param_dict):
     return get_scalar_param(param_dict, GRADIENT_ACCUMULATION_STEPS, GRADIENT_ACCUMULATION_STEPS_DEFAULT)
 
@@ -754,6 +783,10 @@ class DeepSpeedConfig(object):
 
         self.amp_enabled = get_amp_enabled(param_dict)
         self.amp_params = get_amp_params(param_dict)
+
+        self.torch_autocast_enabled = get_torch_autocast_enabled(param_dict)
+        self.torch_autocast_dtype = get_torch_autocast_dtype(param_dict)
+        self.torch_autocast_lower_precision_safe_modules = get_lower_precision_safe_modules(param_dict)
 
         self.compression_config = get_compression_config(param_dict)
         self.graph_harvesting = get_graph_harvesting(param_dict)

@@ -10,7 +10,9 @@ tags: training, finetuning, sequence-parallelism, long-sequence
 - Liger-kernel
 - PYTORCH_CUDA_ALLOC_CONF
 
-It enables training on 0.5M long sequences on a single H100 GPU and a 15M-long sequences on LLama-8B on four 8x H100 nodes.
+It enables on LLama-8B training on 500K tokens on a single H100 GPU, 3.7M on a single node, and 15M on Llama-8B using just four nodes.
+
+To learn about this technology please read this paper: [Arctic Long Sequence Training: Scalable And Efficient Training For Multi-Million Token Sequences](https://arxiv.org/abs/2506.13996).
 
 It's already fully integrated into Arctic Training, see [this guide](https://github.com/snowflakedb/ArcticTraining/blob/main/projects/sequence-parallelism/).
 

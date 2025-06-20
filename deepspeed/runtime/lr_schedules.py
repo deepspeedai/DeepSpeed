@@ -655,12 +655,15 @@ class WarmupLR(object):
     def __init__(self,
                  optimizer: Optimizer,
                  warmup_min_lr: float = 0.0,
-                 warmup_max_lr: float = 0.001,
+                 warmup_max_lr: float = None,
                  warmup_num_steps: int = 1000,
                  warmup_type: str = WARMUP_LOG_RATE,
                  last_batch_iteration: int = -1):
 
         self.optimizer = get_torch_optimizer(optimizer)
+
+        if warmup_max_lr is None:
+            warmup_max_lr = [group['lr'] for group in self.optimizer.param_groups][0]
 
         self.min_lrs = self._format_param(self.optimizer, warmup_min_lr, "min_lr")
         self.max_lrs = self._format_param(self.optimizer, warmup_max_lr, "max_lr")
