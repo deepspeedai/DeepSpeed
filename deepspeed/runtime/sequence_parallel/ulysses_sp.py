@@ -19,6 +19,8 @@ ALST features found in this module:
 - `SequenceTiledCompute` - generic autograd function to perform compute after tiling on the sequence dimension
 - `TiledMLP` - a specific autograd function to perform tiled MLP (it's much easier to understand before trying to grok `SequenceTiledCompute`)
 
+This module implements Arctic Long Sequence Training: Scalable And Efficient Training For Multi-Million Token Sequences: https://arxiv.org/abs/2506.13996
+
 For integration docs see: https://www.deepspeed.ai/tutorials/ulysses-plus-sequence-pallellism
 
 The other ALST features live inside
