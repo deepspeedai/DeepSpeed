@@ -19,7 +19,7 @@ from torch.optim.lr_scheduler import _LRScheduler
 from torch._utils import _flatten_dense_tensors, _unflatten_dense_tensors
 from contextlib import contextmanager
 
-from typing import Callable, Dict, Union, Iterable, Container
+from typing import Callable, Dict, Union, Iterable, Container, List
 
 import deepspeed
 
@@ -95,6 +95,7 @@ from deepspeed.runtime.data_pipeline.data_routing.helper import remove_random_lt
 from deepspeed.runtime.data_pipeline.data_routing.basic_layer import RandomLayerTokenDrop
 
 from deepspeed.utils.zero_to_fp32 import get_fp32_state_dict_from_zero_checkpoint
+from deepspeed.runtime.torch_autocast import init_autocast_params, get_default_autocast_lower_precision_modules, validate_nested_autocast
 
 from .pipe.module import PipelineModule
 from .utils import get_ma_status
@@ -326,6 +327,9 @@ class DeepSpeedEngine(Module):
         # Convert model parameters from generator to list
         if not isinstance(model_parameters, list):
             model_parameters = list(model_parameters)
+
+        if self.torch_autocast_enabled():
+            init_autocast_params(self, self.torch_autocast_dtype(), self.torch_autocast_lower_precision_safe_modules())
 
         if has_optimizer:
             self._configure_optimizer(optimizer, model_parameters)
@@ -959,6 +963,16 @@ class DeepSpeedEngine(Module):
 
     def amp_params(self):
         return self._config.amp_params
+
+    def torch_autocast_enabled(self) -> bool:
+        return self._config.torch_autocast_enabled
+
+    def torch_autocast_dtype(self) -> torch.dtype:
+        return self._config.torch_autocast_dtype
+
+    def torch_autocast_lower_precision_safe_modules(self) -> List[str]:
+        module_names = self._config.torch_autocast_lower_precision_safe_modules
+        return get_default_autocast_lower_precision_modules() if module_names is None else module_names
 
     def fp16_auto_cast(self):
         return self._config.float16_config.auto_cast
@@ -2084,7 +2098,11 @@ class DeepSpeedEngine(Module):
             # We can't have this in forward prologue as the compiler compiles hooks including the forward prologue.
             self.launch_compile_passes(self.global_steps)
 
-        loss = self.module(*inputs, **kwargs)
+        validate_nested_autocast(self)
+        with torch.autocast(device_type=get_accelerator().device_name(),
+                            dtype=self.torch_autocast_dtype(),
+                            enabled=self.torch_autocast_enabled()):
+            loss = self.module(*inputs, **kwargs)
 
         if self.autotuning_profile_model_info():
             activation_mem = get_ma_status() - ma
