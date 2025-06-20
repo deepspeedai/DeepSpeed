@@ -7,8 +7,9 @@ import sys
 import gc
 import collections
 import itertools
-from typing import Deque, Dict, Set, Tuple, Container
+from typing import Deque, Dict, Set, List, Tuple, Container, Optional
 from contextlib import contextmanager
+from dataclasses import dataclass, field
 
 from deepspeed import comm as dist
 from deepspeed.utils import groups, z3_leaf_parameter
@@ -18,6 +19,7 @@ from deepspeed.runtime.base_optimizer import ZeROOptimizer
 from deepspeed.utils import logger
 from deepspeed.utils.torch import register_grad_hook
 from deepspeed.runtime.fp16.loss_scaler import CreateLossScaler
+from deepspeed.runtime.torch_autocast import get_all_autocast_dtypes, is_autocast_initialized, sort_dtypes
 from deepspeed.runtime.comm.coalesced_collectives import reduce_scatter_coalesced, all_to_all_quant_reduce, all_to_all_loco_quant_reduce
 from deepspeed.runtime.utils import inf, is_model_parallel_parameter, get_only_unique_item, mask_nan_or_inf_with_val_inplace
 from deepspeed.runtime.zero.partition_parameters import *
@@ -104,6 +106,20 @@ def unwrap_model_for_generation(model):
             optimizer_offload = model.optimizer
         optimizer_offload._register_deepspeed_module(optimizer_offload.module)
     return
+
+
+@dataclass
+class IPGBucketZ3:
+    buffer: Optional[torch.Tensor] = None
+    buffer_meta: Optional[torch.Tensor] = None
+    params: List[torch.Tensor] = field(default_factory=list)
+    elements: int = 0
+
+    def clear(self):
+        self.buffer = None
+        self.buffer_meta = None
+        self.params.clear()
+        self.elements = 0
 
 
 INITIAL_MICRO_STEP_ID = -1
@@ -376,12 +392,16 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
         # map between param_id and bool to specify if a param is in this partition
         self.is_param_in_current_partition = {}
 
-        self.extra_large_param_to_reduce = None
-        self.grads_in_ipg_bucket = []
-        self.params_in_ipg_bucket = []
+        if is_autocast_initialized():
+            comm_dtypes = get_all_autocast_dtypes([p for params in self.fp16_groups for p in params])
+            self.torch_autocast_gradscaler = torch.amp.GradScaler(device=get_accelerator().device_name())
+        else:
+            comm_dtypes = {self.communication_data_type}
+            self.torch_autocast_gradscaler = None
+
+        self.ipg_buckets: Dict[torch.dtype, IPGBucketZ3] = {dtype: IPGBucketZ3() for dtype in comm_dtypes}
 
         self.params_already_reduced = {}
-        self._release_ipg_buffers()
         self.previous_reduced_grads = None
 
         # model parameter traversal-based param id that's stable across runs
@@ -436,7 +456,7 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
 
         self._link_all_hp_params()
 
-        self.offloaded_states: Set(OffloadDeviceEnum) = set()
+        self.offloaded_states: Set[OffloadDeviceEnum] = set()
 
         if dist.get_rank(group=self.dp_process_group) == 0:
             see_memory_usage(f"After initializing ZeRO optimizer", force=True)
@@ -448,7 +468,7 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
         for hook in self._leaf_module_hooks:
             hook.remove()
         print_rank_0("Removed grad acc hooks", force=False)
-        self._release_ipg_buffers()
+        self.ipg_buckets.clear()
 
     def initialize_ds_offload(
         self,
@@ -535,9 +555,10 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
 
         # IPG
         if self.contiguous_gradients:
-            self.__ipg_bucket_flat_buffer: Tensor = torch.empty(self.reduce_bucket_size,
-                                                                dtype=self.dtype,
-                                                                device=get_accelerator().current_device_name())
+            for dtype, bucket in self.ipg_buckets.items():
+                bucket.buffer = torch.empty(self.reduce_bucket_size,
+                                            dtype=dtype,
+                                            device=get_accelerator().current_device_name())
 
         self.grad_partitions_flat_buffer = None
         self.__param_id_to_grad_partition: Dict[int, Tensor] = {}
@@ -638,10 +659,6 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
                                               device=self.device,
                                               dtype=torch.float32,
                                               timers=self.timers)
-
-    @property
-    def elements_in_ipg_bucket(self):
-        return sum(p.ds_numel for p in self.params_in_ipg_bucket)
 
     def _move_to_flat_buffer(self, param_list, flat_buffer, avoid_copy=False):
         '''If flat buffer is None then the parameters in the param_list are
@@ -965,10 +982,6 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
 
         return sub_groups
 
-    def _release_ipg_buffers(self):
-        if self.contiguous_gradients:
-            self.__ipg_bucket_flat_buffer = None
-
     def _optimizer_step(self, sub_group_id):
         param_group_id = self.sub_group_to_group_id[sub_group_id]
         fp32_param = self.fp32_partitioned_groups_flat[sub_group_id]
@@ -1130,7 +1143,8 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
     @instrument_w_nvtx
     def independent_gradient_partition_epilogue(self):
         self.report_ipg_memory_usage(f"In ipg_epilogue before reduce_ipg_grads", 0)
-        self.__reduce_and_partition_ipg_grads()
+        for comm_dtype in sort_dtypes(self.ipg_buckets.keys()):
+            self.__reduce_and_partition_ipg_grads(comm_dtype)
         self.report_ipg_memory_usage(f"In ipg_epilogue after reduce_ipg_grads", 0)
 
         if not get_accelerator().resolves_data_dependency():
@@ -1247,13 +1261,6 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
     def get_param_id(self, param):
         return OptimizerSwapper.parameter_id(param)
 
-    def report_ipg_memory_usage(self, tag, param_elems):
-        elem_count = self.elements_in_ipg_bucket + param_elems
-        percent_of_bucket_size = (100.0 * elem_count) // self.reduce_bucket_size
-        see_memory_usage(
-            f"{tag}: elems in_bucket {self.elements_in_ipg_bucket} param {param_elems} max_percent {percent_of_bucket_size}",
-            force=False)
-
     ###############Independent Partition Gradient ########################
     def reduce_independent_p_g_buckets_and_remove_grads(self, param):
         #print_rank_0(f"Inside reduce ipg buckets. {debug_param2name_id_shape(param)}, ipg elements {self.elements_in_ipg_bucket}, reduce bucket size {self.reduce_bucket_size}", force=True)
@@ -1263,10 +1270,11 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
         # 0). Otherwise if the incoming param.ds_numel is large, this branch may get triggered on a
         # garbage data and `self.average_tensor()` will crash because its params_to_reduce will be
         # empty, while reduction_list will have that garbage data.
-        if self.elements_in_ipg_bucket + param.ds_numel > self.reduce_bucket_size and self.elements_in_ipg_bucket > 0:
+        comm_dtype = self.get_param_comm_dtype(param)
+        bucket = self.ipg_buckets[comm_dtype]
+        if bucket.elements + param.ds_numel > self.reduce_bucket_size and bucket.elements > 0:
             self.report_ipg_memory_usage("In ipg_remove_grads before reduce_ipg_grads", param.ds_numel)
-
-            self.__reduce_and_partition_ipg_grads()
+            self.__reduce_and_partition_ipg_grads(comm_dtype)
 
         # deal with a use-case of transient grads that will be generated in a loop for the same computation involving some model params - e.g. when performing a tiled memory calculation that shards the normal single sub-module call into a loop over a shards.
         if getattr(param, "ds_grad_is_ready", True):
@@ -1278,31 +1286,35 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
         if not get_accelerator().resolves_data_dependency():
             self.reduce_and_partition_stream.wait_stream(get_accelerator().default_stream())
 
-        if self.contiguous_gradients and self.elements_in_ipg_bucket + param.grad.numel() <= self.reduce_bucket_size:
+        bucket = self.ipg_buckets[self.get_param_comm_dtype(param)]
+        if self.contiguous_gradients and bucket.elements + param.grad.numel() <= self.reduce_bucket_size:
             # move the gradient to a contiguous buffer
             with get_accelerator().stream(self.reduce_and_partition_stream):
                 # move the parameter's gradient to the contiguous flat buffer
-                new_grad_tensor = self.__ipg_bucket_flat_buffer.narrow(0, self.elements_in_ipg_bucket,
-                                                                       param.grad.numel()).view_as(param.grad)
+                new_grad_tensor = bucket.buffer.narrow(0, bucket.elements, param.grad.numel()).view_as(param.grad)
                 new_grad_tensor.copy_(param.grad, non_blocking=True)
                 if not get_accelerator().is_synchronized_device():
                     param.grad.record_stream(get_accelerator().current_stream())
                 param.grad.data = new_grad_tensor
 
-        self.params_in_ipg_bucket.append(param)
+        bucket.params.append(param)
+        bucket.elements += param.grad.numel()
 
     @instrument_w_nvtx
     @torch.no_grad()
-    def __reduce_and_partition_ipg_grads(self, safe_mode: bool = False) -> None:
-        if not self.params_in_ipg_bucket:
+    def __reduce_and_partition_ipg_grads(self, communication_data_type: torch.dtype, safe_mode: bool = False) -> None:
+        bucket = self.ipg_buckets[communication_data_type]
+        params_in_bucket = bucket.params
+
+        if not params_in_bucket:
             return
 
-        for param in self.params_in_ipg_bucket:
+        for param in params_in_bucket:
             if param.grad.numel() != param.ds_numel:
                 raise RuntimeError(f"{param.grad.numel()} != {param.ds_numel} Cannot reduce scatter "
                                    f"gradients whose size is not same as the params")
 
-        assert len(set(p.ds_id for p in self.params_in_ipg_bucket)) == len(self.params_in_ipg_bucket)
+        assert len(set(p.ds_id for p in params_in_bucket)) == len(params_in_bucket)
 
         while self.param_reduce_events and self.param_reduce_events[0].query():
             self.param_reduce_events.popleft()
@@ -1311,18 +1323,18 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
 
         with get_accelerator().stream(self.reduce_and_partition_stream):
             if safe_mode:
-                assert_ints_same_as_other_ranks([p.ds_id for p in self.params_in_ipg_bucket])
+                assert_ints_same_as_other_ranks([p.ds_id for p in params_in_bucket])
 
-            if self.contiguous_gradients and self.elements_in_ipg_bucket <= self.reduce_bucket_size and not self.reduce_scatter:
-                grad_bucket = self.__ipg_bucket_flat_buffer.narrow(0, 0, self.elements_in_ipg_bucket)
-                grad_partitions = self.__avg_scatter_contiguous_grads(grad_bucket)
+            if self.contiguous_gradients and bucket.elements <= self.reduce_bucket_size and not self.reduce_scatter:
+                grad_bucket = bucket.buffer.narrow(0, 0, bucket.elements)
+                grad_partitions = self.__avg_scatter_contiguous_grads(grad_bucket, communication_data_type)
             else:
-                self.params_in_ipg_bucket.sort(key=lambda p: p.ds_id)
-                grad_partitions = self.__avg_scatter_grads(self.params_in_ipg_bucket)
+                params_in_bucket.sort(key=lambda p: p.ds_id)
+                grad_partitions = self.__avg_scatter_grads(params_in_bucket, communication_data_type)
 
-            self.partition_grads(self.params_in_ipg_bucket, grad_partitions)
+            self.partition_grads(params_in_bucket, grad_partitions)
 
-            self.params_in_ipg_bucket.clear()
+            params_in_bucket.clear()
 
             if not get_accelerator().handles_memory_backpressure():
                 event = get_accelerator().Event()
@@ -1330,10 +1342,11 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
                 self.param_reduce_events.append(event)
 
     @instrument_w_nvtx
-    def __avg_scatter_contiguous_grads(self, buffer_to_reduce: Tensor) -> List[Tensor]:
+    def __avg_scatter_contiguous_grads(self, buffer_to_reduce: Tensor,
+                                       communication_data_type: torch.dtype) -> List[Tensor]:
         dtype = buffer_to_reduce.dtype
-        if self.communication_data_type != dtype:
-            buffer_to_reduce = buffer_to_reduce.to(self.communication_data_type)
+        if communication_data_type != dtype:
+            buffer_to_reduce = buffer_to_reduce.to(communication_data_type)
         if self.postscale_gradients and self.gradient_predivide_factor != 1.0:
             buffer_to_reduce = buffer_to_reduce.div_(self.gradient_predivide_factor)
 
@@ -1346,12 +1359,12 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
         if self.postscale_gradients and self.gradient_predivide_factor != world_sz:
             buffer_to_reduce = buffer_to_reduce.mul(self.gradient_predivide_factor)
 
-        if self.communication_data_type != self.dtype:
+        if communication_data_type != self.dtype:
             buffer_to_reduce = buffer_to_reduce.to(self.dtype)
 
         grad_partitions = []
         grad_offset_in_buffer = 0
-        for param in self.params_in_ipg_bucket:
+        for param in self.ipg_buckets[communication_data_type].params:
             grad = param.grad
             chunk_sz = math.ceil(grad.numel() / world_sz)
 
@@ -1371,12 +1384,13 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
         return grad_partitions
 
     @instrument_w_nvtx
-    def __avg_scatter_grads(self, params_to_reduce: List[Parameter]) -> List[Tensor]:
+    def __avg_scatter_grads(self, params_to_reduce: List[Parameter],
+                            communication_data_type: torch.dtype) -> List[Tensor]:
         """average gradients and scatter partitions across ranks"""
 
         full_grads_for_rank = [p.grad for p in params_to_reduce]
-        if self.communication_data_type != self.dtype:
-            full_grads_for_rank = [g.to(self.communication_data_type) for g in full_grads_for_rank]
+        if communication_data_type != self.dtype:
+            full_grads_for_rank = [g.to(communication_data_type) for g in full_grads_for_rank]
 
         if self.postscale_gradients and self.gradient_predivide_factor != 1.0:
             full_grads_for_rank = [g.div(self.gradient_predivide_factor) for g in full_grads_for_rank]
@@ -1396,7 +1410,7 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
                 self.dp_process_group):
             grad_partitions_for_rank = [g.mul(self.gradient_predivide_factor) for g in grad_partitions_for_rank]
 
-        if self.communication_data_type != self.dtype:
+        if communication_data_type != self.dtype:
             grad_partitions_for_rank = [g.to(self.dtype) for g in grad_partitions_for_rank]
 
         return grad_partitions_for_rank
@@ -3012,12 +3026,12 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
 
         # contiguous bucket
         if needs_offload(OffloadStateTypeEnum.contiguous_grad_buffer):
-            if hasattr(self, "_DeepSpeedZeroOptimizer_Stage3__ipg_bucket_flat_buffer"
-                       ) and self.__ipg_bucket_flat_buffer is not None:
-                # Record properties like shape, strides, etc. as a meta tensor
-                self.grad_buffer_meta = self.__ipg_bucket_flat_buffer.to("meta")
-                self.__ipg_bucket_flat_buffer = None
-                self.offloaded_states.add(OffloadStateTypeEnum.contiguous_grad_buffer)
+            for bucket in self.ipg_buckets.values():
+                if bucket.buffer is not None:
+                    # Record properties like shape, strides, etc. as a meta tensor
+                    bucket.buffer_meta = bucket.buffer.to("meta")
+                    bucket.buffer = None
+                    self.offloaded_states.add(OffloadStateTypeEnum.contiguous_grad_buffer)
 
         # Adam
         if needs_offload(OffloadStateTypeEnum.optim_states):
@@ -3074,8 +3088,11 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
 
         # contiguous bucket
         if OffloadStateTypeEnum.contiguous_grad_buffer in self.offloaded_states:
-            self.__ipg_bucket_flat_buffer = torch.empty_like(self.grad_buffer_meta, device=device)
-            # self.__ipg_bucket_flat_buffer.data = self.__ipg_bucket_flat_buffer.data.to(device)
+            for bucket in self.ipg_buckets.values():
+                if bucket.buffer_meta is not None:
+                    # We don't restore the data
+                    bucket.buffer = torch.empty_like(bucket.buffer_meta, device=device)
+
             self.offloaded_states.remove(OffloadStateTypeEnum.contiguous_grad_buffer)
 
         # Adam
