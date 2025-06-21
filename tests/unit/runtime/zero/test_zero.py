@@ -1240,10 +1240,17 @@ class TestParamPartitioningSkipInit(DistributedTest):
                 "stage": 3
             },
         }
-        if get_accelerator().is_bf16_supported():
-            config_dict["bf16"] = {"enabled": True}
-        elif get_accelerator().is_fp16_supported():
-            config_dict["fp16"] = {"enabled": True}
+
+        if dtype == torch.bfloat16:
+            if get_accelerator().is_bf16_supported():
+                config_dict["bf16"] = {"enabled": True}
+            else:
+                pytest.skip("bfloat16 is not supported on this accelerator")
+        elif dtype == torch.float16:
+            if get_accelerator().is_fp16_supported():
+                config_dict["fp16"] = {"enabled": True}
+            else:
+                pytest.skip("fp16 is not supported on this accelerator")
         hidden_dim = 10
 
         class SubModel(torch.nn.Module):
