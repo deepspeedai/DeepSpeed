@@ -1240,10 +1240,14 @@ class TestParamPartitioningSkipInit(DistributedTest):
                 "stage": 3
             },
         }
+        # Determine the actual dtype that will be used based on accelerator support
+        actual_dtype = dtype
         if get_accelerator().is_bf16_supported():
             config_dict["bf16"] = {"enabled": True}
+            actual_dtype = torch.bfloat16
         elif get_accelerator().is_fp16_supported():
             config_dict["fp16"] = {"enabled": True}
+            actual_dtype = torch.float16
         hidden_dim = 10
 
         class SubModel(torch.nn.Module):
@@ -1295,7 +1299,7 @@ class TestParamPartitioningSkipInit(DistributedTest):
                                         total_samples=16,
                                         hidden_dim=hidden_dim,
                                         device=model.device,
-                                        dtype=dtype)
+                                        dtype=actual_dtype)
         dist.barrier()
         for n, batch in enumerate(data_loader):
             loss = model(batch[0], batch[1])
