@@ -1445,7 +1445,8 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
                     _, _, param_id = bucket.params[0]
                     assert self.get_param_id(self.extra_large_param_to_reduce[comm_dtype]
                                              ) == param_id, "param in ipg bucket does not match extra-large param"
-                    extra_large_grad_reduc = self.get_gradient_for_reduction(self.extra_large_param_to_reduce[comm_dtype])
+                    extra_large_grad_reduc = self.get_gradient_for_reduction(
+                        self.extra_large_param_to_reduce[comm_dtype])
                     self.average_tensor(extra_large_grad_reduc.view(-1), comm_dtype)
                     del self.extra_large_param_to_reduce[comm_dtype]
                 else:
