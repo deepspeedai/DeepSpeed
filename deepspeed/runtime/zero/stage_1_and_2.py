@@ -1445,8 +1445,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
                     _, _, param_id = bucket.params[0]
                     assert self.get_param_id(self.extra_large_param_to_reduce[comm_dtype]
                                              ) == param_id, "param in ipg bucket does not match extra-large param"
-                    extra_large_grad_reduc = self.get_gradient_for_reduction(
-                        self.extra_large_param_to_reduce[comm_dtype])
+                    extra_large_grad_reduc = self.get_gradient_for_reduction(self.extra_large_param_to_reduce[comm_dtype])
                     self.average_tensor(extra_large_grad_reduc.view(-1), comm_dtype)
                     del self.extra_large_param_to_reduce[comm_dtype]
                 else:
@@ -2142,7 +2141,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
             self.micro_step_id += 1
 
             if self.contiguous_gradients:
-                for dtype, bucket in self.ipg_buckets.items():
+                for _, bucket in self.ipg_buckets.items():
                     bucket.buffer.clear()
 
                     # Buffer's dtype is the same as the dtype of optimizer, not dtype for autocast
