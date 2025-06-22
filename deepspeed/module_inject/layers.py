@@ -195,6 +195,14 @@ class TensorParallel_Layer(nn.Module, ABC):
             # backward compatibility
             self.world_size = self.tp_world_size
             self.rank = self.tp_index
+        else:
+            self.mp_group = mp_group
+            self.tp_world_size: int = 1
+            self.tp_index: int = 0
+
+            # backward compatibility
+            self.world_size = self.tp_world_size
+            self.rank = self.tp_index
 
         self.name = getattr(self, 'name', None)
         if kwargs.get('name') is not None:
