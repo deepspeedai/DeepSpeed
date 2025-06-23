@@ -109,7 +109,6 @@ class IPGBucket:
     has_moe_params: bool = False
 
     def clear(self):
-        self.buffer.clear()
         self.params.clear()
         self.grads.clear()
         self.elements = 0
@@ -734,7 +733,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
     def _release_ipg_buffers(self):
         if self.contiguous_gradients:
             for bucket in self.ipg_buckets.values():
-                bucket.clear()
+                bucket.buffer.clear()
 
             self.grads_in_partition = None
             self.grads_in_partition_offset = 0
@@ -1443,10 +1442,11 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
             if self.contiguous_gradients:
                 if comm_dtype in self.extra_large_param_to_reduce:
                     assert len(bucket.params) == 1, "more than 1 param in ipg bucket, this shouldn't happen"
-                    _, _, param_id = self.params[0]
-                    assert self.get_param_id(self.extra_large_param_to_reduce
+                    _, _, param_id = bucket.params[0]
+                    assert self.get_param_id(self.extra_large_param_to_reduce[comm_dtype]
                                              ) == param_id, "param in ipg bucket does not match extra-large param"
-                    extra_large_grad_reduc = self.get_gradient_for_reduction(self.extra_large_param_to_reduce)
+                    extra_large_grad_reduc = self.get_gradient_for_reduction(
+                        self.extra_large_param_to_reduce[comm_dtype])
                     self.average_tensor(extra_large_grad_reduc.view(-1), comm_dtype)
                     del self.extra_large_param_to_reduce[comm_dtype]
                 else:
