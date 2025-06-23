@@ -24,10 +24,10 @@ class WandbMonitor(Monitor):
         if self.enabled and dist.get_rank() == 0:
             wandb.init(project=self.project, group=self.group, entity=self.team)
 
-    def log(self, data, step=None, commit=None, sync=None):
+    def log(self, data, step=None, commit=None):
         if self.enabled and dist.get_rank() == 0:
             import wandb
-            return wandb.log(data, step=step, commit=commit, sync=sync)
+            return wandb.log(data, step=step, commit=commit)
 
     def write_events(self, event_list):
         if self.enabled and dist.get_rank() == 0:
