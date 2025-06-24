@@ -11,7 +11,7 @@ import torch
 from torch.fx import Graph, Node
 
 from .fx import get_output_node
-from .util import get_param_nodes
+from .util import get_param_nodes, get_input_nodes
 
 
 @dataclass
@@ -82,3 +82,22 @@ class DSGraphParamManager:
     def get_grad_name(self, param_name) -> str:
         assert self._param_name_to_grad is not None, "Backward graph is not added yet"
         return self._param_name_to_grad[param_name]
+
+    def replace_fake_tensors_with_real_params(self, sample_inputs: List[Any], bw_graph: Graph) -> List[Any]:
+        """Replace fake tensors in sample_inputs with real parameters from DSGraphParamManager
+
+        Args:
+            sample_inputs: The input tensors that may contain fake tensors
+            bw_graph: The backward graph to get parameter mapping from (if in backward pass)
+        """
+        replaced_inputs = list(sample_inputs)
+
+        # For backward pass, get the parameter nodes and their mapping
+        param_nodes_bw, _ = self.get_bwd_mapping(bw_graph)
+        param_names_bw = [n.name for n in param_nodes_bw]
+
+        for i, inp in enumerate(get_input_nodes(bw_graph)):
+            if inp.name in param_names_bw:
+                replaced_inputs[i] = self._params[inp.name].param
+
+        return replaced_inputs
