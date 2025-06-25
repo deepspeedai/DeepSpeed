@@ -187,14 +187,17 @@ class TensorParallel_Layer(nn.Module, ABC):
         """
         super().__init__()
         self.support_training: bool = False
+        self.mp_group = mp_group
         if mp_group is not None:
-            self.mp_group = mp_group
             self.tp_world_size: int = dist.get_world_size(self.mp_group)
-            self.tp_index: int = dist.get_rank(mp_group)
+            self.tp_index: int = dist.get_rank(self.mp_group)
+        else:
+            self.tp_world_size: int = 1
+            self.tp_index: int = 0
 
-            # backward compatibility
-            self.world_size = self.tp_world_size
-            self.rank = self.tp_index
+        # backward compatibility
+        self.world_size = self.tp_world_size
+        self.rank = self.tp_index
 
         self.name = getattr(self, 'name', None)
         if kwargs.get('name') is not None:
