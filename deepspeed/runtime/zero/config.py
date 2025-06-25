@@ -9,7 +9,7 @@ from enum import Enum
 from pydantic import Field, model_validator
 from deepspeed.runtime.config_utils import get_scalar_param, pp_int, DeepSpeedConfigModel
 from deepspeed.utils import logger
-from .offload_config import DeepSpeedZeroOffloadParamConfig, DeepSpeedZeroOffloadOptimizerConfig, OffloadDeviceEnum
+from .offload_config import DeepSpeedZeroOffloadParamConfig, DeepSpeedZeroOffloadOptimizerConfig, OffloadDeviceEnum, ZenFlowConfig
 
 # ZeRO optimization. By default, this optimization is not enabled.
 # Users have to configure the desired optimization (0 means disabled) in params.json as below example:
@@ -164,6 +164,9 @@ class DeepSpeedZeroConfig(DeepSpeedConfigModel):
     sizes. Valid for ZeRO stage 1, 2, 3. Expects a dictionary containing values
     for :any:`DeepSpeedZeroOffloadOptimizerConfig`.
     """
+
+    zenflow: Optional[ZenFlowConfig] = None
+    """Enable ZenFlow"""
 
     sub_group_size: int = Field(pp_int(1e9), ge=0)
     """
