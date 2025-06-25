@@ -27,6 +27,7 @@ from deepspeed import comm as dist
 from deepspeed.runtime.utils import see_memory_usage, DummyOptim
 from .zero.offload_config import OffloadDeviceEnum, OffloadStateTypeEnum
 from deepspeed.runtime.zero.stage_1_and_2 import DeepSpeedZeroOptimizer
+from deepspeed.runtime.zero.zenflow.zenflow_stage_1_and_2 import ZenFlowZeroOptimizer
 from deepspeed.runtime.zero.partition_parameters import ZeroParamStatus
 from deepspeed.runtime.zero.utils import is_zero_supported_optimizer, ZeRORuntimeException
 from deepspeed.runtime.zero.parameter_offload import DeepSpeedZeRoOffload
@@ -321,6 +322,8 @@ class DeepSpeedEngine(Module):
         # Convert model parameters from generator to list
         if not isinstance(model_parameters, list):
             model_parameters = list(model_parameters)
+
+        self._configure_zenflow()
 
         if has_optimizer:
             self._configure_optimizer(optimizer, model_parameters)
@@ -1030,6 +1033,9 @@ class DeepSpeedEngine(Module):
     def aio_config(self):
         return self._config.aio_config
 
+    def zenflow_config(self):
+        return self._config.zero_config.zenflow
+
     def get_data_types(self):
         model_dtype = torch.float32
         if self.fp16_enabled():
@@ -1068,6 +1074,51 @@ class DeepSpeedEngine(Module):
             self.lr_scheduler = lr_scheduler
 
         log_dist(f'DeepSpeed LR Scheduler = {self.lr_scheduler}', ranks=[0])
+
+    def _configure_zenflow(self):
+
+        zenflow_config = self.zenflow_config()
+        if zenflow_config == None:
+            self.zenflow = False
+            return
+
+        self.zenflow = True
+        select_strategy = zenflow_config.select_strategy
+
+        if select_strategy == 'auto':
+            select_strategy = "epoch"
+            if isinstance(zenflow_config.select_interval, int):
+                raise Warning(
+                    "If use auto select strategy, select_interval will be set to 1 and select_strategy will be set to epoch, thus select_interval would be overwritten."
+                )
+            self.select_interval = 1
+        else:
+            if isinstance(zenflow_config.select_interval, str):
+                raise ValueError("If don't use auto select strategy, select_interval must be a number.")
+            self.select_interval = zenflow_config.select_interval
+
+        if isinstance(zenflow_config.update_interval, str):
+            self.auto_update = True
+            self.update_interval = 0
+        else:
+            self.auto_update = False
+            self.update_interval = int(zenflow_config.update_interval)
+
+        if select_strategy == 'epoch':
+            zenflow_config.steps_per_epoch = len(self.training_dataloader)
+            self.select_interval = self.select_interval * len(self.training_dataloader)
+
+        if not self.auto_update and self.select_interval != 0 and self.select_interval < self.update_interval:
+            raise ValueError("Select interval must be greater or equal to update interval")
+
+        self.overlap_step = zenflow_config.overlap_step
+
+        self.full_warm_up_rounds = zenflow_config.full_warm_up_rounds
+
+        self._config.gradient_accumulation_steps = self.update_interval
+
+    def sync_selective_optimizer_lr(self):
+        self.optimizer._sync_selective_optimizer_lr()
 
     def _configure_checkpointing(self, dist_init_required):
         self.checkpoint_engine = TorchCheckpointEngine()
@@ -1449,10 +1500,14 @@ class DeepSpeedEngine(Module):
                     optimizer = torch.optim.AdamW(model_parameters, **optimizer_parameters)
             else:
                 if self.zero_use_cpu_optimizer():
-                    from deepspeed.ops.adam import DeepSpeedCPUAdam
-                    optimizer = DeepSpeedCPUAdam(model_parameters,
-                                                 **optimizer_parameters,
-                                                 adamw_mode=effective_adam_w_mode)
+                    from deepspeed.ops.adam import DeepSpeedCPUAdam, ZenFlowCPUAdam
+                    CPUAdam = ZenFlowCPUAdam if self.zenflow else DeepSpeedCPUAdam
+
+                    zenflow_kwargs = {'overlap_step': self.overlap_step} if self.zenflow else {}
+                    optimizer = CPUAdam(model_parameters,
+                                        **optimizer_parameters,
+                                        adamw_mode=effective_adam_w_mode,
+                                        **zenflow_kwargs)
                 else:
                     from deepspeed.ops.adam import FusedAdam
 
@@ -1663,10 +1718,14 @@ class DeepSpeedEngine(Module):
                 if overlap_comm:
                     logger.warning("Pipeline parallelism does not support overlapped communication, will be disabled.")
                     overlap_comm = False
-            optimizer = DeepSpeedZeroOptimizer(
+            Stage1And2ZeroOptimizer = DeepSpeedZeroOptimizer if not self.zenflow else ZenFlowZeroOptimizer.create(
+                zenflow_config=self.zenflow_config())
+
+            optimizer = Stage1And2ZeroOptimizer(
                 optimizer,
                 self.param_names,
                 timers=timers,
+                optimizer_params=self.optimizer_params(),
                 static_loss_scale=self.loss_scale(),
                 dynamic_loss_scale=self.dynamic_loss_scale(),
                 dynamic_loss_args=self.dynamic_loss_scale_args(),
@@ -1681,6 +1740,7 @@ class DeepSpeedEngine(Module):
                 reduce_scatter=self.zero_reduce_scatter(),
                 overlap_comm=overlap_comm,
                 offload_optimizer_config=self.zero_offload_optimizer(),
+                zenflow_config=self.zenflow_config(),
                 mpu=self.mpu,
                 postscale_gradients=self.postscale_gradients(),
                 gradient_predivide_factor=self.gradient_predivide_factor(),
@@ -2144,6 +2204,9 @@ class DeepSpeedEngine(Module):
         if self.is_deepcompile_enabled():
             deepcompile_backward_prologue(self.is_gradient_accumulation_boundary())
 
+        if self.zenflow and self.auto_update:
+            self.optimizer.zenflow_state ^= 1
+
         return loss
 
     def _backward_epilogue(self):
@@ -2230,8 +2293,21 @@ class DeepSpeedEngine(Module):
 
         """
         if self._is_gradient_accumulation_boundary is None:
-            return (self.micro_steps + 1) % \
-                self.gradient_accumulation_steps() == 0
+            if not self.zenflow:
+                return (self.micro_steps + 1) % \
+                    self.gradient_accumulation_steps() == 0
+            elif not self.auto_update:
+                if (self.micro_steps + 1) < self.full_warm_up_rounds:
+                    return True
+                else:
+                    return ((self.micro_steps + 1 - self.full_warm_up_rounds) % self.gradient_accumulation_steps() == 0) \
+                        or (self.select_interval != 0 and (self.micro_steps + 1) % self.select_interval == 0)
+            else:
+                if (self.micro_steps + 1) <= self.full_warm_up_rounds:
+                    return True
+                else:
+                    return self.optimizer.zenflow_need_update[self.optimizer.zenflow_state ^ 1] \
+                        or (self.select_interval != 0 and (self.micro_steps + 1) % self.select_interval == 0)
         else:
             return self._is_gradient_accumulation_boundary
 
@@ -2335,6 +2411,22 @@ class DeepSpeedEngine(Module):
         self.global_steps += 1
         self.global_samples += self.train_batch_size()
 
+    def _take_selective_parameter_step(self):
+        self.optimizer.selective_optimizer_step()
+
+    def _take_lr_scheduler_step(self, lr_kwargs):
+        if self.lr_scheduler is not None:
+            try:
+                self.lr_scheduler.step(**(lr_kwargs or {}))
+            except TypeError:
+                # XXX Hack to work with Megatron 2.0 and DeepSpeed pipelines.
+                # We don't currently have a way to specify lr_kwargs from
+                # pipe_engine.train_batch()
+                self.lr_scheduler.step(self.train_batch_size())
+
+    def _log_selective_optimizer_timers(self):
+        self.optimizer.log_selective_optimizer_timers()
+
     def step(self, lr_kwargs=None):
         r"""Execute the weight update step after forward and backward propagation
         on effective_train_batch.
@@ -2358,6 +2450,11 @@ class DeepSpeedEngine(Module):
 
         self._step_applied = False  # assume False, will flip to True
 
+        if self.zenflow:
+            self.sync_selective_optimizer_lr()
+            if self.auto_update:
+                self.update_interval += 1
+
         # Update the model when we reach gradient accumulation boundaries
         if self.is_gradient_accumulation_boundary():
             self.gas_boundary_ctr += 1
@@ -2378,6 +2475,18 @@ class DeepSpeedEngine(Module):
                 self._take_model_step(lr_kwargs)
 
             report_progress = self.global_rank == 0 if self.global_rank else True
+
+        if self.zenflow:
+            if not self.is_gradient_accumulation_boundary():
+                self._take_lr_scheduler_step(lr_kwargs)
+                self._log_selective_optimizer_timers()
+            else:
+                if self.micro_steps + 1 >= self.full_warm_up_rounds:
+                    self._take_selective_parameter_step()
+                if self.auto_update:
+                    if dist.get_rank() == 0:
+                        print(f"Zenflow: This is an update iter. update_interval: {self.update_interval}")
+                    self.update_interval = 0
 
         self.tput_timer.stop(global_step=self.is_gradient_accumulation_boundary(), report_speed=report_progress)
 
