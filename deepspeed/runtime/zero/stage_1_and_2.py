@@ -8,6 +8,7 @@ from deepspeed import comm as dist
 from packaging import version as pkg_version
 from collections import OrderedDict
 from torch._utils import _flatten_dense_tensors, _unflatten_dense_tensors
+from deepspeed.runtime.zero.zenflow import zenflow_utils
 
 from deepspeed.runtime.base_optimizer import ZeROOptimizer
 from deepspeed.runtime.fp16.loss_scaler import CreateLossScaler
@@ -111,6 +112,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
                  init_optimizer,
                  param_names,
                  timers,
+                 optimizer_params,
                  static_loss_scale=1.0,
                  dynamic_loss_scale=False,
                  dynamic_loss_args=None,
@@ -125,6 +127,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
                  reduce_scatter=True,
                  overlap_comm=False,
                  offload_optimizer_config=None,
+                 zenflow_config=None,
                  mpu=None,
                  clip_grad=0.0,
                  gradient_accumulation_dtype=torch.float32,
@@ -145,6 +148,8 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
         else:
             self.cpu_offload = False
             self.cpu_offload_pin_memory = False
+
+        self.zenflow = True if zenflow_config is not None else False
 
         if dist.get_rank() == 0:
             logger.info(f"Reduce bucket size {reduce_bucket_size}")
@@ -167,9 +172,9 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
             raise SystemError("Accelerator is not detected, cannot perform low precision training (e.g., fp16, bf16).")
         self.optimizer = init_optimizer
 
-        # Use torch (un)flatten ops
-        self.flatten = _flatten_dense_tensors
-        self.unflatten = _unflatten_dense_tensors
+        # Use torch or zenflow (un)flatten ops
+        self.flatten = _flatten_dense_tensors if not self.zenflow else zenflow_utils._flatten_dense_tensors
+        self.unflatten = _unflatten_dense_tensors if not self.zenflow else zenflow_utils._unflatten_dense_tensors
 
         # ZeRO stage 1 (False) or 2 (True)
         self.partition_gradients = partition_grads
@@ -965,8 +970,12 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
             else:
                 # keeping the gradients contiguous to prevent memory fragmentation, and avoid flattening
                 new_grad_tensor = self.ipg_buffer[self.ipg_index].narrow(0, self.elements_in_ipg_bucket, param.numel())
-                new_grad_tensor.copy_(grad_reduc.view(-1))
-                grad_reduc.data = new_grad_tensor.data.view_as(grad_reduc)
+                new_grad_tensor.copy_(
+                    grad_reduc.view(-1) if not self.zenflow else grad_reduc.permute(
+                        *reversed(range(grad_reduc.ndim))).contiguous().view(-1))
+                grad_reduc.data = new_grad_tensor.data.view_as(grad_reduc) if (
+                    not self.zenflow or grad_reduc.dim() == 1) else new_grad_tensor.data.view_as(
+                        grad_reduc.transpose(0, 1))
 
         self.elements_in_ipg_bucket += param.numel()
 
@@ -1376,7 +1385,13 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
                 assert self.get_param_id(self.extra_large_param_to_reduce
                                          ) == param_id, "param in ipg bucket does not match extra-large param"
                 extra_large_grad_reduc = self.get_gradient_for_reduction(self.extra_large_param_to_reduce)
-                self.average_tensor(extra_large_grad_reduc.view(-1))
+
+                extra_large_grad_reduc_for_average = extra_large_grad_reduc.view(-1) if not self.zenflow \
+                    else extra_large_grad_reduc.permute(*reversed(range(extra_large_grad_reduc.ndim))).contiguous().view(-1)
+                extra_large_grad_reduc.data = extra_large_grad_reduc_for_average.data.view_as(extra_large_grad_reduc) if (not self.zenflow or self.extra_large_param_to_reduce.dim() == 1) \
+                    else extra_large_grad_reduc_for_average.data.view_as(extra_large_grad_reduc.transpose(0, 1))
+
+                self.average_tensor(extra_large_grad_reduc_for_average)
                 self.extra_large_param_to_reduce = None
             else:
                 self.average_tensor(self.ipg_buffer[self.ipg_index].narrow(0, 0, self.elements_in_ipg_bucket))
@@ -1826,7 +1841,11 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
         #    self.optimizer.step(fp16_param_groups=[self.get_bit16_param_group(group_no)])
         #else:
         #    self.optimizer.step()
-        self.optimizer.step()
+        if self.zenflow:
+            self.zenflow_cpu_optimizer_step(group_no)
+        else:
+            self.optimizer.step()
+
         self.optimizer.param_groups = original_param_groups
 
         # We need to link optimizer state after the first step() call
