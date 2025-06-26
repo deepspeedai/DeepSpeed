@@ -12,7 +12,7 @@ class ZenFlowCPUAdam(DeepSpeedCPUAdam):
     def __init__(self, *args, overlap_step=False, **kwargs):
         super(ZenFlowCPUAdam, self).__init__(*args, **kwargs)
         self.overlap_step = overlap_step
-        if self.overlap_step:
+        if not self.overlap_step:
             print("ZenFlowCPUAdam initialized with overlap step.")
             self.step = self._sequential_step
         else:
