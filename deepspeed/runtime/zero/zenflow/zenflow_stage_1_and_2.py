@@ -79,7 +79,8 @@ class ZenFlowZeroOptimizer(DeepSpeedZeroOptimizer):
                  round_robin_gradients=False,
                  has_moe_layers=False,
                  fp16_master_weights_and_gradients=False,
-                 elastic_checkpoint=False):
+                 elastic_checkpoint=False,
+                 check_grad_overflow=True):
 
         super().__init__(init_optimizer, param_names, timers, optimizer_params, static_loss_scale, dynamic_loss_scale,
                          dynamic_loss_args, verbose, contiguous_gradients, reduce_bucket_size,
