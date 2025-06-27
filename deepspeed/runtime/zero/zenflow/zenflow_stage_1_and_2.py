@@ -109,8 +109,12 @@ class ZenFlowZeroOptimizer(DeepSpeedZeroOptimizer):
     @classmethod
     def create(cls, zenflow_config):
         if zenflow_config.overlap_step:
+            # print("Yes!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
+            print("Yes!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!ZenFlowZeroOptimizerParallel")
             return ZenFlowZeroOptimizerParallel
         else:
+            # print("No!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
+            print("No!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!ZenFlowZeroOptimizerSequential")
             return ZenFlowZeroOptimizerSequential
 
     def _configure_zenflow(self, zenflow_config):
@@ -284,7 +288,7 @@ class ZenFlowZeroOptimizer(DeepSpeedZeroOptimizer):
             param: The parameter to process
             param_id: ID of the parameter
         """
-
+        print("Yes!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!process_selected_fp32_groups_grad")
         curr_size = 0
         curr_grad_buffer_size = 0
         curr_sum_buffer_size = 0

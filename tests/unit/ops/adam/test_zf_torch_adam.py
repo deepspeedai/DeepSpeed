@@ -52,7 +52,7 @@ def test_step_with_offload_bucket_flush():
     param1.exp_avg_sq = torch.zeros_like(param1.temp_selected_param)
     param1.exp_avg_cpu_data = param1.exp_avg.clone().cpu()
     param1.exp_avg_sq_cpu_data = param1.exp_avg_sq.clone().cpu()
-    
+
     param2.exp_avg = torch.zeros_like(param2.temp_selected_param)
     param2.exp_avg_sq = torch.zeros_like(param2.temp_selected_param)
     param2.exp_avg_cpu_data = param2.exp_avg.clone().cpu()
@@ -97,6 +97,7 @@ def test_group_step_with_offload():
     opt._group_step_with_offload(group_to_paramlist)
     assert param.selected_grad is None
 
+
 def test_1d_param_support():
     param = Parameter(torch.randn(10))
     param.selected_grad = torch.randn(10)
@@ -105,6 +106,7 @@ def test_1d_param_support():
     opt.step()
     assert param.temp_selected_param is None
     assert param.selected_grad is None
+
 
 def test_state_increment():
     param = torch.nn.Parameter(torch.randn(2, 4))
@@ -124,6 +126,7 @@ def test_state_increment():
     step2 = opt.state[param]['step'].item()
     assert step2 == step1 + 1
 
+
 def _compare_with_torch_adamw(param, zenflow_opt, atol=1e-4):
     torch_param = torch.nn.Parameter(param.detach().clone())
     torch_opt = torch.optim.AdamW([torch_param], lr=zenflow_opt.param_groups[0]['lr'])
@@ -139,12 +142,11 @@ def _compare_with_torch_adamw(param, zenflow_opt, atol=1e-4):
         zenflow_opt.step()
         torch_opt.step()
 
-    np.testing.assert_allclose(
-        torch_param.data.cpu().numpy(),
-        param.data.cpu().numpy(),
-        atol=atol,
-        err_msg="Mismatch with torch.AdamW"
-    )
+    np.testing.assert_allclose(torch_param.data.cpu().numpy(),
+                               param.data.cpu().numpy(),
+                               atol=atol,
+                               err_msg="Mismatch with torch.AdamW")
+
 
 def test_against_torch_adamw():
     param = torch.nn.Parameter(torch.randn(2, 4))
