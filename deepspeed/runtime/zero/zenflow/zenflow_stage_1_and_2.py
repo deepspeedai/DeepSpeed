@@ -110,12 +110,8 @@ class ZenFlowZeroOptimizer(DeepSpeedZeroOptimizer):
     @classmethod
     def create(cls, zenflow_config):
         if zenflow_config.overlap_step:
-            # print("Yes!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
-            print("Yes!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!ZenFlowZeroOptimizerParallel")
             return ZenFlowZeroOptimizerParallel
         else:
-            # print("No!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
-            print("No!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!ZenFlowZeroOptimizerSequential")
             return ZenFlowZeroOptimizerSequential
 
     def _configure_zenflow(self, zenflow_config):
@@ -182,7 +178,7 @@ class ZenFlowZeroOptimizer(DeepSpeedZeroOptimizer):
                 fp32_partition.copy_(bit16_partitions[partition_id].to(dtype=fp32_partition.dtype,
                                                                        device=fp32_partition.device))
 
-    def update_selected_channels(self, tensor, total_size):
+    def update_selected_channels(self, tensor, total_size, communication_data_type):
         curr_size = 0
         curr_index_buffer_size = 0
         rank_and_offsets = []
@@ -194,7 +190,8 @@ class ZenFlowZeroOptimizer(DeepSpeedZeroOptimizer):
         self.index_buffer = torch.empty(total_size, dtype=torch.int32, device='cuda')
 
         # count = 0
-        for i, param_idx_in_group, param_id in self.params_in_ipg_bucket:
+        bucket = self.ipg_buckets[communication_data_type]
+        for i, param_idx_in_group, param_id in bucket.params:
             param = self.bit16_groups[i][param_idx_in_group]
 
             if len(param.shape) == 1:
@@ -255,7 +252,7 @@ class ZenFlowZeroOptimizer(DeepSpeedZeroOptimizer):
             index_slice = self.index_buffer.narrow(0, offset, num_select)
             dist.broadcast(index_slice, src=src_rank, group=process_group)
 
-        for i, param_idx_in_group, param_id in self.params_in_ipg_bucket:
+        for i, param_idx_in_group, param_id in bucket.params:
             param = self.bit16_groups[i][param_idx_in_group]
 
             if len(param.shape) == 1:
@@ -281,7 +278,7 @@ class ZenFlowZeroOptimizer(DeepSpeedZeroOptimizer):
 
         self.index_buffer = None
 
-    def process_selected_fp32_groups_grad(self, tensor, total_size):
+    def _process_selected_fp32_groups_grad(self, tensor, total_size, communication_data_type):
         """
         Process gradients for selected columns in FP32 groups
 
@@ -289,7 +286,7 @@ class ZenFlowZeroOptimizer(DeepSpeedZeroOptimizer):
             param: The parameter to process
             param_id: ID of the parameter
         """
-        print("Yes!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!process_selected_fp32_groups_grad")
+
         curr_size = 0
         curr_grad_buffer_size = 0
         curr_sum_buffer_size = 0
@@ -309,7 +306,8 @@ class ZenFlowZeroOptimizer(DeepSpeedZeroOptimizer):
         group_to_paramlist = {}
 
         # count = 0
-        for i, param_idx_in_group, param_id in self.params_in_ipg_bucket:
+        bucket = self.ipg_buckets[communication_data_type]
+        for i, param_idx_in_group, param_id in bucket.params:
             param = self.bit16_groups[i][param_idx_in_group]
 
             if not hasattr(param, 'selected_indices'):
@@ -389,7 +387,7 @@ class ZenFlowZeroOptimizer(DeepSpeedZeroOptimizer):
                 sum_slice = self.sum_buffer.narrow(0, sum_offset, sum_num)
                 dist.broadcast(sum_slice, src=src_rank, group=process_group)
 
-        for i, param_idx_in_group, param_id in self.params_in_ipg_bucket:
+        for i, param_idx_in_group, param_id in bucket.params:
             param = self.bit16_groups[i][param_idx_in_group]
 
             selected_grad = None
@@ -450,7 +448,7 @@ class ZenFlowZeroOptimizer(DeepSpeedZeroOptimizer):
         if self.auto_update:
             self.sum_buffer = None
 
-    def average_tensor(self, tensor):
+    def average_tensor(self, tensor: torch.Tensor, communication_data_type: torch.dtype):
         if self.overlap_comm:
             stream = self.reduction_stream
             if not get_accelerator().resolves_data_dependency():
@@ -478,12 +476,13 @@ class ZenFlowZeroOptimizer(DeepSpeedZeroOptimizer):
 
             process_group = self.dp_process_group
             # count = 0
-            for i, param_idx_in_group, param_id in self.params_in_ipg_bucket:
+            bucket = self.ipg_buckets[communication_data_type]
+            for i, param_idx_in_group, param_id in bucket.params:
                 param = self.bit16_groups[i][param_idx_in_group]
 
                 process_group = self.dp_process_group
 
-                if self.ipg_bucket_has_moe_params:
+                if bucket.has_moe_params:
                     process_group = self.expert_dp_process_group[param.group_name] if is_moe_param(
                         param) else self.dp_process_group
 
@@ -546,12 +545,14 @@ class ZenFlowZeroOptimizer(DeepSpeedZeroOptimizer):
             for bucket_key in buckets:
                 if self.use_multi_rank_bucket_allreduce:
                     self.allreduce_and_scatter(buckets[bucket_key],
+                                               communication_data_type,
                                                numel_per_bucket=self.reduce_bucket_size,
                                                divide=False,
                                                process_group=bucket_key)
                 else:
                     dst, process_group = bucket_key
                     self.allreduce_no_retain(buckets[bucket_key],
+                                             communication_data_type,
                                              numel_per_bucket=self.reduce_bucket_size,
                                              rank=dst,
                                              divide=False,
@@ -560,7 +561,7 @@ class ZenFlowZeroOptimizer(DeepSpeedZeroOptimizer):
             if self.is_zenflow_select_boundary():
                 self.timers(SELECTIVE_OPTIMIZER_UPDATE_TIMER).start()
                 # print("update selected")
-                self.update_selected_channels(tensor, curr_column_size)
+                self.update_selected_channels(tensor, curr_column_size, communication_data_type)
                 self.timers(SELECTIVE_OPTIMIZER_UPDATE_TIMER).stop()
             elif self.zenflow:
                 self.timers(SELECTIVE_OPTIMIZER_UPDATE_TIMER).start()
@@ -568,7 +569,7 @@ class ZenFlowZeroOptimizer(DeepSpeedZeroOptimizer):
 
             if self.zenflow and self.micro_step >= self.full_warm_up_rounds:
                 self.timers(SELECTIVE_OPTIMIZER_PROCESS_TIMER).start()
-                self.process_selected_fp32_groups_grad(tensor, curr_selected_reduce_size)
+                self._process_selected_fp32_groups_grad(tensor, curr_selected_reduce_size, communication_data_type)
                 self.timers(SELECTIVE_OPTIMIZER_PROCESS_TIMER).stop()
 
     def backward(self, loss, retain_graph=False):
