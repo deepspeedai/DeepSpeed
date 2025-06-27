@@ -2947,7 +2947,7 @@ class DeepSpeedEngine(Module):
 
         Returns:
             A tuple of ``load_path`` and ``client_state``.
-            *``load_path``: Path of the loaded checkpoint. ``None`` if loading the checkpoint failed or loading a HF based UCP
+            *``load_path``: Path of the loaded checkpoint. ``None`` if loading the checkpoint failed or loading a HF based UCP.
             *``client_state``: State dictionary used for loading required training states in the client code.
 
         Important: under ZeRO3, one cannot load checkpoint with ``engine.load_checkpoint()`` right
