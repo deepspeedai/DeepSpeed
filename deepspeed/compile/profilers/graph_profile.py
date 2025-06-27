@@ -96,6 +96,7 @@ class ProfilingInterpreter(Interpreter):
         args: inputs to the graph. Tensors in the inpusts must be real tensors, not fake tensors. args can contain ds parameters.
         returns: The output of the graph. Tensor in the output is real tensors.
         """
+        return_val = None
         try:
             assert _all_real_if_tensor(args), "Inputs must be real tensors"
             self.nz3.enable_profiling(True)
@@ -242,6 +243,7 @@ class MemoryProfilingInterpreter(Interpreter):
         self.debug_log = debug_log
 
     def run(self, *args) -> Any:
+        return_val = None
         try:
             assert _all_real_if_tensor(args), "Inputs must be real tensors"
             self.nz3.enable_profiling(True)
