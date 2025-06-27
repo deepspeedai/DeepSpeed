@@ -21,7 +21,7 @@ ALST features found in this module:
 
 This module implements Arctic Long Sequence Training: Scalable And Efficient Training For Multi-Million Token Sequences: https://arxiv.org/abs/2506.13996
 
-For integration docs see: https://www.deepspeed.ai/tutorials/ulysses-plus-sequence-pallellism
+For integration docs see: https://www.deepspeed.ai/tutorials/ulysses-alst-sequence-pallellism/
 
 The other ALST features live inside
 https://github.com/snowflakedb/ArcticTraining/blob/main/projects/sequence-parallelism/
