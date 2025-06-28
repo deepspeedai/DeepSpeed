@@ -39,7 +39,10 @@ def _args_to_key(v):
     def _tensor_to_key(v) -> str:
         if torch.is_tensor(v):
             if v.numel() == 1:
-                return f"{v.dtype}{v.device}{v.item()}"
+                try:
+                    return f"{v.dtype}{v.device}{v.item()}"
+                except Exception as e:
+                    return f"{v.dtype}{v.device}ptr{v.data_ptr()}"
             else:
                 return f"{v.dtype}{v.device}{v.shape}"
         return str(v)
@@ -274,7 +277,7 @@ class MemoryProfilingInterpreter(Interpreter):
 
         current_alloc = get_accelerator().memory_allocated() + self.mem_usage_out_of_torch
         max_alloc = get_accelerator().max_memory_allocated() + self.mem_usage_out_of_torch
-        vals_to_bcast = torch.tensor([current_alloc, max_alloc], device=self.device)
+        vals_to_bcast = torch.tensor([current_alloc, max_alloc], device=self.device, dtype=torch.int64)
         dist.all_reduce(vals_to_bcast, dist.ReduceOp.MAX)
         current_alloc = vals_to_bcast[0].item()
         max_alloc = vals_to_bcast[1].item()

@@ -127,9 +127,15 @@ def evaluate_symint_from_shape_env(sym_int_v):
     return sym_int_v.node.hint
 
 
-def set_example_values_to_symints(real_inputs):
+def set_example_values_to_symints(real_inputs, param_indices=None):
     real_inputs_ret = []
-    for v in real_inputs:
+
+    # Create a set of parameter indices for quick lookup
+    param_idx_set = set()
+    if param_indices is not None:
+        param_idx_set = {i for i, _, _ in param_indices}
+
+    for i, v in enumerate(real_inputs):
         if isinstance(v, torch.Tensor):
             if is_fake(v):
                 shape = []
@@ -145,11 +151,19 @@ def set_example_values_to_symints(real_inputs):
                     else:
                         stride.append(fs)
                 with unset_fake_temporarily():
-                    dummy_v = torch.ones(shape,
-                                         dtype=v.dtype,
-                                         layout=v.layout,
-                                         device=v.device,
-                                         requires_grad=v.requires_grad).as_strided(shape, stride)
+                    dummy_v = torch.zeros(shape,
+                                          dtype=v.dtype,
+                                          layout=v.layout,
+                                          device=v.device,
+                                          requires_grad=v.requires_grad).as_strided(shape, stride)
+
+                    # Create Parameter if this input index corresponds to a parameter
+                    if i in param_idx_set:
+                        dummy_v = torch.nn.Parameter(dummy_v)
+                        # Copy any additional attributes from the original if they exist
+                        if hasattr(v, 'ds_id'):
+                            dummy_v.ds_id = v.ds_id
+
                     real_inputs_ret.append(dummy_v)
             else:
                 real_inputs_ret.append(v)
@@ -297,14 +311,19 @@ def make_backend(backend, compile_config, compile_kwargs={}):
             graph_index = get_index_by_graph_id(graph_order, graph_id)
             log_rank0(
                 f"Bwd start {graph_index} graph_id={graph_id} alloc_mem={get_accelerator().memory_allocated()} graph={gm.graph}",
-                enable=debug_log)
+                enable=True)
 
             bwd_inputs_stack = get_backward_inputs()
 
+            param_nodes_bw, _ = param_manager[graph_id].get_bwd_mapping(gm.graph)
             if len(bwd_inputs_stack) == 0:
                 # dynamo calls bw compiler ahead of time when symints are saved for backward. See the details for aot_dispatch_autograd in jit_compile_runtime_wrappers.
                 # As we currently use actually bwd input values in bw compiler, we make dummy data for profiling.
-                bwd_real_inputs = set_example_values_to_symints(sample_inputs)
+                # Replace fake tensors with real parameters before calling set_example_values_to_symints
+                log_rank0(f"Generating dummy backward inputs for profiling. graph_id={graph_id}", enable=True)
+                sample_inputs_with_real_params = param_manager[graph_id].replace_fake_tensors_with_real_params(
+                    sample_inputs, gm.graph)
+                bwd_real_inputs = set_example_values_to_symints(sample_inputs_with_real_params)
             else:
                 bwd_real_inputs = bwd_inputs_stack.pop()
 
@@ -323,7 +342,6 @@ def make_backend(backend, compile_config, compile_kwargs={}):
             # assert graph_id in param_manager, f"Graph {graph_id} not found in param_manager"
 
             if free_activation:
-                param_nodes_bw, _ = param_manager[graph_id].get_bwd_mapping(gm.graph)
                 param_names = [n.name for n in param_nodes_bw]
                 non_param_input_names = [n.name for n in get_input_nodes(gm.graph) if n.name not in param_names]
                 add_free_activations(graph_id, gm.graph,
