@@ -127,6 +127,8 @@ def set_full_hp_grad(self, value):
         lp_frag_address = self._hp_mapping.lp_fragment_address
         value_fragment = torch.narrow(value.flatten(), 0, lp_frag_address.start, lp_frag_address.numel)
         lp_grad_fragment.data.copy_(value_fragment.data.reshape_as(lp_grad_fragment.data))
+        if hasattr(self, '_zero_optimizer'):
+            self._zero_optimizer.update_offload_overflow_tracker(value)
 
 
 def safe_get_full_fp32_param(param):

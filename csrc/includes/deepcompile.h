@@ -453,7 +453,7 @@ public:
 
     virtual void endBackward() {}
 
-    at::Tensor reduceGrad(at::Tensor grad_tensor, long ds_id)
+    virtual at::Tensor reduceGrad(at::Tensor grad_tensor, long ds_id)
     {
         int world_size = process_group_->getSize();
         const DSParam& param = param_registry_->getParam(ds_id);
@@ -536,6 +536,40 @@ protected:
     void flushAllReduceBuckets()
     {
         for (const auto& it : reduce_tasks_) { flushReduceBucket(it.first); }
+    }
+
+    // Common helper methods for flushReduceBucket implementations
+    void blockCopyEvents(at::ScalarType scalar_type)
+    {
+        for (const ReduceTask& t : reduce_tasks_.at(scalar_type)) {
+            auto copy_done_event = rs_copy_done_events_.at(t.getDSId());
+            copy_done_event->block(rs_stream_);
+        }
+    }
+
+    void applyPreDivision(at::ScalarType scalar_type)
+    {
+        if (pre_div_reduce_) {
+            at::cuda::CUDAStreamGuard guard(rs_stream_);
+            for (const ReduceTask& t : reduce_tasks_.at(scalar_type)) {
+                t.getSendBuf().div_(process_group_->getSize());
+            }
+        }
+    }
+
+    ncclRedOp_t getReductionOp() const { return pre_div_reduce_ ? ncclSum : ncclAvg; }
+
+    void performCleanup(at::ScalarType scalar_type)
+    {
+        reduce_buckets_->swap(scalar_type, rs_stream_, copy_stream_);
+
+        // Prevent grad tensor from being released before the copy is done
+        auto comp_stream = at::cuda::getCurrentCUDAStream();
+        for (const ReduceTask& t : reduce_tasks_.at(scalar_type)) {
+            auto copy_done_event = rs_copy_done_events_.at(t.getDSId());
+            copy_done_event->block(comp_stream);
+        }
+        reduce_tasks_[scalar_type].clear();
     }
 };
 
