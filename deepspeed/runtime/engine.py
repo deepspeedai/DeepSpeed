@@ -330,12 +330,10 @@ class DeepSpeedEngine(Module):
         if not isinstance(model_parameters, list):
             model_parameters = list(model_parameters)
 
-        self._configure_zenflow()
-
         if self.torch_autocast_enabled():
             init_autocast_params(self, self.torch_autocast_dtype(), self.torch_autocast_lower_precision_safe_modules())
-
-        configure_zenflow(self)
+        self._configure_zenflow = lambda: configure_zenflow(self)
+        self._configure_zenflow()
 
         if has_optimizer:
             self._configure_optimizer(optimizer, model_parameters)
@@ -2460,7 +2458,7 @@ class DeepSpeedEngine(Module):
         self._step_applied = False  # assume False, will flip to True
 
         if self.zenflow:
-            self.sync_selective_optimizer_lr()
+            self.optimizer._sync_selective_optimizer_lr()
             if self.auto_update:
                 self.update_interval += 1
 
