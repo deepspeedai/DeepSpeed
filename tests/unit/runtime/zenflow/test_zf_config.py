@@ -7,7 +7,8 @@ import pytest
 from pydantic import ValidationError
 
 from deepspeed.runtime.zero.config import DeepSpeedZeroConfig, ZeroStageEnum
-from deepspeed.runtime.zero.offload_config import DeepSpeedZeroOffloadOptimizerConfig, ZenFlowConfig
+from deepspeed.runtime.zenflow.zenflow_config import ZenFlowConfig
+from deepspeed.runtime.zero.offload_config import DeepSpeedZeroOffloadOptimizerConfig
 
 
 def test_stage_enum_accepts_int_and_enum():

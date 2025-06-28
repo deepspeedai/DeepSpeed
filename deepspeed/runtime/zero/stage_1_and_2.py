@@ -11,7 +11,7 @@ from dataclasses import dataclass, field
 from typing import List, Dict
 
 from torch._utils import _flatten_dense_tensors, _unflatten_dense_tensors
-from deepspeed.runtime.zero.zenflow import zenflow_utils
+from deepspeed.runtime.zenflow import zenflow_utils
 
 from deepspeed.runtime.base_optimizer import ZeROOptimizer
 from deepspeed.runtime.fp16.loss_scaler import CreateLossScaler
@@ -1933,6 +1933,8 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
         if self.torch_autocast_gradscaler:
             self.torch_autocast_gradscaler.step(self.optimizer)
             self.torch_autocast_gradscaler.update()
+        elif self.zenflow:
+            self.zenflow_cpu_optimizer_step(group_no)
         else:
             self.optimizer.step()
         self.optimizer.param_groups = original_param_groups
