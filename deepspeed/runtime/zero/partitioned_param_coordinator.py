@@ -35,7 +35,7 @@ def get_all_parameters(sub_module, recurse=False):
     return itertools.chain(sub_module.named_parameters(recurse=recurse), sub_module.ds_external_parameters())
 
 
-@compiler.disable
+@compiler.enable(min_version="2.7.0")
 def iter_params(module: Module, recurse=False) -> Iterable[Parameter]:
     return map(lambda pair: pair[1], get_all_parameters(module, recurse))
 
@@ -195,7 +195,7 @@ class PartitionedParameterCoordinator:
                     force=self.__log_trace_cache_warnings)
                 self._invalidate_trace()
 
-    @compiler.disable
+    @compiler.enable(min_version="2.7.0")
     def record_module(self, sub_module: Module) -> None:
         """adds sub module to trace"""
         if is_compiling():
