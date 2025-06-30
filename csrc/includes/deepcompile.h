@@ -19,7 +19,12 @@
 #include <torch/csrc/cuda/nccl.h>
 #include <torch/csrc/distributed/c10d/NCCLUtils.hpp>
 #include <torch/csrc/distributed/c10d/ProcessGroup.hpp>
+
+#if __has_include(<torch/csrc/distributed/c10d/symm_mem/SymmetricMemory.hpp>)
+#include <torch/csrc/distributed/c10d/symm_mem/SymmetricMemory.hpp>
+#else
 #include <torch/csrc/distributed/c10d/SymmetricMemory.hpp>
+#endif
 
 namespace dc {
 
