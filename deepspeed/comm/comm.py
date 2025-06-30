@@ -22,6 +22,7 @@
 """
 
 import torch
+from torch.distributed import GradBucket  # noqa: F401
 import os
 
 from ..constants import TORCH_DISTRIBUTED_DEFAULT_PORT, default_pg_timeout
