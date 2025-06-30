@@ -35,10 +35,24 @@ from deepspeed.utils.debug import (debug_param2name_id_shape, debug_param2name_i
 from deepspeed.accelerator import get_accelerator
 from ..swap_tensor.partitioned_param_swapper import AsyncPartitionedParameterSwapper, PartitionedParamStatus
 from deepspeed.inference.quantization.utils import _quantize_param, WEIGHT_QUANTIZATION_LAYERS, wrap_quantized_functional, wrap_load_from_state_dict
+from deepspeed.runtime.torch_autocast import sort_dtypes, get_autocast_dtype, has_autocast_dtype
 
 partitioned_param_data_shape = [0]
 zero_init_context = 0
 top_level_context = None
+
+
+class DeepSpeedTensorOverride(Enum):
+    dtype = 1
+    device = 2
+
+
+DEFAULT_TENSOR_OVERRIDES = [DeepSpeedTensorOverride.dtype, DeepSpeedTensorOverride.device]
+
+
+def get_allgather_dtype(param, param_ds_tensor):
+    autocast = has_autocast_dtype(param)
+    return get_autocast_dtype(param) if autocast else param_ds_tensor.dtype
 
 
 class NoGatherHandle:
@@ -232,13 +246,14 @@ _orig_torch_eye = torch.eye
 _orig_torch_randn = torch.randn
 
 
-def zero_wrapper_for_fp_tensor_constructor(fn: Callable, target_fp_dtype: torch.dtype) -> Callable:
+def zero_wrapper_for_fp_tensor_constructor(fn: Callable, target_fp_dtype: torch.dtype,
+                                           target_device: torch.device) -> Callable:
 
     def wrapped_fn(*args, **kwargs) -> Tensor:
-        if kwargs.get("device", None) is None:
-            kwargs['device'] = torch.device(get_accelerator().device_name(os.environ["LOCAL_RANK"]))
+        if kwargs.get("device", None) is None and target_device is not None:
+            kwargs['device'] = target_device
         tensor: Tensor = fn(*args, **kwargs)
-        if tensor.is_floating_point():
+        if target_fp_dtype is not None and tensor.is_floating_point():
             tensor.data = tensor.data.to(target_fp_dtype)
 
         return tensor
@@ -246,15 +261,18 @@ def zero_wrapper_for_fp_tensor_constructor(fn: Callable, target_fp_dtype: torch.
     return wrapped_fn
 
 
-def get_new_tensor_fn_for_dtype(dtype: torch.dtype) -> Callable:
+def get_new_tensor_fn_for_dtype(target_fp_dtype: torch.dtype, target_device: torch.device) -> Callable:
 
     def new_tensor(cls, *args, **kwargs) -> Tensor:
-        device = torch.device(get_accelerator().device_name(os.environ["LOCAL_RANK"]))
         if not args:
             args = (0, )
-        tensor = _orig_torch_empty(0, device=device).new_empty(*args, **kwargs)
-        if tensor.is_floating_point():
-            tensor = tensor.to(dtype)
+        if target_device is None:
+            tensor = _orig_torch_empty(0).new_empty(*args, **kwargs)
+        else:
+            tensor = _orig_torch_empty(0, device=target_device).new_empty(*args, **kwargs)
+
+        if tensor.is_floating_point() and target_fp_dtype is not None:
+            tensor = tensor.to(target_fp_dtype)
 
         return tensor
 
@@ -358,12 +376,12 @@ class InsertPostInitMethodToModuleSubClasses(object):
 
     def _set_dtype(self, ds_config, dtype):
         if ds_config is not None and dtype is None:
-            if ds_config.bfloat16_enabled and ds_config.fp16_enabled:
+            if ds_config.bfloat16_config.enabled and ds_config.float16_config.enabled:
                 raise RuntimeError("bfloat16 and fp16 cannot be enabled at once")
 
-            if ds_config.bfloat16_enabled:
+            if ds_config.bfloat16_config.enabled:
                 self.dtype = torch.bfloat16
-            elif ds_config.fp16_enabled:
+            elif ds_config.float16_config.enabled:
                 self.dtype = torch.half
             else:
                 self.dtype = torch.float
@@ -550,7 +568,8 @@ class InsertPostInitMethodToModuleSubClasses(object):
         if Init.override_module_apply:
             torch.nn.modules.module.Module.apply = apply_with_gather(torch.nn.modules.module.Module._old_apply)
 
-        self._add_tensor_creation_wrappers()
+        if self.tensor_overrides:
+            self._add_tensor_creation_wrappers()
 
         if self.mem_efficient_linear:
             print_rank_0(
@@ -586,20 +605,47 @@ class InsertPostInitMethodToModuleSubClasses(object):
             if Init.override_module_apply:
                 torch.nn.modules.module.Module.apply = torch.nn.modules.module.Module._old_apply
 
-            self._remove_tensor_creation_wrappers()
+            if self.tensor_overrides:
+                self._remove_tensor_creation_wrappers()
 
             self.patched = False
 
     def _add_tensor_creation_wrappers(self):
-        torch.Tensor.__new__ = get_new_tensor_fn_for_dtype(self.dtype)
-        torch.tensor = zero_wrapper_for_fp_tensor_constructor(_orig_torch_tensor, self.dtype)
-        torch.empty = zero_wrapper_for_fp_tensor_constructor(_orig_torch_empty, self.dtype)
-        torch.zeros = zero_wrapper_for_fp_tensor_constructor(_orig_torch_zeros, self.dtype)
-        torch.ones = zero_wrapper_for_fp_tensor_constructor(_orig_torch_ones, self.dtype)
-        torch.full = zero_wrapper_for_fp_tensor_constructor(_orig_torch_full, self.dtype)
-        torch.arange = zero_wrapper_for_fp_tensor_constructor(_orig_torch_arange, self.dtype)
-        torch.eye = zero_wrapper_for_fp_tensor_constructor(_orig_torch_eye, self.dtype)
-        torch.randn = zero_wrapper_for_fp_tensor_constructor(_orig_torch_randn, self.dtype)
+        if DeepSpeedTensorOverride.dtype in self.tensor_overrides:
+            target_fp_dtype = self.dtype
+        else:
+            target_fp_dtype = None
+        if DeepSpeedTensorOverride.device in self.tensor_overrides:
+            target_device = self.local_device
+        else:
+            target_device = None
+
+        torch.Tensor.__new__ = get_new_tensor_fn_for_dtype(target_fp_dtype=target_fp_dtype,
+                                                           target_device=target_device)
+        torch.tensor = zero_wrapper_for_fp_tensor_constructor(_orig_torch_tensor,
+                                                              target_fp_dtype=target_fp_dtype,
+                                                              target_device=target_device)
+        torch.empty = zero_wrapper_for_fp_tensor_constructor(_orig_torch_empty,
+                                                             target_fp_dtype=target_fp_dtype,
+                                                             target_device=target_device)
+        torch.zeros = zero_wrapper_for_fp_tensor_constructor(_orig_torch_zeros,
+                                                             target_fp_dtype=target_fp_dtype,
+                                                             target_device=target_device)
+        torch.ones = zero_wrapper_for_fp_tensor_constructor(_orig_torch_ones,
+                                                            target_fp_dtype=target_fp_dtype,
+                                                            target_device=target_device)
+        torch.full = zero_wrapper_for_fp_tensor_constructor(_orig_torch_full,
+                                                            target_fp_dtype=target_fp_dtype,
+                                                            target_device=target_device)
+        torch.arange = zero_wrapper_for_fp_tensor_constructor(_orig_torch_arange,
+                                                              target_fp_dtype=target_fp_dtype,
+                                                              target_device=target_device)
+        torch.eye = zero_wrapper_for_fp_tensor_constructor(_orig_torch_eye,
+                                                           target_fp_dtype=target_fp_dtype,
+                                                           target_device=target_device)
+        torch.randn = zero_wrapper_for_fp_tensor_constructor(_orig_torch_randn,
+                                                             target_fp_dtype=target_fp_dtype,
+                                                             target_device=target_device)
 
     def _remove_tensor_creation_wrappers(self):
         torch.Tensor.__new__ = torch.Tensor.__old_new__
@@ -632,17 +678,24 @@ def restore_init_context():
 
 class AllGatherHandle:
 
-    def __init__(self, handle, param: Parameter, quantization=None) -> None:
+    def __init__(self, handle, param: Parameter, quantization=None, original_dtype=None) -> None:
         if param.ds_status != ZeroParamStatus.INFLIGHT:
             raise RuntimeError(f"expected param {param.ds_summary()} to be available")
+
+        # Only one of original_dtype or quantization is provided
+        assert (original_dtype is None) != (quantization is None)
 
         self.__handle = handle
         self.__param = param
         self.__quantization = quantization
+        self.__original_dtype = original_dtype
 
     def wait(self, handle_dependency=True) -> None:
         instrument_w_nvtx(self.__handle.wait)()
-        if self.__quantization:
+
+        if self.__original_dtype:
+            self.__param.data = self.__param.data.to(self.__original_dtype)
+        elif self.__quantization:
             instrument_w_nvtx(self.__quantization.quant_handle.wait)()
             self.__param.data = self.__quantization.backend.dequantize(
                 self.__quantization.quantized_param, self.__quantization.scale_buffer).to(self.__param.device)
@@ -705,7 +758,8 @@ class AllGatherCoalescedHandle:
                     part_to_copy = self.partitions[rank].narrow(0, param_offset,
                                                                 min(param.ds_numel - param_start, ds_tensor_numel))
                     partitions.append(part_to_copy)
-            param.data = instrument_w_nvtx(torch.cat)(partitions).view(param.ds_shape)
+            # Note that dtypes of param and partitions can be different (currently for torch.autocast support)
+            param.data = instrument_w_nvtx(torch.cat)(partitions).view(param.ds_shape).to(param.ds_tensor.dtype)
             param.ds_status = ZeroParamStatus.AVAILABLE
             if not get_accelerator().is_synchronized_device() and handle_dependency:
                 for part_to_copy in partitions:
@@ -846,7 +900,8 @@ class Init(InsertPostInitMethodToModuleSubClasses):
                  zero_quantized_weights=False,
                  zero_quantized_nontrainable_weights=False,
                  sequence_data_parallel_group=None,
-                 param_swapper=None):
+                 param_swapper=None,
+                 tensor_overrides=DEFAULT_TENSOR_OVERRIDES):
         """A context to enable massive model construction for training with
         ZeRO-3. Models are automatically partitioned (or, sharded) across the
         system and converted to half precision.
@@ -870,7 +925,7 @@ class Init(InsertPostInitMethodToModuleSubClasses):
                 using pinned memory for model weights. ``remote_device`` must be
                 ``"cpu"``. Defaults to pin_memory value in config, otherwise ``False``.
             config_dict_or_path (dict or ``json file``, optional): If provided, provides configuration
-                for swapping fp16 params to NVMe.
+                for swapping fp16 params to NVMe and other things like ``dtype``.
             config (dict or ``json file``, optional): Deprecated, use config_dict_or_path instead.
             enabled (bool, optional): If ``False``, this context has no
                 effect. Defaults to ``True``.
@@ -882,6 +937,7 @@ class Init(InsertPostInitMethodToModuleSubClasses):
             zero_quantized_nontrainable_weights (bool, optional): If ``True``, nontrainable weights will be stored in quantized format. Default is ``False``
             param_swapper (``deepspeed.runtime.swap_tensor.partitioned_param_swapper.AsyncPartitionedParameterSwapper``, optional): [Experimental] Use existing parameter swapper. Defaults to ``None``.
                 This argument will be removed in the near future.
+            tensor_overrides ([`deepspeed.runtime.zero.DeepSpeedTensorOverride`], optional): Tensor attributes to override. Defaults to overriding dtype and device.
 
         This context accelerates model initialization and enables models that
         are too large to allocate in their entirety in CPU memory. It has the
@@ -951,6 +1007,7 @@ class Init(InsertPostInitMethodToModuleSubClasses):
         if _ds_config is not None:
             mem_efficient_linear = _ds_config.zero_config.memory_efficient_linear
 
+        self.tensor_overrides = tensor_overrides
         super().__init__(enabled=enabled, mem_efficient_linear=mem_efficient_linear, ds_config=_ds_config, dtype=dtype)
         if not dist.is_initialized():
             init_distributed()
@@ -1161,7 +1218,11 @@ class Init(InsertPostInitMethodToModuleSubClasses):
                 param_list = [cls]
             return self._all_gather(param_list, async_op=async_op, hierarchy=hierarchy)
 
-        def _all_gather_dtype(dtype, params, world_size, rank_in_group, ds_process_group):
+        def _all_gather_dtype(params, world_size, rank_in_group, ds_process_group, allgather_dtype):
+            # make sure all params have the same dtype
+            dtype = params[0].dtype  # we assume len(params) > 0
+            assert all(p.dtype == dtype for p in params), "all params must have the same dtype"
+
             partition_sz = sum(p.ds_tensor.ds_numel for p in params)
 
             use_secondary_tensor = params[0].ds_secondary_tensor is not None
@@ -1170,7 +1231,7 @@ class Init(InsertPostInitMethodToModuleSubClasses):
                 partition_sz = sum(p.ds_tensor.ds_numel * p.ds_secondary_tensor_num_of_groups for p in params)
 
             flat_tensor = torch.empty(partition_sz * world_size,
-                                      dtype=dtype,
+                                      dtype=allgather_dtype,
                                       device=get_accelerator().current_device_name(),
                                       requires_grad=False)
 
@@ -1179,12 +1240,15 @@ class Init(InsertPostInitMethodToModuleSubClasses):
                 partitions.append(flat_tensor.narrow(0, partition_sz * i, partition_sz))
 
             if use_secondary_tensor:
-                instrument_w_nvtx(
-                    torch.cat)([p.ds_secondary_tensor.to(get_accelerator().current_device_name()) for p in params],
-                               out=partitions[rank_in_group])
-            else:
-                instrument_w_nvtx(torch.cat)([p.ds_tensor.to(get_accelerator().current_device_name()) for p in params],
+                instrument_w_nvtx(torch.cat)([
+                    p.ds_secondary_tensor.to(get_accelerator().current_device_name()).to(allgather_dtype)
+                    for p in params
+                ],
                                              out=partitions[rank_in_group])
+            else:
+                instrument_w_nvtx(torch.cat)(
+                    [p.ds_tensor.to(get_accelerator().current_device_name()).to(allgather_dtype) for p in params],
+                    out=partitions[rank_in_group])
             handle = _dist_allgather_fn(partitions[rank_in_group], flat_tensor, ds_process_group)
             #Fix get_partition_dp_group(params[0]))
 
@@ -1251,20 +1315,27 @@ class Init(InsertPostInitMethodToModuleSubClasses):
                     buffer_size = param.ds_secondary_tensor.shape[0] * world_size  #make sure out is appropriately sized
 
                 param_ds_tensor = param.ds_secondary_tensor if use_secondary_tensor else param.ds_tensor
+
+                original_dtype = param_ds_tensor.dtype
+                if quantize:
+                    allgather_dtype = torch.int8
+                else:
+                    allgather_dtype = get_allgather_dtype(param, param_ds_tensor)
+
                 param_buffer = torch.empty(
                     buffer_size,
-                    dtype=param_ds_tensor.dtype if not quantize else torch.int8,
+                    dtype=allgather_dtype,
                     device=get_accelerator().current_device_name(),
                     requires_grad=False,
                 )
                 if not quantize:
                     handles = _dist_allgather_fn(
-                        param_ds_tensor.to(get_accelerator().current_device_name()),
+                        param_ds_tensor.to(get_accelerator().current_device_name()).to(allgather_dtype),
                         param_buffer,
                         ds_process_group,
                     )
                     param.data = param_buffer.narrow(0, 0, param.ds_numel).view(param.ds_shape).to(param.device)
-                    return AllGatherHandle(handles, param)
+                    return AllGatherHandle(handles, param, original_dtype=original_dtype)
                 else:
                     if hasattr(param_ds_tensor, "ds_quant_scale"):
                         scales = param_ds_tensor.ds_quant_scale
@@ -1292,6 +1363,7 @@ class Init(InsertPostInitMethodToModuleSubClasses):
 
             else:
                 if self.use_all_reduce_for_fetch_params and not quantize and not use_secondary_tensor:
+
                     # Use all_reduce instead of all_gather to fetch the module params
                     flat_buffer_size = sum(p.ds_numel_aligned for p in params)
                     flat_tensor = torch.zeros(flat_buffer_size,
@@ -1313,11 +1385,13 @@ class Init(InsertPostInitMethodToModuleSubClasses):
                     if not quantize:
                         dtype_params = defaultdict(list)
                         for p in params:
-                            dtype_params[p.ds_tensor.dtype].append(p)
+                            allgather_dtype = get_allgather_dtype(p, p.ds_tensor)
+                            dtype_params[allgather_dtype].append(p)
                         handles = []
-                        for dtype, params in dtype_params.items():
+                        for dtype in sort_dtypes(dtype_params.keys()):
                             handles.append(
-                                _all_gather_dtype(dtype, params, world_size, rank_in_group, ds_process_group))
+                                _all_gather_dtype(params, world_size, rank_in_group, ds_process_group,
+                                                  allgather_dtype))
 
                         return MultipleAllGatherHandles(handles)
 
@@ -1921,7 +1995,6 @@ class Init(InsertPostInitMethodToModuleSubClasses):
             flat_scale_tensor = torch.empty(scale_tensor_size,
                                             dtype=param_list[0].ds_tensor.ds_quant_scale.dtype,
                                             device=self.local_device)
-            flat_scale_tensor.requires_grad = False
             scale_partitions = []
             for i in range(self.world_size):
                 start = scale_tensor_size * i

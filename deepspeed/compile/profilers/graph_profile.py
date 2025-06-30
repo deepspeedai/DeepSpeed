@@ -39,7 +39,10 @@ def _args_to_key(v):
     def _tensor_to_key(v) -> str:
         if torch.is_tensor(v):
             if v.numel() == 1:
-                return f"{v.dtype}{v.device}{v.item()}"
+                try:
+                    return f"{v.dtype}{v.device}{v.item()}"
+                except Exception as e:
+                    return f"{v.dtype}{v.device}ptr{v.data_ptr()}"
             else:
                 return f"{v.dtype}{v.device}{v.shape}"
         return str(v)
@@ -96,6 +99,7 @@ class ProfilingInterpreter(Interpreter):
         args: inputs to the graph. Tensors in the inpusts must be real tensors, not fake tensors. args can contain ds parameters.
         returns: The output of the graph. Tensor in the output is real tensors.
         """
+        return_val = None
         try:
             assert _all_real_if_tensor(args), "Inputs must be real tensors"
             self.nz3.enable_profiling(True)
@@ -117,7 +121,7 @@ class ProfilingInterpreter(Interpreter):
         if n.op in {"placeholder", "output"}:
             n.meta["device_time"] = 0.0
             n.meta["wall_time"] = 0.0
-            n.meta["memory"] = 0
+            n.meta["alloc_mem"] = 0
             n.meta["max_memory"] = 0
             n.meta["tensor_size"] = _node_size(n)
             return super().run_node(n)
@@ -148,8 +152,8 @@ class ProfilingInterpreter(Interpreter):
             device_time, wall_time, alloc_mem, max_mem, tensor_size = self.cache[cache_key]
             n.meta["device_time"] = device_time
             n.meta["wall_time"] = wall_time
-            n.meta["alloc_memory"] = alloc_mem
-            n.meta["max_memory"] = max_mem
+            n.meta["alloc_mem"] = alloc_mem
+            n.meta["max_mem"] = max_mem
             n.meta["tensor_size"] = tensor_size
 
         is_release_op = is_release_node(n)
@@ -242,6 +246,7 @@ class MemoryProfilingInterpreter(Interpreter):
         self.debug_log = debug_log
 
     def run(self, *args) -> Any:
+        return_val = None
         try:
             assert _all_real_if_tensor(args), "Inputs must be real tensors"
             self.nz3.enable_profiling(True)
@@ -272,7 +277,7 @@ class MemoryProfilingInterpreter(Interpreter):
 
         current_alloc = get_accelerator().memory_allocated() + self.mem_usage_out_of_torch
         max_alloc = get_accelerator().max_memory_allocated() + self.mem_usage_out_of_torch
-        vals_to_bcast = torch.tensor([current_alloc, max_alloc], device=self.device)
+        vals_to_bcast = torch.tensor([current_alloc, max_alloc], device=self.device, dtype=torch.int64)
         dist.all_reduce(vals_to_bcast, dist.ReduceOp.MAX)
         current_alloc = vals_to_bcast[0].item()
         max_alloc = vals_to_bcast[1].item()

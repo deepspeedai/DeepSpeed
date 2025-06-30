@@ -16,6 +16,7 @@ from .tensor_fragment import set_full_hp_param, set_full_hp_grad
 from .tensor_fragment import safe_set_full_fp32_param, safe_set_full_optimizer_state, safe_set_full_grad
 from .tensor_fragment import safe_get_local_fp32_param, safe_get_local_grad, safe_get_local_optimizer_state
 from .tensor_fragment import safe_set_local_fp32_param, safe_set_local_grad, safe_set_local_optimizer_state
+from .tensor_fragment import safe_update_full_grad_vectorized
 from .z3_leaf_module import set_z3_leaf_modules, unset_z3_leaf_modules, get_z3_leaf_modules, z3_leaf_module, z3_leaf_parameter, set_z3_leaf_module
 from .mixed_precision_linkage import link_hp_params, lazy_init_hp_params_optimizer_state
 from deepspeed.runtime.dataloader import RepeatingLoader

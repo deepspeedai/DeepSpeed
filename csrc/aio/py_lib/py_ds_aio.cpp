@@ -6,7 +6,6 @@
 /*
 Functionality for swapping optimizer tensors to/from (NVMe) storage devices.
 */
-
 #include <torch/extension.h>
 #include "deepspeed_py_aio_handle.h"
 #include "deepspeed_py_copy.h"
@@ -34,6 +33,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m)
         .def("get_single_submit", &deepspeed_aio_handle_t::get_single_submit)
         .def("get_overlap_events", &deepspeed_aio_handle_t::get_overlap_events)
         .def("get_intra_op_parallelism", &deepspeed_aio_handle_t::get_intra_op_parallelism)
+        .def("get_alignment", &deepspeed_aio_handle_t::get_alignment)
 
         .def("read",
              &deepspeed_aio_handle_t::read,
@@ -53,7 +53,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m)
 
         .def("pread",
              &deepspeed_aio_handle_t::pread,
-             "Parallel file read with option of parallelism. Returns count of completed read ops",
+             "Parallel file read with option of asynchronous completion. If synchronous, returns "
+             "count of completed read ops",
              "buffer"_a,
              "filename"_a,
              "validate"_a,
@@ -62,7 +63,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m)
 
         .def("pwrite",
              &deepspeed_aio_handle_t::pwrite,
-             "Parallel file write with option of parallelism. Returns count of completed write ops",
+             "Parallel file write with option of asynchronous completion. If synchronous, returns "
+             "count of completed write ops",
              "buffer"_a,
              "filename"_a,
              "validate"_a,
@@ -71,7 +73,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m)
 
         .def("sync_pread",
              &deepspeed_aio_handle_t::sync_pread,
-             "Synchrononous parallel file read. Returns count of completed read ops",
+             "Synchronous parallel file read. Returns count of completed read ops",
              "buffer"_a,
              "filename"_a,
              "file_offset"_a = 0)
@@ -86,17 +88,27 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m)
         .def("async_pread",
              &deepspeed_aio_handle_t::async_pread,
              "Asynchronous parallel file read. Returns 0 on success. Returns 0 on success, and "
-             "following wait() returns count of completed ops.",
+             "subsequent wait() returns count of completed ops.",
              "buffer"_a,
              "filename"_a,
              "file_offset"_a = 0)
 
+        .def(
+            "async_pwrite",
+            py::overload_cast<const torch::Tensor&, const char*, const int64_t>(
+                &deepspeed_aio_handle_t::async_pwrite),
+            "Asynchronous parallel file write. Returns 0 on success, and subsequent wait() returns "
+            "count of completed ops.",
+            "buffer"_a,
+            "filename"_a,
+            "file_offset"_a = 0)
+
         .def("async_pwrite",
-             &deepspeed_aio_handle_t::async_pwrite,
-             "Asynchronous parallel file write. Returns 0 on success, and following wait() returns "
-             "count of completed ops.",
+             py::overload_cast<const torch::Tensor&, const int, const int64_t>(
+                 &deepspeed_aio_handle_t::async_pwrite),
+             "Asynchronous parallel file write using opened python file object.",
              "buffer"_a,
-             "filename"_a,
+             "fd"_a,
              "file_offset"_a = 0)
 
         .def("new_cpu_locked_tensor",

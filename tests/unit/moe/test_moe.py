@@ -45,7 +45,11 @@ class TestSimpleMoE(DistributedTest):
         hidden_dim = 16
         model = SimpleMoEModel(hidden_dim=hidden_dim, ep_size=1)
         model, optimizer, _, _ = deepspeed.initialize(config=config_dict, model=model)
-        data_loader = sequence_dataloader(model=model, total_samples=50, hidden_dim=hidden_dim, device=model.device)
+        data_loader = sequence_dataloader(model=model,
+                                          total_samples=50,
+                                          hidden_dim=hidden_dim,
+                                          device=model.device,
+                                          dtype=torch.float16)
 
         for n, batch in enumerate(data_loader):
             loss = model(batch[0], batch[1])
@@ -87,16 +91,22 @@ class TestMoE(DistributedTest):
                                                       dist_init_required=False)
         #dist_init_required=False -- parameterize to True/False?
 
-        data_loader = sequence_dataloader(model=model, total_samples=50, hidden_dim=hidden_dim, device=model.device)
+        data_loader = sequence_dataloader(model=model,
+                                          total_samples=50,
+                                          hidden_dim=hidden_dim,
+                                          device=model.device,
+                                          dtype=torch.float16)
 
-        def strict_average_tensor(tensor):
+        def strict_average_tensor(tensor, communication_data_type: torch.dtype):
             process_group = optimizer.dp_process_group
             curr_size = 0
             pg_offsets = []
-            for i, param_idx, param_id in optimizer.params_in_ipg_bucket:
+
+            ipg_bucket = optimizer.ipg_buckets[communication_data_type]
+            for i, param_idx, param_id in ipg_bucket.params:
                 param = optimizer.bit16_groups[i][param_idx]
                 process_group = optimizer.dp_process_group
-                if optimizer.ipg_bucket_has_moe_params:
+                if ipg_bucket.has_moe_params:
                     process_group = optimizer.expert_dp_process_group[param.group_name] if is_moe_param(
                         param) else optimizer.dp_process_group
                 partition_ids = optimizer.param_to_partition_ids[i][param_id]
@@ -134,7 +144,7 @@ class TestMoE(DistributedTest):
                 return orig_narrow(dim, start, length)  # real call
 
             orig_narrow, tensor.narrow = tensor.narrow, strict_narrow
-            type(optimizer).average_tensor(optimizer, tensor)  # real call
+            type(optimizer).average_tensor(optimizer, tensor, communication_data_type)  # real call
             tensor.narrow = orig_narrow
 
         if "average_tensor" in dir(optimizer):
@@ -167,7 +177,11 @@ class TestPRMoE(DistributedTest):
                                               optimizer=optimizer,
                                               dist_init_required=False)
 
-        data_loader = sequence_dataloader(model=model, total_samples=50, hidden_dim=hidden_dim, device=model.device)
+        data_loader = sequence_dataloader(model=model,
+                                          total_samples=50,
+                                          hidden_dim=hidden_dim,
+                                          device=model.device,
+                                          dtype=torch.float16)
 
         for n, batch in enumerate(data_loader):
             loss = model(batch[0], batch[1])
@@ -240,6 +254,15 @@ class TestTopkGate(DistributedTest):
                                             [2, 1, 1], [2, 2, 1], [2, 3, 1], [3, 0, 0]])
         position_dispatch_res = topkgating(logits2, 3, 1, min_capacity=1, drop_policy='position')[2]
         check_equal(logits2, 2, position_sec_sparse, position_dispatch_res)
+
+        #s=4   e=4  topk=2   drop_tokens=False
+        logits3 = torch.tensor([[0.95, 0.85, 0.90, 0.80], [0.70, 0.65, 0.75, 0.60], [0.50, 0.55, 0.45, 0.40],
+                                [0.35, 0.30, 0.25, 0.20]])
+        logits3 *= dist.get_rank() + 1
+        dispatch_res = topkgating(logits3, 2, 1, min_capacity=1, drop_tokens=False)[2]
+        sec_sparse = torch.tensor([[0, 0, 0], [0, 2, 0], [1, 0, 1], [1, 2, 1], [2, 0, 2], [2, 1, 0], [3, 0, 3],
+                                   [3, 1, 1]])
+        check_equal(logits3, 4, sec_sparse, dispatch_res)
 
 
 class TestExpertWeightGradWithZero(DistributedTest):

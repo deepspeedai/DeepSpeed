@@ -13,10 +13,10 @@ from torch.fx import Graph, GraphModule
 try:
     import torch.utils._pytree as pytree
     import torch._dynamo
-    import torch._inductor.scheduler
     from functorch.compile import make_boxed_func
     from torch._functorch.aot_autograd import aot_module_simplified
     from torch._subclasses.fake_tensor import unset_fake_temporarily
+    from torch._subclasses.fake_tensor import is_fake
 except ImportError:
     pass
 
@@ -27,9 +27,10 @@ from .graph_param import DSGraphParamManager
 from .profilers import ProfilingResult
 from .profilers.graph_profile import MemoryProfilingInterpreter
 from .patch_compiled_func import patch_compiled_func, unpatch_compiled_func, get_backward_inputs
-from .util import get_input_nodes, get_activation_node_names, get_index_by_graph_id, get_deepcompile_handle, log_rank0
+from .util import get_input_nodes, get_activation_node_names, get_index_by_graph_id, get_deepcompile_handle, log_rank0, is_backend_inductor
 from .partitioner import get_wrapped_partitioner
 from .inductor import register_custom_ops, patch_create_aot_dispatcher_function
+from .input_storage import InputStorage
 
 remaining_schedule = None
 next_pass_step = -1
@@ -37,14 +38,35 @@ next_passes = None
 current_passes = None
 
 param_manager: Dict[int, DSGraphParamManager] = {}
-graph_order = []
+
+
+class GraphOrder:
+
+    def __init__(self):
+        self.ordered_frames = []
+        self.frames = {}
+
+    def add_graph(self, graph_id, frame_id, needs_backward):
+        if frame_id not in self.ordered_frames:
+            self.ordered_frames.append(frame_id)
+
+        self.frames[frame_id] = (graph_id, needs_backward)
+
+    def get_graph_order(self):
+        return [self.frames[frame_id] for frame_id in self.ordered_frames]
+
+    def clear(self):
+        self.frames.clear()
+
+
+graph_order_with_frame_id = GraphOrder()
+
+frames_needing_bwd = set()
 profiling_results: Dict[int, ProfilingResult] = {}
 opt_pass_times = []
-
 opt_passes = {}
 
 fwd_real_inputs = []
-remaining_bwd_compile_count = 0
 
 
 def register_compile_pass(name: str, opt_pass_fn):
@@ -72,8 +94,7 @@ def launch_compile_passes(global_steps: int):
 
         torch._dynamo.reset()
         get_deepcompile_handle().reset()
-        patch_compiled_func()
-        graph_order.clear()
+        graph_order_with_frame_id.clear()
         profiling_results.clear()
         param_manager.clear()
 
@@ -97,6 +118,62 @@ def set_time_and_tensor_size(graph_id, graph: Graph, mem, bwd, profiling_results
         profiling_results[graph_id].fwd_time = node_time
         profiling_results[graph_id].fwd_tensor_sizes = tensor_sizes
         profiling_results[graph_id].fwd_mem = mem
+
+
+def evaluate_symint_from_shape_env(sym_int_v):
+    assert isinstance(sym_int_v, torch.SymInt)
+    # shape_env = sym_int_v.node.shape_env
+    # v = shape_env.evaluate_sym_node(sym_int_v.node)
+    return sym_int_v.node.hint
+
+
+def set_example_values_to_symints(real_inputs, param_indices=None):
+    real_inputs_ret = []
+
+    # Create a set of parameter indices for quick lookup
+    param_idx_set = set()
+    if param_indices is not None:
+        param_idx_set = {i for i, _, _ in param_indices}
+
+    for i, v in enumerate(real_inputs):
+        if isinstance(v, torch.Tensor):
+            if is_fake(v):
+                shape = []
+                for fs in v.shape:
+                    if isinstance(fs, torch.SymInt):
+                        shape.append(evaluate_symint_from_shape_env(fs))
+                    else:
+                        shape.append(fs)
+                stride = []
+                for fs in v.stride():
+                    if isinstance(fs, torch.SymInt):
+                        stride.append(evaluate_symint_from_shape_env(fs))
+                    else:
+                        stride.append(fs)
+                with unset_fake_temporarily():
+                    dummy_v = torch.zeros(shape,
+                                          dtype=v.dtype,
+                                          layout=v.layout,
+                                          device=v.device,
+                                          requires_grad=v.requires_grad).as_strided(shape, stride)
+
+                    # Create Parameter if this input index corresponds to a parameter
+                    if i in param_idx_set:
+                        dummy_v = torch.nn.Parameter(dummy_v)
+                        # Copy any additional attributes from the original if they exist
+                        if hasattr(v, 'ds_id'):
+                            dummy_v.ds_id = v.ds_id
+
+                    real_inputs_ret.append(dummy_v)
+            else:
+                real_inputs_ret.append(v)
+        else:
+            if isinstance(v, torch.SymInt):
+                real_inputs_ret.append(evaluate_symint_from_shape_env(v))
+            else:
+                real_inputs_ret.append(v)
+
+    return tuple(real_inputs_ret)
 
 
 def run_opt_passes(opt_passes: List[Callable],
@@ -137,16 +214,22 @@ def run_opt_passes(opt_passes: List[Callable],
             get_accelerator().empty_cache()
 
 
-def make_backend(backend, compile_kwargs={}, free_activation=False, debug_log=False):
+def make_backend(backend, compile_config, compile_kwargs={}):
 
     register_custom_ops()
 
+    # Extract values from compile_config
+    debug_log = compile_config.debug_log
+    free_activation = compile_config.free_activation and not is_backend_inductor(backend)
+
     def backend_fn(gm: GraphModule, real_inputs):
         graph_id = id(gm.graph)
-        needs_backward = pytree.tree_any(lambda x: x.requires_grad if torch.is_tensor(x) else False, real_inputs)
 
-        global graph_order
-        graph_order.append((graph_id, needs_backward))
+        needs_backward = pytree.tree_any(lambda x: x.requires_grad if torch.is_tensor(x) else False, real_inputs)
+        frame_id = gm.meta["dynamo_compile_id"].frame_id
+        graph_order_with_frame_id.add_graph(graph_id, frame_id, needs_backward)
+
+        graph_order = graph_order_with_frame_id.get_graph_order()
 
         z3_partition = any(hasattr(v, "ds_id") for v in real_inputs)
         if z3_partition:
@@ -159,7 +242,17 @@ def make_backend(backend, compile_kwargs={}, free_activation=False, debug_log=Fa
                              if isinstance(input_val, torch.nn.Parameter)]
 
         global fwd_real_inputs
+
+        # Create an InputStorage instance for this specific graph
+        # It will be captured by the make_fw_graph closure, eliminating the need for graph ID management
+        input_storage = InputStorage(keep_int_input_tensors=compile_config.keep_int_input_tensors,
+                                     keep_all_input_tensors=compile_config.keep_all_input_tensors)
+
+        # Store in both list (for backward compatibility) and storage (for persistence)
+        # The input_storage keeps tensor metadata to handle cases where
+        # backend_fn is called once but make_fw_graph is called multiple times
         fwd_real_inputs.append(real_inputs)
+        input_storage.put(real_inputs)
 
         global profiling_results
         if graph_id not in profiling_results:
@@ -170,11 +263,29 @@ def make_backend(backend, compile_kwargs={}, free_activation=False, debug_log=Fa
         def make_fw_graph(gm, sample_inputs):
             time_start = time.time()
             graph_index = len(graph_order) - 1
-            real_inputs = fwd_real_inputs.pop(0)
+
+            if needs_backward:
+                if len(frames_needing_bwd) == 0:
+                    patch_compiled_func()
+                frames_needing_bwd.add(frame_id)
+
+            # Try to get real_inputs from the list first, then from storage
+            if fwd_real_inputs:
+                real_inputs = fwd_real_inputs.pop(0)
+            elif input_storage.has_data():
+                # Note: input_storage is captured from the enclosing backend_fn scope
+                # Materialize tensors from storage when list is empty
+                log_rank0(f"Retrieving real inputs from storage for graph_id={graph_id}", enable=debug_log)
+                real_inputs = input_storage.get()
+            else:
+                raise RuntimeError(f"No real inputs available for graph_id {graph_id}. "
+                                   f"List size: {len(fwd_real_inputs)}, Storage has data: {input_storage.has_data()}")
+
+            real_inputs = set_example_values_to_symints(real_inputs)
 
             param_manager[graph_id] = DSGraphParamManager(gm.graph, real_inputs, param_indices)
 
-            real_inputs_with_rng = real_inputs + sample_inputs[len(real_inputs):]
+            real_inputs_with_rng = real_inputs + tuple(sample_inputs[len(real_inputs):])
             run_opt_passes(
                 opt_passes=next_passes,
                 gm=gm,
@@ -187,15 +298,10 @@ def make_backend(backend, compile_kwargs={}, free_activation=False, debug_log=Fa
                 bwd=False,
                 debug_log=debug_log)
 
-            if needs_backward:
-                global remaining_bwd_compile_count
-                remaining_bwd_compile_count += 1
-
             opt_pass_times.append(("fwd", graph_index, graph_id, time.time() - time_start))
 
-            log_rank0(
-                f"Fwd end {graph_index} graph_id={graph_id} alloc_mem={get_accelerator().memory_allocated()} graph={gm.graph}",
-                enable=debug_log)
+            log_rank0(f"Fwd end {graph_index} graph_id={graph_id} alloc_mem={get_accelerator().memory_allocated()}",
+                      enable=debug_log)
 
             return gm.graph
 
@@ -205,17 +311,22 @@ def make_backend(backend, compile_kwargs={}, free_activation=False, debug_log=Fa
             graph_index = get_index_by_graph_id(graph_order, graph_id)
             log_rank0(
                 f"Bwd start {graph_index} graph_id={graph_id} alloc_mem={get_accelerator().memory_allocated()} graph={gm.graph}",
-                enable=debug_log)
+                enable=True)
 
             bwd_inputs_stack = get_backward_inputs()
 
+            param_nodes_bw, _ = param_manager[graph_id].get_bwd_mapping(gm.graph)
             if len(bwd_inputs_stack) == 0:
                 # dynamo calls bw compiler ahead of time when symints are saved for backward. See the details for aot_dispatch_autograd in jit_compile_runtime_wrappers.
-                # As we currently use actually bwd input values in bw compiler, we return None to skip the compilation there.
-                # This would need be handled properly in the future.
-                return None
+                # As we currently use actually bwd input values in bw compiler, we make dummy data for profiling.
+                # Replace fake tensors with real parameters before calling set_example_values_to_symints
+                log_rank0(f"Generating dummy backward inputs for profiling. graph_id={graph_id}", enable=True)
+                sample_inputs_with_real_params = param_manager[graph_id].replace_fake_tensors_with_real_params(
+                    sample_inputs, gm.graph)
+                bwd_real_inputs = set_example_values_to_symints(sample_inputs_with_real_params)
+            else:
+                bwd_real_inputs = bwd_inputs_stack.pop()
 
-            bwd_real_inputs = bwd_inputs_stack.pop()
             run_opt_passes(
                 opt_passes=next_passes,
                 gm=gm,
@@ -231,22 +342,19 @@ def make_backend(backend, compile_kwargs={}, free_activation=False, debug_log=Fa
             # assert graph_id in param_manager, f"Graph {graph_id} not found in param_manager"
 
             if free_activation:
-                param_nodes_bw, _ = param_manager[graph_id].get_bwd_mapping(gm.graph)
                 param_names = [n.name for n in param_nodes_bw]
                 non_param_input_names = [n.name for n in get_input_nodes(gm.graph) if n.name not in param_names]
                 add_free_activations(graph_id, gm.graph,
                                      get_activation_node_names(gm.graph, param_nodes_bw, non_param_input_names))
 
-            global remaining_bwd_compile_count
-            remaining_bwd_compile_count -= 1
-            if remaining_bwd_compile_count == 0:
+            frames_needing_bwd.remove(frame_id)
+            if len(frames_needing_bwd) == 0:
                 unpatch_compiled_func()
 
             log_rank0(
                 f"Bwd end {graph_index} graph_id={graph_id} alloc_mem={get_accelerator().memory_allocated()} graph={gm.graph}",
                 enable=debug_log)
 
-            gm.recompile()
             opt_pass_times.append(("bwd", graph_index, graph_id, time.time() - time_start))
 
             return gm.graph

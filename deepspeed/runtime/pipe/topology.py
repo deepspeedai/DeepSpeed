@@ -411,9 +411,15 @@ class PipelineParallelGrid:
         """ The stage of the pipeline this rank resides in. """
         return self.get_stage_id()
 
+    def get_pipeline_model_parallel_rank(self):
+        return self.get_pipe_parallel_rank()
+
     def get_pipe_parallel_world_size(self):
         """ The number of stages in the pipeline. """
         return self.pipe_parallel_size
+
+    def get_pipeline_model_parallel_world_size(self):
+        return self.get_pipe_parallel_world_size()
 
     def get_pipe_parallel_group(self):
         """ The group of ranks within the same pipeline. """
@@ -430,6 +436,10 @@ class PipelineParallelGrid:
     def get_data_parallel_group(self):
         """ The group of ranks within the same stage of all pipelines. """
         return self.dp_proc_group
+
+    def get_data_parallel_group_ranks(self):
+        """ List of ranks in the data parallel group. """
+        return self.dp_group
 
     # These are model parallel groups across all types of model parallelism.
     # Deepspeed uses them to detect overflow, etc.
@@ -449,8 +459,14 @@ class PipelineParallelGrid:
         else:
             return 0
 
+    def get_tensor_model_parallel_rank(self):
+        return self.get_slice_parallel_rank()
+
     def get_slice_parallel_world_size(self):
         return self.slice_parallel_size
+
+    def get_tensor_model_parallel_world_size(self):
+        return self.get_slice_parallel_world_size()
 
     def get_slice_parallel_group(self):
         return self.slice_proc_group

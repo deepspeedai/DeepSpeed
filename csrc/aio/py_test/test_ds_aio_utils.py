@@ -8,6 +8,8 @@ Functionality of swapping optimizer tensors to/from (NVMe) storage devices.
 
 import os
 from ds_aio_job import Job, run_job
+import torch
+from deepspeed.accelerator import get_accelerator
 
 BYTES_PER_GB = 1024**3
 BYTES_PER_MB = 1024**2
@@ -79,3 +81,11 @@ def create_file(filename, num_bytes):
     print(f'[Start] Create {filename} of {num_bytes} bytes by running {dd_job.cmd()} ....')
     run_job(dd_job)
     print(f'[Done] Create read file of {num_bytes} bytes by running {dd_job.cmd()} ....')
+
+
+def create_page_locked_tensor(num_elem, use_accelerator, aio_handle=None):
+    if use_accelerator:
+        return get_accelerator().pin_memory(torch.randint(high=128, size=(num_elem, ), dtype=torch.uint8,
+                                                          device='cpu'))
+    else:
+        return aio_handle.new_cpu_locked_tensor(num_elem, torch.empty(0, dtype=torch.uint8))

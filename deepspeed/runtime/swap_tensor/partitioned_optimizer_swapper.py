@@ -6,8 +6,6 @@
 Functionality of swapping optimizer tensors to/from (NVMe) storage devices.
 """
 
-import torch
-
 from deepspeed.utils.logging import logger
 from deepspeed.ops.op_builder import AsyncIOBuilder
 from deepspeed import comm as dist
@@ -63,6 +61,15 @@ class PartitionedOptimizerSwapper(OptimizerSwapper):
     def flush_gradients(self):
         self._flush_gradient_swapper(self.gradient_swapper)
 
+    def release_swap_buffers(self, parameter):
+        swap_info = self._get_param_swap_info(parameter)
+        if swap_info is None:
+            return
+        swap_info.release_memory()
+
+        self.swap_buffer_manager.free(swap_info.swap_buffers)
+        swap_info.swap_buffers = []
+
     def swap_in_optimizer_state(self, parameter, async_parameter=None):
         swap_info = self._get_param_swap_info(parameter)
         if swap_info is None:
@@ -70,25 +77,66 @@ class PartitionedOptimizerSwapper(OptimizerSwapper):
 
         self._flush_gradient_swapper(self.gradient_swapper)
 
-        required_buffer_count = len(swap_info.tensors) + (1 if swap_info.has_gradients() else 0)
+        required_buffer_count = swap_info.num_tensors() + (1 if swap_info.has_gradients() else 0)
         aligned_numel = self._io_aligned_numel(swap_info.numel())
         pinned_buffers = self.swap_buffer_manager.allocate(num_elems=aligned_numel,
                                                            count=required_buffer_count,
                                                            dtype=parameter.dtype)
         assert pinned_buffers is not None
-        self.allocated_swap_buffers = pinned_buffers.copy()
+        swap_info.swap_buffers = pinned_buffers.copy()
 
         self._start_timer(SWAP_IN_PARAM_TIMER)
         self._swap_in_parameter(aio_handle=self.aio_handle,
                                 parameter=parameter,
-                                dest_buffers=pinned_buffers[:required_buffer_count])
+                                dest_buffers=pinned_buffers[:swap_info.num_tensors()])
         self._stop_timer(SWAP_IN_PARAM_TIMER)
         self.timer_names.add(SWAP_IN_PARAM_TIMER)
 
-        self._start_timer(SWAP_IN_GRADIENT_TIMER)
-        self._swap_in_gradients(aio_handle=self.aio_handle, parameter=parameter, dest_buffer=pinned_buffers[-1])
-        self._stop_timer(SWAP_IN_GRADIENT_TIMER)
-        self.timer_names.add(SWAP_IN_GRADIENT_TIMER)
+        if swap_info.has_gradients():
+            self._start_timer(SWAP_IN_GRADIENT_TIMER)
+            self._swap_in_gradients(aio_handle=self.aio_handle, parameter=parameter, dest_buffer=pinned_buffers[-1])
+            self._stop_timer(SWAP_IN_GRADIENT_TIMER)
+            self.timer_names.add(SWAP_IN_GRADIENT_TIMER)
+
+    def _swap_out_optimizer_state(self, swap_info):
+        pinned_tensors, pinned_paths = swap_info.get_swap_buffers_and_paths(True)
+        WRITE_TIMER = 'swap_submit_write'
+        self._start_timer(WRITE_TIMER)
+
+        swap_out_tensors(self.aio_handle, pinned_tensors, pinned_paths)
+        assert self.aio_handle.wait() == len(pinned_tensors)
+
+        unpinned_tensors, unpinned_paths = swap_info.get_swap_buffers_and_paths(False)
+        if len(unpinned_tensors) > 0:
+            pinned_buffers = self.swap_buffer_manager.allocate_all(num_elems=self.largest_numel, dtype=self.dtype)
+            self._swap_out_unpinned_tensors(aio_handle=self.aio_handle,
+                                            unpinned_tensors=unpinned_tensors,
+                                            dest_paths=unpinned_paths,
+                                            pinned_buffers=pinned_buffers)
+            swap_info.swap_buffers += pinned_buffers.copy()
+
+        self._stop_timer(WRITE_TIMER)
+        self._log_timers([WRITE_TIMER])
+
+    def writeback_optimizer_state_and_gradients(self, parameter, write_opt_state, write_gradients):
+        swap_info = self._get_param_swap_info(parameter=parameter)
+
+        if swap_info is None:
+            return
+
+        if write_opt_state:
+            self._swap_out_optimizer_state(swap_info)
+
+        if write_gradients and swap_info.has_gradients():
+            param_gradients = swap_info.swapped_gradients.values()
+            swap_buffers = [parameter.grad.narrow(0, grad.offset, grad.length) for grad in param_gradients]
+            swap_paths = [grad.path for grad in param_gradients]
+            swap_out_tensors(self.aio_handle, swap_buffers, swap_paths)
+            assert len(swap_buffers) == self.aio_handle.wait()
+            if swap_info.unswapped_gradients:
+                swap_info.write_unswapped_gradients(src_buffer=parameter.grad)
+
+        self.release_swap_buffers(parameter)
 
     def swap_out_optimizer_state(self, parameter, async_swap=False):
         swap_info = self._get_param_swap_info(parameter=parameter)
@@ -96,37 +144,14 @@ class PartitionedOptimizerSwapper(OptimizerSwapper):
         if swap_info is None:
             return
 
+        swap_bytes = sum(
+            [self._io_aligned_numel(t.numel()) * t.element_size() for t in swap_info.get_compute_tensors()])
+
         self._start_timer(SWAP_OUT_PARAM_TIMER)
-        pinned_tensors, pinned_paths, unpinned_tensors, unpinned_paths = self._separate_pinned_tensors(swap_info)
-        swap_bytes = sum([self._io_aligned_numel(t.numel()) * t.element_size() for t in swap_info.tensors])
-
-        WRITE_TIMER = 'swap_submit_write'
-        self._start_timer(WRITE_TIMER)
-
-        swap_out_tensors(self.aio_handle, pinned_tensors, pinned_paths)
-        assert self.aio_handle.wait() == len(pinned_tensors)
-        for t in pinned_tensors:
-            t.data = torch.Tensor()
-
-        if len(unpinned_tensors) > 0:
-            pinned_buffers = self.swap_buffer_manager.allocate_all(num_elems=self.largest_numel, dtype=self.dtype)
-            self._swap_out_unpinned_tensors(aio_handle=self.aio_handle,
-                                            unpinned_tensors=unpinned_tensors,
-                                            dest_paths=unpinned_paths,
-                                            pinned_buffers=pinned_buffers)
-            self.allocated_swap_buffers += pinned_buffers
-
-            for t in unpinned_tensors:
-                t.data = torch.Tensor()
-        self._stop_timer(WRITE_TIMER)
-
-        self.swap_buffer_manager.free(self.allocated_swap_buffers)
-        self.allocated_swap_buffers = []
-
+        self._swap_out_optimizer_state(swap_info)
+        self.release_swap_buffers(parameter)
         self._stop_timer(SWAP_OUT_PARAM_TIMER)
         self.timer_names.add(SWAP_OUT_PARAM_TIMER)
-
-        self._log_timers([WRITE_TIMER])
 
         if DEBUG_MODE and dist.get_rank() == 0:
             logger.info(f'optimizer_param_swap_out: {(swap_bytes/(1024**3)):5.2f} GB')
@@ -142,16 +167,20 @@ class PartitionedOptimizerSwapper(OptimizerSwapper):
         if swap_info is None:
             return
 
-        assert len(swap_info.tensors) <= len(dest_buffers)
+        num_swap_tensors = swap_info.num_tensors()
+        assert num_swap_tensors <= len(dest_buffers)
 
-        swap_lengths = [self._io_aligned_numel(swap_info.numel())] * len(swap_info.tensors)
+        swap_lengths = [self._io_aligned_numel(swap_info.numel())] * num_swap_tensors
         swap_buffers = get_sized_buffers(dest_buffers, swap_lengths)
+
+        compute_lengths = [swap_info.numel()] * num_swap_tensors
+        compute_buffers = get_sized_buffers(dest_buffers, compute_lengths)
 
         READ_TIMER = 'swap_submit_read_param'
         WAIT_TIMER = 'swap_wait_read_param'
 
         self._start_timer(READ_TIMER)
-        swap_in_tensors(aio_handle, swap_buffers, swap_info.swap_paths)
+        swap_in_tensors(aio_handle, swap_buffers, swap_info.get_swap_paths())
         self._stop_timer(READ_TIMER)
 
         swap_bytes = sum([buffer.numel() * buffer.element_size() for buffer in swap_buffers])
@@ -160,31 +189,11 @@ class PartitionedOptimizerSwapper(OptimizerSwapper):
         aio_handle.wait()
         self._stop_timer(WAIT_TIMER)
 
-        compute_lengths = [swap_info.numel()] * len(swap_info.tensors)
-        compute_buffers = get_sized_buffers(dest_buffers, compute_lengths)
-        for t, buffer in zip(swap_info.tensors, compute_buffers):
-            t.data = buffer.data
+        swap_info.set_swap_buffers(dest_buffers, self._io_aligned_numel(swap_info.numel()))
 
         self._log_timers([READ_TIMER, WAIT_TIMER])
         if DEBUG_MODE and dist.get_rank() == 0:
             logger.info(f'optimizer_param_swap_in: {(swap_bytes/(1024**3)):5.2f} GB')
-
-    def _separate_pinned_tensors(self, swap_info):
-        pinned_tensors = []
-        pinned_paths = []
-
-        unpinned_tensors = []
-        unpinned_paths = []
-
-        for tensor, path in zip(swap_info.tensors, swap_info.swap_paths):
-            if get_accelerator().is_pinned(tensor):
-                pinned_tensors.append(tensor)
-                pinned_paths.append(path)
-            else:
-                unpinned_tensors.append(tensor)
-                unpinned_paths.append(path)
-
-        return pinned_tensors, pinned_paths, unpinned_tensors, unpinned_paths
 
     def _swap_in_pinned_gradients(self, aio_handle, parameter, gradient_tensor):
         swap_info = self.swap_params_info[OptimizerSwapper.parameter_id(parameter)]
@@ -193,7 +202,6 @@ class PartitionedOptimizerSwapper(OptimizerSwapper):
         swap_paths = [grad.path for grad in param_gradients]
         SWAP_READ_GRADIENTS = 'swap_submit_read_gradient'
         SWAP_WAIT_GRADIENTS = 'swap_submit_wait_gradient'
-
         self._start_timer(SWAP_READ_GRADIENTS)
         swap_in_tensors(aio_handle, swap_buffers, swap_paths)
         self._stop_timer(SWAP_READ_GRADIENTS)

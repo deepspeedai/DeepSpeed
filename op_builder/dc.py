@@ -18,8 +18,8 @@ class DeepCompileBuilder(TorchCPUOpBuilder):
 
     def sources(self):
         return [
-            'csrc/compile/deepcompile.cpp', 'csrc/compile/init.cpp', 'csrc/compile/z1.cpp', 'csrc/compile/z3.cpp',
-            'csrc/compile/util.cpp'
+            'csrc/compile/deepcompile.cpp', 'csrc/compile/init.cpp', 'csrc/compile/z1.cpp', 'csrc/compile/z2.cpp',
+            'csrc/compile/z3.cpp', 'csrc/compile/util.cpp'
         ]
 
     def libraries_args(self):
@@ -29,4 +29,12 @@ class DeepCompileBuilder(TorchCPUOpBuilder):
     def include_paths(self):
         import os
         import torch
-        return ['csrc/includes', os.path.join(torch.utils.cpp_extension.CUDA_HOME, "include")]
+        if self.build_for_cpu:
+            CUDA_INCLUDE = []
+        elif not self.is_rocm_pytorch():
+            CUDA_INCLUDE = [os.path.join(torch.utils.cpp_extension.CUDA_HOME, "include")]
+        else:
+            CUDA_INCLUDE = [
+                os.path.join(torch.utils.cpp_extension.ROCM_HOME, "include"),
+            ]
+        return ['csrc/includes'] + CUDA_INCLUDE
