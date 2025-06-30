@@ -15,7 +15,7 @@ from .util import get_deepcompile_handle, add_pre_backward_hook, is_backend_indu
 WARMUP = 5
 
 
-def init_z1(engine, backend, compile_config, compile_kwargs, schedule=None):
+def init_z1(engine, backend, compile_config, compile_kwargs, schedule=None, use_z2=False):
 
     optimizer = engine.optimizer
     optimizer.contiguous_gradients = False  # Avoid creating unnecessary buffer
@@ -52,12 +52,12 @@ def init_z1(engine, backend, compile_config, compile_kwargs, schedule=None):
                 buf = grad_buffer[i][index_in_partition]
                 offset = optimizer.first_offset[i] if first_in_partition else 0
                 # print(f"[r{dist.get_rank()}] Registering group {i} param {param_id} in_partition={in_partition} p={p.shape} buf={buf.shape} partition_offset={offset}")
-                dc.register_z1_param(p.param_id, p.shape, p, buf, int(offset))
+                dc.register_param(p.param_id, p.shape, p, buf, int(offset))
                 index_in_partition += 1
                 first_in_partition = False
             else:
                 # print(f"[r{dist.get_rank()}] Registering group {i} param {param_id} in_partition={in_partition} p={p.shape} buf=None")
-                dc.register_z1_param(p.param_id, p.shape, p, torch.empty([0], dtype=p.dtype, device=p.device), 0)
+                dc.register_param(p.param_id, p.shape, p, torch.empty([0], dtype=p.dtype, device=p.device), 0)
 
     def set_grad_buffer():
         optimizer.averaged_gradients = copy.copy(grad_buffer)
@@ -66,7 +66,10 @@ def init_z1(engine, backend, compile_config, compile_kwargs, schedule=None):
 
     if schedule is None:
         schedule = []
-        schedule.append((0, [zero1_compile.add_z1_reduce]))
+        if use_z2:
+            schedule.append((0, [zero1_compile.add_z2_reduce]))
+        else:
+            schedule.append((0, [zero1_compile.add_z1_reduce]))
     else:
         for opt in schedule:
             # avoid typical misconfiguration
