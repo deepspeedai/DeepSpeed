@@ -183,7 +183,8 @@ class CommsLogger:
 
         from deepspeed.utils.timer import trim_mean
 
-        op_data = self.comms_dict[operation_name]
+        # Create a snapshot to avoid concurrent modification issues
+        op_data = self.comms_dict[operation_name].copy()
         summary = {}
 
         for msg_size, vals in op_data.items():
@@ -266,6 +267,11 @@ class CommsLogger:
         from deepspeed.accelerator import get_accelerator
         from datetime import datetime
 
+        # Create a snapshot of the dictionary to avoid concurrent modification issues
+        # This prevents "dictionary changed size during iteration" errors when
+        # communication operations are happening in other threads
+        comms_dict_snapshot = self.comms_dict.copy()
+
         # Initialize return dictionary structure
         result_dict = {
             "summary": {},
@@ -282,7 +288,7 @@ class CommsLogger:
                 f"{'Comm. Op': <20}{'Message Size': <20}{'Count': <20}{'Total Latency(ms)': <20}{'Avg Latency(ms)': <20}{'tput_avg (Gbps)': <20}{'busbw_avg (Gbps)': <20}"
             )
 
-        for record_name in self.comms_dict.keys():
+        for record_name in comms_dict_snapshot.keys():
             if print_log:
                 print(record_name)
 
@@ -290,7 +296,7 @@ class CommsLogger:
             if return_dict:
                 result_dict["summary"][record_name] = {}
 
-            for msg_size, vals in sorted(self.comms_dict[record_name].items()):
+            for msg_size, vals in sorted(comms_dict_snapshot[record_name].items()):
                 # vals[0] is the count for each msg size
                 count = vals[0]
                 # vals[1] is a list of latency records for each msg size
@@ -331,7 +337,7 @@ class CommsLogger:
                 )
 
             device = get_accelerator().current_device_name()
-            for record_name in self.comms_dict.keys():
+            for record_name in comms_dict_snapshot.keys():
                 if print_log:
                     print(record_name)
 
@@ -339,7 +345,7 @@ class CommsLogger:
                 if return_dict:
                     result_dict["straggler_analysis"][record_name] = {}
 
-                for msg_size, vals in sorted(self.comms_dict[record_name].items()):
+                for msg_size, vals in sorted(comms_dict_snapshot[record_name].items()):
                     # vals[0] is the count for each msg size
                     count = vals[0]
                     # vals[1] is a list of latency records for each msg size
