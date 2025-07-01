@@ -13,10 +13,10 @@ class ZenFlowCPUAdam(DeepSpeedCPUAdam):
         super(ZenFlowCPUAdam, self).__init__(*args, **kwargs)
         self.overlap_step = overlap_step
         if not self.overlap_step:
-            print("ZenFlowCPUAdam initialized with overlap step.")
+            print("ZenFlowCPUAdam initialized with normal step.")
             self.step = self._sequential_step
         else:
-            print("ZenFlowCPUAdam initialized with normal step.")
+            print("ZenFlowCPUAdam initialized with overlap step.")
             self.step = self._parallel_step
 
     @torch.no_grad()

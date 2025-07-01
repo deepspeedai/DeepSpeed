@@ -2183,6 +2183,8 @@ class DeepSpeedEngine(Module):
             else:
                 grads = None
                 self.buffered_allreduce_fallback(grads=grads, elements_per_buffer=bucket_size)
+        elif self.zenflow:
+            self.optimizer.reduce_gradients(pipeline_parallel=self.pipeline_parallelism)
 
     def _backward_prologue(self, loss, scale_wrt_gas=True):
         see_memory_usage("Engine before backward", force=self.memory_breakdown())

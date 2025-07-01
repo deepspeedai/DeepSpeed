@@ -1456,7 +1456,13 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
                                              ) == param_id, "param in ipg bucket does not match extra-large param"
                     extra_large_grad_reduc = self.get_gradient_for_reduction(
                         self.extra_large_param_to_reduce[comm_dtype])
-                    self.average_tensor(extra_large_grad_reduc.view(-1), comm_dtype)
+                    
+                    extra_large_grad_reduc_for_average = extra_large_grad_reduc.view(-1) if not self.zenflow \
+                        else extra_large_grad_reduc.permute(*reversed(range(extra_large_grad_reduc.ndim))).contiguous().view(-1)
+                    extra_large_grad_reduc.data = extra_large_grad_reduc_for_average.data.view_as(extra_large_grad_reduc) if (not self.zenflow or self.extra_large_param_to_reduce.dim() == 1) \
+                        else extra_large_grad_reduc_for_average.data.view_as(extra_large_grad_reduc.transpose(0, 1))
+                    
+                    self.average_tensor(extra_large_grad_reduc_for_average, comm_dtype)
                     del self.extra_large_param_to_reduce[comm_dtype]
                 else:
                     self.average_tensor(bucket.buffer[bucket.index].narrow(0, 0, bucket.elements), comm_dtype)
@@ -1510,7 +1516,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
             self.reduce_ready_partitions_and_remove_grads(param, i)
 
     def reduce_ready_partitions_and_remove_grads(self, param, i):
-        if self.partition_gradients or self.is_gradient_accumulation_boundary:
+        if self.partition_gradients or self.is_gradient_accumulation_boundary or self.zenflow:
             self.reduce_independent_p_g_buckets_and_remove_grads(param, i)
 
     def zero_reduced_gradients(self, partition_id, i):

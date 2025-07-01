@@ -75,8 +75,11 @@ def configure_zenflow(engine: "DeepSpeedEngine") -> None:
         engine.update_interval = int(zenflow_config.update_interval)
 
     if select_strategy == 'epoch':
-        zenflow_config.steps_per_epoch = len(engine.training_dataloader)
-        engine.select_interval = engine.select_interval * len(engine.training_dataloader)
+        if engine.training_dataloader is not None:
+            zenflow_config.steps_per_epoch = len(engine.training_dataloader)
+            engine.select_interval = engine.select_interval * len(engine.training_dataloader)
+        else:
+            engine.select_interval = 0
 
     if not engine.auto_update and engine.select_interval != 0 and engine.select_interval < engine.update_interval:
         raise ValueError("Select interval must be greater or equal to update interval")

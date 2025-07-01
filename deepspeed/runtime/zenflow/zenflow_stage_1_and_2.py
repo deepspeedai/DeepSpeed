@@ -142,7 +142,10 @@ class ZenFlowZeroOptimizer(DeepSpeedZeroOptimizer):
             self.update_interval = int(zenflow_config.update_interval)
 
         if self.select_strategy == 'epoch':
-            self.select_interval = self.select_interval * zenflow_config.steps_per_epoch
+            if zenflow_config.steps_per_epoch is not None:
+                self.select_interval = self.select_interval * zenflow_config.steps_per_epoch
+            else:
+                self.select_interval = 0
 
         if not self.auto_update and self.select_interval != 0 and self.select_interval < self.update_interval:
             raise ValueError("Select interval must be greater or equal to update interval")
@@ -297,16 +300,16 @@ class ZenFlowZeroOptimizer(DeepSpeedZeroOptimizer):
         rank = dist.get_rank(process_group)
 
         self.grad_buffer = torch.empty(total_size, dtype=self.dtype, device='cuda')
-
+        
+        bucket = self.ipg_buckets[communication_data_type]
         if self.auto_update:
-            self.sum_buffer = torch.empty(len(self.params_in_ipg_bucket) + dist.get_world_size(group=process_group),
+            self.sum_buffer = torch.empty(len(bucket.params) + dist.get_world_size(group=process_group),
                                           dtype=torch.bfloat16,
                                           device='cuda')
 
         group_to_paramlist = {}
 
         # count = 0
-        bucket = self.ipg_buckets[communication_data_type]
         for i, param_idx_in_group, param_id in bucket.params:
             param = self.bit16_groups[i][param_idx_in_group]
 
