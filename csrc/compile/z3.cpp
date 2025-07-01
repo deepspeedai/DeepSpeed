@@ -6,17 +6,6 @@
 #include "z3.h"
 #include "deepcompile.h"
 
-#define USE_C10D_NCCL
-
-#include <ATen/cuda/CUDAEvent.h>
-#include <c10/cuda/CUDAGuard.h>
-#include <c10/cuda/CUDAStream.h>
-#include <torch/csrc/cuda/nccl.h>
-#include <torch/csrc/distributed/c10d/NCCLUtils.hpp>
-#include <torch/csrc/distributed/c10d/ProcessGroup.hpp>
-
-#include <torch/csrc/distributed/c10d/SymmetricMemory.hpp>
-
 namespace dc {
 
 const size_t TIMEOUT_SYMMETRIC_MEMORY_BARRIER = 60000;

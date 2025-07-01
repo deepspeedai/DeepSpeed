@@ -37,4 +37,4 @@ class DeepCompileBuilder(TorchCPUOpBuilder):
             CUDA_INCLUDE = [
                 os.path.join(torch.utils.cpp_extension.ROCM_HOME, "include"),
             ]
-        return ['csrc/includes'] + CUDA_INCLUDE
+        return ['csrc/includes', 'csrc/compile'] + CUDA_INCLUDE
