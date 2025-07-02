@@ -1456,12 +1456,12 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
                                              ) == param_id, "param in ipg bucket does not match extra-large param"
                     extra_large_grad_reduc = self.get_gradient_for_reduction(
                         self.extra_large_param_to_reduce[comm_dtype])
-                    
+
                     extra_large_grad_reduc_for_average = extra_large_grad_reduc.view(-1) if not self.zenflow \
                         else extra_large_grad_reduc.permute(*reversed(range(extra_large_grad_reduc.ndim))).contiguous().view(-1)
-                    extra_large_grad_reduc.data = extra_large_grad_reduc_for_average.data.view_as(extra_large_grad_reduc) if (not self.zenflow or self.extra_large_param_to_reduce.dim() == 1) \
+                    extra_large_grad_reduc.data = extra_large_grad_reduc_for_average.data.view_as(extra_large_grad_reduc) if (not self.zenflow or self.extra_large_param_to_reduce[comm_dtype].dim() == 1) \
                         else extra_large_grad_reduc_for_average.data.view_as(extra_large_grad_reduc.transpose(0, 1))
-                    
+
                     self.average_tensor(extra_large_grad_reduc_for_average, comm_dtype)
                     del self.extra_large_param_to_reduce[comm_dtype]
                 else:

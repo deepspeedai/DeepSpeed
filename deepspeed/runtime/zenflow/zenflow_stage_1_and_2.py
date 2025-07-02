@@ -300,7 +300,7 @@ class ZenFlowZeroOptimizer(DeepSpeedZeroOptimizer):
         rank = dist.get_rank(process_group)
 
         self.grad_buffer = torch.empty(total_size, dtype=self.dtype, device='cuda')
-        
+
         bucket = self.ipg_buckets[communication_data_type]
         if self.auto_update:
             self.sum_buffer = torch.empty(len(bucket.params) + dist.get_world_size(group=process_group),
