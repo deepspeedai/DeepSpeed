@@ -32,7 +32,8 @@ from deepspeed.runtime.zero.partition_parameters import ZeroParamStatus
 from deepspeed.runtime.zero.utils import is_zero_supported_optimizer, ZeRORuntimeException
 from deepspeed.runtime.zero.parameter_offload import DeepSpeedZeRoOffload
 from deepspeed.runtime.zero.config import ZERO_OPTIMIZATION
-from deepspeed.runtime.zenflow.zenflow_utils import configure_zenflow
+from deepspeed.runtime.zenflow.engine import (configure_zenflow, zenflow_step, is_zenflow_update_boundary,
+                                              sync_zenflow_optimizer_lr)
 
 from deepspeed.runtime.fp16.fused_optimizer import FP16_Optimizer
 from deepspeed.runtime.fp16.unfused_optimizer import FP16_UnfusedOptimizer
@@ -332,7 +333,12 @@ class DeepSpeedEngine(Module):
 
         if self.torch_autocast_enabled():
             init_autocast_params(self, self.torch_autocast_dtype(), self.torch_autocast_lower_precision_safe_modules())
+
         self._configure_zenflow = lambda: configure_zenflow(self)
+        self._is_zenflow_update_boundary = lambda: is_zenflow_update_boundary(self)
+        self._zenflow_step = lambda lr_kwargs: zenflow_step(self, lr_kwargs)
+        self._sync_zenflow_optimizer_lr = lambda: sync_zenflow_optimizer_lr(self)
+
         self._configure_zenflow()
 
         if has_optimizer:
@@ -2302,21 +2308,10 @@ class DeepSpeedEngine(Module):
 
         """
         if self._is_gradient_accumulation_boundary is None:
-            if not self.zenflow:
-                return (self.micro_steps + 1) % \
-                    self.gradient_accumulation_steps() == 0
-            elif not self.auto_update:
-                if (self.micro_steps + 1) < self.full_warm_up_rounds:
-                    return True
-                else:
-                    return ((self.micro_steps + 1 - self.full_warm_up_rounds) % self.gradient_accumulation_steps() == 0) \
-                        or (self.select_interval != 0 and (self.micro_steps + 1) % self.select_interval == 0)
+            if self.zenflow:
+                return self._is_zenflow_update_boundary()
             else:
-                if (self.micro_steps + 1) <= self.full_warm_up_rounds:
-                    return True
-                else:
-                    return self.optimizer.zenflow_need_update[self.optimizer.zenflow_state ^ 1] \
-                        or (self.select_interval != 0 and (self.micro_steps + 1) % self.select_interval == 0)
+                return (self.micro_steps + 1) % self.gradient_accumulation_steps() == 0
         else:
             return self._is_gradient_accumulation_boundary
 
@@ -2420,22 +2415,6 @@ class DeepSpeedEngine(Module):
         self.global_steps += 1
         self.global_samples += self.train_batch_size()
 
-    def _take_selective_parameter_step(self):
-        self.optimizer.selective_optimizer_step()
-
-    def _take_lr_scheduler_step(self, lr_kwargs):
-        if self.lr_scheduler is not None:
-            try:
-                self.lr_scheduler.step(**(lr_kwargs or {}))
-            except TypeError:
-                # XXX Hack to work with Megatron 2.0 and DeepSpeed pipelines.
-                # We don't currently have a way to specify lr_kwargs from
-                # pipe_engine.train_batch()
-                self.lr_scheduler.step(self.train_batch_size())
-
-    def _log_selective_optimizer_timers(self):
-        self.optimizer.log_selective_optimizer_timers()
-
     def step(self, lr_kwargs=None):
         r"""Execute the weight update step after forward and backward propagation
         on effective_train_batch.
@@ -2489,16 +2468,7 @@ class DeepSpeedEngine(Module):
             report_progress = self.global_rank == 0 if self.global_rank else True
 
         if self.zenflow:
-            if not self.is_gradient_accumulation_boundary():
-                self._take_lr_scheduler_step(lr_kwargs)
-                self._log_selective_optimizer_timers()
-            else:
-                if self.micro_steps + 1 >= self.full_warm_up_rounds:
-                    self._take_selective_parameter_step()
-                if self.auto_update:
-                    if dist.get_rank() == 0:
-                        print(f"Zenflow: This is an update iter. update_interval: {self.update_interval}")
-                    self.update_interval = 0
+            self._zenflow_step(lr_kwargs)
 
         self.tput_timer.stop(global_step=self.is_gradient_accumulation_boundary(), report_speed=report_progress)
 
