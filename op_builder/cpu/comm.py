@@ -5,6 +5,7 @@
 
 import os
 from .builder import CPUOpBuilder
+import platform
 
 
 class CCLCommBuilder(CPUOpBuilder):
@@ -47,6 +48,7 @@ class CCLCommBuilder(CPUOpBuilder):
 class ShareMemCommBuilder(CPUOpBuilder):
     BUILD_VAR = "DS_BUILD_SHM_COMM"
     NAME = "deepspeed_shm_comm"
+    machine = platform.machine().lower()
 
     def __init__(self, name=None):
         name = self.NAME if name is None else name
@@ -56,14 +58,22 @@ class ShareMemCommBuilder(CPUOpBuilder):
         return f'deepspeed.ops.comm.{self.NAME}_op'
 
     def sources(self):
-        return ['csrc/cpu/comm/shm_interface.cpp', 'csrc/cpu/comm/shm.cpp']
+        src_files = ['csrc/cpu/comm/shm_interface.cpp']
+        if self.machine == 'riscv64':
+            src_files.append('csrc/cpu/comm/shm-riscv64.cpp')
+        else:
+            src_files.append('csrc/cpu/comm/shm.cpp')
+        return src_files
 
     def include_paths(self):
         includes = ['csrc/cpu/includes']
         return includes
 
     def cxx_args(self):
-        return ['-O2', '-fopenmp']
+        arg_list = ['-O2', '-fopenmp']
+        if self.machine == 'riscv64':
+            arg_list.append('-march=rv64gcv_zvfh')
+        return arg_list
 
     def is_compatible(self, verbose=False):
         # TODO: add soft compatibility check for private binary release.
