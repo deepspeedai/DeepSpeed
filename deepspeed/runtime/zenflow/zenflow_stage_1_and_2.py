@@ -656,8 +656,9 @@ def zenflow_optimizer_process(pipe, curr_rank, total_rank, param_groups, shared_
     os.environ["CUDA_VISIBLE_DEVICES"] = ""
     disable_accelerator()
 
-    CPUADAM_CORE_START = 65
-    CPUADAM_CORE_END = 112
+    TOTAL_CORES = os.cpu_count()
+    CPUADAM_CORE_START = 0
+    CPUADAM_CORE_END = TOTAL_CORES
     TOTAL_CORES = CPUADAM_CORE_END - CPUADAM_CORE_START
 
     cores_per_rank = TOTAL_CORES // total_rank
