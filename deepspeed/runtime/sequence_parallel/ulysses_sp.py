@@ -836,7 +836,7 @@ class TiledMLP(torch.autograd.Function):
         x_grad = torch.zeros_like(x)
         x_shards = list(torch.chunk(x, chunks=shards, dim=1))
 
-        shard_step = x_shards[0].numel()
+        shard_step = x_shards[0].shape[1]
         for i, x_shard in enumerate(x_shards):
 
             # Tell deepspeed not to add a new grad to its ipg bucket until the last shard is run
@@ -852,8 +852,8 @@ class TiledMLP(torch.autograd.Function):
             x_shard.requires_grad_(x_requires_grad)
 
             shard_offset = i * shard_step
-            x_shard.grad = x_grad.view(-1).narrow(0, shard_offset, x_shard.numel()).view_as(x_shard)
-            incoming_grad_shard = incoming_grad.view(-1).narrow(0, shard_offset, x_shard.numel()).view_as(x_shard)
+            x_shard.grad = x_grad.narrow(1, shard_offset, shard_step).view_as(x_shard)
+            incoming_grad_shard = incoming_grad.narrow(1, shard_offset, shard_step).view_as(x_shard)
             with torch.enable_grad():
                 output = fn(self, x_shard)
             torch.autograd.backward(output, incoming_grad_shard)
