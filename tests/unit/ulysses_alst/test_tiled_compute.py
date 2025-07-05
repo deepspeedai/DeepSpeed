@@ -43,17 +43,20 @@ mlp_forward_orig = SimpleMLP.forward
 
 class MyModel(Module):
 
-    def __init__(self, hidden_dim):
+    def __init__(self, hidden_dim, vocab_size):
         super().__init__()
+        self.vocab_size = vocab_size
         # Critical - need to use a stack of at least 2 mlps to validate that the backward of the last mlp sends the correct gradients to the previous mlp in the stack
         self.mlp1 = SimpleMLP(hidden_dim)
         self.mlp2 = SimpleMLP(hidden_dim)
+        self.lm_head = torch.nn.Linear(hidden_dim, vocab_size, bias=False)
         self.cross_entropy_loss = torch.nn.CrossEntropyLoss()
 
     def forward(self, x, y):
         x = self.mlp1(x)
         x = self.mlp2(x)
-        return self.cross_entropy_loss(x, y)
+        logits = self.lm_head(x)
+        return self.cross_entropy_loss(logits.view(-1, self.vocab_size), y.view(-1))
 
 
 def mlp_forward_tiled_mlp(self, x):
@@ -121,17 +124,18 @@ class TestTiledCompute(DistributedTest):
         # for debug
         # torch.set_printoptions(precision=8, sci_mode=True)
 
+        vocab_size = 10
         seed = 42
-        hidden_dim = 100
+        hidden_dim = 128
         bs = 2
-        seqlen = hidden_dim
+        seqlen = 64
         torch.manual_seed(seed)
         x = torch.rand((bs, seqlen, hidden_dim), dtype=dtype, requires_grad=True)
-        y = torch.empty((bs, seqlen), dtype=torch.long, requires_grad=False).random_(hidden_dim)
+        y = torch.empty((bs, seqlen), dtype=torch.long, requires_grad=False).random_(vocab_size)
 
         # A. Baseline: model with normal MLP
         torch.manual_seed(seed)
-        model_a = MyModel(hidden_dim=hidden_dim).to(dtype)
+        model_a = MyModel(hidden_dim=hidden_dim, vocab_size=vocab_size).to(dtype)
         model_a, _, _, _ = deepspeed.initialize(config=config_dict,
                                                 model=model_a,
                                                 model_parameters=model_a.parameters())
@@ -154,7 +158,7 @@ class TestTiledCompute(DistributedTest):
         # B. model with tiled MLP using TiledMLP
         torch.manual_seed(seed)
         SimpleMLP.forward = mlp_forward_tiled_mlp
-        model_b = MyModel(hidden_dim=hidden_dim).to(dtype)
+        model_b = MyModel(hidden_dim=hidden_dim, vocab_size=vocab_size).to(dtype)
         model_b, _, _, _ = deepspeed.initialize(config=config_dict,
                                                 model=model_b,
                                                 model_parameters=model_b.parameters())
@@ -190,7 +194,7 @@ class TestTiledCompute(DistributedTest):
         # C. model with tiled MLP using the generic version of the same via sequence_tiled_compute + SequenceTiledCompute
         torch.manual_seed(seed)
         SimpleMLP.forward = mlp_forward_sequence_tiled_compute
-        model_c = MyModel(hidden_dim=hidden_dim).to(dtype)
+        model_c = MyModel(hidden_dim=hidden_dim, vocab_size=vocab_size).to(dtype)
         model_c, _, _, _ = deepspeed.initialize(config=config_dict,
                                                 model=model_c,
                                                 model_parameters=model_c.parameters())
