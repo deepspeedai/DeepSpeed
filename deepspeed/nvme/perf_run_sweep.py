@@ -24,7 +24,7 @@ DEFAULT_SWEEP_CONFIG = {
     "queue_depth": [32, 128],
     "sequential_requests": [True, False],
     "single_submit": [False, True],
-    "io_parallel": [1, 2, 4, 8],
+    "io_parallel": [1, 8],
 }
 
 
@@ -41,7 +41,7 @@ class SweepConfig(object):
         self.verbose = args.verbose
         self.other_options = f'{OTHER_OPTIONS} --loops {args.loops} --io_size {args.io_size}'
         if args.gpu:
-            self.other_options += ' --gpu'
+            self.other_options += ' --gpu --use_accelerator_pin_memory'
         if args.gds:
             self.other_options += ' --use_gds'
 
