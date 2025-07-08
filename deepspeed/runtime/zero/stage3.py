@@ -1335,6 +1335,7 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
             self.partition_grads(params_in_bucket, grad_partitions)
 
             params_in_bucket.clear()
+            bucket.elements = 0
 
             if not get_accelerator().handles_memory_backpressure():
                 event = get_accelerator().Event()
