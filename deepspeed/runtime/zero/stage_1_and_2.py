@@ -8,17 +8,20 @@ from deepspeed import comm as dist
 from packaging import version as pkg_version
 from collections import OrderedDict, defaultdict
 from dataclasses import dataclass, field
-from typing import List, Dict
+from typing import List, Dict, Set
 
 from torch._utils import _flatten_dense_tensors, _unflatten_dense_tensors
 
+import gc
+from typing import Container
+from deepspeed.runtime.zero.offload_states import offload_optimizer_states, reload_optimizer_states
 from deepspeed.runtime.base_optimizer import ZeROOptimizer
 from deepspeed.runtime.fp16.loss_scaler import CreateLossScaler
 from deepspeed.runtime.torch_autocast import get_all_autocast_dtypes, is_autocast_initialized, sort_dtypes
 from deepspeed.runtime.utils import (empty_cache, see_memory_usage, inf, is_model_parallel_parameter,
                                      align_dense_tensors, all_gather_dp_groups, mask_nan_or_inf_with_val_inplace)
 from deepspeed.runtime.zero.config import ZeroStageEnum
-from deepspeed.runtime.zero.offload_config import OffloadDeviceEnum
+from deepspeed.runtime.zero.offload_config import OffloadDeviceEnum, OffloadStateTypeEnum
 from deepspeed.ops.adam import DeepSpeedCPUAdam
 from deepspeed.utils import logger
 from deepspeed.utils.torch import register_grad_hook
@@ -608,6 +611,8 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
         self._param_slice_mappings = self._create_param_mapping()
         if self.cpu_offload:
             self._create_optimizer_mapping()
+            
+        self.offloaded_states: Set[OffloadStateTypeEnum] = set()
 
     def destroy(self):
         for i, _ in enumerate(self.optimizer.param_groups):
@@ -2527,8 +2532,8 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
 
         if load_optimizer_states:
             self._link_all_hp_params()
-  
-  def offload_states(self,
+            
+    def offload_states(self,
                        include: Container[OffloadStateTypeEnum] = None,
                        device: OffloadDeviceEnum = OffloadDeviceEnum.cpu,
                        pin_memory: bool = True,
