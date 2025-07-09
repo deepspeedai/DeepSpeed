@@ -699,23 +699,8 @@ class SequenceTiledCompute(torch.autograd.Function):
 
         incoming_grad = grads[0]
         grad_requiring_tensor_grad = torch.zeros_like(grad_requiring_tensor)
-        print(f"income: x {kwargs_to_shard['x'].shape=}")
-        z = list(torch.chunk(kwargs_to_shard['x'], chunks=shards, dim=1))
-        for i, v in enumerate(z):
-            print(f"new shard {i} {v.shape=}")
-
-        for k in kwargs_to_shard.keys():
-            x = kwargs_to_shard["x"]
-            print(f"{k} {x.shape=}")
-            x_shards = list(torch.chunk(x, chunks=shards, dim=1))
-            for i, v in enumerate(x_shards):
-                print(f"good shard {i} {v.shape=}")
 
         kwargs_to_shard_shards = {k: list(torch.chunk(v, chunks=shards, dim=1)) for k, v in kwargs_to_shard.items()}
-        print(f"{shards=}")
-        for k, v in kwargs_to_shard_shards.items():
-            for i, q in enumerate(v):
-                print(f"shard {i} {q.shape=} ({k})")
 
         for i in range(shards):
             # when fn involves one or more model weights deepspeed will normally push a grad to
@@ -740,13 +725,11 @@ class SequenceTiledCompute(torch.autograd.Function):
             # if seqlen is not exactly divisible by shards the last step will be shorter than shard_step
             shard_step = kwargs_to_shard_shards[grad_requiring_tensor_key][i].shape[1]
             shard_offset = i * kwargs_to_shard_shards[grad_requiring_tensor_key][0].shape[1]
-            # this will enable gradual population of the pre-allocated
-            # `grad_requiring_tensor_shard.grad` during `torch.autograd.backward` calls
-            print(f"{grad_requiring_tensor_grad.shape=}")
-            print(f"{shard_offset=}, {shard_step=}")
 
             if grad_requiring_tensor_shard.shape[0] == 1:
-                # on narrow the shard's stride is unaffected with dim0==1 (bs) so we use the most efficient `narrow` alias
+                # on narrow the shard's stride is unaffected with dim0==1 (bs) so we use the most efficient `narrow` alias:
+                # this will enable gradual population of the pre-allocated
+                # `grad_requiring_tensor_shard.grad` during `torch.autograd.backward` calls
                 grad_requiring_tensor_shard.grad = grad_requiring_tensor_grad.narrow(
                     1, shard_offset, shard_step).view_as(grad_requiring_tensor_shard)
 
@@ -860,13 +843,9 @@ class TiledMLP(torch.autograd.Function):
 
         incoming_grad = grads[0]
         x_grad = torch.zeros_like(x)
-        print(f"income: x {x.shape=}")
         x_shards = list(torch.chunk(x, chunks=shards, dim=1))
-        for i, v in enumerate(x_shards):
-            print(f"shard {i} {v.shape=}")
 
         for i, x_shard in enumerate(x_shards):
-            print(i)
             # Tell deepspeed not to add a new grad to its ipg bucket until the last shard is run
             # XXX: DDP, FSDP will need something similar to make it work
             if compute_params is not None:
@@ -886,6 +865,8 @@ class TiledMLP(torch.autograd.Function):
 
             if x.shape[0] == 1:
                 # on narrow the shard's stride is unaffected with dim0==1 (bs) so we use the most efficient `narrow` alias
+                # this will enable gradual population of the pre-allocated
+                # `grad_requiring_tensor_shard.grad` during `torch.autograd.backward` calls
                 x_shard.grad = x_grad.narrow(1, shard_offset, shard_step).view_as(x_shard)
             incoming_grad_shard = incoming_grad.narrow(1, shard_offset, shard_step).view_as(x_shard)
             with torch.enable_grad():
