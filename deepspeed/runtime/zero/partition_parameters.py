@@ -799,7 +799,7 @@ class AllReduceCoalescedHandle:
                 raise RuntimeError(f"expected param {param.ds_summary()} to not be available")
 
     @instrument_w_nvtx
-    def wait(self) -> None:
+    def wait(self, **kwargs) -> None:
         if self.complete:
             return
 
