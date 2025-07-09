@@ -744,8 +744,11 @@ class SequenceTiledCompute(torch.autograd.Function):
             # `grad_requiring_tensor_shard.grad` during `torch.autograd.backward` calls
             print(f"{grad_requiring_tensor_grad.shape=}")
             print(f"{shard_offset=}, {shard_step=}")
-            grad_requiring_tensor_shard.grad = (grad_requiring_tensor_grad.narrow(
-                1, shard_offset, shard_step).view_as(grad_requiring_tensor_shard))  #.contiguous()
+
+            if grad_requiring_tensor_shard.shape[0] == 1:
+                # on narrow the shard's stride is unaffected with dim0==1 (bs) so we use the most efficient `narrow` alias
+                grad_requiring_tensor_shard.grad = grad_requiring_tensor_grad.narrow(
+                    1, shard_offset, shard_step).view_as(grad_requiring_tensor_shard)
 
             with torch.enable_grad():
                 output = fn(**kwargs_to_shard_shard, **kwargs_to_pass)
@@ -757,6 +760,16 @@ class SequenceTiledCompute(torch.autograd.Function):
                 incoming_grad_shard = (incoming_grad.narrow(1, shard_offset,
                                                             shard_step).view_as(grad_requiring_tensor_shard))
                 torch.autograd.backward(output, incoming_grad_shard)
+
+            if grad_requiring_tensor_shard.shape[0] > 1:
+                # this is less efficient than dim0==1 (bs) use case, due to a required copy to fix
+                # the stride and needing a bit more memory for one shard's grad, since
+                # narrow(dim=1, ...) while dim0>1 will lead to:
+                # UserWarning: grad and param do not obey the gradient layout contract. This is not an error, but may impair performance.
+                # when backward is called.
+                grad_requiring_tensor_grad.narrow(1, shard_offset,
+                                                  shard_step).view_as(grad_requiring_tensor_shard).copy_(
+                                                      grad_requiring_tensor_shard.grad)
 
         # positional args
         grad_outputs = [None] * 9
@@ -879,7 +892,9 @@ class TiledMLP(torch.autograd.Function):
                 output = fn(self, x_shard)
             torch.autograd.backward(output, incoming_grad_shard)
             if x.shape[0] > 1:
-                # this is less efficient than dim0==1 (bs) use case, due to a required copy to fix the stride, since narrow(dim=1, ...) while dim0>1 will lead to:
+                # this is less efficient than dim0==1 (bs) use case, due to a required copy to fix
+                # the stride and needing a bit more memory for one shard's grad, since
+                # narrow(dim=1, ...) while dim0>1 will lead to:
                 # UserWarning: grad and param do not obey the gradient layout contract. This is not an error, but may impair performance.
                 # when backward is called.
                 x_grad.narrow(1, shard_offset, shard_step).view_as(x_shard).copy_(x_shard.grad)

@@ -15,9 +15,6 @@ import deepspeed
 import pytest
 import torch
 
-#from io import StringIO
-#from contextlib import redirect_stderr
-
 
 def get_grad(param, zero_stage):
     return safe_get_full_grad(param)
