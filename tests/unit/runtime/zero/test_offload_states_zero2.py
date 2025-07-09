@@ -119,7 +119,7 @@ class TestOffloadStatesZero2(DistributedTest):
         config_dict = {
             "train_micro_batch_size_per_gpu": 1,
             "optimizer": {"type": "Adam", "params": {"lr": 1e-6}},
-            "zero_optimization": {"stage": 1},
+            "zero_optimization": {"stage": 2},
             "bf16": {"enabled": True}
         }
         model = SimpleModel(hidden_dim, nlayers=4)
