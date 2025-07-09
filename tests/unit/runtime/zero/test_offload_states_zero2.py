@@ -102,7 +102,6 @@ def run_model_zero2(model, param_groups, config_dict, hidden_dim, dtype, offload
         for expected, p in zip(adam_exp_avg_sq_expected, reloaded_fp32_param_tensors):
             assert torch.equal(expected, model.optimizer.state[p]['exp_avg_sq'])
 
-# Add hp_params to the list of states to test.
 @pytest.mark.parametrize("included_state", [
     OffloadStateTypeEnum.optim_states,
     OffloadStateTypeEnum.lp_grads,
