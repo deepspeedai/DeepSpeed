@@ -879,8 +879,6 @@ class TiledMLP(torch.autograd.Function):
                 # UserWarning: grad and param do not obey the gradient layout contract. This is not an error, but may impair performance.
                 # when backward is called.
                 x_grad.narrow(1, shard_offset, shard_step).view_as(x_shard).copy_(x_shard.grad)
-            #import os
-            #print(f"done {i} {os.getpid()}")
 
         return (None, None, x_grad, None, None)
 
