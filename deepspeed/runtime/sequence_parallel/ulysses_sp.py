@@ -698,7 +698,11 @@ class SequenceTiledCompute(torch.autograd.Function):
         grad_requiring_tensor.requires_grad_(grad_requiring_tensor_requires_grad)
 
         incoming_grad = grads[0]
-        grad_requiring_tensor_grad = torch.zeros_like(grad_requiring_tensor)
+
+        if grad_requiring_tensor.shape[0] == 1:
+            grad_requiring_tensor_grad = torch.zeros_like(grad_requiring_tensor)
+        else:
+            grad_requiring_tensor_grad = torch.empty_like(grad_requiring_tensor)
 
         kwargs_to_shard_shards = {k: list(torch.chunk(v, chunks=shards, dim=1)) for k, v in kwargs_to_shard.items()}
 
@@ -726,7 +730,7 @@ class SequenceTiledCompute(torch.autograd.Function):
             shard_step = kwargs_to_shard_shards[grad_requiring_tensor_key][i].shape[1]
             shard_offset = i * kwargs_to_shard_shards[grad_requiring_tensor_key][0].shape[1]
 
-            if grad_requiring_tensor_shard.shape[0] == 1:
+            if grad_requiring_tensor.shape[0] == 1:
                 # on narrow the shard's stride is unaffected with dim0==1 (bs) so we use the most efficient `narrow` alias:
                 # this will enable gradual population of the pre-allocated
                 # `grad_requiring_tensor_shard.grad` during `torch.autograd.backward` calls
@@ -744,7 +748,7 @@ class SequenceTiledCompute(torch.autograd.Function):
                                                             shard_step).view_as(grad_requiring_tensor_shard))
                 torch.autograd.backward(output, incoming_grad_shard)
 
-            if grad_requiring_tensor_shard.shape[0] > 1:
+            if grad_requiring_tensor.shape[0] > 1:
                 # this is less efficient than dim0==1 (bs) use case, due to a required copy to fix
                 # the stride and needing a bit more memory for one shard's grad, since
                 # narrow(dim=1, ...) while dim0>1 will lead to:
