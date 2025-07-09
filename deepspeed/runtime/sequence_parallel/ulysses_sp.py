@@ -842,7 +842,11 @@ class TiledMLP(torch.autograd.Function):
         x.requires_grad_(x_requires_grad)
 
         incoming_grad = grads[0]
-        x_grad = torch.zeros_like(x)
+        if x.shape[0] == 1:
+            x_grad = torch.zeros_like(x)
+        else:
+            x_grad = torch.empty_like(x)
+
         x_shards = list(torch.chunk(x, chunks=shards, dim=1))
 
         for i, x_shard in enumerate(x_shards):
