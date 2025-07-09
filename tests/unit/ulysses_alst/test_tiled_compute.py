@@ -200,8 +200,6 @@ class TestTiledCompute(DistributedTest):
         torch_assert_close(param_grad_a2, param_grad_b2)  #, rtol=1e-03, atol=1e-04)
         torch_assert_close(x_grad_a, x_grad_b)
 
-        return
-
         # C. model with tiled MLP using the generic version of the same via sequence_tiled_compute + SequenceTiledCompute
         torch.manual_seed(seed)
         SimpleMLP.forward = mlp_forward_sequence_tiled_compute

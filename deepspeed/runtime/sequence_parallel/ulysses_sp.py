@@ -871,14 +871,14 @@ class TiledMLP(torch.autograd.Function):
             shard_step = x_shards[i].shape[1]
             shard_offset = i * x_shards[0].shape[1]
 
-            if 1:  # x.shape[0] == 10:
+            if x.shape[0] == 1:
                 # on narrow the shard's stride is unaffected with dim0==1 (bs) so we use the most efficient `narrow` alias
                 x_shard.grad = x_grad.narrow(1, shard_offset, shard_step).view_as(x_shard)
             incoming_grad_shard = incoming_grad.narrow(1, shard_offset, shard_step).view_as(x_shard)
             with torch.enable_grad():
                 output = fn(self, x_shard)
             torch.autograd.backward(output, incoming_grad_shard)
-            if x.shape[0] > 10:
+            if x.shape[0] > 1:
                 # this is less efficient than dim0==1 (bs) use case, due to a required copy to fix the stride, since narrow(dim=1, ...) while dim0>1 will lead to:
                 # UserWarning: grad and param do not obey the gradient layout contract. This is not an error, but may impair performance.
                 # when backward is called.
