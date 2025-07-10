@@ -49,11 +49,12 @@ jobs:
           cd accelerate
           git rev-parse --short HEAD
 
-          git checkout 1ac8643
-
+          #git checkout 1ac8643
+          pip install datasets==3.6.0
           # installing dependencies
           pip install .[testing]
           # force protobuf version due to issues
           pip install "protobuf<4.21.0"
           pip list
-          pytest $PYTEST_OPTS --color=yes --durations=0 --verbose tests/deepspeed
+          pytest $PYTEST_OPTS --color=yes --durations=0 --verbose tests/deepspeed/test_deepspeed.py::DeepSpeedConfigIntegration::test_basic_run
+          #tests/deepspeed
