@@ -13,14 +13,16 @@ from unit.common import DistributedTest
 from unit.simple_model import random_dataloader, SimpleModel
 from deepspeed.runtime.zero.offload_config import OffloadDeviceEnum, OffloadStateTypeEnum
 
-#
-# HELPER FUNCTIONS
-#
-
 def validate_hp_params_device(model, device: torch.device):
     """Validates that the sharded FP32 parameters are on the specified device."""
     for p in model.optimizer.single_partition_of_fp32_groups:
         assert p.device == device, f"FP32 param partition is on {p.device}, expected {device}"
+
+# Validation function to check the device of LP (FP16/BF16) model parameters.
+def validate_lp_params_device(model, device: torch.device):
+    """Validates that the sharded LP parameters are on the specified device."""
+    for p in model.parameters():
+        assert p.device == device, f"LP param partition is on {p.device}, expected {device}"
 
 def validate_adam_states_device(model, device: torch.device):
     """Validates that the sharded Adam optimizer states are on the specified device."""
@@ -49,10 +51,10 @@ def run_model_zero2(model, param_groups, config_dict, hidden_dim, dtype, offload
     model, _, _, _ = deepspeed.initialize(model=model, model_parameters=param_groups, config=config_dict)
 
     data_loader = random_dataloader(model=model,
-                                    total_samples=10,
-                                    hidden_dim=hidden_dim,
-                                    device=model.device,
-                                    dtype=dtype)
+                                      total_samples=10,
+                                      hidden_dim=hidden_dim,
+                                      device=model.device,
+                                      dtype=dtype)
     dist.barrier()
     for batch in data_loader:
         loss = model(batch[0], batch[1])
@@ -60,20 +62,23 @@ def run_model_zero2(model, param_groups, config_dict, hidden_dim, dtype, offload
         model.step()
 
         # --- Save state snapshots before offloading ---
+        lp_params_expected = [p.clone().detach() for p in model.parameters()]
         fp32_param_tensors = model.optimizer.single_partition_of_fp32_groups
-        fp32_params_expected = [p.clone() for p in fp32_param_tensors]
-        lp_grads_expected = [p.grad.clone() if p.grad is not None else None for p in fp32_param_tensors]
-        adam_exp_avg_expected = [model.optimizer.state[p]['exp_avg'].clone() for p in fp32_param_tensors]
-        adam_exp_avg_sq_expected = [model.optimizer.state[p]['exp_avg_sq'].clone() for p in fp32_param_tensors]
+        fp32_params_expected = [p.clone().detach() for p in fp32_param_tensors]
+        lp_grads_expected = [p.grad.clone().detach() if p.grad is not None else None for p in fp32_param_tensors]
+        adam_exp_avg_expected = [model.optimizer.state[p]['exp_avg'].clone().detach() for p in fp32_param_tensors if p in model.optimizer.state]
+        adam_exp_avg_sq_expected = [model.optimizer.state[p]['exp_avg_sq'].clone().detach() for p in fp32_param_tensors if p in model.optimizer.state]
+
 
         # --- Start offloading ---
         model.offload_states(include=offloaded_states,
-                             device=offload_device,
-                             pin_memory=pin_memory,
-                             non_blocking=non_blocking)
+                               device=offload_device,
+                               pin_memory=pin_memory,
+                               non_blocking=non_blocking)
 
         # --- Validate that states were moved to CPU ---
-        # FINAL CORRECTION: Call the correct validation function for the state being tested.
+        if offloaded_states is None or OffloadStateTypeEnum.lp_params in offloaded_states:
+            validate_lp_params_device(model, offload_torch_device)
         if offloaded_states is None or OffloadStateTypeEnum.hp_params in offloaded_states:
             validate_hp_params_device(model, offload_torch_device)
         if offloaded_states is None or OffloadStateTypeEnum.optim_states in offloaded_states:
@@ -85,9 +90,14 @@ def run_model_zero2(model, param_groups, config_dict, hidden_dim, dtype, offload
         model.reload_states()
 
         # --- Verify restored states ---
+        validate_lp_params_device(model, accelerator_device)
         validate_hp_params_device(model, accelerator_device)
         validate_adam_states_device(model, accelerator_device)
         validate_grad_device(model, accelerator_device)
+
+        # NVerify data integrity for lp_params.
+        for expected, restored in zip(lp_params_expected, model.parameters()):
+            assert torch.equal(expected, restored)
 
         reloaded_fp32_param_tensors = model.optimizer.single_partition_of_fp32_groups
         for expected, restored in zip(fp32_params_expected, reloaded_fp32_param_tensors):
@@ -97,15 +107,19 @@ def run_model_zero2(model, param_groups, config_dict, hidden_dim, dtype, offload
                 assert torch.equal(expected_grad, p.grad)
             else:
                 assert p.grad is None
-        for expected, p in zip(adam_exp_avg_expected, reloaded_fp32_param_tensors):
+        # Ensure the parameter exists in the state dict before iterating
+        adam_params_in_state = [p for p in reloaded_fp32_param_tensors if p in model.optimizer.state]
+        for expected, p in zip(adam_exp_avg_expected, adam_params_in_state):
             assert torch.equal(expected, model.optimizer.state[p]['exp_avg'])
-        for expected, p in zip(adam_exp_avg_sq_expected, reloaded_fp32_param_tensors):
+        for expected, p in zip(adam_exp_avg_sq_expected, adam_params_in_state):
             assert torch.equal(expected, model.optimizer.state[p]['exp_avg_sq'])
+
 
 @pytest.mark.parametrize("included_state", [
     OffloadStateTypeEnum.optim_states,
     OffloadStateTypeEnum.lp_grads,
     OffloadStateTypeEnum.hp_params,
+    OffloadStateTypeEnum.lp_params,
     None
 ])
 @pytest.mark.parametrize("pin_memory", [False, True])
