@@ -57,4 +57,4 @@ jobs:
           # force protobuf version due to issues
           pip install "protobuf<4.21.0"
           pip list
-          pytest $PYTEST_OPTS --color=yes --durations=0 --verbose tests/deepspeed      
+          pytest $PYTEST_OPTS --color=yes --durations=0 --verbose tests/deepspeed
