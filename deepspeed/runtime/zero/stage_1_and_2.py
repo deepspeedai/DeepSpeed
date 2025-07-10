@@ -2594,8 +2594,8 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
                     buf.data = buf.data.to(device, non_blocking=non_blocking)
 
             # Update model parameter .data pointers to point to new buffers on CPU
-            for i in range(len(self.bit16_groups)):
-                self._update_model_bit16_weights(i)
+            # for i in range(len(self.bit16_groups)):
+            #     self._update_model_bit16_weights(i)
 
             self.offloaded_states.add(OffloadStateTypeEnum.lp_params)
 
