@@ -50,7 +50,7 @@ jobs:
           git rev-parse --short HEAD
 
           #git checkout 1ac8643
-          pip install datasets==3.6.0
+          #pip install datasets==3.6.0
           # installing dependencies
           pip install .[testing]
           # force protobuf version due to issues
