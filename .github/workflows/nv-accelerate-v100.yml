@@ -48,6 +48,9 @@ jobs:
           git clone https://github.com/huggingface/accelerate
           cd accelerate
           git rev-parse --short HEAD
+
+          git checkout 1ac8643
+
           # installing dependencies
           pip install .[testing]
           # force protobuf version due to issues
