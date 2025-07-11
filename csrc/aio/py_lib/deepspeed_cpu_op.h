@@ -13,12 +13,11 @@ struct cpu_op_desc_t : io_op_desc_t {
     bool _is_managed_bounce_buffer;
     const std::unique_ptr<struct deepspeed_pin_tensor_t>& _pinned_tensor_mgr;
 
-    cpu_op_desc_t(const bool read_op,
+    cpu_op_desc_t(const std::unique_ptr<struct deepspeed_pin_tensor_t>& pinned_tensor_mgr,
+                  const bool read_op,
                   const torch::Tensor& buffer,
-                  const std::unique_ptr<struct deepspeed_pin_tensor_t>& pinned_tensor_mgr,
                   const int fd,
                   const char* filename,
-                  const int64_t file_num_bytes,
                   const int intra_op_parallelism,
                   const bool validate,
                   const int64_t file_offset);

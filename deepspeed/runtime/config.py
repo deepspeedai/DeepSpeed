@@ -14,13 +14,6 @@ import copy
 import base64
 
 from .constants import *
-from .fp16.loss_scaler import (
-    INITIAL_LOSS_SCALE,
-    SCALE_WINDOW,
-    DELAYED_SHIFT,
-    CONSECUTIVE_HYSTERESIS,
-    MIN_LOSS_SCALE,
-)
 from .config_utils import (
     get_scalar_param,
     dict_raise_error_on_duplicate_keys,
@@ -31,6 +24,7 @@ from .activation_checkpointing.config import DeepSpeedActivationCheckpointingCon
 from ..comm.config import DeepSpeedCommsConfig
 from ..monitor.config import get_monitor_config
 from ..inference.config import WeightQuantConfig
+from .precision_config import get_bfloat16_config, get_float16_config
 from ..compile.config import CompileConfig
 
 from deepspeed import comm as dist
@@ -62,6 +56,7 @@ from ..nebula.config import DeepSpeedNebulaConfig
 from ..compression.config import get_compression_config, get_quantize_enabled
 from ..compression.constants import *
 from .swap_tensor.aio_config import get_aio_config
+from .model_checkpointing.config import get_checkpoint_config
 
 from .tensor_parallel import get_tensor_parallel_config
 from .data_pipeline.config import get_data_efficiency_enabled, get_data_efficiency_config, get_curriculum_enabled_legacy, get_curriculum_params_legacy
@@ -158,88 +153,33 @@ def get_amp_params(param_dict):
         return False
 
 
-def get_fp16_enabled(param_dict):
-    if FP16 in param_dict.keys():
-        return get_scalar_param(param_dict[FP16], FP16_ENABLED, FP16_ENABLED_DEFAULT)
+def get_torch_autocast_enabled(param_dict):
+    if TORCH_AUTOCAST in param_dict.keys():
+        return get_scalar_param(param_dict[TORCH_AUTOCAST], TORCH_AUTOCAST_ENABLED, TORCH_AUTOCAST_ENABLED_DEFAULT)
     else:
         return False
 
 
-def get_bfloat16_enabled(param_dict):
-    for key in [BFLOAT16, BFLOAT16_OLD]:
-        if key in param_dict.keys():
-            return get_scalar_param(param_dict[key], BFLOAT16_ENABLED, BFLOAT16_ENABLED_DEFAULT)
-    return False
+def get_torch_autocast_dtype(param_dict):
+    if TORCH_AUTOCAST in param_dict:
+        if TORCH_AUTOCAST_DTYPE in param_dict[TORCH_AUTOCAST]:
+            try:
+                return DtypeEnum(param_dict[TORCH_AUTOCAST][TORCH_AUTOCAST_DTYPE]).value
+            except KeyError:
+                raise ValueError(
+                    f"Invalid dtype for torch autocast: {param_dict[TORCH_AUTOCAST][TORCH_AUTOCAST_DTYPE]}")
+    return None
 
 
-def get_bfloat16_immediate_grad_update(param_dict):
-    for key in [BFLOAT16, BFLOAT16_OLD]:
-        if key in param_dict.keys():
-            return get_scalar_param(param_dict[key], BFLOAT16_IMMEDIATE_GRAD_UPDATE,
-                                    BFLOAT16_IMMEDIATE_GRAD_UPDATE_DEFAULT)
-    return False
-
-
-def get_fp16_master_weights_and_grads_enabled(param_dict):
-    if get_fp16_enabled(param_dict):
-        return get_scalar_param(param_dict[FP16], FP16_MASTER_WEIGHTS_AND_GRADS, FP16_MASTER_WEIGHTS_AND_GRADS_DEFAULT)
-    else:
-        return False
-
-
-def get_fp16_auto_cast(param_dict):
-    if get_fp16_enabled(param_dict):
-        return get_scalar_param(param_dict[FP16], FP16_AUTO_CAST, FP16_AUTO_CAST_DEFAULT)
-
-
-def get_loss_scale(param_dict):
-    if get_fp16_enabled(param_dict):
-        return get_scalar_param(param_dict[FP16], FP16_LOSS_SCALE, FP16_LOSS_SCALE_DEFAULT)
-    elif get_bfloat16_enabled(param_dict):
-        return 1.0
-    else:
-        return FP16_LOSS_SCALE_DEFAULT
-
-
-def get_initial_dynamic_scale(param_dict):
-    if get_fp16_enabled(param_dict):
-        initial_scale_power = get_scalar_param(param_dict[FP16], FP16_INITIAL_SCALE_POWER,
-                                               FP16_INITIAL_SCALE_POWER_DEFAULT)
-    elif get_bfloat16_enabled(param_dict):
-        initial_scale_power = 0
-    else:
-        initial_scale_power = FP16_INITIAL_SCALE_POWER_DEFAULT
-
-    return 2**initial_scale_power
-
-
-def get_dynamic_loss_scale_args(param_dict):
-    loss_scale_args = None
-    if get_fp16_enabled(param_dict):
-        fp16_dict = param_dict[FP16]
-        dynamic_loss_args = [
-            FP16_INITIAL_SCALE_POWER,
-            FP16_LOSS_SCALE_WINDOW,
-            FP16_MIN_LOSS_SCALE,
-            FP16_HYSTERESIS,
-            FP16_CONSECUTIVE_HYSTERESIS,
-        ]
-        if any(arg in list(fp16_dict.keys()) for arg in dynamic_loss_args):
-            init_scale = get_scalar_param(fp16_dict, FP16_INITIAL_SCALE_POWER, FP16_INITIAL_SCALE_POWER_DEFAULT)
-            scale_window = get_scalar_param(fp16_dict, FP16_LOSS_SCALE_WINDOW, FP16_LOSS_SCALE_WINDOW_DEFAULT)
-            delayed_shift = get_scalar_param(fp16_dict, FP16_HYSTERESIS, FP16_HYSTERESIS_DEFAULT)
-            consecutive_hysteresis = get_scalar_param(fp16_dict, FP16_CONSECUTIVE_HYSTERESIS,
-                                                      FP16_CONSECUTIVE_HYSTERESIS_DEFAULT)
-            min_loss_scale = get_scalar_param(fp16_dict, FP16_MIN_LOSS_SCALE, FP16_MIN_LOSS_SCALE_DEFAULT)
-            loss_scale_args = {
-                INITIAL_LOSS_SCALE: 2**init_scale,
-                SCALE_WINDOW: scale_window,
-                DELAYED_SHIFT: delayed_shift,
-                CONSECUTIVE_HYSTERESIS: consecutive_hysteresis,
-                MIN_LOSS_SCALE: min_loss_scale,
-            }
-
-    return loss_scale_args
+def get_lower_precision_safe_modules(param_dict):
+    if TORCH_AUTOCAST in param_dict:
+        if TORCH_AUTOCAST_LOWER_PRECISION_SAFE_MODULES in param_dict[TORCH_AUTOCAST]:
+            module_names_with_package = param_dict[TORCH_AUTOCAST][TORCH_AUTOCAST_LOWER_PRECISION_SAFE_MODULES]
+            if not all(isinstance(module_name, str) for module_name in module_names_with_package):
+                raise ValueError(
+                    f"Invalid module names for torch autocast: {module_names_with_package}. Expected list of strings.")
+            return module_names_with_package
+    return None
 
 
 def get_gradient_accumulation_steps(param_dict):
@@ -721,14 +661,23 @@ class DeepSpeedConfig(object):
                 raise ValueError(
                     f"Expected a string path to an existing deepspeed config, or a dictionary or a valid base64. Received: {config}"
                 )
+
         try:
             self.global_rank = dist.get_rank()
             if mpu is not None:
-                self.world_size = mpu.get_data_parallel_world_size()
+                # Ulysses SP
+                if not hasattr(mpu, "get_data_parallel_world_size"):
+                    self.world_size = dist.get_world_size() / mpu.get_sequence_parallel_world_size()
+                else:
+                    self.world_size = mpu.get_data_parallel_world_size()
             elif mesh_device is not None:
                 self.world_size = dist.get_world_size(mesh_device.get_group(mesh_dim="data_parallel"))
             else:
-                self.world_size = dist.get_world_size()
+                # HF zero.init case where there is no mpu
+                if "sequence_parallel_size" in config:
+                    self.world_size = dist.get_world_size() / config["sequence_parallel_size"]
+                else:
+                    self.world_size = dist.get_world_size()
         except:
             self.global_rank = 0
             self.world_size = 1
@@ -827,18 +776,17 @@ class DeepSpeedConfig(object):
         self.monitor_config = get_monitor_config(param_dict)
 
         self.gradient_clipping = get_gradient_clipping(param_dict)
-        self.fp16_enabled = get_fp16_enabled(param_dict)
-        self.fp16_auto_cast = get_fp16_auto_cast(param_dict)
-        self.bfloat16_enabled = get_bfloat16_enabled(param_dict)
-        self.bfloat16_immediate_grad_update = get_bfloat16_immediate_grad_update(param_dict)
-        assert not (self.fp16_enabled
-                    and self.bfloat16_enabled), 'bfloat16 and fp16 modes cannot be simultaneously enabled'
-        self.fp16_master_weights_and_gradients = get_fp16_master_weights_and_grads_enabled(param_dict)
+        self.float16_config = get_float16_config(param_dict)
+        self.bfloat16_config = get_bfloat16_config(param_dict)
+        assert not (self.float16_config.enabled
+                    and self.bfloat16_config.enabled), 'bfloat16 and fp16 modes cannot be simultaneously enabled'
+
         self.amp_enabled = get_amp_enabled(param_dict)
         self.amp_params = get_amp_params(param_dict)
-        self.loss_scale = get_loss_scale(param_dict)
-        self.initial_dynamic_scale = get_initial_dynamic_scale(param_dict)
-        self.dynamic_loss_scale_args = get_dynamic_loss_scale_args(param_dict)
+
+        self.torch_autocast_enabled = get_torch_autocast_enabled(param_dict)
+        self.torch_autocast_dtype = get_torch_autocast_dtype(param_dict)
+        self.torch_autocast_lower_precision_safe_modules = get_lower_precision_safe_modules(param_dict)
 
         self.compression_config = get_compression_config(param_dict)
         self.graph_harvesting = get_graph_harvesting(param_dict)
@@ -909,6 +857,7 @@ class DeepSpeedConfig(object):
         self.dataloader_drop_last = get_dataloader_drop_last(param_dict)
 
         self.nebula_config = DeepSpeedNebulaConfig(param_dict)
+        self.checkpoint_config = get_checkpoint_config(param_dict)
 
         self.weight_quantization_config = WeightQuantConfig(
             **param_dict['weight_quantization']) if 'weight_quantization' in param_dict else None
@@ -941,7 +890,7 @@ class DeepSpeedConfig(object):
         micro_batch = self.train_micro_batch_size_per_gpu
         grad_acc = self.gradient_accumulation_steps
 
-        #print(f"train_batch = {train_batch}, micro_batch={micro_batch}")
+        #print(f"in: train_batch = {train_batch}, micro_batch={micro_batch}")
 
         # all values are provided nothing needs to be set
         if train_batch is not None and micro_batch is not None and grad_acc is not None:
@@ -979,6 +928,8 @@ class DeepSpeedConfig(object):
         else:
             assert False, \
                 'Either train_batch_size or train_micro_batch_size_per_gpu needs to be provided'
+
+        #print(f"final: {self.train_batch_size=} {self.train_micro_batch_size_per_gpu=} {self.gradient_accumulation_steps=}")
 
     def _configure_train_batch_size(self):
         self._set_batch_related_parameters()
@@ -1020,11 +971,11 @@ class DeepSpeedConfig(object):
                     <= ZeroStageEnum.max_stage), "DeepSpeedConfig: Maximum supported ZeRO stage is {}".format(
                         ZeroStageEnum.max_stage)
 
-        if self.fp16_master_weights_and_gradients:
+        if self.float16_config.fp16_master_weights_and_grads:
             assert self.zero_enabled and self.zero_optimization_stage == ZeroStageEnum.gradients, "Fp16_master_weights_and_grads is only supported with ZeRO Stage 2 for now."
 
     def _do_warning_check(self):
-        fp16_enabled = self.fp16_enabled
+        fp16_enabled = self.float16_config.enabled
 
         vocabulary_size = self._param_dict.get(VOCABULARY_SIZE, VOCABULARY_SIZE_DEFAULT)
         if vocabulary_size and vocabulary_size % TENSOR_CORE_ALIGN_SIZE != 0:

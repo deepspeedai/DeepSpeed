@@ -207,6 +207,11 @@ def parse_args(args=None):
 
     parser.add_argument("--ssh_port", type=int, default=None, help="SSH port to use for remote connections")
 
+    parser.add_argument("--venv_script",
+                        type=str,
+                        default=None,
+                        help="Python virtual environment activation script for job.")
+
     return parser.parse_args(args=args)
 
 

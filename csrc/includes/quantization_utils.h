@@ -123,7 +123,7 @@ public:
     DS_D_INLINE T dequantize(int8_t val)
     {
         const float val_deq_f = ((conversion::to<float>(val)) * scale) + offset;
-        return conversion::to<__half>(val_deq_f);
+        return conversion::to<T>(val_deq_f);
     }
 
     DS_D_INLINE void store(float* params, int group_index)
