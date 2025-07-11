@@ -9,23 +9,15 @@
 using namespace std;
 
 cpu_op_desc_t::cpu_op_desc_t(
+    const std::unique_ptr<struct deepspeed_pin_tensor_t>& pinned_tensor_mgr,
     const bool read_op,
     const torch::Tensor& buffer,
-    const std::unique_ptr<struct deepspeed_pin_tensor_t>& pinned_tensor_mgr,
     const int fd,
     const char* filename,
-    const int64_t file_num_bytes,
     const int intra_op_parallelism,
     const bool validate,
     const int64_t file_offset)
-    : io_op_desc_t(read_op,
-                   buffer,
-                   fd,
-                   filename,
-                   file_num_bytes,
-                   intra_op_parallelism,
-                   validate,
-                   file_offset),
+    : io_op_desc_t(read_op, buffer, fd, filename, intra_op_parallelism, validate, file_offset),
       _cpu_buffer(buffer),
       _pinned_tensor_mgr(pinned_tensor_mgr),
       _is_managed_bounce_buffer(false)
@@ -66,7 +58,8 @@ void cpu_op_desc_t::finish()
 
 void cpu_op_desc_t::validate()
 {
-    validate_aio_operation(_read_op, _filename.c_str(), data_ptr(), _file_num_bytes);
+    const auto num_io_bytes = static_cast<int64_t>(_contiguous_buffer.nbytes());
+    validate_aio_operation(_read_op, _filename.c_str(), data_ptr(), num_io_bytes);
 }
 
 void cpu_op_desc_t::run(const int tid,

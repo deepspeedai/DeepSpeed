@@ -254,6 +254,26 @@ def single_all_to_all(input, scatter_idx, gather_idx, batch_dim_idx, group, asyn
     return res
 
 
+class _DimZeroAllToAll(torch.autograd.Function):
+    """Differentiable All2All across dimension 0."""
+
+    @staticmethod
+    def forward(ctx: Any, group: dist.ProcessGroup, input: Tensor) -> Tensor:
+        world_size = dist.get_world_size(group)
+        assert input.shape[0] == world_size, f"Dim 0 {input.shape[0]} is not world size"
+
+        ctx.group = group
+
+        output = torch.empty_like(input).contiguous()
+        # torch.distributed.nn.functional.all_to_all_single(output, input.contiguous(), group=group)
+        dist.all_to_all_single(output, input.contiguous(), group=group)
+        return output
+
+    @staticmethod
+    def backward(ctx: Any, *grad_output: Tensor) -> Tuple[None, Tensor]:
+        return (None, _DimZeroAllToAll.apply(ctx.group, *grad_output))
+
+
 class _SeqAllToAll(torch.autograd.Function):
 
     @staticmethod

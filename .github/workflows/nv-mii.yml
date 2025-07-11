@@ -41,6 +41,12 @@ jobs:
           python -c "import torch; print('torch:', torch.__version__, torch)"
           python -c "import torch; print('CUDA available:', torch.cuda.is_available())"
 
+      - name: Install deepspeed
+        run: |
+          pip install .[dev]
+          ds_report
+
+      # install transformers after deepspeed so that the right version of transformers is installed
       - name: Install transformers
         run: |
           git clone https://github.com/huggingface/transformers
@@ -49,11 +55,6 @@ jobs:
           git checkout v4.42.4
           git rev-parse --short HEAD
           pip install .
-
-      - name: Install deepspeed
-        run: |
-          pip install .[dev]
-          ds_report
 
       - name: Python environment
         run: |

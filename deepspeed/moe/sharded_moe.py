@@ -429,6 +429,7 @@ def topkgating(
             tp = 1 if groups.mpu is None else bwc_tensor_model_parallel_world_size(mpu=groups.mpu)
             new_capacity = torch.ceil(new_capacity / tp).mul(tp).to(new_capacity.dtype)
         capacity = new_capacity
+        locations = torch.cumsum(mask, dim=0) - 1
 
     # normalize gates
     gates_masked = gates * mask
