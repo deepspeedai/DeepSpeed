@@ -27,6 +27,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m)
         .def("get_single_submit", &deepspeed_gds_handle_t::get_single_submit)
         .def("get_overlap_events", &deepspeed_gds_handle_t::get_overlap_events)
         .def("get_intra_op_parallelism", &deepspeed_gds_handle_t::get_intra_op_parallelism)
+        .def("get_alignment", &deepspeed_gds_handle_t::get_alignment)
 
         .def("read",
              &deepspeed_gds_handle_t::read,
@@ -84,12 +85,22 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m)
              "filename"_a,
              "file_offset"_a = 0)
 
+        .def(
+            "async_pwrite",
+            py::overload_cast<const torch::Tensor&, const char*, const int64_t>(
+                &deepspeed_gds_handle_t::async_pwrite),
+            "Asynchronous parallel file write. Returns 0 on success, and subsequent wait() returns "
+            "count of completed ops.",
+            "buffer"_a,
+            "filename"_a,
+            "file_offset"_a = 0)
+
         .def("async_pwrite",
-             &deepspeed_gds_handle_t::async_pwrite,
-             "Asynchronous parallel file write. Returns 0 on success, and following wait() returns "
-             "count of completed ops.",
+             py::overload_cast<const torch::Tensor&, const int, const int64_t>(
+                 &deepspeed_gds_handle_t::async_pwrite),
+             "Asynchronous parallel file write using opened python file object.",
              "buffer"_a,
-             "filename"_a,
+             "fd"_a,
              "file_offset"_a = 0)
 
         .def("new_cpu_locked_tensor",

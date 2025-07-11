@@ -8,7 +8,7 @@ import torch
 import torch_nebula
 
 from deepspeed.runtime.checkpoint_engine.checkpoint_engine import \
-    CheckpointEngine
+    CheckpointEngine, CheckpointCommitInfo
 from deepspeed.utils import logger, log_dist
 from deepspeed.nebula.constants import *
 
@@ -21,6 +21,7 @@ class NebulaCheckpointEngine(CheckpointEngine):
 
     def __init__(self, config_params=None):
         super().__init__(config_params)
+        self.name = "NebulaCheckpointEngine"
         self.checkpoint = None
         self.tag_flag = None
         self.enable_nebula_load = config_params.enable_nebula_load
@@ -35,22 +36,21 @@ class NebulaCheckpointEngine(CheckpointEngine):
         }
         torch_nebula.init(**nebula_config_params)
 
-    def create(self, tag):
-        log_dist(f"[Nebula] Start Checkpoint for tag:{tag}", ranks=[0])
+    def create(self, info: CheckpointCommitInfo):
+        log_dist(f"[Nebula] Start Checkpoint for tag:{info.tag}", ranks=[0])
         # -2 means: customer needs to  explicitly tell nebula
-        # current checkpoint is complete by commit method.
-        self.checkpoint = torch_nebula.Checkpoint(tag, -2)
+        # current checkpoint is complete by commit methond.
+        self.checkpoint = torch_nebula.Checkpoint(info.tag, -2)
 
     def save(self, state_dict, path: str):
         log_dist(f"[Nebula] Create dummy files for loading.")
         torch.save("", path)
 
         tag = _get_tag_from_path(path)
-        partition_name = os.path.basename(path)
-        logger.info(f"[Nebula] Saving {partition_name} under tag {tag}...")
-        self.checkpoint.save(partition_name, state_dict)
-        logger.info(f"[Nebula] Saved {partition_name} under tag {tag}.")
-        return None
+        partititon_name = os.path.basename(path)
+        logger.info(f"[Nebula] Saving {partititon_name} under tag {tag}...")
+        self.checkpoint.save(partititon_name, state_dict)
+        logger.info(f"[Nebula] Saved {partititon_name} under tag {tag}.")
 
     def load(self, path: str, map_location=None):
         tag = _get_tag_from_path(path)
@@ -97,7 +97,8 @@ class NebulaCheckpointEngine(CheckpointEngine):
         logger.info(f"[Nebula] Loaded {path} under tag {tag} from {self.nebula_load_path}.")
         return partition
 
-    def commit(self, tag):
+    def commit(self, info: CheckpointCommitInfo):
+        tag = info.tag
         # nebula commit will be call when all files under give tag are ready to be persisted in the async way.
         logger.info(f"[Nebula] all files for {tag} are saved in tier1. It is ready to start persisting")
         commit_rls = self.checkpoint.commit()

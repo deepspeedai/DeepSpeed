@@ -599,6 +599,8 @@ class PipelineModule(nn.Module):
         return ckpt_files
 
     def save_state_dict(self, save_dir, checkpoint_engine, exclude_frozen_params=False):
+        # TODO: Need to validate interaction of checkpoint_parallel_write_pipeline and fastwriter
+
         # Processes having the same model parallel rank on different data parallel instances
         # have identical layer weights.  We can distribute the task of saving the layer weights
         # among the data parallel ranks.  For example, if a pipeline stage has 9 layers and
@@ -629,7 +631,7 @@ class PipelineModule(nn.Module):
                 for n in self._get_frozen_parameter_names(layer):
                     del orig_state_dict[n]
             final_state_dict = clone_tensors_for_torch_save(orig_state_dict)
-            checkpoint_engine.save(final_state_dict, model_ckpt_path)
+            checkpoint_engine.save(state_dict=final_state_dict, path=model_ckpt_path)
 
     def load_state_dir(self, load_dir, checkpoint_engine, strict=True):
         for idx, layer in enumerate(self.forward_funcs):

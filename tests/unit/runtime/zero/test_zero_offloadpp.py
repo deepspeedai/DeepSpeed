@@ -8,7 +8,7 @@ from unit.common import DistributedTest
 from unit.simple_model import random_dataloader
 
 import deepspeed
-
+import torch
 from deepspeed.runtime.zero.offload_config import DeepSpeedZeroOffloadOptimizerConfig
 
 import torch.nn as nn
@@ -68,7 +68,11 @@ class TestZeroPartialOffloadConfigSweep(DistributedTest):
 
         model = NNModel(h_dim, n_layers)
         model, _, _, _ = deepspeed.initialize(model=model, model_parameters=model.parameters(), config=config_dict)
-        data_loader = random_dataloader(model=model, total_samples=20, hidden_dim=h_dim, device=model.device)
+        data_loader = random_dataloader(model=model,
+                                        total_samples=20,
+                                        hidden_dim=h_dim,
+                                        device=model.device,
+                                        dtype=torch.float16)
         dist.barrier()
 
         for n, batch in enumerate(data_loader):
