@@ -5,6 +5,7 @@
 
 import torch
 from torch import nn
+from torch.utils.data import DataLoader
 from typing import Dict
 import gc
 from deepspeed.inference.quantization import layers
@@ -17,12 +18,15 @@ from .quantization_context import QuantizationContext
 import contextlib
 
 
-def _init_group_wise_weight_quantization(model: nn.Module, ds_config: Dict) -> nn.Module:
+def _init_group_wise_weight_quantization(model: nn.Module,
+                                         ds_config: Dict,
+                                         dataloader: DataLoader = None) -> nn.Module:
     """[Experimental] Apply group-wise weight quantization to model. Replace layers module according to config_list
 
     Args:
         model (nn.Module): A nn.Module
         ds_config (Dict, optional): The ds_config dictionary. use None for non-deepspeed managed model.
+        dataloader (DataLoader, optional): The dataloader used for offline calibration. use None for data-free weight quantization algorithms.
 
     Returns:
         nn.Module: Quantized nn.Module
@@ -35,6 +39,7 @@ def _init_group_wise_weight_quantization(model: nn.Module, ds_config: Dict) -> n
 
     assert 'weight_quantization' in ds_config, 'Please provide quantization config in ds_config'
     quantization_config = ds_config['weight_quantization']['post_init_quant']
+    algo_type = ds_config['weight_quantization']['algo_type']
 
     # Return nvme swapper if exists, else return None.
     # For nvme offloading we must use the same swapper here as model initialized.
@@ -46,6 +51,39 @@ def _init_group_wise_weight_quantization(model: nn.Module, ds_config: Dict) -> n
                             'offload_param' in ds_config['zero_optimization']
 
     layers.is_zero3_enabled = is_zero3_enabled
+
+    neural_compressor_available = True
+    try:
+        from neural_compressor.adaptor.torch_utils.weight_only import rtn_quantize, teq_quantize, gptq_quantize, awq_quantize
+    except ImportError:
+        neural_compressor_available = False
+
+    if algo_type != 'default' and neural_compressor_available:
+        d = {}
+
+        def mapping_key(key, value):
+            if key == 'num_bits':
+                d.update({'bits': value})
+            elif key == 'symmetric':
+                d.update({'scheme': 'sym' if value else 'asym'})
+            else:
+                d.update({key: value})
+            return d
+
+        config = {
+            layer: mapping_key(key, value)
+            for layer, weight_config in quantization_config.items() for key, value in weight_config.items()
+        }
+
+        fn_map = {
+            'rtn': rtn_quantize,
+            'gptq': gptq_quantize,
+            'awq': awq_quantize,
+            'teq': teq_quantize,
+        }
+
+        model = fn_map[algo_type](model, weight_config=config, data_loader=dataloader)
+        return model
 
     context_mgr = ContextManagers([QuantizationContext(config_dict_or_path=ds_config, param_swapper=nvme_swapper)]) \
                     if is_zero3_enabled else contextlib.suppress()
