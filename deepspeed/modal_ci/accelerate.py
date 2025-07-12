@@ -17,9 +17,7 @@ image = (modal.Image
          .run_commands("uv pip install --system --compile-bytecode datasets==3.6.0")
          .run_commands(
                 "git clone https://github.com/huggingface/accelerate && \
-                cd accelerate && \
-                git rev-parse --short HEAD && \
-                uv pip install --system --compile-bytecode .[testing]"
+                uv pip install --system --compile-bytecode accelerate[testing]"
             )
          .run_commands("uv pip install --system --compile-bytecode protobuf")
          .run_commands("pip list")
@@ -45,7 +43,7 @@ app = modal.App("deepspeedai-accelerate-ci", image=image)
 def pytest():
     import subprocess
     subprocess.run(
-        "pytest accelerate/tests/deepspeed".split(),
+        "pwd && ls && pytest accelerate/tests/deepspeed".split(),
         check=True,
         cwd=ROOT_PATH / ".",
     )
