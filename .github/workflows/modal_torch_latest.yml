@@ -1,4 +1,4 @@
-name: deepspeed-torch-latest-modal
+name: modal-torch-latest
 
 # This CI is running on modal.com's GPUs.
 #
@@ -21,6 +21,11 @@ on:
       - master
 
   pull_request:
+    paths-ignore:
+      - 'docs/**'
+      - 'blogs/**'
+      - 'deepspeed/inference/v2/**'
+      - 'tests/unit/inference/v2/**'
     types: [draft, opened, ready_for_review, synchronize]
     branches:
       - master
@@ -82,6 +87,7 @@ jobs:
           cache: 'pip' # caching pip dependencies
 
       - name: Install build dependencies
+      # TODO: Need to determine whether these installs are redundant by subsquent modal.Image call
         run: |
           pip install uv==0.4.0 # much faster than pip
           uv pip install --system modal
