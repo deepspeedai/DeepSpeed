@@ -7,7 +7,7 @@ from pathlib import Path
 
 import modal
 
-ROOT_PATH = Path(__file__).parent.parent
+ROOT_PATH = Path(__file__).parent.parent.parent
 
 # yapf: disable
 image = (modal.Image
@@ -40,5 +40,5 @@ def pytest():
     subprocess.run(
         "pytest --forked -n 4 tests/unit/runtime/zero/test_zero.py  --torch_ver=2.6 --cuda_ver=12.4".split(),
         check=True,
-        cwd=ROOT_PATH / "..",
+        cwd=ROOT_PATH / ".",
     )
