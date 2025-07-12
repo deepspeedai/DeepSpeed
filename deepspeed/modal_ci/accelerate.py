@@ -18,8 +18,8 @@ image = (modal.Image
                 "git clone https://github.com/huggingface/accelerate && \
                 cd accelerate && \
                 git rev-parse --short HEAD && \
-                uv pip install --system --compile-bytecode .[testing] \
-            "             )
+                uv pip install --system --compile-bytecode .[testing]"
+            )
          .run_commands("uv pip install --system --compile-bytecode protobuf<4.21.0")
          .run_commands("pip list")
          .pip_install_from_requirements(ROOT_PATH / "requirements/requirements.txt", gpu="any")
