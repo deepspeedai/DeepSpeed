@@ -21,7 +21,7 @@ image = (modal.Image
                 git rev-parse --short HEAD && \
                 uv pip install --system --compile-bytecode .[testing]"
             )
-         .run_commands("uv pip install --system --compile-bytecode protobuf<4.21.0")
+         .run_commands("uv pip install --system --compile-bytecode protobuf")
          .run_commands("pip list")
          .pip_install_from_requirements(ROOT_PATH / "requirements/requirements.txt", gpu="any")
          .pip_install_from_requirements(ROOT_PATH / "requirements/requirements-dev.txt", gpu="any")
