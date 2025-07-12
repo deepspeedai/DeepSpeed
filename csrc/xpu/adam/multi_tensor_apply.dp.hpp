@@ -112,7 +112,8 @@ private:
 // to make sure multi_tensor_apply_kernel can be used in sycl::buffer
 namespace sycl {
 template <typename T, typename U, typename... ArgTypes>
-struct is_device_copyable<multi_tensor_apply_kernel<T, U, ArgTypes...>> : std::true_type {};
+struct is_device_copyable<multi_tensor_apply_kernel<T, U, ArgTypes...>> : std::true_type {
+};
 }  // namespace sycl
 
 template <int depth, typename T, typename... ArgTypes>
