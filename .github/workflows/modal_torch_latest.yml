@@ -94,4 +94,4 @@ jobs:
 
       - name: Run tests
         run: |
-          modal run -m deepspeed.modal.torch_latest_ci
+          modal run -m deepspeed.modal_ci.torch_latest_ci
