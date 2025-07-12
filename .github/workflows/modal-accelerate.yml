@@ -87,7 +87,7 @@ jobs:
           cache: 'pip' # caching pip dependencies
 
       - name: Install build dependencies
-      # TODO: Need to determine whether these installs are redundant by subsquent modal.Image call
+      # TODO: Need to determine whether these installs are redundant by subesquent modal.Image call.
         run: |
           pip install uv==0.4.0 # much faster than pip
           uv pip install --system modal
