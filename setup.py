@@ -91,6 +91,7 @@ extras_require = {
     'inf': fetch_requirements('requirements/requirements-inf.txt'),
     'sd': fetch_requirements('requirements/requirements-sd.txt'),
     'triton': fetch_requirements('requirements/requirements-triton.txt'),
+    'deepcompile': fetch_requirements('requirements/requirements-deepcompile.txt'),
 }
 
 # Only install pynvml on nvidia gpus.
@@ -202,8 +203,12 @@ for op_name, builder in ALL_OPS.items():
 print(f'Install Ops={install_ops}')
 
 # Write out version/git info.
-git_hash_cmd = shlex.split("bash -c \"git rev-parse --short HEAD\"")
-git_branch_cmd = shlex.split("bash -c \"git rev-parse --abbrev-ref HEAD\"")
+if sys.platform == "win32":
+    git_hash_cmd = shlex.split("git rev-parse --short HEAD")
+    git_branch_cmd = shlex.split("git rev-parse --abbrev-ref HEAD")
+else:
+    git_hash_cmd = shlex.split("bash -c \"git rev-parse --short HEAD\"")
+    git_branch_cmd = shlex.split("bash -c \"git rev-parse --abbrev-ref HEAD\"")
 if command_exists('git') and not is_env_set('DS_BUILD_STRING'):
     try:
         result = subprocess.check_output(git_hash_cmd)

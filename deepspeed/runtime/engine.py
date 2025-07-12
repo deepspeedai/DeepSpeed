@@ -19,7 +19,7 @@ from torch.optim.lr_scheduler import _LRScheduler
 from torch._utils import _flatten_dense_tensors, _unflatten_dense_tensors
 from contextlib import contextmanager
 
-from typing import Callable, Dict, Union, Iterable, Container
+from typing import Callable, Dict, Union, Iterable, Container, List
 
 import deepspeed
 
@@ -43,6 +43,9 @@ from deepspeed.runtime.config import DEEPSPEED_OPTIMIZERS, \
     TORCH_ADAM_PARAM, ADAM_W_MODE, ADAM_W_MODE_DEFAULT, ZERO_ONE_ADAM_OPTIMIZER, MUADAM_OPTIMIZER, MUADAMW_OPTIMIZER, \
     MUSGD_OPTIMIZER, LION_OPTIMIZER
 
+from deepspeed.runtime.model_checkpointing.constants import ValidationMode, \
+    CHECKPOINT_TAG_VALIDATION, CHECKPOINT_WRITER, CHECKPOINT_SERIALIZATION
+
 from deepspeed.runtime.dataloader import DeepSpeedDataLoader
 from deepspeed.runtime.constants import \
     ROUTE_TRAIN, ROUTE_PREDICT, ROUTE_EVAL, \
@@ -62,6 +65,7 @@ from deepspeed.compression.constants import \
     WEIGHT_QUANTIZE_VERBOSE, \
     WEIGHT_QUANTIZE_KERNEL
 from deepspeed.checkpoint.constants import OPTIMIZER_STATE_DICT, FROZEN_PARAM_FRAGMENTS
+from deepspeed.checkpoint.utils import clone_tensors_for_torch_save
 from deepspeed.runtime.sparse_tensor import SparseTensor
 
 from deepspeed.runtime import lr_schedules
@@ -84,12 +88,14 @@ from deepspeed.runtime.data_pipeline.constants import DATA_SAMPLING, \
     RANDOM_LTD_LAYER_TOKEN_LR_SCHEDULE, RANDOM_LTD_LAYER_TOKEN_LR_ENABLED, \
     RANDOM_LTD_GLOBAL_BATCH_SIZE, RANDOM_LTD_MICRO_BATCH_SIZE, DATA_EFFICIENCY
 from deepspeed.runtime.data_pipeline.curriculum_scheduler import CurriculumScheduler
+from deepspeed.runtime.checkpoint_engine import (create_checkpoint_engine, TorchCheckpointEngine, CheckpointCommitInfo)
+
 from deepspeed.runtime.data_pipeline.data_routing.scheduler import RandomLTDScheduler
 from deepspeed.runtime.data_pipeline.data_routing.helper import remove_random_ltd_state_dict
 from deepspeed.runtime.data_pipeline.data_routing.basic_layer import RandomLayerTokenDrop
 
-from deepspeed.runtime.checkpoint_engine.torch_checkpoint_engine import TorchCheckpointEngine
 from deepspeed.utils.zero_to_fp32 import get_fp32_state_dict_from_zero_checkpoint
+from deepspeed.runtime.torch_autocast import init_autocast_params, get_default_autocast_lower_precision_modules, validate_nested_autocast
 
 from .pipe.module import PipelineModule
 from .utils import get_ma_status
@@ -106,6 +112,12 @@ from deepspeed.utils.logging import print_json_dist, print_configuration
 from deepspeed.accelerator import get_accelerator
 
 from deepspeed.runtime.config import DtypeEnum
+
+from deepspeed.compile.util import is_deepcompile_supported, get_deepcompile_handle, deepcompile_backward_prologue
+from deepspeed.compile.backend import register_compile_pass, opt_passes
+from deepspeed.compile.passes import zero3_compile, prefetch, selective_gather, offload_adam_states
+from deepspeed.compile.init_z1 import init_z1
+from deepspeed.compile.init_z3 import init_z3
 
 MEMORY_OPT_ALLREDUCE_SIZE = 500000000
 
@@ -231,6 +243,9 @@ class DeepSpeedEngine(Module):
         self._global_grad_norm = None
         self.use_ds_comm = False  # False --> Use torch.dist, True --> Use ds.comm backend.
         self.checkpoint_engine = None
+        self.optimizer = None
+        self.basic_optimizer = None
+        self.lr_scheduler = None
 
         self._is_gradient_accumulation_boundary = None
         self.scale_wrt_gas = None
@@ -271,8 +286,9 @@ class DeepSpeedEngine(Module):
         # Configure distributed model
         self._configure_distributed_model(model)
 
-        self.module_forward_pre_hook = self._create_module_forward_pre_hook()
-        self.module_forward_post_hook = self._create_module_forward_post_hook()
+        if not self.is_deepcompile_enabled():
+            self.module_forward_pre_hook = self._create_module_forward_pre_hook()
+            self.module_forward_post_hook = self._create_module_forward_post_hook()
 
         # needed for zero_to_fp32 weights reconstruction to remap nameless data to state_dict
         self.param_names = {param: name for name, param in model.named_parameters()}
@@ -300,9 +316,6 @@ class DeepSpeedEngine(Module):
             self.training_dataloader = None
 
         # Configure optimizer and scheduler
-        self.optimizer = None
-        self.basic_optimizer = None
-        self.lr_scheduler = None
         has_optimizer = False
 
         if optimizer or self.optimizer_name():
@@ -314,6 +327,9 @@ class DeepSpeedEngine(Module):
         # Convert model parameters from generator to list
         if not isinstance(model_parameters, list):
             model_parameters = list(model_parameters)
+
+        if self.torch_autocast_enabled():
+            init_autocast_params(self, self.torch_autocast_dtype(), self.torch_autocast_lower_precision_safe_modules())
 
         if has_optimizer:
             self._configure_optimizer(optimizer, model_parameters)
@@ -344,7 +360,7 @@ class DeepSpeedEngine(Module):
         self.save_non_zero_checkpoint = False
         self.save_zero_checkpoint = False
         if not isinstance(self.optimizer, DeepSpeedZeRoOffload):
-            self._configure_checkpointing(dist_init_required)
+            self._configure_checkpointing()
 
         if self.eigenvalue_enabled():
             self.eigenvalue = self._configure_eigenvalue()
@@ -377,6 +393,12 @@ class DeepSpeedEngine(Module):
         self.unflatten = _unflatten_dense_tensors
 
         self._is_compiled = False
+        if is_deepcompile_supported():
+            # Predefined compile passes
+            self.register_compile_pass(zero3_compile.NAME, zero3_compile.add_z3_gather_release)
+            self.register_compile_pass(prefetch.NAME, prefetch.schedule_prefetch)
+            self.register_compile_pass(selective_gather.NAME, selective_gather.selective_gather)
+            self.register_compile_pass(offload_adam_states.NAME, offload_adam_states.move_opt_states)
 
     def _optimized_linear_offload_setup(self):
         self.optimized_linear_base_weight_sharding = False
@@ -483,10 +505,18 @@ class DeepSpeedEngine(Module):
                                                                             prepend=True,
                                                                             with_kwargs=True)
 
+    def __del__(self):
+        self.destroy()
+
     def destroy(self):
         if self.optimizer is not None and hasattr(self.optimizer, 'destroy'):
             self.optimizer.destroy()
+        if self.is_deepcompile_enabled():
+            get_deepcompile_handle().cleanup()
         debug_clear_module_and_param_names()
+
+        if self.checkpoint_engine is not None and self.checkpoint_engine.is_decoupled():
+            self.checkpoint_engine.cleanup()
 
     def _get_model_parameters(self):
         if self.autotuning_profile_model_info():
@@ -590,11 +620,17 @@ class DeepSpeedEngine(Module):
         else:
             raise AttributeError(f"'{type(self).__name__}' object has no attribute '{name}'")
 
+    def checkpoint_serialization_enabled(self):
+        return self._config.checkpoint_config[CHECKPOINT_SERIALIZATION]
+
+    def checkpoint_writer_enabled(self):
+        return self._config.checkpoint_config[CHECKPOINT_WRITER] is not None
+
     def checkpoint_tag_validation_enabled(self):
-        return self._config.checkpoint_tag_validation_enabled
+        return self._config.checkpoint_config[CHECKPOINT_TAG_VALIDATION] != ValidationMode.IGNORE
 
     def checkpoint_tag_validation_fail(self):
-        return self._config.checkpoint_tag_validation_fail
+        return self._config.checkpoint_config[CHECKPOINT_TAG_VALIDATION] == ValidationMode.FAIL
 
     def elasticity_enabled(self):
         return self._config.elasticity_enabled
@@ -914,13 +950,13 @@ class DeepSpeedEngine(Module):
         return self._config.graph_harvesting
 
     def fp16_enabled(self):
-        return self._config.fp16_enabled
+        return self._config.float16_config.enabled
 
     def bfloat16_enabled(self):
-        return self._config.bfloat16_enabled
+        return self._config.bfloat16_config.enabled
 
     def fp16_master_weights_and_gradients(self):
-        return self._config.fp16_master_weights_and_gradients
+        return self._config.float16_config.fp16_master_weights_and_grads
 
     def amp_enabled(self):
         return self._config.amp_enabled
@@ -928,11 +964,21 @@ class DeepSpeedEngine(Module):
     def amp_params(self):
         return self._config.amp_params
 
+    def torch_autocast_enabled(self) -> bool:
+        return self._config.torch_autocast_enabled
+
+    def torch_autocast_dtype(self) -> torch.dtype:
+        return self._config.torch_autocast_dtype
+
+    def torch_autocast_lower_precision_safe_modules(self) -> List[str]:
+        module_names = self._config.torch_autocast_lower_precision_safe_modules
+        return get_default_autocast_lower_precision_modules() if module_names is None else module_names
+
     def fp16_auto_cast(self):
-        return self._config.fp16_auto_cast
+        return self._config.float16_config.auto_cast
 
     def loss_scale(self):
-        return self._config.loss_scale
+        return self._config.float16_config.loss_scale
 
     def gradient_accumulation_steps(self):
         return self._config.gradient_accumulation_steps
@@ -1001,13 +1047,13 @@ class DeepSpeedEngine(Module):
         return self._config.gradient_clipping
 
     def dynamic_loss_scale(self):
-        return self._config.loss_scale == 0
+        return self._config.float16_config.loss_scale == 0
 
     def initial_dynamic_scale(self):
-        return self._config.initial_dynamic_scale
+        return self._config.float16_config.initial_dynamic_scale()
 
     def dynamic_loss_scale_args(self):
-        return self._config.dynamic_loss_scale_args
+        return self._config.float16_config.dynamic_loss_scale_args()
 
     def swap_tensor_config(self):
         return self._config.swap_tensor_config
@@ -1054,27 +1100,22 @@ class DeepSpeedEngine(Module):
 
         log_dist(f'DeepSpeed LR Scheduler = {self.lr_scheduler}', ranks=[0])
 
-    def _configure_checkpointing(self, dist_init_required):
-        self.checkpoint_engine = TorchCheckpointEngine()
-
-        if self._config is not None and self._config.nebula_config.enabled:
-            try:
-                from deepspeed.runtime.checkpoint_engine.nebula_checkpoint_engine import \
-                    NebulaCheckpointEngine
-                self.checkpoint_engine = NebulaCheckpointEngine(config_params=self._config.nebula_config)
-            except ImportError as err:
-                logger.error(f"No torch_nebula was found! Will fall back to torch.save. Details: {err}")
-                self.checkpoint_engine = TorchCheckpointEngine()
+    def _configure_checkpointing(self):
+        # Enable optimization to parallelize checkpointing of DP state
+        optimize_dp_state = not self.zero_optimization_partition_weights()
+        self.checkpoint_engine = create_checkpoint_engine(config_params=self._config,
+                                                          groups=groups,
+                                                          zero_stage=self.zero_optimization_stage(),
+                                                          has_moe_layers=self.has_moe_layers,
+                                                          optimize_dp_state=optimize_dp_state)
 
         dp_rank = groups._get_sequence_data_parallel_rank()
-
         rank = self.local_rank if self.use_node_local_storage() else dp_rank
 
-        # only the first data parallel process needs to store the model checkpoint
-        # if you want to use node local storage this must be done by rank 0 on each
-        # node
-        self.save_non_zero_checkpoint = (rank == 0) or (self.zero_optimization_partition_weights()
-                                                        and self.is_first_weights_partition_group())
+        # Determine if this data parallel process needs to store the model checkpoint
+        if self.checkpoint_engine.is_data_parallel_writer(rank) \
+            or (self.zero_optimization_partition_weights() and self.is_first_weights_partition_group()):
+            self.save_non_zero_checkpoint = True
 
         if self.zero_optimization() or self.bfloat16_enabled():
             param_rank = dist.get_rank(group=self.optimizer.dp_process_group)
@@ -1288,6 +1329,15 @@ class DeepSpeedEngine(Module):
             self.communication_data_type = self._config.seq_parallel_communication_data_type
             self.seq_parallel_group = groups._get_sequence_parallel_group()
 
+        if dist.get_rank() == 0:
+            summary = "********** distributed groups summary **********\n"
+            summary += f"\t {self.dp_world_size=}\n"
+            summary += f"\t {self.mp_world_size=}\n"
+            summary += f"\t {self.seq_dp_world_size=}\n"
+            summary += f"\t {self.sequence_parallel_size=}\n"
+            summary += "***********************************************"
+            logger.info(summary)
+
         if not (self.amp_enabled() or is_zero_init_model):
             self._broadcast_model()
 
@@ -1385,7 +1435,7 @@ class DeepSpeedEngine(Module):
         self._check_for_duplicates(basic_optimizer)
 
         self.basic_optimizer = basic_optimizer
-        log_dist("DeepSpeed Basic Optimizer = {}".format(basic_optimizer.__class__.__name__), ranks=[0])
+        log_dist(f"DeepSpeed Basic Optimizer = {basic_optimizer.__class__.__name__}", ranks=[0])
 
         optimizer_wrapper = self._do_optimizer_sanity_check(basic_optimizer)
 
@@ -1550,10 +1600,12 @@ class DeepSpeedEngine(Module):
         initial_dynamic_scale = self.initial_dynamic_scale()
         dynamic_loss_args = self.dynamic_loss_scale_args()
         clip_grad = self.gradient_clipping()
+
         if APEX_INSTALLED:
             fused_opts = (apex.optimizers.FusedAdam, FusedAdam)
         else:
             fused_opts = FusedAdam
+
         if isinstance(optimizer, fused_opts) \
                 or self.optimizer_name() in [ONEBIT_ADAM_OPTIMIZER, ZERO_ONE_ADAM_OPTIMIZER]:
             if self.dynamic_loss_scale():
@@ -1573,6 +1625,7 @@ class DeepSpeedEngine(Module):
                 )
             else:
                 log_dist(f'Creating fp16 optimizer with static loss scale: {self.loss_scale()}', ranks=[0])
+                timers = self.timers if self.wall_clock_breakdown() else NoopTimer()
                 optimizer = FP16_Optimizer(
                     optimizer,
                     deepspeed=self,
@@ -1580,6 +1633,7 @@ class DeepSpeedEngine(Module):
                     mpu=self.mpu,
                     clip_grad=clip_grad,
                     fused_adam_legacy=self.optimizer_legacy_fusion(),
+                    timers=timers,
                     has_moe_layers=self.has_moe_layers,
                 )
         else:
@@ -1608,6 +1662,7 @@ class DeepSpeedEngine(Module):
         timers = self.timers if self.wall_clock_breakdown() else NoopTimer()
         optimizer = BF16_Optimizer(optimizer,
                                    self.param_names,
+                                   bfloat16_config=self._config.bfloat16_config,
                                    mpu=self.mpu,
                                    clip_grad=clip_grad,
                                    allgather_bucket_size=self.zero_allgather_bucket_size(),
@@ -1615,7 +1670,6 @@ class DeepSpeedEngine(Module):
                                    timers=timers,
                                    grad_acc_dtype=self.get_data_types()[1],
                                    graph_harvesting=self.graph_harvesting(),
-                                   immediate_grad_update=self._config.bfloat16_immediate_grad_update,
                                    has_moe_layers=self.has_moe_layers)
 
         return optimizer
@@ -1625,6 +1679,13 @@ class DeepSpeedEngine(Module):
 
         mics_shard_size = self.mics_shard_size()
         model_dtype, gradient_accumulation_dtype = self.get_data_types()
+
+        if self.bfloat16_enabled():
+            check_grad_overflow = self._config.bfloat16_config.check_grad_overflow
+        elif self.fp16_enabled():
+            check_grad_overflow = True
+        else:
+            check_grad_overflow = False
 
         timers = self.timers if self.wall_clock_breakdown() else NoopTimer()
 
@@ -1677,7 +1738,8 @@ class DeepSpeedEngine(Module):
                 fp16_master_weights_and_gradients=self.fp16_master_weights_and_gradients(),
                 gradient_accumulation_dtype=gradient_accumulation_dtype,
                 communication_data_type=self.communication_data_type,
-                elastic_checkpoint=self.zero_elastic_checkpoint())
+                elastic_checkpoint=self.zero_elastic_checkpoint(),
+                check_grad_overflow=check_grad_overflow)
 
         elif zero_stage == ZeroStageEnum.weights:
             assert not self.has_moe_layers, "MoE not supported with Stage 3"
@@ -2032,7 +2094,15 @@ class DeepSpeedEngine(Module):
         if self.autotuning_profile_model_info():
             ma = get_ma_status()
 
-        loss = self.module(*inputs, **kwargs)
+        if self.is_deepcompile_enabled() and hasattr(self, "launch_compile_passes"):
+            # We can't have this in forward prologue as the compiler compiles hooks including the forward prologue.
+            self.launch_compile_passes(self.global_steps)
+
+        validate_nested_autocast(self)
+        with torch.autocast(device_type=get_accelerator().device_name(),
+                            dtype=self.torch_autocast_dtype(),
+                            enabled=self.torch_autocast_enabled()):
+            loss = self.module(*inputs, **kwargs)
 
         if self.autotuning_profile_model_info():
             activation_mem = get_ma_status() - ma
@@ -2104,7 +2174,8 @@ class DeepSpeedEngine(Module):
             scale_wrt_gas = self.scale_wrt_gas
 
         # scale loss w.r.t. gradient accumulation if reduction is not disabled
-        do_gradient_reduction = self.enable_backward_allreduce and not self.inside_no_sync_ctxt
+        do_gradient_reduction = self.enable_backward_allreduce and not self.inside_no_sync_ctxt and not self.is_deepcompile_enabled(
+        )
         if do_gradient_reduction and self.gradient_accumulation_steps() > 1 and scale_wrt_gas:
             loss = self._scale_loss_by_gas(loss.float())
 
@@ -2121,6 +2192,9 @@ class DeepSpeedEngine(Module):
                     )]
                     self.monitor.write_events(self.summary_events)
 
+        if self.is_deepcompile_enabled():
+            deepcompile_backward_prologue(self.is_gradient_accumulation_boundary())
+
         return loss
 
     def _backward_epilogue(self):
@@ -2128,6 +2202,7 @@ class DeepSpeedEngine(Module):
         if self.enable_backward_allreduce and not self.inside_no_sync_ctxt:
             # Traditional code path that allreduces the module parameter grads
             self.allreduce_gradients()
+
         self._stop_timers(self.engine_timers.backward_reduce_timers)
         see_memory_usage("Engine after backward", force=self.memory_breakdown())
 
@@ -2337,6 +2412,9 @@ class DeepSpeedEngine(Module):
         # Update the model when we reach gradient accumulation boundaries
         if self.is_gradient_accumulation_boundary():
             self.gas_boundary_ctr += 1
+
+            if self.checkpoint_engine.is_decoupled():
+                self._commit_decoupled_checkpoint()
 
             if (self.eigenvalue_enabled() and (self.gas_boundary_ctr % self.eigenvalue_gas_boundary_resolution() == 0)
                     and self.quantizer.any_precision_switch()):
@@ -3282,7 +3360,9 @@ class DeepSpeedEngine(Module):
 
         # Ensure tag is a string
         tag = str(tag)
-        self.checkpoint_engine.create(tag)
+        commit_info = CheckpointCommitInfo(tag=tag, save_dir=save_dir, save_latest=save_latest)
+
+        self.checkpoint_engine.create(commit_info)
 
         # Ensure checkpoint tag is consistent across ranks
         self._checkpoint_tag_validation(tag)
@@ -3329,14 +3409,31 @@ class DeepSpeedEngine(Module):
             self.optimizer.checkpoint_event_epilogue()
 
         # Save latest checkpoint tag
-        self.checkpoint_engine.commit(tag)
-        if save_latest and rank == 0:
-            with open(os.path.join(save_dir, 'latest'), 'w') as fd:
-                fd.write(tag)
+        if not self.checkpoint_engine.is_decoupled():
+            self.checkpoint_engine.commit(tag)
+            if save_latest and self.global_rank == 0:
+                with open(os.path.join(save_dir, 'latest'), 'w') as fd:
+                    fd.write(tag)
 
         dist.barrier()
 
         return True
+
+    def _commit_decoupled_checkpoint(self):
+        assert self.checkpoint_engine.is_decoupled(), \
+            f'{self.checkpoint_engine} is not a Decoupled Checkpoint Engine'
+
+        commit_info = self.checkpoint_engine.get_commit_info()
+        if commit_info is None:
+            return
+
+        self.checkpoint_engine.commit(commit_info)
+
+        if self.global_rank == 0 and commit_info.save_latest:
+            with open(os.path.join(commit_info.save_dir, 'latest'), 'w') as fd:
+                fd.write(commit_info.tag)
+
+        dist.barrier()
 
     def _get_non_moe_state_dict(self, full_state_dict):
         """
@@ -3350,6 +3447,7 @@ class DeepSpeedEngine(Module):
 
     def _save_moe_checkpoint(self, save_dir, tag, client_state={}, exclude_frozen_parameters=False):
         save_path = self._get_ckpt_name(save_dir, tag)
+
         # A hack to save the checkpointing directory. Pipeline parallelism overrides
         # module_state_dict() and uses this path to save the model. module_state_dict()
         # then instead just returns None.
@@ -3363,7 +3461,8 @@ class DeepSpeedEngine(Module):
                 expp_rank = groups._get_expert_parallel_rank(group_name)
                 exp_dp_rank = groups._get_expert_data_parallel_rank(group_name)
                 # print(expp_rank, exp_dp_rank)
-                if exp_dp_rank != 0:
+                # if exp_dp_rank != 0:
+                if not self.checkpoint_engine.is_data_parallel_writer(exp_dp_rank):
                     moe_layer_id += 1
                     continue
 
@@ -3399,7 +3498,8 @@ class DeepSpeedEngine(Module):
                     moe_save_path = self._get_expert_ckpt_name(save_dir, moe_layer_id, global_expert_id, tag, self.mpu)
                     if self.random_ltd_enabled():
                         expert_state_dict = remove_random_ltd_state_dict(expert_state_dict)
-                    self.checkpoint_engine.save(expert_state_dict, moe_save_path)
+                    saveable_state_dict = clone_tensors_for_torch_save(expert_state_dict)
+                    self.checkpoint_engine.save(saveable_state_dict, moe_save_path)
                 moe_layer_id += 1
 
         self._curr_ckpt_path = os.path.join(save_dir, tag)
@@ -3411,14 +3511,17 @@ class DeepSpeedEngine(Module):
         # In the case of E + D parallelism, only the
         # first expert parallel group should save the expert weights
         # since each expert parallel group is a copy of the model's experts
-        if exp_dp_rank == 0:
-            # Save optimizer states. They are different across each exp parallel rank.
-            optimizer_state = {
-                'optimizer': self.optimizer.state_dict() if self.optimizer and not self.zero_optimization() else None
-            }
-            # TODO: why use BufferedWriter not the path
-            file_path = self._get_optimizer_ckpt_name(save_dir, tag, expp_rank)
-            self.checkpoint_engine.save(optimizer_state, file_path)
+        if not self.checkpoint_engine.is_data_parallel_writer(exp_dp_rank):
+            return
+
+        # Save optimizer states. They are different across each exp parallel rank.
+        optimizer_state = {
+            'optimizer': self.optimizer.state_dict() if self.optimizer and not self.zero_optimization() else None
+        }
+        # TODO: why use BufferedWriter not the path
+        file_path = self._get_optimizer_ckpt_name(save_dir, tag, expp_rank)
+        saveable_state_dict = clone_tensors_for_torch_save(optimizer_state)
+        self.checkpoint_engine.save(saveable_state_dict, file_path)
 
         # Load flow uses below saved file for model parameters, RNG and more
         if groups._get_data_parallel_rank() == 0:
@@ -3457,7 +3560,8 @@ class DeepSpeedEngine(Module):
             }
             state.update(client_state)
             logger.info(f'Saving model checkpoint: {save_path}')
-            self.checkpoint_engine.save(state, save_path)
+            saveable_state_dict = clone_tensors_for_torch_save(state)
+            self.checkpoint_engine.save(saveable_state_dict, save_path)
 
     def _create_checkpoint_file(self, save_dir, tag, zero_checkpoint):
         name_function = (self._get_zero_ckpt_name if zero_checkpoint else self._get_ckpt_name)
@@ -3477,8 +3581,6 @@ class DeepSpeedEngine(Module):
         for rank in range(dist.get_world_size(self.optimizer.dp_process_group)):
             if rank == self.global_rank:
                 success = self._create_checkpoint_file(save_dir, tag, True)
-
-            dist.barrier(group=self.optimizer.dp_process_group)
 
         return success
 
@@ -3520,10 +3622,10 @@ class DeepSpeedEngine(Module):
                      ds_config=self.config,
                      ds_version=version)
         state.update(client_state)
+        log_dist(message=f'Saving model checkpoint: {save_path}', ranks=[0])
 
         if self.save_non_zero_checkpoint:
-            log_dist(message=f'Saving model checkpoint: {save_path}', ranks=[0, 1])
-            self.checkpoint_engine.save(state, save_path)
+            self.checkpoint_engine.save(state_dict=state, path=save_path)
 
     def _get_buffer_names(self):
         buffer_names = []
@@ -3674,7 +3776,7 @@ class DeepSpeedEngine(Module):
         if self.global_rank == 0:
             self._copy_recovery_script(save_path)
         ckpt_type = 'zero' if self.zero_optimization() else 'bf16_zero'
-        logger.info(f'{ckpt_type} checkpoint saved {zero_checkpoint_name}')
+        #logger.info(f'{ckpt_type} checkpoint saved {zero_checkpoint_name}')
 
     def _replace_module_consolidated_state_dict(self):
         """
@@ -3829,7 +3931,8 @@ class DeepSpeedEngine(Module):
 
         tag = f"global_step{self.global_steps}"
         tag = str(tag)
-        self.checkpoint_engine.create(tag)
+        commit_info = CheckpointCommitInfo(tag=tag, save_dir=save_dir, save_latest=False)
+        self.checkpoint_engine.create(commit_info)
 
         if dist.get_rank() == 0:
             self.checkpoint_engine.makedirs(save_dir, exist_ok=True)
@@ -3849,7 +3952,7 @@ class DeepSpeedEngine(Module):
             gc.collect()
             get_accelerator().empty_cache()
 
-    def compile(self, backend=get_accelerator().get_compile_backend(), compile_kwargs={}) -> None:
+    def compile(self, backend=get_accelerator().get_compile_backend(), compile_kwargs={}, schedule=None) -> None:
         """Compile the module using the specified backend and kwargs.
         If a compiler_fn is set, it will be used instead of torch.compile().
         """
@@ -3865,9 +3968,57 @@ class DeepSpeedEngine(Module):
         if 'backend' in compile_kwargs:
             logger.warning("The `backend` in `compile_kwargs` will be overridden. Use the `backend` argument instead.")
 
+        logger.info(f"Compiling deepcompile={self.is_deepcompile_enabled()} backend={backend}")
+
+        enable_deepcompile = self.is_deepcompile_enabled()
+        if enable_deepcompile and self.zero_optimization_stage() != ZeroStageEnum.optimizer_states \
+                and self.zero_optimization_stage() != ZeroStageEnum.weights \
+                and self.zero_optimization_stage() != ZeroStageEnum.gradients:
+            logger.info(
+                f"Currently DeepCompile supports ZeRO stage 1, 2, or 3 only, but ZeRO stage is set to {self.zero_optimization_stage()}. Falling back to the torch compiler."
+            )
+            enable_deepcompile = False
+
+        if enable_deepcompile:
+
+            if schedule is not None:
+
+                def passes_name_to_fn(passes):
+                    for p in passes:
+                        assert callable(p) or p in opt_passes, f"Unknown pass {p}"
+                    return [p if callable(p) else opt_passes[p] for p in passes]
+
+                schedule = [(step, passes_name_to_fn(passes)) for step, passes in schedule]
+
+            assert backend in ['inductor', 'eager'], f"Backend {backend} is not supported for DeepCompile."
+
+            compile_config = self._config.compile_config
+            if (("zero_optimization" in self.config and "offload_optimizer" in self.config["zero_optimization"]
+                 and "offload_param" in self.config["zero_optimization"])
+                    and self._config.zero_config.offload_param.device == "cpu"
+                    and self._config.zero_config.offload_optimizer.device == "cpu"):
+                compile_config.offload_parameters = True
+            if self.zero_optimization_stage() == ZeroStageEnum.optimizer_states:
+                backend = init_z1(self, backend, compile_config, compile_kwargs, schedule)
+            elif self.zero_optimization_stage() == ZeroStageEnum.gradients:
+                backend = init_z1(self, backend, compile_config, compile_kwargs, schedule, use_z2=True)
+            elif self.zero_optimization_stage() == ZeroStageEnum.weights:
+                backend = init_z3(self, backend, compile_config, compile_kwargs, schedule)
+
         # create new dict to avoid modifying original dict
         self.module.compile(**{**compile_kwargs, 'backend': backend})
+
         self._is_compiled = True
+
+    def get_compile_time(self):
+        from deepspeed.compile.backend import opt_pass_times
+        return opt_pass_times
+
+    def register_compile_pass(self, pass_name: str, pass_fn: Callable) -> None:
+        register_compile_pass(pass_name, pass_fn)
+
+    def is_deepcompile_enabled(self):
+        return self._config.compile_config.deepcompile
 
     @property
     def is_compiled(self) -> bool:
@@ -3894,7 +4045,9 @@ class DeepSpeedEngine(Module):
         param_offload_config = self.zero_offload_param()
         assert param_offload_config is None or param_offload_config.device == OffloadDeviceEnum.none, "Moving states across devices is not supported for offloaded parameters."
 
-        assert not self.zero_offload_param(), "Moving states across devices is not supported for offloaded parameters."
+        assert not isinstance(
+            self.optimizer,
+            DeepSpeedZeRoOffload), "Moving states across devices is not supported without an optimizer."
 
         if device == OffloadDeviceEnum.none:
             logger.warning("No device specified for offloading states.")
@@ -3913,4 +4066,9 @@ class DeepSpeedEngine(Module):
         """
         assert self.zero_optimization_stage(
         ) == ZeroStageEnum.weights, "Moving buffers back is supported only for ZeRO stage 3."
+
+        assert not isinstance(
+            self.optimizer,
+            DeepSpeedZeRoOffload), "Moving states across devices is not supported without an optimizer."
+
         self.optimizer.reload_states(non_blocking=non_blocking)

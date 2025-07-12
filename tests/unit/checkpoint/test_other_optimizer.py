@@ -48,10 +48,14 @@ class TestOtherOptimizerCheckpoint(DistributedTest):
                 }
             }
         }
+        dtype = torch.float
         if get_accelerator().is_fp16_supported():
             config_dict["fp16"] = {"enabled": True}
-        elif get_accelerator().is_fp16_supported():
-            config_dict["bf16"] = {"enabled": True}
+            dtype = torch.float16
+
+        # with bf16 fails with: DeepSpeed lamb optimizer requires dynamic loss scaling
+        # if get_accelerator().is_bf16_supported():
+        #     config_dict["bf16"] = {"enabled": True}
 
         args = args_from_dict(tmpdir, config_dict)
         hidden_dim = 10
@@ -62,14 +66,16 @@ class TestOtherOptimizerCheckpoint(DistributedTest):
                                             models=models,
                                             hidden_dim=hidden_dim,
                                             tmpdir=tmpdir,
-                                            load_optimizer_states=True)
+                                            load_optimizer_states=True,
+                                            dtype=dtype)
 
         # Ignore optimizer states
         checkpoint_correctness_verification(config_dict,
                                             models=models,
                                             hidden_dim=hidden_dim,
                                             tmpdir=tmpdir,
-                                            load_optimizer_states=False)
+                                            load_optimizer_states=False,
+                                            dtype=dtype)
 
     def test_checkpoint_fused_optimizer(self, tmpdir):
         if get_accelerator().device_name() == "cpu":
@@ -87,10 +93,10 @@ class TestOtherOptimizerCheckpoint(DistributedTest):
                 }
             },
         }
+        dtype = torch.float
         if get_accelerator().is_fp16_supported():
             config_dict["fp16"] = {"enabled": True}
-        elif get_accelerator().is_bf16_supported():
-            config_dict["bf16"] = {"enabled": True}
+            dtype = torch.float16
 
         args = args_from_dict(tmpdir, config_dict)
         hidden_dim = 10
@@ -101,14 +107,16 @@ class TestOtherOptimizerCheckpoint(DistributedTest):
                                             models=models,
                                             hidden_dim=hidden_dim,
                                             tmpdir=tmpdir,
-                                            load_optimizer_states=True)
+                                            load_optimizer_states=True,
+                                            dtype=dtype)
 
         # Ignore optimizer states
         checkpoint_correctness_verification(config_dict,
                                             models=models,
                                             hidden_dim=hidden_dim,
                                             tmpdir=tmpdir,
-                                            load_optimizer_states=False)
+                                            load_optimizer_states=False,
+                                            dtype=dtype)
 
     def test_checkpoint_fp32_optimizer(self, tmpdir):
         config_dict = {

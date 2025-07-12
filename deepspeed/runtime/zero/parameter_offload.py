@@ -73,6 +73,8 @@ class ZeROOrderedDict(OrderedDict):
 
 def _inject_parameters(module, cls):
     for module in module.modules():
+        module._original_parameters = module._parameters
+
         if cls == ZeROOrderedDict:
             new_param = cls(parent_module=module)
         else:
@@ -80,6 +82,7 @@ def _inject_parameters(module, cls):
 
         for key, param in module._parameters.items():
             new_param[key] = param
+
         module._parameters = new_param
 
 
@@ -205,7 +208,8 @@ class DeepSpeedZeRoOffload(object):
                 zero_params[0].convert_to_zero_parameters(param_list=non_zero_params)
             else:
                 group = None
-                if mpu:
+                # parallel_state_sp doesn't have get_data_parallel_group
+                if mpu and hasattr(mpu, "get_data_parallel_group"):
                     group = mpu.get_data_parallel_group()
 
                 Init(module=module,
@@ -232,6 +236,8 @@ class DeepSpeedZeRoOffload(object):
         for hook in self.backward_hooks:
             hook.remove()
 
+        self.fwd_pre_hook.remove()
+
         print_rank_0(f'Deleted module hooks: forward = {num_forward_hooks}, backward = {num_backward_hooks}',
                      force=False)
 
@@ -244,7 +250,7 @@ class DeepSpeedZeRoOffload(object):
 
             self.get_param_coordinator().reset_step()
 
-        self.module.register_forward_pre_hook(_start_of_forward_hook)
+        self.fwd_pre_hook = self.module.register_forward_pre_hook(_start_of_forward_hook)
 
         #likely one of them should be enough but just to be safe
         self._register_deepspeed_module(self.module)
@@ -268,7 +274,7 @@ class DeepSpeedZeRoOffload(object):
                 total_persistent_parameters += param.ds_numel
 
         print_rank_0(
-            f"Parameter Offload: Total persistent parameters: {total_persistent_parameters} in {params_count} params",
+            f"Parameter Offload - Persistent parameters statistics: param_count = {params_count}, numel = {total_persistent_parameters}",
             force=True)
 
         return persistent_params
@@ -287,7 +293,7 @@ class DeepSpeedZeRoOffload(object):
                 count[0] = count[0] + 1
                 self._register_deepspeed_module(child, count=count)
 
-        @instrument_w_nvtx
+        @torch.compiler.disable
         def _pre_forward_module_hook(module, *args):
             self.pre_sub_module_forward_function(module)
 
@@ -365,9 +371,9 @@ class DeepSpeedZeRoOffload(object):
             return _apply_forward_and_backward_to_tensors_only(module, _run_before_forward_function,
                                                                _run_after_backward_hook, inputs)
 
+        @torch.compiler.disable
         def _post_backward_module_hook(module, inputs):
-            if not hasattr(module, "ds_grads_remaining"):
-                module.ds_grads_remaining = 0
+            module.ds_grads_remaining = 0
 
             return apply_to_tensors_only(module.post_bwd_fn.apply,
                                          inputs,
@@ -475,7 +481,7 @@ class DeepSpeedZeRoOffload(object):
             force=False)
 
         param_coordinator = self.get_param_coordinator()
-        param_coordinator.release_sub_module(sub_module)
+        param_coordinator.release_sub_module(sub_module, forward=True)
 
         see_memory_usage(
             f"After sub module function {sub_module.__class__.__name__}  {sub_module.ds_id} after release",
@@ -497,7 +503,7 @@ class DeepSpeedZeRoOffload(object):
             f"After sub module backward function {sub_module.__class__.__name__} {sub_module.ds_id} before release",
             force=False)
 
-        self.get_param_coordinator().release_sub_module(sub_module)
+        self.get_param_coordinator().release_sub_module(sub_module, forward=False)
 
         see_memory_usage(
             f"After sub module backward function {sub_module.__class__.__name__} {sub_module.ds_id} after release",

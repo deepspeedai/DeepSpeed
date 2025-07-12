@@ -83,8 +83,7 @@ def get_default_compute_capabilities():
 cuda_minor_mismatch_ok = {
     10: ["10.0", "10.1", "10.2"],
     11: ["11.0", "11.1", "11.2", "11.3", "11.4", "11.5", "11.6", "11.7", "11.8"],
-    12: ["12.0", "12.1", "12.2", "12.3", "12.4", "12.5", "12.6",
-         "12.8"],  # There does not appear to be a CUDA Toolkit 12.7
+    12: ["12.0", "12.1", "12.2", "12.3", "12.4", "12.5", "12.6", "12.8", "12.9"],  # There is no CUDATk 12.7
 }
 
 
@@ -571,6 +570,8 @@ class OpBuilder(ABC):
         nvcc_args = self.strip_empty_entries(self.nvcc_args())
         cxx_args = self.strip_empty_entries(self.cxx_args())
 
+        cxx_args.append("-UC10_USE_GLOG")
+        nvcc_args.append("-UC10_USE_GLOG")
         if isinstance(self, CUDAOpBuilder):
             if not self.build_for_cpu and self.enable_bf16:
                 cxx_args.append("-DBF16_AVAILABLE")
@@ -590,6 +591,7 @@ class OpBuilder(ABC):
                          extra_cflags=cxx_args,
                          extra_cuda_cflags=nvcc_args,
                          extra_ldflags=self.strip_empty_entries(self.extra_ldflags()),
+                         with_cuda=True if (isinstance(self, CUDAOpBuilder) and not self.build_for_cpu) else None,
                          verbose=verbose)
 
         build_duration = time.time() - start_build

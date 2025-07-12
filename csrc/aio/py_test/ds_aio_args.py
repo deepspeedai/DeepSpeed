@@ -9,6 +9,7 @@ Functionality of swapping optimizer tensors to/from (NVMe) storage devices.
 import argparse
 import os
 from test_ds_aio_utils import refine_integer_value
+from ds_aio_constants import AIO_HANDLE, AIO_BASIC, TORCH_FAST_IO, TORCH_IO, VALID_ENGINES
 from deepspeed.accelerator import get_accelerator
 
 MAPPING_DELIMITER = ':'
@@ -20,6 +21,9 @@ def refine_args(args):
 
     if args.block_size and type(args.block_size) == str:
         args.block_size = refine_integer_value(args.block_size)
+
+    if args.fast_io_size and type(args.fast_io_size) == str:
+        args.fast_io_size = refine_integer_value(args.fast_io_size)
 
     return args
 
@@ -83,6 +87,19 @@ def validate_args(args):
         no_error = no_error and no_mapping_error
         error_messages += mapping_error_messages
 
+    # Validate --engine
+    if args.engine not in VALID_ENGINES:
+        no_error = False
+        error_messages.append(f'Invalid engine {args.engine}. Valid options = {VALID_ENGINES}')
+
+    # Validate --engine=torch_io
+    if args.engine == TORCH_IO:
+        if args.read:
+            no_error = False
+            error_messages.append(f'Read not currently supported for --engine={TORCH_IO}')
+
+    if not no_error:
+        print(f'Found {len(error_messages)} validation error(s)')
     # Validate --gpu, --use_gds
     if args.use_gds and not args.gpu:
         error_messages.append(f'--gpu must be set to transfer with --use_gds')
@@ -111,6 +128,8 @@ def parse_arguments():
 
     parser.add_argument('--io_size', type=str, default=None, required=True, help='Number of bytes to read or write.')
 
+    parser.add_argument('--fast_io_size', type=str, default='64M', help='Size of fast_io pinned buffer (bytes).')
+
     parser.add_argument('--read', action='store_true', help='Perform read I/O (default is write)')
 
     parser.add_argument('--multi_process',
@@ -138,7 +157,13 @@ def parse_arguments():
 
     parser.add_argument('--validate', action='store_true', help='Perform validation of I/O transfer in library.')
 
-    parser.add_argument('--handle', action='store_true', help='Use AIO handle.')
+    parser.add_argument(
+        '--engine',
+        type=str,
+        default=AIO_HANDLE,
+        help=
+        f'Engine to perform I/O. Options are [{AIO_HANDLE}, {AIO_BASIC}, {TORCH_IO}, {TORCH_FAST_IO}]. Default is aio_handle'
+    )
 
     parser.add_argument('--loops', type=int, default=3, help='Count of operation repetitions')
 
@@ -152,6 +177,20 @@ def parse_arguments():
                         action='store_true',
                         help='For GPU memory transfers, measure impact of bounce buffer pinning on critical path.')
 
+    parser.add_argument('--torch_legacy_save', action='store_true', help='Use torch legacy save approach')
+
+    parser.add_argument('--use_accelerator_pin_memory',
+                        action='store_true',
+                        help='Obtain pinned (CPU page-locked) tensors from accelerator')
+
+    parser.add_argument('--warmup_loops', type=int, default=1, help='Count of operation warmup repetitions')
+
+    parser.add_argument('--include_warmup_time', action='store_true', help='Include warmup latency in results')
+
+    parser.add_argument('--different_file_each_iteration',
+                        action='store_true',
+                        help='Read/write a different file on each iteration.')
+
     args = parser.parse_args()
     print(f'args = {args}')
     return args
@@ -163,7 +202,7 @@ def get_validated_args():
     if not validate_args(args):
         quit()
     print(f'Successful validation of command line arguments')
-
+    args.total_loops = args.warmup_loops + args.loops
     peer_tag = 'gpu' if args.gpu else 'process'
     args.mapping_dict = _get_mapping_dict(args)
     args.mapping_list = [(device_id, folder) for device_id, folder in args.mapping_dict.items()]

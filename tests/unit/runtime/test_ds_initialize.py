@@ -23,6 +23,13 @@ from deepspeed.accelerator import get_accelerator
 from deepspeed.ops.op_builder import FusedAdamBuilder
 
 
+# Ensure client multiprocessing is not broken by deepspeed import
+@pytest.mark.parametrize('method', ['spawn', 'fork', 'forkserver'])
+def test_start_method_safety(method):
+    import torch.multiprocessing as mp
+    mp.set_start_method(method)
+
+
 @pytest.mark.parametrize('zero_stage', [0, 3])
 class TestNoOptim(DistributedTest):
     world_size = 1
@@ -40,10 +47,10 @@ class TestNoOptim(DistributedTest):
                 }
             }
         }
-        if get_accelerator().is_fp16_supported():
-            ds_config["fp16"] = {"enabled": True}
-        elif get_accelerator().is_bf16_supported():
+        if get_accelerator().is_bf16_supported():
             ds_config["bf16"] = {"enabled": True}
+        elif get_accelerator().is_fp16_supported():
+            ds_config["fp16"] = {"enabled": True}
         # 20B test
         #hidden_dim = 16 * 1024
         hidden_dim = 4
