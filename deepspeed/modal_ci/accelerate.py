@@ -11,8 +11,16 @@ ROOT_PATH = Path(__file__).parent.parent.parent
 
 # yapf: disable
 image = (modal.Image
-         .from_registry("pytorch/pytorch:2.6.0-cuda12.4-cudnn9-devel", add_python="3.10")
+         .from_registry("pytorch/pytorch:2.7.0-cuda12.6-cudnn9-devel", add_python="3.10")
          .run_commands("apt update && apt install -y libaio-dev")
+         .run_commands("uv pip install --system --compile-bytecode datasets==3.6.0")
+         .run_commands(
+                "git clone https://github.com/huggingface/accelerate && \
+                cd accelerate && \
+                git rev-parse --short HEAD && \
+                uv pip install --system --compile-bytecode .[testing] \
+            ")
+         .run_commands("uv pip install --system --compile-bytecode protobuf<4.21.0")
          .run_commands("pip list")
          .pip_install_from_requirements(ROOT_PATH / "requirements/requirements.txt", gpu="any")
          .pip_install_from_requirements(ROOT_PATH / "requirements/requirements-dev.txt", gpu="any")
@@ -25,9 +33,7 @@ image = (modal.Image
          .add_local_dir(ROOT_PATH / "tests", remote_path="/root/tests")
         )
 
-
-app = modal.App("deepspeedai-torch-latest-ci", image=image)
-
+app = modal.App("deepspeedai-accelerate-ci", image=image)
 
 @app.function(
     gpu="l40s:4",
@@ -38,7 +44,7 @@ app = modal.App("deepspeedai-torch-latest-ci", image=image)
 def pytest():
     import subprocess
     subprocess.run(
-        "pytest --forked -n 4 tests/unit/runtime/zero/test_zero.py tests/unit/runtime/half_precision/test_bf16.py --torch_ver=2.6 --cuda_ver=12.4".split(),
+        "pytest accelerate/tests/deepspeed".split(),
         check=True,
         cwd=ROOT_PATH / ".",
     )
