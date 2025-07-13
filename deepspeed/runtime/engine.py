@@ -730,26 +730,14 @@ class DeepSpeedEngine(Module):
             raise ValueError(f'not yet support')
             #self.lr_scheduler = lr_schedules.WarmupLayerTokenDecayLR(self.optimizer, self.random_ltd_scheduler)
 
-    def get_tensor_parallel_rank(self):
-        # Return tensor parallel rank if mpu is defined, otherwise return None
-        if self.mpu:
-            return self.mpu.get_tensor_model_parallel_rank()
-        else:
-            return None
-
-    def get_pipeline_parallel_rank(self):
-        # Return pipeline parallel rank if mpu is defined, otherwise return None
-        if self.mpu:
-            return self.mpu.get_pipeline_model_parallel_rank()
-        else:
-            return None
-
     def get_data_parallel_rank(self):
-        # Return data parallel rank if mpu is defined, otherwise return None
-        if self.mpu:
-            return self.mpu.get_data_parallel_rank()
-        else:
-            return None
+        return groups.get_data_parallel_rank()
+
+    def get_tensor_parallel_rank(self):
+        return groups.get_tensor_model_parallel_rank()
+
+    def get_model_parallel_rank(self):
+        return groups.get_model_parallel_rank()
 
     def get_sequence_parallel_group(self):
         return self.seq_parallel_group
