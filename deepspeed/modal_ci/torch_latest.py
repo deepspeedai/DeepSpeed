@@ -7,7 +7,7 @@ from pathlib import Path
 
 import modal
 
-ROOT_PATH = Path(__file__).parent.parent.parent
+ROOT_PATH = Path(__file__).parents[2]
 
 # yapf: disable
 image = (modal.Image
