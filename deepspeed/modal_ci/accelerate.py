@@ -20,7 +20,7 @@ image = (modal.Image
                 uv pip install --system --compile-bytecode accelerate[testing]"
             )
          .run_commands("uv pip install --system --compile-bytecode protobuf")
-         .run_commands("pip list")
+         .run_commands("uv pip list")
          .pip_install_from_requirements(ROOT_PATH / "requirements/requirements.txt", gpu="any")
          .pip_install_from_requirements(ROOT_PATH / "requirements/requirements-dev.txt", gpu="any")
          .add_local_dir(ROOT_PATH / "accelerator", remote_path="/root/accelerator")
