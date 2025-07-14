@@ -146,7 +146,7 @@ class DeepSpeedTransformerInference(nn.Module):
         # We set the prev key/value to None when there is a prompt
         if input.shape[1] > 1:
             self.layer_past = None
-        layer_past = layer_past or past_key_value or self.layer_past
+        _layer_past = layer_past or past_key_value or self.layer_past
         head_mask = layer_head_mask if layer_head_mask is not None else head_mask
 
         attn_mask = None
@@ -165,7 +165,7 @@ class DeepSpeedTransformerInference(nn.Module):
                                      self.attention(input,
                                               input_mask,
                                               head_mask,
-                                              layer_past,
+                                              _layer_past,
                                               get_present,
                                               encoder_hidden_states,
                                               encoder_attention_mask,
