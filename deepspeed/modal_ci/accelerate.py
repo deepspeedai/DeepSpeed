@@ -13,7 +13,7 @@ ROOT_PATH = Path(__file__).parent.parent.parent
 image = (modal.Image
          .from_registry("pytorch/pytorch:2.7.0-cuda12.6-cudnn9-devel", add_python="3.10")
          .run_commands("apt update && apt install -y libaio-dev")
-        .apt_install("git")
+         .apt_install("git")
          .run_commands("uv pip install --system --compile-bytecode datasets==3.6.0")
          .run_commands(
                 "git clone https://github.com/huggingface/accelerate && \
