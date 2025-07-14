@@ -7,20 +7,20 @@ from pathlib import Path
 
 import modal
 
-ROOT_PATH = Path(__file__).parent.parent.parent
+ROOT_PATH = Path(__file__).parents[2]
 
 # yapf: disable
 image = (modal.Image
          .from_registry("pytorch/pytorch:2.7.0-cuda12.6-cudnn9-devel", add_python="3.10")
          .run_commands("apt update && apt install -y libaio-dev")
-        .apt_install("git")
+         .apt_install("git")
          .run_commands("uv pip install --system --compile-bytecode datasets==3.6.0")
          .run_commands(
                 "git clone https://github.com/huggingface/accelerate && \
                 uv pip install --system --compile-bytecode accelerate[testing]"
             )
          .run_commands("uv pip install --system --compile-bytecode protobuf")
-         .run_commands("pip list")
+         .run_commands("uv pip list")
          .pip_install_from_requirements(ROOT_PATH / "requirements/requirements.txt", gpu="any")
          .pip_install_from_requirements(ROOT_PATH / "requirements/requirements-dev.txt", gpu="any")
          .add_local_dir(ROOT_PATH / "accelerator", remote_path="/root/accelerator")
