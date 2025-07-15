@@ -4,6 +4,7 @@
 // DeepSpeed Team
 
 #include <c10/cuda/CUDAStream.h>
+#include <hip/hip_bf16.h>
 #include "mixed_gemm.h"
 #include "mixed_gemm_api.h"
 #include "weight_variant.h"
