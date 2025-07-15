@@ -360,14 +360,15 @@ class UlyssesSPAttentionHF(torch.nn.Module):
 
         # we don't have the model yet at this stage
         hf_model_config = AutoConfig.from_pretrained(model_name_or_path)
-        if core_attn_implementation not in ["flash_attention_2", "sdpa"]:
+        supported_attn_implementation = ["flash_attention_2", "flash_attention_3", "sdpa"]
+        if core_attn_implementation not in supported_attn_implementation:
             # notes on the excluded ones:
             # - eager: The problem is that `eager` wants an attention_mask and it creates the wrong attention mask it seems if we don't provide one - it's possible that we could somehow solve this, but it's also unlikely someone will want to use the slow eager attention with sequence parallelism
             # - flex_attention: haven't tried
 
             raise ValueError(
                 f"{core_attn_implementation} attn_implementation isn't currently supported by Ulysses sequence"
-                " parallelism. Set core_attn_implementation arg to either 'flash_attention_2' or 'sdpa'.")
+                f" parallelism. Set core_attn_implementation arg to one of {supported_attn_implementation}.")
 
         if core_attn_implementation not in ALL_ATTENTION_FUNCTIONS:
             raise ValueError(
