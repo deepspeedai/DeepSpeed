@@ -133,6 +133,9 @@ class DeepSpeedTransformerInference(nn.Module):
         if "hidden_states" in kwargs:
             input = kwargs["hidden_states"]
 
+        if layer_past is not None and past_key_value is not None:
+            raise ValueError("Only one of `layer_past` or `past_key_value` can be present.")
+
         input_mask = (input_mask if attn_mask is None else attn_mask) if attention_mask is None else attention_mask
 
         self.allocate_workspace(input.size())
@@ -143,7 +146,7 @@ class DeepSpeedTransformerInference(nn.Module):
         # We set the prev key/value to None when there is a prompt
         if input.shape[1] > 1:
             self.layer_past = None
-        layer_past = layer_past if layer_past is not None else self.layer_past
+        _layer_past = layer_past or past_key_value or self.layer_past
         head_mask = layer_head_mask if layer_head_mask is not None else head_mask
 
         attn_mask = None
@@ -162,7 +165,7 @@ class DeepSpeedTransformerInference(nn.Module):
                                      self.attention(input,
                                               input_mask,
                                               head_mask,
-                                              layer_past,
+                                              _layer_past,
                                               get_present,
                                               encoder_hidden_states,
                                               encoder_attention_mask,
@@ -173,7 +176,7 @@ class DeepSpeedTransformerInference(nn.Module):
                                               **kwargs)
 
             presents = (key, value)
-            self.layer_past = presents if layer_past is None else None
+            self.layer_past = presents if layer_past is None and past_key_value is None else None
             output = self.mlp(attention_output, input, inp_norm, self.attention.attn_ob)
 
             if not self.config.pre_layer_norm:
