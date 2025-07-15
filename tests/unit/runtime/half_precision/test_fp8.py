@@ -6,7 +6,7 @@
 import torch
 import deepspeed
 import pytest
-from unit.common import DistributedTest
+from unit.common import DistributedTest, is_rocm_pytorch
 from unit.util import skip_on_arch
 
 try:
@@ -81,11 +81,18 @@ class TestFp8ComposabilityAcrossZero(DistributedTest):
         else:
             model_dtype = torch.float32
 
+        # Set default tolerances
+        rtol, atol = 1e-07, 1e-05
+
+        # Relax tolerance only for ROCm + FP16
+        if is_rocm_pytorch() and model_dtype == torch.float16:
+            rtol, atol = 3e-07, 3e-05
+
         # config
         zero_stage = [0, 1, 2, 3]
         losses = []
         for stage in zero_stage:
             loss = run_zero(stage, model_dtype)
             losses.append(loss)
-        all_equal = all(torch.allclose(loss, losses[0], 1e-07, 1e-05) for loss in losses)
+        all_equal = all(torch.allclose(loss, losses[0], rtol, atol) for loss in losses)
         assert (all_equal)

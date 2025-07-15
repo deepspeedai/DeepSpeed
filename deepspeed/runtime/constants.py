@@ -3,6 +3,8 @@
 
 # DeepSpeed Team
 
+from deepspeed.accelerator import get_accelerator
+
 #############################################
 # Routes
 #############################################
@@ -117,7 +119,9 @@ SPARSE_GRADIENTS_DEFAULT = False
 BFLOAT16_FORMAT = '''
 BFLOAT16 parameters should be of the format:
 "bf16": {
-  "enabled": true
+  "enabled": true,
+  "immediate_grad_update": false,
+  "check_overflow": false
 }
 '''
 BFLOAT16 = "bf16"
@@ -125,6 +129,9 @@ BFLOAT16_OLD = "bfloat16"  # keeping for backwards compatibility
 
 BFLOAT16_ENABLED = "enabled"
 BFLOAT16_ENABLED_DEFAULT = False
+
+CHECK_OVERFLOW = "check_overflow"
+BFLOAT16_CHECK_OVERFLOW_DEFAULT = False
 
 # BFLOAT16 optimizer immediate gradient update
 BFLOAT16_IMMEDIATE_GRAD_UPDATE = "immediate_grad_update"
@@ -203,6 +210,27 @@ AMP_ENABLED = "enabled"
 AMP_ENABLED_DEFAULT = False
 
 #########################################
+# Torch AMP support
+#########################################
+TORCH_AUTOCAST_FORMAT = '''
+PyTorch autocast config should be of the format:
+"torch_autocast": {
+  "enabled": true,
+  "dtype": "bfloat16",
+  "lower_precision_safe_modules": [
+    "torch.nn.modules.linear.Linear",
+    "torch.nn.modules.conv.Conv2d"
+  ]
+}
+'''
+TORCH_AUTOCAST = "torch_autocast"
+
+TORCH_AUTOCAST_ENABLED = "enabled"
+TORCH_AUTOCAST_ENABLED_DEFAULT = False
+TORCH_AUTOCAST_DTYPE = "dtype"
+TORCH_AUTOCAST_LOWER_PRECISION_SAFE_MODULES = "lower_precision_safe_modules"
+
+#########################################
 # Gradient clipping
 #########################################
 # Gradient clipping. By default, this feature is not enabled.
@@ -250,6 +278,13 @@ Optional comm data type for seq paralleism should be set as:
 "seq_parallel_communication_data_type": "fp32"
 '''
 SEQ_PARALLEL_COMMUNICATION_DATA_TYPE = "seq_parallel_communication_data_type"
+
+if get_accelerator().device_name == 'cuda' and get_accelerator().communication_backend_version() >= (2, 27, 3):
+    # nccl>=2.27.3 uses fp32 accumulation for half precision inputs, so there is no need to waste compute and memory to manually upcast to fp32 unless the user wants it and then override
+    SEQ_PARALLEL_COMMUNICATION_DATA_TYPE_DEFAULT = None
+else:
+    SEQ_PARALLEL_COMMUNICATION_DATA_TYPE_DEFAULT = "fp32"
+
 SEQ_PARALLEL_COMMUNICATION_DATA_TYPE_DEFAULT = "fp32"
 
 #########################################

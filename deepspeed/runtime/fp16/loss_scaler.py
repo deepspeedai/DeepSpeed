@@ -22,6 +22,7 @@ Commit: 93ab4bea59dc5cbf97c079d313741866af4deac9
 """
 
 import torch
+from deepspeed.runtime.config_utils import DeepSpeedConfigObject
 from deepspeed import comm as dist
 from deepspeed.utils import logger
 
@@ -39,12 +40,13 @@ def to_python_float(t):
     return t[0]
 
 
-class LossScalerBase:
+class LossScalerBase(DeepSpeedConfigObject):
     """LossScalarBase
     Base class for a loss scaler
     """
 
     def __init__(self, cur_scale):
+        super(LossScalerBase, self).__init__()
         self.cur_scale = cur_scale
         self.dynamic = False
 
@@ -116,18 +118,17 @@ class DynamicLossScaler(LossScalerBase):
     """
 
     def __init__(self,
-                 init_scale=2**32,
-                 scale_factor=2.,
-                 scale_window=1000,
-                 min_scale=1,
-                 delayed_shift=1,
-                 consecutive_hysteresis=False,
+                 init_scale,
+                 scale_window,
+                 min_scale,
+                 delayed_shift,
+                 consecutive_hysteresis,
                  raise_error_at_min_scale=True,
                  dtype=torch.half):
         super(DynamicLossScaler, self).__init__(init_scale)
         self.cur_iter = 0
         self.last_overflow_iter = -1
-        self.scale_factor = scale_factor
+        self.scale_factor = 2.0
         self.scale_window = scale_window
         self.min_scale = min_scale
         self.delayed_shift = delayed_shift
@@ -196,7 +197,9 @@ class DynamicLossScaler(LossScalerBase):
                     hysteresis_msg = f"Consecutive hysteresis is enabled. Restoring hysteresis to {self.delayed_shift}"
                     logger.info(hysteresis_msg)
                 self.cur_hysteresis = self.delayed_shift
-            if (self.cur_iter - self.last_overflow_iter) % self.scale_window == 0:
+
+            stable_interval = (self.cur_iter - self.last_overflow_iter) - 1
+            if (stable_interval > 0) and (stable_interval % self.scale_window == 0):
                 if not self.consecutive_hysteresis:
                     self.cur_hysteresis = self.delayed_shift
                 self.cur_scale *= self.scale_factor
@@ -207,8 +210,7 @@ class DynamicLossScaler(LossScalerBase):
 # we still create a scaler for other dtypes (fp32, bf16) which does not perform any scaling.
 def CreateLossScaler(dtype, static_loss_scale, dynamic_scaling, dynamic_loss_args):
     if dtype == torch.half and dynamic_scaling:
-        if dynamic_loss_args is None:
-            return DynamicLossScaler(dtype=dtype)
+        assert dynamic_loss_args is not None, f"Dynamic loss scaling parameters must be defined."
         return DynamicLossScaler(dtype=dtype, **dynamic_loss_args)
 
     loss_scale_value = static_loss_scale if dtype == torch.half else 1.0

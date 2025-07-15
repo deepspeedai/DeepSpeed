@@ -725,11 +725,15 @@ def _upsample_flops_compute(*args, **kwargs):
     assert scale_factor is not None, "either size or scale_factor should be defined"
 
     flops = input.numel()
-    if isinstance(scale_factor, tuple) and len(scale_factor) == len(input):
-        flops *= int(_prod(scale_factor))
+    if isinstance(scale_factor, (list, tuple)):
+        # see documentation of `F.interpolate`
+        # the spatial dims are defined as the last `n-2` dims of the tensor
+        assert len(scale_factor) == input.ndim - 2
+        flops *= _prod(scale_factor)
     else:
-        flops *= scale_factor**len(input)
-    return flops, 0
+        flops *= scale_factor**(input.ndim - 2)
+
+    return int(flops), 0
 
 
 def _softmax_flops_compute(input, dim=None, _stacklevel=3, dtype=None):

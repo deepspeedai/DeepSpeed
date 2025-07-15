@@ -35,6 +35,7 @@ def make_param_setter(clsname, param):
 
     def param_setter(self, value):
         setattr(self, f"__{clsname}__{param}", value)
+        self.dtype = value.dtype
         self.complete_component()
 
     return param_setter

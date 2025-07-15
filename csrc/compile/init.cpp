@@ -5,6 +5,7 @@
 
 #include "deepcompile.h"
 #include "z1.h"
+#include "z2.h"
 #include "z3.h"
 
 TORCH_LIBRARY(dc, m)
@@ -80,9 +81,12 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m)
     m.def("is_profiling", &dc::is_profiling, "Check if profiling is enabled");
     m.def("init", &dc::init, "Set the process group");
     m.def("cleanup", &dc::cleanup, "Cleanup the process group");
-    m.def("register_z1_param", &dc::register_z1_param, "Register a parameter");
+    m.def("register_param", &dc::register_param, "Register a parameter");
     m.def("register_graph_z1",
           &dc::register_graph_z1,
+          "Register graph with a list of ds parameter ids");
+    m.def("register_graph_z2",
+          &dc::register_graph_z2,
           "Register graph with a list of ds parameter ids");
     m.def("register_z3_param", &dc::register_z3_param, "Register a parameter");
     m.def("register_graph_z3",
