@@ -526,12 +526,28 @@ here (fold is C++17 only and I don't think helps and recursion feels like
 huge overkill that harms readability) that would be wonderful.
 */
 
+template <typename T>
+DS_D_INLINE T shfl_xor_helper(cg::thread_block_tile<hw_warp_size>& warp, const T& value, int i)
+{
+    return warp.shfl_xor(value, i);
+}
+
+#if defined(__HIP_PLATFORM_AMD__)
+template <>
+DS_D_INLINE __half shfl_xor_helper<__half>(cg::thread_block_tile<hw_warp_size>& warp,
+                                           const __half& value,
+                                           int i)
+{
+    return __half(warp.shfl_xor(float(value), i));
+}
+#endif
+
 template <typename T, ROpType Op, int reduce_width = hw_warp_size>
 DS_D_INLINE void _warp(cg::thread_block_tile<hw_warp_size>& warp, T* data)
 {
 #pragma unroll
     for (int i = 1; i < reduce_width; i *= 2) {
-        data[0] = element<Op>(data[0], warp.shfl_xor(data[0], i));
+        data[0] = element<Op>(data[0], shfl_xor_helper(warp, data[0], i));
     }
 }
 
@@ -540,8 +556,8 @@ DS_D_INLINE void _warp(cg::thread_block_tile<hw_warp_size>& warp, T* data)
 {
 #pragma unroll
     for (int i = 1; i < reduce_width; i *= 2) {
-        data[0] = element<Op1>(data[0], warp.shfl_xor(data[0], i));
-        data[1] = element<Op2>(data[1], warp.shfl_xor(data[1], i));
+        data[0] = element<Op1>(data[0], shfl_xor_helper(warp, data[0], i));
+        data[1] = element<Op2>(data[1], shfl_xor_helper(warp, data[0], i));
     }
 }
 
@@ -550,9 +566,9 @@ DS_D_INLINE void _warp(cg::thread_block_tile<hw_warp_size>& warp, T* data)
 {
 #pragma unroll
     for (int i = 1; i < reduce_width; i *= 2) {
-        data[0] = element<Op1>(data[0], warp.shfl_xor(data[0], i));
-        data[1] = element<Op2>(data[1], warp.shfl_xor(data[1], i));
-        data[2] = element<Op3>(data[2], warp.shfl_xor(data[2], i));
+        data[0] = element<Op1>(data[0], shfl_xor_helper(warp, data[0], i));
+        data[1] = element<Op2>(data[1], shfl_xor_helper(warp, data[0], i));
+        data[2] = element<Op3>(data[2], shfl_xor_helper(warp, data[0], i));
     }
 }
 
@@ -566,10 +582,10 @@ DS_D_INLINE void _warp(cg::thread_block_tile<hw_warp_size>& warp, T* data)
 {
 #pragma unroll
     for (int i = 1; i < reduce_width; i *= 2) {
-        data[0] = element<Op1>(data[0], warp.shfl_xor(data[0], i));
-        data[1] = element<Op2>(data[1], warp.shfl_xor(data[1], i));
-        data[2] = element<Op3>(data[2], warp.shfl_xor(data[2], i));
-        data[3] = element<Op4>(data[3], warp.shfl_xor(data[3], i));
+        data[0] = element<Op1>(data[0], shfl_xor_helper(warp, data[0], i));
+        data[1] = element<Op2>(data[1], shfl_xor_helper(warp, data[0], i));
+        data[2] = element<Op3>(data[2], shfl_xor_helper(warp, data[0], i));
+        data[3] = element<Op4>(data[3], shfl_xor_helper(warp, data[0], i));
     }
 }
 

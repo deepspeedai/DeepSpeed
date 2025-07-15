@@ -6,6 +6,7 @@
 #include "fp_quantize.h"
 
 #include <c10/cuda/CUDAStream.h>
+#include <hip/hip_fp16.h>
 #include <torch/extension.h>
 #include <vector>
 
