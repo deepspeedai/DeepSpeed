@@ -10,7 +10,7 @@ from deepspeed.runtime.sequence_parallel.ulysses_sp import TiledMLP, sequence_ti
 from deepspeed.utils import safe_get_full_grad
 from torch.nn import Linear, Module
 from unit.common import DistributedTest, preferred_dtype
-from unit.util import torch_assert_equal, torch_assert_close
+from unit.util import torch_assert_equal, torch_assert_close, CaptureStderr
 import deepspeed
 import pytest
 import torch
@@ -97,11 +97,12 @@ def mlp_forward_sequence_tiled_compute(self, x):
     )
 
 
+@pytest.mark.parametrize("batch_size", [1, 2])
 @pytest.mark.parametrize("zero_stage", [1, 3])
 class TestTiledCompute(DistributedTest):
     world_size = 1
 
-    def test_tiled_mlp(self, zero_stage):
+    def test_tiled_mlp(self, zero_stage, batch_size):
 
         config_dict = {
             "train_micro_batch_size_per_gpu": 1,
@@ -127,8 +128,8 @@ class TestTiledCompute(DistributedTest):
         vocab_size = 10
         seed = 42
         hidden_dim = 128
-        bs = 2
-        seqlen = 64
+        bs = batch_size
+        seqlen = 125  # use a non 2**n length to test varlen shards (last short)
         torch.manual_seed(seed)
         x = torch.rand((bs, seqlen, hidden_dim), dtype=dtype, requires_grad=True)
         y = torch.empty((bs, seqlen), dtype=torch.long, requires_grad=False).random_(vocab_size)
@@ -166,7 +167,12 @@ class TestTiledCompute(DistributedTest):
         x_b = x.clone().detach().requires_grad_(True)
         y_b = y.clone().detach()
         loss_b = model_b(x_b, y_b)
-        model_b.backward(loss_b)
+
+        with CaptureStderr() as cs:
+            model_b.backward(loss_b)
+        # see the explanation inside TiledMLP.backward
+        assert "grad and param do not obey the gradient layout contract" not in cs.err, f"stride issue: {cs.err}"
+
         param_grad_b1 = get_grad(model_b.module.mlp1.up_proj.weight, zero_stage)
         param_grad_b2 = get_grad(model_b.module.mlp2.up_proj.weight, zero_stage)
         x_grad_b = x_b.grad
@@ -202,7 +208,11 @@ class TestTiledCompute(DistributedTest):
         x_c = x.clone().detach().requires_grad_(True)
         y_c = y.clone().detach()
         loss_c = model_c(x_c, y_c)
-        model_c.backward(loss_c)
+        with CaptureStderr() as cs:
+            model_c.backward(loss_c)
+
+        assert "grad and param do not obey the gradient layout contract" not in cs.err, f"stride issue: {cs.err}"
+
         param_grad_c1 = get_grad(model_c.module.mlp1.up_proj.weight, zero_stage)
         param_grad_c2 = get_grad(model_c.module.mlp2.up_proj.weight, zero_stage)
         x_grad_c = x_c.grad
