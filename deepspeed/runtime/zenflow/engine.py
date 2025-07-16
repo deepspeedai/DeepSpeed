@@ -5,6 +5,7 @@
 
 from deepspeed import comm as dist
 from typing import TYPE_CHECKING
+from deepspeed.utils.torch import required_torch_version
 
 if TYPE_CHECKING:
     from deepspeed.runtime.engine import DeepSpeedEngine
@@ -24,6 +25,10 @@ def configure_zenflow(engine: "DeepSpeedEngine") -> None:
     if zenflow_config == None:
         engine.zenflow = False
         return
+    if not required_torch_version(min_version=2.0):
+        raise ValueError(
+            "Please use PyTorch 2.0 or later to enable ZenFlow. Alternatively, omit `zenflow` config in the config file to fall back to the default ZeRO-Offload optimizer."
+        )
 
     engine.zenflow = True
     select_strategy = zenflow_config.select_strategy
