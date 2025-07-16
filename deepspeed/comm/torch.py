@@ -5,6 +5,7 @@
 
 import deepspeed
 from deepspeed import utils
+from packaging import version
 import inspect
 
 from .utils import *
@@ -152,8 +153,11 @@ class TorchBackend(Backend):
                 rank=rank,
                 world_size=world_size,
             )
-            # device_id arg was added in torch==2.3
-            if 'device_id' in inspect.signature(torch.distributed.init_process_group).parameters:
+
+            # 1. device_id arg was added in torch==2.3
+            # 2. setting device_id leads to hanging in 2.6.0<torch<2.7.1 https://github.com/pytorch/pytorch/issues/153960
+            if 'device_id' in inspect.signature(torch.distributed.init_process_group).parameters and not (
+                    version.parse("2.6.0") < version.parse(torch.__version__) < version.parse("2.7.1")):
                 local_rank = int(os.environ.get('LOCAL_RANK', 0))
                 kwargs.update(device_id=get_accelerator().device(local_rank))
             torch.distributed.init_process_group(backend, **kwargs)
