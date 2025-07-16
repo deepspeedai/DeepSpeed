@@ -243,6 +243,9 @@ class DeepSpeedEngine(Module):
         self._global_grad_norm = None
         self.use_ds_comm = False  # False --> Use torch.dist, True --> Use ds.comm backend.
         self.checkpoint_engine = None
+        self.optimizer = None
+        self.basic_optimizer = None
+        self.lr_scheduler = None
 
         self._is_gradient_accumulation_boundary = None
         self.scale_wrt_gas = None
@@ -313,9 +316,6 @@ class DeepSpeedEngine(Module):
             self.training_dataloader = None
 
         # Configure optimizer and scheduler
-        self.optimizer = None
-        self.basic_optimizer = None
-        self.lr_scheduler = None
         has_optimizer = False
 
         if optimizer or self.optimizer_name():

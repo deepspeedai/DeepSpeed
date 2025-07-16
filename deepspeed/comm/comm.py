@@ -22,6 +22,7 @@
 """
 
 import torch
+from torch.distributed import GradBucket  # noqa: F401
 import os
 
 from ..constants import TORCH_DISTRIBUTED_DEFAULT_PORT, default_pg_timeout
@@ -431,14 +432,159 @@ def monitored_barrier(group=None,
     return cdb.monitored_barrier(group=group, timeout=timeout, wait_all_ranks=wait_all_ranks)
 
 
-def log_summary(show_straggler=False):
+def log_summary(show_straggler=False, return_dict=False):
+    """
+    Print and/or return communication operation statistics across all ranks.
+
+    This function synchronizes all ranks and logs communication statistics.
+    Only rank 0 prints to console by default, but all ranks can return the dictionary.
+
+    Args:
+        show_straggler (bool, optional): Whether to include straggler effect analysis.
+            When True, computes the time difference between the fastest and slowest ranks
+            for each communication operation. Defaults to False.
+        return_dict (bool, optional): Whether to return statistics as a dictionary.
+            When True, returns a comprehensive dictionary with communication metrics.
+            Defaults to False.
+
+    Returns:
+        dict or None: If return_dict=True, returns communication statistics dictionary.
+        The structure is identical to CommsLogger.log_all() return value.
+        Returns None if return_dict=False.
+
+        Dictionary structure (when return_dict=True):
+        {
+            "summary": {
+                "operation_name": {
+                    message_size_bytes: {
+                        "count": int,
+                        "total_latency_ms": float,
+                        "avg_latency_ms": float,
+                        "tput_avg_gbps": float,
+                        "busbw_avg_gbps": float,
+                        "msg_size_bytes": int,
+                        "msg_size_str": str
+                    }
+                }
+            },
+            "straggler_analysis": {...} if show_straggler else None,
+            "metadata": {
+                "world_size": int,
+                "rank": int,
+                "timestamp": str
+            }
+        }
+
+    Note:
+        - This function includes barriers for synchronization across all ranks
+        - Straggler analysis requires additional all_reduce operations
+        - All ranks return the same data when return_dict=True
+        - Only rank 0 prints to console when print_log=True (default behavior)
+
+    Example:
+        # Print summary only (backward compatible)
+        deepspeed.comm.log_summary()
+
+        # Get dictionary and print summary
+        stats = deepspeed.comm.log_summary(return_dict=True)
+
+        # Include straggler analysis
+        stats = deepspeed.comm.log_summary(show_straggler=True, return_dict=True)
+
+        # Access specific operation data
+        if stats and "all_reduce" in stats["summary"]:
+            all_reduce_stats = stats["summary"]["all_reduce"]
+    """
     global cdb
     barrier(log_name='log_summary_barrier')
+
+    result = None
     if cdb.get_rank() == 0:
-        comms_logger.log_all(print_log=True, show_straggler=show_straggler)
+        result = comms_logger.log_all(print_log=True, show_straggler=show_straggler, return_dict=return_dict)
     else:
-        comms_logger.log_all(print_log=False, show_straggler=show_straggler)
+        # Non-rank-0 processes: don't print but may still return dict if requested
+        result = comms_logger.log_all(print_log=False, show_straggler=show_straggler, return_dict=return_dict)
+
     barrier(log_name='log_summary_barrier')
+    return result
+
+
+def reset_log():
+    """
+    Clear all accumulated communication logging data.
+
+    This function clears the communication logger's internal data dictionary,
+    allowing for epoch-by-epoch or interval-based logging. After calling this
+    function, subsequent log_summary() calls will only show statistics for
+    communication operations that occur after the reset.
+
+    Note:
+        - This affects the global communication logger
+        - All accumulated statistics will be lost
+        - This function is useful for getting per-epoch or per-interval statistics
+
+    Example:
+        # Training loop with per-epoch communication logging
+        for epoch in range(num_epochs):
+            # Reset logger at start of epoch
+            deepspeed.comm.reset_log()
+
+            # Train for one epoch
+            train_one_epoch(model, dataloader)
+
+            # Get communication stats for this epoch only
+            epoch_stats = deepspeed.comm.log_summary(return_dict=True)
+            print(f"Epoch {epoch} communication stats: {epoch_stats}")
+    """
+    global comms_logger
+    comms_logger.reset_data()
+
+
+def has_comm_data():
+    """
+    Check if any communication data has been logged.
+
+    Returns:
+        bool: True if communication operations have been logged, False otherwise
+
+    Example:
+        if deepspeed.comm.has_comm_data():
+            stats = deepspeed.comm.log_summary(return_dict=True)
+        else:
+            print("No communication operations logged yet")
+    """
+    global comms_logger
+    return comms_logger.has_data()
+
+
+def get_comm_operation_count():
+    """
+    Get the total number of communication operations logged.
+
+    Returns:
+        int: Total count of all communication operations across all types
+
+    Example:
+        total_ops = deepspeed.comm.get_comm_operation_count()
+        print(f"Total communication operations this epoch: {total_ops}")
+    """
+    global comms_logger
+    return comms_logger.get_total_operations()
+
+
+def get_logged_comm_ops():
+    """
+    Get list of communication operation types that have been logged.
+
+    Returns:
+        list: List of operation names that have been logged (e.g., ['all_reduce', 'broadcast'])
+
+    Example:
+        ops = deepspeed.comm.get_logged_comm_ops()
+        print(f"Communication operations used: {ops}")
+    """
+    global comms_logger
+    return comms_logger.get_operation_names()
 
 
 @timed_op
@@ -657,9 +803,9 @@ def init_distributed(dist_backend=None,
         distributed_port: Optional (int). torch distributed backend port
         verbose: Optional (bool). verbose logging
         timeout: Optional (timedelta). Timeout for operations executed against the process group. The default value of 30 minutes can be overridden by the environment variable `DEEPSPEED_TIMEOUT`.
-        init_method: Optional (string). Torch distributed, URL specifying how to initialize the process group. Default is “env://” if no init_method or store is specified.
+        init_method: Optional (string). Torch distributed, URL specifying how to initialize the process group. Default is "env://" if no init_method or store is specified.
         config: Optional (dict). DeepSpeed configuration for setting up comms options (e.g. Comms profiling)
-        rank: Optional (int). The current manually specified rank. Some init_method like “tcp://” need the rank and world_size as well (see: https://pytorch.org/docs/stable/distributed.html#tcp-initialization)
+        rank: Optional (int). The current manually specified rank. Some init_method like "tcp://" need the rank and world_size as well (see: https://pytorch.org/docs/stable/distributed.html#tcp-initialization)
         world_size: Optional (int). Desired world_size for the TCP or Shared file-system initialization.
     '''
     global cdb

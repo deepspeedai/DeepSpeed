@@ -120,11 +120,12 @@ class DeepSpeedCheckpoint(object):
         self.global_state[ITERATION_KEY] = sd.get(ITERATION_KEY, 0)
         self.global_state[ARGS_KEY] = sd.get(ARGS_KEY, None)
 
-    def get_zero_checkpoint_state(self, pp_index, tp_index, dp_index) -> dict:
+    def get_zero_checkpoint_state(self, pp_index, tp_index, dp_index, strip_tensor_paddings: bool = True) -> dict:
         return self.zero_checkpoint.get_state_for_rank(pp_index=pp_index,
                                                        tp_index=tp_index,
                                                        dp_index=dp_index,
-                                                       keys_to_ignore=[PARAM_SHAPES])
+                                                       keys_to_ignore=[PARAM_SHAPES],
+                                                       strip_tensor_paddings=strip_tensor_paddings)
 
     def get_zero_files(self, pp_index, tp_index, dp_index) -> list:
         return self.zero_checkpoint.get_files_for_rank(pp_index=pp_index, tp_index=tp_index, dp_index=dp_index)
