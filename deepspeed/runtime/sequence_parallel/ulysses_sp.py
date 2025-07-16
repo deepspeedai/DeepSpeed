@@ -699,20 +699,18 @@ class SequenceTiledCompute(torch.autograd.Function):
         grad_requiring_tensor.requires_grad_(grad_requiring_tensor_requires_grad)
 
         incoming_grad = grads[0]
-        grad_requiring_tensor_grad = torch.zeros_like(grad_requiring_tensor)
 
-        kwargs_to_shard_shards = {
-            k: list(torch.chunk(kwargs_to_shard[k], chunks=shards, dim=1))
-            for k in kwargs_to_shard.keys()
-        }
+        if grad_requiring_tensor.shape[0] == 1:
+            grad_requiring_tensor_grad = torch.zeros_like(grad_requiring_tensor)
+        else:
+            grad_requiring_tensor_grad = torch.empty_like(grad_requiring_tensor)
 
-        # if seqlen is not exactly divisible by shards the last step will be shorter than shard_step
-        shard_step = kwargs_to_shard_shards[grad_requiring_tensor_key][0].shape[1]
+        kwargs_to_shard_shards = {k: list(torch.chunk(v, chunks=shards, dim=1)) for k, v in kwargs_to_shard.items()}
+
         for i in range(shards):
-
             # when fn involves one or more model weights deepspeed will normally push a grad to
             # reduce per sub-module call, so since we only want it to add a grad for the last
-            # shard's call , we signal to zero not to add new gradients to reduce until the last
+            # shard's call, we signal to ZeRO not to add new gradients to reduce until the last
             # shard when all gradients have been accumulated. An example for such a call is
             # `model.lm_head(hidden_states)`
             if compute_params is not None:
@@ -724,16 +722,21 @@ class SequenceTiledCompute(torch.autograd.Function):
                     for param in compute_params:
                         param.ds_grad_is_ready = True
 
-            kwargs_to_shard_shard = {k: kwargs_to_shard_shards[k].pop(0) for k in kwargs_to_shard_shards.keys()}
+            kwargs_to_shard_shard = {k: v[i] for k, v in kwargs_to_shard_shards.items()}
             grad_requiring_tensor_shard = kwargs_to_shard_shard[grad_requiring_tensor_key]
 
             grad_requiring_tensor_shard.requires_grad_(grad_requiring_tensor_requires_grad)
 
-            shard_offset = i * shard_step
-            # this will enable gradual population of the pre-allocated
-            # `grad_requiring_tensor_shard.grad` during `torch.autograd.backward` calls
-            grad_requiring_tensor_shard.grad = (grad_requiring_tensor_grad.narrow(
-                1, shard_offset, shard_step).view_as(grad_requiring_tensor_shard))
+            # if seqlen is not exactly divisible by shards the last step will be shorter than shard_step
+            shard_step = kwargs_to_shard_shards[grad_requiring_tensor_key][i].shape[1]
+            shard_offset = i * kwargs_to_shard_shards[grad_requiring_tensor_key][0].shape[1]
+
+            if grad_requiring_tensor.shape[0] == 1:
+                # on narrow the shard's stride is unaffected with dim0==1 (bs) so we use the most efficient `narrow` alias:
+                # this will enable gradual population of the pre-allocated
+                # `grad_requiring_tensor_shard.grad` during `torch.autograd.backward` calls
+                grad_requiring_tensor_shard.grad = grad_requiring_tensor_grad.narrow(
+                    1, shard_offset, shard_step).view_as(grad_requiring_tensor_shard)
 
             with torch.enable_grad():
                 output = fn(**kwargs_to_shard_shard, **kwargs_to_pass)
@@ -745,6 +748,16 @@ class SequenceTiledCompute(torch.autograd.Function):
                 incoming_grad_shard = (incoming_grad.narrow(1, shard_offset,
                                                             shard_step).view_as(grad_requiring_tensor_shard))
                 torch.autograd.backward(output, incoming_grad_shard)
+
+            if grad_requiring_tensor.shape[0] > 1:
+                # this is less efficient than dim0==1 (bs) use case, due to a required copy to fix
+                # the stride and needing a bit more memory for one shard's grad, since
+                # narrow(dim=1, ...) while dim0>1 will lead to:
+                # UserWarning: grad and param do not obey the gradient layout contract. This is not an error, but may impair performance.
+                # when backward is called.
+                grad_requiring_tensor_grad.narrow(1, shard_offset,
+                                                  shard_step).view_as(grad_requiring_tensor_shard).copy_(
+                                                      grad_requiring_tensor_shard.grad)
 
         # positional args
         grad_outputs = [None] * 9
@@ -833,14 +846,18 @@ class TiledMLP(torch.autograd.Function):
         # detach() unsets `x.requires_grad`, so restore it
         x.requires_grad_(x_requires_grad)
 
-        incoming_grad = grads[0]
+        bs, seqlen, hidden_size = x.shape
+
+        # flatten bs+seqlen to avoid having stride issues when narrowing into seqlen w/ bs>1
+        x = x.view(-1, hidden_size)
+        incoming_grad = grads[0].view(-1, hidden_size)
         x_grad = torch.zeros_like(x)
-        x_shards = list(torch.chunk(x, chunks=shards, dim=1))
 
-        shard_step = x_shards[0].shape[1]
+        x_shards = list(torch.chunk(x, chunks=shards, dim=0))
+
         for i, x_shard in enumerate(x_shards):
-
             # Tell deepspeed not to add a new grad to its ipg bucket until the last shard is run
+            # XXX: DDP, FSDP will need something similar to make it work
             if compute_params is not None:
                 if i + 1 < shards:
                     for param in compute_params:
@@ -852,12 +869,18 @@ class TiledMLP(torch.autograd.Function):
 
             x_shard.requires_grad_(x_requires_grad)
 
-            shard_offset = i * shard_step
-            x_shard.grad = x_grad.narrow(1, shard_offset, shard_step).view_as(x_shard)
-            incoming_grad_shard = incoming_grad.narrow(1, shard_offset, shard_step).view_as(x_shard)
+            # if seqlen is not exactly divisible by shards the last step will be shorter than shard_step
+            shard_step = x_shards[i].shape[0]
+            shard_offset = i * x_shards[0].shape[0]
+
+            x_shard.grad = x_grad.narrow(0, shard_offset, shard_step).view_as(x_shard)
+            incoming_grad_shard = incoming_grad.narrow(0, shard_offset, shard_step).view_as(x_shard)
             with torch.enable_grad():
                 output = fn(self, x_shard)
             torch.autograd.backward(output, incoming_grad_shard)
+
+        # unflatten
+        x_grad = x_grad.view(bs, -1, hidden_size)
 
         return (None, None, x_grad, None, None)
 
