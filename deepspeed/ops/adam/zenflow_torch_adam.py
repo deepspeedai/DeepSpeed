@@ -7,21 +7,45 @@ import torch
 from typing import cast, List, Optional, Tuple, Union
 from torch import Tensor
 
-from torch.optim.optimizer import (
-    _default_to_fused_or_foreach,
-    _disable_dynamo_if_unsupported,
-    _get_capturable_supported_devices,
-    _get_value,
-    _stack_if_compiling,
-    _view_as_real,
-    DeviceDict,
-    Optimizer,
-)
+from deepspeed.utils.torch import required_torch_version
+
+# Check if we have PyTorch >= 2.0 for ZenFlow features
+_ZENFLOW_AVAILABLE = required_torch_version(min_version=2.1)
+
+if _ZENFLOW_AVAILABLE:
+    try:
+        from torch.optim.optimizer import (
+            _default_to_fused_or_foreach,
+            _disable_dynamo_if_unsupported,
+            _get_capturable_supported_devices,
+            _get_value,
+            _stack_if_compiling,
+            _view_as_real,
+            DeviceDict,
+            Optimizer,
+        )
+    except ImportError as e:
+        print(f"[WARNING] ZenFlow disabled: torch internal optimizer symbols could not be imported: {e}")
+        _ZENFLOW_AVAILABLE = False
+else:
+    # safe disable dynamo if unsupported
+    def _disable_dynamo_if_unsupported(**kwargs):
+
+        def wrapper(fn):
+            return fn
+
+        return wrapper
+
+    _ZENFLOW_AVAILABLE = False
 
 
 class ZenFlowSelectiveAdamW(torch.optim.AdamW):
 
     def __init__(self, *args, offload=False, bucket_size=5e8, **kwargs):
+        if not _ZENFLOW_AVAILABLE:
+            raise RuntimeError("ZenFlow features are not available with PyTorch < 2.0. "
+                               "Please upgrade to PyTorch 2.0+ to use ZenFlow, or omit 'zenflow' "
+                               "from your DeepSpeed configuration to use the default ZeRO-Offload optimizer.")
         super(ZenFlowSelectiveAdamW, self).__init__(*args, **kwargs)
 
         self.offload = offload
@@ -688,6 +712,11 @@ def adamw(
 
     See :class:`~torch.optim.AdamW` for details.
     """
+    if not _ZENFLOW_AVAILABLE:
+        raise RuntimeError("ZenFlow adamw function is not available with PyTorch < 2.0. "
+                           "Please upgrade to PyTorch 2.0+ to use ZenFlow, or omit 'zenflow' "
+                           "from your DeepSpeed configuration to use the default ZeRO-Offload optimizer.")
+
     if not torch._utils.is_compiling() and not all(isinstance(t, torch.Tensor) for t in state_steps):
         raise RuntimeError("API has changed, `state_steps` argument must contain a list of singleton tensors")
 

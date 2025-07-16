@@ -25,9 +25,9 @@ def configure_zenflow(engine: "DeepSpeedEngine") -> None:
     if zenflow_config == None:
         engine.zenflow = False
         return
-    if not required_torch_version(min_version=2.0):
+    if not required_torch_version(min_version=2.1):
         raise ValueError(
-            "Please use PyTorch 2.0 or later to enable ZenFlow. Alternatively, omit `zenflow` config in the config file to fall back to the default ZeRO-Offload optimizer."
+            "Please use PyTorch 2.1 or later to enable ZenFlow. Alternatively, omit `zenflow` config in the config file to fall back to the default ZeRO-Offload optimizer."
         )
 
     engine.zenflow = True
