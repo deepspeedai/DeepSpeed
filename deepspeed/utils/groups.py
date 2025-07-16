@@ -404,7 +404,7 @@ def _create_expert_data_and_model_parallel(expert_parallel_size_, mpu, use_data_
 
     world_size = dist.get_world_size()
     rank = dist.get_rank()
-    dp_world_size = mpu.get_data_parallel_world_size()
+    dp_world_size = _get_data_parallel_world_size()
     pp_world_size = 1 if mpu is None else bwc_pipeline_parallel_world_size(mpu)
 
     _ensure_divisibility(world_size, tensor_parallel_size_)
@@ -569,31 +569,37 @@ def _get_data_parallel_group_ranks():
 
 
 def _get_broadcast_src_rank():
+    assert dist.is_initialized(), 'dist is not initialized'
     return dist.get_global_rank(_get_sequence_data_parallel_group(), 0)
 
 
 def _get_expert_broadcast_src_rank(group_name):
+    assert dist.is_initialized(), 'dist is not initialized'
     return dist.get_global_rank(_get_expert_data_parallel_group(group_name), 0)
 
 
 def _get_expert_parallel_world_size(group_name):
     """Return world size for the expert parallel group."""
+    assert dist.is_initialized(), 'dist is not initialized'
     return dist.get_world_size(group=_get_expert_parallel_group(group_name))
 
 
 def _get_expert_data_parallel_world_size(group_name):
     """Return world size for the expert data parallel group."""
+    assert dist.is_initialized(), 'dist is not initialized'
     return dist.get_world_size(group=_get_expert_data_parallel_group(group_name))
 
 
 def _get_expert_parallel_rank(group_name):
     """Return my rank for the expert parallel group."""
+    assert dist.is_initialized(), 'dist is not initialized'
     return dist.get_rank(group=_get_expert_parallel_group(group_name))
 
 
 def _get_expert_parallel_src_rank(group_name):
     """Calculate the global rank corresponding to a local rank zero
     in the expert parallel group."""
+    assert dist.is_initialized(), 'dist is not initialized'
     global_rank = dist.get_rank()
     local_world_size = _get_expert_parallel_world_size(group_name)
     return (global_rank // local_world_size) * local_world_size
@@ -601,11 +607,13 @@ def _get_expert_parallel_src_rank(group_name):
 
 def _get_expert_data_parallel_rank(group_name):
     """Return my rank for the expert data parallel group."""
+    assert dist.is_initialized(), 'dist is not initialized'
     return dist.get_rank(group=_get_expert_data_parallel_group(group_name))
 
 
 def _get_data_parallel_world_size():
     """Return world size for the data parallel group."""
+    assert dist.is_initialized(), 'dist is not initialized'
     if mesh_device is not None:
         return dist.get_world_size(mesh_device.get_group(mesh_dim="data_parallel"))
     global mpu
@@ -627,11 +635,13 @@ def _get_model_parallel_world_size():
 
 def _get_data_parallel_rank():
     """Return my rank for the data parallel group."""
+    assert dist.is_initialized(), 'dist is not initialized'
     return dist.get_rank(group=_get_data_parallel_group())
 
 
 def _get_sequence_parallel_world_size():
-    """Return world size for the sequence parallel group."""
+    """Return world size for the model parallel group."""
+    assert dist.is_initialized(), 'dist is not initialized'
     global mpu
     if mesh_device is not None:
         return dist.get_world_size(mesh_device.get_group(mesh_dim="sequence_parallel"))

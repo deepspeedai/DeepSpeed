@@ -37,11 +37,15 @@ def shard_qkv_param(param: torch.Tensor,
     if n_heads_kv is not None and n_heads_q is None:
         raise ValueError("n_heads_kv should not be passed without n_heads_q")
 
+    if param is None:
+        raise ValueError("param should not be None")
     if n_heads_q is None:
         # Guaranteed to be in MHA
         if param.shape[0] // 3 % head_size != 0:
             raise ValueError("MHA param shape is not correct")
         n_heads_q = param.shape[0] // head_size // 3
+        mha_sharding = True
+    elif n_heads_kv is None:
         mha_sharding = True
     else:
         mha_sharding = n_heads_q == n_heads_kv
@@ -72,9 +76,6 @@ def shard_qkv_param(param: torch.Tensor,
             raise ValueError("Currently do not support distributing KV heads across different numbers of shards.")
         else:
             even_kv_sharding = n_heads_kv >= num_shards
-
-        if param is None:
-            return None
 
         q_param = param[:head_size * n_heads_q]
         kv_param = param[head_size * n_heads_q:]

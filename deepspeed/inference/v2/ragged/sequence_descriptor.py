@@ -122,9 +122,9 @@ class DSSequenceDescriptor(BaseSequenceDescriptor):
 
         self._seen_tokens = 0
         self._in_flight_tokens = 0
+        assert kv_cache_ids_shadow is not None  # add check before use
 
-        self._num_allocation_groups = tuple(kv_cache_ids_shadow.shape[0]
-                                            for kv_cache_ids_shadow in kv_cache_ids_shadow)
+        self._num_allocation_groups = tuple(kv_cache_id.shape[0] for kv_cache_id in kv_cache_ids_shadow)
         self._blocks_per_allocation_group = tuple(
             torch.zeros(num_groups, dtype=torch.int32, device="cpu") for num_groups in self._num_allocation_groups)
 

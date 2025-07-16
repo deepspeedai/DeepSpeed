@@ -73,6 +73,8 @@ class MegatronLayerPolicy(TransformerPolicy):
                 attention = self.client_module.attention
             else:
                 attention = self.client_module.self_attention
+        else:
+            return None
 
         return attention.query_key_value.weight, \
                attention.query_key_value.bias, \

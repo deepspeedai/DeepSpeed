@@ -57,7 +57,7 @@ class DeepSpeedDiffusersTransformerBlock(nn.Module):
             self.attn_2.do_out_bias = False
             self.attn_2_bias = self.attn_2.attn_ob
         else:
-            self.attn_2_bias = nn.Paramaeter(torch.zeros_like(self.norm3_g), requires_grad=False)
+            self.attn_2_bias = nn.Parameter(torch.zeros_like(self.norm3_g), requires_grad=False)
 
         self.gated_activation = GatedActivationOp()
         self.layer_norm = LayerNormOp()
