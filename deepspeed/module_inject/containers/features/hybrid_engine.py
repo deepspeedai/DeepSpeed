@@ -97,16 +97,16 @@ class HybridEngineContainer(ABC):
         # TODO(cmikeh2): Re-enable this once verified
         #self.apply_weight_quantization()
 
-    def _release_params(self, param_pairs: List[Tuple[torch.Tensor, torch.Tensor]]):
+    def _release_params(self, param_pairs: List[Tuple[torch.nn.Module, str, torch.Tensor]]):
         """
         Helper for `release_[component]` methods. Accepts a list of tuples where the first
-        element is the module param that needs to be deleted, and the second is the reassignment
-        from the container.
+        element is the module that holds the parameter needs to be deleted, the second is
+        the parameter name in the module, and the third is the reassignment from the container.
         """
-        for module_param, container_param in param_pairs:
-            if module_param is not None:
-                del module_param
-            module_param = container_param
+        for module, param_name, container_param in param_pairs:
+            if getattr(module, param_name, None) is not None:
+                delattr(module, param_name)
+            setattr(module, param_name, container_param)
 
     def release_memory(self):
         """
@@ -115,12 +115,12 @@ class HybridEngineContainer(ABC):
         parameters we've created for inference to free their memory.
         """
         general_params = [
-            (self.module.attention.attn_ow, self.dense_w),
-            (self.module.attention.attn_ob, self.dense_b),
-            (self.module.mlp.attn_nw, self.attn_nw),
-            (self.module.mlp.attn_nb, self.attn_nb),
-            (self.module.norm_w, self.input_nw),
-            (self.module.norm_b, self.input_nb),
+            (self.module.attention, 'attn_ow', self.dense_w),
+            (self.module.attention, 'attn_ob', self.dense_b),
+            (self.module.mlp, 'attn_nw', self.attn_nw),
+            (self.module.mlp, 'attn_nb', self.attn_nb),
+            (self.module, 'norm_w', self.input_nw),
+            (self.module, 'norm_b', self.input_nb),
         ]
 
         self._release_params(general_params)
@@ -133,8 +133,8 @@ class HybridEngineContainer(ABC):
         Release for QKV parameters (as well as any aliases).
         """
         qkv_params = [
-            (self.module.attention.attn_qkvw, self.qkvw),
-            (self.module.attention.attn_qkvb, self.qkvb),
+            (self.module.attention, 'attn_qkvw', self.qkvw),
+            (self.module.attention, 'attn_qkvb', self.qkvb),
         ]
 
         self._release_params(qkv_params)
@@ -144,10 +144,10 @@ class HybridEngineContainer(ABC):
         Release for MLP parameters (as well as any aliases).
         """
         mlp_params = [
-            (self.module.mlp.inter_w, self._h4h_w),
-            (self.module.mlp.inter_b, self._h4h_b),
-            (self.module.mlp.output_w, self._4hh_w),
-            (self.module.mlp.output_b, self._4hh_b),
+            (self.module.mlp, 'inter_w', self._h4h_w),
+            (self.module.mlp, 'inter_b', self._h4h_b),
+            (self.module.mlp, 'output_w', self._4hh_w),
+            (self.module.mlp, 'output_b', self._4hh_b),
         ]
 
         self._release_params(mlp_params)
