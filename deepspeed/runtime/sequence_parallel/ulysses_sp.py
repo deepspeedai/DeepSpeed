@@ -885,6 +885,93 @@ class TiledMLP(torch.autograd.Function):
         return (None, None, x_grad, None, None)
 
 
+class TiledFusedLogitsLoss(torch.autograd.Function):
+    """
+
+    """
+
+    @staticmethod
+    def forward(
+        ctx,
+        fn,
+        self,
+        x,
+        y,
+        shards,
+        compute_params,
+        output_reduction,
+    ) -> torch.Tensor:
+
+        if output_reduction not in ["mean", "sum"]:
+            raise ValueError(f'unknown value {output_reduction}: valid values are: "mean"/"sum"')
+
+        compute_params = [p for p in compute_params if p.requires_grad]
+
+        x_requires_grad = x.requires_grad
+        x = x.detach().requires_grad_(x_requires_grad)
+
+        bs, seqlen, hidden_size = x.shape
+
+        # flatten bs+seqlen to avoid having stride issues when narrowing into seqlen w/ bs>1
+        x = x.view(-1, hidden_size)
+        y = y.view(-1)
+        incoming_grad = torch.tensor(1.0, dtype=x.dtype, device=x.device)
+
+        # we are faking the incoming gradient, and since we perform a reduction outside of `autograd.backward` below we need to pre-adjust the incoming gradient. in the case of "sum" the gradient is 1.0, in the case of "mean" it's 1.0/num_elements, which in this case is 1/shards.
+        if output_reduction == "mean":
+            incoming_grad /= shards
+
+        x_grad = torch.zeros_like(x)
+        x_shards = list(torch.chunk(x, chunks=shards, dim=0))
+        y_shards = list(torch.chunk(y, chunks=shards, dim=0))
+
+        # Tell deepspeed not to add a new grad to its ipg bucket until the last shard is run
+        # XXX: DDP, FSDP will need something similar to make it work
+        if compute_params is not None:
+            for param in compute_params:
+                param.ds_grad_is_ready = False
+
+        output_shards = []
+        for i, (x_shard, y_shard) in enumerate(zip(x_shards, y_shards)):
+            x_shard.requires_grad_(x_requires_grad)
+
+            # if seqlen is not exactly divisible by shards the last step will be shorter than shard_step
+            shard_step = x_shards[i].shape[0]
+            shard_offset = i * x_shards[0].shape[0]
+
+            x_shard.grad = x_grad.narrow(0, shard_offset, shard_step).view_as(x_shard)
+
+            with torch.enable_grad():
+                output = fn(self, x_shard, y_shard)
+                output_shards.append(output)
+            torch.autograd.backward(output, incoming_grad)
+
+        output_unsharded = torch.cat([l.unsqueeze(0) for l in output_shards], dim=0)
+
+        if output_reduction == "mean":
+            output = output_unsharded.mean()
+        elif output_reduction == "sum":
+            output = output_unsharded.sum()
+
+        if compute_params is not None:
+            for param in compute_params:
+                param.ds_grad_is_ready = True
+
+        # unflatten
+        x_grad = x_grad.view(bs, -1, hidden_size)
+
+        ctx.save_for_backward(x_grad.detach())
+        return output
+
+    @staticmethod
+    def backward(ctx, *grads) -> torch.Tensor:
+        (x_grad, ) = ctx.saved_tensors
+        # grads[0] should normally be 1.0 as it should be coming from loss.backward()
+        if grads[0] != 1.0:
+            x_grad *= grads[0]
+        return (None, None, x_grad, None, None, None, None, None)
+
+
 class AutogradComputeMLP(torch.autograd.Function):
     """
     This is a simplified example to override the normal MLP via an autograd function - then tiling can be added - this simplified version was useful to detect a leak in Deepspeed, so let's keep it.
