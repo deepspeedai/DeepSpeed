@@ -40,7 +40,7 @@ def validate_grad_device(model, device: torch.device) -> None:
             assert p.grad.device == device, f"Gradient partition is on {p.grad.device}, expected {device}"
 
 
-def run_model_zero2(model, param_groups, config_dict, hidden_dim, dtype, offloaded_states, pin_memory, non_blocking):
+def run_model_zero12(model, param_groups, config_dict, hidden_dim, dtype, offloaded_states, pin_memory, non_blocking):
     """
     This function runs a training step, offloads states, reloads them, and verifies correctness for ZeRO-2.
     """
@@ -125,10 +125,10 @@ def run_model_zero2(model, param_groups, config_dict, hidden_dim, dtype, offload
 @pytest.mark.parametrize("pin_memory", [False, True])
 @pytest.mark.parametrize("non_blocking", [False, True])
 @pytest.mark.parametrize("zero_stage", [1, 2])
-class TestOffloadStatesZero2(DistributedTest):
+class TestOffloadStatesZero12(DistributedTest):
     world_size = 2
 
-    def test_offload_states_zero2(self, included_state, pin_memory, non_blocking):
+    def test_offload_states_zero12(self, included_state, pin_memory, non_blocking):
         hidden_dim = 1024
         config_dict = {
             "train_micro_batch_size_per_gpu": 1,
@@ -143,5 +143,5 @@ class TestOffloadStatesZero2(DistributedTest):
             "params": [p for n, p in model.named_parameters() if 'bias' in n], "weight_decay": 0.0
         }]
         offloaded_states = None if included_state is None else [included_state]
-        run_model_zero2(model, param_groups, config_dict, hidden_dim, torch.bfloat16, offloaded_states, pin_memory,
+        run_model_zero12(model, param_groups, config_dict, hidden_dim, torch.bfloat16, offloaded_states, pin_memory,
                         non_blocking)
