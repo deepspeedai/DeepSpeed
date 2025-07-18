@@ -124,6 +124,7 @@ def run_model_zero2(model, param_groups, config_dict, hidden_dim, dtype, offload
 ])
 @pytest.mark.parametrize("pin_memory", [False, True])
 @pytest.mark.parametrize("non_blocking", [False, True])
+@pytest.mark.parametrize("zero_stage", [1, 2])
 class TestOffloadStatesZero2(DistributedTest):
     world_size = 2
 
@@ -132,7 +133,7 @@ class TestOffloadStatesZero2(DistributedTest):
         config_dict = {
             "train_micro_batch_size_per_gpu": 1,
             "optimizer": {"type": "Adam", "params": {"lr": 1e-6}},
-            "zero_optimization": {"stage": 2},
+            "zero_optimization": {"stage": zero_stage},
             "bf16": {"enabled": True}
         }
         model = SimpleModel(hidden_dim, nlayers=4)
