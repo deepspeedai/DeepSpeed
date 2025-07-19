@@ -11,7 +11,7 @@ ROOT_PATH = Path(__file__).parents[1]
 
 # yapf: disable
 image = (modal.Image
-         .from_registry("pytorch/pytorch:2.7.0-cuda12.6-cudnn9-devel", add_python="3.10")
+         .from_registry("pytorch/pytorch:2.6.0-cuda12.4-cudnn9-devel", add_python="3.10")
          .run_commands("apt update && apt install -y libaio-dev")
          .apt_install("git")
          .run_commands("uv pip install --system --compile-bytecode datasets==3.6.0")
@@ -23,6 +23,7 @@ image = (modal.Image
          .run_commands("uv pip list")
          .pip_install_from_requirements(ROOT_PATH / "requirements/requirements.txt", gpu="any")
          .pip_install_from_requirements(ROOT_PATH / "requirements/requirements-dev.txt", gpu="any")
+         .add_local_dir(ROOT_PATH / "deepspeed", remote_path="/root/deepspeed")
          .add_local_dir(ROOT_PATH / "accelerator", remote_path="/root/accelerator")
          .add_local_dir(ROOT_PATH / "accelerator", remote_path="/root/deepspeed/accelerator")
          .add_local_dir(ROOT_PATH / "csrc", remote_path="/root/csrc")
@@ -45,7 +46,7 @@ app = modal.App("deepspeedai-accelerate-ci", image=image)
 def pytest():
     import subprocess
     subprocess.run(
-        "pytest -n 4 --verbose /accelerate/tests/deepspeed".split(),
+        "pytest --verbose /accelerate/tests/deepspeed".split(),
         check=True,
         cwd=ROOT_PATH / ".",
     )
