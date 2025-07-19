@@ -71,10 +71,13 @@ def run_model_zero12(model, param_groups, config_dict, hidden_dim, dtype, offloa
 
 
         # --- Start offloading ---
+        alloc_before_offload = get_accelerator().memory_allocated()
         model.offload_states(include=offloaded_states,
                                device=offload_device,
                                pin_memory=pin_memory,
                                non_blocking=non_blocking)
+        alloc_after_offload = get_accelerator().memory_allocated()
+        assert alloc_after_offload < alloc_before_offload, f"Allocated memory should decrease after offload"
 
         # --- Validate that states were moved to CPU ---
         if offloaded_states is None or OffloadStateTypeEnum.lp_params in offloaded_states:
@@ -88,6 +91,8 @@ def run_model_zero12(model, param_groups, config_dict, hidden_dim, dtype, offloa
 
         # --- Reload states back to GPU ---
         model.reload_states()
+        alloc_after_reload = get_accelerator().memory_allocated()
+        assert alloc_after_reload > alloc_after_offload, f"Allocated memory should increase after reload"
 
         # --- Verify restored states ---
         validate_lp_params_device(model, accelerator_device)
@@ -128,7 +133,7 @@ def run_model_zero12(model, param_groups, config_dict, hidden_dim, dtype, offloa
 class TestOffloadStatesZero12(DistributedTest):
     world_size = 2
 
-    def test_offload_states_zero12(self, included_state, pin_memory, non_blocking):
+    def test_offload_states_zero12(self, included_state, pin_memory, non_blocking, zero_stage):
         hidden_dim = 1024
         config_dict = {
             "train_micro_batch_size_per_gpu": 1,
