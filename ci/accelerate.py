@@ -7,7 +7,7 @@ from pathlib import Path
 
 import modal
 
-ROOT_PATH = Path(__file__).parents[2]
+ROOT_PATH = Path(__file__).parents[1]
 
 # yapf: disable
 image = (modal.Image
@@ -30,6 +30,8 @@ image = (modal.Image
          .add_local_dir(ROOT_PATH / "op_builder", remote_path="/root/op_builder")
          .add_local_dir(ROOT_PATH / "op_builder", remote_path="/root/deepspeed/ops/op_builder")
          .add_local_dir(ROOT_PATH / "tests", remote_path="/root/tests")
+         .add_local_dir(ROOT_PATH / "ci", remote_path="/root/ci")
+         .add_local_dir(ROOT_PATH / "ci", remote_path="/root/deepspeed/ci")
         )
 
 app = modal.App("deepspeedai-accelerate-ci", image=image)
