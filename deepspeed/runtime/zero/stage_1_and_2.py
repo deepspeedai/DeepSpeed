@@ -611,7 +611,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
         self._param_slice_mappings = self._create_param_mapping()
         if self.cpu_offload:
             self._create_optimizer_mapping()
-            
+
         self.offloaded_states: Set[OffloadStateTypeEnum] = set()
 
     def destroy(self):
@@ -2644,11 +2644,11 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
             # Move all flattened LP parameter buffers back to GPU by swapping .data
             for buf in self.bit16_groups_flat:
                 buf.data = buf.data.to(device, non_blocking=non_blocking)
-                
+
             # Restore model parameter .data pointers
             for i in range(len(self.bit16_groups)):
                 self._update_model_bit16_weights(i)
-                
+
             # Clean up pinned buffers if they were used
             if hasattr(self, "lp_params_pin_buffers"):
                 del self.lp_params_pin_buffers
