@@ -17,12 +17,13 @@ image = (modal.Image
          .run_commands("uv pip install --system --compile-bytecode datasets==3.6.0")
          .run_commands(
                 "git clone https://github.com/huggingface/accelerate && \
-                uv pip install --system --compile-bytecode accelerate[testing]"
+                uv pip install --system --compile-bytecode ./accelerate[testing]"
             )
          .run_commands("uv pip install --system --compile-bytecode protobuf")
          .run_commands("uv pip list")
          .pip_install_from_requirements(ROOT_PATH / "requirements/requirements.txt", gpu="any")
          .pip_install_from_requirements(ROOT_PATH / "requirements/requirements-dev.txt", gpu="any")
+         .run_commands("pip show deepspeed")
          .add_local_dir(ROOT_PATH / "deepspeed", remote_path="/root/deepspeed")
          .add_local_dir(ROOT_PATH / "accelerator", remote_path="/root/accelerator")
          .add_local_dir(ROOT_PATH / "accelerator", remote_path="/root/deepspeed/accelerator")
