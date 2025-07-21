@@ -47,7 +47,7 @@ app = modal.App("deepspeedai-accelerate-ci", image=image)
 def pytest():
     import subprocess
     subprocess.run(
-        "pytest --verbose /accelerate/tests/deepspeed".split(),
+        "pytest -sv /accelerate/tests/deepspeed".split(),
         check=True,
         cwd=ROOT_PATH / ".",
     )
