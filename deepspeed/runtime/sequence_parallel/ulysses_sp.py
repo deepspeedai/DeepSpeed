@@ -640,6 +640,7 @@ class SequenceTiledCompute(torch.autograd.Function):
         ctx.grad_requiring_tensor_key = grad_requiring_tensor_key
         ctx.compute_params = [p for p in compute_params if p.requires_grad]
         ctx.output_unshard_dimension = output_unshard_dimension
+        ctx.output_reduction = output_reduction
 
         with torch.no_grad():
             args = list(args)
@@ -686,6 +687,7 @@ class SequenceTiledCompute(torch.autograd.Function):
         shards = ctx.shards
         kwargs_to_shard = ctx.kwargs_to_shard
         kwargs_to_pass = ctx.kwargs_to_pass
+        output_reduction = ctx.output_reduction
 
         grad_requiring_tensor_key = ctx.grad_requiring_tensor_key
         grad_requiring_tensor_key_index = ctx.grad_requiring_tensor_key_index
@@ -699,6 +701,9 @@ class SequenceTiledCompute(torch.autograd.Function):
         grad_requiring_tensor.requires_grad_(grad_requiring_tensor_requires_grad)
 
         incoming_grad = grads[0]
+        # since we perform a reduction of outputs that doesn't get included in `autograd.backward` below we need to pre-adjust the incoming gradient. in the case of "sum" the gradient is 1.0, in the case of "mean" it's 1.0/num_elements, which in this case is 1/shards.
+        if output_reduction == "mean":
+            incoming_grad /= shards
 
         if grad_requiring_tensor.shape[0] == 1:
             grad_requiring_tensor_grad = torch.zeros_like(grad_requiring_tensor)
@@ -897,6 +902,7 @@ class TiledFusedLogitsLoss(torch.autograd.Function):
         self,
         x,
         y,
+        mask,
         shards,
         compute_params,
         output_reduction,
@@ -924,15 +930,22 @@ class TiledFusedLogitsLoss(torch.autograd.Function):
         x_grad = torch.zeros_like(x)
         x_shards = list(torch.chunk(x, chunks=shards, dim=0))
         y_shards = list(torch.chunk(y, chunks=shards, dim=0))
-
-        # Tell deepspeed not to add a new grad to its ipg bucket until the last shard is run
-        # XXX: DDP, FSDP will need something similar to make it work
-        if compute_params is not None:
-            for param in compute_params:
-                param.ds_grad_is_ready = False
+        if mask is not None:
+            mask_shards = list(torch.chunk(mask, chunks=shards, dim=0))
 
         output_shards = []
         for i, (x_shard, y_shard) in enumerate(zip(x_shards, y_shards)):
+            # Tell deepspeed not to add a new grad to its ipg bucket until the last shard is run
+            # XXX: DDP, FSDP will need something similar to make it work
+            if compute_params is not None:
+                if i + 1 < shards:
+                    for param in compute_params:
+                        param.ds_grad_is_ready = False
+                else:
+                    # last shard, can add the grad
+                    for param in compute_params:
+                        param.ds_grad_is_ready = True
+
             x_shard.requires_grad_(x_requires_grad)
 
             # if seqlen is not exactly divisible by shards the last step will be shorter than shard_step
@@ -942,7 +955,10 @@ class TiledFusedLogitsLoss(torch.autograd.Function):
             x_shard.grad = x_grad.narrow(0, shard_offset, shard_step).view_as(x_shard)
 
             with torch.enable_grad():
-                output = fn(self, x_shard, y_shard)
+                args = (self, x_shard, y_shard)
+                if mask is not None:
+                    args.append(mask_shards[i])
+                output = fn(*args)
                 output_shards.append(output)
             torch.autograd.backward(output, incoming_grad)
 
@@ -952,10 +968,6 @@ class TiledFusedLogitsLoss(torch.autograd.Function):
             output = output_unsharded.mean()
         elif output_reduction == "sum":
             output = output_unsharded.sum()
-
-        if compute_params is not None:
-            for param in compute_params:
-                param.ds_grad_is_ready = True
 
         # unflatten
         x_grad = x_grad.view(bs, -1, hidden_size)
@@ -969,7 +981,7 @@ class TiledFusedLogitsLoss(torch.autograd.Function):
         # grads[0] should normally be 1.0 as it should be coming from loss.backward()
         if grads[0] != 1.0:
             x_grad *= grads[0]
-        return (None, None, x_grad, None, None, None, None, None)
+        return (None, None, x_grad, None, None, None, None, None, None)
 
 
 class AutogradComputeMLP(torch.autograd.Function):

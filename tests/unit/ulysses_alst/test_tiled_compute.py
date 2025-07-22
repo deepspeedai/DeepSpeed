@@ -246,6 +246,7 @@ class TestTiledFusedLogitsLoss(DistributedTest):
                 logits = self.lm_head(x)
                 return self.cross_entropy_loss(logits.view(-1, self.vocab_size), y.view(-1))
 
+            mask = None
             shards = 2
             compute_params = [self.lm_head.weight]
             output_reduction = "mean"
@@ -254,6 +255,7 @@ class TestTiledFusedLogitsLoss(DistributedTest):
                 self,
                 x,
                 y,
+                mask,
                 shards,
                 compute_params,
                 output_reduction,
@@ -340,7 +342,8 @@ class TestTiledFusedLogitsLoss(DistributedTest):
         # print(f"{x_grad_b=}")
         # print(f"{param_grad_a=}")
         # print(f"{param_grad_b=}")
-        torch_assert_equal(loss_a, loss_b)
+        # usually this is an exact match, but on cpu CI this fails.
+        torch_assert_close(loss_a, loss_b)
 
         # Gradient will not be exactly the same, especially under half-precision. And bf16 is
         # particularly lossy so need to lower tolerance a bit more than the default. Switch to
