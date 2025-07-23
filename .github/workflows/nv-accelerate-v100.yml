@@ -48,6 +48,10 @@ jobs:
           git clone https://github.com/huggingface/accelerate
           cd accelerate
           git rev-parse --short HEAD
+
+          # temp workaround until this is resolved https://github.com/huggingface/accelerate/issues/3676
+          pip install datasets==3.6.0
+
           # installing dependencies
           pip install .[testing]
           # force protobuf version due to issues
