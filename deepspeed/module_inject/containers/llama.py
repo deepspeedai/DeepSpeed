@@ -34,7 +34,10 @@ class DS_LLAMAContainer(MetaTensorContainer, HybridGatedMLPContainer, HybridSpli
         _config.rotate_half = True
         _config.rotate_every_two = False
         _config.rotary_dim = self.hidden_size // self.num_attention_heads
-        _config.rope_theta = self.policy.client_module.self_attn.rope_theta
+        if hasattr(self.policy.client_module.self_attn, 'config'):
+            _config.rope_theta = self.policy.client_module.self_attn.config.rope_theta
+        else:
+            _config.rope_theta = self.policy.client_module.self_attn.rope_theta
         self.module = DeepSpeedGPTInference(_config, mp_group=self.mp_group)
 
         return self.module
@@ -128,9 +131,13 @@ class LLAMALayerPolicy(TransformerPolicy):
             LLAMALayerPolicy._orig_layer_class = None
 
     def get_hidden_heads(self):
+        if hasattr(self.client_module.self_attn, 'config'):
+            num_heads = self.client_module.self_attn.config.num_attention_heads
+        else:
+            num_heads = self.client_module.self_attn.num_heads
         hidden_heads = (
             self.client_module.self_attn.q_proj.in_features,
-            self.client_module.self_attn.num_heads,
+            num_heads,
             self.client_module.input_layernorm.variance_epsilon,
             self.client_module.mlp.gate_proj.out_features,
         )
