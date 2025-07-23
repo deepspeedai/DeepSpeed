@@ -323,22 +323,14 @@ def replace_transformer_layer(orig_layer_impl, model, checkpoint_dict, config, m
 
     def replace_fn(child, _policy, layer_id=0, prefix="", state_dict=None):
         # copy relevant state from child -> new module
-        if config.replace_with_kernel_inject:
+        if not is_autotp_training_mode() and config.replace_with_kernel_inject:
             new_module = replace_with_policy(child,
                                              _policy,
                                              config.triangular_masking,
                                              inference=True,
                                              layer_id=layer_id)
         else:
-            # copy relevant state from child -> new module
-            if not is_autotp_training_mode() and config.replace_with_kernel_inject:
-                new_module = replace_with_policy(child,
-                                                 _policy,
-                                                 config.triangular_masking,
-                                                 inference=True,
-                                                 layer_id=layer_id)
-            else:
-                new_module = replace_wo_policy(child, _policy, prefix=prefix, state_dict=state_dict)
+            new_module = replace_wo_policy(child, _policy, prefix=prefix, state_dict=state_dict)
 
         return new_module
 
