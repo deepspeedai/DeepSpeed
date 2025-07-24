@@ -911,16 +911,25 @@ class TiledFusedLogitsLoss(torch.autograd.Function):
         if output_reduction not in ["mean", "sum"]:
             raise ValueError(f'unknown value {output_reduction}: valid values are: "mean"/"sum"')
 
+        assert x.dim() >= 2, "x must be at least 2D [batch_size, seq_len, ...]"
+        assert y.dim() >= 2, "y must be at least 2D [batch_size, seq_len, ...]"
+        assert x.shape[:2] == y.shape[:2], "x and y batch/seq dims must match"
+        if mask is not None:
+            assert mask.dim() == 2, "mask must be 2D [batch_size, seq_len]"
+            assert mask.shape == x.shape[:2], "mask shape must match x and y batch/seq"
+
         compute_params = [p for p in compute_params if p.requires_grad]
 
         x_requires_grad = x.requires_grad
         x = x.detach().requires_grad_(x_requires_grad)
 
-        bs, seqlen, hidden_size = x.shape
+        bs, seqlen = x.shape[:2]
 
         # flatten bs+seqlen to avoid having stride issues when narrowing into seqlen w/ bs>1
-        x = x.view(-1, hidden_size)
-        y = y.view(-1)
+        x = x.view(-1, *x.shape[2:])
+        y = y.view(-1, *y.shape[2:])
+        if mask is not None:
+            mask = mask.view(-1)
         incoming_grad = torch.tensor(1.0, dtype=x.dtype, device=x.device)
 
         # we are faking the incoming gradient, and since we perform a reduction outside of `autograd.backward` below we need to pre-adjust the incoming gradient. in the case of "sum" the gradient is 1.0, in the case of "mean" it's 1.0/num_elements, which in this case is 1/shards.
@@ -970,7 +979,7 @@ class TiledFusedLogitsLoss(torch.autograd.Function):
             output = output_unsharded.sum()
 
         # unflatten
-        x_grad = x_grad.view(bs, -1, hidden_size)
+        x_grad = x_grad.view(bs, seqlen, *x_grad.shape[1:])
 
         ctx.save_for_backward(x_grad.detach())
         return output
