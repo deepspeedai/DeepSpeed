@@ -137,7 +137,7 @@ def module_replacement(model, module_name, compression_technique=None, mpu=None)
     else:
         new_module = None
 
-    if compression_technique is not None:
+    if compression_technique is not None and new_module is not None:
         for k, v in compression_technique.items():
             if k == SPARSE_PRUNING:
                 if v[SPARSE_PRUNING_ENABLED]:

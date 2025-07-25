@@ -93,8 +93,10 @@ def generic_injection(module, dtype=None, enable_cuda_graph=True):
             return child
         if len(policy_attn) == 5:
             qkvw, attn_ow, attn_ob, hidden_size, heads = policy_attn
+            qw, kw, vw = torch.empty(0), torch.empty(0), torch.empty(0)
         else:
             qw, kw, vw, attn_ow, attn_ob, hidden_size, heads = policy_attn
+            qkvw = torch.empty(0)
 
         config = transformer_inference.DeepSpeedInferenceConfig(
             hidden_size=hidden_size,
@@ -113,11 +115,15 @@ def generic_injection(module, dtype=None, enable_cuda_graph=True):
             return data
 
         if len(policy_attn) == 5:
+            assert qkvw is not None and qkvw.data is not None, "qkvw can't be None"
             attn_module.attn_qkvw.data = transpose(qkvw.data)
         else:
             attn_module.attn_qkvw = None
+            assert qw is not None and qw.data is not None, "qw can't be None"
             attn_module.attn_qw.data = transpose(qw.data)
+            assert kw is not None and kw.data is not None, "kw can't be None"
             attn_module.attn_kw.data = transpose(kw.data)
+            assert vw is not None and vw.data is not None, "vw can't be None"
             attn_module.attn_vw.data = transpose(vw.data)
 
         attn_module.attn_qkvb = None
@@ -316,21 +322,15 @@ def replace_transformer_layer(orig_layer_impl, model, checkpoint_dict, config, m
         return _autotp._replace_module(module)
 
     def replace_fn(child, _policy, layer_id=0, prefix="", state_dict=None):
-        training = False  # todo: refactor this part to go in the config
-        if training:
-            # copy relevant state from child -> new module
-            new_module = replace_with_policy(child, _policy, config.triangular_masking)
-
+        # copy relevant state from child -> new module
+        if not is_autotp_training_mode() and config.replace_with_kernel_inject:
+            new_module = replace_with_policy(child,
+                                             _policy,
+                                             config.triangular_masking,
+                                             inference=True,
+                                             layer_id=layer_id)
         else:
-            # copy relevant state from child -> new module
-            if not is_autotp_training_mode() and config.replace_with_kernel_inject:
-                new_module = replace_with_policy(child,
-                                                 _policy,
-                                                 config.triangular_masking,
-                                                 inference=True,
-                                                 layer_id=layer_id)
-            else:
-                new_module = replace_wo_policy(child, _policy, prefix=prefix, state_dict=state_dict)
+            new_module = replace_wo_policy(child, _policy, prefix=prefix, state_dict=state_dict)
 
         return new_module
 

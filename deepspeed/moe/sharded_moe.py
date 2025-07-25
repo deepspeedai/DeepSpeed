@@ -400,7 +400,7 @@ def topkgating(
     me = torch.mean(gates, dim=0)
     ce = torch.mean(mask.float(), dim=0)
     l_aux = torch.mean(me * ce) * num_experts * num_experts / k
-
+    locations = None
     if drop_tokens:
         # Calculate configured capacity and remove locations outside capacity from mask
         capacity = _capacity(gates, torch.tensor(capacity_factor * k), torch.tensor(min_capacity))
@@ -437,6 +437,8 @@ def topkgating(
     denom_s = torch.clamp(gates_s, min=torch.finfo(gates_masked.dtype).eps)
     gates_masked = gates_masked / denom_s
 
+    if locations is None:
+        raise ValueError(f"Locations is not set: {locations}")
     # dispatch_mask
     locations_sc = _one_hot_to_float((locations * mask), capacity)
 

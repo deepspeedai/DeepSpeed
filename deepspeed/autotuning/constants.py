@@ -144,7 +144,7 @@ DEFAULT_MIN_MEM_CONFIG = {
     "zero_optimization": {
         "stage": 3
     },
-    "memory_break_down": False
+    "memory_breakdown": False
 }
 
 DEFAULT_TUNING_SPACE_ZERO_0 = {"zero_optimization": {"stage": 0}}
