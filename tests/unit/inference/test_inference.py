@@ -555,7 +555,8 @@ class TestInjectionPolicy(DistributedTest):
 
 
 @pytest.mark.seq_inference
-@pytest.mark.parametrize("model_w_task", [("hf-internal-testing/tiny-random-LlamaForCausalLM", "text-generation")], ids=["llama"])
+@pytest.mark.parametrize("model_w_task", [("hf-internal-testing/tiny-random-LlamaForCausalLM", "text-generation")],
+                         ids=["llama"])
 @pytest.mark.parametrize("dtype", [torch.half], ids=["fp16"])
 class TestLlamaInjection(DistributedTest):
     world_size = 1
@@ -574,23 +575,21 @@ class TestLlamaInjection(DistributedTest):
         model, task = model_w_task
 
         tokenizer = LlamaTokenizer.from_pretrained(model)
-        config = LlamaConfig(
-            vocab_size=32000,
-            hidden_size=4096,
-            intermediate_size=11008,
-            num_hidden_layers=1,
-            num_attention_heads=32,
-            max_position_embeddings=2048,
-            initializer_range=0.02,
-            rms_norm_eps=1e-5,
-            use_cache=True,
-            pad_token_id=0,
-            bos_token_id=1,
-            eos_token_id=2,
-            tie_word_embeddings=True
-        )
+        config = LlamaConfig(vocab_size=32000,
+                             hidden_size=4096,
+                             intermediate_size=11008,
+                             num_hidden_layers=1,
+                             num_attention_heads=32,
+                             max_position_embeddings=2048,
+                             initializer_range=0.02,
+                             rms_norm_eps=1e-5,
+                             use_cache=True,
+                             pad_token_id=0,
+                             bos_token_id=1,
+                             eos_token_id=2,
+                             tie_word_embeddings=True)
         model = LlamaForCausalLM(config)
-        
+
         local_rank = int(os.getenv("LOCAL_RANK", "0"))
         device = torch.device(get_accelerator().device_name(local_rank))
 
@@ -609,12 +608,10 @@ class TestLlamaInjection(DistributedTest):
         bs_output = pipe(query, **inf_kwargs)
 
         try:
-            pipe.model = deepspeed.init_inference(
-                pipe.model,
-                mp_size=self.world_size,
-                dtype=dtype,
-                replace_with_kernel_inject=True
-            )
+            pipe.model = deepspeed.init_inference(pipe.model,
+                                                  mp_size=self.world_size,
+                                                  dtype=dtype,
+                                                  replace_with_kernel_inject=True)
             check_injection(pipe.model)
         except AttributeError as e:
             if "'LlamaAttention' object has no attribute 'num_heads'" in str(e):
