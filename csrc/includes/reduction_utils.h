@@ -538,7 +538,8 @@ DS_D_INLINE __half shfl_xor_helper<__half>(cg::thread_block_tile<hw_warp_size>& 
                                            const __half& value,
                                            int i)
 {
-    return __half(warp.shfl_xor(float(value), i));
+    float fvalue = __half2float(value);
+    return __half(warp.shfl_xor(fvalue, i));
 }
 #endif
 
