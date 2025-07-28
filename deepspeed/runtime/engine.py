@@ -41,7 +41,7 @@ from deepspeed.module_inject.layers import GatherReplacedLayerParams, configure_
 from deepspeed.runtime.config import DEEPSPEED_OPTIMIZERS, \
     ADAGRAD_OPTIMIZER, ADAM_OPTIMIZER, ADAMW_OPTIMIZER, LAMB_OPTIMIZER, ONEBIT_ADAM_OPTIMIZER, ONEBIT_LAMB_OPTIMIZER, \
     TORCH_ADAM_PARAM, ADAM_W_MODE, ADAM_W_MODE_DEFAULT, ZERO_ONE_ADAM_OPTIMIZER, MUADAM_OPTIMIZER, MUADAMW_OPTIMIZER, \
-    MUSGD_OPTIMIZER, LION_OPTIMIZER
+    MUSGD_OPTIMIZER, LION_OPTIMIZER, MUON_OPTIMIZER
 
 from deepspeed.runtime.model_checkpointing.constants import ValidationMode, \
     CHECKPOINT_TAG_VALIDATION, CHECKPOINT_WRITER, CHECKPOINT_SERIALIZATION
@@ -1553,6 +1553,20 @@ class DeepSpeedEngine(Module):
             except ImportError:
                 logger.error(f"Install mup to use MuSGD optimizer")
             optimizer = MuSGD(model_parameters, **optimizer_parameters)
+        elif self.optimizer_name() == MUON_OPTIMIZER:
+            try:
+                from muon import MuonWithAuxAdam
+            except ImportError:
+                logger.error(f"Install muon to use Muon optimizer")
+            muon_params = [p for p in model_parameters if getattr(p, "_use_muon", False)]
+            non_muon_params = [p for p in model_parameters if not getattr(p, "_use_muon", False)]
+
+            param_groups = []
+            if muon_params:
+                param_groups.append(dict(params=muon_params, use_muon=True, **optimizer_parameters))
+            if non_muon_params:
+                param_groups.append(dict(params=non_muon_params, use_muon=False, **optimizer_parameters))
+            optimizer = MuonWithAuxAdam(param_groups)
         else:
             torch_optimizer = getattr(torch.optim, self.optimizer_name())
             optimizer = torch_optimizer(model_parameters, **optimizer_parameters)
