@@ -18,6 +18,7 @@ ALST features found in this module:
 - `UlyssesSPDataLoaderAdapter` - DL adapter to shard the normal DL batches to be used by `UlyssesSPAttentionHF`
 - `SequenceTiledCompute` - generic autograd function to perform compute after tiling on the sequence dimension
 - `TiledMLP` - a specific autograd function to perform tiled MLP (it's much easier to understand before trying to grok `SequenceTiledCompute`)
+- `TiledFusedLogitsLoss` - a specific autograd function to perform loss computation without manifesting the full logits tensor and instead computing loss on shards of logits.
 
 This module implements Arctic Long Sequence Training: Scalable And Efficient Training For Multi-Million Token Sequences: https://arxiv.org/abs/2506.13996
 
@@ -892,6 +893,47 @@ class TiledMLP(torch.autograd.Function):
 
 class TiledFusedLogitsLoss(torch.autograd.Function):
     """
+    Perform a tiled loss computation while not manifesting a full logits tensor to massively reduce memory usage.
+
+    Args:
+    - fn: the function to call on sharded inputs
+    - `self`: the lm_head module object, often it will be `unwrapped_model.model.lm_head`
+    - `x`: the input (typically `hidden_states`) - which gets sharded
+    - `y`: the target (typically `labels` or `shift_labels`) - which gets sharded.
+    - `mask`: an optional mask. It will be not passed to the `fn` if set to `None`. If not-`None` it'll be sharded with `x` and `y`
+    - `shards`: how many shards to use
+    - compute_params: a list of weights engaged in the compute Default: `None` (only needed when using DeepSpeed ZeRO)
+    - output_reduction: "mean" or "sum". If the unmasked elements in `x` are of different sizes in different shards, it's recommended to use "sum" instead of "mean" and perform the balanced mean to the output. This would be the case if `x` is not evenly divisible by `shards` or if the mask may lead to a different number of unmasked elements.
+
+    Returns:
+    - the computed `loss`
+
+    Note, that since this autograd function is typically the last one in the call stack, it performs `backward` inside `forward` and compensates for `output_reduction` artificially. This removes the need to re-run `forward` a second time inside `backward`
+
+    For a generic tiled compute implementation that can handle many other types of `forward` see `SequenceTiledCompute`.
+
+    An example:
+
+        def loss_fn(self, x, y):
+            logits = self.lm_head(x)
+            return self.cross_entropy_loss(logits.view(-1, self.vocab_size), y.view(-1))
+
+        x = hidden_states
+        y = shift_labels
+        mask = None
+        shards = 2
+        compute_params = [self.lm_head.weight]
+        output_reduction = "mean"
+        loss = TiledFusedLogitsLoss.apply(
+            loss_fn,
+            self,
+            x,
+            y,
+            mask,
+            shards,
+            compute_params,
+            output_reduction,
+        )
 
     """
 
