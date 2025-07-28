@@ -2,15 +2,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
 # DeepSpeed Team
-"""Unit-test that compares MuonWithAuxAdam on CPU vs GPU to ensure identical
-parameter updates, mirroring the structure of test_cpu_adam.py and
-test_cpu_lion.py.
-
-We treat GPU Muon as the reference implementation (if a GPU is present)
-and verify that the CPU implementation produces numerically similar
-results (<1e-2 relative tolerance) for a variety of model sizes and
-precisions.
-"""
 
 import torch
 import numpy as np
