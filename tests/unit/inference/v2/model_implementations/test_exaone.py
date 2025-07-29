@@ -22,6 +22,7 @@ class TestExaoneImplementation:
         except Exception:
             pytest.skip("EXAONE 4.0 model config not available")
 
+    @pytest.mark.inference_v2
     def test_exaone_config_properties(self, exaone_config):
         """Test that EXAONE config has expected properties"""
         assert exaone_config.model_type == "exaone4"
@@ -38,6 +39,7 @@ class TestExaoneImplementation:
 
         assert abs(ratio - 3.0) < 0.1, f"Expected 3:1 ratio, got {ratio:.1f}:1"
 
+    @pytest.mark.inference_v2
     def test_transformer_container_param_mapping(self, exaone_config):
         """Test ExaoneTransformerContainer parameter mapping"""
         container = ExaoneTransformerContainer(exaone_config)
@@ -58,6 +60,7 @@ class TestExaoneImplementation:
         for param_name in expected_mappings:
             assert param_name in container.PARAM_MAPPING, f"Missing mapping for {param_name}"
 
+    @pytest.mark.inference_v2
     def test_non_transformer_container_param_mapping(self, exaone_config):
         """Test ExaoneNonTransformerContainer parameter mapping"""
         container = ExaoneNonTransformerContainer(exaone_config)
@@ -71,6 +74,7 @@ class TestExaoneImplementation:
         for param_name in expected_mappings:
             assert param_name in container.PARAM_MAPPING, f"Missing mapping for {param_name}"
 
+    @pytest.mark.inference_v2
     def test_exaone_inference_model_properties(self, exaone_config):
         """Test EXAONE model configuration properties"""
         # Test basic config properties that our model would use
@@ -88,6 +92,7 @@ class TestExaoneImplementation:
         from deepspeed.inference.v2.model_implementations.exaone.model import ExaoneInferenceModel
         assert ExaoneInferenceModel is not None
 
+    @pytest.mark.inference_v2
     def test_hybrid_attention_layer_detection(self, exaone_config):
         """Test hybrid attention layer type detection logic"""
         # Test the layer pattern without full model instantiation
@@ -124,6 +129,7 @@ class TestExaoneImplementation:
         for layer in local_layers:
             assert should_apply_rope(layer), f"Local layer {layer} should apply RoPE"
 
+    @pytest.mark.inference_v2
     def test_exaone_policy_creation(self, exaone_config):
         """Test ExaonePolicy creation and container map building"""
 
@@ -146,6 +152,7 @@ class TestExaoneImplementation:
         assert container_map.non_transformer_params is not None
         assert len(list(container_map.transformer_params)) == exaone_config.num_hidden_layers
 
+    @pytest.mark.inference_v2
     def test_model_type_recognition(self, exaone_config):
         """Test that EXAONE model type is correctly recognized"""
         assert exaone_config.model_type == "exaone4"
@@ -153,6 +160,7 @@ class TestExaoneImplementation:
         # Test that the config has the expected architecture
         assert "Exaone4ForCausalLM" in exaone_config.architectures
 
+    @pytest.mark.inference_v2
     @pytest.mark.parametrize("layer_idx,expected_type", [
         (0, 'sliding_attention'),
         (1, 'sliding_attention'),
