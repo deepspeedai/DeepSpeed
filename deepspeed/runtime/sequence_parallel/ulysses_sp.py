@@ -951,14 +951,18 @@ class TiledFusedLogitsLoss(torch.autograd.Function):
     ) -> torch.Tensor:
 
         if output_reduction not in ["mean", "sum"]:
-            raise ValueError(f'unknown value {output_reduction}: valid values are: "mean"/"sum"')
-
-        assert x.dim() >= 2, "x must be at least 2D [batch_size, seq_len, ...]"
-        assert y.dim() >= 2, "y must be at least 2D [batch_size, seq_len, ...]"
-        assert x.shape[:2] == y.shape[:2], "x and y batch/seq dims must match"
+            raise ValueError(f'unknown reduction {output_reduction}: valid values are: "mean"/"sum"')
+        if x.dim() < 2:
+            raise ValueError("x must be at least 2D [batch_size, seq_len, ...]")
+        if y.dim() < 2:
+            raise ValueError("y must be at least 2D [batch_size, seq_len, ...]")
+        if x.shape[:2] != y.shape[:2]:
+            raise ValueError("x and y batch/seq dims must match")
         if mask is not None:
-            assert mask.dim() == 2, "mask must be 2D [batch_size, seq_len]"
-            assert mask.shape == x.shape[:2], "mask shape must match x and y batch/seq"
+            if mask.dim() != 2:
+                raise ValueError(f"mask must be 2D [batch_size, seq_len], but got {mask.dim()}")
+            if mask.shape != x.shape[:2]:
+                raise ValueError(f"mask shape must match x and y batch/seq")
 
         compute_params = [p for p in compute_params if p.requires_grad]
 
