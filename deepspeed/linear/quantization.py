@@ -42,7 +42,7 @@ class QuantizedParameter(nn.Parameter):
         quantizer: Quantizer = None,
     ):
         if requires_grad:
-            raise ValueError(f"requires_grad=True is not supported with QuantizedParameter")
+            raise ValueError("requires_grad=True is not supported with QuantizedParameter")
         if data is None:
             data = torch.empty(0)
         self = torch.Tensor._make_subclass(cls, data, requires_grad)

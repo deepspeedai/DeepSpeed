@@ -94,14 +94,14 @@ class DeepSpeedCheckpoint(object):
         return self.dp_degree != self.zero_checkpoint.get_src_dp_degree()
 
     def show_2d_mapping(self):
-        print(f'reshaped 2d map ---- begin')
+        print('reshaped 2d map ---- begin')
 
         for i in range(self.pp_degree):
             for j in range(self.tp_degree):
                 file_list = self.get_2d_parallel_files(pp_index=i, tp_index=j)
                 print(f'[{i}, {j}] = {file_list}')
 
-        print(f'reshaped 2d map ---- end')
+        print('reshaped 2d map ---- end')
 
     def show_tp_embedding_map(self):
         self._dump_mapping(self.tp_to_embedding_map, 'tp_to_embedding_layers')

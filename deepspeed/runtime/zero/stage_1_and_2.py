@@ -596,10 +596,10 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
         see_memory_usage("After initializing optimizer states", force=True)
 
         if dist.get_rank() == 0:
-            logger.info(f"optimizer state initialized")
+            logger.info("optimizer state initialized")
 
         if dist.get_rank(group=self.dp_process_group) == 0:
-            see_memory_usage(f"After initializing ZeRO optimizer", force=True)
+            see_memory_usage("After initializing ZeRO optimizer", force=True)
 
         self._link_all_hp_params()
         self._hp_optimizer_states_linked = False
@@ -822,9 +822,9 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
                     i, param_group, partition_id)
 
     def independent_gradient_partition_epilogue(self):
-        self.report_ipg_memory_usage(f"In ipg_epilogue before reduce_ipg_grads", 0)
+        self.report_ipg_memory_usage("In ipg_epilogue before reduce_ipg_grads", 0)
         self.reduce_ipg_grads()
-        self.report_ipg_memory_usage(f"In ipg_epilogue after reduce_ipg_grads", 0)
+        self.report_ipg_memory_usage("In ipg_epilogue after reduce_ipg_grads", 0)
 
         # if dist.get_rank() == 0:
         #    logger.info("Params already reduced %s", self.params_already_reduced)
@@ -865,7 +865,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
         # All gradients required by the step
         # are in self.averaged_gradients
         self.zero_grad(set_to_none=True)
-        see_memory_usage(f"End ipg_epilogue")
+        see_memory_usage("End ipg_epilogue")
 
     # resets all partition to no reduced
     # sets remaining grads to the total number of grads in each partition
@@ -1937,7 +1937,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
         """
         self.micro_step_id = INITIAL_MICRO_STEP_ID
 
-        see_memory_usage(f"In step before checking overflow")
+        see_memory_usage("In step before checking overflow")
 
         # First compute norm for all group so we know if there is overflow
         if self.check_grad_overflow:
@@ -2427,7 +2427,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
         self.clip_grad = sd.get(CLIP_GRAD, self.clip_grad)
 
         ckpt_version = sd.get(DS_VERSION, False)
-        assert ckpt_version, f"Empty ds_version in checkpoint, not clear how to proceed"
+        assert ckpt_version, "Empty ds_version in checkpoint, not clear how to proceed"
         ckpt_version = pkg_version.parse(ckpt_version)
 
         # zero stage 1 mode

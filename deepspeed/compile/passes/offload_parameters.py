@@ -34,7 +34,7 @@ def add_reload_parameter(graph_id: int, gm: GraphModule, node: Node, ds_id: int)
         new_node = gm.graph.create_node('call_function',
                                         torch.ops.dc.reload_parameter.default,
                                         args, {},
-                                        name=f"reload_parameter")
+                                        name="reload_parameter")
     return new_node
 
 

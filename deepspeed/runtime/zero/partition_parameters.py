@@ -1020,7 +1020,7 @@ class Init(InsertPostInitMethodToModuleSubClasses):
 
         if sequence_data_parallel_group is not None:
             logger.warning(
-                f"sequence_data_parallel_group' is deprecated and will be removed. Use 'data_parallel_group' instead.")
+                "sequence_data_parallel_group' is deprecated and will be removed. Use 'data_parallel_group' instead.")
             if data_parallel_group is not None:
                 raise ValueError(
                     "Both 'data_parallel_group' and 'sequence_data_parallel_group' were specified. Please provide only one of these arguments."

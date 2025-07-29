@@ -43,7 +43,7 @@ class NebulaCheckpointEngine(CheckpointEngine):
         self.checkpoint = torch_nebula.Checkpoint(info.tag, -2)
 
     def save(self, state_dict, path: str):
-        log_dist(f"[Nebula] Create dummy files for loading.")
+        log_dist("[Nebula] Create dummy files for loading.")
         torch.save("", path)
 
         tag = _get_tag_from_path(path)
@@ -84,7 +84,7 @@ class NebulaCheckpointEngine(CheckpointEngine):
             checkpoint = torch_nebula.get_latest_checkpoint(persist_path=self.nebula_load_path)
             if checkpoint is None or (checkpoint is not None and checkpoint.tag == ''):
                 logger.info(
-                    f"Unable to find latest checkpoint from Nebula tier3, try to get latest checkpoint again from nebula tier1 path!"
+                    "Unable to find latest checkpoint from Nebula tier3, try to get latest checkpoint again from nebula tier1 path!"
                 )
                 # nebula tier1 latest
                 checkpoint = torch_nebula.get_latest_checkpoint()
@@ -103,6 +103,6 @@ class NebulaCheckpointEngine(CheckpointEngine):
         logger.info(f"[Nebula] all files for {tag} are saved in tier1. It is ready to start persisting")
         commit_rls = self.checkpoint.commit()
         if not commit_rls:
-            logger.error(f"[Nebula] failed to commit the checkpoint, please check the log.")
+            logger.error("[Nebula] failed to commit the checkpoint, please check the log.")
             return False
         return commit_rls

@@ -62,14 +62,14 @@ def run_model(model, param_groups, config_dict, hidden_dim, dtype, offloaded_sta
                              pin_memory=pin_memory,
                              non_blocking=non_blocking)
         alloc_after_offload = get_accelerator().memory_allocated()
-        assert alloc_after_offload < alloc_before_offload, f"Allocated memory should decrease after offload"
+        assert alloc_after_offload < alloc_before_offload, "Allocated memory should decrease after offload"
 
         validate_device(model, torch.device(offload_device.value), offloaded_states)
 
         # Reload states
         model.reload_states()
         assert alloc_after_offload < get_accelerator().memory_allocated(
-        ), f"Allocated memory should increase after offload back"
+        ), "Allocated memory should increase after offload back"
 
         # Verify restored states
         hp_param_restored = [safe_get_local_fp32_param(p) for p in model.parameters()]

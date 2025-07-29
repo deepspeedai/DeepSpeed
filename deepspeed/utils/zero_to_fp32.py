@@ -709,10 +709,10 @@ def load_state_dict_from_zero_checkpoint(model, checkpoint_dir, tag=None):
     ``model.load_state_dict(state_dict)`` will remove all the deepspeed magic from it.
 
     """
-    logger.info(f"Extracting fp32 weights")
+    logger.info("Extracting fp32 weights")
     state_dict = get_fp32_state_dict_from_zero_checkpoint(checkpoint_dir, tag)
 
-    logger.info(f"Overwriting model with fp32 weights")
+    logger.info("Overwriting model with fp32 weights")
     model = model.cpu()
     model.load_state_dict(state_dict, strict=False)
 
