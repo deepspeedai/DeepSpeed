@@ -1,6 +1,7 @@
 einops
 hjson
 msgpack
+muon-optimizer @ git+https://github.com/KellerJordan/Muon.git
 ninja
 numpy
 packaging>=20.0
