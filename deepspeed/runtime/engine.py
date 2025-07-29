@@ -3198,7 +3198,7 @@ class DeepSpeedEngine(Module):
         if load_optimizer_states:
             deepspeed_states.append('optimizer')
 
-        client_state = {key: value for key, value in checkpoint.items() if not key in deepspeed_states}
+        client_state = {key: value for key, value in checkpoint.items() if key not in deepspeed_states}
 
         if optim_checkpoint is not None:
             client_state['optimizer'] = optim_checkpoint['optimizer']

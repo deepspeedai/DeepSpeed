@@ -716,7 +716,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
 
         for i, tensor in enumerate(tensor_list):
             j = i % num_partitions
-            if not j in partition_tensors:
+            if j not in partition_tensors:
                 partition_tensors[j] = []
             partition_tensors[j].append((i, tensor))
 
@@ -840,7 +840,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
         if self.cpu_offload is False:
             for i, _ in enumerate(self.bit16_groups):
 
-                if not i in self.averaged_gradients or self.averaged_gradients[i] is None:
+                if i not in self.averaged_gradients or self.averaged_gradients[i] is None:
                     self.averaged_gradients[i] = self.get_flat_partition(
                         self.params_in_partition[i],
                         self.first_offset[i],

@@ -24,7 +24,7 @@ class meg_2d_parallel_map(object):
         assert type(data) is list
 
         key = self._make_key(pp_index, tp_index)
-        if not key in self.map.keys():
+        if key not in self.map.keys():
             self.map[key] = []
         self.map[key] += data
 

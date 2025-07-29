@@ -155,7 +155,7 @@ def parse_optim_states(files, ds_checkpoint_dir):
         state_dict["optimizer_state_dict"].pop("optimizer_state_dict", None)
         state_dicts.append(state_dict)
 
-    if not ZERO_STAGE in state_dicts[0][OPTIMIZER_STATE_DICT]:
+    if ZERO_STAGE not in state_dicts[0][OPTIMIZER_STATE_DICT]:
         raise ValueError(f"{files[0]} is not a zero checkpoint")
     zero_stage = state_dicts[0][OPTIMIZER_STATE_DICT][ZERO_STAGE]
     world_size = state_dicts[0][OPTIMIZER_STATE_DICT][PARTITION_COUNT]

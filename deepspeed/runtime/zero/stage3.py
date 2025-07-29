@@ -1515,7 +1515,7 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
                     self.norm_for_param_grads[self.get_param_id(param)] = self._constant_buffered_norm2(grad_buffer)
 
                     if self._swappable_optimizer_subgroup(i):
-                        if not i in offload_fp32_gradients.keys():
+                        if i not in offload_fp32_gradients.keys():
                             offload_fp32_gradients[i] = []
                             offload_fp32_offsets[i] = []
 
