@@ -1012,7 +1012,7 @@ class TiledFusedLogitsLoss(torch.autograd.Function):
             with torch.enable_grad():
                 args = (self, x_shard, y_shard)
                 if mask is not None:
-                    args.append(mask_shards[i])
+                    args += (mask_shards[i], )
                 output = fn(*args)
                 output_shards.append(output)
             torch.autograd.backward(output, incoming_grad)
