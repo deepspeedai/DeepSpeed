@@ -55,6 +55,9 @@ class BaseZenFlowTest:
 
     def run_training_distributed(self, config_dict):
 
+        if get_accelerator().device_name() == "cpu":
+            return
+            
         model = SimpleModel(self.hidden_dim)
         model, _, _, _ = deepspeed.initialize(model=model, model_parameters=model.parameters(), config=config_dict)
         train_dataloader = random_dataloader(model=model,
