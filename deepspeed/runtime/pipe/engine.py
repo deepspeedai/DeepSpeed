@@ -535,6 +535,9 @@ class PipelineEngine(DeepSpeedEngine):
         """True if this process is in the last stage in the pipeline."""
         return self.stage_id == self.num_stages - 1
 
+    def get_pipeline_parallel_rank(self):
+        return self.stage_id
+
     def _reduce_outputs(self, outputs, reduce='avg', reduce_dp=True, micro_batches=None):
         if reduce is None:
             return outputs
