@@ -730,6 +730,15 @@ class DeepSpeedEngine(Module):
             raise ValueError(f'not yet support')
             #self.lr_scheduler = lr_schedules.WarmupLayerTokenDecayLR(self.optimizer, self.random_ltd_scheduler)
 
+    def get_data_parallel_rank(self):
+        return groups.get_data_parallel_rank()
+
+    def get_tensor_parallel_rank(self):
+        return groups.get_tensor_model_parallel_rank()
+
+    def get_model_parallel_rank(self):
+        return groups.get_model_parallel_rank()
+
     def get_sequence_parallel_group(self):
         return self.seq_parallel_group
 
