@@ -92,6 +92,7 @@ extras_require = {
     'sd': fetch_requirements('requirements/requirements-sd.txt'),
     'triton': fetch_requirements('requirements/requirements-triton.txt'),
     'deepcompile': fetch_requirements('requirements/requirements-deepcompile.txt'),
+    'muon': ['muon-optimizer @ git+https://github.com/KellerJordan/Muon.git'],
 }
 
 # Only install pynvml on nvidia gpus.
