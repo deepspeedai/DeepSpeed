@@ -249,7 +249,7 @@ def get_sparse_pruning_shared_parameters(param_dict):
             output[SPARSE_PRUNING_DENSE_RATIO] = get_scalar_param(sub_param_dict, SPARSE_PRUNING_DENSE_RATIO,
                                                                   SPARSE_PRUNING_DENSE_RATIO_DEFAULT)
             assert output[SPARSE_PRUNING_DENSE_RATIO] > 0 and output[
-                SPARSE_PRUNING_DENSE_RATIO] < 1, f"Invalid dense_ratio value. Must be less than 1"
+                SPARSE_PRUNING_DENSE_RATIO] < 1, "Invalid dense_ratio value. Must be less than 1"
             output[SPARSE_PRUNING_SCHEDULE_OFFSET_STRIDE] = get_scalar_param(
                 sub_param_dict, SPARSE_PRUNING_SCHEDULE_OFFSET_STRIDE, SPARSE_PRUNING_SCHEDULE_OFFSET_STRIDE_DEFAULT)
             output[SPARSE_PRUNING_EXCLUDED_MODULES] = get_list_param(sub_param_dict, SPARSE_PRUNING_EXCLUDED_MODULES,
@@ -258,7 +258,7 @@ def get_sparse_pruning_shared_parameters(param_dict):
                                                                           SPARSE_PRUNING_SCHEDULE_OFFSET_END,
                                                                           output[SPARSE_PRUNING_SCHEDULE_OFFSET])
             assert output[SPARSE_PRUNING_SCHEDULE_OFFSET] <= output[
-                SPARSE_PRUNING_SCHEDULE_OFFSET_END], f"Invalid schedule_offset and schedule_offset_end values"
+                SPARSE_PRUNING_SCHEDULE_OFFSET_END], "Invalid schedule_offset and schedule_offset_end values"
     else:
         output[SPARSE_PRUNING_ENABLED] = SPARSE_PRUNING_ENABLED_DEFAULT
         output[SPARSE_PRUNING_METHOD] = SPARSE_PRUNING_METHOD_DEFAULT

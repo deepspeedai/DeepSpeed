@@ -188,7 +188,7 @@ def main():
 
     if not is_torch_elastic_compatible():
         if args.enable_elastic_training:
-            logger.info(f"Disabling elastic training support as \
+            logger.info("Disabling elastic training support as \
                     PyTorch version should be greater than 1.11.x")
             args.enable_elastic_training = False
 

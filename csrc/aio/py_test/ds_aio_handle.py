@@ -80,7 +80,7 @@ class AIOHandle_Engine(object):
         io_parallel = args.io_parallel if args.io_parallel else 1
         handle = AsyncIOBuilder().load().aio_handle(args.block_size, args.queue_depth, args.single_submit,
                                                     not args.sequential_requests, io_parallel)
-        task_log(tid, f'created deepspeed aio handle engine')
+        task_log(tid, 'created deepspeed aio handle engine')
 
         bounce_buffer = None
         if args.gpu:

@@ -126,7 +126,7 @@ class FP_Quantize(Quantizer):
 
         if scale is not None:
             assert input_q.numel() == fp_out.numel(), \
-            f'[De-quantization Error]: quantized data should have the same size as original tensor when scale is not None!'
+            '[De-quantization Error]: quantized data should have the same size as original tensor when scale is not None!'
             input_q = torch.cat([input_q.reshape(-1, self.group_size), scale], dim=-1).contiguous()
         fp_quant_module.dequantize(fp_out, input_q, self.group_size, q_mantisa_bits, q_bits - q_mantisa_bits - 1)
         return fp_out
@@ -159,7 +159,7 @@ class FP_Quantize(Quantizer):
 
         if scale is not None:
             assert input_q.numel() == fp_out.numel(), \
-            f'[De-quantization Error]: quantized data should have the same size as original tensor when scale is not None!'
+            '[De-quantization Error]: quantized data should have the same size as original tensor when scale is not None!'
             input_q = torch.cat([input_q.reshape(-1, self.group_size), scale], dim=-1).contiguous()
 
         fp_quant_module.selective_dequantize(fp_out, input_q, indexes, self.group_size, q_mantisa_bits,

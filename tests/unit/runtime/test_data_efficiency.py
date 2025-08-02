@@ -236,4 +236,4 @@ class TestLegacyCurriculumScheduler(DistributedTest):
             model.step()
             if n + 1 in ground_truths:
                 true_seqlen = ground_truths[n + 1]
-                assert seqlen == true_seqlen, f"Incorrect curriculum schedule"
+                assert seqlen == true_seqlen, "Incorrect curriculum schedule"

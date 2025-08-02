@@ -59,9 +59,9 @@ def env_mapping(env, rank_name_list=None, local_rank_name_list=None):
             if rank == None:
                 rank = env.get(rank_name)
             elif rank != env.get(rank_name):
-                raise EnvironmentError(f"rank number doesn't match!")
+                raise EnvironmentError("rank number doesn't match!")
     if rank == None:
-        raise EnvironmentError(f"rank number is not in current env!")
+        raise EnvironmentError("rank number is not in current env!")
     env['RANK'] = rank
 
     local_rank = None
@@ -70,9 +70,9 @@ def env_mapping(env, rank_name_list=None, local_rank_name_list=None):
             if local_rank == None:
                 local_rank = env.get(local_rank_name)
             elif local_rank != env.get(local_rank_name):
-                raise EnvironmentError(f"local_rank number doesn't match!")
+                raise EnvironmentError("local_rank number doesn't match!")
     if local_rank == None:
-        raise EnvironmentError(f"rank number is not in current env!")
+        raise EnvironmentError("rank number is not in current env!")
     env['LOCAL_RANK'] = local_rank
 
     return env

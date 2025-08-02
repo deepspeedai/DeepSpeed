@@ -496,7 +496,7 @@ class TopKGate(Module):
         self.top2_2nd_expert_sampling = top2_2nd_expert_sampling
 
     def _set_ep_group(self, ep_group):
-        assert self.ep_group is None, f'Attempting to override an existing ep_group'
+        assert self.ep_group is None, 'Attempting to override an existing ep_group'
         self.ep_group = ep_group
 
     def forward(self,

@@ -107,7 +107,7 @@ class Eigenvalue(object):
             # Disable eigenvalue if the model doesn't support second order gradients computation,
             # e.g. when enabling DS transformer kernel.
             if len(grads) == 0 or len(params) == 0:
-                log_dist(f'The model does NOT support eigenvalue computation.', ranks=[0], level=logging.WARNING)
+                log_dist('The model does NOT support eigenvalue computation.', ranks=[0], level=logging.WARNING)
                 return []
 
             i = 0

@@ -288,7 +288,7 @@ class TestExpertWeightGradWithZero(DistributedTest):
             """
             rank = int(deepspeed.comm.get_rank())
             ep_state_dict = dict()
-            dst_sub_key = f"deepspeed_moe.experts.deepspeed_experts.0"
+            dst_sub_key = "deepspeed_moe.experts.deepspeed_experts.0"
             src_sub_key = f"deepspeed_moe.experts.deepspeed_experts.{rank}"
             for moe_layer in ["moe_1", "moe_2"]:
                 for mlp_in_moe in [0, 1]:

@@ -210,7 +210,7 @@ class DynamicLossScaler(LossScalerBase):
 # we still create a scaler for other dtypes (fp32, bf16) which does not perform any scaling.
 def CreateLossScaler(dtype, static_loss_scale, dynamic_scaling, dynamic_loss_args):
     if dtype == torch.half and dynamic_scaling:
-        assert dynamic_loss_args is not None, f"Dynamic loss scaling parameters must be defined."
+        assert dynamic_loss_args is not None, "Dynamic loss scaling parameters must be defined."
         return DynamicLossScaler(dtype=dtype, **dynamic_loss_args)
 
     loss_scale_value = static_loss_scale if dtype == torch.half else 1.0

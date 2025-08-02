@@ -269,7 +269,7 @@ def merge_tp_slices(ds_checkpoint, dir, slice_dir, tp_degree, name_and_shape):
 
     step_merged = _merge_zero_shards(slice_base_path, "step", tp_degree, shape)
     if step_merged:
-        _save_checkpoint(os.path.join(param_base_path, f"step.pt"), step_merged[0])
+        _save_checkpoint(os.path.join(param_base_path, "step.pt"), step_merged[0])
 
     for state in ("fp32", "exp_avg", "exp_avg_sq"):
         slices = _merge_zero_shards(slice_base_path, state, tp_degree, shape)
@@ -415,7 +415,7 @@ def _save_optimizer_state(args, ds_checkpoint):
     output_sd = {k: v for k, v in optim_sd.items() if k not in sharded_states}
     output_sd[PARAM_GROUPS] = optim_sd[BASE_OPTIMIZER_STATE][PARAM_GROUPS]
     zero_output_folder = os.path.join(args.output_folder, "zero")
-    output_file_path = os.path.join(zero_output_folder, f"optimizer_state.pt")
+    output_file_path = os.path.join(zero_output_folder, "optimizer_state.pt")
     _save_checkpoint(output_file_path, output_sd)
 
 
@@ -424,7 +424,7 @@ def _save_optimizer_state_stage3(args, optim_files):
     output_sd = sd[OPTIMIZER_STATE_DICT]
     output_sd[PARAM_GROUPS] = output_sd[OPTIMIZER_STATE_DICT][PARAM_GROUPS]
     zero_output_folder = os.path.join(args.output_folder, "zero")
-    output_file_path = os.path.join(zero_output_folder, f"optimizer_state.pt")
+    output_file_path = os.path.join(zero_output_folder, "optimizer_state.pt")
     _save_checkpoint(output_file_path, output_sd)
 
 
@@ -467,7 +467,7 @@ def _check_for_required_state(ds_checkpoint):
 
 
 def main(args):
-    print(f'Convert DeepSpeed Checkpoint to Universal Checkpoint')
+    print('Convert DeepSpeed Checkpoint to Universal Checkpoint')
 
     print(f'Converting DeepSpeed checkpoint in {args.input_folder} to Universal checkpoint in {args.output_folder}')
 

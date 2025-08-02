@@ -94,14 +94,14 @@ class DeepSpeedCheckpoint(object):
         return self.dp_degree != self.zero_checkpoint.get_src_dp_degree()
 
     def show_2d_mapping(self):
-        print(f'reshaped 2d map ---- begin')
+        print('reshaped 2d map ---- begin')
 
         for i in range(self.pp_degree):
             for j in range(self.tp_degree):
                 file_list = self.get_2d_parallel_files(pp_index=i, tp_index=j)
                 print(f'[{i}, {j}] = {file_list}')
 
-        print(f'reshaped 2d map ---- end')
+        print('reshaped 2d map ---- end')
 
     def show_tp_embedding_map(self):
         self._dump_mapping(self.tp_to_embedding_map, 'tp_to_embedding_layers')
@@ -137,7 +137,7 @@ class DeepSpeedCheckpoint(object):
         return self.layer_keys[self.final_layer_norm_idx]
 
     def get_iteration(self):
-        if not ITERATION_KEY in self.global_state:
+        if ITERATION_KEY not in self.global_state:
             sd = torch.load(self.mp_rank_files[0], map_location=torch.device('cpu'), weights_only=False)
             self.global_state[ITERATION_KEY] = sd.get(ITERATION_KEY, 0)
 
@@ -157,7 +157,7 @@ class DeepSpeedCheckpoint(object):
         return self.tp_to_embedding_map[tp_index]
 
     def _get_checkpoint_value(self, key):
-        if not key in self.global_state:
+        if key not in self.global_state:
             sd = torch.load(self.mp_rank_files[0], map_location=torch.device('cpu'), weights_only=False)
             self.global_state[key] = sd.get(key, None)
 
@@ -254,7 +254,7 @@ class DeepSpeedCheckpoint(object):
             layer_file_partitions = partition_data(layer_files, self.tp_degree)
             for tp_index in range(self.tp_degree):
                 map_key = (tp_index, pp_index)
-                if not map_key in file_map.keys():
+                if map_key not in file_map.keys():
                     file_map[map_key] = []
                 file_map[map_key].append(layer_file_partitions[tp_index])
 
@@ -286,7 +286,7 @@ class DeepSpeedCheckpoint(object):
     def _merge_state_dicts(self, sd_list):
         merged_sd = {}
         for key in sd_list[0].keys():
-            if not key in SEQUENTIAL_LAYERS:
+            if key not in SEQUENTIAL_LAYERS:
                 cat_dim = LAYER_CONCAT_DIM.get(key, 0)
                 merged_sd[key] = torch.cat([sd[key] for sd in sd_list], dim=cat_dim)
             else:

@@ -115,7 +115,7 @@ def add_free_activations(graph_id: int, graph: Graph, activation_node_names: Lis
     def _should_free(node: Node) -> bool:
         if not hasattr(node, "meta"):
             return False
-        if not "tensor_meta" in node.meta:
+        if "tensor_meta" not in node.meta:
             return False
         return True
 

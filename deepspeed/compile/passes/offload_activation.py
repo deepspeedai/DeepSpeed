@@ -34,7 +34,7 @@ def get_random_id() -> int:
 def _should_offload(node: Node) -> bool:
     if not hasattr(node, "meta"):
         return False
-    if not "tensor_meta" in node.meta:
+    if "tensor_meta" not in node.meta:
         return False
 
     return True

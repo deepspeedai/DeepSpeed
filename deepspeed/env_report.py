@@ -91,7 +91,7 @@ def installed_cann_version():
     import re
     ascend_path = installed_cann_path()
     if ascend_path is None:
-        return f"CANN_HOME does not exist, unable to compile NPU op(s)"
+        return "CANN_HOME does not exist, unable to compile NPU op(s)"
     cann_version = ""
     for dirpath, _, filenames in os.walk(os.path.realpath(ascend_path)):
         if cann_version:
