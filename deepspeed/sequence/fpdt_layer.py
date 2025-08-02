@@ -124,7 +124,7 @@ class FPDT_InputConstruct(torch.nn.Module):
         load_balanced_tokens = self.tokens[:, indices]
         load_balanced_labels = self.labels[:, indices] if self.labels is not None else self.labels
 
-        load_balanced_attention_mask = self.attention_mask if self.attention_mask is not None else self.attention_mask
+        load_balanced_attention_mask = self.attention_mask
         load_balanced_position_ids = self.position_ids[:,
                                                        indices] if self.position_ids is not None else self.position_ids
 
