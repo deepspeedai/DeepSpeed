@@ -171,6 +171,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
             self.cpu_offload = False
             self.cpu_offload_pin_memory = False
 
+        # TODO: Remove zenflow-specific call from vanilla ZeroOptimizer, try to isolate zenflow-specific code into sub-class zenflow_zero_optimizer
         self.zenflow = True if zenflow_config is not None else False
 
         if dist.get_rank() == 0:
@@ -1939,6 +1940,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
         if self.torch_autocast_gradscaler:
             self.torch_autocast_gradscaler.step(self.optimizer)
             self.torch_autocast_gradscaler.update()
+        # TODO: Remove zenflow-specific call from vanilla ZeroOptimizer
         elif self.zenflow:
             self.zenflow_cpu_optimizer_step(group_no)
         else:
