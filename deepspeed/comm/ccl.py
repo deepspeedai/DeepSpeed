@@ -77,27 +77,12 @@ class CCLBackend(TorchBackend):
             return CCLHandler(self.ccl_comm_op)
 
     def all_reduce(self, tensor, op=ReduceOp.SUM, group=None, async_op=False):
-        use_caching = False
-        if use_caching:
-            match_id = f"{tensor.size()}-{op}"
-            name = "all_reduce_caching"
-            if name in self.available_coll:
-                group = self.get_all_ranks_from_group(group)
-                return self.ccl_comm_op.all_reduce_caching(tensor, op, match_id, group, async_op)
-            else:
-                return self.run_collective(name=name,
-                                           tensor=tensor,
-                                           op=op,
-                                           match_id=match_id,
-                                           group=group,
-                                           async_op=async_op)
+        name = "all_reduce"
+        if name in self.available_coll:
+            group = self.get_all_ranks_from_group(group)
+            return self.ccl_comm_op.all_reduce(tensor, op, group, async_op)
         else:
-            name = "all_reduce"
-            if name in self.available_coll:
-                group = self.get_all_ranks_from_group(group)
-                return self.ccl_comm_op.all_reduce(tensor, op, group, async_op)
-            else:
-                return self.run_collective(name=name, tensor=tensor, op=op, group=group, async_op=async_op)
+            return self.run_collective(name=name, tensor=tensor, op=op, group=group, async_op=async_op)
 
     def inference_all_reduce(self, tensor, op=ReduceOp.SUM, group=None):
         name = "inference_all_reduce"
