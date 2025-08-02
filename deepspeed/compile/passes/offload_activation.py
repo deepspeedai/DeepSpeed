@@ -101,7 +101,7 @@ def reload_activation_bwd(graph: Graph, graph_id: int, graph_order: List[int], m
         with graph.inserting_after(reload_node):
             wait_node = graph.create_node('call_function',
                                           torch.ops.dc.wait_reload.default, (reload_node, graph_id, val_id), {},
-                                          name=f"wait_copy_{node.name}_{val_id}")
+                                          name=f"wait_copy_{reload_node.name}_{val_id}")
 
         # replace all uses of node with wait_node
         users = {}
