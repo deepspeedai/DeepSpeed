@@ -2532,7 +2532,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
 
         if load_optimizer_states:
             self._link_all_hp_params()
-            
+
     def offload_states(self,
                     include: Container[OffloadStateTypeEnum] = None,
                     device: OffloadDeviceEnum = OffloadDeviceEnum.cpu,
