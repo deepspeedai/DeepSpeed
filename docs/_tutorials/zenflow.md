@@ -3,7 +3,7 @@ title: "ZenFlow"
 tags: training
 ---
 
-ZenFlow is an extension of ZeRO-Offload that decouples and asynchronously updates gradients during training. It reduces CPU-induced stalls when using offload optimizers, enabling smoother and faster training. Like ZeRO-Offload, ZenFlow requires no code changes—only configuration updates in your DeepSpeed JSON file.
+ZenFlow is an extension of ZeRO-Offload that decouples and asynchronously updates gradients during training. It reduces CPU-induced stalls when using offload optimizers, enabling smoother and faster training. Like ZeRO-Offload, ZenFlow requires no code changes, only configuration updates in your DeepSpeed JSON file.
 
 We recommend that you read the tutorials on [Getting Started](/getting-started/) and [ZeRO](/tutorials/zero/) before stepping through this tutorial. ZenFlow builds on top of [ZeRO-Offload](/tutorials/zero-offload/), so shared setup details can be found there.
 
