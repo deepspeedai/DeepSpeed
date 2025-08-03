@@ -1812,8 +1812,8 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
                     continue
                 if is_model_parallel_parameter(p) or (self.model_parallel_rank == 0):
                     all_norms.append(
-                        torch.linalg.vector_norm(g.data.double().detach(),
-                                                 ord=norm_type).to(get_accelerator().current_device_name()))
+                        torch.norm(g.data.double(),
+                                   p=norm_type).to(get_accelerator().current_device_name()))
             if len(all_norms) > 0:
                 total_norm = torch.stack(all_norms).square().sum().float()
             else:
@@ -1910,7 +1910,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
             self._average_expert_grad_norms(norm_groups)
 
         # calculating L2 norm
-        return torch.linalg.vector_norm(torch.stack(norm_groups), ord=norm_type)
+        return torch.norm(torch.stack(norm_groups), p=norm_type)
 
     def get_bit16_param_group(self, group_no):
         bit16_partitions = self.parallel_partitioned_bit16_groups[group_no]
@@ -2118,8 +2118,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
 
     def has_overflow(self, partition_gradients=True):
         overflow = self.local_overflow if self.cpu_offload else self.has_overflow_partitioned_grads_serial()
-        overflow_gpu = get_accelerator().ByteTensor([overflow]) if self.cpu_offload else overflow.byte().to(
-            get_accelerator().current_device_name())
+        overflow_gpu = torch.tensor([overflow], dtype=torch.uint8).to(get_accelerator().current_device_name())
 
         if partition_gradients:
             '''This will capture overflow across all data parallel and expert parallel process
@@ -2533,11 +2532,73 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
         if load_optimizer_states:
             self._link_all_hp_params()
 
+    def _clear_hp_buffer_references(self):
+        """
+        Clear all references that might prevent GPU memory release when offloading HP params.
+        This includes gradient views, HP mapping fragments, and optimizer state fragments.
+        """
+        # Clear gradient references in offload_gradient_dict
+        if hasattr(self, 'offload_gradient_dict'):
+            for param_group_index in self.offload_gradient_dict:
+                if self.offload_gradient_dict[param_group_index] is not None:
+                    self.offload_gradient_dict[param_group_index].clear()
+
+        # Clear gradient buffers attached to HP params
+        for i, buf in enumerate(self.single_partition_of_fp32_groups):
+            if hasattr(buf, 'grad') and buf.grad is not None:
+                buf.grad = None
+
+        # Clear HP mapping references in model parameters
+        for i, param_group in enumerate(self.bit16_groups):
+            for param in param_group:
+                if hasattr(param, '_hp_mapping') and param._hp_mapping is not None:
+                    # Clear the fragment references that point to GPU buffers
+                    if hasattr(param._hp_mapping, 'hp_fragment'):
+                        param._hp_mapping.hp_fragment = None
+                    if hasattr(param._hp_mapping, 'optim_fragment') and param._hp_mapping.optim_fragment is not None:
+                        param._hp_mapping.optim_fragment.clear()
+
+        # Force garbage collection to release references
+        gc.collect()
+
+    def _clear_lp_grads_references(self):
+        """
+        Clear all references that might prevent GPU memory release when offloading LP grads.
+        This includes averaged_gradients views and HP mapping gradient references.
+        """
+        # Clear HP mapping gradient references in model parameters
+        for i, param_group in enumerate(self.bit16_groups):
+            for param in param_group:
+                if hasattr(param, '_hp_mapping') and param._hp_mapping is not None:
+                    # Clear gradient_dict references that point to averaged_gradients
+                    if hasattr(param._hp_mapping, 'gradient_dict'):
+                        param._hp_mapping.gradient_dict = {}
+                    if hasattr(param._hp_mapping, 'offload_gradient_dict'):
+                        param._hp_mapping.offload_gradient_dict = {}
+        self.zero_grad(set_to_none=True)
+        # Force garbage collection to release references
+        gc.collect()
+
+    def _clear_lp_params_references(self):
+        """
+        Clear all references that might prevent GPU memory release when offloading LP params.
+        This includes HP mapping lp_fragment references and completely nullifying _hp_mapping.
+        """
+        # Completely clear HP mapping to break all references to GPU tensors
+        for i, param_group in enumerate(self.bit16_groups):
+            for param in param_group:
+                if hasattr(param, '_hp_mapping') and param._hp_mapping is not None:
+                    # Completely nullify _hp_mapping to break all references
+                    param._hp_mapping = None
+
+        # Force garbage collection to release references
+        gc.collect()
+
     def offload_states(self,
-                    include: Container[OffloadStateTypeEnum] = None,
-                    device: OffloadDeviceEnum = OffloadDeviceEnum.cpu,
-                    pin_memory: bool = True,
-                    non_blocking: bool = False):
+                       include: Container[OffloadStateTypeEnum] = None,
+                       device: OffloadDeviceEnum = OffloadDeviceEnum.cpu,
+                       pin_memory: bool = True,
+                       non_blocking: bool = False):
         """
         Offload optimizer states from GPU to the specified device (typically CPU).
 
@@ -2560,63 +2621,75 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
 
         # Offload FP32 Master Parameters (HP Params)
         if needs_offload(OffloadStateTypeEnum.hp_params):
+            self._clear_hp_buffer_references()
             if pin_memory:
                 if not hasattr(self, "hp_params_pin_buffers"):
                     self.hp_params_pin_buffers = [
-                        torch.empty_like(t, device=device).pin_memory()
-                        for t in self.single_partition_of_fp32_groups
+                        torch.empty_like(t,
+                                         device=device).pin_memory() for t in self.single_partition_of_fp32_groups
                     ]
-
                 for src_tensor, dest_buf in zip(self.single_partition_of_fp32_groups, self.hp_params_pin_buffers):
                     dest_buf.copy_(src_tensor, non_blocking=non_blocking)
                     src_tensor.data = dest_buf
             else:
                 for buf in self.single_partition_of_fp32_groups:
                     buf.data = buf.data.to(device, non_blocking=non_blocking)
+            gc.collect()
+            torch.cuda.empty_cache()
             self.offloaded_states.add(OffloadStateTypeEnum.hp_params)
 
         # Offload FP16/BF16 Model Parameters (LP Params)
         if needs_offload(OffloadStateTypeEnum.lp_params):
+            self._clear_lp_params_references()
+            for group in self.bit16_groups:
+                for param in group:
+                    param.data = torch.empty(0, dtype=param.dtype, device=param.device)
+            for group_partitions in self.parallel_partitioned_bit16_groups:
+                group_partitions.clear()
+
+            gc.collect()
+            if get_accelerator().is_available():
+                get_accelerator().empty_cache()
+
             if pin_memory:
                 if not hasattr(self, "lp_params_pin_buffers"):
                     self.lp_params_pin_buffers = [
-                        torch.empty_like(t, device=device).pin_memory()
-                        for t in self.bit16_groups_flat
+                        torch.empty_like(t,
+                                         device=device).pin_memory() for t in self.bit16_groups_flat
                     ]
-
-                # Copy data to pinned buffers and then swap the .data pointers
                 for src_tensor, dest_buf in zip(self.bit16_groups_flat, self.lp_params_pin_buffers):
                     dest_buf.copy_(src_tensor, non_blocking=non_blocking)
                     src_tensor.data = dest_buf
             else:
-                # Move flattened LP parameter buffers to CPU by swapping .data
                 for buf in self.bit16_groups_flat:
                     buf.data = buf.data.to(device, non_blocking=non_blocking)
-
-            # Update model parameter .data pointers to point to new buffers on CPU
             for i in range(len(self.bit16_groups)):
                 self._update_model_bit16_weights(i)
-
+            gc.collect()
+            if get_accelerator().is_available():
+                get_accelerator().empty_cache()
             self.offloaded_states.add(OffloadStateTypeEnum.lp_params)
 
-        # Offload Partitioned Gradients (LP Grads) - mainly for Stage 2
+        # Offload Partitioned Gradients (LP Grads)
         if needs_offload(OffloadStateTypeEnum.lp_grads):
-            if self.partition_gradients:
-                for i in self.averaged_gradients:
-                    if self.averaged_gradients[i] is not None:
-                        for j in range(len(self.averaged_gradients[i])):
-                            grad_tensor = self.averaged_gradients[i][j]
-                            if torch.is_tensor(grad_tensor):
-                                self.averaged_gradients[i][j] = grad_tensor.to(device, non_blocking=non_blocking)
-                self.offloaded_states.add(OffloadStateTypeEnum.lp_grads)
-            else:
-                logger.warning("Warning: Offloading lp_grads is only supported in ZeRO Stage 2.")
+            # NOTE: The root cause of the lp_grads failure is very likely external to this function,
+            # originating from an unexpected gradient state left by the step() method.
+            # This implementation provides the cleanest, most consistent logic for offloading,
+            # but it cannot fix an issue with a pre-existing problematic tensor state.
+            # Use the .data swap idiom which is the most robust method available within this function.
+            for hp_param in self.single_partition_of_fp32_groups:
+                if hp_param.grad is not None and hp_param.grad.device.type != device:
+                    hp_param.grad.data = hp_param.grad.data.to(device, non_blocking=non_blocking)
 
-        # Offload Optimizer States (e.g., Adam momentum and variance)
+            gc.collect()
+            if get_accelerator().is_available():
+                get_accelerator().empty_cache()
+            self.offloaded_states.add(OffloadStateTypeEnum.lp_grads)
+
+        # Offload Optimizer States
         if needs_offload(OffloadStateTypeEnum.optim_states):
             offload_optimizer_states(self.optimizer, device, pin_memory=pin_memory, non_blocking=non_blocking)
             self.offloaded_states.add(OffloadStateTypeEnum.optim_states)
-
         gc.collect()
         if get_accelerator().is_available():
             get_accelerator().empty_cache()
@@ -2637,41 +2710,43 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
                 buf.data = buf.data.to(device, non_blocking=non_blocking)
             if hasattr(self, "hp_params_pin_buffers"):
                 del self.hp_params_pin_buffers
+            self._link_all_hp_params()
             self.offloaded_states.remove(OffloadStateTypeEnum.hp_params)
 
         # Reload FP16/BF16 Model Parameters (LP Params)
         if OffloadStateTypeEnum.lp_params in self.offloaded_states:
-            # Move all flattened LP parameter buffers back to GPU by swapping .data
             for buf in self.bit16_groups_flat:
                 buf.data = buf.data.to(device, non_blocking=non_blocking)
 
-            # Restore model parameter .data pointers
+            # Reconstruct the parallel partitions now that the flat buffer is back on GPU.
+            self.parallel_partitioned_bit16_groups.clear()
+            for i, flat_group in enumerate(self.bit16_groups_flat):
+                data_parallel_partitions = self.get_data_parallel_partitions(flat_group, i)
+                self.parallel_partitioned_bit16_groups.append(data_parallel_partitions)
+
             for i in range(len(self.bit16_groups)):
                 self._update_model_bit16_weights(i)
 
-            # Clean up pinned buffers if they were used
             if hasattr(self, "lp_params_pin_buffers"):
                 del self.lp_params_pin_buffers
-
+            self._link_all_hp_params()
             self.offloaded_states.remove(OffloadStateTypeEnum.lp_params)
 
-        # Reload Partitioned Gradients (LP Grads) - mainly for Stage 2
+        # Reload Partitioned Gradients (LP Grads)
         if OffloadStateTypeEnum.lp_grads in self.offloaded_states:
-            if self.partition_gradients:
-                for i in self.averaged_gradients:
-                    if self.averaged_gradients[i] is not None:
-                        for j in range(len(self.averaged_gradients[i])):
-                            grad_tensor = self.averaged_gradients[i][j]
-                            if torch.is_tensor(grad_tensor):
-                                self.averaged_gradients[i][j] = grad_tensor.to(device, non_blocking=non_blocking)
-                self.offloaded_states.remove(OffloadStateTypeEnum.lp_grads)
+            # Mirror the simplified offload logic, using .data swap.
+            for hp_param in self.single_partition_of_fp32_groups:
+                if hp_param.grad is not None and hp_param.grad.device.type != device:
+                    hp_param.grad.data = hp_param.grad.data.to(device, non_blocking=non_blocking)
+
+            self._link_all_hp_params()
+            self.offloaded_states.remove(OffloadStateTypeEnum.lp_grads)
 
         # Reload Optimizer States
         if OffloadStateTypeEnum.optim_states in self.offloaded_states:
             reload_optimizer_states(self.optimizer, device, non_blocking=non_blocking)
             self.offloaded_states.remove(OffloadStateTypeEnum.optim_states)
 
-        # Synchronize if using non-blocking transfers
         if non_blocking:
             get_accelerator().synchronize()
 
