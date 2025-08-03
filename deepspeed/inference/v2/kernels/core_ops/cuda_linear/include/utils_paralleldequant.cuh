@@ -120,11 +120,7 @@ __device__ __forceinline__ void ExtractFromSharedToReg_Scales(uint32_t* Scales,
 #pragma unroll
     for (int i = 0; i < 4; i++) {
         // T __shfl_sync(unsigned mask, T var, int srcLane, int width=warpSize);
-#if defined(__HIP_PLATFORM_AMD__)
-        Scales[i] = __shfl_sync(static_cast<uint64_t>(0xffffffff), tmpReg, i, 4);
-#else
         Scales[i] = __shfl_sync(0xffffffff, tmpReg, i, 4);
-#endif
     }
 }
 

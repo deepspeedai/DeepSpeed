@@ -558,7 +558,7 @@ DS_D_INLINE void _warp(cg::thread_block_tile<hw_warp_size>& warp, T* data)
 #pragma unroll
     for (int i = 1; i < reduce_width; i *= 2) {
         data[0] = element<Op1>(data[0], shfl_xor_helper(warp, data[0], i));
-        data[1] = element<Op2>(data[1], shfl_xor_helper(warp, data[0], i));
+        data[1] = element<Op2>(data[1], shfl_xor_helper(warp, data[1], i));
     }
 }
 
@@ -568,8 +568,8 @@ DS_D_INLINE void _warp(cg::thread_block_tile<hw_warp_size>& warp, T* data)
 #pragma unroll
     for (int i = 1; i < reduce_width; i *= 2) {
         data[0] = element<Op1>(data[0], shfl_xor_helper(warp, data[0], i));
-        data[1] = element<Op2>(data[1], shfl_xor_helper(warp, data[0], i));
-        data[2] = element<Op3>(data[2], shfl_xor_helper(warp, data[0], i));
+        data[1] = element<Op2>(data[1], shfl_xor_helper(warp, data[1], i));
+        data[2] = element<Op3>(data[2], shfl_xor_helper(warp, data[2], i));
     }
 }
 
@@ -584,9 +584,9 @@ DS_D_INLINE void _warp(cg::thread_block_tile<hw_warp_size>& warp, T* data)
 #pragma unroll
     for (int i = 1; i < reduce_width; i *= 2) {
         data[0] = element<Op1>(data[0], shfl_xor_helper(warp, data[0], i));
-        data[1] = element<Op2>(data[1], shfl_xor_helper(warp, data[0], i));
-        data[2] = element<Op3>(data[2], shfl_xor_helper(warp, data[0], i));
-        data[3] = element<Op4>(data[3], shfl_xor_helper(warp, data[0], i));
+        data[1] = element<Op2>(data[1], shfl_xor_helper(warp, data[1], i));
+        data[2] = element<Op3>(data[2], shfl_xor_helper(warp, data[2], i));
+        data[3] = element<Op4>(data[3], shfl_xor_helper(warp, data[3], i));
     }
 }
 

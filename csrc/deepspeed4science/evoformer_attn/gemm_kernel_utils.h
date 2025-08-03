@@ -233,11 +233,7 @@ struct call_conditional<false, TA, TB> {
 
 CUTLASS_DEVICE int32_t warp_uniform(int32_t value)
 {
-#if defined(__HIP_PLATFORM_AMD__)
-    return (int32_t)__shfl_sync(static_cast<uint64_t>(0xffffffff), (unsigned)value, 0);
-#else
     return (int32_t)__shfl_sync(0xffffffff, (unsigned)value, 0);
-#endif
 }
 
 template <typename T>
