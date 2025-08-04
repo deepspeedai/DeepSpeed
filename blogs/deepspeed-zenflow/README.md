@@ -81,7 +81,7 @@ For more detailed performance results, please refer to our [arXiv paper](https:/
 
 Training large models with offloading can save GPU memory, but often at the cost of *performance*. In this section, we briefly discuss three topics. **First**, we explain why coupling CPU-side optimizer updates with GPU compute leads to severe GPU stalls during LLM fine-tuning. **Next**, we quantify how full-gradient offloading saturates the limited PCIe bandwidth on A100/H100 servers, inflating iteration time. **Finally**, we reveal the highly skewed importance distribution of gradients, showing that uniformly updating all parameters in GPUs at the same time is wasteful and unnecessary.
 
-### CPU-Induced GPU Stalls
+### Offloading-Induced GPU Stalls
 
 
 <div align="center">
