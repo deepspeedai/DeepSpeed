@@ -67,10 +67,10 @@ ZenFlow is the **first offloading framework** to offer a **bounded-asynchronous*
 | Feature | Benefit |
 |--------|---------|
 | Up to **5×** end-to-end speed-up over ZeRO-Offload and **6.3×** over ZeRO-Infinity | Faster time-to-convergence |
-| **> 85% GPU-stall reduction** on A100 / H100 nodes | Keeps GPUs busy, higher utilization |
+| **> 85% reduction in GPU stalls** on A100 / H100 nodes | Keeps GPUs busy, higher utilization |
 | **≈ 2× lower PCIe traffic** (1.13× model size per step vs. 2× in ZeRO) | Less bandwidth pressure on clusters |
 | **Maintains or improves accuracy** on GLUE (OPT-350M → Llama-13B) | No accuracy loss |
-| **Lightweight gradient-selection proxy** (6000× smaller than full AllGather) | Scales to multi-GPU settings without memory footprint spikes |
+| **Lightweight gradient selection** (6000× cheaper than full AllGather) | Scales to multi-GPU settings without memory footprint spikes |
 | **Auto-tuning (Zen-auto)** automatically adapts update interval on-the-fly | No manual knob tuning |
 
 For more detailed performance results, please refer to our [arXiv paper](https://arxiv.org/abs/2505.12242).
@@ -95,8 +95,7 @@ Synchronous offloading frameworks (e.g., ZeRO-Offload) keep the GPU idle while t
 
 ### Bandwidth Bottlenecks
 
-A single training step moves one full gradient matrix from GPU to CPU and one full parameter matrix back, i.e., **2× model size of PCIe traffic per step**. Even on PCIe 4.0 (≈ 32 GB/s), Llama-2-13B pushes ~40 GB per iteration, adding **> 1s** of transfer latency. The problem is worse in multi-node settings where cross-node network bandwidth (< 400 Gb/s) is an order of magnitude lower than that of NVLinks, making communication the dominant cost.
-
+A single training step moves a full copy of the model gradients from GPU to CPU and a full copy of the model parameters back, i.e., **2× model size of PCIe traffic per step**. Even on PCIe 4.0 (≈ 32 GB/s), Llama-2-13B pushes ~40 GB per iteration, adding **> 1s** of transfer latency.
 ### Unequal Gradient Importance
 
 Not all gradients matter equally. Our analysis shows that **the top 1% of gradient channels contribute over 90% of the ℓ²-norm energy** during fine-tuning. In other words, most updates have little impact on model learning, yet still incur disproportionately high compute and I/O costs in traditional offloading pipelines.
@@ -169,7 +168,7 @@ To try out DeepSpeed-ZenFlow, please refer to the [ZenFlow tutorial](https://git
 ```bibtex
 @article{lan2025zenflow,
   title   = {ZenFlow: Enabling Stall-Free Offloading Training via Asynchronous Updates},
-  author  = {Tingfeng Lan and Yusen Wu and Bin Ma and Zhaoyuan Su and Rui Yang and Tekin Bicer and Dong Li and Yue Cheng},
+  author  = {Tingfeng Lan and Yusen Wu and Bin Ma and Zhaoyuan Su and Rui Yang and Tekin Bicer and Masahiro Tanaka and Olatunji Ruwase and Dong Li  and Yue Cheng},
   journal = {arXiv preprint arXiv:2505.12242},
   year    = {2025}
 }
@@ -179,6 +178,6 @@ To try out DeepSpeed-ZenFlow, please refer to the [ZenFlow tutorial](https://git
 
 ## Acknowledgements
 
-This work is the result of a close collaboration between University of Virginia (UVA), University of California, Merced (UC Merced), Argonne National Laboratory (ANL) and DeepSpeed.
+This work is the result of a close collaboration between University of Virginia (UVA), University of California, Merced (UC Merced), Argonne National Laboratory (ANL) and DeepSpeed team.
 
-The contributors include [Tingfeng Lan](https://antlera.github.io/), [Yusen Wu](https://joshwoo2003.github.io/), [Zhaoyuan Su](https://alexsssu.github.io/), [Rui Yang](https://ruiyang00.github.io/), and [Yue Cheng](https://tddg.github.io/) from UVA; [Bin Ma](https://www.linkedin.com/in/bin-ma-ba665b182/) and [Dong Li](https://faculty.ucmerced.edu/dong-li/) from UC Merced; and [Tekin Bicer](https://www.anl.gov/profile/tekin-bicer) from ANL. We also thank the DeepSpeed team, especially [Olatunji Ruwase](https://www.linkedin.com/in/tunji-ruwase-088952/) and [Masahiro Tanaka](https://www.linkedin.com/in/masahiro-tanaka-77482926/), for early feedback and insightful discussions, and the open-source community for their valuable contributions.
+The contributors include [Tingfeng Lan](https://antlera.github.io/), [Yusen Wu](https://joshwoo2003.github.io/), [Zhaoyuan Su](https://alexsssu.github.io/), [Rui Yang](https://ruiyang00.github.io/), and [Yue Cheng](https://tddg.github.io/) from UVA; [Bin Ma](https://www.linkedin.com/in/bin-ma-ba665b182/) and [Dong Li](https://faculty.ucmerced.edu/dong-li/) from UC Merced; [Tekin Bicer](https://www.anl.gov/profile/tekin-bicer) from ANL; [Olatunji Ruwase](https://www.linkedin.com/in/tunji-ruwase-088952/) and [Masahiro Tanaka](https://www.linkedin.com/in/masahiro-tanaka-77482926/) from the DeepSpeed team. We especially thank [Olatunji Ruwase](https://www.linkedin.com/in/tunji-ruwase-088952/) and [Masahiro Tanaka](https://www.linkedin.com/in/masahiro-tanaka-77482926/) for their early feedback and insightful discussions and also for open-source community support.
