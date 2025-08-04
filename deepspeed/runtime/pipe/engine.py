@@ -13,7 +13,6 @@ from deepspeed import comm as dist
 
 from deepspeed.utils import logger
 from deepspeed.utils.timer import ThroughputTimer
-from deepspeed.accelerator import get_accelerator
 from deepspeed.runtime.bf16_optimizer import BF16_Optimizer
 
 from ..engine import DeepSpeedEngine, MEMORY_OPT_ALLREDUCE_SIZE
@@ -712,7 +711,6 @@ class PipelineEngine(DeepSpeedEngine):
 
     def _exec_forward_pass(self, buffer_id):
         self.tput_timer.start()
-        self.mem_status('BEFORE FWD', reset_max=True)
 
         if isinstance(self.pipe_buffers['inputs'][buffer_id], tuple):
             inputs = tuple(t.clone() for t in self.pipe_buffers['inputs'][buffer_id])
@@ -808,13 +806,10 @@ class PipelineEngine(DeepSpeedEngine):
         assert self.optimizer is not None, "must provide optimizer during " \
                                            "init in order to use backward"
 
-        self.mem_status('BEFORE BWD', reset_max=True)
-
         # The last stage just runs backward on the loss using DeepSpeed's typical
         # mechanisms.
         if self.is_last_stage():
             super().backward(self.loss)
-            self.mem_status('AFTER BWD')
             return
 
         outputs = self.pipe_buffers['outputs'][buffer_id]
@@ -880,8 +875,6 @@ class PipelineEngine(DeepSpeedEngine):
             self.timers(BACKWARD_INNER_GLOBAL_TIMER).stop()
             self.timers(BACKWARD_MICRO_TIMER).stop()
             self.timers(BACKWARD_GLOBAL_TIMER).stop()
-
-        self.mem_status('AFTER BWD')
 
     def _exec_load_micro_batch(self, buffer_id):
         if self.wall_clock_breakdown():
@@ -1221,13 +1214,10 @@ class PipelineEngine(DeepSpeedEngine):
         if self.wall_clock_breakdown():
             self.timers(STEP_MICRO_TIMER).start()
             self.timers(STEP_GLOBAL_TIMER).start()
-        self.mem_status('BEFORE STEP', reset_max=True)
 
         self._force_grad_boundary = True
         self._take_model_step(lr_kwargs)
         self._force_grad_boundary = False
-
-        self.mem_status('AFTER STEP')
 
         if self.global_rank == 0 and self.monitor.enabled:
             self.summary_events = [(f'Train/Samples/lr', self.get_lr()[0], self.global_samples)]
@@ -1306,53 +1296,6 @@ class PipelineEngine(DeepSpeedEngine):
     def step(self, *args, **kwargs):
         """Disabled for pipeline parallel training. See ``train_batch()``. """
         raise PipelineError("Only train_batch() is accessible in pipeline mode.")
-
-    def mem_status(self, msg, print_rank=-1, reset_max=False):
-        return
-        global mem_alloced, mem_cached
-        if not self.global_steps == 0 or not self.global_steps == 9:
-            #return
-            pass
-        if self.mpu.get_data_parallel_rank() != 0:
-            return
-
-        if self.global_rank != 0:
-            return
-
-        rank = self.global_rank
-        if print_rank != -1 and rank != print_rank:
-            return
-
-        get_accelerator().synchronize()
-
-        if reset_max:
-            get_accelerator().reset_max_memory_cached()
-            get_accelerator().reset_max_memory_allocated()
-
-        new_alloced = get_accelerator().memory_allocated()
-        new_cached = get_accelerator().memory_cached()
-
-        delta_alloced = new_alloced - mem_alloced
-        delta_cached = new_cached - mem_cached
-
-        mem_cached = new_cached
-        mem_alloced = new_alloced
-
-        max_alloced = get_accelerator().max_memory_allocated()
-        max_cached = get_accelerator().max_memory_cached()
-
-        # convert to GB for printing
-        new_alloced /= 1024**3
-        new_cached /= 1024**3
-        delta_alloced /= 1024**3
-        delta_cached /= 1024**3
-        max_alloced /= 1024**3
-        max_cached /= 1024**3
-
-        print(
-            f'RANK={rank} STAGE={self.stage_id} STEP={self.global_steps} MEMSTATS', msg,
-            f'current alloc={new_alloced:0.4f}GB (delta={delta_alloced:0.4f}GB max={max_alloced:0.4f}GB) '
-            f'current cache={new_cached:0.4f}GB (delta={delta_cached:0.4f}GB max={max_cached:0.4f}GB)')
 
     def module_state_dict(self, exclude_frozen_parameters=False):
         """Override hack to save a pipe model and return the directory path of the save.

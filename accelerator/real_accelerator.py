@@ -67,7 +67,7 @@ def get_accelerator():
                     f"XPU_Accelerator requires intel_extension_for_pytorch, which is not installed on this system.")
         elif accelerator_name == "xpu.external":
             try:
-                import intel_extension_for_deepspeed  # noqa: F401 # type: ignore
+                from intel_extension_for_deepspeed import XPU_Accelerator  # noqa: F401 # type: ignore
             except ImportError as e:
                 raise ValueError(
                     f"XPU_Accelerator external requires intel_extension_for_deepspeed, which is not installed on this system."
@@ -224,6 +224,12 @@ def get_accelerator():
         ds_accelerator = CPU_Accelerator()
     elif accelerator_name == "xpu.external":
         # XPU_Accelerator is already imported in detection stage
+        try:
+            from intel_extension_for_deepspeed import XPU_Accelerator  # noqa: F811
+        except ImportError as e:
+            raise ValueError(
+                f"XPU_Accelerator external requires intel_extension_for_deepspeed, which is not installed on this system."
+            )
         ds_accelerator = XPU_Accelerator()
     elif accelerator_name == "xpu":
         from .xpu_accelerator import XPU_Accelerator
@@ -258,7 +264,7 @@ def get_accelerator():
 def set_accelerator(accel_obj):
     global ds_accelerator
     _validate_accelerator(accel_obj)
-    if accel_logger is not None:
+    if accel_logger is not None and accel_obj is not None:
         accel_logger.info(f"Setting ds_accelerator to {accel_obj._name} (model specified)")
     ds_accelerator = accel_obj
 

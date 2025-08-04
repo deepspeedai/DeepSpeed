@@ -407,7 +407,6 @@ class DeepSpeedEngine(Module):
         for _, module in self.module.named_modules():
             if isinstance(module, LoRAOptimizedLinear):
                 self.optimized_linear_lora_enabled = True
-                offload_ratio = None
                 if offload_ratio is not None:
                     assert offload_ratio == module.lora_config.offload_ratio, \
                         "all lora_config offload ratios should be the same across the model"
@@ -1262,10 +1261,6 @@ class DeepSpeedEngine(Module):
     @staticmethod
     def __check_params(model: Module, dtype: torch.dtype) -> None:
         return
-        if not all(param.dtype == dtype for param in model.parameters()) and dist.get_rank() == 0:
-            raise ValueError(f"{dtype} is enabled but the following parameters have dtype that is "
-                             f"not {dtype}: "
-                             f"{[(n, p.dtype) for n, p in model.named_parameters() if p.dtype != dtype]}")
 
     def _set_client_model(self, model):
         # register client model in _modules so that nn.module methods work correctly
