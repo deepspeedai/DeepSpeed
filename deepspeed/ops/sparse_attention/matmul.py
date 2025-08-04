@@ -128,18 +128,18 @@ def _kernel(A, B, C, stride_za, stride_ha, stride_ma, stride_ka, stride_zb, stri
             inc_b = TK * stride_kb
         else:
             pinc += 2
-        if meta['DSD']:
-            inc_b = tl.load(pinc)
-            inc_a = tl.load(pinc + 1)
-            inc_b = tl.multiple_of(inc_b, 8)
-            inc_a = tl.multiple_of(inc_a, 8)
-            inc_b = inc_b * stride_kb
-        if meta['DDS']:
-            inc_a = tl.load(pinc)
-            inc_b = tl.load(pinc + 1)
-            inc_a = tl.multiple_of(inc_a, 8)
-            inc_b = tl.multiple_of(inc_b, 8)
-            inc_a = inc_a * stride_ka
+            if meta['DSD']:
+                inc_b = tl.load(pinc)
+                inc_a = tl.load(pinc + 1)
+                inc_b = tl.multiple_of(inc_b, 8)
+                inc_a = tl.multiple_of(inc_a, 8)
+                inc_b = inc_b * stride_kb
+            if meta['DDS']:
+                inc_a = tl.load(pinc)
+                inc_b = tl.load(pinc + 1)
+                inc_a = tl.multiple_of(inc_a, 8)
+                inc_b = tl.multiple_of(inc_b, 8)
+                inc_a = inc_a * stride_ka
         pa += inc_a
         pb += inc_b
         # pre-fetch
