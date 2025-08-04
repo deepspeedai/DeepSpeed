@@ -263,7 +263,7 @@ def safe_get_local_grad(param):
         Returns:
             Union[torch.Tensor, None]: A tensor on accelerator device
     """
-    assert hasattr(param, 'ds_id'), f'This API is only defined for ZeRO-3 partitioned parameters'
+    assert hasattr(param, 'ds_id'), 'This API is only defined for ZeRO-3 partitioned parameters'
     return param._z3_optimizer.get_local_fp32_grad_for_param(param)
 
 
@@ -277,7 +277,7 @@ def safe_set_local_grad(param, value):
             param (``torch.nn.Parameter``): A model parameter.
             value (``torch.Tensor``): New value of local gradient partition.
     """
-    assert hasattr(param, 'ds_id'), f'This API is only defined for ZeRO-3 partitioned parameters'
+    assert hasattr(param, 'ds_id'), 'This API is only defined for ZeRO-3 partitioned parameters'
     param._z3_optimizer.set_local_grad_for_param(value, param)
 
 
@@ -290,7 +290,7 @@ def safe_get_local_fp32_param(param):
         Returns:
             Union[torch.Tensor, None]: A tensor on accelerator device
     """
-    assert hasattr(param, 'ds_id'), f'This API is only defined for ZeRO-3 partitioned parameters'
+    assert hasattr(param, 'ds_id'), 'This API is only defined for ZeRO-3 partitioned parameters'
     return param._z3_optimizer.get_local_fp32_param(param)
 
 
@@ -304,7 +304,7 @@ def safe_get_local_optimizer_state(param, optim_state_key):
         Returns:
             Union[torch.Tensor, None]: A tensor on accelerator device
     """
-    assert hasattr(param, 'ds_id'), f'This API is only defined for ZeRO-3 partitioned parameters'
+    assert hasattr(param, 'ds_id'), 'This API is only defined for ZeRO-3 partitioned parameters'
     return param._z3_optimizer.get_local_fp32_param(param, optim_state_key)
 
 
@@ -316,7 +316,7 @@ def safe_set_local_optimizer_state(param, value, optim_state_key):
             value (``torch.Tensor``): New value of local optimizer state partition.
             optim_state_key (``string``): Key value of optimizer state (e.g., `exp_avg` in Adam optimizer).
     """
-    assert hasattr(param, 'ds_id'), f'This API is only defined for ZeRO-3 partitioned parameters'
+    assert hasattr(param, 'ds_id'), 'This API is only defined for ZeRO-3 partitioned parameters'
     param._z3_optimizer.set_local_hp_param(value, param, optim_state_key)
 
 
@@ -327,7 +327,7 @@ def safe_set_local_fp32_param(param, value):
             param (``torch.nn.Parameter``): A model parameter.
             value (``torch.Tensor``): New value of local parameter partition.
     """
-    assert hasattr(param, 'ds_id'), f'This API is only defined for ZeRO-3 partitioned parameters'
+    assert hasattr(param, 'ds_id'), 'This API is only defined for ZeRO-3 partitioned parameters'
     param._z3_optimizer.set_local_hp_param(value, param)
 
 

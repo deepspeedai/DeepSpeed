@@ -12,7 +12,7 @@ from .io_engine import io_engine_multiprocessing
 
 
 def ds_io_main():
-    print(f'Testing DeepNVMe python frontend')
+    print('Testing DeepNVMe python frontend')
 
     args = get_validated_args()
     mp.set_start_method('spawn', force=True)

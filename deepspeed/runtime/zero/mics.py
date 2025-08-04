@@ -47,7 +47,7 @@ class MiCS_AllGatherCoalescedHandle(AllGatherCoalescedHandle):
             instrument_w_nvtx(self.allgather_handle.wait)()
         except (ValueError, RuntimeError) as e:
             log_dist(
-                f"WARNING: Runtime Error while waiting the collective all-gather, possibly due to the _IllegalWork",
+                "WARNING: Runtime Error while waiting the collective all-gather, possibly due to the _IllegalWork",
                 ranks=[0])
             log_dist(f"Error message: {e}", ranks=[0])
 
@@ -158,7 +158,7 @@ class MiCS_Init(Init):
 
         if sequence_data_parallel_group is not None:
             logger.warning(
-                f"sequence_data_parallel_group' is deprecated and will be removed. Use 'data_parallel_group' instead.")
+                "sequence_data_parallel_group' is deprecated and will be removed. Use 'data_parallel_group' instead.")
             if data_parallel_group is not None:
                 raise ValueError(
                     "Both 'data_parallel_group' and 'sequence_data_parallel_group' were specified. Please provide only one of these arguments."
@@ -339,7 +339,7 @@ class MiCS_Offload(DeepSpeedZeRoOffload):
         """ overload the parent class function for convert the parameters
 
         """
-        log_dist(f'Convert to zero parameters from MiCS Offload manager', ranks=[0])
+        log_dist('Convert to zero parameters from MiCS Offload manager', ranks=[0])
         non_zero_params = [p for p in module.parameters() if not is_zero_param(p)]
         if non_zero_params:
             zero_params = [p for p in module.parameters() if is_zero_param(p)]

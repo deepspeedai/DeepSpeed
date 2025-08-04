@@ -846,7 +846,7 @@ def get_global_norm_of_tensors(input_tensors, norm_type=2, mpu=None, use_graph=F
         Total norm of the tensors (viewed as a single vector).
     """
     assert isinstance(input_tensors, Iterable), f'expected Iterable type not {type(input_tensors)}'
-    assert all([torch.is_tensor(t) for t in input_tensors]), f'expected list of only tensors'
+    assert all([torch.is_tensor(t) for t in input_tensors]), 'expected list of only tensors'
 
     norm_type = float(norm_type)
     all_norms = []

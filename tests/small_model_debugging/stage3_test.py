@@ -15,9 +15,9 @@ import deepspeed
 class VerboseLinear(torch.nn.Linear):
 
     def __init__(self, **kwargs):
-        print(f'Begin VerboseLinear.__init__')
+        print('Begin VerboseLinear.__init__')
         super().__init__(**kwargs)
-        print(f'End VerboseLinear.__init__')
+        print('End VerboseLinear.__init__')
 
 
 class LinearStack(torch.nn.Module):

@@ -27,7 +27,7 @@ class HPU_Accelerator(DeepSpeedAccelerator):
             torch.utils.deterministic.fill_uninitialized_memory = False
         except ImportError as e:
             raise ValueError(
-                f"HPU_Accelerator requires habana_frameworks.torch.hpu, which is not installed on this system.")
+                "HPU_Accelerator requires habana_frameworks.torch.hpu, which is not installed on this system.")
 
         self.fp16_supported = None
 

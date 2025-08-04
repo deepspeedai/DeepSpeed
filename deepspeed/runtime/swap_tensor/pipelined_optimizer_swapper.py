@@ -213,7 +213,7 @@ class PipelinedOptimizerSwapper(OptimizerSwapper):
                                                               count=required_buffer_count,
                                                               dtype=parameter.dtype)
         assert allocated_buffers is not None, \
-        f"PipelinedOptimizerSwapper ran out of swap buffers, try increasing 'buffer_count'"
+        "PipelinedOptimizerSwapper ran out of swap buffers, try increasing 'buffer_count'"
 
         state_buffers = allocated_buffers[:num_swap_tensors]
         param_info.set_swap_buffers(state_buffers, aligned_numel)
