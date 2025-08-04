@@ -81,7 +81,7 @@ class Autotuner:
         if not os.path.exists(self.results_dir):
             try:
                 os.makedirs(self.results_dir, exist_ok=True)
-                logger.info(f"Created autotuning results directory: {self.exps_dir}")
+                logger.info(f"Created autotuning results directory: {self.results_dir}")
             except:
                 logger.error(
                     f"Failed to create {self.results_dir}, please check results_dir in the autotuning config file is accessible by all the nodes in the job."
