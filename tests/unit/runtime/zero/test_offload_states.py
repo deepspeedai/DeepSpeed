@@ -212,7 +212,7 @@ def validate_device(model, device: torch.device, offloaded_states) -> None:
                 assert compare_device(state), f"State {state} is not on device {device}"
 
 
-def run_model(model, param_groups, config_dict, hidden_dim, dtype, offloaded_states, pin_memory, non_blocking):
+def run_model_zero3(model, param_groups, config_dict, hidden_dim, dtype, offloaded_states, pin_memory, non_blocking):
     # Currently we only support OffloadDeviceEnum.cpu
     offload_device = OffloadDeviceEnum.cpu
 
@@ -282,11 +282,11 @@ def run_model(model, param_groups, config_dict, hidden_dim, dtype, offloaded_sta
 ])
 @pytest.mark.parametrize("pin_memory", [False, True])
 @pytest.mark.parametrize("non_blocking", [False, True])
-class TestOffloadStates(DistributedTest):
+class TestOffloadStatesZero3(DistributedTest):
     # Need multiple gpus to test possible hanging
     world_size = 2
 
-    def test_offload_states(self, included_state, pin_memory, non_blocking):
+    def test_offload_states_zero3(self, included_state, pin_memory, non_blocking):
         hidden_dim = 1024
 
         config_dict = {
@@ -314,5 +314,5 @@ class TestOffloadStates(DistributedTest):
             "weight_decay": 0.0
         }]
         offloaded_states = None if included_state is None else [included_state]
-        run_model(model, param_groups, config_dict, hidden_dim, torch.bfloat16, offloaded_states, pin_memory,
+        run_model_zero3(model, param_groups, config_dict, hidden_dim, torch.bfloat16, offloaded_states, pin_memory,
                   non_blocking)
