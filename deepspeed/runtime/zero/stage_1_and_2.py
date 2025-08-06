@@ -2562,29 +2562,6 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
         # Force garbage collection to release references
         gc.collect()
 
-    def _clear_lp_grads_references(self):
-        """
-        Clear all Python-level references that might prevent GPU memory from being
-        released after offloading Low-Precision (LP) gradients. This is a crucial
-        step for effective garbage collection.
-
-        This includes breaking references held in two main places:
-        1. Special mapping dictionaries (`_hp_mapping`) that link LP params to gradients.
-        2. The standard `.grad` and `.grad_accum` attributes on the parameters themselves.
-        """
-        # Clear HP mapping gradient references in model parameters
-        for i, param_group in enumerate(self.bit16_groups):
-            for param in param_group:
-                if hasattr(param, '_hp_mapping') and param._hp_mapping is not None:
-                    # Clear gradient_dict references that point to averaged_gradients
-                    if hasattr(param._hp_mapping, 'gradient_dict'):
-                        param._hp_mapping.gradient_dict = {}
-                    if hasattr(param._hp_mapping, 'offload_gradient_dict'):
-                        param._hp_mapping.offload_gradient_dict = {}
-        self.zero_grad(set_to_none=True)
-        # Force garbage collection to release references
-        gc.collect()
-
     def _clear_lp_params_references(self):
         """
         Clear all references that might prevent GPU memory release when offloading LP params.
