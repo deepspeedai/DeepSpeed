@@ -2562,13 +2562,15 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
         # Force garbage collection to release references
         gc.collect()
 
-    # 首先，我们需要从 ZeRO-2 的代码中借用或添加一个辅助函数 _clear_lp_grads_references，
-    # 它的作用是清除模型参数中可能存在的对梯度张量的引用，确保可以被完全释放。
-    # 将这个函数添加到 DeepSpeedZeroOptimizer 类中。
     def _clear_lp_grads_references(self):
         """
-        Clear all references that might prevent GPU memory release when offloading LP grads.
-        This includes averaged_gradients views and HP mapping gradient references.
+        Clear all Python-level references that might prevent GPU memory from being
+        released after offloading Low-Precision (LP) gradients. This is a crucial
+        step for effective garbage collection.
+
+        This includes breaking references held in two main places:
+        1. Special mapping dictionaries (`_hp_mapping`) that link LP params to gradients.
+        2. The standard `.grad` and `.grad_accum` attributes on the parameters themselves.
         """
         # Clear HP mapping gradient references in model parameters
         for i, param_group in enumerate(self.bit16_groups):
