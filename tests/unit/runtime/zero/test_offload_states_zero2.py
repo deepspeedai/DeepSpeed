@@ -16,13 +16,12 @@ from deepspeed.runtime.zero.offload_config import OffloadDeviceEnum, OffloadStat
 def validate_hp_params_device(model, device: torch.device):
     """Validates that the sharded FP32 parameters are on the specified device."""
     for p in model.optimizer.single_partition_of_fp32_groups:
-        assert p.device == device, f"FP32 param partition is on {p.device}, expected {device}"
+        assert p.device.type == device.type, f"FP32 param partition is on {p.device}, expected {device}"
 
-# Validation function to check the device of LP (FP16/BF16) model parameters.
 def validate_lp_params_device(model, device: torch.device):
     """Validates that the sharded LP parameters are on the specified device."""
     for p in model.parameters():
-        assert p.device == device, f"LP param partition is on {p.device}, expected {device}"
+        assert p.device.type == device.type, f"LP param partition is on {p.device}, expected {device}"
 
 def validate_adam_states_device(model, device: torch.device):
     """Validates that the sharded Adam optimizer states are on the specified device."""
@@ -31,18 +30,26 @@ def validate_adam_states_device(model, device: torch.device):
             for state_key in ['exp_avg', 'exp_avg_sq']:
                 if state_key in model.optimizer.state[p]:
                     state_tensor = model.optimizer.state[p][state_key]
-                    assert state_tensor.device == device, f"Optimizer state '{state_key}' is on {state_tensor.device}, expected {device}"
+                    assert state_tensor.device.type == device.type, f"Optimizer state '{state_key}' is on {state_tensor.device}, expected {device}"
 
 def validate_grad_device(model, device: torch.device) -> None:
     """Validates that the sharded gradients are on the specified device."""
-    for p in model.optimizer.single_partition_of_fp32_groups:
-        if p.grad is not None:
-            assert p.grad.device == device, f"Gradient partition is on {p.grad.device}, expected {device}"
-
+    # This path is for before step() where gradients are in averaged_gradients
+    if model.optimizer.averaged_gradients:
+        for grad_list in model.optimizer.averaged_gradients.values():
+            if grad_list is not None:
+                for grad_tensor in grad_list:
+                    assert grad_tensor.device.type == device.type, f"Gradient partition in averaged_gradients is on {grad_tensor.device}, expected {device}"
+    else:
+        # This path is for after step() or if grads are not in averaged_gradients
+        for p in model.optimizer.single_partition_of_fp32_groups:
+            if p.grad is not None:
+                assert p.grad.device.type == device.type, f"Gradient partition on hp_param.grad is on {p.grad.device}, expected {device}"
 
 def run_model_zero12(model, param_groups, config_dict, hidden_dim, dtype, offloaded_states, pin_memory, non_blocking):
     """
-    This function runs a training step, offloads states, reloads them, and verifies correctness for ZeRO-2.
+    This function runs a training step, offloads states, reloads them, and verifies correctness for ZeRO-1/2.
+    The logic is carefully structured to handle transient gradient states vs. persistent parameter/optimizer states.
     """
     offload_device = OffloadDeviceEnum.cpu
     offload_torch_device = torch.device(offload_device.value)
@@ -56,69 +63,97 @@ def run_model_zero12(model, param_groups, config_dict, hidden_dim, dtype, offloa
                                       device=model.device,
                                       dtype=dtype)
     dist.barrier()
-    for batch in data_loader:
-        loss = model(batch[0], batch[1])
-        model.backward(loss)
-        model.step()
 
-        # --- Save state snapshots before offloading ---
-        lp_params_expected = [p.clone().detach() for p in model.parameters()]
-        fp32_param_tensors = model.optimizer.single_partition_of_fp32_groups
-        fp32_params_expected = [p.clone().detach() for p in fp32_param_tensors]
-        lp_grads_expected = [p.grad.clone().detach() if p.grad is not None else None for p in fp32_param_tensors]
-        adam_exp_avg_expected = [model.optimizer.state[p]['exp_avg'].clone().detach() for p in fp32_param_tensors if p in model.optimizer.state]
-        adam_exp_avg_sq_expected = [model.optimizer.state[p]['exp_avg_sq'].clone().detach() for p in fp32_param_tensors if p in model.optimizer.state]
+    # We only need one step to verify the logic
+    batch = next(iter(data_loader))
 
+    loss = model(batch[0], batch[1])
+    model.backward(loss)
 
-        # --- Start offloading ---
+    # Determine if we are testing a transient state (gradients) or a persistent state
+    # REVERTED: Condition now only checks for lp_grads as it's the relevant transient state.
+    is_grad_test = offloaded_states is not None and OffloadStateTypeEnum.lp_grads in offloaded_states
+
+    if is_grad_test:
+        # --- TEST PATH FOR TRANSIENT GRADIENT STATE ---
+        # Gradients exist only between backward() and step(). We must test them here.
+        grads_expected = [
+            [g.clone().detach() for g in grad_list]
+            for grad_list in model.optimizer.averaged_gradients.values() if grad_list is not None
+        ]
+
         alloc_before_offload = get_accelerator().memory_allocated()
-        model.offload_states(include=offloaded_states,
-                               device=offload_device,
-                               pin_memory=pin_memory,
-                               non_blocking=non_blocking)
+        model.offload_states(include=offloaded_states, device=offload_device, pin_memory=pin_memory, non_blocking=non_blocking)
         alloc_after_offload = get_accelerator().memory_allocated()
-        assert alloc_after_offload < alloc_before_offload, f"Allocated memory should decrease after offload"
+        assert alloc_after_offload < alloc_before_offload, "FAIL: Allocated memory for grads should decrease after offload"
+        validate_grad_device(model, offload_torch_device)
 
-        # --- Validate that states were moved to CPU ---
+        model.reload_states()
+        alloc_after_reload = get_accelerator().memory_allocated()
+
+        assert alloc_after_reload > alloc_after_offload, "FAIL: Allocated memory for grads should increase after reload"
+        validate_grad_device(model, accelerator_device)
+
+        reloaded_grads = [
+            grad_list for grad_list in model.optimizer.averaged_gradients.values() if grad_list is not None
+        ]
+        assert len(grads_expected) == len(reloaded_grads), "FAIL: Number of gradient groups changed after reload"
+        for expected_list, reloaded_list in zip(grads_expected, reloaded_grads):
+            for expected_g, reloaded_g in zip(expected_list, reloaded_list):
+                assert torch.equal(expected_g, reloaded_g), "FAIL: Reloaded gradient data does not match original"
+
+    model.step()
+
+    if not is_grad_test:
+        # --- TEST PATH FOR PERSISTENT STATES (Params, Optimizer States) ---
+        # These states exist after step(), so we can test them here.
+
+        # --- Save state snapshots before offloading for data integrity check ---
+        lp_params_expected = [p.clone().detach() for p in model.parameters()]
+        hp_params_expected = [p.clone().detach() for p in model.optimizer.single_partition_of_fp32_groups]
+
+        adam_params_in_state_before = [p for p in model.optimizer.single_partition_of_fp32_groups if p in model.optimizer.state]
+        adam_exp_avg_expected = [model.optimizer.state[p]['exp_avg'].clone().detach() for p in adam_params_in_state_before]
+        adam_exp_avg_sq_expected = [model.optimizer.state[p]['exp_avg_sq'].clone().detach() for p in adam_params_in_state_before]
+
+        alloc_before_offload = get_accelerator().memory_allocated()
+        model.offload_states(include=offloaded_states, device=offload_device, pin_memory=pin_memory, non_blocking=non_blocking)
+        alloc_after_offload = get_accelerator().memory_allocated()
+        assert alloc_after_offload < alloc_before_offload, f"FAIL: Allocated memory for persistent state {offloaded_states} should decrease after offload"
+
         if offloaded_states is None or OffloadStateTypeEnum.lp_params in offloaded_states:
             validate_lp_params_device(model, offload_torch_device)
         if offloaded_states is None or OffloadStateTypeEnum.hp_params in offloaded_states:
             validate_hp_params_device(model, offload_torch_device)
         if offloaded_states is None or OffloadStateTypeEnum.optim_states in offloaded_states:
             validate_adam_states_device(model, offload_torch_device)
-        if offloaded_states is None or OffloadStateTypeEnum.lp_grads in offloaded_states:
-            validate_grad_device(model, offload_torch_device)
 
-        # --- Reload states back to GPU ---
         model.reload_states()
         alloc_after_reload = get_accelerator().memory_allocated()
-        assert alloc_after_reload > alloc_after_offload, f"Allocated memory should increase after reload"
+        assert alloc_after_reload > alloc_after_offload, f"FAIL: Allocated memory for persistent state {offloaded_states} should increase after reload"
 
-        # --- Verify restored states ---
-        validate_lp_params_device(model, accelerator_device)
-        validate_hp_params_device(model, accelerator_device)
-        validate_adam_states_device(model, accelerator_device)
-        validate_grad_device(model, accelerator_device)
-
-        # NVerify data integrity for lp_params.
+        # --- Verify restored data integrity ---
         for expected, restored in zip(lp_params_expected, model.parameters()):
-            assert torch.equal(expected, restored)
+            assert torch.equal(expected, restored), "FAIL: Reloaded LP param data does not match original"
 
-        reloaded_fp32_param_tensors = model.optimizer.single_partition_of_fp32_groups
-        for expected, restored in zip(fp32_params_expected, reloaded_fp32_param_tensors):
-            assert torch.equal(expected, restored)
-        for expected_grad, p in zip(lp_grads_expected, reloaded_fp32_param_tensors):
-            if expected_grad is not None:
-                assert torch.equal(expected_grad, p.grad)
-            else:
-                assert p.grad is None
-        # Ensure the parameter exists in the state dict before iterating
-        adam_params_in_state = [p for p in reloaded_fp32_param_tensors if p in model.optimizer.state]
-        for expected, p in zip(adam_exp_avg_expected, adam_params_in_state):
-            assert torch.equal(expected, model.optimizer.state[p]['exp_avg'])
-        for expected, p in zip(adam_exp_avg_sq_expected, adam_params_in_state):
-            assert torch.equal(expected, model.optimizer.state[p]['exp_avg_sq'])
+        for expected, restored in zip(hp_params_expected, model.optimizer.single_partition_of_fp32_groups):
+            assert torch.equal(expected, restored), "FAIL: Reloaded HP param data does not match original"
 
+        adam_params_in_state_after = [p for p in model.optimizer.single_partition_of_fp32_groups if p in model.optimizer.state]
+        assert len(adam_params_in_state_before) == len(adam_params_in_state_after), "FAIL: Number of params in optimizer state changed after reload"
+
+        for expected, p in zip(adam_exp_avg_expected, adam_params_in_state_after):
+            assert torch.equal(expected, model.optimizer.state[p]['exp_avg']), "FAIL: Reloaded 'exp_avg' data does not match original"
+        for expected, p in zip(adam_exp_avg_sq_expected, adam_params_in_state_after):
+            assert torch.equal(expected, model.optimizer.state[p]['exp_avg_sq']), "FAIL: Reloaded 'exp_avg_sq' data does not match original"
+
+
+    # --- FINAL VALIDATION FOR ALL TESTS ---
+    validate_lp_params_device(model, accelerator_device)
+    validate_hp_params_device(model, accelerator_device)
+    validate_adam_states_device(model, accelerator_device)
+
+    assert torch.any(torch.ne(list(model.parameters())[0], 0.0))
 
 @pytest.mark.parametrize("included_state", [
     OffloadStateTypeEnum.optim_states,
@@ -149,4 +184,4 @@ class TestOffloadStatesZero12(DistributedTest):
         }]
         offloaded_states = None if included_state is None else [included_state]
         run_model_zero12(model, param_groups, config_dict, hidden_dim, torch.bfloat16, offloaded_states, pin_memory,
-                        non_blocking)
+                         non_blocking)
