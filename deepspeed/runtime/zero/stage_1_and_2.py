@@ -2561,6 +2561,9 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
         # Force garbage collection to release references
         gc.collect()
 
+    # 首先，我们需要从 ZeRO-2 的代码中借用或添加一个辅助函数 _clear_lp_grads_references，
+    # 它的作用是清除模型参数中可能存在的对梯度张量的引用，确保可以被完全释放。
+    # 将这个函数添加到 DeepSpeedZeroOptimizer 类中。
     def _clear_lp_grads_references(self):
         """
         Clear all references that might prevent GPU memory release when offloading LP grads.
@@ -2672,19 +2675,31 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
 
         # Offload Partitioned Gradients (LP Grads)
         if needs_offload(OffloadStateTypeEnum.lp_grads):
-            # NOTE: The root cause of the lp_grads failure is very likely external to this function,
-            # originating from an unexpected gradient state left by the step() method.
-            # This implementation provides the cleanest, most consistent logic for offloading,
-            # but it cannot fix an issue with a pre-existing problematic tensor state.
-            # Use the .data swap idiom which is the most robust method available within this function.
-            for hp_param in self.single_partition_of_fp32_groups:
-                if hp_param.grad is not None and hp_param.grad.device.type != device:
-                    hp_param.grad.data = hp_param.grad.data.to(device, non_blocking=non_blocking)
+            for group_idx in self.averaged_gradients:
+                grad_list = self.averaged_gradients.get(group_idx)
+                if grad_list is not None:
+                    for grad_tensor in grad_list:
+                        if grad_tensor is not None and grad_tensor.device.type != device:
+                            # Key insight: We only move the underlying data storage (`.data`) to the target device.
+                            # The Python tensor object and the dictionary structure (`self.averaged_gradients`)
+                            # remain intact, preserving the references needed for reloading.
+                            grad_tensor.data = grad_tensor.data.to(device, non_blocking=non_blocking)
 
+            # Clean up any temporary objects, but do NOT clear self.averaged_gradients itself,
+            # as its structure is needed to find the tensors again during the reload process.
             gc.collect()
             if get_accelerator().is_available():
                 get_accelerator().empty_cache()
             self.offloaded_states.add(OffloadStateTypeEnum.lp_grads)
+
+        # Offload Optimizer States
+        if needs_offload(OffloadStateTypeEnum.optim_states):
+            offload_optimizer_states(self.optimizer, device, pin_memory=pin_memory, non_blocking=non_blocking)
+            self.offloaded_states.add(OffloadStateTypeEnum.optim_states)
+
+        if not non_blocking:
+            if get_accelerator().is_available():
+                get_accelerator().synchronize()
 
         # Offload Optimizer States
         if needs_offload(OffloadStateTypeEnum.optim_states):
@@ -2734,12 +2749,15 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
 
         # Reload Partitioned Gradients (LP Grads)
         if OffloadStateTypeEnum.lp_grads in self.offloaded_states:
-            # Mirror the simplified offload logic, using .data swap.
-            for hp_param in self.single_partition_of_fp32_groups:
-                if hp_param.grad is not None and hp_param.grad.device.type != device:
-                    hp_param.grad.data = hp_param.grad.data.to(device, non_blocking=non_blocking)
+            # Since we preserved the `self.averaged_gradients` structure during offload,
+            # we can now iterate through it again. The tensors within currently point to CPU data.
+            for group_idx in self.averaged_gradients:
+                grad_list = self.averaged_gradients.get(group_idx)
+                if grad_list is not None:
+                    for grad_tensor in grad_list:
+                        if grad_tensor is not None and grad_tensor.device.type != device:
+                            grad_tensor.data = grad_tensor.data.to(device, non_blocking=non_blocking)
 
-            self._link_all_hp_params()
             self.offloaded_states.remove(OffloadStateTypeEnum.lp_grads)
 
         # Reload Optimizer States
