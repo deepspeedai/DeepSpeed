@@ -2640,8 +2640,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
             else:
                 for buf in self.single_partition_of_fp32_groups:
                     buf.data = buf.data.to(device, non_blocking=non_blocking)
-            gc.collect()
-            torch.cuda.empty_cache()
+
             self.offloaded_states.add(OffloadStateTypeEnum.hp_params)
 
         # Offload FP16/BF16 Model Parameters (LP Params)
@@ -2652,10 +2651,6 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
                     param.data = torch.empty(0, dtype=param.dtype, device=param.device)
             for group_partitions in self.parallel_partitioned_bit16_groups:
                 group_partitions.clear()
-
-            gc.collect()
-            if get_accelerator().is_available():
-                get_accelerator().empty_cache()
 
             if pin_memory:
                 if not hasattr(self, "lp_params_pin_buffers"):
@@ -2671,9 +2666,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
                     buf.data = buf.data.to(device, non_blocking=non_blocking)
             for i in range(len(self.bit16_groups)):
                 self._update_model_bit16_weights(i)
-            gc.collect()
-            if get_accelerator().is_available():
-                get_accelerator().empty_cache()
+
             self.offloaded_states.add(OffloadStateTypeEnum.lp_params)
 
         # Offload Partitioned Gradients (LP Grads)
@@ -2688,11 +2681,6 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
                             # remain intact, preserving the references needed for reloading.
                             grad_tensor.data = grad_tensor.data.to(device, non_blocking=non_blocking)
 
-            # Clean up any temporary objects, but do NOT clear self.averaged_gradients itself,
-            # as its structure is needed to find the tensors again during the reload process.
-            gc.collect()
-            if get_accelerator().is_available():
-                get_accelerator().empty_cache()
             self.offloaded_states.add(OffloadStateTypeEnum.lp_grads)
 
         # Offload Optimizer States
@@ -2704,10 +2692,6 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
             if get_accelerator().is_available():
                 get_accelerator().synchronize()
 
-        # Offload Optimizer States
-        if needs_offload(OffloadStateTypeEnum.optim_states):
-            offload_optimizer_states(self.optimizer, device, pin_memory=pin_memory, non_blocking=non_blocking)
-            self.offloaded_states.add(OffloadStateTypeEnum.optim_states)
         gc.collect()
         if get_accelerator().is_available():
             get_accelerator().empty_cache()
