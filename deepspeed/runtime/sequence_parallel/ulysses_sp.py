@@ -503,7 +503,6 @@ class UlyssesSPDataLoaderAdapter:
         except StopIteration:
             self.iter = iter(self.dl)
             raise StopIteration
-        batch = next(self.iter)
         micro_batches = defaultdict(dict)
         # XXX: replace with more efficient all-to-all?
 
