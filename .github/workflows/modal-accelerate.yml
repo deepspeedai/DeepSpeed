@@ -89,10 +89,10 @@ jobs:
       - name: Install build dependencies
       # TODO: Need to determine whether these installs are redundant by subesquent modal.Image call.
         run: |
-          pip install uv==0.4.0 # much faster than pip
+          pip install uv # much faster than pip
           uv pip install --system modal
-          uv pip install --system .[dev,autotuning]
-          ds_report
+          # uv pip install --system .[dev,autotuning]
+          # ds_report
           # time uv pip compile arctic_training/setup.py --extra all -o arctic_training/ci-requirements.txt
           # # add vllm manually to deps since it fails pip compile w/o CUDA_HOME being set in github actions
           # # if changing the version here also change it in setup.py to match
