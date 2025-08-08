@@ -75,7 +75,7 @@ Finally, here is a screenshot of `htop` showing host CPU and memory activity dur
 </a>
 
 ### CPU Adam perf tuning
-ZeRO offload already support multi-gpu training.  If the workload is using CPU optimizer, the workload can be further tuened by pass `--bind_cores_to_rank` to the deepspeed launch command. This switch will mainly do two things:
+ZeRO offload already support multi-gpu training.  If the workload is using CPU optimizer, the workload can be further tuned by passing `--bind_cores_to_rank` to the deepspeed launch command. This switch will mainly do two things:
 1. Divide physical CPU cores evenly among ranks, make each rank to have a dedicated set of CPU cores to run CPU optimizer.
 2. Set OMP_NUM_THREADS environment variable to the number of CPU cores assigned to each rank, so OpenMP code in CPU optimizer will have near optimal performance.
 
