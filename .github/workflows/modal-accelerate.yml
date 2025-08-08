@@ -100,4 +100,4 @@ jobs:
 
       - name: Run tests
         run: |
-          modal run -m deepspeed.modal_ci.accelerate
+          modal run -m ci.accelerate
