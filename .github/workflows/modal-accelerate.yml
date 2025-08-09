@@ -93,4 +93,6 @@ jobs:
 
       - name: Run tests
         run: |
+          pwd
+          ls 
           modal run -m ci.accelerate
