@@ -15,7 +15,7 @@ image = (modal.Image
          .run_commands("apt update && apt install -y libaio-dev")
          .apt_install("git")
          .run_commands("uv pip install --system --compile-bytecode datasets==3.6.0")
-         .env({"PYTHONPATH" : "/root"})
+        #  .env({"PYTHONPATH" : "/root"})
          .run_commands(
                 "git clone https://github.com/huggingface/accelerate && \
                 uv pip install --system --compile-bytecode ./accelerate[testing]"
@@ -37,24 +37,19 @@ app = modal.App("deepspeedai-accelerate-ci", image=image)
     timeout=1800,
 )
 def pytest():
+    import os
     import subprocess
-    subprocess.run(
-        "export PYTHONPATH=/root".split(),
-        check=True,
-        cwd=ROOT_PATH / ".",
-    )    
-    subprocess.run(
-        "echo $PYTHONPATH".split(),
-        check=True,
-        cwd=ROOT_PATH / ".",
-    )
+    test_env = os.environ.copy()
+    test_env['PYTHONPATH'] += ":/root"
     subprocess.run(
         "pip show deepspeed".split(),
+        env=test_env, 
         check=True,
         cwd=ROOT_PATH / ".",
     )
     subprocess.run(
         "pytest -sv /accelerate/tests/deepspeed".split(),
+        env=test_env, 
         check=True,
         cwd=ROOT_PATH / ".",
     )
