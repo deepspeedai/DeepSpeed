@@ -15,13 +15,12 @@ image = (modal.Image
          .run_commands("apt update && apt install -y libaio-dev")
          .apt_install("git")
          .run_commands("uv pip install --system --compile-bytecode datasets==3.6.0")
-        #  .env({"PYTHONPATH" : "/root"})
          .run_commands(
                 "git clone https://github.com/huggingface/accelerate && \
                 uv pip install --system --compile-bytecode ./accelerate[testing]"
             )
-         .pip_install_from_requirements(ROOT_PATH / "requirements/requirements.txt", gpu="any")
-         .pip_install_from_requirements(ROOT_PATH / "requirements/requirements-dev.txt", gpu="any")
+        #  .pip_install_from_requirements(ROOT_PATH / "requirements/requirements.txt", gpu="any")
+        #  .pip_install_from_requirements(ROOT_PATH / "requirements/requirements-dev.txt", gpu="any")
          .add_local_dir(ROOT_PATH , remote_path="/root/")
          .add_local_dir(ROOT_PATH / "accelerator", remote_path="/root/deepspeed/accelerator")
          .add_local_dir(ROOT_PATH / "csrc", remote_path="/root/deepspeed/ops/csrc")
