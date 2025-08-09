@@ -57,8 +57,11 @@ jobs:
           token: ${{ secrets.GITHUB_TOKEN }}
           filters: |
             deepspeed:
-              - 'deepspeed/**/*.py'
-              - '.github/workflows/deepspeed.yml'
+              - 'deepspeed/**'
+              - '.github/workflows/modal*.yml'
+              - 'ci/**'
+              - 'tests/unit/**'
+              - 'csrc/**'
 
   deploy:
     name: DeepSpeedAI CI
@@ -94,5 +97,5 @@ jobs:
       - name: Run tests
         run: |
           pwd
-          ls 
+          ls
           modal run -m ci.accelerate
