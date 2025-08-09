@@ -13,19 +13,12 @@ ROOT_PATH = Path(__file__).parents[1]
 image = (modal.Image
          .from_registry("pytorch/pytorch:2.6.0-cuda12.4-cudnn9-devel", add_python="3.10")
          .run_commands("apt update && apt install -y libaio-dev")
-         .run_commands("uv pip list")
          .pip_install_from_requirements(ROOT_PATH / "requirements/requirements.txt", gpu="any")
          .pip_install_from_requirements(ROOT_PATH / "requirements/requirements-dev.txt", gpu="any")
-         .add_local_dir(ROOT_PATH / "deepspeed", remote_path="/root/deepspeed")
-         .add_local_dir(ROOT_PATH / "accelerator", remote_path="/root/accelerator")
+        .add_local_dir(ROOT_PATH , remote_path="/root/")
          .add_local_dir(ROOT_PATH / "accelerator", remote_path="/root/deepspeed/accelerator")
-         .add_local_dir(ROOT_PATH / "csrc", remote_path="/root/csrc")
          .add_local_dir(ROOT_PATH / "csrc", remote_path="/root/deepspeed/ops/csrc")
-         .add_local_dir(ROOT_PATH / "op_builder", remote_path="/root/op_builder")
          .add_local_dir(ROOT_PATH / "op_builder", remote_path="/root/deepspeed/ops/op_builder")
-         .add_local_dir(ROOT_PATH / "tests", remote_path="/root/tests")
-         .add_local_dir(ROOT_PATH / "ci", remote_path="/root/ci")
-         .add_local_dir(ROOT_PATH / "ci", remote_path="/root/deepspeed/ci")
         )
 
 
