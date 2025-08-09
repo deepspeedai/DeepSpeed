@@ -94,7 +94,7 @@ jobs:
         run: |
           pip install uv # much faster than pip
           uv pip install --system modal
-          uv pip install .[dev]
+          pip install .[dev]
 
       - name: Run tests
         run: |
