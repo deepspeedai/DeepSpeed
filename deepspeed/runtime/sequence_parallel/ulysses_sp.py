@@ -986,7 +986,8 @@ class TiledFusedLogitsLoss(torch.autograd.Function):
         if output_reduction == "mean":
             incoming_grad /= shards
 
-        x_grad = torch.zeros_like(x)
+        # XXX: deal with the use case of running in inference mode, where we don't need backward
+        x_grad = torch.zeros_like(x) if x_requires_grad else None
         x_shards = list(torch.chunk(x, chunks=shards, dim=0))
         y_shards = list(torch.chunk(y, chunks=shards, dim=0))
         if mask is not None:
@@ -1011,15 +1012,18 @@ class TiledFusedLogitsLoss(torch.autograd.Function):
             shard_step = x_shards[i].shape[0]
             shard_offset = i * x_shards[0].shape[0]
 
-            x_shard.grad = x_grad.narrow(0, shard_offset, shard_step).view_as(x_shard)
-
-            with torch.enable_grad():
-                args = (self, x_shard, y_shard)
-                if mask is not None:
-                    args += (mask_shards[i], )
+            args = (self, x_shard, y_shard)
+            if mask is not None:
+                args += (mask_shards[i], )
+            if x_grad is not None:
+                x_shard.grad = x_grad.narrow(0, shard_offset, shard_step).view_as(x_shard)
+                with torch.enable_grad():
+                    output = fn(*args)
+                    output_shards.append(output)
+                torch.autograd.backward(output, incoming_grad)
+            else:
                 output = fn(*args)
                 output_shards.append(output)
-            torch.autograd.backward(output, incoming_grad)
 
         output_unsharded = torch.cat([l.unsqueeze(0) for l in output_shards], dim=0)
 
@@ -1029,9 +1033,10 @@ class TiledFusedLogitsLoss(torch.autograd.Function):
             output = output_unsharded.sum()
 
         # unflatten
-        x_grad = x_grad.view(bs, seqlen, *x_grad.shape[1:])
+        if x_grad is not None:
+            x_grad = x_grad.view(bs, seqlen, *x_grad.shape[1:])
+            ctx.save_for_backward(x_grad.detach())
 
-        ctx.save_for_backward(x_grad.detach())
         return output
 
     @staticmethod
