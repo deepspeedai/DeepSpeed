@@ -42,16 +42,18 @@ def pytest():
     test_env = os.environ.copy()
     test_env['PYTHONPATH'] += ":/root"
 
-    # subprocess.run(
-    #     "pip show deepspeed".split(),
-    #     env=test_env, 
-    #     check=True,
-    #     cwd=ROOT_PATH / ".",
-    # )
-
     subprocess.run(
         "pytest -sv /accelerate/tests/deepspeed".split(),
         env=test_env, 
         check=True,
         cwd=ROOT_PATH / ".",
     )
+
+    subprocess.run(
+        "pip show torch".split(),
+        env=test_env, 
+        check=True,
+        cwd=ROOT_PATH / ".",
+    )
+    py_path=test_env["PYTHONPATH"]
+    print(f"{ROOT_PATH=} {py_path=}")
