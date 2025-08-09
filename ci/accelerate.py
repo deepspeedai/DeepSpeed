@@ -37,23 +37,9 @@ app = modal.App("deepspeedai-accelerate-ci", image=image)
     timeout=1800,
 )
 def pytest():
-    import os
     import subprocess
-    test_env = os.environ.copy()
-
     subprocess.run(
-        "pytest -sv /accelerate/tests/deepspeed".split(),
-        env=test_env, 
+        "pytest -n 4 /accelerate/tests/deepspeed".split(),
         check=True,
         cwd=ROOT_PATH / ".",
     )
-
-    subprocess.run(
-        "pip show torch".split(),
-        env=test_env, 
-        check=True,
-        cwd=ROOT_PATH / ".",
-    )
-    py_path=test_env["PYTHONPATH"]
-    print(f"{ROOT_PATH=} {py_path=}")
-    print(f'{os.listdir(ROOT_PATH)=}')
