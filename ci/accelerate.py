@@ -39,6 +39,11 @@ app = modal.App("deepspeedai-accelerate-ci", image=image)
 def pytest():
     import subprocess
     subprocess.run(
+        "pip show deepspeed".split(),
+        check=True,
+        cwd=ROOT_PATH / ".",
+    )
+    subprocess.run(
         "pytest -sv /accelerate/tests/deepspeed".split(),
         check=True,
         cwd=ROOT_PATH / ".",
