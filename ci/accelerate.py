@@ -42,6 +42,7 @@ def pytest():
         "echo $PYTHONPATH".split(),
         check=True,
         cwd=ROOT_PATH / ".",
+    )
     subprocess.run(
         "pip show deepspeed".split(),
         check=True,
