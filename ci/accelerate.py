@@ -42,7 +42,8 @@ def pytest():
         "export PYTHONPATH=/root".split(),
         check=True,
         cwd=ROOT_PATH / ".",
-    )    subprocess.run(
+    )    
+    subprocess.run(
         "echo $PYTHONPATH".split(),
         check=True,
         cwd=ROOT_PATH / ".",
