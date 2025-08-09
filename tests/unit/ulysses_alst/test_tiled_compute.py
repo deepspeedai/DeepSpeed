@@ -6,7 +6,7 @@
 Arctic Long Sequence Training (ALST) Tiled compute component tests
 """
 
-from deepspeed.runtime.sequence_parallel.ulysses_sp import TiledMLP, sequence_tiled_compute
+from deepspeed.runtime.sequence_parallel.ulysses_sp import TiledMLP, sequence_tiled_compute, TiledFusedLogitsLoss
 from deepspeed.utils import safe_get_full_grad
 from torch.nn import Linear, Module
 from unit.common import DistributedTest, preferred_dtype
@@ -229,3 +229,129 @@ class TestTiledCompute(DistributedTest):
         torch_assert_close(param_grad_a1, param_grad_c1)  #, rtol=1e-03, atol=1e-04)
         torch_assert_close(param_grad_a2, param_grad_c2)  #, rtol=1e-03, atol=1e-04)
         torch_assert_close(x_grad_a, x_grad_c)
+
+
+@pytest.mark.parametrize("batch_size", [1, 2])
+@pytest.mark.parametrize("zero_stage", [1, 3])
+class TestTiledFusedLogitsLoss(DistributedTest):
+    world_size = 1
+
+    def test_tiled_fused_logits_loss(self, zero_stage, batch_size):
+
+        def tiled_forward(self, x, y):
+            x = self.mlp1(x)
+            x = self.mlp2(x)
+
+            def loss_fn(self, x, y):
+                logits = self.lm_head(x)
+                return self.cross_entropy_loss(logits.view(-1, self.vocab_size), y.view(-1))
+
+            mask = None
+            shards = 2
+            compute_params = [self.lm_head.weight]
+            output_reduction = "mean"
+            loss = TiledFusedLogitsLoss.apply(
+                loss_fn,
+                self,
+                x,
+                y,
+                mask,
+                shards,
+                compute_params,
+                output_reduction,
+            )
+            return loss
+
+        config_dict = {
+            "train_micro_batch_size_per_gpu": 1,
+            "zero_optimization": {
+                "stage": zero_stage
+            },
+            "optimizer": {
+                "type": "Adam",
+                "params": {
+                    "lr": 1e-3
+                }
+            },
+        }
+        dtype = preferred_dtype()
+        #dtype = torch.float
+        if dtype == torch.bfloat16:
+            config_dict["bf16"] = {"enabled": True}
+        elif dtype == torch.float16:
+            config_dict["fp16"] = {"enabled": True, "loss_scale": 1.0}
+
+        # for debug
+        # torch.set_printoptions(precision=8, sci_mode=True)
+
+        vocab_size = 100
+        seed = 42
+        hidden_dim = 64
+        bs = batch_size
+        seqlen = 425  # use a non 2**n length to test varlen shards (last short)
+        torch.manual_seed(seed)
+        x = torch.rand((bs, seqlen, hidden_dim), dtype=dtype, requires_grad=True)
+        y = torch.empty((bs, seqlen), dtype=torch.long, requires_grad=False).random_(vocab_size)
+
+        # A. Baseline: model with normal loss
+        torch.manual_seed(seed)
+        model_a = MyModel(hidden_dim=hidden_dim, vocab_size=vocab_size).to(dtype)
+        model_a, _, _, _ = deepspeed.initialize(config=config_dict,
+                                                model=model_a,
+                                                model_parameters=model_a.parameters())
+
+        x = x.to(model_a.device)
+        y = y.to(model_a.device)
+
+        x_a = x.clone().detach().requires_grad_(True)
+        y_a = y.clone().detach()
+
+        loss_a = model_a(x_a, y_a)
+        model_a.backward(loss_a)
+        param_grad_a = get_grad(model_a.module.lm_head.weight, zero_stage)
+        x_grad_a = x_a.grad
+        assert param_grad_a is not None
+        assert x_grad_a is not None
+
+        # B. model with fused tiled logits loss
+        torch.manual_seed(seed)
+        MyModel.forward_orig = MyModel.forward
+        MyModel.forward = tiled_forward
+        model_b = MyModel(hidden_dim=hidden_dim, vocab_size=vocab_size).to(dtype)
+        model_b, _, _, _ = deepspeed.initialize(config=config_dict,
+                                                model=model_b,
+                                                model_parameters=model_b.parameters())
+
+        x_b = x.clone().detach().requires_grad_(True)
+        y_b = y.clone().detach()
+        loss_b = model_b(x_b, y_b)
+
+        with CaptureStderr() as cs:
+            model_b.backward(loss_b)
+        # see the explanation inside TiledMLP.backward
+        assert "grad and param do not obey the gradient layout contract" not in cs.err, f"stride issue: {cs.err}"
+
+        param_grad_b = get_grad(model_b.module.lm_head.weight, zero_stage)
+        x_grad_b = x_b.grad
+        assert param_grad_b is not None
+        assert x_grad_b is not None
+
+        # print(f"{loss_a=}")
+        # print(f"{loss_b=}")
+        # print(f"{x_grad_a=}")
+        # print(f"{x_grad_b=}")
+        # print(f"{param_grad_a=}")
+        # print(f"{param_grad_b=}")
+        # usually this is an exact match, but on cpu CI this fails.
+        torch_assert_close(loss_a, loss_b)
+
+        # Gradient will not be exactly the same, especially under half-precision. And bf16 is
+        # particularly lossy so need to lower tolerance a bit more than the default. Switch to
+        # dtype torch.float or even torch.double to see that the diff is tiny - so the math is
+        # correct, but accumulation error adds up. Alternatively making hidden_dim bigger makes the
+        # divergence much smaller as well.
+        torch_assert_close(x_grad_a, x_grad_b)
+        torch_assert_close(param_grad_a, param_grad_b)  #, rtol=1e-03, atol=1e-04)
+
+        # restore
+        MyModel.forward = MyModel.forward_orig
