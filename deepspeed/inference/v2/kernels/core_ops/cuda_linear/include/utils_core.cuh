@@ -70,15 +70,15 @@ __device__ __forceinline__ void core_mma_slice(
                                  ? 1
                                  : TilingConfig::WARP_COL_MMA_TENSORS /
                                        2;  // 1 set = 4 registers, containing a 16*16 MMA block
-    uint32_t(*c_uint_ptr)[REG_PER_THREAD_C_TENSOR_16_16] =
-        reinterpret_cast<uint32_t(*)[REG_PER_THREAD_C_TENSOR_16_16]>(
+    uint32_t (*c_uint_ptr)[REG_PER_THREAD_C_TENSOR_16_16] =
+        reinterpret_cast<uint32_t (*)[REG_PER_THREAD_C_TENSOR_16_16]>(
             c);  // Registers for accumulated FP32 results
 
     // Setting RPTRs for double buffers
-    uint32_t(*a_read)[4] = a;
-    uint32_t(*a_write)[4] = a;
-    uint32_t(*b_read)[4] = b;
-    uint32_t(*b_write)[4] = b;
+    uint32_t (*a_read)[4] = a;
+    uint32_t (*a_write)[4] = a;
+    uint32_t (*b_read)[4] = b;
+    uint32_t (*b_write)[4] = b;
     if (slice_id % 2 == 1) {
         b_write += NumRegSets_b;
         a_write += NumRegSets_a;
@@ -149,8 +149,8 @@ __device__ __forceinline__ void PipelinedCoreLoop(
                                        2;  // 1 set = 4 registers, containing a 16*16 MMA block
 
     // Registers to store FP32 results
-    uint32_t(*c_uint_ptr)[REG_PER_THREAD_C_TENSOR_16_16] =
-        reinterpret_cast<uint32_t(*)[REG_PER_THREAD_C_TENSOR_16_16]>(c);
+    uint32_t (*c_uint_ptr)[REG_PER_THREAD_C_TENSOR_16_16] =
+        reinterpret_cast<uint32_t (*)[REG_PER_THREAD_C_TENSOR_16_16]>(c);
     // Registers to store FP6 fragments for a slice (64*16) of A matrix => 32 FP6 per thread => 6
     // register per thread;
     uint32_t a_1[2 * 2];  // double buffer is used
@@ -167,8 +167,8 @@ __device__ __forceinline__ void PipelinedCoreLoop(
 
 #pragma unroll
     for (int k = 0; k < WARP_K_MMA_TENSORS; k++) {
-        uint32_t(*b_read)[4] = b;
-        uint32_t(*b_write)[4] = b;
+        uint32_t (*b_read)[4] = b;
+        uint32_t (*b_write)[4] = b;
         uint32_t* a_1_read = a_1;
         uint32_t* a_1_write = a_1;
         uint32_t* a_2_read = a_2;
