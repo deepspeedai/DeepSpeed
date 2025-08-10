@@ -190,7 +190,7 @@ class ZenFlowZeroOptimizer(DeepSpeedZeroOptimizer):
         process_group = self.dp_process_group
         rank = dist.get_rank(process_group)
 
-        self.index_buffer = torch.empty(total_size, dtype=torch.int32, device='cuda')
+        self.index_buffer = torch.empty(total_size, dtype=torch.int32, device=get_accelerator().current_device_name())
 
         # count = 0
         bucket = self.ipg_buckets[communication_data_type]
@@ -299,13 +299,13 @@ class ZenFlowZeroOptimizer(DeepSpeedZeroOptimizer):
         process_group = self.dp_process_group
         rank = dist.get_rank(process_group)
 
-        self.grad_buffer = torch.empty(total_size, dtype=self.dtype, device='cuda')
+        self.grad_buffer = torch.empty(total_size, dtype=self.dtype, device=get_accelerator().current_device_name())
 
         bucket = self.ipg_buckets[communication_data_type]
         if self.auto_update:
             self.sum_buffer = torch.empty(len(bucket.params) + dist.get_world_size(group=process_group),
                                           dtype=torch.bfloat16,
-                                          device='cuda')
+                                          device=get_accelerator().current_device_name())
 
         group_to_paramlist = {}
 
@@ -653,7 +653,6 @@ def disable_accelerator():
 
 def zenflow_optimizer_process(pipe, curr_rank, total_rank, param_groups, shared_overlap_grad_map,
                               shared_stale_param_map):
-    os.environ["CUDA_VISIBLE_DEVICES"] = ""
     disable_accelerator()
 
     TOTAL_CORES = os.cpu_count()
