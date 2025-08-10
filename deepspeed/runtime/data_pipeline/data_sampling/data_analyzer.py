@@ -715,7 +715,7 @@ class DistributedDataAnalyzer(object):
                 buffer = torch.cat(tensor_list, dim=0).to(self.device)
                 write_buffer_to_file(buffer, 0, builder)
             elif self.worker_id == 0 and src > 0:  # rank 0 receives other rank's data and writes it
-                buffer = torch.empty(sizes[src].item(), dtype=buffer.dtype, device=buffer.device)
+                buffer = torch.empty(sizes[src].item(), dtype=numpy_dtype, device=self.device)
                 err = dist.recv(buffer, src=src, group=self.comm_group, tag=src)
                 assert err == src and len(buffer) > 0, "recv failed"
                 write_buffer_to_file(buffer, src, builder)

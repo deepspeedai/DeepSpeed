@@ -1656,16 +1656,11 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
 
         tensor_to_allreduce.div_(dist.get_world_size(group=self.dp_process_group) / float(self.sequence_parallel_size))
 
-        if rank is None:
-            #    "All Reducing"
-            dist.all_reduce(tensor_to_allreduce, group=self.dp_process_group)
-        else:
-            global_rank = dist.get_global_rank(self.dp_process_group, rank)
-            dist.reduce(tensor_to_allreduce, global_rank, group=self.dp_process_group)
+        #    "All Reducing"
+        dist.all_reduce(tensor_to_allreduce, group=self.dp_process_group)
 
         if communication_data_type != tensor.dtype and tensor is not tensor_to_allreduce:
-            if rank is None or rank == dist.get_rank(group=self.dp_process_group):
-                tensor.copy_(tensor_to_allreduce)
+            tensor.copy_(tensor_to_allreduce)
 
         return tensor
 

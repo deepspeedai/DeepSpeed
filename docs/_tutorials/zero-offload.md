@@ -74,4 +74,11 @@ Finally, here is a screenshot of `htop` showing host CPU and memory activity dur
 <img src="/assets/images/zero_offload_dp1_10B_cpu.png">
 </a>
 
+### CPU Adam perf tuning
+ZeRO offload already support multi-gpu training.  If the workload is using CPU optimizer, the workload can be further tuned by passing `--bind_cores_to_rank` to the deepspeed launch command. This switch will mainly do two things:
+1. Divide physical CPU cores evenly among ranks, make each rank to have a dedicated set of CPU cores to run CPU optimizer.
+2. Set OMP_NUM_THREADS environment variable to the number of CPU cores assigned to each rank, so OpenMP code in CPU optimizer will have near optimal performance.
+
+ZeRO offload is a hybrid workload that is both heavy on GPU and CPU, and DeepSpeed is optimized for both GPU and CPU performance.  Refer to [How to launch DeepSpeed on Intel Architecture CPU](https://github.com/deepspeedai/DeepSpeed/blob/master/docs/_tutorials/accelerator-setup-guide.md#how-to-launch-deepspeed-on-intel-architecture-cpu) for more details on how to tune core bindings for CPU performance.
+
 Congratulations! You have completed the ZeRO-Offload tutorial.
