@@ -28,8 +28,6 @@ app = modal.App("deepspeedai-torch-latest-ci", image=image)
 
 @app.function(
     gpu="l40s:2",
-    # gpu="a10g:2",
-    # secrets=[modal.Secret.from_local_environ(["HF_TOKEN"])],
     timeout=1800,
 )
 def pytest():

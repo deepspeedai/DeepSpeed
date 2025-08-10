@@ -32,8 +32,6 @@ app = modal.App("deepspeedai-accelerate-ci", image=image)
 
 @app.function(
     gpu="l40s:1",
-    # gpu="a10g:2",
-    # secrets=[modal.Secret.from_local_environ(["HF_TOKEN"])],
     timeout=1800,
 )
 def pytest():
