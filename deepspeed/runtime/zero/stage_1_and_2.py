@@ -105,6 +105,7 @@ def _pad_tensor_by_size(src_tensor, pad_size, dtype, device):
 @dataclass
 class IPGBucket:
     buffer: List[torch.Tensor] = field(default_factory=list)
+    buffer_meta: List[torch.Tensor] = field(default_factory=list)
     params: List[torch.Tensor] = field(default_factory=list)
     grads: List[torch.Tensor] = field(default_factory=list)
     elements: int = 0
