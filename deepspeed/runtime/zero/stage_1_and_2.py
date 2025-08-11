@@ -117,6 +117,7 @@ class IPGBucket:
         self.elements = 0
         self.index = 0
         self.has_moe_params = False
+        self.buffer_meta.clear()
 
 
 class DeepSpeedZeroOptimizer(ZeROOptimizer):
@@ -2664,6 +2665,16 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
         if needs_offload(OffloadStateTypeEnum.optim_states):
             offload_optimizer_states(self.optimizer, device, pin_memory=pin_memory, non_blocking=non_blocking)
             self.offloaded_states.add(OffloadStateTypeEnum.optim_states)
+        
+        # Offload Contiguous Gradient Buffers
+        if needs_offload(OffloadStateTypeEnum.contiguous_grad_buffer):
+            for bucket in self.ipg_buckets.values():
+                if bucket.buffer:
+                    bucket.buffer_meta.clear()
+                    for buf in bucket.buffer:
+                        bucket.buffer_meta.append(buf.to("meta"))
+                    bucket.buffer.clear()
+            self.offloaded_states.add(OffloadStateTypeEnum.contiguous_grad_buffer)
 
         if not non_blocking:
             if get_accelerator().is_available():
@@ -2728,6 +2739,16 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
         if OffloadStateTypeEnum.optim_states in self.offloaded_states:
             reload_optimizer_states(self.optimizer, device, non_blocking=non_blocking)
             self.offloaded_states.remove(OffloadStateTypeEnum.optim_states)
+        
+        # Reload Contiguous Gradient Buffers
+        if OffloadStateTypeEnum.contiguous_grad_buffer in self.offloaded_states:
+            for bucket in self.ipg_buckets.values():
+                if bucket.buffer_meta:
+                    bucket.buffer.clear()
+                    for meta_buf in bucket.buffer_meta:
+                        bucket.buffer.append(torch.empty_like(meta_buf, device=device))
+                    bucket.buffer_meta.clear()
+            self.offloaded_states.remove(OffloadStateTypeEnum.contiguous_grad_buffer)
 
         if non_blocking:
             get_accelerator().synchronize()
