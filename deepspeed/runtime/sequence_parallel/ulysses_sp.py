@@ -497,8 +497,12 @@ class UlyssesSPDataLoaderAdapter:
         return self.micro_batches.pop(0)
 
     def refill(self):
-        # this will raise StopIteration when empty
-        batch = next(self.iter)
+        # reset the iterator if StopIteration arrives, and re-raise it to allow multiple epochs to run
+        try:
+            batch = next(self.iter)
+        except StopIteration:
+            self.iter = iter(self.dl)
+            raise StopIteration
         micro_batches = defaultdict(dict)
         # XXX: replace with more efficient all-to-all?
 
