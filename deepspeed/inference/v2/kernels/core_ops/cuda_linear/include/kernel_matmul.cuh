@@ -246,8 +246,8 @@ __global__ void QUANT_GEMM_Kernel(const uint4* Weight1,
     /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
     /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
     // Store the C fragments to shared memory.
-    float (*smem_CFrag)[TilingConfig::TILE_M + PADDING_SHARED_MEM_FOR_C_4] =
-        reinterpret_cast<float (*)[TilingConfig::TILE_M + PADDING_SHARED_MEM_FOR_C_4]>(smem);
+    float(*smem_CFrag)[TilingConfig::TILE_M + PADDING_SHARED_MEM_FOR_C_4] =
+        reinterpret_cast<float(*)[TilingConfig::TILE_M + PADDING_SHARED_MEM_FOR_C_4]>(smem);
     StoreToSharedMemoryFromRegister<TilingConfig>(smem_CFrag, c);
     __syncthreads();
     // Now that shared memory contains all the D tiles, stream them to global memory.

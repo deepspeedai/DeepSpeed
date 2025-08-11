@@ -12,8 +12,10 @@
 template <typename arch,
           typename scalar_t,
           typename torch_scalar_t,
-          template <typename, typename, typename> class Broadcast1_,
-          template <typename, typename, typename> class Broadcast2_>
+          template <typename, typename, typename>
+          class Broadcast1_,
+          template <typename, typename, typename>
+          class Broadcast2_>
 typename std::enable_if<!CheckArch<arch, scalar_t>::value>::type attention_impl_template(
     torch::Tensor& q,
     torch::Tensor& k,
@@ -29,8 +31,10 @@ typename std::enable_if<!CheckArch<arch, scalar_t>::value>::type attention_impl_
 template <typename arch,
           typename scalar_t,
           typename torch_scalar_t,
-          template <typename, typename, typename> class Broadcast1_,
-          template <typename, typename, typename> class Broadcast2_>
+          template <typename, typename, typename>
+          class Broadcast1_,
+          template <typename, typename, typename>
+          class Broadcast2_>
 typename std::enable_if<CheckArch<arch, scalar_t>::value>::type attention_impl_template(
     torch::Tensor& q,
     torch::Tensor& k,

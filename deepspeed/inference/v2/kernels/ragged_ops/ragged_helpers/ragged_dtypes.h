@@ -14,7 +14,8 @@ struct
 {
     int32_t n_tokens;
     int32_t n_sequences;
-} typedef RaggedBatchDescriptor;
+}
+typedef RaggedBatchDescriptor;
 
 struct
 #ifdef __CUDA_CC__
@@ -25,7 +26,8 @@ struct
     int32_t n_tokens;
     int32_t seen_tokens;
     int32_t UNUSED;  // Explicit padding to match the Python code pattern.
-} typedef InflightSeqDescriptor;
+}
+typedef InflightSeqDescriptor;
 
 struct
 #ifdef __CUDA_CC__
@@ -35,7 +37,8 @@ struct
     int32_t** block_lists;
     int32_t block_size;
     int32_t n_blocks;
-} typedef KVCacheDescriptor;
+}
+typedef KVCacheDescriptor;
 
 struct {
     const RaggedBatchDescriptor* batch_metadata;  // Offset 0
