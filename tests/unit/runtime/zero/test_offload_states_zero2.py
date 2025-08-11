@@ -46,6 +46,12 @@ def validate_grad_device(model, device: torch.device) -> None:
             if p.grad is not None:
                 assert p.grad.device.type == device.type, f"Gradient partition on hp_param.grad is on {p.grad.device}, expected {device}"
 
+def validate_contiguous_grad_buffer_device(model, device: torch.device):
+    """Validates that the contiguous gradient buffers are on the specified device."""
+    for bucket in model.optimizer.ipg_buckets.values():
+        for buf in bucket.buffer:
+            assert buf.device.type == device.type, f"Contiguous grad buffer is on {buf.device}, expected {device}"
+
 def run_model_zero12(model, param_groups, config_dict, hidden_dim, dtype, offloaded_states, pin_memory, non_blocking):
     """
     This function runs a training step, offloads states, reloads them, and verifies correctness for ZeRO-1/2.
@@ -72,35 +78,45 @@ def run_model_zero12(model, param_groups, config_dict, hidden_dim, dtype, offloa
 
     # Determine if we are testing a transient state (gradients) or a persistent state
     # REVERTED: Condition now only checks for lp_grads as it's the relevant transient state.
-    is_grad_test = offloaded_states is not None and OffloadStateTypeEnum.lp_grads in offloaded_states
+    is_grad_test = offloaded_states is not None and (OffloadStateTypeEnum.lp_grads in offloaded_states
+                                                     or OffloadStateTypeEnum.contiguous_grad_buffer in offloaded_states)
 
     if is_grad_test:
         # --- TEST PATH FOR TRANSIENT GRADIENT STATE ---
         # Gradients exist only between backward() and step(). We must test them here.
-        grads_expected = [
-            [g.clone().detach() for g in grad_list]
-            for grad_list in model.optimizer.averaged_gradients.values() if grad_list is not None
-        ]
+        if OffloadStateTypeEnum.lp_grads in offloaded_states:
+            grads_expected = [
+                [g.clone().detach() for g in grad_list]
+                for grad_list in model.optimizer.averaged_gradients.values() if grad_list is not None
+            ]
 
         alloc_before_offload = get_accelerator().memory_allocated()
         model.offload_states(include=offloaded_states, device=offload_device, pin_memory=pin_memory, non_blocking=non_blocking)
         alloc_after_offload = get_accelerator().memory_allocated()
         assert alloc_after_offload < alloc_before_offload, "FAIL: Allocated memory for grads should decrease after offload"
-        validate_grad_device(model, offload_torch_device)
+        
+        if OffloadStateTypeEnum.lp_grads in offloaded_states:
+            validate_grad_device(model, offload_torch_device)
+        if OffloadStateTypeEnum.contiguous_grad_buffer in offloaded_states:
+            # After offload, the buffer list should be empty as we've released the tensors
+            for bucket in model.optimizer.ipg_buckets.values():
+                assert not bucket.buffer, "Contiguous grad buffer list should be empty after offload"    
 
         model.reload_states()
         alloc_after_reload = get_accelerator().memory_allocated()
-
         assert alloc_after_reload > alloc_after_offload, "FAIL: Allocated memory for grads should increase after reload"
-        validate_grad_device(model, accelerator_device)
-
-        reloaded_grads = [
-            grad_list for grad_list in model.optimizer.averaged_gradients.values() if grad_list is not None
-        ]
-        assert len(grads_expected) == len(reloaded_grads), "FAIL: Number of gradient groups changed after reload"
-        for expected_list, reloaded_list in zip(grads_expected, reloaded_grads):
-            for expected_g, reloaded_g in zip(expected_list, reloaded_list):
-                assert torch.equal(expected_g, reloaded_g), "FAIL: Reloaded gradient data does not match original"
+        
+        if OffloadStateTypeEnum.lp_grads in offloaded_states:
+            validate_grad_device(model, accelerator_device)
+            reloaded_grads = [
+                grad_list for grad_list in model.optimizer.averaged_gradients.values() if grad_list is not None
+            ]
+            assert len(grads_expected) == len(reloaded_grads), "FAIL: Number of gradient groups changed after reload"
+            for expected_list, reloaded_list in zip(grads_expected, reloaded_grads):
+                for expected_g, reloaded_g in zip(expected_list, reloaded_list):
+                    assert torch.equal(expected_g, reloaded_g), "FAIL: Reloaded gradient data does not match original"
+        if OffloadStateTypeEnum.contiguous_grad_buffer in offloaded_states:
+            validate_contiguous_grad_buffer_device(model, accelerator_device)
 
     model.step()
 
@@ -160,6 +176,7 @@ def run_model_zero12(model, param_groups, config_dict, hidden_dim, dtype, offloa
     OffloadStateTypeEnum.lp_grads,
     OffloadStateTypeEnum.hp_params,
     OffloadStateTypeEnum.lp_params,
+    OffloadStateTypeEnum.contiguous_grad_buffer,
     None
 ])
 @pytest.mark.parametrize("pin_memory", [False, True])
@@ -176,6 +193,13 @@ class TestOffloadStatesZero12(DistributedTest):
             "zero_optimization": {"stage": zero_stage},
             "bf16": {"enabled": True}
         }
+        
+        if included_state == OffloadStateTypeEnum.contiguous_grad_buffer:
+            # This test requires enabling contiguous_gradients
+            if "zero_optimization" not in config_dict:
+                config_dict["zero_optimization"] = {}
+            config_dict["zero_optimization"]["contiguous_gradients"] = True
+        
         model = SimpleModel(hidden_dim, nlayers=4)
         param_groups = [{
             "params": [p for n, p in model.named_parameters() if 'bias' not in n], "weight_decay": 0.1
