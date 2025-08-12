@@ -245,6 +245,8 @@ class CUDA_Accelerator(DeepSpeedAccelerator):
         return self._communication_backend_name
 
     def is_triton_supported(self):
+        if not self.is_available():
+            return False
         major, _ = torch.cuda.get_device_capability()
         if major >= 8:
             return True
