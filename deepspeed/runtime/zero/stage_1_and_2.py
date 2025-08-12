@@ -105,7 +105,6 @@ def _pad_tensor_by_size(src_tensor, pad_size, dtype, device):
 @dataclass
 class IPGBucket:
     buffer: List[torch.Tensor] = field(default_factory=list)
-    buffer_meta: List[torch.Tensor] = field(default_factory=list)
     params: List[torch.Tensor] = field(default_factory=list)
     grads: List[torch.Tensor] = field(default_factory=list)
     elements: int = 0
@@ -118,7 +117,6 @@ class IPGBucket:
         self.elements = 0
         self.index = 0
         self.has_moe_params = False
-        self.buffer_meta.clear()
 
 
 class DeepSpeedZeroOptimizer(ZeROOptimizer):
@@ -1002,9 +1000,6 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
             self.report_ipg_memory_usage("In ipg_remove_grads before reduce_ipg_grads", param.numel(), param.dtype)
             self.reduce_ipg_grads()
             if self.contiguous_gradients and self.overlap_comm:
-                if not get_accelerator().resolves_data_dependency():
-                    self.reduction_stream.wait_stream(get_accelerator().current_stream())
-                    get_accelerator().current_stream().wait_stream(self.reduction_stream)
                 # Swap index between 0 and 1
                 bucket.index = 1 - bucket.index
             self.report_ipg_memory_usage("In ipg_remove_grads after reduce_ipg_grads", param.numel(), param.dtype)
@@ -1356,9 +1351,10 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
         dest_tensor = self.single_partition_of_fp32_groups[i].grad.view(-1).narrow(0, dest_offset, num_elements)
 
         grad_accum = self.get_param_gradient_attribute(param)
-        assert grad_accum is not None
-
-        src_tensor = grad_accum.view(-1).narrow(0, source_offset, num_elements)
+        if grad_accum is None:
+            src_tensor = grad_accum.view(-1).narrow(0, source_offset, num_elements)
+        else:
+            src_tensor = grad_accum.view(-1).narrow(0, source_offset, num_elements)
         if not self.fp16_master_weights_and_gradients:
             src_tensor = src_tensor.float()
 
@@ -2668,16 +2664,6 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
         if needs_offload(OffloadStateTypeEnum.optim_states):
             offload_optimizer_states(self.optimizer, device, pin_memory=pin_memory, non_blocking=non_blocking)
             self.offloaded_states.add(OffloadStateTypeEnum.optim_states)
-        
-        # Offload Contiguous Gradient Buffers
-        if needs_offload(OffloadStateTypeEnum.contiguous_grad_buffer):
-            for bucket in self.ipg_buckets.values():
-                if bucket.buffer:
-                    bucket.buffer_meta.clear()
-                    for buf in bucket.buffer:
-                        bucket.buffer_meta.append(buf.to("meta"))
-                    bucket.buffer.clear()
-            self.offloaded_states.add(OffloadStateTypeEnum.contiguous_grad_buffer)
 
         if not non_blocking:
             if get_accelerator().is_available():
@@ -2742,16 +2728,6 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
         if OffloadStateTypeEnum.optim_states in self.offloaded_states:
             reload_optimizer_states(self.optimizer, device, non_blocking=non_blocking)
             self.offloaded_states.remove(OffloadStateTypeEnum.optim_states)
-        
-        # Reload Contiguous Gradient Buffers
-        if OffloadStateTypeEnum.contiguous_grad_buffer in self.offloaded_states:
-            for bucket in self.ipg_buckets.values():
-                if bucket.buffer_meta:
-                    bucket.buffer.clear()
-                    for meta_buf in bucket.buffer_meta:
-                        bucket.buffer.append(torch.empty_like(meta_buf, device=device))
-                    bucket.buffer_meta.clear()
-            self.offloaded_states.remove(OffloadStateTypeEnum.contiguous_grad_buffer)
 
         if non_blocking:
             get_accelerator().synchronize()
