@@ -101,7 +101,7 @@ class PDSHRunner(MultiNodeRunner):
             f"--master_port={self.args.master_port}"
         ]
         if self.args.venv_script is not None:
-            deepspeed_launch = [f"source {self.args.venv_script}"] + deepspeed_launch
+            deepspeed_launch = [f"source {self.args.venv_script};"] + deepspeed_launch
         if self.args.no_python:
             deepspeed_launch.append("--no_python")
         if self.args.module:

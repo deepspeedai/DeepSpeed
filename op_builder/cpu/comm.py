@@ -39,7 +39,6 @@ class CCLCommBuilder(CPUOpBuilder):
             raise ValueError(
                 "Didn't find CCL_ROOT, install oneCCL from https://github.com/oneapi-src/oneCCL and source its environment variable"
             )
-            return []
         else:
             return ['-lccl', f'-L{ccl_root_path}/lib']
 

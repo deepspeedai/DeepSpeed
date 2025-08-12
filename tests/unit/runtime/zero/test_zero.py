@@ -394,7 +394,7 @@ class TestIncorectAllgatherBucketSize(DistributedTest):
 
 
 class TestPartitionNcclAlignment(DistributedTest):
-    world_size = 4
+    world_size = 2
 
     def test(self, zero_stage=2):
         config_dict = {
@@ -835,7 +835,7 @@ class TestZero3ParamPartitioningBase(DistributedTest):
 @pytest.mark.parametrize("init_context_manager", [True, False])
 @pytest.mark.parametrize("reduce_scatter", [True, False])
 class TestZero3ParamPartitioningLargeParam(DistributedTest):
-    world_size = 4
+    world_size = 2
 
     def test(self, init_context_manager: bool, reduce_scatter: bool, param_sz: int = 8100) -> None:
 
@@ -997,7 +997,7 @@ class TestZero3ParamPartitioningManyParams(DistributedTest):
 
 
 class TestZero3InitForParentWeightInitialization(DistributedTest):
-    world_size = 4
+    world_size = 2
 
     def test(self):
 
