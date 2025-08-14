@@ -20,15 +20,15 @@ on:
     branches:
       - master
 
-  pull_request_target:
+  pull_request:
     paths-ignore:
       - 'docs/**'
       - 'blogs/**'
       - 'deepspeed/inference/v2/**'
       - 'tests/unit/inference/v2/**'
     types: [draft, opened, ready_for_review, synchronize]
-    # branches:
-    #   - master
+    branches:
+      - master
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref || github.run_id }}
