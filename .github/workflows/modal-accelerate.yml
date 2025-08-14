@@ -20,13 +20,13 @@ on:
     branches:
       - master
 
-  pull_request:
+  pull_request_target:
     paths-ignore:
       - 'docs/**'
       - 'blogs/**'
       - 'deepspeed/inference/v2/**'
       - 'tests/unit/inference/v2/**'
-    types: [draft, opened, ready_for_review, synchronize]
+    types: [draft, opened, ready_for_review, synchronize, edited]
     branches:
       - master
 
