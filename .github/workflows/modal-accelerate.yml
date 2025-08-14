@@ -26,7 +26,7 @@ on:
       - 'blogs/**'
       - 'deepspeed/inference/v2/**'
       - 'tests/unit/inference/v2/**'
-    types: [opened, ready_for_review, synchronize]
+    types: [opened]
     branches:
       - master
 
