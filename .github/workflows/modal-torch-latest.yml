@@ -3,7 +3,7 @@ name: modal-torch-latest
 # This CI is running on modal.com's GPUs.
 #
 # It's set up here on github actions and then the cloned repo is sent to modal and everything
-# happens on their hw - see deepspeed/modal_ci/torch_latest.py  for where the actual vm is loaded, updated and the tests are
+# happens on their hw - see ci/torch_latest.py  for where the actual vm is loaded, updated and the tests are
 # run.
 #
 # Both files are annotated to what's important and how one might change or update things if needed.
@@ -16,17 +16,18 @@ name: modal-torch-latest
 
 on:
   workflow_dispatch:
+
   push:
     branches:
       - master
 
-  pull_request:
+  pull_request_target:
     paths-ignore:
       - 'docs/**'
       - 'blogs/**'
       - 'deepspeed/inference/v2/**'
       - 'tests/unit/inference/v2/**'
-    types: [draft, opened, ready_for_review, synchronize]
+    types: [review_requested, ready_for_review, synchronize]
     branches:
       - master
 
