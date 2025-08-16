@@ -537,6 +537,12 @@ class PipelineEngine(DeepSpeedEngine):
     def get_pipeline_parallel_rank(self):
         return self.stage_id
 
+    def get_parallel_world_sizes(self):
+        """Return a dict of parallel world sizes for data/tensor/pipeline parallelism."""
+        sizes = super().get_parallel_world_sizes()
+        sizes["pp"] = self.num_stages
+        return sizes
+
     def _reduce_outputs(self, outputs, reduce='avg', reduce_dp=True, micro_batches=None):
         if reduce is None:
             return outputs
