@@ -102,7 +102,7 @@ class OptimizerStateSwapInfo(object):
     def get_or_create_gradient_paths(self, offsets, lengths):
         gradient_paths = []
         for offset, length in zip(offsets, lengths):
-            if not offset in self.swapped_gradients.keys():
+            if offset not in self.swapped_gradients.keys():
                 path = os.path.join(self.swap_folder, f'{self.param_id}_gradient_{offset}_{length}.tensor.swp')
                 self.swapped_gradients[offset] = FlattenedTensorSwapInfo(path, length, offset)
 
@@ -233,7 +233,7 @@ class OptimizerSwapper(object):
             self.timer_names.update(gradient_swapper.get_timer_names())
 
     def _swap_out_gradients(self, parameter, gradient_offsets, gradient_tensors, gradient_swapper):
-        if not OptimizerSwapper.parameter_id(parameter) in self.swap_params_info.keys():
+        if OptimizerSwapper.parameter_id(parameter) not in self.swap_params_info.keys():
             return
 
         swap_info = self.swap_params_info[OptimizerSwapper.parameter_id(parameter)]
@@ -471,7 +471,7 @@ class OptimizerSwapper(object):
             )
 
     def _get_state_tensors(self, parameter):
-        if not parameter in self.optimizer.state:
+        if parameter not in self.optimizer.state:
             return []
 
         tensor_list = []
@@ -490,7 +490,7 @@ class OptimizerSwapper(object):
 
     def _create_param_swap_info(self, parameter, numel):
         param_id = OptimizerSwapper.parameter_id(parameter)
-        assert not param_id in self.swap_params_info
+        assert param_id not in self.swap_params_info
 
         self.swap_params_info[param_id] = OptimizerStateSwapInfo(parameter=parameter,
                                                                  numel=numel,

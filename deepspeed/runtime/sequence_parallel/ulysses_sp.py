@@ -1266,7 +1266,7 @@ class UlyssesSPFwdLossBwdWithLogits:
 
     def sp_fwd_loss_bwd(self, batch) -> torch.Tensor:
 
-        see_memory_usage(f"entered sp_fwd_loss_bwd", force=True)
+        see_memory_usage("entered sp_fwd_loss_bwd", force=True)
 
         # ensure shapes are correct
         if not (batch["input_ids"].shape == batch["position_ids"].shape == batch["labels"].shape):

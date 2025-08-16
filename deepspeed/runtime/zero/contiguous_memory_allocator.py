@@ -85,7 +85,7 @@ class ContiguousMemoryAllocator(object):
 
         assert tensor_id in self.tensor_map.keys(), "No such tensor allocated by the allocator."
         assert tensor.numel() >= numel, "Assert tensor buffer does is not large enough"
-        assert not tensor_id in self.id_to_params.keys(), "This tensor has already been assigned to a param"
+        assert tensor_id not in self.id_to_params.keys(), "This tensor has already been assigned to a param"
 
         self.id_to_params[tensor_id] = [param]
 

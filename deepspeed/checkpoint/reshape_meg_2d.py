@@ -24,7 +24,7 @@ class meg_2d_parallel_map(object):
         assert type(data) is list
 
         key = self._make_key(pp_index, tp_index)
-        if not key in self.map.keys():
+        if key not in self.map.keys():
             self.map[key] = []
         self.map[key] += data
 
@@ -84,14 +84,14 @@ def reshape_meg_2d_parallel(old_pp_degree, old_tp_degree, new_pp_degree, new_tp_
     old_2d_map = meg_2d_parallel_map(old_pp_degree, old_tp_degree)
     old_2d_map.simple_init()
     if verbose:
-        old_2d_map.print_data(f'original_2d_map:')
+        old_2d_map.print_data('original_2d_map:')
 
     if old_tp_degree != new_tp_degree:
         new_tp_map = _reshape_tp_dimension(old_2d_map, new_tp_degree)
     else:
         new_tp_map = old_2d_map
     if verbose:
-        new_tp_map.print_data(f'after_tp_reshape:')
+        new_tp_map.print_data('after_tp_reshape:')
 
     if old_pp_degree != new_pp_degree:
         final_map = _reshape_pp_dimension(new_tp_map, new_pp_degree)
@@ -99,7 +99,7 @@ def reshape_meg_2d_parallel(old_pp_degree, old_tp_degree, new_pp_degree, new_tp_
         final_map = new_tp_map
 
     if verbose:
-        final_map.print_data(f'final_2d_map:')
+        final_map.print_data('final_2d_map:')
 
     return final_map
 
@@ -159,7 +159,7 @@ def get_mpu_ranks(tp_size=1, pp_size=1, dp_size=1, virtual_pp_size=None):
         ranks = [data_parallel_group_ranks[i] for data_parallel_group_ranks in all_dp_group_ranks]
         all_pp_group_ranks.append(list(ranks))
 
-    print(f"PP", all_pp_group_ranks)
+    print("PP", all_pp_group_ranks)
 
     # Build the tensor model-parallel groups.
     all_tp_group_ranks = []
@@ -167,7 +167,7 @@ def get_mpu_ranks(tp_size=1, pp_size=1, dp_size=1, virtual_pp_size=None):
         ranks = range(i * tensor_model_parallel_size, (i + 1) * tensor_model_parallel_size)
         all_tp_group_ranks.append(list(ranks))
 
-    print(f"TP", all_tp_group_ranks)
+    print("TP", all_tp_group_ranks)
 
     return all_tp_group_ranks, all_pp_group_ranks, all_dp_group_ranks
 

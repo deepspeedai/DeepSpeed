@@ -255,7 +255,7 @@ class TestZ3LeafOptimization(DistributedTest):
         loss, duration = bench_loss_and_time(config_dict)
 
         if dist.get_rank() == 0:
-            print(f"baseline exec time:", baseline_exec_time)
+            print("baseline exec time:", baseline_exec_time)
             print(
                 f"finegrained optimziation exec time: {duration},granularity threshold:{module_granularity_threshold} "
             )

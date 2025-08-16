@@ -49,7 +49,7 @@ class TestTwoOutputModel(DistributedTest):
                                               targets=[1, 2])
         for n, batch in enumerate(data_loader):
             assert len(batch) % 2 == 0, \
-                 f"multi_output_dataloader failed to return even number of data samples (input+target)"
+                 "multi_output_dataloader failed to return even number of data samples (input+target)"
 
             midpoint = len(batch) // 2
             inputs, targets = batch[:midpoint], batch[midpoint:]
@@ -107,7 +107,7 @@ class TestThreeOutputModel(DistributedTest):
                                               targets=[1, 2, 3])
         for n, batch in enumerate(data_loader):
             assert len(batch) % 2 == 0, \
-                 f"multi_output_dataloader failed to return even number of data samples (input+target)"
+                 "multi_output_dataloader failed to return even number of data samples (input+target)"
 
             midpoint = len(batch) // 2
             inputs, targets = batch[:midpoint], batch[midpoint:]

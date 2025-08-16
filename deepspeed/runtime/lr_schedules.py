@@ -209,7 +209,7 @@ def get_config_from_args(args):
     if not hasattr(args, LR_SCHEDULE) or args.lr_schedule is None:
         return None, '--{} not specified on command line'.format(LR_SCHEDULE)
 
-    if not args.lr_schedule in VALID_LR_SCHEDULES:
+    if args.lr_schedule not in VALID_LR_SCHEDULES:
         return None, '{} is not supported LR schedule'.format(args.lr_schedule)
 
     config = {}
@@ -227,16 +227,16 @@ def get_config_from_args(args):
 
 
 def get_lr_from_config(config):
-    if not 'type' in config:
+    if 'type' not in config:
         return None, 'LR schedule type not defined in config'
 
-    if not 'params' in config:
+    if 'params' not in config:
         return None, 'LR schedule params not defined in config'
 
     lr_schedule = config['type']
     lr_params = config['params']
 
-    if not lr_schedule in VALID_LR_SCHEDULES:
+    if lr_schedule not in VALID_LR_SCHEDULES:
         return None, '{} is not a valid LR schedule'.format(lr_schedule)
 
     if lr_schedule == LR_RANGE_TEST:
