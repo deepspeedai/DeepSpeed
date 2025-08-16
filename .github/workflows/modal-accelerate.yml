@@ -1,0 +1,99 @@
+name: modal-accelerate
+
+# This CI is running on modal.com's GPUs.
+#
+# It's set up here on github actions and then the cloned repo is sent to modal and everything
+# happens on their hw - see ci/accelerate.py for where the actual vm is loaded, updated and the tests are
+# run.
+#
+# Both files are annotated to what's important and how one might change or update things if needed.
+#
+# Note that since this is a Required job we can't use `on.push.path` file filter - we are using
+# collect-tests job to do the filtering for us so that the job can be skipped and satisfy the
+# Required status for PRs to pass.
+#
+
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - master
+
+  pull_request_target:
+    paths-ignore:
+      - 'docs/**'
+      - 'blogs/**'
+      - 'deepspeed/inference/v2/**'
+      - 'tests/unit/inference/v2/**'
+    types: [review_requested, ready_for_review, synchronize]
+    branches:
+      - master
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref || github.run_id }}
+  cancel-in-progress: true
+
+jobs:
+  collect-tests:
+    name: Collect tests to run
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      deepspeed: ${{ steps.filter.outputs.deepspeed }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          lfs: true
+
+      - name: Filter changed files
+        uses: dorny/paths-filter@v2
+        id: filter
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          filters: |
+            deepspeed:
+              - 'deepspeed/**'
+              - '.github/workflows/modal*.yml'
+              - 'ci/**'
+              - 'tests/unit/**'
+              - 'csrc/**'
+
+  deploy:
+    name: DeepSpeedAI CI
+    runs-on: ubuntu-latest
+    needs: collect-tests
+    env:
+      # these are created at https://modal.com/settings/deepspeedai/tokens
+      # they are then added to the repo's secrets at https://github.com/deepspeedai/deepspeed/settings/secrets/actions
+      MODAL_TOKEN_ID: ${{ secrets.MODAL_TOKEN_ID }}
+      MODAL_TOKEN_SECRET: ${{ secrets.MODAL_TOKEN_SECRET }}
+      # this one comes from https://huggingface.co/settings/profile of the bot user
+      # and it too is then updated at https://github.com/deepspeedai/deepspeed/settings/secrets/actions
+      HF_TOKEN: ${{ secrets.HF_TOKEN }}
+
+    if: needs.collect-tests.outputs.deepspeed == 'true'
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          lfs: true
+
+      - name: Install Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+          cache: 'pip' # caching pip dependencies
+
+      - name: Install build dependencies
+        run: |
+          pip install uv # much faster than pip
+          uv pip install --system modal
+
+      - name: Run tests
+        run: |
+          modal run -m ci.accelerate
