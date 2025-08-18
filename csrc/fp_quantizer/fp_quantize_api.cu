@@ -11,6 +11,9 @@
 
 #if defined(__HIP_PLATFORM_AMD__)
 #include <hip/hip_fp16.h>
+#if BF16_AVAILABLE
+#include <hip/hip_bf16.h>
+#endif
 #endif
 
 #define DISPATCH_QUANTIZE(T_TYPE, C_TYPE, mantisa, exponent)                             \
