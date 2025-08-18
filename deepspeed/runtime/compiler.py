@@ -49,6 +49,8 @@ def enable(min_version=None):
     """
 
     def decorator(func):
+        if not is_compiling():
+            return func
 
         @functools.wraps(func)
         def wrapper(*args, **kwargs):
