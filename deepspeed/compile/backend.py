@@ -311,7 +311,7 @@ def make_backend(backend, compile_config, compile_kwargs={}):
             graph_index = get_index_by_graph_id(graph_order, graph_id)
             log_rank0(
                 f"Bwd start {graph_index} graph_id={graph_id} alloc_mem={get_accelerator().memory_allocated()} graph={gm.graph}",
-                enable=True)
+                enable=debug_log)
 
             bwd_inputs_stack = get_backward_inputs()
 
