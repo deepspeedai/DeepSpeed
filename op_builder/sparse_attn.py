@@ -42,7 +42,7 @@ class SparseAttnBuilder(OpBuilder):
             import torch
         except ImportError:
             if verbose:
-                self.warning(f"unable to import torch, please install it first")
+                self.warning("unable to import torch, please install it first")
             return False
 
         # torch-cpu will not have a cuda version
@@ -70,7 +70,7 @@ class SparseAttnBuilder(OpBuilder):
             # auto-install of triton is broken on some systems, reverting to manual install for now
             # see this issue: https://github.com/deepspeedai/DeepSpeed/issues/1710
             if verbose:
-                self.warning(f"please install triton==1.0.0 if you want to use sparse attention")
+                self.warning("please install triton==1.0.0 if you want to use sparse attention")
             return False
 
         if pkg_version:

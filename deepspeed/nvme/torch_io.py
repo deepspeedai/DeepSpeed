@@ -54,7 +54,7 @@ class TorchIO_Engine(object):
                  f'{io_string} file {filename} of size {args.io_size} bytes from buffer on device {buffer.device}',
                  force=True)
 
-        task_log(tid, f'created torch_io engine')
+        task_log(tid, 'created torch_io engine')
 
         ctxt = {}
         ctxt[FILE] = filename

@@ -101,7 +101,7 @@ def get_metric(file, metric):
 
 
 def validate_args(args):
-    if not args.metric in PERF_METRICS:
+    if args.metric not in PERF_METRICS:
         print(f'{args.metric} is not a valid performance metrics')
         return False
 

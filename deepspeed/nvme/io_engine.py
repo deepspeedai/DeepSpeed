@@ -76,7 +76,7 @@ def io_engine_tasklet(pool_params):
     task_barrier(aio_barrier, num_processes)
 
     # Run pre task
-    task_log(tid, f'running pre-task')
+    task_log(tid, 'running pre-task')
     io_engine = schedule["pre"]((args, tid))
     task_barrier(aio_barrier, num_processes)
 
@@ -91,7 +91,7 @@ def io_engine_tasklet(pool_params):
         io_engine.ctxt["main_task_sec"].append(stop_time - start_time)
 
     # Run post task
-    task_log(tid, f'running post-task')
+    task_log(tid, 'running post-task')
     schedule["post"]((args, tid, io_engine))
     task_barrier(aio_barrier, num_processes)
 

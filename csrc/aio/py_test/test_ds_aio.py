@@ -12,7 +12,7 @@ from io_engine import io_engine_multiprocessing
 
 
 def main():
-    print(f'Testing deepspeed_aio python frontend')
+    print('Testing deepspeed_aio python frontend')
 
     args = get_validated_args()
     mp.set_start_method('spawn', force=True)
