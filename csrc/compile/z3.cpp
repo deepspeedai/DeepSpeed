@@ -69,67 +69,33 @@ public:
         const at::Tensor& ds_tensor = param.getDSTensor();
 
         if (symm_mem == nullptr) {
-            // Support uneven shard sizes across ranks by padding to max shard size
-            int world_size = process_group_->getSize();
-            int rank = process_group_->getRank();
+            // Fast path: assume uniform shard sizes (ZeRO-3 partitions are padded to uniform size)
+            const int world_size = process_group_->getSize();
+            const int64_t shard_elems = ds_tensor.numel();
 
-            int64_t local_count = ds_tensor.numel();
-
-            // Gather local shard sizes from all ranks
-            auto count_options = at::TensorOptions().dtype(at::kLong).device(at::kCUDA);
-            at::Tensor local_count_tensor = torch::tensor({local_count}, count_options);
-            std::vector<at::Tensor> all_counts(world_size);
-            for (int i = 0; i < world_size; ++i) {
-                all_counts[i] = torch::empty_like(local_count_tensor);
-            }
-            process_group_->allgather(all_counts, local_count_tensor)->wait();
-
-            int64_t max_count = 0;
-            std::vector<int64_t> host_counts(world_size);
-            for (int i = 0; i < world_size; ++i) {
-                host_counts[i] = all_counts[i].to(torch::kCPU).item<int64_t>();
-                if (host_counts[i] > max_count) { max_count = host_counts[i]; }
-            }
-
-            // Prepare padded send buffer and gather buffer on AG stream
-            at::Tensor send_buf;
             at::Tensor gather_tmp;
             {
                 at::cuda::CUDAStreamGuard guard(ag_stream_);
-                send_buf = torch::empty({max_count}, ds_tensor.options());
-                // Copy real shard
-                send_buf.index_put_({torch::indexing::Slice(0, local_count)}, ds_tensor.flatten(), true);
-                // Zero-pad the tail if needed
-                if (local_count < max_count) {
-                    auto pad_len = max_count - local_count;
-                    send_buf.index_put_({torch::indexing::Slice(local_count, max_count)},
-                                        torch::zeros({pad_len}, ds_tensor.options()),
-                                        true);
-                }
-                gather_tmp = torch::empty({static_cast<long>(world_size) * max_count}, ds_tensor.options());
+                gather_tmp = torch::empty({static_cast<long>(world_size) * shard_elems},
+                                          ds_tensor.options());
             }
 
-            ncclResult_t result = ncclAllGather(send_buf.data_ptr(),
+            ncclResult_t result = ncclAllGather(ds_tensor.flatten().data_ptr(),
                                                 gather_tmp.data_ptr(),
-                                                max_count,
+                                                shard_elems,
                                                 get_nccl_data_type(ds_tensor.scalar_type()),
                                                 nccl_comm_,
                                                 ag_stream_);
 
             if (result != ncclSuccess) { throw std::runtime_error("NCCL AllGather failed"); }
 
-            // Reconstruct full parameter into output_buf (flattened), then shape
+            // Trim any end padding to the true parameter size
             {
                 at::cuda::CUDAStreamGuard guard(ag_stream_);
                 auto out_flat = output_buf.flatten();
-                int64_t out_offset = 0;
-                for (int i = 0; i < world_size; ++i) {
-                    int64_t len = host_counts[i];
-                    if (len == 0) { continue; }
-                    auto src = gather_tmp.index({torch::indexing::Slice(i * max_count, i * max_count + len)});
-                    out_flat.index_put_({torch::indexing::Slice(out_offset, out_offset + len)}, src, true);
-                    out_offset += len;
-                }
+                const int64_t true_numel = static_cast<int64_t>(productDim(param.getShape()));
+                auto src = gather_tmp.index({torch::indexing::Slice(0, true_numel)});
+                out_flat.copy_(src, /*non_blocking=*/true);
             }
         } else {
             at::cuda::CUDAStreamGuard guard(ag_stream_);
@@ -437,6 +403,27 @@ void register_z3_param(long ds_id,
 {
     param_registry->registerParam(ds_id, ds_shape, ds_tensor, grad_buffer, true, 0, persistent);
     if (persistent) { param_registry->registerGatheredParam(ds_id, ds_tensor); }
+
+    // Validate that shard sizes are uniform across ranks at registration time (not on the hot path)
+    // This ensures launchAllGather can assume uniform shard sizes without extra synchronization.
+    const int64_t local_count = ds_tensor.numel();
+    const int world_size = process_group->getSize();
+
+    auto count_options = at::TensorOptions().dtype(at::kLong).device(at::kCUDA);
+    at::Tensor local_count_tensor = torch::tensor({local_count}, count_options);
+    std::vector<at::Tensor> all_counts(world_size);
+    for (int i = 0; i < world_size; ++i) { all_counts[i] = torch::empty_like(local_count_tensor); }
+    process_group->allgather(all_counts, local_count_tensor)->wait();
+
+    int64_t reference = local_count;
+    for (int i = 0; i < world_size; ++i) {
+        int64_t c = all_counts[i].to(torch::kCPU).item<int64_t>();
+        if (c != reference) {
+            throw std::runtime_error(
+                "ZeRO-3 registration error: non-uniform shard sizes detected across ranks. "
+                "Please check parameter partitioning.");
+        }
+    }
 }
 
 at::Tensor allgather_param(at::Tensor param_tensor, long graph_id, long ds_id)
