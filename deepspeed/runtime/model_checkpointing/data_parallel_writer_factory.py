@@ -57,7 +57,7 @@ class DataParallelWriterFactory(object):
             return self._create_config(1, 0) if dp_rank == 0 else None
 
         assert self._uni_parallel_info.pure_dp, \
-            f'3D parallelism is not yet supported for data parallel checkpointing.'
+            '3D parallelism is not yet supported for data parallel checkpointing.'
 
         if self._parallel_unit == CheckpointDataParallel.REPLICA or ep_info.ep_world_size == 1:
             return self._get_parallel_write_for_ddp(ep_info.dp_world_size, ep_info.dp_rank)

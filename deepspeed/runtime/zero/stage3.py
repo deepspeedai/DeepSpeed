@@ -459,7 +459,7 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
         self.offloaded_states: Set[OffloadDeviceEnum] = set()
 
         if dist.get_rank(group=self.dp_process_group) == 0:
-            see_memory_usage(f"After initializing ZeRO optimizer", force=True)
+            see_memory_usage("After initializing ZeRO optimizer", force=True)
 
     def destroy(self):
         self.parameter_offload.destroy()
@@ -551,7 +551,7 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
         dist.barrier()
 
         if dist.get_rank() == 0:
-            logger.info(f"optimizer state initialized")
+            logger.info("optimizer state initialized")
 
         # IPG
         if self.contiguous_gradients:
@@ -647,7 +647,7 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
         nvme_swap_folder = os.path.join(offload_optimizer_config.nvme_path, 'zero_stage_3')
         os.makedirs(nvme_swap_folder, exist_ok=True)
         if dist.get_rank() == 0:
-            logger.info(f'Tensor Swapping: Adding optimizer tensors')
+            logger.info('Tensor Swapping: Adding optimizer tensors')
 
         swapper_type = PipelinedOptimizerSwapper if offload_optimizer_config.pipeline else PartitionedOptimizerSwapper
 
@@ -797,7 +797,7 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
                     largest_partition_numel = [t.ds_numel for t in sub_group]
                     max_partition_numel = total_elements
 
-            assert len(largest_partition_numel) > 0, f'Unexpected that largest partition is empty'
+            assert len(largest_partition_numel) > 0, 'Unexpected that largest partition is empty'
             self.fp16_groups[0][0].nvme_swapper.reserve_partitioned_swap_space(largest_partition_numel)
 
     def _get_parameter_partitions(self) -> List[Tensor]:
@@ -1142,10 +1142,10 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
 
     @instrument_w_nvtx
     def independent_gradient_partition_epilogue(self):
-        self.report_ipg_memory_usage(f"In ipg_epilogue before reduce_ipg_grads", 0)
+        self.report_ipg_memory_usage("In ipg_epilogue before reduce_ipg_grads", 0)
         for comm_dtype in sort_dtypes(self.ipg_buckets.keys()):
             self.__reduce_and_partition_ipg_grads(comm_dtype)
-        self.report_ipg_memory_usage(f"In ipg_epilogue after reduce_ipg_grads", 0)
+        self.report_ipg_memory_usage("In ipg_epilogue after reduce_ipg_grads", 0)
 
         if not get_accelerator().resolves_data_dependency():
             self.reduce_and_partition_stream.synchronize()
@@ -1173,7 +1173,7 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
         self.independent_gradient_partition_epilogue()
 
     def create_reduce_and_remove_grad_hooks(self):
-        print_rank_0(f'[Begin] Create gradient reduction hooks')
+        print_rank_0('[Begin] Create gradient reduction hooks')
         self.leaf_parameters = defaultdict(list)
         for i, param_group in enumerate(self.fp16_groups):
             for param in param_group:
@@ -1256,7 +1256,7 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
             self._leaf_module_hooks.append(leaf_module.register_forward_pre_hook(wrapper_pre_hook(leaf_parameters)))
             self._leaf_module_hooks.append(leaf_module.register_forward_hook(wrapper_post_hook()))
 
-        print_rank_0(f'[End] Create gradient reduction hooks')
+        print_rank_0('[End] Create gradient reduction hooks')
 
     def get_param_id(self, param):
         return OptimizerSwapper.parameter_id(param)
@@ -1426,7 +1426,7 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
                 self.grad_position[param_id] = [int(i), int(current_offset), int(num_elements)]
                 #print(f"param id {param_id} i:{i}, ds_tensor {num_elements} numel {param.numel()}")
                 current_offset += num_elements
-        see_memory_usage(f"After Set Grad positions", force=False)
+        see_memory_usage("After Set Grad positions", force=False)
 
     def _constant_buffered_norm2(self, input, buffer_size=250000000):
         norm = None
@@ -1515,7 +1515,7 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
                     self.norm_for_param_grads[self.get_param_id(param)] = self._constant_buffered_norm2(grad_buffer)
 
                     if self._swappable_optimizer_subgroup(i):
-                        if not i in offload_fp32_gradients.keys():
+                        if i not in offload_fp32_gradients.keys():
                             offload_fp32_gradients[i] = []
                             offload_fp32_offsets[i] = []
 
@@ -1560,7 +1560,7 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
         """
         if not self.zero_quantized_nontrainable_weights:
             print_rank_0(
-                f"Warning: quantize_nontrainable_params() called with zero_quantized_nontrainable_weights disabled, return without doing anything",
+                "Warning: quantize_nontrainable_params() called with zero_quantized_nontrainable_weights disabled, return without doing anything",
                 force=True)
             return
         quantizer_module = CUDAQuantizer()
@@ -1881,8 +1881,8 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
     def _pre_step(self):
         self.micro_step_id = 0
 
-        print_rank_0(f"Inside Step function")
-        see_memory_usage(f"In step before checking overflow", force=False)
+        print_rank_0("Inside Step function")
+        see_memory_usage("In step before checking overflow", force=False)
 
         print_rank_0("Finished Tracing at Beginning of Step")
         self._get_param_coordinator().hierarchy = 0
@@ -2084,7 +2084,7 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
         self.timers.log(timer_names)
 
         see_memory_usage('After zero_optimizer step', force=False)
-        print_rank_0(f"------------------Finishing Step-----------------------")
+        print_rank_0("------------------Finishing Step-----------------------")
 
     @instrument_w_nvtx
     def _reassign_or_swap_out_partitioned_parameters(self, sub_group_id):
@@ -2296,7 +2296,7 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
         if self.swap_optimizer:
             self.optimizer_swapper.pre_backward()
 
-        see_memory_usage(f"Before backward", force=False)
+        see_memory_usage("Before backward", force=False)
 
         if self.custom_loss_scaler:
             scaled_loss = self.external_loss_scale * loss
@@ -2486,7 +2486,7 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
         if not param.requires_grad:
             return
 
-        assert hasattr(param, "ds_tensor"), f" The parameter does not contain the partitioned copy of the tensor."
+        assert hasattr(param, "ds_tensor"), " The parameter does not contain the partitioned copy of the tensor."
         assert value.numel() == param.ds_tensor.numel(
         ), f" Number of elements do not match: {value.numel()} != {param.ds_tensor.ds_numel}"
 
@@ -2961,7 +2961,7 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
 
         self.empty_partition_cache()
 
-        assert self.optimizer.__class__ == deepspeed.ops.adam.fused_adam.FusedAdam, f"Offloading is supported only for DeepSpeed FusedAdam."
+        assert self.optimizer.__class__ == deepspeed.ops.adam.fused_adam.FusedAdam, "Offloading is supported only for DeepSpeed FusedAdam."
 
         def needs_offload(target):
             # return True
