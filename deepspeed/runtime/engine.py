@@ -4078,9 +4078,6 @@ class DeepSpeedEngine(Module):
             pin_memory: Optional. Whether to pin the memory of the offloaded states.
             non_blocking: Optional. Whether to offload the states asynchronously.
         """
-        assert self.zero_optimization_stage(
-        ) == ZeroStageEnum.weights, "Moving buffers across devices is supported only for ZeRO stage 3."
-
         opt_offload_config = self.zero_offload_optimizer()
         assert opt_offload_config is None or opt_offload_config.device == OffloadDeviceEnum.none, "Moving states across devices is not supported for offloaded optimizer states."
         param_offload_config = self.zero_offload_param()
@@ -4105,9 +4102,6 @@ class DeepSpeedEngine(Module):
         Arguments:
             non_blocking: Optional. Whether to offload the states asynchronously.
         """
-        assert self.zero_optimization_stage(
-        ) == ZeroStageEnum.weights, "Moving buffers back is supported only for ZeRO stage 3."
-
         assert not isinstance(
             self.optimizer,
             DeepSpeedZeRoOffload), "Moving states across devices is not supported without an optimizer."
