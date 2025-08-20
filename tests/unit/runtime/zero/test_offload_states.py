@@ -19,15 +19,18 @@ from deepspeed.runtime.zero.offload_states import get_state_devices
 # ZeRO-1 and ZeRO-2 TESTS
 # ==============================================================================
 
+
 def validate_hp_params_device(model, device: torch.device):
     """Validates that the sharded FP32 parameters are on the specified device."""
     for p in model.optimizer.single_partition_of_fp32_groups:
         assert p.device.type == device.type, f"FP32 param partition is on {p.device}, expected {device}"
 
+
 def validate_lp_params_device(model, device: torch.device):
     """Validates that the sharded LP parameters are on the specified device."""
     for p in model.parameters():
         assert p.device.type == device.type, f"LP param partition is on {p.device}, expected {device}"
+
 
 def validate_adam_states_device(model, device: torch.device):
     """Validates that the sharded Adam optimizer states are on the specified device."""
@@ -37,6 +40,7 @@ def validate_adam_states_device(model, device: torch.device):
                 if state_key in model.optimizer.state[p]:
                     state_tensor = model.optimizer.state[p][state_key]
                     assert state_tensor.device.type == device.type, f"Optimizer state '{state_key}' is on {state_tensor.device}, expected {device}"
+
 
 def validate_grad_device(model, device: torch.device) -> None:
     """Validates that the sharded gradients are on the specified device."""
@@ -52,6 +56,7 @@ def validate_grad_device(model, device: torch.device) -> None:
             if p.grad is not None:
                 assert p.grad.device.type == device.type, f"Gradient partition on hp_param.grad is on {p.grad.device}, expected {device}"
 
+
 def run_model_zero12(model, param_groups, config_dict, hidden_dim, dtype, offloaded_states, pin_memory, non_blocking):
     """
     This function runs a training step, offloads states, reloads them, and verifies correctness for ZeRO-1/2.
@@ -64,10 +69,10 @@ def run_model_zero12(model, param_groups, config_dict, hidden_dim, dtype, offloa
     model, _, _, _ = deepspeed.initialize(model=model, model_parameters=param_groups, config=config_dict)
 
     data_loader = random_dataloader(model=model,
-                                      total_samples=10,
-                                      hidden_dim=hidden_dim,
-                                      device=model.device,
-                                      dtype=dtype)
+                                    total_samples=10,
+                                    hidden_dim=hidden_dim,
+                                    device=model.device,
+                                    dtype=dtype)
     dist.barrier()
 
     # We only need one step to verify the logic
@@ -83,13 +88,14 @@ def run_model_zero12(model, param_groups, config_dict, hidden_dim, dtype, offloa
     if is_grad_test:
         # --- TEST PATH FOR TRANSIENT GRADIENT STATE ---
         # Gradients exist only between backward() and step(). We must test them here.
-        grads_expected = [
-            [g.clone().detach() for g in grad_list]
-            for grad_list in model.optimizer.averaged_gradients.values() if grad_list is not None
-        ]
+        grads_expected = [[g.clone().detach() for g in grad_list]
+                          for grad_list in model.optimizer.averaged_gradients.values() if grad_list is not None]
 
         alloc_before_offload = get_accelerator().memory_allocated()
-        model.offload_states(include=offloaded_states, device=offload_device, pin_memory=pin_memory, non_blocking=non_blocking)
+        model.offload_states(include=offloaded_states,
+                             device=offload_device,
+                             pin_memory=pin_memory,
+                             non_blocking=non_blocking)
         alloc_after_offload = get_accelerator().memory_allocated()
         assert alloc_after_offload < alloc_before_offload, "FAIL: Allocated memory for grads should decrease after offload"
         validate_grad_device(model, offload_torch_device)
@@ -118,12 +124,21 @@ def run_model_zero12(model, param_groups, config_dict, hidden_dim, dtype, offloa
         lp_params_expected = [p.clone().detach() for p in model.parameters()]
         hp_params_expected = [p.clone().detach() for p in model.optimizer.single_partition_of_fp32_groups]
 
-        adam_params_in_state_before = [p for p in model.optimizer.single_partition_of_fp32_groups if p in model.optimizer.state]
-        adam_exp_avg_expected = [model.optimizer.state[p]['exp_avg'].clone().detach() for p in adam_params_in_state_before]
-        adam_exp_avg_sq_expected = [model.optimizer.state[p]['exp_avg_sq'].clone().detach() for p in adam_params_in_state_before]
+        adam_params_in_state_before = [
+            p for p in model.optimizer.single_partition_of_fp32_groups if p in model.optimizer.state
+        ]
+        adam_exp_avg_expected = [
+            model.optimizer.state[p]['exp_avg'].clone().detach() for p in adam_params_in_state_before
+        ]
+        adam_exp_avg_sq_expected = [
+            model.optimizer.state[p]['exp_avg_sq'].clone().detach() for p in adam_params_in_state_before
+        ]
 
         alloc_before_offload = get_accelerator().memory_allocated()
-        model.offload_states(include=offloaded_states, device=offload_device, pin_memory=pin_memory, non_blocking=non_blocking)
+        model.offload_states(include=offloaded_states,
+                             device=offload_device,
+                             pin_memory=pin_memory,
+                             non_blocking=non_blocking)
         alloc_after_offload = get_accelerator().memory_allocated()
         assert alloc_after_offload < alloc_before_offload, f"FAIL: Allocated memory for persistent state {offloaded_states} should decrease after offload"
 
@@ -145,14 +160,19 @@ def run_model_zero12(model, param_groups, config_dict, hidden_dim, dtype, offloa
         for expected, restored in zip(hp_params_expected, model.optimizer.single_partition_of_fp32_groups):
             assert torch.equal(expected, restored), "FAIL: Reloaded HP param data does not match original"
 
-        adam_params_in_state_after = [p for p in model.optimizer.single_partition_of_fp32_groups if p in model.optimizer.state]
-        assert len(adam_params_in_state_before) == len(adam_params_in_state_after), "FAIL: Number of params in optimizer state changed after reload"
+        adam_params_in_state_after = [
+            p for p in model.optimizer.single_partition_of_fp32_groups if p in model.optimizer.state
+        ]
+        assert len(adam_params_in_state_before) == len(
+            adam_params_in_state_after), "FAIL: Number of params in optimizer state changed after reload"
 
         for expected, p in zip(adam_exp_avg_expected, adam_params_in_state_after):
-            assert torch.equal(expected, model.optimizer.state[p]['exp_avg']), "FAIL: Reloaded 'exp_avg' data does not match original"
+            assert torch.equal(
+                expected, model.optimizer.state[p]['exp_avg']), "FAIL: Reloaded 'exp_avg' data does not match original"
         for expected, p in zip(adam_exp_avg_sq_expected, adam_params_in_state_after):
-            assert torch.equal(expected, model.optimizer.state[p]['exp_avg_sq']), "FAIL: Reloaded 'exp_avg_sq' data does not match original"
-
+            assert torch.equal(
+                expected,
+                model.optimizer.state[p]['exp_avg_sq']), "FAIL: Reloaded 'exp_avg_sq' data does not match original"
 
     # --- FINAL VALIDATION FOR ALL TESTS ---
     validate_lp_params_device(model, accelerator_device)
@@ -163,11 +183,8 @@ def run_model_zero12(model, param_groups, config_dict, hidden_dim, dtype, offloa
 
 
 @pytest.mark.parametrize("included_state", [
-    OffloadStateTypeEnum.optim_states,
-    OffloadStateTypeEnum.lp_grads,
-    OffloadStateTypeEnum.hp_params,
-    OffloadStateTypeEnum.lp_params,
-    None
+    OffloadStateTypeEnum.optim_states, OffloadStateTypeEnum.lp_grads, OffloadStateTypeEnum.hp_params,
+    OffloadStateTypeEnum.lp_params, None
 ])
 @pytest.mark.parametrize("pin_memory", [False, True])
 @pytest.mark.parametrize("non_blocking", [False, True])
@@ -179,23 +196,36 @@ class TestOffloadStatesZero12(DistributedTest):
         hidden_dim = 1024
         config_dict = {
             "train_micro_batch_size_per_gpu": 1,
-            "optimizer": {"type": "Adam", "params": {"lr": 1e-6}},
-            "zero_optimization": {"stage": zero_stage},
-            "bf16": {"enabled": True}
+            "optimizer": {
+                "type": "Adam",
+                "params": {
+                    "lr": 1e-6
+                }
+            },
+            "zero_optimization": {
+                "stage": zero_stage
+            },
+            "bf16": {
+                "enabled": True
+            }
         }
         model = SimpleModel(hidden_dim, nlayers=4)
         param_groups = [{
-            "params": [p for n, p in model.named_parameters() if 'bias' not in n], "weight_decay": 0.1
+            "params": [p for n, p in model.named_parameters() if 'bias' not in n],
+            "weight_decay": 0.1
         }, {
-            "params": [p for n, p in model.named_parameters() if 'bias' in n], "weight_decay": 0.0
+            "params": [p for n, p in model.named_parameters() if 'bias' in n],
+            "weight_decay": 0.0
         }]
         offloaded_states = None if included_state is None else [included_state]
         run_model_zero12(model, param_groups, config_dict, hidden_dim, torch.bfloat16, offloaded_states, pin_memory,
                          non_blocking)
 
+
 # ==============================================================================
 # ZeRO-3 TESTS
 # ==============================================================================
+
 
 def validate_device(model, device: torch.device, offloaded_states) -> None:
 
@@ -207,7 +237,7 @@ def validate_device(model, device: torch.device, offloaded_states) -> None:
         if offloaded_states is None or state in offloaded_states:
             if state == OffloadStateTypeEnum.contiguous_grad_buffer and device == torch.device("cpu"):
                 assert len(get_state_devices(model,
-                                           state)) == 0, f"State {state} must be removed after offload_states()"
+                                             state)) == 0, f"State {state} must be removed after offload_states()"
             else:
                 assert compare_device(state), f"State {state} is not on device {device}"
 
@@ -218,10 +248,10 @@ def run_model_zero3(model, param_groups, config_dict, hidden_dim, dtype, offload
 
     model, _, _, _ = deepspeed.initialize(model=model, model_parameters=param_groups, config=config_dict)
     data_loader = random_dataloader(model=model,
-                                      total_samples=10,
-                                      hidden_dim=hidden_dim,
-                                      device=model.device,
-                                      dtype=dtype)
+                                    total_samples=10,
+                                    hidden_dim=hidden_dim,
+                                    device=model.device,
+                                    dtype=dtype)
     dist.barrier()
     for batch in data_loader:
         loss = model(batch[0], batch[1])
@@ -237,9 +267,9 @@ def run_model_zero3(model, param_groups, config_dict, hidden_dim, dtype, offload
         # Start offloading
         alloc_before_offload = get_accelerator().memory_allocated()
         model.offload_states(include=offloaded_states,
-                              device=offload_device,
-                              pin_memory=pin_memory,
-                              non_blocking=non_blocking)
+                             device=offload_device,
+                             pin_memory=pin_memory,
+                             non_blocking=non_blocking)
         alloc_after_offload = get_accelerator().memory_allocated()
         assert alloc_after_offload < alloc_before_offload, "Allocated memory should decrease after offload"
 
@@ -315,4 +345,4 @@ class TestOffloadStatesZero3(DistributedTest):
         }]
         offloaded_states = None if included_state is None else [included_state]
         run_model_zero3(model, param_groups, config_dict, hidden_dim, torch.bfloat16, offloaded_states, pin_memory,
-                  non_blocking)
+                        non_blocking)
