@@ -209,6 +209,10 @@ All DeepSpeed documentation, tutorials, and blogs can be found on our website: [
 | [Blogs](https://www.deepspeed.ai/posts/)                                                       |  Blogs                                   |
 
 
+# CI funding
+
+This being an open source project we rely on others to provide us resources for CI hardware. At this moment Modal is kindly supporting our GPU CI runs by funding the hardware for us. Modal is an AI infrastructure platform for inference, fine-tuning, batch jobs and more. Get started with $30/mo in free credits today at https://modal.com. We have been getting an amazing support from Modal's team and will surely recommend them to your business.
+
 # Contributing
 DeepSpeed welcomes your contributions! Please see our
 [contributing](CONTRIBUTING.md) guide for more details on formatting, testing,
