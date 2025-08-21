@@ -35,7 +35,6 @@ if _ZENFLOW_AVAILABLE:
             return wrapper
     
         _ZENFLOW_AVAILABLE = False
-        _ZENFLOW_AVAILABLE = False
 else:
     # safe disable dynamo if unsupported
     def _disable_dynamo_if_unsupported(**kwargs):
