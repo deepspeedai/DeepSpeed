@@ -74,7 +74,8 @@ public:
             const int64_t shard_elems = ds_tensor.numel();
 
             // Perform all-gather directly into the pre-allocated padded output buffer
-            ncclResult_t result = ncclAllGather(ds_tensor.flatten().data_ptr(),
+            // NCCL requires contiguous storage; use .contiguous() explicitly
+            ncclResult_t result = ncclAllGather(ds_tensor.contiguous().data_ptr(),
                                                 output_buf.data_ptr(),
                                                 shard_elems,
                                                 get_nccl_data_type(ds_tensor.scalar_type()),
