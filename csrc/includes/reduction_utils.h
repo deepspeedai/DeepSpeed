@@ -583,29 +583,21 @@ DS_D_INLINE void _warp(cg::thread_block_tile<hw_warp_size>& warp, T* data)
 
 #if defined(__HIP_PLATFORM_AMD__)
 template <int reduce_width, typename T, ROpType... Ops>
-DS_D_INLINE void _warp_with_type_conversion(
-    cg::thread_block_tile<hw_warp_size>& warp_arg,
-    T* data)
+DS_D_INLINE void _warp_with_type_conversion(cg::thread_block_tile<hw_warp_size>& warp_arg, T* data)
 {
     constexpr int elems = sizeof...(Ops);
-    if constexpr (
-        !(std::is_integral<T>::value || std::is_floating_point<T>::value)
-    ) {
+    if constexpr (!(std::is_integral<T>::value || std::is_floating_point<T>::value)) {
         float temp_data[elems];
 #pragma unroll
-        for (int i = 0; i < elems; i++) {
-            temp_data[i] = conversion::to<float>(data[i]);
-        }
+        for (int i = 0; i < elems; i++) { temp_data[i] = conversion::to<float>(data[i]); }
         _warp<float, Ops...>(warp_arg, temp_data);
 #pragma unroll
-        for (int i = 0; i < elems; i++) {
-            data[i] = conversion::to<T>(temp_data[i]);
-        }
+        for (int i = 0; i < elems; i++) { data[i] = conversion::to<T>(temp_data[i]); }
     } else {
         _warp<T, Ops...>(warp_arg, data);
     }
 }
-#endif // defined(__HIP_PLATFORM_AMD__)
+#endif  // defined(__HIP_PLATFORM_AMD__)
 
 /*
 Implementation for primary block reduction that serves both `block` and
@@ -667,7 +659,6 @@ DS_D_INLINE void _block(cg::thread_block& tb,
 #else
             _warp<T, Ops..., total_warps>(warp_arg, data);
 #endif
-
 
 #pragma unroll
             for (int i = 0; i < elems; i++) {
