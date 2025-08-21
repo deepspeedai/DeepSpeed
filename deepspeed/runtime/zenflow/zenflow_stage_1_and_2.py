@@ -4,6 +4,7 @@
 # DeepSpeed Team
 
 import os
+import psutil
 import torch
 from deepspeed import comm as dist
 import torch.multiprocessing as mp
@@ -652,27 +653,12 @@ def disable_accelerator():
 
 
 def zenflow_optimizer_process(pipe, curr_rank, total_rank, param_groups, shared_overlap_grad_map,
-                              shared_stale_param_map):
+                              shared_stale_param_map, zf_affinity):
     disable_accelerator()
 
-    TOTAL_CORES = os.cpu_count()
-    CPUADAM_CORE_START = 0
-    CPUADAM_CORE_END = TOTAL_CORES
-    TOTAL_CORES = CPUADAM_CORE_END - CPUADAM_CORE_START
-
-    cores_per_rank = TOTAL_CORES // total_rank
-    extra = TOTAL_CORES % total_rank
-    start_offset = curr_rank * cores_per_rank + min(curr_rank, extra)
-    end_offset = start_offset + cores_per_rank + (1 if curr_rank < extra else 0)
-    assigned_cores = set(range(CPUADAM_CORE_START + start_offset, CPUADAM_CORE_START + end_offset))
-
-    try:
-        os.sched_setaffinity(0, assigned_cores)
-        print(f"[Optimizer Thread] Rank {curr_rank} bound to CPU cores: {os.sched_getaffinity(0)}", flush=True)
-    except AttributeError:
-        print("[Optimizer Thread] sched_setaffinity not supported on this system.")
-    except Exception as e:
-        print(f"[Optimizer Thread] Failed to set affinity: {e}")
+    current_process = psutil.Process()
+    current_process.cpu_affinity(zf_affinity)
+    os.environ['OMP_NUM_THREADS'] = str(len(zf_affinity))
 
     from deepspeed.ops.adam import ZenFlowCPUAdam
     optimizer = ZenFlowCPUAdam(param_groups, overlap_step=True)
@@ -807,10 +793,16 @@ class ZenFlowZeroOptimizerParallel(ZenFlowZeroOptimizer):
         curr_rank = dist.get_rank()
         total_rank = dist.get_world_size()
 
+        current_process = psutil.Process()
+        current_affinity = current_process.cpu_affinity()
+        ds_num_cores = 2
+        zf_affinity = current_affinity[ds_num_cores:]
+        ds_affinity = current_affinity[:ds_num_cores]
+        current_process.cpu_affinity(ds_affinity)
         self.process = ctx.Process(
             target=zenflow_optimizer_process,
             args=(self.child_conn, curr_rank, total_rank, param_groups_data, self.shared_overlap_grad_map,
-                  self.shared_stale_param_map),
+                  self.shared_stale_param_map, zf_affinity),
         )
         self.process.daemon = True
         self.process.start()
