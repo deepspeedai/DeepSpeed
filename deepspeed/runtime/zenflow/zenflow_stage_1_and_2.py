@@ -95,6 +95,7 @@ class ZenFlowZeroOptimizer(DeepSpeedZeroOptimizer):
         self.micro_step = -1
         self.full_warm_up_rounds = zenflow_config.full_warm_up_rounds
         self.offload_selective_optimizer = zenflow_config.offload
+        self.pt_reserved_cores = zenflow_config.pt_reserved_cores
 
         if self.offload_selective_optimizer:
             assert overlap_comm, "offload selective optimizer should be used with overlap_comm"
@@ -193,7 +194,6 @@ class ZenFlowZeroOptimizer(DeepSpeedZeroOptimizer):
 
         self.index_buffer = torch.empty(total_size, dtype=torch.int32, device=get_accelerator().current_device_name())
 
-        # count = 0
         bucket = self.ipg_buckets[communication_data_type]
         for i, param_idx_in_group, param_id in bucket.params:
             param = self.bit16_groups[i][param_idx_in_group]
@@ -310,7 +310,6 @@ class ZenFlowZeroOptimizer(DeepSpeedZeroOptimizer):
 
         group_to_paramlist = {}
 
-        # count = 0
         for i, param_idx_in_group, param_id in bucket.params:
             param = self.bit16_groups[i][param_idx_in_group]
 
@@ -479,7 +478,6 @@ class ZenFlowZeroOptimizer(DeepSpeedZeroOptimizer):
             curr_selected_reduce_size = 0
 
             process_group = self.dp_process_group
-            # count = 0
             bucket = self.ipg_buckets[communication_data_type]
             for i, param_idx_in_group, param_id in bucket.params:
                 param = self.bit16_groups[i][param_idx_in_group]
@@ -507,10 +505,6 @@ class ZenFlowZeroOptimizer(DeepSpeedZeroOptimizer):
                 # Calculate rank and offsets for grad slices
                 for idx in range(len(partition_ids_w_offsets)):
                     partition_id, offset = partition_ids_w_offsets[idx]
-
-                    # if dist.get_rank() == 0 and count < 100:
-                    #     print(f"Rank {dist.get_rank()} rank offset id {idx} calculated dp size {dist.get_world_size(group=process_group)} real dp size {dist.get_world_size(self.real_dp_process_group[i])} and dst: {partition_id}")
-                    # count += 1
 
                     # Calculate numel for grad slice depending on partition location
                     if idx == len(partition_ids_w_offsets) - 1:
@@ -659,6 +653,7 @@ def zenflow_optimizer_process(pipe, curr_rank, total_rank, param_groups, shared_
     current_process = psutil.Process()
     current_process.cpu_affinity(zf_affinity)
     os.environ['OMP_NUM_THREADS'] = str(len(zf_affinity))
+    print (f"Setting zenflow optimizer affinity to {zf_affinity}, OMP_NUM_THREADS={len(zf_affinity)}")
 
     from deepspeed.ops.adam import ZenFlowCPUAdam
     optimizer = ZenFlowCPUAdam(param_groups, overlap_step=True)
@@ -795,10 +790,13 @@ class ZenFlowZeroOptimizerParallel(ZenFlowZeroOptimizer):
 
         current_process = psutil.Process()
         current_affinity = current_process.cpu_affinity()
-        ds_num_cores = 2
-        zf_affinity = current_affinity[ds_num_cores:]
-        ds_affinity = current_affinity[:ds_num_cores]
-        current_process.cpu_affinity(ds_affinity)
+        ds_num_cores = self.pt_reserved_cores
+        if ds_num_cores >0 and ds_num_cores < len(current_affinity):
+            zf_affinity = current_affinity[ds_num_cores:]
+            pt_affinity = current_affinity[:ds_num_cores]
+        else:
+            zf_affinity = current_affinity
+            pt_affinity = current_affinity
         self.process = ctx.Process(
             target=zenflow_optimizer_process,
             args=(self.child_conn, curr_rank, total_rank, param_groups_data, self.shared_overlap_grad_map,
@@ -806,6 +804,9 @@ class ZenFlowZeroOptimizerParallel(ZenFlowZeroOptimizer):
         )
         self.process.daemon = True
         self.process.start()
+        print (f"Setting pytorch affinity to {pt_affinity}, OMP_NUM_THREADS={len(pt_affinity)}")
+        current_process.cpu_affinity(pt_affinity)
+        os.environ['OMP_NUM_THREADS'] = str(len(pt_affinity))
 
         msg = self.parent_conn.recv()
         assert msg["type"] == "ready", "Optimizer process did not initialize correctly."
