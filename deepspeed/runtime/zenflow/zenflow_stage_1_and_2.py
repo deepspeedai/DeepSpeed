@@ -653,7 +653,7 @@ def zenflow_optimizer_process(pipe, curr_rank, total_rank, param_groups, shared_
     current_process = psutil.Process()
     current_process.cpu_affinity(zf_affinity)
     os.environ['OMP_NUM_THREADS'] = str(len(zf_affinity))
-    print (f"Setting zenflow optimizer affinity to {zf_affinity}, OMP_NUM_THREADS={len(zf_affinity)}")
+    print(f"Setting zenflow optimizer affinity to {zf_affinity}, OMP_NUM_THREADS={len(zf_affinity)}")
 
     from deepspeed.ops.adam import ZenFlowCPUAdam
     optimizer = ZenFlowCPUAdam(param_groups, overlap_step=True)
@@ -791,7 +791,7 @@ class ZenFlowZeroOptimizerParallel(ZenFlowZeroOptimizer):
         current_process = psutil.Process()
         current_affinity = current_process.cpu_affinity()
         ds_num_cores = self.pt_reserved_cores
-        if ds_num_cores >0 and ds_num_cores < len(current_affinity):
+        if ds_num_cores > 0 and ds_num_cores < len(current_affinity):
             zf_affinity = current_affinity[ds_num_cores:]
             pt_affinity = current_affinity[:ds_num_cores]
         else:
@@ -804,7 +804,7 @@ class ZenFlowZeroOptimizerParallel(ZenFlowZeroOptimizer):
         )
         self.process.daemon = True
         self.process.start()
-        print (f"Setting pytorch affinity to {pt_affinity}, OMP_NUM_THREADS={len(pt_affinity)}")
+        print(f"Setting pytorch affinity to {pt_affinity}, OMP_NUM_THREADS={len(pt_affinity)}")
         current_process.cpu_affinity(pt_affinity)
         os.environ['OMP_NUM_THREADS'] = str(len(pt_affinity))
 
