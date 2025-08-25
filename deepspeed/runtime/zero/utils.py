@@ -53,6 +53,13 @@ try:
 except ImportError:
     pass
 
+# Add MuonWithAuxAdam to supported list if muon is installed
+try:
+    from muon import MuonWithAuxAdam
+    ZERO_SUPPORTED_OPTIMIZERS.append(MuonWithAuxAdam)
+except ImportError:
+    pass
+
 
 def is_zero_supported_optimizer(optimizer):
     if dist.get_rank() == 0:
