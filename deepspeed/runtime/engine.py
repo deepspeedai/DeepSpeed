@@ -1090,10 +1090,7 @@ class DeepSpeedEngine(Module):
             model_dtype = torch.bfloat16
 
         if self._config.grad_accum_dtype is None:
-            if model_dtype == torch.bfloat16 and not self.zero_optimization():
-                grad_accum_dtype = torch.float32
-            else:
-                grad_accum_dtype = model_dtype
+            grad_accum_dtype = model_dtype
         else:
             grad_accum_dtype = DtypeEnum(self._config.grad_accum_dtype).value
 
