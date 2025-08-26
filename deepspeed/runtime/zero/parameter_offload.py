@@ -93,7 +93,7 @@ class DeepSpeedZeRoOffload(object):
         module,
         timers,
         ds_config,
-        zenflow,
+        zenflow=False,
         overlap_comm=True,
         prefetch_bucket_size=50000000,
         max_reuse_distance=1000000000,
