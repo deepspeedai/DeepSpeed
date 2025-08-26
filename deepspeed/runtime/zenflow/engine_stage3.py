@@ -70,8 +70,8 @@ def configure_zenflow(optimizer_z3, zenflow_config):
 
 
 def _initialize_zenflow_stage3_prologue(optimizer_z3: "DeepSpeedZeroOptimizer_Stage3",
-                                       module,
-                                       zenflow_config: dict = None):
+                                        module,
+                                        zenflow_config: dict = None):
 
     optimizer_z3.zenflow = True if zenflow_config is not None else False
 
@@ -83,8 +83,8 @@ def _initialize_zenflow_stage3_prologue(optimizer_z3: "DeepSpeedZeroOptimizer_St
 
 
 def _initialize_zenflow_stage3_epilogue(optimizer_z3: "DeepSpeedZeroOptimizer_Stage3",
-                                       zenflow_config: dict = None,
-                                       overlap_comm: bool = False):
+                                        zenflow_config: dict = None,
+                                        overlap_comm: bool = False):
 
     if not optimizer_z3.zenflow:
         return
