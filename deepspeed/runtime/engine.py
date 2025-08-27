@@ -1093,7 +1093,6 @@ class DeepSpeedEngine(Module):
             grad_accum_dtype = model_dtype
         else:
             grad_accum_dtype = DtypeEnum(self._config.grad_accum_dtype).value
-
         return (model_dtype, grad_accum_dtype)
 
     def _optimizer_has_ckpt_event_prologue(self):
@@ -1389,6 +1388,8 @@ class DeepSpeedEngine(Module):
             ) == 1 and not self.zero_cpu_offload():
                 return BFLOAT16
             return ZERO_OPTIMIZATION
+        elif model_dtype == torch.float32:
+            return None
         elif amp_enabled:
             if model_dtype != grad_accum_dtype:
                 raise NotImplementedError(
@@ -1408,13 +1409,11 @@ class DeepSpeedEngine(Module):
                     "**** BF16 gradient accumulation is not safe numerically with large number of accumulation steps, proceed with caution *****"
                 )
                 return BFLOAT16
-
             return FP16 if model_dtype == torch.float16 else DDP_BFLOAT16
-            # else optimizer_wrapper = None
         elif model_dtype == torch.bfloat16 and grad_accum_dtype == torch.float32:
             return BFLOAT16
         else:
-            raise NotImplementedError("unsupported mix of model dtype and gradient accumulation type")
+            raise NotImplementedError(f"unsupported mix of {model_dtype=} and {grad_accum_dtype=}")
 
         return None
 
