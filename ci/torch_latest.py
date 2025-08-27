@@ -33,7 +33,7 @@ app = modal.App("deepspeedai-torch-latest-ci", image=image)
 def pytest():
     import subprocess
     subprocess.run(
-        "pytest -n 4 --verbose tests/unit/runtime/zero/test_zero.py tests/unit/runtime/half_precision/test_bf16.py --torch_ver=2.6 --cuda_ver=12.4".split(),
+        "pytest -n 4 --verbose tests/unit/runtime/zero/test_zero.py tests/unit/runtime/half_precision/test_bf16.py tests/unit/runtime/zero/test_zero_autocast.py --torch_ver=2.6 --cuda_ver=12.4".split(),
         check=True,
         cwd=ROOT_PATH / ".",
     )

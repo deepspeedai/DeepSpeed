@@ -54,7 +54,7 @@ from deepspeed.runtime.zero.muon.muon_optimizer import MuonWithAuxAdam
 from deepspeed.runtime.constants import \
     ROUTE_TRAIN, ROUTE_PREDICT, ROUTE_EVAL, \
     PLD_THETA, PLD_GAMMA, BFLOAT16, FP16, AMP, GRADIENT_ACCUMULATION_STEPS, \
-    DATA_PARALLEL_GROUP, GLOBAL_RANK
+    DATA_PARALLEL_GROUP, GLOBAL_RANK, DDP_BFLOAT16
 from deepspeed.runtime.zero.config import ZeroStageEnum
 from deepspeed.compression import compression_scheduler
 from deepspeed.compression.constants import \
@@ -1091,13 +1091,9 @@ class DeepSpeedEngine(Module):
             model_dtype = torch.bfloat16
 
         if self._config.grad_accum_dtype is None:
-            if model_dtype == torch.bfloat16 and not self.zero_optimization():
-                grad_accum_dtype = torch.float32
-            else:
-                grad_accum_dtype = model_dtype
+            grad_accum_dtype = model_dtype
         else:
             grad_accum_dtype = DtypeEnum(self._config.grad_accum_dtype).value
-
         return (model_dtype, grad_accum_dtype)
 
     def _optimizer_has_ckpt_event_prologue(self):
@@ -1139,7 +1135,7 @@ class DeepSpeedEngine(Module):
             or (self.zero_optimization_partition_weights() and self.is_first_weights_partition_group()):
             self.save_non_zero_checkpoint = True
 
-        if self.zero_optimization() or self.bfloat16_enabled():
+        if hasattr(self.optimizer, 'dp_process_group'):
             param_rank = dist.get_rank(group=self.optimizer.dp_process_group)
 
             # Only the first parameter parallel process needs to store the
@@ -1407,23 +1403,18 @@ class DeepSpeedEngine(Module):
             return AMP
         # data type checks
         elif model_dtype == grad_accum_dtype:
-            if model_dtype == torch.bfloat16:
-                if self.pipeline_parallelism:
-                    logger.warning(
-                        "**** BF16 gradient accumulation is not safe numerically with large number of accumulation steps, proceed with caution *****"
-                    )
-                    return BFLOAT16
-                else:
-                    raise NotImplementedError(
-                        "Bfloat16 wrapper must use a gradient accumulation type of fp32, enable ZeRO to use Bfloat16 gradient accumulation"
-                    )
-            if model_dtype == torch.float16:
-                return FP16
-            # else optimizer_wrapper = None
+            if model_dtype == torch.float32:
+                return None
+            if model_dtype == torch.bfloat16 and self.pipeline_parallelism:
+                logger.warning(
+                    "**** BF16 gradient accumulation is not safe numerically with large number of accumulation steps, proceed with caution *****"
+                )
+                return BFLOAT16
+            return FP16 if model_dtype == torch.float16 else DDP_BFLOAT16
         elif model_dtype == torch.bfloat16 and grad_accum_dtype == torch.float32:
             return BFLOAT16
         else:
-            raise NotImplementedError("unsupported mix of model dtype and gradient accumulation type")
+            raise NotImplementedError(f"unsupported mix of {model_dtype=} and {grad_accum_dtype=}")
 
         return None
 
@@ -1466,8 +1457,9 @@ class DeepSpeedEngine(Module):
             self._set_client_model(model)
             self._broadcast_model()
             # TODO: maybe need to broadcast experts differently?
-        elif optimizer_wrapper == FP16:
-            self.optimizer = self._configure_fp16_optimizer(basic_optimizer)
+        elif optimizer_wrapper in [FP16, DDP_BFLOAT16]:
+            lp_dtype = torch.float16 if optimizer_wrapper == FP16 else torch.bfloat16
+            self.optimizer = self._configure_fp16_optimizer(basic_optimizer, lp_dtype)
         elif optimizer_wrapper == BFLOAT16:
             self.optimizer = self._configure_bf16_optimizer(basic_optimizer)
         else:
@@ -1641,7 +1633,7 @@ class DeepSpeedEngine(Module):
             )
         return quantizer
 
-    def _configure_fp16_optimizer(self, optimizer):
+    def _configure_fp16_optimizer(self, optimizer, low_precision_dtype):
         initial_dynamic_scale = self.initial_dynamic_scale()
         dynamic_loss_args = self.dynamic_loss_scale_args()
         clip_grad = self.gradient_clipping()
@@ -1659,6 +1651,7 @@ class DeepSpeedEngine(Module):
                 optimizer = FP16_Optimizer(
                     optimizer,
                     deepspeed=self,
+                    low_precision_dtype=low_precision_dtype,
                     dynamic_loss_scale=True,
                     initial_dynamic_scale=initial_dynamic_scale,
                     dynamic_loss_args=dynamic_loss_args,
@@ -1674,6 +1667,7 @@ class DeepSpeedEngine(Module):
                 optimizer = FP16_Optimizer(
                     optimizer,
                     deepspeed=self,
+                    low_precision_dtype=low_precision_dtype,
                     static_loss_scale=self.loss_scale(),
                     mpu=self.mpu,
                     clip_grad=clip_grad,
