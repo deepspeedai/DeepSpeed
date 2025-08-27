@@ -44,12 +44,13 @@ from deepspeed.module_inject.layers import GatherReplacedLayerParams, configure_
 from deepspeed.runtime.config import DEEPSPEED_OPTIMIZERS, \
     ADAGRAD_OPTIMIZER, ADAM_OPTIMIZER, ADAMW_OPTIMIZER, LAMB_OPTIMIZER, ONEBIT_ADAM_OPTIMIZER, ONEBIT_LAMB_OPTIMIZER, \
     TORCH_ADAM_PARAM, ADAM_W_MODE, ADAM_W_MODE_DEFAULT, ZERO_ONE_ADAM_OPTIMIZER, MUADAM_OPTIMIZER, MUADAMW_OPTIMIZER, \
-    MUSGD_OPTIMIZER, LION_OPTIMIZER
+    MUSGD_OPTIMIZER, LION_OPTIMIZER, MUON_OPTIMIZER
 
 from deepspeed.runtime.model_checkpointing.constants import ValidationMode, \
     CHECKPOINT_TAG_VALIDATION, CHECKPOINT_WRITER, CHECKPOINT_SERIALIZATION
 
 from deepspeed.runtime.dataloader import DeepSpeedDataLoader
+from deepspeed.runtime.zero.muon.muon_optimizer import MuonWithAuxAdam
 from deepspeed.runtime.constants import \
     ROUTE_TRAIN, ROUTE_PREDICT, ROUTE_EVAL, \
     PLD_THETA, PLD_GAMMA, BFLOAT16, FP16, AMP, GRADIENT_ACCUMULATION_STEPS, \
@@ -1566,6 +1567,29 @@ class DeepSpeedEngine(Module):
             except ImportError:
                 logger.error("Install mup to use MuSGD optimizer")
             optimizer = MuSGD(model_parameters, **optimizer_parameters)
+        elif self.optimizer_name() == MUON_OPTIMIZER:
+            zero_stage = self.zero_optimization_stage()
+            assert zero_stage <= ZeroStageEnum.gradients, "Muon optimizer is not yet compatible with ZeRO Stage 3"
+            if not all([hasattr(p, 'use_muon') for p in model_parameters]):
+                msg = "Muon optimizer is used, but the use_muon attribute is NOT configured for some of the model parameters, " \
+                "please set by `param.use_muon = True / False` for all params"
+                logger.error(msg)
+            muon_params = [p for p in model_parameters if p.use_muon]
+            non_muon_params = [p for p in model_parameters if not p.use_muon]
+            param_groups = []
+            if muon_params:
+                accepted_parameters = dict()
+                for key in ["lr", "momentum", "weight_decay"]:
+                    if key in optimizer_parameters:
+                        accepted_parameters[key] = optimizer_parameters[key]
+                param_groups.append(dict(params=muon_params, use_muon=True, **accepted_parameters))
+            if non_muon_params:
+                accepted_parameters = dict()
+                for key in ["lr", "betas", "eps", "weight_decay"]:
+                    if key in optimizer_parameters:
+                        accepted_parameters[key] = optimizer_parameters[key]
+                param_groups.append(dict(params=non_muon_params, use_muon=False, **accepted_parameters))
+            optimizer = MuonWithAuxAdam(param_groups)
         else:
             torch_optimizer = getattr(torch.optim, self.optimizer_name())
             optimizer = torch_optimizer(model_parameters, **optimizer_parameters)
