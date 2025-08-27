@@ -45,6 +45,13 @@ ZERO_SUPPORTED_OPTIMIZERS = [
     DeepSpeedCPULion, FusedLion
 ]
 
+# Add MuonWithAuxAdam to supported list if muon is installed
+try:
+    from deepspeed.runtime.muon_optimizer import MuonWithAuxAdam
+    ZERO_SUPPORTED_OPTIMIZERS.append(MuonWithAuxAdam)
+except ImportError:
+    pass
+
 # Add apex FusedAdam to supported list if apex is installed
 try:
     import apex
