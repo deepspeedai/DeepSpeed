@@ -50,15 +50,16 @@ Torch Automatic Mixed Precision (AMP)
 DeepSpeed provides torch-compatible automatic mixed precision (AMP) training via
 `torch.autocast <https://docs.pytorch.org/docs/stable/amp.html>`_ functionality.  The following snippet illustrates how to enable Torch AMP.
 
-... code-block:: json
-  {
-    ...,
-    "torch_autocast": {
-        "enabled": true,
-        "dtype": "bfloat16",
-        "lower_precision_safe_modules": ["torch.nn.Linear", "torch.nn.Conv2d"]
-    }
-}
+    .. code-block:: python
+
+        {
+            "torch_autocast": {
+                "enabled": true,
+                "dtype": "bfloat16",
+                "lower_precision_safe_modules": ["torch.nn.Linear", "torch.nn.Conv2d"]
+            },
+            ...
+        }
 
 Each configuration works as follows:
 
