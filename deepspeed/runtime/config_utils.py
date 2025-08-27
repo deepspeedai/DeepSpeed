@@ -137,7 +137,7 @@ class pp_int(int):
         return inst
 
     def __repr__(self):
-        if self.custom_print_str:
+        if hasattr(self, "custom_print_str") and self.custom_print_str:
             return self.custom_print_str
         return f"{self.real:,}"
 
