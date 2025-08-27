@@ -61,12 +61,12 @@ DeepSpeed provides torch-compatible automatic mixed precision (AMP) training via
 }
 
 Each configuration works as follows:
-enabled: Enable torch.autocast if this is set to True. You don't need to call torch.autocast in your code.
+* ``enabled``: Enable torch.autocast if this is set to True. You don't need to call torch.autocast in your code.
 The grad scaler is also applied in the DeepSpeed optimizer.
-dtype: lower precision dtype passed to torch.autocast. Gradients for allreduce (reduce-scatter) and parameters for allgather (only for ZeRO3) of lower_precision_safe_modules are also downcasted to this dtype.
-lower_precision_safe_modules: Downcast for allreduce (reduce-scatter) and allgather (ZeRO3) are applied only to modules specified in this list.
+* ``dtype``: lower precision dtype passed to torch.autocast. Gradients for allreduce (reduce-scatter) and parameters for allgather (only for ZeRO3) of lower_precision_safe_modules are also downcasted to this dtype.
+* ``lower_precision_safe_modules``: Downcast for allreduce (reduce-scatter) and allgather (ZeRO3) are applied only to modules specified in this list.
 (The precision for PyTorch operators in forward/backward follows torch.autocast's policy, not this list.)
-You can set names of classes with their packages. If you don't set this item, DeepSpeed uses the default list: [torch.nn.Linear, torch.nn.Conv1d, torch.nn.Conv2d, torch.nn.Conv3d].
+You can set names of classes with their packages. If you don't set this item, DeepSpeed uses the default list: ``[torch.nn.Linear, torch.nn.Conv1d, torch.nn.Conv2d, torch.nn.Conv3d]``.
 
 .. autofunction:: deepspeed.runtime.torch_autocast.init_autocast_params
 .. autofunction:: deepspeed.runtime.torch_autocast.is_autocast_initialized
