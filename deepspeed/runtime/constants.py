@@ -137,6 +137,9 @@ BFLOAT16_CHECK_OVERFLOW_DEFAULT = False
 BFLOAT16_IMMEDIATE_GRAD_UPDATE = "immediate_grad_update"
 BFLOAT16_IMMEDIATE_GRAD_UPDATE_DEFAULT = True
 
+# DDP variant of BFLOAT16
+DDP_BFLOAT16 = "bf16"
+
 #########################################
 # FP16 support
 #########################################
