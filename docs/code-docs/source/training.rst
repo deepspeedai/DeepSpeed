@@ -36,19 +36,19 @@ Gradient Accumulation
 Mixed Precision Training
 -------------------------
 DeepSpeed supports mixed precision training using either native or Torch mechanisms. The desired mixed precision mode can be selected through the configuration dict.
+Mixed precision training can used with ZeRO (i.e., stages > 0) and without ZeRO (i.e., stage=0).
 
 
 Native Mixed Precision
 ======================================================
-DeepSpeed provides native support for mixed precsion training with
-`fp16 https://www.deepspeed.ai/docs/config-json/#fp16-training-options`_ and `bf16 https://www.deepspeed.ai/docs/config-json/#bfloat16-training-options`_.
+DeepSpeed provides native support for
+`fp16 <https://www.deepspeed.ai/docs/config-json/#fp16-training-options>`_ and `bf16 <https://www.deepspeed.ai/docs/config-json/#bfloat16-training-options>`_ mixed precsion training.
 
 
 Torch Automatic Mixed Precision (AMP)
 ======================================================
 DeepSpeed provides torch-compatible automatic mixed precision (AMP) training via
-`torch.autocast <https://docs.pytorch.org/docs/stable/amp.html>`_ functionality.  This can be used for training with ZeRO (i.e., stages > 0) and without ZeRO (i.e., stage=0).
-The following snippet illustrates how to enable Torch AMP.
+`torch.autocast <https://docs.pytorch.org/docs/stable/amp.html>`_ functionality.  The following snippet illustrates how to enable Torch AMP.
 
 ... code-block:: json
   {
