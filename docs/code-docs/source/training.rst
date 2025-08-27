@@ -35,7 +35,7 @@ Gradient Accumulation
 
 Mixed Precision Training
 -------------------------
-DeepSpeed supports mixed precision training using either native or Torch mechanisms. The desired mixed precision mode can be selected through the configuration dict.
+DeepSpeed supports mixed precision training using either native or PyTorch mechanisms. The desired mixed precision mode can be selected through the configuration dict.
 Mixed precision training can used with ZeRO (i.e., stages > 0) and without ZeRO (i.e., stage=0).
 
 
