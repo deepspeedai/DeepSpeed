@@ -798,8 +798,13 @@ class ZenFlowZeroOptimizerParallel(ZenFlowZeroOptimizer):
 
         current_process = psutil.Process()
         current_affinity = current_process.cpu_affinity()
-        all_affinities = [torch.zeros(len(current_affinity), dtype=torch.int32, device=get_accelerator().current_device_name()) for _ in range(total_rank)]
-        dist.all_gather(all_affinities, torch.tensor(current_affinity, dtype=torch.int32, device=get_accelerator().current_device_name()))
+        all_affinities = [
+            torch.zeros(len(current_affinity), dtype=torch.int32, device=get_accelerator().current_device_name())
+            for _ in range(total_rank)
+        ]
+        dist.all_gather(
+            all_affinities,
+            torch.tensor(current_affinity, dtype=torch.int32, device=get_accelerator().current_device_name()))
         # When affinity across all ranks are the same, the workers are not binded.  Do a soft bind here
         if self.all_tensors_equal(all_affinities):
             print(f"Recompute worker affinities")
@@ -809,7 +814,7 @@ class ZenFlowZeroOptimizerParallel(ZenFlowZeroOptimizer):
             my_rank = curr_rank
             my_size = total_rank
             cores_per_rank = num_available_phy_cores // my_size
-            current_affinity = available_phy_cores[my_rank*cores_per_rank : (my_rank+1)*cores_per_rank]
+            current_affinity = available_phy_cores[my_rank * cores_per_rank:(my_rank + 1) * cores_per_rank]
         ds_num_cores = self.pt_reserved_cores
         if ds_num_cores > 0 and ds_num_cores < len(current_affinity):
             zf_affinity = current_affinity[ds_num_cores:]
