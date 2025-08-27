@@ -760,6 +760,14 @@ class ZenFlowZeroOptimizerParallel(ZenFlowZeroOptimizer):
         dest_tensor.copy_(src_tensor, non_blocking=True)
         param.grad = None  #offload only
 
+    # check if all tensors in the list are equal to each other
+    def all_tensors_equal(self, tensor_list):
+        first_tensor = tensor_list[0]
+        for tensor in tensor_list[1:]:
+            if not torch.equal(first_tensor, tensor):
+                return False
+        return True
+
     def start_optimizer_process(self):
         from multiprocessing import Pipe, get_context, Manager
 
@@ -790,6 +798,18 @@ class ZenFlowZeroOptimizerParallel(ZenFlowZeroOptimizer):
 
         current_process = psutil.Process()
         current_affinity = current_process.cpu_affinity()
+        all_affinities = [torch.zeros(len(current_affinity), dtype=torch.int32, device=get_accelerator().current_device_name()) for _ in range(total_rank)]
+        dist.all_gather(all_affinities, torch.tensor(current_affinity, dtype=torch.int32, device=get_accelerator().current_device_name()))
+        # When affinity across all ranks are the same, the workers are not binded.  Do a soft bind here
+        if self.all_tensors_equal(all_affinities):
+            print(f"Recompute worker affinities")
+            num_phy_cores = psutil.cpu_count(logical=False)
+            available_phy_cores = [i for i in current_affinity if i < num_phy_cores]
+            num_available_phy_cores = len(available_phy_cores)
+            my_rank = curr_rank
+            my_size = total_rank
+            cores_per_rank = num_available_phy_cores // my_size
+            current_affinity = available_phy_cores[my_rank*cores_per_rank : (my_rank+1)*cores_per_rank]
         ds_num_cores = self.pt_reserved_cores
         if ds_num_cores > 0 and ds_num_cores < len(current_affinity):
             zf_affinity = current_affinity[ds_num_cores:]
