@@ -63,7 +63,7 @@ DeepSpeed provides torch-compatible automatic mixed precision (AMP) training via
 
 Each configuration works as follows:
 
-* ``enabled``: Enable torch.autocast when set to True. You don't need to call torch.autocast in your code. The grad scaler is also applied in the DeepSpeed optimizer.
+* ``enabled``: Enable ``torch.autocast`` when set to ``True``. You don't need to call ``torch.autocast`` in your code. The grad scaler is also applied in the DeepSpeed optimizer.
 * ``dtype``: Lower precision dtype passed to torch.autocast. Gradients for allreduce (reduce-scatter) and parameters for allgather (only for ZeRO3) of lower_precision_safe_modules are also downcasted to this dtype.
 * ``lower_precision_safe_modules``: The list of modules that will be downcasted for all-reduce (reduce-scatter) and all-gather (ZeRO3). The precision for PyTorch operators in forward/backward follows ``torch.autocast``'s policy, not this list. If you don't set this item, DeepSpeed uses the default list: ``[torch.nn.Linear, torch.nn.Conv1d, torch.nn.Conv2d, torch.nn.Conv3d]``.
 
