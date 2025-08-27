@@ -1388,8 +1388,6 @@ class DeepSpeedEngine(Module):
             ) == 1 and not self.zero_cpu_offload():
                 return BFLOAT16
             return ZERO_OPTIMIZATION
-        elif model_dtype == torch.float32:
-            return None
         elif amp_enabled:
             if model_dtype != grad_accum_dtype:
                 raise NotImplementedError(
@@ -1404,6 +1402,8 @@ class DeepSpeedEngine(Module):
             return AMP
         # data type checks
         elif model_dtype == grad_accum_dtype:
+            if model_dtype == torch.float32:
+                return None
             if model_dtype == torch.bfloat16 and self.pipeline_parallelism:
                 logger.warning(
                     "**** BF16 gradient accumulation is not safe numerically with large number of accumulation steps, proceed with caution *****"
