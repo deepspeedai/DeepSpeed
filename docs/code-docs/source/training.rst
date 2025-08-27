@@ -45,7 +45,7 @@ DeepSpeed provides native support for
 `fp16 <https://www.deepspeed.ai/docs/config-json/#fp16-training-options>`_ and `bf16 <https://www.deepspeed.ai/docs/config-json/#bfloat16-training-options>`_ mixed precsion training.
 
 
-Torch Automatic Mixed Precision (AMP)
+PyTorch Automatic Mixed Precision (AMP)
 ======================================================
 DeepSpeed provides torch-compatible automatic mixed precision (AMP) training via
 `torch.autocast <https://docs.pytorch.org/docs/stable/amp.html>`_ functionality.  The following snippet illustrates how to enable Torch AMP.
