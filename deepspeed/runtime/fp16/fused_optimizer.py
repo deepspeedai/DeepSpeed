@@ -211,8 +211,8 @@ class FP16_Optimizer(DeepSpeedOptimizer):
         return self.optimizer.param_groups[0]["lr"]
 
     def override_loss_scale(self, loss_scale):
-        if not self.use_grad_scaling:
-            return
+        assert self.use_grad_scaling, f"Loss scale overriding only supported for torch.float16, rather than {self.low_precision_dtype}"
+
         if loss_scale != self.external_loss_scale:
             logger.info(f'[deepspeed] setting loss scale from {self.external_loss_scale} -> {loss_scale}')
         self.custom_loss_scaler = True
@@ -399,7 +399,6 @@ class FP16_Optimizer(DeepSpeedOptimizer):
         3. scaled_loss.backward(), which accumulates scaled gradients into the ``.grad`` attributes of the model's fp16 leaves
         """
         if self.custom_loss_scaler:
-            assert self.use_grad_scaling
             scaled_loss = self.external_loss_scale * loss
             scaled_loss.backward()
         else:
