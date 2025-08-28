@@ -40,6 +40,7 @@ class FP16_Optimizer(DeepSpeedOptimizer):
     def __init__(self,
                  init_optimizer,
                  deepspeed=None,
+                 low_precision_dtype=torch.float16,
                  static_loss_scale=1.0,
                  dynamic_loss_scale=False,
                  initial_dynamic_scale=2**32,
@@ -53,11 +54,13 @@ class FP16_Optimizer(DeepSpeedOptimizer):
 
         self.fused_adam_legacy = fused_adam_legacy
         self.timers = timers
-        self.deepspeed = deepspeed
         self.has_moe_layers = has_moe_layers
+        self.deepspeed = deepspeed
         self.using_pipeline = getattr(self.deepspeed, 'pipeline_parallelism', False)
+        self.low_precision_dtype = low_precision_dtype
+        self.use_grad_scaling = low_precision_dtype == torch.float16
         if not get_accelerator().is_available():
-            raise SystemError("Cannot use fp16 without accelerator.")
+            raise SystemError("Cannot use {low_precision_dtype} without accelerator.")
         self.optimizer = init_optimizer
 
         # param flattened by groups
@@ -86,24 +89,27 @@ class FP16_Optimizer(DeepSpeedOptimizer):
             param_group['params'] = [self.fp32_groups_flat[i]]
 
         # we may have a way of fusing dynamic scale. Do not support for now
-        if dynamic_loss_scale:
-            self.dynamic_loss_scale = True
-            self.cur_iter = 0
-            self.last_overflow_iter = -1
-            self.scale_factor = 2
+        if self.use_grad_scaling:
+            if dynamic_loss_scale:
+                self.dynamic_loss_scale = True
+                self.cur_iter = 0
+                self.last_overflow_iter = -1
+                self.scale_factor = 2
 
-            if dynamic_loss_args is None:
-                self.cur_scale = initial_dynamic_scale
-                self.scale_window = 1000
-                self.min_loss_scale = 1
+                if dynamic_loss_args is None:
+                    self.cur_scale = initial_dynamic_scale
+                    self.scale_window = 1000
+                    self.min_loss_scale = 1
+                else:
+                    self.cur_scale = dynamic_loss_args[INITIAL_LOSS_SCALE]
+                    self.scale_window = dynamic_loss_args[SCALE_WINDOW]
+                    self.min_loss_scale = dynamic_loss_args[MIN_LOSS_SCALE]
             else:
-                self.cur_scale = dynamic_loss_args[INITIAL_LOSS_SCALE]
-                self.scale_window = dynamic_loss_args[SCALE_WINDOW]
-                self.min_loss_scale = dynamic_loss_args[MIN_LOSS_SCALE]
+                self.dynamic_loss_scale = False
+                self.cur_iter = 0
+                self.cur_scale = static_loss_scale
         else:
-            self.dynamic_loss_scale = False
-            self.cur_iter = 0
-            self.cur_scale = static_loss_scale
+            self.cur_scale = 1.0
         self.verbose = verbose
 
         self.custom_loss_scaler = False
@@ -166,14 +172,15 @@ class FP16_Optimizer(DeepSpeedOptimizer):
             norm_groups.append(get_weight_norm(grads_groups_flat[i], mpu=self.mpu))
 
         self.overflow = self.overflow_checker.check_using_norm(norm_groups)
-        prev_scale = self.cur_scale
-        self._update_scale(self.overflow)
+        if self.use_grad_scaling:
+            prev_scale = self.cur_scale
+            self._update_scale(self.overflow)
 
-        if self.overflow:
-            if self.verbose:
-                logger.info("[deepspeed] fp16 dynamic loss scale overflow! Skipping step. Attempted loss "
-                            "scale: {}, reducing to {}".format(prev_scale, self.cur_scale))
-            return self.overflow
+            if self.overflow:
+                if self.verbose:
+                    logger.info("[deepspeed] fp16 dynamic loss scale overflow! Skipping step. Attempted loss "
+                                "scale: {}, reducing to {}".format(prev_scale, self.cur_scale))
+                return self.overflow
 
         scaled_grad_norm = get_global_norm(norm_list=norm_groups)
 
@@ -204,6 +211,8 @@ class FP16_Optimizer(DeepSpeedOptimizer):
         return self.optimizer.param_groups[0]["lr"]
 
     def override_loss_scale(self, loss_scale):
+        assert self.use_grad_scaling, f"Loss scale overriding only supported for torch.float16, rather than {self.low_precision_dtype}"
+
         if loss_scale != self.external_loss_scale:
             logger.info(f'[deepspeed] setting loss scale from {self.external_loss_scale} -> {loss_scale}')
         self.custom_loss_scaler = True
@@ -260,18 +269,20 @@ class FP16_Optimizer(DeepSpeedOptimizer):
         self.overflow = self.overflow_checker.has_overflow(fp16_params)
         if self.timers:
             self.timers(OVERFLOW_CHECK_TIMER).stop()
-        prev_scale = self.cur_scale
-        self._update_scale(self.overflow)
-        if self.overflow:
-            if self.verbose:
-                log_dist(
-                    "Overflow detected. Skipping step. Attempted loss "
-                    f"scale: {prev_scale}, reducing to {self.cur_scale}",
-                    ranks=[0])
-            # Clear gradients
-            for i, group in enumerate(self.fp16_groups):
-                for p in group:
-                    p.grad = None
+
+        if self.use_grad_scaling:
+            prev_scale = self.cur_scale
+            self._update_scale(self.overflow)
+            if self.overflow:
+                if self.verbose:
+                    log_dist(
+                        "Overflow detected. Skipping step. Attempted loss "
+                        f"scale: {prev_scale}, reducing to {self.cur_scale}",
+                        ranks=[0])
+                # Clear gradients
+                for i, group in enumerate(self.fp16_groups):
+                    for p in group:
+                        p.grad = None
 
             if self.timers:
                 self.timers.log(OVERFLOW_TIMERS)
@@ -449,13 +460,14 @@ class FP16_Optimizer(DeepSpeedOptimizer):
             torch.save(checkpoint, "saved.pth")
         """
         state_dict = {}
-        state_dict['dynamic_loss_scale'] = self.dynamic_loss_scale
-        state_dict['cur_scale'] = self.cur_scale
-        state_dict['cur_iter'] = self.cur_iter
-        if state_dict['dynamic_loss_scale']:
-            state_dict['last_overflow_iter'] = self.last_overflow_iter
-            state_dict['scale_factor'] = self.scale_factor
-            state_dict['scale_window'] = self.scale_window
+        if self.use_grad_scaling:
+            state_dict['dynamic_loss_scale'] = self.dynamic_loss_scale
+            state_dict['cur_scale'] = self.cur_scale
+            state_dict['cur_iter'] = self.cur_iter
+            if state_dict['dynamic_loss_scale']:
+                state_dict['last_overflow_iter'] = self.last_overflow_iter
+                state_dict['scale_factor'] = self.scale_factor
+                state_dict['scale_window'] = self.scale_window
         state_dict[OPTIMIZER_STATE_DICT] = self.optimizer.state_dict()
         state_dict['fp32_groups_flat'] = self.fp32_groups_flat
         state_dict[CLIP_GRAD] = self.clip_grad
@@ -483,13 +495,14 @@ class FP16_Optimizer(DeepSpeedOptimizer):
             optimizer.load_state_dict(checkpoint['optimizer'])
         """
         # I think it should actually be ok to reload the optimizer before the model.
-        self.dynamic_loss_scale = state_dict['dynamic_loss_scale']
-        self.cur_scale = state_dict['cur_scale']
-        self.cur_iter = state_dict['cur_iter']
-        if state_dict['dynamic_loss_scale']:
-            self.last_overflow_iter = state_dict['last_overflow_iter']
-            self.scale_factor = state_dict['scale_factor']
-            self.scale_window = state_dict['scale_window']
+        if self.use_grad_scaling:
+            self.dynamic_loss_scale = state_dict['dynamic_loss_scale']
+            self.cur_scale = state_dict['cur_scale']
+            self.cur_iter = state_dict['cur_iter']
+            if state_dict['dynamic_loss_scale']:
+                self.last_overflow_iter = state_dict['last_overflow_iter']
+                self.scale_factor = state_dict['scale_factor']
+                self.scale_window = state_dict['scale_window']
         if load_optimizer_states:
             self.optimizer.load_state_dict(state_dict[OPTIMIZER_STATE_DICT])
         self.clip_grad = state_dict[CLIP_GRAD]
@@ -515,12 +528,16 @@ class FP16_Optimizer(DeepSpeedOptimizer):
 
     # Promote loss scale so it can be retrieved or set via "fp16_optimizer_instance.loss_scale"
     def _get_loss_scale(self):
+        if not self.use_grad_scaling:
+            return None
+
         if self.custom_loss_scaler:
             return self.external_loss_scale
         else:
             return self.cur_scale
 
     def _set_loss_scale(self, value):
-        self.loss_scaler.cur_scale = value
+        if self.use_grad_scaling:
+            self.loss_scaler.cur_scale = value
 
     loss_scale = property(_get_loss_scale, _set_loss_scale)
