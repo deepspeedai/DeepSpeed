@@ -33,6 +33,46 @@ Gradient Accumulation
 .. autofunction:: deepspeed.DeepSpeedEngine.is_gradient_accumulation_boundary
 
 
+Mixed Precision Training
+-------------------------
+DeepSpeed supports mixed precision training using either native or PyTorch mechanisms. The desired mixed precision mode can be selected through the configuration dict.
+Mixed precision training can used with ZeRO (i.e., stages > 0) and without ZeRO (i.e., stage=0).
+
+
+Native Mixed Precision
+======================================================
+DeepSpeed provides native support for
+`fp16 <https://www.deepspeed.ai/docs/config-json/#fp16-training-options>`_ and `bf16 <https://www.deepspeed.ai/docs/config-json/#bfloat16-training-options>`_ mixed precsion training.
+
+
+PyTorch Automatic Mixed Precision (AMP)
+======================================================
+DeepSpeed provides torch-compatible automatic mixed precision (AMP) training via
+`torch.autocast <https://docs.pytorch.org/docs/stable/amp.html>`_ functionality.  The following snippet illustrates how to enable Torch AMP.
+
+    .. code-block:: python
+
+        {
+            "torch_autocast": {
+                "enabled": true,
+                "dtype": "bfloat16",
+                "lower_precision_safe_modules": ["torch.nn.Linear", "torch.nn.Conv2d"]
+            },
+            ...
+        }
+
+Each configuration works as follows:
+
+* ``enabled``: Enable ``torch.autocast`` when set to ``True``. You don't need to call ``torch.autocast`` in your code. The grad scaler is also applied in the DeepSpeed optimizer.
+* ``dtype``: Lower precision dtype passed to ``torch.autocast``. Gradients for all-reduce (reduce-scatter) and parameters for all-gather (only for ZeRO3) of ``lower_precision_safe_modules`` are also downcasted to this ``dtype``.
+* ``lower_precision_safe_modules``: The list of modules that will be downcasted for all-reduce (reduce-scatter) and all-gather (ZeRO3). The precision for PyTorch operators in forward/backward follows ``torch.autocast``'s policy, not this list. If you don't set this item, DeepSpeed uses the default list: ``[torch.nn.Linear, torch.nn.Conv1d, torch.nn.Conv2d, torch.nn.Conv3d]``.
+
+.. autofunction:: deepspeed.runtime.torch_autocast.init_autocast_params
+.. autofunction:: deepspeed.runtime.torch_autocast.is_autocast_initialized
+.. autofunction:: deepspeed.runtime.torch_autocast.get_default_autocast_lower_precision_modules
+.. autofunction:: deepspeed.runtime.torch_autocast.has_autocast_dtype
+
+
 Model Saving
 ------------
 .. autofunction:: deepspeed.DeepSpeedEngine.save_16bit_model
