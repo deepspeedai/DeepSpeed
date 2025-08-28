@@ -16,8 +16,8 @@ from unit.common import enable_determinism
 
 
 @enable_determinism(123)
-def compare_loss(self, config, dtype, iteration=5):
-    hidden_dim = 10
+def compare_loss(self, config, dtype, iteration=5, hidden_dim_override=None):
+    hidden_dim = hidden_dim_override if hidden_dim_override is not None else 10
     RTOL = 5e-1
     ATOL = 1e-2
 
