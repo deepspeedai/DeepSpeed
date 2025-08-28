@@ -9,6 +9,7 @@ title: "Latest News"
 
 <!-- NOTE: Maintain only the five latest releases in 'latest news' section -->
 
+
 * [2025/08] [ZenFlow: Stall-Free Offloading Engine for LLM Training](https://pytorch.org/blog/zenflow-stall-free-offloading-engine-for-llm-training/)
 
 * [2025/06] [Arctic Long Sequence Training (ALST) with DeepSpeed: Scalable And Efficient Training For Multi-Million Token Sequences](https://www.snowflake.com/en/engineering-blog/arctic-long-sequence-training-multi-million-token-ai/)
@@ -19,26 +20,18 @@ title: "Latest News"
 
 * [2025/03] [DeepSpeed AutoTP: Automatic Tensor Parallel Training of Hugging Face models](https://github.com/deepspeedai/DeepSpeed/blob/master/blogs/huggingface-tp/README.md)
 
-* [2024/12] [Ulysses-Offload: Democratizing Long Context LLM Training ](https://github.com/deepspeedai/DeepSpeed/blob/master/blogs/ulysses-offload/README.md)
-
-* [2024/12] [DeepSpeed Domino: Communication-Free LLM Training Engine](https://github.com/deepspeedai/DeepSpeed/blob/master/blogs/deepspeed-domino/README.md)
 
 <!-- NOTE: we must use html for news items otherwise links will be broken in the 'more news' section -->
 
 <details>
 <!-- NOTE: Maintain only three items in 'more news' section -->
  <summary>More news</summary>
-
  <ul>
-
-   <li> [2024/08] <a href="https://github.com/deepspeedai/DeepSpeed/blob/master/blogs/windows/08-2024/README.md"> DeepSpeed on Windows</a>) [<a href="https://github.com/deepspeedai/DeepSpeed/blob/master/blogs/windows/08-2024/japanese/README.md"> 日本語 </a>] [<a href="https://github.com/deepspeedai/DeepSpeed/blob/master/blogs/windows/08-2024/chinese/README.md"> 中文 </a>] </li>
-
-   <li> [2024/08] <a href="https://github.com/deepspeedai/DeepSpeed/blob/master/blogs/deepspeed-gds/README.md"> DeepNVMe: Improving DL Applications through I/O Optimizations</a> [<a href="https://github.com/deepspeedai/DeepSpeed/blob/master/blogs/deepspeed-gds/japanese/README.md"> 日本語 </a>] [<a href="https://github.com/deepspeedai/DeepSpeed/blob/master/blogs/deepspeed-gds/japanese/README.md"> 中文 </a>] </li>
-
-   <li> [2024/07] <a href="https://github.com/microsoft/DeepSpeed/tree/master/blogs/deepspeed-ucp/README.md"> DeepSpeed Universal Checkpointing: Efficient and Flexible Checkpointing for Large Scale Distributed Training</a> [<a href="https://github.com/microsoft/DeepSpeed/tree/master/blogs/deepspeed-ucp/japanese/README.md"> 日本語 </a>] </li>
-
-
-
+   <li>[2024/12] <a href="https://github.com/deepspeedai/DeepSpeed/blob/master/blogs/ulysses-offload/README.md">Ulysses-Offload: Democratizing Long Context LLM Training</a></li>
+   <li>[2024/12] <a href="https://github.com/deepspeedai/DeepSpeed/blob/master/blogs/deepspeed-domino/README.md">DeepSpeed-Domino: Communication-Free LLM Training Engine</a></li>
+   <li>[2024/08] <a href="https://github.com/deepspeedai/DeepSpeed/tree/master/blogs/windows/08-2024/README.md">DeepSpeed on Windows</a> 
+   [<a href="https://github.com/deepspeedai/DeepSpeed/tree/master/blogs/windows/08-2024/japanese/README.md">日本語</a>] 
+   [<a href="https://github.com/deepspeedai/DeepSpeed/tree/master/blogs/windows/08-2024/chinese/README.md">中文</a>]</li>
  </ul>
 </details>
 
