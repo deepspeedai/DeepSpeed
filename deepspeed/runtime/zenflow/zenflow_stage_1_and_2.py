@@ -558,7 +558,6 @@ class ZenFlowZeroOptimizer(DeepSpeedZeroOptimizer):
 
             if self.is_zenflow_select_boundary():
                 self.timers(SELECTIVE_OPTIMIZER_UPDATE_TIMER).start()
-                # print("update selected")
                 self.update_selected_channels(tensor, curr_column_size, communication_data_type)
                 self.timers(SELECTIVE_OPTIMIZER_UPDATE_TIMER).stop()
             elif self.zenflow:
@@ -653,7 +652,7 @@ def zenflow_optimizer_process(pipe, curr_rank, total_rank, param_groups, shared_
     current_process = psutil.Process()
     current_process.cpu_affinity(zf_affinity)
     os.environ['OMP_NUM_THREADS'] = str(len(zf_affinity))
-    print(f"Setting zenflow optimizer affinity to {zf_affinity}, OMP_NUM_THREADS={len(zf_affinity)}")
+    #print(f"Setting zenflow optimizer affinity to {zf_affinity}, OMP_NUM_THREADS={len(zf_affinity)}")
 
     from deepspeed.ops.adam import ZenFlowCPUAdam
     optimizer = ZenFlowCPUAdam(param_groups, overlap_step=True)
@@ -799,15 +798,17 @@ class ZenFlowZeroOptimizerParallel(ZenFlowZeroOptimizer):
         current_process = psutil.Process()
         current_affinity = current_process.cpu_affinity()
         all_affinities = [
-            torch.zeros(len(current_affinity), dtype=torch.int32, device=get_accelerator().current_device_name())
-            for _ in range(total_rank)
+            torch.zeros(len(current_affinity),
+                        dtype=type(current_affinity[0]),
+                        device=get_accelerator().current_device_name()) for _ in range(total_rank)
         ]
         dist.all_gather(
             all_affinities,
-            torch.tensor(current_affinity, dtype=torch.int32, device=get_accelerator().current_device_name()))
+            torch.tensor(current_affinity,
+                         dtype=type(current_affinity[0]),
+                         device=get_accelerator().current_device_name()))
         # When affinity across all ranks are the same, the workers are not binded.  Do a soft bind here
         if self.all_tensors_equal(all_affinities):
-            print(f"Recompute worker affinities")
             num_phy_cores = psutil.cpu_count(logical=False)
             available_phy_cores = [i for i in current_affinity if i < num_phy_cores]
             num_available_phy_cores = len(available_phy_cores)
@@ -815,10 +816,10 @@ class ZenFlowZeroOptimizerParallel(ZenFlowZeroOptimizer):
             my_size = total_rank
             cores_per_rank = num_available_phy_cores // my_size
             current_affinity = available_phy_cores[my_rank * cores_per_rank:(my_rank + 1) * cores_per_rank]
-        ds_num_cores = self.pt_reserved_cores
-        if ds_num_cores > 0 and ds_num_cores < len(current_affinity):
-            zf_affinity = current_affinity[ds_num_cores:]
-            pt_affinity = current_affinity[:ds_num_cores]
+        pt_num_cores = self.pt_reserved_cores
+        if pt_num_cores > 0 and pt_num_cores < len(current_affinity):
+            zf_affinity = current_affinity[pt_num_cores:]
+            pt_affinity = current_affinity[:pt_num_cores]
         else:
             zf_affinity = current_affinity
             pt_affinity = current_affinity
@@ -829,7 +830,7 @@ class ZenFlowZeroOptimizerParallel(ZenFlowZeroOptimizer):
         )
         self.process.daemon = True
         self.process.start()
-        print(f"Setting pytorch affinity to {pt_affinity}, OMP_NUM_THREADS={len(pt_affinity)}")
+        #print(f"Setting pytorch affinity to {pt_affinity}, OMP_NUM_THREADS={len(pt_affinity)}")
         current_process.cpu_affinity(pt_affinity)
         os.environ['OMP_NUM_THREADS'] = str(len(pt_affinity))
 
