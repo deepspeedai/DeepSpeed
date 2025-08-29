@@ -80,7 +80,8 @@ def assert_lst_len_same_as_other_ranks(lst: List[int]) -> None:
     rank0_len_tensor_cpu = rank0_len_tensor.cpu().item()
     if rank0_len_tensor_cpu != local_len_tensor:
         raise RuntimeError(f"disagreement between rank0 and rank{dist.get_rank()}: "
-                           f"rank0: {rank0_len_tensor_cpu}, rank{dist.get_rank()}: {local_len_tensor}")
+                           f"\n rank0: {rank0_len_tensor_cpu} "
+                           f"\n rank{dist.get_rank()}: {local_len_tensor}")
 
 
 def get_lst_from_rank0(lst: List[int]) -> None:
@@ -96,7 +97,8 @@ def get_lst_from_rank0(lst: List[int]) -> None:
     )
     dist.broadcast(lst_tensor, src=0, async_op=False)
 
-    return list(lst_tensor.cpu().numpy())
+    return [t.item() for t in lst_tensor.cpu()]
+    # return list(lst_tensor.cpu().numpy())
 
 
 @instrument_w_nvtx
@@ -112,7 +114,8 @@ def assert_ints_same_as_other_ranks(ints: List[int]) -> None:
     rank0_ints = get_lst_from_rank0(ints)
     if ints != rank0_ints:
         raise RuntimeError(f"disagreement between rank0 and rank{dist.get_rank()}: "
-                           f"rank0: {rank0_ints}, rank{dist.get_rank()}: {ints}")
+                           f"\n rank0: {rank0_ints} "
+                           f"\n rank{dist.get_rank()}: {ints}")
 
 
 def is_builtin_type(obj):
