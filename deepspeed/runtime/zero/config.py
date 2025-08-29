@@ -46,7 +46,7 @@ ZeRO optimization should be enabled as:
     "memory_efficient_linear": [true|false],
     "override_module_apply": [true|false],
     "zeropp_loco_param": {...},
-    ""log_trace_cache_warnings" : [true|false],
+    "log_trace_cache_warnings" : [true|false],
     "enable_sanity_checks": [true|false],
     }
 }

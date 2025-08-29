@@ -77,7 +77,7 @@ def assert_lst_len_same_as_other_ranks(lst: List[int]) -> None:
     )
     local_len_tensor = len(lst)
     dist.broadcast(rank0_len_tensor, src=0, async_op=False)
-    rank0_len_tensor_cpu = rank0_len_tensor.cpu()
+    rank0_len_tensor_cpu = rank0_len_tensor.cpu().item()
     if rank0_len_tensor_cpu != local_len_tensor:
         raise RuntimeError(f"disagreement between rank0 and rank{dist.get_rank()}: "
                            f"rank0: {rank0_len_tensor_cpu}, rank{dist.get_rank()}: {local_len_tensor}")
