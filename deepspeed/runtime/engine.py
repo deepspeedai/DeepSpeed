@@ -1059,7 +1059,7 @@ class DeepSpeedEngine(Module):
     def zero_log_trace_cache_warnings(self):
         return self._config.zero_config.log_trace_cache_warnings
 
-    def enable_sanity_checks(self):
+    def is_sanity_checks_enabled(self):
         return self._config.zero_config.enable_sanity_checks
 
     def dump_state(self):
