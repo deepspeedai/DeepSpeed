@@ -46,7 +46,8 @@ ZeRO optimization should be enabled as:
     "memory_efficient_linear": [true|false],
     "override_module_apply": [true|false],
     "zeropp_loco_param": {...},
-    "log_trace_cache_warnings" : [true|false],
+    ""log_trace_cache_warnings" : [true|false],
+    "enable_sanity_checks": [true|false],
     }
 }
 """
@@ -348,6 +349,11 @@ class DeepSpeedZeroConfig(DeepSpeedConfigModel):
     log_trace_cache_warnings: bool = False
     """
     Whether to log warnings from trace cache, such as invalidation events.
+    """
+
+    enable_sanity_checks: bool = False
+    """
+    Enable internal sanity checks, which could be useful for debugging
     """
 
     # Validators
