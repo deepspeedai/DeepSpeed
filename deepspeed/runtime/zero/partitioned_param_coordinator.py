@@ -223,32 +223,45 @@ class PartitionedParameterCoordinator:
         self.__param_order = []
         for sub_module in self.__submodule_order:
             self.record_parameters(sub_module)
-
+ 
+    iter_counter = 0 
     @compiler.disable
     def reset_step(self) -> None:
         """indicate that we have completed one fwd+bwd for the model"""
         if is_compiling():
             return
+    
+        from arctic_training.debug import printflock 
+        printflock(f'{dist.get_rank()=} in reset step {self.__trace_mode=} {self.iter_counter=}')
 
         self._clean_inflight_param_registry()
-
         if not self.is_complete_trace():  # not self.trace_complete:
             # Make sure that recorded submodule orders are identical across ranks
+            dist.barrier()
+            printflock(f'{dist.get_rank()=} pass reset step barrrer {self.__trace_mode=} {self.iter_counter=}')
+
             assert_ints_same_as_other_ranks([m.ds_id for m in self.__submodule_order])
+            dist.barrier()
+            printflock(f'{dist.get_rank()=} assert 1')
 
             if self.is_record_trace():
                 # Successfully recorded a trace
                 self.construct_parameter_trace_from_module_trace()
                 # Make sure that recorded parameter orders are identical across ranks
                 assert_ints_same_as_other_ranks([p.param.ds_id for p in self.__param_order])
+                dist.barrier()
+                printflock(f'{dist.get_rank()=} assert 2')
+
                 assert_ints_same_as_other_ranks([p.step_id_last_used_at for p in self.__param_order])
+                dist.barrier()
+                printflock(f'{dist.get_rank()=} assert 3')
 
                 self.__submodule_order = tuple(self.__submodule_order)  # freeze
                 self.__param_order = tuple(self.__param_order)  # freeze
                 self.__trace_mode = ZeRoTraceMode.COMPLETE
                 print_rank_0(
                     f"completed record trace of {len(self.__submodule_order)} sub modules: {[m.ds_id for m in self.__submodule_order]}",
-                    force=False)
+                    force=True)
             else:
                 # Enable trace recording for next forward/backward pass
                 self.__trace_mode = ZeRoTraceMode.RECORD
@@ -263,6 +276,9 @@ class PartitionedParameterCoordinator:
         self.__step_id = 0
         self.__n_available_params = 0
         self.__profiler.reset_events()
+        printflock(f'{dist.get_rank()=} exiting reset step {self.__trace_mode=} {self.iter_counter=}')
+        self.iter_counter += 1 
+
 
     def _dump_params(self, tag, sub_module, params, step_id=None):
         if step_id is None:
