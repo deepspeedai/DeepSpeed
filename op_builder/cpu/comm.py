@@ -5,7 +5,6 @@
 
 import os
 from .builder import CPUOpBuilder
-import platform
 
 
 class CCLCommBuilder(CPUOpBuilder):
@@ -47,7 +46,6 @@ class CCLCommBuilder(CPUOpBuilder):
 class ShareMemCommBuilder(CPUOpBuilder):
     BUILD_VAR = "DS_BUILD_SHM_COMM"
     NAME = "deepspeed_shm_comm"
-    machine = platform.machine().lower()
 
     def __init__(self, name=None):
         name = self.NAME if name is None else name
@@ -57,12 +55,7 @@ class ShareMemCommBuilder(CPUOpBuilder):
         return f'deepspeed.ops.comm.{self.NAME}_op'
 
     def sources(self):
-        src_files = ['csrc/cpu/comm/shm_interface.cpp', 'csrc/cpu/comm/shm.cpp']
-        if self.machine == 'riscv64':
-            src_files.append('csrc/cpu/comm/riscv64/shm_rvv.cpp')
-        else:
-            src_files.append('csrc/cpu/comm/x86_64/shm_avx512.cpp')
-        return src_files
+        return ['csrc/cpu/comm/shm_interface.cpp', 'csrc/cpu/comm/shm.cpp']
 
     def include_paths(self):
         includes = ['csrc/cpu/includes']

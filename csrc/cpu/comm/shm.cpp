@@ -12,6 +12,7 @@
 #include "shm.h"
 
 #if defined(__riscv)
+#define TARGET_RISCV 1
 #include "riscv64/shm.h"
 #else
 #include "x86_64/shm.h"
@@ -80,7 +81,7 @@ void shared_close(SharedData* data)
     }
 }
 
-int world_size;
+static int world_size;
 
 // SHM based allreduce helper functions
 // buffer that holds shm name
@@ -141,6 +142,186 @@ void reduce_all_buffers(int start_elements,
     }
 }
 
+#define CVT_ADD_BF16(x)                                                 \
+    do {                                                                \
+        auto in##x##_val = CVT_BF16_TO_FP32(VLOAD_U16(buffers[x] + i)); \
+        inout_val = VADD_F32_2VL(inout_val, in##x##_val);               \
+    } while (0)
+
+void reduce_bf16_buffers(int start_elements, int num_elements, char* to_buffer, char** buffers)
+{
+    const int element_size = 2;
+#if TARGET_RISCV
+    size_t vl = __riscv_vsetvl_e16m1(num_elements);
+    vector_length_in_bytes = vl * element_size;
+#else
+    const int vl = vector_length_in_bytes / element_size;
+#endif
+    int main_elements = num_elements - (num_elements % vl);
+    int remain_elements = num_elements % vl;
+
+    // process aligned part
+#pragma omp parallel for
+    for (int i = start_elements * element_size; i < (start_elements + main_elements) * element_size;
+         i += vector_length_in_bytes) {
+        auto inout_val = CVT_BF16_TO_FP32(VLOAD_U16(buffers[0] + i));
+        switch (world_size) {
+            case 16: CVT_ADD_BF16(15);
+            case 15: CVT_ADD_BF16(14);
+            case 14: CVT_ADD_BF16(13);
+            case 13: CVT_ADD_BF16(12);
+            case 12: CVT_ADD_BF16(11);
+            case 11: CVT_ADD_BF16(10);
+            case 10: CVT_ADD_BF16(9);
+            case 9: CVT_ADD_BF16(8);
+            case 8: CVT_ADD_BF16(7);
+            case 7: CVT_ADD_BF16(6);
+            case 6: CVT_ADD_BF16(5);
+            case 5: CVT_ADD_BF16(4);
+            case 4: CVT_ADD_BF16(3);
+            case 3: CVT_ADD_BF16(2);
+            case 2: CVT_ADD_BF16(1);
+            case 1: break;
+            default:
+                for (int j = 1; j < world_size; j++) {
+                    auto in_val = CVT_BF16_TO_FP32(VLOAD_U16(buffers[j] + i));
+                    inout_val = VADD_F32_2VL(inout_val, in_val);
+                }
+        }
+        VSTORE_U16(to_buffer + i, CVT_FP32_TO_BF16(inout_val));
+    }
+
+    // process remaining part
+    int i = (start_elements + main_elements) * element_size;
+    while (remain_elements > 0) {
+        float val = 0.0f;
+        for (int j = 0; j < world_size; j++) { val += *(at::BFloat16*)(buffers[j] + i); }
+        *(at::BFloat16*)(to_buffer + i) = val;
+        remain_elements--;
+        i += element_size;
+    }
+}
+
+#define CVT_ADD_FP16(x)                                                 \
+    do {                                                                \
+        auto in##x##_val = CVT_FP16_TO_FP32(VLOAD_F16(buffers[x] + i)); \
+        inout_val = VADD_F32_2VL(inout_val, in##x##_val);               \
+    } while (0)
+
+void reduce_fp16_buffers(int start_elements, int num_elements, char* to_buffer, char** buffers)
+{
+    const int element_size = 2;
+#if TARGET_RISCV
+    size_t vl = __riscv_vsetvl_e16m1(num_elements);
+    vector_length_in_bytes = vl * element_size;
+#else
+    const int vl = vector_length_in_bytes / element_size;
+#endif
+    int main_elements = num_elements - (num_elements % vl);
+    int remain_elements = num_elements % vl;
+
+    // process aligned part
+#pragma omp parallel for
+    for (int i = start_elements * element_size; i < (start_elements + main_elements) * element_size;
+         i += vector_length_in_bytes) {
+        auto inout_val = CVT_FP16_TO_FP32(VLOAD_F16(buffers[0] + i));
+        switch (world_size) {
+            case 16: CVT_ADD_FP16(15);
+            case 15: CVT_ADD_FP16(14);
+            case 14: CVT_ADD_FP16(13);
+            case 13: CVT_ADD_FP16(12);
+            case 12: CVT_ADD_FP16(11);
+            case 11: CVT_ADD_FP16(10);
+            case 10: CVT_ADD_FP16(9);
+            case 9: CVT_ADD_FP16(8);
+            case 8: CVT_ADD_FP16(7);
+            case 7: CVT_ADD_FP16(6);
+            case 6: CVT_ADD_FP16(5);
+            case 5: CVT_ADD_FP16(4);
+            case 4: CVT_ADD_FP16(3);
+            case 3: CVT_ADD_FP16(2);
+            case 2: CVT_ADD_FP16(1);
+            case 1: break;
+            default:
+                for (int j = 1; j < world_size; j++) {
+                    auto in_val = CVT_FP16_TO_FP32(VLOAD_F16(buffers[j] + i));
+                    inout_val = VADD_F32_2VL(inout_val, in_val);
+                }
+        }
+        VSTORE_F16(to_buffer + i, CVT_FP32_TO_FP16(inout_val));
+    }
+
+    // process remaining part
+    int i = (start_elements + main_elements) * element_size;
+    while (remain_elements > 0) {
+        float val = 0.0f;
+        for (int j = 0; j < world_size; j++) { val += *(at::Half*)(buffers[j] + i); }
+        *(at::Half*)(to_buffer + i) = val;
+        remain_elements--;
+        i += element_size;
+    }
+}
+
+#define CVT_ADD_F32(x)                                \
+    do {                                              \
+        auto in##x##_val = VLOAD_F32(buffers[x] + i); \
+        inout_val = VADD_F32(inout_val, in##x##_val); \
+    } while (0)
+
+void reduce_fp32_buffers(int start_elements, int num_elements, char* to_buffer, char** buffers)
+{
+    const int element_size = 4;
+#if TARGET_RISCV
+    size_t vl = __riscv_vsetvl_e32m1(num_elements);
+    vector_length_in_bytes = vl * element_size;
+#else
+    const int vl = vector_length_in_bytes / element_size;
+#endif
+    int main_elements = num_elements - (num_elements % vl);
+    int remain_elements = num_elements % vl;
+
+    // process aligned part
+#pragma omp parallel for
+    for (int i = start_elements * element_size; i < (start_elements + main_elements) * element_size;
+         i += vector_length_in_bytes) {
+        auto inout_val = VLOAD_F32(buffers[0] + i);
+        switch (world_size) {
+            case 16: CVT_ADD_F32(15);
+            case 15: CVT_ADD_F32(14);
+            case 14: CVT_ADD_F32(13);
+            case 13: CVT_ADD_F32(12);
+            case 12: CVT_ADD_F32(11);
+            case 11: CVT_ADD_F32(10);
+            case 10: CVT_ADD_F32(9);
+            case 9: CVT_ADD_F32(8);
+            case 8: CVT_ADD_F32(7);
+            case 7: CVT_ADD_F32(6);
+            case 6: CVT_ADD_F32(5);
+            case 5: CVT_ADD_F32(4);
+            case 4: CVT_ADD_F32(3);
+            case 3: CVT_ADD_F32(2);
+            case 2: CVT_ADD_F32(1);
+            case 1: break;
+            default:
+                for (int j = 1; j < world_size; j++) {
+                    auto in_val = VLOAD_F32(buffers[j] + i);
+                    inout_val = VADD_F32(inout_val, in_val);
+                }
+        }
+        VSTORE_F32(to_buffer + i, inout_val);
+    }
+
+    // process remaining part
+    int i = (start_elements + main_elements) * element_size;
+    while (remain_elements > 0) {
+        float val = 0.0f;
+        for (int j = 0; j < world_size; j++) { val += *(float*)(buffers[j] + i); }
+        *(float*)(to_buffer + i) = val;
+        remain_elements--;
+        i += element_size;
+    }
+}
+
 static bool is_initialized = 0;
 static int world_rank;
 
@@ -198,6 +379,24 @@ void shm_initialize(int size, int rank, char* addr_string, char* port_string)
         distributed_buffer[0][i] = workspace[i]->buffer + BUFFER1_OFFSET(0);
         distributed_buffer[1][i] = workspace[i]->buffer + BUFFER1_OFFSET(1);
     }
+}
+
+void parallel_memcpy(void* to, void* from, size_t n_bytes)
+{
+#if TARGET_RISCV
+    size_t vl = __riscv_vsetvl_e8m1(n_bytes);
+    vector_length_in_bytes = vl;
+#endif
+    auto aligned_bytes = n_bytes - (n_bytes % vector_length_in_bytes);
+    // process aligned part
+#pragma omp parallel for
+    for (int i = 0; i < aligned_bytes; i += vector_length_in_bytes) {
+        auto val = VLOAD_U8((char*)from + i);
+        VSTORE_U8((char*)to + i, val);
+    }
+
+    // process remaining part
+    for (int i = aligned_bytes; i < n_bytes; i++) { *((char*)to + i) = *((char*)from + i); }
 }
 
 #define positive_mod(num, mod) ((((num) % (mod)) + (mod)) % (mod))
