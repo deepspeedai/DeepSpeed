@@ -98,7 +98,6 @@ def get_lst_from_rank0(lst: List[int]) -> None:
     dist.broadcast(lst_tensor, src=0, async_op=False)
 
     return [t.item() for t in lst_tensor.cpu()]
-    # return list(lst_tensor.cpu().numpy())
 
 
 @instrument_w_nvtx
