@@ -22,7 +22,7 @@ log_levels = {
 class LoggerFactory:
 
     @staticmethod
-    def create_logger(name=None, level=logging.INFO):
+    def create_logger(name=None, level=logging.WARNING):
         """create a logger
 
         Args:
@@ -58,7 +58,7 @@ class LoggerFactory:
         return logger_
 
 
-logger = LoggerFactory.create_logger(name="DeepSpeed", level=logging.INFO)
+logger = LoggerFactory.create_logger(name="DeepSpeed", level=logging.WARNING)
 
 
 @functools.lru_cache(None)
