@@ -35,7 +35,7 @@ from deepspeed.utils.debug import (debug_param2name_id_shape, debug_param2name_i
 from deepspeed.accelerator import get_accelerator
 from ..swap_tensor.partitioned_param_swapper import AsyncPartitionedParameterSwapper, PartitionedParamStatus
 from deepspeed.inference.quantization.utils import _quantize_param, WEIGHT_QUANTIZATION_LAYERS, wrap_quantized_functional, wrap_load_from_state_dict
-from deepspeed.runtime.torch_autocast import sort_dtypes, get_autocast_dtype, has_autocast_dtype
+from deepspeed.runtime.torch_autocast import sort_dtypes, get_comm_dtype, has_comm_dtype
 
 partitioned_param_data_shape = [0]
 zero_init_context = 0
@@ -51,8 +51,8 @@ DEFAULT_TENSOR_OVERRIDES = [DeepSpeedTensorOverride.dtype, DeepSpeedTensorOverri
 
 
 def get_allgather_dtype(param, param_ds_tensor):
-    autocast = has_autocast_dtype(param)
-    return get_autocast_dtype(param) if autocast else param_ds_tensor.dtype
+    autocast = has_comm_dtype(param)
+    return get_comm_dtype(param) if autocast else param_ds_tensor.dtype
 
 
 class NoGatherHandle:

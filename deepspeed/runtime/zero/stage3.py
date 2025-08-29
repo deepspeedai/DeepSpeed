@@ -19,7 +19,7 @@ from deepspeed.runtime.base_optimizer import ZeROOptimizer
 from deepspeed.utils import logger
 from deepspeed.utils.torch import register_grad_hook
 from deepspeed.runtime.fp16.loss_scaler import CreateLossScaler
-from deepspeed.runtime.torch_autocast import get_all_autocast_dtypes, is_autocast_initialized, sort_dtypes
+from deepspeed.runtime.torch_autocast import get_autocast_dtype, get_all_comm_dtypes, is_autocast_initialized, sort_dtypes
 from deepspeed.runtime.comm.coalesced_collectives import reduce_scatter_coalesced, all_to_all_quant_reduce, all_to_all_loco_quant_reduce
 from deepspeed.runtime.utils import inf, is_model_parallel_parameter, get_only_unique_item, mask_nan_or_inf_with_val_inplace
 from deepspeed.runtime.zero.partition_parameters import *
@@ -392,12 +392,13 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
         # map between param_id and bool to specify if a param is in this partition
         self.is_param_in_current_partition = {}
 
+        self.torch_autocast_gradscaler = None
         if is_autocast_initialized():
-            comm_dtypes = get_all_autocast_dtypes([p for params in self.fp16_groups for p in params])
-            self.torch_autocast_gradscaler = torch.amp.GradScaler(device=get_accelerator().device_name())
+            comm_dtypes = get_all_comm_dtypes([p for params in self.fp16_groups for p in params])
+            if get_autocast_dtype() == torch.float16:
+                self.torch_autocast_gradscaler = torch.amp.GradScaler(device=get_accelerator().device_name())
         else:
             comm_dtypes = {self.communication_data_type}
-            self.torch_autocast_gradscaler = None
 
         self.ipg_buckets: Dict[torch.dtype, IPGBucketZ3] = {dtype: IPGBucketZ3() for dtype in comm_dtypes}
 
@@ -985,19 +986,27 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
     def _optimizer_step(self, sub_group_id):
         param_group_id = self.sub_group_to_group_id[sub_group_id]
         fp32_param = self.fp32_partitioned_groups_flat[sub_group_id]
+
+        def step_with_gradscaler(optimizer):
+            if self.torch_autocast_gradscaler:
+                self.torch_autocast_gradscaler.step(optimizer)
+                self.torch_autocast_gradscaler.update()
+            else:
+                optimizer.step()
+
         if self.offload_optimizer:
             cur_device = self.subgroup_to_device[sub_group_id]
             if cur_device == 'cpu':
                 self.optimizer.param_groups[param_group_id]['params'] = [fp32_param]
-                cpu_loss = self.optimizer.step()
+                step_with_gradscaler(self.optimizer)
                 self.optimizer.param_groups[param_group_id]['params'] = []
             else:
                 self.backup_optimizer.param_groups[param_group_id]['params'] = [fp32_param]
-                gpu_loss = self.backup_optimizer.step()
+                step_with_gradscaler(self.backup_optimizer)
                 self.backup_optimizer.param_groups[param_group_id]['params'] = []
         else:
             self.optimizer.param_groups[param_group_id]['params'] = [fp32_param]
-            self.optimizer.step()
+            step_with_gradscaler(self.optimizer)
             self.optimizer.param_groups[param_group_id]['params'] = []
 
     def _swappable_optimizer_subgroup(self, sub_group_id):
@@ -2301,6 +2310,8 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
         if self.custom_loss_scaler:
             scaled_loss = self.external_loss_scale * loss
             scaled_loss.backward()
+        elif self.torch_autocast_gradscaler:
+            self.torch_autocast_gradscaler.scale(loss).backward(retain_graph=retain_graph)
         else:
             self.loss_scaler.backward(loss.float(), retain_graph=retain_graph)
 
