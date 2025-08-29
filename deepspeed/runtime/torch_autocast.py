@@ -16,8 +16,12 @@ LOWER_PRECISION_SAFE_MODULES = [
     torch.nn.Conv3d,
 ]
 
-TORCH_AUTOCAST_INITIALIZED = False
+PARAM_COMM_DTYPE_ATTR_NAME = "comm_dtype"
 _WARNED_NESTED_AUTOCAST = False
+
+# TODO: Avoid using global variables
+TORCH_AUTOCAST_INITIALIZED = False
+TORCH_AUTOCAST_DTYPE = False
 
 
 def _validate_auto_cast_settings(engine):
@@ -53,10 +57,12 @@ def init_autocast_params(engine, dtype: torch.dtype,
     for module in model.modules():
         if module.__class__ in lower_precision_safe_module_classes:
             for p in module.parameters(recurse=False):
-                p.autocast_dtype = dtype
+                setattr(p, PARAM_COMM_DTYPE_ATTR_NAME, dtype)
 
     global TORCH_AUTOCAST_INITIALIZED
     TORCH_AUTOCAST_INITIALIZED = True
+    global TORCH_AUTOCAST_DTYPE
+    TORCH_AUTOCAST_DTYPE = dtype
 
 
 def is_autocast_initialized() -> bool:
@@ -67,16 +73,20 @@ def get_default_autocast_lower_precision_modules() -> List[str]:
     return [f"{cls.__module__}.{cls.__name__}" for cls in LOWER_PRECISION_SAFE_MODULES]
 
 
-def get_autocast_dtype(param: torch.nn.Parameter) -> torch.dtype:
-    return param.autocast_dtype if hasattr(param, "autocast_dtype") else param.dtype
+def get_autocast_dtype() -> torch.dtype:
+    return TORCH_AUTOCAST_DTYPE
 
 
-def has_autocast_dtype(param: torch.nn.Parameter) -> bool:
-    return hasattr(param, "autocast_dtype")
+def has_comm_dtype(param: torch.nn.Parameter) -> bool:
+    return hasattr(param, PARAM_COMM_DTYPE_ATTR_NAME)
 
 
-def get_all_autocast_dtypes(params: Iterable) -> Set[torch.dtype]:
-    return {get_autocast_dtype(p) for p in params}
+def get_comm_dtype(param: torch.nn.Parameter) -> torch.dtype:
+    return getattr(param, PARAM_COMM_DTYPE_ATTR_NAME, param.dtype)
+
+
+def get_all_comm_dtypes(params: Iterable) -> Set[torch.dtype]:
+    return {get_comm_dtype(p) for p in params}
 
 
 def sort_dtypes(dtypes: List[torch.dtype]) -> List[torch.dtype]:
