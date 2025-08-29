@@ -95,6 +95,7 @@ def get_lst_from_rank0(lst: List[int]) -> None:
         requires_grad=False,
     )
     dist.broadcast(lst_tensor, src=0, async_op=False)
+
     return list(lst_tensor.cpu().numpy())
 
 
