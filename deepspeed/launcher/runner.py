@@ -14,6 +14,7 @@ import re
 import sys
 import json
 import base64
+import logging
 import argparse
 import subprocess
 import collections
@@ -211,6 +212,8 @@ def parse_args(args=None):
                         type=str,
                         default=None,
                         help="Python virtual environment activation script for job.")
+
+    parser.add_argument("-q", "--quiet", action="store_true", help="Turns launcher logging off")
 
     return parser.parse_args(args=args)
 
@@ -424,6 +427,9 @@ def parse_num_nodes(str_num_nodes: str, elastic_training: bool):
 def main(args=None):
     args = parse_args(args)
 
+    if args.quiet:
+        logger.setLevel(logging.WARNING)
+
     if args.elastic_training:
         assert args.master_addr != "", "Master Addr is required when elastic training is enabled"
 
@@ -553,6 +559,9 @@ def main(args=None):
             deepspeed_launch.append("--bind_cores_to_rank")
         if args.bind_core_list is not None:
             deepspeed_launch.append(f"--bind_core_list={args.bind_core_list}")
+        if args.quiet:
+            deepspeed_launch.append("--quiet")
+
         cmd = deepspeed_launch + [args.user_script] + args.user_args
     else:
         args.launcher = args.launcher.lower()

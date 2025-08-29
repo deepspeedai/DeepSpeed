@@ -522,7 +522,7 @@ class OpBuilder(ABC):
                             extra_compile_args={'cxx': self.strip_empty_entries(self.cxx_args())},
                             extra_link_args=self.strip_empty_entries(self.extra_ldflags()))
 
-    def load(self, verbose=True):
+    def load(self, verbose=False):
         if self.name in __class__._loaded_ops:
             return __class__._loaded_ops[self.name]
 

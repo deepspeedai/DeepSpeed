@@ -16,6 +16,7 @@ import subprocess
 import os
 import json
 import base64
+import logging
 import time
 import signal
 import psutil
@@ -102,6 +103,8 @@ def parse_args():
                         "numbers and range. i.e. 1,3-5,7 => [1,3,4,5,7].  When not "
                         "specified, all cores on system would be used rank binding")
 
+    parser.add_argument("-q", "--quiet", action="store_true", help="Turns launcher logging off")
+
     # positional
     parser.add_argument("training_script",
                         type=str,
@@ -133,6 +136,9 @@ def terminate_process_tree(pid):
 def main():
     args = parse_args()
     current_env = os.environ.copy()
+
+    if args.quiet:
+        logger.setLevel(logging.WARNING)
 
     for k in current_env.keys():
         if "NCCL" in k:
