@@ -229,7 +229,7 @@ class TestOptimizerImplementation(DistributedTest):
         is_supported[(None, 'fp16', None)] = True
         is_supported[(None, 'fp16', 'fp16')] = True
         # BF16 Wrapper
-        is_supported[(None, 'bf16', 'fp32')] = True
+        is_supported[(None, 'bf16', 'bf16')] = True
         is_supported[(None, 'bf16', None)] = True
         # No Wrapper
         is_supported[(None, 'fp32', None)] = True
