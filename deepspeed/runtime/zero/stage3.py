@@ -177,6 +177,7 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
         zero_module_granularity_threshold=0,
         zeropp_loco_param=None,
         log_trace_cache_warnings=False,
+        enable_sanity_checks=False,
     ):
         see_memory_usage("Stage 3 initialize beginning", force=True)
 
@@ -220,6 +221,7 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
         self.params_in_nvme_and_cpu = False
         self.max_params_in_cpu = 0
         self.partial_offload = offload_ratio
+        self.enable_sanity_checks = enable_sanity_checks
 
         #num of ranks in a ZeRO param partitioning group
         self.zero_hpz_partition_size = zero_hpz_partition_size
@@ -1302,7 +1304,7 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
 
     @instrument_w_nvtx
     @torch.no_grad()
-    def __reduce_and_partition_ipg_grads(self, communication_data_type: torch.dtype, safe_mode: bool = False) -> None:
+    def __reduce_and_partition_ipg_grads(self, communication_data_type: torch.dtype) -> None:
         bucket = self.ipg_buckets[communication_data_type]
         params_in_bucket = bucket.params
 
@@ -1322,7 +1324,7 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
             self.param_reduce_events.popleft().synchronize()
 
         with get_accelerator().stream(self.reduce_and_partition_stream):
-            if safe_mode:
+            if self.enable_sanity_checks:
                 assert_ints_same_as_other_ranks([p.ds_id for p in params_in_bucket])
 
             if self.contiguous_gradients and bucket.elements <= self.reduce_bucket_size and not self.reduce_scatter:
