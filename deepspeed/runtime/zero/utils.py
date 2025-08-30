@@ -113,6 +113,7 @@ def assert_ints_same_as_other_ranks(ints: List[int]) -> None:
     rank0_ints = get_lst_from_rank0(ints)
     if ints != rank0_ints:
         raise RuntimeError(f"Detected a disagreement on list contents between rank0 and rank{dist.get_rank()}: "
+                           f"\n list length: {len(ints)}"
                            f"\n rank0: {rank0_ints} "
                            f"\n rank{dist.get_rank()}: {ints}")
 
