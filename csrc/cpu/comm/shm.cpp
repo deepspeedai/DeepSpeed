@@ -7,10 +7,16 @@
 
 #include <ATen/ATen.h>
 #include <fcntl.h>
-#include <immintrin.h>
 #include <semaphore.h>
 #include <sys/mman.h>
 #include "shm.h"
+
+#if defined(__riscv)
+#define TARGET_RISCV 1
+#include "riscv64/shm.h"
+#else
+#include "x86_64/shm.h"
+#endif
 
 // #define DO_PROFILE
 #ifdef DO_PROFILE
@@ -115,52 +121,6 @@ void wait_buffer_state_until_2(int index,
     }
 }
 
-__m512 cvt_bf16_to_fp32(const __m256i src) __attribute__((target("avx512bw")));
-inline __m512 cvt_bf16_to_fp32(const __m256i src)
-{
-    auto y = _mm512_cvtepu16_epi32(src);
-    return _mm512_castsi512_ps(_mm512_bslli_epi128(y, 2));
-}
-
-inline __m256i cvt_fp32_to_bf16(const __m512 src) __attribute__((target("avx512bw")));
-inline __m256i cvt_fp32_to_bf16(const __m512 src)
-{
-    __m512i value = _mm512_castps_si512(src);
-    __m512i nan = _mm512_set1_epi32(0xffff);
-    auto mask_value = _mm512_cmp_ps_mask(src, src, _CMP_ORD_Q);
-    __m512i ones = _mm512_set1_epi32(0x1);
-    __m512i vec_bias = _mm512_set1_epi32(0x7fff);
-    // uint32_t lsb = (input >> 16) & 1;
-    auto t_value = _mm512_and_si512(_mm512_srli_epi32(value, 16), ones);
-    // uint32_t rounding_bias = 0x7fff + lsb;
-    t_value = _mm512_add_epi32(t_value, vec_bias);
-    // input += rounding_bias;
-    t_value = _mm512_add_epi32(t_value, value);
-    // input = input >> 16;
-    t_value = _mm512_srli_epi32(t_value, 16);
-    // Check NaN before converting back to bf16
-    t_value = _mm512_mask_blend_epi32(mask_value, nan, t_value);
-    return _mm512_cvtusepi32_epi16(t_value);
-}
-
-__m512 cvt_fp16_to_fp32(const __m256i src) __attribute__((target("avx512bw")));
-inline __m512 cvt_fp16_to_fp32(const __m256i src) { return _mm512_cvtph_ps(src); }
-
-inline __m256i cvt_fp32_to_fp16(const __m512 src) __attribute__((target("avx512bw")));
-inline __m256i cvt_fp32_to_fp16(const __m512 src)
-{
-    return _mm512_cvtps_ph(src, (_MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC));
-}
-
-void reduce_bf16_buffers(int start_elements, int num_elements, char* to_buffer, char** buffers)
-    __attribute__((target("avx512bw")));
-
-void reduce_fp16_buffers(int start_elements, int num_elements, char* to_buffer, char** buffers)
-    __attribute__((target("avx512bw")));
-
-void reduce_fp32_buffers(int start_elements, int num_elements, char* to_buffer, char** buffers)
-    __attribute__((target("avx512bw")));
-
 void reduce_all_buffers(int start_elements,
                         int num_elements,
                         c10::ScalarType scalar_type,
@@ -182,30 +142,29 @@ void reduce_all_buffers(int start_elements,
     }
 }
 
-#define CVT_ADD_BF16(x)                                                                      \
-    do {                                                                                     \
-        auto in##x##_val = cvt_bf16_to_fp32(_mm256_loadu_si256((__m256i*)(buffers[x] + i))); \
-        inout_val = _mm512_add_ps(inout_val, in##x##_val);                                   \
+#define CVT_ADD_BF16(x)                                                 \
+    do {                                                                \
+        auto in##x##_val = CVT_BF16_TO_FP32(VLOAD_U16(buffers[x] + i)); \
+        inout_val = VADD_F32_2VL(inout_val, in##x##_val);               \
     } while (0)
-
-// Reduce functions down below use vectorized algorithm, the number of bytes processed each
-// iteration depends on vector length.  256bit vector ==> 32 bytes, 512bit vector ==> 64 bytes
-// If you change implementation of reduce_bf16_buffers, etc. , check whether this number needs
-// to be changed
-#define VECTOR_LENGTH_IN_BYTES 32
 
 void reduce_bf16_buffers(int start_elements, int num_elements, char* to_buffer, char** buffers)
 {
     const int element_size = 2;
-    const int vector_length = VECTOR_LENGTH_IN_BYTES / element_size;
-    int main_elements = num_elements - (num_elements % vector_length);
-    int remain_elements = num_elements % vector_length;
+#if TARGET_RISCV
+    size_t vl = __riscv_vsetvl_e16m1(num_elements);
+    vector_length_in_bytes = vl * element_size;
+#else
+    const int vl = vector_length_in_bytes / element_size;
+#endif
+    int main_elements = num_elements - (num_elements % vl);
+    int remain_elements = num_elements % vl;
 
     // process aligned part
 #pragma omp parallel for
     for (int i = start_elements * element_size; i < (start_elements + main_elements) * element_size;
-         i += VECTOR_LENGTH_IN_BYTES) {
-        auto inout_val = cvt_bf16_to_fp32(_mm256_loadu_si256((__m256i*)(buffers[0] + i)));
+         i += vector_length_in_bytes) {
+        auto inout_val = CVT_BF16_TO_FP32(VLOAD_U16(buffers[0] + i));
         switch (world_size) {
             case 16: CVT_ADD_BF16(15);
             case 15: CVT_ADD_BF16(14);
@@ -225,11 +184,11 @@ void reduce_bf16_buffers(int start_elements, int num_elements, char* to_buffer, 
             case 1: break;
             default:
                 for (int j = 1; j < world_size; j++) {
-                    auto in_val = cvt_bf16_to_fp32(_mm256_loadu_si256((__m256i*)(buffers[j] + i)));
-                    inout_val = _mm512_add_ps(inout_val, in_val);
+                    auto in_val = CVT_BF16_TO_FP32(VLOAD_U16(buffers[j] + i));
+                    inout_val = VADD_F32_2VL(inout_val, in_val);
                 }
         }
-        _mm256_storeu_si256((__m256i*)(to_buffer + i), cvt_fp32_to_bf16(inout_val));
+        VSTORE_U16(to_buffer + i, CVT_FP32_TO_BF16(inout_val));
     }
 
     // process remaining part
@@ -243,24 +202,29 @@ void reduce_bf16_buffers(int start_elements, int num_elements, char* to_buffer, 
     }
 }
 
-#define CVT_ADD_FP16(x)                                                                      \
-    do {                                                                                     \
-        auto in##x##_val = cvt_fp16_to_fp32(_mm256_loadu_si256((__m256i*)(buffers[x] + i))); \
-        inout_val = _mm512_add_ps(inout_val, in##x##_val);                                   \
+#define CVT_ADD_FP16(x)                                                 \
+    do {                                                                \
+        auto in##x##_val = CVT_FP16_TO_FP32(VLOAD_F16(buffers[x] + i)); \
+        inout_val = VADD_F32_2VL(inout_val, in##x##_val);               \
     } while (0)
 
 void reduce_fp16_buffers(int start_elements, int num_elements, char* to_buffer, char** buffers)
 {
     const int element_size = 2;
-    const int vector_length = VECTOR_LENGTH_IN_BYTES / element_size;
-    int main_elements = num_elements - (num_elements % vector_length);
-    int remain_elements = num_elements % vector_length;
+#if TARGET_RISCV
+    size_t vl = __riscv_vsetvl_e16m1(num_elements);
+    vector_length_in_bytes = vl * element_size;
+#else
+    const int vl = vector_length_in_bytes / element_size;
+#endif
+    int main_elements = num_elements - (num_elements % vl);
+    int remain_elements = num_elements % vl;
 
     // process aligned part
 #pragma omp parallel for
     for (int i = start_elements * element_size; i < (start_elements + main_elements) * element_size;
-         i += VECTOR_LENGTH_IN_BYTES) {
-        auto inout_val = cvt_fp16_to_fp32(_mm256_loadu_si256((__m256i*)(buffers[0] + i)));
+         i += vector_length_in_bytes) {
+        auto inout_val = CVT_FP16_TO_FP32(VLOAD_F16(buffers[0] + i));
         switch (world_size) {
             case 16: CVT_ADD_FP16(15);
             case 15: CVT_ADD_FP16(14);
@@ -280,11 +244,11 @@ void reduce_fp16_buffers(int start_elements, int num_elements, char* to_buffer, 
             case 1: break;
             default:
                 for (int j = 1; j < world_size; j++) {
-                    auto in_val = cvt_fp16_to_fp32(_mm256_loadu_si256((__m256i*)(buffers[j] + i)));
-                    inout_val = _mm512_add_ps(inout_val, in_val);
+                    auto in_val = CVT_FP16_TO_FP32(VLOAD_F16(buffers[j] + i));
+                    inout_val = VADD_F32_2VL(inout_val, in_val);
                 }
         }
-        _mm256_storeu_si256((__m256i*)(to_buffer + i), cvt_fp32_to_fp16(inout_val));
+        VSTORE_F16(to_buffer + i, CVT_FP32_TO_FP16(inout_val));
     }
 
     // process remaining part
@@ -298,24 +262,29 @@ void reduce_fp16_buffers(int start_elements, int num_elements, char* to_buffer, 
     }
 }
 
-#define CVT_ADD_F32(x)                                                \
-    do {                                                              \
-        auto in##x##_val = _mm256_loadu_ps((float*)(buffers[x] + i)); \
-        inout_val = _mm256_add_ps(inout_val, in##x##_val);            \
+#define CVT_ADD_F32(x)                                \
+    do {                                              \
+        auto in##x##_val = VLOAD_F32(buffers[x] + i); \
+        inout_val = VADD_F32(inout_val, in##x##_val); \
     } while (0)
 
 void reduce_fp32_buffers(int start_elements, int num_elements, char* to_buffer, char** buffers)
 {
     const int element_size = 4;
-    const int vector_length = VECTOR_LENGTH_IN_BYTES / element_size;
-    int main_elements = num_elements - (num_elements % vector_length);
-    int remain_elements = num_elements % vector_length;
+#if TARGET_RISCV
+    size_t vl = __riscv_vsetvl_e32m1(num_elements);
+    vector_length_in_bytes = vl * element_size;
+#else
+    const int vl = vector_length_in_bytes / element_size;
+#endif
+    int main_elements = num_elements - (num_elements % vl);
+    int remain_elements = num_elements % vl;
 
     // process aligned part
 #pragma omp parallel for
     for (int i = start_elements * element_size; i < (start_elements + main_elements) * element_size;
-         i += VECTOR_LENGTH_IN_BYTES) {
-        auto inout_val = _mm256_loadu_ps((float*)(buffers[0] + i));
+         i += vector_length_in_bytes) {
+        auto inout_val = VLOAD_F32(buffers[0] + i);
         switch (world_size) {
             case 16: CVT_ADD_F32(15);
             case 15: CVT_ADD_F32(14);
@@ -335,11 +304,11 @@ void reduce_fp32_buffers(int start_elements, int num_elements, char* to_buffer, 
             case 1: break;
             default:
                 for (int j = 1; j < world_size; j++) {
-                    auto in_val = _mm256_loadu_ps((float*)(buffers[j] + i));
-                    inout_val = _mm256_add_ps(inout_val, in_val);
+                    auto in_val = VLOAD_F32(buffers[j] + i);
+                    inout_val = VADD_F32(inout_val, in_val);
                 }
         }
-        _mm256_storeu_ps((float*)(to_buffer + i), inout_val);
+        VSTORE_F32(to_buffer + i, inout_val);
     }
 
     // process remaining part
@@ -412,16 +381,18 @@ void shm_initialize(int size, int rank, char* addr_string, char* port_string)
     }
 }
 
-static void parallel_memcpy(void* to, void* from, size_t n_bytes)
-    __attribute__((target("avx512bw")));
-static void parallel_memcpy(void* to, void* from, size_t n_bytes)
+void parallel_memcpy(void* to, void* from, size_t n_bytes)
 {
-    auto aligned_bytes = n_bytes - (n_bytes % VECTOR_LENGTH_IN_BYTES);
+#if TARGET_RISCV
+    size_t vl = __riscv_vsetvl_e8m1(n_bytes);
+    vector_length_in_bytes = vl;
+#endif
+    auto aligned_bytes = n_bytes - (n_bytes % vector_length_in_bytes);
     // process aligned part
 #pragma omp parallel for
-    for (int i = 0; i < aligned_bytes; i += VECTOR_LENGTH_IN_BYTES) {
-        auto val = _mm256_loadu_si256((__m256i*)((char*)from + i));
-        _mm256_storeu_si256((__m256i*)((char*)to + i), val);
+    for (int i = 0; i < aligned_bytes; i += vector_length_in_bytes) {
+        auto val = VLOAD_U8((char*)from + i);
+        VSTORE_U8((char*)to + i, val);
     }
 
     // process remaining part
