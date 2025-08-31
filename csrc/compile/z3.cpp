@@ -427,10 +427,13 @@ void register_z3_param(long ds_id,
     at::Tensor local_count_tensor = torch::tensor({local_count}, count_options);
     std::vector<at::Tensor> all_counts(world_size);
     for (int i = 0; i < world_size; ++i) { all_counts[i] = torch::empty_like(local_count_tensor); }
-    process_group
-        ->allgather(std::vector<std::vector<at::Tensor>>{all_counts},
-                    std::vector<at::Tensor>{local_count_tensor})
-        ->wait();
+    std::vector<std::vector<at::Tensor>> all_counts_buffer{all_counts};
+    std::vector<at::Tensor> local_count_buffer{local_count_tensor};
+    // Build lvalue buffers for output and input as required by ProcessGroup::allgather
+    std::vector<std::vector<at::Tensor>> output_tensors(world_size);
+    for (int i = 0; i < world_size; ++i) { output_tensors[i].push_back(all_counts[i]); }
+    std::vector<at::Tensor> input_tensors = {local_count_tensor};
+    process_group->allgather(output_tensors, input_tensors)->wait();
 
     int64_t reference = local_count;
     for (int i = 0; i < world_size; ++i) {
