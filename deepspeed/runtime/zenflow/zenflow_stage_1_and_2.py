@@ -4,6 +4,7 @@
 # DeepSpeed Team
 
 import os
+import math
 import psutil
 import torch
 from deepspeed import comm as dist
@@ -95,7 +96,7 @@ class ZenFlowZeroOptimizer(DeepSpeedZeroOptimizer):
         self.micro_step = -1
         self.full_warm_up_rounds = zenflow_config.full_warm_up_rounds
         self.offload_selective_optimizer = zenflow_config.offload
-        self.pt_reserved_cores = zenflow_config.pt_reserved_cores
+        self.pt_reserved_cores_perc = zenflow_config.pt_reserved_cores_perc
 
         if self.offload_selective_optimizer:
             assert overlap_comm, "offload selective optimizer should be used with overlap_comm"
@@ -815,7 +816,7 @@ class ZenFlowZeroOptimizerParallel(ZenFlowZeroOptimizer):
             my_size = total_rank
             cores_per_rank = num_available_phy_cores // my_size
             current_affinity = available_phy_cores[my_rank * cores_per_rank:(my_rank + 1) * cores_per_rank]
-        pt_num_cores = self.pt_reserved_cores
+        pt_num_cores = math.ceil(self.pt_reserved_cores_perc * len(current_affinity))
         if pt_num_cores > 0 and pt_num_cores < len(current_affinity):
             zf_affinity = current_affinity[pt_num_cores:]
             pt_affinity = current_affinity[:pt_num_cores]
