@@ -67,6 +67,23 @@ def is_zero_supported_optimizer(optimizer):
     return type(optimizer) in ZERO_SUPPORTED_OPTIMIZERS
 
 
+@instrument_w_nvtx
+def assert_lst_len_same_as_other_ranks(lst: List[int]) -> None:
+    rank0_len_tensor = torch.tensor(
+        len(lst) if dist.get_rank() == 0 else -1,
+        dtype=int,
+        device=torch.device(get_accelerator().device_name(os.environ["LOCAL_RANK"])),
+        requires_grad=False,
+    )
+    local_list_length = len(lst)
+    dist.broadcast(rank0_len_tensor, src=0, async_op=False)
+    rank0_list_length = rank0_len_tensor.cpu().item()
+    if rank0_list_length != local_list_length:
+        raise RuntimeError(f"Detected a disagreement on list length between rank0 and rank{dist.get_rank()}: "
+                           f"\n rank0: {rank0_list_length} "
+                           f"\n rank{dist.get_rank()}: {local_list_length}")
+
+
 def get_lst_from_rank0(lst: List[int]) -> None:
     """
     NOTE: creates both communication and synchronization overhead so should be used
@@ -80,7 +97,7 @@ def get_lst_from_rank0(lst: List[int]) -> None:
     )
     dist.broadcast(lst_tensor, src=0, async_op=False)
 
-    return list(lst_tensor.cpu().numpy())
+    return [t.item() for t in lst_tensor.cpu()]
 
 
 @instrument_w_nvtx
@@ -92,10 +109,13 @@ def assert_ints_same_as_other_ranks(ints: List[int]) -> None:
     takes a list of ints from each rank and ensures that they are the same
     across ranks, throwing an exception if they are not.
     """
+    assert_lst_len_same_as_other_ranks(ints)
     rank0_ints = get_lst_from_rank0(ints)
     if ints != rank0_ints:
-        raise RuntimeError(f"disagreement between rank0 and rank{dist.get_rank()}: "
-                           f"rank0: {rank0_ints}, rank{dist.get_rank()}: {ints}")
+        raise RuntimeError(f"Detected a disagreement on list contents between rank0 and rank{dist.get_rank()}: "
+                           f"\n list length: {len(ints)}"
+                           f"\n rank0: {rank0_ints} "
+                           f"\n rank{dist.get_rank()}: {ints}")
 
 
 def is_builtin_type(obj):

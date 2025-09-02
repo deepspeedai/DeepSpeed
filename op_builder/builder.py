@@ -420,6 +420,8 @@ class OpBuilder(ABC):
         if cpu_info['arch'].startswith('PPC_'):
             # gcc does not provide -march on PowerPC, use -mcpu instead
             return '-mcpu=native'
+        elif cpu_info['arch'].startswith('riscv64'):
+            return '-march=rv64gc'
         return '-march=native'
 
     def get_cuda_compile_flag(self):
@@ -455,6 +457,8 @@ class OpBuilder(ABC):
                 cpu_info['flags'] += 'avx2'
         elif 'ppc64le' in result:
             cpu_info['arch'] = "PPC_"
+        elif 'riscv64' in result:
+            cpu_info['arch'] = "riscv64"
 
         return cpu_info
 
