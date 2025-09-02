@@ -28,7 +28,7 @@ from .multinode_runner import PDSHRunner, OpenMPIRunner, MVAPICHRunner, SlurmRun
 from .constants import PDSH_LAUNCHER, OPENMPI_LAUNCHER, MVAPICH_LAUNCHER, SLURM_LAUNCHER, MPICH_LAUNCHER, IMPI_LAUNCHER
 from ..constants import TORCH_DISTRIBUTED_DEFAULT_PORT
 from ..nebula.constants import NEBULA_EXPORT_ENVS
-from ..utils import logger
+from ..utils import logger, set_log_level_from_string
 
 from ..autotuning import Autotuner
 from deepspeed.accelerator import get_accelerator
@@ -211,6 +211,18 @@ def parse_args(args=None):
                         type=str,
                         default=None,
                         help="Python virtual environment activation script for job.")
+
+    # TODOV1: change the default to 'warning'
+    parser.add_argument("--log_level",
+                        type=str,
+                        default="info",
+                        choices=['debug', 'info', 'warning', 'error', 'critical'],
+                        help="Set runner loglevel. The default is 'info'")
+
+    parser.add_argument("-q",
+                        "--quiet",
+                        action="store_true",
+                        help="Try to be as quiet as possible. Aliases to `--log_level error`")
 
     return parser.parse_args(args=args)
 
@@ -424,6 +436,10 @@ def parse_num_nodes(str_num_nodes: str, elastic_training: bool):
 def main(args=None):
     args = parse_args(args)
 
+    if args.quiet:
+        args.log_level = "error"
+    set_log_level_from_string(args.log_level)
+
     if args.elastic_training:
         assert args.master_addr != "", "Master Addr is required when elastic training is enabled"
 
@@ -553,6 +569,10 @@ def main(args=None):
             deepspeed_launch.append("--bind_cores_to_rank")
         if args.bind_core_list is not None:
             deepspeed_launch.append(f"--bind_core_list={args.bind_core_list}")
+        if args.quiet:
+            deepspeed_launch.append("--quiet")
+        deepspeed_launch.append(f"--log_level={args.log_level}")
+
         cmd = deepspeed_launch + [args.user_script] + args.user_args
     else:
         args.launcher = args.launcher.lower()
