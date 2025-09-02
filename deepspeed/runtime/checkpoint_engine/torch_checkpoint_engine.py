@@ -24,7 +24,7 @@ class TorchCheckpointEngine(CheckpointEngine):
         log_dist(f'[{ENGINE_NAME}] Initialized with serialization = {self.zipfile_serialization}', ranks=[0])
 
     def create(self, info: CheckpointCommitInfo):
-        log_dist(f"[Torch] Checkpoint {info.tag} is begin to save!", ranks=[0])
+        log_dist(f"[Torch] Checkpoint {info.tag} is about to be saved!", ranks=[0])
         pass
 
     def save(self, state_dict, path: str):
