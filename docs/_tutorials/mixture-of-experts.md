@@ -63,7 +63,7 @@ Updated with MoE Layers
 
 ### Pyramid-Residual MoE
 
-Recently, we proposed a novel [Pyramid-Residual MoE](https://arxiv.org/abs/2201.05596) (PR-MoE) model architecture. To create such an MoE model, the users need to do two additional things: 
+Recently, we proposed a novel [Pyramid-Residual MoE](https://arxiv.org/abs/2201.05596) (PR-MoE) model architecture. To create such an MoE model, the users need to do two additional things:
 
 1. To make a pyramid structure, pass `num_experts` as a list e.g. `[4, 8]`.
 2. Use the ```use_residual``` flag to indicate that the MoE layer is now a Residual MoE layer.
