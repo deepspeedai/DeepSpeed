@@ -26,7 +26,7 @@ def search_error(filename):
     return None
 
 
-def was_interruptted(filename):
+def was_interrupted(filename):
     if not os.path.exists(filename):
         return "stderr.log does not exist"
     with open(filename) as f:
@@ -422,7 +422,7 @@ def memory_to_string(n, postfix="", units=None, precision=2):
         elif n // 10**6 > 0:
             return str(round(n / 1024**2, precision)) + " M" + postfix
         elif n // 10**3 > 0:
-            return str(round(n / 1014, precision)) + " K" + postfix
+            return str(round(n / 1024, precision)) + " K" + postfix
         else:
             return str(n) + " "
     else:

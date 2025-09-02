@@ -1059,6 +1059,9 @@ class DeepSpeedEngine(Module):
     def zero_log_trace_cache_warnings(self):
         return self._config.zero_config.log_trace_cache_warnings
 
+    def is_sanity_checks_enabled(self):
+        return self._config.zero_config.enable_sanity_checks
+
     def dump_state(self):
         return self._config.dump_state
 
@@ -1433,7 +1436,8 @@ class DeepSpeedEngine(Module):
                 basic_optimizer = client_optimizer(model_parameters)
                 log_dist('Using client callable to create basic optimizer', ranks=[0])
 
-            if self.zero_use_cpu_optimizer() and not isinstance(basic_optimizer, deepspeed.ops.adam.DeepSpeedCPUAdam):
+            if (self.zero_use_cpu_optimizer() and not isinstance(basic_optimizer, deepspeed.ops.adam.DeepSpeedCPUAdam)
+                    and not isinstance(basic_optimizer, deepspeed.ops.lion.DeepSpeedCPULion)):
                 if self.zero_force_ds_cpu_optimizer():
                     msg = f'You are using ZeRO-Offload with a client provided optimizer ({type(basic_optimizer)}) which in most cases will yield poor performance. Please either use deepspeed.ops.adam.DeepSpeedCPUAdam or set an optimizer in your ds-config (https://www.deepspeed.ai/docs/config-json/#optimizer-parameters). If you really want to use a custom optimizer w. ZeRO-Offload and understand the performance impacts you can also set <"zero_force_ds_cpu_optimizer": false> in your configuration file.'
                     raise ZeRORuntimeException(msg)
@@ -1859,6 +1863,7 @@ class DeepSpeedEngine(Module):
                     zero_module_granularity_threshold=self.zero_module_granularity_threshold(),
                     zeropp_loco_param=self.zeropp_loco_param(),
                     log_trace_cache_warnings=self.zero_log_trace_cache_warnings(),
+                    enable_sanity_checks=self.is_sanity_checks_enabled(),
                 )
 
         else:
