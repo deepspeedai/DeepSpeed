@@ -22,7 +22,7 @@ log_levels = {
 class LoggerFactory:
 
     @staticmethod
-    def create_logger(name=None, level=logging.INFO):
+    def create_logger(name=None, level=logging.WARNING):
         """create a logger
 
         Args:
@@ -58,7 +58,7 @@ class LoggerFactory:
         return logger_
 
 
-logger = LoggerFactory.create_logger(name="DeepSpeed", level=logging.INFO)
+logger = LoggerFactory.create_logger(name="DeepSpeed", level=logging.WARNING)
 
 
 @functools.lru_cache(None)
@@ -134,6 +134,29 @@ def print_json_dist(message, ranks=None, path=None):
             os.fsync(outfile)
 
 
+def get_log_level_from_string(log_level_str):
+    """converts a log level string into its numerical equivalent. e.g. "info" => `logging.INFO`
+    """
+    log_level_str = log_level_str.lower()
+    if log_level_str not in log_levels:
+        raise ValueError(
+            f"{log_level_str} is not one of the valid logging levels. Valid log levels are {log_levels.keys()}.")
+    return log_levels[log_level_str]
+
+
+def set_log_level_from_string(log_level_str, custom_logger=None):
+    """Sets a log level in the passed `logger` from string. e.g. "info" => `logging.INFO`
+
+    Args:
+        log_level_str: one of 'debug', 'info', 'warning', 'error', 'critical'
+        custom_logger: if `None` will use the default `logger` object
+    """
+    log_level = get_log_level_from_string(log_level_str)
+    if custom_logger is None:
+        custom_logger = logger
+    custom_logger.setLevel(log_level)
+
+
 def get_current_level():
     """
     Return logger's current log level
@@ -156,8 +179,5 @@ def should_log_le(max_log_level_str):
     if not isinstance(max_log_level_str, str):
         raise ValueError(f"{max_log_level_str} is not a string")
 
-    max_log_level_str = max_log_level_str.lower()
-    if max_log_level_str not in log_levels:
-        raise ValueError(f"{max_log_level_str} is not one of the logging levels")
-
-    return get_current_level() <= log_levels[max_log_level_str]
+    max_log_level = get_log_level_from_string(max_log_level_str)
+    return get_current_level() <= max_log_level
