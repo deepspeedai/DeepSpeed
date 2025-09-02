@@ -1350,7 +1350,6 @@ class Init(InsertPostInitMethodToModuleSubClasses):
                         # a different CUDA stream asynchronously.
                         # To avoid this, we allocate a new buffer with the original dtype, even though it is less
                         # memory-efficient. The dtype conversion will then be handled in `wait()` of AllGatherHandle.
-                        param.data = torch.empty_like(param_buffer, dtype=original_dtype)
                         return AllGatherHandle(handles,
                                                param,
                                                param_buffer=param_buffer,
