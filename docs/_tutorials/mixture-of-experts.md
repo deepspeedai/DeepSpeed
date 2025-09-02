@@ -45,7 +45,7 @@ The GPUs (or ranks) participating in an expert-parallel group of size ```ep_size
 
 ### MoE layer API
 
-The hidden_size is the input dimension of a particular layer and the output dimension is the same as that. This could lead to some changes to your model definition, especially for vision/convolutional models because the input/output dimensions don't match in certain cases. E.g. in the CIFAR-10 example, we modify the third fully connected layer to add the MoE layer. To cater for this, we need to add an additional fully-connected layer, whose input dimension is equal to the output dimension of the MoE layer.
+The `hidden_size` is the input dimension of a particular layer and the output dimension is the same as that. This could lead to some changes to your model definition, especially for vision/convolutional models because the input/output dimensions don't match in certain cases. E.g. in the CIFAR-10 example, we modify the third fully connected layer to add the MoE layer. To cater for this, we need to add an additional fully-connected layer, whose input dimension is equal to the output dimension of the MoE layer.
 
 Original model config
 
@@ -63,7 +63,10 @@ Updated with MoE Layers
 
 ### Pyramid-Residual MoE
 
-Recently, we proposed a novel [Pyramid-Residual MoE](https://arxiv.org/abs/2201.05596) (PR-MoE) model architecture. To create such an MoE model, the users need to do two additional things: 1) To make a pyramid structure, pass num_experts as a list e.g. [4, 8] and 2) Use the ```use_residual``` flag to indicate that the MoE layer is now a Residual MoE layer.
+Recently, we proposed a novel [Pyramid-Residual MoE](https://arxiv.org/abs/2201.05596) (PR-MoE) model architecture. To create such an MoE model, the users need to do two additional things: 
+
+1. To make a pyramid structure, pass `num_experts` as a list e.g. `[4, 8]`.
+2. Use the ```use_residual``` flag to indicate that the MoE layer is now a Residual MoE layer.
 
 ```python
 self.experts = deepspeed.moe.layer.MoE(hidden_size=input_dim, expert=ExpertModule(), num_experts=[..], ep_size=ep_size, use_residual=True)
@@ -79,7 +82,7 @@ EP_WORLD_SIZE = 2
 EXPERTS = [8]
 ```
 
-The model code needs to use the deepspeed.moe.layer.MoE API as follows.
+The model code needs to use the `deepspeed.moe.layer.MoE` API as follows.
 
 ```python
 self.experts = deepspeed.moe.layer.MoE(hidden_size=input_dim, expert=ExpertModule(), num_experts=EXPERTS, ep_size=EP_WORLD_SIZE)
