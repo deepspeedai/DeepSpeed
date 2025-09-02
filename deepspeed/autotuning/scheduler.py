@@ -18,7 +18,7 @@ from tqdm import tqdm
 
 from ..utils import logger
 from .constants import AUTOTUNING, AUTOTUNING_METRIC_PATH, BUFSIZE
-from .utils import get_val_by_key, search_error, was_interruptted
+from .utils import get_val_by_key, search_error, was_interrupted
 """
 thread-0: loop over experiment queue dispatching experiments if they become available
 thread-N: start each experiment in its own thread
@@ -76,7 +76,7 @@ class ResourceManager:
 
                     # skip existing experiments (except for the ones that were interrupted)
                     if os.path.exists(result_dir) and os.path.exists(stderr_file):
-                        if not was_interruptted(stderr_file):
+                        if not was_interrupted(stderr_file):
                             err = search_error(stderr_file)
                             exp_id = exp["exp_id"]
                             self.finished_experiments[exp_id] = (exp, err)
