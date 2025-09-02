@@ -21,7 +21,7 @@ _WARNED_NESTED_AUTOCAST = False
 
 # TODO: Avoid using global variables
 TORCH_AUTOCAST_INITIALIZED = False
-TORCH_AUTOCAST_DTYPE = False
+TORCH_AUTOCAST_DTYPE = None
 
 
 def _validate_auto_cast_settings(engine):

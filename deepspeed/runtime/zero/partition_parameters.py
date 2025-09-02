@@ -678,23 +678,22 @@ def restore_init_context():
 
 class AllGatherHandle:
 
-    def __init__(self, handle, param: Parameter, quantization=None, original_dtype=None) -> None:
+    def __init__(self, handle, param: Parameter, quantization=None, param_buffer=None, original_dtype=None) -> None:
         if param.ds_status != ZeroParamStatus.INFLIGHT:
             raise RuntimeError(f"expected param {param.ds_summary()} to be available")
-
-        # Only one of original_dtype or quantization is provided
-        assert (original_dtype is None) != (quantization is None)
 
         self.__handle = handle
         self.__param = param
         self.__quantization = quantization
+        self.__param_buffer = param_buffer
         self.__original_dtype = original_dtype
 
     def wait(self, handle_dependency=True) -> None:
         instrument_w_nvtx(self.__handle.wait)()
 
-        if self.__original_dtype:
-            self.__param.data = self.__param.data.to(self.__original_dtype)
+        if self.__param_buffer is not None:
+            self.__param.data = self.__param_buffer.narrow(0, 0, self.__param.ds_numel).view(self.__param.ds_shape).to(
+                self.__original_dtype).to(self.__param.device)
         elif self.__quantization:
             instrument_w_nvtx(self.__quantization.quant_handle.wait)()
             self.__param.data = self.__quantization.backend.dequantize(
@@ -1334,8 +1333,28 @@ class Init(InsertPostInitMethodToModuleSubClasses):
                         param_buffer,
                         ds_process_group,
                     )
-                    param.data = param_buffer.narrow(0, 0, param.ds_numel).view(param.ds_shape).to(param.device)
-                    return AllGatherHandle(handles, param, original_dtype=original_dtype)
+
+                    if original_dtype == allgather_dtype:
+                        param.data = param_buffer.narrow(0, 0, param.ds_numel).view(param.ds_shape).to(param.device)
+                        return AllGatherHandle(handles, param)
+                    else:
+                        # This case is complicated:
+                        # We use `register_post_accumulate_grad_hook` to set allgather hooks. Normally, the hook is
+                        # called once per parameter, even if that parameter is tied to multiple layers.
+                        # However, when the dtype changes, the hook may be triggered multiple times.
+                        # If we directly do:
+                        #   param_buffer.narrow(0, 0, param.ds_numel).view(param.ds_shape).to(param.device)
+                        # as above, the dtype may differ, causing the gradient-reduce hook
+                        # to be invoked multiple times.
+                        # We cannot simply call `.to(original_dtype)` here either, because communication runs on
+                        # a different CUDA stream asynchronously.
+                        # To avoid this, we allocate a new buffer with the original dtype, even though it is less
+                        # memory-efficient. The dtype conversion will then be handled in `wait()` of AllGatherHandle.
+                        param.data = torch.empty_like(param_buffer, dtype=original_dtype)
+                        return AllGatherHandle(handles,
+                                               param,
+                                               param_buffer=param_buffer,
+                                               original_dtype=original_dtype)
                 else:
                     if hasattr(param_ds_tensor, "ds_quant_scale"):
                         scales = param_ds_tensor.ds_quant_scale
