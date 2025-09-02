@@ -13,7 +13,7 @@ For more details on results and further discussion, please see our press release
 {: .notice--info}
 
 As a simple starting point we will show how to apply DeepSpeed MoE to a cifar10 example. Please refer to
-our [cifar10 example](https://github.com/deepspeedai/DeepSpeedExamples/tree/master/cifar) going forward.
+our [cifar10 example](https://github.com/deepspeedai/DeepSpeedExamples/tree/master/training/cifar) going forward.
 
 If you are adding MoE to an existing model you can use the snippet below to help guide you:
 
@@ -28,10 +28,10 @@ DeepSpeed MoE supports five different forms of parallelism, and it exploits both
 | E + D            | Expert + Data                       | Accelerates training throughput by scaling to multiple data parallel groups |
 | E + Z            | Expert + ZeRO-powered data          | Partitions the nonexpert parameters to support larger base models           |
 | E + D + M        | Expert + Data + Model               | Supports massive hidden sizes and even larger base models than E+Z          |
-| E + D + Z        | Expert + Data + ZeRO-powered data   | Supports massive hidden sizes and even larger base models than E+Z          |
+| E + D + Z        | Expert + Data + ZeRO-powered data   | Supports massive hidden sizes and even larger base models than E+Z+M        |
 | E + Z-Off + M    | Expert + ZeRO-Offload + Model       | Leverages both GPU and CPU memory for large MoE models on limited # of GPUs |
 
-To support different forms of parallelism, we create various process groups inside DeepSpeed. The helper functions that DeepSpeed uses reside in ```deepspeed.utils.groups.py```
+To support different forms of parallelism, we create various process groups inside DeepSpeed. The helper functions that DeepSpeed uses reside in ```deepspeed/utils/groups.py```
 
 Note: The following function has been deprecated now and model training code does not need to call this anymore.
 
@@ -45,7 +45,7 @@ The GPUs (or ranks) participating in an expert-parallel group of size ```ep_size
 
 ### MoE layer API
 
-The hidden_size is the input dimension of a particular layer and the output dimension is the same as that. This could lead to some changes to your model definition, especially for vision/convolutional models because the input/output dimensions don't match in certain cases. E.g. in the CIFAR-10 example, we modify the third fully connected layer to add the MoE layer. To cater for this, we need to add an additional fully-connected layer, whose input dimension is equal to the output dimension of the MoE layer.
+The `hidden_size` is the input dimension of a particular layer and the output dimension is the same as that. This could lead to some changes to your model definition, especially for vision/convolutional models because the input/output dimensions don't match in certain cases. E.g. in the CIFAR-10 example, we modify the third fully connected layer to add the MoE layer. To cater for this, we need to add an additional fully-connected layer, whose input dimension is equal to the output dimension of the MoE layer.
 
 Original model config
 
@@ -63,7 +63,10 @@ Updated with MoE Layers
 
 ### Pyramid-Residual MoE
 
-Recently, we proposed a novel [Pyramid-Residual MoE](https://arxiv.org/abs/2201.05596) (PR-MoE) model architecture. To create such an MoE model, the users need to do two additional things: 1) To make a pyramid structure, pass num_experts as a list e.g. [4, 8] and 2) Use the ```use_residual``` flag to indicate that the MoE layer is now a Residual MoE layer.
+Recently, we proposed a novel [Pyramid-Residual MoE](https://arxiv.org/abs/2201.05596) (PR-MoE) model architecture. To create such an MoE model, the users need to do two additional things:
+
+1. To make a pyramid structure, pass `num_experts` as a list e.g. `[4, 8]`.
+2. Use the ```use_residual``` flag to indicate that the MoE layer is now a Residual MoE layer.
 
 ```python
 self.experts = deepspeed.moe.layer.MoE(hidden_size=input_dim, expert=ExpertModule(), num_experts=[..], ep_size=ep_size, use_residual=True)
@@ -79,13 +82,13 @@ EP_WORLD_SIZE = 2
 EXPERTS = [8]
 ```
 
-The model code needs to use the deepspeed.moe.layer.MoE API as follows.
+The model code needs to use the `deepspeed.moe.layer.MoE` API as follows.
 
 ```python
 self.experts = deepspeed.moe.layer.MoE(hidden_size=input_dim, expert=ExpertModule(), num_experts=EXPERTS, ep_size=EP_WORLD_SIZE)
 ```
 
-With the above two commands, the DeepSpeed runtime will be set to train an MoE model with a total of 8 experts on 4 GPUs in 4 experts/GPU mode. We call this the E + D mode as described earlier in the table.
+With the above code, the DeepSpeed runtime will be set to train an MoE model with a total of 8 experts on 4 GPUs in 4 experts/GPU mode. We call this the E + D mode as described earlier in the table.
 
 
 ```python
@@ -104,11 +107,11 @@ fc4 = torch.nn.Linear(84, 10)
 
 ```
 
-For a runnable end-to-end example that covers both the standard MoE architecture as well as the PR-MoE model , please look at the [cifar10 example](https://github.com/deepspeedai/DeepSpeedExamples/tree/master/cifar). In addition, see the advanced usage section of this tutorial that links to a more comprehensive example for NLG models.
+For a runnable end-to-end example that covers both the standard MoE architecture, as well as the PR-MoE model, please look at the [cifar10 example](https://github.com/deepspeedai/DeepSpeedExamples/tree/master/training/cifar). In addition, see the advanced usage section of this tutorial that links to a more comprehensive example for NLG models.
 
 ### Combining ZeRO-Offload and DeepSpeed MoE for very large models
 
-To use MoE Layers in DeepSpeed, we rely on two parameter groups that are passed to an optimizer. A concrete example to create such groups is available from the [cifar10 example](https://github.com/deepspeedai/DeepSpeedExamples/tree/master/cifar).
+To use MoE Layers in DeepSpeed, we rely on two parameter groups that are passed to an optimizer. A concrete example to create such groups is available from the [cifar10 example](https://github.com/deepspeedai/DeepSpeedExamples/tree/master/training/cifar).
 
 The relevant function that creates these param groups is as follows.
 
@@ -134,7 +137,7 @@ model_engine, optimizer, trainloader, __ = deepspeed.initialize(
 
 We are working on automating this functionality in the DeepSpeed ZeRO optimizer so the model training code can be simplified further.
 
-To run the [cifar10 example](https://github.com/deepspeedai/DeepSpeedExamples/tree/master/cifar) with ZeRO-Offload (stage 2) and MoE, please set the ds_config flags
+To run the [cifar10 example](https://github.com/deepspeedai/DeepSpeedExamples/tree/master/training/cifar) with ZeRO-Offload (stage 2) and MoE, please set the `ds_config` flags
 
 ```json
 "zero_optimization": {
@@ -149,7 +152,7 @@ To run the [cifar10 example](https://github.com/deepspeedai/DeepSpeedExamples/tr
   }
 ```
 
-An additional optimization to save memory for extremely large model training on limited number of GPUs has also been introduced. Please enable that using the following config flag to the fp16 optimizer in ds_config.
+An additional optimization to save memory for extremely large model training on limited number of GPUs has also been introduced. Please enable that using the following config flag to the fp16 optimizer in `ds_config`.
 
   ```json
     "fp16": {

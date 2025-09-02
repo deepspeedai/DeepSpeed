@@ -137,7 +137,7 @@ In our experience these are four most critical parameters of 1Cycle schedules.
 1. We chose to use the slower LRRT schedule (`lr_range_test_step_rate=5`) to
 set `cycle_min_lr` because it achieves the best loss and the faster schedule
 diverges fairly quickly.
-2. We set `cycle_min_lr` to 0.005 even though the plot shows that performance
+2. We set `cycle_max_lr` to 0.005 even though the plot shows that performance
 was still improving at slightly higher learning rate. This is because we
 observed that if we wait till the maximum learning rate, the model could be at
 the point of divergence and impossible to recover.
