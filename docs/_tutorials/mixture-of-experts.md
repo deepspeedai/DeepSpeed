@@ -28,10 +28,10 @@ DeepSpeed MoE supports five different forms of parallelism, and it exploits both
 | E + D            | Expert + Data                       | Accelerates training throughput by scaling to multiple data parallel groups |
 | E + Z            | Expert + ZeRO-powered data          | Partitions the nonexpert parameters to support larger base models           |
 | E + D + M        | Expert + Data + Model               | Supports massive hidden sizes and even larger base models than E+Z          |
-| E + D + Z        | Expert + Data + ZeRO-powered data   | Supports massive hidden sizes and even larger base models than E+Z          |
+| E + D + Z        | Expert + Data + ZeRO-powered data   | Supports massive hidden sizes and even larger base models than E+Z+M        |
 | E + Z-Off + M    | Expert + ZeRO-Offload + Model       | Leverages both GPU and CPU memory for large MoE models on limited # of GPUs |
 
-To support different forms of parallelism, we create various process groups inside DeepSpeed. The helper functions that DeepSpeed uses reside in ```deepspeed.utils.groups.py```
+To support different forms of parallelism, we create various process groups inside DeepSpeed. The helper functions that DeepSpeed uses reside in ```deepspeed/utils/groups.py```
 
 Note: The following function has been deprecated now and model training code does not need to call this anymore.
 
