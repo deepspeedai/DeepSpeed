@@ -25,7 +25,7 @@ from argparse import ArgumentParser, REMAINDER
 from ..constants import TORCH_DISTRIBUTED_DEFAULT_PORT, CROSS_RANK, CROSS_SIZE
 from deepspeed.accelerator import get_accelerator
 from ..nebula.constants import DLTS_POD_ENV_PATH
-from ..utils import logger, get_numactl_cmd
+from ..utils import logger, get_numactl_cmd, set_log_level_from_string
 from ..elasticity import is_torch_elastic_compatible
 from .constants import ELASTIC_TRAINING_ID_DEFAULT
 
@@ -102,6 +102,18 @@ def parse_args():
                         "numbers and range. i.e. 1,3-5,7 => [1,3,4,5,7].  When not "
                         "specified, all cores on system would be used rank binding")
 
+    # TODOV1: change the default to 'warning'
+    parser.add_argument("--log_level",
+                        type=str,
+                        default="info",
+                        choices=['debug', 'info', 'warning', 'error', 'critical'],
+                        help="Set launcher loglevel. The default is 'info'")
+
+    parser.add_argument("-q",
+                        "--quiet",
+                        action="store_true",
+                        help="Try to be as quiet as possible. Aliases to `--log_level error`")
+
     # positional
     parser.add_argument("training_script",
                         type=str,
@@ -133,6 +145,10 @@ def terminate_process_tree(pid):
 def main():
     args = parse_args()
     current_env = os.environ.copy()
+
+    if args.quiet:
+        args.log_level = "error"
+    set_log_level_from_string(args.log_level)
 
     for k in current_env.keys():
         if "NCCL" in k:
