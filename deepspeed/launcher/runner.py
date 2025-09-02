@@ -228,7 +228,6 @@ def parse_args(args=None):
 
 
 def fetch_hostfile(hostfile_path):
-
     if not os.path.isfile(hostfile_path):
         logger.warning("Unable to find hostfile, will proceed with training "
                        "with local resources only.")
