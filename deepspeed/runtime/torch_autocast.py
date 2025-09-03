@@ -8,6 +8,7 @@ import importlib
 from contextlib import contextmanager
 
 import torch
+import deepspeed.comm as dist
 from deepspeed.utils import logger
 from deepspeed.accelerator import get_accelerator
 
@@ -108,8 +109,10 @@ def autocast_if_enabled(engine):
     if torch.is_autocast_enabled():
         if engine.torch_autocast_enabled():
             if not _WARNED_NESTED_AUTOCAST:
-                logger.info("torch.autocast is already enabled outside DeepSpeed. "
-                            "Switching to the configuration defined in `torch_autocast` section of DeepSpeed config.")
+                if dist.get_rank() == 0:
+                    logger.info(
+                        "torch.autocast is already enabled outside DeepSpeed. "
+                        "Switching to the configuration defined in `torch_autocast` section of DeepSpeed config.")
                 _WARNED_NESTED_AUTOCAST = True
             with torch.autocast(device_type=get_accelerator().device_name(),
                                 dtype=engine.torch_autocast_dtype(),
@@ -117,11 +120,12 @@ def autocast_if_enabled(engine):
                 yield
         else:
             if not _WARNED_NESTED_AUTOCAST:
-                logger.warning(
-                    "torch.autocast is enabled outside DeepSpeed but disabled within the DeepSpeed engine. "
-                    "If you are using DeepSpeed's built-in mixed precision, the engine will follow the settings in bf16/fp16 section. "
-                    "To use torch's native autocast instead, configure the `torch_autocast` section in the DeepSpeed config."
-                )
+                if dist.get_rank() == 0:
+                    logger.warning(
+                        "torch.autocast is enabled outside DeepSpeed but disabled within the DeepSpeed engine. "
+                        "If you are using DeepSpeed's built-in mixed precision, the engine will follow the settings in bf16/fp16 section. "
+                        "To use torch's native autocast instead, configure the `torch_autocast` section in the DeepSpeed config."
+                    )
                 _WARNED_NESTED_AUTOCAST = True
             with torch.autocast(device_type=get_accelerator().device_name(), enabled=False):
                 yield
