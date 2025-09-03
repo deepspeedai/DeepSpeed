@@ -30,7 +30,7 @@ if _ZENFLOW_AVAILABLE:
 
 if not _ZENFLOW_AVAILABLE:
     # safe disable dynamo if unsupported
-    def _disable_dynamo_if_unsupported(**kwargs):
+    def _disable_dynamo_if_unsupported(**kwargs):  # noqa
 
         def wrapper(fn):
             return fn
