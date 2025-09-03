@@ -1346,10 +1346,11 @@ class Init(InsertPostInitMethodToModuleSubClasses):
                         #   param_buffer.narrow(0, 0, param.ds_numel).view(param.ds_shape).to(param.device)
                         # as above, the dtype may differ, causing the gradient-reduce hook
                         # to be invoked multiple times.
-                        # We cannot simply call `.to(original_dtype)` here either, because communication runs on
-                        # a different CUDA stream asynchronously.
-                        # To avoid this, we allocate a new buffer with the original dtype, even though it is less
-                        # memory-efficient. The dtype conversion will then be handled in `wait()` of AllGatherHandle.
+                        # To avoid this, we leave `param.data` in a partitioned state.
+                        # This prevents duplicate gradient-reduce hook calls.
+                        # In theory, this path could be consolidated with the case where
+                        # (original_dtype == allgather_dtype), but because it changes the
+                        # state transition of DeepSpeed parameters, we keep it separate for safety.
                         return AllGatherHandle(handles,
                                                param,
                                                param_buffer=param_buffer,
