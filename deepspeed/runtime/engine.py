@@ -99,7 +99,7 @@ from deepspeed.runtime.data_pipeline.data_routing.helper import remove_random_lt
 from deepspeed.runtime.data_pipeline.data_routing.basic_layer import RandomLayerTokenDrop
 
 from deepspeed.utils.zero_to_fp32 import get_fp32_state_dict_from_zero_checkpoint
-from deepspeed.runtime.torch_autocast import init_autocast_params, get_default_autocast_lower_precision_modules, validate_nested_autocast
+from deepspeed.runtime.torch_autocast import init_autocast_params, get_default_autocast_lower_precision_modules, autocast_if_enabled
 
 from .pipe.module import PipelineModule
 from .utils import get_ma_status
@@ -2147,10 +2147,7 @@ class DeepSpeedEngine(Module):
             # We can't have this in forward prologue as the compiler compiles hooks including the forward prologue.
             self.launch_compile_passes(self.global_steps)
 
-        validate_nested_autocast(self)
-        with torch.autocast(device_type=get_accelerator().device_name(),
-                            dtype=self.torch_autocast_dtype(),
-                            enabled=self.torch_autocast_enabled()):
+        with autocast_if_enabled(self):
             loss = self.module(*inputs, **kwargs)
 
         if self.autotuning_profile_model_info():
