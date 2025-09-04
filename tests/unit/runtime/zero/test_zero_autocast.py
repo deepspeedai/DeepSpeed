@@ -163,8 +163,8 @@ def compare_loss(model_cls,
 class TestZeroAutoCast(DistributedTest):
     world_size = 2
 
-    @pytest.mark.parametrize("zero_stage", [3])
-    @pytest.mark.parametrize("dtype", [torch.bfloat16])
+    @pytest.mark.parametrize("zero_stage", [0, 1, 2, 3])
+    @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
     def test(self, enable, zero_stage, dtype):
         lower_precision_safe_modules = [torch.nn.Linear]
         autocast_conf = {"enabled": enable, "dtype": str(dtype)}
