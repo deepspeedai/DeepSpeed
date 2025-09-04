@@ -147,7 +147,7 @@ class TorchBackend(Backend):
 
     def init_process_group(self, backend, timeout, init_method, rank, world_size):
         if not torch.distributed.is_initialized():
-            kwargs = dict(backend,
+            kwargs = dict(
                 timeout=timeout,
                 init_method=init_method,
                 rank=rank,
