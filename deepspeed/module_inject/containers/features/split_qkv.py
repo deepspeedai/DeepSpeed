@@ -34,29 +34,33 @@ class HybridSplitQKVContainer(HybridEngineContainer):
         # Only need to alter
         if self.module.attention.attn_qkvw is None:
             params = [
-                (self.module.attention.attn_qw, self.qw),
-                (self.module.attention.attn_qb, self.qb),
-                (self.module.attention.attn_kw, self.kw),
-                (self.module.attention.attn_kb, self.kb),
-                (self.module.attention.attn_vw, self.vw),
-                (self.module.attention.attn_vb, self.vb),
+                (self.module.attention, 'attn_qw', self.qw),
+                (self.module.attention, 'attn_qb', self.qb),
+                (self.module.attention, 'attn_kw', self.kw),
+                (self.module.attention, 'attn_kb', self.kb),
+                (self.module.attention, 'attn_vw', self.vw),
+                (self.module.attention, 'attn_vb', self.vb),
             ]
-            for dst, src in params:
-                dst = mp_replace.copy(
-                    dst[:self.qw.shape[0] // mp_replace.mp_size], src, int8=reversed_dim,
-                    allocate_tensor=reversed_dim) if src is not None else None
+            for mod, dst_name, src in params:
+                dst_orig = getattr(mod, dst_name)
+                setattr(
+                    mod, dst_name,
+                    mp_replace.copy(dst_orig[:self.qw.shape[0] // mp_replace.mp_size],
+                                    src,
+                                    int8=reversed_dim,
+                                    allocate_tensor=reversed_dim) if src is not None else None)
         else:
             super().attention_qkv_mp(mp_replace)
 
     def release_qkv(self):
         super().release_qkv()
         split_qkv_params = [
-            (self.module.attention.attn_qw, self.qw),
-            (self.module.attention.attn_qb, self.qb),
-            (self.module.attention.attn_kw, self.kw),
-            (self.module.attention.attn_kb, self.kb),
-            (self.module.attention.attn_vw, self.vw),
-            (self.module.attention.attn_vb, self.vb),
+            (self.module.attention, 'attn_qw', self.qw),
+            (self.module.attention, 'attn_qb', self.qb),
+            (self.module.attention, 'attn_kw', self.kw),
+            (self.module.attention, 'attn_kb', self.kb),
+            (self.module.attention, 'attn_vw', self.vw),
+            (self.module.attention, 'attn_vb', self.vb),
         ]
 
         self._release_params(split_qkv_params)
