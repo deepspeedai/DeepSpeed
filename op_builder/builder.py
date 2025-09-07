@@ -432,7 +432,7 @@ class OpBuilder(ABC):
         except MissingCUDAException:
             print(f"{WARNING} {self.name} cuda is missing or is incompatible with installed torch, "
                   "only cpu ops can be compiled!")
-            return '-D__DISABLE_CUDA__'
+        return '-D__DISABLE_CUDA__'
 
     def _backup_cpuinfo(self):
         # Construct cpu_info dict from lscpu that is similar to what py-cpuinfo provides
@@ -522,7 +522,7 @@ class OpBuilder(ABC):
                             extra_compile_args={'cxx': self.strip_empty_entries(self.cxx_args())},
                             extra_link_args=self.strip_empty_entries(self.extra_ldflags()))
 
-    def load(self, verbose=True):
+    def load(self, verbose=False):
         if self.name in __class__._loaded_ops:
             return __class__._loaded_ops[self.name]
 

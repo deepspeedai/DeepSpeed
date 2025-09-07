@@ -25,11 +25,12 @@ if _ZENFLOW_AVAILABLE:
             Optimizer,
         )
     except ImportError as e:
-        print(f"[WARNING] ZenFlow disabled: torch internal optimizer symbols could not be imported: {e}")
+        # print(f"[WARNING] ZenFlow disabled: torch internal optimizer symbols could not be imported: {e}")
         _ZENFLOW_AVAILABLE = False
-else:
+
+if not _ZENFLOW_AVAILABLE:
     # safe disable dynamo if unsupported
-    def _disable_dynamo_if_unsupported(**kwargs):
+    def _disable_dynamo_if_unsupported(**kwargs):  # noqa
 
         def wrapper(fn):
             return fn

@@ -5,9 +5,12 @@
 
 from typing import Iterable, Set, List, Union
 import importlib
+from contextlib import contextmanager
 
 import torch
+import deepspeed.comm as dist
 from deepspeed.utils import logger
+from deepspeed.accelerator import get_accelerator
 
 LOWER_PRECISION_SAFE_MODULES = [
     torch.nn.Linear,
@@ -16,8 +19,12 @@ LOWER_PRECISION_SAFE_MODULES = [
     torch.nn.Conv3d,
 ]
 
-TORCH_AUTOCAST_INITIALIZED = False
+PARAM_COMM_DTYPE_ATTR_NAME = "comm_dtype"
 _WARNED_NESTED_AUTOCAST = False
+
+# TODO: Avoid using global variables
+TORCH_AUTOCAST_INITIALIZED = False
+TORCH_AUTOCAST_DTYPE = None
 
 
 def _validate_auto_cast_settings(engine):
@@ -25,10 +32,6 @@ def _validate_auto_cast_settings(engine):
     assert not engine.fp16_enabled(), "Cannot enable both torch autocast and fp16"
     assert not engine.bfloat16_enabled(), "Cannot enable both torch autocast and bfloat16"
     assert not engine.zero_quantized_weights(), "Cannot enable both torch autocast and zero quantized weights"
-
-    assert all(p.dtype == torch.float32
-               for p in engine.parameters()), "All parameters must be float32 for torch autocast"
-    assert engine.communication_data_type == torch.float32, "Communication data type must be float32 for torch autocast"
 
 
 def init_autocast_params(engine, dtype: torch.dtype,
@@ -53,10 +56,12 @@ def init_autocast_params(engine, dtype: torch.dtype,
     for module in model.modules():
         if module.__class__ in lower_precision_safe_module_classes:
             for p in module.parameters(recurse=False):
-                p.autocast_dtype = dtype
+                setattr(p, PARAM_COMM_DTYPE_ATTR_NAME, dtype)
 
     global TORCH_AUTOCAST_INITIALIZED
     TORCH_AUTOCAST_INITIALIZED = True
+    global TORCH_AUTOCAST_DTYPE
+    TORCH_AUTOCAST_DTYPE = dtype
 
 
 def is_autocast_initialized() -> bool:
@@ -67,34 +72,68 @@ def get_default_autocast_lower_precision_modules() -> List[str]:
     return [f"{cls.__module__}.{cls.__name__}" for cls in LOWER_PRECISION_SAFE_MODULES]
 
 
-def get_autocast_dtype(param: torch.nn.Parameter) -> torch.dtype:
-    return param.autocast_dtype if hasattr(param, "autocast_dtype") else param.dtype
+def get_autocast_dtype() -> torch.dtype:
+    return TORCH_AUTOCAST_DTYPE
 
 
-def has_autocast_dtype(param: torch.nn.Parameter) -> bool:
-    return hasattr(param, "autocast_dtype")
+def has_comm_dtype(param: torch.nn.Parameter) -> bool:
+    return hasattr(param, PARAM_COMM_DTYPE_ATTR_NAME)
 
 
-def get_all_autocast_dtypes(params: Iterable) -> Set[torch.dtype]:
-    return {get_autocast_dtype(p) for p in params}
+def get_comm_dtype(param: torch.nn.Parameter) -> torch.dtype:
+    return getattr(param, PARAM_COMM_DTYPE_ATTR_NAME, param.dtype)
+
+
+def get_all_comm_dtypes(params: Iterable) -> Set[torch.dtype]:
+    return {get_comm_dtype(p) for p in params}
 
 
 def sort_dtypes(dtypes: List[torch.dtype]) -> List[torch.dtype]:
     return sorted(dtypes, key=str)
 
 
-def validate_nested_autocast(engine):
+@contextmanager
+def autocast_if_enabled(engine):
+    """Context manager for DeepSpeed autocast with conditional support.
+
+    This function manages `torch.autocast` contexts under DeepSpeed, allowing
+    autocast to be enabled or disabled dynamically based on runtime conditions.
+    It ensures consistency when autocast is already active outside of DeepSpeed,
+    or when it is configured within the DeepSpeed engine.
+
+    Args:
+        engine: DeepSpeed engine instance.
+    """
     global _WARNED_NESTED_AUTOCAST
 
     if torch.is_autocast_enabled():
         if engine.torch_autocast_enabled():
             if not _WARNED_NESTED_AUTOCAST:
-                logger.warning(
-                    "DeepSpeed detected torch.autocast context outside the engine. "
-                    "This is unnecessary when torch.autocast is already enabled through the DeepSpeed config.")
+                if dist.get_rank() == 0:
+                    logger.info(
+                        "torch.autocast is already enabled outside DeepSpeed. "
+                        "Switching to the configuration defined in `torch_autocast` section of DeepSpeed config.")
                 _WARNED_NESTED_AUTOCAST = True
+            with torch.autocast(device_type=get_accelerator().device_name(),
+                                dtype=engine.torch_autocast_dtype(),
+                                enabled=True):
+                yield
         else:
-            raise AssertionError(
-                "torch.autocast is enabled outside DeepSpeed, but not in the DeepSpeed config. "
-                "Please enable torch.autocast through the DeepSpeed config to ensure the correct communication dtype is used."
-            )
+            if not _WARNED_NESTED_AUTOCAST:
+                if dist.get_rank() == 0:
+                    logger.warning(
+                        "torch.autocast is enabled outside DeepSpeed but disabled within the DeepSpeed engine. "
+                        "If you are using DeepSpeed's built-in mixed precision, the engine will follow the settings in bf16/fp16 section. "
+                        "To use torch's native autocast instead, configure the `torch_autocast` section in the DeepSpeed config."
+                    )
+                _WARNED_NESTED_AUTOCAST = True
+            with torch.autocast(device_type=get_accelerator().device_name(), enabled=False):
+                yield
+    else:
+        if engine.torch_autocast_enabled():
+            with torch.autocast(device_type=get_accelerator().device_name(),
+                                dtype=engine.torch_autocast_dtype(),
+                                enabled=True):
+                yield
+        else:
+            yield

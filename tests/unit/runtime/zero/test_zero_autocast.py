@@ -17,6 +17,7 @@ from unit.util import bf16_required_version_check
 import deepspeed
 from deepspeed.accelerator import get_accelerator
 from deepspeed.runtime.zero import GatheredParameters
+from deepspeed.runtime.torch_autocast import PARAM_COMM_DTYPE_ATTR_NAME, get_comm_dtype
 
 RTOL = 0.1
 ATOL = 0.0
@@ -41,7 +42,7 @@ class SimpleModelWithLayerNorm(torch.nn.Module):
 
 
 def step_amp(enabled, baseline_model, baseline_optimizer, target_engine, dtype, enable_autocast_outside,
-             baseline_scaler, step, x, y, rtol, atol):
+             baseline_scaler, step, x, y, rtol, atol, expect_match):
     device_type = get_accelerator().device_name()
 
     # Runs the forward pass with autocasting.
@@ -58,18 +59,29 @@ def step_amp(enabled, baseline_model, baseline_optimizer, target_engine, dtype, 
         target_loss = target_engine(x, y)
 
     # reduce-scatter in `dtype` makes a difference in the loss.
-    if step <= 1:
-        assert reduce_boolean_flags(
-            torch.allclose(baseline_loss.float(), target_loss.float(), rtol=rtol, atol=atol),
-            all), f"Losses do not match: baseline_loss={baseline_loss}, target_loss={target_loss}"
+    if step <= 1 and expect_match:
+        allclose_local = torch.allclose(baseline_loss.float(), target_loss.float(), rtol=rtol, atol=atol)
+        if not allclose_local:
+            print(f"Losses do not match: baseline_loss={baseline_loss}, target_loss={target_loss}")
+        # Ensure all ranks either pass or fail together.
+        # If some ranks fail while others pass, subsequent tests or iterations may hang.
+        if not reduce_boolean_flags(allclose_local, all):
+            assert False, f"Losses do not match on one or more ranks."
 
     target_engine.backward(target_loss)
     target_engine.step()
 
 
 @enable_determinism(123)
-def compare_loss(model_cls, enable, zero_stage, dtype, autocast_conf, enable_autocast_outside,
-                 lower_precision_safe_modules):
+def compare_loss(model_cls,
+                 enable,
+                 zero_stage,
+                 model_dtype,
+                 dtype,
+                 autocast_conf,
+                 enable_autocast_outside,
+                 lower_precision_safe_modules,
+                 expect_match=True):
     iteration = 5
     hidden_dim = 10
     lr = 0.001
@@ -89,6 +101,7 @@ def compare_loss(model_cls, enable, zero_stage, dtype, autocast_conf, enable_aut
     }
 
     model = model_cls(hidden_dim)
+    model.to(model_dtype)
 
     deepspeed.init_distributed(dist_backend='nccl')
 
@@ -100,7 +113,16 @@ def compare_loss(model_cls, enable, zero_stage, dtype, autocast_conf, enable_aut
 
     stage_3_enabled = config_dict["zero_optimization"]["stage"] == 3
     if stage_3_enabled:
-        with deepspeed.zero.Init(config_dict_or_path=config_dict):
+        # Trick to avoid conversion to fp32 in Init() while also avoiding deepspeed's mixed precision
+        # Ideally Init() should have a flag to avoid conversion to fp32
+        import copy
+        config_for_init = copy.deepcopy(config_dict)
+        if model_dtype == torch.float16:
+            config_for_init["fp16"] = {"enabled": True}
+        elif model_dtype == torch.bfloat16:
+            config_for_init["bf16"] = {"enabled": True}
+
+        with deepspeed.zero.Init(config_dict_or_path=config_for_init):
             target_model = model_cls(hidden_dim)
         with GatheredParameters(target_model.parameters(), modifier_rank=0):
             for p1, p2 in zip(target_model.parameters(), model.parameters()):
@@ -117,21 +139,24 @@ def compare_loss(model_cls, enable, zero_stage, dtype, autocast_conf, enable_aut
 
     for i, (x, y) in enumerate(zip(xs, ys)):
         step_amp(enable, baseline_model, baseline_optimizer, target_engine, dtype, enable_autocast_outside,
-                 baseline_scaler, i, x, y, RTOL, ATOL)
+                 baseline_scaler, i, x, y, RTOL, ATOL, expect_match)
 
     for module in target_engine.modules():
         for p in module.parameters(recurse=False):
-            if module.__class__ in lower_precision_safe_modules:
+            if module.__class__ in lower_precision_safe_modules and autocast_conf["enabled"]:
                 assert hasattr(
-                    p, "autocast_dtype"
+                    p, PARAM_COMM_DTYPE_ATTR_NAME
                 ), f"A module is in the lower precision safe list, but param does not have autocast_dtype: {module.__class__.__name__}"
-                assert p.autocast_dtype == dtype, f"dtype of a module in the lower precision safe list is not set to {dtype}: {module.__class__.__name__}"
+                assert get_comm_dtype(
+                    p
+                ) == dtype, f"dtype of a module in the lower precision safe list is not set to {dtype}: {module.__class__.__name__}"
             else:
                 assert not hasattr(
-                    p, "autocast_dtype"
+                    p, PARAM_COMM_DTYPE_ATTR_NAME
                 ), f"A module is not in the lower precision safe list, but param has autocast_dtype: {module.__class__.__name__}"
-                assert p.dtype == torch.float32, f"dtype of a module not in the lower precision safe list is not float32: {module.__class__.__name__}"
-
+                assert get_comm_dtype(
+                    p
+                ) == model_dtype, f"comm dtype doesn't match module dtype though the module is not in lower precision list"
     target_engine.destroy()
 
 
@@ -145,7 +170,8 @@ class TestZeroAutoCast(DistributedTest):
         lower_precision_safe_modules = [torch.nn.Linear]
         autocast_conf = {"enabled": enable, "dtype": str(dtype)}
 
-        compare_loss(SimpleModel, enable, zero_stage, dtype, autocast_conf, False, lower_precision_safe_modules)
+        compare_loss(SimpleModel, enable, zero_stage, torch.float32, dtype, autocast_conf, False,
+                     lower_precision_safe_modules)
 
     @pytest.mark.parametrize("zero_stage", [0, 1, 2, 3])
     @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
@@ -158,24 +184,38 @@ class TestZeroAutoCast(DistributedTest):
         }
 
         # The model has both lower precision safe and unsafe modules.
-        compare_loss(SimpleModelWithLayerNorm, enable, zero_stage, dtype, autocast_conf, False,
+        compare_loss(SimpleModelWithLayerNorm, enable, zero_stage, torch.float32, dtype, autocast_conf, False,
                      lower_precision_safe_modules)
 
-    @pytest.mark.parametrize("zero_stage", [1])
+    @pytest.mark.parametrize("zero_stage", [0, 1, 2, 3])
     @pytest.mark.parametrize("dtype", [torch.bfloat16])
-    def test_error_autocast_outside_ds(self, enable, zero_stage, dtype):
-        """Throw an error when torch.autocast is enabled outside deepspeed engine but disabled in config."""
-
+    def test_nested_autocast(self, enable, zero_stage, dtype):
         lower_precision_safe_modules = [torch.nn.Linear]
         autocast_conf = {
             "enabled": False,
             "dtype": str(dtype),
         }
 
-        try:
-            compare_loss(SimpleModelWithLayerNorm, enable, zero_stage, dtype, autocast_conf, True,
-                         lower_precision_safe_modules)
-            pytest.fail(
-                "Expected an error when torch.autocast is enabled outside deepspeed engine but disabled in config.")
-        except AssertionError as e:
-            pass
+        # torch.autocast is disabled in DeepSpeed engine
+        compare_loss(SimpleModelWithLayerNorm,
+                     enable,
+                     zero_stage,
+                     torch.float32,
+                     dtype,
+                     autocast_conf,
+                     True,
+                     lower_precision_safe_modules,
+                     expect_match=False)
+
+    @pytest.mark.parametrize("zero_stage", [0, 1, 2, 3])
+    @pytest.mark.parametrize("dtype", [torch.bfloat16])
+    def test_lower_precision_model(self, enable, zero_stage, dtype):
+        lower_precision_safe_modules = [torch.nn.Linear]
+        autocast_conf = {
+            "enabled": enable,
+            "dtype": str(dtype),
+        }
+
+        # Use the same dtype for model as autocast dtype
+        compare_loss(SimpleModelWithLayerNorm, enable, zero_stage, dtype, dtype, autocast_conf, True,
+                     lower_precision_safe_modules, False)
