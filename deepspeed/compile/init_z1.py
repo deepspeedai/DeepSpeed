@@ -32,14 +32,25 @@ def init_z1(engine, backend, compile_config, compile_kwargs, schedule=None, use_
     grad_buffer = {}
 
     for i, group in enumerate(optimizer.bit16_groups):
+        # Temporarily populate all_grad_tensors for get_flat_partition call
+        # This is needed because get_flat_partition accesses all_grad_tensors[param_group_idx][i]
+        # but it's empty during initialization
+        original_all_grad_tensors = optimizer.all_grad_tensors.copy() if hasattr(optimizer, 'all_grad_tensors') else {}
+        if i not in optimizer.all_grad_tensors or optimizer.all_grad_tensors[i] is None:
+            optimizer.all_grad_tensors[i] = optimizer.get_all_grad_tensors(optimizer.params_in_partition[i],
+                                                                           optimizer.gradient_accumulation_dtype)
 
         grad_buffer[i] = optimizer.get_flat_partition(optimizer.params_in_partition[i],
                                                       optimizer.first_offset[i],
                                                       optimizer.partition_size[i],
                                                       dtype=optimizer.gradient_accumulation_dtype,
                                                       device=get_accelerator().current_device_name(),
+                                                      param_group_idx=i,
                                                       return_tensor_list=True)
         grad_buffer[i] = [p.clone().detach() for p in grad_buffer[i]]  # Maybe not necessary
+
+        # Restore original all_grad_tensors state
+        optimizer.all_grad_tensors = original_all_grad_tensors
 
         index_in_partition = 0
         first_in_partition = True
