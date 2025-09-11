@@ -4,7 +4,7 @@
 # DeepSpeed Team
 
 import copy
-from typing import List
+from typing import List, Tuple
 
 import torch
 from torch.fx import Graph, GraphModule
@@ -250,8 +250,9 @@ reload_task_remaining = []
 total_reload_mem = 0
 
 
-def offload_opt_states_inc(graph: Graph, graph_id: int, graph_order: List[int], profiling_results: ProfilingResult,
-                           mem_budget: float, param_manager: DSGraphParamManager, bwd: bool) -> Graph:
+def offload_opt_states_inc(graph: Graph, graph_id: int, graph_order: List[Tuple[int, bool]],
+                           profiling_results: ProfilingResult, mem_budget: float, param_manager: DSGraphParamManager,
+                           bwd: bool) -> Graph:
 
     to_remove = []
     for node in graph.nodes:
@@ -475,8 +476,9 @@ def add_record_max_mem_nodes(graph: Graph):
             graph.create_node('call_function', update_max_memory, (name, ), {}, name=name)
 
 
-def insert_offload_opt_states(graph: Graph, graph_id: int, graph_order: List[int], profiling_results: ProfilingResult,
-                              mem_budget: float, param_manager: DSGraphParamManager, bwd: bool) -> Graph:
+def insert_offload_opt_states(graph: Graph, graph_id: int, graph_order: List[Tuple[int, bool]],
+                              profiling_results: ProfilingResult, mem_budget: float,
+                              param_manager: DSGraphParamManager, bwd: bool) -> Graph:
 
     if bwd:
         graph_order_with_backward = [g[0] for g in graph_order if g[1]]
@@ -512,23 +514,24 @@ def insert_offload_opt_states(graph: Graph, graph_id: int, graph_order: List[int
     return graph
 
 
-def move_opt_states(gm: GraphModule, graph_id: int, graph_order: List[int], profiling_results, create_inputs_fn,
-                    mem_budget: float, param_manager: DSGraphParamManager, bwd: bool) -> GraphModule:
+def move_opt_states(gm: GraphModule, graph_id: int, graph_order: List[Tuple[int, bool]], profiling_results,
+                    create_inputs_fn, mem_budget: float, param_manager: DSGraphParamManager, bwd: bool) -> GraphModule:
     gm.graph = offload_opt_states_inc(gm.graph, graph_id, graph_order, profiling_results, mem_budget, param_manager,
                                       bwd)
     return gm
 
 
-def move_opt_states_sync(gm: GraphModule, graph_id: int, graph_order: List[int], profiling_results, create_inputs_fn,
-                         mem_budget: float, param_manager: DSGraphParamManager, bwd: bool) -> GraphModule:
+def move_opt_states_sync(gm: GraphModule, graph_id: int, graph_order: List[Tuple[int, bool]], profiling_results,
+                         create_inputs_fn, mem_budget: float, param_manager: DSGraphParamManager,
+                         bwd: bool) -> GraphModule:
     gm.graph = insert_offload_opt_states(gm.graph, graph_id, graph_order, profiling_results, mem_budget, param_manager,
                                          bwd)
     return gm
 
 
-def offload_adam_states_for_init(gm: GraphModule, graph_id: int, graph_order: List[int], profiling_results,
-                                 create_inputs_fn, mem_budget: float, param_manager: DSGraphParamManager,
-                                 bwd: bool) -> GraphModule:
+def offload_adam_states_for_init(gm: GraphModule, graph_id: int, graph_order: List[Tuple[int, bool]],
+                                 profiling_results, create_inputs_fn, mem_budget: float,
+                                 param_manager: DSGraphParamManager, bwd: bool) -> GraphModule:
     if not bwd and graph_id == graph_order[0][0]:
         with unset_fake_temporarily():
             offload_adam_states_sync()
