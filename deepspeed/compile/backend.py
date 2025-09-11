@@ -151,11 +151,12 @@ def set_example_values_to_symints(real_inputs, param_indices=None):
                     else:
                         stride.append(fs)
                 with unset_fake_temporarily():
-                    dummy_v = torch.zeros(shape,
-                                          dtype=v.dtype,
-                                          layout=v.layout,
-                                          device=v.device,
-                                          requires_grad=v.requires_grad).as_strided(shape, stride)
+                    dummy_v = torch.empty_strided(shape,
+                                                  stride,
+                                                  dtype=v.dtype,
+                                                  layout=v.layout,
+                                                  device=v.device,
+                                                  requires_grad=v.requires_grad).zero_()
 
                     # Create Parameter if this input index corresponds to a parameter
                     if i in param_idx_set:
