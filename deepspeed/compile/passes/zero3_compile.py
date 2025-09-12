@@ -174,6 +174,9 @@ def add_z3_gather_release_bw(gm: GraphModule,
         0,  # unused
         debug_log=debug_log)
 
+    with gm.graph.inserting_before(get_output_node(gm.graph)):
+        gm.graph.create_node("call_function", torch.ops.dc.end_backward.default, (graph_id, ))
+
     return gm
 
 

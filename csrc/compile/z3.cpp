@@ -48,6 +48,8 @@ public:
 
     void endBackward() override
     {
+        CustomOpExecutor::endBackward();
+
         if (param_updated_) {
             for (auto& it : has_acc_grad_) {
                 it.second = false;
@@ -520,5 +522,11 @@ void offload_parameter(at::Tensor tensor, long graph_id, long ds_id)
 }
 void reload_parameter_meta(at::Tensor param_tensor, long graph_id, long ds_id) {}
 void offload_parameter_meta(at::Tensor tensor, long graph_id, long ds_id) {}
+
+void end_backward(long graph_id)
+{
+    auto executor = getExecutor<Z3CustomOpExecutor>(graph_id, executors);
+    executor->endBackward();
+}
 
 }  // namespace dc
