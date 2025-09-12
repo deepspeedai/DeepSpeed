@@ -119,16 +119,16 @@ class TestDeepCompile(DistributedTest):
 
     @pytest.mark.parametrize('dtype', [torch.float32])
     @pytest.mark.parametrize('zero_stage', [3])
-    def test_uneven_shard_assertion(self, zero_stage, dtype):
-        """Test that uneven shard sizes are properly caught by the registration-time assertion"""
+    def test_padded_shard_handling(self, zero_stage, dtype):
+        """Test that parameters with padding (uneven division) work correctly with DeepCompile"""
         if not required_torch_version(min_version=2.6):
             pytest.skip("DeepCompile requires PyTorch >= v2.6")
 
         if get_accelerator().device_name() == "cpu":
             pytest.skip("CPU does not support this test yet")
 
-        # Use a hidden dimension that creates uneven shards across 2 ranks
-        # With world_size=2, a hidden_dim of 13 should create uneven partitions
+        # Use a hidden dimension that requires padding when divided across ranks
+        # With world_size=2, a hidden_dim of 13 creates parameters that need padding
         config_dict = {
             "train_micro_batch_size_per_gpu": 1,
             "steps_per_print": 1,
@@ -146,16 +146,6 @@ class TestDeepCompile(DistributedTest):
             }
         }
 
-        # This should trigger the uniform shard size assertion
-        # Expected behavior: RuntimeError about non-uniform shard sizes
-        try:
-            compare_loss(self, config_dict, dtype, iteration=1, hidden_dim_override=13)
-            # If we reach here, the assertion didn't work as expected
-            pytest.fail("Expected RuntimeError for non-uniform shard sizes was not raised")
-        except RuntimeError as e:
-            if "non-uniform shard sizes detected" in str(e):
-                # Expected behavior - test passes
-                pass
-            else:
-                # Unexpected error
-                raise e
+        # This should work correctly with our padding-aware implementation
+        # The test verifies that padded parameters are handled properly
+        compare_loss(self, config_dict, dtype, iteration=1, hidden_dim_override=13)

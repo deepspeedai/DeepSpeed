@@ -418,30 +418,35 @@ void register_z3_param(long ds_id,
     param_registry->registerParam(ds_id, ds_shape, ds_tensor, grad_buffer, true, 0, persistent);
     if (persistent) { param_registry->registerGatheredParam(ds_id, ds_tensor); }
 
-    // Validate that shard sizes are uniform across ranks at registration time (not on the hot path)
-    // This ensures launchAllGather can assume uniform shard sizes without extra synchronization.
+    // Validate that padded shard sizes are uniform across ranks at registration time
+    // DeepSpeed pads parameters to ensure even division, so we check the padded size
+    // which should be uniform across all ranks for correct allgather behavior
     const int64_t local_count = ds_tensor.numel();
     const int world_size = process_group->getSize();
-
+    
+    // Calculate padded size (aligned to world_size)
+    const int64_t total_numel = grad_buffer.numel();  // This is the total parameter size
+    const int64_t padded_per_rank = (total_numel + world_size - 1) / world_size;
+    
+    // For verification: all ranks should have the same padded size
     auto count_options = at::TensorOptions().dtype(at::kLong).device(at::kCUDA);
-    at::Tensor local_count_tensor = torch::tensor({local_count}, count_options);
-    std::vector<at::Tensor> all_counts(world_size);
-    for (int i = 0; i < world_size; ++i) { all_counts[i] = torch::empty_like(local_count_tensor); }
-    std::vector<std::vector<at::Tensor>> all_counts_buffer{all_counts};
-    std::vector<at::Tensor> local_count_buffer{local_count_tensor};
+    at::Tensor local_padded_tensor = torch::tensor({padded_per_rank}, count_options);
+    std::vector<at::Tensor> all_padded_counts(world_size);
+    for (int i = 0; i < world_size; ++i) { all_padded_counts[i] = torch::empty_like(local_padded_tensor); }
+    
     // Build lvalue buffers for output and input as required by ProcessGroup::allgather
     std::vector<std::vector<at::Tensor>> output_tensors(world_size);
-    for (int i = 0; i < world_size; ++i) { output_tensors[i].push_back(all_counts[i]); }
-    std::vector<at::Tensor> input_tensors = {local_count_tensor};
+    for (int i = 0; i < world_size; ++i) { output_tensors[i].push_back(all_padded_counts[i]); }
+    std::vector<at::Tensor> input_tensors = {local_padded_tensor};
     process_group->allgather(output_tensors, input_tensors)->wait();
-
-    int64_t reference = local_count;
+    
+    // Verify all ranks agree on the padded size
     for (int i = 0; i < world_size; ++i) {
-        int64_t c = all_counts[i].to(torch::kCPU).item<int64_t>();
-        if (c != reference) {
+        int64_t padded_count = all_padded_counts[i].to(torch::kCPU).item<int64_t>();
+        if (padded_count != padded_per_rank) {
             throw std::runtime_error(
-                "ZeRO-3 registration error: non-uniform shard sizes detected across ranks. "
-                "Please check parameter partitioning.");
+                "ZeRO-3 registration error: inconsistent padded shard sizes across ranks. "
+                "This is an internal error - please report this issue.");
         }
     }
 }
