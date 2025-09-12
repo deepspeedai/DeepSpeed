@@ -1632,7 +1632,7 @@ class Init(InsertPostInitMethodToModuleSubClasses):
         for param in param_list:
             print_rank_0(f"Before Partitioning Param {param.ds_id}", force=False)
             if self.zero_param_process_group is not None:
-                self._partition_param_sec(param)
+                self._partition_param_sec(param, has_been_updated=has_been_updated)
             self._partition_param(param, has_been_updated=has_been_updated, free_data=True)
 
             param.ds_status = ZeroParamStatus.NOT_AVAILABLE
