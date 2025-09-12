@@ -32,23 +32,8 @@ app = modal.App("deepspeedai-torch-latest-ci", image=image)
 )
 def pytest():
     import subprocess
-    test_files = [
-        "tests/unit/v1/zero/test_zero.py",
-        "tests/unit/v1/half_precision/test_bf16.py",
-        "tests/unit/v1/zero/test_zero_autocast.py",
-        "tests/unit/v1/compile/test_compile_zero.py",
-    ]
-    command = [
-        "pytest",
-        "-n",
-        "4",
-        "--verbose",
-        *test_files,
-        "--torch_ver=2.6",
-        "--cuda_ver=12.4",
-    ]
     subprocess.run(
-        command,
+        "pytest -n 4 --verbose tests/unit/v1/ --torch_ver=2.6 --cuda_ver=12.4".split(),
         check=True,
         cwd=ROOT_PATH / ".",
     )
