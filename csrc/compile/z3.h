@@ -33,8 +33,8 @@ void prefetch_params_fused_meta(long graph_id,
 void invalidate_gathered_param(long ds_id);
 void clear_all_gathered_params();
 at::Tensor allgather_param_meta(at::Tensor param_tensor, long graph_id, long ds_id);
-at::Tensor release_param(at::Tensor dummy, long graph_id, long ds_id, long n_users);
-at::Tensor release_param_meta(at::Tensor dummy, long graph_id, long ds_id, long n_users);
+c10::IValue release_param(c10::IValue dummy, long graph_id, long ds_id, long n_users);
+c10::IValue release_param_meta(c10::IValue dummy, long graph_id, long ds_id, long n_users);
 at::Tensor wait_allgather(at::Tensor v, long graph_id, const long ds_id);
 at::Tensor wait_allgather_meta(at::Tensor v, long graph_id, long ds_id);
 at::Tensor offload_tensor(at::Tensor tensor, long graph_id, long id);

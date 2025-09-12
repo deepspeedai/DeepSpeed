@@ -455,16 +455,17 @@ at::Tensor allgather_param_meta(at::Tensor param_tensor, long graph_id, long ds_
     return output_buf;
 }
 
-at::Tensor release_param(at::Tensor dummy, long graph_id, long ds_id, long n_users)
+c10::IValue release_param(c10::IValue dummy, long graph_id, long ds_id, long n_users)
 {
     auto executor = getExecutor<Z3CustomOpExecutor>(graph_id, executors);
     executor->releaseParam(ds_id, n_users);
 
-    if (clone_custom_op_output) { return dummy.clone(); }
+    // TODO: check is dummy is a tensor or tuple
+    // if (clone_custom_op_output) { return dummy.clone(); }
     return dummy;
 }
 
-at::Tensor release_param_meta(at::Tensor dummy, long graph_id, long ds_id, long n_users)
+c10::IValue release_param_meta(c10::IValue dummy, long graph_id, long ds_id, long n_users)
 {
     return dummy;
 }
