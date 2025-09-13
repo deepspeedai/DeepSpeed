@@ -113,9 +113,9 @@ public:
         const DSParam& param = param_registry_->getParam(ds_id);
         const at::Tensor& ds_tensor = param.getDSTensor();
         const int world_size = process_group_->getSize();
-        const int64_t shard_elems = ds_tensor.numel();
-        const int64_t padded_numel = static_cast<int64_t>(world_size) * shard_elems;
         const int64_t true_numel = static_cast<int64_t>(productDim(param.getShape()));
+        const int64_t padded_per_rank = (true_numel + world_size - 1) / world_size;
+        const int64_t padded_numel = static_cast<int64_t>(world_size) * padded_per_rank;
 
         if (param_registry_->isValid(ds_id)) {
             // Return a view sliced to the true size with the original shape
