@@ -99,7 +99,7 @@ from deepspeed.runtime.data_pipeline.data_routing.helper import remove_random_lt
 from deepspeed.runtime.data_pipeline.data_routing.basic_layer import RandomLayerTokenDrop
 
 from deepspeed.utils.zero_to_fp32 import get_fp32_state_dict_from_zero_checkpoint
-from deepspeed.runtime.torch_autocast import init_autocast_params, get_default_autocast_lower_precision_modules, validate_nested_autocast
+from deepspeed.runtime.torch_autocast import init_autocast_params, get_default_autocast_lower_precision_modules, autocast_if_enabled
 
 from .pipe.module import PipelineModule
 from .utils import get_ma_status
@@ -1059,6 +1059,9 @@ class DeepSpeedEngine(Module):
     def zero_log_trace_cache_warnings(self):
         return self._config.zero_config.log_trace_cache_warnings
 
+    def is_sanity_checks_enabled(self):
+        return self._config.zero_config.enable_sanity_checks
+
     def dump_state(self):
         return self._config.dump_state
 
@@ -1433,7 +1436,8 @@ class DeepSpeedEngine(Module):
                 basic_optimizer = client_optimizer(model_parameters)
                 log_dist('Using client callable to create basic optimizer', ranks=[0])
 
-            if self.zero_use_cpu_optimizer() and not isinstance(basic_optimizer, deepspeed.ops.adam.DeepSpeedCPUAdam):
+            if (self.zero_use_cpu_optimizer() and not isinstance(basic_optimizer, deepspeed.ops.adam.DeepSpeedCPUAdam)
+                    and not isinstance(basic_optimizer, deepspeed.ops.lion.DeepSpeedCPULion)):
                 if self.zero_force_ds_cpu_optimizer():
                     msg = f'You are using ZeRO-Offload with a client provided optimizer ({type(basic_optimizer)}) which in most cases will yield poor performance. Please either use deepspeed.ops.adam.DeepSpeedCPUAdam or set an optimizer in your ds-config (https://www.deepspeed.ai/docs/config-json/#optimizer-parameters). If you really want to use a custom optimizer w. ZeRO-Offload and understand the performance impacts you can also set <"zero_force_ds_cpu_optimizer": false> in your configuration file.'
                     raise ZeRORuntimeException(msg)
@@ -1859,6 +1863,7 @@ class DeepSpeedEngine(Module):
                     zero_module_granularity_threshold=self.zero_module_granularity_threshold(),
                     zeropp_loco_param=self.zeropp_loco_param(),
                     log_trace_cache_warnings=self.zero_log_trace_cache_warnings(),
+                    enable_sanity_checks=self.is_sanity_checks_enabled(),
                 )
 
         else:
@@ -2142,10 +2147,7 @@ class DeepSpeedEngine(Module):
             # We can't have this in forward prologue as the compiler compiles hooks including the forward prologue.
             self.launch_compile_passes(self.global_steps)
 
-        validate_nested_autocast(self)
-        with torch.autocast(device_type=get_accelerator().device_name(),
-                            dtype=self.torch_autocast_dtype(),
-                            enabled=self.torch_autocast_enabled()):
+        with autocast_if_enabled(self):
             loss = self.module(*inputs, **kwargs)
 
         if self.autotuning_profile_model_info():
@@ -2197,6 +2199,11 @@ class DeepSpeedEngine(Module):
 
     @instrument_w_nvtx
     def allreduce_gradients(self, bucket_size=MEMORY_OPT_ALLREDUCE_SIZE):
+        # Skip gradient reduction when DeepCompile is enabled
+        # DeepCompile handles its own gradient reduction through compiled graph operations
+        if self.is_deepcompile_enabled():
+            return
+
         # Pass (PP) gas boundary flag to optimizer (required for zero)
         self.optimizer.is_gradient_accumulation_boundary = self.is_gradient_accumulation_boundary()
         # ZeRO stage >= 2 communicates during non gradient accumulation boundaries as well

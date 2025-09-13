@@ -103,8 +103,13 @@ def set_random_seed(seed):
     import numpy
     import random
     random.seed(seed)
-    numpy.random.seed(seed)
-    torch.manual_seed(seed)
+
+    # pytest-randomly passes a too large seed
+    # `numpy.random.default_rng` could be a better approach, but it requires more changes to use rngs explicitly
+    # numpy.random accepts only 32-bit integers
+    numpy.random.seed(seed % (2**32))
+    # torch.manual_seed accepts only 64-bit integers
+    torch.manual_seed(seed % (2**63))
 
 
 def is_model_parallel_parameter(p) -> bool:
