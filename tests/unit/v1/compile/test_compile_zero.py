@@ -10,7 +10,7 @@ from deepspeed.runtime.zero.offload_config import OffloadDeviceEnum
 from deepspeed.utils.torch import required_torch_version
 from deepspeed.accelerator import get_accelerator
 
-from unit.runtime.compile.util import compare_loss
+from unit.v1.compile.util import compare_loss
 from unit.common import DistributedTest
 from unit.util import bf16_required_version_check, skip_on_arch
 import deepspeed
