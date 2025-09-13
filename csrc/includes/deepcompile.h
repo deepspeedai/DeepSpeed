@@ -18,6 +18,7 @@
 #include <c10/cuda/CUDAStream.h>
 #include <torch/csrc/cuda/nccl.h>
 #include <torch/csrc/distributed/c10d/NCCLUtils.hpp>
+#include <torch/csrc/distributed/c10d/ParamCommsUtils.hpp>
 #include <torch/csrc/distributed/c10d/ProcessGroup.hpp>
 
 #if __has_include(<torch/csrc/distributed/c10d/symm_mem/SymmetricMemory.hpp>)
@@ -261,6 +262,7 @@ public:
         : id_(id),
           shape_(std::move(ds_shape)),
           ds_tensor_(ds_tensor),
+          ds_dtype_(ds_tensor.scalar_type()),
           grad_buffer_(grad_buffer),
           partitioned_(partitioned),
           offset_(offset),
@@ -272,6 +274,7 @@ public:
 
     long getId() const { return id_; }
     std::vector<int64_t> getShape() const { return shape_; }
+    at::ScalarType getDtype() const { return ds_dtype_; }
     at::Tensor getDSTensor() const
     {
         // If the reload event exists and is complete, return the reloaded tensor (if defined)
@@ -343,6 +346,7 @@ public:
 private:
     long id_;
     std::vector<int64_t> shape_;
+    at::ScalarType ds_dtype_;
     at::Tensor ds_tensor_;
     at::Tensor ds_reload_tensor_;
     at::Tensor grad_buffer_;
