@@ -15,7 +15,7 @@ image = (modal.Image
          .run_commands("apt update && apt install -y libaio-dev")
          .pip_install_from_requirements(ROOT_PATH / "requirements/requirements.txt", gpu="any")
          .pip_install_from_requirements(ROOT_PATH / "requirements/requirements-dev.txt", gpu="any")
-         .pip_install_from_requirements(ROOT_PATH / "requirements/requirements-deepcompile.txt", gpu="any")         
+         .pip_install_from_requirements(ROOT_PATH / "requirements/requirements-deepcompile.txt", gpu="any")
          .add_local_dir(ROOT_PATH , remote_path="/root/", copy=True)
          .run_commands("pip install /root")
          .add_local_dir(ROOT_PATH / "accelerator", remote_path="/root/deepspeed/accelerator")
