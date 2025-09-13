@@ -425,7 +425,9 @@ void register_z3_param(long ds_id,
     const int world_size = process_group->getSize();
     
     // Calculate padded size (aligned to world_size)
-    const int64_t total_numel = grad_buffer.numel();  // This is the total parameter size
+    // Use ds_shape to compute the full (unpartitioned) parameter size
+    int64_t total_numel = 1;
+    for (const auto dim : ds_shape) { total_numel *= dim; }
     const int64_t padded_per_rank = (total_numel + world_size - 1) / world_size;
     
     // For verification: all ranks should have the same padded size
