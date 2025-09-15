@@ -70,6 +70,9 @@ def add_gather_and_release(graph_id: int, graph: Graph, param_manager, param_nod
 
     node_to_uses = get_real_uses(graph)
     for pn in param_nodes:
+        if len(pn.users) == 0:
+            continue
+
         add_allgather(graph_id, graph, pn, param_manager.ds_ids[pn.name])
         ds_id = param_manager.ds_ids[pn.name]
         users = node_to_uses[pn]
@@ -85,6 +88,8 @@ def add_gather_and_reduce(graph_id: int, graph: Graph, param_manager, param_node
     add_gather_and_release(graph_id, graph, param_manager, param_nodes_bw)
 
     for param_name in param_manager.param_names:
+        if param_name_to_grad[param_name] is None:
+            continue
         add_reduce(graph_id, graph, param_name_to_grad[param_name], param_name, param_manager.ds_ids[param_name])
 
     return move_primals_to_head(graph)
