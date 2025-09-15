@@ -343,8 +343,9 @@ def fast_free_schedule(graph: Graph, available_mem: int, output_size: int, debug
 
                 schedule_until_free = schedule_until_ag + diff_required_nodes
                 for release_node in release_nodes[ds_id]:
-                    if release_node not in schedule_until_free:
-                        schedule_until_free.append(release_node)
+                    for release_dep_node in get_node_requirements(release_node, scheduled + schedule_until_free):
+                        if release_dep_node not in schedule_until_free:
+                            schedule_until_free.append(release_dep_node)
 
                 n_scheduled_ags = len(
                     [n for n in schedule_until_free if n.target == torch.ops.dc.allgather_param.default])
