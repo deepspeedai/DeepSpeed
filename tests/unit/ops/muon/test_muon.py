@@ -24,14 +24,6 @@ for optimizer_name in ['muon', 'adam']:
                     muon_configs.append([optimizer_name, stage, lr, model_dim, nlayer])
 
 
-def set_muon_flag(params):
-    for p in params:
-        if p.ndim >= 2:
-            setattr(p, "use_muon", True)
-        else:
-            setattr(p, "use_muon", False)
-
-
 @pytest.mark.parametrize('optimizer_type, zero_stage, lr, hidden_dim, nlayer', muon_configs)
 class TestMuonConfigs(DistributedTest):
 
@@ -55,8 +47,6 @@ class TestMuonConfigs(DistributedTest):
         # Perform a few training steps to ensure the optimizer works correctly
 
         model = SimpleModel(hidden_dim=hidden_dim, nlayers=nlayer)
-        if 'muon' in optimizer_type:
-            set_muon_flag(model.parameters())
         initial_params = [p.clone().cpu() for p in model.parameters()]
         engine, optimizer, _, _ = deepspeed.initialize(
             config=config_dict,
