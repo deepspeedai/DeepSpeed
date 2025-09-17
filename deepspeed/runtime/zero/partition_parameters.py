@@ -594,7 +594,7 @@ class InsertPostInitMethodToModuleSubClasses(object):
         if self.patched:
 
             def _disable_class(cls):
-                if hasattr(cls, '_old_init'):
+                if '__init__' in cls.__dict__ and hasattr(cls, '_old_init'):
                     cls.__init__ = cls._old_init
 
             for subclass in get_all_subclasses(torch.nn.modules.module.Module):
