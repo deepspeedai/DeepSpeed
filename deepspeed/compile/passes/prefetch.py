@@ -3,7 +3,7 @@
 
 # DeepSpeed Team
 
-from typing import List
+from typing import List, Tuple
 
 import torch
 from torch.fx import Graph, Node, GraphModule
@@ -34,8 +34,9 @@ def get_ds_id(node: Node):
     return node.args[2]
 
 
-def schedule_prefetch(gm: GraphModule, graph_id: int, graph_order: List[int], profiling_results, create_inputs_fn,
-                      mem_budget: float, param_manager: DSGraphParamManager, bwd: bool) -> GraphModule:
+def schedule_prefetch(gm: GraphModule, graph_id: int, graph_order: List[Tuple[int, bool]], profiling_results,
+                      create_inputs_fn, mem_budget: float, param_manager: DSGraphParamManager,
+                      bwd: bool) -> GraphModule:
 
     max_mem = get_accelerator().total_memory() * (1 - MARGIN)
     vals_to_bcast = torch.tensor([max_mem], device=torch.device(get_accelerator().current_device()))

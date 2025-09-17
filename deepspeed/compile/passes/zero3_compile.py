@@ -4,7 +4,7 @@
 # DeepSpeed Team
 
 import gc
-from typing import List, Dict
+from typing import List, Dict, Tuple
 
 import torch
 from torch.fx import Graph, Node, GraphModule
@@ -92,7 +92,7 @@ def add_gather_and_reduce(graph_id: int, graph: Graph, param_manager, param_node
 
 def add_z3_gather_release_fw(gm: GraphModule,
                              graph_id: int,
-                             graph_order: List[int],
+                             graph_order: List[Tuple[int, bool]],
                              profiling_results,
                              create_inputs_fn,
                              param_manager,
@@ -139,7 +139,7 @@ def add_z3_gather_release_fw(gm: GraphModule,
 
 def add_z3_gather_release_bw(gm: GraphModule,
                              graph_id: int,
-                             graph_order: List[int],
+                             graph_order: List[Tuple[int, bool]],
                              profiling_results,
                              create_inputs_fn,
                              param_manager,
@@ -172,8 +172,8 @@ def add_z3_gather_release_bw(gm: GraphModule,
     return gm
 
 
-def add_z3_gather_release(gm: GraphModule, graph_id: int, graph_order: List[int], profiling_results, create_inputs_fn,
-                          mem_budget: float, param_manager, bwd: bool) -> GraphModule:
+def add_z3_gather_release(gm: GraphModule, graph_id: int, graph_order: List[Tuple[int, bool]], profiling_results,
+                          create_inputs_fn, mem_budget: float, param_manager, bwd: bool) -> GraphModule:
     if bwd:
         return add_z3_gather_release_bw(gm,
                                         graph_id,
