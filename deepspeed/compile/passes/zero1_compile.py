@@ -3,7 +3,7 @@
 
 # DeepSpeed Team
 
-from typing import List
+from typing import List, Tuple
 
 import torch
 from torch.fx import GraphModule
@@ -52,15 +52,15 @@ def add_z1_reduce_bw(gm: GraphModule, graph_id: int, param_manager) -> GraphModu
     return gm
 
 
-def add_z1_reduce(gm: GraphModule, graph_id: int, graph_order: List[int], profiling_results, create_inputs_fn,
-                  mem_budget: float, param_manager, bwd: bool) -> GraphModule:
+def add_z1_reduce(gm: GraphModule, graph_id: int, graph_order: List[Tuple[int, bool]], profiling_results,
+                  create_inputs_fn, mem_budget: float, param_manager, bwd: bool) -> GraphModule:
     if bwd:
         return add_z1_reduce_bw(gm, graph_id, param_manager)
     return add_z1_reduce_fw(gm, graph_id, profiling_results, param_manager, use_z2=False)
 
 
-def add_z2_reduce(gm: GraphModule, graph_id: int, graph_order: List[int], profiling_results, create_inputs_fn,
-                  mem_budget: float, param_manager, bwd: bool) -> GraphModule:
+def add_z2_reduce(gm: GraphModule, graph_id: int, graph_order: List[Tuple[int, bool]], profiling_results,
+                  create_inputs_fn, mem_budget: float, param_manager, bwd: bool) -> GraphModule:
     if bwd:
         return add_z1_reduce_bw(gm, graph_id, param_manager)
     return add_z1_reduce_fw(gm, graph_id, profiling_results, param_manager, use_z2=True)

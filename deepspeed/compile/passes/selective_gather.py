@@ -4,7 +4,7 @@
 # DeepSpeed Team
 
 from collections import defaultdict
-from typing import List
+from typing import List, Tuple
 
 import torch
 from torch.fx import GraphModule
@@ -21,8 +21,9 @@ max_alloc_mem = 0
 last_optimize_step = 0
 
 
-def selective_gather(gm: GraphModule, graph_id: int, graph_order: List[int], profiling_results, create_inputs_fn,
-                     mem_budget: float, param_manager: DSGraphParamManager, bwd: bool) -> GraphModule:
+def selective_gather(gm: GraphModule, graph_id: int, graph_order: List[Tuple[int, bool]], profiling_results,
+                     create_inputs_fn, mem_budget: float, param_manager: DSGraphParamManager,
+                     bwd: bool) -> GraphModule:
 
     if not bwd:
         return gm
@@ -138,7 +139,7 @@ def selective_gather(gm: GraphModule, graph_id: int, graph_order: List[int], pro
 
 # def make_selective_gather(z3_optimizer, nz3):
 
-#     def selective_gather_wrapper(graph: Graph, graph_id: int, graph_order: List[int], profiling_results,
+#     def selective_gather_wrapper(graph: Graph, graph_id: int, graph_order: List[Tuple[int, bool]], profiling_results,
 #                                  mem_budget: float, param_manager, bwd: bool) -> Graph:
 #         return selective_gather(graph, graph_id, graph_order, profiling_results, mem_budget, param_manager, bwd,
 #                                 z3_optimizer, nz3)

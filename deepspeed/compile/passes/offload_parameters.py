@@ -3,7 +3,7 @@
 
 # DeepSpeed Team
 
-from typing import List
+from typing import List, Tuple
 
 import torch
 from torch.fx import Node, GraphModule
@@ -43,8 +43,9 @@ def get_ds_id(node: Node):
     return node.args[2]
 
 
-def offload_parameter_fwd(gm: GraphModule, graph_id: int, graph_order: List[int], profiling_results, create_inputs_fn,
-                          mem_budget: float, param_manager: DSGraphParamManager, bwd: bool) -> GraphModule:
+def offload_parameter_fwd(gm: GraphModule, graph_id: int, graph_order: List[Tuple[int, bool]], profiling_results,
+                          create_inputs_fn, mem_budget: float, param_manager: DSGraphParamManager,
+                          bwd: bool) -> GraphModule:
     node_to_last_use, user_to_last_uses = get_last_uses(gm.graph)
     for node in gm.graph.nodes:
         if (isinstance(node, Node) and node.target == torch.ops.dc.allgather_param.default):
