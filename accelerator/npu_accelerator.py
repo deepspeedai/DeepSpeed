@@ -45,7 +45,7 @@ class NPU_Accelerator(DeepSpeedAccelerator):
         return 'npu:{}'.format(device_index)
 
     def device(self, device_index=None):
-        return torch.npu.device(device_index)
+        return torch.device('npu', device_index)
 
     def set_device(self, device_index):
         torch.npu.set_device(device_index)
