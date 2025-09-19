@@ -45,7 +45,8 @@ static void Kernel_Ex(cudaStream_t stream,
     static size_t SHMEM_SZ =
         max(TilingConfig::SMEM_SIZE_B_TILE + SMEM_SIZE_A1_TILE + SMEM_SIZE_A2_TILE,
             TilingConfig::SMEM_SIZE_C_TILE);
-    cudaFuncSetAttribute(QUANT_GEMM_Kernel<TilingConfig, OutputDataType>,
+    auto kernel = QUANT_GEMM_Kernel<TilingConfig, OutputDataType>;
+    cudaFuncSetAttribute(reinterpret_cast<const void*>(kernel),
                          cudaFuncAttributeMaxDynamicSharedMemorySize,
                          SHMEM_SZ);
     size_t dimN = (N_Global - 1) / TilingConfig::TILE_N + 1;
