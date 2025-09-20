@@ -1295,8 +1295,7 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
             self.param_reduce_events.popleft().synchronize()
 
         with get_accelerator().stream(self.reduce_and_partition_stream):
-            # if self.enable_sanity_checks:
-            if True:
+            if self.enable_sanity_checks:
                 assert_ints_same_as_other_ranks([p.ds_id for p in params_in_bucket])
 
             if self.contiguous_gradients and bucket.elements <= self.reduce_bucket_size and not self.reduce_scatter:
