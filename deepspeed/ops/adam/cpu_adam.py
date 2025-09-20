@@ -164,3 +164,86 @@ class DeepSpeedCPUAdam(torch.optim.Optimizer):
                                              group['weight_decay'], group['bias_correction'], p.data, p.grad.data,
                                              state['exp_avg'], state['exp_avg_sq'])
         return loss
+
+    @torch.no_grad()
+    def step_subgroup(self, subgroup_id: int, closure=None):
+        """Update the model parameters in a single subgroup (by index)."""
+        loss = None
+        if closure is not None:
+            with torch.enable_grad():
+                loss = closure()
+
+        # Intended device for step
+        device = torch.device('cpu')
+
+        for group in self.param_groups:
+            for p in group['params']:
+
+                if p.grad is None:
+                    continue
+
+                assert p.device == device, f"CPUAdam param is on {p.device} and must be 'cpu', make " \
+                        "sure you enabled 'offload_optimizer': 'cpu' in your ZeRO config."
+
+                state = self.state[subgroup_id]
+
+                if len(state) == 0:
+                    state['step'] = 0
+
+                    state_dtype = torch.float if self.fp32_optimizer_states else p.dtype
+
+                    state['exp_avg'] = torch.zeros_like(p.data, dtype=state_dtype, device=device)
+                    state['exp_avg_sq'] = torch.zeros_like(p.data, dtype=state_dtype, device=device)
+
+                state['step'] += 1
+                beta1, beta2 = group['betas']
+                self.ds_opt_adam.adam_update(self.opt_id, state['step'], group['lr'], beta1, beta2, group['eps'],
+                                             group['weight_decay'], group['bias_correction'], p.data, p.grad.data,
+                                             state['exp_avg'], state['exp_avg_sq'])
+        return loss
+
+    @torch.no_grad()
+    def rollback_subgroup(self, sub_group_id: int, closure=None):
+        """
+        Rollback the optimizer state for a specific subgroup.
+        """
+        loss = None
+        if closure is not None:
+            with torch.enable_grad():
+                loss = closure()
+
+        # Intended device for step
+        device = torch.device('cpu')
+
+        # Validate subgroup state exists and is initialized
+        if sub_group_id not in self.state or len(self.state[sub_group_id]) == 0:
+            raise RuntimeError(f"Cannot rollback optimizer state for sub_group_id {sub_group_id} "
+                               f"as it has not been initialized.")
+
+        subgroup_state = self.state[sub_group_id]
+
+        # Check if we can rollback (step count must be > 0)
+        if subgroup_state.get('step', 0) <= 0:
+            raise RuntimeError(f"Cannot rollback sub_group_id {sub_group_id}: "
+                               f"step count is {subgroup_state.get('step', 0)}")
+
+        for _, group in enumerate(self.param_groups):
+            for _, param in enumerate(group['params']):
+                if param.grad is None:
+                    continue
+
+                assert param.device == device, (
+                    f"CPUAdam param is on {param.device} and must be 'cpu', "
+                    f"make sure you enabled 'offload_optimizer': 'cpu' in your ZeRO config.")
+
+                # Decrement step count
+                subgroup_state['step'] -= 1
+
+                # Extract hyperparameters
+                beta1, beta2 = group['betas']
+
+                self.ds_opt_adam.adam_rollback(self.opt_id, subgroup_state['step'], group['lr'], beta1, beta2,
+                                               group['eps'], group['weight_decay'], group['bias_correction'],
+                                               param.data, param.grad.data, subgroup_state['exp_avg'],
+                                               subgroup_state['exp_avg_sq'])
+        return loss
