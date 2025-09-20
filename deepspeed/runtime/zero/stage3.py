@@ -17,7 +17,7 @@ from deepspeed.utils import groups, z3_leaf_parameter
 from torch._utils import _flatten_dense_tensors, _unflatten_dense_tensors
 from deepspeed.runtime.base_optimizer import ZeROOptimizer
 from deepspeed.utils import logger
-from deepspeed.utils.torch import register_grad_hook
+from deepspeed.utils.torch import register_grad_hook, required_torch_version
 from deepspeed.runtime.fp16.loss_scaler import CreateLossScaler
 from deepspeed.runtime.torch_autocast import get_autocast_dtype, get_all_comm_dtypes, is_autocast_initialized, sort_dtypes
 from deepspeed.runtime.comm.coalesced_collectives import reduce_scatter_coalesced, all_to_all_quant_reduce, all_to_all_loco_quant_reduce
@@ -1226,6 +1226,7 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
 
                 return reduce_leaf_module_grads
 
+            assert required_torch_version(min_version=1.8), "Leaf module requires PyTorch >= 1.8"
             self._leaf_module_hooks.append(leaf_module.register_full_backward_hook(make_hook(leaf_parameters)))
 
         print_rank_0('[End] Create gradient reduction hooks')
