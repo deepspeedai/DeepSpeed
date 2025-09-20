@@ -437,8 +437,9 @@ void register_z3_param(long ds_id,
     for (int i = 0; i < world_size; ++i) { all_padded_counts[i] = torch::empty_like(local_padded_tensor); }
     
     // Build lvalue buffers for output and input as required by ProcessGroup::allgather
-    std::vector<std::vector<at::Tensor>> output_tensors(world_size);
-    for (int i = 0; i < world_size; ++i) { output_tensors[i].push_back(all_padded_counts[i]); }
+    // The first argument must be a single-element vector containing a vector of WORLD_SIZE tensors
+    std::vector<std::vector<at::Tensor>> output_tensors(1);
+    output_tensors[0] = all_padded_counts;
     std::vector<at::Tensor> input_tensors = {local_padded_tensor};
     process_group->allgather(output_tensors, input_tensors)->wait();
     
