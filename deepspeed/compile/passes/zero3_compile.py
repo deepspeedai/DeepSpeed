@@ -5,6 +5,7 @@
 
 import gc
 from typing import List, Dict, Tuple
+import _operator
 
 import torch
 from torch.fx import Graph, Node, GraphModule
@@ -77,7 +78,19 @@ def add_gather_and_release(graph_id: int, graph: Graph, param_manager, param_nod
         ds_id = param_manager.ds_ids[pn.name]
         users = node_to_uses[pn]
         for user in users:
-            add_release(graph_id, graph, user, pn, ds_id, len(users))
+            # release_param() only accepts tensors as its first argument. If
+            # `user` is a tuple, we should release the param after any of
+            # operator.getitem of that tuple.
+            #
+            # Since no torch op takes a tuple as an input, we simply walk
+            # through users of `user` and check if there is any call to
+            # operator.getitem.
+            for secondary_user in user.users:
+                if secondary_user.op == "call_function" and secondary_user.target == _operator.getitem:
+                    add_release(graph_id, graph, secondary_user, pn, ds_id, len(users))
+                    break
+            else:
+                add_release(graph_id, graph, user, pn, ds_id, len(users))
 
     return move_primals_to_head(graph)
 
