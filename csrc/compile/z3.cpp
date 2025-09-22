@@ -423,26 +423,28 @@ void register_z3_param(long ds_id,
     // which should be uniform across all ranks for correct allgather behavior
     const int64_t local_count = ds_tensor.numel();
     const int world_size = process_group->getSize();
-    
+
     // Calculate padded size (aligned to world_size)
     // Use ds_shape to compute the full (unpartitioned) parameter size
     int64_t total_numel = 1;
     for (const auto dim : ds_shape) { total_numel *= dim; }
     const int64_t padded_per_rank = (total_numel + world_size - 1) / world_size;
-    
+
     // For verification: all ranks should have the same padded size
     auto count_options = at::TensorOptions().dtype(at::kLong).device(at::kCUDA);
     at::Tensor local_padded_tensor = torch::tensor({padded_per_rank}, count_options);
     std::vector<at::Tensor> all_padded_counts(world_size);
-    for (int i = 0; i < world_size; ++i) { all_padded_counts[i] = torch::empty_like(local_padded_tensor); }
-    
+    for (int i = 0; i < world_size; ++i) {
+        all_padded_counts[i] = torch::empty_like(local_padded_tensor);
+    }
+
     // Build lvalue buffers for output and input as required by ProcessGroup::allgather
     // The first argument must be a single-element vector containing a vector of WORLD_SIZE tensors
     std::vector<std::vector<at::Tensor>> output_tensors(1);
     output_tensors[0] = all_padded_counts;
     std::vector<at::Tensor> input_tensors = {local_padded_tensor};
     process_group->allgather(output_tensors, input_tensors)->wait();
-    
+
     // Verify all ranks agree on the padded size
     for (int i = 0; i < world_size; ++i) {
         int64_t padded_count = all_padded_counts[i].to(torch::kCPU).item<int64_t>();
