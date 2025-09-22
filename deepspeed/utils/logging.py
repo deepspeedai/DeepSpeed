@@ -155,6 +155,8 @@ def set_log_level_from_string(log_level_str, custom_logger=None):
     if custom_logger is None:
         custom_logger = logger
     custom_logger.setLevel(log_level)
+    for ch in custom_logger.handlers:
+        ch.setLevel(log_level)
 
 
 def get_current_level():
