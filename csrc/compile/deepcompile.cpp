@@ -180,9 +180,10 @@ void start_backward(bool update)
     for (auto& it : executors) { it.second->startBackward(update); }
 }
 
-// We don't call this
-// void end_backward(bool update)
-// {
-// }
+void end_backward(long graph_id)
+{
+    auto executor = getExecutor<CustomOpExecutor>(graph_id, executors);
+    executor->endBackward();
+}
 
 }  // namespace dc
