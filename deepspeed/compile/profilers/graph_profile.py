@@ -122,7 +122,7 @@ class ProfilingInterpreter(Interpreter):
             n.meta["device_time"] = 0.0
             n.meta["wall_time"] = 0.0
             n.meta["alloc_mem"] = 0
-            n.meta["max_memory"] = 0
+            n.meta["max_mem"] = 0
             n.meta["tensor_size"] = _node_size(n)
             return super().run_node(n)
 

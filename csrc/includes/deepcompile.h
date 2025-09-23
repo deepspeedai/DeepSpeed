@@ -456,7 +456,13 @@ public:
 
     virtual void startBackward(bool update) { param_updated_ = update; }
 
-    virtual void endBackward() {}
+    virtual void endBackward()
+    {
+        flushAllReduceBuckets();
+
+        // This synchronization ensures all of reduce calls are done before optimizer's step.
+        at::cuda::stream_synchronize(rs_stream_);
+    }
 
     virtual at::Tensor reduceGrad(at::Tensor grad_tensor, long ds_id)
     {
@@ -498,19 +504,6 @@ public:
             at::cuda::CUDAStreamGuard guard(copy_stream_);
             reduce_in_buffer.copy_(copy_src, true);
             rs_copy_done_events_[ds_id]->record(copy_stream_);
-        }
-
-        reduce_counter_--;
-
-        if (reduce_counter_ == 0) {
-            flushAllReduceBuckets();
-
-            reduce_counter_ = ds_ids_.size();
-
-            // This synchronization ensures all of reduce calls are done before optimizer's step.
-            at::cuda::stream_synchronize(rs_stream_);
-
-            endBackward();
         }
 
         return at::Tensor();

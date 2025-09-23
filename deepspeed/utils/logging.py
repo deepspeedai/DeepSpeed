@@ -145,7 +145,7 @@ def get_log_level_from_string(log_level_str):
 
 
 def set_log_level_from_string(log_level_str, custom_logger=None):
-    """Sets a log level in the passed `logger` from string. e.g. "info" => `logging.INFO`
+    """Sets a log level in the passed `logger` and its handlers from string. e.g. "info" => `logging.INFO`
 
     Args:
         log_level_str: one of 'debug', 'info', 'warning', 'error', 'critical'
@@ -155,6 +155,8 @@ def set_log_level_from_string(log_level_str, custom_logger=None):
     if custom_logger is None:
         custom_logger = logger
     custom_logger.setLevel(log_level)
+    for handler in custom_logger.handlers:
+        handler.setLevel(log_level)
 
 
 def get_current_level():

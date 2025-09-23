@@ -9,7 +9,7 @@ import torch
 from torch.fx import GraphModule
 
 from ..util import get_deepcompile_handle
-from ..fx import add_postprocess, move_primals_to_head, _make_node_meta
+from ..fx import add_postprocess, move_primals_to_head, _make_node_meta, get_output_node
 
 NAME = "zero1_compile"
 
@@ -49,6 +49,10 @@ def add_z1_reduce_bw(gm: GraphModule, graph_id: int, param_manager) -> GraphModu
         new_node.meta["val"] = None
 
     gm.graph = move_primals_to_head(graph)
+
+    with gm.graph.inserting_before(get_output_node(gm.graph)):
+        gm.graph.create_node("call_function", torch.ops.dc.end_backward.default, (graph_id, ))
+
     return gm
 
 
