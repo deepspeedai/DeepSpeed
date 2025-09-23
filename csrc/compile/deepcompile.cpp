@@ -21,6 +21,8 @@ bool clone_custom_op_output;
 bool profile = false;
 bool pre_div_reduce = true;
 
+int64_t free_activation_threshold;
+
 bool sync_before_reduce;     // for debugging
 bool sync_after_reduce;      // for debugging
 bool sync_before_allgather;  // for debugging
@@ -108,11 +110,9 @@ at::Tensor reduce_grad_meta(at::Tensor grad_tensor, long graph_id, long ds_id)
 
 void free_tensors(std::vector<at::Tensor> tensors)
 {
-    int64_t THRESHOLD = 10 * 1024 * 1024;
-
     if (!profile) {
         for (auto& tensor : tensors) {
-            if (tensor.is_cuda() && tensor.numel() > THRESHOLD) {
+            if (tensor.is_cuda() && tensor.numel() > free_activation_threshold) {
                 tensor.record_stream(at::cuda::getCurrentCUDAStream());
                 tensor.set_data(torch::empty({0}, tensor.options()));
             }
@@ -158,6 +158,7 @@ void init(c10::intrusive_ptr<c10d::ProcessGroup> pg,
         initial_reduce_bucket_size, get_config<bool>(config, "double_buffer"));
     use_symm_mem = get_config<bool>(config, "symmetric_memory");
     clone_custom_op_output = _clone_custom_op_output;
+    free_activation_threshold = get_config<int64_t>(config, "free_activation_threshold");
 
     sync_before_reduce = get_config<bool>(config, "sync_before_reduce");
     sync_after_reduce = get_config<bool>(config, "sync_after_reduce");
