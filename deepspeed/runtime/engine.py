@@ -1829,6 +1829,7 @@ class DeepSpeedEngine(Module):
                 optimizer = DeepSpeedZeroOptimizer_Stage3(
                     self.module,
                     optimizer,
+                    self.param_names,
                     timers=timers,
                     ds_config=self.config,
                     static_loss_scale=self.loss_scale(),
@@ -1876,6 +1877,7 @@ class DeepSpeedEngine(Module):
         model_dtype, gradient_accumulation_dtype = self.get_data_types()
         optimizer = MiCS_Optimizer(self.module,
                                    basic_optimizer,
+                                   self.param_names,
                                    timers=timers,
                                    ds_config=self.config,
                                    static_loss_scale=self.loss_scale(),
@@ -2992,7 +2994,7 @@ class DeepSpeedEngine(Module):
         bf16_mode = self.bfloat16_enabled()
         return self._get_rank_zero_ckpt_name(checkpoints_path, tag, mp_rank, pp_rank, bf16_mode)
 
-    def _get_ckpt_name(self, checkpoints_path, tag, mp_placeholder=None):
+    def _get_ckpt_name(self, checkpoints_path, tag, mp_placeholder=None, read_mode=False):
         if mp_placeholder is not None:
             mp_rank_str = mp_placeholder
         else:
@@ -3000,10 +3002,11 @@ class DeepSpeedEngine(Module):
             mp_rank_str = f"{mp_rank:02d}"
 
         if self.zero_optimization_partition_weights():
-            if self.load_universal_checkpoint():
-                filename = "zero_pp_rank_0"
-            else:
-                filename = "zero_pp_rank_{}".format(dist.get_rank(group=self.optimizer.dp_process_group))
+            # For stage 3, when loading the checkpoint, the world size may change, non-existent files may be loaded,
+            # so load the first ckpt file for every worker. When writing the checkpoint, each process still writes
+            # its own ckpt file to avoid conflicts.
+            filename = "zero_pp_rank_{}".format(0 if read_mode else dist.get_rank(
+                group=self.optimizer.dp_process_group))
             ckpt_name = os.path.join(
                 checkpoints_path,
                 str(tag),
@@ -3038,7 +3041,7 @@ class DeepSpeedEngine(Module):
 
     def _get_all_ckpt_names(self, checkpoints_path, tag):
         # It is required that (checkpoints_path, tag) are consistent among all ranks.
-        ckpt_file_pattern = self._get_ckpt_name(checkpoints_path, tag, mp_placeholder="*")
+        ckpt_file_pattern = self._get_ckpt_name(checkpoints_path, tag, mp_placeholder="*", read_mode=True)
         import glob
 
         ckpt_files = glob.glob(ckpt_file_pattern)

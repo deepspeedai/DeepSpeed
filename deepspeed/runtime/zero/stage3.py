@@ -141,6 +141,7 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
         self,
         module,
         init_optimizer,
+        param_names,
         timers,
         ds_config,
         static_loss_scale=1.0,
@@ -199,6 +200,7 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
             raise SystemError("Cannot use fp16 without accelerator.")
 
         self.optimizer = init_optimizer
+        self.param_names = param_names
 
         # Use torch (un)flatten ops
         self.flatten = _flatten_dense_tensors
@@ -2879,18 +2881,34 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
         optim_sd = torch.load(optim_state_path, weights_only=False)
         self._load_global_state_stage3(optim_sd)
 
-        key_list = ["fp32", "exp_avg", "exp_avg_sq"]
+        # Generally the step of each optimizer file should be the same, we can obtain from any parameter.
+        state_step = optim_sd[OPTIMIZER_STATE_DICT]['state'][0]['step']
+        for key in ["fp32", "exp_avg", "exp_avg_sq"]:
+            for sub_group_id, fp16_group in enumerate(self.fp16_groups):
+                fp32_param = self.fp32_partitioned_groups_flat[sub_group_id]
+                key_tensor = torch.zeros_like(fp32_param)
+                offset = 0
+                for param in fp16_group:
+                    if param not in self.param_names:
+                        raise ValueError(f"failed to find optimizer param in named params")
+                    param_name = self.param_names[param]
+                    key_layer_state_partition = self.load_hp_checkpoint_state(os.path.join(checkpoint_dir, param_name),
+                                                                              key)
+                    key_tensor.narrow(0, offset, key_layer_state_partition.numel()).copy_(key_layer_state_partition)
+                    offset += key_layer_state_partition.numel()
+                if key == "fp32":
+                    self.fp32_partitioned_groups_flat[sub_group_id].data.copy_(key_tensor)
+                    self.optimizer.state[fp32_param]['step'] = state_step
+                else:
+                    self.optimizer.state[fp32_param][key] = key_tensor
 
-        for key in key_list:
-            key_tensor = torch.empty(0)
-            for layer in param_shapes[0].keys():
-                key_layer_state_partition = self.load_hp_checkpoint_state(os.path.join(checkpoint_dir, layer), key)
-                key_tensor = torch.cat((key_tensor, key_layer_state_partition))
-            if key == "fp32":
-                self.fp32_partitioned_groups_flat[0].data.copy_(key_tensor)
-                self.optimizer.param_groups[0]['params'].append(self.fp32_partitioned_groups_flat[0])
-            else:
-                optim_sd[OPTIMIZER_STATE_DICT]['state'][0][key] = key_tensor
+        for param_group in self.optimizer.param_groups:
+            # Generally, the hyperparameters of each parameter should be the same, we can obtain from any parameter.
+            for key, value in optim_sd[OPTIMIZER_STATE_DICT]["param_groups"][0].items():
+                if key == 'params':
+                    param_group['params'] = []
+                else:
+                    param_group[key] = value
 
         if self.swap_optimizer:
             # Purge the swapped optimizer state, it was initialized to the freshly created model and not the checkpoint
@@ -2905,10 +2923,6 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
                 self._reassign_or_swap_out_partitioned_parameters(sub_group_id)
                 self._release_sub_group(sub_group_id, timer_names)
             self._post_step(timer_names)
-
-        self.optimizer.load_state_dict(optim_sd[OPTIMIZER_STATE_DICT])
-        for param_group in self.optimizer.param_groups:
-            param_group['params'] = []
 
         for sub_group_id in range(len(self.fp32_partitioned_groups_flat)):
             fp32_param = self.fp32_partitioned_groups_flat[sub_group_id]
