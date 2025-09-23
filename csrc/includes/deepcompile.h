@@ -590,14 +590,9 @@ void free_tensors(std::vector<at::Tensor> tensors);
 void free_tensors_meta(std::vector<at::Tensor> tensors);
 
 void init(c10::intrusive_ptr<c10d::ProcessGroup> pg,
+          pybind11::object& config,
           int64_t initial_reduce_bucket_size,
-          bool enable_double_buffer,
-          bool _use_symm_mem,
-          bool _clone_custom_op_output,
-          bool _sync_before_reduce,
-          bool _sync_after_reduce,
-          bool _sync_before_allgather,
-          bool _sync_after_allgather);
+          bool _clone_custom_op_output);
 void reset();
 void cleanup();
 
