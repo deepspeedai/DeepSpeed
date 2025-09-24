@@ -1031,7 +1031,10 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
                 self.torch_autocast_gradscaler.step(optimizer)
                 self.torch_autocast_gradscaler.update()
             else:
-                optimizer.step()
+                if not self.zenflow:
+                    optimizer.step()
+                else:
+                    self.zenflow_cpu_optimizer_step()
 
         if self.offload_optimizer:
             cur_device = self.subgroup_to_device[sub_group_id]
