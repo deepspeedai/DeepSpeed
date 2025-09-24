@@ -21,11 +21,14 @@ class ZeROOptimizer(DeepSpeedOptimizer):
     def load_hp_checkpoint_state_from_checkpoint_dir(self, lp_groups_name: str, checkpoint_dir: str) -> None:
         checkpoint_dir = os.path.join(checkpoint_dir, "zero")
         optim_state_path = os.path.join(checkpoint_dir, "optimizer_state.pt")
-        assert os.path.isfile(
-            optim_state_path), f'{optim_state_path} containing optimizer global state is missing! Cannot proceed.'
-        optim_sd = torch.load(optim_state_path, weights_only=False)
-
-        self._load_global_state(optim_sd)
+        if os.path.isfile(optim_state_path):
+            ignore_missing_optim_state = False
+            optim_sd = torch.load(optim_state_path, weights_only=False)
+            self._load_global_state(optim_sd)
+        else:
+            logger.warning(f'{optim_state_path} containing optimizer global state is missing!')
+            ignore_missing_optim_state = True
+            optim_sd = {}
 
         tp_rank = bwc_tensor_model_parallel_rank(mpu=self.mpu)
         if self.mpu is None:
@@ -35,8 +38,7 @@ class ZeROOptimizer(DeepSpeedOptimizer):
             tp_world_size = self.mpu.get_slice_parallel_world_size() if hasattr(self.mpu, "get_slice_parallel_world_size") \
                 else self.mpu.get_tensor_model_parallel_world_size()
 
-        for i, (param_group,
-                loaded_param_group) in enumerate(zip(self.optimizer.param_groups, optim_sd['param_groups'])):
+        for i, param_group in enumerate(self.optimizer.param_groups):
             # We have an assumption that all params in the same param_group have the same keys
             opt_keys = set()
             steps = []
@@ -58,6 +60,9 @@ class ZeROOptimizer(DeepSpeedOptimizer):
 
             map_to_flat_opt_states(hp_param, lp_groups[i], self.optimizer.state, opt_keys)
 
+            if ignore_missing_optim_state:
+                continue
+            loaded_param_group = optim_sd['param_groups'][i]
             for key, value in loaded_param_group.items():
                 if key == 'params':
                     continue

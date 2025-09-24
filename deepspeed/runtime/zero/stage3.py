@@ -2874,11 +2874,13 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
         """ Load optimizer and model states from the checkpoint directory. """
         checkpoint_dir = os.path.join(checkpoint_dir, "zero")
         optim_state_path = os.path.join(checkpoint_dir, "optimizer_state.pt")
-        assert os.path.isfile(
-            optim_state_path), f'{optim_state_path} containing optimizer global state is missing! Cannot proceed.'
-
-        optim_sd = torch.load(optim_state_path, weights_only=False)
-        self._load_global_state_stage3(optim_sd)
+        if os.path.isfile(optim_state_path):
+            ignore_missing_optim_state = False
+            optim_sd = torch.load(optim_state_path, weights_only=False)
+            self._load_global_state_stage3(optim_sd)
+        else:
+            logger.warning(f'{optim_state_path} containing optimizer global state is missing!')
+            ignore_missing_optim_state = True
 
         key_list = ["fp32", "exp_avg", "exp_avg_sq"]
 
@@ -2890,14 +2892,13 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
             if key == "fp32":
                 self.fp32_partitioned_groups_flat[0].data.copy_(key_tensor)
                 self.optimizer.param_groups[0]['params'].append(self.fp32_partitioned_groups_flat[0])
-            else:
+            elif not ignore_missing_optim_state:
                 optim_sd[OPTIMIZER_STATE_DICT]['state'][0][key] = key_tensor
 
         if self.swap_optimizer:
             # Purge the swapped optimizer state, it was initialized to the freshly created model and not the checkpoint
             self.optimizer_swapper.purge_state()
 
-        if self.swap_optimizer:
             # Touch all parameters to synchronize all buffers
             timer_names = set()
             self._partition_all_parameters()
@@ -2907,9 +2908,10 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
                 self._release_sub_group(sub_group_id, timer_names)
             self._post_step(timer_names)
 
-        self.optimizer.load_state_dict(optim_sd[OPTIMIZER_STATE_DICT])
-        for param_group in self.optimizer.param_groups:
-            param_group['params'] = []
+        if not ignore_missing_optim_state:
+            self.optimizer.load_state_dict(optim_sd[OPTIMIZER_STATE_DICT])
+            for param_group in self.optimizer.param_groups:
+                param_group['params'] = []
 
         for sub_group_id in range(len(self.fp32_partitioned_groups_flat)):
             fp32_param = self.fp32_partitioned_groups_flat[sub_group_id]
@@ -2933,7 +2935,13 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
         local_rank = dist.get_local_rank()
 
         # Load tensors from files and reshape them to flat vectors
-        loaded_checkpoint_state = torch.load(os.path.join(folder, f"{key}.pt"), weights_only=False).view(-1)
+        loaded_state = torch.load(os.path.join(folder, f"{key}.pt"), weights_only=False)
+        if isinstance(loaded_state, dict):
+            loaded_checkpoint_state = loaded_state['param'].view(-1)
+        elif isinstance(loaded_state, torch.Tensor):
+            loaded_checkpoint_state = loaded_state.view(-1)
+        else:
+            raise ValueError(f"Unknown type {type(loaded_state)} for loaded state")
 
         # Partition the loaded data according to the local rank
         world_size = dist.get_world_size(group=self.dp_process_group)

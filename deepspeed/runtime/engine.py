@@ -3053,7 +3053,7 @@ class DeepSpeedEngine(Module):
 
         ckpt_files = glob.glob(ckpt_file_pattern)
         ckpt_files.sort()
-        return ckpt_files
+        return ckpt_files, ckpt_file_pattern
 
     def load_checkpoint(self,
                         load_dir,
@@ -3077,7 +3077,7 @@ class DeepSpeedEngine(Module):
 
         Returns:
             A tuple of ``load_path`` and ``client_state``.
-            *``load_path``: Path of the loaded checkpoint. ``None`` if loading the checkpoint failed.
+            *``load_path``: Path of the loaded checkpoint. ``None`` if loading the checkpoint failed or loading a HF based UCP.
             *``client_state``: State dictionary used for loading required training states in the client code.
 
         Important: under ZeRO3, one cannot load checkpoint with ``engine.load_checkpoint()`` right
@@ -3116,6 +3116,11 @@ class DeepSpeedEngine(Module):
                                                          custom_load_fn=custom_load_fn)
 
         load_zero_checkpoint = load_path is not None and (self.zero_optimization() or self.bfloat16_enabled())
+        if self.load_universal_checkpoint():
+            ucp_ckpt_folder = os.path.join(load_dir, tag)
+            # UCP load can ignore '*mp' files or '*model_states.pt' but ucp_ckpt_folder must exist
+            load_zero_checkpoint = os.path.isdir(ucp_ckpt_folder)
+
         if load_zero_checkpoint:
             if (load_optimizer_states and not load_module_only) or self.load_universal_checkpoint():
                 success = self._load_zero_checkpoint(load_dir, tag, load_optimizer_states=load_optimizer_states)
@@ -3156,7 +3161,11 @@ class DeepSpeedEngine(Module):
 
         from deepspeed.runtime.state_dict_factory import SDLoaderFactory
 
-        ckpt_list = self._get_all_ckpt_names(load_dir, tag)
+        ckpt_list, ckpt_file_pattern = self._get_all_ckpt_names(load_dir, tag)
+        if self.load_universal_checkpoint() and len(ckpt_list) == 0:
+            logger.warning(f"Unable to find {ckpt_file_pattern} files in UCP folder {load_dir}")
+            return None, {}
+
         sd_loader = SDLoaderFactory.get_sd_loader(ckpt_list, checkpoint_engine=self.checkpoint_engine)
 
         is_pipe_parallel = isinstance(self.module, PipelineModule)
