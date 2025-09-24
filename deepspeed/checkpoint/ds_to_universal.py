@@ -514,7 +514,7 @@ def main(args):
     else:
         model_files = _get_model_state_files(args.input_folder)
         param_shapes = _parse_model_states_stage3(model_files)
-        dp_degree = len(optim_files)
+        dp_degree = len(model_files)
 
         temp_dir = os.path.join(args.output_folder, 'tmp')
 
