@@ -8,6 +8,7 @@ from deepspeed.runtime.zero.partition_parameters import *
 import os
 import torch
 import math
+import psutil
 from deepspeed import comm as dist
 from deepspeed.utils import logger
 from deepspeed.ops.adam import ZenFlowSelectiveAdamW_stage3
@@ -77,6 +78,8 @@ def _initialize_zenflow_stage3_prologue(optimizer_z3: "DeepSpeedZeroOptimizer_St
 
     if not optimizer_z3.zenflow:
         return
+
+    optimizer_z3.pt_reserved_cores_perc = zenflow_config.pt_reserved_cores_perc
 
     for p in module.parameters():
         p.data = p.data.t().contiguous() if len(p.shape) != 1 else p.data
@@ -531,28 +534,12 @@ def disable_accelerator():
 
 
 def zenflow_optimizer_process(pipe, curr_rank, total_rank, param_groups, shared_overlap_grad_map,
-                              shared_stale_param_map):
-    os.environ["CUDA_VISIBLE_DEVICES"] = ""
+                              shared_stale_param_map, zf_affinity):
     disable_accelerator()
 
-    TOTAL_CORES = os.cpu_count()
-    CPUADAM_CORE_START = 0
-    CPUADAM_CORE_END = TOTAL_CORES
-    TOTAL_CORES = CPUADAM_CORE_END - CPUADAM_CORE_START
-
-    cores_per_rank = TOTAL_CORES // total_rank
-    extra = TOTAL_CORES % total_rank
-    start_offset = curr_rank * cores_per_rank + min(curr_rank, extra)
-    end_offset = start_offset + cores_per_rank + (1 if curr_rank < extra else 0)
-    assigned_cores = set(range(CPUADAM_CORE_START + start_offset, CPUADAM_CORE_START + end_offset))
-
-    try:
-        os.sched_setaffinity(0, assigned_cores)
-        print(f"[Optimizer Thread] Rank {curr_rank} bound to CPU cores: {os.sched_getaffinity(0)}", flush=True)
-    except AttributeError:
-        print("[Optimizer Thread] sched_setaffinity not supported on this system.")
-    except Exception as e:
-        print(f"[Optimizer Thread] Failed to set affinity: {e}")
+    current_process = psutil.Process()
+    current_process.cpu_affinity(zf_affinity)
+    os.environ['OMP_NUM_THREADS'] = str(len(zf_affinity))
 
     from deepspeed.ops.adam import ZenFlowCPUAdam
     optimizer = ZenFlowCPUAdam(param_groups, overlap_step=True)
@@ -589,6 +576,14 @@ def zenflow_optimizer_process(pipe, curr_rank, total_rank, param_groups, shared_
             break
 
 
+def all_tensors_equal(tensor_list):
+    first_tensor = tensor_list[0]
+    for tensor in tensor_list[1:]:
+        if not torch.equal(first_tensor, tensor):
+            return False
+    return True
+
+
 def start_optimizer_process(optimizer_z3):
     from multiprocessing import Pipe, get_context, Manager
 
@@ -615,13 +610,44 @@ def start_optimizer_process(optimizer_z3):
     curr_rank = dist.get_rank()
     total_rank = dist.get_world_size()
 
+    current_process = psutil.Process()
+    current_affinity = current_process.cpu_affinity()
+    all_affinities = [
+        torch.zeros(len(current_affinity),
+                    dtype=type(current_affinity[0]),
+                    device=get_accelerator().current_device_name()) for _ in range(total_rank)
+    ]
+    dist.all_gather(
+        all_affinities,
+        torch.tensor(current_affinity, dtype=type(current_affinity[0]),
+                     device=get_accelerator().current_device_name()))
+    # When affinity across all ranks are the same, the workers are not binded.  Do a soft bind here
+    if all_tensors_equal(all_affinities):
+        num_phy_cores = psutil.cpu_count(logical=False)
+        available_phy_cores = [i for i in current_affinity if i < num_phy_cores]
+        num_available_phy_cores = len(available_phy_cores)
+        my_rank = curr_rank
+        my_size = total_rank
+        cores_per_rank = num_available_phy_cores // my_size
+        current_affinity = available_phy_cores[my_rank * cores_per_rank:(my_rank + 1) * cores_per_rank]
+    pt_num_cores = math.ceil(optimizer_z3.pt_reserved_cores_perc * len(current_affinity))
+    if pt_num_cores > 0 and pt_num_cores < len(current_affinity):
+        zf_affinity = current_affinity[pt_num_cores:]
+        pt_affinity = current_affinity[:pt_num_cores]
+    else:
+        zf_affinity = current_affinity
+        pt_affinity = current_affinity
+
     optimizer_z3.process = ctx.Process(
         target=zenflow_optimizer_process,
         args=(optimizer_z3.child_conn, curr_rank, total_rank, param_groups_data, optimizer_z3.shared_overlap_grad_map,
-              optimizer_z3.shared_stale_param_map),
+              optimizer_z3.shared_stale_param_map, zf_affinity),
     )
     optimizer_z3.process.daemon = True
     optimizer_z3.process.start()
+
+    current_process.cpu_affinity(pt_affinity)
+    os.environ['OMP_NUM_THREADS'] = str(len(pt_affinity))
 
     msg = optimizer_z3.parent_conn.recv()
     assert msg["type"] == "ready", "Optimizer process did not initialize correctly."
