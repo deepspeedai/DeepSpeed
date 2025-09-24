@@ -93,6 +93,12 @@ class DeepSpeedZeroOffloadOptimizerConfig(DeepSpeedConfigModel):
     ratio: float = Field(1.0, ge=0.0, le=1.0)
     """ Percentage of offloaded optimizer states to CPU Adam. Only valid with ZeRO Stage 3."""
 
+    super_offload: bool = False
+    """ Enable high performance CPU offloading for Superchips. Only valid with ZeRO Stage 3."""
+
+    cpuadam_cores_perc: float = Field(0.8, ge=0.0, le=1.0)
+    """ Percentage of CPU cores to use for CPU Adam. Only valid with ZeRO Stage 3 and super_offload=True."""
+
     @model_validator(mode="after")
     def set_pipeline(self):
         pipeline = self.pipeline_read or self.pipeline_write

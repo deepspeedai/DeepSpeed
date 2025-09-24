@@ -15,6 +15,9 @@ class CompileConfig(DeepSpeedConfigModel):
     free_activation: bool = False
     """ Turn on/off the free activation mode """
 
+    free_activation_threshold: int = 10 * 1024 * 1024
+    """ In free activation mode, activations no less than this threshold (in byte) are eagerly freed """
+
     offload_activation: bool = False
     """ Turn on/off the activation offloading """
 

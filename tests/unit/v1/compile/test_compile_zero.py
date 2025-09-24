@@ -149,3 +149,34 @@ class TestDeepCompile(DistributedTest):
         # This should work correctly with our padding-aware implementation
         # The test verifies that padded parameters are handled properly
         compare_loss(self, config_dict, dtype, iteration=1, hidden_dim_override=13)
+
+    @pytest.mark.parametrize('dtype', [torch.float32])
+    @pytest.mark.parametrize('zero_stage', [1, 3])
+    def test_free_activation_mode(self, zero_stage, dtype):
+        """Test that eagerly free activations work correctly and the threshold is configurable"""
+        if not required_torch_version(min_version=2.6):
+            pytest.skip("DeepCompile requires PyTorch >= v2.6")
+
+        if get_accelerator().device_name() == "cpu":
+            pytest.skip("CPU does not support this test yet")
+
+        config_dict = {
+            "train_micro_batch_size_per_gpu": 1,
+            "steps_per_print": 1,
+            "optimizer": {
+                "type": "Adam",
+                "params": {
+                    "lr": 0.00015
+                }
+            },
+            "zero_optimization": {
+                "stage": zero_stage,
+            },
+            "compile": {
+                "deepcompile": True,
+                "free_activation": True,
+                "free_activation_threshold": 0,
+            }
+        }
+
+        compare_loss(self, config_dict, dtype)

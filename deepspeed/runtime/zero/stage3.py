@@ -178,6 +178,7 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
         zeropp_loco_param=None,
         log_trace_cache_warnings=False,
         enable_sanity_checks=False,
+        cpuadam_cores_perc=0.8,
     ):
         see_memory_usage("Stage 3 initialize beginning", force=True)
 
@@ -873,7 +874,7 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
             sub_group_size = len(self.fp16_partitioned_groups_flat)
             # print(f"Partial offload sub_group_size is {sub_group_size}, ratio is {self.partial_offload}\n")
             for i in range(sub_group_size):
-                if i < int(self.partial_offload * sub_group_size):
+                if i >= int((1 - self.partial_offload) * sub_group_size):
                     self.subgroup_to_device[i] = 'cpu'
                 else:
                     self.subgroup_to_device[i] = get_accelerator()._name

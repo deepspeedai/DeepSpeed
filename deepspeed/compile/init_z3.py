@@ -28,10 +28,7 @@ def init_z3(engine, backend, compile_config, compile_kwargs, schedule=None):
         get_accelerator().empty_cache()
 
     dc = get_deepcompile_handle()
-    dc.init(engine.data_parallel_group,
-            engine.zero_reduce_bucket_size(), compile_config.double_buffer, compile_config.symmetric_memory,
-            is_backend_inductor(backend), compile_config.sync_before_reduce, compile_config.sync_after_reduce,
-            compile_config.sync_before_allgather, compile_config.sync_after_allgather)
+    dc.init(engine.data_parallel_group, compile_config, engine.zero_reduce_bucket_size(), is_backend_inductor(backend))
 
     # Unset hooks
     for m in engine.module.modules():
