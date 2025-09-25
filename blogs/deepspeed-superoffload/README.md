@@ -9,6 +9,22 @@
 
 ---
 
+## Table of Content
+
+- [SuperOffload: Unleashing the Power of Large-Scale LLM Training on Superchips](#superoffload-unleashing-the-power-of-large-scale-llm-training-on-superchips)
+  - [Table of Content](#table-of-content)
+  - [Introduction](#introduction)
+  - [SuperOffload Highlights](#superoffload-highlights)
+  - [How SuperOffload Works](#how-superoffload-works)
+    - [1. Speculation-then-Validation (STV)](#1-speculation-then-validation-stv)
+    - [2. Partial Offloading with Fine-Grained Bucketization](#2-partial-offloading-with-fine-grained-bucketization)
+    - [3. Superchip-Aware Casting](#3-superchip-aware-casting)
+  - [Experience and Insights](#experience-and-insights)
+  - [Getting Started](#getting-started)
+  - [Status \& Availability](#status--availability)
+  - [Acknowledgements](#acknowledgements)
+  - [BibTeX](#bibtex)
+
 ## Introduction
 
 Recent models, especially MoE, at the scale of tens to hundreds of billions of parameters, make fine-tuning on limited GPUs difficult. Offloading to CPU memory helps reduce GPU demand but typically assumes GPU-CPU connections over PCIe, which is bandwidth-limited (e.g., 32 GB/s on PCIe-Gen4). Thus, prior work mainly optimizes data transfers to avoid PCIe becoming a major performance bottleneck. However, hardware vendors are introducing a new class of tightly coupled architectures—such as NVIDIA GH200, GB200, and AMD MI300A—that challenge these long-standing assumptions.
@@ -22,7 +38,7 @@ Built on top of ZeRO Stage 3, SuperOffload enables scaling to even larger models
 
 ---
 
-## SuperOffoad Highlight
+## SuperOffload Highlights
 
 - **Single GH200:** Full fine-tuning of GPT-OSS-20B, Qwen3-14B, achieving ~600 TFLOPS (seq len 4K, batch size 4).
 - **Scales Further:** Qwen3-30B-A3B & Seed-OSS-36B on 2× GH200; Llama-70B on 4× GH200.
@@ -54,7 +70,7 @@ Overlap CPU-Adam with backward propagation on the GPU.
 
 - Instead of waiting for all updated parameters to return from CPU, keep the optimizer states and gradients of the last few buckets in GPU memory (if HBM allows).
 - Reduces synchronization bubbles and idle time between iterations.
-- Parameter **n'** controls how many tail buckets remain on GPU.
+- Parameter \(n'\) controls how many tail buckets remain on GPU.
 
 ---
 
@@ -121,14 +137,22 @@ Overlap CPU-Adam with backward propagation on the GPU.
 
 ---
 
-## Status & Availability
+## Getting Started
 
-SuperOffload is released as modular extensions atop ZeRO Stage 3 inside DeepSpeed with native configuration hooks exposed to Hugging Face Transformers (no model code changes). Community feedback & contributions are welcome.
+SuperOffload is integrated into DeepSpeed as modular extensions on top of ZeRO Stage 3 and exposed via native configuration in Hugging Face Transformers—no model code changes required.
 
-To enable SuperOffload, add the following line to your DeepSpeed config:
+To enable SuperOffload, add the following switch to your DeepSpeed config:
 
 ![Enable SuperOffload](./images/superoffload_enable.jpg)  
-*Figure 5: Enable SuperOffload with a single line in DeepSpeed config.*
+*Figure 5: Enable SuperOffload with a single line in the DeepSpeed config.*
+
+Tip: On superchip platforms (e.g., GH200/GB200/MI300A), combine NUMA binding and MPAM settings from "Experience and Insights" to stabilize bandwidth and improve end-to-end performance.
+
+## Status & Availability
+
+SuperOffload is open-sourced as modular extensions atop ZeRO Stage 3 in DeepSpeed and is exposed via native configuration in Hugging Face Transformers (no model code changes).
+
+Community feedback and contributions are welcome. For enablement and examples, see "Getting Started" above.
 
 ---
 
