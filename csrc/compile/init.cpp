@@ -22,6 +22,7 @@ TORCH_LIBRARY(dc, m)
     m.def("wait_reload(Tensor a, int id, int id) -> Tensor");
     m.def("offload_parameter(Tensor a, int id, int id) -> ()");
     m.def("reload_parameter(Tensor a, int id, int id) -> ()");
+    m.def("end_backward(int graph_id) -> ()");
 
     m.def("test_call(Tensor a) -> Tensor");
 }
@@ -74,6 +75,10 @@ TORCH_LIBRARY_IMPL(dc, Meta, m)
     m.impl("offload_parameter", &dc::offload_parameter_meta);
 }
 
+// The "Undefined" dispatch key is for operations whose arguments do not contain
+// a tensor.
+TORCH_LIBRARY_IMPL(dc, Undefined, m) { m.impl("end_backward", &dc::end_backward); }
+
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m)
 {
     m.def("set_persistent", &dc::set_persistent, "Set persistent flag for a parameter");
@@ -95,7 +100,6 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m)
     m.def("start_forward", &dc::start_forward, "Start forward pass");
     m.def("end_forward", &dc::end_forward, "End forward pass");
     m.def("start_backward", &dc::start_backward, "Start backward pass");
-    // m.def("end_backward", &dc::end_backward, "End backward pass");
     m.def("cleanup", &dc::cleanup, "Clean up DeepCompile");
     m.def("reset", &dc::reset, "Reset the state");
     m.def("invalidate_gathered_param", &dc::invalidate_gathered_param, "Invalidate gathered param");

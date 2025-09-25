@@ -5,6 +5,7 @@
 
 import gc
 from typing import List, Dict, Tuple
+import _operator
 
 import torch
 from torch.fx import Graph, Node, GraphModule
@@ -70,11 +71,26 @@ def add_gather_and_release(graph_id: int, graph: Graph, param_manager, param_nod
 
     node_to_uses = get_real_uses(graph)
     for pn in param_nodes:
+        if len(pn.users) == 0:
+            continue
+
         add_allgather(graph_id, graph, pn, param_manager.ds_ids[pn.name])
         ds_id = param_manager.ds_ids[pn.name]
         users = node_to_uses[pn]
         for user in users:
-            add_release(graph_id, graph, user, pn, ds_id, len(users))
+            # release_param() only accepts tensors as its first argument. If
+            # `user` is a tuple, we should release the param after any of
+            # operator.getitem of that tuple.
+            #
+            # Since no torch op takes a tuple as an input, we simply walk
+            # through users of `user` and check if there is any call to
+            # operator.getitem.
+            for secondary_user in user.users:
+                if secondary_user.op == "call_function" and secondary_user.target == _operator.getitem:
+                    add_release(graph_id, graph, secondary_user, pn, ds_id, len(users))
+                    break
+            else:
+                add_release(graph_id, graph, user, pn, ds_id, len(users))
 
     return move_primals_to_head(graph)
 
@@ -85,6 +101,8 @@ def add_gather_and_reduce(graph_id: int, graph: Graph, param_manager, param_node
     add_gather_and_release(graph_id, graph, param_manager, param_nodes_bw)
 
     for param_name in param_manager.param_names:
+        if param_name_to_grad[param_name] is None:
+            continue
         add_reduce(graph_id, graph, param_name_to_grad[param_name], param_name, param_manager.ds_ids[param_name])
 
     return move_primals_to_head(graph)
@@ -168,6 +186,9 @@ def add_z3_gather_release_bw(gm: GraphModule,
         get_accelerator().available_memory(),
         0,  # unused
         debug_log=debug_log)
+
+    with gm.graph.inserting_before(get_output_node(gm.graph)):
+        gm.graph.create_node("call_function", torch.ops.dc.end_backward.default, (graph_id, ))
 
     return gm
 

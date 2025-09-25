@@ -32,6 +32,8 @@ public:
 
     void endBackward() override
     {
+        CustomOpExecutor::endBackward();
+
         if (param_updated_) {
             for (auto& it : has_acc_grad_) { it.second = false; }
         }
