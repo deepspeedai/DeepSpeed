@@ -33,8 +33,10 @@ The open-source release of **SuperOffload** addresses this gap by providing a se
 
 Built on top of ZeRO Stage 3, SuperOffload enables scaling to even larger models, including Qwen3-30B-A3B, Seed-OSS-36B on two GH200s and Llama-70B on four GH200s. All of this is supported natively through Hugging Face Transformers and DeepSpeed, with no need for custom modeling code.
 
-![SuperOffload system overview](./images/superoffload_comparision.jpg)  
-*Figure 1: SuperOffload delivers up to 4× higher throughput than ZeRO-Offload for large-model fine-tuning across varying sequence lengths and batch sizes, achieving a peak throughput of 600 TFLOPS.*
+<div align="center">
+<img src="./images/superoffload_comparision.jpg" alt="SuperOffload system overview" width="80%">
+<p align="center"><em>Figure 1: SuperOffload delivers up to 4× higher throughput than ZeRO-Offload for large-model fine-tuning across varying sequence lengths and batch sizes, achieving a peak throughput of 600 TFLOPS.</em></p>
+</div>
 
 ---
 
@@ -58,11 +60,15 @@ Overlap CPU-Adam with backward propagation on the GPU.
 - **Speculation-then-validation** avoids this bottleneck by speculatively running CPU optimizer updates before full gradient checks finish.  
 - If issues are detected later (NaN, INF, or gradient overflow), the update is rolled back and redone safely.
 
+<div align="center">
 <img src="./images/superoffload_schedule.jpg" alt="Schedule comparison" width="80%">
 <p align="center"><em>Figure 2: Previous offloading approach suffers from global gradient norm and global check of NAN and INF values, which expose the optimizer step to the critical path and prevent overlapping opportunities. In SuperOffload, we introduce a speculation-then-validation schedule to address this issue.</em></p>
+</div>
 
+<div align="center">
 <img src="./images/superoffload_rollback.jpg" alt="Gradient clipping data" width="80%">
-*Figure 3: Red points indicate gradient clipping triggered during BLOOM pre-training — rare after warm-up, showing STV’s benefits.*
+<p align="center"><em>Figure 3: Red points indicate gradient clipping triggered during BLOOM pre-training — rare after warm-up, showing STV’s benefits.</em></p>
+</div>
 
 ---
 
@@ -80,8 +86,10 @@ Overlap CPU-Adam with backward propagation on the GPU.
 - On superchips with high CPU↔GPU bandwidth, casting cost matters.
 - SuperOffload improves efficiency by performing casting on the GPU and sending **high-precision** tensors to the CPU.
 
+<div align="center">
 <img src="./images/superoffload_cast_transfer.jpg" alt="Casting optimization" width="80%">
-*Figure 4: Casting to higher precision first on GPU and then transferring tensors is more efficient on Superchips.*
+<p align="center"><em>Figure 4: Casting to higher precision first on GPU and then transferring tensors is more efficient on Superchips.</em></p>
+</div>
 
 ---
 
@@ -143,8 +151,10 @@ SuperOffload is integrated into DeepSpeed as modular extensions on top of ZeRO S
 
 To enable SuperOffload, add the following switch to your DeepSpeed config:
 
+<div align="center">
 <img src="./images/superoffload_enable.jpg" alt="Enable SuperOffload" width="60%">
-*Figure 5: Enable SuperOffload with a single line in the DeepSpeed config.*
+<p align="center"><em>Figure 5: Enable SuperOffload with a single line in the DeepSpeed config.</em></p>
+</div>
 
 Tip: On superchip platforms (e.g., GH200/GB200/MI300A), combine NUMA binding and MPAM settings from "Experience and Insights" to stabilize bandwidth and improve end-to-end performance.
 
