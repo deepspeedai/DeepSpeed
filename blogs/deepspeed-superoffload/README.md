@@ -58,10 +58,10 @@ Overlap CPU-Adam with backward propagation on the GPU.
 - **Speculation-then-validation** avoids this bottleneck by speculatively running CPU optimizer updates before full gradient checks finish.  
 - If issues are detected later (NaN, INF, or gradient overflow), the update is rolled back and redone safely.
 
-![Schedule comparison](./images/superoffload_schedule.jpg)  
-*Figure 2: Previous offloading approach suffers from global gradient norm and global check of NAN and INF values, which expose the optimizer step to the critical path and prevent overlapping opportunities. In SuperOffload, we introduce a speculation-then-validation schedule to address this issue.*
+<img src="./images/superoffload_schedule.jpg" alt="Schedule comparison" width="80%">
+<p align="center"><em>Figure 2: Previous offloading approach suffers from global gradient norm and global check of NAN and INF values, which expose the optimizer step to the critical path and prevent overlapping opportunities. In SuperOffload, we introduce a speculation-then-validation schedule to address this issue.</em></p>
 
-![Gradient clipping data](./images/superoffload_rollback.jpg)  
+<img src="./images/superoffload_rollback.jpg" alt="Gradient clipping data" width="80%">
 *Figure 3: Red points indicate gradient clipping triggered during BLOOM pre-training — rare after warm-up, showing STV’s benefits.*
 
 ---
@@ -80,7 +80,7 @@ Overlap CPU-Adam with backward propagation on the GPU.
 - On superchips with high CPU↔GPU bandwidth, casting cost matters.
 - SuperOffload improves efficiency by performing casting on the GPU and sending **high-precision** tensors to the CPU.
 
-![Casting optimization](./images/superoffload_cast_transfer.jpg)  
+<img src="./images/superoffload_cast_transfer.jpg" alt="Casting optimization" width="80%">
 *Figure 4: Casting to higher precision first on GPU and then transferring tensors is more efficient on Superchips.*
 
 ---
@@ -143,7 +143,7 @@ SuperOffload is integrated into DeepSpeed as modular extensions on top of ZeRO S
 
 To enable SuperOffload, add the following switch to your DeepSpeed config:
 
-![Enable SuperOffload](./images/superoffload_enable.jpg)  
+<img src="./images/superoffload_enable.jpg" alt="Enable SuperOffload" width="60%">
 *Figure 5: Enable SuperOffload with a single line in the DeepSpeed config.*
 
 Tip: On superchip platforms (e.g., GH200/GB200/MI300A), combine NUMA binding and MPAM settings from "Experience and Insights" to stabilize bandwidth and improve end-to-end performance.
