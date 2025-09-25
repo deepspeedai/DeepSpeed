@@ -35,6 +35,10 @@ from deepspeed.checkpoint.constants import (DS_VERSION, OPTIMIZER_STATE_DICT, SI
                                             FP32_FLAT_GROUPS, ZERO_STAGE, PARTITION_COUNT, PARAM_SHAPES, BUFFER_NAMES,
                                             FROZEN_PARAM_SHAPES, FROZEN_PARAM_FRAGMENTS)
 
+from deepspeed.checkpoint import DeepSpeedCheckpoint
+
+from deepspeed.checkpoint.ds_to_universal import _inject_missing_state, _extract_zero_shard_files, _extract_zero_shard_files_stage3, _get_model_state_files, _parse_model_states_stage3, _get_optim_files
+
 
 @dataclass
 class zero_model_state:
@@ -101,6 +105,7 @@ def get_model_state_files(checkpoint_dir):
 
 def parse_model_states(files):
     zero_model_states = []
+    zero_stage = None
     for file in files:
         state_dict = torch.load(file, map_location=device, weights_only=False)
 
@@ -142,7 +147,9 @@ def parse_model_states(files):
                                          frozen_param_fragments=frozen_param_fragments)
         zero_model_states.append(z_model_state)
 
-    return zero_model_states
+        if zero_stage is None:
+            zero_stage = state_dict['ds_config']['zero_optimization']['stage']
+    return zero_stage, zero_model_states
 
 
 def parse_optim_states(files, ds_checkpoint_dir):
@@ -195,20 +202,15 @@ def _get_fp32_state_dict_from_zero_checkpoint(ds_checkpoint_dir, exclude_frozen_
     """
     print(f"Processing zero checkpoint '{ds_checkpoint_dir}'")
 
-    optim_files = get_optim_files(ds_checkpoint_dir)
-    zero_stage, world_size, fp32_flat_groups = parse_optim_states(optim_files, ds_checkpoint_dir)
-    print(f"Detected checkpoint of type zero stage {zero_stage}, world_size: {world_size}")
-
     model_files = get_model_state_files(ds_checkpoint_dir)
-
-    zero_model_states = parse_model_states(model_files)
+    zero_stage, zero_model_states = parse_model_states(model_files)
     print(f'Parsing checkpoint created by deepspeed=={zero_model_states[0].ds_version}')
 
     if zero_stage <= 2:
-        return _get_fp32_state_dict_from_zero2_checkpoint(world_size, fp32_flat_groups, zero_model_states,
+        return _get_fp32_state_dict_from_zero2_checkpoint(ds_checkpoint_dir, zero_model_states,
                                                           exclude_frozen_parameters)
     elif zero_stage == 3:
-        return _get_fp32_state_dict_from_zero3_checkpoint(world_size, fp32_flat_groups, zero_model_states,
+        return _get_fp32_state_dict_from_zero3_checkpoint(ds_checkpoint_dir, zero_model_states,
                                                           exclude_frozen_parameters)
 
 
@@ -322,9 +324,21 @@ def _zero2_merge_trainable_params(state_dict, world_size, fp32_flat_groups, zero
     print(f"Reconstructed fp32 state dict with {total_params} params {total_numel} elements")
 
 
-def _get_fp32_state_dict_from_zero2_checkpoint(world_size, fp32_flat_groups, zero_model_states,
-                                               exclude_frozen_parameters):
+def _consolidate_ucp_checkpoints(args, state_dict, slice_shapes):
+    zero_output_folder = os.path.join(args.output_dir, "zero")
+
+    for param in slice_shapes.keys():
+        ucp_checkpoint_path = os.path.join(zero_output_folder, param, "fp32.pt")
+        weight = torch.load(ucp_checkpoint_path, map_location=device)
+        state_dict[param] = weight['param']
+
+
+def _get_fp32_state_dict_from_zero2_checkpoint(ds_checkpoint_dir, zero_model_states, exclude_frozen_parameters):
+
     state_dict = OrderedDict()
+
+    ds_checkpoint = DeepSpeedCheckpoint(ds_checkpoint_dir)
+    _inject_missing_state(ds_checkpoint)
 
     # buffers
     buffers = zero_model_states[0].buffers
@@ -335,7 +349,20 @@ def _get_fp32_state_dict_from_zero2_checkpoint(world_size, fp32_flat_groups, zer
     if not exclude_frozen_parameters:
         _zero2_merge_frozen_params(state_dict, zero_model_states)
 
-    _zero2_merge_trainable_params(state_dict, world_size, fp32_flat_groups, zero_model_states)
+    param_shards = _extract_zero_shard_files(args,
+                                             ds_checkpoint,
+                                             temp_dir=None,
+                                             weight_only=True,
+                                             data_type=args.data_type)
+
+    param_shards.sort(key=lambda x: x[0])
+
+    for _, param in param_shards:
+        for key, value in param.items():
+            if key in state_dict:
+                state_dict[key] = torch.cat((state_dict[key], value), 0)
+            else:
+                state_dict[key] = value
 
     # recover shared parameters
     for pair in zero_model_states[0].shared_params:
@@ -487,9 +514,14 @@ def _zero3_merge_trainable_params(state_dict, world_size, fp32_flat_groups, zero
     print(f"Reconstructed Trainable fp32 state dict with {total_params} params {total_numel} elements")
 
 
-def _get_fp32_state_dict_from_zero3_checkpoint(world_size, fp32_flat_groups, zero_model_states,
-                                               exclude_frozen_parameters):
+def _get_fp32_state_dict_from_zero3_checkpoint(ds_checkpoint_dir, zero_model_states, exclude_frozen_parameters):
     state_dict = OrderedDict()
+
+    model_files = _get_model_state_files(ds_checkpoint_dir)
+    optim_files = _get_optim_files(ds_checkpoint_dir)
+    param_shapes = _parse_model_states_stage3(model_files)
+    param_shapes = {k: v for d in param_shapes for k, v in d.items()}
+    world_size = len(model_files)
 
     # buffers
     buffers = zero_model_states[0].buffers
@@ -500,7 +532,22 @@ def _get_fp32_state_dict_from_zero3_checkpoint(world_size, fp32_flat_groups, zer
     if not exclude_frozen_parameters:
         _zero3_merge_frozen_params(state_dict, world_size, zero_model_states)
 
-    _zero3_merge_trainable_params(state_dict, world_size, fp32_flat_groups, zero_model_states)
+    param_shards = _extract_zero_shard_files_stage3(args,
+                                                    optim_files,
+                                                    param_shapes,
+                                                    world_size,
+                                                    temp_dir=None,
+                                                    weight_only=True,
+                                                    data_type=args.data_type)
+
+    param_shards.sort(key=lambda x: x[0])
+
+    for _, param in param_shards:
+        for key, value in param.items():
+            if key in state_dict:
+                state_dict[key] = torch.cat((state_dict[key], value), 0)
+            else:
+                state_dict[key] = value
 
     # recover shared parameters
     for pair in zero_model_states[0].shared_params:
@@ -535,7 +582,7 @@ def get_fp32_state_dict_from_zero_checkpoint(checkpoint_dir,
                                              exclude_frozen_parameters=False,
                                              lazy_mode=False):
     """
-    Convert ZeRO 2 or 3 checkpoint into a single fp32 consolidated state_dict that can be loaded with
+    Convert ZeRO 2 or 3 checkpoint into a single fp32/fp16/bf16 consolidated state_dict that can be loaded with
     ``load_state_dict()`` and used for training without DeepSpeed or shared with others, for example
     via a model hub.
 
@@ -748,6 +795,19 @@ if __name__ == "__main__":
                         help="checkpoint tag used as a unique identifier for checkpoint. e.g., global_step1")
     parser.add_argument("--exclude_frozen_parameters", action='store_true', help="exclude frozen parameters")
     parser.add_argument("-d", "--debug", action='store_true', help="enable debug")
+    parser.add_argument('--num_extract_workers',
+                        default=4,
+                        type=int,
+                        help='How many parallel processes to extract zero shards')
+    parser.add_argument('--no_strict',
+                        dest='strict',
+                        action='store_false',
+                        help='Do not perform validity checks on converted checkpoint.')
+    parser.add_argument(
+        '--data_type',
+        default='FP32',
+        choices=['FP32', 'FP16', 'BF16'],
+        help="Specify the output tensor data type format (FP32, FP16, BF16, FP8, BF8). Default is FP32.")
     args = parser.parse_args()
 
     debug = args.debug

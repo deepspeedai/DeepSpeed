@@ -5,16 +5,18 @@
 
 # DeepSpeed Team
 
-from functools import partial
-from itertools import chain
 import argparse
 import glob
 import itertools
 import math
-from concurrent.futures import ProcessPoolExecutor
 import os
 import re
 import shutil
+from collections import OrderedDict
+from concurrent.futures import ProcessPoolExecutor
+from functools import partial
+from itertools import chain
+
 import torch
 import tqdm
 #from pprint import pprint
@@ -109,7 +111,7 @@ def _save_checkpoint(file_path, chkpt_sd):
     torch.save(chkpt_sd, file_path)
 
 
-def extract_zero_shards(dir, ds_checkpoint, indices_3D):
+def extract_zero_shards(dir, ds_checkpoint, weight_only, data_type, indices_3D):
     pp_index, tp_index, dp_index = indices_3D
     sd = ds_checkpoint.get_zero_checkpoint_state(pp_index=pp_index, tp_index=tp_index, dp_index=dp_index)
 
@@ -121,19 +123,20 @@ def extract_zero_shards(dir, ds_checkpoint, indices_3D):
     pipeline_replicated_params = universal_checkpoint_info.get(PIPELINE_REPLICATED_PARAMETER_PATTERNS, [])
     # print(f'{pipeline_replicated_params=}')
 
-    # dict
     state_groups = optim_sd[BASE_OPTIMIZER_STATE]["state"]
-    # list
     fp32_groups = optim_sd[SINGLE_PARTITION_OF_FP32_GROUPS]
-    param_groups_cnt = len(state_groups)
 
-    for param_group_id in range(param_groups_cnt):
+    param_state = OrderedDict()
 
-        flat_state = dict(
-            exp_avg=state_groups[param_group_id]["exp_avg"],
-            exp_avg_sq=state_groups[param_group_id]["exp_avg_sq"],
-            fp32=fp32_groups[param_group_id],
-        )
+    for param_group_id in range(len(state_groups)):
+        if weight_only:
+            flat_state = dict(fp32=fp32_groups[param_group_id].detach(), )
+        else:
+            flat_state = dict(
+                exp_avg=state_groups[param_group_id]["exp_avg"],
+                exp_avg_sq=state_groups[param_group_id]["exp_avg_sq"],
+                fp32=fp32_groups[param_group_id],
+            )
 
         if "step" in state_groups[param_group_id]:
             flat_state["step"] = state_groups[param_group_id]["step"]
@@ -145,18 +148,25 @@ def extract_zero_shards(dir, ds_checkpoint, indices_3D):
 
             # pprint(f"dpt{dp_index}{pp_index}{tp_index} {param_group_id} {name} => {fragment_mapping.start}:{fragment_mapping.numel}")
             for state_key in flat_state.keys():
-                dump_param_fragment(dir, tp_index, dp_index, state_key, flat_state[state_key], name,
-                                    fragment_mapping.start, fragment_mapping.numel)
+                dump_param_fragment(param_state, dir, tp_index, dp_index, state_key, flat_state[state_key], name,
+                                    fragment_mapping.start, fragment_mapping.numel, data_type, weight_only)
+
+    return dp_index, param_state
 
 
-def extract_zero_shards_stage3(optim_files, param_shapes, dp_degree, temp_dir, dp_index):
+def extract_zero_shards_stage3(optim_files, param_shapes, dp_degree, temp_dir, weight_only, data_type, dp_index):
     state_dict = torch.load(optim_files[dp_index], map_location='cpu', weights_only=False)
 
-    flat_state = dict(
-        exp_avg=state_dict[OPTIMIZER_STATE_DICT]['optimizer_state_dict']['state'][0]["exp_avg"],
-        exp_avg_sq=state_dict[OPTIMIZER_STATE_DICT]['optimizer_state_dict']['state'][0]["exp_avg_sq"],
-        fp32=state_dict[OPTIMIZER_STATE_DICT]['fp32_flat_groups'][0],
-    )
+    param_state = OrderedDict()
+
+    if weight_only:
+        flat_state = dict(fp32=state_dict[OPTIMIZER_STATE_DICT]['fp32_flat_groups'][0].detach(), )
+    else:
+        flat_state = dict(
+            exp_avg=state_dict[OPTIMIZER_STATE_DICT]['optimizer_state_dict']['state'][0]["exp_avg"],
+            exp_avg_sq=state_dict[OPTIMIZER_STATE_DICT]['optimizer_state_dict']['state'][0]["exp_avg_sq"],
+            fp32=state_dict[OPTIMIZER_STATE_DICT]['fp32_flat_groups'][0],
+        )
 
     offset = 0
     for name, shape in param_shapes.items():
@@ -164,9 +174,11 @@ def extract_zero_shards_stage3(optim_files, param_shapes, dp_degree, temp_dir, d
         partitioned_numel, _ = _zero_partitioned_param_info(unpartitioned_numel, dp_degree)
         padding_free_numel = min(partitioned_numel, abs(unpartitioned_numel - dp_index * partitioned_numel))
         for state_key in flat_state.keys():
-            dump_param_fragment(temp_dir, 0, dp_index, state_key, flat_state[state_key], name, offset,
-                                padding_free_numel)
+            dump_param_fragment(param_state, temp_dir, 0, dp_index, state_key, flat_state[state_key], name, offset,
+                                padding_free_numel, data_type, weight_only)
         offset += partitioned_numel
+
+    return dp_index, param_state
 
 
 cnt = 0
@@ -176,23 +188,29 @@ def dp_index_to_str(dp_index):
     return f"{dp_index:0>2d}"
 
 
-def dump_param_fragment(dir, tp_index, dp_index, state_name, state_flat_tensor, param_name, offset, numel):
+def dump_param_fragment(param_state, dir, tp_index, dp_index, state_name, state_flat_tensor, param_name, offset, numel,
+                        data_type, weight_only):
 
     global cnt  # temp hack
 
-    param_base_path = os.path.join(dir, param_name, str(tp_index))
-    os.makedirs(param_base_path, exist_ok=True)
-
     cnt += 1
-
-    path = os.path.join(param_base_path, f"{state_name}.{dp_index_to_str(dp_index)}")
-
-    #print(f"{param_name}: {offset}: {numel} => {path}")
 
     # State might be a python int or a tensor
     if state_name != "step" and torch.is_tensor(state_flat_tensor):
         state_flat_tensor = state_flat_tensor.narrow(0, offset, numel).clone()
-    _save_checkpoint(path, state_flat_tensor)
+
+        if data_type == "FP16":
+            state_flat_tensor = state_flat_tensor.to(torch.float16)
+        elif data_type == "BF16":
+            state_flat_tensor = state_flat_tensor.to(torch.bfloat16)
+
+    if weight_only:
+        param_state[param_name] = state_flat_tensor
+    else:
+        param_base_path = os.path.join(dir, param_name, str(tp_index))
+        os.makedirs(param_base_path, exist_ok=True)
+        path = os.path.join(param_base_path, f"{state_name}.{dp_index_to_str(dp_index)}")
+        _save_checkpoint(path, state_flat_tensor)
 
 
 def _merge_zero_shards(param_base_path, state, tp_degree, slice_shape=None):
@@ -360,19 +378,26 @@ def _do_parallel_work(do_work, work_chunks, num_workers):
     return results
 
 
-def _extract_zero_shard_files(args, ds_checkpoint, temp_dir):
+def _extract_zero_shard_files(args, ds_checkpoint, temp_dir, weight_only=False, data_type="FP32"):
     _3d_range_list = list(
         itertools.product(range(ds_checkpoint.pp_degree), range(ds_checkpoint.tp_degree),
                           range(ds_checkpoint.dp_degree)))
     #pprint(f'{_3d_range_list=}')
 
-    do_work = partial(extract_zero_shards, temp_dir, ds_checkpoint)
-    _do_parallel_work(do_work, _3d_range_list, args.num_extract_workers)
+    do_work = partial(extract_zero_shards, temp_dir, ds_checkpoint, weight_only, data_type)
+    return _do_parallel_work(do_work, _3d_range_list, args.num_extract_workers)
 
 
-def _extract_zero_shard_files_stage3(args, optim_files, param_shapes, dp_degree, temp_dir):
-    do_work = partial(extract_zero_shards_stage3, optim_files, param_shapes, dp_degree, temp_dir)
-    _do_parallel_work(do_work, list(range(dp_degree)), args.num_extract_workers)
+def _extract_zero_shard_files_stage3(args,
+                                     optim_files,
+                                     param_shapes,
+                                     dp_degree,
+                                     temp_dir,
+                                     weight_only=False,
+                                     data_type="FP32"):
+    do_work = partial(extract_zero_shards_stage3, optim_files, param_shapes, dp_degree, temp_dir, weight_only,
+                      data_type)
+    return _do_parallel_work(do_work, list(range(dp_degree)), args.num_extract_workers)
 
 
 def _merge_tp_slice_files(args, ds_checkpoint, slice_shapes, temp_dir):
