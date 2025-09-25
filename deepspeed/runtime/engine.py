@@ -886,6 +886,12 @@ class DeepSpeedEngine(Module):
     def zero_partial_offload(self):
         return getattr(self._config.zero_config.offload_optimizer, "ratio", 1.0)
 
+    def super_offload(self):
+        return getattr(self._config.zero_config.offload_optimizer, "super_offload", False)
+
+    def cpuadam_cores_perc(self):
+        return getattr(self._config.zero_config.offload_optimizer, "cpuadam_cores_perc", 0.9)
+
     def zero_sub_group_size(self):
         return self._config.zero_config.sub_group_size
 
@@ -1826,7 +1832,10 @@ class DeepSpeedEngine(Module):
 
                 log_dist(f'Creating {model_dtype} ZeRO stage {zero_stage} optimizer', ranks=[0])
                 from deepspeed.runtime.zero.stage3 import DeepSpeedZeroOptimizer_Stage3
-                optimizer = DeepSpeedZeroOptimizer_Stage3(
+                from deepspeed.runtime.superoffload.superoffload_stage3 import SuperOffloadOptimizer_Stage3
+                Stage3ZeroOptimizer = DeepSpeedZeroOptimizer_Stage3 if not self.super_offload(
+                ) else SuperOffloadOptimizer_Stage3
+                optimizer = Stage3ZeroOptimizer(
                     self.module,
                     optimizer,
                     self.param_names,
@@ -1865,6 +1874,7 @@ class DeepSpeedEngine(Module):
                     zeropp_loco_param=self.zeropp_loco_param(),
                     log_trace_cache_warnings=self.zero_log_trace_cache_warnings(),
                     enable_sanity_checks=self.is_sanity_checks_enabled(),
+                    cpuadam_cores_perc=self.cpuadam_cores_perc(),
                 )
 
         else:
