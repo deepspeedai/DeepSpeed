@@ -13,6 +13,7 @@ on:
       - '.github/workflows/nv-mii.yml'
       - 'requirements/**'
       - 'setup.py'
+      - 'pyproject.toml'
       - 'deepspeed/__init__.py'
       - 'deepspeed/inference/**'
       - '!deepspeed/inference/v2/**' # exclude v2 dir
