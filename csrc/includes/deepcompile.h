@@ -98,7 +98,6 @@ extern c10::intrusive_ptr<c10d::ProcessGroup> process_group;
 extern c10::intrusive_ptr<c10d::symmetric_memory::SymmetricMemory> symm_mem;
 extern ncclComm_t nccl_comm;
 extern bool use_symm_mem;
-extern bool clone_custom_op_output;
 extern bool profile;
 extern bool pre_div_reduce;
 
@@ -591,8 +590,7 @@ void free_tensors_meta(std::vector<at::Tensor> tensors);
 
 void init(c10::intrusive_ptr<c10d::ProcessGroup> pg,
           pybind11::object& config,
-          int64_t initial_reduce_bucket_size,
-          bool _clone_custom_op_output);
+          int64_t initial_reduce_bucket_size);
 void reset();
 void cleanup();
 
