@@ -2846,8 +2846,7 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
             raise NotImplementedError("ZeRO-3 does not yet support elastic checkpointing, please disable for now.")
 
         if checkpoint_folder:
-            self._load_universal_checkpoint(checkpoint_folder, load_optimizer_states, load_from_fp32_weights,
-                                            param_shapes)
+            self._load_universal_checkpoint(checkpoint_folder, load_optimizer_states, load_from_fp32_weights)
         else:
             self._rigid_load_state_dict(state_dict_list[dist.get_rank(group=self.dp_process_group)],
                                         load_optimizer_states=load_optimizer_states)
@@ -2868,11 +2867,10 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
                 self.persistent_parameters[0].partition(self.persistent_parameters)
                 # self.persistent_parameters[0].all_gather(self.persistent_parameters) # this will be done in checkpoint_event_epilogue() so remove it to prevent double all_gather
 
-    def _load_universal_checkpoint(self, checkpoint_folder, load_optimizer_states, load_from_fp32_weights,
-                                   param_shapes):
-        self.load_hp_checkpoint_state_from_checkpoint_dir_stage3(checkpoint_folder, param_shapes)
+    def _load_universal_checkpoint(self, checkpoint_folder, load_optimizer_states, load_from_fp32_weights):
+        self.load_hp_checkpoint_state_from_checkpoint_dir_stage3(checkpoint_folder)
 
-    def load_hp_checkpoint_state_from_checkpoint_dir_stage3(self, checkpoint_dir, param_shapes):
+    def load_hp_checkpoint_state_from_checkpoint_dir_stage3(self, checkpoint_dir):
         """ Load optimizer and model states from the checkpoint directory. """
         checkpoint_dir = os.path.join(checkpoint_dir, "zero")
         optim_state_path = os.path.join(checkpoint_dir, "optimizer_state.pt")
