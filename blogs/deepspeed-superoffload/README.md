@@ -2,8 +2,8 @@
 
 **Efficient full-parameter fine-tuning of GPT-OSS-20B & Qwen3-14B models on a single GPU and Llama3-70B on four GPUs, achieving up to 600 TFLOPS**
 
-**Authors**  
-[Xinyu Lian](https://xinyulian.tech/)<sup>1</sup>, [Masahiro Tanaka](https://tohtana.github.io/)<sup>2</sup>, [Olatunji Ruwase](https://www.snowflake.com/en/blog/authors/olatunji--tunji--ruwase/)<sup>3</sup>, [Minjia Zhang](https://minjiazhang.github.io/)<sup>1</sup>  
+**Authors**
+[Xinyu Lian](https://xinyulian.tech/)<sup>1</sup>, [Masahiro Tanaka](https://tohtana.github.io/)<sup>2</sup>, [Olatunji Ruwase](https://www.snowflake.com/en/blog/authors/olatunji--tunji--ruwase/)<sup>3</sup>, [Minjia Zhang](https://minjiazhang.github.io/)<sup>1</sup>
 
 <sup>1</sup>University of Illinois Urbana-Champaign · <sup>2</sup>Anyscale · <sup>3</sup>Snowflake
 
@@ -57,7 +57,7 @@ Built on top of ZeRO Stage 3, SuperOffload enables scaling to even larger models
 Overlap CPU-Adam with backward propagation on the GPU.
 
 - Traditional gradient clipping and NaN/INF checks block the optimizer step until all gradients arrive.
-- **Speculation-then-validation** avoids this bottleneck by speculatively running CPU optimizer updates before full gradient checks finish.  
+- **Speculation-then-validation** avoids this bottleneck by speculatively running CPU optimizer updates before full gradient checks finish.
 - If issues are detected later (NaN, INF, or gradient overflow), the update is rolled back and redone safely.
 
 <div align="center">
@@ -95,13 +95,13 @@ Overlap CPU-Adam with backward propagation on the GPU.
 
 ## Experience and Insights
 
-- **NUMA Binding:**  
-  Pair each GPU with its directly associated CPU to maximize bandwidth. In DeepSpeed:  
+- **NUMA Binding:**
+  Pair each GPU with its directly associated CPU to maximize bandwidth. In DeepSpeed:
   ```bash
   --bind_cores_to_rank
   ```
 
-- **MPAM (Memory System Resource Partitioning and Monitoring):**  
+- **MPAM (Memory System Resource Partitioning and Monitoring):**
   Reduces interference between CPU and GPU tasks.
 
   **How to enable MPAM on Nvidia Superchips:**
