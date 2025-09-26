@@ -16,6 +16,7 @@ try:
     import torch._dynamo
     from functorch.compile import make_boxed_func
     from torch._functorch.aot_autograd import aot_module_simplified
+    from torch._functorch.partitioners import min_cut_rematerialization_partition
     from torch._subclasses.fake_tensor import unset_fake_temporarily
     from torch._subclasses.fake_tensor import is_fake
 except ImportError:
@@ -367,17 +368,16 @@ def make_backend(backend, compile_config, compile_kwargs={}):
 
                 return compiler_fn
 
+            partition_fn = get_wrapped_partitioner(z3_partition, param_indices, min_cut_rematerialization_partition)
             aot_mod = aot_module_simplified(gm,
                                             real_inputs,
                                             fw_compiler=make_compiler_fn(make_fw_graph),
                                             bw_compiler=make_compiler_fn(make_bw_graph),
-                                            partition_fn=get_wrapped_partitioner(param_indices))
+                                            partition_fn=partition_fn)
             return torch._dynamo.optimize(**compile_kwargs)(aot_mod)
         elif backend == "inductor":
             patch_create_aot_dispatcher_function(graph_id, z3_partition, make_fw_graph, make_bw_graph, real_inputs,
                                                  param_indices, param_manager)
-            from .partitioner import get_wrapped_choose_saved_values_set
-            torch._functorch.partitioners.choose_saved_values_set = get_wrapped_choose_saved_values_set(param_indices)
 
             return torch._inductor.compile(gm, real_inputs)
 
