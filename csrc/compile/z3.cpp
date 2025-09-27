@@ -530,8 +530,6 @@ at::Tensor release_param(at::Tensor dummy, long graph_id, long ds_id, long n_use
 {
     auto executor = getExecutor<Z3CustomOpExecutor>(graph_id, executors);
     executor->releaseParam(ds_id, n_users);
-
-    if (clone_custom_op_output) { return dummy.clone(); }
     return dummy;
 }
 
