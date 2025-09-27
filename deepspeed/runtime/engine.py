@@ -2211,7 +2211,7 @@ class DeepSpeedEngine(Module):
     def allreduce_gradients(self, bucket_size=MEMORY_OPT_ALLREDUCE_SIZE):
         # Skip gradient reduction when DeepCompile is enabled
         # DeepCompile handles its own gradient reduction through compiled graph operations
-        if self.is_deepcompile_enabled():
+        if self.is_deepcompile_enabled() and self.zero_optimization_stage()!=3:
             return
 
         # Pass (PP) gas boundary flag to optimizer (required for zero)
