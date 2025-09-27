@@ -10,7 +10,7 @@ import _operator
 import torch
 from torch.fx import Graph, Node, GraphModule
 
-from ..util import get_input_nodes, get_param_nodes, get_index_by_graph_id, get_deepcompile_handle, get_real_uses
+from ..util import get_input_nodes, get_param_nodes, get_index_by_graph_id, get_deepcompile_handle, get_real_uses, is_cast_op
 from ..fx import add_postprocess, _make_node_meta, get_output_node, move_primals_to_head
 from ..profilers.graph_profile import ProfilingInterpreter
 from ..list_schedule import fast_free_schedule
@@ -21,14 +21,15 @@ from deepspeed.accelerator import get_accelerator
 NAME = "zero3_compile"
 
 
-def add_allgather(graph_id: int, graph: Graph, node: Node, ds_id: int):
+def add_allgather(graph_id: int, graph: Graph, node: Node, ds_id: int, dtype: torch.dtype):
     new_ag_node = add_postprocess(graph,
                                   node,
                                   torch.ops.dc.allgather_param.default,
                                   extra_args=[graph_id, ds_id],
+                                  extra_kwargs={"dtype": dtype},
                                   name=f"allgather_ds_param_{node.target}_{ds_id}",
                                   meta=_make_node_meta(node, ds_id, True))
-    new_ag_node.meta["val"] = node.meta["val"]
+    new_ag_node.meta["val"] = node.meta["val"].to(dtype)
 
     # Set the previous node back to output
     # We don't want to change the output node to allgather
@@ -42,7 +43,7 @@ def add_allgather(graph_id: int, graph: Graph, node: Node, ds_id: int):
                                     extra_args=[graph_id, ds_id],
                                     name=f"wait_allgather_ds_param__{node.target}_{ds_id}",
                                     meta=_make_node_meta(node, ds_id, False))
-    new_wait_node.meta["val"] = node.meta["val"]
+    new_wait_node.meta["val"] = new_ag_node.meta["val"]
 
     return new_ag_node
 
@@ -74,9 +75,30 @@ def add_gather_and_release(graph_id: int, graph: Graph, param_manager, param_nod
         if len(pn.users) == 0:
             continue
 
-        add_allgather(graph_id, graph, pn, param_manager.ds_ids[pn.name])
+        # If the only use of the parameter is a type-cast to a smaller type, fuse it with all-gather.
+        fuse_typecast = False
+        target_dtype = param_manager.params[pn.name].dtype
+        if len([user for user in pn.users if user.op != "output"]) == 1:
+            typecast_node = next(iter(pn.users))
+
+            is_cast, casted_dtype = is_cast_op(typecast_node)
+            if is_cast and casted_dtype.itemsize < target_dtype.itemsize:
+                fuse_typecast = True
+                target_dtype = casted_dtype
+
+        add_allgather(graph_id, graph, pn, param_manager.ds_ids[pn.name], target_dtype)
+        if fuse_typecast:
+            users = node_to_uses[typecast_node]
+            wait_node = typecast_node.args[0]
+            for user in list(typecast_node.users.keys()):
+                if user.op == "output":
+                    wait_node.meta["original_output_name"] = typecast_node.name
+                user.replace_input_with(typecast_node, wait_node)
+            graph.erase_node(typecast_node)
+        else:
+            users = node_to_uses[pn]
+
         ds_id = param_manager.ds_ids[pn.name]
-        users = node_to_uses[pn]
         for user in users:
             # release_param() only accepts tensors as its first argument. If
             # `user` is a tuple, we should release the param after any of

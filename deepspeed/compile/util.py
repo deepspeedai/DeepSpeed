@@ -5,7 +5,7 @@
 
 import functools
 import operator
-from typing import List, Tuple, Dict
+from typing import List, Tuple, Dict, Optional
 from collections import defaultdict
 
 import torch
@@ -129,6 +129,15 @@ def get_param_nodes(graph: Graph, index_to_ds_ids: List[Tuple[int, int]]) -> Lis
 
 def is_comm_op(node: Node) -> bool:
     return "comm" in node.meta and node.meta["comm"]
+
+
+def is_cast_op(node: Node) -> Tuple[bool, Optional[torch.dtype]]:
+    if node.op == "call_function":
+        if node.target == torch.ops.prims.convert_element_type.default:
+            return (True, node.args[1])
+        elif node.target == torch.ops.aten._to_copy.default and set(node.kwargs.keys()) == {"dtype"}:
+            return (True, node.kwargs["dtype"])
+    return (False, None)
 
 
 def exclude_from_act_offload(node: Node) -> bool:
