@@ -479,7 +479,7 @@ class DeepSpeedEngine(Module):
                         dist.broadcast_object_list(object_list=_src_args,
                                                    src=bcast_rank,
                                                    group=bcast_group,
-                                                   device=get_accelerator().current_device_name())
+                                                   device=torch.device(get_accelerator().current_device()))
                         # Rank 0 does not need to compare with itself
                         is_equal = True
                     else:
@@ -487,19 +487,19 @@ class DeepSpeedEngine(Module):
                         dist.broadcast_object_list(object_list=_src_args,
                                                    src=bcast_rank,
                                                    group=bcast_group,
-                                                   device=get_accelerator().current_device_name())
+                                                   device=torch.device(get_accelerator().current_device()))
 
                         is_equal = compare_tensors_in_structures(args, _src_args[0])
 
                     equal_tensor = torch.tensor(is_equal,
                                                 dtype=self.communication_data_type,
-                                                device=get_accelerator().current_device_name())
+                                                device=torch.device(get_accelerator().current_device()))
                     dist.all_reduce(equal_tensor, group=bcast_group)
                     assert torch.equal(
                         equal_tensor,
                         torch.tensor(groups.get_tensor_model_parallel_world_size(),
                                      dtype=self.communication_data_type,
-                                     device=get_accelerator().current_device_name())
+                                     device=torch.device(get_accelerator().current_device()))
                     ), "Data inconsistency within the TP group. Please check the Dataloader implementation to ensure consistency."
 
             bcast_rank = self.mpu.get_tensor_model_parallel_src_rank()
