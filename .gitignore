@@ -60,3 +60,6 @@ tests/unit/saved_checkpoint/
 *.hip
 *.cuh
 *hip_layers.h
+
+# virtual env directory for format
+venv
