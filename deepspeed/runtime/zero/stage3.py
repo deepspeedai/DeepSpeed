@@ -17,7 +17,7 @@ from deepspeed.utils import groups, z3_leaf_parameter
 from torch._utils import _flatten_dense_tensors, _unflatten_dense_tensors
 from deepspeed.runtime.base_optimizer import ZeROOptimizer
 from deepspeed.utils import logger
-from deepspeed.utils.torch import register_grad_hook
+from deepspeed.utils.torch import register_grad_hook, required_torch_version
 from deepspeed.runtime.fp16.loss_scaler import CreateLossScaler
 from deepspeed.runtime.torch_autocast import get_autocast_dtype, get_all_comm_dtypes, is_autocast_initialized, sort_dtypes
 from deepspeed.runtime.comm.coalesced_collectives import reduce_scatter_coalesced, all_to_all_quant_reduce, all_to_all_loco_quant_reduce
@@ -26,7 +26,7 @@ from deepspeed.runtime.zero.partition_parameters import *
 from deepspeed.runtime.zero.config import ZeroStageEnum
 from deepspeed.runtime.zero.offload_config import OffloadDeviceEnum, OffloadStateTypeEnum
 from deepspeed.runtime.zero.parameter_offload import DeepSpeedZeRoOffload
-from deepspeed.runtime.zero.utils import apply_to_tensors_only, get_mapping_to_flat_buffer
+from deepspeed.runtime.zero.utils import get_mapping_to_flat_buffer
 from deepspeed.runtime.zero.offload_states import offload_adam_states, reload_adam_states
 from deepspeed.ops.adam import DeepSpeedCPUAdam
 from deepspeed.runtime.swap_tensor.partitioned_param_swapper import PartitionedParamStatus
@@ -141,6 +141,7 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
         self,
         module,
         init_optimizer,
+        param_names,
         timers,
         ds_config,
         static_loss_scale=1.0,
@@ -200,6 +201,7 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
             raise SystemError("Cannot use fp16 without accelerator.")
 
         self.optimizer = init_optimizer
+        self.param_names = param_names
 
         # Use torch (un)flatten ops
         self.flatten = _flatten_dense_tensors
@@ -1214,59 +1216,21 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
                     # Partition the parameter after creating the hook
                     param.partition()
 
-        # We delay reduce-scatter for all gradients in the leaf modules until the backward pass of the leaf module is done
+        # We delay reduce for all gradients in the leaf modules until the backward pass of the leaf module is done
         for leaf_module, leaf_parameters in self.leaf_parameters.items():
 
-            def wrapper_pre_hook(params):
+            def make_hook(params):
 
-                def forward_pre_hook(module, input):
-                    """Pre-forward hook to set backward hook on input tensors to the leaf module"""
-                    module._leaf_module_inputs_remaining = 0
+                def reduce_leaf_module_grads(module, grad_input, grad_output):
+                    for param in params:
+                        if param.grad is None:
+                            param.grad = torch.zeros_like(param)
+                        self.reduce_ready_partitions_and_remove_grads(param)
 
-                    @instrument_w_nvtx
-                    def reduce_leaf_module_grads(grad):
-                        module._leaf_module_inputs_remaining -= 1
-                        # Make sure everything is done in the leaf module
-                        if module._leaf_module_inputs_remaining == 0:
-                            for param in params:
-                                if param.grad is None:
-                                    param.grad = torch.zeros_like(param)
-                                self.reduce_ready_partitions_and_remove_grads(param)
+                return reduce_leaf_module_grads
 
-                    def set_module_bwd_hook(tensor):
-                        if tensor.requires_grad:
-                            module._leaf_module_inputs_remaining += 1
-                            tensor.register_hook(reduce_leaf_module_grads)
-                        return tensor
-
-                    output = apply_to_tensors_only(set_module_bwd_hook, input)
-
-                    return output
-
-                return forward_pre_hook
-
-            def wrapper_post_hook():
-
-                def forward_post_hook(module, input, output):
-                    """Pre-forward hook to set backward hook on input tensors to the leaf module"""
-                    module._leaf_output_required_grad_num = 0
-
-                    def increment_rg_count_bwd_hook(tensor):
-                        if tensor.requires_grad:
-                            module._leaf_output_required_grad_num += 1
-                        return tensor
-
-                    apply_to_tensors_only(increment_rg_count_bwd_hook, output)
-
-                    if module._leaf_module_inputs_remaining == 0 and module._leaf_output_required_grad_num > 0:
-                        raise RuntimeError(
-                            "A module cannot be set as a leaf module when it does not have any input tensors that require gradients and has output tensors that require gradients. This is because the gradient reduction hook will not be called in this case."
-                        )
-
-                return forward_post_hook
-
-            self._leaf_module_hooks.append(leaf_module.register_forward_pre_hook(wrapper_pre_hook(leaf_parameters)))
-            self._leaf_module_hooks.append(leaf_module.register_forward_hook(wrapper_post_hook()))
+            assert required_torch_version(min_version=1.8), "Leaf module requires PyTorch >= 1.8"
+            self._leaf_module_hooks.append(leaf_module.register_full_backward_hook(make_hook(leaf_parameters)))
 
         print_rank_0('[End] Create gradient reduction hooks')
 
@@ -2844,8 +2808,7 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
             raise NotImplementedError("ZeRO-3 does not yet support elastic checkpointing, please disable for now.")
 
         if checkpoint_folder:
-            self._load_universal_checkpoint(checkpoint_folder, load_optimizer_states, load_from_fp32_weights,
-                                            param_shapes)
+            self._load_universal_checkpoint(checkpoint_folder, load_optimizer_states, load_from_fp32_weights)
         else:
             self._rigid_load_state_dict(state_dict_list[dist.get_rank(group=self.dp_process_group)],
                                         load_optimizer_states=load_optimizer_states)
@@ -2866,11 +2829,10 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
                 self.persistent_parameters[0].partition(self.persistent_parameters)
                 # self.persistent_parameters[0].all_gather(self.persistent_parameters) # this will be done in checkpoint_event_epilogue() so remove it to prevent double all_gather
 
-    def _load_universal_checkpoint(self, checkpoint_folder, load_optimizer_states, load_from_fp32_weights,
-                                   param_shapes):
-        self.load_hp_checkpoint_state_from_checkpoint_dir_stage3(checkpoint_folder, param_shapes)
+    def _load_universal_checkpoint(self, checkpoint_folder, load_optimizer_states, load_from_fp32_weights):
+        self.load_hp_checkpoint_state_from_checkpoint_dir_stage3(checkpoint_folder)
 
-    def load_hp_checkpoint_state_from_checkpoint_dir_stage3(self, checkpoint_dir, param_shapes):
+    def load_hp_checkpoint_state_from_checkpoint_dir_stage3(self, checkpoint_dir):
         """ Load optimizer and model states from the checkpoint directory. """
         checkpoint_dir = os.path.join(checkpoint_dir, "zero")
         optim_state_path = os.path.join(checkpoint_dir, "optimizer_state.pt")
@@ -2880,18 +2842,34 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
         optim_sd = torch.load(optim_state_path, weights_only=False)
         self._load_global_state_stage3(optim_sd)
 
-        key_list = ["fp32", "exp_avg", "exp_avg_sq"]
+        # Generally the step of each optimizer file should be the same, we can obtain from any parameter.
+        state_step = optim_sd[OPTIMIZER_STATE_DICT]['state'][0]['step']
+        for key in ["fp32", "exp_avg", "exp_avg_sq"]:
+            for sub_group_id, fp16_group in enumerate(self.fp16_groups):
+                fp32_param = self.fp32_partitioned_groups_flat[sub_group_id]
+                key_tensor = torch.zeros_like(fp32_param)
+                offset = 0
+                for param in fp16_group:
+                    if param not in self.param_names:
+                        raise ValueError(f"failed to find optimizer param in named params")
+                    param_name = self.param_names[param]
+                    key_layer_state_partition = self.load_hp_checkpoint_state(os.path.join(checkpoint_dir, param_name),
+                                                                              key)
+                    key_tensor.narrow(0, offset, key_layer_state_partition.numel()).copy_(key_layer_state_partition)
+                    offset += key_layer_state_partition.numel()
+                if key == "fp32":
+                    self.fp32_partitioned_groups_flat[sub_group_id].data.copy_(key_tensor)
+                    self.optimizer.state[fp32_param]['step'] = state_step
+                else:
+                    self.optimizer.state[fp32_param][key] = key_tensor
 
-        for key in key_list:
-            key_tensor = torch.empty(0)
-            for layer in param_shapes[0].keys():
-                key_layer_state_partition = self.load_hp_checkpoint_state(os.path.join(checkpoint_dir, layer), key)
-                key_tensor = torch.cat((key_tensor, key_layer_state_partition))
-            if key == "fp32":
-                self.fp32_partitioned_groups_flat[0].data.copy_(key_tensor)
-                self.optimizer.param_groups[0]['params'].append(self.fp32_partitioned_groups_flat[0])
-            else:
-                optim_sd[OPTIMIZER_STATE_DICT]['state'][0][key] = key_tensor
+        for param_group in self.optimizer.param_groups:
+            # Generally, the hyperparameters of each parameter should be the same, we can obtain from any parameter.
+            for key, value in optim_sd[OPTIMIZER_STATE_DICT]["param_groups"][0].items():
+                if key == 'params':
+                    param_group['params'] = []
+                else:
+                    param_group[key] = value
 
         if self.swap_optimizer:
             # Purge the swapped optimizer state, it was initialized to the freshly created model and not the checkpoint
@@ -2906,10 +2884,6 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
                 self._reassign_or_swap_out_partitioned_parameters(sub_group_id)
                 self._release_sub_group(sub_group_id, timer_names)
             self._post_step(timer_names)
-
-        self.optimizer.load_state_dict(optim_sd[OPTIMIZER_STATE_DICT])
-        for param_group in self.optimizer.param_groups:
-            param_group['params'] = []
 
         for sub_group_id in range(len(self.fp32_partitioned_groups_flat)):
             fp32_param = self.fp32_partitioned_groups_flat[sub_group_id]
@@ -2930,7 +2904,7 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
         self.overflow = sd.get('overflow', self.overflow)
 
     def load_hp_checkpoint_state(self, folder, key):
-        local_rank = dist.get_local_rank()
+        rank = dist.get_rank(group=self.dp_process_group)
 
         # Load tensors from files and reshape them to flat vectors
         loaded_checkpoint_state = torch.load(os.path.join(folder, f"{key}.pt"), weights_only=False).view(-1)
@@ -2944,8 +2918,7 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
             padding_size = world_size * partitioned_numel - unpartitioned_numel
             padding_tensor = torch.zeros(padding_size, dtype=loaded_checkpoint_state.dtype)
             loaded_checkpoint_state = torch.cat([loaded_checkpoint_state, padding_tensor])
-        checkpoint_state_partition = loaded_checkpoint_state.narrow(0, local_rank * partitioned_numel,
-                                                                    partitioned_numel)
+        checkpoint_state_partition = loaded_checkpoint_state.narrow(0, rank * partitioned_numel, partitioned_numel)
 
         return checkpoint_state_partition
 

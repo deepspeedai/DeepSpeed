@@ -479,7 +479,7 @@ class DeepSpeedEngine(Module):
                         dist.broadcast_object_list(object_list=_src_args,
                                                    src=bcast_rank,
                                                    group=bcast_group,
-                                                   device=get_accelerator().current_device())
+                                                   device=torch.device(get_accelerator().current_device_name()))
                         # Rank 0 does not need to compare with itself
                         is_equal = True
                     else:
@@ -487,19 +487,19 @@ class DeepSpeedEngine(Module):
                         dist.broadcast_object_list(object_list=_src_args,
                                                    src=bcast_rank,
                                                    group=bcast_group,
-                                                   device=get_accelerator().current_device())
+                                                   device=torch.device(get_accelerator().current_device_name()))
 
                         is_equal = compare_tensors_in_structures(args, _src_args[0])
 
                     equal_tensor = torch.tensor(is_equal,
                                                 dtype=self.communication_data_type,
-                                                device=get_accelerator().current_device())
+                                                device=torch.device(get_accelerator().current_device_name()))
                     dist.all_reduce(equal_tensor, group=bcast_group)
                     assert torch.equal(
                         equal_tensor,
                         torch.tensor(groups.get_tensor_model_parallel_world_size(),
                                      dtype=self.communication_data_type,
-                                     device=get_accelerator().current_device())
+                                     device=torch.device(get_accelerator().current_device_name()))
                     ), "Data inconsistency within the TP group. Please check the Dataloader implementation to ensure consistency."
 
             bcast_rank = self.mpu.get_tensor_model_parallel_src_rank()
@@ -1838,6 +1838,7 @@ class DeepSpeedEngine(Module):
                 optimizer = Stage3ZeroOptimizer(
                     self.module,
                     optimizer,
+                    self.param_names,
                     timers=timers,
                     ds_config=self.config,
                     static_loss_scale=self.loss_scale(),
@@ -1886,6 +1887,7 @@ class DeepSpeedEngine(Module):
         model_dtype, gradient_accumulation_dtype = self.get_data_types()
         optimizer = MiCS_Optimizer(self.module,
                                    basic_optimizer,
+                                   self.param_names,
                                    timers=timers,
                                    ds_config=self.config,
                                    static_loss_scale=self.loss_scale(),
@@ -3010,10 +3012,7 @@ class DeepSpeedEngine(Module):
             mp_rank_str = f"{mp_rank:02d}"
 
         if self.zero_optimization_partition_weights():
-            if self.load_universal_checkpoint():
-                filename = "zero_pp_rank_0"
-            else:
-                filename = "zero_pp_rank_{}".format(dist.get_rank(group=self.optimizer.dp_process_group))
+            filename = "zero_pp_rank_{}".format(dist.get_rank(group=self.optimizer.dp_process_group))
             ckpt_name = os.path.join(
                 checkpoints_path,
                 str(tag),
@@ -3053,7 +3052,10 @@ class DeepSpeedEngine(Module):
 
         ckpt_files = glob.glob(ckpt_file_pattern)
         ckpt_files.sort()
-        return ckpt_files
+        if self.load_universal_checkpoint():
+            return [ckpt_files[0]]
+        else:
+            return ckpt_files
 
     def load_checkpoint(self,
                         load_dir,

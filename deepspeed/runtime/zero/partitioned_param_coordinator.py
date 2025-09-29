@@ -432,7 +432,7 @@ class PartitionedParameterCoordinator:
         free_data = not z3_leaf_module(submodule) or not self.fast_sharding_for_leaf_module
         if not free_data:
             # wait for the computation to finish and launch as early as possible.
-            empty_buffer = torch.empty(1, device=get_accelerator().current_device())
+            empty_buffer = torch.empty(1, device=torch.device(get_accelerator().current_device_name()))
 
         for param in iter_params(submodule, recurse=z3_leaf_module(submodule)):
             param.ds_active_sub_modules.discard(submodule.ds_id)
