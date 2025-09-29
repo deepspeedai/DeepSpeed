@@ -196,8 +196,8 @@ This work is a close collaboration among [University of Illinois Urbana-Champaig
 
 We also gratefully acknowledge William Gropp, Brett Bode, and Gregory H. Bauer from the National Center for Supercomputing Applications (NCSA), as well as Dan Ernst, Ian Karlin, Giridhar Chukkapalli, Kurt Rago, and others from NVIDIA for their valuable discussions and guidance on MPAM support on Grace CPU.
 
-
 Community feedback and contributions are welcome. For enablement and examples, see "Getting Started" above.
+
 ---
 
 ## BibTeX
