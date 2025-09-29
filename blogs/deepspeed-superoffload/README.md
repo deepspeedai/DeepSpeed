@@ -73,7 +73,7 @@ The conventional approach for ensuring training stability is to perform optimize
 <p align="center"><em>Figure 2: Previous offloading approach suffers from global gradient norm and global check of NAN and INF values, which expose the optimizer step to the critical path and prevent overlapping opportunities. In SuperOffload, we introduce a speculation-then-validation schedule to address this issue.</em></p>
 </div>
 
-We evaluated the effectiveness of STV by measuring the frequency of undoing speculative optimizer computations in a pre-training run of a BLOOM-176B model. As shown in the figure below, such rollback (due to gradient clipping, etc.) rarely occur after warmup, making the associated overheads negligible over the entire training run. This makes STV practical for accelerating large-scale training.
+We evaluated the effectiveness of STV by measuring the frequency of undoing speculative optimizer computations in a pre-training run of a BLOOM-176B model. As shown in the figure below, such rollbacks (e.g., due to gradient clipping, etc.) are rare after warmup, making the associated overheads negligible over the entire training run. This makes STV practical for accelerating large-scale training.
 
 <div align="center">
 <img src="./images/superoffload_rollback.jpg" alt="Gradient clipping data" width="80%">
@@ -171,7 +171,7 @@ Existing offloading solutions for LLM training require CPU implementations of th
 
 ## Getting Started
 
-End-to-end finetuning examples using Superoffload are available [here](https://github.com/deepspeedai/DeepSpeedExamples/tree/master/training/DeepSpeed-SuperOffload#readme). To enable SuperOffload, add the following switch to your DeepSpeed config:
+End-to-end finetuning examples using Superoffload are available [here](https://github.com/deepspeedai/DeepSpeedExamples/tree/master/training/DeepSpeed-SuperOffload#readme). To get started even quicker, you can enable SuperOffload by adding the following switch to your DeepSpeed config:
 
 <div align="center">
 <img src="./images/superoffload_enable.jpg" alt="Enable SuperOffload" width="60%">
