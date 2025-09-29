@@ -367,6 +367,7 @@ class MiCS_Optimizer(DeepSpeedZeroOptimizer_Stage3):
     def __init__(self,
                  module,
                  init_optimizer,
+                 param_names,
                  timers,
                  ds_config,
                  static_loss_scale=1,
@@ -398,7 +399,7 @@ class MiCS_Optimizer(DeepSpeedZeroOptimizer_Stage3):
                  aio_config=None):
 
         log_dist("Init MiCS optimizer", ranks=[0])
-        super().__init__(module, init_optimizer, timers, ds_config, static_loss_scale, dynamic_loss_scale,
+        super().__init__(module, init_optimizer, param_names, timers, ds_config, static_loss_scale, dynamic_loss_scale,
                          dynamic_loss_args, verbose, contiguous_gradients, reduce_bucket_size, prefetch_bucket_size,
                          max_reuse_distance, max_live_parameters, param_persistence_threshold,
                          model_persistence_threshold, dp_process_group, reduce_scatter, overlap_comm,

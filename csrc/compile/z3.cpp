@@ -68,7 +68,12 @@ public:
                          c10::intrusive_ptr<c10d::symmetric_memory::SymmetricMemory> symm_mem)
     {
         const DSParam& param = param_registry_->getParam(ds_id);
-        const at::Tensor& ds_tensor = param.getDSTensor();
+        at::Tensor ds_tensor = param.getDSTensor();
+
+        if (ds_tensor.scalar_type() != output_buf.scalar_type()) {
+            at::cuda::CUDAStreamGuard guard(ag_stream_);
+            ds_tensor = ds_tensor.to(output_buf.scalar_type(), true, true);
+        }
 
         if (symm_mem == nullptr) {
             // Fast path: assume uniform shard sizes (ZeRO-3 partitions are padded to uniform size)
@@ -110,6 +115,7 @@ public:
     }
 
     at::Tensor allgatherParam(long ds_id,
+                              std::optional<at::ScalarType> dtype,
                               c10::intrusive_ptr<c10d::symmetric_memory::SymmetricMemory> symm_mem)
     {
         const DSParam& param = param_registry_->getParam(ds_id);
@@ -118,11 +124,16 @@ public:
         const int64_t true_numel = static_cast<int64_t>(productDim(param.getShape()));
         const int64_t padded_per_rank = (true_numel + world_size - 1) / world_size;
         const int64_t padded_numel = static_cast<int64_t>(world_size) * padded_per_rank;
+        at::ScalarType target_dtype = dtype ? dtype.value() : ds_tensor.scalar_type();
 
         if (param_registry_->isValid(ds_id)) {
             // Return a view sliced to the true size with the original shape
+            //
+            // Persistent params are gathered in their original dtype which may
+            // be different from the requested.
             auto base = param_registry_->getGatheredParam(ds_id);
             return base.flatten()
+                .to(target_dtype)
                 .index({torch::indexing::Slice(0, true_numel)})
                 .view(param.getShape());
         }
@@ -134,7 +145,7 @@ public:
         }
         if (!output_buf.defined()) {
             at::cuda::CUDAStreamGuard guard(ag_stream_);
-            output_buf = torch::empty({padded_numel}, ds_tensor.options());
+            output_buf = torch::empty({padded_numel}, ds_tensor.options().dtype(target_dtype));
         }
 
         assert(hasKey(ag_comp_done_events_, ds_id));
@@ -150,16 +161,20 @@ public:
             .view(param.getShape());
     }
 
-    void prefetchParamsFused(std::vector<int64_t> ds_ids,
+    void prefetchParamsFused(const std::vector<long>& ds_ids,
+                             const std::optional<std::vector<at::ScalarType>> dtypes,
                              c10::intrusive_ptr<c10d::symmetric_memory::SymmetricMemory> symm_mem)
     {
-        std::vector<int64_t> invalid_ds_ids;
-        for (const auto& ds_id : ds_ids) {
-            if (!param_registry_->isValid(ds_id)) { invalid_ds_ids.push_back(ds_id); }
+        std::vector<std::tuple<long, std::optional<at::ScalarType>>> invalid_params;
+        for (int i = 0; i < ds_ids.size(); i++) {
+            if (!param_registry_->isValid(ds_ids[i])) {
+                auto dtype = dtypes ? dtypes.value()[i] : std::optional<at::ScalarType>();
+                invalid_params.push_back(std::make_tuple(ds_ids[i], dtype));
+            }
         }
 
         std::unordered_map<long, at::Tensor> output_bufs;
-        for (long ds_id : invalid_ds_ids) {
+        for (const auto& [ds_id, dtype] : invalid_params) {
             const DSParam& param = param_registry_->getParam(ds_id);
             const at::Tensor& ds_tensor = param.getDSTensor();
             const int world_size = process_group_->getSize();
@@ -173,22 +188,26 @@ public:
                     continue;
                 }
             }
-            output_bufs[ds_id] = torch::empty({padded_numel}, ds_tensor.options());
+            auto target_dtype = dtype ? dtype.value() : ds_tensor.scalar_type();
+            output_bufs[ds_id] =
+                torch::empty({padded_numel}, ds_tensor.options().dtype(target_dtype));
         }
 
-        for (long ds_id : invalid_ds_ids) {
+        for (const auto& [ds_id, _] : invalid_params) {
             ag_comp_done_events_[ds_id]->record();
             ag_comp_done_events_[ds_id]->block(ag_stream_);
         }
 
         ncclGroupStart();
-        for (long ds_id : invalid_ds_ids) {
+        for (const auto& [ds_id, _] : invalid_params) {
             assert(hasKey(output_bufs, ds_id));
             launchAllGather(output_bufs.at(ds_id), ds_id, symm_mem);
         }
         ncclGroupEnd();
 
-        for (long ds_id : invalid_ds_ids) { ag_comm_done_events_[ds_id]->record(ag_stream_); }
+        for (const auto& [ds_id, _] : invalid_params) {
+            ag_comm_done_events_[ds_id]->record(ag_stream_);
+        }
     }
 
     void releaseParam(long ds_id, long n_users)
@@ -458,12 +477,15 @@ void register_z3_param(long ds_id,
     }
 }
 
-at::Tensor allgather_param(at::Tensor param_tensor, long graph_id, long ds_id)
+at::Tensor allgather_param(at::Tensor param_tensor,
+                           long graph_id,
+                           long ds_id,
+                           std::optional<at::ScalarType> dtype)
 {
     auto executor = getExecutor<Z3CustomOpExecutor>(graph_id, executors);
 
     if (sync_before_allgather) { c10::cuda::device_synchronize(); }
-    auto ret = executor->allgatherParam(ds_id, symm_mem);
+    auto ret = executor->allgatherParam(ds_id, dtype, symm_mem);
     if (sync_after_allgather) { c10::cuda::device_synchronize(); }
     return ret;
 }
@@ -477,22 +499,25 @@ void set_persistent(long ds_id)
     for (auto& it : executors) {
         if (it.second->hasParam(ds_id)) {
             auto executor = getExecutor<Z3CustomOpExecutor>(it.first, executors);
-            executor->allgatherParam(ds_id, symm_mem);
+            auto dtype = param_registry->getParam(ds_id).getDtype();
+            executor->allgatherParam(ds_id, dtype, symm_mem);
         }
     }
 }
 
 void prefetch_params_fused(long graph_id,
-                           const std::vector<at::Tensor> params,
-                           const std::vector<long>& ds_ids)
+                           const std::vector<at::Tensor>& params,
+                           const std::vector<long>& ds_ids,
+                           const std::optional<std::vector<at::ScalarType>>& dtypes)
 {
     auto executor = getExecutor<Z3CustomOpExecutor>(graph_id, executors);
-    executor->prefetchParamsFused(ds_ids, symm_mem);
+    executor->prefetchParamsFused(ds_ids, dtypes, symm_mem);
 }
 
 void prefetch_params_fused_meta(long graph_id,
-                                const std::vector<at::Tensor> params,
-                                const std::vector<long>& ds_ids)
+                                const std::vector<at::Tensor>& params,
+                                const std::vector<long>& ds_ids,
+                                const std::optional<std::vector<at::ScalarType>>& dtypes)
 {
 }
 
@@ -518,11 +543,14 @@ void clear_all_gathered_params()
     }
 }
 
-at::Tensor allgather_param_meta(at::Tensor param_tensor, long graph_id, long ds_id)
+at::Tensor allgather_param_meta(at::Tensor param_tensor,
+                                long graph_id,
+                                long ds_id,
+                                std::optional<at::ScalarType> dtype)
 {
     const DSParam& param = param_registry->getParam(ds_id);
     auto options = param.getDSTensor().options().device(c10::kMeta);
-    at::Tensor output_buf = torch::empty(param.getShape(), options);
+    at::Tensor output_buf = torch::empty(param.getShape(), options.dtype(dtype));
     return output_buf;
 }
 
@@ -530,8 +558,6 @@ at::Tensor release_param(at::Tensor dummy, long graph_id, long ds_id, long n_use
 {
     auto executor = getExecutor<Z3CustomOpExecutor>(graph_id, executors);
     executor->releaseParam(ds_id, n_users);
-
-    if (clone_custom_op_output) { return dummy.clone(); }
     return dummy;
 }
 
