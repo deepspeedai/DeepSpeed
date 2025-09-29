@@ -3052,15 +3052,15 @@ class DeepSpeedEngine(Module):
 
     def _get_all_ckpt_names(self, checkpoints_path, tag):
         # It is required that (checkpoints_path, tag) are consistent among all ranks.
-        ckpt_file_pattern = self._get_ckpt_name(checkpoints_path, tag, mp_placeholder="*", pp_placeholder="*")
+        ckpt_file_pattern = self._get_ckpt_name(checkpoints_path,
+                                                tag,
+                                                mp_placeholder="*",
+                                                pp_placeholder="0" if self.load_universal_checkpoint() else None)
         import glob
 
         ckpt_files = glob.glob(ckpt_file_pattern)
         ckpt_files.sort()
-        if self.load_universal_checkpoint():
-            return [ckpt_files[0]]
-        else:
-            return ckpt_files
+        return ckpt_files
 
     def load_checkpoint(self,
                         load_dir,
