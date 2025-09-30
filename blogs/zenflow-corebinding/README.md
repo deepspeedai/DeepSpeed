@@ -23,7 +23,9 @@ This raised a question: Could this switch also benefit ZeRO Offload?  We conduct
 | No bind core| 2707.32ms | 3127.24ms | 2826.04ms | 2887ms |
 | Bind core   | 2649.06ms | 2641.82ms | 2200.76ms | 2497ms |
 
-*Test environment: 2xDGX-A100-SXM4-40GB, 2xAMD EPYC 7742 64-Core Processor，1TB memory，DeepSpeedExamples/training/DeepSpeed-ZenFlow/finetuning*
+*Test environment: 2xDGX-A100-SXM4-40GB, 2xAMD EPYC 7742 64-Core Processor，1TB memory*
+
+Test URL: [DeepSpeedExamples/training/DeepSpeed-ZenFlow/finetuning](https://github.com/deepspeedai/DeepSpeedExamples/tree/master/training/DeepSpeed-ZenFlow/finetuning) * All following tests are using the same directory *
 
 Test command:
   - No core binding: `deepspeed --num_gpus=2 finetune_llama.py --model_name Qwen/Qwen2.5-3B --output_dir output --lr 2e-5 --batch_size 8 --deepspeed_config zo_config.json --num_train_epochs 1`
@@ -69,7 +71,9 @@ From this data, DeepSpeed's core binding provides approximately a 15% performanc
 Test command:
   - No core binding: `deepspeed --num_gpus=2 finetune_llama.py --model_name Qwen/Qwen2.5-3B --output_dir output --lr 2e-5 --batch_size 8 --deepspeed_config zf_config.json --num_train_epochs 1`
   - With core binding: `deepspeed --num_gpus=2 --bind_cores_to_rank finetune_llama.py --model_name Qwen/Qwen2.5-3B --output_dir output --lr 2e-5 --batch_size 8 --deepspeed_config zf_config.json --num_train_epochs 1`
+
 *DeepSpeed commit: 1d7b90adc48d57c2283e8825f5c668a3730ff899*
+
 Config file (`zf_config.json`):
 ```
 {
