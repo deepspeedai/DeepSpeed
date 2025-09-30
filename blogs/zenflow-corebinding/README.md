@@ -1,7 +1,7 @@
 # Study of ZenFlow and ZeRO offload performance with DeepSpeed CPU core binding
-Author: Ma, Guokai; Wang, Zhipeng; Lan, Tingfeng
+Author: Guokai Ma; Zhipeng Wang
 
-TL;DR: ZenFlow is an improvement to ZeRO Offload added by Tingfeng Lan et al. on DeepSpeed. After testing this feature, we explored the relationship between ZenFlow performance and DeepSpeed CPU core binding.
+**TL;DR:** ZenFlow is an improvement to ZeRO Offload added by Tingfeng Lan et al. on DeepSpeed. After testing this feature, we explored the relationship between ZenFlow performance and DeepSpeed CPU core binding.
 
 ## ZenFlow technology introduction
 [ZenFlow](https://arxiv.org/abs/2505.12242) is a recent improvement to ZeRO Offload implemented in DeepSpeed. Its primary goal is to address the GPU stall issues caused by ZeRO Offload. These stalls mainly originate from two sources: 1) the data transfer from the GPU to the CPU, which is limited by the GPU-CPU bandwidth, and 2) the computational overhead of executing the Adam optimizer on the CPU, which is constrained by CPU performance and memory bandwidth.
@@ -23,13 +23,13 @@ Improvement to ZeRO Offload performance from DeepSpeed CPU core binding
 | No bind core| 2707.32ms | 3127.24ms | 2826.04ms | 2887ms |
 | Bind core   | 2649.06ms | 2641.82ms | 2200.76ms | 2497ms |
 
-Test environment: 2xDGX-A100-SXM4-40GB, 2xAMD EPYC 7742 64-Core Processor，1TB memory，DeepSpeedExamples/training/DeepSpeed-ZenFlow/finetuning
+*Test environment: 2xDGX-A100-SXM4-40GB, 2xAMD EPYC 7742 64-Core Processor，1TB memory，DeepSpeedExamples/training/DeepSpeed-ZenFlow/finetuning*
 
 Test command:
-  - No core binding: deepspeed --num_gpus=2 finetune_llama.py --model_name Qwen/Qwen2.5-3B --output_dir output --lr 2e-5 --batch_size 8 --deepspeed_config zo_config.json --num_train_epochs 1
-  - With core binding: deepspeed --num_gpus=2 --bind_cores_to_rank finetune_llama.py --model_name Qwen/Qwen2.5-3B --output_dir output --lr 2e-5 --batch_size 8 --deepspeed_config zo_config.json --num_train_epochs 1
+  - No core binding: `deepspeed --num_gpus=2 finetune_llama.py --model_name Qwen/Qwen2.5-3B --output_dir output --lr 2e-5 --batch_size 8 --deepspeed_config zo_config.json --num_train_epochs 1`
+  - With core binding: `deepspeed --num_gpus=2 --bind_cores_to_rank finetune_llama.py --model_name Qwen/Qwen2.5-3B --output_dir output --lr 2e-5 --batch_size 8 --deepspeed_config zo_config.json --num_train_epochs 1`
 
-Config file (zo_config.json):
+Config file (`zo_config.json`):
 ```
 {
     "train_batch_size": 8,
@@ -67,12 +67,12 @@ Improvement to ZenFlow performance from DeepSpeed CPU core binding (Qwen2.5-3B, 
 |ZenFlow core binding| 1337.66ms | 1443.87ms | 1475.04ms | 1419ms |
 |DeepSpeed core binding| 1233.6ms | 1228.36ms | 1235ms | 1232ms |
 
-ZenFlow use 4 iterations to compute gradient importance, so we start from 5th iteration to measure time
+*ZenFlow use 4 iterations to compute gradient importance, so we start from 5th iteration to measure time*
 Test command:
-  - No core binding: deepspeed --num_gpus=2 finetune_llama.py --model_name Qwen/Qwen2.5-3B --output_dir output --lr 2e-5 --batch_size 8 --deepspeed_config zf_config.json --num_train_epochs 1
-  - With core binding: deepspeed --num_gpus=2 --bind_cores_to_rank finetune_llama.py --model_name Qwen/Qwen2.5-3B --output_dir output --lr 2e-5 --batch_size 8 --deepspeed_config zf_config.json --num_train_epochs 1
-DeepSpeed commit: 1d7b90adc48d57c2283e8825f5c668a3730ff899
-Config file (zo_config.json):
+  - No core binding: `deepspeed --num_gpus=2 finetune_llama.py --model_name Qwen/Qwen2.5-3B --output_dir output --lr 2e-5 --batch_size 8 --deepspeed_config zf_config.json --num_train_epochs 1`
+  - With core binding: `deepspeed --num_gpus=2 --bind_cores_to_rank finetune_llama.py --model_name Qwen/Qwen2.5-3B --output_dir output --lr 2e-5 --batch_size 8 --deepspeed_config zf_config.json --num_train_epochs 1`
+*DeepSpeed commit: 1d7b90adc48d57c2283e8825f5c668a3730ff899*
+Config file (`zf_config.json`):
 ```
 {
     "train_batch_size": 8,
@@ -120,7 +120,7 @@ Based on this understanding, we collaborated with the ZenFlow authors to update 
 
 First, before each rank launches a ZenFlow worker process, it needs to enumerate the list of available physical cores. If these lists of physical cores differ across ranks, it indicates that DeepSpeed has already performed physical core binding. Otherwise, each rank needs to allocate its own list of available cores from the total pool.
 
-Finally, each rank allocates a subset of cores from its own list to the ZenFlow worker process and sets the corresponding OMP_NUM_THREADS environment variable. This ensures that all processes use distinct CPU cores, preventing interference, and also allows for proper configuration of the OpenMP thread pool size. (https://github.com/deepspeedai/DeepSpeed/blob/master/deepspeed/runtime/zenflow/zenflow_stage_1_and_2.py)
+Finally, each rank allocates a subset of cores from its own list to the ZenFlow worker process and sets the corresponding OMP_NUM_THREADS environment variable. This ensures that all processes use distinct CPU cores, preventing interference, and also allows for proper configuration of the OpenMP thread pool size. [code](https://github.com/deepspeedai/DeepSpeed/blob/master/deepspeed/runtime/zenflow/zenflow_stage_1_and_2.py)
 
 Under this new core binding mechanism, we re-evaluated the performance of ZenFlow:
 
@@ -130,7 +130,7 @@ ZenFlow perf. with new core binding mechanism (Qwen2.5-3B, 2xA100 40GB, 2xEPYC 7
 | New ZenFlow worker core binding | 1321.21ms | 1269.83ms | 1384.47ms | 1325ms |
 | DeepSpeed core binding + new ZenFlow worker core binding | 1111.68ms | 1125.38ms | 1111.91ms | 1116ms |
 
-DeepSpeed commit: 80033a82938f6cd8ce4988a63c914941e7a8f324
+*DeepSpeed commit: 80033a82938f6cd8ce4988a63c914941e7a8f324*
 
 The results indicate that ZenFlow's performance was further enhanced under the new core binding mechanism. Compared to the original binding method, performance improved by 7% when not using DeepSpeed's core binding. When DeepSpeed's core binding was enabled, the performance gain reached 10%.
 
