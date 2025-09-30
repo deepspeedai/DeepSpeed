@@ -1,4 +1,4 @@
-# Study of ZenFlow and ZeRO offload performance with DeepSpeed CPU core binding
+# [LAB] Study of ZenFlow and ZeRO offload performance with DeepSpeed CPU core binding
 Author: Guokai Ma; Zhipeng Wang
 
 **TL;DR:** ZenFlow is an improvement to ZeRO Offload added by Tingfeng Lan et al. on DeepSpeed. After testing this feature, we explored the relationship between ZenFlow performance and DeepSpeed CPU core binding.
@@ -17,7 +17,7 @@ This reminds us that DeepSpeed itself supports CPU core binding through the --bi
 
 This raised a question: Could this switch also benefit ZeRO Offload?  We conducted tests to explore this possibility.
 
-Improvement to ZeRO Offload performance from DeepSpeed CPU core binding
+### Improvement to ZeRO Offload performance from DeepSpeed CPU core binding
 |             | Avg. time of first 51 iterations (1st run) | 2nd run | 3rd run | Average |
 |-------------|--------------------------------------------|---------|---------|---------|
 | No bind core| 2707.32ms | 3127.24ms | 2826.04ms | 2887ms |
@@ -59,9 +59,7 @@ Config file (`zo_config.json`):
 
 From this data, DeepSpeed's core binding provides approximately a 15% performance improvement for ZeRO Offload. So, could it also benefit ZenFlow's performance? With this question in mind, we decided to comment out the core binding logic within ZenFlow and instead directly use the --bind_cores_to_rank flag to run ZenFlow:
 
-Improvement to ZenFlow performance from DeepSpeed CPU core binding (Qwen2.5-3B, 2xA100 40GB, 2xEPYC 7742)
-
-
+### Improvement to ZenFlow performance from DeepSpeed CPU core binding (Qwen2.5-3B, 2xA100 40GB, 2xEPYC 7742)
 |                    | Avg. time from iteration 5-51 (1st run) | 2nd run | 3rd run | Average |
 |--------------------|-----------------------------------------|---------|---------|---------|
 |ZenFlow core binding| 1337.66ms | 1443.87ms | 1475.04ms | 1419ms |
@@ -124,7 +122,7 @@ Finally, each rank allocates a subset of cores from its own list to the ZenFlow 
 
 Under this new core binding mechanism, we re-evaluated the performance of ZenFlow:
 
-ZenFlow perf. with new core binding mechanism (Qwen2.5-3B, 2xA100 40GB, 2xEPYC 7742)
+### ZenFlow perf. with new core binding mechanism (Qwen2.5-3B, 2xA100 40GB, 2xEPYC 7742)
 |                    | Avg. time from iteration 5-51 (1st run) | 2nd run | 3rd run | Average |
 |--------------------|-----------------------------------------|---------|---------|---------|
 | New ZenFlow worker core binding | 1321.21ms | 1269.83ms | 1384.47ms | 1325ms |
@@ -144,7 +142,7 @@ Regardless, the key finding remains: the new ZenFlow binding mechanism improves 
 
 We conducted a comparative analysis of the performance across several configurations: ZeRO Offload without core binding, ZeRO Offload with core binding, and ZenFlow both before and after our improvements. The results are summarized as follows:
 
-Perf comparison table (Qwen2.5-3B, 2xA100 40GB, 2xEPYC 7742)
+### Perf comparison table (Qwen2.5-3B, 2xA100 40GB, 2xEPYC 7742)
 |             | Average time | Perf. improv. vs. baseline |
 |-------------|--------------|----------------------------|
 | ZeRO Offload without binding -- baseline | 2887ms | 1x |
@@ -163,9 +161,7 @@ In addition to comparisons with ZeRO Offload, a performance comparison against s
 
 Since we couldn't run Qwen2.5-3B with ZeRO2 using the same config on two GPUs in our test environment, we conducted the practicality test using Qwen2.5-1.5B instead:
 
-Practicality test - Qwen2.5-1.5B, BS=8
-
-
+### Practicality test - Qwen2.5-1.5B, BS=8
 |  | Average time | Practicality metric |
 |-------------|--------------|---------------------|
 | ZeRO2 | 240ms | |
