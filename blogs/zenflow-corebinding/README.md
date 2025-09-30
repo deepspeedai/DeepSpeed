@@ -1,31 +1,36 @@
 # Study of ZenFlow and ZeRO offload performance with DeepSpeed CPU core binding
+Author: Ma, Guokai; Wang, Zhipeng; Lan, Tingfeng
 
 TL;DR: ZenFlow is an improvement to ZeRO Offload added by Tingfeng Lan et al. on DeepSpeed. After testing this feature, we explored the relationship between ZenFlow performance and DeepSpeed CPU core binding.
-Author: Ma, Guokai; Wang, Zhipeng, Lan, Tingfeng
 
 ## ZenFlow technology introduction
 [ZenFlow](https://arxiv.org/abs/2505.12242) is a recent improvement to ZeRO Offload implemented in DeepSpeed. Its primary goal is to address the GPU stall issues caused by ZeRO Offload. These stalls mainly originate from two sources: 1) the data transfer from the GPU to the CPU, which is limited by the GPU-CPU bandwidth, and 2) the computational overhead of executing the Adam optimizer on the CPU, which is constrained by CPU performance and memory bandwidth.
+
 The core idea of ZenFlow is to separate gradients into two groups based on their norm. A very small portion of gradients, which have larger norms, are classified as important gradients and are updated directly on the GPU. The vast majority of gradients, which have smaller norms, are used to update the weights on the CPU at a lower frequency than the important gradients. If the gradients are not scheduled for an update in the current training iteration, they are accumulated into a copy of the gradients. These accumulated gradients are then used for the weight update in a subsequent iteration.
+
 Furthermore, the weight updates on the CPU are designed to run in parallel with the computations on the GPU, thereby achieving the objective of reducing GPU stall.
 
 To achieve the goal of parallelizing weight updates on the CPU with GPU computations, ZenFlow creates an additional process for each rank. This dedicated process handles the weight updates, while the original process for each rank can continue executing GPU computation code. This design enables the concurrency between weight updates and GPU computations.  In addition to these optimizations, ZenFlow also performs CPU core binding for the weight update processes. It binds the CPU update processes of different ranks to distinct CPU cores to enhance CPU performance.
+
 ## DeepSpeed CPU core binding feature and its improvement to CPU offloading performance
 This reminds us that DeepSpeed itself supports CPU core binding through the --bind_cores_to_rank flag.  This switch was originally designed to improve multi-socket CPU inference performance. By binding cores, different workers can run on distinct CPU cores without interfering with each other, thereby enhancing locality.  Additionally, DeepSpeed's core binding feature automatically configures the OMP_NUM_THREADS environment variable to ensure the OpenMP thread pool size matches the number of allocated cores.
+
 This raised a question: Could this switch also benefit ZeRO Offload?  We conducted tests to explore this possibility.
 
 Improvement to ZeRO Offload performance from DeepSpeed CPU core binding
-
-
 |             | Avg. time of first 51 iterations (1st run) | 2nd run | 3rd run | Average |
 |-------------|--------------------------------------------|---------|---------|---------|
 | No bind core| 2707.32ms | 3127.24ms | 2826.04ms | 2887ms |
 | Bind core   | 2649.06ms | 2641.82ms | 2200.76ms | 2497ms |
 
 Test environment: 2xDGX-A100-SXM4-40GB, 2xAMD EPYC 7742 64-Core Processor，1TB memory，DeepSpeedExamples/training/DeepSpeed-ZenFlow/finetuning
-Test command:
-	No core binding: deepspeed --num_gpus=2 finetune_llama.py --model_name Qwen/Qwen2.5-3B --output_dir output --lr 2e-5 --batch_size 8 --deepspeed_config zo_config.json --num_train_epochs 1
-	With core binding: deepspeed --num_gpus=2 --bind_cores_to_rank finetune_llama.py --model_name Qwen/Qwen2.5-3B --output_dir output --lr 2e-5 --batch_size 8 --deepspeed_config zo_config.json --num_train_epochs 1
+
+- Test command:
+    - No core binding: deepspeed --num_gpus=2 finetune_llama.py --model_name Qwen/Qwen2.5-3B --output_dir output --lr 2e-5 --batch_size 8 --deepspeed_config zo_config.json --num_train_epochs 1
+    - With core binding: deepspeed --num_gpus=2 --bind_cores_to_rank finetune_llama.py --model_name Qwen/Qwen2.5-3B --output_dir output --lr 2e-5 --batch_size 8 --deepspeed_config zo_config.json --num_train_epochs 1
+
 Config file (zo_config.json):
+```
 {
     "train_batch_size": 8,
     "bf16": { "enabled": true },
@@ -50,7 +55,7 @@ Config file (zo_config.json):
     "zero_allow_untested_optimizer": true,
     "wall_clock_breakdown": true
 }
-
+```
 
 From this data, DeepSpeed's core binding provides approximately a 15% performance improvement for ZeRO Offload. So, could it also benefit ZenFlow's performance? With this question in mind, we decided to comment out the core binding logic within ZenFlow and instead directly use the --bind_cores_to_rank flag to run ZenFlow:
 
