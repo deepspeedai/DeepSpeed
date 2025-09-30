@@ -23,17 +23,17 @@ This raised a question: Could this switch also benefit ZeRO Offload?  We conduct
 | No bind core| 2707.32ms | 3127.24ms | 2826.04ms | 2887ms |
 | Bind core   | 2649.06ms | 2641.82ms | 2200.76ms | 2497ms |
 
-*Model: Qwen2.5-3B*
+**Model:** Qwen2.5-3B
 
-*Test environment: 2xDGX-A100-SXM4-40GB, 2xAMD EPYC 7742 64-Core Processor，1TB memory*
+**Test environment:** 2xDGX-A100-SXM4-40GB, 2xAMD EPYC 7742 64-Core Processor，1TB memory
 
-Test URL: [DeepSpeedExamples/training/DeepSpeed-ZenFlow/finetuning](https://github.com/deepspeedai/DeepSpeedExamples/tree/master/training/DeepSpeed-ZenFlow/finetuning) (All following tests are using the same URL)
+**Test URL:** [DeepSpeedExamples/training/DeepSpeed-ZenFlow/finetuning](https://github.com/deepspeedai/DeepSpeedExamples/tree/master/training/DeepSpeed-ZenFlow/finetuning) (All following tests are using the same URL)
 
-Test command:
-  - No core binding: `deepspeed --num_gpus=2 finetune_llama.py --model_name Qwen/Qwen2.5-3B --output_dir output --lr 2e-5 --batch_size 8 --deepspeed_config zo_config.json --num_train_epochs 1`
-  - With core binding: `deepspeed --num_gpus=2 --bind_cores_to_rank finetune_llama.py --model_name Qwen/Qwen2.5-3B --output_dir output --lr 2e-5 --batch_size 8 --deepspeed_config zo_config.json --num_train_epochs 1`
+**Test command:**
+  - **No core binding:** `deepspeed --num_gpus=2 finetune_llama.py --model_name Qwen/Qwen2.5-3B --output_dir output --lr 2e-5 --batch_size 8 --deepspeed_config zo_config.json --num_train_epochs 1`
+  - **With core binding:** `deepspeed --num_gpus=2 --bind_cores_to_rank finetune_llama.py --model_name Qwen/Qwen2.5-3B --output_dir output --lr 2e-5 --batch_size 8 --deepspeed_config zo_config.json --num_train_epochs 1`
 
-Config file (`zo_config.json`):
+**Config file** (`zo_config.json`):
 ```
 {
     "train_batch_size": 8,
@@ -69,20 +69,20 @@ From this data, DeepSpeed's core binding provides approximately a 15% performanc
 |ZenFlow core binding| 1337.66ms | 1443.87ms | 1475.04ms | 1419ms |
 |DeepSpeed core binding| 1233.6ms | 1228.36ms | 1235ms | 1232ms |
 
-*Model: Qwen2.5-3B*
+**Model:** Qwen2.5-3B
 
-*Test environment: 2xDGX-A100-SXM4-40GB, 2xAMD EPYC 7742 64-Core Processor，1TB memory*
+**Test environment:** 2xDGX-A100-SXM4-40GB, 2xAMD EPYC 7742 64-Core Processor，1TB memory
 
-*DeepSpeed commit: 1d7b90adc48d57c2283e8825f5c668a3730ff899*
+**DeepSpeed commit:** 1d7b90adc48d57c2283e8825f5c668a3730ff899
 
 *ZenFlow use 4 iterations to compute gradient importance, so we start from 5th iteration to measure time*
 
-Test command:
-  - No core binding: `deepspeed --num_gpus=2 finetune_llama.py --model_name Qwen/Qwen2.5-3B --output_dir output --lr 2e-5 --batch_size 8 --deepspeed_config zf_config.json --num_train_epochs 1`
-  - With core binding: `deepspeed --num_gpus=2 --bind_cores_to_rank finetune_llama.py --model_name Qwen/Qwen2.5-3B --output_dir output --lr 2e-5 --batch_size 8 --deepspeed_config zf_config.json --num_train_epochs 1`
+**Test command:**
+  - **No core binding:** `deepspeed --num_gpus=2 finetune_llama.py --model_name Qwen/Qwen2.5-3B --output_dir output --lr 2e-5 --batch_size 8 --deepspeed_config zf_config.json --num_train_epochs 1`
+  - **With core binding:** `deepspeed --num_gpus=2 --bind_cores_to_rank finetune_llama.py --model_name Qwen/Qwen2.5-3B --output_dir output --lr 2e-5 --batch_size 8 --deepspeed_config zf_config.json --num_train_epochs 1`
 
 
-Config file (`zf_config.json`):
+**Config file** (`zf_config.json`):
 ```
 {
     "train_batch_size": 8,
@@ -140,11 +140,11 @@ Under this new core binding mechanism, we re-evaluated the performance of ZenFlo
 | New ZenFlow worker core binding | 1321.21ms | 1269.83ms | 1384.47ms | 1325ms |
 | DeepSpeed core binding + new ZenFlow worker core binding | 1111.68ms | 1125.38ms | 1111.91ms | 1116ms |
 
-*Model: Qwen2.5-3B*
+**Model:** Qwen2.5-3B
 
-*Test environment: 2xDGX-A100-SXM4-40GB, 2xAMD EPYC 7742 64-Core Processor，1TB memory*
+**Test environment:** 2xDGX-A100-SXM4-40GB, 2xAMD EPYC 7742 64-Core Processor，1TB memory
 
-*DeepSpeed commit: 80033a82938f6cd8ce4988a63c914941e7a8f324*
+**DeepSpeed commit:** 80033a82938f6cd8ce4988a63c914941e7a8f324
 
 The results indicate that ZenFlow's performance was further enhanced under the new core binding mechanism. Compared to the original binding method, performance improved by 7% when not using DeepSpeed's core binding. When DeepSpeed's core binding was enabled, the performance gain reached 10%.
 
@@ -166,9 +166,9 @@ We conducted a comparative analysis of the performance across several configurat
 | ZenFlow original worker core binding | 1419ms | 2.03x |
 | DeepSpeed core binding +ZenFlow new worker core binding | 1116ms | 2.59x |
 
-*Model: Qwen2.5-3B*
+**Model:** Qwen2.5-3B
 
-*Test environment: 2xDGX-A100-SXM4-40GB, 2xAMD EPYC 7742 64-Core Processor，1TB memory*
+**Test environment:** 2xDGX-A100-SXM4-40GB, 2xAMD EPYC 7742 64-Core Processor，1TB memory
 
 The results clearly show that the improved ZenFlow achieves a 2.59x speedup compared to ZeRO Offload without core binding, and a 2.24x speedup compared to ZeRO Offload with core binding.
 
@@ -188,9 +188,9 @@ Since we couldn't run Qwen2.5-3B with ZeRO2 using the same config on two GPUs in
 | ZeRO Offload with DeepSpeed core binding | 1365ms | 17.6% |
 | DeepSpeed core binding + new ZenFlow worker core binding | 569ms | 42.2% |
 
-*Model: Qwen2.5-B*
+**Model: Qwen2.5-B**
 
-*Test environment: 2xDGX-A100-SXM4-40GB, 2xAMD EPYC 7742 64-Core Processor，1TB memory*
+**Test environment:** 2xDGX-A100-SXM4-40GB, 2xAMD EPYC 7742 64-Core Processor，1TB memory
 
 Based on the tests conducted on 2xA100 GPUs, the practicality metric for ZeRO Offload was 17.6%, while ZenFlow achieved a practicality metric of 42.2%. This result demonstrates that ZenFlow significantly improves the practicality of offloading.
 
