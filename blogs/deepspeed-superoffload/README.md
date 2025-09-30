@@ -1,11 +1,11 @@
 # SuperOffload: Unleashing the Power of Large-Scale LLM Training on Superchips
 
-**Efficient full-parameter fine-tuning of GPT-OSS-20B & Qwen3-14B models on a single GPU and Llama3-70B on four GPUs, achieving up to 600 TFLOPS**
+**Efficient full-parameter fine-tuning of GPT-OSS-20B & Qwen3-14B models on a single NVIDIA GH200 Superchip and Llama3-70B on four NVIDIA GH200 Superchips, while delivering up to 600 TFLOPS training throughput**
 
 **Authors**
 [Xinyu Lian](https://xinyulian.tech/)<sup>1</sup>, [Masahiro Tanaka](https://tohtana.github.io/)<sup>2</sup>, [Olatunji Ruwase](https://www.snowflake.com/en/blog/authors/olatunji--tunji--ruwase/)<sup>3</sup>, [Minjia Zhang](https://minjiazhang.github.io/)<sup>1</sup>
 
-<sup>1</sup>University of Illinois Urbana-Champaign · <sup>2</sup>Anyscale · <sup>3</sup>Snowflake
+<sup>1</sup>SSAIL Lab, University of Illinois Urbana-Champaign · <sup>2</sup>Anyscale · <sup>3</sup>Snowflake
 
 ---
 
@@ -13,25 +13,33 @@
 
 - [SuperOffload: Unleashing the Power of Large-Scale LLM Training on Superchips](#superoffload-unleashing-the-power-of-large-scale-llm-training-on-superchips)
   - [Table of Content](#table-of-content)
-  - [Introduction](#introduction)
   - [SuperOffload Highlights](#superoffload-highlights)
+  - [Introduction](#introduction)
   - [How SuperOffload Works](#how-superoffload-works)
     - [1. Speculation-then-Validation (STV)](#1-speculation-then-validation-stv)
     - [2. Heterogeneous Optimizer Computation](#2-heterogeneous-optimizer-computation)
     - [3. Superchip-Aware Casting](#3-superchip-aware-casting)
     - [4. GraceAdam for Optimizer Efficiency](#4-graceadam-for-optimizer-efficiency)
   - [Experience and Insights](#experience-and-insights)
-  - [Getting Started](#getting-started)
+  - [Easy-to-Use](#easy-to-use)
   - [Acknowledgements](#acknowledgements)
   - [BibTeX](#bibtex)
 
-  <!-- - [Status \& Availability](#status--availability) -->
+## SuperOffload Highlights
+
+- **Single GH200:** Full fine-tuning of GPT-OSS-20B, Qwen3-14B, achieving up to 600 TFLOPS (seq len 4K, batch size 4).
+- **Multi-GPU:** Qwen3-30B-A3B & Seed-OSS-36B on 2× NVIDIA GH200; Llama-70B on 4× NVIDIA GH200.
+- **Faster Training:** Up to 4× higher throughput compared to prior work such as ZeRO-Offload under modest settings.
+- **Increased GPU Utilization:** Boost GPU utilization from ~50% to >80%.
+- **Engineering & Composability:** Works with ZeRO-3 and Ulysses; operational tips (e.g., NUMA binding, MPAM) are documented in the tutorial.
+
+---
 
 ## Introduction
 
-The emergence of tightly coupled heterogeneous GPU/CPU architectures (a.k.a., Superchips), such as NVIDIA GH200, GB200, and AMD MI300A, offers new optimization opportunities for large-scale AI. One such direction is improving the efficiency of CPU offloading, a popular AI democratization technqiue for reducing the GPU demands of large language model (LLM) training. Existing offloading solutions were designed for traditional loosely coupled architectures, and are suboptimal on Superchips suffering high overheads and low GPU utilization. To address this gap, and to enable efficient offloading-based LLM training on SuperChip systems, we have developed and open-sourced **SuperOffload**.
+The emergence of tightly coupled heterogeneous GPU/CPU architectures (a.k.a., Superchips), such as NVIDIA GH200, GB200, and AMD MI300A, offers new optimization opportunities for large-scale AI. Yet it remains under-explored in terms of how to make the best use of these new hardware for large-scale LLM training. Existing offloading solutions were designed for traditional loosely coupled architectures, and are suboptimal on Superchips suffering high overheads and low GPU utilization. To address this gap and to make the best use of Superchips for efficient LLM training, we have developed and open-sourced **SuperOffload**.
 
-SuperOffload is a set of modular optimization techniques that leverage Superchip hardware to significantly improve CPU offloading efficiency for LLM training. Unlike prior offloading solutions which assume slow GPU-CPU interconnects (e.g., 64GB/sec for PCIe-Gen4), SuperOffload exploits the much faster interconnects (e.g., 900GB/sec for NVLink-C2C) to boost GPU and CPU utilization, and training throughput. With SuperOffload, models such as **GPT-OSS-20B**, **Qwen3-14B**, and **Phi-4** can be fully fine-tuned on a single GH200, achieving **600 TFLOPS** under modest settings (sequence length 4k, batch size 4). This delivers up to **4×** higher throughput compared to ZeRO-Offload. SuperOffload enables scaling to even larger models, including Qwen3-30B-A3B and Seed-OSS-36B on two GH200s and Llama-70B on four GH200s.
+SuperOffload introduces a set of novel techniques that make the best use of Hopper GPU, Grace CPU, and NVLink-C2C, simultaneously for LLM training. Unlike prior offloading solutions which assume slow GPU-CPU interconnects (e.g., 64GB/sec for PCIe-Gen4), SuperOffload exploits the much faster interconnects (e.g., 900GB/sec for NVLink-C2C) to boost GPU and CPU utilization, and training throughput. With SuperOffload, models such as **GPT-OSS-20B**, **Qwen3-14B**, and **Phi-4** can be fully fine-tuned on a single GH200, delivering **up to 600 TFLOPS** training throughput under modest settings (sequence length 4k, batch size 4). This delivers up to **4×** higher throughput compared to prior work such as ZeRO-Offload. SuperOffload enables scaling to even larger models, including Qwen3-30B-A3B and Seed-OSS-36B on two GH200s and Llama-70B on four GH200s.
 
 SuperOffload is built on top of DeepSpeed ZeRO Stage 3, and available in DeepSpeed versions >= [0.18.0](https://github.com/deepspeedai/DeepSpeed/releases/tag/v0.18.0). To enable easy integration into LLM finetuning pipelines, SuperOffload is compatible with Hugging Face Transformers and does not require any changes to modeling code.
 
@@ -43,30 +51,21 @@ The open-source release of **SuperOffload** addresses this gap by providing a se
 
 <div align="center">
 <img src="./images/superoffload_comparision.jpg" alt="SuperOffload system overview" width="80%">
-<p align="center"><em>Figure 1: SuperOffload delivers up to 4× higher throughput than ZeRO-Offload for large-model fine-tuning across varying sequence lengths and batch sizes, achieving a peak throughput of 600 TFLOPS.</em></p>
+<p align="center"><em>Figure 1: SuperOffload delivers up to 4× higher throughput than ZeRO-Offload for large-model fine-tuning across varying sequence lengths and batch sizes, achieving up to 600 TFLOPS throughput.</em></p>
 </div>
 
 ---
 
-## SuperOffload Highlights
-
-- **Single GH200:** Full fine-tuning of GPT-OSS-20B, Qwen3-14B, achieving ~600 TFLOPS (seq len 4K, batch size 4).
-- **Multi-GPU:** Qwen3-30B-A3B & Seed-OSS-36B on 2× GH200; Llama-70B on 4× GH200.
-- **Faster Offloading:** Up to 4× faster than ZeRO-Offload under modest settings.
-- **Increased GPU Utilization:** Boost GPU utilization from ~50% to >80%.
-- **No Model Changes:** Fully configuration driven.
-- **OSS Ecosystem Integration:** DeepSpeed ZeRO Stage 3 with Hugging Face Transformers integration.
-
----
-
 ## How SuperOffload Works
+
+
 
 SuperOffload consists of four composable offloading optimization techniques: (1) Speculation-then-Validation, (2) GPU/CPU Optimizer Computation, (3) Superchip-Aware Casting, and (4) GraceAdam. We provide brief descriptions of these techniques below.
 
 
 ### 1. Speculation-then-Validation (STV)
 
-The conventional approach for ensuring training stability is to perform optimizer computation after global gradient post-processing (e.g., overflow checks). However, this exposes the entire optimizer latency on the critical path of training, causing non-trivial delays when computed on CPU. STV avoids this bottleneck by breaking this dependency, and overlapping speculative optimizer computation on CPU with backward propagation on GPU. When gradient post-processing eventually completes, the speculative optimizer computations are either committed, discarded, or correctly replayed as appropriate. STV's post-validation of training stability enables it to safely reduce the critical path compared to prior pre-validation approaches. The figure below illustrates how SuperOffload schedules backward propagation and optimizer computation differently from traditional approaches, such as ZeRoOffload.
+In most offloading solutions, synchronizations between CPU and GPU are needed in the optimizer step to ensure numerical robustness. For example, clipping the gradient norm requires calculating the global gradient norm, and mixed precision training requires a global check of NaN and INF values. These operations require the CPU to wait until all gradients have been received before the optimizer step and weight updates. STV avoids this bottleneck by breaking this dependency but still preserves the semantics of training by overlapping speculative optimizer computation on CPU with backward propagation on GPU. When gradient post-processing eventually completes, the speculative optimizer computations are either committed, discarded, or correctly replayed as appropriate. STV's post-validation of training stability enables it to safely reduce the critical path compared to prior pre-validation approaches. The figure below illustrates how SuperOffload schedules backward propagation and optimizer computation differently from traditional approaches, such as ZeRO-Offload.
 
 <div align="center">
 <img src="./images/superoffload_schedule.jpg" alt="Schedule comparison" width="80%">
@@ -77,7 +76,7 @@ We evaluated the effectiveness of STV by measuring the frequency of undoing spec
 
 <div align="center">
 <img src="./images/superoffload_rollback.jpg" alt="Gradient clipping data" width="80%">
-<p align="center"><em>Figure 3: Red points indicate gradient clipping triggered during BLOOM pre-training — rare after warm-up, showing STV’s benefits.</em></p>
+<p align="center"><em>Figure 3: Red points indicate gradient clipping triggered during BLOOM pre-training — rare after warm-up, indicating that SuperOffload's STV mechanism effectively eliminates stalls caused by gradient clipping and NaN/INF check-induced synchronizations.</em></p>
 </div>
 
 ---
@@ -169,9 +168,9 @@ Existing offloading solutions for LLM training require CPU implementations of th
 
 ---
 
-## Getting Started
+## Easy-to-Use
 
-End-to-end finetuning examples using Superoffload are available [here](https://github.com/deepspeedai/DeepSpeedExamples/tree/master/training/DeepSpeed-SuperOffload#readme). To get started even quicker, you can enable SuperOffload by adding the following switch to your DeepSpeed config:
+End-to-end finetuning examples using SuperOffload are available in our tutorial/readme: [DeepSpeedExamples: SuperOffload](https://github.com/deepspeedai/DeepSpeedExamples/tree/master/training/DeepSpeed-SuperOffload#readme). To enable SuperOffload quickly, add the following switch to your DeepSpeed config (see tutorial for full context):
 
 <div align="center">
 <img src="./images/superoffload_enable.jpg" alt="Enable SuperOffload" width="60%">
