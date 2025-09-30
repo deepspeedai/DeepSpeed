@@ -1,5 +1,5 @@
 # [LAB] Study of ZenFlow and ZeRO offload performance with DeepSpeed CPU core binding
-Author: Guokai Ma; Zhipeng Wang
+**Author:** Guokai Ma; Zhipeng Wang
 
 **TL;DR:** ZenFlow is an improvement to ZeRO Offload added by Tingfeng Lan et al. on DeepSpeed. After testing this feature, we explored the relationship between ZenFlow performance and DeepSpeed CPU core binding.
 
@@ -13,7 +13,7 @@ Furthermore, the weight updates on the CPU are designed to run in parallel with 
 To achieve the goal of parallelizing weight updates on the CPU with GPU computations, ZenFlow creates an additional process for each rank. This dedicated process handles the weight updates, while the original process for each rank can continue executing GPU computation code. This design enables the concurrency between weight updates and GPU computations.  In addition to these optimizations, ZenFlow also performs CPU core binding for the weight update processes. It binds the CPU update processes of different ranks to distinct CPU cores to enhance CPU performance.
 
 ## DeepSpeed CPU core binding feature and its improvement to CPU offloading performance
-This reminds us that DeepSpeed itself supports CPU core binding through the --bind_cores_to_rank flag.  This switch was originally designed to improve multi-socket CPU inference performance. By binding cores, different workers can run on distinct CPU cores without interfering with each other, thereby enhancing locality.  Additionally, DeepSpeed's core binding feature automatically configures the OMP_NUM_THREADS environment variable to ensure the OpenMP thread pool size matches the number of allocated cores.
+This reminds us that DeepSpeed itself supports CPU core binding through the `--bind_cores_to_rank` flag.  This switch was originally designed to improve multi-socket CPU inference performance. By binding cores, different workers can run on distinct CPU cores without interfering with each other, thereby enhancing locality.  Additionally, DeepSpeed's core binding feature automatically configures the `OMP_NUM_THREADS` environment variable to ensure the OpenMP thread pool size matches the number of allocated cores.
 
 This raised a question: Could this switch also benefit ZeRO Offload?  We conducted tests to explore this possibility.
 
@@ -61,7 +61,7 @@ Config file (`zo_config.json`):
 }
 ```
 
-From this data, DeepSpeed's core binding provides approximately a 15% performance improvement for ZeRO Offload. So, could it also benefit ZenFlow's performance? With this question in mind, we decided to comment out the core binding logic within ZenFlow and instead directly use the --bind_cores_to_rank flag to run ZenFlow:
+From this data, DeepSpeed's core binding provides approximately a 15% performance improvement for ZeRO Offload. So, could it also benefit ZenFlow's performance? With this question in mind, we decided to comment out the core binding logic within ZenFlow and instead directly use the `--bind_cores_to_rank` flag to run ZenFlow:
 
 ### Improvement to ZenFlow performance from DeepSpeed CPU core binding
 |                    | Avg. time from iteration 5-51 (1st run) | 2nd run | 3rd run | Average |
@@ -130,7 +130,7 @@ Based on this understanding, we collaborated with the ZenFlow authors to update 
 
 First, before each rank launches a ZenFlow worker process, it needs to enumerate the list of available physical cores. If these lists of physical cores differ across ranks, it indicates that DeepSpeed has already performed physical core binding. Otherwise, each rank needs to allocate its own list of available cores from the total pool.
 
-Finally, each rank allocates a subset of cores from its own list to the ZenFlow worker process and sets the corresponding OMP_NUM_THREADS environment variable. This ensures that all processes use distinct CPU cores, preventing interference, and also allows for proper configuration of the OpenMP thread pool size. [code](https://github.com/deepspeedai/DeepSpeed/blob/master/deepspeed/runtime/zenflow/zenflow_stage_1_and_2.py)
+Finally, each rank allocates a subset of cores from its own list to the ZenFlow worker process and sets the corresponding `OMP_NUM_THREADS` environment variable. This ensures that all processes use distinct CPU cores, preventing interference, and also allows for proper configuration of the OpenMP thread pool size. [code](https://github.com/deepspeedai/DeepSpeed/blob/master/deepspeed/runtime/zenflow/zenflow_stage_1_and_2.py)
 
 Under this new core binding mechanism, we re-evaluated the performance of ZenFlow:
 
@@ -174,7 +174,7 @@ The results clearly show that the improved ZenFlow achieves a 2.59x speedup comp
 
 Given that ZenFlow's core innovations involve reducing the frequency of weight updates and parallelizing CPU/GPU execution, the 2.24x improvement over the core-bound ZeRO Offload is particularly significant. This comparison provides a more accurate reflection of ZenFlow's inherent performance advantages. By using the core-bound ZeRO Offload as the baseline, we effectively isolate and quantify the performance gains attributable specifically to ZenFlow's algorithmic optimizations, rather than those coming from general core-binding techniques. This strongly validates the effectiveness of ZenFlow's fundamental design.
 
-Through our collaboration with the ZenFlow authors, the new core-binding mechanism has been integrated into the main branch of DeepSpeed. As a result, users can now achieve optimal offload performance by simply using ZenFlow in conjunction with the DeepSpeed --bind_cores_to_rank flag. This integration provides an out-of-the-box, high-performance experience that leverages the combined strengths of both the algorithmic innovations in ZenFlow and the low-level system optimizations in DeepSpeed's core binding.
+Through our collaboration with the ZenFlow authors, the new core-binding mechanism has been integrated into the main branch of DeepSpeed. As a result, users can now achieve optimal offload performance by simply using ZenFlow in conjunction with the DeepSpeed `--bind_cores_to_rank` flag. This integration provides an out-of-the-box, high-performance experience that leverages the combined strengths of both the algorithmic innovations in ZenFlow and the low-level system optimizations in DeepSpeed's core binding.
 
 ## Practicality metric, a metric to evaluate offloading technology
 In addition to comparisons with ZeRO Offload, a performance comparison against scenarios without offloading better demonstrates the practicality of ZenFlow or ZeRO Offload. While it's true that ZeRO Offload or ZenFlow enables model optimization with relatively limited VRAM, achieving a breakthrough from impossibility to possibility, if the performance gap is too significant, the decision to use offloading becomes a dilemma. We consider the performance difference between scenarios with and without offloading as a practicality metric. A value of 1 represents the ideal scenario, indicating that offloading has no impact on performance. The smaller this value, the poorer the practicality, as users would need to wait considerably longer for fine-tuning.
