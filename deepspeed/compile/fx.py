@@ -3,7 +3,7 @@
 
 # DeepSpeed Team
 
-from typing import Callable, Any, List
+from typing import Callable, Any, List, Dict
 from collections import defaultdict
 
 import torch
@@ -60,7 +60,8 @@ def add_args_process(graph: Graph,
 def add_postprocess(graph: Graph,
                     node: Node,
                     fn: Callable[..., Any],
-                    extra_args: List[int] = [],
+                    extra_args: List[Any] = [],
+                    extra_kwargs: Dict[str, Any] = {},
                     name=None,
                     meta={}) -> Node:
     # https://github.com/pytorch/examples/blob/main/fx/wrap_output_dynamically.py
@@ -70,7 +71,7 @@ def add_postprocess(graph: Graph,
             args += (a, )
 
         node_users = node.users.keys()
-        new_node = graph.create_node('call_function', fn, args, {}, name=name)
+        new_node = graph.create_node('call_function', fn, args, extra_kwargs, name=name)
         users = {}
         for u in node_users:
             if u != new_node:
