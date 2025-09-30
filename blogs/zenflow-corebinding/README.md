@@ -135,10 +135,10 @@ Finally, each rank allocates a subset of cores from its own list to the ZenFlow 
 Under this new core binding mechanism, we re-evaluated the performance of ZenFlow:
 
 ### ZenFlow perf. with new core binding mechanism
-|                    | Avg. time from iteration 5-51 (1st run) | 2nd run | 3rd run | Average |
-|--------------------|-----------------------------------------|---------|---------|---------|
-| New ZenFlow worker core binding | 1321.21ms | 1269.83ms | 1384.47ms | 1325ms |
-| DeepSpeed core binding + new ZenFlow worker core binding | 1111.68ms | 1125.38ms | 1111.91ms | 1116ms |
+|                    | Avg. time from iteration 5-51 (1st run) | 2nd run | 3rd run | Average | Improvement over original binding |
+|--------------------|-----------------------------------------|---------|---------|---------|------|
+| New ZenFlow worker core binding | 1321.21ms | 1269.83ms | 1384.47ms | 1325ms | 7% |
+| DeepSpeed core binding + new ZenFlow worker core binding | 1111.68ms | 1125.38ms | 1111.91ms | 1116ms | 10% |
 
 **Model:** Qwen2.5-3B
 
@@ -170,7 +170,7 @@ We conducted a comparative analysis of the performance across several configurat
 
 **Test environment:** 2xDGX-A100-SXM4-40GB, 2xAMD EPYC 7742 64-Core Processor，1TB memory
 
-The results clearly show that the improved ZenFlow achieves a 2.59x speedup compared to ZeRO Offload without core binding, and a 2.24x speedup compared to ZeRO Offload with core binding.
+The result clearly shows that the improved ZenFlow achieves a 2.59x speedup compared to ZeRO Offload without core binding, and a 2.24x speedup compared to ZeRO Offload with core binding.
 
 Given that ZenFlow's core innovations involve reducing the frequency of weight updates and parallelizing CPU/GPU execution, the 2.24x improvement over the core-bound ZeRO Offload is particularly significant. This comparison provides a more accurate reflection of ZenFlow's inherent performance advantages. By using the core-bound ZeRO Offload as the baseline, we effectively isolate and quantify the performance gains attributable specifically to ZenFlow's algorithmic optimizations, rather than those coming from general core-binding techniques. This strongly validates the effectiveness of ZenFlow's fundamental design.
 
@@ -198,4 +198,4 @@ Based on the tests conducted on 2xA100 GPUs, the practicality metric for ZeRO Of
 ZeRO Offload is an effective technique for reducing VRAM pressure, making the fine-tuning of large models possible. We have now seen that ZenFlow, as a new technology, achieves a breakthrough improvement in the practicality of ZeRO Offload, bringing it to a usable level. When combined with DeepSpeed's core binding, ZenFlow is able to deliver its optimal performance.
 
 ## Disclaimer
-All performance data presented in this article is measured for the sole purpose of discussing the effects of specific optimization techniques. There is no guarantee that the data was obtained under optimal software or hardware configurations, nor does it represent a performance evaluation of any software or hardware products mentioned. This article discusses only the relative performance changes resulting from specific optimization methods.
+All performance data presented in this article is measured for the sole purpose of discussing the effects of specific optimization techniques. There is no guarantee that the data was obtained under optimal software or hardware configurations, nor does it represent a performance evaluation of any software or hardware products mentioned. This article discusses only the relative performance changes resulting from specific optimization methods.  The performance gain depends on specific software or hardware configuration and may vary in your own run.
