@@ -129,6 +129,7 @@ ZenFlow perf. with new core binding mechanism (Qwen2.5-3B, 2xA100 40GB, 2xEPYC 7
 |--------------------|-----------------------------------------|---------|---------|---------|
 | New ZenFlow worker core binding | 1321.21ms | 1269.83ms | 1384.47ms | 1325ms |
 | DeepSpeed core binding + new ZenFlow worker core binding | 1111.68ms | 1125.38ms | 1111.91ms | 1116ms |
+
 DeepSpeed commit: 80033a82938f6cd8ce4988a63c914941e7a8f324
 
 The results indicate that ZenFlow's performance was further enhanced under the new core binding mechanism. Compared to the original binding method, performance improved by 7% when not using DeepSpeed's core binding. When DeepSpeed's core binding was enabled, the performance gain reached 10%.
@@ -144,29 +145,20 @@ Regardless, the key finding remains: the new ZenFlow binding mechanism improves 
 We conducted a comparative analysis of the performance across several configurations: ZeRO Offload without core binding, ZeRO Offload with core binding, and ZenFlow both before and after our improvements. The results are summarized as follows:
 
 Perf comparison table (Qwen2.5-3B, 2xA100 40GB, 2xEPYC 7742)
-
-
-Average time
-Perf. improv. vs. baseline
-ZeRO Offload without binding -- baseline
-2887ms
-1x
-ZeRO Offload with DeepSpeed core binding
-2497ms
-1.16x
-ZenFlow original worker core binding
-1419ms
-2.03x
-DeepSpeed core binding +ZenFlow new worker core binding
-1116ms
-2.59x
-
+|             | Average time | Perf. improv. vs. baseline |
+|-------------|--------------|----------------------------|
+| ZeRO Offload without binding -- baseline | 2887ms | 1x |
+| ZeRO Offload with DeepSpeed core binding | 2497ms | 1.16x |
+| ZenFlow original worker core binding | 1419ms | 2.03x |
+| DeepSpeed core binding +ZenFlow new worker core binding | 1116ms | 2.59x |
 
 The results clearly show that the improved ZenFlow achieves a 2.59x speedup compared to ZeRO Offload without core binding, and a 2.24x speedup compared to ZeRO Offload with core binding.
+
 Given that ZenFlow's core innovations involve reducing the frequency of weight updates and parallelizing CPU/GPU execution, the 2.24x improvement over the core-bound ZeRO Offload is particularly significant. This comparison provides a more accurate reflection of ZenFlow's inherent performance advantages. By using the core-bound ZeRO Offload as the baseline, we effectively isolate and quantify the performance gains attributable specifically to ZenFlow's algorithmic optimizations, rather than those coming from general core-binding techniques. This strongly validates the effectiveness of ZenFlow's fundamental design.
 
 Through our collaboration with the ZenFlow authors, the new core-binding mechanism has been integrated into the main branch of DeepSpeed. As a result, users can now achieve optimal offload performance by simply using ZenFlow in conjunction with the DeepSpeed --bind_cores_to_rank flag. This integration provides an out-of-the-box, high-performance experience that leverages the combined strengths of both the algorithmic innovations in ZenFlow and the low-level system optimizations in DeepSpeed's core binding.
-Practicality metric, a metric to evaluate offloading technology
+
+## Practicality metric, a metric to evaluate offloading technology
 In addition to comparisons with ZeRO Offload, a performance comparison against scenarios without offloading better demonstrates the practicality of ZenFlow or ZeRO Offload. While it's true that ZeRO Offload or ZenFlow enables model optimization with relatively limited VRAM, achieving a breakthrough from impossibility to possibility, if the performance gap is too significant, the decision to use offloading becomes a dilemma. We consider the performance difference between scenarios with and without offloading as a practicality metric. A value of 1 represents the ideal scenario, indicating that offloading has no impact on performance. The smaller this value, the poorer the practicality, as users would need to wait considerably longer for fine-tuning.
 
 Since we couldn't run Qwen2.5-3B with ZeRO2 using the same config on two GPUs in our test environment, we conducted the practicality test using Qwen2.5-1.5B instead:
@@ -174,22 +166,16 @@ Since we couldn't run Qwen2.5-3B with ZeRO2 using the same config on two GPUs in
 Practicality test - Qwen2.5-1.5B, BS=8
 
 
-Average time
-Practicality metric
-ZeRO2
-240ms
-
-
-ZeRO Offload with DeepSpeed core binding
-1365ms
-17.6%
-DeepSpeed core binding + new ZenFlow worker core binding
-569ms
-42.2%
-
+|  | Average time | Practicality metric |
+|-------------|--------------|---------------------|
+| ZeRO2 | 240ms | |
+| ZeRO Offload with DeepSpeed core binding | 1365ms | 17.6% |
+| DeepSpeed core binding + new ZenFlow worker core binding | 569ms | 42.2% |
 
 Based on the tests conducted on 2xA100 GPUs, the practicality metric for ZeRO Offload was 17.6%, while ZenFlow achieved a practicality metric of 42.2%. This result demonstrates that ZenFlow significantly improves the practicality of offloading.
-Summary
+
+## Summary
 ZeRO Offload is an effective technique for reducing VRAM pressure, making the fine-tuning of large models possible. We have now seen that ZenFlow, as a new technology, achieves a breakthrough improvement in the practicality of ZeRO Offload, bringing it to a usable level. When combined with DeepSpeed's core binding, ZenFlow is able to deliver its optimal performance.
-Disclaimer
+
+## Disclaimer
 All performance data presented in this article is measured for the sole purpose of discussing the effects of specific optimization techniques. There is no guarantee that the data was obtained under optimal software or hardware configurations, nor does it represent a performance evaluation of any software or hardware products mentioned. This article discusses only the relative performance changes resulting from specific optimization methods.
