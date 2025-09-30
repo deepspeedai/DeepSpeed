@@ -25,9 +25,9 @@ Improvement to ZeRO Offload performance from DeepSpeed CPU core binding
 
 Test environment: 2xDGX-A100-SXM4-40GB, 2xAMD EPYC 7742 64-Core Processor，1TB memory，DeepSpeedExamples/training/DeepSpeed-ZenFlow/finetuning
 
-- Test command:
-    - No core binding: deepspeed --num_gpus=2 finetune_llama.py --model_name Qwen/Qwen2.5-3B --output_dir output --lr 2e-5 --batch_size 8 --deepspeed_config zo_config.json --num_train_epochs 1
-    - With core binding: deepspeed --num_gpus=2 --bind_cores_to_rank finetune_llama.py --model_name Qwen/Qwen2.5-3B --output_dir output --lr 2e-5 --batch_size 8 --deepspeed_config zo_config.json --num_train_epochs 1
+Test command:
+  - No core binding: deepspeed --num_gpus=2 finetune_llama.py --model_name Qwen/Qwen2.5-3B --output_dir output --lr 2e-5 --batch_size 8 --deepspeed_config zo_config.json --num_train_epochs 1
+  - With core binding: deepspeed --num_gpus=2 --bind_cores_to_rank finetune_llama.py --model_name Qwen/Qwen2.5-3B --output_dir output --lr 2e-5 --batch_size 8 --deepspeed_config zo_config.json --num_train_epochs 1
 
 Config file (zo_config.json):
 ```
@@ -62,25 +62,18 @@ From this data, DeepSpeed's core binding provides approximately a 15% performanc
 Improvement to ZenFlow performance from DeepSpeed CPU core binding (Qwen2.5-3B, 2xA100 40GB, 2xEPYC 7742)
 
 
- Avg. time from iteration 5-51 (3 runs)
-Average
-ZenFlow core binding
-1337.66ms
-1443.87ms
-1475.04ms
-1419ms
-DeepSpeed core binding
-1233.6ms
-1228.36ms
-1235ms
-1232ms
+|                    | Avg. time from iteration 5-51 (1st run) | 2nd run | 3rd run | Average |
+|--------------------|-----------------------------------------|---------|---------|---------|
+|ZenFlow core binding| 1337.66ms | 1443.87ms | 1475.04ms | 1419ms |
+|DeepSpeed core binding| 1233.6ms | 1228.36ms | 1235ms | 1232ms |
 
 ZenFlow use 4 iterations to compute gradient importance, so we start from 5th iteration to measure time
 Test command:
-	No core binding: deepspeed --num_gpus=2 finetune_llama.py --model_name Qwen/Qwen2.5-3B --output_dir output --lr 2e-5 --batch_size 8 --deepspeed_config zf_config.json --num_train_epochs 1
-	With core binding: deepspeed --num_gpus=2 --bind_cores_to_rank finetune_llama.py --model_name Qwen/Qwen2.5-3B --output_dir output --lr 2e-5 --batch_size 8 --deepspeed_config zf_config.json --num_train_epochs 1
+  - No core binding: deepspeed --num_gpus=2 finetune_llama.py --model_name Qwen/Qwen2.5-3B --output_dir output --lr 2e-5 --batch_size 8 --deepspeed_config zf_config.json --num_train_epochs 1
+  - With core binding: deepspeed --num_gpus=2 --bind_cores_to_rank finetune_llama.py --model_name Qwen/Qwen2.5-3B --output_dir output --lr 2e-5 --batch_size 8 --deepspeed_config zf_config.json --num_train_epochs 1
 DeepSpeed commit: 1d7b90adc48d57c2283e8825f5c668a3730ff899
 Config file (zo_config.json):
+```
 {
     "train_batch_size": 8,
     "bf16": { "enabled": true },
@@ -111,36 +104,31 @@ Config file (zo_config.json):
     "gradient_clipping": 1.0,
     "zero_allow_untested_optimizer": true
 }
+```
 
 
 We observed a performance improvement of approximately 15% from DeepSpeed CPU core binding against ZenFlow core binding. Why did this happen?
-Our improvements to ZenFlow CPU core binding mechanism
+
+## Our improvements to ZenFlow CPU core binding mechanism
 After communicating with the authors of ZenFlow, we gained a new understanding of the core binding mechanism required by ZenFlow.
+
 First, the ZenFlow worker processes need to use a dedicated set of CPU cores, separate from those used by the main process of each rank. Second, the ZenFlow workers and the main processes should be bound to different physical cores, avoiding binding to virtual cores (hyper-threads). Third, the OpenMP thread pool size should be appropriately set to match the number of cores allocated to the ZenFlow workers.
+
 In the original ZenFlow implementation, all cores (including the virtual cores corresponding to physical cores) were used for core binding, meaning the workers were not properly isolated at the physical core level. In contrast, DeepSpeed's core binding specifically binds processes to physical cores only, which explains the performance improvement we observed.
 
 Based on this understanding, we collaborated with the ZenFlow authors to update its core binding mechanism.
+
 First, before each rank launches a ZenFlow worker process, it needs to enumerate the list of available physical cores. If these lists of physical cores differ across ranks, it indicates that DeepSpeed has already performed physical core binding. Otherwise, each rank needs to allocate its own list of available cores from the total pool.
 
 Finally, each rank allocates a subset of cores from its own list to the ZenFlow worker process and sets the corresponding OMP_NUM_THREADS environment variable. This ensures that all processes use distinct CPU cores, preventing interference, and also allows for proper configuration of the OpenMP thread pool size. (https://github.com/deepspeedai/DeepSpeed/blob/master/deepspeed/runtime/zenflow/zenflow_stage_1_and_2.py)
 
 Under this new core binding mechanism, we re-evaluated the performance of ZenFlow:
+
 ZenFlow perf. with new core binding mechanism (Qwen2.5-3B, 2xA100 40GB, 2xEPYC 7742)
-
-
- Avg. time from iteration 5-51 (3 runs)
-Average
-New ZenFlow worker core binding
-1321.21ms
-1269.83ms
-1384.47ms
-1325ms
-DeepSpeed core binding + new ZenFlow worker core binding
-1111.68ms
-1125.38ms
-1111.91ms
-1116ms
-
+|                    | Avg. time from iteration 5-51 (1st run) | 2nd run | 3rd run | Average |
+|--------------------|-----------------------------------------|---------|---------|---------|
+| New ZenFlow worker core binding | 1321.21ms | 1269.83ms | 1384.47ms | 1325ms |
+| DeepSpeed core binding + new ZenFlow worker core binding | 1111.68ms | 1125.38ms | 1111.91ms | 1116ms |
 DeepSpeed commit: 80033a82938f6cd8ce4988a63c914941e7a8f324
 
 The results indicate that ZenFlow's performance was further enhanced under the new core binding mechanism. Compared to the original binding method, performance improved by 7% when not using DeepSpeed's core binding. When DeepSpeed's core binding was enabled, the performance gain reached 10%.
