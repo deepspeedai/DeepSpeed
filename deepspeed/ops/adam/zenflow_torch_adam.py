@@ -53,30 +53,22 @@ class ZenFlowSelectiveAdamW(torch.optim.AdamW):
 
         if offload:
             self.step = self._step_with_offload
-            self.temp_copy_param = self._temp_copy_param_with_offload
             self.group_step = self._group_step_with_offload
             self.bucket_size = bucket_size
         else:
             self.step = self._step_without_offload
-            self.temp_copy_param = self._temp_copy_param_without_offload
             self.group_step = self._group_step_without_offload
 
-    @torch.no_grad()
-    def _temp_copy_param_with_offload(self, group_to_paramlist):
+    def temp_copy_param(self, group_to_paramlist):
         for group_id, params in group_to_paramlist.items():
             for param in params:
                 if hasattr(param, "selected_grad"):
                     temp_selected_param = param.data[:, param.selected_indices].clone().detach() if len(
                         param.shape) != 1 else param.data.clone().detach()
-                    param.temp_selected_param = temp_selected_param.cpu()
-
-    @torch.no_grad()
-    def _temp_copy_param_without_offload(self, group_to_paramlist):
-        for group_id, params in group_to_paramlist.items():
-            for param in params:
-                if hasattr(param, "selected_grad"):
-                    param.temp_selected_param = param.data[:, param.selected_indices].clone().detach() if len(
-                        param.shape) != 1 else param.data.clone().detach()
+                    if self.offload:
+                        param.temp_selected_param = temp_selected_param.cpu()
+                    else:
+                        param.temp_selected_param = temp_selected_param
 
     def copy_mv_from_cpu(self, params):
         for param in params:
@@ -322,29 +314,14 @@ class ZenFlowSelectiveAdamW_stage3(torch.optim.AdamW):
 
         if offload:
             self.step = self._step_with_offload
-            self.temp_copy_param = self._temp_copy_param_with_offload
             self.group_step = self._group_step_with_offload
             self.bucket_size = bucket_size
         else:
             self.step = self._step_without_offload
-            self.temp_copy_param = self._temp_copy_param_without_offload
             self.group_step = self._group_step_without_offload
 
     @torch.no_grad()
-    def _temp_copy_param_without_offload(self, paramlist):
-        for param in paramlist:
-            if hasattr(param, "selected_grad"):
-                num_column, num_row = param.ds_shape if len(param.ds_shape) != 1 else (param.ds_shape[0], 1)
-
-                if num_row != 1:
-                    param_2d = param.ds_tensor.data.narrow(0, param.complete_column_offset, param.complete_numel).view(
-                        param.complete_numel // num_row, num_row)
-                    param.temp_selected_param = param_2d[param.selected_indices, :].clone().detach()
-                else:
-                    param.temp_selected_param = param.ds_tensor.data.clone().detach()
-
-    @torch.no_grad()
-    def _temp_copy_param_with_offload(self, paramlist):
+    def temp_copy_param(self, paramlist):
         for param in paramlist:
             if hasattr(param, "selected_grad"):
                 num_column, num_row = param.ds_shape if len(param.ds_shape) != 1 else (param.ds_shape[0], 1)
@@ -355,7 +332,11 @@ class ZenFlowSelectiveAdamW_stage3(torch.optim.AdamW):
                     temp_selected_param = param_2d[param.selected_indices, :].clone().detach()
                 else:
                     temp_selected_param = param.ds_tensor.data.clone().detach()
-                param.temp_selected_param = temp_selected_param.cpu()
+
+                if self.offload:
+                    param.temp_selected_param = temp_selected_param.cpu()
+                else:
+                    param.temp_selected_param = temp_selected_param
 
     def clear_selected_mv(self):
         print("Zenflow: clearing selective optimizer states...")
