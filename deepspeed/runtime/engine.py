@@ -74,7 +74,7 @@ from deepspeed.runtime.sparse_tensor import SparseTensor
 
 from deepspeed.runtime import lr_schedules
 from deepspeed.utils import groups
-from deepspeed.utils import logger, log_dist, instrument_w_nvtx
+from deepspeed.utils import logger, log_dist, log_dist_once, instrument_w_nvtx
 from deepspeed.utils.timer import NoopTimer, ThroughputTimer, SynchronizedWallClockTimer, \
     FORWARD_MICRO_TIMER, BACKWARD_MICRO_TIMER, BACKWARD_INNER_MICRO_TIMER, BACKWARD_REDUCE_MICRO_TIMER, \
     STEP_MICRO_TIMER, \
@@ -287,12 +287,14 @@ class DeepSpeedEngine(Module):
 
         self.pipeline_parallelism = isinstance(model, PipelineModule)
 
+        self._deepcompile_active = False
+
         # Configure distributed model
         self._configure_distributed_model(model)
 
-        if not self.is_deepcompile_enabled():
-            self.module_forward_pre_hook = self._create_module_forward_pre_hook()
-            self.module_forward_post_hook = self._create_module_forward_post_hook()
+        # These hooks should be disabled later if DeepCompile is not active.
+        self.module_forward_pre_hook = self._create_module_forward_pre_hook()
+        self.module_forward_post_hook = self._create_module_forward_post_hook()
 
         # needed for zero_to_fp32 weights reconstruction to remap nameless data to state_dict
         self.param_names = {param: name for name, param in model.named_parameters()}
@@ -521,7 +523,7 @@ class DeepSpeedEngine(Module):
     def destroy(self):
         if self.optimizer is not None and hasattr(self.optimizer, 'destroy'):
             self.optimizer.destroy()
-        if self.is_deepcompile_enabled():
+        if self.is_deepcompile_active():
             get_deepcompile_handle().cleanup()
         debug_clear_module_and_param_names()
 
@@ -2155,7 +2157,12 @@ class DeepSpeedEngine(Module):
         if self.autotuning_profile_model_info():
             ma = get_ma_status()
 
-        if self.is_deepcompile_enabled() and hasattr(self, "launch_compile_passes"):
+        if self.is_deepcompile_enabled() and not self.is_deepcompile_active() and not self.is_compiled:
+            log_dist_once(
+                "DeepCompile is enabled but engine.compile() has not been called; executing without DeepCompile until compile() runs.",
+                ranks=[0])
+
+        if self.is_deepcompile_active() and hasattr(self, "launch_compile_passes"):
             # We can't have this in forward prologue as the compiler compiles hooks including the forward prologue.
             self.launch_compile_passes(self.global_steps)
 
@@ -2213,7 +2220,7 @@ class DeepSpeedEngine(Module):
     def allreduce_gradients(self, bucket_size=MEMORY_OPT_ALLREDUCE_SIZE):
         # Skip gradient reduction when DeepCompile is enabled
         # DeepCompile handles its own gradient reduction through compiled graph operations
-        if self.is_deepcompile_enabled():
+        if self.is_deepcompile_active():
             return
 
         # Pass (PP) gas boundary flag to optimizer (required for zero)
@@ -2239,7 +2246,7 @@ class DeepSpeedEngine(Module):
             scale_wrt_gas = self.scale_wrt_gas
 
         # scale loss w.r.t. gradient accumulation if reduction is not disabled
-        do_gradient_reduction = self.enable_backward_allreduce and not self.inside_no_sync_ctxt and not self.is_deepcompile_enabled(
+        do_gradient_reduction = self.enable_backward_allreduce and not self.inside_no_sync_ctxt and not self.is_deepcompile_active(
         )
         if do_gradient_reduction and self.gradient_accumulation_steps() > 1 and scale_wrt_gas:
             loss = self._scale_loss_by_gas(loss.float())
@@ -2257,7 +2264,7 @@ class DeepSpeedEngine(Module):
                     )]
                     self.monitor.write_events(self.summary_events)
 
-        if self.is_deepcompile_enabled():
+        if self.is_deepcompile_active():
             deepcompile_backward_prologue(self.is_gradient_accumulation_boundary())
 
         if self.zenflow and self.auto_update:
@@ -4083,10 +4090,39 @@ class DeepSpeedEngine(Module):
             elif self.zero_optimization_stage() == ZeroStageEnum.weights:
                 backend = init_z3(self, backend, compile_config, compile_kwargs, schedule)
 
+        # Hook state must align with whether DeepCompile is active.
+        self._set_deepcompile_active(enable_deepcompile)
+
         # create new dict to avoid modifying original dict
-        self.module.compile(**{**compile_kwargs, 'backend': backend})
+        try:
+            self.module.compile(**{**compile_kwargs, 'backend': backend})
+        except Exception:
+            if enable_deepcompile:
+                # Restore default hooks if compilation fails before completing.
+                self._set_deepcompile_active(False)
+            raise
 
         self._is_compiled = True
+
+    def _set_deepcompile_active(self, active: bool) -> None:
+        """Toggle DeepCompile runtime state and manage forward hooks accordingly."""
+        if self._deepcompile_active == active:
+            return
+
+        if active:
+            if self.module_forward_pre_hook is not None:
+                self.module_forward_pre_hook.remove()
+                self.module_forward_pre_hook = None
+            if self.module_forward_post_hook is not None:
+                self.module_forward_post_hook.remove()
+                self.module_forward_post_hook = None
+        else:
+            if self.module_forward_pre_hook is None:
+                self.module_forward_pre_hook = self._create_module_forward_pre_hook()
+            if self.module_forward_post_hook is None:
+                self.module_forward_post_hook = self._create_module_forward_post_hook()
+
+        self._deepcompile_active = active
 
     def get_compile_time(self):
         from deepspeed.compile.backend import opt_pass_times
@@ -4095,8 +4131,11 @@ class DeepSpeedEngine(Module):
     def register_compile_pass(self, pass_name: str, pass_fn: Callable) -> None:
         register_compile_pass(pass_name, pass_fn)
 
-    def is_deepcompile_enabled(self):
+    def is_deepcompile_enabled(self) -> bool:
         return self._config.compile_config.deepcompile
+
+    def is_deepcompile_active(self) -> bool:
+        return self._deepcompile_active
 
     @property
     def is_compiled(self) -> bool:
