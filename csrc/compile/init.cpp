@@ -10,10 +10,12 @@
 
 TORCH_LIBRARY(dc, m)
 {
-    m.def("allgather_param(Tensor a, int graph_id, int id) -> Tensor");
-    m.def("prefetch_params_fused(int graph_id, Tensor[] params, int[] ids) -> ()");
-    m.def("wait_allgather(Tensor a, int graph_id, int id) -> Tensor");
-    m.def("release_param(Tensor a, int graph_id, int id, int n_users) -> Tensor");
+    m.def("allgather_param(Tensor a, int graph_id, int id, ScalarType? dtype = None) -> Tensor");
+    m.def(
+        "prefetch_params_fused(int graph_id, Tensor[] params, int[] ids,"
+        "                      ScalarType[]? dtypes = None) -> ()");
+    m.def("wait_allgather(Tensor(a) a, int graph_id, int id) -> Tensor(a)");
+    m.def("release_param(Tensor(a) a, int graph_id, int id, int n_users) -> Tensor(a)");
     m.def("reduce_grad(Tensor a, int graph_id, int id) -> Tensor");
     m.def("free_tensors(Tensor[] a) -> ()");
     m.def("offload_tensor(Tensor a, int id, int id) -> Tensor");
