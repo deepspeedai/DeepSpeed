@@ -53,11 +53,9 @@ class ZenFlowSelectiveAdamW(torch.optim.AdamW):
 
         if offload:
             self.step = self._step_with_offload
-            self.group_step = self._group_step_with_offload
             self.bucket_size = bucket_size
         else:
             self.step = self._step_without_offload
-            self.group_step = self._group_step_without_offload
 
     def temp_copy_param(self, group_to_paramlist):
         for group_id, params in group_to_paramlist.items():
@@ -189,9 +187,12 @@ class ZenFlowSelectiveAdamW(torch.optim.AdamW):
             flush_bucket()
 
     @torch.no_grad()
-    def _group_step_without_offload(self, group_to_paramlist):
+    def group_step(self, group_to_paramlist):
         for group_id, params in group_to_paramlist.items():
             group = self.param_groups[group_id]
+
+            if self.offload:
+                self.copy_mv_from_cpu(params)
 
             params_with_grad: List[Tensor] = []
             grads: List[Tensor] = []
@@ -199,25 +200,35 @@ class ZenFlowSelectiveAdamW(torch.optim.AdamW):
             exp_avg_sqs: List[Tensor] = []
             max_exp_avg_sqs: List[Tensor] = []
             state_steps: List[Tensor] = []
+
             amsgrad: bool = group["amsgrad"]
             beta1, beta2 = cast(Tuple[float, float], group["betas"])
 
             for param in params:
                 if hasattr(param, "selected_grad"):
-                    selected_param = param.data[:, param.selected_indices] if len(param.shape) != 1 else param.data
+                    is_2d = (len(param.shape) != 1)
+                    selected_param = param.data[:, param.selected_indices] if is_2d else param.data
 
                     state = self.state.setdefault(param, {})
                     if len(state) == 0:
                         state["step"] = torch.zeros((), dtype=param.dtype, device=selected_param.device)
-                        state["exp_avg"] = torch.zeros_like(selected_param)
-                        state["exp_avg_sq"] = torch.zeros_like(selected_param)
                         if amsgrad:
                             state["max_exp_avg_sq"] = torch.zeros_like(selected_param)
+                        if not self.offload:
+                            state["exp_avg"] = torch.zeros_like(selected_param)
+                            state["exp_avg_sq"] = torch.zeros_like(selected_param)
+
+                    if self.offload:
+                        exp_avg_t = param.exp_avg.view_as(selected_param)
+                        exp_avg_sq_t = param.exp_avg_sq.view_as(selected_param)
+                    else:
+                        exp_avg_t = state["exp_avg"]
+                        exp_avg_sq_t = state["exp_avg_sq"]
 
                     params_with_grad.append(selected_param)
                     grads.append(param.selected_grad)
-                    exp_avgs.append(state["exp_avg"])
-                    exp_avg_sqs.append(state["exp_avg_sq"])
+                    exp_avgs.append(exp_avg_t)
+                    exp_avg_sqs.append(exp_avg_sq_t)
                     if amsgrad:
                         max_exp_avg_sqs.append(state["max_exp_avg_sq"])
                     state_steps.append(state["step"])
@@ -239,68 +250,11 @@ class ZenFlowSelectiveAdamW(torch.optim.AdamW):
             )
 
             for i, param in enumerate(params):
-                if hasattr(param, "selected_grad"):
-                    if len(param.shape) != 1:
-                        param.data[:, param.selected_indices] = params_with_grad[i]
+                if hasattr(param, "selected_grad") and len(param.shape) != 1:
+                    param.data[:, param.selected_indices] = params_with_grad[i]
 
-            for param in params:
-                param.selected_grad = None
-
-    @torch.no_grad()
-    def _group_step_with_offload(self, group_to_paramlist):
-        for group_id, params in group_to_paramlist.items():
-            group = self.param_groups[group_id]
-
-            self.copy_mv_from_cpu(params)
-            params_with_grad: List[Tensor] = []
-            grads: List[Tensor] = []
-            exp_avgs: List[Tensor] = []
-            exp_avg_sqs: List[Tensor] = []
-            max_exp_avg_sqs: List[Tensor] = []
-            state_steps: List[Tensor] = []
-            amsgrad: bool = group["amsgrad"]
-            beta1, beta2 = cast(Tuple[float, float], group["betas"])
-
-            for param in params:
-                if hasattr(param, "selected_grad"):
-                    selected_param = param.data[:, param.selected_indices] if len(param.shape) != 1 else param.data
-
-                    state = self.state.setdefault(param, {})
-                    if len(state) == 0:
-                        state["step"] = torch.zeros((), dtype=param.dtype, device=selected_param.device)
-                        if amsgrad:
-                            state["max_exp_avg_sq"] = torch.zeros_like(selected_param)
-
-                    params_with_grad.append(selected_param)
-                    grads.append(param.selected_grad)
-                    exp_avgs.append(param.exp_avg.view_as(selected_param))
-                    exp_avg_sqs.append(param.exp_avg_sq.view_as(selected_param))
-                    if amsgrad:
-                        max_exp_avg_sqs.append(state["max_exp_avg_sq"])
-                    state_steps.append(state["step"])
-
-            adamw(
-                params_with_grad,
-                grads,
-                exp_avgs,
-                exp_avg_sqs,
-                max_exp_avg_sqs,
-                state_steps,
-                amsgrad=amsgrad,
-                beta1=beta1,
-                beta2=beta2,
-                lr=group["lr"],
-                weight_decay=group["weight_decay"],
-                eps=group["eps"],
-                maximize=False,
-            )
-
-            for i, param in enumerate(params):
-                if hasattr(param, "selected_grad"):
-                    if len(param.shape) != 1:
-                        param.data[:, param.selected_indices] = params_with_grad[i]
-
-            self.copy_mv_to_cpu(params)
+            if self.offload:
+                self.copy_mv_to_cpu(params)
 
             for param in params:
                 param.selected_grad = None
@@ -314,11 +268,9 @@ class ZenFlowSelectiveAdamW_stage3(torch.optim.AdamW):
 
         if offload:
             self.step = self._step_with_offload
-            self.group_step = self._group_step_with_offload
             self.bucket_size = bucket_size
         else:
             self.step = self._step_without_offload
-            self.group_step = self._group_step_without_offload
 
     @torch.no_grad()
     def temp_copy_param(self, paramlist):
@@ -421,83 +373,6 @@ class ZenFlowSelectiveAdamW_stage3(torch.optim.AdamW):
                     param.temp_selected_param = None
                     param.selected_grad = None
 
-    @torch.no_grad()
-    def _group_step_without_offload(self, paramlist):
-
-        group_to_paramlist = {}
-        for param in paramlist:
-            group_id = param.group_id
-            if group_id not in group_to_paramlist:
-                group_to_paramlist[group_id] = []
-            group_to_paramlist[group_id].append(param)
-
-        for group_id in sorted(group_to_paramlist.keys()):
-            params = group_to_paramlist[group_id]
-            group = self.param_groups[group_id]
-
-            params_with_grad: List[Tensor] = []
-            grads: List[Tensor] = []
-            exp_avgs: List[Tensor] = []
-            exp_avg_sqs: List[Tensor] = []
-            max_exp_avg_sqs: List[Tensor] = []
-            state_steps: List[Tensor] = []
-            amsgrad: bool = group["amsgrad"]
-            beta1, beta2 = cast(Tuple[float, float], group["betas"])
-
-            for param in params:
-                if hasattr(param, "selected_grad"):
-                    num_column, num_row = param.ds_shape if len(param.ds_shape) != 1 else (param.ds_shape[0], 1)
-
-                    if num_row != 1:
-                        param_2d = param.ds_tensor.data.narrow(0, param.complete_column_offset,
-                                                               param.complete_numel).view(
-                                                                   param.complete_numel // num_row, num_row)
-                        selected_param = param_2d[param.selected_indices, :]
-                    else:
-                        selected_param = param.ds_tensor.data
-
-                    state = self.state.setdefault(param, {})
-                    if len(state) == 0:
-                        state["step"] = torch.zeros((), dtype=param.dtype, device=selected_param.device)
-                        state["exp_avg"] = torch.zeros_like(selected_param)
-                        state["exp_avg_sq"] = torch.zeros_like(selected_param)
-                        if amsgrad:
-                            state["max_exp_avg_sq"] = torch.zeros_like(selected_param)
-
-                    params_with_grad.append(selected_param)
-                    grads.append(param.selected_grad)
-                    exp_avgs.append(state["exp_avg"])
-                    exp_avg_sqs.append(state["exp_avg_sq"])
-                    if amsgrad:
-                        max_exp_avg_sqs.append(state["max_exp_avg_sq"])
-                    state_steps.append(state["step"])
-            adamw(
-                params_with_grad,
-                grads,
-                exp_avgs,
-                exp_avg_sqs,
-                max_exp_avg_sqs,
-                state_steps,
-                amsgrad=amsgrad,
-                beta1=beta1,
-                beta2=beta2,
-                lr=group["lr"],
-                weight_decay=group["weight_decay"],
-                eps=group["eps"],
-                maximize=False,
-            )
-            for i, param in enumerate(params):
-                if hasattr(param, "selected_grad"):
-                    num_column, num_row = param.ds_shape if len(param.ds_shape) != 1 else (param.ds_shape[0], 1)
-                    if num_row != 1:
-                        param_2d = param.ds_tensor.data.narrow(0, param.complete_column_offset,
-                                                               param.complete_numel).view(
-                                                                   param.complete_numel // num_row, num_row)
-                        param_2d[param.selected_indices, :] = params_with_grad[i]
-
-            for param in params:
-                param.selected_grad = None
-
     def copy_mv_from_cpu(self, params):
         for param in params:
             param.exp_avg = param.exp_avg_cpu_data.to(param.device, non_blocking=True)
@@ -511,7 +386,7 @@ class ZenFlowSelectiveAdamW_stage3(torch.optim.AdamW):
             param.exp_avg_sq = None
 
     @torch.no_grad()
-    def _group_step_with_offload(self, paramlist):
+    def group_step(self, paramlist):
 
         group_to_paramlist = {}
         for param in paramlist:
@@ -524,13 +399,16 @@ class ZenFlowSelectiveAdamW_stage3(torch.optim.AdamW):
             params = group_to_paramlist[group_id]
             group = self.param_groups[group_id]
 
-            self.copy_mv_from_cpu(params)
+            if self.offload:
+                self.copy_mv_from_cpu(params)
+
             params_with_grad: List[Tensor] = []
             grads: List[Tensor] = []
             exp_avgs: List[Tensor] = []
             exp_avg_sqs: List[Tensor] = []
             max_exp_avg_sqs: List[Tensor] = []
             state_steps: List[Tensor] = []
+
             amsgrad: bool = group["amsgrad"]
             beta1, beta2 = cast(Tuple[float, float], group["betas"])
 
@@ -551,11 +429,21 @@ class ZenFlowSelectiveAdamW_stage3(torch.optim.AdamW):
                         state["step"] = torch.zeros((), dtype=param.dtype, device=selected_param.device)
                         if amsgrad:
                             state["max_exp_avg_sq"] = torch.zeros_like(selected_param)
+                        if not self.offload:
+                            state["exp_avg"] = torch.zeros_like(selected_param)
+                            state["exp_avg_sq"] = torch.zeros_like(selected_param)
+
+                    if self.offload:
+                        exp_avg_t = param.exp_avg.view_as(selected_param)
+                        exp_avg_sq_t = param.exp_avg_sq.view_as(selected_param)
+                    else:
+                        exp_avg_t = state["exp_avg"]
+                        exp_avg_sq_t = state["exp_avg_sq"]
 
                     params_with_grad.append(selected_param)
                     grads.append(param.selected_grad)
-                    exp_avgs.append(param.exp_avg.view_as(selected_param))
-                    exp_avg_sqs.append(param.exp_avg_sq.view_as(selected_param))
+                    exp_avgs.append(exp_avg_t)
+                    exp_avg_sqs.append(exp_avg_sq_t)
                     if amsgrad:
                         max_exp_avg_sqs.append(state["max_exp_avg_sq"])
                     state_steps.append(state["step"])
@@ -585,7 +473,8 @@ class ZenFlowSelectiveAdamW_stage3(torch.optim.AdamW):
                                                                    param.complete_numel // num_row, num_row)
                         param_2d[param.selected_indices, :] = params_with_grad[i]
 
-            self.copy_mv_to_cpu(params)
+            if self.offload:
+                self.copy_mv_to_cpu(params)
 
             for param in params:
                 param.selected_grad = None
