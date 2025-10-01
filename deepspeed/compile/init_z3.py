@@ -23,8 +23,8 @@ def init_z3(engine, backend, compile_config, compile_kwargs, schedule=None):
     optimizer = engine.optimizer
     use_opt = not isinstance(optimizer, DeepSpeedZeRoOffload)
 
-    if use_opt and hasattr(optimizer, '_DeepSpeedZeroOptimizer_Stage3__ipg_bucket_flat_buffer'):
-        optimizer._DeepSpeedZeroOptimizer_Stage3__ipg_bucket_flat_buffer = None
+    if use_opt and hasattr(optimizer, "ipg_buckets"):
+        optimizer.ipg_buckets.clear()
         get_accelerator().empty_cache()
 
     dc = get_deepcompile_handle()
