@@ -107,6 +107,22 @@ def log_dist(message, ranks=None, level=logging.INFO):
         logger.log(level, final_message)
 
 
+@functools.lru_cache(None)
+def _log_dist_once_cached(message, ranks_key, level):
+    ranks_arg = list(ranks_key) if ranks_key is not None else None
+    log_dist(message, ranks=ranks_arg, level=level)
+
+
+def log_dist_once(message, ranks=None, level=logging.INFO):
+    # Identical to `log_dist`, but will emit each unique message only once per process.
+    # ranks is a list which is unhashable, so convert to tuple for caching
+    ranks_key = tuple(ranks) if ranks is not None else None
+    _log_dist_once_cached(message, ranks_key, level)
+
+
+logger.log_dist_once = log_dist_once
+
+
 def print_json_dist(message, ranks=None, path=None):
     from deepspeed import comm as dist
     """Print message when one of following condition meets
