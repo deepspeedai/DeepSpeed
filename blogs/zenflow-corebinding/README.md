@@ -23,7 +23,7 @@ This raised a question: Could this switch also benefit ZeRO Offload?  We conduct
 
 **Model:** Qwen2.5-3B
 
-**Test environment:** 2xDGX-A100-SXM4-40GB, 2xAMD EPYC 7742 64-Core Processor，1TB memory
+**Test environment:** 2xDGX-A100-SXM4-40GB, 2xAMD EPYC 7742 64-Core Processor, 1TB memory
 
 **Test URL:** [DeepSpeedExamples/training/DeepSpeed-ZenFlow/finetuning](https://github.com/deepspeedai/DeepSpeedExamples/tree/master/training/DeepSpeed-ZenFlow/finetuning) (All following tests are using the same URL)
 
@@ -69,7 +69,7 @@ From this data, DeepSpeed's core binding provides approximately a 15% performanc
 
 **Model:** Qwen2.5-3B
 
-**Test environment:** 2xDGX-A100-SXM4-40GB, 2xAMD EPYC 7742 64-Core Processor，1TB memory
+**Test environment:** 2xDGX-A100-SXM4-40GB, 2xAMD EPYC 7742 64-Core Processor, 1TB memory
 
 **DeepSpeed commit:** 1d7b90adc48d57c2283e8825f5c668a3730ff899
 
@@ -140,7 +140,7 @@ Under this new core binding mechanism, we re-evaluated the performance of ZenFlo
 
 **Model:** Qwen2.5-3B
 
-**Test environment:** 2xDGX-A100-SXM4-40GB, 2xAMD EPYC 7742 64-Core Processor，1TB memory
+**Test environment:** 2xDGX-A100-SXM4-40GB, 2xAMD EPYC 7742 64-Core Processor, 1TB memory
 
 **DeepSpeed commit:** 80033a82938f6cd8ce4988a63c914941e7a8f324
 
@@ -166,7 +166,7 @@ We conducted a comparative analysis of the performance across several configurat
 
 **Model:** Qwen2.5-3B
 
-**Test environment:** 2xDGX-A100-SXM4-40GB, 2xAMD EPYC 7742 64-Core Processor，1TB memory
+**Test environment:** 2xDGX-A100-SXM4-40GB, 2xAMD EPYC 7742 64-Core Processor, 1TB memory
 
 The result clearly shows that the improved ZenFlow achieves a 2.59x speedup compared to ZeRO Offload without core binding, and a 2.24x speedup compared to ZeRO Offload with core binding.
 
@@ -186,9 +186,9 @@ Since we couldn't run Qwen2.5-3B with ZeRO2 using the same config on two GPUs in
 | ZeRO Offload with DeepSpeed core binding | 1365ms | 17.6% |
 | DeepSpeed core binding + new ZenFlow worker core binding | 569ms | 42.2% |
 
-**Model: Qwen2.5-B**
+**Model: Qwen2.5-1.5B**
 
-**Test environment:** 2xDGX-A100-SXM4-40GB, 2xAMD EPYC 7742 64-Core Processor，1TB memory
+**Test environment:** 2xDGX-A100-SXM4-40GB, 2xAMD EPYC 7742 64-Core Processor, 1TB memory
 
 Based on the tests conducted on 2xA100 GPUs, the practicality metric for ZeRO Offload was 17.6%, while ZenFlow achieved a practicality metric of 42.2%. This result demonstrates that ZenFlow significantly improves the practicality of offloading.
 
