@@ -83,7 +83,7 @@ def print_configuration(args, name):
         logger.info("  {} {} {}".format(arg, dots, getattr(args, arg)))
 
 
-def log_dist(message, ranks=None, level=logging.INFO):
+def log_dist(message, ranks=None, level=logging.INFO, use_logger=True):
     from deepspeed import comm as dist
     """Log message when one of following condition meets
 
@@ -94,6 +94,7 @@ def log_dist(message, ranks=None, level=logging.INFO):
         message (str)
         ranks (list)
         level (int)
+        use_logger (bool): if `False` ignores the log-levels and always prints
 
     """
     should_log = not dist.is_initialized()
@@ -104,7 +105,10 @@ def log_dist(message, ranks=None, level=logging.INFO):
         should_log = should_log or (my_rank in set(ranks))
     if should_log:
         final_message = "[Rank {}] {}".format(my_rank, message)
-        logger.log(level, final_message)
+        if use_logger:
+            logger.log(level, final_message)
+        else:
+            print(final_message)
 
 
 @functools.lru_cache(None)
