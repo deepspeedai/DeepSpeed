@@ -2,7 +2,7 @@
 **TL;DR:** ZenFlow is an improvement to ZeRO Offload contributed to DeepSpeed by Tingfeng Lan et al. After testing this feature, we explored the relationship between ZenFlow performance and DeepSpeed CPU core binding.
 
 ## ZenFlow technology introduction
-[ZenFlow](https://arxiv.org/abs/2505.12242) is a recent improvement to ZeRO Offload implemented in DeepSpeed. Its primary goal is to address the GPU stall issues caused by ZeRO Offload. These stalls mainly originate from two sources: 1) the data transfer from the GPU to the CPU, which is limited by the GPU-CPU bandwidth, and 2) the computational overhead of executing the Adam optimizer on the CPU, which is constrained by CPU performance and memory bandwidth.
+[ZenFlow](https://arxiv.org/abs/2505.12242) is a recent improvement to ZeRO Offload implemented in DeepSpeed. Its primary goal is to address the GPU stalls caused by ZeRO Offload. These stalls mainly originate from two sources: 1) the data transfer from the GPU to the CPU, which is limited by PCIe bandwidth, and 2) the computational overhead of executing the Adam optimizer on the CPU, which is constrained by CPU performance and memory bandwidth.
 
 The core idea of ZenFlow is to separate gradients into two groups based on their norm. A very small portion of gradients, which have larger norms, are classified as important gradients and are updated directly on the GPU. The vast majority of gradients, which have smaller norms, are used to update the weights on the CPU at a lower frequency than the important gradients. If the gradients are not scheduled for an update in the current training iteration, they are accumulated into a copy of the gradients. These accumulated gradients are then used for the weight update in a subsequent iteration.
 
