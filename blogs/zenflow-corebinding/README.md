@@ -1,5 +1,5 @@
 # [LAB] Study of ZenFlow and ZeRO offload performance with DeepSpeed CPU core binding
-**TL;DR:** ZenFlow is an improvement to ZeRO Offload added by Tingfeng Lan et al. on DeepSpeed. After testing this feature, we explored the relationship between ZenFlow performance and DeepSpeed CPU core binding.
+**TL;DR:** ZenFlow is an improvement to ZeRO Offload contributed to DeepSpeed by Tingfeng Lan et al. After testing this feature, we explored the relationship between ZenFlow performance and DeepSpeed CPU core binding.
 
 ## ZenFlow technology introduction
 [ZenFlow](https://arxiv.org/abs/2505.12242) is a recent improvement to ZeRO Offload implemented in DeepSpeed. Its primary goal is to address the GPU stall issues caused by ZeRO Offload. These stalls mainly originate from two sources: 1) the data transfer from the GPU to the CPU, which is limited by the GPU-CPU bandwidth, and 2) the computational overhead of executing the Adam optimizer on the CPU, which is constrained by CPU performance and memory bandwidth.
