@@ -9,6 +9,10 @@
 #include "ds_kernel_utils.h"
 #include "memory_access_utils.h"
 
+#if defined(BF16_AVAILABLE) && defined(__HIP_PLATFORM_AMD__)
+#include <hip/hip_bfloat16.h>
+#endif
+
 namespace cg = cooperative_groups;
 
 namespace reduce {
@@ -374,7 +378,11 @@ DS_D_INLINE __half init<ROpType::Max>()
 template <>
 DS_D_INLINE __nv_bfloat16 init<ROpType::Max>()
 {
+#ifdef __HIP_PLATFORM_AMD__
+    constexpr __hip_bfloat16_raw neg_inf = {0xFF80};
+#else
     constexpr __nv_bfloat16_raw neg_inf = {0xFF80};
+#endif
     return __nv_bfloat16(neg_inf);
 }
 #endif
@@ -573,6 +581,24 @@ DS_D_INLINE void _warp(cg::thread_block_tile<hw_warp_size>& warp, T* data)
     }
 }
 
+#if defined(__HIP_PLATFORM_AMD__)
+template <int reduce_width, typename T, ROpType... Ops>
+DS_D_INLINE void _warp_with_type_conversion(cg::thread_block_tile<hw_warp_size>& warp_arg, T* data)
+{
+    constexpr int elems = sizeof...(Ops);
+    if constexpr (!(std::is_integral<T>::value || std::is_floating_point<T>::value)) {
+        float temp_data[elems];
+#pragma unroll
+        for (int i = 0; i < elems; i++) { temp_data[i] = conversion::to<float>(data[i]); }
+        _warp<float, Ops...>(warp_arg, temp_data);
+#pragma unroll
+        for (int i = 0; i < elems; i++) { data[i] = conversion::to<T>(temp_data[i]); }
+    } else {
+        _warp<T, Ops...>(warp_arg, data);
+    }
+}
+#endif  // defined(__HIP_PLATFORM_AMD__)
+
 /*
 Implementation for primary block reduction that serves both `block` and
 `partitioned_block`.
@@ -600,7 +626,11 @@ DS_D_INLINE void _block(cg::thread_block& tb,
 #endif
 
     // Always perform warp-scope reduction
+#ifdef __HIP_PLATFORM_AMD__
+    _warp_with_type_conversion<hw_warp_size, T, Ops...>(warp_arg, data);
+#else
     _warp<T, Ops...>(warp_arg, data);
+#endif
 
     // If max_warps == 1 let's skip the runtime check
     if (total_warps != 1) {
@@ -624,8 +654,11 @@ DS_D_INLINE void _block(cg::thread_block& tb,
             } else {
                 init<Ops...>(data);
             }
-
+#ifdef __HIP_PLATFORM_AMD__
+            _warp_with_type_conversion<total_warps, T, Ops...>(warp_arg, data);
+#else
             _warp<T, Ops..., total_warps>(warp_arg, data);
+#endif
 
 #pragma unroll
             for (int i = 0; i < elems; i++) {

@@ -13,6 +13,8 @@ class InferenceBuilder(CUDAOpBuilder):
     def __init__(self, name=None):
         name = self.NAME if name is None else name
         super().__init__(name=name)
+        if self.is_rocm_pytorch():
+            self.enable_bf16 = True
 
     def absolute_name(self):
         return f'deepspeed.ops.transformer.inference.{self.NAME}_op'
@@ -55,7 +57,7 @@ class InferenceBuilder(CUDAOpBuilder):
 
     def sources(self):
         return [
-            'csrc/transformer/inference/csrc/pt_binding.cpp',
+            'csrc/transformer/inference/csrc/pt_binding.cu',
             'csrc/transformer/inference/csrc/gelu.cu',
             'csrc/transformer/inference/csrc/relu.cu',
             'csrc/transformer/inference/csrc/layer_norm.cu',
