@@ -32,7 +32,7 @@ This raised a question: Could this switch also benefit ZeRO Offload?  We conduct
   - **With core binding:** `deepspeed --num_gpus=2 --bind_cores_to_rank finetune_llama.py --model_name Qwen/Qwen2.5-3B --output_dir output --lr 2e-5 --batch_size 8 --deepspeed_config zo_config.json --num_train_epochs 1`
 
 **Config file** (`zo_config.json`):
-```
+```json
 {
     "train_batch_size": 8,
     "bf16": { "enabled": true },
