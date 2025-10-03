@@ -81,7 +81,7 @@ From this data, DeepSpeed's core binding provides approximately a 15% performanc
 
 
 **Config file** (`zf_config.json`):
-```
+```json
 {
     "train_batch_size": 8,
     "bf16": { "enabled": true },
