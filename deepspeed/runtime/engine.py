@@ -70,11 +70,12 @@ from deepspeed.compression.constants import \
     WEIGHT_QUANTIZE_KERNEL
 from deepspeed.checkpoint.constants import OPTIMIZER_STATE_DICT, FROZEN_PARAM_FRAGMENTS
 from deepspeed.checkpoint.utils import clone_tensors_for_torch_save
+from deepspeed.checkpoint.ds_to_universal import dp_index_to_str
 from deepspeed.runtime.sparse_tensor import SparseTensor
 
 from deepspeed.runtime import lr_schedules
 from deepspeed.utils import groups
-from deepspeed.utils import logger, log_dist, instrument_w_nvtx
+from deepspeed.utils import logger, log_dist, log_dist_once, instrument_w_nvtx
 from deepspeed.utils.timer import NoopTimer, ThroughputTimer, SynchronizedWallClockTimer, \
     FORWARD_MICRO_TIMER, BACKWARD_MICRO_TIMER, BACKWARD_INNER_MICRO_TIMER, BACKWARD_REDUCE_MICRO_TIMER, \
     STEP_MICRO_TIMER, \
@@ -287,12 +288,14 @@ class DeepSpeedEngine(Module):
 
         self.pipeline_parallelism = isinstance(model, PipelineModule)
 
+        self._deepcompile_active = False
+
         # Configure distributed model
         self._configure_distributed_model(model)
 
-        if not self.is_deepcompile_enabled():
-            self.module_forward_pre_hook = self._create_module_forward_pre_hook()
-            self.module_forward_post_hook = self._create_module_forward_post_hook()
+        # These hooks should be disabled later if DeepCompile is not active.
+        self.module_forward_pre_hook = self._create_module_forward_pre_hook()
+        self.module_forward_post_hook = self._create_module_forward_post_hook()
 
         # needed for zero_to_fp32 weights reconstruction to remap nameless data to state_dict
         self.param_names = {param: name for name, param in model.named_parameters()}
@@ -521,7 +524,7 @@ class DeepSpeedEngine(Module):
     def destroy(self):
         if self.optimizer is not None and hasattr(self.optimizer, 'destroy'):
             self.optimizer.destroy()
-        if self.is_deepcompile_enabled():
+        if self.is_deepcompile_active():
             get_deepcompile_handle().cleanup()
         debug_clear_module_and_param_names()
 
@@ -2156,7 +2159,12 @@ class DeepSpeedEngine(Module):
         if self.autotuning_profile_model_info():
             ma = get_ma_status()
 
-        if self.is_deepcompile_enabled() and hasattr(self, "launch_compile_passes"):
+        if self.is_deepcompile_enabled() and not self.is_deepcompile_active() and not self.is_compiled:
+            log_dist_once(
+                "DeepCompile is enabled but engine.compile() has not been called; executing without DeepCompile until compile() runs.",
+                ranks=[0])
+
+        if self.is_deepcompile_active() and hasattr(self, "launch_compile_passes"):
             # We can't have this in forward prologue as the compiler compiles hooks including the forward prologue.
             self.launch_compile_passes(self.global_steps)
 
@@ -2214,7 +2222,7 @@ class DeepSpeedEngine(Module):
     def allreduce_gradients(self, bucket_size=MEMORY_OPT_ALLREDUCE_SIZE):
         # Skip gradient reduction when DeepCompile is enabled
         # DeepCompile handles its own gradient reduction through compiled graph operations
-        if self.is_deepcompile_enabled():
+        if self.is_deepcompile_active():
             return
 
         # Pass (PP) gas boundary flag to optimizer (required for zero)
@@ -2240,7 +2248,7 @@ class DeepSpeedEngine(Module):
             scale_wrt_gas = self.scale_wrt_gas
 
         # scale loss w.r.t. gradient accumulation if reduction is not disabled
-        do_gradient_reduction = self.enable_backward_allreduce and not self.inside_no_sync_ctxt and not self.is_deepcompile_enabled(
+        do_gradient_reduction = self.enable_backward_allreduce and not self.inside_no_sync_ctxt and not self.is_deepcompile_active(
         )
         if do_gradient_reduction and self.gradient_accumulation_steps() > 1 and scale_wrt_gas:
             loss = self._scale_loss_by_gas(loss.float())
@@ -2258,7 +2266,7 @@ class DeepSpeedEngine(Module):
                     )]
                     self.monitor.write_events(self.summary_events)
 
-        if self.is_deepcompile_enabled():
+        if self.is_deepcompile_active():
             deepcompile_backward_prologue(self.is_gradient_accumulation_boundary())
 
         if self.zenflow and self.auto_update:
@@ -3005,7 +3013,7 @@ class DeepSpeedEngine(Module):
         bf16_mode = self.bfloat16_enabled()
         return self._get_rank_zero_ckpt_name(checkpoints_path, tag, mp_rank, pp_rank, bf16_mode)
 
-    def _get_ckpt_name(self, checkpoints_path, tag, mp_placeholder=None):
+    def _get_ckpt_name(self, checkpoints_path, tag, mp_placeholder=None, pp_placeholder=None):
         if mp_placeholder is not None:
             mp_rank_str = mp_placeholder
         else:
@@ -3013,7 +3021,12 @@ class DeepSpeedEngine(Module):
             mp_rank_str = f"{mp_rank:02d}"
 
         if self.zero_optimization_partition_weights():
-            filename = "zero_pp_rank_{}".format(dist.get_rank(group=self.optimizer.dp_process_group))
+            if pp_placeholder is not None:
+                pp_rank = pp_placeholder
+            else:
+                pp_rank = dist.get_rank(group=self.optimizer.dp_process_group)
+
+            filename = "zero_pp_rank_{}".format(pp_rank)
             ckpt_name = os.path.join(
                 checkpoints_path,
                 str(tag),
@@ -3048,15 +3061,15 @@ class DeepSpeedEngine(Module):
 
     def _get_all_ckpt_names(self, checkpoints_path, tag):
         # It is required that (checkpoints_path, tag) are consistent among all ranks.
-        ckpt_file_pattern = self._get_ckpt_name(checkpoints_path, tag, mp_placeholder="*")
+        ckpt_file_pattern = self._get_ckpt_name(checkpoints_path,
+                                                tag,
+                                                mp_placeholder="*",
+                                                pp_placeholder="0" if self.load_universal_checkpoint() else None)
         import glob
 
         ckpt_files = glob.glob(ckpt_file_pattern)
         ckpt_files.sort()
-        if self.load_universal_checkpoint():
-            return [ckpt_files[0]]
-        else:
-            return ckpt_files
+        return ckpt_files
 
     def load_checkpoint(self,
                         load_dir,
@@ -3119,7 +3132,7 @@ class DeepSpeedEngine(Module):
                                                          custom_load_fn=custom_load_fn)
 
         load_zero_checkpoint = load_path is not None and self.zero_optimization()
-        if load_zero_checkpoint:
+        if load_zero_checkpoint and not self.zero_nvme_offload_optimizer():
             if (load_optimizer_states and not load_module_only) or self.load_universal_checkpoint():
                 success = self._load_zero_checkpoint(load_dir, tag, load_optimizer_states=load_optimizer_states)
             else:
@@ -3129,8 +3142,10 @@ class DeepSpeedEngine(Module):
 
         if self.zero_nvme_offload_optimizer():
             from shutil import copytree, disk_usage
+            rank = self.local_rank if self.use_node_local_storage() else self.global_rank
+            rank_dir = "rank" + dp_index_to_str(rank)
             offload_dir = self.optimizer.optimizer_swapper.swap_folder
-            offload_ckpt_dir = os.path.join(load_dir, tag, "offloaded_tensors")
+            offload_ckpt_dir = os.path.join(load_dir, tag, "offloaded_tensors", rank_dir)
             _, _, free = disk_usage(offload_dir)
             logger.info(
                 f"Copying NVMe offload checkpoint from {offload_ckpt_dir} to {offload_dir}, {free / 1e9:,.2f} GB free on target filesystem..."
@@ -3471,8 +3486,9 @@ class DeepSpeedEngine(Module):
 
         if self.zero_nvme_offload_optimizer():
             from shutil import copytree, disk_usage
+            rank_dir = "rank" + dp_index_to_str(rank)
             offload_dir = self.optimizer.optimizer_swapper.swap_folder
-            offload_ckpt_dir = os.path.join(save_dir, tag, "offloaded_tensors")
+            offload_ckpt_dir = os.path.join(save_dir, tag, "offloaded_tensors", rank_dir)
             _, _, free = disk_usage(save_dir)
             logger.info(
                 f"Copying NVMe offload files from {offload_dir} to {offload_ckpt_dir}, {free / 1e9:,.2f} GB free on target filesystem..."
@@ -4084,10 +4100,39 @@ class DeepSpeedEngine(Module):
             elif self.zero_optimization_stage() == ZeroStageEnum.weights:
                 backend = init_z3(self, backend, compile_config, compile_kwargs, schedule)
 
+        # Hook state must align with whether DeepCompile is active.
+        self._set_deepcompile_active(enable_deepcompile)
+
         # create new dict to avoid modifying original dict
-        self.module.compile(**{**compile_kwargs, 'backend': backend})
+        try:
+            self.module.compile(**{**compile_kwargs, 'backend': backend})
+        except Exception:
+            if enable_deepcompile:
+                # Restore default hooks if compilation fails before completing.
+                self._set_deepcompile_active(False)
+            raise
 
         self._is_compiled = True
+
+    def _set_deepcompile_active(self, active: bool) -> None:
+        """Toggle DeepCompile runtime state and manage forward hooks accordingly."""
+        if self._deepcompile_active == active:
+            return
+
+        if active:
+            if self.module_forward_pre_hook is not None:
+                self.module_forward_pre_hook.remove()
+                self.module_forward_pre_hook = None
+            if self.module_forward_post_hook is not None:
+                self.module_forward_post_hook.remove()
+                self.module_forward_post_hook = None
+        else:
+            if self.module_forward_pre_hook is None:
+                self.module_forward_pre_hook = self._create_module_forward_pre_hook()
+            if self.module_forward_post_hook is None:
+                self.module_forward_post_hook = self._create_module_forward_post_hook()
+
+        self._deepcompile_active = active
 
     def get_compile_time(self):
         from deepspeed.compile.backend import opt_pass_times
@@ -4096,8 +4141,11 @@ class DeepSpeedEngine(Module):
     def register_compile_pass(self, pass_name: str, pass_fn: Callable) -> None:
         register_compile_pass(pass_name, pass_fn)
 
-    def is_deepcompile_enabled(self):
+    def is_deepcompile_enabled(self) -> bool:
         return self._config.compile_config.deepcompile
+
+    def is_deepcompile_active(self) -> bool:
+        return self._deepcompile_active
 
     @property
     def is_compiled(self) -> bool:
