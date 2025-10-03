@@ -9,6 +9,22 @@
 
 ---
 
+## 目录 <!-- omit in toc -->
+
+- [SuperOffload：释放超级芯片上大规模LLM训练的潜力](#superoffload释放超级芯片上大规模llm训练的潜力)
+  - [SuperOffload的亮点](#superoffload的亮点)
+  - [介绍](#介绍)
+  - [SuperOffload的工作原理](#superoffload的工作原理)
+    - [1. 推测验证机制（STV）](#1-推测验证机制stv)
+    - [2. 异构优化器计算](#2-异构优化器计算)
+    - [3. 超级芯片感知的类型转换](#3-超级芯片感知的类型转换)
+    - [4. GraceAdam：提升优化器效率](#4-graceadam提升优化器效率)
+  - [经验与洞察](#经验与洞察)
+  - [快速使用指南](#快速使用指南)
+  - [致谢](#致谢)
+
+---
+
 ## SuperOffload的亮点
 
 - 在**一块GH200**上能够对GPT-OSS-20B和Qwen3-14B进行全参数微调，达到600TFLOPS的运算速度（Seqlen=4K，BS=4）。
