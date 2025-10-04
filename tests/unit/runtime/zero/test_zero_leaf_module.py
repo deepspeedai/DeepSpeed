@@ -11,7 +11,11 @@ from unit.common import DistributedTest, preferred_dtype
 from unit.simple_model import random_dataloader
 
 import deepspeed
-from deepspeed.utils import set_z3_leaf_modules, unset_z3_leaf_modules, get_z3_leaf_modules, z3_leaf_module
+from deepspeed.utils import set_z3_leaf_modules, unset_z3_leaf_modules, get_z3_leaf_modules, z3_leaf_module, \
+    set_z3_leaf_modules_by_name, set_z3_leaf_modules_by_suffix
+from deepspeed.runtime.zero.config import DeepSpeedZeroConfig
+from deepspeed.runtime.zero.leaf_module_config import (DEFAULT_LEAF_MODULE_CLASSES, DEFAULT_LEAF_MODULE_NAMES,
+                                                       DEFAULT_LEAF_MODULE_NAME_SUFFIXES)
 from deepspeed.accelerator import get_accelerator
 from torch import nn
 import time
@@ -82,6 +86,142 @@ class FineGrainedBlock(nn.Module):
         return x
 
 
+class BaseLeafModule(nn.Module):
+
+    def __init__(self):
+        super(BaseLeafModule, self).__init__()
+
+
+class SubLeafModule(BaseLeafModule):
+
+    def __init__(self, hidden_dim):
+        super(SubLeafModule, self).__init__()
+        self.proj = nn.Linear(hidden_dim, hidden_dim)
+
+    def forward(self, x):
+        return self.proj(x)
+
+
+class WrapperLeafModule(nn.Module):
+
+    def __init__(self, hidden_dim):
+        super(WrapperLeafModule, self).__init__()
+        self.child = SubLeafModule(hidden_dim)
+
+    def forward(self, x):
+        return self.child(x)
+
+
+def test_set_leaf_modules_with_fully_qualified_name():
+    hidden_dim = 16
+    model = WrapperLeafModule(hidden_dim)
+    fq_name = f"{SubLeafModule.__module__}.{SubLeafModule.__qualname__}"
+
+    matched = set_z3_leaf_modules(model, [fq_name])
+
+    assert len(matched) == 1
+    assert matched[0] is model.child
+    assert z3_leaf_module(model.child)
+    assert not z3_leaf_module(model)
+
+
+def test_set_leaf_modules_no_raise_when_missing():
+    hidden_dim = 16
+    model = WrapperLeafModule(hidden_dim)
+
+    matched = set_z3_leaf_modules(model, ["NonExistentClass"], raise_if_not_found=False)
+
+    assert matched == []
+    assert not z3_leaf_module(model.child)
+
+
+def test_set_leaf_modules_by_name():
+    hidden_dim = 16
+    model = WrapperLeafModule(hidden_dim)
+
+    matched, missing = set_z3_leaf_modules_by_name(model, ["child"])
+
+    assert matched == [model.child]
+    assert missing == []
+    assert z3_leaf_module(model.child)
+
+
+def test_set_leaf_modules_by_name_missing():
+    hidden_dim = 16
+    model = WrapperLeafModule(hidden_dim)
+
+    matched, missing = set_z3_leaf_modules_by_name(model, ["missing"], raise_if_not_found=False)
+
+    assert matched == []
+    assert missing == ["missing"]
+
+
+def test_set_leaf_modules_by_suffix():
+    hidden_dim = 16
+    model = WrapperLeafModule(hidden_dim)
+
+    matched, missing = set_z3_leaf_modules_by_suffix(model, ["child"])
+
+    assert missing == []
+    assert matched == [model.child]
+    assert z3_leaf_module(model.child)
+
+
+def test_set_leaf_modules_by_suffix_missing():
+    hidden_dim = 16
+    model = WrapperLeafModule(hidden_dim)
+
+    matched, missing = set_z3_leaf_modules_by_suffix(model, ["missing"], raise_if_not_found=False)
+
+    assert matched == []
+    assert missing == ["missing"]
+
+
+def test_zero_leaf_module_default_config():
+    config = DeepSpeedZeroConfig()
+    assert config.leaf_module.classes == DEFAULT_LEAF_MODULE_CLASSES
+    assert config.leaf_module.names == DEFAULT_LEAF_MODULE_NAMES
+    assert config.leaf_module.name_suffixes == DEFAULT_LEAF_MODULE_NAME_SUFFIXES
+
+
+def test_zero_leaf_module_custom_config():
+    payload = {
+        "leaf_module": {
+            "classes": ["custom.module.CustomClass"],
+            "names": ["transformer.layer"],
+            "name_suffixes": ["experts"]
+        }
+    }
+
+    config = DeepSpeedZeroConfig(**payload)
+
+    assert config.leaf_module.classes == ["custom.module.CustomClass"]
+    assert config.leaf_module.names == ["transformer.layer"]
+    assert config.leaf_module.name_suffixes == ["experts"]
+
+
+def test_zero_leaf_module_string_coercion():
+    payload = {"leaf_module": {"classes": "my.Class", "names": "submodule", "name_suffixes": "tail"}}
+
+    config = DeepSpeedZeroConfig(**payload)
+
+    assert config.leaf_module.classes == ["my.Class"]
+    assert config.leaf_module.names == ["submodule"]
+    assert config.leaf_module.name_suffixes == ["tail"]
+
+
+@pytest.mark.skip(reason="Requires Hugging Face transformers; run manually when validating defaults.")
+def test_default_leaf_module_classes_exist():
+    import importlib
+
+    from deepspeed.runtime.zero.leaf_module_config import DEFAULT_LEAF_MODULE_CLASSES
+
+    for cls_path in DEFAULT_LEAF_MODULE_CLASSES:
+        module_name, _, class_name = cls_path.rpartition('.')
+        module = importlib.import_module(module_name)
+        assert hasattr(module, class_name), f"Expected {class_name} in {module_name}"
+
+
 class modelWithFineGrainedBlock(nn.Module):
 
     def __init__(self, hidden_dim, num_block):
@@ -123,10 +263,7 @@ class TestSetZ3LeafModule(DistributedTest):
     world_size = 2
     reuse_dist_env = True
 
-    def _test_set_z3_leaf_modules(self, cls, requires_grad):
-        hidden_dim = 128
-
-        # `stage3_max_reuse_distance` is set to 0 to cause an error if the module is not set as a leaf module
+    def _create_zero_config(self, hidden_dim, leaf_module=None):
         config_dict = {
             "train_micro_batch_size_per_gpu": 1,
             "steps_per_print": 1,
@@ -143,10 +280,19 @@ class TestSetZ3LeafModule(DistributedTest):
                 "stage3_max_reuse_distance": 0,
             }
         }
+        if leaf_module is not None:
+            config_dict["zero_optimization"]["leaf_module"] = leaf_module
+
         if preferred_dtype() is torch.float16:
             config_dict["fp16"] = {"enabled": True}
         elif preferred_dtype() is torch.bfloat16:
             config_dict["bf16"] = {"enabled": True}
+
+        return config_dict
+
+    def _test_set_z3_leaf_modules(self, cls, requires_grad):
+        hidden_dim = 128
+        config_dict = self._create_zero_config(hidden_dim)
 
         model = cls(hidden_dim)
 
@@ -181,6 +327,17 @@ class TestSetZ3LeafModule(DistributedTest):
             "Expected only one module to be unset as a leaf module"
         assert len(get_z3_leaf_modules(model)) == 0, "Expected there is no leaf module"
 
+    def test_set_leaf_modules_with_subclass(self):
+        hidden_dim = 32
+        model = WrapperLeafModule(hidden_dim)
+
+        leaf_modules = set_z3_leaf_modules(model, [BaseLeafModule])
+
+        assert len(leaf_modules) == 1, "Expected the subclass instance to be marked as leaf"
+        assert leaf_modules[0] is model.child, "Expected the subclass instance to be returned"
+        assert z3_leaf_module(model.child), "Expected subclass instance flagged as leaf"
+        assert not z3_leaf_module(model), "Expected wrapper module to remain non-leaf"
+
     def test_set_no_match_class(self):
         hidden_dim = 128
         model = ChooseModuleByCounter(hidden_dim)
@@ -189,6 +346,25 @@ class TestSetZ3LeafModule(DistributedTest):
             raise AssertionError("Expected error that no module is set as a leaf module")
         except ValueError as e:
             pass
+
+    def test_leaf_module_enabled_via_config(self):
+        hidden_dim = 128
+        leaf_class_fqn = f"{ChooseModuleByCounter.__module__}.{ChooseModuleByCounter.__qualname__}"
+        config_dict = self._create_zero_config(hidden_dim,
+                                               leaf_module={
+                                                   "classes": [leaf_class_fqn],
+                                                   "name_suffixes": ["linears"]
+                                               })
+
+        model = ChooseModuleByCounter(hidden_dim)
+        assert not z3_leaf_module(model)
+
+        run_model(model, config_dict, hidden_dim, preferred_dtype(), True)
+
+        assert z3_leaf_module(model)
+        modules_by_name = dict(model.named_modules())
+        assert "linears" in modules_by_name
+        assert z3_leaf_module(modules_by_name["linears"])
 
 
 @pytest.mark.parametrize("module_granularity_threshold", [0, 100, 12100, 10000000])

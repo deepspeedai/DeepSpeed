@@ -83,19 +83,20 @@ def print_configuration(args, name):
         logger.info("  {} {} {}".format(arg, dots, getattr(args, arg)))
 
 
-def log_dist(message, ranks=None, level=logging.INFO, use_logger=True):
+def get_dist_msg(message, ranks=None):
     from deepspeed import comm as dist
-    """Log message when one of following condition meets
+    """Return a message with rank prefix when one of following conditions is met:
 
-    + not dist.is_initialized()
-    + dist.get_rank() in ranks if ranks is not None or ranks = [-1]
+      + not dist.is_initialized()
+      + dist.get_rank() in ranks if ranks is not None or ranks = [-1]
+
+    If neither is met, `None` is returned.
+
+    Example: "hello" => "[Rank 0] hello"
 
     Args:
         message (str)
         ranks (list)
-        level (int)
-        use_logger (bool): if `False` ignores the log-levels and always prints
-
     """
     should_log = not dist.is_initialized()
     ranks = ranks or []
@@ -104,11 +105,36 @@ def log_dist(message, ranks=None, level=logging.INFO, use_logger=True):
         should_log = ranks[0] == -1
         should_log = should_log or (my_rank in set(ranks))
     if should_log:
-        final_message = "[Rank {}] {}".format(my_rank, message)
-        if use_logger:
-            logger.log(level, final_message)
-        else:
-            print(final_message)
+        return "[Rank {}] {}".format(my_rank, message)
+    else:
+        return None
+
+
+def log_dist(message, ranks=None, level=logging.INFO):
+    """Log message when get_dist_msg() deems it should be logged, see its docstring for details.
+
+    Args:
+        message (str)
+        ranks (list)
+        level (int)
+    """
+    final_message = get_dist_msg(message, ranks)
+    if final_message is not None:
+        logger.log(level, final_message)
+
+
+def print_dist(message, ranks=None):
+    """print message when get_dist_msg() deems it should be logged, see its docstring for details.
+
+    Use this function instead of `log_dist` when the log level shouldn't impact whether the message should be printed or not.
+
+    Args:
+        message (str)
+        ranks (list)
+    """
+    final_message = get_dist_msg(message, ranks)
+    if final_message is not None:
+        print(final_message)
 
 
 @functools.lru_cache(None)

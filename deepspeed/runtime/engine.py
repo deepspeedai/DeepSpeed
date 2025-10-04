@@ -76,6 +76,7 @@ from deepspeed.runtime.sparse_tensor import SparseTensor
 from deepspeed.runtime import lr_schedules
 from deepspeed.utils import groups
 from deepspeed.utils import logger, log_dist, log_dist_once, instrument_w_nvtx
+from deepspeed.utils.z3_leaf_module import apply_zero_leaf_module_config
 from deepspeed.utils.timer import NoopTimer, ThroughputTimer, SynchronizedWallClockTimer, \
     FORWARD_MICRO_TIMER, BACKWARD_MICRO_TIMER, BACKWARD_INNER_MICRO_TIMER, BACKWARD_REDUCE_MICRO_TIMER, \
     STEP_MICRO_TIMER, \
@@ -1293,6 +1294,7 @@ class DeepSpeedEngine(Module):
 
     def _configure_distributed_model(self, model):
         self._set_client_model(model)
+        apply_zero_leaf_module_config(self.module, getattr(self._config.zero_config, "leaf_module", None))
         is_zero_init_model = self.zero_optimization_partition_weights() and any(
             [hasattr(param, "ds_id") for param in self.module.parameters()])
 

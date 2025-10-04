@@ -73,6 +73,84 @@ Each configuration works as follows:
 .. autofunction:: deepspeed.runtime.torch_autocast.has_autocast_dtype
 
 
+Configuring ZeRO Leaf Modules
+-----------------------------
+
+ZeRO-3 relies on module execution order to gather partitioned parameters.
+When models select submodules dynamically (for example, MoE routers), different data-parallel ranks may gather different sets of parameters, which can cause the all-gather collective to deadlock.
+To avoid this problem, you can designate the parent of dynamically activated submodules (e.g., MoE experts) as a "leaf" module.
+When a module is marked as a leaf, ZeRO gathers all of its descendants immediately and stops inserting hooks beneath it.
+
+Programmatic API
+================
+
+Use :func:`deepspeed.utils.set_z3_leaf_modules` to flag modules by class, class
+name, or both. Optionally combine with
+:func:`deepspeed.utils.set_z3_leaf_modules_by_name` to target specific entries
+from ``model.named_modules()`` or
+:func:`deepspeed.utils.set_z3_leaf_modules_by_suffix` to match suffixes of those
+names.
+
+.. code-block:: python
+
+    from deepspeed.utils import (
+        set_z3_leaf_modules,
+        set_z3_leaf_modules_by_name,
+        set_z3_leaf_modules_by_suffix,
+    )
+
+    # Match by class or subclass
+    set_z3_leaf_modules(model, [CustomMoEBlock])
+
+    # Match by fully qualified class name
+    set_z3_leaf_modules(model, ["my_package.layers.CustomMoEBlock"])
+
+    # Match by module name returned from model.named_modules()
+    set_z3_leaf_modules_by_name(model, ["transformer.layers.0.experts"])
+
+    # Match by suffix of names returned from model.named_modules()
+    set_z3_leaf_modules_by_suffix(model, ["experts"])
+
+Configuration in DeepSpeed config
+=================================
+
+The same behavior can be controlled from the DeepSpeed config. Add a
+``leaf_module`` block to ``zero_optimization`` specifying either classes,
+module names, or name suffixes (or any combination). By default DeepSpeed marks
+several Hugging Face MoE blocks—including Mixtral and Qwen MoE sparse blocks so
+that they behave well with ZeRO3.
+
+The default class list currently contains:
+
+* ``transformers.models.mixtral.modeling_mixtral.MixtralSparseMoeBlock``
+* ``transformers.models.qwen2_moe.modeling_qwen2_moe.Qwen2MoeSparseMoeBlock``
+* ``transformers.models.qwen3_moe.modeling_qwen3_moe.Qwen3MoeSparseMoeBlock``
+
+.. code-block:: json
+
+    {
+      "train_micro_batch_size_per_gpu": 1,
+      "zero_optimization": {
+        "stage": 3,
+        "leaf_module": {
+          "classes": ["my_package.layers.CustomMoEBlock"],
+          "names": ["transformer.layers.0.experts"],
+          "name_suffixes": ["experts"]
+        }
+      }
+    }
+
+``names`` must match exactly what ``model.named_modules()`` produces. The
+``name_suffixes`` field compares each suffix against the end of those same
+module paths, making it convenient to apply a rule across repeated structures.
+Entries in ``classes`` may be either bare class names (for example,
+``MixtralSparseMoeBlock``) or fully qualified dotted paths; both forms are
+accepted.
+
+You can mix and match the API and configuration approaches; all referenced
+modules are flagged before ZeRO installs its hooks.
+
+
 Model Saving
 ------------
 .. autofunction:: deepspeed.DeepSpeedEngine.save_16bit_model
