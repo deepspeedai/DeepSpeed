@@ -12,12 +12,14 @@ from deepspeed.accelerator import get_accelerator
 from deepspeed.runtime.zero import GatheredParameters
 
 from unit.simple_model import SimpleModel
-from unit.common import enable_determinism
+from unit.common import enable_determinism, allclose_on_all_ranks
 
 
 @enable_determinism(123)
 def compare_loss(self, config, dtype, iteration=5, hidden_dim_override=None):
     hidden_dim = hidden_dim_override if hidden_dim_override is not None else 10
+
+    # the default tolerances of torch.testing.assert_close are too small
     RTOL = 5e-1
     ATOL = 1e-2
 
@@ -56,7 +58,7 @@ def compare_loss(self, config, dtype, iteration=5, hidden_dim_override=None):
         baseline_loss = baseline_engine(x, y)
         target_loss = target_engine(x, y)
 
-        assert torch.allclose(baseline_loss, target_loss, rtol=RTOL, atol=ATOL)
+        allclose_on_all_ranks(baseline_loss, target_loss, "Loss values are not close.", rtol=RTOL, atol=ATOL)
 
         baseline_engine.backward(baseline_loss)
         target_engine.backward(target_loss)
@@ -66,7 +68,7 @@ def compare_loss(self, config, dtype, iteration=5, hidden_dim_override=None):
 
         with GatheredParameters(target_engine.parameters()):
             for p1, p2 in zip(baseline_engine.parameters(), target_engine.parameters()):
-                assert torch.allclose(p1.to(dtype), p2, rtol=RTOL, atol=ATOL)
+                allclose_on_all_ranks(p1, p2, "Parameters are not equal.", rtol=RTOL, atol=ATOL)
 
     baseline_engine.destroy()
     target_engine.destroy()
