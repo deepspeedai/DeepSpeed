@@ -33,13 +33,15 @@ class DataStatesCheckpointEngine(CheckpointEngine):
         return self.ckpt_engine.load(path, map_location)
 
     def commit(self, info: CheckpointCommitInfo):
+        if info is None:
+            return
         assert info == self.commit_info
-        self.ckpt_engine.wait()
+        self.ckpt_engine.wait(persist=True)
         return self.ckpt_engine.commit(info.tag)
 
     def cleanup(self):
         self.commit(self.commit_info)
-        self.ckpt_engine.wait(True)
+        self.ckpt_engine.wait(persist=True)
         del self.ckpt_engine
 
     def is_decoupled(self):
