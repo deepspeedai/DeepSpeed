@@ -9,6 +9,7 @@ title: "Latest News"
 
 <!-- NOTE: Maintain only the five latest releases in 'latest news' section -->
 
+* [2025/10] [(LAB) Study of ZenFlow and ZeRO offload performance with DeepSpeed CPU core binding](https://github.com/deepspeedai/DeepSpeed/blob/master/blogs/zenflow-corebinding/README.md)
 
 * [2025/08] [ZenFlow: Stall-Free Offloading Engine for LLM Training](https://pytorch.org/blog/zenflow-stall-free-offloading-engine-for-llm-training/)
 
@@ -18,7 +19,6 @@ title: "Latest News"
 
 * [2025/04] [DeepCompile: Unlocking Compiler Optimization for Distributed Training](https://github.com/deepspeedai/DeepSpeed/blob/master/blogs/deepcompile/README.md)
 
-* [2025/03] [DeepSpeed AutoTP: Automatic Tensor Parallel Training of Hugging Face models](https://github.com/deepspeedai/DeepSpeed/blob/master/blogs/huggingface-tp/README.md)
 
 
 <!-- NOTE: we must use html for news items otherwise links will be broken in the 'more news' section -->
@@ -27,6 +27,7 @@ title: "Latest News"
 <!-- NOTE: Maintain only three items in 'more news' section -->
  <summary>More news</summary>
  <ul>
+   <li>[2025/03] <a href="https://github.com/deepspeedai/DeepSpeed/blob/master/blogs/huggingface-tp/README.md">DeepSpeed AutoTP: Automatic Tensor Parallel Training of Hugging Face models</a></li>
    <li>[2024/12] <a href="https://github.com/deepspeedai/DeepSpeed/blob/master/blogs/ulysses-offload/README.md">Ulysses-Offload: Democratizing Long Context LLM Training</a></li>
    <li>[2024/12] <a href="https://github.com/deepspeedai/DeepSpeed/blob/master/blogs/deepspeed-domino/README.md">DeepSpeed-Domino: Communication-Free LLM Training Engine</a></li>
    <li>[2024/08] <a href="https://github.com/deepspeedai/DeepSpeed/tree/master/blogs/windows/08-2024/README.md">DeepSpeed on Windows</a>
