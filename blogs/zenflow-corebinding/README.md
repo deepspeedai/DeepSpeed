@@ -1,4 +1,4 @@
-# [LAB] Study of ZenFlow and ZeRO offload performance with DeepSpeed CPU core binding
+# Study of ZenFlow and ZeRO offload performance with DeepSpeed CPU core binding
 **TL;DR:** ZenFlow is an improvement to ZeRO Offload contributed to DeepSpeed by Tingfeng Lan et al. After testing this feature, we explored the relationship between ZenFlow performance and DeepSpeed CPU core binding.
 
 ## ZenFlow technology introduction
