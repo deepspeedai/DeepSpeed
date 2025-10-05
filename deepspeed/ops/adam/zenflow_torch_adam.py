@@ -157,6 +157,13 @@ class ZenFlowSelectiveAdamW(torch.optim.AdamW):
 
     @torch.no_grad()
     def _step_with_offload(self):
+        """
+        Performs parameter updates in offload mode.
+
+        In this mode, group_step() calls adamw() on each pre-partitioned param bucket,
+        so memory can be released after each bucket update to reduce GPU overhead.
+        Without offload, adamw() is called directly for speed.
+        """
         for group_id, group in enumerate(self.param_groups):
             params = group["params"]
 
@@ -481,6 +488,14 @@ class ZenFlowSelectiveAdamW_stage3(torch.optim.AdamW):
 
     @torch.no_grad()
     def _step_with_offload(self):
+        """
+        Performs parameter updates in offload mode.
+
+        In this mode, group_step() calls adamw() on each pre-partitioned param bucket,
+        so memory can be released after each bucket update to reduce GPU overhead.
+        Without offload, adamw() is called directly for speed.
+        """
+
         for group_id, group in enumerate(self.param_groups):
             params = group["params"]
 
