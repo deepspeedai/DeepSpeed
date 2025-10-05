@@ -21,6 +21,8 @@ import deepspeed
 from deepspeed.accelerator import get_accelerator
 import deepspeed.comm as dist
 
+from .util import torch_assert_close
+
 import pytest
 from _pytest.outcomes import Skipped
 from _pytest.fixtures import FixtureLookupError, FixtureFunctionMarker
@@ -562,6 +564,8 @@ def enable_determinism(seed: int):
 
 
 def reduce_boolean_flags(flag: bool, op=all) -> bool:
+    if not dist.is_initialized():
+        return flag
     device = get_accelerator().current_device()
     tensor_flag = torch.tensor(1 if flag else 0, dtype=torch.int, device=device)
     world_size = dist.get_world_size()
@@ -569,3 +573,24 @@ def reduce_boolean_flags(flag: bool, op=all) -> bool:
     dist.all_gather_into_tensor(tensor_flag_buf, tensor_flag)
     list_flags = [bool(f) for f in tensor_flag_buf.tolist()]
     return op(list_flags)
+
+
+def allclose_on_all_ranks(actual, expected, assert_message=None, **kwargs) -> None:
+    """
+    Compare two tensors across all ranks.
+    We want to make sure that all ranks succeed or fail together.
+    """
+    allclose_local = False
+    allclose_global = False
+    mismatch_msg = ""
+    try:
+        torch_assert_close(actual, expected, **kwargs)
+        allclose_local = True
+        allclose_global = reduce_boolean_flags(allclose_local, all)
+    except AssertionError:
+        allclose_global = reduce_boolean_flags(allclose_local, all)
+        mismatch_msg = f"Tensors are not close: {actual=}, {expected=} {kwargs=}"
+
+    if not allclose_global:
+        message = "Tensors are not close on all ranks." if assert_message is None else assert_message
+        raise AssertionError(f"{message} {mismatch_msg}")
