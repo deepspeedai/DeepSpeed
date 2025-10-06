@@ -11,6 +11,7 @@ from deepspeed.runtime.config_utils import get_scalar_param, pp_int, DeepSpeedCo
 from deepspeed.utils import logger
 from .offload_config import DeepSpeedZeroOffloadParamConfig, DeepSpeedZeroOffloadOptimizerConfig, OffloadDeviceEnum
 from deepspeed.runtime.zenflow.zenflow_config import ZenFlowConfig
+from .leaf_module_config import DeepSpeedZeroLeafModuleConfig
 
 # ZeRO optimization. By default, this optimization is not enabled.
 # Users have to configure the desired optimization (0 means disabled) in params.json as below example:
@@ -354,6 +355,11 @@ class DeepSpeedZeroConfig(DeepSpeedConfigModel):
     enable_sanity_checks: bool = False
     """
     Enable internal sanity checks, which could be useful for debugging
+    """
+
+    leaf_module: DeepSpeedZeroLeafModuleConfig = Field(default_factory=DeepSpeedZeroLeafModuleConfig)
+    """
+    Configuration for modules that should be treated as ZeRO3 leaf modules.
     """
 
     # Validators

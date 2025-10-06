@@ -76,6 +76,7 @@ from deepspeed.runtime.sparse_tensor import SparseTensor
 from deepspeed.runtime import lr_schedules
 from deepspeed.utils import groups
 from deepspeed.utils import logger, log_dist, log_dist_once, instrument_w_nvtx
+from deepspeed.utils.z3_leaf_module import apply_zero_leaf_module_config
 from deepspeed.utils.timer import NoopTimer, ThroughputTimer, SynchronizedWallClockTimer, \
     FORWARD_MICRO_TIMER, BACKWARD_MICRO_TIMER, BACKWARD_INNER_MICRO_TIMER, BACKWARD_REDUCE_MICRO_TIMER, \
     STEP_MICRO_TIMER, \
@@ -335,8 +336,13 @@ class DeepSpeedEngine(Module):
         if not isinstance(model_parameters, list):
             model_parameters = list(model_parameters)
 
+        # grad scaler only for Z0 (no ZeRO) + fp16 + torch_autocast
+        # ZeRO1/2/3 optimizers have their own grad scaler logic
+        self.torch_autocast_z0_gradscaler = None
         if self.torch_autocast_enabled():
             init_autocast_params(self, self.torch_autocast_dtype(), self.torch_autocast_lower_precision_safe_modules())
+            if (not self.zero_optimization() and self.torch_autocast_dtype() == torch.float16):
+                self.torch_autocast_z0_gradscaler = torch.amp.GradScaler(device=get_accelerator().device_name())
 
         self._configure_zenflow = lambda: configure_zenflow(self)
         self._is_zenflow_update_boundary = lambda: is_zenflow_update_boundary(self)
@@ -1293,6 +1299,7 @@ class DeepSpeedEngine(Module):
 
     def _configure_distributed_model(self, model):
         self._set_client_model(model)
+        apply_zero_leaf_module_config(self.module, getattr(self._config.zero_config, "leaf_module", None))
         is_zero_init_model = self.zero_optimization_partition_weights() and any(
             [hasattr(param, "ds_id") for param in self.module.parameters()])
 
@@ -2302,7 +2309,12 @@ class DeepSpeedEngine(Module):
         elif self.bfloat16_enabled():
             self.optimizer.backward(loss, retain_graph=retain_graph)
         else:
-            if self.eigenvalue_enabled():
+            if self.torch_autocast_z0_gradscaler:
+                if self.eigenvalue_enabled():
+                    self.torch_autocast_z0_gradscaler.scale(loss).backward(create_graph=True, retain_graph=True)
+                else:
+                    self.torch_autocast_z0_gradscaler.scale(loss).backward(retain_graph=retain_graph)
+            elif self.eigenvalue_enabled():
                 loss.backward(create_graph=True, retain_graph=True)
             else:
                 loss.backward(retain_graph=retain_graph)
@@ -2401,6 +2413,9 @@ class DeepSpeedEngine(Module):
 
     def _take_model_step(self, lr_kwargs, block_eigenvalue={}):
         if self.gradient_clipping() > 0.0:
+            if self.torch_autocast_z0_gradscaler:
+                # Unscale for gradient clipping
+                self.torch_autocast_z0_gradscaler.unscale_(self.optimizer)
             if not (self.fp16_enabled() or self.bfloat16_enabled() or self.amp_enabled() or self.zero_optimization()):
                 self.clip_fp32_gradients()
             elif self.amp_enabled():
@@ -2408,7 +2423,11 @@ class DeepSpeedEngine(Module):
                 # https://nvidia.github.io/apex/advanced.html#gradient-clipping
                 master_params = amp.master_params(self.optimizer)
                 clip_grad_norm_(parameters=master_params, max_norm=self.gradient_clipping(), mpu=self.mpu)
-        self.optimizer.step()
+        if self.torch_autocast_z0_gradscaler:
+            self.torch_autocast_z0_gradscaler.step(self.optimizer)
+            self.torch_autocast_z0_gradscaler.update()
+        else:
+            self.optimizer.step()
 
         if hasattr(self.optimizer, '_global_grad_norm'):
             self._global_grad_norm = self.optimizer._global_grad_norm
