@@ -58,3 +58,6 @@ class CheckpointEngine(ABC):
 
     def cleanup(self):
         pass
+
+    def preserves_storage_sharing(self):
+        return True
