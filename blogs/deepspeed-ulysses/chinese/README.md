@@ -152,4 +152,4 @@ DeepSpeed-Ulysses已经完全与Megatron-DeepSpeed代码库集成并经过测试
 
 我们欢迎各种形式的贡献和合作，以共同推动当长上下文窗口不再是限制时的各种创新。DeepSpeed-Ulysses是大规模AI训练和推理的更大DeepSpeed生态系统的一部分。有关所有DeepSpeed技术和创新的更多细节，请访问我们的[网站]((https://www.deepspeed.ai/))，并关注我们在X（Twitter）上的帐号（[英文](https://twitter.com/DeepSpeedAI)，[日文](https://twitter.com/DeepSpeedAI_JP)）和[中文知乎](https://www.zhihu.com/people/deepspeed)。
 
-我们愿意与大学、研究实验室和公司合作。有关此类请求（以及不适合在GitHub上提出的其他请求），请直接发送电子邮件至<deepspeed-info@microsoft.com>。
+我们愿意与大学、研究实验室和公司合作。有关此类请求（以及不适合在GitHub上提出的其他请求），请直接发送电子邮件至<info@deepspeed.ai>。
