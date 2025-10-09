@@ -24,6 +24,7 @@ class SuperOffloadOptimizer_Stage3(DeepSpeedZeroOptimizer_Stage3):
         self,
         module,
         init_optimizer,
+        param_names,
         timers,
         ds_config,
         static_loss_scale=1.0,
@@ -70,8 +71,9 @@ class SuperOffloadOptimizer_Stage3(DeepSpeedZeroOptimizer_Stage3):
         self._cur_bucket_index = -1
         self.async_cpuadam_num = 0
         self.max_grad_numel = 0
+        self.convert_grad_on_cpu = convert_grad_on_cpu
 
-        super().__init__(module, init_optimizer, timers, ds_config, static_loss_scale, dynamic_loss_scale,
+        super().__init__(module, init_optimizer, param_names, timers, ds_config, static_loss_scale, dynamic_loss_scale,
                          dynamic_loss_args, verbose, contiguous_gradients, reduce_bucket_size, prefetch_bucket_size,
                          max_reuse_distance, max_live_parameters, param_persistence_threshold,
                          model_persistence_threshold, dp_process_group, reduce_scatter, overlap_comm,
@@ -147,7 +149,7 @@ class SuperOffloadOptimizer_Stage3(DeepSpeedZeroOptimizer_Stage3):
                 self._DeepSpeedZeroOptimizer_Stage3__add_grad_to_ipg_bucket(param)
 
             # If this is a single-parameter sub-group, reduce immediately
-            if self.sub_group_to_param_num[self._cur_bucket_index] == 1:
+            if self.sub_group_to_param_num.get(self._cur_bucket_index, -1) == 1:
                 self._DeepSpeedZeroOptimizer_Stage3__reduce_and_partition_ipg_grads(comm_dtype)
 
         elif i != self._cur_bucket_index:
@@ -159,7 +161,7 @@ class SuperOffloadOptimizer_Stage3(DeepSpeedZeroOptimizer_Stage3):
                 self._DeepSpeedZeroOptimizer_Stage3__add_grad_to_ipg_bucket(param)
 
             # Check if bucket is complete
-            if self.sub_group_to_param_num[self._cur_bucket_index] == len(bucket.params):
+            if self.sub_group_to_param_num.get(self._cur_bucket_index, -1) == len(bucket.params):
                 self._DeepSpeedZeroOptimizer_Stage3__reduce_and_partition_ipg_grads(comm_dtype)
 
                 # Process buffered parameters

@@ -180,6 +180,7 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
         log_trace_cache_warnings=False,
         enable_sanity_checks=False,
         cpuadam_cores_perc=0.8,
+        convert_grad_on_cpu=True,
     ):
         see_memory_usage("Stage 3 initialize beginning", force=True)
 
