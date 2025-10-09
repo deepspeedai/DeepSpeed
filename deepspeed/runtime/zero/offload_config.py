@@ -96,6 +96,9 @@ class DeepSpeedZeroOffloadOptimizerConfig(DeepSpeedConfigModel):
     super_offload: bool = False
     """ Enable high performance CPU offloading for Superchips. Only valid with ZeRO Stage 3."""
 
+    convert_grad_on_cpu: bool = True
+    """ Choose whether the grads are converted on CPU or GPU """
+
     cpuadam_cores_perc: float = Field(0.8, ge=0.0, le=1.0)
     """ Percentage of CPU cores to use for CPU Adam. Only valid with ZeRO Stage 3 and super_offload=True."""
 

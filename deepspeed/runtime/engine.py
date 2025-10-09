@@ -898,6 +898,9 @@ class DeepSpeedEngine(Module):
     def super_offload(self):
         return getattr(self._config.zero_config.offload_optimizer, "super_offload", False)
 
+    def convert_grad_on_cpu(self):
+        return getattr(self._config.zero_config.offload_optimizer, "convert_grad_on_cpu", True)
+
     def cpuadam_cores_perc(self):
         return getattr(self._config.zero_config.offload_optimizer, "cpuadam_cores_perc", 0.9)
 
@@ -1885,6 +1888,7 @@ class DeepSpeedEngine(Module):
                     log_trace_cache_warnings=self.zero_log_trace_cache_warnings(),
                     enable_sanity_checks=self.is_sanity_checks_enabled(),
                     cpuadam_cores_perc=self.cpuadam_cores_perc(),
+                    convert_grad_on_cpu=self.convert_grad_on_cpu(),
                 )
 
         else:

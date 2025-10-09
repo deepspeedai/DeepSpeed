@@ -62,6 +62,7 @@ class SuperOffloadOptimizer_Stage3(DeepSpeedZeroOptimizer_Stage3):
         log_trace_cache_warnings=False,
         enable_sanity_checks=False,
         cpuadam_cores_perc=0.8,
+        convert_grad_on_cpu=False,
     ):
 
         self.sub_group_to_param_num = {}
@@ -69,7 +70,6 @@ class SuperOffloadOptimizer_Stage3(DeepSpeedZeroOptimizer_Stage3):
         self._cur_bucket_index = -1
         self.async_cpuadam_num = 0
         self.max_grad_numel = 0
-        self.convert_grad_on_cpu = False
 
         super().__init__(module, init_optimizer, timers, ds_config, static_loss_scale, dynamic_loss_scale,
                          dynamic_loss_args, verbose, contiguous_gradients, reduce_bucket_size, prefetch_bucket_size,
