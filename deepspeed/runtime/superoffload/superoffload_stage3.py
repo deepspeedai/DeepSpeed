@@ -69,6 +69,7 @@ class SuperOffloadOptimizer_Stage3(DeepSpeedZeroOptimizer_Stage3):
         self._cur_bucket_index = -1
         self.async_cpuadam_num = 0
         self.max_grad_numel = 0
+        self.convert_grad_on_cpu = False
 
         super().__init__(module, init_optimizer, timers, ds_config, static_loss_scale, dynamic_loss_scale,
                          dynamic_loss_args, verbose, contiguous_gradients, reduce_bucket_size, prefetch_bucket_size,
@@ -219,7 +220,11 @@ class SuperOffloadOptimizer_Stage3(DeepSpeedZeroOptimizer_Stage3):
             for i in buffer_numel_min.keys():
                 fp32_grad_tensor = self.fp32_partitioned_groups_flat[i].grad.narrow(
                     0, buffer_numel_min[i], buffer_numel_max[i] - buffer_numel_min[i])
-                concatenated_buffer = torch.cat(device_buffers[i], dim=0).float()
+                if self.convert_grad_on_cpu:
+                    concatenated_buffer = torch.cat(device_buffers[i], dim=0)
+                else:
+                    # convert to fp32 on GPU only when your D2H BW is super fast
+                    concatenated_buffer = torch.cat(device_buffers[i], dim=0).float()
 
                 if self.subgroup_to_device[i] == 'cpu':
                     # Trigger asynchronous CPU optimization
