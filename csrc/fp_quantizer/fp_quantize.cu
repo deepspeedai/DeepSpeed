@@ -14,9 +14,6 @@
 
 #include <cuda_fp16.h>
 #include <curand_kernel.h>
-#if defined(__HIP_PLATFORM_AMD__)
-#include <hip/hip_fp16.h>
-#endif
 
 #ifdef BF16_AVAILABLE
 #include <cuda_bf16.h>

@@ -59,7 +59,6 @@ DS_D_INLINE __half to(__half val)
 {
     return val;
 }
-
 #ifdef BF16_AVAILABLE
 template <>
 DS_D_INLINE __nv_bfloat16 to(__nv_bfloat16 val)
