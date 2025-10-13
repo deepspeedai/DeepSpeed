@@ -1868,6 +1868,7 @@ class DeepSpeedEngine(Module):
                     overlap_comm=self.zero_overlap_comm(),
                     offload_optimizer_config=self.zero_offload_optimizer(),
                     offload_param_config=self.zero_offload_param(),
+                    zenflow_config=self.zenflow_config(),
                     sub_group_size=self.zero_sub_group_size(),
                     offload_ratio=self.zero_partial_offload(),
                     mpu=self.mpu,

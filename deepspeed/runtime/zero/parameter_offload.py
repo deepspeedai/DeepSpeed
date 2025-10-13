@@ -93,6 +93,7 @@ class DeepSpeedZeRoOffload(object):
         module,
         timers,
         ds_config,
+        zenflow=False,
         overlap_comm=True,
         prefetch_bucket_size=50000000,
         max_reuse_distance=1000000000,
@@ -115,6 +116,7 @@ class DeepSpeedZeRoOffload(object):
 
         self.module = module
         self.timers = timers
+        self.zenflow = zenflow
         self.dtype = list(module.parameters())[0].dtype
         self.dp_process_group = dp_process_group
         self.offload_device = None
@@ -472,6 +474,11 @@ class DeepSpeedZeRoOffload(object):
             param_coordinator.record_module(sub_module)
         param_coordinator.fetch_sub_module(sub_module, forward=True)
 
+        if self.zenflow:
+            params_to_fetch = set(iter_params(sub_module, recurse=z3_leaf_module(sub_module)))
+            for param in params_to_fetch:
+                param.data = param.data.t() if len(param.ds_shape) != 1 else param.data
+
         see_memory_usage(f"Before sub module function {sub_module.__class__.__name__} after fetch", force=False)
 
     @torch.no_grad()
@@ -479,6 +486,11 @@ class DeepSpeedZeRoOffload(object):
         see_memory_usage(
             f"After sub module function {sub_module.__class__.__name__} {sub_module.ds_id} before release",
             force=False)
+
+        if self.zenflow:
+            params_to_fetch = set(iter_params(sub_module, recurse=z3_leaf_module(sub_module)))
+            for param in params_to_fetch:
+                param.data = param.data.t() if len(param.ds_shape) != 1 else param.data
 
         param_coordinator = self.get_param_coordinator()
         param_coordinator.release_sub_module(sub_module, forward=True)
@@ -496,12 +508,22 @@ class DeepSpeedZeRoOffload(object):
             param_coordinator.record_module(sub_module)
         param_coordinator.fetch_sub_module(sub_module, forward=False)
 
+        if self.zenflow:
+            params_to_fetch = set(iter_params(sub_module, recurse=z3_leaf_module(sub_module)))
+            for param in params_to_fetch:
+                param.data = param.data.t() if len(param.ds_shape) != 1 else param.data
+
     @torch.no_grad()
     def post_sub_module_backward_function(self, sub_module):
         # assert sub_module.training, "backward pass is invalid for module in evaluation mode"
         see_memory_usage(
             f"After sub module backward function {sub_module.__class__.__name__} {sub_module.ds_id} before release",
             force=False)
+
+        if self.zenflow:
+            params_to_fetch = set(iter_params(sub_module, recurse=z3_leaf_module(sub_module)))
+            for param in params_to_fetch:
+                param.data = param.data.t() if len(param.ds_shape) != 1 else param.data
 
         self.get_param_coordinator().release_sub_module(sub_module, forward=False)
 
