@@ -122,7 +122,7 @@ class ProfilingInterpreter(Interpreter):
             n.meta["device_time"] = 0.0
             n.meta["wall_time"] = 0.0
             n.meta["alloc_mem"] = 0
-            n.meta["max_memory"] = 0
+            n.meta["max_mem"] = 0
             n.meta["tensor_size"] = _node_size(n)
             return super().run_node(n)
 
@@ -130,9 +130,15 @@ class ProfilingInterpreter(Interpreter):
         assert isinstance(args, tuple)
         assert isinstance(kwargs, dict)
 
+        partitioned_params = {}
+
         def rebuild_param_if_necessary(v):
             if hasattr(v, "ds_id"):
                 v.all_gather(param_list=[v])
+                if hasattr(v, "ds_target_dtype"):
+                    casted = v.to(v.ds_target_dtype)
+                    partitioned_params[id(casted)] = v
+                    return casted
             return v
 
         args = map_aggregate(args, lambda x: rebuild_param_if_necessary(x))
@@ -191,6 +197,8 @@ class ProfilingInterpreter(Interpreter):
         tensor_size = _node_size(out)
 
         def partition_param_if_necessary(v):
+            if id(v) in partitioned_params:
+                v = partitioned_params[id(v)]
             if hasattr(v, "ds_id") and not v.ds_persist:
                 v.partition(param_list=[v], has_been_updated=False)
             return v
@@ -227,6 +235,8 @@ class ProfilingInterpreter(Interpreter):
             assert hasattr(out, "ds_id")
             if not out.ds_persist:
                 self.nz3.invalidate_gathered_param(args[2])
+            if "dtype" in n.kwargs:
+                setattr(out, "ds_target_dtype", n.kwargs["dtype"])
             self.allgather_mem[out.ds_id] = n.meta["alloc_mem"]
 
         return out

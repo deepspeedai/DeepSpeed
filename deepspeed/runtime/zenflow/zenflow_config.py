@@ -39,6 +39,10 @@ class ZenFlowConfig(DeepSpeedConfigModel):
     full_warm_up_rounds: int = 0
     """Number of initial rounds during which all gradients are fully updated (no selection)."""
 
+    pt_reserved_cores_perc: float = Field(0.5, ge=0.0, le=1.0)
+    """Number of cores reserved for pytorch threads,
+       the remaining cores will be used by zenflow optimizer workers"""
+
     steps_per_epoch: Optional[int] = Field(
         default=None,
         description=
@@ -58,5 +62,8 @@ class ZenFlowConfig(DeepSpeedConfigModel):
 
         if not isinstance(self.full_warm_up_rounds, int):
             raise ValueError('full_warm_up_rounds must be an integer')
+
+        if not isinstance(self.pt_reserved_cores_perc, float):
+            raise ValueError('pt_reserved_cores_perc must be a float')
 
         return self

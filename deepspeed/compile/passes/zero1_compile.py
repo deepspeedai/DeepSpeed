@@ -3,13 +3,13 @@
 
 # DeepSpeed Team
 
-from typing import List
+from typing import List, Tuple
 
 import torch
 from torch.fx import GraphModule
 
 from ..util import get_deepcompile_handle
-from ..fx import add_postprocess, move_primals_to_head, _make_node_meta
+from ..fx import add_postprocess, move_primals_to_head, _make_node_meta, get_output_node
 
 NAME = "zero1_compile"
 
@@ -49,18 +49,22 @@ def add_z1_reduce_bw(gm: GraphModule, graph_id: int, param_manager) -> GraphModu
         new_node.meta["val"] = None
 
     gm.graph = move_primals_to_head(graph)
+
+    with gm.graph.inserting_before(get_output_node(gm.graph)):
+        gm.graph.create_node("call_function", torch.ops.dc.end_backward.default, (graph_id, ))
+
     return gm
 
 
-def add_z1_reduce(gm: GraphModule, graph_id: int, graph_order: List[int], profiling_results, create_inputs_fn,
-                  mem_budget: float, param_manager, bwd: bool) -> GraphModule:
+def add_z1_reduce(gm: GraphModule, graph_id: int, graph_order: List[Tuple[int, bool]], profiling_results,
+                  create_inputs_fn, mem_budget: float, param_manager, bwd: bool) -> GraphModule:
     if bwd:
         return add_z1_reduce_bw(gm, graph_id, param_manager)
     return add_z1_reduce_fw(gm, graph_id, profiling_results, param_manager, use_z2=False)
 
 
-def add_z2_reduce(gm: GraphModule, graph_id: int, graph_order: List[int], profiling_results, create_inputs_fn,
-                  mem_budget: float, param_manager, bwd: bool) -> GraphModule:
+def add_z2_reduce(gm: GraphModule, graph_id: int, graph_order: List[Tuple[int, bool]], profiling_results,
+                  create_inputs_fn, mem_budget: float, param_manager, bwd: bool) -> GraphModule:
     if bwd:
         return add_z1_reduce_bw(gm, graph_id, param_manager)
     return add_z1_reduce_fw(gm, graph_id, profiling_results, param_manager, use_z2=True)

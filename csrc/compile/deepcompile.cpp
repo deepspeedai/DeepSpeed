@@ -17,9 +17,10 @@ c10::intrusive_ptr<c10d::ProcessGroup> process_group = nullptr;
 c10::intrusive_ptr<c10d::symmetric_memory::SymmetricMemory> symm_mem = nullptr;
 ncclComm_t nccl_comm;
 bool use_symm_mem;
-bool clone_custom_op_output;
 bool profile = false;
 bool pre_div_reduce = true;
+
+int64_t free_activation_threshold;
 
 bool sync_before_reduce;     // for debugging
 bool sync_after_reduce;      // for debugging
@@ -108,11 +109,9 @@ at::Tensor reduce_grad_meta(at::Tensor grad_tensor, long graph_id, long ds_id)
 
 void free_tensors(std::vector<at::Tensor> tensors)
 {
-    int64_t THRESHOLD = 10 * 1024 * 1024;
-
     if (!profile) {
         for (auto& tensor : tensors) {
-            if (tensor.is_cuda() && tensor.numel() > THRESHOLD) {
+            if (tensor.is_cuda() && tensor.numel() > free_activation_threshold) {
                 tensor.record_stream(at::cuda::getCurrentCUDAStream());
                 tensor.set_data(torch::empty({0}, tensor.options()));
             }
@@ -122,15 +121,15 @@ void free_tensors(std::vector<at::Tensor> tensors)
 
 void free_tensors_meta(std::vector<at::Tensor> tensors) {}
 
+template <typename T>
+static T get_config(pybind11::object& config, const char* name)
+{
+    return pybind11::getattr(config, name).cast<T>();
+}
+
 void init(c10::intrusive_ptr<c10d::ProcessGroup> pg,
-          int64_t initial_reduce_bucket_size,
-          bool enable_double_buffer,
-          bool _use_symm_mem,
-          bool _clone_custom_op_output,
-          bool _sync_before_reduce,
-          bool _sync_after_reduce,
-          bool _sync_before_allgather,
-          bool _sync_after_allgather)
+          pybind11::object& config,
+          int64_t initial_reduce_bucket_size)
 {
     process_group = pg;
 
@@ -153,15 +152,15 @@ void init(c10::intrusive_ptr<c10d::ProcessGroup> pg,
     ncclCommInitRank(&nccl_comm, process_group->getSize(), ncclID, process_group->getRank());
 
     param_registry = std::make_shared<DSParamRegistry>();
-    reduce_buckets = std::make_shared<DoubleBufferedReduceBucket>(initial_reduce_bucket_size,
-                                                                  enable_double_buffer);
-    use_symm_mem = _use_symm_mem;
-    clone_custom_op_output = _clone_custom_op_output;
+    reduce_buckets = std::make_shared<DoubleBufferedReduceBucket>(
+        initial_reduce_bucket_size, get_config<bool>(config, "double_buffer"));
+    use_symm_mem = get_config<bool>(config, "symmetric_memory");
+    free_activation_threshold = get_config<int64_t>(config, "free_activation_threshold");
 
-    sync_before_reduce = _sync_before_reduce;
-    sync_after_reduce = _sync_after_reduce;
-    sync_before_allgather = _sync_before_allgather;
-    sync_after_allgather = _sync_after_allgather;
+    sync_before_reduce = get_config<bool>(config, "sync_before_reduce");
+    sync_after_reduce = get_config<bool>(config, "sync_after_reduce");
+    sync_before_allgather = get_config<bool>(config, "sync_before_allgather");
+    sync_after_allgather = get_config<bool>(config, "sync_after_allgather");
 }
 
 void start_forward()
@@ -180,9 +179,10 @@ void start_backward(bool update)
     for (auto& it : executors) { it.second->startBackward(update); }
 }
 
-// We don't call this
-// void end_backward(bool update)
-// {
-// }
+void end_backward(long graph_id)
+{
+    auto executor = getExecutor<CustomOpExecutor>(graph_id, executors);
+    executor->endBackward();
+}
 
 }  // namespace dc

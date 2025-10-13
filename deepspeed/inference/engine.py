@@ -125,7 +125,7 @@ class InferenceEngine(Module):
             moe = False
 
         if moe and dist.get_world_size() > 1:
-            self._create_ep_parallel_group(config.moe.moe_experts)
+            self._create_ep_parallel_group(config.moe.ep_size)
 
         # We only support three modes: 1) user specified policy for tensor-parallelism, 2) kernel injection (replace_with_kernel_inject), and 3) automatic tensor parallelism if tp_size > 1.
         if self.injection_dict:
@@ -267,6 +267,8 @@ class InferenceEngine(Module):
             self.expert_mp_group.update({e: None})
         for moe_ep_size in self.ep_group.keys():
             num_ep_groups = dist.get_world_size() // moe_ep_size
+            if num_ep_groups == 0:
+                raise ValueError(f"Invalid ep_size={moe_ep_size} for world_size={dist.get_world_size()}")
             for i in range(num_ep_groups):
                 ep_cnt = i * moe_ep_size
                 size = dist.get_world_size() if moe_ep_size > dist.get_world_size() else moe_ep_size

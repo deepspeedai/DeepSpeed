@@ -163,7 +163,7 @@ See [PR-4938](https://github.com/deepspeedai/DeepSpeed/pull/4938), [PR-4920](htt
 
 # 5. Community Engagement <a name="community-engagement"></a>
 
-DeepSpeed welcomes your contributions! We encourage you to report issues, contribute PRs, and join discussions on the [DeepSpeed GitHub](https://github.com/deepspeedai/DeepSpeed/) page. Please see our [contributing guide](https://github.com/deepspeedai/DeepSpeed/blob/master/CONTRIBUTING.md) for more details. We are open to collaborations with universities, research labs, and companies, such as those working together on deep learning research, applying DeepSpeed to empower real-world AI models and applications, and so on. For such requests (and other requests unsuitable for GitHub), please directly email to deepspeed-info@microsoft.com.
+DeepSpeed welcomes your contributions! We encourage you to report issues, contribute PRs, and join discussions on the [DeepSpeed GitHub](https://github.com/deepspeedai/DeepSpeed/) page. Please see our [contributing guide](https://github.com/deepspeedai/DeepSpeed/blob/master/CONTRIBUTING.md) for more details. We are open to collaborations with universities, research labs, and companies, such as those working together on deep learning research, applying DeepSpeed to empower real-world AI models and applications, and so on. For such requests (and other requests unsuitable for GitHub), please directly email to info@deepspeed.ai.
 
 *We would like to recognize the contribution from our user community in adding support for the [Qwen](https://arxiv.org/abs/2309.16609) model family to DeepSpeed-FastGen in [PR-4913](https://github.com/deepspeedai/DeepSpeed/pull/4913).*
 

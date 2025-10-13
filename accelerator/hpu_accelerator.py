@@ -54,9 +54,8 @@ class HPU_Accelerator(DeepSpeedAccelerator):
         return True
 
     def device_name(self, device_index=None):
-        if device_index is None:
-            return self._name
-        return '{}:{}'.format(self._name, device_index)
+        # ignoring device_index.
+        return 'hpu'
 
     def device(self, device_index=None):
         return torch.device(self.device_name(device_index))

@@ -121,7 +121,7 @@ https://github.com/deepspeedai/DeepSpeedExamples/blob/master/benchmarks/inferenc
 * 请访问我们的 [网站](https://www.deepspeed.ai/) 了解详细的博客文章、教程和文档。
 * 在我们的 [英文 X(Twitter)](https://twitter.com/DeepSpeedAI)、[日语 X(Twitter)](https://twitter.com/DeepSpeedAI_JP) 和 [中文知乎](https://www.zhihu.com/people/deepspeed) 上关注我们，以获取 DeepSpeed 的最新消息。
 
-我们欢迎您为 DeepSpeed 做出贡献！我们鼓励您报告问题、贡献 PRs、并在 [DeepSpeed GitHub](https://github.com/deepspeedai/DeepSpeed/) 页面上参加讨论。有关更多详细信息，请查看我们的 [贡献指南](https://github.com/deepspeedai/DeepSpeed/blob/master/CONTRIBUTING.md)。我们对与大学、研究实验室、公司等进行合作持开放态度，例如共同进行深度学习研究、应用 DeepSpeed 为现实世界的 AI 模型和应用提供支持等等。对于此类请求（以及其他不适合 GitHub 的请求），请直接发送电子邮件至 deepspeed-info@microsoft.com。
+我们欢迎您为 DeepSpeed 做出贡献！我们鼓励您报告问题、贡献 PRs、并在 [DeepSpeed GitHub](https://github.com/deepspeedai/DeepSpeed/) 页面上参加讨论。有关更多详细信息，请查看我们的 [贡献指南](https://github.com/deepspeedai/DeepSpeed/blob/master/CONTRIBUTING.md)。我们对与大学、研究实验室、公司等进行合作持开放态度，例如共同进行深度学习研究、应用 DeepSpeed 为现实世界的 AI 模型和应用提供支持等等。对于此类请求（以及其他不适合 GitHub 的请求），请直接发送电子邮件至 info@deepspeed.ai。
 
 * 如果你喜欢我们的工作，请在[DeepSpeed GitHub](https://github.com/deepspeedai/DeepSpeed/)， [DeepSpeed-MII GitHub](https://github.com/deepspeedai/DeepSpeed-MII/) 和 [DeepSpeedExamples GitHub](https://github.com/deepspeedai/DeepSpeedExamples/)仓库“点赞”！
 
