@@ -13,8 +13,6 @@ class InferenceBuilder(CUDAOpBuilder):
     def __init__(self, name=None):
         name = self.NAME if name is None else name
         super().__init__(name=name)
-        if self.is_rocm_pytorch():
-            self.enable_bf16 = True
 
     def absolute_name(self):
         return f'deepspeed.ops.transformer.inference.{self.NAME}_op'
@@ -57,7 +55,7 @@ class InferenceBuilder(CUDAOpBuilder):
 
     def sources(self):
         return [
-            'csrc/transformer/inference/csrc/pt_binding.cu',
+            'csrc/transformer/inference/csrc/pt_binding.cpp',
             'csrc/transformer/inference/csrc/gelu.cu',
             'csrc/transformer/inference/csrc/relu.cu',
             'csrc/transformer/inference/csrc/layer_norm.cu',
@@ -77,3 +75,14 @@ class InferenceBuilder(CUDAOpBuilder):
 
     def include_paths(self):
         return ['csrc/transformer/inference/includes', 'csrc/includes']
+
+    def nvcc_args(self):
+        args = super().nvcc_args()
+        """BF16 is supported on AMD, but including `cuda_bf16.h` (`<hip/hip_bfloat16.h>` after hipification)
+           in host-only translation units (*.cpp files) fails because GPU-specific builtins are pulled in with the BF16 type.
+           This cannot be avoided via forward declarations for this transformer_inference extension,
+           since `pt_binding.cpp` code explicitly requires the BF16 header, so disable it for now.
+        """
+        if self.is_rocm_pytorch():
+            self.enable_bf16 = False
+        return args

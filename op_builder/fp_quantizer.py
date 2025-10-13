@@ -18,8 +18,6 @@ class FPQuantizerBuilder(CUDAOpBuilder):
     def __init__(self, name=None):
         name = self.NAME if name is None else name
         super().__init__(name=name)
-        if self.is_rocm_pytorch():
-            self.enable_bf16 = True
 
     def absolute_name(self):
         return f'deepspeed.ops.fp_quantizer.{self.NAME}_op'
@@ -92,7 +90,7 @@ class FPQuantizerBuilder(CUDAOpBuilder):
     def sources(self):
         return [
             "csrc/fp_quantizer/fp_quantize.cu",
-            "csrc/fp_quantizer/fp_quantize_api.cu",
+            "csrc/fp_quantizer/fp_quantize.cpp",
         ]
 
     def extra_ldflags(self):

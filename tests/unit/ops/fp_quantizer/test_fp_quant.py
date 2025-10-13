@@ -57,7 +57,7 @@ def test_fp_quant_meta(dtype):
 
         qtorch_out = qtorch_quantize(x, exp_bits=exp_bits, man_bits=man_bits, group_size=group_size)
         qtorch_error = (qtorch_out - x).abs().sum() / x.numel()
-        ds_error = (x_dequantized - x).abs().sum() / x.numel()
+        ds_error = (x_dequantized - ds_x).abs().sum() / x.numel()
 
         assert 0.0004 > abs(qtorch_error.item() - ds_error.item()), f"failed on iteration {i}"
 
@@ -129,6 +129,6 @@ def test_fp_quant(dtype, q_bits):
         qtorch_out = qtorch_quantize(x, exp_bits=exp_bits, man_bits=man_bits, group_size=quant_config.group_size)
 
         qtorch_error = (qtorch_out - x).abs().sum() / x.numel()
-        ds_error = (x_dequantized - x).abs().sum() / x.numel()
+        ds_error = (x_dequantized - ds_x).abs().sum() / x.numel()
 
         assert 0.0004 > abs(qtorch_error.item() - ds_error.item()), f"failed on iteration {i}"

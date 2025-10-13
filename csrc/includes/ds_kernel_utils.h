@@ -13,7 +13,11 @@ used throughout the codebase.
 #include <cuda.h>
 #include <cuda_fp16.h>
 
-#ifdef BF16_AVAILABLE
+// Note: BF16 support on AMD but we have to exclude here cuda_bf16.h (which turn to
+// <hip/hip_bfloat16.h> after hipifying), because this header is pulled into .cpp translation units
+// that are compiled by a host-only compiler, which triggers build errors. Added forward declaration
+// instead, see code block below
+#if defined(BF16_AVAILABLE) && !defined(__HIP_PLATFORM_AMD__)
 #include <cuda_bf16.h>
 #endif
 
@@ -21,7 +25,9 @@ used throughout the codebase.
 #define DS_D_INLINE __device__ __forceinline__
 
 #ifdef __HIP_PLATFORM_AMD__
-
+#if BF16_AVAILABLE
+struct __hip_bfloat16;
+#endif
 // constexpr variant of warpSize for templating
 constexpr int hw_warp_size = ROCM_WAVEFRONT_SIZE;
 #define HALF_PRECISION_AVAILABLE = 1

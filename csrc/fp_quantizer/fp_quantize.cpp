@@ -9,13 +9,6 @@
 #include <torch/extension.h>
 #include <vector>
 
-#if defined(__HIP_PLATFORM_AMD__)
-#include <hip/hip_fp16.h>
-#if BF16_AVAILABLE
-#include <hip/hip_bf16.h>
-#endif
-#endif
-
 #define DISPATCH_QUANTIZE(T_TYPE, C_TYPE, mantisa, exponent)                             \
     if (val.options().dtype() == torch::T_TYPE) {                                        \
         launch_quantization<C_TYPE, mantisa, exponent>((C_TYPE*)val.data_ptr(),          \
