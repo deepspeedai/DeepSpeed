@@ -7,6 +7,7 @@ SuperOffload utilities for 1) running CPU optimizers in separate processes.
 
 """
 
+import os
 from typing import Dict, Optional, Any
 import torch
 import torch.multiprocessing as mp
@@ -35,7 +36,8 @@ class EventTypes:
 
 
 def superoffload_optimizer_worker(param_queue: mp.SimpleQueue, result_queue: mp.SimpleQueue,
-                                  optimizer_config: Dict[str, Any], max_grad_numel: int) -> None:
+                                  optimizer_config: Dict[str, Any], max_grad_numel: int,
+                                  cpuadam_cores: list) -> None:
     """
     This function runs in a separate process and continuously processes optimization
     tasks from the parameter queue. It creates a DeepSpeedCPUAdam optimizer and
@@ -48,6 +50,7 @@ def superoffload_optimizer_worker(param_queue: mp.SimpleQueue, result_queue: mp.
                          lr, betas, eps, weight_decay, and amsgrad parameters
         max_grad_numel: Maximum number of elements expected in gradient tensors
     """
+    _set_cpu_affinity(cpuadam_cores)
     # Initialize dummy parameter for optimizer creation
     cpu_tensor = torch.randn(1, device="cpu")
     cpu_param = torch.nn.Parameter(cpu_tensor)
@@ -141,6 +144,16 @@ def superoffload_optimizer_worker(param_queue: mp.SimpleQueue, result_queue: mp.
 
     logger.debug("Worker process terminated")
 
+def _set_cpu_affinity(cores: list) -> None:
+    try:
+        current_process = psutil.Process()
+        current_process.cpu_affinity(cores)
+        os.environ['OMP_NUM_THREADS'] = str(len(cpuadam_cores))
+    except (psutil.AccessDenied, psutil.NoSuchProcess, AttributeError) as e:
+        logger.debug(f"Could not set CPU affinities for superoffload optimizer process: {e}")
+    except Exception as e:
+        logger.warning(f"Unexpected error setting CPU affinity: {e}")
+
 
 class SuperOffloadCPUOptimizer:
 
@@ -156,46 +169,37 @@ class SuperOffloadCPUOptimizer:
         self.param_queue = self.mp_context.SimpleQueue()
         self.result_queue = self.mp_context.SimpleQueue()
 
+        # Set CPU affinity for better performance isolation
+        pt_cores, cpuadam_cores = self._calc_cpu_affinity(cpuadam_cores_perc)
+
+        logger.debug(f"Set CPU affinity - PyTorch cores: {pt_cores}, "
+                     f"Optimizer cores: {cpuadam_cores}")
         self.cpuadam_process = self.mp_context.Process(
             target=superoffload_optimizer_worker,
-            args=(self.param_queue, self.result_queue, optimizer_config, max_grad_numel),
+            args=(self.param_queue, self.result_queue, optimizer_config, max_grad_numel, cpuadam_cores),
             daemon=True,
         )
         self.cpuadam_process.start()
 
-        # Set CPU affinity for better performance isolation
-        self._set_cpu_affinity(cpuadam_cores_perc)
+        _set_cpu_affinity(pt_cores)
 
-    def _set_cpu_affinity(self, cpuadam_cores_perc: float) -> None:
+
+    def _calc_cpu_affinity(self, cpuadam_cores_perc: float) -> None:
         """
-        Set CPU affinity for the main (Pytorch) process and worker (CPU Adam) process.
+        Compute CPU affinity for the main (Pytorch) process and worker (CPU Adam) process.
 
         Args:
             cpuadam_cores_perc: Percentage of cores to allocate to the worker (CPU Adam) process
         """
-        try:
-            current_process = psutil.Process()
-            all_cores = current_process.cpu_affinity()
-            num_cores = len(all_cores)
+        current_process = psutil.Process()
+        all_cores = current_process.cpu_affinity()
+        num_cores = len(all_cores)
 
-            split_idx = int((1 - cpuadam_cores_perc) * num_cores)
-            pt_cores = all_cores[:split_idx]
-            cpuadam_cores = all_cores[split_idx:]
+        split_idx = int((1 - cpuadam_cores_perc) * num_cores)
+        pt_cores = all_cores[:split_idx]
+        cpuadam_cores = all_cores[split_idx:]
 
-            # Set affinity for main process (PyTorch)
-            current_process.cpu_affinity(pt_cores)
-
-            # Set affinity for optimizer process (CPU Adam)
-            optimizer_process = psutil.Process(self.cpuadam_process.pid)
-            optimizer_process.cpu_affinity(cpuadam_cores)
-
-            logger.debug(f"Set CPU affinity - PyTorch cores: {pt_cores}, "
-                         f"Optimizer cores: {cpuadam_cores}")
-
-        except (psutil.AccessDenied, psutil.NoSuchProcess, AttributeError) as e:
-            logger.debug(f"Could not set CPU affinities for superoffload optimizer process: {e}")
-        except Exception as e:
-            logger.warning(f"Unexpected error setting CPU affinity: {e}")
+        return pt_cores, cpuadam_cores
 
     def async_step(self,
                    param_group_id: int,
