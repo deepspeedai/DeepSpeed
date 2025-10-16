@@ -37,7 +37,7 @@ def create_checkpoint_engine(config_params, groups, zero_stage, has_moe_layers, 
 
         if config_params.datastates_config.enabled:
             try:
-                from deepspeed.runtime.checkpoint_engine.datastates_checkpoint_engine import DataStatesCheckpointEngine
+                from .datastates_checkpoint_engine import DataStatesCheckpointEngine
                 return DataStatesCheckpointEngine(deepspeed_config=config_params, rank=dist.get_rank())
             except ImportError as err:
                 logger.error(
