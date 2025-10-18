@@ -183,6 +183,6 @@ DeepSpeed-VisualChatは、さまざまなDeep Learningシステムやモデリ�
 * 私たちの[ウェブサイト](https://www.deepspeed.ai/)で、詳細なブログ記事、チュートリアル、役立つドキュメントを提供しています。
 * DeepSpeedの最新ニュースは、[English X(Twitter)](https://twitter.com/DeepSpeedAI)、[Japanese X(Twitter)](https://twitter.com/DeepSpeedAI_JP)、[Chinese Zhihu](https://www.zhihu.com/people/deepspeed)をフォローしてください。
 
-DeepSpeedは、皆様の開発への参加を歓迎しています。DeepSpeedのGitHubページで、バグ報告、Pull Request、ディスカッションへの参加が可能です。詳細は[ガイドライン](https://github.com/deepspeedai/DeepSpeed/blob/master/CONTRIBUTING.md)をご覧ください。また、大学、研究所、企業とのコラボレーションも行っています。こうしたコラボレーションについてのご要望（およびGitHubには適さないその他の話題）については<deepspeed-info@microsoft.com> まで直接メールをお送りください。
+DeepSpeedは、皆様の開発への参加を歓迎しています。DeepSpeedのGitHubページで、バグ報告、Pull Request、ディスカッションへの参加が可能です。詳細は[ガイドライン](https://github.com/deepspeedai/DeepSpeed/blob/master/CONTRIBUTING.md)をご覧ください。また、大学、研究所、企業とのコラボレーションも行っています。こうしたコラボレーションについてのご要望（およびGitHubには適さないその他の話題）については<info@deepspeed.ai> まで直接メールをお送りください。
 
 * 私たちの[DeepSpeed GitHub](https://github.com/deepspeedai/DeepSpeed/)および[DeepSpeedExamples GitHub](https://github.com/deepspeedai/DeepSpeedExamples/)リポジトリが気に入ったら、ぜひスターをつけてください！

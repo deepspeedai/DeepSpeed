@@ -127,7 +127,7 @@ DeepSpeed4Science的旅程始于两个开创性的基于LLM的结构生物学研
 
 ## 总结和路线图
 
-我们非常自豪和兴奋地宣布DeepSpeed4Science计划以及几个研发亮点和成果。从今天开始，我们将在[deepspeed4science.ai](https://deepspeed4science.ai/)上介绍我们的新计划，包括关于我们的外部合作者的信息，以及当前和未来的DeepSpeed4Science技术发布。我们的一个高层次目标是推广广泛解决大规模科学发现的主要系统痛点的AI系统技术。我们希望全球的科学家们能够从DeepSpeed4Science通过开源软件解锁的新功能中受益。我们期待更好地了解阻碍您的科学发现的AI系统设计挑战。我们真诚地欢迎您的参与，帮助构建一个更有前途的AI4Science未来。请给我们发送电子邮件至<deepspeed-info@microsoft.com>。我们鼓励您在我们的[DeepSpeed GitHub](https://github.com/deepspeedai/DeepSpeed/)上报告问题、贡献PR、参与讨论。
+我们非常自豪和兴奋地宣布DeepSpeed4Science计划以及几个研发亮点和成果。从今天开始，我们将在[deepspeed4science.ai](https://deepspeed4science.ai/)上介绍我们的新计划，包括关于我们的外部合作者的信息，以及当前和未来的DeepSpeed4Science技术发布。我们的一个高层次目标是推广广泛解决大规模科学发现的主要系统痛点的AI系统技术。我们希望全球的科学家们能够从DeepSpeed4Science通过开源软件解锁的新功能中受益。我们期待更好地了解阻碍您的科学发现的AI系统设计挑战。我们真诚地欢迎您的参与，帮助构建一个更有前途的AI4Science未来。请给我们发送电子邮件至<info@deepspeed.ai>。我们鼓励您在我们的[DeepSpeed GitHub](https://github.com/deepspeedai/DeepSpeed/)上报告问题、贡献PR、参与讨论。
 
 ## 致谢
 

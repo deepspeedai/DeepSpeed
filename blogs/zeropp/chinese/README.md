@@ -176,7 +176,7 @@ DeepSpeed-ZeRO++ 是 DeepSpeed 生态系统的一部分。 要了解更多信息
 
 您还可以在我们的[英文 Twitter](https://twitter.com/DeepSpeedAI)、[日文 Twitter](https://twitter.com/DeepSpeedAI_JP) 和[中文知乎](https://www.zhihu.com/people/deepspeed) 上获取最新的 DeepSpeed 新闻。
 
-DeepSpeed 欢迎您的贡献！ 我们鼓励您在 DeepSpeed GitHub 页面上报告问题、贡献 PR 并加入讨论。 有关更多详细信息，请参阅我们的贡献指南。 我们对与大学、研究实验室和公司的合作持开放态度。 对于此类请求（以及其他不适合 GitHub 的请求），请直接发送电子邮件至 <deepspeed-info@microsoft.com>。
+DeepSpeed 欢迎您的贡献！ 我们鼓励您在 DeepSpeed GitHub 页面上报告问题、贡献 PR 并加入讨论。 有关更多详细信息，请参阅我们的贡献指南。 我们对与大学、研究实验室和公司的合作持开放态度。 对于此类请求（以及其他不适合 GitHub 的请求），请直接发送电子邮件至 <info@deepspeed.ai>。
 
 **贡献者:**
 

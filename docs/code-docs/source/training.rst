@@ -116,15 +116,7 @@ Configuration in DeepSpeed config
 
 The same behavior can be controlled from the DeepSpeed config. Add a
 ``leaf_module`` block to ``zero_optimization`` specifying either classes,
-module names, or name suffixes (or any combination). By default DeepSpeed marks
-several Hugging Face MoE blocks—including Mixtral and Qwen MoE sparse blocks so
-that they behave well with ZeRO3.
-
-The default class list currently contains:
-
-* ``transformers.models.mixtral.modeling_mixtral.MixtralSparseMoeBlock``
-* ``transformers.models.qwen2_moe.modeling_qwen2_moe.Qwen2MoeSparseMoeBlock``
-* ``transformers.models.qwen3_moe.modeling_qwen3_moe.Qwen3MoeSparseMoeBlock``
+module names, or name suffixes (or any combination). While the example below shows three different ways (``classes``, ``names``, and ``name_suffixes``) to specify modules as leaf modules, typically you will use just one of these.
 
 .. code-block:: json
 
@@ -149,6 +141,12 @@ accepted.
 
 You can mix and match the API and configuration approaches; all referenced
 modules are flagged before ZeRO installs its hooks.
+
+By default DeepSpeed marks several Hugging Face MoE blocks—including Mixtral and Qwen MoE sparse blocks so that they behave well with ZeRO3. The default class list currently contains:
+
+* ``transformers.models.mixtral.modeling_mixtral.MixtralSparseMoeBlock``
+* ``transformers.models.qwen2_moe.modeling_qwen2_moe.Qwen2MoeSparseMoeBlock``
+* ``transformers.models.qwen3_moe.modeling_qwen3_moe.Qwen3MoeSparseMoeBlock``
 
 
 Model Saving

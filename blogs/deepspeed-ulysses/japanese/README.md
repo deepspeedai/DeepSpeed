@@ -155,4 +155,4 @@ DeepSpeed-Ulyssesは、DeepSpeedのGitHubを通じてアクセス可能です。
 
 長いコンテキストを扱う際の制約を取り除くことによって何が可能になるのか、ユーザの皆様と共に様々な可能性を探求するため、幅広い協力やコラボレーションを歓迎します。DeepSpeed-Ulyssesは、大規模なAIの訓練と推論のためのより大きなDeepSpeedエコシステムの一部です。DeepSpeedの多くの技術や革新的な機能の詳細については、[ウェブサイト](https://www.deepspeed.ai/)をご覧いただくか、X（以前のTwitter。[英語版](https://twitter.com/DeepSpeedAI)、[日本語版](https://twitter.com/DeepSpeedAI_JP)）や、中国の[Zhihu](https://www.zhihu.com/people/deepspeed)でフォローしてください。
 
-DeepSpeedは、皆様の開発への参加を歓迎しています。DeepSpeedのGitHubページで、バグ報告、Pull Request、ディスカッションへの参加が可能です。詳細は[ガイドライン](https://github.com/deepspeedai/DeepSpeed/blob/master/CONTRIBUTING.md)をご覧ください。また、大学、研究所、企業とのコラボレーションも行っています。こうしたコラボレーションについてのご要望（およびGitHubには適さないその他の話題）については<deepspeed-info@microsoft.com> まで直接メールをお送りください。
+DeepSpeedは、皆様の開発への参加を歓迎しています。DeepSpeedのGitHubページで、バグ報告、Pull Request、ディスカッションへの参加が可能です。詳細は[ガイドライン](https://github.com/deepspeedai/DeepSpeed/blob/master/CONTRIBUTING.md)をご覧ください。また、大学、研究所、企業とのコラボレーションも行っています。こうしたコラボレーションについてのご要望（およびGitHubには適さないその他の話題）については<info@deepspeed.ai> まで直接メールをお送りください。

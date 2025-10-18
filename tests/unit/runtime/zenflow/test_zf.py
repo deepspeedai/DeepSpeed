@@ -74,7 +74,7 @@ class BaseZenFlowTest:
         model.destroy()
 
 
-@pytest.mark.parametrize("stage", [1, 2])
+@pytest.mark.parametrize("stage", [1, 2, 3])
 @pytest.mark.parametrize("full_warm_up_rounds", [0, 3])
 @pytest.mark.parametrize("offload_selective_optimizer", [True, False])
 @pytest.mark.parametrize("select_strategy,select_interval,update_interval", [
@@ -93,7 +93,7 @@ class TestZenFlowSingleGPU(DistributedTest, BaseZenFlowTest):
         tester.run_training_distributed(config_dict)
 
 
-@pytest.mark.parametrize("stage", [1, 2])
+@pytest.mark.parametrize("stage", [1, 2, 3])
 @pytest.mark.parametrize("full_warm_up_rounds", [0, 3])
 @pytest.mark.parametrize("offload_selective_optimizer", [True, False])
 @pytest.mark.parametrize("select_strategy,select_interval,update_interval", [
