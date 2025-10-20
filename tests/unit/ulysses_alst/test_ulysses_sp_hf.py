@@ -29,7 +29,7 @@ def get_grad(param, zero_stage):
     #     return safe_get_full_grad(param)
 
 
-@pytest.mark.parametrize("zero_stage", [1, 3])
+@pytest.mark.parametrize("zero_stage", [2, 3])
 class TestUlyssesSPHF(DistributedTest):
     world_size = 2
 

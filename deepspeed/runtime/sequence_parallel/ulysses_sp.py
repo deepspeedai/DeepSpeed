@@ -44,6 +44,11 @@ import math
 import torch
 import torch.distributed.nn
 
+from deepspeed.utils.debug import print_rank0
+from functools import partial
+
+pr0 = partial(print_rank0, force=True)
+
 
 class UlyssesSPAttentionHF(torch.nn.Module):
     """Re-Implementation of deepspeed.sequence.layer.DistributedAttention. This implementation enforces the input shape
@@ -345,8 +350,16 @@ class UlyssesSPAttentionHF(torch.nn.Module):
         seq_length_is_variable=True,
     ):
         """
-        Register "ulysses" attn_implementation with HF transformers and return mpu (Megatron-LM-style parallel state object).
-        If sequence_parallel_size==1 do nothng and return None.
+        Register "ulysses" attn_implementation with HF transformers and return mpu (Megatron-LM-style parallel state groups object).
+        If sequence_parallel_size==1 do nothing and return None.
+
+        Args:
+        - model_name_or_path (object or str): model object, or HF hub model name, or model's local path
+        - core_attn_implementation (str): which attention to use: flash_attention_2 or flash_attention_3 or sdpa
+        - sequence_parallel_size (int): sequence parallelism dimension (if 1 it's disabled)
+        - max_length (int): actual global sequence length
+        - micro_batch_size (int): micro batch size
+        - seq_length_is_variable (bool): whether global seqlen may change between batches an optimization flag - the default is `True`
 
         """
         if sequence_parallel_size == 1:
@@ -359,8 +372,14 @@ class UlyssesSPAttentionHF(torch.nn.Module):
 
         mpu.initialize_sequence_parallel(sequence_parallel_size=sequence_parallel_size)
 
-        # we don't have the model yet at this stage
-        hf_model_config = AutoConfig.from_pretrained(model_name_or_path)
+        from transformers import PreTrainedModel
+        if isinstance(model_name_or_path, PreTrainedModel):
+            # we already have the model
+            hf_model_config = model_name_or_path.config
+        else:
+            # if we don't have the model yet at this stage
+            hf_model_config = AutoConfig.from_pretrained(model_name_or_path)
+
         supported_attn_implementation = ["flash_attention_2", "flash_attention_3", "sdpa"]
         if core_attn_implementation not in supported_attn_implementation:
             # notes on the excluded ones:
@@ -481,22 +500,29 @@ class UlyssesSPDataLoaderAdapter:
         self.sp_world_size = sp_world_size
         self.device = device
 
+        pr0(f"adapter: creating {len(self.dl)=} {self.sp_world_size=}")
+
         self.iter = iter(dl)
         self.micro_batches: list[Any] = []
 
     def __len__(self):
+
+        pr0(f"{len(self.dl)} {self.sp_world_size}")
         return len(self.dl) * self.sp_world_size
 
     def __iter__(self):
         return self
 
     def __next__(self):
+
+        pr0("adapter: next")
         if len(self.micro_batches) == 0:
             self.refill()
 
         return self.micro_batches.pop(0)
 
     def refill(self):
+        pr0("refill")
         # reset the iterator if StopIteration arrives, and re-raise it to allow multiple epochs to run
         try:
             batch = next(self.iter)

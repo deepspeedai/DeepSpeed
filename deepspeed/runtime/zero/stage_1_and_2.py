@@ -40,6 +40,8 @@ from deepspeed.utils import link_hp_params, lazy_init_hp_params_optimizer_state
 from deepspeed.checkpoint import enable_universal_checkpoint
 
 from deepspeed.utils import groups
+from deepspeed.utils.debug import debug_param2name
+
 # Toggle this to true to enable correctness test
 # with gradient partitioning and without
 pg_correctness_test = False
@@ -49,6 +51,11 @@ OPTIMIZER_GRADIENTS_TIMER = 'optimizer_gradients'
 OPTIMIZER_STEP_TIMER = 'optimizer_step'
 OPTIMIZER_TIMERS = [OPTIMIZER_ALLGATHER_TIMER, OPTIMIZER_GRADIENTS_TIMER, OPTIMIZER_STEP_TIMER]
 INITIAL_MICRO_STEP_ID = -1
+
+from deepspeed.utils.debug import print_rank0
+from functools import partial
+
+pr0 = partial(print_rank0, force=True)
 
 
 def input(msg):
@@ -857,6 +864,8 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
                 else:
                     avg_new = self.get_all_grad_tensors(self.params_in_partition[i],
                                                         dtype=self.gradient_accumulation_dtype)
+                    #pr0(f"{avg_new=}")
+                    #pr0(f"{self.all_grad_tensors[i]=}")
                     for accumulated_grad, new_avg_grad in zip(self.all_grad_tensors[i], avg_new):
                         accumulated_grad.add_(new_avg_grad)
                 if self.is_gradient_accumulation_boundary:
@@ -1003,7 +1012,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
         grad_reduc = self.get_gradient_for_reduction(param)
         bucket = self.ipg_buckets[self.get_param_comm_dtype(param)]
         if bucket.elements + param.numel() > self.reduce_bucket_size:
-            self.report_ipg_memory_usage("In ipg_remove_grads before reduce_ipg_grads", param.numel(), param.dtype)
+            self.report_ipg_memory_usage("In ipg_remove_grads before reduce_ipg_grads", param.numel())
             self.reduce_ipg_grads()
             if self.contiguous_gradients and self.overlap_comm:
                 if not get_accelerator().resolves_data_dependency():
@@ -1011,13 +1020,13 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
                     get_accelerator().current_stream().wait_stream(self.reduction_stream)
                 # Swap index between 0 and 1
                 bucket.index = 1 - bucket.index
-            self.report_ipg_memory_usage("In ipg_remove_grads after reduce_ipg_grads", param.numel(), param.dtype)
+            self.report_ipg_memory_usage("In ipg_remove_grads after reduce_ipg_grads", param.numel())
 
         param_id = self.get_param_id(param)
         assert self.params_already_reduced[param_id] == False, \
-            f"The parameter {param_id} has already been reduced. \
+            f"The parameter {debug_param2name(param)} has already been reduced. \
             Gradient computed twice for this partition. \
-            Multiple gradient reduction is currently not supported"
+            Multiple gradient reductions are currently not supported"
 
         if self.contiguous_gradients:
             if param.numel() > self.reduce_bucket_size:
