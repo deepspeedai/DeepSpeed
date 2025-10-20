@@ -1003,7 +1003,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
         grad_reduc = self.get_gradient_for_reduction(param)
         bucket = self.ipg_buckets[self.get_param_comm_dtype(param)]
         if bucket.elements + param.numel() > self.reduce_bucket_size:
-            self.report_ipg_memory_usage("In ipg_remove_grads before reduce_ipg_grads", param.numel(), param.dtype)
+            self.report_ipg_memory_usage("In ipg_remove_grads before reduce_ipg_grads", param.numel())
             self.reduce_ipg_grads()
             if self.contiguous_gradients and self.overlap_comm:
                 if not get_accelerator().resolves_data_dependency():
@@ -1011,7 +1011,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
                     get_accelerator().current_stream().wait_stream(self.reduction_stream)
                 # Swap index between 0 and 1
                 bucket.index = 1 - bucket.index
-            self.report_ipg_memory_usage("In ipg_remove_grads after reduce_ipg_grads", param.numel(), param.dtype)
+            self.report_ipg_memory_usage("In ipg_remove_grads after reduce_ipg_grads", param.numel())
 
         param_id = self.get_param_id(param)
         assert self.params_already_reduced[param_id] == False, \
