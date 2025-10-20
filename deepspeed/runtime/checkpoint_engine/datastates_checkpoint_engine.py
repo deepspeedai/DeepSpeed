@@ -7,7 +7,6 @@
 
 from deepspeed.runtime.checkpoint_engine.checkpoint_engine import \
     CheckpointEngine, CheckpointCommitInfo
-from datastates import CheckpointEngine as DataStatesEngine
 
 ENGINE_NAME = "DataStatesCheckpointEngine"
 
@@ -17,7 +16,14 @@ class DataStatesCheckpointEngine(CheckpointEngine):
     def __init__(self, deepspeed_config, rank):
         super().__init__(deepspeed_config)
         self.commit_info = None
-        self.ckpt_engine = DataStatesEngine(deepspeed_config, rank)
+        self.ckpt_engine = None
+        try:
+            from datastates import CheckpointEngine as DataStatesEngine
+            self.ckpt_engine = DataStatesEngine(deepspeed_config, rank)
+        except ImportError:
+            raise RuntimeError("Please install DataStates from https://github.com/DataStates/datastates-llm.")
+        except Exception as e:
+            raise RuntimeError(f"An error occurred while initializing DataStates Checkpoint Engine: {e}")
 
     def __del__(self):
         self.cleanup()
