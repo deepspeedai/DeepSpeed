@@ -52,12 +52,6 @@ OPTIMIZER_STEP_TIMER = 'optimizer_step'
 OPTIMIZER_TIMERS = [OPTIMIZER_ALLGATHER_TIMER, OPTIMIZER_GRADIENTS_TIMER, OPTIMIZER_STEP_TIMER]
 INITIAL_MICRO_STEP_ID = -1
 
-from deepspeed.utils.debug import print_rank0
-from functools import partial
-
-pr0 = partial(print_rank0, force=True)
-
-
 def input(msg):
     return
 
@@ -864,8 +858,6 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
                 else:
                     avg_new = self.get_all_grad_tensors(self.params_in_partition[i],
                                                         dtype=self.gradient_accumulation_dtype)
-                    #pr0(f"{avg_new=}")
-                    #pr0(f"{self.all_grad_tensors[i]=}")
                     for accumulated_grad, new_avg_grad in zip(self.all_grad_tensors[i], avg_new):
                         accumulated_grad.add_(new_avg_grad)
                 if self.is_gradient_accumulation_boundary:

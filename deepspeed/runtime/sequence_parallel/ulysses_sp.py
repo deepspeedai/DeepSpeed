@@ -44,12 +44,6 @@ import math
 import torch
 import torch.distributed.nn
 
-from deepspeed.utils.debug import print_rank0
-from functools import partial
-
-pr0 = partial(print_rank0, force=True)
-
-
 class UlyssesSPAttentionHF(torch.nn.Module):
     """Re-Implementation of deepspeed.sequence.layer.DistributedAttention. This implementation enforces the input shape
     to be standard [sl, bs, hc, hs] form. Any deviation from this shape will raise an error.
@@ -500,29 +494,22 @@ class UlyssesSPDataLoaderAdapter:
         self.sp_world_size = sp_world_size
         self.device = device
 
-        pr0(f"adapter: creating {len(self.dl)=} {self.sp_world_size=}")
-
         self.iter = iter(dl)
         self.micro_batches: list[Any] = []
 
     def __len__(self):
-
-        pr0(f"{len(self.dl)} {self.sp_world_size}")
         return len(self.dl) * self.sp_world_size
 
     def __iter__(self):
         return self
 
     def __next__(self):
-
-        pr0("adapter: next")
         if len(self.micro_batches) == 0:
             self.refill()
 
         return self.micro_batches.pop(0)
 
     def refill(self):
-        pr0("refill")
         # reset the iterator if StopIteration arrives, and re-raise it to allow multiple epochs to run
         try:
             batch = next(self.iter)
@@ -541,6 +528,8 @@ class UlyssesSPDataLoaderAdapter:
         for k in batch.keys():
             if torch.is_tensor(batch[k]):
                 batch[k] = batch[k].to(self.device)
+                if seqlen != batch[k].shape[1]:
+                    raise ValueError(f"{k}'s shape {batch[k].shape} must match input_ids's shape {batch["input_ids"].shape}")
                 with torch.no_grad():
                     tensor_list = [
                         torch.zeros((batch[k].shape[0], seqlens[i]), dtype=batch[k].dtype, device=batch[k].device)
