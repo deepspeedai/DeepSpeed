@@ -44,6 +44,7 @@ import math
 import torch
 import torch.distributed.nn
 
+
 class UlyssesSPAttentionHF(torch.nn.Module):
     """Re-Implementation of deepspeed.sequence.layer.DistributedAttention. This implementation enforces the input shape
     to be standard [sl, bs, hc, hs] form. Any deviation from this shape will raise an error.
