@@ -539,7 +539,8 @@ class UlyssesSPDataLoaderAdapter:
             if torch.is_tensor(batch[k]):
                 batch[k] = batch[k].to(self.device)
                 if seqlen != batch[k].shape[1]:
-                    raise ValueError(f"{k}'s shape {batch[k].shape} must match input_ids's shape {batch["input_ids"].shape}")
+                    raise ValueError(
+                        f"{k}'s shape {batch[k].shape} must match input_ids's shape {batch['input_ids'].shape}")
                 with torch.no_grad():
                     tensor_list = [
                         torch.zeros((batch[k].shape[0], seqlens[i]), dtype=batch[k].dtype, device=batch[k].device)
