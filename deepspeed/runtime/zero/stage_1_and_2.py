@@ -40,6 +40,7 @@ from deepspeed.utils import link_hp_params, lazy_init_hp_params_optimizer_state
 from deepspeed.checkpoint import enable_universal_checkpoint
 
 from deepspeed.utils import groups
+from deepspeed.utils.debug import debug_param2name
 # Toggle this to true to enable correctness test
 # with gradient partitioning and without
 pg_correctness_test = False
@@ -1015,9 +1016,9 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
 
         param_id = self.get_param_id(param)
         assert self.params_already_reduced[param_id] == False, \
-            f"The parameter {param_id} has already been reduced. \
+            f"The parameter {debug_param2name(param)} has already been reduced. \
             Gradient computed twice for this partition. \
-            Multiple gradient reduction is currently not supported"
+            Multiple gradient reductions are currently not supported"
 
         if self.contiguous_gradients:
             if param.numel() > self.reduce_bucket_size:
