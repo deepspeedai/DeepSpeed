@@ -474,6 +474,19 @@ class UlyssesSPDataLoaderAdapter:
 
         If more tokens need to be consumed per step use the gradient accumulation feature.
 
+        Ulysses expects the following dict keys in each DL batch (`dl->iter->next`):
+        - `input_ids`
+        - `position_ids`
+        - `labels`
+
+        Additional entries can be present.
+
+        The tensors are expected to be of shape: `[batch_size, seqlen, ...]`
+
+        The sharding happens on the seqlen (1st) dimension for all tensors in the batch, any non-tensor entries get copied to all ranks.
+
+        `attention_mask` isn't used by Ulysses, because it's typically too large when it's 4D, and position_ids is just 1D, therefore it's much much smaller and consumes little GPU memory.
+
         Arguments:
         - `dl`: an existing DataLoader object to wrap
         - `sp_rank`: SP rank
@@ -483,10 +496,6 @@ class UlyssesSPDataLoaderAdapter:
 
         Returns:
             Another DataLoader object
-
-        Here are the current assumptions on the inputs fetched by dl->iter->next
-        - the batch is a dict with at least the keys: `input_ids`, `labels`, `position_ids` - but can have any additional keys necessary.
-        - the tensor values get sharded, the non-tensor values are passed along as is
         """
 
         self.dl = dl
