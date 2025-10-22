@@ -3,7 +3,6 @@
 
 # DeepSpeed Team
 
-import sys
 import time
 import torch
 from typing import List
@@ -26,42 +25,7 @@ class SuperOffloadOptimizer_Stage3(DeepSpeedZeroOptimizer_Stage3):
         init_optimizer,
         timers,
         ds_config,
-        static_loss_scale=1.0,
-        dynamic_loss_scale=False,
-        dynamic_loss_args=None,
-        verbose=True,
-        contiguous_gradients=True,
-        reduce_bucket_size=500000000,
-        prefetch_bucket_size=50000000,
-        max_reuse_distance=1000000000,
-        max_live_parameters=1000000000,
-        param_persistence_threshold=100000,
-        model_persistence_threshold=sys.maxsize,
-        dp_process_group=None,
-        reduce_scatter=True,
-        overlap_comm=False,
-        offload_optimizer_config=None,
-        offload_param_config=None,
-        sub_group_size=1000000000000,
-        offload_ratio=0.0,
-        mpu=None,
-        clip_grad=0.0,
-        gradient_accumulation_dtype=torch.float32,
-        communication_data_type=torch.float16,
-        postscale_gradients=True,
-        gradient_predivide_factor=1.0,
-        gradient_accumulation_steps=1,
-        elastic_checkpoint=False,
-        aio_config=None,
-        all2all_process_group=None,
-        zero_hpz_partition_size=1,
-        zero_quantized_weights=False,
-        zero_quantized_nontrainable_weights=False,
-        zero_module_granularity_threshold=0,
-        zeropp_loco_param=None,
-        log_trace_cache_warnings=False,
-        enable_sanity_checks=False,
-        cpuadam_cores_perc=0.8,
+        **kwargs,
     ):
 
         self.sub_group_to_param_num = {}
@@ -70,16 +34,7 @@ class SuperOffloadOptimizer_Stage3(DeepSpeedZeroOptimizer_Stage3):
         self.async_cpuadam_num = 0
         self.max_grad_numel = 0
 
-        super().__init__(module, init_optimizer, timers, ds_config, static_loss_scale, dynamic_loss_scale,
-                         dynamic_loss_args, verbose, contiguous_gradients, reduce_bucket_size, prefetch_bucket_size,
-                         max_reuse_distance, max_live_parameters, param_persistence_threshold,
-                         model_persistence_threshold, dp_process_group, reduce_scatter, overlap_comm,
-                         offload_optimizer_config, offload_param_config, sub_group_size, offload_ratio, mpu, clip_grad,
-                         gradient_accumulation_dtype, communication_data_type, postscale_gradients,
-                         gradient_predivide_factor, gradient_accumulation_steps, elastic_checkpoint, aio_config,
-                         all2all_process_group, zero_hpz_partition_size, zero_quantized_weights,
-                         zero_quantized_nontrainable_weights, zero_module_granularity_threshold, zeropp_loco_param,
-                         log_trace_cache_warnings, enable_sanity_checks)
+        super().__init__(module, init_optimizer, timers, ds_config, **kwargs)
 
         optimizer_config = {
             "lr": self.optimizer.param_groups[0]["lr"],
@@ -88,6 +43,7 @@ class SuperOffloadOptimizer_Stage3(DeepSpeedZeroOptimizer_Stage3):
             "weight_decay": self.optimizer.param_groups[0]["weight_decay"],
             "amsgrad": self.optimizer.param_groups[0]["amsgrad"]
         }
+        cpuadam_cores_perc = kwargs.get("cpuadam_cores_perc", 0.8)
         self.superoffload_cpu_optimizer = SuperOffloadCPUOptimizer(optimizer_config=optimizer_config,
                                                                    cpuadam_cores_perc=cpuadam_cores_perc,
                                                                    max_grad_numel=self.max_grad_numel)

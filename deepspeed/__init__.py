@@ -68,8 +68,8 @@ dist = None
 
 def set_optimizer_flags(config_class, model):
     if config_class.optimizer_name == MUON_OPTIMIZER:
-        for p in model.parameters():
-            if p.ndim >= 2:
+        for name, p in model.named_parameters():
+            if p.ndim >= 2 and not any(keyword in name.lower() for keyword in ("embed", "lm_head")):
                 setattr(p, "use_muon", True)
             else:
                 setattr(p, "use_muon", False)

@@ -41,7 +41,6 @@ from deepspeed.checkpoint import enable_universal_checkpoint
 
 from deepspeed.utils import groups
 from deepspeed.utils.debug import debug_param2name
-
 # Toggle this to true to enable correctness test
 # with gradient partitioning and without
 pg_correctness_test = False

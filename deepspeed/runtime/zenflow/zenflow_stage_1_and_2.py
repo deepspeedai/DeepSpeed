@@ -46,49 +46,18 @@ SELECTIVE_OPTIMIZER_TIMERS = [
 
 class ZenFlowZeroOptimizer(DeepSpeedZeroOptimizer):
 
-    def __init__(self,
-                 init_optimizer,
-                 param_names,
-                 timers,
-                 optimizer_params,
-                 static_loss_scale=1.0,
-                 dynamic_loss_scale=False,
-                 dynamic_loss_args=None,
-                 verbose=True,
-                 contiguous_gradients=True,
-                 reduce_bucket_size=500000000,
-                 use_multi_rank_bucket_allreduce=True,
-                 allgather_bucket_size=5000000000,
-                 dp_process_group=None,
-                 expert_parallel_group=None,
-                 expert_data_parallel_group=None,
-                 reduce_scatter=True,
-                 overlap_comm=False,
-                 offload_optimizer_config=None,
-                 zenflow_config=None,
-                 mpu=None,
-                 clip_grad=0.0,
-                 gradient_accumulation_dtype=torch.float32,
-                 communication_data_type=torch.float16,
-                 postscale_gradients=True,
-                 gradient_predivide_factor=1.0,
-                 gradient_accumulation_steps=1,
-                 ignore_unused_parameters=True,
-                 partition_grads=True,
-                 round_robin_gradients=False,
-                 has_moe_layers=False,
-                 fp16_master_weights_and_gradients=False,
-                 elastic_checkpoint=False,
-                 check_grad_overflow=True):
+    def __init__(
+        self,
+        init_optimizer,
+        param_names,
+        timers,
+        optimizer_params,
+        **kwargs,
+    ):
 
-        super().__init__(init_optimizer, param_names, timers, optimizer_params, static_loss_scale, dynamic_loss_scale,
-                         dynamic_loss_args, verbose, contiguous_gradients, reduce_bucket_size,
-                         use_multi_rank_bucket_allreduce, allgather_bucket_size, dp_process_group,
-                         expert_parallel_group, expert_data_parallel_group, reduce_scatter, overlap_comm,
-                         offload_optimizer_config, zenflow_config, mpu, clip_grad, gradient_accumulation_dtype,
-                         communication_data_type, postscale_gradients, gradient_predivide_factor,
-                         gradient_accumulation_steps, ignore_unused_parameters, partition_grads, round_robin_gradients,
-                         has_moe_layers, fp16_master_weights_and_gradients, elastic_checkpoint)
+        super().__init__(init_optimizer, param_names, timers, optimizer_params, **kwargs)
+
+        zenflow_config = kwargs.get("zenflow_config", None)
 
         self.micro_step = -1
         self.full_warm_up_rounds = zenflow_config.full_warm_up_rounds
@@ -98,7 +67,7 @@ class ZenFlowZeroOptimizer(DeepSpeedZeroOptimizer):
         self.zf_stage3 = False
 
         if self.offload_selective_optimizer:
-            assert overlap_comm, "offload selective optimizer should be used with overlap_comm"
+            assert kwargs.get("overlap_comm", False), "offload selective optimizer should be used with overlap_comm"
 
         self._configure_zenflow(zenflow_config)
 
