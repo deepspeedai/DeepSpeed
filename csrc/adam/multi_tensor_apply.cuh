@@ -28,7 +28,7 @@ constexpr int depth_to_max_blocks[5] = {320, 320, 320, 320, 320};
 template <int n>
 struct TensorListMetadata {
     void* addresses[n][depth_to_max_tensors[n - 1]];
-    int sizes[depth_to_max_tensors[n - 1]];
+    int64_t sizes[depth_to_max_tensors[n - 1]];
     unsigned char block_to_tensor[depth_to_max_blocks[n - 1]];
     int block_to_chunk[depth_to_max_blocks[n - 1]];  // I fear this needs to be a full int.
     int start_tensor_this_launch;
