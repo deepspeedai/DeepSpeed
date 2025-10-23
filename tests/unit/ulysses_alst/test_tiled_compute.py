@@ -98,7 +98,7 @@ def mlp_forward_sequence_tiled_compute(self, x):
 
 
 @pytest.mark.parametrize("batch_size", [1, 2])
-@pytest.mark.parametrize("zero_stage", [1, 3])
+@pytest.mark.parametrize("zero_stage", [2, 3])
 class TestTiledCompute(DistributedTest):
     world_size = 1
 
@@ -232,7 +232,7 @@ class TestTiledCompute(DistributedTest):
 
 
 @pytest.mark.parametrize("batch_size", [1, 2])
-@pytest.mark.parametrize("zero_stage", [1, 3])
+@pytest.mark.parametrize("zero_stage", [2, 3])
 class TestTiledFusedLogitsLoss(DistributedTest):
     world_size = 1
 
