@@ -6,7 +6,6 @@
 # Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-import sys
 from typing import List
 
 import deepspeed
@@ -47,7 +46,7 @@ class MiCS_AllGatherCoalescedHandle(AllGatherCoalescedHandle):
             instrument_w_nvtx(self.allgather_handle.wait)()
         except (ValueError, RuntimeError) as e:
             log_dist(
-                f"WARNING: Runtime Error while waiting the collective all-gather, possibly due to the _IllegalWork",
+                "WARNING: Runtime Error while waiting the collective all-gather, possibly due to the _IllegalWork",
                 ranks=[0])
             log_dist(f"Error message: {e}", ranks=[0])
 
@@ -158,7 +157,7 @@ class MiCS_Init(Init):
 
         if sequence_data_parallel_group is not None:
             logger.warning(
-                f"sequence_data_parallel_group' is deprecated and will be removed. Use 'data_parallel_group' instead.")
+                "sequence_data_parallel_group' is deprecated and will be removed. Use 'data_parallel_group' instead.")
             if data_parallel_group is not None:
                 raise ValueError(
                     "Both 'data_parallel_group' and 'sequence_data_parallel_group' were specified. Please provide only one of these arguments."
@@ -339,7 +338,7 @@ class MiCS_Offload(DeepSpeedZeRoOffload):
         """ overload the parent class function for convert the parameters
 
         """
-        log_dist(f'Convert to zero parameters from MiCS Offload manager', ranks=[0])
+        log_dist('Convert to zero parameters from MiCS Offload manager', ranks=[0])
         non_zero_params = [p for p in module.parameters() if not is_zero_param(p)]
         if non_zero_params:
             zero_params = [p for p in module.parameters() if is_zero_param(p)]
@@ -367,44 +366,20 @@ class MiCS_Optimizer(DeepSpeedZeroOptimizer_Stage3):
     def __init__(self,
                  module,
                  init_optimizer,
+                 param_names,
                  timers,
                  ds_config,
-                 static_loss_scale=1,
-                 dynamic_loss_scale=False,
-                 dynamic_loss_args=None,
-                 verbose=True,
-                 contiguous_gradients=True,
-                 reduce_bucket_size=500000000,
-                 prefetch_bucket_size=50000000,
-                 max_reuse_distance=1000000000,
-                 max_live_parameters=1000000000,
-                 param_persistence_threshold=100000,
-                 model_persistence_threshold=sys.maxsize,
-                 dp_process_group=None,
-                 reduce_scatter=True,
-                 overlap_comm=False,
-                 offload_optimizer_config=None,
-                 offload_param_config=None,
-                 sub_group_size=1000000000000,
-                 offload_ratio=0.0,
-                 mpu=None,
-                 clip_grad=0,
                  gradient_accumulation_dtype=torch.float16,
-                 communication_data_type=torch.float16,
-                 postscale_gradients=True,
-                 gradient_predivide_factor=1,
-                 gradient_accumulation_steps=1,
-                 elastic_checkpoint=False,
-                 aio_config=None):
+                 **kwargs):
 
         log_dist("Init MiCS optimizer", ranks=[0])
-        super().__init__(module, init_optimizer, timers, ds_config, static_loss_scale, dynamic_loss_scale,
-                         dynamic_loss_args, verbose, contiguous_gradients, reduce_bucket_size, prefetch_bucket_size,
-                         max_reuse_distance, max_live_parameters, param_persistence_threshold,
-                         model_persistence_threshold, dp_process_group, reduce_scatter, overlap_comm,
-                         offload_optimizer_config, offload_param_config, sub_group_size, offload_ratio, mpu, clip_grad,
-                         gradient_accumulation_dtype, communication_data_type, postscale_gradients,
-                         gradient_predivide_factor, gradient_accumulation_steps, elastic_checkpoint, aio_config)
+        super().__init__(module,
+                         init_optimizer,
+                         param_names,
+                         timers,
+                         ds_config,
+                         gradient_accumulation_dtype=gradient_accumulation_dtype,
+                         **kwargs)
         first_param = next(module.parameters())
         # overload the dp_process_group and partition_count
         assert hasattr(first_param, "comm"), " ".join([

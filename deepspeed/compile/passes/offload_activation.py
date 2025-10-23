@@ -34,14 +34,15 @@ def get_random_id() -> int:
 def _should_offload(node: Node) -> bool:
     if not hasattr(node, "meta"):
         return False
-    if not "tensor_meta" in node.meta:
+    if "tensor_meta" not in node.meta:
         return False
 
     return True
 
 
 def offload_activation_fwd(graph: Graph, graph_id: int, nodes_to_offload_with_names: List[Tuple[str, Node]],
-                           graph_order: List[int], mem_budget: float, param_manager: DSGraphParamManager) -> Graph:
+                           graph_order: List[Tuple[int, bool]], mem_budget: float,
+                           param_manager: DSGraphParamManager) -> Graph:
     param_names = set(param_manager.param_names)
 
     import copy
@@ -77,7 +78,7 @@ def offload_activation_fwd(graph: Graph, graph_id: int, nodes_to_offload_with_na
     return graph
 
 
-def reload_activation_bwd(graph: Graph, graph_id: int, graph_order: List[int], mem_budget: float,
+def reload_activation_bwd(graph: Graph, graph_id: int, graph_order: List[Tuple[int, bool]], mem_budget: float,
                           param_manager: DSGraphParamManager) -> Graph:
 
     graph_value_to_id = value_to_id[graph_id]

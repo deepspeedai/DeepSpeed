@@ -64,13 +64,13 @@ def get_accelerator():
                 assert ipex._C._has_xpu(), "XPU_Accelerator requires an intel_extension_for_pytorch that supports XPU."
             except ImportError as e:
                 raise ValueError(
-                    f"XPU_Accelerator requires intel_extension_for_pytorch, which is not installed on this system.")
+                    "XPU_Accelerator requires intel_extension_for_pytorch, which is not installed on this system.")
         elif accelerator_name == "xpu.external":
             try:
                 from intel_extension_for_deepspeed import XPU_Accelerator  # noqa: F401 # type: ignore
             except ImportError as e:
                 raise ValueError(
-                    f"XPU_Accelerator external requires intel_extension_for_deepspeed, which is not installed on this system."
+                    "XPU_Accelerator external requires intel_extension_for_deepspeed, which is not installed on this system."
                 )
         elif accelerator_name == "cpu":
             pass
@@ -78,13 +78,13 @@ def get_accelerator():
             try:
                 import torch_npu  # noqa: F401 # type: ignore
             except ImportError as e:
-                raise ValueError(f"NPU_Accelerator requires torch_npu, which is not installed on this system.")
+                raise ValueError("NPU_Accelerator requires torch_npu, which is not installed on this system.")
             pass
         elif accelerator_name == "sdaa":
             try:
                 import torch_sdaa  # noqa: F401 # type: ignore
             except ImportError as e:
-                raise ValueError(f"SDAA_Accelerator requires torch_sdaa, which is not installed on this system.")
+                raise ValueError("SDAA_Accelerator requires torch_sdaa, which is not installed on this system.")
             pass
         elif accelerator_name == "mps":
             try:
@@ -93,18 +93,18 @@ def get_accelerator():
                 # should use torch.mps.is_available() if it exists someday but this is used as proxy
                 torch.mps.current_allocated_memory()
             except (RuntimeError, ImportError) as e:
-                raise ValueError(f"MPS_Accelerator requires torch.mps, which is not installed on this system.")
+                raise ValueError("MPS_Accelerator requires torch.mps, which is not installed on this system.")
         elif accelerator_name == "hpu":
             try:
                 import habana_frameworks.torch.hpu  # noqa: F401
             except ImportError as e:
                 raise ValueError(
-                    f"HPU_Accelerator requires habana_frameworks.torch.hpu, which is not installed on this system.")
+                    "HPU_Accelerator requires habana_frameworks.torch.hpu, which is not installed on this system.")
         elif accelerator_name == "mlu":
             try:
                 import torch_mlu  # noqa: F401
             except ImportError as e:
-                raise ValueError(f"MLU_Accelerator requires torch_mlu, which is not installed on this system.")
+                raise ValueError("MLU_Accelerator requires torch_mlu, which is not installed on this system.")
         elif accelerator_name not in SUPPORTED_ACCELERATOR_LIST:
             raise ValueError(f'DS_ACCELERATOR must be one of {SUPPORTED_ACCELERATOR_LIST}. '
                              f'Value "{accelerator_name}" is not supported')

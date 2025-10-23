@@ -345,8 +345,16 @@ class UlyssesSPAttentionHF(torch.nn.Module):
         seq_length_is_variable=True,
     ):
         """
-        Register "ulysses" attn_implementation with HF transformers and return mpu (Megatron-LM-style parallel state object).
-        If sequence_parallel_size==1 do nothng and return None.
+        Register "ulysses" attn_implementation with HF transformers and return mpu (Megatron-LM-style parallel state groups object).
+        If sequence_parallel_size==1 do nothing and return None.
+
+        Args:
+        - model_name_or_path (object or str): model object, or HF hub model name, or model's local path
+        - core_attn_implementation (str): which attention to use: flash_attention_2 or flash_attention_3 or sdpa
+        - sequence_parallel_size (int): sequence parallelism dimension (if 1 it's disabled)
+        - max_length (int): actual global sequence length
+        - micro_batch_size (int): micro batch size
+        - seq_length_is_variable (bool): whether global seqlen may change between batches an optimization flag - the default is `True`
 
         """
         if sequence_parallel_size == 1:
@@ -359,8 +367,14 @@ class UlyssesSPAttentionHF(torch.nn.Module):
 
         mpu.initialize_sequence_parallel(sequence_parallel_size=sequence_parallel_size)
 
-        # we don't have the model yet at this stage
-        hf_model_config = AutoConfig.from_pretrained(model_name_or_path)
+        from transformers import PreTrainedModel
+        if isinstance(model_name_or_path, PreTrainedModel):
+            # we already have the model
+            hf_model_config = model_name_or_path.config
+        else:
+            # if we don't have the model yet at this stage
+            hf_model_config = AutoConfig.from_pretrained(model_name_or_path)
+
         supported_attn_implementation = ["flash_attention_2", "flash_attention_3", "sdpa"]
         if core_attn_implementation not in supported_attn_implementation:
             # notes on the excluded ones:
@@ -460,6 +474,19 @@ class UlyssesSPDataLoaderAdapter:
 
         If more tokens need to be consumed per step use the gradient accumulation feature.
 
+        Ulysses expects the following dict keys in each DL batch (`dl->iter->next`):
+        - `input_ids`
+        - `position_ids`
+        - `labels`
+
+        Additional entries can be present.
+
+        The tensors are expected to be of shape: `[batch_size, seqlen, ...]`
+
+        The sharding happens on the seqlen (1st) dimension for all tensors in the batch, any non-tensor entries get copied to all ranks.
+
+        `attention_mask` isn't used by Ulysses, because it's typically too large when it's 4D, and position_ids is just 1D, therefore it's much much smaller and consumes little GPU memory.
+
         Arguments:
         - `dl`: an existing DataLoader object to wrap
         - `sp_rank`: SP rank
@@ -469,10 +496,6 @@ class UlyssesSPDataLoaderAdapter:
 
         Returns:
             Another DataLoader object
-
-        Here are the current assumptions on the inputs fetched by dl->iter->next
-        - the batch is a dict with at least the keys: `input_ids`, `labels`, `position_ids` - but can have any additional keys necessary.
-        - the tensor values get sharded, the non-tensor values are passed along as is
         """
 
         self.dl = dl
@@ -515,6 +538,9 @@ class UlyssesSPDataLoaderAdapter:
         for k in batch.keys():
             if torch.is_tensor(batch[k]):
                 batch[k] = batch[k].to(self.device)
+                if seqlen != batch[k].shape[1]:
+                    raise ValueError(
+                        f"{k}'s shape {batch[k].shape} must match input_ids's shape {batch['input_ids'].shape}")
                 with torch.no_grad():
                     tensor_list = [
                         torch.zeros((batch[k].shape[0], seqlens[i]), dtype=batch[k].dtype, device=batch[k].device)
@@ -836,10 +862,11 @@ class TiledMLP(torch.autograd.Function):
         ctx.compute_params = [p for p in compute_params if p.requires_grad]
         ctx.save_for_backward(x)
 
-        x_shards = list(torch.chunk(x, chunks=shards, dim=1))
+        # x.shape could be [bs, seqlen, hidden_size] or [seqlen, hidden_size] (moe experts)
+        x_shards = list(torch.chunk(x, chunks=shards, dim=-2))
         with torch.no_grad():
             output_shards = [fn(self, x_shard) for x_shard in x_shards]
-        output_unsharded = torch.cat(output_shards, dim=1)
+        output_unsharded = torch.cat(output_shards, dim=-2)
 
         return output_unsharded
 
@@ -856,7 +883,9 @@ class TiledMLP(torch.autograd.Function):
         # detach() unsets `x.requires_grad`, so restore it
         x.requires_grad_(x_requires_grad)
 
-        bs, seqlen, hidden_size = x.shape
+        # x.shape could be [bs, seqlen, hidden_size] or [seqlen, hidden_size] (moe experts)
+        hidden_size = x.shape[-1]
+        x_shape_orig = x.shape
 
         # flatten bs+seqlen to avoid having stride issues when narrowing into seqlen w/ bs>1
         x = x.view(-1, hidden_size)
@@ -890,7 +919,7 @@ class TiledMLP(torch.autograd.Function):
             torch.autograd.backward(output, incoming_grad_shard)
 
         # unflatten
-        x_grad = x_grad.view(bs, -1, hidden_size)
+        x_grad = x_grad.view(x_shape_orig)
 
         return (None, None, x_grad, None, None)
 
@@ -1266,7 +1295,7 @@ class UlyssesSPFwdLossBwdWithLogits:
 
     def sp_fwd_loss_bwd(self, batch) -> torch.Tensor:
 
-        see_memory_usage(f"entered sp_fwd_loss_bwd", force=True)
+        see_memory_usage("entered sp_fwd_loss_bwd", force=True)
 
         # ensure shapes are correct
         if not (batch["input_ids"].shape == batch["position_ids"].shape == batch["labels"].shape):

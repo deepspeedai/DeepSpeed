@@ -217,7 +217,7 @@ class PipelineEngine(DeepSpeedEngine):
                 # set activation_checkpoint_func to non_reentrant_checkpoint func.
                 self.module.activation_checkpoint_func = ds_checkpointing.non_reentrant_checkpoint
                 if self.grid.get_global_rank() == 0:
-                    logger.info(f'CONFIG: activation_checkpoint_func=non_reentrant_checkpoint')
+                    logger.info('CONFIG: activation_checkpoint_func=non_reentrant_checkpoint')
         if self.module.activation_checkpoint_interval > 0:
             self.module._precompute_checkpointable_values()
 
@@ -359,7 +359,7 @@ class PipelineEngine(DeepSpeedEngine):
             The arithmetic mean of the losses computed this batch.
         """
         if not torch._C.is_grad_enabled():
-            raise RuntimeError(f'train_batch() requires gradients enabled. Use eval_batch() instead.')
+            raise RuntimeError('train_batch() requires gradients enabled. Use eval_batch() instead.')
 
         # Curriculum learning could change activation shape
         if self.curriculum_enabled_legacy():
@@ -408,8 +408,8 @@ class PipelineEngine(DeepSpeedEngine):
 
         # Monitoring
         if self.global_rank == 0 and self.monitor.enabled:
-            self.summary_events = [(f'Train/Samples/train_loss', self.agg_train_loss.mean().item(),
-                                    self.global_samples)]
+            self.summary_events = [('Train/Samples/train_loss', self.agg_train_loss.mean().item(), self.global_samples)
+                                   ]
             self.monitor.write_events(self.summary_events)
 
         if self.steps_per_print() is not None and self.wall_clock_breakdown(
@@ -498,7 +498,7 @@ class PipelineEngine(DeepSpeedEngine):
             eval_output = self._bcast_pipe_scalar(eval_output)
 
         if self.global_rank == 0 and self.monitor.enabled:
-            self.summary_events = [(f'Train/Samples/eval_loss', eval_output.mean().item(), self.global_samples)]
+            self.summary_events = [('Train/Samples/eval_loss', eval_output.mean().item(), self.global_samples)]
             self.monitor.write_events(self.summary_events)
 
         # Restore the training iterator
@@ -1220,10 +1220,9 @@ class PipelineEngine(DeepSpeedEngine):
         self._force_grad_boundary = False
 
         if self.global_rank == 0 and self.monitor.enabled:
-            self.summary_events = [(f'Train/Samples/lr', self.get_lr()[0], self.global_samples)]
+            self.summary_events = [('Train/Samples/lr', self.get_lr()[0], self.global_samples)]
             if self.fp16_enabled() and hasattr(self.optimizer, 'cur_scale'):
-                self.summary_events.append(
-                    (f'Train/Samples/loss_scale', self.optimizer.cur_scale, self.global_samples))
+                self.summary_events.append(('Train/Samples/loss_scale', self.optimizer.cur_scale, self.global_samples))
             self.monitor.write_events(self.summary_events)
 
         if self.wall_clock_breakdown():

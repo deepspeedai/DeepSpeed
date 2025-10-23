@@ -54,7 +54,7 @@ class AIOBasic_Engine(object):
         task_log(tid,
                  f'{io_string} file {filename} of size {args.io_size} bytes from buffer on device {buffer.device}')
 
-        task_log(tid, f'created deepspeed aio basic engine')
+        task_log(tid, 'created deepspeed aio basic engine')
 
         ctxt = {}
         ctxt[FILE] = filename

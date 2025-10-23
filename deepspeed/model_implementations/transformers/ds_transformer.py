@@ -56,7 +56,7 @@ class DeepSpeedTransformerInference(nn.Module):
         if DeepSpeedTransformerInference.layer_id == 1:
             log_dist(f"DeepSpeed-Inference config: {self.config.__dict__}", [0])
             if deepspeed.HAS_TRITON and self.config.use_triton:
-                log_dist(f"Injecting Triton kernels ...", [0])
+                log_dist("Injecting Triton kernels ...", [0])
 
         if self.config.bigscience_bloom:
             self.attention = BloomSelfAttention(self.config, mp_group, quantize_scales, quantize_groups, merge_count)

@@ -497,7 +497,7 @@ def replace_transformer_layer(orig_layer_impl, model, checkpoint_dict, config, m
         if dist.is_initialized():
             dist.barrier()
         transformer_name = get_transformer_name(replaced_module)
-        non_tp_ckpt_name = f'non-tp.pt'
+        non_tp_ckpt_name = 'non-tp.pt'
         ckpt_files = [non_tp_ckpt_name]
         os.makedirs(config.save_mp_checkpoint_path, exist_ok=True)
 

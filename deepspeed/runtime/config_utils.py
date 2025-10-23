@@ -137,7 +137,7 @@ class pp_int(int):
         return inst
 
     def __repr__(self):
-        if self.custom_print_str:
+        if hasattr(self, "custom_print_str") and self.custom_print_str:
             return self.custom_print_str
         return f"{self.real:,}"
 
@@ -169,7 +169,7 @@ class ScientificNotationEncoder(json.JSONEncoder):
             x = [f'\n{prefix}"{k}": {self.iterencode(v, level=level)}' for k, v in o.items()]
             return "{" + ", ".join(x) + f"\n{prefix_close}" + "}"
         elif isinstance(o, collections.abc.Sequence) and not isinstance(o, str):
-            return f"[{ f', '.join(map(self.iterencode, o)) }]"
+            return f"[{ ', '.join(map(self.iterencode, o)) }]"
         return "\n, ".join(super().iterencode(o, _one_shot))
 
 

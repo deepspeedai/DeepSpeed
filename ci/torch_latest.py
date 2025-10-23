@@ -15,6 +15,7 @@ image = (modal.Image
          .run_commands("apt update && apt install -y libaio-dev")
          .pip_install_from_requirements(ROOT_PATH / "requirements/requirements.txt", gpu="any")
          .pip_install_from_requirements(ROOT_PATH / "requirements/requirements-dev.txt", gpu="any")
+         .pip_install_from_requirements(ROOT_PATH / "requirements/requirements-deepcompile.txt", gpu="any")
          .add_local_dir(ROOT_PATH , remote_path="/root/", copy=True)
          .run_commands("pip install /root")
          .add_local_dir(ROOT_PATH / "accelerator", remote_path="/root/deepspeed/accelerator")
@@ -33,7 +34,7 @@ app = modal.App("deepspeedai-torch-latest-ci", image=image)
 def pytest():
     import subprocess
     subprocess.run(
-        "pytest -n 4 --verbose tests/unit/runtime/zero/test_zero.py tests/unit/runtime/half_precision/test_bf16.py --torch_ver=2.6 --cuda_ver=12.4".split(),
+        "pytest -n 4 --verbose tests/unit/v1/ --torch_ver=2.6 --cuda_ver=12.4".split(),
         check=True,
         cwd=ROOT_PATH / ".",
     )

@@ -28,7 +28,7 @@ from . import module_inject
 from .accelerator import get_accelerator
 from .constants import TORCH_DISTRIBUTED_DEFAULT_PORT
 from .runtime.engine import DeepSpeedEngine, DeepSpeedOptimizerCallable, DeepSpeedSchedulerCallable
-from .runtime.engine import ADAM_OPTIMIZER, LAMB_OPTIMIZER
+from .runtime.engine import ADAM_OPTIMIZER, LAMB_OPTIMIZER, MUON_OPTIMIZER
 from .runtime.hybrid_engine import DeepSpeedHybridEngine
 from .runtime.pipe.engine import PipelineEngine
 from .inference.engine import InferenceEngine
@@ -64,6 +64,15 @@ __git_branch__ = git_branch
 
 # Set to torch's distributed package or deepspeed.comm based inside DeepSpeedEngine init
 dist = None
+
+
+def set_optimizer_flags(config_class, model):
+    if config_class.optimizer_name == MUON_OPTIMIZER:
+        for name, p in model.named_parameters():
+            if p.ndim >= 2 and not any(keyword in name.lower() for keyword in ("embed", "lm_head")):
+                setattr(p, "use_muon", True)
+            else:
+                setattr(p, "use_muon", False)
 
 
 def initialize(args=None,
@@ -177,6 +186,7 @@ def initialize(args=None,
     assert config is not None, "DeepSpeed requires --deepspeed_config to specify configuration file"
     if not isinstance(model, PipelineModule):
         config_class = DeepSpeedConfig(config, mpu, mesh_device=mesh_device)
+        set_optimizer_flags(config_class, model)
         if config_class.hybrid_engine.enabled:
             engine = DeepSpeedHybridEngine(args=args,
                                            model=model,
@@ -206,6 +216,7 @@ def initialize(args=None,
         assert mpu is None, "mpu must be None with pipeline parallelism"
         mpu = model.mpu()
         config_class = DeepSpeedConfig(config, mpu)
+        set_optimizer_flags(config_class, model)
         engine = PipelineEngine(args=args,
                                 model=model,
                                 optimizer=optimizer,

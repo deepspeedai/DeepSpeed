@@ -103,7 +103,7 @@ class TritonSelfAttention(nn.Module):
 
         # triton autotune table update for score/context matmul
         if triton_autotune:
-            print(f"running triton autotune for regular attention kernel")
+            print("running triton autotune for regular attention kernel")
             __class__._triton_autotune(2, self.config.max_out_tokens, self.head_size, self.config.hidden_size,
                                        self.triangular_masking, self.scale)
 

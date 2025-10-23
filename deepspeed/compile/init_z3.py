@@ -13,7 +13,7 @@ from deepspeed.runtime.zero.parameter_offload import DeepSpeedZeRoOffload
 from .passes import zero3_compile, prefetch, selective_gather, offload_parameters
 from .backend import make_backend, launch_compile_passes, init_schedule
 from .patch_fake_tensor import patch_fake_tensor
-from .util import get_deepcompile_handle, add_pre_backward_hook, is_backend_inductor
+from .util import get_deepcompile_handle, add_pre_backward_hook
 
 WARMUP = 5
 
@@ -23,15 +23,12 @@ def init_z3(engine, backend, compile_config, compile_kwargs, schedule=None):
     optimizer = engine.optimizer
     use_opt = not isinstance(optimizer, DeepSpeedZeRoOffload)
 
-    if use_opt and hasattr(optimizer, '_DeepSpeedZeroOptimizer_Stage3__ipg_bucket_flat_buffer'):
-        optimizer._DeepSpeedZeroOptimizer_Stage3__ipg_bucket_flat_buffer = None
+    if use_opt and hasattr(optimizer, "ipg_buckets"):
+        optimizer.ipg_buckets.clear()
         get_accelerator().empty_cache()
 
     dc = get_deepcompile_handle()
-    dc.init(engine.data_parallel_group,
-            engine.zero_reduce_bucket_size(), compile_config.double_buffer, compile_config.symmetric_memory,
-            is_backend_inductor(backend), compile_config.sync_before_reduce, compile_config.sync_after_reduce,
-            compile_config.sync_before_allgather, compile_config.sync_after_allgather)
+    dc.init(engine.data_parallel_group, compile_config, engine.zero_reduce_bucket_size())
 
     # Unset hooks
     for m in engine.module.modules():

@@ -40,7 +40,7 @@ class CheckpointSize(object):
 
 def init_decoupled_checkpoint(config_params, dp_writer_config, save_event, save_queue, optimize_dp_state):
     checkpoint_engine = FastCheckpointEngine(config_params, dp_writer_config, optimize_dp_state)
-    print(f'Created FastCheckpointEngine for Decoupled Checkpointing')
+    print('Created FastCheckpointEngine for Decoupled Checkpointing')
     save_path_list = []
     while True:
         (save_info, event_type) = save_queue.get()

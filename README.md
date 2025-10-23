@@ -16,25 +16,31 @@
 
 ## Latest News
 <b> <span style="color:orange" > DeepSpeed empowers ChatGPT-like model training with a single click, offering 15x speedup over SOTA RLHF systems with unprecedented cost reduction at all scales; [learn how](https://github.com/deepspeedai/DeepSpeed/tree/master/blogs/deepspeed-chat)</span>.</b>
+
+* [2025/08] [ZenFlow: Stall-Free Offloading Engine for LLM Training](https://pytorch.org/blog/zenflow-stall-free-offloading-engine-for-llm-training/)
+
 * [2025/06] [Arctic Long Sequence Training (ALST) with DeepSpeed: Scalable And Efficient Training For Multi-Million Token Sequences](https://www.snowflake.com/en/engineering-blog/arctic-long-sequence-training-multi-million-token-ai/)
+
+* [2025/06] [DeepNVMe: Affordable I/O scaling for Deep Learning Applications](https://github.com/deepspeedai/DeepSpeed/blob/master/blogs/deepnvme/06-2025/README.md)
+
 * [2025/04] [DeepCompile: Unlocking Compiler Optimization for Distributed Training](https://github.com/deepspeedai/DeepSpeed/blob/master/blogs/deepcompile/README.md)
-* [2025/03] [DeepSpeed-AutoTP: Automatic Tensor Parallel Training of Hugging Face models](https://github.com/deepspeedai/DeepSpeed/blob/master/blogs/huggingface-tp/README.md)
-* [2024/12] [Ulysses-Offload: Democratizing Long Context LLM Training ](https://github.com/deepspeedai/DeepSpeed/blob/master/blogs/ulysses-offload/README.md)
-* [2024/12] [DeepSpeed-Domino: Communication-Free LLM Training Engine](https://github.com/deepspeedai/DeepSpeed/blob/master/blogs/deepspeed-domino/README.md)
-* [2024/08] [DeepSpeed on Windows](https://github.com/deepspeedai/DeepSpeed/tree/master/blogs/windows/08-2024/README.md) [[日本語](https://github.com/deepspeedai/DeepSpeed/tree/master/blogs/windows/08-2024/japanese/README.md)]  [[中文](https://github.com/deepspeedai/DeepSpeed/tree/master/blogs/windows/08-2024/chinese/README.md)]
+
+* [2025/03] [DeepSpeed AutoTP: Automatic Tensor Parallel Training of Hugging Face models](https://github.com/deepspeedai/DeepSpeed/blob/master/blogs/huggingface-tp/README.md)
+
 
 <!-- NOTE: we must use html for news items otherwise links will be broken in the 'more news' section -->
 <details>
+<!-- NOTE: Maintain only three items in 'more news' section -->
  <summary>More news</summary>
  <ul>
-   <li> [2024/08] <a href="https://github.com/deepspeedai/DeepSpeed/blob/master/blogs/deepspeed-gds/README.md"> DeepNVMe: Improving DL Applications through I/O Optimizations</a> [<a href="ttps://github.com/deepspeedai/DeepSpeed/blob/master/blogs/deepspeed-gds/japanese/README.md"> 日本語 </a>] [<a href="https://github.com/deepspeedai/DeepSpeed/blob/master/blogs/deepspeed-gds/japanese/README.md"> 中文 </a>]</li>
-
-    <li> [2024/07] <a href="https://github.com/microsoft/DeepSpeed/tree/master/blogs/deepspeed-ucp/README.md"> DeepSpeed Universal Checkpointing: Efficient and Flexible Checkpointing for Large Scale Distributed Training</a> [<a href="https://github.com/microsoft/DeepSpeed/tree/master/blogs/deepspeed-ucp/japanese/README.md"> 日本語 </a>] </li>
-
-   <li> [2024/03] <a href="https://github.com/microsoft/DeepSpeed/tree/master/blogs/deepspeed-fp6/03-05-2024/README.md"> DeepSpeed-FP6: The Power of FP6-Centric Serving for Large Language Models</a> [<a href="https://github.com/microsoft/DeepSpeed/tree/master/blogs/deepspeed-fp6/03-05-2024/README-Chinese.md"> 中文 </a>] </li>
-
+   <li>[2024/12] <a href="https://github.com/deepspeedai/DeepSpeed/blob/master/blogs/ulysses-offload/README.md">Ulysses-Offload: Democratizing Long Context LLM Training</a></li>
+   <li>[2024/12] <a href="https://github.com/deepspeedai/DeepSpeed/blob/master/blogs/deepspeed-domino/README.md">DeepSpeed-Domino: Communication-Free LLM Training Engine</a></li>
+   <li>[2024/08] <a href="https://github.com/deepspeedai/DeepSpeed/tree/master/blogs/windows/08-2024/README.md">DeepSpeed on Windows</a>
+   [<a href="https://github.com/deepspeedai/DeepSpeed/tree/master/blogs/windows/08-2024/japanese/README.md">日本語</a>]
+   [<a href="https://github.com/deepspeedai/DeepSpeed/tree/master/blogs/windows/08-2024/chinese/README.md">中文</a>]</li>
  </ul>
 </details>
+
 
 ---
 
@@ -209,6 +215,10 @@ All DeepSpeed documentation, tutorials, and blogs can be found on our website: [
 | [Blogs](https://www.deepspeed.ai/posts/)                                                       |  Blogs                                   |
 
 
+# CI funding
+
+This being an open source project we rely on others to provide us resources for CI hardware. At this moment Modal is kindly supporting our GPU CI runs by funding the hardware for us. Modal is an AI infrastructure platform for inference, fine-tuning, batch jobs and more. Get started with $30/mo in free credits today at https://modal.com. We have been getting an amazing support from Modal's team and will surely recommend them to your business.
+
 # Contributing
 DeepSpeed welcomes your contributions! Please see our
 [contributing](CONTRIBUTING.md) guide for more details on formatting, testing,
@@ -273,7 +283,8 @@ Conduct](https://opensource.microsoft.com/codeofconduct/). For more information 
 32. Sam Ade Jacobs, Masahiro Tanaka, Chengming Zhang, Minjia Zhang, Reza Yazdani Aminadabi, Shuaiwen Leon Song, Samyam Rajbhandari, Yuxiong He. (2024) [System Optimizations for Enabling Training of Extreme Long Sequence Transformer Models](https://dl.acm.org/doi/10.1145/3662158.3662806)
 33. Xinyu Lian, Sam Ade Jacobs, Lev Kurilenko, Masahiro Tanaka, Stas Bekman, Olatunji Ruwase, Minjia Zhang. (2024) Universal Checkpointing: Efficient and Flexible Checkpointing for Large Scale Distributed Training [arXiv:2406.18820](https://arxiv.org/abs/2406.18820)
 34. Stas Bekman, Samyam Rajbhandari, Michael Wyatt, Jeff Rasley, Tunji Ruwase, Zhewei Yao, Aurick Qiao, Yuxiong He. (2025) Arctic Long Sequence Training: Scalable And Efficient Training For Multi-Million Token Sequences [arXiv:2506.13996](https://arxiv.org/abs/2506.13996)
-
+35. Tingfeng Lan, Yusen Wu, Bin Ma, Zhaoyuan Su, Rui Yang, Tekin Bicer, Masahiro Tanaka, Olatunji Ruwase, Dong Li, Yue Cheng. (2025) ZenFlow: Enabling Stall-Free Offloading Training via Asynchronous Updates [arXiv:2505.12242](https://arxiv.org/abs/2505.12242)
+36. Xinyu Lian, Masahiro Tanaka, Olatunji Ruwase, Minjia Zhang. (2026) SuperOffload: Unleashing the Power of Large-Scale LLM Training on Superchips [ASPLOS 2026](https://www.asplos-conference.org/asplos2026)
 
 # Videos
 1. DeepSpeed KDD 2020 Tutorial

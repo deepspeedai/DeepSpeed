@@ -24,7 +24,7 @@ from deepspeed.runtime.utils import is_model_parallel_parameter
 
 def skip_on_device():
     if get_accelerator().device_name() == 'xpu':
-        pytest.skip(f"XPU requires a higher version for test")
+        pytest.skip("XPU requires a higher version for test")
 
 
 class SequentialLinearModel(torch.nn.Module):
@@ -449,9 +449,9 @@ class TestSave(DistributedTest):
         base_state_dict = base_model.state_dict()
         if dist.get_rank() == 0:
             # we should consider the case when zero3 is used in the future.
-            assert compare_state_dicts(base_state_dict, tp_state_dict), f"State_dict is not the same!"
+            assert compare_state_dicts(base_state_dict, tp_state_dict), "State_dict is not the same!"
         else:
-            assert tp_state_dict is None, f"noly rank0 should have the state_dict"
+            assert tp_state_dict is None, "noly rank0 should have the state_dict"
 
     def test_ckpt_save(self, tmpdir, tp_size: int, zero_stage: int):
         skip_on_device()

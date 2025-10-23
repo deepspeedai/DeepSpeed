@@ -14,6 +14,25 @@ def _make_offload_state_key(key):
     return f"{key}_offload_buffer"
 
 
+def offload_optimizer_states(optimizer, device, pin_memory=False, non_blocking=False):
+    for state in optimizer.state.values():
+        for k, v in state.items():
+            if torch.is_tensor(v):
+                if pin_memory and v.device.type != 'cpu':
+                    pinned_buffer = torch.empty_like(v, device='cpu').pin_memory()
+                    pinned_buffer.copy_(v, non_blocking=non_blocking)
+                    state[k] = pinned_buffer
+                else:
+                    state[k] = v.to(device, non_blocking=non_blocking)
+
+
+def reload_optimizer_states(optimizer, device, non_blocking=False):
+    for state in optimizer.state.values():
+        for k, v in state.items():
+            if torch.is_tensor(v):
+                state[k] = v.to(device, non_blocking=non_blocking)
+
+
 def offload_adam_states(optimizer, device, pin_memory: bool = False, non_blocking: bool = False):
     """Move optimizer states to device. Note that this assumes the state structure of DeepSpeed Adam."""
 

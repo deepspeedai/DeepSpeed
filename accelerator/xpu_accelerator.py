@@ -61,7 +61,7 @@ class XPU_Accelerator(DeepSpeedAccelerator):
         return 'xpu:{}'.format(device_index)
 
     def device(self, device_index=None):
-        return torch.xpu.device(device_index)
+        return torch.device('xpu', device_index)
 
     def set_device(self, device_index):
         torch.xpu.set_device(device_index)

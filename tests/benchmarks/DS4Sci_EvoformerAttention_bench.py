@@ -99,7 +99,7 @@ def benchmark():
         with cuda_timer(baseline_bw):
             ref_out.backward(d_out)
 
-    print(f"batch size\tours (FW)\tbaseline (FW)\tours (BW)\tbaseline (BW)")
+    print("batch size\tours (FW)\tbaseline (FW)\tours (BW)\tbaseline (BW)")
     for i in range(len(ours_fw)):
         print(f"{i+1}\t{ours_fw[i]}\t{baseline_fw[i]}\t{ours_bw[i]}\t{baseline_bw[i]}")
 

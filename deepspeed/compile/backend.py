@@ -3,9 +3,10 @@
 
 # DeepSpeed Team
 
-from typing import Dict, List, Callable
+from typing import Dict, List, Callable, Tuple
 import time
 import gc
+from collections import OrderedDict
 
 import torch
 from torch.fx import Graph, GraphModule
@@ -15,6 +16,7 @@ try:
     import torch._dynamo
     from functorch.compile import make_boxed_func
     from torch._functorch.aot_autograd import aot_module_simplified
+    from torch._functorch.partitioners import min_cut_rematerialization_partition
     from torch._subclasses.fake_tensor import unset_fake_temporarily
     from torch._subclasses.fake_tensor import is_fake
 except ImportError:
@@ -43,17 +45,14 @@ param_manager: Dict[int, DSGraphParamManager] = {}
 class GraphOrder:
 
     def __init__(self):
-        self.ordered_frames = []
-        self.frames = {}
+        self.frames = OrderedDict()
 
-    def add_graph(self, graph_id, frame_id, needs_backward):
-        if frame_id not in self.ordered_frames:
-            self.ordered_frames.append(frame_id)
+    def add_graph(self, graph_id: int, frame_id: int, needs_backward: bool):
+        if frame_id not in self.frames:
+            self.frames[frame_id] = (graph_id, needs_backward)
 
-        self.frames[frame_id] = (graph_id, needs_backward)
-
-    def get_graph_order(self):
-        return [self.frames[frame_id] for frame_id in self.ordered_frames]
+    def get_graph_order(self) -> List[Tuple[int, bool]]:
+        return list(self.frames.values())
 
     def clear(self):
         self.frames.clear()
@@ -151,11 +150,12 @@ def set_example_values_to_symints(real_inputs, param_indices=None):
                     else:
                         stride.append(fs)
                 with unset_fake_temporarily():
-                    dummy_v = torch.zeros(shape,
-                                          dtype=v.dtype,
-                                          layout=v.layout,
-                                          device=v.device,
-                                          requires_grad=v.requires_grad).as_strided(shape, stride)
+                    dummy_v = torch.empty_strided(shape,
+                                                  stride,
+                                                  dtype=v.dtype,
+                                                  layout=v.layout,
+                                                  device=v.device,
+                                                  requires_grad=v.requires_grad).zero_()
 
                     # Create Parameter if this input index corresponds to a parameter
                     if i in param_idx_set:
@@ -179,7 +179,7 @@ def set_example_values_to_symints(real_inputs, param_indices=None):
 def run_opt_passes(opt_passes: List[Callable],
                    gm: GraphModule,
                    graph_id: int,
-                   graph_order: List[int],
+                   graph_order: List[Tuple[int, bool]],
                    profiling_results,
                    create_inputs_fn,
                    mem_budget: float,
@@ -311,7 +311,7 @@ def make_backend(backend, compile_config, compile_kwargs={}):
             graph_index = get_index_by_graph_id(graph_order, graph_id)
             log_rank0(
                 f"Bwd start {graph_index} graph_id={graph_id} alloc_mem={get_accelerator().memory_allocated()} graph={gm.graph}",
-                enable=True)
+                enable=debug_log)
 
             bwd_inputs_stack = get_backward_inputs()
 
@@ -368,17 +368,16 @@ def make_backend(backend, compile_config, compile_kwargs={}):
 
                 return compiler_fn
 
+            partition_fn = get_wrapped_partitioner(z3_partition, param_indices, min_cut_rematerialization_partition)
             aot_mod = aot_module_simplified(gm,
                                             real_inputs,
                                             fw_compiler=make_compiler_fn(make_fw_graph),
                                             bw_compiler=make_compiler_fn(make_bw_graph),
-                                            partition_fn=get_wrapped_partitioner(param_indices))
+                                            partition_fn=partition_fn)
             return torch._dynamo.optimize(**compile_kwargs)(aot_mod)
         elif backend == "inductor":
             patch_create_aot_dispatcher_function(graph_id, z3_partition, make_fw_graph, make_bw_graph, real_inputs,
                                                  param_indices, param_manager)
-            from .partitioner import get_wrapped_choose_saved_values_set
-            torch._functorch.partitioners.choose_saved_values_set = get_wrapped_choose_saved_values_set(param_indices)
 
             return torch._inductor.compile(gm, real_inputs)
 

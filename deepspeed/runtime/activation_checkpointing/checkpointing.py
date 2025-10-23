@@ -1122,7 +1122,7 @@ def configure(
     #print configuration only once
     see_memory_usage("After configuration", force=False)
     if dist.get_rank() == 0:
-        logger.info(f"Activation Checkpointing Information")
+        logger.info("Activation Checkpointing Information")
         logger.info(f"----Partition Activations {PARTITION_ACTIVATIONS}, CPU CHECKPOINTING {CPU_CHECKPOINT}")
         logger.info(f"----contiguous Memory Checkpointing {CONTIGUOUS_CHECKPOINTING} with {num_layers} total layers")
         logger.info(f"----Synchronization {SYNCHRONIZE}")

@@ -50,7 +50,7 @@ class FPQuantizerBuilder(CUDAOpBuilder):
         except ImportError:
             if verbose:
                 self.warning(
-                    f"please install triton==2.3.0, 2.3.1 or 3.0.0 if you want to use the FP Quantizer Kernels")
+                    "please install triton==2.3.0, 2.3.1 or 3.0.0 if you want to use the FP Quantizer Kernels")
             return False
 
         # triton 2.3.{0,1} and 3.0.0 are ok.

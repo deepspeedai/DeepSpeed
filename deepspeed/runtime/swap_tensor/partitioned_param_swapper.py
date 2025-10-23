@@ -399,8 +399,8 @@ class AsyncPartitionedParameterSwapper(object):
         self.partitioned_swap_pool = SwapBufferPool([self.partitioned_swap_buffer])
 
     def swap_out_partitioned_params(self, dst_fp16_params, src_fp32_params):
-        assert self.partitioned_swap_buffer is not None, f'partitioned swap buffers for fp16 params not initialized'
-        assert self.partitioned_swap_pool is not None, f'partitioned swap pool for fp16 params not initialized'
+        assert self.partitioned_swap_buffer is not None, 'partitioned swap buffers for fp16 params not initialized'
+        assert self.partitioned_swap_pool is not None, 'partitioned swap pool for fp16 params not initialized'
         assert len(dst_fp16_params) == len(src_fp32_params), \
         f'mismatch in number of fp16 params {len(dst_fp16_params)} and fp32 params {len(src_fp32_params)}'
 

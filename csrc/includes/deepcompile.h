@@ -18,6 +18,7 @@
 #include <c10/cuda/CUDAStream.h>
 #include <torch/csrc/cuda/nccl.h>
 #include <torch/csrc/distributed/c10d/NCCLUtils.hpp>
+#include <torch/csrc/distributed/c10d/ParamCommsUtils.hpp>
 #include <torch/csrc/distributed/c10d/ProcessGroup.hpp>
 
 #if __has_include(<torch/csrc/distributed/c10d/symm_mem/SymmetricMemory.hpp>)
@@ -98,7 +99,6 @@ extern c10::intrusive_ptr<c10d::ProcessGroup> process_group;
 extern c10::intrusive_ptr<c10d::symmetric_memory::SymmetricMemory> symm_mem;
 extern ncclComm_t nccl_comm;
 extern bool use_symm_mem;
-extern bool clone_custom_op_output;
 extern bool profile;
 extern bool pre_div_reduce;
 
@@ -262,6 +262,7 @@ public:
         : id_(id),
           shape_(std::move(ds_shape)),
           ds_tensor_(ds_tensor),
+          ds_dtype_(ds_tensor.scalar_type()),
           grad_buffer_(grad_buffer),
           partitioned_(partitioned),
           offset_(offset),
@@ -273,6 +274,7 @@ public:
 
     long getId() const { return id_; }
     std::vector<int64_t> getShape() const { return shape_; }
+    at::ScalarType getDtype() const { return ds_dtype_; }
     at::Tensor getDSTensor() const
     {
         // If the reload event exists and is complete, return the reloaded tensor (if defined)
@@ -344,6 +346,7 @@ public:
 private:
     long id_;
     std::vector<int64_t> shape_;
+    at::ScalarType ds_dtype_;
     at::Tensor ds_tensor_;
     at::Tensor ds_reload_tensor_;
     at::Tensor grad_buffer_;
@@ -456,7 +459,13 @@ public:
 
     virtual void startBackward(bool update) { param_updated_ = update; }
 
-    virtual void endBackward() {}
+    virtual void endBackward()
+    {
+        flushAllReduceBuckets();
+
+        // This synchronization ensures all of reduce calls are done before optimizer's step.
+        at::cuda::stream_synchronize(rs_stream_);
+    }
 
     virtual at::Tensor reduceGrad(at::Tensor grad_tensor, long ds_id)
     {
@@ -498,19 +507,6 @@ public:
             at::cuda::CUDAStreamGuard guard(copy_stream_);
             reduce_in_buffer.copy_(copy_src, true);
             rs_copy_done_events_[ds_id]->record(copy_stream_);
-        }
-
-        reduce_counter_--;
-
-        if (reduce_counter_ == 0) {
-            flushAllReduceBuckets();
-
-            reduce_counter_ = ds_ids_.size();
-
-            // This synchronization ensures all of reduce calls are done before optimizer's step.
-            at::cuda::stream_synchronize(rs_stream_);
-
-            endBackward();
         }
 
         return at::Tensor();
@@ -597,14 +593,8 @@ void free_tensors(std::vector<at::Tensor> tensors);
 void free_tensors_meta(std::vector<at::Tensor> tensors);
 
 void init(c10::intrusive_ptr<c10d::ProcessGroup> pg,
-          int64_t initial_reduce_bucket_size,
-          bool enable_double_buffer,
-          bool _use_symm_mem,
-          bool _clone_custom_op_output,
-          bool _sync_before_reduce,
-          bool _sync_after_reduce,
-          bool _sync_before_allgather,
-          bool _sync_after_allgather);
+          pybind11::object& config,
+          int64_t initial_reduce_bucket_size);
 void reset();
 void cleanup();
 

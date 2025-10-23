@@ -30,7 +30,7 @@ def swap_out_tensors(swap_handle, tensor_buffers, swap_paths):
 def print_object(obj, name, exclude_list=[]):
     logger.info('{}:'.format(name))
     for arg in sorted(vars(obj)):
-        if not arg in exclude_list:
+        if arg not in exclude_list:
             dots = '.' * (29 - len(arg))
             logger.info('  {} {} {}'.format(arg, dots, getattr(obj, arg)))
 
@@ -55,7 +55,7 @@ class SwapBuffer(object):
 
     def allocate_tensor(self, swap_path, numel, aligned_numel):
         assert self.has_space(aligned_numel)
-        assert not self.offset in self.swap_tensors
+        assert self.offset not in self.swap_tensors
 
         allocate_offset = self.offset
         swap_tensor = self.buffer.narrow(0, allocate_offset, aligned_numel)

@@ -70,10 +70,10 @@ def validate_args(args):
     error_messages = []
 
     if args.folder is not None and len(args.folder_to_device_mapping) > 0:
-        error_messages.append(f'--folder and --folder_to_device_mapping cannot be specified together.')
+        error_messages.append('--folder and --folder_to_device_mapping cannot be specified together.')
         no_error = False
     elif args.folder is None and len(args.folder_to_device_mapping) == 0:
-        error_messages.append(f'At least one of --folder or --folder_to_device_mapping must be specified.')
+        error_messages.append('At least one of --folder or --folder_to_device_mapping must be specified.')
         no_error = False
 
     # Validate --folder
@@ -102,7 +102,7 @@ def validate_args(args):
         print(f'Found {len(error_messages)} validation error(s)')
     # Validate --gpu, --use_gds
     if args.use_gds and not args.gpu:
-        error_messages.append(f'--gpu must be set to transfer with --use_gds')
+        error_messages.append('--gpu must be set to transfer with --use_gds')
         no_error = False
 
     if not no_error:
@@ -201,7 +201,7 @@ def get_validated_args():
     args = refine_args(args)
     if not validate_args(args):
         quit()
-    print(f'Successful validation of command line arguments')
+    print('Successful validation of command line arguments')
     args.total_loops = args.warmup_loops + args.loops
     peer_tag = 'gpu' if args.gpu else 'process'
     args.mapping_dict = _get_mapping_dict(args)

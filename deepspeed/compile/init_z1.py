@@ -10,7 +10,7 @@ import torch
 from deepspeed.accelerator import get_accelerator
 from .passes import zero1_compile, zero3_compile
 from .backend import make_backend, launch_compile_passes, init_schedule
-from .util import get_deepcompile_handle, add_pre_backward_hook, is_backend_inductor
+from .util import get_deepcompile_handle, add_pre_backward_hook
 
 WARMUP = 5
 
@@ -24,20 +24,27 @@ def init_z1(engine, backend, compile_config, compile_kwargs, schedule=None, use_
     optimizer._grad_acc_hooks.clear()
 
     dc = get_deepcompile_handle()
-    dc.init(engine.data_parallel_group,
-            engine.zero_reduce_bucket_size(), compile_config.double_buffer, compile_config.symmetric_memory,
-            is_backend_inductor(backend), compile_config.sync_before_reduce, compile_config.sync_after_reduce, False,
-            False)
+    dc.init(engine.data_parallel_group, compile_config, engine.zero_reduce_bucket_size())
 
     grad_buffer = {}
 
+    # Save original all_grad_tensors state as we temporarily modify it
+    original_all_grad_tensors = optimizer.all_grad_tensors.copy() if hasattr(optimizer, 'all_grad_tensors') else {}
+
     for i, group in enumerate(optimizer.bit16_groups):
+        # Temporarily populate all_grad_tensors for get_flat_partition call
+        # This is needed because get_flat_partition accesses all_grad_tensors[param_group_idx][i]
+        # but it's empty during initialization
+        if i not in optimizer.all_grad_tensors or optimizer.all_grad_tensors[i] is None:
+            optimizer.all_grad_tensors[i] = optimizer.get_all_grad_tensors(optimizer.params_in_partition[i],
+                                                                           optimizer.gradient_accumulation_dtype)
 
         grad_buffer[i] = optimizer.get_flat_partition(optimizer.params_in_partition[i],
                                                       optimizer.first_offset[i],
                                                       optimizer.partition_size[i],
                                                       dtype=optimizer.gradient_accumulation_dtype,
                                                       device=get_accelerator().current_device_name(),
+                                                      param_group_idx=i,
                                                       return_tensor_list=True)
         grad_buffer[i] = [p.clone().detach() for p in grad_buffer[i]]  # Maybe not necessary
 
@@ -58,6 +65,9 @@ def init_z1(engine, backend, compile_config, compile_kwargs, schedule=None, use_
             else:
                 # print(f"[r{dist.get_rank()}] Registering group {i} param {param_id} in_partition={in_partition} p={p.shape} buf=None")
                 dc.register_param(p.param_id, p.shape, p, torch.empty([0], dtype=p.dtype, device=p.device), 0)
+
+    # Restore original all_grad_tensors state
+    optimizer.all_grad_tensors = original_all_grad_tensors
 
     def set_grad_buffer():
         optimizer.averaged_gradients = copy.copy(grad_buffer)

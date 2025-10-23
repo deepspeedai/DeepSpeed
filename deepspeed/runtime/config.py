@@ -52,6 +52,7 @@ from ..elasticity.constants import (
 from ..profiling.config import DeepSpeedFlopsProfilerConfig
 from ..autotuning.config import DeepSpeedAutotuningConfig
 from ..nebula.config import DeepSpeedNebulaConfig
+from ..datastates.config import DeepSpeedDataStatesConfig
 
 from ..compression.config import get_compression_config, get_quantize_enabled
 from ..compression.constants import *
@@ -77,9 +78,11 @@ MUADAM_OPTIMIZER = 'muadam'
 MUADAMW_OPTIMIZER = 'muadamw'
 MUSGD_OPTIMIZER = 'musgd'
 LION_OPTIMIZER = 'lion'
+MUON_OPTIMIZER = 'muon'
+
 DEEPSPEED_OPTIMIZERS = [
     ADAGRAD_OPTIMIZER, ADAM_OPTIMIZER, ADAMW_OPTIMIZER, LAMB_OPTIMIZER, ONEBIT_ADAM_OPTIMIZER, ONEBIT_LAMB_OPTIMIZER,
-    ZERO_ONE_ADAM_OPTIMIZER, MUADAM_OPTIMIZER, MUADAMW_OPTIMIZER, MUSGD_OPTIMIZER, LION_OPTIMIZER
+    ZERO_ONE_ADAM_OPTIMIZER, MUADAM_OPTIMIZER, MUADAMW_OPTIMIZER, MUSGD_OPTIMIZER, LION_OPTIMIZER, MUON_OPTIMIZER
 ]
 
 # extra optimizer parameters for adam/adamw
@@ -857,6 +860,7 @@ class DeepSpeedConfig(object):
         self.dataloader_drop_last = get_dataloader_drop_last(param_dict)
 
         self.nebula_config = DeepSpeedNebulaConfig(param_dict)
+        self.datastates_config = DeepSpeedDataStatesConfig(param_dict)
         self.checkpoint_config = get_checkpoint_config(param_dict)
 
         self.weight_quantization_config = WeightQuantConfig(

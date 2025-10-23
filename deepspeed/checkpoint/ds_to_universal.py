@@ -152,21 +152,21 @@ def extract_zero_shards(dir, ds_checkpoint, indices_3D):
 def extract_zero_shards_stage3(optim_files, param_shapes, dp_degree, temp_dir, dp_index):
     state_dict = torch.load(optim_files[dp_index], map_location='cpu', weights_only=False)
 
-    flat_state = dict(
-        exp_avg=state_dict[OPTIMIZER_STATE_DICT]['optimizer_state_dict']['state'][0]["exp_avg"],
-        exp_avg_sq=state_dict[OPTIMIZER_STATE_DICT]['optimizer_state_dict']['state'][0]["exp_avg_sq"],
-        fp32=state_dict[OPTIMIZER_STATE_DICT]['fp32_flat_groups'][0],
-    )
-
-    offset = 0
-    for name, shape in param_shapes.items():
-        unpartitioned_numel = shape.numel()
-        partitioned_numel, _ = _zero_partitioned_param_info(unpartitioned_numel, dp_degree)
-        padding_free_numel = min(partitioned_numel, abs(unpartitioned_numel - dp_index * partitioned_numel))
-        for state_key in flat_state.keys():
-            dump_param_fragment(temp_dir, 0, dp_index, state_key, flat_state[state_key], name, offset,
-                                padding_free_numel)
-        offset += partitioned_numel
+    for idx, sub_group_shape in enumerate(param_shapes):
+        flat_state = dict(
+            exp_avg=state_dict[OPTIMIZER_STATE_DICT]['optimizer_state_dict']['state'][idx]["exp_avg"],
+            exp_avg_sq=state_dict[OPTIMIZER_STATE_DICT]['optimizer_state_dict']['state'][idx]["exp_avg_sq"],
+            fp32=state_dict[OPTIMIZER_STATE_DICT]['fp32_flat_groups'][idx],
+        )
+        offset = 0
+        for name, shape in sub_group_shape.items():
+            unpartitioned_numel = shape.numel()
+            partitioned_numel, _ = _zero_partitioned_param_info(unpartitioned_numel, dp_degree)
+            padding_free_numel = min(partitioned_numel, abs(unpartitioned_numel - dp_index * partitioned_numel))
+            for state_key in flat_state.keys():
+                dump_param_fragment(temp_dir, 0, dp_index, state_key, flat_state[state_key], name, offset,
+                                    padding_free_numel)
+            offset += partitioned_numel
 
 
 cnt = 0
@@ -269,7 +269,7 @@ def merge_tp_slices(ds_checkpoint, dir, slice_dir, tp_degree, name_and_shape):
 
     step_merged = _merge_zero_shards(slice_base_path, "step", tp_degree, shape)
     if step_merged:
-        _save_checkpoint(os.path.join(param_base_path, f"step.pt"), step_merged[0])
+        _save_checkpoint(os.path.join(param_base_path, "step.pt"), step_merged[0])
 
     for state in ("fp32", "exp_avg", "exp_avg_sq"):
         slices = _merge_zero_shards(slice_base_path, state, tp_degree, shape)
@@ -390,10 +390,10 @@ def _merge_tp_slice_files(args, ds_checkpoint, slice_shapes, temp_dir):
         print(f'Warning: Unused patterns={unmatched_patterns} while merging tp slices')
 
 
-def _merge_zero3_slice_files(args, param_shapes, dp_degree, temp_dir):
+def _merge_zero3_slice_files(args, param_keys, dp_degree, temp_dir):
     zero_output_folder = os.path.join(args.output_folder, "zero")
     do_work = partial(merge_zero3_slices, dp_degree, zero_output_folder, temp_dir)
-    _do_parallel_work(do_work, param_shapes.keys(), args.num_merge_workers)
+    _do_parallel_work(do_work, param_keys, args.num_merge_workers)
 
 
 def _zero_partitioned_param_info(unpartitioned_numel, world_size):
@@ -415,7 +415,7 @@ def _save_optimizer_state(args, ds_checkpoint):
     output_sd = {k: v for k, v in optim_sd.items() if k not in sharded_states}
     output_sd[PARAM_GROUPS] = optim_sd[BASE_OPTIMIZER_STATE][PARAM_GROUPS]
     zero_output_folder = os.path.join(args.output_folder, "zero")
-    output_file_path = os.path.join(zero_output_folder, f"optimizer_state.pt")
+    output_file_path = os.path.join(zero_output_folder, "optimizer_state.pt")
     _save_checkpoint(output_file_path, output_sd)
 
 
@@ -424,7 +424,7 @@ def _save_optimizer_state_stage3(args, optim_files):
     output_sd = sd[OPTIMIZER_STATE_DICT]
     output_sd[PARAM_GROUPS] = output_sd[OPTIMIZER_STATE_DICT][PARAM_GROUPS]
     zero_output_folder = os.path.join(args.output_folder, "zero")
-    output_file_path = os.path.join(zero_output_folder, f"optimizer_state.pt")
+    output_file_path = os.path.join(zero_output_folder, "optimizer_state.pt")
     _save_checkpoint(output_file_path, output_sd)
 
 
@@ -467,7 +467,7 @@ def _check_for_required_state(ds_checkpoint):
 
 
 def main(args):
-    print(f'Convert DeepSpeed Checkpoint to Universal Checkpoint')
+    print('Convert DeepSpeed Checkpoint to Universal Checkpoint')
 
     print(f'Converting DeepSpeed checkpoint in {args.input_folder} to Universal checkpoint in {args.output_folder}')
 
@@ -514,7 +514,6 @@ def main(args):
     else:
         model_files = _get_model_state_files(args.input_folder)
         param_shapes = _parse_model_states_stage3(model_files)
-        param_shapes = {k: v for d in param_shapes for k, v in d.items()}
         dp_degree = len(model_files)
 
         temp_dir = os.path.join(args.output_folder, 'tmp')
@@ -523,7 +522,8 @@ def main(args):
         _extract_zero_shard_files_stage3(args, optim_files, param_shapes, dp_degree, temp_dir)
 
         print('*** 2. Merging slices .....')
-        _merge_zero3_slice_files(args, param_shapes, dp_degree, temp_dir)
+        param_keys = {key for sub_group_shapes in param_shapes for key in sub_group_shapes.keys()}
+        _merge_zero3_slice_files(args, param_keys, dp_degree, temp_dir)
 
         print('*** 3. Saving common optimizer states')
         _save_optimizer_state_stage3(args, optim_files)

@@ -22,7 +22,7 @@ log_levels = {
 class LoggerFactory:
 
     @staticmethod
-    def create_logger(name=None, level=logging.INFO):
+    def create_logger(name=None, level=logging.WARNING):
         """create a logger
 
         Args:
@@ -58,7 +58,7 @@ class LoggerFactory:
         return logger_
 
 
-logger = LoggerFactory.create_logger(name="DeepSpeed", level=logging.INFO)
+logger = LoggerFactory.create_logger(name="DeepSpeed", level=logging.WARNING)
 
 
 @functools.lru_cache(None)
@@ -83,18 +83,20 @@ def print_configuration(args, name):
         logger.info("  {} {} {}".format(arg, dots, getattr(args, arg)))
 
 
-def log_dist(message, ranks=None, level=logging.INFO):
+def get_dist_msg(message, ranks=None):
     from deepspeed import comm as dist
-    """Log message when one of following condition meets
+    """Return a message with rank prefix when one of following conditions is met:
 
-    + not dist.is_initialized()
-    + dist.get_rank() in ranks if ranks is not None or ranks = [-1]
+      + not dist.is_initialized()
+      + dist.get_rank() in ranks if ranks is not None or ranks = [-1]
+
+    If neither is met, `None` is returned.
+
+    Example: "hello" => "[Rank 0] hello"
 
     Args:
         message (str)
         ranks (list)
-        level (int)
-
     """
     should_log = not dist.is_initialized()
     ranks = ranks or []
@@ -103,8 +105,52 @@ def log_dist(message, ranks=None, level=logging.INFO):
         should_log = ranks[0] == -1
         should_log = should_log or (my_rank in set(ranks))
     if should_log:
-        final_message = "[Rank {}] {}".format(my_rank, message)
+        return "[Rank {}] {}".format(my_rank, message)
+    else:
+        return None
+
+
+def log_dist(message, ranks=None, level=logging.INFO):
+    """Log message when get_dist_msg() deems it should be logged, see its docstring for details.
+
+    Args:
+        message (str)
+        ranks (list)
+        level (int)
+    """
+    final_message = get_dist_msg(message, ranks)
+    if final_message is not None:
         logger.log(level, final_message)
+
+
+def print_dist(message, ranks=None):
+    """print message when get_dist_msg() deems it should be logged, see its docstring for details.
+
+    Use this function instead of `log_dist` when the log level shouldn't impact whether the message should be printed or not.
+
+    Args:
+        message (str)
+        ranks (list)
+    """
+    final_message = get_dist_msg(message, ranks)
+    if final_message is not None:
+        print(final_message)
+
+
+@functools.lru_cache(None)
+def _log_dist_once_cached(message, ranks_key, level):
+    ranks_arg = list(ranks_key) if ranks_key is not None else None
+    log_dist(message, ranks=ranks_arg, level=level)
+
+
+def log_dist_once(message, ranks=None, level=logging.INFO):
+    # Identical to `log_dist`, but will emit each unique message only once per process.
+    # ranks is a list which is unhashable, so convert to tuple for caching
+    ranks_key = tuple(ranks) if ranks is not None else None
+    _log_dist_once_cached(message, ranks_key, level)
+
+
+logger.log_dist_once = log_dist_once
 
 
 def print_json_dist(message, ranks=None, path=None):
@@ -134,6 +180,31 @@ def print_json_dist(message, ranks=None, path=None):
             os.fsync(outfile)
 
 
+def get_log_level_from_string(log_level_str):
+    """converts a log level string into its numerical equivalent. e.g. "info" => `logging.INFO`
+    """
+    log_level_str = log_level_str.lower()
+    if log_level_str not in log_levels:
+        raise ValueError(
+            f"{log_level_str} is not one of the valid logging levels. Valid log levels are {log_levels.keys()}.")
+    return log_levels[log_level_str]
+
+
+def set_log_level_from_string(log_level_str, custom_logger=None):
+    """Sets a log level in the passed `logger` and its handlers from string. e.g. "info" => `logging.INFO`
+
+    Args:
+        log_level_str: one of 'debug', 'info', 'warning', 'error', 'critical'
+        custom_logger: if `None` will use the default `logger` object
+    """
+    log_level = get_log_level_from_string(log_level_str)
+    if custom_logger is None:
+        custom_logger = logger
+    custom_logger.setLevel(log_level)
+    for handler in custom_logger.handlers:
+        handler.setLevel(log_level)
+
+
 def get_current_level():
     """
     Return logger's current log level
@@ -156,8 +227,5 @@ def should_log_le(max_log_level_str):
     if not isinstance(max_log_level_str, str):
         raise ValueError(f"{max_log_level_str} is not a string")
 
-    max_log_level_str = max_log_level_str.lower()
-    if max_log_level_str not in log_levels:
-        raise ValueError(f"{max_log_level_str} is not one of the logging levels")
-
-    return get_current_level() <= log_levels[max_log_level_str]
+    max_log_level = get_log_level_from_string(max_log_level_str)
+    return get_current_level() <= max_log_level

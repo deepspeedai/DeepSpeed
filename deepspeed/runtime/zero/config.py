@@ -10,6 +10,8 @@ from pydantic import Field, model_validator
 from deepspeed.runtime.config_utils import get_scalar_param, pp_int, DeepSpeedConfigModel
 from deepspeed.utils import logger
 from .offload_config import DeepSpeedZeroOffloadParamConfig, DeepSpeedZeroOffloadOptimizerConfig, OffloadDeviceEnum
+from deepspeed.runtime.zenflow.zenflow_config import ZenFlowConfig
+from .leaf_module_config import DeepSpeedZeroLeafModuleConfig
 
 # ZeRO optimization. By default, this optimization is not enabled.
 # Users have to configure the desired optimization (0 means disabled) in params.json as below example:
@@ -46,6 +48,7 @@ ZeRO optimization should be enabled as:
     "override_module_apply": [true|false],
     "zeropp_loco_param": {...},
     "log_trace_cache_warnings" : [true|false],
+    "enable_sanity_checks": [true|false],
     }
 }
 """
@@ -164,6 +167,9 @@ class DeepSpeedZeroConfig(DeepSpeedConfigModel):
     sizes. Valid for ZeRO stage 1, 2, 3. Expects a dictionary containing values
     for :any:`DeepSpeedZeroOffloadOptimizerConfig`.
     """
+
+    zenflow: Optional[ZenFlowConfig] = None
+    """Enable ZenFlow"""
 
     sub_group_size: int = Field(pp_int(1e9), ge=0)
     """
@@ -344,6 +350,16 @@ class DeepSpeedZeroConfig(DeepSpeedConfigModel):
     log_trace_cache_warnings: bool = False
     """
     Whether to log warnings from trace cache, such as invalidation events.
+    """
+
+    enable_sanity_checks: bool = False
+    """
+    Enable internal sanity checks, which could be useful for debugging
+    """
+
+    leaf_module: DeepSpeedZeroLeafModuleConfig = Field(default_factory=DeepSpeedZeroLeafModuleConfig)
+    """
+    Configuration for modules that should be treated as ZeRO3 leaf modules.
     """
 
     # Validators

@@ -142,7 +142,7 @@ class FixedSparsityConfig(SparsityConfig):
 
         if (num_different_global_patterns > 1 and not different_layout_per_head):
             raise ValueError(
-                f'Number of different layouts cannot be more than one when you have set a single layout for all heads! Set different_layout_per_head to True.'
+                'Number of different layouts cannot be more than one when you have set a single layout for all heads! Set different_layout_per_head to True.'
             )
         if (num_different_global_patterns > (num_local_blocks // num_global_blocks)):
             raise ValueError(

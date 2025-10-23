@@ -420,6 +420,8 @@ class OpBuilder(ABC):
         if cpu_info['arch'].startswith('PPC_'):
             # gcc does not provide -march on PowerPC, use -mcpu instead
             return '-mcpu=native'
+        elif cpu_info['arch'].startswith('riscv64'):
+            return '-march=rv64gc'
         return '-march=native'
 
     def get_cuda_compile_flag(self):
@@ -430,7 +432,7 @@ class OpBuilder(ABC):
         except MissingCUDAException:
             print(f"{WARNING} {self.name} cuda is missing or is incompatible with installed torch, "
                   "only cpu ops can be compiled!")
-            return '-D__DISABLE_CUDA__'
+        return '-D__DISABLE_CUDA__'
 
     def _backup_cpuinfo(self):
         # Construct cpu_info dict from lscpu that is similar to what py-cpuinfo provides
@@ -455,6 +457,8 @@ class OpBuilder(ABC):
                 cpu_info['flags'] += 'avx2'
         elif 'ppc64le' in result:
             cpu_info['arch'] = "PPC_"
+        elif 'riscv64' in result:
+            cpu_info['arch'] = "riscv64"
 
         return cpu_info
 
@@ -518,7 +522,7 @@ class OpBuilder(ABC):
                             extra_compile_args={'cxx': self.strip_empty_entries(self.cxx_args())},
                             extra_link_args=self.strip_empty_entries(self.extra_ldflags()))
 
-    def load(self, verbose=True):
+    def load(self, verbose=False):
         if self.name in __class__._loaded_ops:
             return __class__._loaded_ops[self.name]
 

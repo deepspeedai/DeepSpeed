@@ -150,8 +150,8 @@ def prepare_tp_fused_qkvw(module, src, mp_size, gpu_index):
         module_name = max(module_name_matches, key=len)
         fused_type = fused_type_dict[module_name]
         return _transpose_fused_qkvw(src, mp_size, fused_type, module)
-    warning_once(f"Unrecognized fusedkqv weight type, default to using bloom type,"
-                 f"please check in prepare_tp_fused_qkvw() to avoid potential calculation errors")
+    warning_once("Unrecognized fusedkqv weight type, default to using bloom type,"
+                 "please check in prepare_tp_fused_qkvw() to avoid potential calculation errors")
     return _bloom_type_transpose(src, mp_size)
 
 

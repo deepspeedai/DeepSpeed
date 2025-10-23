@@ -95,7 +95,7 @@ class AIOHandle_Engine(object):
         else:
             handle = AsyncIOBuilder().load().aio_handle(args.block_size, args.queue_depth, args.single_submit,
                                                         not args.sequential_requests, io_parallel)
-        task_log(tid, f'Created DeepNVMe handle engine')
+        task_log(tid, 'Created DeepNVMe handle engine')
 
         bounce_buffer = None
         if args.gpu:

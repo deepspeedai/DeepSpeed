@@ -15,7 +15,7 @@ from deepspeed.io import FastFileWriter
 class Torch_FastIO_Engine(object):
 
     def __init__(self, args, tid, read_op):
-        assert read_op is False, f'Read operation is not currently supported'
+        assert read_op is False, 'Read operation is not currently supported'
         self.ctxt = self._create_context(args, tid, read_op)
         self.zipfile_serialization = not args.torch_legacy_save
 
@@ -69,7 +69,7 @@ class Torch_FastIO_Engine(object):
 
         fast_io_buffer = create_page_locked_tensor(args.fast_io_size, args.use_accelerator_pin_memory, aio_handle)
 
-        task_log(tid, f'created torch_fastio engine')
+        task_log(tid, 'created torch_fastio engine')
 
         ctxt = {}
         ctxt[FILE] = filename
