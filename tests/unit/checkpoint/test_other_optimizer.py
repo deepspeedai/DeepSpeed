@@ -18,7 +18,8 @@ class TestOtherOptimizerCheckpoint(DistributedTest):
     world_size = 2
 
     @pytest.mark.skipif(not deepspeed.ops.__compatible_ops__[FusedLambBuilder.NAME], reason="lamb is not compatible")
-    def test_checkpoint_unfused_optimizer(self, tmpdir):
+    @pytest.mark.parametrize('compile_mode', [True, False])
+    def test_checkpoint_unfused_optimizer(self, tmpdir, compile_mode):
         #if not get_accelerator().is_fp16_supported():
         #    pytest.skip("fp16 is not supported")
         config_dict = {
@@ -67,7 +68,8 @@ class TestOtherOptimizerCheckpoint(DistributedTest):
                                             hidden_dim=hidden_dim,
                                             tmpdir=tmpdir,
                                             load_optimizer_states=True,
-                                            dtype=dtype)
+                                            dtype=dtype,
+                                            compile_mode=compile_mode)
 
         # Ignore optimizer states
         checkpoint_correctness_verification(config_dict,
@@ -75,9 +77,11 @@ class TestOtherOptimizerCheckpoint(DistributedTest):
                                             hidden_dim=hidden_dim,
                                             tmpdir=tmpdir,
                                             load_optimizer_states=False,
-                                            dtype=dtype)
+                                            dtype=dtype,
+                                            compile_mode=compile_mode)
 
-    def test_checkpoint_fused_optimizer(self, tmpdir):
+    @pytest.mark.parametrize('compile_mode', [True, False])
+    def test_checkpoint_fused_optimizer(self, tmpdir, compile_mode):
         if get_accelerator().device_name() == "cpu":
             pytest.skip("CPU accelerator does not support this test")
         config_dict = {
@@ -108,7 +112,8 @@ class TestOtherOptimizerCheckpoint(DistributedTest):
                                             hidden_dim=hidden_dim,
                                             tmpdir=tmpdir,
                                             load_optimizer_states=True,
-                                            dtype=dtype)
+                                            dtype=dtype,
+                                            compile_mode=compile_mode)
 
         # Ignore optimizer states
         checkpoint_correctness_verification(config_dict,
@@ -116,9 +121,11 @@ class TestOtherOptimizerCheckpoint(DistributedTest):
                                             hidden_dim=hidden_dim,
                                             tmpdir=tmpdir,
                                             load_optimizer_states=False,
-                                            dtype=dtype)
+                                            dtype=dtype,
+                                            compile_mode=compile_mode)
 
-    def test_checkpoint_fp32_optimizer(self, tmpdir):
+    @pytest.mark.parametrize('compile_mode', [True, False])
+    def test_checkpoint_fp32_optimizer(self, tmpdir, compile_mode):
         config_dict = {
             "train_batch_size": 2,
             "steps_per_print": 1,
@@ -143,4 +150,5 @@ class TestOtherOptimizerCheckpoint(DistributedTest):
                                             models=models,
                                             hidden_dim=hidden_dim,
                                             tmpdir=tmpdir,
-                                            dtype=torch.float32)
+                                            dtype=torch.float32,
+                                            compile_mode=compile_mode)

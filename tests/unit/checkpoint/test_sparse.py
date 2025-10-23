@@ -24,8 +24,9 @@ class TestSparseCheckpoint(DistributedTest):
         [True, False],
         [True, True],
     ])
+    @pytest.mark.parametrize('compile_mode', [True, False])
     def test_non_strict_load_sparse(self, tmpdir, to_save_model_has_embedding, to_save_model_sparse,
-                                    destination_has_embedding, destination_sparse):
+                                    destination_has_embedding, destination_sparse, compile_mode):
 
         class ModelNoEmbedding(torch.nn.Module):
 
@@ -65,6 +66,10 @@ class TestSparseCheckpoint(DistributedTest):
                                                                "train_batch_size": 2,
                                                                "sparse_gradients": destination_sparse
                                                            })
+
+        if compile_mode:
+            engine_to_save.compile()
+            engine_destination.compile()
 
         save_folder = os.path.join(tmpdir, 'saved_checkpoint')
         save_tag = '1'

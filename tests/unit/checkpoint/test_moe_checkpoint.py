@@ -38,8 +38,9 @@ class TestMoECheckpoint(DistributedTest):
                                             seq_dataloader=True,
                                             dtype=torch.float16)
 
+    @pytest.mark.parametrize('compile_mode', [True, False])
     @pytest.mark.parametrize("ep_size, load_optim_states", [(4, True), (4, False), (2, True), (2, False)])
-    def test_checkpoint_moe_and_zero(self, tmpdir, ep_size, load_optim_states):
+    def test_checkpoint_moe_and_zero(self, tmpdir, ep_size, load_optim_states, compile_mode):
         if not required_torch_version(min_version=1.8):
             pytest.skip("DeepSpeed MoE tests need torch 1.8 or higher to run correctly")
 
@@ -80,4 +81,5 @@ class TestMoECheckpoint(DistributedTest):
                                             empty_tag=True,
                                             base_optimizers=optimizers,
                                             seq_dataloader=True,
-                                            dtype=torch.float16)
+                                            dtype=torch.float16,
+                                            compile_mode=compile_mode)

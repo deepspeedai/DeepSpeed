@@ -76,7 +76,9 @@ class save_shard(DistributedFixture):
 class TestCheckpointShard(DistributedTest):
     world_size = 2
 
-    def test(self, model_name, dtype, class_tmpdir, save_shard):
+    @pytest.mark.parametrize('compile_mode', [True, False])
+    def test(self, model_name, dtype, class_tmpdir, save_shard, compile_mode):
+
         world_size = int(os.getenv("WORLD_SIZE", "1"))
         inf_config = {
             "replace_with_kernel_inject": True,
@@ -95,6 +97,8 @@ class TestCheckpointShard(DistributedTest):
             model = AutoModelForCausalLM.from_config(model_config, torch_dtype=torch.bfloat16)
         model = model.eval()
         model = deepspeed.init_inference(model, config=inf_config)
+        if compile_mode:
+            model.compile()
         check_dtype(model, dtype)
 
 
@@ -102,7 +106,8 @@ class TestCheckpointShard(DistributedTest):
 class TestCheckpointShardinAutoTP(DistributedTest):
     world_size = 2
 
-    def test(self, model_name, class_tmpdir):
+    @pytest.mark.parametrize('compile_mode', [True, False])
+    def test(self, model_name, class_tmpdir, compile_mode):
 
         def write_checkpoints_json(model_name, class_tmpdir):
             import json
@@ -140,3 +145,5 @@ class TestCheckpointShardinAutoTP(DistributedTest):
             model = AutoModelForCausalLM.from_config(model_config, torch_dtype=torch.bfloat16)
         model = model.eval()
         model = deepspeed.init_inference(model, config=inf_config)
+        if compile_mode:
+            model.compile()

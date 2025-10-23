@@ -348,6 +348,7 @@ def validate_test(model_w_task, dtype, enable_cuda_graph, enable_triton):
     return msg
 
 
+@pytest.mark.parametrize('compile_mode', [True, False])
 @pytest.mark.inference
 class TestModelTask(DistributedTest):
     world_size = 1
@@ -361,6 +362,7 @@ class TestModelTask(DistributedTest):
         query,
         inf_kwargs,
         assert_fn,
+        compile_mode,
         perf_meas=True,
     ):
         invalid_test_msg = validate_test(model_w_task, dtype, enable_cuda_graph, enable_triton)
@@ -407,6 +409,8 @@ class TestModelTask(DistributedTest):
         ).max_out_tokens:
             args.update({'max_out_tokens': pipe.tokenizer.model_max_length})
         pipe.model = deepspeed.init_inference(pipe.model, **args)
+        if compile_mode:
+            pipe.model.compile()
         check_injection(pipe.model)
         # Warm-up queries for perf measurement
         #for i in range(10):
@@ -434,6 +438,7 @@ class TestModelTask(DistributedTest):
         assert assert_fn(bs_output, ds_output)
 
 
+@pytest.mark.parametrize('compile_mode', [True, False])
 @pytest.mark.seq_inference
 @pytest.mark.parametrize("model_w_task", [("EleutherAI/gpt-neo-1.3B", "text-generation"),
                                           ("EleutherAI/gpt-neox-20b", "text-generation"),
@@ -450,6 +455,7 @@ class TestMPSize(DistributedTest):
         query,
         inf_kwargs,
         assert_fn,
+        compile_mode,
     ):
         invalid_test_msg = validate_test(model_w_task, dtype, enable_cuda_graph=False, enable_triton=False)
         if invalid_test_msg:
@@ -470,6 +476,8 @@ class TestMPSize(DistributedTest):
                                               mp_size=self.world_size,
                                               dtype=dtype,
                                               replace_with_kernel_inject=True)
+        if compile_mode:
+            pipe.model.compile()
         check_injection(pipe.model)
         # Switch device to GPU so that input tensors are not on CPU
         pipe.device = torch.device(get_accelerator().device_name(local_rank))
@@ -480,6 +488,7 @@ class TestMPSize(DistributedTest):
         assert assert_fn(bs_output, ds_output)
 
 
+@pytest.mark.parametrize('compile_mode', [True, False])
 @pytest.mark.inference
 @pytest.mark.parametrize("model_w_task", [("openai-community/gpt2", "text-generation")], ids=["gpt2"])
 class TestLowCpuMemUsage(DistributedTest):
@@ -491,6 +500,7 @@ class TestLowCpuMemUsage(DistributedTest):
         query,
         inf_kwargs,
         assert_fn,
+        compile_mode,
     ):
         model, task = model_w_task
         dtype = torch.float16
@@ -506,12 +516,14 @@ class TestLowCpuMemUsage(DistributedTest):
                                               dtype=dtype,
                                               replace_method="auto",
                                               replace_with_kernel_inject=True)
-
+        if compile_mode:
+            pipe.model.compile()
         ds_output = pipe(query, **inf_kwargs)
 
         assert assert_fn(bs_output, ds_output)
 
 
+@pytest.mark.parametrize('compile_mode', [True, False])
 @pytest.mark.seq_inference
 @pytest.mark.parametrize(
     "model_w_task, injection_policy",
@@ -528,7 +540,17 @@ class TestLowCpuMemUsage(DistributedTest):
 @pytest.mark.parametrize("dtype", [torch.float], ids=["fp32"])
 class TestInjectionPolicy(DistributedTest):
 
-    def test(self, model_w_task, injection_policy, query, inf_kwargs, assert_fn, dtype, world_size):
+    def test(
+        self,
+        model_w_task,
+        injection_policy,
+        query,
+        inf_kwargs,
+        assert_fn,
+        dtype,
+        world_size,
+        compile_mode,
+    ):
         invalid_test_msg = validate_test(model_w_task, dtype, enable_cuda_graph=False, enable_triton=False)
         if invalid_test_msg:
             pytest.skip(invalid_test_msg)
@@ -546,6 +568,8 @@ class TestInjectionPolicy(DistributedTest):
                                               mp_size=world_size,
                                               dtype=dtype,
                                               injection_policy=injection_policy)
+        if compile_mode:
+            pipe.model.compile()
         ds_output = pipe(query, **inf_kwargs)
 
         print(local_rank, "baseline", bs_output)
@@ -608,6 +632,7 @@ class TestLlamaInjection(DistributedTest):
         # assert assert_fn(bs_output, ds_output)
 
 
+@pytest.mark.parametrize('compile_mode', [True, False])
 @pytest.mark.seq_inference
 @pytest.mark.parametrize('keep_module_on_host', [True, False])
 @pytest.mark.parametrize(
@@ -626,6 +651,7 @@ class TestAutoTensorParallelism(DistributedTest):
         inf_kwargs,
         assert_fn,
         dtype,
+        compile_mode,
         keep_module_on_host,
     ):
         invalid_test_msg = validate_test(model_w_task, dtype, enable_cuda_graph=False, enable_triton=False)
@@ -653,6 +679,8 @@ class TestAutoTensorParallelism(DistributedTest):
                                               mp_size=world_size,
                                               dtype=dtype,
                                               keep_module_on_host=keep_module_on_host)
+        if compile_mode:
+            pipe.model.compile()
         ds_output = pipe(query, **inf_kwargs)
 
         print(local_rank, "baseline", bs_output)
@@ -671,6 +699,7 @@ class TestAutoTensorParallelism(DistributedTest):
         inf_kwargs,
         assert_fn,
         dtype,
+        compile_mode,
         keep_module_on_host,
     ):
         invalid_test_msg = validate_test(model_w_task, dtype, enable_cuda_graph=False, enable_triton=False)
@@ -693,6 +722,8 @@ class TestAutoTensorParallelism(DistributedTest):
                                               mp_size=world_size,
                                               dtype=dtype,
                                               keep_module_on_host=keep_module_on_host)
+        if compile_mode:
+            pipe.model.compile()
         ds_output = pipe(query, **inf_kwargs)
 
         print(local_rank, "baseline", bs_output)
@@ -704,6 +735,7 @@ class TestAutoTensorParallelism(DistributedTest):
                 assert param.device == torch.device('cpu'), f"keep_module_on_host is on but param {name} is not on cpu"
 
 
+@pytest.mark.parametrize('compile_mode', [True, False])
 @pytest.mark.nightly
 @pytest.mark.parametrize(
     "model_family, model_name",
@@ -718,7 +750,7 @@ class TestLMCorrectness(DistributedTest):
     world_size = 1
     exec_timeout = 1200  # Give these tests longer to complete
 
-    def test(self, model_family, model_name, task):
+    def test(self, model_family, model_name, task, compile_mode):
         # imports here to avoid import errors when pytest collects tests
         import lm_eval
         import lm_eval.models
@@ -776,6 +808,8 @@ class TestLMCorrectness(DistributedTest):
             replace_with_kernel_inject=True,
             enable_cuda_graph=False,
         )
+        if compile_mode:
+            ds_model.compile()
         check_injection(ds_model)
         setattr(lm, model_family, ds_model)
         get_accelerator().synchronize()
