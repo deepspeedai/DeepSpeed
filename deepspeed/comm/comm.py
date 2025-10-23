@@ -29,7 +29,6 @@ from ..constants import TORCH_DISTRIBUTED_DEFAULT_PORT, default_pg_timeout
 from .constants import *
 from .reduce_op import *
 from deepspeed.accelerator import get_accelerator
-from deepspeed.comm.ccl import CCLBackend
 
 from deepspeed.utils.comms_logging import CommsLogger
 from deepspeed.utils import timer, get_caller_func
@@ -158,6 +157,7 @@ def init_deepspeed_backend(ds_backend, timeout, init_method):
     elif ds_backend == GLOO_BACKEND:
         utils.logger.debug("Gloo backend in DeepSpeed not yet implemented")
     elif ds_backend == CCL_BACKEND:
+        from deepspeed.comm.ccl import CCLBackend
         ccl_backend = CCLBackend(rank=rank, world_size=size, timeout=timeout, init_method=init_method)
         utils.logger.info(f"Initialize {ds_backend} backend")
     elif ds_backend == HCCL_BACKEND:
