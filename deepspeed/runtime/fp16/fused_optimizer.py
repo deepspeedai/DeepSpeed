@@ -283,10 +283,9 @@ class FP16_Optimizer(DeepSpeedOptimizer):
                 for i, group in enumerate(self.fp16_groups):
                     for p in group:
                         p.grad = None
-
-            if self.timers:
-                self.timers.log(OVERFLOW_TIMERS)
-            return self.overflow
+                if self.timers:
+                    self.timers.log(OVERFLOW_TIMERS)
+                return self.overflow
 
         grads_groups_flat = []
         non_experts_grads_for_norm = []
