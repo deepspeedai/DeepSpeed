@@ -621,6 +621,7 @@ class PipelineModule(nn.Module):
         layer_list = self.forward_funcs[start:end]
 
         checkpoint_engine.makedirs(save_dir, exist_ok=True)
+        should_clone = checkpoint_engine.preserves_storage_sharing()
         for idx, layer in enumerate(layer_list):
             model_ckpt_path = self.ckpt_layer_path(save_dir, start + idx)
             if not hasattr(layer, 'state_dict'):
@@ -630,7 +631,9 @@ class PipelineModule(nn.Module):
             if exclude_frozen_params:
                 for n in self._get_frozen_parameter_names(layer):
                     del orig_state_dict[n]
-            final_state_dict = clone_tensors_for_torch_save(orig_state_dict)
+            final_state_dict = orig_state_dict
+            if should_clone:
+                final_state_dict = clone_tensors_for_torch_save(orig_state_dict)
             checkpoint_engine.save(state_dict=final_state_dict, path=model_ckpt_path)
 
     def load_state_dir(self, load_dir, checkpoint_engine, strict=True):
