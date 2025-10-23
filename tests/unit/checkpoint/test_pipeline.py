@@ -15,8 +15,9 @@ import pytest
 class TestPipelineCheckpoint(DistributedTest):
     world_size = 4
 
+    @pytest.mark.parametrize('compile_mode', [True, False])
     @pytest.mark.parametrize("zero_stage", [0, 1])
-    def test_checkpoint_pipe_engine(self, zero_stage, tmpdir):
+    def test_checkpoint_pipe_engine(self, zero_stage, tmpdir, compile_mode):
         skip_on_arch(min_arch=7)
 
         config_dict = {
@@ -61,7 +62,8 @@ class TestPipelineCheckpoint(DistributedTest):
                                             load_optimizer_states=True,
                                             load_lr_scheduler_states=True,
                                             train_batch=True,
-                                            dtype=torch.float16 if zero_stage > 0 else torch.float32)
+                                            dtype=torch.float16 if zero_stage > 0 else torch.float32,
+                                            compile_mode=compile_mode)
 
     @pytest.mark.parametrize(
         "base_topo,test_topo",

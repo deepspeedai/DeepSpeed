@@ -211,9 +211,10 @@ def update_gathered_stage3_optimizer(optimizer_state, param_shapes, world_size):
 @pytest.mark.parametrize("use_torch_adam", [False, True])
 @pytest.mark.parametrize("load_optim", [False, True])
 @pytest.mark.parametrize("sub_group_size", [-1, 100])
+@pytest.mark.parametrize('compile_mode', [True, False])
 class TestZeROUniversalCheckpointDP(DistributedTest):
 
-    def _run_test(self, tmpdir, dtype, ds_config, load_optim, use_torch_adam, world_size):
+    def _run_test(self, tmpdir, dtype, ds_config, load_optim, use_torch_adam, world_size, compile_mode):
         if dtype == torch.bfloat16 and not bf16_required_version_check():
             pytest.skip(
                 " DeepSpeed BFloat16 tests need torch >= 1.10, NCCL >= 2.10.3, CUDA > =11.0 and HW support for BFloat16 to run correctly"
@@ -225,6 +226,9 @@ class TestZeROUniversalCheckpointDP(DistributedTest):
         ds_config["checkpoint"] = {"load_universal": True}
         univ_model = SimpleModel(hidden_dim, nlayers=2)
         univ_model = init_ds_engine(univ_model, ds_config, use_torch_adam)
+        if compile_mode:
+            univ_model.compile()
+
         univ_model.load_checkpoint(tmpdir, tag=f"{CP_TAG}_universal", load_optimizer_states=load_optim)
 
         model_state = univ_model.state_dict()
@@ -260,13 +264,16 @@ class TestZeROUniversalCheckpointDP(DistributedTest):
         univ_model.destroy()
 
     @pytest.mark.world_size(2)
-    def test_dp_world_size_2to2(self, baseline_ws2, tmpdir, dtype, ds_config, load_optim, use_torch_adam):
-        self._run_test(tmpdir, dtype, ds_config, load_optim, use_torch_adam, 2)
+    def test_dp_world_size_2to2(self, baseline_ws2, tmpdir, dtype, ds_config, load_optim, use_torch_adam,
+                                compile_mode):
+        self._run_test(tmpdir, dtype, ds_config, load_optim, use_torch_adam, compile_mode)
 
     @pytest.mark.world_size(2)
-    def test_dp_world_size_4to2(self, baseline_ws4, tmpdir, dtype, ds_config, load_optim, use_torch_adam):
-        self._run_test(tmpdir, dtype, ds_config, load_optim, use_torch_adam, 2)
+    def test_dp_world_size_4to2(self, baseline_ws4, tmpdir, dtype, ds_config, load_optim, use_torch_adam,
+                                compile_mode):
+        self._run_test(tmpdir, dtype, ds_config, load_optim, use_torch_adam, compile_mode)
 
     @pytest.mark.world_size(4)
-    def test_dp_world_size_2to4(self, baseline_ws2, tmpdir, dtype, ds_config, load_optim, use_torch_adam):
-        self._run_test(tmpdir, dtype, ds_config, load_optim, use_torch_adam, 4)
+    def test_dp_world_size_2to4(self, baseline_ws2, tmpdir, dtype, ds_config, load_optim, use_torch_adam,
+                                compile_mode):
+        self._run_test(tmpdir, dtype, ds_config, load_optim, use_torch_adam, 4, compile_mode)

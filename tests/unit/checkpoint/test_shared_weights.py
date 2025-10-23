@@ -7,6 +7,7 @@ import torch
 import torch.nn as nn
 
 import deepspeed
+import pytest
 from deepspeed.utils.zero_to_fp32 import get_fp32_state_dict_from_zero_checkpoint
 from unit.common import DistributedTest
 
@@ -25,7 +26,8 @@ class ModelWithSharedWeights(nn.Module):
 class TestCheckpointSharedWeights(DistributedTest):
     world_size = 2
 
-    def test_checkpoint_shared_weights(self, tmp_path):
+    @pytest.mark.parametrize('compile_mode', [True, False])
+    def test_checkpoint_shared_weights(self, tmp_path, compile_mode):
         config = {
             "train_micro_batch_size_per_gpu": 2,
             "zero_allow_untested_optimizer": True,
@@ -41,6 +43,9 @@ class TestCheckpointSharedWeights(DistributedTest):
             model=model,
             optimizer=optimizer,
         )
+        if compile_mode:
+            deepspeed_engine.compile()
+
         filename = tmp_path / "checkpoint.pt"
         deepspeed_engine.save_checkpoint(filename, tag="checkpoint")
 
