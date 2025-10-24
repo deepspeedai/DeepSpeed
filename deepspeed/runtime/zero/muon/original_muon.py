@@ -31,6 +31,7 @@ import torch
 import deepspeed.comm as dist  # replace torch's distributed package with deepspeed.comm to resolve deepspeed check
 
 
+@torch.compile
 def zeropower_via_newtonschulz5(G, steps: int):
     """
     Newton-Schulz iteration to compute the zeroth power / orthogonalization of G. We opt to use a
@@ -60,6 +61,7 @@ def zeropower_via_newtonschulz5(G, steps: int):
     return X
 
 
+@torch.compile
 def muon_update(grad, momentum, beta=0.95, ns_steps=5, nesterov=True):
     momentum.lerp_(grad, 1 - beta)
     update = grad.lerp_(momentum, beta) if nesterov else momentum
