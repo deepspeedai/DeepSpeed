@@ -954,13 +954,17 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
                     unpinned_fp32_buffer = torch.empty(num_elements, device=self.device, dtype=torch.float)
                     self._swap_in_sub_group_to_flat_buffer(unpinned_fp32_buffer, i)
                     self.fp32_partitioned_groups_flat.append(unpinned_fp32_buffer)
+                elif self.offload_optimizer:
+                    self.fp32_partitioned_groups_flat.append(self.fp16_partitioned_groups_flat[i].to(
+                        self.subgroup_to_device[i]).clone().float().detach())
+                elif self.fp16_partitioned_groups_flat[i].dtype == torch.float32:
+                    # When torch autocast is enabled, weights in the provided model (and thus groups in the so-called
+                    # "fp16" partitioned groups) are already in and updated using fp32. In such cases we don't need
+                    # another copy of the weights.
+                    self.fp32_partitioned_groups_flat.append(self.fp16_partitioned_groups_flat[i])
                 else:
-                    if self.offload_optimizer:
-                        self.fp32_partitioned_groups_flat.append(self.fp16_partitioned_groups_flat[i].to(
-                            self.subgroup_to_device[i]).clone().float().detach())
-                    else:
-                        self.fp32_partitioned_groups_flat.append(self.fp16_partitioned_groups_flat[i].to(
-                            self.device).clone().float().detach())
+                    self.fp32_partitioned_groups_flat.append(self.fp16_partitioned_groups_flat[i].to(
+                        self.device).clone().float().detach())
                 self.fp32_partitioned_groups_flat[i].ds_id = ds_id
 
             self.fp32_partitioned_groups_flat[i].requires_grad = True  # keep this in case internal optimizer uses it
@@ -2114,6 +2118,8 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
     @instrument_w_nvtx
     def _reassign_or_swap_out_partitioned_parameters(self, sub_group_id):
         if self.fp16_partitioned_groups_flat[sub_group_id] is not None:
+            # When torch autocast is enabled, groups in fp16_partitioned_groups are in fp32 already and those in
+            # fp32_partitioned_groups are aliases. Calling tensor.data.copy_ will not trigger any copy in that case.
             self.fp16_partitioned_groups_flat[sub_group_id].data.copy_(
                 self.fp32_partitioned_groups_flat[sub_group_id].data)
 
