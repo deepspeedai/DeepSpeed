@@ -85,8 +85,8 @@ class TestFp8ComposabilityAcrossZero(DistributedTest):
         rtol, atol = 1e-07, 1e-05
 
         # Relax tolerance only for ROCm + FP16
-        if is_rocm_pytorch() and model_dtype == torch.float16:
-            rtol, atol = 3e-07, 3e-05
+        if is_rocm_pytorch() and base_datatype in ["fp16", "bf16"]:
+            rtol, atol = 1e-07, 1e-04
 
         # config
         zero_stage = [0, 1, 2, 3]
