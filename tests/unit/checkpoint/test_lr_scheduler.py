@@ -15,12 +15,13 @@ from unit.checkpoint.common import checkpoint_correctness_verification
 import pytest
 
 
+@pytest.mark.parametrize('compile_mode', [True, False])
 @pytest.mark.parametrize('zero_stage, use_cpu_offload', [(0, False), (1, False), (2, False), (2, True), (3, False),
                                                          (3, True)])
 class TestLRSchedulerCheckpoint(DistributedTest):
     world_size = 2
 
-    def test_checkpoint_lr_scheduler(self, tmpdir, zero_stage, use_cpu_offload):
+    def test_checkpoint_lr_scheduler(self, tmpdir, zero_stage, use_cpu_offload, compile_mode):
         if use_cpu_offload and not deepspeed.ops.__compatible_ops__[CPUAdamBuilder.NAME]:
             pytest.skip("cpu-adam is not compatible")
         if get_accelerator().device_name() == 'cpu':
@@ -70,9 +71,10 @@ class TestLRSchedulerCheckpoint(DistributedTest):
                                             hidden_dim,
                                             tmpdir,
                                             load_optimizer_states=False,
-                                            load_lr_scheduler_states=True)
+                                            load_lr_scheduler_states=True,
+                                            compile_mode=compile_mode)
 
-    def test_checkpoint_no_lr_scheduler(self, tmpdir, zero_stage, use_cpu_offload):
+    def test_checkpoint_no_lr_scheduler(self, tmpdir, zero_stage, use_cpu_offload, compile_mode):
         if use_cpu_offload and not deepspeed.ops.__compatible_ops__[CPUAdamBuilder.NAME]:
             pytest.skip("cpu-adam is not compatible")
         if get_accelerator().device_name() == 'cpu':
@@ -117,4 +119,5 @@ class TestLRSchedulerCheckpoint(DistributedTest):
                                             hidden_dim,
                                             tmpdir,
                                             load_optimizer_states=False,
-                                            load_lr_scheduler_states=False)
+                                            load_lr_scheduler_states=False,
+                                            compile_mode=compile_mode)
