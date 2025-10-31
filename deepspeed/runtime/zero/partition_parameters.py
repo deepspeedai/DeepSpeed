@@ -6,7 +6,7 @@
 import math
 import os
 import types
-from typing import Callable, Iterable
+from typing import Callable, Iterable, Union
 from enum import Enum
 import functools
 import itertools
@@ -778,7 +778,7 @@ class AllGatherCoalescedHandle:
 
 class MultipleAllGatherHandles:
 
-    def __init__(self, handles: List[AllGatherCoalescedHandle]):
+    def __init__(self, handles: List[Union[AllGatherHandle, AllGatherCoalescedHandle]]):
         self.handles = handles
 
     def wait(self, handle_dependency=True) -> None:
@@ -1097,8 +1097,11 @@ class Init(InsertPostInitMethodToModuleSubClasses):
 
         self.use_all_reduce_for_fetch_params = get_config_default(DeepSpeedZeroConfig,
                                                                   "use_all_reduce_for_fetch_params")
+        self.allgather_single_param = get_config_default(DeepSpeedZeroConfig,
+                                                         "allgather_single_param")
         if _ds_config is not None:
             self.use_all_reduce_for_fetch_params = _ds_config.zero_config.use_all_reduce_for_fetch_params
+            self.allgather_single_param = _ds_config.zero_config.allgather_single_param
 
     def _update_persist_config(self, ds_config):
         Init.apply_param_persistence = True
@@ -1306,79 +1309,81 @@ class Init(InsertPostInitMethodToModuleSubClasses):
                 # otherwise could mix data between tensors.
                 assert_ints_same_as_other_ranks([p.ds_tensor.ds_numel for p in params])
 
-            if len(params) == 1:
+            if self.allgather_single_param or len(params) == 1:
                 # have an opportunity to avoid some intermediate memory allocations
-                param = params[0]
-                buffer_size = math.ceil(param.ds_numel / world_size) * world_size
-                if use_secondary_tensor:
-                    buffer_size = param.ds_secondary_tensor.shape[0] * world_size  #make sure out is appropriately sized
+                handles = []
+                for param in params:
+                    buffer_size = math.ceil(param.ds_numel / world_size) * world_size
+                    if use_secondary_tensor:
+                        buffer_size = param.ds_secondary_tensor.shape[0] * world_size  #make sure out is appropriately sized
 
-                param_ds_tensor = param.ds_secondary_tensor if use_secondary_tensor else param.ds_tensor
+                    param_ds_tensor = param.ds_secondary_tensor if use_secondary_tensor else param.ds_tensor
 
-                original_dtype = param_ds_tensor.dtype
-                if quantize:
-                    allgather_dtype = torch.int8
-                else:
-                    allgather_dtype = get_allgather_dtype(param, param_ds_tensor)
-
-                param_buffer = torch.empty(
-                    buffer_size,
-                    dtype=allgather_dtype,
-                    device=get_accelerator().current_device_name(),
-                    requires_grad=False,
-                )
-                if not quantize:
-                    handles = _dist_allgather_fn(
-                        param_ds_tensor.to(get_accelerator().current_device_name()).to(allgather_dtype),
-                        param_buffer,
-                        ds_process_group,
-                    )
-
-                    if original_dtype == allgather_dtype:
-                        param.data = param_buffer.narrow(0, 0, param.ds_numel).view(param.ds_shape).to(param.device)
-                        return AllGatherHandle(handles, param)
+                    original_dtype = param_ds_tensor.dtype
+                    if quantize:
+                        allgather_dtype = torch.int8
                     else:
-                        # This case is complicated:
-                        # We use `register_post_accumulate_grad_hook` to set allgather hooks. Normally, the hook is
-                        # called once per parameter, even if that parameter is tied to multiple layers.
-                        # However, when the dtype changes, the hook may be triggered multiple times.
-                        # If we directly do:
-                        #   param_buffer.narrow(0, 0, param.ds_numel).view(param.ds_shape).to(param.device)
-                        # as above, the dtype may differ, causing the gradient-reduce hook
-                        # to be invoked multiple times.
-                        # To avoid this, we leave `param.data` in a partitioned state.
-                        # This prevents duplicate gradient-reduce hook calls.
-                        # In theory, this path could be consolidated with the case where
-                        # (original_dtype == allgather_dtype), but because it changes the
-                        # state transition of DeepSpeed parameters, we keep it separate for safety.
-                        return AllGatherHandle(handles,
-                                               param,
-                                               param_buffer=param_buffer,
-                                               original_dtype=original_dtype)
-                else:
-                    if hasattr(param_ds_tensor, "ds_quant_scale"):
-                        scales = param_ds_tensor.ds_quant_scale
-                        quantized_param = param_ds_tensor.data
-                    else:
-                        quantized_param, scales = self.quantizer_module.quantize(param_ds_tensor)
-                    handle = _dist_allgather_fn(quantized_param.to(get_accelerator().current_device_name()),
-                                                param_buffer, ds_process_group)
+                        allgather_dtype = get_allgather_dtype(param, param_ds_tensor)
 
-                    quant_scale_buffer = torch.empty(
-                        scales.numel() * world_size,
-                        dtype=scales.dtype,
+                    param_buffer = torch.empty(
+                        buffer_size,
+                        dtype=allgather_dtype,
                         device=get_accelerator().current_device_name(),
                         requires_grad=False,
                     )
-                    quant_handle = _dist_allgather_fn(scales.to(get_accelerator().current_device_name()),
-                                                      quant_scale_buffer, ds_process_group)
-                    quant_info = QuantizationInfo()
-                    quant_info.quantized_param = param_buffer.narrow(0, 0, param.ds_numel).view(param.ds_shape).to(
-                        param.device)
-                    quant_info.backend = self.quantizer_module
-                    quant_info.quant_handle = quant_handle
-                    quant_info.scale_buffer = quant_scale_buffer
-                    return AllGatherHandle(handle, param, quantization=quant_info)
+                    if not quantize:
+                        handle = _dist_allgather_fn(
+                            param_ds_tensor.to(get_accelerator().current_device_name()).to(allgather_dtype),
+                            param_buffer,
+                            ds_process_group,
+                        )
+
+                        if original_dtype == allgather_dtype:
+                            param.data = param_buffer.narrow(0, 0, param.ds_numel).view(param.ds_shape).to(param.device)
+                            handles.append(AllGatherHandle(handle, param))
+                        else:
+                            # This case is complicated:
+                            # We use `register_post_accumulate_grad_hook` to set allgather hooks. Normally, the hook is
+                            # called once per parameter, even if that parameter is tied to multiple layers.
+                            # However, when the dtype changes, the hook may be triggered multiple times.
+                            # If we directly do:
+                            #   param_buffer.narrow(0, 0, param.ds_numel).view(param.ds_shape).to(param.device)
+                            # as above, the dtype may differ, causing the gradient-reduce hook
+                            # to be invoked multiple times.
+                            # To avoid this, we leave `param.data` in a partitioned state.
+                            # This prevents duplicate gradient-reduce hook calls.
+                            # In theory, this path could be consolidated with the case where
+                            # (original_dtype == allgather_dtype), but because it changes the
+                            # state transition of DeepSpeed parameters, we keep it separate for safety.
+                            handles.append(AllGatherHandle(handle,
+                                                param,
+                                                param_buffer=param_buffer,
+                                                original_dtype=original_dtype))
+                    else:
+                        if hasattr(param_ds_tensor, "ds_quant_scale"):
+                            scales = param_ds_tensor.ds_quant_scale
+                            quantized_param = param_ds_tensor.data
+                        else:
+                            quantized_param, scales = self.quantizer_module.quantize(param_ds_tensor)
+                        handle = _dist_allgather_fn(quantized_param.to(get_accelerator().current_device_name()),
+                                                    param_buffer, ds_process_group)
+
+                        quant_scale_buffer = torch.empty(
+                            scales.numel() * world_size,
+                            dtype=scales.dtype,
+                            device=get_accelerator().current_device_name(),
+                            requires_grad=False,
+                        )
+                        quant_handle = _dist_allgather_fn(scales.to(get_accelerator().current_device_name()),
+                                                        quant_scale_buffer, ds_process_group)
+                        quant_info = QuantizationInfo()
+                        quant_info.quantized_param = param_buffer.narrow(0, 0, param.ds_numel).view(param.ds_shape).to(
+                            param.device)
+                        quant_info.backend = self.quantizer_module
+                        quant_info.quant_handle = quant_handle
+                        quant_info.scale_buffer = quant_scale_buffer
+                        handles.append(AllGatherHandle(handle, param, quantization=quant_info))
+                return MultipleAllGatherHandles(handles)
 
             else:
                 if self.use_all_reduce_for_fetch_params and not quantize and not use_secondary_tensor:
