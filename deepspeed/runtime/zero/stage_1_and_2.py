@@ -1002,7 +1002,8 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
     def reduce_independent_p_g_buckets_and_remove_grads(self, param, i):
 
         grad_reduc = self.get_gradient_for_reduction(param)
-        bucket = self.ipg_buckets[self.get_param_comm_dtype(param)]
+        comm_dtype = self.get_param_comm_dtype(param)
+        bucket = self.ipg_buckets[comm_dtype]
         if bucket.elements + param.numel() > self.reduce_bucket_size:
             self.report_ipg_memory_usage("In ipg_remove_grads before reduce_ipg_grads", param.numel())
             self.reduce_ipg_grads()
@@ -1022,7 +1023,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
 
         if self.contiguous_gradients:
             if param.numel() > self.reduce_bucket_size:
-                self.extra_large_param_to_reduce[param.dtype] = param
+                self.extra_large_param_to_reduce[comm_dtype] = param
             else:
                 # keeping the gradients contiguous to prevent memory fragmentation, and avoid flattening
                 new_grad_tensor = bucket.buffer[bucket.index].narrow(0, bucket.elements, param.numel())
