@@ -2007,7 +2007,8 @@ class Init(InsertPostInitMethodToModuleSubClasses):
                 partitions = []
                 for i in range(self.num_partitions):
                     start = partition_size * i
-                    partitions.append(flat_tensor.narrow(0, start, partition_size))
+                    partitioned_tensor = flat_tensor.narrow(0, start, partition_size)
+                    partitions.append(partitioned_tensor)
 
                     if i == self.get_partition_rank():
                         partitioned_tensor.copy_(param.ds_tensor.data)
