@@ -31,6 +31,7 @@ def pytest_configure(config):
 def pytest_addoption(parser):
     parser.addoption("--torch_ver", default=None, type=str)
     parser.addoption("--cuda_ver", default=None, type=str)
+    parser.addoption("--enable-compile-mode", action="store_true", help="Run both compiled/non-compiled versions")
 
 
 def validate_version(expected, found):
@@ -68,6 +69,13 @@ def pytest_runtest_call(item):
         dist_test_class = item.cls()
         dist_test_class(item._request)
         item.runtest = lambda: True  # Dummy function so test is not run twice
+
+
+def pytest_generate_tests(metafunc):
+    if "compile_mode" in metafunc.fixturenames:
+        compile_testing_enabled = metafunc.config.getoption("--enable-compile-mode")
+        params = [False, True] if compile_testing_enabled else [False]
+        metafunc.parametrize("compile_mode", params)
 
 
 # We allow DistributedTest to reuse distributed environments. When the last

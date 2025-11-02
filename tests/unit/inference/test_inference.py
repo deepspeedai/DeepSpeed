@@ -348,7 +348,6 @@ def validate_test(model_w_task, dtype, enable_cuda_graph, enable_triton):
     return msg
 
 
-@pytest.mark.parametrize('compile_mode', [True, False])
 @pytest.mark.inference
 class TestModelTask(DistributedTest):
     world_size = 1
@@ -438,7 +437,6 @@ class TestModelTask(DistributedTest):
         assert assert_fn(bs_output, ds_output)
 
 
-@pytest.mark.parametrize('compile_mode', [True, False])
 @pytest.mark.seq_inference
 @pytest.mark.parametrize("model_w_task", [("EleutherAI/gpt-neo-1.3B", "text-generation"),
                                           ("EleutherAI/gpt-neox-20b", "text-generation"),
@@ -488,7 +486,6 @@ class TestMPSize(DistributedTest):
         assert assert_fn(bs_output, ds_output)
 
 
-@pytest.mark.parametrize('compile_mode', [True, False])
 @pytest.mark.inference
 @pytest.mark.parametrize("model_w_task", [("openai-community/gpt2", "text-generation")], ids=["gpt2"])
 class TestLowCpuMemUsage(DistributedTest):
@@ -523,7 +520,6 @@ class TestLowCpuMemUsage(DistributedTest):
         assert assert_fn(bs_output, ds_output)
 
 
-@pytest.mark.parametrize('compile_mode', [True, False])
 @pytest.mark.seq_inference
 @pytest.mark.parametrize(
     "model_w_task, injection_policy",
@@ -632,7 +628,6 @@ class TestLlamaInjection(DistributedTest):
         # assert assert_fn(bs_output, ds_output)
 
 
-@pytest.mark.parametrize('compile_mode', [True, False])
 @pytest.mark.seq_inference
 @pytest.mark.parametrize('keep_module_on_host', [True, False])
 @pytest.mark.parametrize(
@@ -735,7 +730,6 @@ class TestAutoTensorParallelism(DistributedTest):
                 assert param.device == torch.device('cpu'), f"keep_module_on_host is on but param {name} is not on cpu"
 
 
-@pytest.mark.parametrize('compile_mode', [True, False])
 @pytest.mark.nightly
 @pytest.mark.parametrize(
     "model_family, model_name",

@@ -211,7 +211,6 @@ def update_gathered_stage3_optimizer(optimizer_state, param_shapes, world_size):
 @pytest.mark.parametrize("use_torch_adam", [False, True])
 @pytest.mark.parametrize("load_optim", [False, True])
 @pytest.mark.parametrize("sub_group_size", [-1, 100])
-@pytest.mark.parametrize('compile_mode', [True, False])
 class TestZeROUniversalCheckpointDP(DistributedTest):
 
     def _run_test(self, tmpdir, dtype, ds_config, load_optim, use_torch_adam, world_size, compile_mode):

@@ -19,7 +19,6 @@ if not deepspeed.ops.__compatible_ops__[FusedAdamBuilder.NAME]:
 class TestLatestCheckpoint(DistributedTest):
     world_size = 1
 
-    @pytest.mark.parametrize('compile_mode', [True, False])
     def test_existing_latest(self, tmpdir, compile_mode):
         config_dict = {
             "train_batch_size": 2,
@@ -43,7 +42,6 @@ class TestLatestCheckpoint(DistributedTest):
                                             dtype=torch.float,
                                             compile_mode=compile_mode)
 
-    @pytest.mark.parametrize('compile_mode', [True, False])
     def test_missing_latest(self, tmpdir, compile_mode):
         config_dict = {
             "train_batch_size": 2,

@@ -38,7 +38,6 @@ class TestMoECheckpoint(DistributedTest):
                                             seq_dataloader=True,
                                             dtype=torch.float16)
 
-    @pytest.mark.parametrize('compile_mode', [True, False])
     @pytest.mark.parametrize("ep_size, load_optim_states", [(4, True), (4, False), (2, True), (2, False)])
     def test_checkpoint_moe_and_zero(self, tmpdir, ep_size, load_optim_states, compile_mode):
         if not required_torch_version(min_version=1.8):

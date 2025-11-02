@@ -76,7 +76,6 @@ class save_shard(DistributedFixture):
 class TestCheckpointShard(DistributedTest):
     world_size = 2
 
-    @pytest.mark.parametrize('compile_mode', [True, False])
     def test(self, model_name, dtype, class_tmpdir, save_shard, compile_mode):
 
         world_size = int(os.getenv("WORLD_SIZE", "1"))
@@ -106,7 +105,6 @@ class TestCheckpointShard(DistributedTest):
 class TestCheckpointShardinAutoTP(DistributedTest):
     world_size = 2
 
-    @pytest.mark.parametrize('compile_mode', [True, False])
     def test(self, model_name, class_tmpdir, compile_mode):
 
         def write_checkpoints_json(model_name, class_tmpdir):

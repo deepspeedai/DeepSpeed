@@ -14,7 +14,6 @@ import pytest
 class TestCheckpointValidationTag(DistributedTest):
     world_size = 2
 
-    @pytest.mark.parametrize('compile_mode', [True, False])
     @pytest.mark.parametrize('valid_mode', ["FAIL", "WARN", "IGNORE"])
     def test_checkpoint_unique_tag(self, tmpdir, valid_mode, compile_mode):
         config_dict = {
@@ -42,7 +41,6 @@ class TestCheckpointValidationTag(DistributedTest):
         else:
             model.save_checkpoint(save_dir=tmpdir, tag=f"tag-{dist.get_rank()}")
 
-    @pytest.mark.parametrize('compile_mode', [True, False])
     def test_checkpoint_unknown_tag_validation(self, tmpdir, compile_mode):
 
         config_dict = {

@@ -15,7 +15,6 @@ from unit.checkpoint.common import checkpoint_correctness_verification
 import pytest
 
 
-@pytest.mark.parametrize('compile_mode', [True, False])
 @pytest.mark.parametrize('zero_stage, use_cpu_offload', [(0, False), (1, False), (2, False), (2, True), (3, False),
                                                          (3, True)])
 class TestLRSchedulerCheckpoint(DistributedTest):

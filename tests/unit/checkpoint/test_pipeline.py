@@ -15,7 +15,6 @@ import pytest
 class TestPipelineCheckpoint(DistributedTest):
     world_size = 4
 
-    @pytest.mark.parametrize('compile_mode', [True, False])
     @pytest.mark.parametrize("zero_stage", [0, 1])
     def test_checkpoint_pipe_engine(self, zero_stage, tmpdir, compile_mode):
         skip_on_arch(min_arch=7)

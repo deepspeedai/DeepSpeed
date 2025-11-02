@@ -24,7 +24,6 @@ class TestSparseCheckpoint(DistributedTest):
         [True, False],
         [True, True],
     ])
-    @pytest.mark.parametrize('compile_mode', [True, False])
     def test_non_strict_load_sparse(self, tmpdir, to_save_model_has_embedding, to_save_model_sparse,
                                     destination_has_embedding, destination_sparse, compile_mode):
 

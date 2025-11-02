@@ -21,7 +21,6 @@ import pytest
 class TestZeROCheckpoint(DistributedTest):
     world_size = 2
 
-    @pytest.mark.parametrize('compile_mode', [True, False])
     @pytest.mark.parametrize('zero_stage', [3])
     def test_pipeline_checkpoint_loading(self, tmpdir, zero_stage, compile_mode):
         config_dict = {
@@ -170,7 +169,6 @@ class TestZeROCheckpoint(DistributedTest):
                                             load_optimizer_states=True,
                                             compile_mode=compile_mode)
 
-    @pytest.mark.parametrize('compile_mode', [True, False])
     @pytest.mark.parametrize('zero_stage', [0, 1, 2, 3])
     def test_load_module_only(self, tmpdir, zero_stage, compile_mode):
         if zero_stage == 0 and get_accelerator().device_name() == "cpu":
@@ -237,7 +235,6 @@ class ws4_model_checkpoint(DistributedFixture):
         model.save_checkpoint(class_tmpdir)
 
 
-@pytest.mark.parametrize('compile_mode', [True, False])
 @pytest.mark.parametrize("elastic_save", [True, False])
 @pytest.mark.parametrize("elastic_load", [True, False])
 @pytest.mark.parametrize("load_optim", [True, False])
@@ -334,7 +331,6 @@ class TestZeROElasticCheckpoint(DistributedTest):
             model.load_checkpoint(class_tmpdir, load_optimizer_states=load_optim)
 
 
-@pytest.mark.parametrize('compile_mode', [True, False])
 class TestZeROSaveLoadEdgeCase(DistributedTest):
     world_size = 2
 
@@ -651,7 +647,6 @@ class TestZeROCheckpointFrozenWeights(DistributedTest):
 class TestSaveTensorClone(DistributedTest):
     world_size = 1
 
-    @pytest.mark.parametrize('compile_mode', [True, False])
     @pytest.mark.parametrize('zero_stage', [1, 2])
     @pytest.mark.parametrize('use_cpu_device', [True, False])
     def test_save_tensor_clone(self, tmpdir, zero_stage, use_cpu_device, compile_mode):
