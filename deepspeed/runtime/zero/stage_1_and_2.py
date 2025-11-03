@@ -2297,7 +2297,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
     def _get_state_without_padding(self, state_with_padding, padding):
         lean_state = {}
         for key, value in state_with_padding.items():
-            if torch.is_tensor(value):
+            if torch.is_tensor(value) and value.dim() > 0:
                 lean_length = value.numel() - padding
                 lean_state[key] = value[:lean_length]
             else:
