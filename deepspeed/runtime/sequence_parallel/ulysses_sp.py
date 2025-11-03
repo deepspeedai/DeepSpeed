@@ -670,6 +670,8 @@ class SequenceTiledCompute(torch.autograd.Function):
     """
     A generic autograd function to perform a tiled compute.
 
+    Please note this module re-computes `forward` in the `backward`. So the `forward` occurs twice each iteration. And if you're using activation checkpointing it then occurs trice.
+
     Please note that this implementation doesn't require DeepSpeed and can work without it. `compute_params` can remain `None` in such a case.
 
     For an easier to understand example see TiledMLP - which is the same as this autograd function but without the generalization code.
@@ -835,9 +837,11 @@ class SequenceTiledCompute(torch.autograd.Function):
 
 class TiledMLP(torch.autograd.Function):
     """
-    Perform a tiled MLP computation to massively reduce memory usage needed to compute MLP when using very long sequence lengths
+    Perform a tiled MLP computation to massively reduce memory usage needed to compute MLP when using very long sequence lengths.
 
-    For a general tiled compute implementation that can handle any `forward` see `SequenceTiledCompute`
+    Please note this module re-computes `forward` in the `backward`. So the `forward` occurs twice each iteration. And if you're using activation checkpointing it then occurs trice.
+
+    For a general tiled compute implementation that can handle any `forward` see `SequenceTiledCompute`.
 
     Args:
     - fn: the function to call on sharded inputs
