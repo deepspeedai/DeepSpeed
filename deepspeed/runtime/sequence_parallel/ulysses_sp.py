@@ -670,7 +670,7 @@ class SequenceTiledCompute(torch.autograd.Function):
     """
     A generic autograd function to perform a tiled compute.
 
-    Please note this module recalculates `forward` in the `backward`. So the `forward` occurs twice. And if you're using activation checkpoiting it occurs trice.
+    Please note this module re-computes `forward` in the `backward`. So the `forward` occurs twice. And if you're using activation checkpoiting it occurs trice.
 
     Please note that this implementation doesn't require DeepSpeed and can work without it. `compute_params` can remain `None` in such a case.
 
@@ -839,7 +839,7 @@ class TiledMLP(torch.autograd.Function):
     """
     Perform a tiled MLP computation to massively reduce memory usage needed to compute MLP when using very long sequence lengths.
 
-    Please note this module recalculates `forward` in the `backward`. So the `forward` occurs twice. And if you're using activation checkpoiting it occurs trice.
+    Please note this module re-computes `forward` in the `backward`. So the `forward` occurs twice. And if you're using activation checkpoiting it occurs trice.
 
     For a general tiled compute implementation that can handle any `forward` see `SequenceTiledCompute`.
 
