@@ -105,7 +105,7 @@ from deepspeed.runtime.torch_autocast import init_autocast_params, get_default_a
 
 from .pipe.module import PipelineModule
 from .utils import get_ma_status
-from .compiler import is_compile_supported
+from .compiler import is_compile_supported, compiled_autograd
 from ..ops.adam import FusedAdam
 from ..moe.sharded_moe import TopKGate, MOELayer
 from ..moe.layer import MoE
@@ -419,6 +419,9 @@ class DeepSpeedEngine(Module):
             self.register_compile_pass(prefetch.NAME, prefetch.schedule_prefetch)
             self.register_compile_pass(selective_gather.NAME, selective_gather.selective_gather)
             self.register_compile_pass(offload_adam_states.NAME, offload_adam_states.move_opt_states)
+
+        self._is_compiled_autograd_enabled = False
+        self._compile_kwargs = {}
 
     def _optimized_linear_offload_setup(self):
         self.optimized_linear_base_weight_sharding = False
@@ -2353,8 +2356,9 @@ class DeepSpeedEngine(Module):
 
         self._start_timers(self.engine_timers.backward_timers)
         loss = self._backward_prologue(loss, scale_wrt_gas)
-        self._do_optimizer_backward(loss, retain_graph)
-        self._backward_epilogue()
+        with compiled_autograd(self._is_compiled_autograd_enabled, self._compile_kwargs):
+            self._do_optimizer_backward(loss, retain_graph)
+            self._backward_epilogue()
         self._stop_timers(self.engine_timers.backward_timers)
 
         return loss
@@ -4072,7 +4076,11 @@ class DeepSpeedEngine(Module):
             gc.collect()
             get_accelerator().empty_cache()
 
-    def compile(self, backend=get_accelerator().get_compile_backend(), compile_kwargs={}, schedule=None) -> None:
+    def compile(self,
+                backend=get_accelerator().get_compile_backend(),
+                compile_kwargs={},
+                schedule=None,
+                compiled_autograd_enabled=False) -> None:
         """Compile the module using the specified backend and kwargs.
         If a compiler_fn is set, it will be used instead of torch.compile().
         """
@@ -4138,6 +4146,8 @@ class DeepSpeedEngine(Module):
             raise
 
         self._is_compiled = True
+        self._is_compiled_autograd_enabled = compiled_autograd_enabled
+        self._compile_kwargs = compile_kwargs
 
     def _set_deepcompile_active(self, active: bool) -> None:
         """Toggle DeepCompile runtime state and manage forward hooks accordingly."""
