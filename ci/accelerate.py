@@ -14,6 +14,7 @@ image = (modal.Image
          .from_registry("pytorch/pytorch:2.6.0-cuda12.4-cudnn9-devel", add_python="3.10")
          .run_commands("apt update && apt install -y libaio-dev")
          .apt_install("git")
+         .run_commands("pip install uv")
          .run_commands("uv pip install --system --compile-bytecode datasets==3.6.0")
          .run_commands(
                 "git clone https://github.com/huggingface/accelerate && \
