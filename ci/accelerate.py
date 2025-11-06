@@ -15,7 +15,6 @@ image = (modal.Image
          .run_commands("apt update && apt install -y libaio-dev")
          .apt_install("git")
          .pip_install("uv")
-         #.run_commands("uv pip install --system --compile-bytecode datasets==3.6.0")
          # uv_pip_install already includes --compile-bytecode
          .uv_pip_install("datasets==3.6.0", extra_options="--system")
          .pip_install_from_requirements(ROOT_PATH / "requirements/requirements.txt", gpu="any")
