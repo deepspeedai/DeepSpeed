@@ -96,4 +96,5 @@ jobs:
 
       - name: Run tests
         run: |
+          cat ci/accelerate.py
           modal run -m ci.accelerate
