@@ -20,6 +20,11 @@ on:
     branches:
       - master
 
+  # you have to switch to `pull_request` if you need to change the CI job's python script,
+  # otherwise GH will use a master version of the CI files, ignoring the modifications in the PR -
+  # the other way is to use modal cli to test this job from one's host - it'd require setting up
+  # modal secrets
+  # pull_request:
   pull_request_target:
     paths-ignore:
       - 'docs/**'
