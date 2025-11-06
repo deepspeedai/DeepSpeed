@@ -16,6 +16,7 @@ image = (modal.Image
          .apt_install("git")
          .pip_install("uv")
          #.run_commands("uv pip install --system --compile-bytecode datasets==3.6.0")
+         # uv_pip_install already includes --compile-bytecode
          .uv_pip_install("datasets==3.6.0", extra_options="--system")
          .pip_install_from_requirements(ROOT_PATH / "requirements/requirements.txt", gpu="any")
          .pip_install_from_requirements(ROOT_PATH / "requirements/requirements-dev.txt", gpu="any")
@@ -35,16 +36,25 @@ app = modal.App("deepspeedai-accelerate-ci", image=image)
 def pytest():
     import subprocess
 
-    cmd = "git clone https://github.com/huggingface/accelerate && uv pip install --system --compile-bytecode ./accelerate[testing]"
-
+    cmd = "git clone https://github.com/huggingface/accelerate"
+    print(f"running: {cmd}")
+    subprocess.run(
+        cmd.split(),
+        check=True,
+        cwd=ROOT_PATH / ".",
+    )
+    cmd = "uv pip install --system --compile-bytecode ./accelerate[testing]"
+    print(f"running: {cmd}")
     subprocess.run(
         cmd.split(),
         check=True,
         cwd=ROOT_PATH / ".",
     )
 
+    cmd = "pytest ./accelerate/tests/deepspeed"
+    print(f"running: {cmd}")
     subprocess.run(
-        "pytest ./accelerate/tests/deepspeed".split(),
+        cmd.split(),
         check=True,
         cwd=ROOT_PATH / ".",
     )
