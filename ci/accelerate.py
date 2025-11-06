@@ -9,6 +9,10 @@ import modal
 
 ROOT_PATH = Path(__file__).parents[1]
 
+import os
+# forces rebuild if needed
+os.environ['MODAL_FORCE_BUILD'] = "1"
+
 # yapf: disable
 image = (modal.Image
          .from_registry("pytorch/pytorch:2.6.0-cuda12.4-cudnn9-devel", add_python="3.10")
