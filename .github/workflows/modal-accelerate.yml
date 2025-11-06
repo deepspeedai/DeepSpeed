@@ -20,7 +20,7 @@ on:
     branches:
       - master
 
-  pull_request_target:
+  pull_request:
     paths-ignore:
       - 'docs/**'
       - 'blogs/**'
