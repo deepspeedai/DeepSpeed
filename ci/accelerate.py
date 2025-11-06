@@ -12,7 +12,6 @@ ROOT_PATH = Path(__file__).parents[1]
 # yapf: disable
 image = (modal.Image
          .from_registry("pytorch/pytorch:2.6.0-cuda12.4-cudnn9-devel", add_python="3.10")
-         .run_commands("apt update && apt install -y libaio-dev")
          .apt_install("git")
          .pip_install("uv")
          # uv_pip_install already includes --compile-bytecode
