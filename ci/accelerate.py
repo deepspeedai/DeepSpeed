@@ -16,7 +16,7 @@ image = (modal.Image
          .apt_install("git")
          .pip_install("uv")
          #.run_commands("uv pip install --system --compile-bytecode datasets==3.6.0")
-         .uv_pip_install("datasets==3.6.0", extra_options="--system --compile-bytecode")
+         .uv_pip_install("datasets==3.6.0", extra_options="--system")
          .pip_install_from_requirements(ROOT_PATH / "requirements/requirements.txt", gpu="any")
          .pip_install_from_requirements(ROOT_PATH / "requirements/requirements-dev.txt", gpu="any")
          .add_local_dir(ROOT_PATH , remote_path="/root/", copy=True)
