@@ -4161,6 +4161,11 @@ class DeepSpeedEngine(Module):
             if self.module_forward_post_hook is not None:
                 self.module_forward_post_hook.remove()
                 self.module_forward_post_hook = None
+            
+            if self._is_compiled_autograd_enabled:
+                logger.warning("Compiled autograd is not compatible with DeepCompile, disabling compiled autograd.")
+                self._is_compiled_autograd_enabled = False
+                self._compile_kwargs = None
         else:
             if self.module_forward_pre_hook is None:
                 self.module_forward_pre_hook = self._create_module_forward_pre_hook()
