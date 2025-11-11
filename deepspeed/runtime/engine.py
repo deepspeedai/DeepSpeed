@@ -4152,12 +4152,13 @@ class DeepSpeedEngine(Module):
             raise
 
         self._is_compiled = True
+        self._compile_kwargs = compile_kwargs
         if compiled_autograd_enabled:
             if not self._deepcompile_active:
                 self._is_compiled_autograd_enabled = compiled_autograd_enabled
-                self._compile_kwargs = compile_kwargs
             else:
                 logger.warning("Compiled autograd is not compatible with DeepCompile, disabling compiled autograd.")
+                self._is_compiled_autograd_enabled = False
 
     def _set_deepcompile_active(self, active: bool) -> None:
         """Toggle DeepCompile runtime state and manage forward hooks accordingly."""
