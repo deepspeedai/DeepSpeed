@@ -94,7 +94,6 @@ class LayerMetaclass(type):
 
                     # Check for invalid mappings
                     if base_dependency not in all_names:
-                        continue
                         raise ValueError(
                             "Target parameter \"{}\" not found in this layer. Valid targets are {}".format(
                                 base_dependency, all_names))
@@ -123,7 +122,6 @@ class LayerMetaclass(type):
                         raise ValueError(
                             "ParametrizedList index inference can only work with a single glob: {}".format(src_name))
                     elif glob_count == 0:
-                        continue
                         raise ValueError(
                             "Must have wildcard (*) in source name for ParametrizedList mapping: {}".format(src_name))
 
