@@ -51,24 +51,38 @@ def debug_param2name(param):
         return "unknown"
 
 
+def ds_id(param):
+    if hasattr(param, "ds_id"):
+        return param.ds_id
+    else:
+        return "none"
+
+
+def ds_shape(param):
+    if hasattr(param, "ds_shape"):
+        return param.ds_shape
+    else:
+        return param.shape
+
+
 def debug_param2name_id(param):
-    return f"name={debug_param2name(param)} id={param.ds_id}"
+    return f"name={debug_param2name(param)} id={ds_id(param)}"
 
 
 def debug_param2name_id_shape(param):
-    return f"name={debug_param2name(param)} id={param.ds_id} shape={param.ds_shape}"
+    return f"name={debug_param2name(param)} id={ds_id(param)} shape={ds_shape(param)}"
 
 
 def debug_param2name_id_shape_device(param):
-    return f"name={debug_param2name(param)} id={param.ds_id} shape={param.ds_shape} device={param.device}"
+    return f"name={debug_param2name(param)} id={ds_id(param)} shape={ds_shape(param)} device={param.device}"
 
 
 def debug_param2name_id_numel(param):
-    return f"name={debug_param2name(param)} id={param.ds_id} numel={param.numel()}"
+    return f"name={debug_param2name(param)} id={ds_id(param)} numel={param.numel()}"
 
 
 def debug_param2name_id_shape_status(param):
-    return f"name={debug_param2name(param)} id={param.ds_id} shape={param.ds_shape} status={param.ds_status}"
+    return f"name={debug_param2name(param)} id={ds_id(param)} shape={ds_shape(param)} status={param.ds_status}"
 
 
 def printflock(*msgs):
