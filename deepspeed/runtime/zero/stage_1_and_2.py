@@ -442,7 +442,8 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
                     self.device).clone().half().detach()
 
             if self.cpu_offload:
-                weights_partition = get_accelerator().pin_memory(weights_partition)
+                if self.cpu_offload_pin_memory:
+                    weights_partition = get_accelerator().pin_memory(weights_partition)
                 temp_dtype = self.parallel_partitioned_bit16_groups[i][partition_id].dtype
                 temp_buffer_bit16 = torch.full(weights_partition.shape,
                                                fill_value=0.0,
