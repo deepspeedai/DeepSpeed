@@ -57,11 +57,13 @@ def ds_id(param):
     else:
         return "none"
 
+
 def ds_shape(param):
     if hasattr(param, "ds_shape"):
         return param.ds_shape
     else:
         return param.shape
+
 
 def debug_param2name_id(param):
     return f"name={debug_param2name(param)} id={ds_id(param)}"
