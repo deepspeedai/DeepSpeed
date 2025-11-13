@@ -6,7 +6,7 @@
 import math
 import os
 import types
-from typing import Callable, Iterable
+from typing import Callable, Iterable, Union
 from enum import Enum
 import functools
 import itertools
@@ -778,7 +778,7 @@ class AllGatherCoalescedHandle:
 
 class MultipleAllGatherHandles:
 
-    def __init__(self, handles: List[AllGatherCoalescedHandle]):
+    def __init__(self, handles: List[Union[AllGatherHandle, AllGatherCoalescedHandle]]):
         self.handles = handles
 
     def wait(self, handle_dependency=True) -> None:
@@ -1097,8 +1097,10 @@ class Init(InsertPostInitMethodToModuleSubClasses):
 
         self.use_all_reduce_for_fetch_params = get_config_default(DeepSpeedZeroConfig,
                                                                   "use_all_reduce_for_fetch_params")
+        self.allgather_single_param = get_config_default(DeepSpeedZeroConfig, "allgather_single_param")
         if _ds_config is not None:
             self.use_all_reduce_for_fetch_params = _ds_config.zero_config.use_all_reduce_for_fetch_params
+            self.allgather_single_param = _ds_config.zero_config.allgather_single_param
 
     def _update_persist_config(self, ds_config):
         Init.apply_param_persistence = True
@@ -1306,79 +1308,84 @@ class Init(InsertPostInitMethodToModuleSubClasses):
                 # otherwise could mix data between tensors.
                 assert_ints_same_as_other_ranks([p.ds_tensor.ds_numel for p in params])
 
-            if len(params) == 1:
+            if self.allgather_single_param or len(params) == 1:
                 # have an opportunity to avoid some intermediate memory allocations
-                param = params[0]
-                buffer_size = math.ceil(param.ds_numel / world_size) * world_size
-                if use_secondary_tensor:
-                    buffer_size = param.ds_secondary_tensor.shape[0] * world_size  #make sure out is appropriately sized
+                handles = []
+                for param in params:
+                    buffer_size = math.ceil(param.ds_numel / world_size) * world_size
+                    if use_secondary_tensor:
+                        buffer_size = param.ds_secondary_tensor.shape[
+                            0] * world_size  #make sure out is appropriately sized
 
-                param_ds_tensor = param.ds_secondary_tensor if use_secondary_tensor else param.ds_tensor
+                    param_ds_tensor = param.ds_secondary_tensor if use_secondary_tensor else param.ds_tensor
 
-                original_dtype = param_ds_tensor.dtype
-                if quantize:
-                    allgather_dtype = torch.int8
-                else:
-                    allgather_dtype = get_allgather_dtype(param, param_ds_tensor)
-
-                param_buffer = torch.empty(
-                    buffer_size,
-                    dtype=allgather_dtype,
-                    device=get_accelerator().current_device_name(),
-                    requires_grad=False,
-                )
-                if not quantize:
-                    handles = _dist_allgather_fn(
-                        param_ds_tensor.to(get_accelerator().current_device_name()).to(allgather_dtype),
-                        param_buffer,
-                        ds_process_group,
-                    )
-
-                    if original_dtype == allgather_dtype:
-                        param.data = param_buffer.narrow(0, 0, param.ds_numel).view(param.ds_shape).to(param.device)
-                        return AllGatherHandle(handles, param)
+                    original_dtype = param_ds_tensor.dtype
+                    if quantize:
+                        allgather_dtype = torch.int8
                     else:
-                        # This case is complicated:
-                        # We use `register_post_accumulate_grad_hook` to set allgather hooks. Normally, the hook is
-                        # called once per parameter, even if that parameter is tied to multiple layers.
-                        # However, when the dtype changes, the hook may be triggered multiple times.
-                        # If we directly do:
-                        #   param_buffer.narrow(0, 0, param.ds_numel).view(param.ds_shape).to(param.device)
-                        # as above, the dtype may differ, causing the gradient-reduce hook
-                        # to be invoked multiple times.
-                        # To avoid this, we leave `param.data` in a partitioned state.
-                        # This prevents duplicate gradient-reduce hook calls.
-                        # In theory, this path could be consolidated with the case where
-                        # (original_dtype == allgather_dtype), but because it changes the
-                        # state transition of DeepSpeed parameters, we keep it separate for safety.
-                        return AllGatherHandle(handles,
-                                               param,
-                                               param_buffer=param_buffer,
-                                               original_dtype=original_dtype)
-                else:
-                    if hasattr(param_ds_tensor, "ds_quant_scale"):
-                        scales = param_ds_tensor.ds_quant_scale
-                        quantized_param = param_ds_tensor.data
-                    else:
-                        quantized_param, scales = self.quantizer_module.quantize(param_ds_tensor)
-                    handle = _dist_allgather_fn(quantized_param.to(get_accelerator().current_device_name()),
-                                                param_buffer, ds_process_group)
+                        allgather_dtype = get_allgather_dtype(param, param_ds_tensor)
 
-                    quant_scale_buffer = torch.empty(
-                        scales.numel() * world_size,
-                        dtype=scales.dtype,
+                    param_buffer = torch.empty(
+                        buffer_size,
+                        dtype=allgather_dtype,
                         device=get_accelerator().current_device_name(),
                         requires_grad=False,
                     )
-                    quant_handle = _dist_allgather_fn(scales.to(get_accelerator().current_device_name()),
-                                                      quant_scale_buffer, ds_process_group)
-                    quant_info = QuantizationInfo()
-                    quant_info.quantized_param = param_buffer.narrow(0, 0, param.ds_numel).view(param.ds_shape).to(
-                        param.device)
-                    quant_info.backend = self.quantizer_module
-                    quant_info.quant_handle = quant_handle
-                    quant_info.scale_buffer = quant_scale_buffer
-                    return AllGatherHandle(handle, param, quantization=quant_info)
+                    if not quantize:
+                        handle = _dist_allgather_fn(
+                            param_ds_tensor.to(get_accelerator().current_device_name()).to(allgather_dtype),
+                            param_buffer,
+                            ds_process_group,
+                        )
+
+                        if original_dtype == allgather_dtype:
+                            param.data = param_buffer.narrow(0, 0,
+                                                             param.ds_numel).view(param.ds_shape).to(param.device)
+                            handles.append(AllGatherHandle(handle, param))
+                        else:
+                            # This case is complicated:
+                            # We use `register_post_accumulate_grad_hook` to set allgather hooks. Normally, the hook is
+                            # called once per parameter, even if that parameter is tied to multiple layers.
+                            # However, when the dtype changes, the hook may be triggered multiple times.
+                            # If we directly do:
+                            #   param_buffer.narrow(0, 0, param.ds_numel).view(param.ds_shape).to(param.device)
+                            # as above, the dtype may differ, causing the gradient-reduce hook
+                            # to be invoked multiple times.
+                            # To avoid this, we leave `param.data` in a partitioned state.
+                            # This prevents duplicate gradient-reduce hook calls.
+                            # In theory, this path could be consolidated with the case where
+                            # (original_dtype == allgather_dtype), but because it changes the
+                            # state transition of DeepSpeed parameters, we keep it separate for safety.
+                            handles.append(
+                                AllGatherHandle(handle,
+                                                param,
+                                                param_buffer=param_buffer,
+                                                original_dtype=original_dtype))
+                    else:
+                        if hasattr(param_ds_tensor, "ds_quant_scale"):
+                            scales = param_ds_tensor.ds_quant_scale
+                            quantized_param = param_ds_tensor.data
+                        else:
+                            quantized_param, scales = self.quantizer_module.quantize(param_ds_tensor)
+                        handle = _dist_allgather_fn(quantized_param.to(get_accelerator().current_device_name()),
+                                                    param_buffer, ds_process_group)
+
+                        quant_scale_buffer = torch.empty(
+                            scales.numel() * world_size,
+                            dtype=scales.dtype,
+                            device=get_accelerator().current_device_name(),
+                            requires_grad=False,
+                        )
+                        quant_handle = _dist_allgather_fn(scales.to(get_accelerator().current_device_name()),
+                                                          quant_scale_buffer, ds_process_group)
+                        quant_info = QuantizationInfo()
+                        quant_info.quantized_param = param_buffer.narrow(0, 0, param.ds_numel).view(param.ds_shape).to(
+                            param.device)
+                        quant_info.backend = self.quantizer_module
+                        quant_info.quant_handle = quant_handle
+                        quant_info.scale_buffer = quant_scale_buffer
+                        handles.append(AllGatherHandle(handle, param, quantization=quant_info))
+                return MultipleAllGatherHandles(handles)
 
             else:
                 if self.use_all_reduce_for_fetch_params and not quantize and not use_secondary_tensor:
@@ -1989,78 +1996,126 @@ class Init(InsertPostInitMethodToModuleSubClasses):
         if len(param_list) == 0:
             return
 
-        partition_size = sum([param.ds_tensor.ds_numel for param in param_list])
+        if self.allgather_single_param:
+            for param in param_list:
+                partition_size = param.ds_tensor.ds_numel
+                tensor_size = partition_size * self.num_partitions
 
-        tensor_size = partition_size * self.num_partitions
-        flat_tensor = torch.empty(tensor_size, dtype=param_list[0].ds_tensor.dtype, device=self.local_device)
-        partitions = []
-        for i in range(self.num_partitions):
-            start = partition_size * i
+                flat_tensor = torch.empty(tensor_size, dtype=param.ds_tensor.dtype, device=self.local_device)
+                flat_tensor.requires_grad = False
 
-            partitions.append(flat_tensor.narrow(0, start, partition_size))
+                partitions = []
+                for i in range(self.num_partitions):
+                    start = partition_size * i
+                    partitioned_tensor = flat_tensor.narrow(0, start, partition_size)
+                    partitions.append(partitioned_tensor)
 
-            if i == self.get_partition_rank():
-                offset = 0
-                for param in param_list:
-                    param_numel = param.ds_tensor.ds_numel
+                    if i == self.get_partition_rank():
+                        partitioned_tensor.copy_(param.ds_tensor.data)
 
-                    partitions[i].narrow(0, offset, param_numel).copy_(param.ds_tensor.data)
+                if hasattr(param, 'ds_quant_scale'):
+                    scale_size = param.ds_tensor.ds_quant_scale.numel()
+                    scale_tensor_size = scale_size * self.num_partitions
+                    flat_scale_tensor = torch.empty(scale_tensor_size,
+                                                    dtype=param.ds_tensor.ds_quant_scale.dtype,
+                                                    device=self.local_device)
+                    flat_scale_tensor.requires_grad = False
 
-                    offset += param_numel
+                    scale_partitions = []
+                    for i in range(self.num_partitions):
+                        start = scale_size * i
+                        scale_partitions.append(flat_scale_tensor.narrow(0, start, scale_size))
+                        if i == self.get_partition_rank():
+                            scale_partitions[i].copy_(param.ds_tensor.ds_quant_scale.data)
 
-        if hasattr(param_list[0], 'ds_quant_scale'):
-            scale_size = sum([param.ds_tensor.ds_quant_scale.numel() for param in param_list])
-            scale_tensor_size = scale_size * self.world_size
-            flat_scale_tensor = torch.empty(scale_tensor_size,
-                                            dtype=param_list[0].ds_tensor.ds_quant_scale.dtype,
-                                            device=self.local_device)
-            scale_partitions = []
-            for i in range(self.world_size):
-                start = scale_tensor_size * i
-                scale_partitions.append(flat_scale_tensor.narrow(0, start, scale_tensor_size))
-                if i == self.rank:
-                    offset = 0
-                    for param in param_list:
-                        param_scale_numel = param.ds_tensor.ds_quant_scale.ds_numel
+                dist.all_gather_into_tensor(flat_tensor,
+                                            partitions[self.get_partition_rank()],
+                                            group=self.get_partition_dp_group(param),
+                                            async_op=False)
 
-                        scale_partitions[i].narrow(0, offset,
-                                                   param_scale_numel).copy_(param.ds_tensor.ds_quant_scale.data)
-
-                        offset += param_scale_numel
-
-        dist.all_gather_into_tensor(flat_tensor,
-                                    partitions[self.get_partition_rank()],
+                if hasattr(param, 'ds_quant_scale'):
+                    dist.all_gather(flat_scale_tensor,
+                                    param.ds_tensor.ds_quant_scale,
                                     group=self.get_partition_dp_group(param),
                                     async_op=False)
-        if hasattr(param_list[0], 'ds_quant_scale'):
-            dist.all_gather(flat_scale_tensor,
-                            param_list[0].ds_quant_scale,
-                            group=self.get_partition_dp_group(param),
-                            async_op=False)
-        param_offset = 0
 
-        for param in param_list:
-            param_partition_size = param.ds_tensor.ds_numel
-            param_size = param.ds_numel
-            replicated_tensor = torch.empty(param.ds_shape, dtype=param.ds_tensor.dtype, device=self.local_device)
+                param.data = flat_tensor.narrow(0, 0, param.ds_numel).view(param.ds_shape).data
 
+                if hasattr(param, 'ds_quant_scale'):
+                    param.data = self.quantizer_module.dequantize(param.data, flat_scale_tensor)
+        else:
+            partition_size = sum([param.ds_tensor.ds_numel for param in param_list])
+
+            tensor_size = partition_size * self.num_partitions
+            flat_tensor = torch.empty(tensor_size, dtype=param_list[0].ds_tensor.dtype, device=self.local_device)
+            partitions = []
             for i in range(self.num_partitions):
+                start = partition_size * i
 
-                start = i * partition_size
+                partitions.append(flat_tensor.narrow(0, start, partition_size))
 
-                param_start = i * param_partition_size
+                if i == self.get_partition_rank():
+                    offset = 0
+                    for param in param_list:
+                        param_numel = param.ds_tensor.ds_numel
 
-                if param_start < param_size:
-                    numel_to_copy = min(param_size - param_start, param_partition_size)
+                        partitions[i].narrow(0, offset, param_numel).copy_(param.ds_tensor.data)
 
-                    part_to_copy = partitions[i].narrow(0, param_offset, numel_to_copy)
+                        offset += param_numel
 
-                    replicated_tensor.view(-1).narrow(0, param_start, numel_to_copy).copy_(part_to_copy)
-            #param_offset += param.data.numel()
-            param_offset += param.ds_tensor.ds_numel
             if hasattr(param_list[0], 'ds_quant_scale'):
-                replicated_tensor = self.quantizer_module.dequantize(replicated_tensor, flat_scale_tensor)
-            param.data = replicated_tensor.data
+                scale_size = sum([param.ds_tensor.ds_quant_scale.numel() for param in param_list])
+                scale_tensor_size = scale_size * self.world_size
+                flat_scale_tensor = torch.empty(scale_tensor_size,
+                                                dtype=param_list[0].ds_tensor.ds_quant_scale.dtype,
+                                                device=self.local_device)
+                scale_partitions = []
+                for i in range(self.world_size):
+                    start = scale_tensor_size * i
+                    scale_partitions.append(flat_scale_tensor.narrow(0, start, scale_tensor_size))
+                    if i == self.rank:
+                        offset = 0
+                        for param in param_list:
+                            param_scale_numel = param.ds_tensor.ds_quant_scale.ds_numel
+
+                            scale_partitions[i].narrow(0, offset,
+                                                       param_scale_numel).copy_(param.ds_tensor.ds_quant_scale.data)
+
+                            offset += param_scale_numel
+
+            dist.all_gather_into_tensor(flat_tensor,
+                                        partitions[self.get_partition_rank()],
+                                        group=self.get_partition_dp_group(param),
+                                        async_op=False)
+            if hasattr(param_list[0], 'ds_quant_scale'):
+                dist.all_gather(flat_scale_tensor,
+                                param_list[0].ds_quant_scale,
+                                group=self.get_partition_dp_group(param),
+                                async_op=False)
+            param_offset = 0
+
+            for param in param_list:
+                param_partition_size = param.ds_tensor.ds_numel
+                param_size = param.ds_numel
+                replicated_tensor = torch.empty(param.ds_shape, dtype=param.ds_tensor.dtype, device=self.local_device)
+
+                for i in range(self.num_partitions):
+
+                    start = i * partition_size
+
+                    param_start = i * param_partition_size
+
+                    if param_start < param_size:
+                        numel_to_copy = min(param_size - param_start, param_partition_size)
+
+                        part_to_copy = partitions[i].narrow(0, param_offset, numel_to_copy)
+
+                        replicated_tensor.view(-1).narrow(0, param_start, numel_to_copy).copy_(part_to_copy)
+                #param_offset += param.data.numel()
+                param_offset += param.ds_tensor.ds_numel
+                if hasattr(param_list[0], 'ds_quant_scale'):
+                    replicated_tensor = self.quantizer_module.dequantize(replicated_tensor, flat_scale_tensor)
+                param.data = replicated_tensor.data
 
         return None
 
