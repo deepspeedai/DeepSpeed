@@ -1097,8 +1097,7 @@ class Init(InsertPostInitMethodToModuleSubClasses):
 
         self.use_all_reduce_for_fetch_params = get_config_default(DeepSpeedZeroConfig,
                                                                   "use_all_reduce_for_fetch_params")
-        self.allgather_single_param = get_config_default(DeepSpeedZeroConfig,
-                                                         "allgather_single_param")
+        self.allgather_single_param = get_config_default(DeepSpeedZeroConfig, "allgather_single_param")
         if _ds_config is not None:
             self.use_all_reduce_for_fetch_params = _ds_config.zero_config.use_all_reduce_for_fetch_params
             self.allgather_single_param = _ds_config.zero_config.allgather_single_param
@@ -1315,7 +1314,8 @@ class Init(InsertPostInitMethodToModuleSubClasses):
                 for param in params:
                     buffer_size = math.ceil(param.ds_numel / world_size) * world_size
                     if use_secondary_tensor:
-                        buffer_size = param.ds_secondary_tensor.shape[0] * world_size  #make sure out is appropriately sized
+                        buffer_size = param.ds_secondary_tensor.shape[
+                            0] * world_size  #make sure out is appropriately sized
 
                     param_ds_tensor = param.ds_secondary_tensor if use_secondary_tensor else param.ds_tensor
 
@@ -1339,7 +1339,8 @@ class Init(InsertPostInitMethodToModuleSubClasses):
                         )
 
                         if original_dtype == allgather_dtype:
-                            param.data = param_buffer.narrow(0, 0, param.ds_numel).view(param.ds_shape).to(param.device)
+                            param.data = param_buffer.narrow(0, 0,
+                                                             param.ds_numel).view(param.ds_shape).to(param.device)
                             handles.append(AllGatherHandle(handle, param))
                         else:
                             # This case is complicated:
@@ -1355,7 +1356,8 @@ class Init(InsertPostInitMethodToModuleSubClasses):
                             # In theory, this path could be consolidated with the case where
                             # (original_dtype == allgather_dtype), but because it changes the
                             # state transition of DeepSpeed parameters, we keep it separate for safety.
-                            handles.append(AllGatherHandle(handle,
+                            handles.append(
+                                AllGatherHandle(handle,
                                                 param,
                                                 param_buffer=param_buffer,
                                                 original_dtype=original_dtype))
@@ -1375,7 +1377,7 @@ class Init(InsertPostInitMethodToModuleSubClasses):
                             requires_grad=False,
                         )
                         quant_handle = _dist_allgather_fn(scales.to(get_accelerator().current_device_name()),
-                                                        quant_scale_buffer, ds_process_group)
+                                                          quant_scale_buffer, ds_process_group)
                         quant_info = QuantizationInfo()
                         quant_info.quantized_param = param_buffer.narrow(0, 0, param.ds_numel).view(param.ds_shape).to(
                             param.device)
@@ -2017,8 +2019,8 @@ class Init(InsertPostInitMethodToModuleSubClasses):
                     scale_size = param.ds_tensor.ds_quant_scale.numel()
                     scale_tensor_size = scale_size * self.num_partitions
                     flat_scale_tensor = torch.empty(scale_tensor_size,
-                                                dtype=param.ds_tensor.ds_quant_scale.dtype,
-                                                device=self.local_device)
+                                                    dtype=param.ds_tensor.ds_quant_scale.dtype,
+                                                    device=self.local_device)
                     flat_scale_tensor.requires_grad = False
 
                     scale_partitions = []
@@ -2029,9 +2031,9 @@ class Init(InsertPostInitMethodToModuleSubClasses):
                             scale_partitions[i].copy_(param.ds_tensor.ds_quant_scale.data)
 
                 dist.all_gather_into_tensor(flat_tensor,
-                                        partitions[self.get_partition_rank()],
-                                        group=self.get_partition_dp_group(param),
-                                        async_op=False)
+                                            partitions[self.get_partition_rank()],
+                                            group=self.get_partition_dp_group(param),
+                                            async_op=False)
 
                 if hasattr(param, 'ds_quant_scale'):
                     dist.all_gather(flat_scale_tensor,
@@ -2079,7 +2081,7 @@ class Init(InsertPostInitMethodToModuleSubClasses):
                             param_scale_numel = param.ds_tensor.ds_quant_scale.ds_numel
 
                             scale_partitions[i].narrow(0, offset,
-                                                    param_scale_numel).copy_(param.ds_tensor.ds_quant_scale.data)
+                                                       param_scale_numel).copy_(param.ds_tensor.ds_quant_scale.data)
 
                             offset += param_scale_numel
 
