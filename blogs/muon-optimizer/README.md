@@ -32,3 +32,6 @@ Muon optimizer is getting more and more attention, and is verified by product le
 -[] Performance optimization to make Muon optimizer more efficient
 
 If you have thoughts, feedback and contribution on Muon optimizer, welcome to start an issue for discussion, or submit a PR to DeepSpeed.  Let’s make Muon optimizer rock solid and lightning fast in DeepSpeed!
+
+## Contributors
+This work is contributed from Wang, Zhipeng (@PKUWZP); Chi McIsaac(@qimcis) and Ma, Guokai (@delock)
