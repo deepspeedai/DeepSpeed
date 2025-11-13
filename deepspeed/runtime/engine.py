@@ -1120,6 +1120,9 @@ class DeepSpeedEngine(Module):
     def zero_log_trace_cache_warnings(self):
         return self._config.zero_config.log_trace_cache_warnings
 
+    def zero_allgather_single_param(self):
+        return self._config.zero_config.allgather_single_param
+
     def is_sanity_checks_enabled(self):
         return self._config.zero_config.enable_sanity_checks
 
@@ -1895,6 +1898,10 @@ class DeepSpeedEngine(Module):
                     ranks=[0])
                 if mics_shard_size > 0:
                     return self._return_mics_optimizer(optimizer, timers)
+
+                if self.zero_allgather_single_param():
+                    log_dist(f"If zero_allgather_single_param is True, set prefetch_bucket_size to 1", ranks=[0])
+                    self._config.zero_config.prefetch_bucket_size = 1
 
                 log_dist(f'Creating {model_dtype} ZeRO stage {zero_stage} optimizer', ranks=[0])
                 from deepspeed.runtime.zero.stage3 import DeepSpeedZeroOptimizer_Stage3
