@@ -56,7 +56,8 @@ BS=8, sequence length=512
 | Adam      | Yes        | 4.5s           |
 
 **Key Performance Insights:**
-From this result, we can see in certain situation, Muon optimizer can use less memory and does not need CPU offloading, while Adam optimizer cannot fit GPU memory and requires CPU offloading.
+
+From this result, we can see in certain situation, Muon optimizer can use less memory and does not need CPU offloading, while Adam optimizer cannot fit GPU memory and requires CPU offloading.  This collaterally brings performance benefit even when Muon optimizer needs more computation, because no offloading needed.
 
 ## Future plan
 Muon optimizer is getting more and more attention, and is verified by product level open LLM model such as Kimi-K2 which has 1T weights.  This makes Muon a second choice even potential replacement of Adam optimizer.   To make Muon optimizer more accessible in production environment, the following feature is needed:
