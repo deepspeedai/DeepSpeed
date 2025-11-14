@@ -71,3 +71,15 @@ def enable(min_version=None):
 
 def is_compiling():
     return torch_is_compiling()
+
+
+def dummy_decorator(func):
+    return func
+
+
+# robust version of @torch.compile
+def compile():
+    if hasattr(torch, "compile"):
+        return torch.compile
+    else:
+        return dummy_decorator
