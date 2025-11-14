@@ -49,11 +49,11 @@ We tested finetune Qwen2.5-3B model with tatsu-lab/aplaca dataset on 2xA100 (40G
 
 BS=8, sequence length=512
 
-| Optimizer | Offloading | Iteration Time | Memory Usage |
-|-----------|------------|----------------|--------------|
-| Muon      | No         | 0.9s           | 32 GB/GPU    |
-| Adam      | No         | OOM (Crash)    | >40 GB/GPU   |
-| Adam      | Yes        | 4.5s           | 38 GB/GPU    |
+| Optimizer | Offloading | Iteration Time |
+|-----------|------------|----------------|
+| Muon      | No         | 0.9s           |
+| Adam      | No         | OOM (Crash)    |
+| Adam      | Yes        | 4.5s           |
 
 **Key Performance Insights:**
 From this result, we can see in certain situation, Muon optimizer can use less memory and does not need CPU offloading, while Adam optimizer cannot fit GPU memory and requires CPU offloading.
