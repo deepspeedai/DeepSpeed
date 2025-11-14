@@ -31,8 +31,14 @@ import torch
 import deepspeed.comm as dist  # replace torch's distributed package with deepspeed.comm to resolve deepspeed check
 from deepspeed.runtime import compiler
 
+# Try to import Triton-optimized version
+try:
+    from .triton_muon import triton_muon_update, has_triton
+    TRITON_AVAILABLE = has_triton()
+except ImportError:
+    TRITON_AVAILABLE = False
 
-@compiler.compile()
+
 def zeropower_via_newtonschulz5(G, steps: int):
     """
     Newton-Schulz iteration to compute the zeroth power / orthogonalization of G. We opt to use a
@@ -64,13 +70,62 @@ def zeropower_via_newtonschulz5(G, steps: int):
 
 @compiler.compile()
 def muon_update(grad, momentum, beta=0.95, ns_steps=5, nesterov=True):
+    """
+    Muon update function with automatic Triton optimization.
+    Uses Triton for optimal performance when available and beneficial.
+    """
     momentum.lerp_(grad, 1 - beta)
     update = grad.lerp_(momentum, beta) if nesterov else momentum
     if update.ndim == 4:  # for the case of conv filters
         update = update.view(len(update), -1)
-    update = zeropower_via_newtonschulz5(update, steps=ns_steps)
+
+    # Smart selection between Triton and PyTorch implementations
+    if TRITON_AVAILABLE and _should_use_triton(update):
+        update = triton_muon_update(grad, momentum, beta, ns_steps, nesterov)
+    else:
+        update = _original_zeropower_via_newtonschulz5(update, steps=ns_steps)
+
     update *= max(1, grad.size(-2) / grad.size(-1))**0.5
     return update
+
+
+def _should_use_triton(tensor):
+    """
+    Determine if Triton optimization should be used for this tensor.
+    Triton is most beneficial for small to medium-sized matrices.
+    """
+    if tensor.ndim < 2:
+        return False
+
+    M, N = tensor.shape[-2:]
+    total_elements = M * N
+
+    # Use Triton for matrices that are large enough to benefit
+    # but not so large that memory bandwidth becomes the bottleneck
+    return 64 <= total_elements <= 1024 * 1024
+
+
+def _original_zeropower_via_newtonschulz5(G, steps: int):
+    """
+    Original PyTorch implementation of Newton-Schulz iteration.
+    Used as fallback when Triton is not available or not beneficial.
+    """
+    a, b, c = (3.4445, -4.7750, 2.0315)
+    X = G.bfloat16()
+    if G.size(-2) > G.size(-1):
+        X = X.mT
+
+    # Ensure spectral norm is at most 1
+    X = X / (X.norm(dim=(-2, -1), keepdim=True) + 1e-7)
+    # Perform the NS iterations
+    for _ in range(steps):
+        A = X @ X.mT
+        B = b * A + c * A @ A  # quintic computation strategy adapted from suggestion by @jxbz, @leloykun, and @YouJiacheng
+        X = a * X + B @ X
+
+    if G.size(-2) > G.size(-1):
+        X = X.mT
+    return X
 
 
 class Muon(torch.optim.Optimizer):
