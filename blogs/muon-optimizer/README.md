@@ -25,21 +25,17 @@ cd deepspeed_finetune_demo
 Muon optimizer has significantly smaller memory requirements than Adam optimizer, making it particularly valuable for large-scale model training.
 
 ### Memory Usage Comparison
+In theory, Muon optimizer has one momentum buffer while Adam has two, this makes Muon optimizer use 50% less memory for optimizer states compared to Adam
 
 | Optimizer | Momentum Buffers | Memory per Parameter | Example: 3B Model |
 |-----------|------------------|---------------------|-------------------|
-| **Adam**  | 2 (m, v)         | 8 bytes             | ~24 GB            |
-| **Muon**  | 1 (momentum)     | 4 bytes             | ~12 GB            |
+| Adam      | 2 (m, v)         | 8 bytes             | ~24 GB            |
+| Muon      | 1 (momentum)     | 4 bytes             | ~12 GB            |
 
-### Practical Benefits
-
-1. **Memory Reduction**: Muon uses **50% less memory** for optimizer states compared to Adam
-2. **Larger Batch Sizes**: With reduced memory overhead, you can increase batch sizes by up to 25%
-3. **Avoid CPU Offloading**: Models that require CPU offloading with Adam may fit entirely in GPU memory with Muon
-4. **Better Scaling**: More efficient memory usage enables training larger models on the same hardware
+With Muon optimizer, we can potentially use larger batch sizes and avoid CPU offloading.
 
 ### Real-world Example: 3B Model - No Offloading Required
-In our experiments with a 3B parameter model on 2×A100 (40GB each) using batch size=8 and input length=512:
+We tested finetune Qwen2.5-3B model with tatsu-lab/aplaca dataset on 2xA100 (40GB GPU memory each) using batch size=8 and input length=512:
 
 **Training Configuration:**
 - Model: Qwen2.5-3B
@@ -49,31 +45,15 @@ In our experiments with a 3B parameter model on 2×A100 (40GB each) using batch 
 - GPU memory: 80 GB total (2×A100 40GB)
 - ZeRO Stage: Stage 2 (distributed optimizer states and gradients)
 
-**Adam Optimizer Setup:**
-- Model parameters: 3B × 4 bytes = 12 GB
-- Adam optimizer states: 3B × 8 bytes = 24 GB
-- Activation memory (batch=8, seq=512): ~8 GB
-- Gradient memory: 3B × 4 bytes = 12 GB
-- **Per GPU memory with ZeRO Stage 2**: (12 + 8) + (24 + 12)/2 = 20 + 18 = 38 GB
-- **Result**: Fits within 40GB per GPU, but with minimal headroom
-
-**Muon Optimizer Setup:**
-- Model parameters: 3B × 4 bytes = 12 GB
-- Muon optimizer states: 3B × 4 bytes = 12 GB
-- Activation memory (batch=8, seq=512): ~8 GB
-- Gradient memory: 3B × 4 bytes = 12 GB
-- **Per GPU memory with ZeRO Stage 2**: (12 + 8) + (12 + 12)/2 = 20 + 12 = 32 GB
-- **Result**: Comfortably fits with 8GB headroom per GPU
-
-**Actual Performance Test Results:**
+**Performance Test Results:**
 
 BS=8, sequence length=512
 
 | Optimizer | Offloading | Iteration Time | Memory Usage |
 |-----------|------------|----------------|--------------|
-| **Muon**  | No         | **0.9s**       | 32 GB/GPU    |
-| **Adam**  | No         | OOM (Crash)    | >40 GB/GPU   |
-| **Adam**  | Yes        | **4.5s**       | 38 GB/GPU    |
+| Muon      | No         | 0.9s           | 32 GB/GPU    |
+| Adam      | No         | OOM (Crash)    | >40 GB/GPU   |
+| Adam      | Yes        | 4.5s           | 38 GB/GPU    |
 
 **Key Performance Insights:**
 From this result, we can see in certain situation, Muon optimizer can use less memory and does not need CPU offloading, while Adam optimizer cannot fit GPU memory and requires CPU offloading.
