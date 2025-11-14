@@ -40,6 +40,7 @@ from deepspeed.utils import link_hp_params, lazy_init_hp_params_optimizer_state
 from deepspeed.checkpoint import enable_universal_checkpoint
 
 from deepspeed.utils import groups
+from deepspeed.utils.debug import debug_param2name
 # Toggle this to true to enable correctness test
 # with gradient partitioning and without
 pg_correctness_test = False
@@ -441,7 +442,8 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
                     self.device).clone().half().detach()
 
             if self.cpu_offload:
-                weights_partition = get_accelerator().pin_memory(weights_partition)
+                if self.cpu_offload_pin_memory:
+                    weights_partition = get_accelerator().pin_memory(weights_partition)
                 temp_dtype = self.parallel_partitioned_bit16_groups[i][partition_id].dtype
                 temp_buffer_bit16 = torch.full(weights_partition.shape,
                                                fill_value=0.0,
@@ -1001,9 +1003,10 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
     def reduce_independent_p_g_buckets_and_remove_grads(self, param, i):
 
         grad_reduc = self.get_gradient_for_reduction(param)
-        bucket = self.ipg_buckets[self.get_param_comm_dtype(param)]
+        comm_dtype = self.get_param_comm_dtype(param)
+        bucket = self.ipg_buckets[comm_dtype]
         if bucket.elements + param.numel() > self.reduce_bucket_size:
-            self.report_ipg_memory_usage("In ipg_remove_grads before reduce_ipg_grads", param.numel(), param.dtype)
+            self.report_ipg_memory_usage("In ipg_remove_grads before reduce_ipg_grads", param.numel())
             self.reduce_ipg_grads()
             if self.contiguous_gradients and self.overlap_comm:
                 if not get_accelerator().resolves_data_dependency():
@@ -1011,17 +1014,17 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
                     get_accelerator().current_stream().wait_stream(self.reduction_stream)
                 # Swap index between 0 and 1
                 bucket.index = 1 - bucket.index
-            self.report_ipg_memory_usage("In ipg_remove_grads after reduce_ipg_grads", param.numel(), param.dtype)
+            self.report_ipg_memory_usage("In ipg_remove_grads after reduce_ipg_grads", param.numel())
 
         param_id = self.get_param_id(param)
         assert self.params_already_reduced[param_id] == False, \
-            f"The parameter {param_id} has already been reduced. \
+            f"The parameter {debug_param2name(param)} has already been reduced. \
             Gradient computed twice for this partition. \
-            Multiple gradient reduction is currently not supported"
+            Multiple gradient reductions are currently not supported"
 
         if self.contiguous_gradients:
             if param.numel() > self.reduce_bucket_size:
-                self.extra_large_param_to_reduce[param.dtype] = param
+                self.extra_large_param_to_reduce[comm_dtype] = param
             else:
                 # keeping the gradients contiguous to prevent memory fragmentation, and avoid flattening
                 new_grad_tensor = bucket.buffer[bucket.index].narrow(0, bucket.elements, param.numel())
@@ -2291,7 +2294,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
     def _get_state_without_padding(self, state_with_padding, padding):
         lean_state = {}
         for key, value in state_with_padding.items():
-            if torch.is_tensor(value):
+            if torch.is_tensor(value) and value.dim() > 0:
                 lean_length = value.numel() - padding
                 lean_state[key] = value[:lean_length]
             else:

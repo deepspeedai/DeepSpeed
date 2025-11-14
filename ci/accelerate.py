@@ -12,13 +12,10 @@ ROOT_PATH = Path(__file__).parents[1]
 # yapf: disable
 image = (modal.Image
          .from_registry("pytorch/pytorch:2.6.0-cuda12.4-cudnn9-devel", add_python="3.10")
-         .run_commands("apt update && apt install -y libaio-dev")
          .apt_install("git")
-         .run_commands("uv pip install --system --compile-bytecode datasets==3.6.0")
-         .run_commands(
-                "git clone https://github.com/huggingface/accelerate && \
-                uv pip install --system --compile-bytecode ./accelerate[testing]"
-            )
+         .pip_install("uv")
+         # uv_pip_install already includes --compile-bytecode
+         .uv_pip_install("datasets==3.6.0", extra_options="--system")
          .pip_install_from_requirements(ROOT_PATH / "requirements/requirements.txt", gpu="any")
          .pip_install_from_requirements(ROOT_PATH / "requirements/requirements-dev.txt", gpu="any")
          .add_local_dir(ROOT_PATH , remote_path="/root/", copy=True)
@@ -36,8 +33,26 @@ app = modal.App("deepspeedai-accelerate-ci", image=image)
 )
 def pytest():
     import subprocess
+
+    cmd = "git clone https://github.com/huggingface/accelerate"
+    print(f"running: {cmd}")
     subprocess.run(
-        "pytest /accelerate/tests/deepspeed".split(),
+        cmd.split(),
+        check=True,
+        cwd=ROOT_PATH / ".",
+    )
+    cmd = "uv pip install --system --compile-bytecode ./accelerate[testing]"
+    print(f"running: {cmd}")
+    subprocess.run(
+        cmd.split(),
+        check=True,
+        cwd=ROOT_PATH / ".",
+    )
+
+    cmd = "pytest ./accelerate/tests/deepspeed"
+    print(f"running: {cmd}")
+    subprocess.run(
+        cmd.split(),
         check=True,
         cwd=ROOT_PATH / ".",
     )

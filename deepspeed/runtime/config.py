@@ -52,6 +52,7 @@ from ..elasticity.constants import (
 from ..profiling.config import DeepSpeedFlopsProfilerConfig
 from ..autotuning.config import DeepSpeedAutotuningConfig
 from ..nebula.config import DeepSpeedNebulaConfig
+from ..datastates.config import DeepSpeedDataStatesConfig
 
 from ..compression.config import get_compression_config, get_quantize_enabled
 from ..compression.constants import *
@@ -859,6 +860,7 @@ class DeepSpeedConfig(object):
         self.dataloader_drop_last = get_dataloader_drop_last(param_dict)
 
         self.nebula_config = DeepSpeedNebulaConfig(param_dict)
+        self.datastates_config = DeepSpeedDataStatesConfig(param_dict)
         self.checkpoint_config = get_checkpoint_config(param_dict)
 
         self.weight_quantization_config = WeightQuantConfig(

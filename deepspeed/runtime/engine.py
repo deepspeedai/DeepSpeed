@@ -1599,15 +1599,21 @@ class DeepSpeedEngine(Module):
             param_groups = []
             if muon_params:
                 accepted_parameters = dict()
-                for key in ["lr", "momentum", "weight_decay"]:
+                for key in ["lr", "momentum", "weight_decay", "muon_lr"]:
                     if key in optimizer_parameters:
-                        accepted_parameters[key] = optimizer_parameters[key]
+                        if key == "muon_lr":  # muon_lr will override lr
+                            accepted_parameters['lr'] = optimizer_parameters[key]
+                        else:
+                            accepted_parameters[key] = optimizer_parameters[key]
                 param_groups.append(dict(params=muon_params, use_muon=True, **accepted_parameters))
             if non_muon_params:
                 accepted_parameters = dict()
-                for key in ["lr", "betas", "eps", "weight_decay"]:
+                for key in ["lr", "betas", "eps", "weight_decay", "adam_lr"]:
                     if key in optimizer_parameters:
-                        accepted_parameters[key] = optimizer_parameters[key]
+                        if key == "adam_lr":  # adam_lr will override lr
+                            accepted_parameters['lr'] = optimizer_parameters[key]
+                        else:
+                            accepted_parameters[key] = optimizer_parameters[key]
                 param_groups.append(dict(params=non_muon_params, use_muon=False, **accepted_parameters))
             optimizer = MuonWithAuxAdam(param_groups)
         else:
@@ -3612,7 +3618,9 @@ class DeepSpeedEngine(Module):
                     moe_save_path = self._get_expert_ckpt_name(save_dir, moe_layer_id, global_expert_id, tag, self.mpu)
                     if self.random_ltd_enabled():
                         expert_state_dict = remove_random_ltd_state_dict(expert_state_dict)
-                    saveable_state_dict = clone_tensors_for_torch_save(expert_state_dict)
+                    saveable_state_dict = expert_state_dict
+                    if self.checkpoint_engine.preserves_storage_sharing():
+                        saveable_state_dict = clone_tensors_for_torch_save(expert_state_dict)
                     self.checkpoint_engine.save(saveable_state_dict, moe_save_path)
                 moe_layer_id += 1
 
@@ -3634,7 +3642,9 @@ class DeepSpeedEngine(Module):
         }
         # TODO: why use BufferedWriter not the path
         file_path = self._get_optimizer_ckpt_name(save_dir, tag, expp_rank)
-        saveable_state_dict = clone_tensors_for_torch_save(optimizer_state)
+        saveable_state_dict = optimizer_state
+        if self.checkpoint_engine.preserves_storage_sharing():
+            saveable_state_dict = clone_tensors_for_torch_save(optimizer_state)
         self.checkpoint_engine.save(saveable_state_dict, file_path)
 
         # Load flow uses below saved file for model parameters, RNG and more
@@ -3674,7 +3684,9 @@ class DeepSpeedEngine(Module):
             }
             state.update(client_state)
             logger.info(f'Saving model checkpoint: {save_path}')
-            saveable_state_dict = clone_tensors_for_torch_save(state)
+            savable_state_dict = state
+            if self.checkpoint_engine.preserves_storage_sharing():
+                saveable_state_dict = clone_tensors_for_torch_save(state)
             self.checkpoint_engine.save(saveable_state_dict, save_path)
 
     def _create_checkpoint_file(self, save_dir, tag, zero_checkpoint):

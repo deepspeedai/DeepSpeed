@@ -32,6 +32,7 @@ https://github.com/snowflakedb/ArcticTraining/blob/main/projects/sequence-parall
 from collections import defaultdict
 from deepspeed.runtime.utils import see_memory_usage
 from deepspeed.sequence.layer import _DimZeroAllToAll
+from deepspeed.utils.logging import logger
 from einops import rearrange
 from packaging import version
 from torch import Tensor
@@ -68,15 +69,15 @@ class UlyssesSPAttentionHF(torch.nn.Module):
 
     Arguments:
         attn: normal attention implementation from transformers.modeling_utils.ALL_ATTENTION_FUNCTIONS
-        local_seq_length (int): local sequence length per GPU
-        global_seq_length (int): actual sequence length
+        seq_length_is_variable (bool): whether global seqlen may change between batches
+        local_seq_length (int): local sequence length per GPU or None if seq_length_is_variable is True
+        global_seq_length (int): actual sequence length or None if seq_length_is_variable is True
         batch_size (int): batch size
         attn_head_size (int): size of each attention head
         attn_head_count (int): total number of attention heads
         kv_head_count (int): total number of kv heads
         num_hidden_layers (int): total number of layers
         process_group (dist.ProcessGroup): Ulysses process group
-        seq_length_is_variable (bool): whether global seqlen may change between batches
 
 
     Extras:
@@ -86,8 +87,6 @@ class UlyssesSPAttentionHF(torch.nn.Module):
     def __init__(
         self,
         attn,
-        local_seq_length: int,
-        global_seq_length: int,
         batch_size: int,
         attn_head_count: int,
         attn_head_size: int,
@@ -95,6 +94,8 @@ class UlyssesSPAttentionHF(torch.nn.Module):
         num_hidden_layers: int,
         process_group: dist.ProcessGroup,
         seq_length_is_variable: bool = False,
+        local_seq_length: int = None,
+        global_seq_length: int = None,
     ) -> None:
         super().__init__()
         self.attn = attn
@@ -102,10 +103,10 @@ class UlyssesSPAttentionHF(torch.nn.Module):
         self.world_size = dist.get_world_size(process_group)
         self.sp_rank = dist.get_rank(process_group)
 
-        self.local_seq_length = local_seq_length
-        self.global_seq_length = global_seq_length
         self.batch_size = batch_size
         self.seq_length_is_variable = seq_length_is_variable
+        self.local_seq_length = local_seq_length
+        self.global_seq_length = global_seq_length
 
         self.attn_head_size = attn_head_size
         self.attn_head_count = attn_head_count
@@ -137,6 +138,12 @@ class UlyssesSPAttentionHF(torch.nn.Module):
             raise ValueError(
                 f"KV attention head count {self.global_kv_head_count} is not divisible by SP size {self.world_size} or"
                 " vice versa")
+
+        if self.seq_length_is_variable:
+            # the self.required_*_shape depending on the following will get updated in `forward`
+            # use 1 as a placeholder for dim=0 to keep torch.Size happy
+            local_seq_length = 1
+            global_seq_length = 1
 
         # [sl_l bs hc hs]
         self.required_query_shape = torch.Size([local_seq_length, batch_size, attn_head_count, attn_head_size])
@@ -239,8 +246,8 @@ class UlyssesSPAttentionHF(torch.nn.Module):
         # print_rank0(f"{key.shape=}")
         # print_rank0(f"{value.shape=}")
         # print_rank0(f"{self.required_input_shape=}")
-        current_local_seq_length = query.shape[2]
-        if self.seq_length_is_variable and current_local_seq_length != self.required_query_shape[0]:
+        if self.seq_length_is_variable:
+            current_local_seq_length = query.shape[2]
             self.local_seq_length = current_local_seq_length
             self.global_seq_length = current_local_seq_length * self.world_size
             # update the required seqlen shapes
@@ -340,17 +347,39 @@ class UlyssesSPAttentionHF(torch.nn.Module):
         model_name_or_path,
         core_attn_implementation,
         sequence_parallel_size,
-        max_length,
         micro_batch_size,
+        seq_length=None,
         seq_length_is_variable=True,
+        # deprecated
+        max_length=None,
     ):
         """
-        Register "ulysses" attn_implementation with HF transformers and return mpu (Megatron-LM-style parallel state object).
-        If sequence_parallel_size==1 do nothng and return None.
+        Register "ulysses" attn_implementation with HF transformers and return mpu (Megatron-LM-style parallel state groups object).
+        If sequence_parallel_size==1 do nothing and return None.
+
+        Args:
+        - model_name_or_path (object or str): model object, or HF hub model name, or model's local path
+        - core_attn_implementation (str): which attention to use: flash_attention_2 or flash_attention_3 or sdpa
+        - sequence_parallel_size (int): sequence parallelism dimension (if 1 it's disabled)
+        - micro_batch_size (int): micro batch size
+        - seq_length (int): set this argument if the sequence length is fixed in all batches
+        - seq_length_is_variable (bool): whether global seqlen may change between batches an optimization flag - the default is `True`
+        - max_length (int): actual global sequence length - this argument is deprecated - use `seq_length` instead
 
         """
         if sequence_parallel_size == 1:
             return None
+
+        if max_length is not None:
+            logger.warning(
+                "The 'max_length` argument is deprecated and will be eventually removed, please use `seq_length` instead"
+            )
+            if seq_length is None and max_length is not None:
+                seq_length = max_length
+        if not seq_length_is_variable and seq_length is None:
+            raise ValueError(
+                "Either `seq_length_is_variable` needs to be `True` or `seq_length` needs to be set to an integer value of the fixed batch size length."
+            )
 
         from transformers import AutoConfig
         from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
@@ -359,8 +388,14 @@ class UlyssesSPAttentionHF(torch.nn.Module):
 
         mpu.initialize_sequence_parallel(sequence_parallel_size=sequence_parallel_size)
 
-        # we don't have the model yet at this stage
-        hf_model_config = AutoConfig.from_pretrained(model_name_or_path)
+        from transformers import PreTrainedModel
+        if isinstance(model_name_or_path, PreTrainedModel):
+            # we already have the model
+            hf_model_config = model_name_or_path.config
+        else:
+            # if we don't have the model yet at this stage
+            hf_model_config = AutoConfig.from_pretrained(model_name_or_path)
+
         supported_attn_implementation = ["flash_attention_2", "flash_attention_3", "sdpa"]
         if core_attn_implementation not in supported_attn_implementation:
             # notes on the excluded ones:
@@ -376,10 +411,16 @@ class UlyssesSPAttentionHF(torch.nn.Module):
                 f"{core_attn_implementation} is not a valid attn_implementation. The choices are {ALL_ATTENTION_FUNCTIONS.valid_keys()}"
             )
         core_attn_function = ALL_ATTENTION_FUNCTIONS[core_attn_implementation]
+
+        if seq_length_is_variable:
+            local_seq_length = None
+            global_seq_length = None
+        else:
+            local_seq_length = seq_length // mpu.get_sequence_parallel_world_size()
+            global_seq_length = seq_length
+
         uattn = UlyssesSPAttentionHF(
             attn=core_attn_function,
-            local_seq_length=max_length // mpu.get_sequence_parallel_world_size(),
-            global_seq_length=max_length,
             batch_size=micro_batch_size,
             attn_head_count=hf_model_config.num_attention_heads,
             attn_head_size=getattr(hf_model_config, "head_dim",
@@ -388,6 +429,8 @@ class UlyssesSPAttentionHF(torch.nn.Module):
             num_hidden_layers=hf_model_config.num_hidden_layers,
             process_group=mpu.get_sequence_parallel_group(),
             seq_length_is_variable=seq_length_is_variable,
+            local_seq_length=local_seq_length,
+            global_seq_length=global_seq_length,
         )
 
         def uattn_wrapper(
@@ -460,6 +503,19 @@ class UlyssesSPDataLoaderAdapter:
 
         If more tokens need to be consumed per step use the gradient accumulation feature.
 
+        Ulysses expects the following dict keys in each DL batch (`dl->iter->next`):
+        - `input_ids`
+        - `position_ids`
+        - `labels`
+
+        Additional entries can be present.
+
+        The tensors are expected to be of shape: `[batch_size, seqlen, ...]`
+
+        The sharding happens on the seqlen (1st) dimension for all tensors in the batch, any non-tensor entries get copied to all ranks.
+
+        `attention_mask` isn't used by Ulysses, because it's typically too large when it's 4D, and position_ids is just 1D, therefore it's much much smaller and consumes little GPU memory.
+
         Arguments:
         - `dl`: an existing DataLoader object to wrap
         - `sp_rank`: SP rank
@@ -469,10 +525,6 @@ class UlyssesSPDataLoaderAdapter:
 
         Returns:
             Another DataLoader object
-
-        Here are the current assumptions on the inputs fetched by dl->iter->next
-        - the batch is a dict with at least the keys: `input_ids`, `labels`, `position_ids` - but can have any additional keys necessary.
-        - the tensor values get sharded, the non-tensor values are passed along as is
         """
 
         self.dl = dl
@@ -515,6 +567,9 @@ class UlyssesSPDataLoaderAdapter:
         for k in batch.keys():
             if torch.is_tensor(batch[k]):
                 batch[k] = batch[k].to(self.device)
+                if seqlen != batch[k].shape[1]:
+                    raise ValueError(
+                        f"{k}'s shape {batch[k].shape} must match input_ids's shape {batch['input_ids'].shape}")
                 with torch.no_grad():
                     tensor_list = [
                         torch.zeros((batch[k].shape[0], seqlens[i]), dtype=batch[k].dtype, device=batch[k].device)
@@ -614,6 +669,8 @@ def sequence_tiled_compute(
 class SequenceTiledCompute(torch.autograd.Function):
     """
     A generic autograd function to perform a tiled compute.
+
+    Please note this module re-computes `forward` in the `backward`. So the `forward` occurs twice each iteration. And if you're using activation checkpointing it then occurs trice.
 
     Please note that this implementation doesn't require DeepSpeed and can work without it. `compute_params` can remain `None` in such a case.
 
@@ -780,9 +837,11 @@ class SequenceTiledCompute(torch.autograd.Function):
 
 class TiledMLP(torch.autograd.Function):
     """
-    Perform a tiled MLP computation to massively reduce memory usage needed to compute MLP when using very long sequence lengths
+    Perform a tiled MLP computation to massively reduce memory usage needed to compute MLP when using very long sequence lengths.
 
-    For a general tiled compute implementation that can handle any `forward` see `SequenceTiledCompute`
+    Please note this module re-computes `forward` in the `backward`. So the `forward` occurs twice each iteration. And if you're using activation checkpointing it then occurs trice.
+
+    For a general tiled compute implementation that can handle any `forward` see `SequenceTiledCompute`.
 
     Args:
     - fn: the function to call on sharded inputs

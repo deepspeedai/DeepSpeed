@@ -36,7 +36,7 @@ import deepspeed.comm as dist
 import torch
 
 model_name_or_path = 'hf-internal-testing/tiny-random-LlamaForCausalLM'
-max_length = 64
+seq_length = 64
 sequence_parallel_size = 2
 micro_batch_size = 1
 
@@ -74,8 +74,8 @@ mpu = UlyssesSPAttentionHF.register_with_transformers(
     model_name_or_path=model_name_or_path,
     core_attn_implementation="sdpa",
     sequence_parallel_size=sequence_parallel_size,
-    max_length=max_length,
     micro_batch_size=micro_batch_size,
+    seq_length=seq_length,
     seq_length_is_variable=True,
 )
 
@@ -151,15 +151,41 @@ mpu = UlyssesSPAttentionHF.register_with_transformers(
     model_name_or_path=model_name_or_path,
     core_attn_implementation="sdpa",
     sequence_parallel_size=sequence_parallel_size,
-    max_length=max_length,
     micro_batch_size=micro_batch_size,
+    seq_length=seq_length,
     seq_length_is_variable=True,
 )
 ```
 
 It also creates nccl process groups encapsulated by the `mpu` object it returns.
 
+For the `model_name_or_path` argument you can also pass the already existing HF Transformers `model` object.
+
 `UlyssesSPAttentionHF.register_with_transformers` has to be called before `from_pretrained` is called.
+
+If `seq_length_is_variable` is `True` (which is also the default value), `UlyssesSPAttentionHF` will recalculate the shapes on each `forward` based on the incoming batch's shapes - in which case you don't need to set `seq_length` - you can just skip it like so:
+```
+mpu = UlyssesSPAttentionHF.register_with_transformers(
+    model_name_or_path=model_name_or_path,
+    core_attn_implementation="sdpa",
+    sequence_parallel_size=sequence_parallel_size,
+    micro_batch_size=micro_batch_size,
+    seq_length_is_variable=True,
+)
+```
+
+If, however, all your batches have an identical sequence length, then you'd save a few microseconds per run with using the `seq_length_is_variable=False` code path, which will pre-measure all shapes once and re-use them in all runs:
+
+```
+mpu = UlyssesSPAttentionHF.register_with_transformers(
+    [...]
+    seq_length=seq_length,
+    seq_length_is_variable=False,
+)
+```
+
+If you pass `seq_length`, remember that it has to be divisible by `sequence_parallel_size`. And of course, this also applies to all batches, even if you use `seq_length_is_variable=True`.
+
 
 ### UlyssesSPDataLoaderAdapter
 
@@ -173,9 +199,9 @@ dl = UlyssesSPDataLoaderAdapter(
 )
 ```
 
-This takes an existing DataLoader object and returns a new one that will shard the batches on the sequence dimension and synchronize all GPUs of the replica to return only its corresponding shard.
+This takes an existing DataLoader object and returns a new one that will shard the batches on the sequence dimension and synchronize all GPUs of the replica to return to each rank only its corresponding sequence shard.
 
-It also takes care of pre-shifting labels and replacing `labels` with `shift_labels` in the batch.
+It also takes care of replacing `labels` with `shift_labels` in the batch, by pre-shifting labels, which is crucial for the correct loss calculation when using Ulysses sequence parallelism.
 
 ### Loss averaging
 

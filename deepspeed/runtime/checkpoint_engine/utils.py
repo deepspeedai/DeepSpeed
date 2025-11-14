@@ -6,7 +6,7 @@
 from deepspeed.runtime.model_checkpointing.constants import *
 from deepspeed.runtime.model_checkpointing.utils import create_data_parallel_writer_config
 from deepspeed.utils import logger
-
+from deepspeed import comm as dist
 from .decoupled_checkpoint_engine import DecoupledCheckpointEngine
 from .fast_checkpoint_engine import FastCheckpointEngine
 from .torch_checkpoint_engine import TorchCheckpointEngine
@@ -34,5 +34,15 @@ def create_checkpoint_engine(config_params, groups, zero_stage, has_moe_layers, 
                 return TorchCheckpointEngine(config_params)
             else:
                 return NebulaCheckpointEngine(config_params=config_params.nebula_config)
+
+        if config_params.datastates_config.enabled:
+            try:
+                from .datastates_checkpoint_engine import DataStatesCheckpointEngine
+                return DataStatesCheckpointEngine(deepspeed_config=config_params, rank=dist.get_rank())
+            except ImportError as err:
+                logger.error(
+                    f"No datastates engine found! Install from https://github.com/DataStates/datastates-llm. Will fall back to torch.save. Details: {err}"
+                )
+                return TorchCheckpointEngine(config_params)
 
     return TorchCheckpointEngine(config_params)
