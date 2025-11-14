@@ -26,12 +26,13 @@ Muon optimizer has smaller memory requirements than Adam optimizer.  Adam optimi
 
 ## Future plan
 Muon optimizer is getting more and more attention, and is verified by product level open LLM model such as Kimi-K2 which has 1T weights.  This makes Muon a second choice even potential replacement of Adam optimizer.   To make Muon optimizer more accessible in production environment, the following feature is needed:
--[] Muon optimizer with ZeRO stage 3
--[] CPU Offloading support
--[] MuonClip support
--[] Performance optimization to make Muon optimizer more efficient
 
-If you have thoughts, feedback and contribution on Muon optimizer, welcome to start an issue for discussion, or submit a PR to DeepSpeed.  Let’s make Muon optimizer rock solid and lightning fast in DeepSpeed!
+- [ ] Muon optimizer with ZeRO stage 3
+- [ ] CPU Offloading support
+- [ ] MuonClip support
+- [ ] Performance optimization to make Muon optimizer more efficient
+
+If you have thoughts, feedback and contribution on Muon optimizer, welcome to start an issue for discussion, or submit a PR to DeepSpeed.  Let's make Muon optimizer rock solid and lightning fast in DeepSpeed!
 
 ## Contributors
 This work is contributed from Wang, Zhipeng (@PKUWZP); Chi McIsaac(@qimcis) and Ma, Guokai (@delock)
