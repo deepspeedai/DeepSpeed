@@ -16,6 +16,11 @@ of type :class:`DeepSpeedEngine`. This engine is used to progress training:
         #weight update
         model_engine.step()
 
+Note that ``model_engine.backward()`` accepts only a scalar loss tensor produced by a forward pass.
+Starting from v0.18.3, DeepSpeed also supports direct calls to ``tensor.backward()``. You can now call
+``loss.backward()`` or ``tensor.backward(out_grad)`` when your PyTorch version supports the necessary APIs.
+If your PyTorch version does not support these APIs, a direct call to ``tensor.backward()`` will raise an error.
+
 Forward Propagation
 -------------------
 .. autofunction:: deepspeed.DeepSpeedEngine.forward
@@ -176,7 +181,6 @@ The following code snippet illustrates independently training multiple models on
        for engine, loss in zip(model_engines, losses):
           engine.backward(loss)
 
-
 The above is similar to typical DeepSpeed usage except for the creation of multiple DeepSpeedEngines (one for each model).
 
 
@@ -194,9 +198,6 @@ The following code snippet illustrates jointly training multiple models on a sha
         loss.backward()
 
         for engine in model_engines:
-            engine._backward_epilogue()
-
-        for engine in model_engines:
             engine.step()
 
         for engine in model_engines:
@@ -206,4 +207,6 @@ Besides the use of multiple DeepSpeedEngines, the above differs from typical usa
 
 #. The **backward** call is made using the common loss value rather on individual model engines.
 
-#. **_backward_epilogue** is called on model engine, after the **loss.backward()**.
+You can call ``loss.backward()`` once for the shared loss.
+
+**Note:** Previously, you had to call ``_backward_epilogue`` on each model engine after ``loss.backward()``. However, starting from v0.18.3, DeepSpeed automatically handles this internally, so you no longer need to call ``_backward_epilogue`` manually.
