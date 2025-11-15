@@ -272,7 +272,7 @@ void launch_bias_residual_layer_norm<float>(float* vals,
     else if (hidden_dim > 32768 && hidden_dim <= 65536)
         threads <<= 2;
     else if (hidden_dim > 65536)
-        throw std::runtime_error("Unsupport hidden_dim.");
+        throw std::runtime_error("Unsupported hidden_dim.");
 
     dim3 block_dim(threads);
 
@@ -305,7 +305,7 @@ void launch_bias_residual_layer_norm<__half>(__half* vals,
     else if (hidden_dim > 32768 && hidden_dim <= 65536)
         threads <<= 3;
     else if (hidden_dim > 65536)
-        throw std::runtime_error("Unsupport hidden_dim.");
+        throw std::runtime_error("Unsupported hidden_dim.");
 
     dim3 block_dim(threads);
 
@@ -577,7 +577,7 @@ void launch_bias_residual_layer_norm<float>(float* vals,
     else if (hidden_dim > 32768 && hidden_dim <= 65536)
         threads <<= 2;
     else if (hidden_dim > 65536)
-        throw std::runtime_error("Unsupport hidden_dim.");
+        throw std::runtime_error("Unsupported hidden_dim.");
 
     dim3 block_dim(threads);
 
@@ -611,7 +611,7 @@ void launch_bias_residual_layer_norm<__half>(__half* vals,
     else if (hidden_dim > 32768 && hidden_dim <= 65536)
         threads <<= 3;
     else if (hidden_dim > 65536)
-        throw std::runtime_error("Unsupport hidden_dim.");
+        throw std::runtime_error("Unsupported hidden_dim.");
 
     dim3 block_dim(threads);
     fused_bias_residual_layer_norm<<<grid_dim, block_dim, 0, stream>>>(
@@ -1023,7 +1023,7 @@ void launch_layerNorm_backward<float>(const float* out_grad,
     else if (hidden_dim > 32768 && hidden_dim <= 65536)
         threads <<= 2;
     else if (hidden_dim > 65536)
-        throw std::runtime_error("Unsupport hidden_dim.");
+        throw std::runtime_error("Unsupported hidden_dim.");
 
     dim3 block_dim2(threads);
 
@@ -1062,7 +1062,7 @@ void launch_layerNorm_backward<__half>(const __half* out_grad,
     else if (hidden_dim > 32768 && hidden_dim <= 65536)
         threads <<= 3;
     else if (hidden_dim > 65536)
-        throw std::runtime_error("Unsupport hidden_dim.");
+        throw std::runtime_error("Unsupported hidden_dim.");
 
     dim3 block_dim2(threads / 2);
 
@@ -1329,7 +1329,7 @@ void launch_layerNorm_backward<float>(const float* out_grad,
     else if (hidden_dim > 32768 && hidden_dim <= 65536)
         threads <<= 2;
     else if (hidden_dim > 65536)
-        throw std::runtime_error("Unsupport hidden_dim.");
+        throw std::runtime_error("Unsupported hidden_dim.");
 
     dim3 block_dim2(threads);
     LayerNormBackward2<<<grid_dim2, block_dim2, 0, stream[1]>>>(
@@ -1366,7 +1366,7 @@ void launch_layerNorm_backward<__half>(const __half* out_grad,
     else if (hidden_dim > 32768 && hidden_dim <= 65536)
         threads <<= 3;
     else if (hidden_dim > 65536)
-        throw std::runtime_error("Unsupport hidden_dim.");
+        throw std::runtime_error("Unsupported hidden_dim.");
 
     dim3 block_dim2(threads / 2);
     LayerNormBackward2<<<grid_dim2, block_dim2, 0, stream[1]>>>(
@@ -1769,7 +1769,7 @@ void launch_layerNorm_backward_fused_add<float>(const float* out_grad1,
     else if (hidden_dim > 32768 && hidden_dim <= 65536)
         threads <<= 2;
     else if (hidden_dim > 65536)
-        throw std::runtime_error("Unsupport hidden_dim.");
+        throw std::runtime_error("Unsupported hidden_dim.");
 
     dim3 block_dim2(threads);
     LayerNormBackward2_fused_add<<<grid_dim2, block_dim2, 0, stream[1]>>>(
@@ -1808,7 +1808,7 @@ void launch_layerNorm_backward_fused_add<__half>(const __half* out_grad1,
     else if (hidden_dim > 32768 && hidden_dim <= 65536)
         threads <<= 3;
     else if (hidden_dim > 65536)
-        throw std::runtime_error("Unsupport hidden_dim.");
+        throw std::runtime_error("Unsupported hidden_dim.");
 
     dim3 block_dim2(threads / 2);
     LayerNormBackward2_fused_add<<<grid_dim2, block_dim2, 0, stream[1]>>>(
@@ -2088,7 +2088,7 @@ void launch_layerNorm_backward_fused_add<float>(const float* out_grad1,
     else if (hidden_dim > 32768 && hidden_dim <= 65536)
         threads <<= 2;
     else if (hidden_dim > 65536)
-        throw std::runtime_error("Unsupport hidden_dim.");
+        throw std::runtime_error("Unsupported hidden_dim.");
 
     dim3 block_dim2(threads);
     LayerNormBackward2_fused_add<<<grid_dim2, block_dim2, 0, stream[1]>>>(
@@ -2126,7 +2126,7 @@ void launch_layerNorm_backward_fused_add<__half>(const __half* out_grad1,
     else if (hidden_dim > 32768 && hidden_dim <= 65536)
         threads <<= 3;
     else if (hidden_dim > 65536)
-        throw std::runtime_error("Unsupport hidden_dim.");
+        throw std::runtime_error("Unsupported hidden_dim.");
 
     dim3 block_dim2(threads / 2);
     LayerNormBackward2_fused_add<<<grid_dim2, block_dim2, 0, stream[1]>>>(
