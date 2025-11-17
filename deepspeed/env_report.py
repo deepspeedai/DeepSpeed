@@ -28,6 +28,7 @@ warning = f"{YELLOW}[WARNING]{END}"
 
 
 def op_report(verbose=True):
+    from torch.utils.cpp_extension import is_ninja_available
     max_dots = 23
     max_dots2 = 11
     h = ["op name", "installed", "compatible"]
@@ -41,7 +42,7 @@ def op_report(verbose=True):
 
     print("-" * (max_dots + max_dots2 + len(h[0]) + len(h[1])))
     print("JIT compiled ops requires ninja")
-    ninja_status = OKAY if ninja_installed() else FAIL
+    ninja_status = OKAY if is_ninja_available() else FAIL
     print('ninja', "." * (max_dots - 5), ninja_status)
     print("-" * (max_dots + max_dots2 + len(h[0]) + len(h[1])))
     print(h[0], "." * (max_dots - len(h[0])), h[1], "." * (max_dots2 - len(h[1])), h[2])
@@ -56,14 +57,6 @@ def op_report(verbose=True):
         dots2 = '.' * ((len(h[1]) + (max_dots2 - len(h[1]))) - (len(is_installed) - color_len))
         print(op_name, dots, is_installed, dots2, is_compatible)
     print("-" * (max_dots + max_dots2 + len(h[0]) + len(h[1])))
-
-
-def ninja_installed():
-    try:
-        import ninja  # noqa: F401 # type: ignore
-    except ImportError:
-        return False
-    return True
 
 
 def nvcc_version():
