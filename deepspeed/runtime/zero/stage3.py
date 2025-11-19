@@ -21,7 +21,7 @@ from deepspeed.utils.torch import register_grad_hook, required_torch_version
 from deepspeed.runtime.fp16.loss_scaler import CreateLossScaler
 from deepspeed.runtime.torch_autocast import get_autocast_dtype, get_all_comm_dtypes, is_autocast_initialized, sort_dtypes
 from deepspeed.runtime.comm.coalesced_collectives import reduce_scatter_coalesced, all_to_all_quant_reduce, all_to_all_loco_quant_reduce
-from deepspeed.runtime.utils import inf, is_model_parallel_parameter, get_only_unique_item, mask_nan_or_inf_with_val_inplace
+from deepspeed.runtime.utils import inf, is_model_parallel_parameter, get_only_unique_item, mask_nan_or_inf_with_val_inplace, count_used_parameters_in_backward
 from deepspeed.runtime.zero.partition_parameters import *
 from deepspeed.runtime.zero.config import ZeroStageEnum
 from deepspeed.runtime.zero.offload_config import OffloadDeviceEnum, OffloadStateTypeEnum
@@ -186,6 +186,7 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
         see_memory_usage("Stage 3 initialize beginning", force=True)
 
         print_rank_0(f"initialized {__class__.__name__} with args: {locals()}", force=False)
+        super().__init__()
 
         if dist.get_rank() == 0:
             logger.info(f"Reduce bucket size {reduce_bucket_size}")
@@ -1230,28 +1231,39 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
     def create_reduce_and_remove_grad_hooks(self):
         print_rank_0('[Begin] Create gradient reduction hooks')
         self.leaf_parameters = defaultdict(list)
+        non_leaf_params_requiring_grad = []
+
+        for i, param_group in enumerate(self.fp16_groups):
+            for param in param_group:
+                if z3_leaf_parameter(param):
+                    self.leaf_parameters[param.ds_z3_leaf_module].append(param)
+                elif param.requires_grad:
+                    non_leaf_params_requiring_grad.append(param)
+
+        leaf_module_count = len(self.leaf_parameters)
+
         for i, param_group in enumerate(self.fp16_groups):
             for param in param_group:
                 if param.requires_grad:
-                    #print_rank_0(f" Before all gather {param.device}, {param.shape}")
-                    print_rank_0(f"Before all gather {param.device}, {param.shape}", force=False)
-
-                    # The hook must be created in un-partitioned parameter
                     param.all_gather()
 
-                    #print(f"After all gather {param.device}, {param.shape}")
                     def wrapper(param):
 
                         @instrument_w_nvtx
                         def reduce_partition_and_remove_grads(*notneeded):
+                            if self._remaining_grad_acc_hooks == 0:
+                                self._remaining_grad_acc_hooks = count_used_parameters_in_backward(
+                                    non_leaf_params_requiring_grad) + leaf_module_count
+
                             self.reduce_ready_partitions_and_remove_grads(param)
+
+                            self._remaining_grad_acc_hooks -= 1
+                            if self._remaining_grad_acc_hooks == 0:
+                                self.run_grad_acc_post_hooks()
 
                         self._grad_acc_hooks.append(register_grad_hook(param, reduce_partition_and_remove_grads))
 
-                    #print(f"param grad fn {param.expand_as(param).grad_fn}")
-                    if z3_leaf_parameter(param):
-                        self.leaf_parameters[param.ds_z3_leaf_module].append(param)
-                    else:
+                    if not z3_leaf_parameter(param):
                         wrapper(param)
 
                     # Partition the parameter after creating the hook
@@ -1263,16 +1275,26 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
             def make_hook(params):
 
                 def reduce_leaf_module_grads(module, grad_input, grad_output):
+                    if self._remaining_grad_acc_hooks == 0:
+                        self._remaining_grad_acc_hooks = count_used_parameters_in_backward(
+                            non_leaf_params_requiring_grad) + leaf_module_count
+
                     for param in params:
                         # this takes care of grads for MoE experts that didn't participate in the current iteration/layer
                         if param.grad is None:
                             param.grad = torch.zeros_like(param)
                         self.reduce_ready_partitions_and_remove_grads(param)
 
+                    self._remaining_grad_acc_hooks -= 1
+                    if self._remaining_grad_acc_hooks == 0:
+                        self.run_grad_acc_post_hooks()
+
                 return reduce_leaf_module_grads
 
             assert required_torch_version(min_version=1.8), "Leaf module requires PyTorch >= 1.8"
             self._leaf_module_hooks.append(leaf_module.register_full_backward_hook(make_hook(leaf_parameters)))
+
+        self._remaining_grad_acc_hooks = 0
 
         print_rank_0('[End] Create gradient reduction hooks')
 
@@ -2316,15 +2338,7 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
                 return True
             return False
 
-    @instrument_w_nvtx
-    def backward(self, loss, retain_graph=False):
-        """
-        :attr:`backward` performs the following steps:
-
-        1. fp32_loss = loss.float()
-        2. scaled_loss = fp32_loss*loss_scale
-        3. scaled_loss.backward(), which accumulates scaled gradients into the ``.grad`` attributes of the model's fp16 leaves
-        """
+    def backward_prologue(self):
         if self.swap_optimizer:
             self.optimizer_swapper.pre_backward()
 
@@ -2333,14 +2347,7 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
 
         see_memory_usage("Before backward", force=False)
 
-        if self.custom_loss_scaler:
-            scaled_loss = self.external_loss_scale * loss
-            scaled_loss.backward()
-        elif self.torch_autocast_gradscaler:
-            self.torch_autocast_gradscaler.scale(loss).backward(retain_graph=retain_graph)
-        else:
-            self.loss_scaler.backward(loss.float(), retain_graph=retain_graph)
-
+    def backward_epilogue(self):
         if self.zenflow:
             self.zenflow_backward_epilogue()
 
