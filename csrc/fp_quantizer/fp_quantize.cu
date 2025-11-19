@@ -4,7 +4,7 @@
 // DeepSpeed Team
 
 #include <stdexcept>
-#include "context.h"
+#include "fp_context.h"
 #include "fp_quantize.h"
 #include "memory_access_utils.h"
 #include "reduction_utils.h"
