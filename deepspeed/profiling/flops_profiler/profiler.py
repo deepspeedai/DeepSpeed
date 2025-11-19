@@ -167,6 +167,16 @@ class FlopsProfiler(object):
         Adds or resets the extra attributes.
         """
 
+        # ensure no residual operator statistics remain from a prior profiling
+        # session. In certain workflows, patched operator wrappers can emit
+        # bookkeeping information even after hooks are removed (for example when
+        # modules invoke autograd-generated graphs). Clearing the global
+        # collectors prevents stale entries from leaking into the next
+        # invocation which would otherwise inflate the aggregated FLOP/MAC
+        # counts when `start_profile` is called repeatedly.
+        module_flop_count.clear()
+        module_mac_count.clear()
+
         def get_param_count_and_ep(param):
             """
             Return the number of parameters in the layer, whether the layer is an MoE layer,
@@ -227,6 +237,8 @@ class FlopsProfiler(object):
                 del module.__duration__
 
         self.model.apply(remove_profile_attrs)
+        module_flop_count.clear()
+        module_mac_count.clear()
         logger.info("Flops profiler finished")
 
     def get_total_flops(self, as_string=False):
