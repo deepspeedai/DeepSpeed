@@ -225,7 +225,8 @@ Example of <i>**scheduler**</i>
     "loss_scale_window": 1000,
     "hysteresis": 2,
     "consecutive_hysteresis": false,
-    "min_loss_scale": 1
+    "min_loss_scale": 1,
+    "fp16_master_weights_and_grads": false
 }
 ```
 
@@ -277,6 +278,20 @@ Example of <i>**scheduler**</i>
 | ----------------------------------------------------------------------------------------------------- | ------- |
 | <i>**min_loss_scale**</i> is  a **fp16** parameter representing the minimum dynamic loss scale value. | `1`     |
 
+<i>**fp16:fp16_master_weights_and_grads**</i>: [boolean]
+
+| Description | Default |
+| ----------- | ------- |
+| Keep master parameters/gradients in fp16 instead of fp32 for ZeRO optimizer state. Requires ZeRO Stage 2 or 3 with ZeRO-Offload and `DeepSpeedCPUAdam` so optimizer states can remain in fp32. | `false` |
+
+**Support matrix (fp16 master weights/gradients)**
+
+| ZeRO stage | Offload required? | Notes |
+| ---------- | ----------------- | ----- |
+| 0 | Not supported | |
+| 1/2/3 | Yes (`offload_optimizer` with `DeepSpeedCPUAdam`) | Optimizer states stay fp32 on CPU. |
+
+
 ### BFLOAT16 training options
 
 **Note:** this mode cannot be combined with the `amp` mode described below.
@@ -293,7 +308,9 @@ Example of <i>**scheduler**</i>
 
 ```json
 "bf16": {
-   "enabled": true
+   "enabled": true,
+   "bf16_master_weights_and_grads": true,
+   "bf16_optimizer_states": true
  }
 ```
 
@@ -303,6 +320,24 @@ Example of <i>**scheduler**</i>
 |--------------------------------------------------------------------| ------- |
 | <i>**enabled**</i> indicates whether BFLOAT16 training is enabled. | `false` |
 
+<i>**bf16:bf16_master_weights_and_grads**</i>: [boolean]
+
+| Description | Default |
+| ----------- | ------- |
+| Keep ZeRO master parameters/gradients in bf16 instead of fp32. Supported with ZeRO Stages 1, 2, or 3. If you leave optimizer states in fp32, ZeRO-Offload with `DeepSpeedCPUAdam` is required. | `false` |
+
+<i>**bf16:bf16_optimizer_states**</i>: [boolean]
+
+| Description | Default |
+| ----------- | ------- |
+| Keep optimizer states in bf16 as well. Requires `bf16_master_weights_and_grads=true`. Enabling this removes the offload requirement because optimizer states no longer stay fp32. | `false` |
+
+**Support matrix (bf16 master weights/gradients)**
+
+| ZeRO stage | bf16_optimizer_states=False | bf16_optimizer_states=True |
+| ---------- | --------------------------- | -------------------------- |
+| 0 | Not supported | Not supported |
+| 1/2/3 | Requires ZeRO-Offload + `DeepSpeedCPUAdam` (optimizer states stay fp32 on CPU) | Supported without offload; optimizer states kept in bf16 |
 
 ### Automatic mixed precision (AMP) training options
 
@@ -335,6 +370,55 @@ Example of <i>**scheduler**</i>
 | Description                                                                                                                                                                                                            | Default |
 | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------- |
 | Any parameters outside of "enabled" will be passed to AMP's initialize call, see the API and descriptions here at the [apex.amp.initialize documentation](https://nvidia.github.io/apex/amp.html#apex.amp.initialize). | None    |
+
+### PyTorch Automatic Mixed Precision (torch.autocast) training options
+
+<i>**torch_autocast**</i>: [dictionary]
+
+| Description                                                                                                                                                                                                                                                                                                                                                                                                     | Default |
+| --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------- |
+| Configuration for using PyTorch's native automatic mixed precision training via [torch.autocast](https://pytorch.org/docs/stable/amp.html). This provides torch-compatible AMP functionality without requiring Apex. The gradient scaler is automatically applied in the DeepSpeed optimizer. Compatible with ZeRO stages 0, 1, 2, and 3. | None    |
+
+```json
+"torch_autocast": {
+    "enabled": true,
+    "dtype": "bfloat16",
+    "lower_precision_safe_modules": ["torch.nn.Linear", "torch.nn.Conv2d"]
+}
+```
+
+<i>**torch_autocast:enabled**</i>: [boolean]
+
+| Description                                                                                                                                                                      | Default |
+| -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------- |
+| <i>**enabled**</i> is a **torch_autocast** parameter indicating whether or not torch.autocast is enabled. When enabled, you don't need to call torch.autocast in your code. | `false` |
+
+<i>**torch_autocast:dtype**</i>: [string]
+
+| Description                                                                                                                                                                                                                                                                                               | Default       |
+| --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------- |
+| <i>**dtype**</i> is a **torch_autocast** parameter specifying the lower precision dtype passed to torch.autocast. Valid values are `"bfloat16"` or `"float16"`. Gradients for all-reduce (reduce-scatter) and parameters for all-gather (only for ZeRO Stage 3) of `lower_precision_safe_modules` are also downcasted to this dtype. | `"bfloat16"` |
+
+<i>**torch_autocast:lower_precision_safe_modules**</i>: [list of strings]
+
+| Description                                                                                                                                                                                                                                                                                                                                                                  | Default                                                                      |
+| ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------- |
+| <i>**lower_precision_safe_modules**</i> is a **torch_autocast** parameter specifying the list of module types that will be downcasted for all-reduce (reduce-scatter) and all-gather (ZeRO Stage 3 only). The precision for PyTorch operators in forward/backward follows torch.autocast's policy, not this list. | `["torch.nn.Linear", "torch.nn.Conv1d", "torch.nn.Conv2d", "torch.nn.Conv3d"]` |
+
+**Note:** When using `torch.autocast` with manual backward passes (`loss.backward()` instead of `engine.backward()`), you must use `engine.scale(loss)` to apply the gradient scaler. For example:
+{: .notice--info}
+
+```python
+# Training loop with torch.autocast and manual backward
+for batch in data_loader:
+    loss = model_engine(batch)
+
+    # Apply loss scaling before manual backward
+    scaled_loss = model_engine.scale(loss)
+    scaled_loss.backward()
+
+    model_engine.step()
+```
 
 ### Gradient Clipping
 
