@@ -11,7 +11,7 @@ except ImportError:
     pass
 
 
-class MuonWithAuxAdam(BaseMuonWithAuxAdam):
+class MuonWithAuxAdamStage1And2(BaseMuonWithAuxAdam):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -46,3 +46,6 @@ class MuonWithAuxAdam(BaseMuonWithAuxAdam):
                     p.add_(update, alpha=-group["lr"])
 
         return loss
+
+class MuonWithAuxAdamStage3(BaseMuonWithAuxAdam):
+    pass
