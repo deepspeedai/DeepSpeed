@@ -86,10 +86,11 @@ class SYCLOpBuilder(OpBuilder):
             raise RuntimeError(
                 f"Unable to JIT load the {self.name} op due to it not being compatible due to hardware/software issue. {self.error_log}"
             )
+        from torch.utils.cpp_extension import verify_ninja_availability
         try:
-            import ninja  # noqa: F401
-        except ImportError:
-            raise RuntimeError(f"Unable to JIT load the {self.name} op due to ninja not being installed.")
+            verify_ninja_availability()
+        except RuntimeError as e:
+            raise RuntimeError(f"Unable to JIT load the {self.name} op due to ninja not being installed.") from e
 
         self.jit_mode = True
         from intel_extension_for_pytorch.xpu.cpp_extension import load
