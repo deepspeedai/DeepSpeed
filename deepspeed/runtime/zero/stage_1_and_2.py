@@ -20,7 +20,8 @@ from deepspeed.runtime.base_optimizer import ZeROOptimizer
 from deepspeed.runtime.fp16.loss_scaler import CreateLossScaler
 from deepspeed.runtime.torch_autocast import get_autocast_dtype, get_all_comm_dtypes, is_autocast_initialized, sort_dtypes
 from deepspeed.runtime.utils import (empty_cache, see_memory_usage, inf, is_model_parallel_parameter,
-                                     align_dense_tensors, all_gather_dp_groups, mask_nan_or_inf_with_val_inplace)
+                                     align_dense_tensors, all_gather_dp_groups, mask_nan_or_inf_with_val_inplace,
+                                     count_used_parameters_in_backward)
 from deepspeed.runtime.zero.config import ZeroStageEnum
 from deepspeed.runtime.zero.offload_config import OffloadDeviceEnum, OffloadStateTypeEnum
 from deepspeed.ops.adam import DeepSpeedCPUAdam
@@ -167,6 +168,8 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
                  fp16_master_weights_and_gradients=False,
                  elastic_checkpoint=False,
                  check_grad_overflow=True):
+
+        super().__init__()
 
         if offload_optimizer_config is not None and offload_optimizer_config.device != OffloadDeviceEnum.none:
             self.cpu_offload = True
@@ -853,7 +856,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
 
         if self.cpu_offload is False:
             for i, _ in enumerate(self.bit16_groups):
-                if not i in self.averaged_gradients or self.averaged_gradients[i] is None:
+                if i not in self.all_grad_tensors or self.all_grad_tensors[i] is None:
                     self.all_grad_tensors[i] = self.get_all_grad_tensors(self.params_in_partition[i],
                                                                          dtype=self.gradient_accumulation_dtype)
                 else:
@@ -977,6 +980,13 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
             param.grad = None
 
     def create_gradient_handling_hooks(self):
+        all_params_requiring_grad = []
+
+        for i, param_group in enumerate(self.bit16_groups):
+            for param in param_group:
+                if param.requires_grad:
+                    all_params_requiring_grad.append(param)
+
         for i, param_group in enumerate(self.bit16_groups):
             for param in param_group:
                 if param.requires_grad:
@@ -984,11 +994,21 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
                     def wrapper(param, i):
 
                         def grad_handling_hook(*notneeded):
+                            if self._remaining_grad_acc_hooks == 0:
+                                self._remaining_grad_acc_hooks = count_used_parameters_in_backward(
+                                    all_params_requiring_grad)
+
                             self.process_gradients(param, i)
+
+                            self._remaining_grad_acc_hooks -= 1
+                            if self._remaining_grad_acc_hooks == 0:
+                                self.run_grad_acc_post_hooks()
 
                         self._grad_acc_hooks.append(register_grad_hook(param, grad_handling_hook))
 
                     wrapper(param, i)
+
+        self._remaining_grad_acc_hooks = 0
 
     def get_param_id(self, param):
         unique_id = id(param)
@@ -1520,7 +1540,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
         #####################################################################
 
     def process_gradients(self, param, i):
-        self.backward_prologue()
+        self.setup_buckets()
         if self.use_grad_accum_attribute:
             self._fill_param_grad_accum_attribute(param)
         if self.partition_gradients or self.overlap_comm:
@@ -2199,7 +2219,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
         inf_or_nan = nan.logical_or(inf)
         return inf_or_nan.float().max()
 
-    def backward_prologue(self):
+    def setup_buckets(self):
         if not self.ready_for_gradients:
             self.micro_step_id += 1
 
@@ -2224,27 +2244,10 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
 
             self.ready_for_gradients = True
 
-    def backward_epilogue(self):
+    def backward_epilogue(self, *args, **kwargs):
         # Only for Stage 1, Mode 2
         if self.use_grad_accum_attribute:
             self.fill_grad_accum_attribute()
-
-    def backward(self, loss, retain_graph=False):
-        """
-        :attr:`backward` performs the following steps:
-
-        1. fp32_loss = loss.float()
-        2. scaled_loss = fp32_loss*loss_scale
-        3. scaled_loss.backward(), which accumulates scaled gradients into the ``.grad`` attributes of the model's fp16 leaves
-        """
-        if self.custom_loss_scaler:
-            scaled_loss = self.external_loss_scale * loss
-            scaled_loss.backward()
-        elif self.torch_autocast_gradscaler:
-            self.torch_autocast_gradscaler.scale(loss).backward(retain_graph=retain_graph)
-        else:
-            self.loss_scaler.backward(loss.float(), retain_graph=retain_graph)
-        self.backward_epilogue()
 
     def check_overflow(self, partition_gradients=True):
         self._check_overflow(partition_gradients)

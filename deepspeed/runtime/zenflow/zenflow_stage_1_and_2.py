@@ -565,6 +565,7 @@ class ZenFlowZeroOptimizer(DeepSpeedZeroOptimizer):
             self.selective_optimizer.clear_selected_mv()
             self.timers(SELECTIVE_OPTIMIZER_SYNC_TIMER).stop()
 
+        self.enter_backward()
         if self.custom_loss_scaler:
             scaled_loss = self.external_loss_scale * loss
             scaled_loss.backward(retain_graph=retain_graph)
@@ -572,6 +573,7 @@ class ZenFlowZeroOptimizer(DeepSpeedZeroOptimizer):
             self.loss_scaler.backward(loss.float(), retain_graph=retain_graph)
 
         self.backward_epilogue()
+        self.exit_backward()
 
     def log_selective_optimizer_timers(self):
         self.timers.log(SELECTIVE_OPTIMIZER_TIMERS)
