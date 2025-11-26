@@ -5,11 +5,13 @@
 
 import os
 import torch
+from typing import Any
 
 from deepspeed.utils import logger
 from deepspeed.utils.tensor_fragment import map_to_flat_opt_states
 from deepspeed.runtime.utils import bwc_tensor_model_parallel_rank, see_memory_usage
 from deepspeed.runtime.torch_autocast import get_comm_dtype, is_autocast_initialized
+from deepspeed.runtime.utils import maybe_loss_for_backward
 
 
 class DeepSpeedOptimizer(object):
@@ -17,6 +19,11 @@ class DeepSpeedOptimizer(object):
 
 
 class ZeROOptimizer(DeepSpeedOptimizer):
+
+    def __init__(self):
+        self._remaining_grad_acc_hooks = 0
+        self._grad_acc_post_hooks = []
+        self._backward_active_depth = 0
 
     def load_hp_checkpoint_state_from_checkpoint_dir(self, lp_groups_name: str, checkpoint_dir: str) -> None:
         checkpoint_dir = os.path.join(checkpoint_dir, "zero")
@@ -79,3 +86,73 @@ class ZeROOptimizer(DeepSpeedOptimizer):
             return get_comm_dtype(param)
         else:
             return self.communication_data_type
+
+    def needs_scaler(self) -> bool:
+        """
+        Check if this optimizer requires loss scaling for correct backward pass.
+
+        Returns True if any of the following conditions are met:
+        - Custom loss scaler is enabled
+        - torch.autocast gradient scaler is active (fp16 only)
+        - Dynamic loss scaling is enabled (fp16 with DeepSpeed's loss scaler)
+
+        Returns False for bf16 or fp32, which don't require gradient scaling.
+        """
+        return (self.custom_loss_scaler or self.torch_autocast_gradscaler is not None
+                or (hasattr(self, 'dynamic_loss_scale') and self.dynamic_loss_scale))
+
+    def scale_if_loss(self, value: Any) -> Any:
+        """
+        Applies loss scaling to the input value if it is a loss tensor.
+        """
+        if maybe_loss_for_backward(value):
+            if self.custom_loss_scaler:
+                return self.external_loss_scale * value
+            if self.torch_autocast_gradscaler:
+                return self.torch_autocast_gradscaler.scale(value)
+            return self.loss_scaler.scale_loss(value)
+
+        return value
+
+    def backward_prologue(self):
+        pass
+
+    def backward_epilogue(self, **kwargs):
+        pass
+
+    def backward(self, loss, **kwargs):
+        assert maybe_loss_for_backward(loss), "Optimizer's backward() only accepts a scalar tensor"
+
+        scaled_loss = self.backward_prologue(loss)
+        retain_graph = kwargs.pop('retain_graph', False)
+        self.enter_backward()
+        scaled_loss.backward(retain_graph=retain_graph)
+        self.backward_epilogue()
+        self.exit_backward()
+
+    def register_grad_acc_post_hook(self, hook):
+        self._grad_acc_post_hooks.append(hook)
+
+    def unregister_grad_acc_post_hooks(self):
+        self._grad_acc_post_hooks = []
+
+    def run_grad_acc_post_hooks(self):
+        # Custom autograd Functions (e.g., TiledFusedLogitsLoss) can invoke
+        # `torch.autograd.backward()` from their *forward* pass before the user
+        # ever calls `engine.backward(loss)`. Those early backward calls still
+        # trigger ZeRO's grad hooks, but we must not run the engine's
+        # post-backward logic (which reduces/clears grads) until the outer/user
+        # backward is active. The depth guard filters out only those pre-user
+        # invocations while still allowing backward calls that happen during
+        # the real user backward.
+        if self._backward_active_depth == 0:
+            return
+        for hook in self._grad_acc_post_hooks:
+            hook()
+
+    def enter_backward(self):
+        self._backward_active_depth += 1
+
+    def exit_backward(self):
+        if self._backward_active_depth > 0:
+            self._backward_active_depth -= 1
