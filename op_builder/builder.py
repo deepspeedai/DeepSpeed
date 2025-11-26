@@ -779,6 +779,7 @@ class CUDAOpBuilder(OpBuilder):
                 '-DROCM_VERSION_MAJOR=%s' % ROCM_MAJOR,
                 '-DROCM_VERSION_MINOR=%s' % ROCM_MINOR
             ]
+            self.enable_bf16 = True
         else:
             try:
                 nvcc_threads = int(os.getenv("DS_NVCC_THREADS", ""))
