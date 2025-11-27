@@ -29,8 +29,6 @@ TORCH_AUTOCAST_DTYPE = None
 
 def _validate_auto_cast_settings(engine):
 
-    assert not engine.fp16_enabled(), "Cannot enable both torch autocast and fp16"
-    assert not engine.bfloat16_enabled(), "Cannot enable both torch autocast and bfloat16"
     assert not engine.zero_quantized_weights(), "Cannot enable both torch autocast and zero quantized weights"
 
 
