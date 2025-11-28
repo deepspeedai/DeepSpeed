@@ -51,7 +51,7 @@ from deepspeed.runtime.model_checkpointing.constants import ValidationMode, \
     CHECKPOINT_TAG_VALIDATION, CHECKPOINT_WRITER, CHECKPOINT_SERIALIZATION
 
 from deepspeed.runtime.dataloader import DeepSpeedDataLoader
-from deepspeed.runtime.zero.muon.muon_optimizer import MuonWithAuxAdamStage1And2
+from deepspeed.runtime.zero.muon.muon_optimizer import MuonWithAuxAdam
 from deepspeed.runtime.constants import \
     ROUTE_TRAIN, ROUTE_PREDICT, ROUTE_EVAL, \
     PLD_THETA, PLD_GAMMA, BFLOAT16, FP16, AMP, GRADIENT_ACCUMULATION_STEPS, \
@@ -1641,7 +1641,7 @@ class DeepSpeedEngine(Module):
                         else:
                             accepted_parameters[key] = optimizer_parameters[key]
                 param_groups.append(dict(params=non_muon_params, use_muon=False, **accepted_parameters))
-            optimizer = MuonWithAuxAdamStage1And2(param_groups)
+            optimizer = MuonWithAuxAdam(param_groups)
         else:
             torch_optimizer = getattr(torch.optim, self.optimizer_name())
             optimizer = torch_optimizer(model_parameters, **optimizer_parameters)

@@ -11,7 +11,7 @@ except ImportError:
     pass
 
 
-class MuonWithAuxAdamStage1And2(BaseMuonWithAuxAdam):
+class MuonWithAuxAdam(BaseMuonWithAuxAdam):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
