@@ -16,11 +16,11 @@ if torch.half not in get_accelerator().supported_dtypes():
 # 'optimizer_type, zero_stage, lr, hidden_dim, nlayer'
 
 muon_configs = []
-for optimizer_name in ['muon', 'adam']:
-    for stage in [1, 2]:
-        for lr in [0.01, 0.05]:
-            for model_dim in [32, 128]:
-                for nlayer in [5, 10]:
+for optimizer_name in ['adam']:
+    for stage in [3]:
+        for lr in [0.01]:
+            for model_dim in [32]:
+                for nlayer in [5]:
                     muon_configs.append([optimizer_name, stage, lr, model_dim, nlayer])
 
 

@@ -10,7 +10,7 @@ import itertools
 from typing import Deque, Dict, Set, List, Tuple, Container, Optional
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-
+import copy
 from deepspeed import comm as dist
 from deepspeed.utils import groups, z3_leaf_parameter
 
@@ -36,6 +36,7 @@ from deepspeed.runtime.swap_tensor.partitioned_optimizer_swapper import Partitio
 from deepspeed.runtime.swap_tensor.pipelined_optimizer_swapper import PipelinedOptimizerSwapper
 from deepspeed.checkpoint.constants import OPTIMIZER_STATE_DICT, FP32_FLAT_GROUPS, PARTITION_COUNT, ZERO_STAGE, LOSS_SCALER
 from deepspeed.accelerator import get_accelerator
+from deepspeed.runtime.zero.muon.original_muon import muon_update
 
 # Toggle this to true to enable correctness test
 # with gradient partitioning and without
@@ -1314,6 +1315,7 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
         bucket = self.ipg_buckets[comm_dtype]
         if bucket.elements + param.ds_numel > self.reduce_bucket_size and bucket.elements > 0:
             self.report_ipg_memory_usage("In ipg_remove_grads before reduce_ipg_grads", param.ds_numel)
+            # assert False, "check entrance of reduce_independent_p_g_buckets_and_remove_grads"
             self.__reduce_and_partition_ipg_grads(comm_dtype)
 
         # deal with a use-case of transient grads that will be generated in a loop for the same computation involving some model params - e.g. when performing a tiled memory calculation that shards the normal single sub-module call into a loop over a shards.
@@ -1323,6 +1325,7 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
     @instrument_w_nvtx
     @torch.no_grad()
     def __add_grad_to_ipg_bucket(self, param: Parameter) -> None:
+        # assert False, "check entrance of __add_grad_to_ipg_bucket"
         if not get_accelerator().resolves_data_dependency():
             self.reduce_and_partition_stream.wait_stream(get_accelerator().default_stream())
 
@@ -1361,6 +1364,18 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
                                    f"gradients whose size is not same as the params")
 
         assert len(set(p.ds_id for p in params_in_bucket)) == len(params_in_bucket)
+        # create the momentum buffer for the muon optimizer
+        # for param in params_in_bucket:
+        #     if (not self.optimizer.state[param]) and getattr(param, 'use_muon', False) and 'muon' in self.optimizer.__class__.__name__.lower():
+        #         self.optimizer.state[param] = {}
+        #     if "momentum_buffer" not in self.optimizer.state[param] and getattr(param, 'use_muon', False) and 'muon' in self.optimizer.__class__.__name__.lower():
+        #         # since param is already converted to a deepspeed parameter, we can just copy it
+        #         self.optimizer.state[param]["momentum_buffer"] = copy.copy(param)
+        #         self.optimizer.state[param]["momentum_buffer"].grad = None
+        #         self.optimizer.state[param]["momentum_buffer"].requires_grad = False
+        #         self.optimizer.state[param]["momentum_buffer"].data = param.data.clone() # to avoid the data dependency
+        #         # make the momentum buffer a field of the parameter
+        #         param.momentum_buffer = self.optimizer.state[param]["momentum_buffer"]
 
         while self.param_reduce_events and self.param_reduce_events[0].query():
             self.param_reduce_events.popleft()
@@ -1419,6 +1434,18 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
         grad_offset_in_buffer = 0
         for param in self.ipg_buckets[communication_data_type].params:
             grad = param.grad
+            assert False, "check entrance of __avg_scatter_contiguous_grads"
+            # # here, the grad is in gathered status, not in sharded status
+            # if getattr(param, 'use_muon', False) and 'muon' in self.optimizer.__class__.__name__.lower():
+            #     # for muon update, this all_gather can be slow
+            #     param.momentum_buffer.all_gather()
+            #     start_offset = grad_offset_in_buffer
+            #     end_offset = grad_offset_in_buffer + grad.numel()
+            #     partition = buffer_to_reduce[start_offset:end_offset]
+            #     partition = muon_update(partition, param.momentum_buffer, beta=self.optimizer.param_groups[0]['momentum'])
+            #     # write back to the buffer
+            #     buffer_to_reduce[start_offset:end_offset].data.copy_(partition)
+            #     param.momentum_buffer.partition()
             chunk_sz = math.ceil(grad.numel() / world_sz)
 
             start_offset = grad_offset_in_buffer + min(rank * chunk_sz, grad.numel())
