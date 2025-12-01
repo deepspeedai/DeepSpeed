@@ -1615,7 +1615,7 @@ class DeepSpeedEngine(Module):
             optimizer = MuSGD(model_parameters, **optimizer_parameters)
         elif self.optimizer_name() == MUON_OPTIMIZER:
             zero_stage = self.zero_optimization_stage()
-            assert zero_stage <= ZeroStageEnum.gradients, "Muon optimizer is not yet compatible with ZeRO Stage 3"
+            # assert zero_stage <= ZeroStageEnum.gradients, "Muon optimizer is not yet compatible with ZeRO Stage 3"
             if not all([hasattr(p, 'use_muon') for p in model_parameters]):
                 msg = "Muon optimizer is used, but the use_muon attribute is NOT configured for some of the model parameters, " \
                 "please set by `param.use_muon = True / False` for all params"
@@ -1623,6 +1623,9 @@ class DeepSpeedEngine(Module):
             muon_params = [p for p in model_parameters if p.use_muon]
             non_muon_params = [p for p in model_parameters if not p.use_muon]
             param_groups = []
+            # print(f"muon_params: {muon_params}")
+            # print(f"non_muon_params: {non_muon_params}")
+            # assert False, "check entrance of _configure_basic_optimizer"
             if muon_params:
                 accepted_parameters = dict()
                 for key in ["lr", "momentum", "weight_decay", "muon_lr"]:

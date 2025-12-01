@@ -46,6 +46,3 @@ class MuonWithAuxAdam(BaseMuonWithAuxAdam):
                     p.add_(update, alpha=-group["lr"])
 
         return loss
-
-class MuonWithAuxAdamStage3(BaseMuonWithAuxAdam):
-    pass

@@ -16,7 +16,7 @@ if torch.half not in get_accelerator().supported_dtypes():
 # 'optimizer_type, zero_stage, lr, hidden_dim, nlayer'
 
 muon_configs = []
-for optimizer_name in ['adam']:
+for optimizer_name in ['muon']:  # 'adam',  , 'adam'
     for stage in [3]:
         for lr in [0.01]:
             for model_dim in [32]:
@@ -42,7 +42,18 @@ class TestMuonConfigs(DistributedTest):
             },
             "zero_optimization": {
                 "stage": zero_stage,
-            }
+                "reduce_scatter": False,
+                "offload_param": {
+                    "device": "cpu",
+                    "pin_memory": True
+                },
+                "offload_optimizer": {
+                    "device": "cpu",
+                    "pin_memory": True,
+                    # "nvme_path": "local_nvme",
+                }
+            },
+            "save_momentum_buffer_in_memory": True,
         }
         # Perform a few training steps to ensure the optimizer works correctly
 
