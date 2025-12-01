@@ -313,8 +313,8 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
         self.reduce_scatter = reduce_scatter
         self.use_muon = 'muon' in self.optimizer.__class__.__name__.lower()
         print(f"ds_config: {ds_config}")
-        self.save_momentum_buffer_in_memory = ds_config.get('save_momentum_buffer_in_memory', False)
-        print(f"self.save_momentum_buffer_in_memory: {self.save_momentum_buffer_in_memory}")
+        self.save_muon_momentum_buffer_in_memory = ds_config.get('save_muon_momentum_buffer_in_memory', False)
+        print(f"self.save_muon_momentum_buffer_in_memory: {self.save_muon_momentum_buffer_in_memory}")
         # assert False, "check entrance of DeepSpeedZeroOptimizer_Stage3"
         if self.use_muon and self.reduce_scatter:
             raise ValueError("Muon and reduce scatter cannot be used together")
@@ -373,7 +373,7 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
         #a single 32-bit partition of the parallel partitioned parameters
         #that this process will update
         self.fp32_partitioned_groups_flat = []
-        if self.use_muon and self.save_momentum_buffer_in_memory:
+        if self.use_muon and self.save_muon_momentum_buffer_in_memory:
             self.fp32_muon_momentum_buffer_partitioned_groups_flat = []
         self.next_swappable_fp32_partitioned_groups = []
 
@@ -782,6 +782,7 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
                 # assert False, "check entrance of _create_fp16_partitions_with_defragmentation"
                 if getattr(param_group['params'][0], 'use_muon', False):
                     self.sub_groups_using_muon.extend([True] * len(param_groups[idx]))
+                    self.muon_beta = param_group['momentum']
                 else:
                     self.sub_groups_using_muon.extend([False] * len(param_groups[idx]))
             print(f"self.sub_groups_using_muon: {self.sub_groups_using_muon}")
@@ -920,7 +921,7 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
             if self.fp32_partitioned_groups_flat[i] not in self.optimizer.state:
                 self.optimizer.state[self.fp32_partitioned_groups_flat[i]] = {}
             self.optimizer.state[self.fp32_partitioned_groups_flat[i]]["momentum_buffer"] = unpinned_fp32_buffer_momentum
-            if self.save_momentum_buffer_in_memory:
+            if self.save_muon_momentum_buffer_in_memory:
                 self.fp32_muon_momentum_buffer_partitioned_groups_flat.append(unpinned_fp32_buffer_momentum)
                 self.fp32_muon_momentum_buffer_partitioned_groups_flat[i].ds_id = ds_id
 
@@ -1490,26 +1491,26 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
                 params_to_subgroup_maps[i].append((idx, dest_offset))
                 idx += 1
         for i in params_to_subgroup_maps:
-            if self._swappable_optimizer_subgroup(i) and not self.save_momentum_buffer_in_memory:
+            if self._swappable_optimizer_subgroup(i) and not self.save_muon_momentum_buffer_in_memory:
                 self.optimizer_swapper.swap_in_optimizer_state(parameter=self.fp32_partitioned_groups_flat[i])
                 for idx, dest_offset in params_to_subgroup_maps[i]:
                     momentum_buffer[idx] = self.optimizer.state[self.fp32_partitioned_groups_flat[i]]["momentum_buffer"].narrow(0, dest_offset, param.partition_numel()).clone()
                 self.optimizer_swapper.swap_out_optimizer_state(parameter=self.fp32_partitioned_groups_flat[i])
-            elif self.save_momentum_buffer_in_memory:
+            elif self.save_muon_momentum_buffer_in_memory:
                 for idx, dest_offset in params_to_subgroup_maps[i]:
                     momentum_buffer[idx] = self.fp32_muon_momentum_buffer_partitioned_groups_flat[i].narrow(0, dest_offset, param.partition_numel()).clone()
             else:
-                raise ValueError("Invalid momentum buffer save mode")
+                raise ValueError("Invalid momentum buffer save mode, momentum buffer should be saved in memory or swapped in and out to nvme")
         if momentum_buffer:
             gathered_params_momentums = self._fp32_partitioned_buffers_all_gather(use_muon_params, momentum_buffer, communication_data_type)
             for i in params_to_subgroup_maps:
-                if self._swappable_optimizer_subgroup(i) and not self.save_momentum_buffer_in_memory:
+                if self._swappable_optimizer_subgroup(i) and not self.save_muon_momentum_buffer_in_memory:
                     self.optimizer_swapper.swap_in_optimizer_state(parameter=self.fp32_partitioned_groups_flat[i])
                 for idx, dest_offset in params_to_subgroup_maps[i]:
                     param = use_muon_params[idx]
                     gathered_momentum = gathered_params_momentums[idx]
                     partition = param.grad
-                    beta = self.optimizer.param_groups[0]['momentum']
+                    beta = self.muon_beta
                     # print(f"beta: {beta}")
                     # assert False, "check entrance of _update_momentum_buffer"
                     print(f"gathered_momentum: {gathered_momentum.shape}, gathered_momentum.dtype: {gathered_momentum.dtype}, gathered_momentum.device: {gathered_momentum.device}")
@@ -1517,7 +1518,11 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
                     partition = muon_update(partition, gathered_momentum, beta=beta)
                     param.grad.data.copy_(partition, non_blocking=False)
                     world_sz = dist.get_world_size(self.dp_process_group)
+                    
                     rank = dist.get_rank(self.dp_process_group)
+                    print(f"world_sz: {world_sz}")
+                    print(f"rank: {rank}")
+                    # assert False, "check entrance of _update_momentum_buffer"
                     chunk_sz = math.ceil(param.grad.numel() / world_sz)
                     start_offset = rank * chunk_sz
                     end_offset = start_offset + chunk_sz
@@ -1526,15 +1531,15 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
                         buffer_to_update[:param.grad.numel() - start_offset] = gathered_momentum.view(-1).data.float()[start_offset: param.grad.numel()]
                     else:
                         buffer_to_update = gathered_momentum.view(-1).data.float()[start_offset:end_offset]
-                    if self._swappable_optimizer_subgroup(i) and not self.save_momentum_buffer_in_memory:
+                    if self._swappable_optimizer_subgroup(i) and not self.save_muon_momentum_buffer_in_memory:
                         self.optimizer.state[self.fp32_partitioned_groups_flat[i]]["momentum_buffer"].narrow(0, dest_offset, param.partition_numel()).data.copy_(buffer_to_update, non_blocking=False)
-                    elif self.save_momentum_buffer_in_memory:
+                    elif self.save_muon_momentum_buffer_in_memory:
                         self.fp32_muon_momentum_buffer_partitioned_groups_flat[i].narrow(0, dest_offset, param.partition_numel()).data.copy_(buffer_to_update, non_blocking=False)
                         # update the momentum buffer in the optimizer state
                         self.optimizer.state[self.fp32_partitioned_groups_flat[i]]["momentum_buffer"] = self.fp32_muon_momentum_buffer_partitioned_groups_flat[i]
                     else:
-                        raise ValueError("Invalid momentum buffer save mode")
-                if self._swappable_optimizer_subgroup(i) and not self.save_momentum_buffer_in_memory:
+                        raise ValueError("Invalid momentum buffer save mode, momentum buffer should be saved in memory or swapped in and out to nvme")
+                if self._swappable_optimizer_subgroup(i) and not self.save_muon_momentum_buffer_in_memory:
                     self.optimizer_swapper.swap_out_optimizer_state(parameter=self.fp32_partitioned_groups_flat[i])
 
     @instrument_w_nvtx

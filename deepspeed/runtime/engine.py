@@ -1396,7 +1396,8 @@ class DeepSpeedEngine(Module):
             summary += f"\t {self.sequence_parallel_size=}\n"
             summary += "***********************************************"
             logger.info(summary)
-
+            print(f"summary: {summary}")
+            # assert False, f"check entrance of _configure_distributed_model: {summary}"
         if not (self.amp_enabled() or is_zero_init_model):
             self._broadcast_model()
 

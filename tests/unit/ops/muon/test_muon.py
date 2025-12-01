@@ -2,7 +2,9 @@
 # SPDX-License-Identifier: Apache-2.0
 
 # DeepSpeed Team
-
+import os
+os.environ["DS_DISABLE_ASYNC_IO"] = "1"
+os.environ["DS_BUILD_OPS"] = "0"
 import deepspeed
 import torch
 import pytest
@@ -21,13 +23,14 @@ for optimizer_name in ['muon']:  # 'adam',  , 'adam'
         for lr in [0.01]:
             for model_dim in [32]:
                 for nlayer in [5]:
-                    muon_configs.append([optimizer_name, stage, lr, model_dim, nlayer])
+                    for offload_optimizer in [True, False]:
+                        muon_configs.append([optimizer_name, stage, lr, model_dim, nlayer, offload_optimizer])
 
 
-@pytest.mark.parametrize('optimizer_type, zero_stage, lr, hidden_dim, nlayer', muon_configs)
+@pytest.mark.parametrize('optimizer_type, zero_stage, lr, hidden_dim, nlayer, offload_optimizer', muon_configs)
 class TestMuonConfigs(DistributedTest):
 
-    def test(self, optimizer_type, zero_stage, lr, hidden_dim, nlayer):
+    def test(self, optimizer_type, zero_stage, lr, hidden_dim, nlayer, offload_optimizer):
         optimizer_params = {"lr": lr}
         batch_size = 8
         config_dict = {
@@ -40,6 +43,9 @@ class TestMuonConfigs(DistributedTest):
             "fp16": {
                 "enabled": True
             },
+            "aio": {
+                "aio_enabled": False
+            },
             "zero_optimization": {
                 "stage": zero_stage,
                 "reduce_scatter": False,
@@ -47,14 +53,15 @@ class TestMuonConfigs(DistributedTest):
                     "device": "cpu",
                     "pin_memory": True
                 },
-                "offload_optimizer": {
+            },
+            "save_muon_momentum_buffer_in_memory": True,
+        }
+        if offload_optimizer:
+            config_dict["zero_optimization"]["offload_optimizer"] = {
                     "device": "cpu",
                     "pin_memory": True,
-                    # "nvme_path": "local_nvme",
                 }
-            },
-            "save_momentum_buffer_in_memory": True,
-        }
+
         # Perform a few training steps to ensure the optimizer works correctly
 
         model = SimpleModel(hidden_dim=hidden_dim, nlayers=nlayer)
