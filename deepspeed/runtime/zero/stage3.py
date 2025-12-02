@@ -1456,10 +1456,16 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
         idx = 0
         # find the parameters that need to be updated using muon and they will be indexed by the subgroups
         # this is done since the parameters are swapped in and out to nvme by the subgroups
+        params_size_offset = 0
+        param_grad_offsets = {}
         for param in self.ipg_buckets[communication_data_type].params:
             i, dest_offset, _ = self.grad_position[self.get_param_id(param)]
             if self.use_muon and self.sub_groups_using_muon[i]:
                 use_muon_params.append(param)
+                param_grad_offsets[param] = params_size_offset
+                # copy the gradients back to the params in the ipg bucket for the muon update
+                param.grad.data.copy_(buffer_to_reduce[params_size_offset:params_size_offset + param.grad.numel()], non_blocking=False)
+                params_size_offset += param.grad.numel()
                 momentum_buffer.append(None)
                 if i not in params_to_subgroup_maps:
                     params_to_subgroup_maps[i] = []
@@ -1497,10 +1503,12 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
                 gathered_momentums_pad = gathered_momentums + [torch.empty_like(gathered_momentums[-1])] * (world_sz - len(gathered_momentums) % world_sz)
                 for base_i in range(len(params))[::world_sz]:
                     if base_i + rank < len(params):
-                        g = params[base_i + rank].grad
+                        param = params[base_i + rank]
+                        g = param.grad
                         m = gathered_momentums_pad[base_i + rank]
                         update = muon_update(g, m, beta=self.muon_beta)
                         g.data.copy_(update, non_blocking=False)
+                        buffer_to_reduce.narrow(0, param_grad_offsets[param], param.grad.numel()).data.copy_(g, non_blocking=False)
                     dist.all_gather(params_pad[base_i:base_i + world_sz], params_pad[base_i + rank])
                     dist.all_gather(gathered_momentums_pad[base_i:base_i + world_sz], gathered_momentums_pad[base_i + rank])
                 # now each rank has the full momentum buffers updated as well as the gradients updated
