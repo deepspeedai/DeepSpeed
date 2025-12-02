@@ -90,3 +90,15 @@ def compiled_autograd(enabled, kwargs):
             yield
     finally:
         pass
+
+
+def dummy_decorator(func):
+    return func
+
+
+# robust version of @torch.compile
+def compile():
+    if hasattr(torch, "compile"):
+        return torch.compile
+    else:
+        return dummy_decorator
