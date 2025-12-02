@@ -1500,7 +1500,8 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
                 rank = dist.get_rank(self.dp_process_group)
                 params = [use_muon_params[idx] for idx, _ in params_to_subgroup_maps[i]]
                 gathered_momentums = [gathered_params_momentums[idx] for idx, _ in params_to_subgroup_maps[i]]
-                params_pad = params + [torch.empty_like(params[-1])] * (world_sz - len(params) % world_sz)
+                # params_pad = params + [torch.empty_like(params[-1])] * (world_sz - len(params) % world_sz)
+                grads_pad = [param.grad for param in params] + [torch.empty_like(params[-1].grad)] * (world_sz - len(params) % world_sz)
                 gathered_momentums_pad = gathered_momentums + [torch.empty_like(gathered_momentums[-1])] * (world_sz - len(gathered_momentums) % world_sz)
                 for base_i in range(len(params))[::world_sz]:
                     if base_i + rank < len(params):
@@ -1510,7 +1511,7 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
                         update = muon_update(g, m, beta=self.muon_beta)
                         g.data.copy_(update, non_blocking=False)
                         buffer_to_reduce.narrow(0, param_grad_offsets[param], param.grad.numel()).data.copy_(g.view(-1), non_blocking=False)
-                    dist.all_gather(params_pad[base_i:base_i + world_sz], params_pad[base_i + rank])
+                    dist.all_gather(grads_pad[base_i:base_i + world_sz], grads_pad[base_i + rank])
                     dist.all_gather(gathered_momentums_pad[base_i:base_i + world_sz], gathered_momentums_pad[base_i + rank])
                 # now each rank has the full momentum buffers updated as well as the gradients updated
                 # then write them backt to the optimizer state
