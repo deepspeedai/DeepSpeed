@@ -1901,7 +1901,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
                 tensor_list[0], 'use_muon', False) and 'muon' in self.optimizer.__class__.__name__.lower():
             # need to check the total # of elements in the parameters in this group and this partition
             total_size = sum([t.numel() for t in tensor_list])
-            flatten_bf_list = [torch.zeros([total_size], dtype=dtype)]  # put on cpu to save space
+            flatten_bf_list = [torch.zeros([total_size], dtype=dtype, device=device)]
             self.optimizer.state[flatten_copy]["momentum_buffer"] = self.flatten(flatten_bf_list)
 
         buffer_idx = 0
@@ -1909,13 +1909,9 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
             grad_accum = self.all_grad_tensors[param_group_idx][i]
             if getattr(tensor, 'use_muon', False) and 'muon' in self.optimizer.__class__.__name__.lower():
                 assert tensor.ndim > 1, f"if use muon, then tensor dim > 1, got {tensor.size()}"
-                # create a gpu copy
                 buffer = torch.narrow(self.optimizer.state[flatten_copy]["momentum_buffer"], 0, buffer_idx,
-                                      tensor.numel()).view(tensor.size()).to(device).to(dtype)
+                                      tensor.numel()).view(tensor.size())
                 grad_accum = muon_update(grad_accum, buffer, self.optimizer.param_groups[param_group_idx]['momentum'])
-                # write back to the cpu copy
-                torch.narrow(self.optimizer.state[flatten_copy]["momentum_buffer"], 0, buffer_idx,
-                             tensor.numel()).data.copy_(buffer.view(-1).data)
             tensor = grad_accum
             num_elements = tensor.numel()
             buffer_idx += num_elements
