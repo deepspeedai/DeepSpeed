@@ -374,7 +374,7 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
         #that this process will update
         self.fp32_partitioned_groups_flat = []
         if self.use_muon and self.save_muon_momentum_buffer_in_memory:
-            self.fp32_muon_momentum_buffer_partitioned_groups_flat = []
+            self.muon_momentum_buffer_partitioned_groups_flat = []
         self.next_swappable_fp32_partitioned_groups = []
 
         # number of elements per partition in each group
@@ -922,8 +922,8 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
                 self.optimizer.state[self.fp32_partitioned_groups_flat[i]] = {}
             self.optimizer.state[self.fp32_partitioned_groups_flat[i]]["momentum_buffer"] = unpinned_fp32_buffer_momentum
             if self.save_muon_momentum_buffer_in_memory:
-                self.fp32_muon_momentum_buffer_partitioned_groups_flat.append(unpinned_fp32_buffer_momentum)
-                self.fp32_muon_momentum_buffer_partitioned_groups_flat[i].ds_id = ds_id
+                self.muon_momentum_buffer_partitioned_groups_flat.append(unpinned_fp32_buffer_momentum)
+                self.muon_momentum_buffer_partitioned_groups_flat[i].ds_id = ds_id
 
     def _create_fp32_partitions(self):
         cpu_memory_usage = 0
@@ -1482,14 +1482,14 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
                 self.optimizer_swapper.swap_out_optimizer_state(parameter=self.fp32_partitioned_groups_flat[i])
             elif self.save_muon_momentum_buffer_in_memory:
                 for idx, dest_offset in params_to_subgroup_maps[i]:
-                    momentum_buffer[idx] = self.fp32_muon_momentum_buffer_partitioned_groups_flat[i].narrow(0, dest_offset, param.partition_numel()).clone()
+                    momentum_buffer[idx] = self.muon_momentum_buffer_partitioned_groups_flat[i].narrow(0, dest_offset, param.partition_numel()).clone()
             else:
                 raise ValueError("Invalid momentum buffer save mode, momentum buffer should be saved in memory or swapped in and out to nvme")
         # if there are parameters that need to be updated using muon
         if momentum_buffer:
             # all gather the momentum buffers of the parameters to the global buffer
             # this is done since the momentum buffers are stored in partitions just like the params themselves
-            gathered_params_momentums = self._fp32_partitioned_buffers_all_gather(use_muon_params, momentum_buffer, communication_data_type)
+            gathered_params_momentums = self._partitioned_buffers_all_gather(use_muon_params, momentum_buffer, communication_data_type)
             for i in params_to_subgroup_maps:
                 if self._swappable_optimizer_subgroup(i) and not self.save_muon_momentum_buffer_in_memory:
                     self.optimizer_swapper.swap_in_optimizer_state(parameter=self.fp32_partitioned_groups_flat[i])
@@ -1523,15 +1523,15 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
                     end_offset = start_offset + chunk_sz
                     if end_offset > param.grad.numel():
                         buffer_to_update = torch.zeros(chunk_sz, device=param.grad.device, dtype=param.grad.dtype)
-                        buffer_to_update[:param.grad.numel() - start_offset] = gathered_momentum.view(-1).data.float()[start_offset: param.grad.numel()]
+                        buffer_to_update[:param.grad.numel() - start_offset] = gathered_momentum.view(-1).data[start_offset: param.grad.numel()]
                     else:
-                        buffer_to_update = gathered_momentum.view(-1).data.float()[start_offset:end_offset]
+                        buffer_to_update = gathered_momentum.view(-1).data[start_offset:end_offset]
                     if self._swappable_optimizer_subgroup(i) and not self.save_muon_momentum_buffer_in_memory:
                         self.optimizer.state[self.fp32_partitioned_groups_flat[i]]["momentum_buffer"].narrow(0, dest_offset, param.partition_numel()).data.copy_(buffer_to_update, non_blocking=False)
                     elif self.save_muon_momentum_buffer_in_memory:
-                        self.fp32_muon_momentum_buffer_partitioned_groups_flat[i].narrow(0, dest_offset, param.partition_numel()).data.copy_(buffer_to_update, non_blocking=False)
+                        self.muon_momentum_buffer_partitioned_groups_flat[i].narrow(0, dest_offset, param.partition_numel()).data.copy_(buffer_to_update, non_blocking=False)
                         # update the momentum buffer in the optimizer state
-                        self.optimizer.state[self.fp32_partitioned_groups_flat[i]]["momentum_buffer"] = self.fp32_muon_momentum_buffer_partitioned_groups_flat[i]
+                        self.optimizer.state[self.fp32_partitioned_groups_flat[i]]["momentum_buffer"] = self.muon_momentum_buffer_partitioned_groups_flat[i]
                     else:
                         raise ValueError("Invalid momentum buffer save mode, momentum buffer should be saved in memory or swapped in and out to nvme")
                 if self._swappable_optimizer_subgroup(i) and not self.save_muon_momentum_buffer_in_memory:
@@ -1736,7 +1736,7 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
         return buffers
 
 
-    def _fp32_partitioned_buffers_all_gather(self, params: List[Parameter], buffers_to_allgather: List[Tensor], communication_data_type: torch.dtype):
+    def _partitioned_buffers_all_gather(self, params: List[Parameter], buffers_to_allgather: List[Tensor], communication_data_type: torch.dtype):
         """
         Allgather the partitioned buffers of the parameters to the global buffer.
         Args:
@@ -1746,7 +1746,7 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
         Returns:
             List[Tensor]
         """
-        # assert False, "check entrance of _fp32_partitioned_buffers_all_gather"
+        # assert False, "check entrance of _partitioned_buffers_all_gather"
         assert len(params) == len(buffers_to_allgather), "params and buffers_to_allgather must have the same length"
         assert all(param.partition_numel() == buffer.numel() for param, buffer in zip(params, buffers_to_allgather)), "params and buffers_to_allgather must have the same numel"
         coalesced_buffer = instrument_w_nvtx(torch.cat)(buffers_to_allgather)
