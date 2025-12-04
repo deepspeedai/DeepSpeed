@@ -166,6 +166,8 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
                  round_robin_gradients=False,
                  has_moe_layers=False,
                  fp16_master_weights_and_gradients=False,
+                 bf16_master_weights_and_gradients=False,
+                 bf16_optimizer_states=False,
                  elastic_checkpoint=False,
                  check_grad_overflow=True):
 
@@ -267,13 +269,20 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
         self.round_robin_gradients = round_robin_gradients
 
         self.extra_large_param_to_reduce: Dict[int, torch.Tensor] = {}
-        self.fp16_master_weights_and_gradients = fp16_master_weights_and_gradients
 
-        if self.fp16_master_weights_and_gradients:
+        def _enforce_cpu_offload():
             assert self.cpu_offload and type(self.optimizer) in [DeepSpeedCPUAdam], \
-            f"fp16_master_and_gradients requires optimizer to support keeping fp16 master and gradients while keeping the optimizer states in fp32."\
-            f"Currently only supported using ZeRO-Offload with DeepSpeedCPUAdam. But current setting is ZeRO-Offload:{self.cpu_offload} and optimizer type {type(self.optimizer)}." \
-            f"Either disable fp16_master_weights_and_gradients or enable {self.zero_stage_string} Offload with DeepSpeedCPUAdam."
+                f"Master weights feature requires {self.zero_stage_string} Offload with DeepSpeedCPUAdam. " \
+                f"Current ZeRO-Offload:{self.cpu_offload} optimizer type {type(self.optimizer)}."
+
+        self.master_weights_and_grads_dtype = self._configure_master_weights(
+            fp16_master_weights_and_gradients=fp16_master_weights_and_gradients,
+            bf16_master_weights_and_gradients=bf16_master_weights_and_gradients,
+            bf16_optimizer_states=bf16_optimizer_states,
+            fp16_offload_validator=_enforce_cpu_offload,
+            bf16_fp32_offload_validator=_enforce_cpu_offload)
+
+        self.low_precision_master_weights_and_grads = self.master_weights_and_grads_dtype != torch.float32
 
         if self.reduce_scatter and self.partition_gradients:
             valid_reduce_scatter_dtypes = (torch.float16, torch.bfloat16, torch.float32)
@@ -437,12 +446,8 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
             # A partition of the fp32 master weights that will be updated by this process.
             # Note that the params in single_partition_of_fp32_groups is cloned and detached
             # from the origin params of the model.
-            if not fp16_master_weights_and_gradients:
-                weights_partition = self.parallel_partitioned_bit16_groups[i][partition_id].to(
-                    self.device).clone().float().detach()
-            else:
-                weights_partition = self.parallel_partitioned_bit16_groups[i][partition_id].to(
-                    self.device).clone().half().detach()
+            weights_partition = self.parallel_partitioned_bit16_groups[i][partition_id].detach().clone().to(
+                device=self.device, dtype=self.master_weights_and_grads_dtype)
 
             if self.cpu_offload:
                 if self.cpu_offload_pin_memory:
@@ -1314,7 +1319,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
 
         #buffer for storing gradients for this parameter in CPU
         def buffer_to_accumulate_to_in_cpu():
-            if not self.fp16_master_weights_and_gradients:
+            if not self.low_precision_master_weights_and_grads:
                 buffer = torch.zeros(param.numel(), dtype=param.dtype, device=self.device)
                 return get_accelerator().pin_memory(buffer) if self.cpu_offload_pin_memory else buffer
             else:
@@ -1323,7 +1328,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
         #accumulate gradients into param.grad_accum or parts of it that belongs to this partition
         def accumulate_gradients():
             grad_accum = self.get_param_gradient_attribute(param)
-            if not self.fp16_master_weights_and_gradients:
+            if not self.low_precision_master_weights_and_grads:
                 dest_buffer.copy_(self.accumulated_grads_in_cpu[param_id].view(-1), non_blocking=True)
                 grad_accum.data.view(-1).add_(dest_buffer)
             else:
@@ -1336,7 +1341,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
         #move accumulated gradients back to CPU
         def copy_gradients_to_cpu():
             grad_accum = self.get_param_gradient_attribute(param)
-            if not self.fp16_master_weights_and_gradients:
+            if not self.low_precision_master_weights_and_grads:
                 self.accumulated_grads_in_cpu[param_id].data.copy_(grad_accum.data.view(-1), non_blocking=True)
             else:
                 self.accumulated_grads_in_cpu[param_id].data.copy_(grad_accum.data.view(-1).narrow(
@@ -1390,8 +1395,8 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
         assert grad_accum is not None
 
         src_tensor = grad_accum.view(-1).narrow(0, source_offset, num_elements)
-        if not self.fp16_master_weights_and_gradients:
-            src_tensor = src_tensor.float()
+        if src_tensor.dtype != self.master_weights_and_grads_dtype:
+            src_tensor = src_tensor.to(self.master_weights_and_grads_dtype)
 
         dest_tensor.copy_(src_tensor, non_blocking=True)
         self.clear_grad_attribute(param)  #offload only
@@ -1890,6 +1895,13 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
                            device,
                            param_group_idx,
                            return_tensor_list=False):
+        if len(tensor_list) == 0:
+            # This condition can fire when we have small parameteters and many ranks.
+            zero_buffer = torch.zeros(int(partition_size), dtype=dtype, device=device)
+            if return_tensor_list:
+                return [zero_buffer]
+            return zero_buffer
+
         flat_tensor_list = []
         current_size = 0
         # find the flatten copy in the optimizer's state

@@ -1632,7 +1632,7 @@ class Init(InsertPostInitMethodToModuleSubClasses):
         for param in param_list:
             print_rank_0(f"Before Partitioning Param {param.ds_id}", force=False)
             if self.zero_param_process_group is not None:
-                self._partition_param_sec(param)
+                self._partition_param_sec(param, has_been_updated=has_been_updated)
             self._partition_param(param, has_been_updated=has_been_updated, free_data=True)
 
             param.ds_status = ZeroParamStatus.NOT_AVAILABLE
@@ -1805,8 +1805,10 @@ class Init(InsertPostInitMethodToModuleSubClasses):
             sec_numel = max(0, min(param.ds_numel - secondary_start, secondary_partition_size))
 
             # copy from full tensor to secondary tensor
-            param.ds_secondary_tensor.narrow(0, 0,
-                                             sec_numel).copy_(one_dim_param.narrow(0, secondary_start, sec_numel))
+            with torch.no_grad():
+                # make sure param.ds_secondary_tensor requires_grad always be false
+                param.ds_secondary_tensor.narrow(0, 0,
+                                                 sec_numel).copy_(one_dim_param.narrow(0, secondary_start, sec_numel))
 
             # TODO: This is a temporary fix to avoid the issue that 2nd tensor all-gather happens before 2nd tensor partition is done
             if not get_accelerator().resolves_data_dependency():

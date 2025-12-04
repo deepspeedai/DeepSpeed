@@ -156,3 +156,37 @@ class ZeROOptimizer(DeepSpeedOptimizer):
     def exit_backward(self):
         if self._backward_active_depth > 0:
             self._backward_active_depth -= 1
+
+    def _configure_master_weights(self,
+                                  fp16_master_weights_and_gradients=False,
+                                  bf16_master_weights_and_gradients=False,
+                                  bf16_optimizer_states=False,
+                                  fp16_offload_validator=None,
+                                  bf16_fp32_offload_validator=None):
+        """
+        Common validation and dtype selection for ZeRO optimizer master-weight settings.
+        Optionally accepts callables that enforce backend-specific offload requirements.
+        """
+        self.fp16_master_weights_and_gradients = fp16_master_weights_and_gradients
+        self.bf16_master_weights_and_gradients = bf16_master_weights_and_gradients
+        assert not (self.fp16_master_weights_and_gradients and self.bf16_master_weights_and_gradients), \
+            "fp16_master_weights_and_gradients and bf16_master_weights_and_gradients are mutually exclusive."
+
+        self.bf16_optimizer_states = bf16_optimizer_states
+        if self.bf16_optimizer_states:
+            assert self.bf16_master_weights_and_gradients, \
+                "bf16_optimizer_states requires bf16_master_weights_and_gradients."
+
+        if (self.bf16_master_weights_and_gradients and not self.bf16_optimizer_states
+                and bf16_fp32_offload_validator is not None):
+            bf16_fp32_offload_validator()
+
+        if self.fp16_master_weights_and_gradients and fp16_offload_validator is not None:
+            fp16_offload_validator()
+
+        if self.fp16_master_weights_and_gradients:
+            return torch.float16
+        elif self.bf16_master_weights_and_gradients:
+            return torch.bfloat16
+        else:
+            return torch.float32
