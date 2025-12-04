@@ -2765,6 +2765,9 @@ class DeepSpeedEngine(Module):
             self.engine_timers_cache[name] = self.timers(name).elapsed(reset=False)
 
     def get_wall_clock_timers(self):
+        r"""
+            Return a dict snapshot of the Engine's wall clock timers. 
+        """
         return self.engine_timers_cache
 
     def _autotuning_exit(self):
