@@ -2766,7 +2766,7 @@ class DeepSpeedEngine(Module):
 
     def get_wall_clock_timers(self):
         r"""
-            Return a dict snapshot of the Engine's wall clock timers. 
+            Return a dict snapshot of the Engine's wall clock timers.
         """
         return self.engine_timers_cache
 
