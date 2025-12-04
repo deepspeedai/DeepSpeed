@@ -976,7 +976,18 @@ class DeepSpeedConfig(object):
                         ZeroStageEnum.max_stage)
 
         if self.float16_config.fp16_master_weights_and_grads:
-            assert self.zero_enabled and self.zero_optimization_stage == ZeroStageEnum.gradients, "Fp16_master_weights_and_grads is only supported with ZeRO Stage 2 for now."
+            assert self.zero_enabled and self.zero_optimization_stage in (
+                ZeroStageEnum.optimizer_states, ZeroStageEnum.gradients,
+                ZeroStageEnum.weights), "Fp16_master_weights_and_grads is only supported with ZeRO Stage 1, 2, or 3."
+        if self.bfloat16_config.bf16_master_weights_and_grads:
+            assert self.zero_enabled and self.zero_optimization_stage in (
+                ZeroStageEnum.optimizer_states, ZeroStageEnum.gradients,
+                ZeroStageEnum.weights), "Bf16_master_weights_and_grads is only supported with ZeRO Stage 1, 2, or 3."
+        if self.bfloat16_config.bf16_optimizer_states:
+            assert self.zero_enabled and self.zero_optimization_stage in (
+                ZeroStageEnum.optimizer_states, ZeroStageEnum.gradients,
+                ZeroStageEnum.weights), "bf16_optimizer_states is only supported with ZeRO Stage 1, 2, or 3."
+            assert self.bfloat16_config.bf16_master_weights_and_grads, "bf16_optimizer_states requires bf16_master_weights_and_grads to be enabled."
 
     def _do_warning_check(self):
         fp16_enabled = self.float16_config.enabled

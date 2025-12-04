@@ -669,8 +669,8 @@ class ZenFlowZeroOptimizerParallel(ZenFlowZeroOptimizer):
             src_tensor = grad_accum.view(-1).narrow(0, source_offset, num_elements)
         else:
             src_tensor = grad_accum.view(-1).narrow(0, source_offset, num_elements)
-        if not self.fp16_master_weights_and_gradients:
-            src_tensor = src_tensor.float()
+        if src_tensor.dtype != self.master_weights_and_grads_dtype:
+            src_tensor = src_tensor.to(self.master_weights_and_grads_dtype)
 
         dest_tensor.copy_(src_tensor, non_blocking=True)
         param.grad = None  #offload only

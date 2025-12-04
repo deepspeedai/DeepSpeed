@@ -168,6 +168,9 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
         clip_grad=0.0,
         gradient_accumulation_dtype=torch.float32,
         communication_data_type=torch.float16,
+        fp16_master_weights_and_gradients=False,
+        bf16_master_weights_and_gradients=False,
+        bf16_optimizer_states=False,
         postscale_gradients=True,
         gradient_predivide_factor=1.0,
         gradient_accumulation_steps=1,
@@ -266,6 +269,18 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
 
         self.persistent_parameters = self.parameter_offload.persistent_parameters
         self._configure_offloading(offload_optimizer_config, offload_param_config)
+
+        def _enforce_optimizer_offload():
+            assert self.offload_optimizer and type(self.optimizer) == DeepSpeedCPUAdam, \
+                "Master weights feature requires ZeRO-3 Offload with DeepSpeedCPUAdam. " \
+                f"Current ZeRO-3 Offload:{self.offload_optimizer} optimizer type {type(self.optimizer)}."
+
+        self.master_weights_and_grads_dtype = self._configure_master_weights(
+            fp16_master_weights_and_gradients=fp16_master_weights_and_gradients,
+            bf16_master_weights_and_gradients=bf16_master_weights_and_gradients,
+            bf16_optimizer_states=bf16_optimizer_states,
+            fp16_offload_validator=_enforce_optimizer_offload,
+            bf16_fp32_offload_validator=_enforce_optimizer_offload)
 
         # backup fused_adam optimizer init
         if self.offload_optimizer and self.partial_offload != 1.0:
@@ -694,7 +709,7 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
                                               optimizer=self.optimizer,
                                               largest_numel=max(self.fp16_partitioned_groups_flat_numel),
                                               device=self.device,
-                                              dtype=torch.float32,
+                                              dtype=self.master_weights_and_grads_dtype,
                                               timers=self.timers)
 
     def _move_to_flat_buffer(self, param_list, flat_buffer, avoid_copy=False):
@@ -903,7 +918,7 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
         nvme_fp16_partitions_info = []
         nvme_fp16_num_elems = []
         nvme_fp32_dest_tensors = []
-        fp32_element_size = torch.tensor([], dtype=torch.float32).element_size()
+        fp32_element_size = torch.tensor([], dtype=self.master_weights_and_grads_dtype).element_size()
 
         # Assign portion of subgroup to cpu, the other to gpu.
         if self.offload_optimizer:
@@ -924,7 +939,7 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
 
             # a partition of the fp32 master weights that will be updated by this process
             if self._swappable_optimizer_subgroup(i):
-                self.fp32_partitioned_groups_flat.append(torch.Tensor())
+                self.fp32_partitioned_groups_flat.append(torch.empty(0, dtype=self.master_weights_and_grads_dtype))
                 self.fp32_partitioned_groups_flat[i].ds_id = ds_id
                 nvme_memory_usage += (fp32_element_size * num_elements)
                 num_swappable_partitions += 1
@@ -938,7 +953,9 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
                         nvme_fp16_num_elems.append(num_elements)
                         nvme_fp32_dest_tensors.append(self.fp32_partitioned_groups_flat[i])
                     else:
-                        unpinned_fp32_buffer = torch.empty(num_elements, device=self.device, dtype=torch.float)
+                        unpinned_fp32_buffer = torch.empty(num_elements,
+                                                           device=self.device,
+                                                           dtype=self.master_weights_and_grads_dtype)
                         self._swap_in_sub_group_to_flat_buffer(unpinned_fp32_buffer, i)
                         self.optimizer_swapper.initialize_parameters(parameters=[self.fp32_partitioned_groups_flat[i]],
                                                                      src_tensors=[unpinned_fp32_buffer])
@@ -952,20 +969,25 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
                 cpu_memory_sub_groups += 1
 
                 if self.params_in_nvme_and_cpu and tensor is None:
-                    unpinned_fp32_buffer = torch.empty(num_elements, device=self.device, dtype=torch.float)
+                    unpinned_fp32_buffer = torch.empty(num_elements,
+                                                       device=self.device,
+                                                       dtype=self.master_weights_and_grads_dtype)
                     self._swap_in_sub_group_to_flat_buffer(unpinned_fp32_buffer, i)
                     self.fp32_partitioned_groups_flat.append(unpinned_fp32_buffer)
                 elif self.offload_optimizer:
-                    self.fp32_partitioned_groups_flat.append(self.fp16_partitioned_groups_flat[i].to(
-                        self.subgroup_to_device[i]).clone().float().detach())
-                elif self.fp16_partitioned_groups_flat[i].dtype == torch.float32:
+                    converted = self.fp16_partitioned_groups_flat[i].to(self.subgroup_to_device[i],
+                                                                        dtype=self.master_weights_and_grads_dtype)
+                    self.fp32_partitioned_groups_flat.append(converted.clone().detach())
+                elif self.fp16_partitioned_groups_flat[i].dtype == self.master_weights_and_grads_dtype and \
+                        self.fp16_partitioned_groups_flat[i].device == self.device:
                     # When torch autocast is enabled, weights in the provided model (and thus groups in the so-called
                     # "fp16" partitioned groups) are already in and updated using fp32. In such cases we don't need
                     # another copy of the weights.
                     self.fp32_partitioned_groups_flat.append(self.fp16_partitioned_groups_flat[i])
                 else:
-                    self.fp32_partitioned_groups_flat.append(self.fp16_partitioned_groups_flat[i].to(
-                        self.device).clone().float().detach())
+                    converted = self.fp16_partitioned_groups_flat[i].to(self.device,
+                                                                        dtype=self.master_weights_and_grads_dtype)
+                    self.fp32_partitioned_groups_flat.append(converted.clone().detach())
                 self.fp32_partitioned_groups_flat[i].ds_id = ds_id
 
             self.fp32_partitioned_groups_flat[i].requires_grad = True  # keep this in case internal optimizer uses it
@@ -1498,7 +1520,7 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
     def async_inplace_copy_grad_to_fp32_buffer_from_gpu(self, param, fp32_grad_tensor):
         with get_accelerator().stream(self.copy_grad_stream):
             param_id = self.get_param_id(param)
-            src_tensor = param.grad.view(-1).float()
+            src_tensor = param.grad.view(-1).to(dtype=self.master_weights_and_grads_dtype)
             #print(f"src_tensor {src_tensor.size()} and fp32 grad {fp32_grad_tensor.size()}")
             fp32_grad_tensor.copy_(src_tensor, non_blocking=True)
             param.grad = None
@@ -1571,12 +1593,12 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
                             offload_fp32_gradients[i] = []
                             offload_fp32_offsets[i] = []
 
-                        offload_fp32_gradients[i].append(grad_buffer.float())
+                        offload_fp32_gradients[i].append(grad_buffer.to(dtype=self.master_weights_and_grads_dtype))
                         offload_fp32_offsets[i].append(dest_offset)
                     else:
                         fp32_grad_tensor = self.fp32_partitioned_groups_flat[i].grad.narrow(
                             0, dest_offset, grad_buffer.numel())
-                        fp32_grad_tensor.copy_(grad_buffer.float())
+                        fp32_grad_tensor.copy_(grad_buffer.to(dtype=self.master_weights_and_grads_dtype))
 
             # free the gradient
             if not get_accelerator().is_synchronized_device():
@@ -2376,7 +2398,7 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
 
     def _fp32_state_allgather(self, param, fp32_state_partition):
         reduce_buffer = torch.empty(self.partition_count * fp32_state_partition.numel(),
-                                    dtype=torch.float32,
+                                    dtype=self.master_weights_and_grads_dtype,
                                     device=param.device)
         my_rank = dist.get_rank(group=self.dp_process_group)
         partition = reduce_buffer.narrow(0, fp32_state_partition.numel() * my_rank, fp32_state_partition.numel())
