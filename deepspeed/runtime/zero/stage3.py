@@ -3002,6 +3002,7 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
         self._partition_all_parameters()
 
     def checkpoint_event_epilogue(self):
+        self.invalidate_secondary_tensor()
         if len(self.persistent_parameters) > 0:
             self.persistent_parameters[0].all_gather(self.persistent_parameters)
 

@@ -8,6 +8,7 @@ from types import SimpleNamespace
 from deepspeed.ops.op_builder import CPUAdamBuilder
 from deepspeed.checkpoint.utils import clone_tensors_for_torch_save, get_model_ckpt_name_for_rank
 from deepspeed.accelerator import get_accelerator
+from deepspeed.runtime.zero import ZeroParamStatus
 from deepspeed.utils.torch import required_torch_version
 
 from unit.common import DistributedTest, DistributedFixture
@@ -210,6 +211,33 @@ class ws4_model_checkpoint(DistributedFixture):
         if load_optim:
             torch.save(model.optimizer.optimizer.state_dict(), os.path.join(class_tmpdir, 'opt-state-dict'))
         model.save_checkpoint(class_tmpdir)
+
+
+class ws4_model_checkpoint_zeropp(DistributedFixture):
+
+    world_size = 4
+
+    def run(self, class_tmpdir):
+        config_dict = {
+            "train_batch_size": 4,
+            "optimizer": {
+                "type": 'Adam'
+            },
+            "zero_optimization": {
+                "stage": 3,
+                "zero_hpz_partition_size": 2,
+            }
+        }
+
+        hidden_dim = 10
+        model = SimpleModel(hidden_dim)
+        for param in model.parameters():
+            param.data = torch.ones_like(param.data, device=param.data.device, requires_grad=False)
+
+        # save model and zero checkpoint
+        torch.save(model.state_dict(), os.path.join(class_tmpdir, "model.pt"))
+        ds_model = create_deepspeed_model(config_dict=config_dict, model=model, base_optimizer=None)
+        ds_model.save_checkpoint(class_tmpdir)
 
 
 @pytest.mark.parametrize("elastic_save", [True, False])
@@ -660,3 +688,72 @@ class TestZeRONonDistributed(DistributedTest):
         engine._change_recovery_script_permissions(fake_recovery_script_dst)
 
         assert log_called, "Expected deepspeed.utils.logger.info to be called."
+
+
+class TestZeROPPLoadCheckpoint(DistributedTest):
+
+    world_size = 4
+
+    def test_load_zeropp_model(self, ws4_model_checkpoint_zeropp, class_tmpdir):
+        config_dict = {
+            "train_batch_size": 4,
+            "optimizer": {
+                "type": 'Adam'
+            },
+            "zero_optimization": {
+                "stage": 3,
+                "zero_hpz_partition_size": 2,
+                "stage3_param_persistence_threshold": 1
+            }
+        }
+
+        # Init model and load saved model
+        hidden_dim = 10
+        with deepspeed.zero.Init(config_dict_or_path=config_dict):
+            model = SimpleModel(hidden_dim)
+        ds_model = create_deepspeed_model(config_dict=config_dict, model=model, base_optimizer=None)
+
+        with deepspeed.zero.GatheredParameters(ds_model.module.parameters(), modifier_rank=0):
+            if dist.get_rank() == 0:
+                state_dict = torch.load(os.path.join(class_tmpdir, "model.pt"))
+                ds_model.module.load_state_dict(state_dict)
+
+        # Check the parameters after gather
+        params_to_gather = [p for p in ds_model.module.parameters() if p.ds_status == ZeroParamStatus.NOT_AVAILABLE]
+        if len(params_to_gather) > 0:
+            handle = params_to_gather[0].all_gather_coalesced(params_to_gather)
+            handle.wait()
+        for ds_param in params_to_gather:
+            for v in ds_param.data.cpu().flatten().numpy():
+                assert v == 1.0
+
+    def test_load_zeropp_checkpoint(self, ws4_model_checkpoint_zeropp, class_tmpdir):
+        config_dict = {
+            "train_batch_size": 4,
+            "optimizer": {
+                "type": 'Adam'
+            },
+            "zero_optimization": {
+                "stage": 3,
+                "zero_hpz_partition_size": 2,
+                "stage3_param_persistence_threshold": 1
+            }
+        }
+
+        # Init model and load zero checkpoint
+        hidden_dim = 10
+        model = SimpleModel(hidden_dim)
+        ds_model = create_deepspeed_model(config_dict=config_dict, model=model, base_optimizer=None)
+        ds_model.load_checkpoint(class_tmpdir,
+                                 load_optimizer_states=True,
+                                 load_lr_scheduler_states=False,
+                                 load_module_only=False)
+
+        # Check the parameters after gather
+        params_to_gather = [p for p in ds_model.module.parameters() if p.ds_status == ZeroParamStatus.NOT_AVAILABLE]
+        if len(params_to_gather) > 0:
+            handle = params_to_gather[0].all_gather_coalesced(params_to_gather)
+            handle.wait()
+        for ds_param in params_to_gather:
+            for v in ds_param.data.cpu().flatten().numpy():
+                assert v == 1.0
