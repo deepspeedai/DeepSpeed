@@ -312,10 +312,7 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
 
         self.reduce_scatter = reduce_scatter
         self.use_muon = 'muon' in self.optimizer.__class__.__name__.lower()
-        print(f"ds_config: {ds_config}")
         self.save_muon_momentum_buffer_in_memory = ds_config.get('save_muon_momentum_buffer_in_memory', False)
-        print(f"self.save_muon_momentum_buffer_in_memory: {self.save_muon_momentum_buffer_in_memory}")
-        # assert False, "check entrance of DeepSpeedZeroOptimizer_Stage3"
         if self.use_muon and self.reduce_scatter:
             raise ValueError("Muon and reduce scatter cannot be used together")
         if self.use_muon and self.all2all_process_group is not None:
@@ -485,10 +482,6 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
 
         if dist.get_rank(group=self.dp_process_group) == 0:
             see_memory_usage("After initializing ZeRO optimizer", force=True)
-        print(f"self.offload_param: {self.offload_param}")
-        print(f"self.offload_optimizer: {self.offload_optimizer}")
-        print(f"self.swap_optimizer: {self.swap_optimizer}")
-        # assert False, "check entrance of DeepSpeedZeroOptimizer_Stage3"
 
     def destroy(self):
         self.parameter_offload.destroy()
@@ -777,16 +770,11 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
         if self.use_muon:
             self.sub_groups_using_muon =[]
             for idx, param_group in enumerate(fp16_param_groups):
-                # print(f"param_group: {param_group}")
-                print(f"use_muon for param_group {idx}: {getattr(param_group['params'][0], 'use_muon')}, {{param_group}}")
-                # assert False, "check entrance of _create_fp16_partitions_with_defragmentation"
                 if getattr(param_group['params'][0], 'use_muon', False):
                     self.sub_groups_using_muon.extend([True] * len(param_groups[idx]))
                     self.muon_beta = param_group['momentum']
                 else:
                     self.sub_groups_using_muon.extend([False] * len(param_groups[idx]))
-            print(f"self.sub_groups_using_muon: {self.sub_groups_using_muon}")
-            #assert False, "check entrance of _create_fp16_partitions_with_defragmentation"
         # bookkeeping related to param groups
         for param_group_idx, param_group in enumerate(param_groups):
             for sub_group in param_group:
@@ -1357,7 +1345,6 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
         bucket = self.ipg_buckets[comm_dtype]
         if bucket.elements + param.ds_numel > self.reduce_bucket_size and bucket.elements > 0:
             self.report_ipg_memory_usage("In ipg_remove_grads before reduce_ipg_grads", param.ds_numel)
-            # assert False, "check entrance of reduce_independent_p_g_buckets_and_remove_grads"
             self.__reduce_and_partition_ipg_grads(comm_dtype)
 
         # deal with a use-case of transient grads that will be generated in a loop for the same computation involving some model params - e.g. when performing a tiled memory calculation that shards the normal single sub-module call into a loop over a shards.
@@ -1367,7 +1354,6 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
     @instrument_w_nvtx
     @torch.no_grad()
     def __add_grad_to_ipg_bucket(self, param: Parameter) -> None:
-        # assert False, "check entrance of __add_grad_to_ipg_bucket"
         if not get_accelerator().resolves_data_dependency():
             self.reduce_and_partition_stream.wait_stream(get_accelerator().default_stream())
 
@@ -1449,7 +1435,6 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
         Returns:
             None
         """
-        # assert False, "check entrance of _apply_distributed_muon_update"
         momentum_buffer = []
         use_muon_params = []
         params_to_subgroup_maps = {}
@@ -1464,7 +1449,6 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
                 use_muon_params.append(param)
                 param_grad_offsets[param] = params_size_offset
                 # copy the gradients back to the params in the ipg bucket for the muon update
-                print(f"params_size_offset: {params_size_offset}, param.grad.numel(): {param.grad.numel()}")
                 param.grad.data.copy_(buffer_to_reduce.narrow(0, params_size_offset, param.grad.numel()).view_as(param.grad), non_blocking=False)
                 momentum_buffer.append(None)
                 if i not in params_to_subgroup_maps:

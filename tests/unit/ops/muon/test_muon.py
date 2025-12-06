@@ -18,11 +18,11 @@ if torch.half not in get_accelerator().supported_dtypes():
 # 'optimizer_type, zero_stage, lr, hidden_dim, nlayer'
 
 muon_configs = []
-for optimizer_name in ['muon']:  # 'adam',  , 'adam'
-    for stage in [3]:
-        for lr in [0.01]:
-            for model_dim in [32]:
-                for nlayer in [5]:
+for optimizer_name in ['adam', 'muon']:
+    for stage in [1, 2, 3]:
+        for lr in [0.01, 0.05]:
+            for model_dim in [32, 128]:
+                for nlayer in [5, 10]:
                     for offload_optimizer in [True, False]:
                         muon_configs.append([optimizer_name, stage, lr, model_dim, nlayer, offload_optimizer])
 
@@ -43,16 +43,9 @@ class TestMuonConfigs(DistributedTest):
             "fp16": {
                 "enabled": True
             },
-            "aio": {
-                "aio_enabled": False
-            },
             "zero_optimization": {
                 "stage": zero_stage,
                 "reduce_scatter": False,
-                "offload_param": {
-                    "device": "cpu",
-                    "pin_memory": True
-                },
             },
             "save_muon_momentum_buffer_in_memory": True,
         }
