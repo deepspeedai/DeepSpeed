@@ -2,9 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 # DeepSpeed Team
-import os
-os.environ["DS_DISABLE_ASYNC_IO"] = "1"
-os.environ["DS_BUILD_OPS"] = "0"
+
 import deepspeed
 import torch
 import pytest
@@ -18,7 +16,7 @@ if torch.half not in get_accelerator().supported_dtypes():
 # 'optimizer_type, zero_stage, lr, hidden_dim, nlayer'
 
 muon_configs = []
-for optimizer_name in ['adam', 'muon']:
+for optimizer_name in ['muon', 'adam']:
     for stage in [1, 2, 3]:
         for lr in [0.01, 0.05]:
             for model_dim in [32, 128]:
