@@ -23,6 +23,7 @@ class SuperOffloadOptimizer_Stage3(DeepSpeedZeroOptimizer_Stage3):
         self,
         module,
         init_optimizer,
+        param_names,
         timers,
         ds_config,
         **kwargs,
@@ -34,7 +35,7 @@ class SuperOffloadOptimizer_Stage3(DeepSpeedZeroOptimizer_Stage3):
         self.async_cpuadam_num = 0
         self.max_grad_numel = 0
 
-        super().__init__(module, init_optimizer, timers, ds_config, **kwargs)
+        super().__init__(module, init_optimizer, param_names, timers, ds_config, **kwargs)
 
         optimizer_config = {
             "lr": self.optimizer.param_groups[0]["lr"],
