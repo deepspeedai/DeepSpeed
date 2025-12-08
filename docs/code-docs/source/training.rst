@@ -67,13 +67,13 @@ Mixed precision training can used with ZeRO (i.e., stages > 0) and without ZeRO 
 
 
 Native Mixed Precision
-======================================================
+~~~~~~~~~~~~~~~~~~~~~~
 DeepSpeed provides native support for
 `fp16 <https://www.deepspeed.ai/docs/config-json/#fp16-training-options>`_ and `bf16 <https://www.deepspeed.ai/docs/config-json/#bfloat16-training-options>`_ mixed precsion training.
 
 
 PyTorch Automatic Mixed Precision (AMP)
-======================================================
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 DeepSpeed provides torch-compatible automatic mixed precision (AMP) training via
 `torch.autocast <https://docs.pytorch.org/docs/stable/amp.html>`_ functionality.  The following snippet illustrates how to enable Torch AMP.
 
@@ -134,7 +134,7 @@ To avoid this problem, you can designate the parent of dynamically activated sub
 When a module is marked as a leaf, ZeRO gathers all of its descendants immediately and stops inserting hooks beneath it.
 
 Programmatic API
-================
+~~~~~~~~~~~~~~~~
 
 Use :func:`deepspeed.utils.set_z3_leaf_modules` to flag modules by class, class
 name, or both. Optionally combine with
@@ -164,7 +164,7 @@ names.
     set_z3_leaf_modules_by_suffix(model, ["experts"])
 
 Configuration in DeepSpeed config
-=================================
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 The same behavior can be controlled from the DeepSpeed config. Add a
 ``leaf_module`` block to ``zero_optimization`` specifying either classes,
@@ -216,7 +216,7 @@ The core approach is to create individual DeepSpeedEngines for each model.
 
 
 Training Independent Models
-===========================
+~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 The following code snippet illustrates independently training multiple models on the same dataset.
 
@@ -232,7 +232,7 @@ The above is similar to typical DeepSpeed usage except for the creation of multi
 
 
 Jointly Training Models With Shared Loss
-========================================
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 The following code snippet illustrates jointly training multiple models on a shared loss value.
 

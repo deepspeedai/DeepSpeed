@@ -56,6 +56,16 @@ class DeepSpeedBF16Config(DeepSpeedConfigModel):
     Check for gradient overflows and underflows
     """
 
+    bf16_master_weights_and_grads: bool = False
+    """
+    Maintain master weights/gradients in bf16 precision for ZeRO optimizer.
+    """
+
+    bf16_optimizer_states: bool = False
+    """
+    Keep optimizer states in bf16 (only valid when bf16_master_weights_and_grads is enabled).
+    """
+
 
 #########################################
 # FP16 support

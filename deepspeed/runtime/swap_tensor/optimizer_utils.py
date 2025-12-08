@@ -343,7 +343,8 @@ class OptimizerSwapper(object):
         for src, dst in zip(unswapped_srcs, unswapped_dsts):
             dst.data.copy_(src.data)
 
-        assert len(swap_tensors) == aio_handle.wait()
+        if len(swap_tensors) > 0:
+            assert len(swap_tensors) == aio_handle.wait()
 
         return swapped_fp16_tensors
 
