@@ -709,7 +709,7 @@ def _replace_module(model, policies, prefix='', layer_id=0, level_id=0, state_di
                 else:
                     continue
             if len(child._buffers) != 0 and state_dict is not None:
-                Loading.load_buffer(child, state_dict, checking_key)
+                Loading.load_buffer(child, state_dict, checking_key, mp_group=None)
             _, layer_id = _replace_module(child,
                                           policies,
                                           prefix if level_id == 0 and skip_level_0_prefix(model, state_dict) else \
