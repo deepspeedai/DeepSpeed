@@ -1634,21 +1634,27 @@ class DeepSpeedEngine(Module):
             param_groups = []
             if muon_params:
                 accepted_parameters = dict()
-                for key in ["lr", "momentum", "weight_decay", "muon_lr"]:
+                # Handle muon_lr first - if present, use it and skip base lr
+                if "muon_lr" in optimizer_parameters:
+                    accepted_parameters['lr'] = optimizer_parameters['muon_lr']
+                elif "lr" in optimizer_parameters:
+                    accepted_parameters['lr'] = optimizer_parameters['lr']
+                # Add other muon-specific parameters
+                for key in ["momentum", "weight_decay"]:
                     if key in optimizer_parameters:
-                        if key == "muon_lr":  # muon_lr will override lr
-                            accepted_parameters['lr'] = optimizer_parameters[key]
-                        else:
-                            accepted_parameters[key] = optimizer_parameters[key]
+                        accepted_parameters[key] = optimizer_parameters[key]
                 param_groups.append(dict(params=muon_params, use_muon=True, **accepted_parameters))
             if non_muon_params:
                 accepted_parameters = dict()
-                for key in ["lr", "betas", "eps", "weight_decay", "adam_lr"]:
+                # Handle adam_lr first - if present, use it and skip base lr
+                if "adam_lr" in optimizer_parameters:
+                    accepted_parameters['lr'] = optimizer_parameters['adam_lr']
+                elif "lr" in optimizer_parameters:
+                    accepted_parameters['lr'] = optimizer_parameters['lr']
+                # Add other adam-specific parameters
+                for key in ["betas", "eps", "weight_decay"]:
                     if key in optimizer_parameters:
-                        if key == "adam_lr":  # adam_lr will override lr
-                            accepted_parameters['lr'] = optimizer_parameters[key]
-                        else:
-                            accepted_parameters[key] = optimizer_parameters[key]
+                        accepted_parameters[key] = optimizer_parameters[key]
                 param_groups.append(dict(params=non_muon_params, use_muon=False, **accepted_parameters))
             optimizer = MuonWithAuxAdam(param_groups)
         else:
