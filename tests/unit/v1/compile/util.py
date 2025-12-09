@@ -4,6 +4,9 @@
 # DeepSpeed Team
 
 from copy import deepcopy
+import os
+import random
+import numpy as np
 
 import torch
 
@@ -12,16 +15,28 @@ from deepspeed.accelerator import get_accelerator
 from deepspeed.runtime.zero import GatheredParameters
 
 from unit.simple_model import SimpleModel
-from unit.common import enable_determinism, allclose_on_all_ranks
+from unit.common import allclose_on_all_ranks
 
 
-@enable_determinism(123)
 def compare_loss(self, config, dtype, iteration=5, hidden_dim_override=None):
     hidden_dim = hidden_dim_override if hidden_dim_override is not None else 10
 
     # the default tolerances of torch.testing.assert_close are too small
     RTOL = 5e-1
     ATOL = 1e-2
+
+    # Use a fixed seed for determinism. We don't use the @enable_determinism decorator
+    # because it also sets torch.use_deterministic_algorithms(True), which seems
+    # incompatible with torch.compile() in test environments.
+    # Might be related to https://github.com/pytorch/pytorch/issues/159855
+    local_rank = int(os.getenv("LOCAL_RANK", "0"))
+    seed = 123 + local_rank
+
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    get_accelerator().manual_seed(seed)
+    get_accelerator().manual_seed_all(seed)
 
     device = torch.device(get_accelerator().current_device_name())
     model = SimpleModel(hidden_dim)
