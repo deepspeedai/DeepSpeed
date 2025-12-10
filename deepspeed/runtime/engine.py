@@ -198,6 +198,9 @@ class EngineTimers(object):
                 STEP_GLOBAL_TIMER
             ]
 
+    def active_timers(self):
+        return self.micro_timers + self.global_timers
+
 
 class DeepSpeedEngine(Module):
     r"""DeepSpeed engine for training."""
@@ -406,6 +409,8 @@ class DeepSpeedEngine(Module):
         self.engine_timers = EngineTimers(enable_micro_timers=self.wall_clock_breakdown(),
                                           enable_global_timers=self.wall_clock_breakdown()
                                           or self.flops_profiler_enabled())
+
+        self.engine_timers_cache = {}
 
         if self.global_rank == 0:
             self._config.print("DeepSpeedEngine configuration")
@@ -2334,7 +2339,10 @@ class DeepSpeedEngine(Module):
         if self.zero_optimization():
             self.optimizer.is_gradient_accumulation_boundary = self.is_gradient_accumulation_boundary()
 
+        self._start_timers(self.engine_timers.backward_inner_timers)
+
     def _backward_epilogue(self):
+        self._stop_timers(self.engine_timers.backward_inner_timers)
         self._start_timers(self.engine_timers.backward_reduce_timers)
         if self.enable_backward_allreduce and not self.inside_no_sync_ctxt:
             # Traditional code path that allreduces the module parameter grads
@@ -2723,6 +2731,9 @@ class DeepSpeedEngine(Module):
             self._autotuning_exit()
 
         if self.wall_clock_breakdown():
+            # Update client accessible wall clock timers cache
+            self._update_wall_clock_timers()
+
             # Log micro timing and reset
             self.timers.log(names=self.engine_timers.micro_timers, memory_breakdown=self.memory_breakdown())
 
@@ -2751,6 +2762,17 @@ class DeepSpeedEngine(Module):
                 (self.global_steps >= self.flops_profiler_profile_step())
         for name in timer_names:
             self.timers(name).stop(record=record)
+
+    def _update_wall_clock_timers(self):
+        self.engine_timers_cache = {}
+        for name in self.engine_timers.active_timers():
+            self.engine_timers_cache[name] = self.timers(name).elapsed(reset=False)
+
+    def get_wall_clock_timers(self):
+        r"""
+            Return a dict snapshot of the Engine's wall clock timers.
+        """
+        return self.engine_timers_cache
 
     def _autotuning_exit(self):
         if self.global_rank == 0:
