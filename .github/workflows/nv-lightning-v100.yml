@@ -1,51 +1,53 @@
-name: nv-lightning-v100
+# name: nv-lightning-v100
 
-on:
-  workflow_dispatch:
-  pull_request:
-    paths-ignore:
-      - 'docs/**'
-      - 'blogs/**'
-      - 'deepspeed/inference/v2/**'
-      - 'tests/unit/inference/v2/**'
-  merge_group:
-    branches: [ master ]
-  schedule:
-    - cron: "0 0 * * *"
+# disabled as the v100s are no more - need to port to modal while removing v100
 
-concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+# on:
+#   workflow_dispatch:
+#   pull_request:
+#     paths-ignore:
+#       - 'docs/**'
+#       - 'blogs/**'
+#       - 'deepspeed/inference/v2/**'
+#       - 'tests/unit/inference/v2/**'
+#   merge_group:
+#     branches: [ master ]
+#   schedule:
+#     - cron: "0 0 * * *"
 
-jobs:
-  unit-tests:
-    runs-on: [self-hosted, nvidia, cu124, v100]
+# concurrency:
+#   group: ${{ github.workflow }}-${{ github.ref }}
+#   cancel-in-progress: true
 
-    steps:
-      - uses: actions/checkout@v4
+# jobs:
+#   unit-tests:
+#     runs-on: [self-hosted, nvidia, cu124, v100]
 
-      - id: setup-venv
-        uses: ./.github/workflows/setup-venv
+#     steps:
+#       - uses: actions/checkout@v4
 
-      - name: Install pytorch
-        run: |
-          pip install -U --cache-dir $TORCH_CACHE torch torchvision --index-url https://download.pytorch.org/whl/cu124
-          python -c "import torch; print('torch:', torch.__version__, torch)"
-          python -c "import torch; print('CUDA available:', torch.cuda.is_available())"
+#       - id: setup-venv
+#         uses: ./.github/workflows/setup-venv
 
-      - name: Install deepspeed
-        run: |
-          pip install .[dev,autotuning]
-          ds_report
+#       - name: Install pytorch
+#         run: |
+#           pip install -U --cache-dir $TORCH_CACHE torch torchvision --index-url https://download.pytorch.org/whl/cu124
+#           python -c "import torch; print('torch:', torch.__version__, torch)"
+#           python -c "import torch; print('CUDA available:', torch.cuda.is_available())"
 
-      - name: Python environment
-        run: |
-          pip list
+#       - name: Install deepspeed
+#         run: |
+#           pip install .[dev,autotuning]
+#           ds_report
 
-      - name: PyTorch Lightning Tests
-        run: |
-          unset TORCH_CUDA_ARCH_LIST # only jit compile for current arch
-          pip install pytorch-lightning
-          pip install "protobuf<4.21.0"
-          cd tests
-          pytest $PYTEST_OPTS lightning/
+#       - name: Python environment
+#         run: |
+#           pip list
+
+#       - name: PyTorch Lightning Tests
+#         run: |
+#           unset TORCH_CUDA_ARCH_LIST # only jit compile for current arch
+#           pip install pytorch-lightning
+#           pip install "protobuf<4.21.0"
+#           cd tests
+#           pytest $PYTEST_OPTS lightning/

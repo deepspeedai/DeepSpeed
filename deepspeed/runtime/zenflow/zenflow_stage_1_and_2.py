@@ -565,6 +565,7 @@ class ZenFlowZeroOptimizer(DeepSpeedZeroOptimizer):
             self.selective_optimizer.clear_selected_mv()
             self.timers(SELECTIVE_OPTIMIZER_SYNC_TIMER).stop()
 
+        self.enter_backward()
         if self.custom_loss_scaler:
             scaled_loss = self.external_loss_scale * loss
             scaled_loss.backward(retain_graph=retain_graph)
@@ -572,6 +573,7 @@ class ZenFlowZeroOptimizer(DeepSpeedZeroOptimizer):
             self.loss_scaler.backward(loss.float(), retain_graph=retain_graph)
 
         self.backward_epilogue()
+        self.exit_backward()
 
     def log_selective_optimizer_timers(self):
         self.timers.log(SELECTIVE_OPTIMIZER_TIMERS)
@@ -667,8 +669,8 @@ class ZenFlowZeroOptimizerParallel(ZenFlowZeroOptimizer):
             src_tensor = grad_accum.view(-1).narrow(0, source_offset, num_elements)
         else:
             src_tensor = grad_accum.view(-1).narrow(0, source_offset, num_elements)
-        if not self.fp16_master_weights_and_gradients:
-            src_tensor = src_tensor.float()
+        if src_tensor.dtype != self.master_weights_and_grads_dtype:
+            src_tensor = src_tensor.to(self.master_weights_and_grads_dtype)
 
         dest_tensor.copy_(src_tensor, non_blocking=True)
         param.grad = None  #offload only

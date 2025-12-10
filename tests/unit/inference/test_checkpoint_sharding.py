@@ -12,8 +12,16 @@ from unit.common import DistributedTest, DistributedFixture
 from transformers import AutoConfig, AutoModelForCausalLM
 import deepspeed.comm as dist
 from huggingface_hub import snapshot_download
-from transformers.utils import is_offline_mode
 from deepspeed.ops.op_builder import InferenceBuilder
+
+# Handle different versions of transformers
+try:
+    from transformers.utils import is_offline_mode
+except ImportError:
+    # For transformers >= 5.0, is_offline_mode was removed
+    # transformers >= 5.0 requires huggingface_hub >= 1.2.1 which has is_offline_mode
+    from huggingface_hub import is_offline_mode
+
 from deepspeed.accelerator import get_accelerator
 
 if not deepspeed.ops.__compatible_ops__[InferenceBuilder.NAME]:

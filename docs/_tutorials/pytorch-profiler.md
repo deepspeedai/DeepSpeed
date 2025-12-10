@@ -49,7 +49,7 @@ The `record_function` context manager can be used to label arbitrary code ranges
 
 ```python
 with profile(record_shapes=True) as prof: # record_shapes indicates whether to record shapes of the operator inputs.
-    with record_function("""):"
+    with record_function("model_forward"):
         model_engine(inputs)
 ```
 

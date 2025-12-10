@@ -60,8 +60,14 @@ class LossScalerBase(DeepSpeedConfigObject):
     def update_scale(self, overflow):
         pass
 
+    def scale_loss(self, loss):
+        """ Scales the loss by the current loss scale.
+        We need this function to scale loss without calling backward on it.
+        """
+        return loss * self.loss_scale
+
     def backward(self, loss, retain_graph=False):
-        scaled_loss = loss * self.loss_scale
+        scaled_loss = self.scale_loss(loss)
         scaled_loss.backward(retain_graph=retain_graph)
         # print(f'LossScalerBackward: {scaled_loss=}')
 

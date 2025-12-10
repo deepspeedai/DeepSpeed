@@ -16,6 +16,11 @@ of type :class:`DeepSpeedEngine`. This engine is used to progress training:
         #weight update
         model_engine.step()
 
+Note that ``model_engine.backward()`` accepts only a scalar loss tensor produced by a forward pass.
+Starting from v0.18.3, DeepSpeed also supports direct calls to ``tensor.backward()``. You can now call
+``loss.backward()`` or ``tensor.backward(out_grad)`` when your PyTorch version supports the necessary APIs.
+If your PyTorch version does not support these APIs, a direct call to ``tensor.backward()`` will raise an error.
+
 Forward Propagation
 -------------------
 .. autofunction:: deepspeed.DeepSpeedEngine.forward
@@ -23,6 +28,28 @@ Forward Propagation
 Backward Propagation
 --------------------
 .. autofunction:: deepspeed.DeepSpeedEngine.backward
+
+Loss Scaling for Manual Backward Passes
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+.. autofunction:: deepspeed.DeepSpeedEngine.scale
+
+When using mixed precision training (fp16, bf16, or torch.autocast), DeepSpeed applies loss scaling
+to prevent gradient underflow. If you prefer to call ``loss.backward()`` directly instead of
+``engine.backward(loss)``, you must use ``engine.scale(loss)`` to apply the appropriate loss scaler:
+
+.. code-block:: python
+
+    # Option 1: Use engine.backward() (recommended)
+    loss = model_engine(batch)
+    model_engine.backward(loss)
+
+    # Option 2: Manual backward with scaling
+    loss = model_engine(batch)
+    scaled_loss = model_engine.scale(loss)
+    scaled_loss.backward()
+
+Both approaches produce identical gradients. The ``scale()`` method automatically applies the
+appropriate scaler based on your configuration (ZeRO optimizer scaler, torch.autocast GradScaler, etc.).
 
 Optimizer Step
 --------------
@@ -40,13 +67,13 @@ Mixed precision training can used with ZeRO (i.e., stages > 0) and without ZeRO 
 
 
 Native Mixed Precision
-======================================================
+~~~~~~~~~~~~~~~~~~~~~~
 DeepSpeed provides native support for
 `fp16 <https://www.deepspeed.ai/docs/config-json/#fp16-training-options>`_ and `bf16 <https://www.deepspeed.ai/docs/config-json/#bfloat16-training-options>`_ mixed precsion training.
 
 
 PyTorch Automatic Mixed Precision (AMP)
-======================================================
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 DeepSpeed provides torch-compatible automatic mixed precision (AMP) training via
 `torch.autocast <https://docs.pytorch.org/docs/stable/amp.html>`_ functionality.  The following snippet illustrates how to enable Torch AMP.
 
@@ -67,6 +94,31 @@ Each configuration works as follows:
 * ``dtype``: Lower precision dtype passed to ``torch.autocast``. Gradients for all-reduce (reduce-scatter) and parameters for all-gather (only for ZeRO3) of ``lower_precision_safe_modules`` are also downcasted to this ``dtype``.
 * ``lower_precision_safe_modules``: The list of modules that will be downcasted for all-reduce (reduce-scatter) and all-gather (ZeRO3). The precision for PyTorch operators in forward/backward follows ``torch.autocast``'s policy, not this list. If you don't set this item, DeepSpeed uses the default list: ``[torch.nn.Linear, torch.nn.Conv1d, torch.nn.Conv2d, torch.nn.Conv3d]``.
 
+Manual Backward with torch.autocast
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+When using ``torch.autocast`` with manual backward passes (``loss.backward()`` instead of ``engine.backward()``),
+you must use ``engine.scale(loss)`` to apply the gradient scaler:
+
+.. code-block:: python
+
+    # Training loop with torch.autocast and manual backward
+    for batch in data_loader:
+        loss = model_engine(batch)
+
+        # Apply loss scaling before manual backward
+        scaled_loss = model_engine.scale(loss)
+        scaled_loss.backward()
+
+        model_engine.step()
+
+The ``scale()`` method ensures that the ``torch.amp.GradScaler`` is properly applied when ``torch.autocast``
+is enabled with fp16. For bf16 or when no mixed precision is used, ``scale()`` returns the loss unchanged.
+
+If you call ``loss.backward()`` directly without using ``engine.scale()`` or ``engine.backward()``, DeepSpeed
+will raise a ``RuntimeError`` to prevent training with unscaled gradients, which can lead to incorrect results
+or gradient underflow.
+
 .. autofunction:: deepspeed.runtime.torch_autocast.init_autocast_params
 .. autofunction:: deepspeed.runtime.torch_autocast.is_autocast_initialized
 .. autofunction:: deepspeed.runtime.torch_autocast.get_default_autocast_lower_precision_modules
@@ -82,7 +134,7 @@ To avoid this problem, you can designate the parent of dynamically activated sub
 When a module is marked as a leaf, ZeRO gathers all of its descendants immediately and stops inserting hooks beneath it.
 
 Programmatic API
-================
+~~~~~~~~~~~~~~~~
 
 Use :func:`deepspeed.utils.set_z3_leaf_modules` to flag modules by class, class
 name, or both. Optionally combine with
@@ -112,7 +164,7 @@ names.
     set_z3_leaf_modules_by_suffix(model, ["experts"])
 
 Configuration in DeepSpeed config
-=================================
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 The same behavior can be controlled from the DeepSpeed config. Add a
 ``leaf_module`` block to ``zero_optimization`` specifying either classes,
@@ -164,7 +216,7 @@ The core approach is to create individual DeepSpeedEngines for each model.
 
 
 Training Independent Models
-===========================
+~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 The following code snippet illustrates independently training multiple models on the same dataset.
 
@@ -176,12 +228,11 @@ The following code snippet illustrates independently training multiple models on
        for engine, loss in zip(model_engines, losses):
           engine.backward(loss)
 
-
 The above is similar to typical DeepSpeed usage except for the creation of multiple DeepSpeedEngines (one for each model).
 
 
 Jointly Training Models With Shared Loss
-========================================
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 The following code snippet illustrates jointly training multiple models on a shared loss value.
 
@@ -194,9 +245,6 @@ The following code snippet illustrates jointly training multiple models on a sha
         loss.backward()
 
         for engine in model_engines:
-            engine._backward_epilogue()
-
-        for engine in model_engines:
             engine.step()
 
         for engine in model_engines:
@@ -206,4 +254,6 @@ Besides the use of multiple DeepSpeedEngines, the above differs from typical usa
 
 #. The **backward** call is made using the common loss value rather on individual model engines.
 
-#. **_backward_epilogue** is called on model engine, after the **loss.backward()**.
+You can call ``loss.backward()`` once for the shared loss.
+
+**Note:** Previously, you had to call ``_backward_epilogue`` on each model engine after ``loss.backward()``. However, starting from v0.18.3, DeepSpeed automatically handles this internally, so you no longer need to call ``_backward_epilogue`` manually.

@@ -88,7 +88,6 @@ class SynchronizedWallClockTimer:
                 self.elapsed_records = [et * 1000.0 for et in self.event_timers]
             else:
                 self.elapsed_records = [et.get_elapsed_msec() for et in self.event_timers]
-            self.event_timers.clear()
             return sum(self.elapsed_records)
 
         def reset(self):
