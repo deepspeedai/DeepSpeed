@@ -96,16 +96,19 @@ from deepspeed import comm as dist
 class _AllToAll(torch.autograd.Function):
 
     @staticmethod
-    def forward(ctx: Any, group: dist.ProcessGroup, input: Tensor) -> Tensor:  # type: ignore
+    def forward(ctx: Any, group: dist.ProcessGroup, input: Tensor, async_op=False) -> Tensor:  # type: ignore
         ctx.group = group
         input = input.contiguous()
         output = torch.empty_like(input)
-        dist.all_to_all_single(output, input, group=group)
-        return output
+        work = dist.all_to_all_single(output, input, group=group, async_op=async_op)
+        if async_op:
+            return output, work
+        else:
+            return output
 
     @staticmethod
     def backward(ctx: Any, *grad_output: Tensor) -> Tuple[None, Tensor]:
-        return (None, _AllToAll.apply(ctx.group, *grad_output))
+        return (None, _AllToAll.apply(ctx.group, *grad_output), None)
 
 
 # einsum rewrites are on par or more performant
@@ -550,6 +553,7 @@ class MOELayer(Base):
         expert (torch.nn.Module):
             expert network
     """
+    d2d_stream = torch.cuda.Stream()
 
     def __init__(self,
                  gate: Module,
@@ -572,6 +576,8 @@ class MOELayer(Base):
         self.wall_clock_breakdown = False
 
         self.use_tutel = use_tutel and TUTEL_INSTALLED and gate.k == 1
+        self.enable_pipelie = True
+        self.shard_num = 4
 
         if self.use_tutel:
             logger.info('Using Tutel optimizations.')
@@ -586,8 +592,54 @@ class MOELayer(Base):
         self.ep_group = ep_group
         self.gate._set_ep_group(ep_group)
 
-    def forward(self, *input: Tensor, **kwargs: Any) -> Tensor:
+    # During multi machine MOE training, alltoall is the communication between machines,
+    # allgather is the communication within machines. They use different communication links,
+    # so they can be executed in parallel
+    # input shape (E,C,M)，Shard input in C dim, first execute alltoall on the shard,
+    # So the allgather of this shard and the alltoall of the next shard are executed in parallel
+    # A        E        I       M
+    # A1       E1       I1      M1
+    #   A2       E2       I2      M2
+    #     A3       E3       I3      M3
+    #       A4       E4       I4      M4
+    def pipeline_alltoall_with_allgather(self, input, shard_dim=1) -> Tensor:
+        if not self.enable_pipelie:
+            input = _AllToAll.apply(self.ep_group, input)
+            input = gather_tokens(input, dim=shard_dim)
+            return input
 
+        assert self.shard_num > 0, f"shard_num must be a positive number,but get is {self.shard_num}"
+        input_chunks = list(input.chunk(self.shard_num, dim=shard_dim))
+        world_size = bwc_tensor_model_parallel_world_size(groups.mpu)
+        dims = list(input.size())
+        dims[shard_dim] = dims[shard_dim] * world_size
+        output = torch.empty(dims, device=input.device)
+        input_gather_dim_len = input.shape[shard_dim]
+        have_gather_len = 0
+        works = []
+        for i in range(len(input_chunks)):
+            input_chunks[i], work = _AllToAll.apply(self.ep_group, input_chunks[i], True)
+            works.append(work)
+
+        current_stream = torch.cuda.current_stream()
+        for i in range(len(input_chunks)):
+            works[i].wait()
+            # we use dim 0 do allgather and chunk, so we can avoid unnecessary cat in gather_tokens
+            gather_out = gather_tokens(input_chunks[i], dim=0)
+            gather_list = gather_out.chunk(world_size, dim=0)
+            dim_len = gather_list[0].shape[shard_dim]
+            MOELayer.d2d_stream.wait_stream(current_stream)
+
+            for j in range(len(gather_list)):
+                start = input_gather_dim_len * j + have_gather_len
+                with torch.cuda.stream(MOELayer.d2d_stream):
+                    torch.narrow(output, shard_dim, start, dim_len).copy_(gather_list[j])
+            have_gather_len += dim_len
+
+        current_stream.wait_stream(MOELayer.d2d_stream)
+        return output
+
+    def forward(self, *input: Tensor, **kwargs: Any) -> Tensor:
         if self.wall_clock_breakdown:
             self.timers(MOE_TIMER).start()
 
@@ -611,9 +663,6 @@ class MOELayer(Base):
             self.l_aux, combine_weights, dispatch_mask, self.exp_counts = self.gate(reshaped_input, input[1])
             dispatched_input = einsum("sec,sm->ecm", dispatch_mask.type_as(input[0]), reshaped_input)
 
-        if self.wall_clock_breakdown:
-            self.timers(FIRST_ALLTOALL_TIMER).start()
-
         tensor_model_world_size = bwc_tensor_model_parallel_world_size(groups.mpu)
         if tensor_model_world_size > 1:
             # If the non-expert is tensor-parallel,
@@ -628,18 +677,17 @@ class MOELayer(Base):
             # an allgather to ensure correctness,
             dispatched_input = drop_tokens(dispatched_input, dim=1)
 
-        dispatched_input = _AllToAll.apply(self.ep_group, dispatched_input)
+        if self.wall_clock_breakdown:
+            self.timers(FIRST_ALLTOALL_TIMER).start()
+
+        if tensor_model_world_size > 1 and groups._get_expert_model_parallel_world_size() > 1:
+            dispatched_input = self.pipeline_alltoall_with_allgather(dispatched_input)
+        else:
+            dispatched_input = _AllToAll.apply(self.ep_group, dispatched_input)
 
         if self.wall_clock_breakdown:
             self.timers(FIRST_ALLTOALL_TIMER).stop()
             self.time_falltoall = self.timers(FIRST_ALLTOALL_TIMER).elapsed(reset=False)
-
-        if tensor_model_world_size > 1 and groups._get_expert_model_parallel_world_size() > 1:
-            # if both expert and non-expert are tensor-parallel
-            # the dropped duplicate tokens need to be gathered on each
-            # tensor parallel rank again to ensure correctness
-            dispatched_input = gather_tokens(dispatched_input, dim=1)
-
         # Re-shape after all-to-all: ecm -> gecm
         dispatched_input = dispatched_input.reshape(self.ep_size, self.num_local_experts, -1, d_model)
         expert_output = self.experts(dispatched_input)
@@ -654,17 +702,11 @@ class MOELayer(Base):
         if self.wall_clock_breakdown:
             self.timers(SECOND_ALLTOALL_TIMER).start()
 
-        expert_output = _AllToAll.apply(self.ep_group, expert_output)
+        expert_output = self.pipeline_alltoall_with_allgather(expert_output)
 
         if self.wall_clock_breakdown:
             self.timers(SECOND_ALLTOALL_TIMER).stop()
             self.time_salltoall = self.timers(SECOND_ALLTOALL_TIMER).elapsed(reset=False)
-
-        if tensor_model_world_size > 1:
-            # the dropped duplicate tokens need to be gathered on each
-            # tensor parallel rank again for the tensor-parallel
-            # non-expert of the next layer.
-            expert_output = gather_tokens(expert_output, dim=1)
 
         if self.use_tutel:
             combined_output = self._tutel_dispatcher.decode(expert_output.view(E * C, M))
