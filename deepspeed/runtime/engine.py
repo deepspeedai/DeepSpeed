@@ -3837,7 +3837,7 @@ class DeepSpeedEngine(Module):
             }
             state.update(client_state)
             logger.info(f'Saving model checkpoint: {save_path}')
-            savable_state_dict = state
+            saveable_state_dict = state
             if self.checkpoint_engine.preserves_storage_sharing():
                 saveable_state_dict = clone_tensors_for_torch_save(state)
             self.checkpoint_engine.save(saveable_state_dict, save_path)
