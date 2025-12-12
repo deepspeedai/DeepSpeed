@@ -2359,6 +2359,8 @@ class DeepSpeedEngine(Module):
         self._stop_timers(self.engine_timers.backward_timers)
 
     def _backward_prologue_per_tensor(self, grad):
+        if grad is None:
+            return grad
         # Only scale gradients if scale_wrt_gas is True, consistent with backward() parameter
         if self._scale_wrt_gas:
             return grad / self.gradient_accumulation_steps()
@@ -3846,7 +3848,7 @@ class DeepSpeedEngine(Module):
             }
             state.update(client_state)
             logger.info(f'Saving model checkpoint: {save_path}')
-            savable_state_dict = state
+            saveable_state_dict = state
             if self.checkpoint_engine.preserves_storage_sharing():
                 saveable_state_dict = clone_tensors_for_torch_save(state)
             self.checkpoint_engine.save(saveable_state_dict, save_path)
