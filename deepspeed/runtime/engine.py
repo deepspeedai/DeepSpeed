@@ -2359,10 +2359,8 @@ class DeepSpeedEngine(Module):
         self._stop_timers(self.engine_timers.backward_timers)
 
     def _backward_prologue_per_tensor(self, grad):
-        if grad is None:
-            return grad
         # Only scale gradients if scale_wrt_gas is True, consistent with backward() parameter
-        if self._scale_wrt_gas:
+        if grad is not None and self._scale_wrt_gas:
             return grad / self.gradient_accumulation_steps()
         return grad
 
