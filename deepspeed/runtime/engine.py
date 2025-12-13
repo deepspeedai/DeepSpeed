@@ -436,6 +436,8 @@ class DeepSpeedEngine(Module):
         # See `count_used_parameters_in_backward` for more details.
         self._running_engine_backward = False
         self._support_torch_style_backward = False
+        # Flag to control whether gradients should be scaled by gradient accumulation steps
+        self._scale_wrt_gas = True
         if isinstance(self.optimizer, ZeROOptimizer) and check_internal_apis_for_count_used_parameters():
             self._support_torch_style_backward = True
             # These hooks are used for non-scalar backward support, such as `out.backward(out_grad)`,
@@ -2357,7 +2359,10 @@ class DeepSpeedEngine(Module):
         self._stop_timers(self.engine_timers.backward_timers)
 
     def _backward_prologue_per_tensor(self, grad):
-        return grad / self.gradient_accumulation_steps()
+        # Only scale gradients if scale_wrt_gas is True, consistent with backward() parameter
+        if grad is not None and self._scale_wrt_gas:
+            return grad / self.gradient_accumulation_steps()
+        return grad
 
     def _backward_post_hook(self):
         if not self._running_engine_backward:
@@ -2464,6 +2469,8 @@ class DeepSpeedEngine(Module):
             loss: Torch tensor on which to execute backward propagation
             retain_graph: bool, default: false
                 forward on user defined choice of retain_graph
+            scale_wrt_gas: bool, default: true
+                whether to scale gradients and return value by gradient accumulation steps
         """
         assert self.optimizer is not None and not isinstance(self.optimizer, DummyOptim), \
             "must provide optimizer during init in order to use backward"
@@ -2471,6 +2478,8 @@ class DeepSpeedEngine(Module):
             loss), "loss must be a scalar tensor. If you need to pass output gradients, backward() of output tensors"
 
         self._running_engine_backward = True
+        # Store scale_wrt_gas so the hook can respect it
+        self._scale_wrt_gas = scale_wrt_gas
 
         # Set flag to prevent hooks from firing (we'll manually call prologue/epilogue)
         backward_kwargs = {"retain_graph": retain_graph}
@@ -3837,7 +3846,7 @@ class DeepSpeedEngine(Module):
             }
             state.update(client_state)
             logger.info(f'Saving model checkpoint: {save_path}')
-            savable_state_dict = state
+            saveable_state_dict = state
             if self.checkpoint_engine.preserves_storage_sharing():
                 saveable_state_dict = clone_tensors_for_torch_save(state)
             self.checkpoint_engine.save(saveable_state_dict, save_path)

@@ -328,6 +328,52 @@ class TestZeroUserBackwardGradAccumulation(DistributedTest):
 
         model_engine.destroy()
 
+    def test_grad_accumulation_scale_wrt_gas_false(self, zero_stage):
+        """Test that scale_wrt_gas=False disables gradient scaling by accumulation steps.
+
+        When scale_wrt_gas=False is passed to engine.backward(), gradients should NOT be
+        scaled by gradient_accumulation_steps. This is useful when users want to handle
+        gradient scaling themselves (e.g., using Hugging Face Accelerate).
+        """
+        hidden_dim = 4
+        gradient_accumulation_steps = 4
+
+        # Create DDP and DeepSpeed models with gradient accumulation
+        model_ddp, optimizer_ddp, model_engine, device, _ = setup_models_and_engines(
+            model_class=SimpleModel,
+            zero_stage=zero_stage,
+            gradient_accumulation_steps=gradient_accumulation_steps,
+            hidden_dim=hidden_dim,
+            nlayers=2)
+
+        # Create data
+        data_loader = random_dataloader(model=model_engine, total_samples=16, hidden_dim=hidden_dim, device=device)
+
+        # Run training with gradient accumulation but WITHOUT scaling by GAS
+        for i, batch in enumerate(data_loader):
+            # DDP: Do NOT divide by GAS (since we're testing scale_wrt_gas=False)
+            loss_ddp = model_ddp(batch[0], batch[1])
+            loss_ddp.backward()
+
+            # DeepSpeed: Use scale_wrt_gas=False to disable gradient scaling
+            loss_ds = model_engine(batch[0], batch[1])
+            model_engine.backward(loss_ds, scale_wrt_gas=False)
+
+            # Compare gradients at accumulation boundary
+            if model_engine.is_gradient_accumulation_boundary():
+                grads_ddp = collect_ddp_gradients(model_ddp)
+                grads_ds = collect_gradients_safe(model_engine)
+                compare_gradients(grads_ddp, grads_ds, f"step {i} with scale_wrt_gas=False")
+
+                # Step both optimizers
+                optimizer_ddp.step()
+                optimizer_ddp.zero_grad()
+
+            # Step DeepSpeed (handles gradient accumulation internally)
+            model_engine.step()
+
+        model_engine.destroy()
+
 
 @pytest.mark.parametrize("zero_stage", [1, 2, 3])
 class TestZeroUserBackwardMultipleEngines(DistributedTest):
