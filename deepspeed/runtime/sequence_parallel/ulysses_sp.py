@@ -389,7 +389,9 @@ class UlyssesSPAttentionHF(torch.nn.Module):
         mpu.initialize_sequence_parallel(sequence_parallel_size=sequence_parallel_size)
 
         from transformers import PreTrainedModel
-        if isinstance(model_name_or_path, PreTrainedModel):
+        if hasattr(model_name_or_path, "config"):
+            hf_model_config = model_name_or_path.config
+        elif isinstance(model_name_or_path, PreTrainedModel):
             # we already have the model
             hf_model_config = model_name_or_path.config
         else:
