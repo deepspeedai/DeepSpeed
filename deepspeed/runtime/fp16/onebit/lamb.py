@@ -178,7 +178,7 @@ class OnebitLamb(torch.optim.Optimizer):
                 momentum_scales = []
                 for group in self.param_groups:
                     momentum_scales.append([(torch.linalg.vector_norm(self.state[p]['exp_avg']) /
-                                             np.sqrt(torch.numel(self.state[p]['exp_avg']))).item()
+                                             np.sqrt(torch.numel(self.state[p]['exp_avg']) if torch.numel(self.state[p]['exp_avg']) > 0 else 1.0)).item()
                                             for p in group['params']])
                 united_scale = sum([sum(x) for x in momentum_scales]) / sum([len(x) for x in momentum_scales])
                 for i, group in enumerate(self.param_groups):
