@@ -3838,7 +3838,7 @@ class DeepSpeedEngine(Module):
                 'global_samples':
                 self.global_samples,
                 'dp_world_size':
-                self.dp_world_size,
+                self.seq_dp_world_size,
                 'mp_world_size':
                 self.mp_world_size,
                 'num_experts':
