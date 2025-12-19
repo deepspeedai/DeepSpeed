@@ -65,7 +65,7 @@ repos:
         ]
 
 -   repo: https://github.com/pycqa/flake8
-    rev: 7.0.0
+    rev: 5.0.4
     hooks:
     -   id: flake8
         args: ['--config=.flake8']
