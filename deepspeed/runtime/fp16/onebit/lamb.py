@@ -82,6 +82,31 @@ class OnebitLamb(torch.optim.Optimizer):
         if amsgrad:
             raise RuntimeError('1-bit Lamb does not support the AMSGrad variant.')
 
+        # Filter out empty parameters (numel == 0) - similar to how frozen params are handled
+        filtered_params = []
+        if isinstance(params, (list, tuple)) and len(params) > 0:
+            # Check if first element is a dict (parameter groups) or a Parameter
+            if isinstance(params[0], dict):
+                # params is a list of parameter group dicts
+                for param_group in params:
+                    filtered_group = {}
+                    trainable_params = []
+                    for key, value in param_group.items():
+                        if key == 'params':
+                            # Filter out empty parameters
+                            trainable_params = [p for p in value if p.numel() > 0]
+                        else:
+                            filtered_group[key] = value
+                    # Only add group if it has non-empty parameters
+                    if len(trainable_params) > 0:
+                        filtered_group['params'] = trainable_params
+                        filtered_params.append(filtered_group)
+            else:
+                # params is a list of Parameters
+                filtered_params = [p for p in params if p.numel() > 0]
+        else:
+            filtered_params = params
+
         defaults = dict(lr=lr,
                         bias_correction=bias_correction,
                         betas=betas,
@@ -91,7 +116,7 @@ class OnebitLamb(torch.optim.Optimizer):
                         max_coeff=max_coeff,
                         min_coeff=min_coeff)
 
-        super(OnebitLamb, self).__init__(params, defaults)
+        super(OnebitLamb, self).__init__(filtered_params, defaults)
         self.eps_mode = 0 if eps_inside_sqrt else 1
         self.deepspeed = deepspeed
         self.lamb_freeze_key = False
@@ -178,7 +203,7 @@ class OnebitLamb(torch.optim.Optimizer):
                 momentum_scales = []
                 for group in self.param_groups:
                     momentum_scales.append([(torch.linalg.vector_norm(self.state[p]['exp_avg']) /
-                                             np.sqrt(torch.numel(self.state[p]['exp_avg']) if torch.numel(self.state[p]['exp_avg']) > 0 else 1.0)).item()
+                                             np.sqrt(torch.numel(self.state[p]['exp_avg']))).item()
                                             for p in group['params']])
                 united_scale = sum([sum(x) for x in momentum_scales]) / sum([len(x) for x in momentum_scales])
                 for i, group in enumerate(self.param_groups):
