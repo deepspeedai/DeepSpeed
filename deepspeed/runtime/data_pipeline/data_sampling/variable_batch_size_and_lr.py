@@ -6,7 +6,6 @@
 # support/questions/maintenance: github user @brunomaga or @deepspeedai/deepspeed
 
 import random
-import torch
 import os
 import math
 import numpy as np
