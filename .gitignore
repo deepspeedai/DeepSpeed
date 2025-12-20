@@ -58,8 +58,14 @@ tests/unit/saved_checkpoint/
 *_hip.cpp
 *_hip.h
 *.hip
+# Keep ignoring .cuh globally but un-ignore under deepspeed/ops
 *.cuh
 *hip_layers.h
 
 # virtual env directory for format
 venv
+
+# Allow CUDA header files under deepspeed ops to be tracked
+# (Un-ignore only .cuh files under the deepspeed/ops tree)
+!deepspeed/ops/**/.cuh
+!deepspeed/ops/*.cuh
