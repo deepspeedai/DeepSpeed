@@ -118,9 +118,11 @@ class DecoupledCheckpointEngine(CheckpointEngine):
             pass
 
     def _check_process_alive(self):
-        """Check if the checkpoint process is still alive."""
-        if self.ckpt_process is None:
-            return False
+        """Check if the checkpoint process is still alive.
+
+        Note: Only call this when self.ckpt_process is not None.
+        Some ranks don't have a checkpoint process by design (see Figure 6 in paper).
+        """
         return self.ckpt_process.is_alive()
 
     def _wait_for_event_with_timeout(self, timeout_seconds=DEFAULT_CHECKPOINT_TIMEOUT_SECONDS):
@@ -153,6 +155,9 @@ class DecoupledCheckpointEngine(CheckpointEngine):
         return sd
 
     def save(self, state_dict, path: str):
+        if self.ckpt_process is None:
+            return
+
         # Check process health before attempting to save
         if not self._check_process_alive():
             return
@@ -166,7 +171,11 @@ class DecoupledCheckpointEngine(CheckpointEngine):
             raise ValueError(f"[{ENGINE_NAME}] Checkpoint commit info mismatch: "
                              f"expected {self.commit_info}, got {info}")
 
-        if self._check_process_alive():
+        if self.ckpt_process is not None:
+            # Check process health before waiting
+            if not self._check_process_alive():
+                raise RuntimeError(f"[{ENGINE_NAME}] Cannot commit checkpoint: checkpoint process is not running.")
+
             self.save_queue.put((None, DecoupledEvent.COMMIT_EVENT))
             # Wait with timeout and health checks instead of blocking forever
             self._wait_for_event_with_timeout()
