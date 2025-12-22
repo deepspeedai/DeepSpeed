@@ -10,6 +10,7 @@ from deepspeed import comm as dist
 from deepspeed.utils.torch import required_torch_version
 from torch._utils import _flatten_dense_tensors, _unflatten_dense_tensors
 from deepspeed.accelerator import get_accelerator
+from deepspeed.runtime.utils import filter_empty_parameters
 
 
 class OnebitLamb(torch.optim.Optimizer):
@@ -82,30 +83,8 @@ class OnebitLamb(torch.optim.Optimizer):
         if amsgrad:
             raise RuntimeError('1-bit Lamb does not support the AMSGrad variant.')
 
-        # Filter out empty parameters (numel == 0) - similar to how frozen params are handled
-        filtered_params = []
-        if isinstance(params, (list, tuple)) and len(params) > 0:
-            # Check if first element is a dict (parameter groups) or a Parameter
-            if isinstance(params[0], dict):
-                # params is a list of parameter group dicts
-                for param_group in params:
-                    filtered_group = {}
-                    trainable_params = []
-                    for key, value in param_group.items():
-                        if key == 'params':
-                            # Filter out empty parameters
-                            trainable_params = [p for p in value if p.numel() > 0]
-                        else:
-                            filtered_group[key] = value
-                    # Only add group if it has non-empty parameters
-                    if len(trainable_params) > 0:
-                        filtered_group['params'] = trainable_params
-                        filtered_params.append(filtered_group)
-            else:
-                # params is a list of Parameters
-                filtered_params = [p for p in params if p.numel() > 0]
-        else:
-            filtered_params = params
+        # Filter out empty parameters (numel == 0) to avoid NaN in scaling calculations
+        filtered_params = filter_empty_parameters(params)
 
         defaults = dict(lr=lr,
                         bias_correction=bias_correction,
