@@ -188,7 +188,9 @@ class DecoupledCheckpointEngine(CheckpointEngine):
             post_size = get_checkpoint_folder_size(info.save_dir, info.tag, self.local_rank)
             self.checkpoint_size.set_post_size(post_size)
 
-        if self.global_rank == 0 and self.checkpoint_size.gb_size() is not None:
+        assert self.checkpoint_size.gb_size() is not None, "Checkpoint size should be set after commit"
+
+        if self.global_rank == 0:
             print(
                 f'{self.name} self.global_rank={self.global_rank} created checkpoint of {round(self.checkpoint_size.gb_size(), 2)} GB'
             )
