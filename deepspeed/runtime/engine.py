@@ -3692,7 +3692,8 @@ class DeepSpeedEngine(Module):
 
         # Save latest checkpoint tag
         if not self.checkpoint_engine.is_decoupled():
-            self.checkpoint_engine.commit(tag)
+            commit_info = CheckpointCommitInfo(tag=tag, save_dir=save_dir, save_latest=save_latest)
+            self.checkpoint_engine.commit(commit_info)
             if save_latest and self.global_rank == 0:
                 with open(os.path.join(save_dir, 'latest'), 'w') as fd:
                     fd.write(tag)
@@ -3838,7 +3839,7 @@ class DeepSpeedEngine(Module):
                 'global_samples':
                 self.global_samples,
                 'dp_world_size':
-                self.dp_world_size,
+                self.seq_dp_world_size,
                 'mp_world_size':
                 self.mp_world_size,
                 'num_experts':
@@ -4227,7 +4228,7 @@ class DeepSpeedEngine(Module):
             logger.info(f"Saving model weights to {path}, tag: {tag}")
             self.checkpoint_engine.save(state_dict, path)
 
-        self.checkpoint_engine.commit(tag)
+        self.checkpoint_engine.commit(commit_info)
 
         return True
 
