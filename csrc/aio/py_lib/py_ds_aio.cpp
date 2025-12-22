@@ -124,5 +124,6 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m)
 
         .def("wait",
              &deepspeed_aio_handle_t::wait,
-             "Wait for (ongoing) asynchronous operations to complete");
+             "Wait for (ongoing) asynchronous operations to complete",
+             py::call_guard<py::gil_scoped_release>());
 }
