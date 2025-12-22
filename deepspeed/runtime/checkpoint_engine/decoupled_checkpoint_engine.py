@@ -40,27 +40,31 @@ class CheckpointSize(object):
 
 
 def init_decoupled_checkpoint(config_params, dp_writer_config, save_event, save_queue, optimize_dp_state):
-    checkpoint_engine = FastCheckpointEngine(config_params, dp_writer_config, optimize_dp_state)
-    print('Created FastCheckpointEngine for Decoupled Checkpointing')
-    save_path_list = []
-    while True:
-        (save_info, event_type) = save_queue.get()
-        if event_type == DecoupledEvent.SAVE_EVENT and save_info is not None:
-            state_dict, save_path = save_info
-            # print(f'Received decoupled checkpoint request for {save_path=}')
-            save_path_list.append(save_path)
-            checkpoint_engine.save(state_dict, save_path)
-            del state_dict
-            # print(f'Completed decoupled checkpoint request for {save_path=}')
+    try:
+        checkpoint_engine = FastCheckpointEngine(config_params, dp_writer_config, optimize_dp_state)
+        print('Created FastCheckpointEngine for Decoupled Checkpointing')
+        save_path_list = []
+        while True:
+            (save_info, event_type) = save_queue.get()
+            if event_type == DecoupledEvent.SAVE_EVENT and save_info is not None:
+                state_dict, save_path = save_info
+                # print(f'Received decoupled checkpoint request for {save_path=}')
+                save_path_list.append(save_path)
+                checkpoint_engine.save(state_dict, save_path)
+                del state_dict
+                # print(f'Completed decoupled checkpoint request for {save_path=}')
 
-        if event_type == DecoupledEvent.COMMIT_EVENT:
-            # print(f'Recieved commit request for {save_path_list=}')
-            save_path_list = []
-            save_event.set()
+            if event_type == DecoupledEvent.COMMIT_EVENT:
+                # print(f'Recieved commit request for {save_path_list=}')
+                save_path_list = []
+                save_event.set()
 
-        if event_type == DecoupledEvent.EXIT_EVENT:
-            # print(f'Received decoupled exit request')
-            break
+            if event_type == DecoupledEvent.EXIT_EVENT:
+                # print(f'Received decoupled exit request')
+                break
+    except Exception as e:
+        print(f'[{ENGINE_NAME}] Checkpoint subprocess crashed with error: {e}')
+        raise
 
 
 ENGINE_NAME = "DecoupledCheckpointEngine"
@@ -74,8 +78,11 @@ PROCESS_HEALTH_CHECK_INTERVAL_SECONDS = 10
 class DecoupledCheckpointEngine(CheckpointEngine):
 
     def __init__(self, config_params, dp_writer_config, optimize_dp_state):
-        if mp.get_start_methods(allow_None=False) is None:
+        # Set spawn method if not already set (needed for CUDA tensor sharing)
+        try:
             mp.set_start_method('spawn')
+        except RuntimeError:
+            pass  # Already set, ignore
         super().__init__(config_params)
         self.name = ENGINE_NAME
         self.dp_writer_config = dp_writer_config
@@ -146,12 +153,9 @@ class DecoupledCheckpointEngine(CheckpointEngine):
         return sd
 
     def save(self, state_dict, path: str):
-        if self.ckpt_process is None:
-            return
-
         # Check process health before attempting to save
         if not self._check_process_alive():
-            raise RuntimeError(f"[{ENGINE_NAME}] Cannot save checkpoint: checkpoint process is not running.")
+            return
 
         save_info = (state_dict, path)
         self.save_queue.put((save_info, DecoupledEvent.SAVE_EVENT))
@@ -162,23 +166,20 @@ class DecoupledCheckpointEngine(CheckpointEngine):
             raise ValueError(f"[{ENGINE_NAME}] Checkpoint commit info mismatch: "
                              f"expected {self.commit_info}, got {info}")
 
-        if self.ckpt_process is not None:
-            # Check process health before waiting
-            if not self._check_process_alive():
-                raise RuntimeError(f"[{ENGINE_NAME}] Cannot commit checkpoint: checkpoint process is not running.")
-
+        if self._check_process_alive():
             self.save_queue.put((None, DecoupledEvent.COMMIT_EVENT))
             # Wait with timeout and health checks instead of blocking forever
             self._wait_for_event_with_timeout()
             self.save_event.clear()
-            self.commit_info = None
+
+        self.commit_info = None
 
         if self.checkpoint_size.gb_size() is None:
             dist.barrier()
             post_size = get_checkpoint_folder_size(info.save_dir, info.tag, self.local_rank)
             self.checkpoint_size.set_post_size(post_size)
 
-        if self.global_rank == 0:
+        if self.global_rank == 0 and self.checkpoint_size.gb_size() is not None:
             print(
                 f'{self.name} self.global_rank={self.global_rank} created checkpoint of {round(self.checkpoint_size.gb_size(), 2)} GB'
             )
