@@ -1244,3 +1244,95 @@ class TestCompressedAllReduceBasic(DistributedTest):
         if torch.sum(check_mag_mask) != 0:
             print("Fails at {} of positions".format(torch.sum(check_mag_mask)))
         assert torch.sum(diff_server_mask) == 0 or torch.sum(check_mag_mask) == 0
+
+
+class TestOneBitLambEmptyParameters(DistributedTest):
+    world_size = 2
+
+    def test(self):
+        """Test that OnebitLamb correctly filters out empty parameters (numel=0)"""
+        if not get_accelerator().is_fp16_supported():
+            pytest.skip("fp16 is not supported")
+
+        # Create a model with normal and empty parameters
+        class ModelWithEmptyParam(torch.nn.Module):
+
+            def __init__(self):
+                super().__init__()
+                self.linear = torch.nn.Linear(10, 10)
+                # Empty parameter (0 elements)
+                self.empty_param = torch.nn.Parameter(torch.empty(0, 10))
+
+            def forward(self, x, y):
+                return self.cross_entropy_loss(self.linear(x), y)
+
+        model = ModelWithEmptyParam()
+        model.cross_entropy_loss = torch.nn.CrossEntropyLoss()
+
+        # Create parameter groups including empty parameter
+        param_groups = [
+            {
+                'params': [model.linear.weight, model.linear.bias],
+                'weight_decay': 0.01
+            },
+            {
+                'params': [model.empty_param],
+                'weight_decay': 0.0
+            }  # Empty parameter
+        ]
+
+        config_dict = {
+            "train_batch_size": 2,
+            "steps_per_print": 1,
+            "optimizer": {
+                "type": "OneBitLamb",
+                "params": {
+                    "lr": 0.00015,
+                    "weight_decay": 0.01,
+                    "max_coeff": 0.3,
+                    "min_coeff": 0.01,
+                    "freeze_step": 2,
+                    "cuda_aware": False,
+                    "comm_backend_name": get_accelerator().communication_backend_name(),
+                    "coeff_beta": 0.9,
+                    "factor_max": 1.0,
+                    "factor_min": 0.5,
+                    "factor_threshold": 0.1,
+                },
+            },
+            "gradient_clipping": 1.0,
+            "fp16": {
+                "enabled": True,
+                "loss_scale": 0,
+                "initial_scale_power": 16,
+            },
+        }
+
+        # Verify empty parameter is filtered out
+        model, optimizer, _, _ = deepspeed.initialize(
+            config=config_dict,
+            model=model,
+            model_parameters=param_groups,
+        )
+
+        # Check that empty parameter is not in optimizer param_groups
+        for group in optimizer.optimizer.param_groups:
+            for p in group['params']:
+                assert p.numel() > 0, "Empty parameters should be filtered out"
+
+        # Run a few training steps to ensure no NaN
+        data_loader = random_dataloader(
+            model=model,
+            total_samples=20,
+            hidden_dim=10,
+            device=model.device,
+            dtype=torch.float16,
+        )
+        for n, batch in enumerate(data_loader):
+            loss = model(batch[0], batch[1])
+            model.backward(loss)
+            model.step()
+            # Verify no NaN in parameters
+            for group in optimizer.optimizer.param_groups:
+                for p in group['params']:
+                    assert not torch.isnan(p).any(), "Parameters should not contain NaN"
