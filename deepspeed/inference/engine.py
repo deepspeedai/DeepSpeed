@@ -24,7 +24,7 @@ from ..moe.utils import has_moe_layers
 from ..module_inject import LinearAllreduce, LinearLayer, Normalize, ReplaceWithTensorSlicing
 from deepspeed.accelerator import get_accelerator
 from ..module_inject.policy import TransformerPolicy
-from ..module_inject.auto_tp import AutoTP
+from ..module_inject.auto_tp import AutoTP, Loading
 
 from ..module_inject.replace_policy import generic_policies
 from ..module_inject.auto_tp_model_utils import build_bloom_alibi_tensor, build_mpt_atten_bias_tensor, build_mpt_alibi_tensor, get_alibi_mask
@@ -363,7 +363,14 @@ class InferenceEngine(Module):
                             child = Normalize(dim=child.weight.ds_shape[-1], dtype=child.weight.dtype, eps=child.eps)
                             setattr(module, name, child)
                     load(child, self.sd, prefix + name + '.')
+                    # Load buffers for this module
+                    if len(child._buffers) != 0:
+                        Loading.load_buffer(child, self.sd, checking_key, self.mp_group)
                 else:
+                    checking_key = prefix + name + '.'
+                    # Load buffers for non-policy modules
+                    if len(child._buffers) != 0:
+                        Loading.load_buffer(child, self.sd, checking_key, self.mp_group)
                     load_module_recursive(child, prefix if level == 0 else prefix + name + '.', level + 1)
 
         load_module_recursive(r_module)
