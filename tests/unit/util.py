@@ -49,12 +49,15 @@ def bf16_required_version_check(accelerator_check=True):
 
     if torch_info['nccl_version'] == '0.0':
         # Use runtime NCCL version if available
-        if hasattr(torch.cuda, 'nccl') and hasattr(torch.cuda.nccl, 'version'):  #ignore-cuda
-            nccl_ver = torch.cuda.nccl.version()  #ignore-cuda
-            NCCL_MAJOR, NCCL_MINOR = nccl_ver[0], nccl_ver[1]
+        if torch.cuda.is_available():  #ignore-cuda
+            try:
+                nccl_ver = torch.cuda.nccl.version()  #ignore-cuda
+                NCCL_MAJOR, NCCL_MINOR = nccl_ver[0], nccl_ver[1]
+            except (AttributeError, RuntimeError):
+                NCCL_MAJOR, NCCL_MINOR = 0, 0
         else:
-            # Assume NCCL is sufficient if we can't detect it
-            NCCL_MAJOR, NCCL_MINOR = 2, 10
+            # No CUDA means no NCCL; NPU/HPU/XPU have separate checks below
+            NCCL_MAJOR, NCCL_MINOR = 0, 0
     else:
         NCCL_MAJOR, NCCL_MINOR = split_version(torch_info['nccl_version'])
 
