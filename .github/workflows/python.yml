@@ -26,23 +26,24 @@ jobs:
 
     runs-on: ubuntu-24.04
     container:
-      image: deepspeed/gh-builder:py${{ matrix.pyVersion }}
+      image: python:${{ matrix.pyVersion }}-slim
 
     steps:
         - uses: actions/checkout@v4
 
-        - name: Check disk space
+        - name: Install build dependencies
           run: |
-            df -h
-            du -sh /usr/local/lib/python*/dist-packages/ 2>/dev/null || true
-
+            apt-get update && apt-get install -y build-essential ninja-build
         - name: environment
           run: |
             which python
             python --version
+        - name: Install PyTorch (CPU)
+          run: |
+            pip install torch --index-url https://download.pytorch.org/whl/cpu
         - name: Install deepspeed
           run: |
-            pip3 install .
+            pip install .
         - name: DS Report
           run: |
              ds_report
