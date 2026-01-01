@@ -147,21 +147,6 @@ class OpenMPIRunner(MultiNodeRunner):
         if self.args.num_nodes != -1 or self.args.num_gpus != -1:
             raise ValueError(f"{self.name} backend does not support limiting num nodes/gpus")
 
-    def _setup_mpi_environment(self):
-        """Sets up MPI-related environment variables or raises an error if they're missing."""
-
-        required_vars = ['OMPI_COMM_WORLD_LOCAL_RANK', 'OMPI_COMM_WORLD_RANK', 'OMPI_COMM_WORLD_SIZE']
-
-        # Check if all these are present
-        if not all(var in os.environ for var in required_vars):
-            raise EnvironmentError("MPI environment variables are not set. "
-                                   "Ensure you are running the script with an MPI-compatible launcher.")
-
-        # Now safe to read all
-        os.environ['LOCAL_RANK'] = os.environ['OMPI_COMM_WORLD_LOCAL_RANK']
-        os.environ['RANK'] = os.environ['OMPI_COMM_WORLD_RANK']
-        os.environ['WORLD_SIZE'] = os.environ['OMPI_COMM_WORLD_SIZE']
-
     def get_cmd(self, environment, active_resources):
         total_process_count = sum(self.resource_pool.values())
 
@@ -490,4 +475,3 @@ class MVAPICHRunner(MultiNodeRunner):
                 python_exec.append("-m")
 
         return mpirun_cmd + export_cmd + python_exec + [self.user_script] + self.user_arguments
-
