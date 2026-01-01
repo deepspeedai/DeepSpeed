@@ -31,6 +31,11 @@ jobs:
     steps:
         - uses: actions/checkout@v4
 
+        - name: Check disk space
+          run: |
+            df -h
+            du -sh /usr/local/lib/python*/dist-packages/ 2>/dev/null || true
+
         - name: environment
           run: |
             which python
