@@ -21,23 +21,29 @@ jobs:
   unit-tests:
     strategy:
       matrix:
-        pyVersion: ["3.8", "3.9", "3.10"]
+        pyVersion: ["3.10", "3.11", "3.12"]
       fail-fast: false
 
     runs-on: ubuntu-24.04
     container:
-      image: deepspeed/gh-builder:py${{ matrix.pyVersion }}
+      image: python:${{ matrix.pyVersion }}-slim
 
     steps:
         - uses: actions/checkout@v4
 
+        - name: Install build dependencies
+          run: |
+            apt-get update && apt-get install -y build-essential ninja-build
         - name: environment
           run: |
             which python
             python --version
+        - name: Install PyTorch (CPU)
+          run: |
+            pip install torch --index-url https://download.pytorch.org/whl/cpu
         - name: Install deepspeed
           run: |
-            pip3 install .
+            pip install .
         - name: DS Report
           run: |
              ds_report
