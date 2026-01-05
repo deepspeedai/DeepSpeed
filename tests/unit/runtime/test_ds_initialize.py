@@ -29,6 +29,7 @@ def test_start_method_safety(method):
     import torch.multiprocessing as mp
     mp.set_start_method(method, force=True)
 
+
 @pytest.mark.parametrize('zero_stage', [0, 3])
 class TestNoOptim(DistributedTest):
     world_size = 1
