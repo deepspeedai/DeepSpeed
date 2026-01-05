@@ -5,6 +5,7 @@
 
 from .builder import CUDAOpBuilder, installed_cuda_version
 import os
+from packaging.version import Version
 
 
 class EvoformerAttnBuilder(CUDAOpBuilder):
@@ -66,9 +67,7 @@ class EvoformerAttnBuilder(CUDAOpBuilder):
                 if verbose:
                     self.warning("Please pip install nvidia-cutlass if trying to pre-compile kernels")
                 return False
-            cutlass_major, cutlass_minor = cutlass.__version__.split('.')[:2]
-            cutlass_compatible = (int(cutlass_major) >= 3 and int(cutlass_minor) >= 1)
-            if not cutlass_compatible:
+            if Version(cutlass.__version__) < Version('3.1.0'):
                 if verbose:
                     self.warning("Please use CUTLASS version >= 3.1.0")
                 return False
