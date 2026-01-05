@@ -1,0 +1,99 @@
+################################################################################
+# DeepSpeed CI - AWS L40S GPU Tests (HuggingFace Accelerate Integration)
+#
+# Runs the same tests as modal-accelerate.yml but on AWS self-hosted runners.
+# Tests DeepSpeed integration with HuggingFace Accelerate library.
+# Uses 4x NVIDIA L40S GPUs on g6e.12xlarge instances.
+################################################################################
+
+name: aws-accelerate
+
+on:
+  workflow_dispatch:
+
+  push:
+    branches:
+      - master
+
+  pull_request:
+    paths-ignore:
+      - 'docs/**'
+      - 'blogs/**'
+      - 'deepspeed/inference/v2/**'
+      - 'tests/unit/inference/v2/**'
+    branches:
+      - master
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  accelerate-tests:
+    name: Accelerate Integration Tests
+    runs-on: [self-hosted, gpu-ci, gpu-l40s, l40s-1gpu, aws]
+
+    container:
+      image: nvidia/cuda:12.6.3-devel-ubuntu22.04
+      options: --gpus all --shm-size "32G"
+
+    env:
+      TORCH_VER: "2.7"
+      CUDA_VER: "12.6"
+
+    steps:
+      - name: Install system dependencies
+        run: |
+          apt-get update && apt-get install -y git git-lfs libaio-dev python3 python3-pip
+          git lfs install
+          ln -sf /usr/bin/python3 /usr/bin/python
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          lfs: true
+
+      - name: Install PyTorch
+        run: |
+          pip install torch==2.7.1 torchvision==0.22.1 torchaudio==2.7.1 --index-url https://download.pytorch.org/whl/cu126
+
+      - name: Install Python dependencies
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements/requirements.txt
+          pip install -r requirements/requirements-dev.txt
+          pip install datasets
+
+      - name: Check environment
+        run: |
+          echo "=== GPU Information ==="
+          nvidia-smi
+          echo ""
+          echo "=== CUDA Version ==="
+          nvcc --version
+          echo ""
+          echo "=== Python/PyTorch Info ==="
+          python --version
+          python -c "import torch; print(f'PyTorch: {torch.__version__}')"
+          python -c "import torch; print(f'CUDA available: {torch.cuda.is_available()}')"
+          python -c "import torch; print(f'CUDA devices: {torch.cuda.device_count()}')"
+          python -c "import torch; print(f'BF16 support: {torch.cuda.is_bf16_supported()}')"
+
+      - name: Install DeepSpeed
+        run: |
+          # Initialize CUDA before install so setup.py can detect NCCL version
+          python -c "import torch; torch.cuda.init(); print(f'NCCL version: {torch.cuda.nccl.version()}')"
+          # Use --no-build-isolation so setup.py can access pre-installed PyTorch
+          pip install --no-build-isolation .
+          ds_report
+          # Debug: Check captured torch_info values
+          python -c "from deepspeed.git_version_info import torch_info; print(f'torch_info: {torch_info}')"
+
+      - name: Clone and install Accelerate
+        run: |
+          git clone https://github.com/huggingface/accelerate
+          pip install "./accelerate[testing]"
+
+      - name: Run Accelerate DeepSpeed tests
+        run: |
+          pytest --verbose ./accelerate/tests/deepspeed

@@ -10,6 +10,7 @@ from deepspeed import comm as dist
 from deepspeed.utils.torch import required_torch_version
 from torch._utils import _flatten_dense_tensors, _unflatten_dense_tensors
 from deepspeed.accelerator import get_accelerator
+from deepspeed.runtime.utils import filter_empty_parameters
 
 
 class OnebitLamb(torch.optim.Optimizer):
@@ -82,6 +83,9 @@ class OnebitLamb(torch.optim.Optimizer):
         if amsgrad:
             raise RuntimeError('1-bit Lamb does not support the AMSGrad variant.')
 
+        # Filter out empty parameters (numel == 0) to avoid NaN in scaling calculations
+        filtered_params = filter_empty_parameters(params)
+
         defaults = dict(lr=lr,
                         bias_correction=bias_correction,
                         betas=betas,
@@ -91,7 +95,7 @@ class OnebitLamb(torch.optim.Optimizer):
                         max_coeff=max_coeff,
                         min_coeff=min_coeff)
 
-        super(OnebitLamb, self).__init__(params, defaults)
+        super(OnebitLamb, self).__init__(filtered_params, defaults)
         self.eps_mode = 0 if eps_inside_sqrt else 1
         self.deepspeed = deepspeed
         self.lamb_freeze_key = False

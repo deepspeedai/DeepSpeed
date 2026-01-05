@@ -47,6 +47,45 @@ class DummyOptim():
         self.param_groups.append({'params': params})
 
 
+def filter_empty_parameters(params):
+    """Filter out empty parameters (numel == 0) from optimizer params.
+
+    This is useful for optimizers that perform operations like division by numel,
+    which would produce NaNs for empty parameters.
+
+    Args:
+        params: Either a list/tuple of Parameters, or a list of parameter group dicts
+                (each dict has 'params' key with list of Parameters)
+
+    Returns:
+        Filtered params in the same format as input (list of Parameters or list of dicts)
+    """
+    if not isinstance(params, (list, tuple)) or len(params) == 0:
+        return params
+
+    # Check if first element is a dict (parameter groups) or a Parameter
+    if isinstance(params[0], dict):
+        # params is a list of parameter group dicts
+        filtered_params = []
+        for param_group in params:
+            filtered_group = {}
+            trainable_params = []
+            for key, value in param_group.items():
+                if key == 'params':
+                    # Filter out empty parameters
+                    trainable_params = [p for p in value if p.numel() > 0]
+                else:
+                    filtered_group[key] = value
+            # Only add group if it has non-empty parameters
+            if len(trainable_params) > 0:
+                filtered_group['params'] = trainable_params
+                filtered_params.append(filtered_group)
+        return filtered_params
+    else:
+        # params is a list of Parameters
+        return [p for p in params if p.numel() > 0]
+
+
 graph_cache = {}
 
 

@@ -25,7 +25,7 @@ from deepspeed.ops.op_builder.dc import DeepCompileBuilder
 
 
 def is_deepcompile_supported() -> bool:
-    return required_torch_version(min_version=2.6, max_version=2.7) and get_accelerator().device_name() == "cuda"
+    return required_torch_version(min_version=2.6, max_version=2.9) and get_accelerator().device_name() == "cuda"
 
 
 dc_handle = None
