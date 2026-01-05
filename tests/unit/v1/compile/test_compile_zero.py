@@ -82,6 +82,8 @@ class TestDeepCompile(DistributedTest):
     def test(self, zero_stage, dtype, deepcompile):
         if not required_torch_version(min_version=2.6):
             pytest.skip("DeepCompile requires PyTorch >= v2.6")
+        if zero_stage == 3 and required_torch_version(min_version=2.9):
+            pytest.skip("DeepCompile with ZeRO stage 3 is not currently supported on PyTorch >= 2.9")
 
         if dtype == torch.bfloat16:
             skip_on_arch(min_arch=8)
@@ -123,6 +125,8 @@ class TestDeepCompile(DistributedTest):
         """Test that parameters with padding (uneven division) work correctly with DeepCompile"""
         if not required_torch_version(min_version=2.6):
             pytest.skip("DeepCompile requires PyTorch >= v2.6")
+        if required_torch_version(min_version=2.9):
+            pytest.skip("DeepCompile with ZeRO stage 3 is not supported on PyTorch >= 2.9")
 
         if get_accelerator().device_name() == "cpu":
             pytest.skip("CPU does not support this test yet")
@@ -156,6 +160,8 @@ class TestDeepCompile(DistributedTest):
         """Test that eagerly free activations work correctly and the threshold is configurable"""
         if not required_torch_version(min_version=2.6):
             pytest.skip("DeepCompile requires PyTorch >= v2.6")
+        if zero_stage == 3 and required_torch_version(min_version=2.9):
+            pytest.skip("DeepCompile with ZeRO stage 3 is not supported on PyTorch >= 2.9")
 
         if get_accelerator().device_name() == "cpu":
             pytest.skip("CPU does not support this test yet")
@@ -187,6 +193,8 @@ class TestDeepCompile(DistributedTest):
         """Test that allgather and autocast can be correctly fused with DeepCompile"""
         if not required_torch_version(min_version=2.6):
             pytest.skip("DeepCompile requires PyTorch >= v2.6")
+        if required_torch_version(min_version=2.9):
+            pytest.skip("DeepCompile with ZeRO stage 3 is not supported on PyTorch >= 2.9")
 
         if get_accelerator().device_name() == "cpu":
             pytest.skip("CPU does not support this test yet")

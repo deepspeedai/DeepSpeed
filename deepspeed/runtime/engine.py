@@ -77,6 +77,7 @@ from deepspeed.runtime.sparse_tensor import SparseTensor
 from deepspeed.runtime import lr_schedules
 from deepspeed.utils import groups
 from deepspeed.utils import logger, log_dist, log_dist_once, instrument_w_nvtx
+from deepspeed.utils.torch import required_torch_version
 from deepspeed.utils.z3_leaf_module import apply_zero_leaf_module_config
 from deepspeed.utils.timer import NoopTimer, ThroughputTimer, SynchronizedWallClockTimer, \
     FORWARD_MICRO_TIMER, BACKWARD_MICRO_TIMER, BACKWARD_INNER_MICRO_TIMER, BACKWARD_REDUCE_MICRO_TIMER, \
@@ -4296,6 +4297,10 @@ class DeepSpeedEngine(Module):
             elif self.zero_optimization_stage() == ZeroStageEnum.gradients:
                 backend = init_z1(self, backend, compile_config, compile_kwargs, schedule, use_z2=True)
             elif self.zero_optimization_stage() == ZeroStageEnum.weights:
+                if required_torch_version(min_version=2.9):
+                    raise RuntimeError(
+                        "DeepCompile with ZeRO stage 3 is not currently supported on PyTorch >= 2.9. "
+                        "Please use ZeRO stage 1 or 2 with DeepCompile, or disable DeepCompile for ZeRO stage 3.")
                 backend = init_z3(self, backend, compile_config, compile_kwargs, schedule)
 
         # Hook state must align with whether DeepCompile is active.

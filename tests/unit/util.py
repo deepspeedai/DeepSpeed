@@ -38,9 +38,41 @@ def skip_on_cuda(valid_cuda):
 
 def bf16_required_version_check(accelerator_check=True):
     split_version = lambda x: map(int, x.split('.')[:2])
-    TORCH_MAJOR, TORCH_MINOR = split_version(torch_info['version'])
-    NCCL_MAJOR, NCCL_MINOR = split_version(torch_info['nccl_version'])
-    CUDA_MAJOR, CUDA_MINOR = split_version(torch_info['cuda_version'])
+
+    # torch_info may have stale/zero values if installed without --no-build-isolation
+    # In that case, fall back to runtime detection
+    if torch_info['version'] == '0.0':
+        # Use runtime torch version
+        TORCH_MAJOR, TORCH_MINOR = split_version(torch.__version__)
+    else:
+        TORCH_MAJOR, TORCH_MINOR = split_version(torch_info['version'])
+
+    if torch_info['nccl_version'] == '0.0':
+        # Use runtime NCCL version if available
+        if torch.cuda.is_available():  #ignore-cuda
+            try:
+                nccl_ver = torch.cuda.nccl.version()  #ignore-cuda
+                NCCL_MAJOR, NCCL_MINOR = nccl_ver[0], nccl_ver[1]
+            except (AttributeError, RuntimeError):
+                NCCL_MAJOR, NCCL_MINOR = 0, 0
+        else:
+            # No CUDA means no NCCL; NPU/HPU/XPU have separate checks below
+            NCCL_MAJOR, NCCL_MINOR = 0, 0
+    else:
+        NCCL_MAJOR, NCCL_MINOR = split_version(torch_info['nccl_version'])
+
+    if torch_info['cuda_version'] == '0.0':
+        # Use runtime CUDA version
+        if torch.cuda.is_available():  #ignore-cuda
+            cuda_ver = torch.version.cuda
+            if cuda_ver:
+                CUDA_MAJOR, CUDA_MINOR = split_version(cuda_ver)
+            else:
+                CUDA_MAJOR, CUDA_MINOR = 0, 0
+        else:
+            CUDA_MAJOR, CUDA_MINOR = 0, 0
+    else:
+        CUDA_MAJOR, CUDA_MINOR = split_version(torch_info['cuda_version'])
 
     # Sometimes bf16 tests are runnable even if not natively supported by accelerator
     if accelerator_check:
