@@ -31,31 +31,31 @@ git submodule update --init --recursive
 ### Running Unmodified Megatron-LM GPT2 model
 
 * For a single GPU run:
-    - change `scripts/pretrain_gpt2.sh`, set its `--train-data` argument as `"webtext"`.
-    - run `bash scripts/pretrain_gpt2.sh`
+    - change `examples/pretrain_gpt.sh`, set its `--train-data` argument as `"webtext"`.
+    - run `bash examples/pretrain_gpt.sh`
 
 * For multiple GPUs and/or nodes run:
-    - change `scripts/pretrain_gpt2_model_parallel.sh`
+    - change `examples/pretrain_gpt_distributed_with_mp.sh`
         - set its `--train-data` argument as `"webtext"`
         - `GPUS_PER_NODE` indicates how many GPUs per node involved in the testing
         - `NNODES` indicates how many nodes involved in the testing
 
-    - run `bash scripts/pretrain_gpt2_model_parallel.sh`
+    - run `bash examples/pretrain_gpt_distributed_with_mp.sh`
 
 
 ## Enabling DeepSpeed
 
 To use DeepSpeed we will modify three files :
 
-* `arguments.py` : Arguments configurations
-* `pretrain_gpt2.py` : Main entry point for training
-* `utils.py` : Checkpoint saving and loading utilities
+* `megatron/arguments.py` : Arguments configurations
+* `pretrain_gpt.py` : Main entry point for training
+* `megatron/utils.py` : Checkpoint saving and loading utilities
 
 
 ### Argument Parsing
 The first step is adding DeepSpeed arguments to
 Megatron-LM GPT2 model, using `deepspeed.add_config_arguments()` in
-`arguments.py`.
+`megatron/arguments.py`.
 
 ```python
 def get_args():
@@ -360,9 +360,9 @@ Megatron-LM GPT2 model with DeepSpeed applied, execute the following command to
 start training.
 
 - Single GPU run
-  - run `bash scripts/ds_pretrain_gpt2.sh`
+  - run `bash scripts/ds_pretrain_gpt.sh`
 - Multiple GPUs/Nodes run
-  - run `bash scripts/ds_zero2_pretrain_gpt2_model_parallel.sh`
+  - run `bash scripts/ds_zero2_pretrain_gpt_model_parallel.sh`
 
 ## DeepSpeed Evaluation using GPT-2
 
@@ -400,3 +400,4 @@ More concretely, DeepSpeed and ZeRO-2 excel in four aspects (as visualized in Fi
 **Democratizing large model training**: ZeRO-2 empowers model scientists to train models up to 13 billion parameters efficiently without any model parallelism that typically requires model refactoring (Figure 2, bottom right). 13 billion parameters is larger than most of the largest state-of-the-art models (such as Google T5, with 11 billion parameters). Model scientists can therefore experiment freely with large models without worrying about model parallelism. In comparison, the implementations of classic data-parallelism approaches (such as PyTorch Distributed Data Parallel) run out of memory with 1.4-billion-parameter models, while ZeRO-1 supports up to 6 billion parameters for comparison.
 
 Furthermore, in the absence of model parallelism, these models can be trained on low bandwidth clusters while still achieving significantly better throughput compared to using model parallelism. For example, the GPT-2 model can be trained nearly 4x faster with ZeRO powered data parallelism compared to using model parallelism on a four node cluster connected with 40 Gbps Infiniband interconnect, where each node has four NVIDIA 16GB V100 GPUs connected with PCI-E. Therefore, with this performance improvement, large model training is no longer limited to GPU clusters with ultra fast interconnect, but also accessible on modest clusters with limited bandwidth.
+
