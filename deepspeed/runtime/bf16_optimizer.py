@@ -559,4 +559,3 @@ def _get_padded_tensor(src_tensor, size):
     slice_tensor = torch.narrow(padded_tensor, 0, 0, src_tensor.numel())
     slice_tensor.data.copy_(src_tensor.data)
     return padded_tensor
-
