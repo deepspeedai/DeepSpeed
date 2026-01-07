@@ -280,24 +280,19 @@ class ParallelState:
         self.decoder_rank_generator = None
         self.expert_decoder_rank_generator = None
 
-    def _get_nccl_options(self, pg_name: str, nccl_comm_cfgs: dict):
-        """Set the NCCL process group options."""
-        if pg_name in nccl_comm_cfgs:
-            # FIXME: deepspeed.comm does not provide a way to set NCCL options yet.
-            nccl_options = torch.distributed.ProcessGroupNCCL.Options(
-                is_high_priority_stream=nccl_comm_cfgs[pg_name].get("is_high_priority_stream", False))
-            if "cga_cluster_size" in nccl_comm_cfgs[pg_name]:
-                nccl_options.config.cga_cluster_size = nccl_comm_cfgs[pg_name]["cga_cluster_size"]
-            if "max_ctas" in nccl_comm_cfgs[pg_name]:
-                nccl_options.config.max_ctas = nccl_comm_cfgs[pg_name]["max_ctas"]
-            if "min_ctas" in nccl_comm_cfgs[pg_name]:
-                nccl_options.config.min_ctas = nccl_comm_cfgs[pg_name]["min_ctas"]
-            if "net_name" in nccl_comm_cfgs[pg_name]:
-                nccl_options.config.net_name = nccl_comm_cfgs[pg_name]["net_name"]
-                if nccl_options.config.net_name.lower() not in ["ib", "socket"]:
-                    raise RuntimeError(f"net_name ({nccl_options.config.net_name}) is not supported."
-                                       f"Accepted values: 'IB' or 'socket'.")
-            return nccl_options
+    def _get_pg_options(self, pg_name: str, pg_comm_cfgs: dict):
+        """Get the options for a specific process group."""
+        # TODO: construct process group options from json config
+        #
+        # As of PyTorch 2.9, the only backend that supports pg options is nccl,
+        # and a nccl-specific class, namely ProcessGroupNCCL.Options, is
+        # required to construct the options.
+        #
+        # To enable configuring such options in DeepSpeed, we need to define the
+        # interface for users to specify them and also figure out whether we
+        # want to export ProcessGroupNCCL.Options in deepspeed.comm or allow
+        # using torch distributed for this specific case in check-torchdist.py.
+        # Those are left as future work.
         return None
 
     def _create_group(
@@ -393,13 +388,11 @@ class ParallelState:
         expert_model_parallel_size: int = 1,
         num_distributed_optimizer_instances: int = 1,
         expert_tensor_parallel_size: Optional[int] = None,
-        nccl_communicator_config_path: Optional[str] = None,
         distributed_timeout_minutes: int = 30,
         order: str = "tp-cp-ep-dp-pp",
         get_embedding_ranks: Optional[Callable[[List[int], Optional[int]], List[int]]] = None,
         get_position_embedding_ranks: Optional[Callable[[List[int], Optional[int]], List[int]]] = None,
         create_gloo_process_groups: bool = True,
-        high_priority_stream_groups: Optional[List[str]] = None,
     ) -> None:
         """Initialize model data parallel groups.
 
@@ -439,23 +432,10 @@ class ParallelState:
             self.virtual_pipeline_model_parallel_rank = 0
             self.virtual_pipeline_model_parallel_world_size = virtual_pipeline_model_parallel_size
 
-        # Load NCCL configs
-        nccl_comm_cfgs = {}
-        if nccl_communicator_config_path is not None:
-            try:
-                import yaml
-            except ImportError:
-                raise RuntimeError("Cannot import `yaml`. Setting custom nccl communicator configs "
-                                   "requires the yaml package.")
-            with open(nccl_communicator_config_path, "r") as stream:
-                nccl_comm_cfgs = yaml.safe_load(stream)
-
-        # Set high priority stream groups
-        high_priority_stream_groups = high_priority_stream_groups or []
-        for pg_name in high_priority_stream_groups:
-            if pg_name not in nccl_comm_cfgs:
-                nccl_comm_cfgs[pg_name] = {}
-            nccl_comm_cfgs[pg_name]["is_high_priority_stream"] = True
+        # TODO: Collect process group options from configs
+        #
+        # Check _get_pg_options for details.
+        pg_comm_cfgs = {}
 
         # Create rank generators
         self.decoder_rank_generator = RankGenerator(
@@ -502,7 +482,7 @@ class ParallelState:
             group_with_cp = self._create_group(
                 ranks_with_cp,
                 timeout=timeout,
-                pg_options=self._get_nccl_options("dp_cp", nccl_comm_cfgs),
+                pg_options=self._get_pg_options("dp_cp", pg_comm_cfgs),
                 group_desc="DATA_PARALLEL_GROUP_WITH_CP",
             )
             if create_gloo_process_groups:
@@ -526,7 +506,7 @@ class ParallelState:
                     intra_partial_dp_group_with_cp = self._create_group(
                         intra_partial_dp_ranks_with_cp,
                         timeout=timeout,
-                        pg_options=self._get_nccl_options("intra_dp_cp", nccl_comm_cfgs),
+                        pg_options=self._get_pg_options("intra_dp_cp", pg_comm_cfgs),
                         group_desc="INTRA_PARTIAL_DATA_PARALLEL_GROUP_WITH_CP",
                     )
                     if create_gloo_process_groups:
@@ -550,7 +530,7 @@ class ParallelState:
             group = self._create_group(
                 ranks,
                 timeout=timeout,
-                pg_options=self._get_nccl_options("dp", nccl_comm_cfgs),
+                pg_options=self._get_pg_options("dp", pg_comm_cfgs),
                 group_desc="DATA_PARALLEL_GROUP",
             )
             if create_gloo_process_groups:
@@ -571,7 +551,7 @@ class ParallelState:
             group = self._create_group(
                 ranks,
                 timeout=timeout,
-                pg_options=self._get_nccl_options("cp", nccl_comm_cfgs),
+                pg_options=self._get_pg_options("cp", pg_comm_cfgs),
                 group_desc="CONTEXT_PARALLEL_GROUP",
             )
             if rank in ranks:
@@ -584,7 +564,7 @@ class ParallelState:
                     ranks,
                     hierarchical_context_parallel_sizes,
                     create_gloo_process_groups=False,
-                    pg_options=self._get_nccl_options("hcp", nccl_comm_cfgs),
+                    pg_options=self._get_pg_options("hcp", pg_comm_cfgs),
                     timeout=timeout,
                     group_desc="CONTEXT_PARALLEL_GROUP",
                 )
@@ -597,7 +577,7 @@ class ParallelState:
             group = self._create_group(
                 ranks,
                 timeout=timeout,
-                pg_options=self._get_nccl_options("mp", nccl_comm_cfgs),
+                pg_options=self._get_pg_options("mp", pg_comm_cfgs),
                 group_desc="MODEL_PARALLEL_GROUP",
             )
             if rank in ranks:
@@ -610,7 +590,7 @@ class ParallelState:
             group = self._create_group(
                 ranks,
                 timeout=timeout,
-                pg_options=self._get_nccl_options("tp", nccl_comm_cfgs),
+                pg_options=self._get_pg_options("tp", pg_comm_cfgs),
                 group_desc="TENSOR_MODEL_PARALLEL_GROUP",
             )
             if rank in ranks:
@@ -627,8 +607,8 @@ class ParallelState:
                 ranks,
                 timeout=timeout,
                 backend=pipeline_model_parallel_comm_backend,
-                pg_options=(None if pipeline_model_parallel_comm_backend == "ucc" else self._get_nccl_options(
-                    "pp", nccl_comm_cfgs)),
+                pg_options=(None if pipeline_model_parallel_comm_backend == "ucc" else self._get_pg_options(
+                    "pp", pg_comm_cfgs)),
                 group_desc="PIPELINE_MODEL_PARALLEL_GROUP",
             )
             assert (
@@ -653,7 +633,7 @@ class ParallelState:
             group = self._create_group(
                 embedding_ranks,
                 timeout=timeout,
-                pg_options=self._get_nccl_options("embd", nccl_comm_cfgs),
+                pg_options=self._get_pg_options("embd", pg_comm_cfgs),
                 group_desc="EMBEDDING_GROUP",
             )
             if rank in embedding_ranks:
@@ -664,7 +644,7 @@ class ParallelState:
             group = self._create_group(
                 position_embedding_ranks,
                 timeout=timeout,
-                pg_options=self._get_nccl_options("pos_embd", nccl_comm_cfgs),
+                pg_options=self._get_pg_options("pos_embd", pg_comm_cfgs),
                 group_desc="POSITION_EMBEDDING_GROUP",
             )
             if rank in position_embedding_ranks:
@@ -677,7 +657,7 @@ class ParallelState:
             group = self._create_group(
                 ranks,
                 timeout=timeout,
-                pg_options=self._get_nccl_options("tp_dp_cp", nccl_comm_cfgs),
+                pg_options=self._get_pg_options("tp_dp_cp", pg_comm_cfgs),
                 group_desc="TENSOR_AND_DATA_PARALLEL_GROUP_WITH_CP",
             )
             if rank in ranks:
@@ -686,7 +666,7 @@ class ParallelState:
             group = self._create_group(
                 ranks,
                 timeout=timeout,
-                pg_options=self._get_nccl_options("tp_dp", nccl_comm_cfgs),
+                pg_options=self._get_pg_options("tp_dp", pg_comm_cfgs),
                 group_desc="TENSOR_AND_DATA_PARALLEL_GROUP",
             )
             if rank in ranks:
@@ -697,7 +677,7 @@ class ParallelState:
             group = self._create_group(
                 ranks,
                 timeout=timeout,
-                pg_options=self._get_nccl_options("tp_cp", nccl_comm_cfgs),
+                pg_options=self._get_pg_options("tp_cp", pg_comm_cfgs),
                 group_desc="TENSOR_AND_CONTEXT_PARALLEL_GROUP",
             )
             if rank in ranks:
@@ -708,7 +688,7 @@ class ParallelState:
         for ranks in self.expert_decoder_rank_generator.get_ranks('ep'):
             group = self._create_group(
                 ranks,
-                pg_options=self._get_nccl_options("ep", nccl_comm_cfgs),
+                pg_options=self._get_pg_options("ep", pg_comm_cfgs),
                 group_desc="EXPERT_MODEL_PARALLEL_GROUP",
             )
             if rank in ranks:
@@ -719,7 +699,7 @@ class ParallelState:
             group = self._create_group(
                 ranks,
                 timeout=timeout,
-                pg_options=self._get_nccl_options("ep_tp", nccl_comm_cfgs),
+                pg_options=self._get_pg_options("ep_tp", pg_comm_cfgs),
                 group_desc="EXPERT_TENSOR_PARALLEL_GROUP",
             )
             if rank in ranks:
@@ -730,7 +710,7 @@ class ParallelState:
             group = self._create_group(
                 ranks,
                 timeout=timeout,
-                pg_options=self._get_nccl_options("tp_ep_mp", nccl_comm_cfgs),
+                pg_options=self._get_pg_options("tp_ep_mp", pg_comm_cfgs),
                 group_desc="EXPERT_TENSOR_AND_MODEL_PARALLEL_GROUP",
             )
             if rank in ranks:
@@ -741,7 +721,7 @@ class ParallelState:
             group = self._create_group(
                 ranks,
                 timeout=timeout,
-                pg_options=self._get_nccl_options("tp_ep_pp", nccl_comm_cfgs),
+                pg_options=self._get_pg_options("tp_ep_pp", pg_comm_cfgs),
                 group_desc="EXPERT_TENSOR_MODEL_PIPELINE_PARALLEL_GROUP",
             )
             if rank in ranks:
@@ -761,7 +741,7 @@ class ParallelState:
             group = self._create_group(
                 ranks,
                 timeout=timeout,
-                pg_options=self._get_nccl_options("ep_dp", nccl_comm_cfgs),
+                pg_options=self._get_pg_options("ep_dp", pg_comm_cfgs),
                 group_desc="EXPERT_DATA_PARALLEL_GROUP",
             )
             if create_gloo_process_groups:
@@ -779,8 +759,8 @@ class ParallelState:
                     [intra_partial_expert_data_parallel_size, num_distributed_optimizer_instances],
                     create_gloo_process_groups=create_gloo_process_groups,
                     pg_options=[
-                        self._get_nccl_options("intra_ep_dp", nccl_comm_cfgs),
-                        self._get_nccl_options("inter_ep_dp", nccl_comm_cfgs),
+                        self._get_pg_options("intra_ep_dp", pg_comm_cfgs),
+                        self._get_pg_options("inter_ep_dp", pg_comm_cfgs),
                     ],
                     timeout=timeout,
                     group_desc="EXPERT_DATA_PARALLEL_GROUP",
@@ -804,7 +784,7 @@ class ParallelState:
                 intra_dist_opt_instance_group = self._create_group(
                     intra_dist_opt_ranks,
                     timeout=timeout,
-                    pg_options=self._get_nccl_options("intra_dist_opt_instance", nccl_comm_cfgs),
+                    pg_options=self._get_pg_options("intra_dist_opt_instance", pg_comm_cfgs),
                     group_desc="INTRA_DISTRIBUTED_OPTIMIZER_INSTANCE_GROUP",
                 )
                 if rank in intra_dist_opt_ranks:
