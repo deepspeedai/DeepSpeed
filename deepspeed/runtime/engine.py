@@ -4403,3 +4403,10 @@ class DeepSpeedEngine(Module):
             DeepSpeedZeRoOffload), "Moving states across devices is not supported without an optimizer."
 
         self.optimizer.reload_states(non_blocking=non_blocking)
+
+    def set_all_reduce_hook(
+        self,
+        hook: Callable[[torch.Tensor], None],
+    ):
+        if hasattr(self.optimizer, "_all_reduce_hook"):
+            self.optimizer._all_reduce_hook = hook

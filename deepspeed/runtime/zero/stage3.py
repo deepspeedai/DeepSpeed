@@ -488,6 +488,8 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
 
         self.offloaded_states: Set[OffloadDeviceEnum] = set()
 
+        self._all_reduce_hook: Optional[Callable[[torch.Tensor], None]] = None
+
         if dist.get_rank(group=self.dp_process_group) == 0:
             see_memory_usage("After initializing ZeRO optimizer", force=True)
 
@@ -1406,7 +1408,11 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
             if self.zenflow and self.micro_step >= self.full_warm_up_rounds:
                 self._process_selected_fp32_groups_grad(params_in_bucket, grad_partitions)
 
-            self.partition_grads(params_in_bucket, grad_partitions)
+            grad_buffers = self.partition_grads(params_in_bucket, grad_partitions)
+
+            if self._all_reduce_hook and self.is_gradient_accumulation_boundary:
+                for grad_buffer in grad_buffers:
+                    self._all_reduce_hook(grad_buffer)
 
             params_in_bucket.clear()
             bucket.elements = 0
