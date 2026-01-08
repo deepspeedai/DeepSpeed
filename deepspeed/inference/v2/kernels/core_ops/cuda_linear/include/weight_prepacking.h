@@ -205,4 +205,3 @@ void weight_matrix_prepacking(int* FP6Weights, size_t M, size_t K)
 }
 
 #endif
-
