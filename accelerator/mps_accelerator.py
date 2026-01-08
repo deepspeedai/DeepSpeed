@@ -26,7 +26,8 @@ class MPS_Accelerator(DeepSpeedAccelerator):
         return False
 
     def use_host_timers(self):
-        return self.is_synchronized_device()
+        # Event timers are not supported on MPS
+        return True
 
     def resolves_data_dependency(self):
         return self.is_synchronized_device()
