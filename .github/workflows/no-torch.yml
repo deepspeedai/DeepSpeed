@@ -7,6 +7,8 @@ on:
       - 'accelerator/**'
       - '.github/workflows/no-torch.yml'
       - 'op_builder/**'
+      - 'setup.py'
+      - 'pyproject.toml'
   schedule:
     - cron: "0 0 * * *"
 
