@@ -103,6 +103,8 @@ class BF16_Optimizer(ZeROOptimizer):
         see_memory_usage('end bf16_ optimizer', force=True)
 
     def destroy(self):
+        if not self.using_real_optimizer:
+            return
         for i, _ in enumerate(self.optimizer.param_groups):
             for p in self.bf16_groups[i]:
                 if getattr(p, '_hp_mapping', None):
