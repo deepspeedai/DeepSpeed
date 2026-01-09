@@ -27,7 +27,7 @@ from deepspeed.ops.op_builder import FusedAdamBuilder
 @pytest.mark.parametrize('method', ['spawn', 'fork', 'forkserver'])
 def test_start_method_safety(method):
     import torch.multiprocessing as mp
-    mp.set_start_method(method)
+    mp.set_start_method(method, force=True)
 
 
 @pytest.mark.parametrize('zero_stage', [0, 3])
