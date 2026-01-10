@@ -50,6 +50,14 @@ class HcclBackend(object):
         # align size of original_buffer and error
         original_size = buffer_m.numel()
         worker_error_size = worker_error.numel()
+        if original_size == 0:
+            if worker_error_size:
+                worker_error.zero_()
+            if server_error.numel():
+                server_error.zero_()
+            if len(original_shape) > 1:
+                return buffer_m.reshape(original_shape)
+            return buffer_m
         if original_size != worker_error_size:
             empty_tensor = torch.zeros(worker_error_size - original_size, device=buffer_m.device)
             buffer_m = torch.cat([buffer_m, empty_tensor])
