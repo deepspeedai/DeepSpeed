@@ -457,6 +457,9 @@ class DeepSpeedEngine(Module):
         self._is_compiled_autograd_enabled = False
         self._compile_kwargs = {}
 
+        if self.dist_backend is None:
+            self.enable_backward_allreduce = False
+
     def _optimized_linear_offload_setup(self):
         self.optimized_linear_base_weight_sharding = False
         self.optimized_linear_lora_enabled = False
@@ -1309,6 +1312,8 @@ class DeepSpeedEngine(Module):
                 f'Client Optimizer (type = {type(self.client_optimizer)} is not instantiated but Client LR Scheduler is instantiated'
 
     def _broadcast_model(self):
+        if self.dist_backend is None:
+            return
 
         def is_replicated(p):
             if hasattr(p, "ds_status") and p.ds_status is not ZeroParamStatus.AVAILABLE:
