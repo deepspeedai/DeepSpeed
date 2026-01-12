@@ -9,6 +9,7 @@ import time
 import numpy as np
 from mpi4py import MPI
 
+from deepspeed.runtime.comm.utils import check_and_handle_empty_buffer
 from deepspeed.runtime.compression.cupy import CupyBackend
 
 
@@ -137,14 +138,9 @@ class MpiBackend(object):
             buffer_m = torch.flatten(buffer_m)
         original_size = buffer_m.numel()
         worker_error_size = worker_error.numel()
-        if original_size == 0:
-            if worker_error_size:
-                worker_error.zero_()
-            if server_error.numel():
-                server_error.zero_()
-            if len(original_shape) > 1:
-                return buffer_m.reshape(original_shape)
-            return buffer_m
+        result = check_and_handle_empty_buffer(buffer_m, original_shape, original_size, worker_error, server_error)
+        if result is not None:
+            return result
         cupy.cuda.Device(local_rank).use()
 
         if original_size != worker_error_size:
