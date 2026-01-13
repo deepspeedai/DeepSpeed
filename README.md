@@ -186,8 +186,8 @@ Thanks so much to all of our amazing contributors!
 ## Developer Certificate of Origin
 This project welcomes contributions and suggestions. Most contributions require you to
 agree to a Developer Certificate of Origin (DCO)[https://wiki.linuxfoundation.org/dco]
-stating that they agree to the terms published at https://developercertificate for that
-*particular* contribution.
+stating that they agree to the terms published at https://developercertificate.org for
+that *particular* contribution.
 
 DCOs are per-commit, so each commit needs to be signed off.  These can be signed in
 the commit by adding the `-s` flag.  DCO enforcement can also be signed off in the PR
