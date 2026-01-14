@@ -271,9 +271,10 @@ class DeepSpeedZeroConfig(DeepSpeedConfigModel):
 
     allgather_single_param: bool = Field(default=False, alias="stage3_allgather_single_param")
     """
-    Enables allgather on individual parameters instead of parameter lists in stage3.
-    Reduces peak memory usage and improves performance in high memory pressure scenarios
-    by minimizing temporary buffers required for parameter gathering.
+    Enables allgather on individual parameters directly, bypassing the standard parameter bucketing mechanism
+    in stage3. This significantly reduces data copy overhead (eliminating copy-to-bucket operations)
+    and lowers peak memory usage by avoiding the allocation of large temporary flattening buffers.
+    Recommended for scenarios with high memory pressure.
     """
 
     stage3_gather_fp16_weights_on_model_save: bool = Field(False,
