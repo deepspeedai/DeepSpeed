@@ -2004,47 +2004,46 @@ class Init(InsertPostInitMethodToModuleSubClasses):
                 tensor_size = partition_size * self.num_partitions
 
                 flat_tensor = torch.empty(tensor_size, dtype=param.ds_tensor.dtype, device=self.local_device)
-                flat_tensor.requires_grad = False
+                if self.use_all_gather_into_tensor:
+                    dist.all_gather_into_tensor(flat_tensor,
+                                                param.ds_tensor.to(get_accelerator().device_name()),
+                                                group=self.get_partition_dp_group(param),
+                                                async_op=False)
+                else:
+                    partitions = []
+                    for i in range(self.num_partitions):
+                        partitions.append(flat_tensor.narrow(0, partition_size * i, partition_size))
+                        if i == self.get_partition_rank():
+                            partitions[i].data.copy_(param.ds_tensor.data, non_blocking=True)
+                    dist.all_gather(partitions,
+                                    partitions[self.get_partition_rank()],
+                                    group=self.get_partition_dp_group(param),
+                                    async_op=False)
 
-                partitions = []
-                for i in range(self.num_partitions):
-                    start = partition_size * i
-                    partitioned_tensor = flat_tensor.narrow(0, start, partition_size)
-                    partitions.append(partitioned_tensor)
-
-                    if i == self.get_partition_rank():
-                        partitioned_tensor.copy_(param.ds_tensor.data)
-
-                if hasattr(param, 'ds_quant_scale'):
+                if hasattr(param.ds_tensor, 'ds_quant_scale'):
                     scale_size = param.ds_tensor.ds_quant_scale.numel()
                     scale_tensor_size = scale_size * self.num_partitions
                     flat_scale_tensor = torch.empty(scale_tensor_size,
                                                     dtype=param.ds_tensor.ds_quant_scale.dtype,
                                                     device=self.local_device)
-                    flat_scale_tensor.requires_grad = False
+                    if self.use_all_gather_into_tensor:
+                        dist.all_gather_into_tensor(flat_scale_tensor,
+                                                    param.ds_tensor.ds_quant_scale.to(get_accelerator().device_name()),
+                                                    group=self.get_partition_dp_group(param),
+                                                    async_op=False)
+                    else:
+                        scale_partitions = []
+                        for i in range(self.num_partitions):
+                            scale_partitions.append(flat_scale_tensor.narrow(0, scale_size * i, scale_size))
+                            if i == self.get_partition_rank():
+                                scale_partitions[i].data.copy_(param.ds_tensor.ds_quant_scale.data, non_blocking=True)
+                        dist.all_gather(scale_partitions,
+                                        scale_partitions[self.get_partition_rank()],
+                                        group=self.get_partition_dp_group(param),
+                                        async_op=False)
+                    flat_tensor = self.quantizer_module.dequantize(flat_tensor, flat_scale_tensor)
 
-                    scale_partitions = []
-                    for i in range(self.num_partitions):
-                        start = scale_size * i
-                        scale_partitions.append(flat_scale_tensor.narrow(0, start, scale_size))
-                        if i == self.get_partition_rank():
-                            scale_partitions[i].copy_(param.ds_tensor.ds_quant_scale.data)
-
-                dist.all_gather_into_tensor(flat_tensor,
-                                            partitions[self.get_partition_rank()],
-                                            group=self.get_partition_dp_group(param),
-                                            async_op=False)
-
-                if hasattr(param, 'ds_quant_scale'):
-                    dist.all_gather(flat_scale_tensor,
-                                    param.ds_tensor.ds_quant_scale,
-                                    group=self.get_partition_dp_group(param),
-                                    async_op=False)
-
-                param.data = flat_tensor.narrow(0, 0, param.ds_numel).view(param.ds_shape).data
-
-                if hasattr(param, 'ds_quant_scale'):
-                    param.data = self.quantizer_module.dequantize(param.data, flat_scale_tensor)
+                param.data = flat_tensor.narrow(0, 0, param.ds_numel).view(param.ds_shape)
         else:
             partition_size = sum([param.ds_tensor.ds_numel for param in param_list])
 
