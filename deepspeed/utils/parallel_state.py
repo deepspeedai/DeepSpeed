@@ -150,16 +150,32 @@ def generate_masked_orthogonal_rank_groups(world_size: int, parallel_size: List[
 class RankGenerator:
     """A class for generating rank groups for different modes of parallelism."""
 
-    def __init__(self, tp: int, ep: int, dp: int, pp: int, cp: int, order: str, rank_offset: int = 0) -> None:
+    def __init__(self, tp: int, ep: int, dp: int, pp: int, cp: int, sp: int, order: str, rank_offset: int = 0) -> None:
         assert (ep == 1 or cp == 1), "Both EP and CP > 1 is not allowed in one rank generator."
+
+        # Check SP compatibility: SP cannot be used with TP, PP, or EP
+        if sp > 1:
+            if tp > 1:
+                raise RuntimeError(f"Sequence Parallel (SP) cannot be used together with Tensor Parallel (TP). "
+                                   f"SP size: {sp}, TP size: {tp}. "
+                                   "Please set tp=1 when using SP.")
+            if pp > 1:
+                raise RuntimeError(f"Sequence Parallel (SP) cannot be used together with Pipeline Parallel (PP). "
+                                   f"SP size: {sp}, PP size: {pp}. "
+                                   "Please set pp=1 when using SP.")
+            if ep > 1:
+                raise RuntimeError(f"Sequence Parallel (SP) cannot be used together with Expert Parallel (EP). "
+                                   f"SP size: {sp}, EP size: {ep}. "
+                                   "Please set ep=1 when using SP.")
 
         self.tp = tp
         self.ep = ep
         self.dp = dp
         self.pp = pp
         self.cp = cp
+        self.sp = sp
         self.rank_offset = rank_offset
-        self.world_size = tp * dp * pp * cp * ep
+        self.world_size = tp * dp * pp * cp * ep * sp
 
         self.name_to_size = {
             "tp": self.tp,
@@ -167,6 +183,7 @@ class RankGenerator:
             "dp": self.dp,
             "ep": self.ep,
             "cp": self.cp,
+            "sp": self.sp,
         }
         self.order = order
         order = order.lower()
@@ -230,6 +247,10 @@ class ParallelState:
         self.tensor_and_data_parallel_group_with_cp = None
         self.data_parallel_group_with_cp = None
         self.data_parallel_group_with_cp_gloo = None
+
+        # Sequence parallel groups
+        self.sequence_parallel_group = None
+        self.sequence_and_data_parallel_group = None
 
         # Expert-related groups
         self.expert_model_parallel_group = None
@@ -384,12 +405,13 @@ class ParallelState:
         virtual_pipeline_model_parallel_size: Optional[int] = None,
         pipeline_model_parallel_comm_backend: Optional[str] = None,
         context_parallel_size: int = 1,
+        sequence_parallel_size: int = 1,
         hierarchical_context_parallel_sizes: Optional[List[int]] = None,
         expert_model_parallel_size: int = 1,
         num_distributed_optimizer_instances: int = 1,
         expert_tensor_parallel_size: Optional[int] = None,
         distributed_timeout_minutes: int = 30,
-        order: str = "tp-cp-ep-dp-pp",
+        order: str = "tp-ep-dp-pp",
         get_embedding_ranks: Optional[Callable[[List[int], Optional[int]], List[int]]] = None,
         get_position_embedding_ranks: Optional[Callable[[List[int], Optional[int]], List[int]]] = None,
         create_gloo_process_groups: bool = True,
@@ -446,6 +468,7 @@ class ParallelState:
             cp=context_parallel_size,
             order=order,
             rank_offset=0,
+            sp=1,
         )
 
         # Build expert rank generator
@@ -467,6 +490,7 @@ class ParallelState:
             cp=1,
             order=order,
             rank_offset=0,
+            sp=1,
         )
 
         timeout = timedelta(minutes=distributed_timeout_minutes)
@@ -791,6 +815,48 @@ class ParallelState:
                     self.intra_distributed_optimizer_instance_group = intra_dist_opt_instance_group
                 intra_dist_opt_ranks = []
 
+        # Build sequence parallel groups
+        if sequence_parallel_size > 1:
+            assert self.sequence_parallel_group is None, "sequence parallel group is already initialized"
+            assert self.sequence_and_data_parallel_group is None, "sequence and data parallel group is already initialized"
+
+            if world_size < sequence_parallel_size:
+                raise RuntimeError(
+                    f"world_size ({world_size}) is less than sequence_parallel_size ({sequence_parallel_size})")
+
+            if world_size % sequence_parallel_size != 0:
+                raise RuntimeError(
+                    f"world_size ({world_size}) is not divisible by sequence_parallel_size ({sequence_parallel_size})")
+
+            sp_data_parallel_size = world_size // sequence_parallel_size
+            sequence_and_data_parallel_size = sequence_parallel_size * sp_data_parallel_size
+            num_sequence_parallel_groups = world_size // sequence_parallel_size
+            num_sequence_and_data_parallel_groups = world_size // sequence_and_data_parallel_size
+
+            # Build the sequence parallel groups
+            for i in range(num_sequence_parallel_groups):
+                ranks = list(range(i * sequence_parallel_size, (i + 1) * sequence_parallel_size))
+                group = self._create_group(
+                    ranks,
+                    timeout=timeout,
+                    pg_options=self._get_pg_options("sp", pg_comm_cfgs),
+                    group_desc="SEQUENCE_PARALLEL_GROUP",
+                )
+                if rank in ranks:
+                    self.sequence_parallel_group = group
+
+            # Build the sequence and data parallel groups
+            for i in range(num_sequence_and_data_parallel_groups):
+                ranks = list(range(i * sequence_and_data_parallel_size, (i + 1) * sequence_and_data_parallel_size))
+                group = self._create_group(
+                    ranks,
+                    timeout=timeout,
+                    pg_options=self._get_pg_options("sp_dp", pg_comm_cfgs),
+                    group_desc="SEQUENCE_AND_DATA_PARALLEL_GROUP",
+                )
+                if rank in ranks:
+                    self.sequence_and_data_parallel_group = group
+
         # Initialize global memory buffer
         self._set_global_memory_buffer()
 
@@ -836,6 +902,18 @@ class ParallelState:
         if check_initialized:
             assert self.context_parallel_group is not None, "context parallel group is not initialized"
         return self.context_parallel_group
+
+    def get_sequence_parallel_group(self, check_initialized=True):
+        """Get the sequence-parallel group the caller rank belongs to."""
+        if check_initialized:
+            assert self.sequence_parallel_group is not None, "sequence parallel group is not initialized"
+        return self.sequence_parallel_group
+
+    def get_sequence_and_data_parallel_group(self, check_initialized=True):
+        """Get the sequence and data parallel group the caller rank belongs to."""
+        if check_initialized:
+            assert self.sequence_and_data_parallel_group is not None, "sequence and data parallel group is not initialized"
+        return self.sequence_and_data_parallel_group
 
     def get_embedding_group(self, check_initialized=True):
         """Get the embedding group the caller rank belongs to."""
@@ -918,6 +996,34 @@ class ParallelState:
             return self.get_context_parallel_group().rank()
         else:
             return 0
+
+    def get_sequence_parallel_world_size(self):
+        """Return world size for the sequence parallel group."""
+        if dist.is_available() and dist.is_initialized():
+            if self.sequence_parallel_group is not None:
+                return self.get_sequence_parallel_group().size()
+        return 1
+
+    def get_sequence_parallel_rank(self):
+        """Return caller's rank in the sequence-parallel group."""
+        if dist.is_available() and dist.is_initialized():
+            if self.sequence_parallel_group is not None:
+                return self.get_sequence_parallel_group().rank()
+        return 0
+
+    def get_sequence_and_data_parallel_world_size(self):
+        """Return world size for the sequence and data parallel group."""
+        if dist.is_available() and dist.is_initialized():
+            if self.sequence_and_data_parallel_group is not None:
+                return self.get_sequence_and_data_parallel_group().size()
+        return 0
+
+    def get_sequence_and_data_parallel_rank(self):
+        """Return caller's rank in the sequence and data parallel group."""
+        if dist.is_available() and dist.is_initialized():
+            if self.sequence_and_data_parallel_group is not None:
+                return self.get_sequence_and_data_parallel_group().rank()
+        return 0
 
     def is_initialized(self):
         """Check if parallel state has been initialized"""

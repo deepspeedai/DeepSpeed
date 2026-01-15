@@ -402,6 +402,77 @@ def get_context_parallel_rank(name: Optional[str] = None):
 
 
 # ============================================================================
+# Sequence Parallel Functions
+# ============================================================================
+
+
+def get_sequence_parallel_group(name: Optional[str] = None):
+    """Get the sequence-parallel group the caller rank belongs to.
+
+    Args:
+        name: Optional name of the parallel state instance. If None, uses current active instance.
+
+    DeepSpeed-compatible interface.
+    """
+    return get_parallel_state(name).get_sequence_parallel_group()
+
+
+def get_sequence_parallel_world_size(name: Optional[str] = None):
+    """Return world size for the sequence parallel group.
+
+    Args:
+        name: Optional name of the parallel state instance. If None, uses current active instance.
+
+    DeepSpeed-compatible interface.
+    """
+    return get_parallel_state(name).get_sequence_parallel_world_size()
+
+
+def get_sequence_parallel_rank(name: Optional[str] = None):
+    """Return caller's rank in the sequence-parallel group.
+
+    Args:
+        name: Optional name of the parallel state instance. If None, uses current active instance.
+
+    DeepSpeed-compatible interface.
+    """
+    return get_parallel_state(name).get_sequence_parallel_rank()
+
+
+def get_sequence_and_data_parallel_group(name: Optional[str] = None):
+    """Get the sequence and data parallel group the caller rank belongs to.
+
+    Args:
+        name: Optional name of the parallel state instance. If None, uses current active instance.
+
+    DeepSpeed-compatible interface.
+    """
+    return get_parallel_state(name).get_sequence_and_data_parallel_group()
+
+
+def get_sequence_and_data_parallel_world_size(name: Optional[str] = None):
+    """Return world size for the sequence and data parallel group.
+
+    Args:
+        name: Optional name of the parallel state instance. If None, uses current active instance.
+
+    DeepSpeed-compatible interface.
+    """
+    return get_parallel_state(name).get_sequence_and_data_parallel_world_size()
+
+
+def get_sequence_and_data_parallel_rank(name: Optional[str] = None):
+    """Return caller's rank in the sequence and data parallel group.
+
+    Args:
+        name: Optional name of the parallel state instance. If None, uses current active instance.
+
+    DeepSpeed-compatible interface.
+    """
+    return get_parallel_state(name).get_sequence_and_data_parallel_rank()
+
+
+# ============================================================================
 # Expert Parallel Functions
 # ============================================================================
 
@@ -638,12 +709,20 @@ def initialize_parallel_state_from_config(
             "distributed_timeout_minutes": 30,
             "order": "tp-ep-dp-pp",
             "create_gloo_process_groups": true,
-            "high_priority_stream_groups": null
+            "high_priority_stream_groups": null,
+            "sequence_parallel_size": 1
           },
 
           // Note: The following parameters are NOT supported in DeepSpeed:
           // - "context_parallel_size": must be 1 (default)
           // - "hierarchical_context_parallel_sizes": not supported
+
+          // Sequence Parallel (SP) usage notes:
+          // - SP cannot be used together with TP, PP, or EP
+          // - When using SP, set tp=1, pp=1, ep=1
+          // - Example SP config: {"sequence_parallel_size": 4, "order": "sp-dp"}
+          // - SP can be combined with DP: {"sequence_parallel_size": 4, "data_parallel_size": 2, "order": "sp-dp"}
+
           "train_batch_size": 8,
           ...
         }
