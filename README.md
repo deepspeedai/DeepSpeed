@@ -185,7 +185,7 @@ Thanks so much to all of our amazing contributors!
 
 ## Developer Certificate of Origin
 This project welcomes contributions and suggestions. Most contributions require you to
-agree to a Developer Certificate of Origin (DCO)[https://wiki.linuxfoundation.org/dco]
+agree to a Developer Certificate of Origin [DCO](https://wiki.linuxfoundation.org/dco)
 stating that they agree to the terms published at https://developercertificate.org for
 that *particular* contribution.
 
