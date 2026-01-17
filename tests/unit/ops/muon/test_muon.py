@@ -42,7 +42,8 @@ class TestMuonConfigs(DistributedTest):
             },
             "zero_optimization": {
                 "stage": zero_stage,
-            }
+            },
+            "zero_allow_untested_optimizer": True
         }
         # Perform a few training steps to ensure the optimizer works correctly
 

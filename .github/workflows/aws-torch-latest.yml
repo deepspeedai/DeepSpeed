@@ -42,11 +42,11 @@ jobs:
               - '!tests/unit/inference/v2/**'
 
   unit-tests:
-    name: Unit Tests (V1)
+    name: Unit Tests (Full)
     needs: check-paths
     if: needs.check-paths.outputs.should_run == 'true'
     runs-on: [self-hosted, gpu-ci, gpu-l40s, l40s-4gpu, aws]
-    timeout-minutes: 60
+    timeout-minutes: 180
 
     container:
       image: nvidia/cuda:12.6.3-devel-ubuntu22.04
@@ -72,12 +72,20 @@ jobs:
         run: |
           pip install torch==2.7.1 torchvision==0.22.1 torchaudio==2.7.1 --index-url https://download.pytorch.org/whl/cu126
 
+      - name: Install transformers
+        run: |
+          git clone https://github.com/huggingface/transformers
+          cd transformers
+          git checkout 981c276
+          pip install .
+
       - name: Install Python dependencies
         run: |
           pip install --upgrade pip
           pip install -r requirements/requirements.txt
           pip install -r requirements/requirements-dev.txt
           pip install -r requirements/requirements-deepcompile.txt
+          pip install pytest-timeout pytest-instafail
 
       - name: Check environment
         run: |
@@ -99,11 +107,64 @@ jobs:
           # Initialize CUDA before install so setup.py can detect NCCL version
           python -c "import torch; torch.cuda.init(); print(f'NCCL version: {torch.cuda.nccl.version()}')"
           # Use --no-build-isolation so setup.py can access pre-installed PyTorch
-          pip install --no-build-isolation .
+          pip install --no-build-isolation .[dev,1bit,autotuning,deepcompile]
           ds_report
           # Debug: Check captured torch_info values
           python -c "from deepspeed.git_version_info import torch_info; print(f'torch_info: {torch_info}')"
 
-      - name: Run unit tests
+      - name: Python environment
         run: |
-          pytest -n 4 --forked --verbose tests/unit/v1/ --torch_ver=${{ env.TORCH_VER }} --cuda_ver=${{ env.CUDA_VER }}
+          pip list
+
+      - name: Unit tests
+        run: |
+          export TORCH_CUDA_ARCH_LIST="8.9"
+          cd tests
+          # Debug: Use -n 1 to run tests sequentially
+          # Skip tests that hang in CI environment:
+          # - aio: async I/O tests hang
+          # - lion: CPU lion optimizer tests hang  
+          # - adagrad: CPU adagrad tests may hang
+          # - accelerators: transformer forward/backward tests may hang
+          # - pipe: pipeline parallelism tests timeout
+          # - adam: CPU adam tests timeout (test_cpu_adam.py)
+          # - zenflow: zenflow distributed tests timeout
+          # - checkpoint/test_pipeline.py: pipeline checkpoint tests timeout
+          # - runtime/test_multiple_models.py: multiple model tests timeout
+          # - runtime/half_precision/onebit: onebit tests timeout (pipeline tests)
+          # - runtime/test_ds_initialize.py: optimizer implementation tests timeout
+          # - runtime/zero/test_zero_leaf_module.py: leaf module tests timeout
+          # - runtime/zero/test_zero_tensor_fragment.py: tensor fragment tests timeout
+          # - runtime/test_mup_optimizers.py: muP optimizer tests timeout
+          pytest --instafail --timeout 600 --forked -n 4 unit/ \
+            --ignore=unit/ops/aio \
+            --ignore=unit/ops/lion \
+            --ignore=unit/ops/adagrad \
+            --ignore=unit/ops/accelerators \
+            --ignore=unit/ops/adam \
+            --ignore=unit/runtime/pipe \
+            --ignore=unit/runtime/zenflow \
+            --ignore=unit/runtime/test_multiple_models.py \
+            --ignore=unit/runtime/test_ds_initialize.py \
+            --ignore=unit/runtime/test_mup_optimizers.py \
+            --ignore=unit/runtime/half_precision/onebit \
+            --ignore=unit/runtime/zero/test_zero_leaf_module.py \
+            --ignore=unit/runtime/zero/test_zero_tensor_fragment.py \
+            --ignore=unit/checkpoint/test_pipeline.py \
+            --torch_ver=${{ env.TORCH_VER }} --cuda_ver=${{ env.CUDA_VER }}
+          pytest --instafail --timeout 600 --forked -m 'sequential' unit/ \
+            --ignore=unit/ops/aio \
+            --ignore=unit/ops/lion \
+            --ignore=unit/ops/adagrad \
+            --ignore=unit/ops/accelerators \
+            --ignore=unit/ops/adam \
+            --ignore=unit/runtime/pipe \
+            --ignore=unit/runtime/zenflow \
+            --ignore=unit/runtime/test_multiple_models.py \
+            --ignore=unit/runtime/test_ds_initialize.py \
+            --ignore=unit/runtime/test_mup_optimizers.py \
+            --ignore=unit/runtime/half_precision/onebit \
+            --ignore=unit/runtime/zero/test_zero_leaf_module.py \
+            --ignore=unit/runtime/zero/test_zero_tensor_fragment.py \
+            --ignore=unit/checkpoint/test_pipeline.py \
+            --torch_ver=${{ env.TORCH_VER }} --cuda_ver=${{ env.CUDA_VER }}

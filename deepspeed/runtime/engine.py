@@ -3420,7 +3420,7 @@ class DeepSpeedEngine(Module):
             if self.optimizer is not None and hasattr(self.optimizer, 'refresh_fp32_params'):
                 self.optimizer.refresh_fp32_params()
         else:
-            has_zero_optimizer_state = self.zero_optimization() or self.bfloat16_enabled()
+            has_zero_optimizer_state = self.zero_optimization()
             if load_optimizer_states and self.optimizer is not None and not has_zero_optimizer_state:
                 if self.has_moe_layers:
                     largest_group_name = groups._get_max_expert_size_name()
@@ -3889,7 +3889,7 @@ class DeepSpeedEngine(Module):
 
         save_path = self._get_ckpt_name(save_dir, tag)
 
-        zero_optimizer_state = self.zero_optimization() or self.bfloat16_enabled()
+        zero_optimizer_state = self.zero_optimization()
 
         save_frozen_param = self.zero_optimization_partition_gradients() and not exclude_frozen_parameters
 
