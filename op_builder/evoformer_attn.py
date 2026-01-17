@@ -15,24 +15,24 @@ class EvoformerAttnBuilder(CUDAOpBuilder):
     def __init__(self, name=None):
         name = self.NAME if name is None else name
         super().__init__(name=name)
-        self.cutlass_path = os.environ.get('CUTLASS_PATH')
+        self.cutlass_path = os.environ.get("CUTLASS_PATH")
         # Target GPU architecture
         # Current useful values: >70, >75, >80, see gemm_kernel_utils.h
         # For modern GPUs, >80 is obfiously the right value
-        self.gpu_arch = os.environ.get('DS_EVOFORMER_GPU_ARCH')
+        self.gpu_arch = os.environ.get("DS_EVOFORMER_GPU_ARCH")
 
     def absolute_name(self):
-        return f'deepspeed.ops.{self.NAME}_op'
+        return f"deepspeed.ops.{self.NAME}_op"
 
     def extra_ldflags(self):
         if not self.is_rocm_pytorch():
-            return ['-lcurand']
+            return ["-lcurand"]
         else:
             return []
 
     def sources(self):
-        src_dir = 'csrc/deepspeed4science/evoformer_attn'
-        return [f'{src_dir}/attention.cpp', f'{src_dir}/attention_back.cu', f'{src_dir}/attention_cu.cu']
+        src_dir = "csrc/deepspeed4science/evoformer_attn"
+        return [f"{src_dir}/attention.cpp", f"{src_dir}/attention_back.cu", f"{src_dir}/attention_cu.cu"]
 
     def nvcc_args(self):
         args = super().nvcc_args()
@@ -69,9 +69,9 @@ class EvoformerAttnBuilder(CUDAOpBuilder):
             except (RuntimeError, ImportError):
                 return False
             # Check version in case it is a CUTLASS_PATH points to a CUTLASS checkout
-            if os.path.exists(f'{self.cutlass_path}/CHANGELOG.md'):
-                with open(f'{self.cutlass_path}/CHANGELOG.md', 'r') as f:
-                    if '3.1.0' not in f.read():
+            if os.path.exists(f"{self.cutlass_path}/CHANGELOG.md"):
+                with open(f"{self.cutlass_path}/CHANGELOG.md", "r") as f:
+                    if "3.1.0" not in f.read():
                         if verbose:
                             self.warning("Please use CUTLASS version >= 3.1.0")
                         return False
@@ -81,7 +81,7 @@ class EvoformerAttnBuilder(CUDAOpBuilder):
         if not os.environ.get("DS_IGNORE_CUDA_DETECTION"):
             if not self.is_rocm_pytorch() and torch.cuda.is_available():  #ignore-cuda
                 sys_cuda_major, _ = installed_cuda_version()
-                torch_cuda_major = int(torch.version.cuda.split('.')[0])
+                torch_cuda_major = int(torch.version.cuda.split(".")[0])
                 cuda_capability = torch.cuda.get_device_properties(0).major  #ignore-cuda
                 if cuda_capability < 7:
                     if verbose:
