@@ -123,55 +123,11 @@ jobs:
         run: |
           export TORCH_CUDA_ARCH_LIST="8.9"
           cd tests
-          # Debug: Use -n 1 to run tests sequentially
-          # Skip tests that hang in CI environment:
-          # - aio: async I/O tests (enabled - using DS_DISABLE_REUSE_DIST_ENV=1 and /mnt/aio mount)
-          # - lion: CPU lion optimizer tests hang  
-          # - adagrad: CPU adagrad tests may hang
-          # - accelerators: transformer forward/backward tests may hang
-          # - pipe: pipeline parallelism tests timeout
-          # - adam: CPU adam tests timeout (test_cpu_adam.py)
-          # - zenflow: zenflow distributed tests timeout
-          # - checkpoint/test_pipeline.py: pipeline checkpoint tests timeout
-          # - runtime/test_multiple_models.py: multiple model tests timeout
-          # - runtime/half_precision/onebit: onebit tests timeout (pipeline tests)
-          # - runtime/test_ds_initialize.py: optimizer implementation tests timeout
-          # - runtime/zero/test_zero_leaf_module.py: leaf module tests timeout
-          # - runtime/zero/test_zero_tensor_fragment.py: tensor fragment tests timeout
-          # - runtime/test_mup_optimizers.py: muP optimizer tests timeout
-          # - launcher/test_user_args.py: shell quoting edge cases fail in CI
-          # - runtime/zero/test_nvme_checkpointing.py: nvme tests fail in CI (no nvme device)
+          # Run full test suite with DS_DISABLE_REUSE_DIST_ENV=1 to prevent pool worker hangs
+          # Only skip nvme tests (no nvme device in CI)
           pytest --instafail --timeout 600 --forked -n 4 --basetemp=/mnt/aio unit/ \
-            --ignore=unit/ops/lion \
-            --ignore=unit/ops/adagrad \
-            --ignore=unit/ops/accelerators \
-            --ignore=unit/ops/adam \
-            --ignore=unit/runtime/pipe \
-            --ignore=unit/runtime/zenflow \
-            --ignore=unit/runtime/test_multiple_models.py \
-            --ignore=unit/runtime/test_ds_initialize.py \
-            --ignore=unit/runtime/test_mup_optimizers.py \
-            --ignore=unit/runtime/half_precision/onebit \
-            --ignore=unit/runtime/zero/test_zero_leaf_module.py \
-            --ignore=unit/runtime/zero/test_zero_tensor_fragment.py \
-            --ignore=unit/checkpoint/test_pipeline.py \
-            --ignore=unit/launcher/test_user_args.py \
             --ignore=unit/runtime/zero/test_nvme_checkpointing.py \
             --torch_ver=${{ env.TORCH_VER }} --cuda_ver=${{ env.CUDA_VER }}
           pytest --instafail --timeout 600 --forked -m 'sequential' --basetemp=/mnt/aio unit/ \
-            --ignore=unit/ops/lion \
-            --ignore=unit/ops/adagrad \
-            --ignore=unit/ops/accelerators \
-            --ignore=unit/ops/adam \
-            --ignore=unit/runtime/pipe \
-            --ignore=unit/runtime/zenflow \
-            --ignore=unit/runtime/test_multiple_models.py \
-            --ignore=unit/runtime/test_ds_initialize.py \
-            --ignore=unit/runtime/test_mup_optimizers.py \
-            --ignore=unit/runtime/half_precision/onebit \
-            --ignore=unit/runtime/zero/test_zero_leaf_module.py \
-            --ignore=unit/runtime/zero/test_zero_tensor_fragment.py \
-            --ignore=unit/checkpoint/test_pipeline.py \
-            --ignore=unit/launcher/test_user_args.py \
             --ignore=unit/runtime/zero/test_nvme_checkpointing.py \
             --torch_ver=${{ env.TORCH_VER }} --cuda_ver=${{ env.CUDA_VER }}
