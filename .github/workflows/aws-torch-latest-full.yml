@@ -95,5 +95,6 @@ jobs:
         run: |
           unset TORCH_CUDA_ARCH_LIST # only jit compile for current arch
           cd tests
-          pytest -x --instafail --timeout 600 --forked -n 8 unit/ --torch_ver=${{ env.TORCH_VER }} --cuda_ver=${{ env.CUDA_VER }}
+          # Use -n 1 to run tests sequentially to avoid parallel execution issues
+          pytest -x --instafail --timeout 600 --forked -n 1 unit/ --torch_ver=${{ env.TORCH_VER }} --cuda_ver=${{ env.CUDA_VER }}
           pytest --instafail --timeout 600 --forked -m 'sequential' unit/ --torch_ver=${{ env.TORCH_VER }} --cuda_ver=${{ env.CUDA_VER }}

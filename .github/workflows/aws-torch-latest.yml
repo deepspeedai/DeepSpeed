@@ -42,11 +42,11 @@ jobs:
               - '!tests/unit/inference/v2/**'
 
   unit-tests:
-    name: Unit Tests (V1)
+    name: Unit Tests (Full)
     needs: check-paths
     if: needs.check-paths.outputs.should_run == 'true'
     runs-on: [self-hosted, gpu-ci, gpu-l40s, l40s-4gpu, aws]
-    timeout-minutes: 60
+    timeout-minutes: 180
 
     container:
       image: nvidia/cuda:12.6.3-devel-ubuntu22.04
@@ -72,12 +72,20 @@ jobs:
         run: |
           pip install torch==2.7.1 torchvision==0.22.1 torchaudio==2.7.1 --index-url https://download.pytorch.org/whl/cu126
 
+      - name: Install transformers
+        run: |
+          git clone https://github.com/huggingface/transformers
+          cd transformers
+          git checkout 981c276
+          pip install .
+
       - name: Install Python dependencies
         run: |
           pip install --upgrade pip
           pip install -r requirements/requirements.txt
           pip install -r requirements/requirements-dev.txt
           pip install -r requirements/requirements-deepcompile.txt
+          pip install pytest-timeout pytest-instafail
 
       - name: Check environment
         run: |
@@ -99,11 +107,19 @@ jobs:
           # Initialize CUDA before install so setup.py can detect NCCL version
           python -c "import torch; torch.cuda.init(); print(f'NCCL version: {torch.cuda.nccl.version()}')"
           # Use --no-build-isolation so setup.py can access pre-installed PyTorch
-          pip install --no-build-isolation .
+          pip install --no-build-isolation .[dev,1bit,autotuning,deepcompile]
           ds_report
           # Debug: Check captured torch_info values
           python -c "from deepspeed.git_version_info import torch_info; print(f'torch_info: {torch_info}')"
 
-      - name: Run unit tests
+      - name: Python environment
         run: |
-          pytest -n 4 --forked --verbose tests/unit/v1/ --torch_ver=${{ env.TORCH_VER }} --cuda_ver=${{ env.CUDA_VER }}
+          pip list
+
+      - name: Unit tests
+        run: |
+          unset TORCH_CUDA_ARCH_LIST
+          cd tests
+          # Debug: Use -n 1 to run tests sequentially
+          pytest -x --instafail --timeout 600 --forked -n 1 unit/ --torch_ver=${{ env.TORCH_VER }} --cuda_ver=${{ env.CUDA_VER }}
+          pytest --instafail --timeout 600 --forked -m 'sequential' unit/ --torch_ver=${{ env.TORCH_VER }} --cuda_ver=${{ env.CUDA_VER }}
