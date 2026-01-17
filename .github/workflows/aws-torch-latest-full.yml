@@ -23,11 +23,14 @@ jobs:
 
     container:
       image: nvidia/cuda:12.6.3-devel-ubuntu22.04
-      options: --gpus all --shm-size "32G"
+      # Mount /mnt/aio for async I/O tests (O_DIRECT requires native filesystem, not overlayfs)
+      options: --gpus all --shm-size "32G" -v /mnt/aio:/mnt/aio
 
     env:
       TORCH_VER: "2.7"
       CUDA_VER: "12.6"
+      # Disable reuse_dist_env to prevent pool worker cleanup hangs in full test runs
+      DS_DISABLE_REUSE_DIST_ENV: "1"
 
     steps:
       - name: Install system dependencies
@@ -96,5 +99,6 @@ jobs:
           unset TORCH_CUDA_ARCH_LIST # only jit compile for current arch
           cd tests
           # Use -n 1 to run tests sequentially to avoid parallel execution issues
-          pytest -x --instafail --timeout 600 --forked -n 1 unit/ --torch_ver=${{ env.TORCH_VER }} --cuda_ver=${{ env.CUDA_VER }}
-          pytest --instafail --timeout 600 --forked -m 'sequential' unit/ --torch_ver=${{ env.TORCH_VER }} --cuda_ver=${{ env.CUDA_VER }}
+          # Use --basetemp=/mnt/aio for async I/O tests (O_DIRECT requires native filesystem)
+          pytest -x --instafail --timeout 600 --forked -n 1 --basetemp=/mnt/aio unit/ --torch_ver=${{ env.TORCH_VER }} --cuda_ver=${{ env.CUDA_VER }}
+          pytest --instafail --timeout 600 --forked -m 'sequential' --basetemp=/mnt/aio unit/ --torch_ver=${{ env.TORCH_VER }} --cuda_ver=${{ env.CUDA_VER }}

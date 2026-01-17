@@ -273,6 +273,12 @@ class DistributedExec(ABC):
             self.non_daemonic_procs = True
             self.reuse_dist_env = False
 
+        # Allow disabling reuse_dist_env via environment variable.
+        # This is useful for CI full test runs where reusing distributed environment
+        # can cause pool worker cleanup to hang after tests complete.
+        if os.environ.get('DS_DISABLE_REUSE_DIST_ENV', '0') == '1':
+            self.reuse_dist_env = False
+
         # Set start method to `forkserver` (or `fork`)
         mp.set_start_method('forkserver', force=True)
 
