@@ -137,6 +137,7 @@ jobs:
           # - runtime/zero/test_zero_tensor_fragment.py: tensor fragment tests timeout
           # - runtime/test_mup_optimizers.py: muP optimizer tests timeout
           # - launcher/test_user_args.py: shell quoting edge cases fail in CI
+          # - runtime/zero/test_nvme_checkpointing.py: nvme tests fail in CI (no nvme device)
           pytest --instafail --timeout 600 --forked -n 4 unit/ \
             --ignore=unit/ops/aio \
             --ignore=unit/ops/lion \
@@ -153,6 +154,7 @@ jobs:
             --ignore=unit/runtime/zero/test_zero_tensor_fragment.py \
             --ignore=unit/checkpoint/test_pipeline.py \
             --ignore=unit/launcher/test_user_args.py \
+            --ignore=unit/runtime/zero/test_nvme_checkpointing.py \
             --torch_ver=${{ env.TORCH_VER }} --cuda_ver=${{ env.CUDA_VER }}
           pytest --instafail --timeout 600 --forked -m 'sequential' unit/ \
             --ignore=unit/ops/aio \
@@ -170,4 +172,5 @@ jobs:
             --ignore=unit/runtime/zero/test_zero_tensor_fragment.py \
             --ignore=unit/checkpoint/test_pipeline.py \
             --ignore=unit/launcher/test_user_args.py \
+            --ignore=unit/runtime/zero/test_nvme_checkpointing.py \
             --torch_ver=${{ env.TORCH_VER }} --cuda_ver=${{ env.CUDA_VER }}
