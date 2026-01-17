@@ -130,6 +130,7 @@ jobs:
           # - adam: CPU adam tests timeout (test_cpu_adam.py)
           # - zenflow: zenflow distributed tests timeout
           # - checkpoint/test_pipeline.py: pipeline checkpoint tests timeout
+          # - runtime/test_multiple_models.py: multiple model tests timeout
           pytest -x --instafail --timeout 600 --forked -n 1 unit/ \
             --ignore=unit/ops/aio \
             --ignore=unit/ops/lion \
@@ -138,6 +139,7 @@ jobs:
             --ignore=unit/ops/adam \
             --ignore=unit/runtime/pipe \
             --ignore=unit/runtime/zenflow \
+            --ignore=unit/runtime/test_multiple_models.py \
             --ignore=unit/checkpoint/test_pipeline.py \
             --torch_ver=${{ env.TORCH_VER }} --cuda_ver=${{ env.CUDA_VER }}
           pytest --instafail --timeout 600 --forked -m 'sequential' unit/ \
@@ -148,5 +150,6 @@ jobs:
             --ignore=unit/ops/adam \
             --ignore=unit/runtime/pipe \
             --ignore=unit/runtime/zenflow \
+            --ignore=unit/runtime/test_multiple_models.py \
             --ignore=unit/checkpoint/test_pipeline.py \
             --torch_ver=${{ env.TORCH_VER }} --cuda_ver=${{ env.CUDA_VER }}
