@@ -5,7 +5,7 @@
 
 from .builder import CUDAOpBuilder, installed_cuda_version
 import os
-from packaging.version import Version
+from pathlib import Path
 
 
 class EvoformerAttnBuilder(CUDAOpBuilder):
@@ -49,28 +49,25 @@ class EvoformerAttnBuilder(CUDAOpBuilder):
             if verbose:
                 self.warning("Please install torch if trying to pre-compile kernels")
             return False
+
         if self.cutlass_path is None:
             if verbose:
-                self.warning("Please specify the CUTLASS repo directory as environment variable $CUTLASS_PATH")
+                self.warning("Please specify CUTLASS location directory as environment variable CUTLASS_PATH")
+                self.warning("Possible values are: a path, DS_IGNORE_CUTLASS_DETECTION and DS_USE_CUTLASS_PYTHON_BINDINGS")
             return False
-        if os.path.exists(f'{self.cutlass_path}/CHANGELOG.md'):
-            with open(f'{self.cutlass_path}/CHANGELOG.md', 'r') as f:
-                if '3.1.0' not in f.read():
-                    if verbose:
-                        self.warning("Please use CUTLASS version >= 3.1.0")
-                    return False
-        else:
-            # pip install nvidia-cutlass package
+
+        if self.cutlass_path != "DS_IGNORE_CUTLASS_DETECTION":
             try:
-                import cutlass
-            except ImportError:
-                if verbose:
-                    self.warning("Please pip install nvidia-cutlass if trying to pre-compile kernels")
+                self.include_paths()
+            except (RuntimeError, ImportError):
                 return False
-            if Version(cutlass.__version__) < Version('3.1.0'):
-                if verbose:
-                    self.warning("Please use CUTLASS version >= 3.1.0")
-                return False
+            # Check version in case it is a CUTLASS_PATH points to a CUTLASS checkout
+            if os.path.exists(f'{self.cutlass_path}/CHANGELOG.md'):
+                with open(f'{self.cutlass_path}/CHANGELOG.md', 'r') as f:
+                    if '3.1.0' not in f.read():
+                        if verbose:
+                            self.warning("Please use CUTLASS version >= 3.1.0")
+                        return False
 
         cuda_okay = True
         if not self.is_rocm_pytorch() and torch.cuda.is_available():  #ignore-cuda
@@ -88,5 +85,27 @@ class EvoformerAttnBuilder(CUDAOpBuilder):
         return super().is_compatible(verbose) and cuda_okay
 
     def include_paths(self):
-        includes = [f'{self.cutlass_path}/include', f'{self.cutlass_path}/tools/util/include']
-        return includes
+        # Assume the user knows best and CUTLASS location is already setup externally
+        if self.cutlass_path == "DS_IGNORE_CUTLASS_DETECTION":
+            return []
+        # Use header files vendored with deprecated python packages
+        if self.cutlass_path == "DS_USE_CUTLASS_PYTHON_BINDINGS":
+            try:
+                import cutlass_library
+                cutlass_path = Path(cutlass_library.__file__).parent / "source"
+            except ImportError:
+                self.warning(
+                    "Please pip install nvidia-cutlass (note that this is deprecated and likely outdated)"
+                )
+                raise
+        # Use hardcoded path in CUTLASS_PATH
+        else:
+            cutlass_path = Path(self.cutlass_path)
+        cutlass_path = cutlass_path.resolve()
+        if not cutlass_path.is_dir():
+            raise RuntimeError(f"CUTLASS_PATH {cutlass_path} does not exist")
+        include_dirs = cutlass_path / "include", cutlass_path / "tools" / "util" / "include"
+        include_dirs = [include_dir for include_dir in include_dirs if include_dir.is_dir()]
+        if not include_dirs:
+            raise RuntimeError(f"CUTLASS_PATH {cutlass_path} does not contain any include directories")
+        return include_dirs
