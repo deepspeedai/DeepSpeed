@@ -99,6 +99,8 @@ jobs:
           unset TORCH_CUDA_ARCH_LIST # only jit compile for current arch
           cd tests
           # Use -n 1 to run tests sequentially to avoid parallel execution issues
-          # Use --basetemp=/mnt/aio for async I/O tests (O_DIRECT requires native filesystem)
-          pytest -x --instafail --timeout 600 --forked -n 1 --basetemp=/mnt/aio unit/ --torch_ver=${{ env.TORCH_VER }} --cuda_ver=${{ env.CUDA_VER }}
-          pytest --instafail --timeout 600 --forked -m 'sequential' --basetemp=/mnt/aio unit/ --torch_ver=${{ env.TORCH_VER }} --cuda_ver=${{ env.CUDA_VER }}
+          # Use /mnt/aio/pytest as basetemp for O_DIRECT support in aio tests
+          rm -rf /mnt/aio/pytest
+          pytest -x --instafail --timeout 600 --forked -n 1 --basetemp=/mnt/aio/pytest unit/ --torch_ver=${{ env.TORCH_VER }} --cuda_ver=${{ env.CUDA_VER }}
+          rm -rf /mnt/aio/pytest
+          pytest --instafail --timeout 600 --forked -m 'sequential' --basetemp=/mnt/aio/pytest unit/ --torch_ver=${{ env.TORCH_VER }} --cuda_ver=${{ env.CUDA_VER }}

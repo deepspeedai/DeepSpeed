@@ -125,9 +125,12 @@ jobs:
           cd tests
           # Run full test suite with DS_DISABLE_REUSE_DIST_ENV=1 to prevent pool worker hangs
           # Only skip nvme tests (no nvme device in CI)
-          pytest --instafail --timeout 600 --forked -n 4 --basetemp=/mnt/aio unit/ \
+          # Use /mnt/aio/pytest as basetemp for O_DIRECT support in aio tests
+          rm -rf /mnt/aio/pytest
+          pytest --instafail --timeout 600 --forked -n 4 --basetemp=/mnt/aio/pytest unit/ \
             --ignore=unit/runtime/zero/test_nvme_checkpointing.py \
             --torch_ver=${{ env.TORCH_VER }} --cuda_ver=${{ env.CUDA_VER }}
-          pytest --instafail --timeout 600 --forked -m 'sequential' --basetemp=/mnt/aio unit/ \
+          rm -rf /mnt/aio/pytest
+          pytest --instafail --timeout 600 --forked -m 'sequential' --basetemp=/mnt/aio/pytest unit/ \
             --ignore=unit/runtime/zero/test_nvme_checkpointing.py \
             --torch_ver=${{ env.TORCH_VER }} --cuda_ver=${{ env.CUDA_VER }}
