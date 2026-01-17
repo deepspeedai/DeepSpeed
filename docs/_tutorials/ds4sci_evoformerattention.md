@@ -13,8 +13,13 @@ tags: training inference
 
 ### 3.1 Installation
 
-`DS4Sci_EvoformerAttention` is released as part of DeepSpeed >= 0.10.3. `DS4Sci_EvoformerAttention` is implemented based on [CUTLASS](https://github.com/NVIDIA/cutlass). You need to clone the CUTLASS repository and specify the path to it in the environment variable `CUTLASS_PATH`.
+`DS4Sci_EvoformerAttention` is released as part of DeepSpeed >= 0.10.3.
 
+`DS4Sci_EvoformerAttention` is implemented based on [CUTLASS](https://github.com/NVIDIA/cutlass). You need to clone the CUTLASS repository and specify the path to it in the environment variable `CUTLASS_PATH`.
+CUTLASS setup detection can be ignored by setting ```CUTLASS_PATH="DS_IGNORE_CUTLASS_DETECTION"```, which is useful if you have a well setup compiler (e.g., compiling in a conda package with cutlass and the cuda compilers installed).
+CUTLASS location can be automatically inferred using pypi's [nvidia-cutlass](https://pypi.org/project/nvidia-cutlass/) package by setting ```CUTLASS_PATH="DS_USE_CUTLASS_PYTHON_BINDINGS"```. Note that this is discouraged as ```nvidia-cutlass``` is not maintained anymore and outdated.
+
+You can always simply clone cutlass and setup ```CUTLASS_PATH```:
 ```shell
 git clone https://github.com/NVIDIA/cutlass
 export CUTLASS_PATH=/path/to/cutlass
