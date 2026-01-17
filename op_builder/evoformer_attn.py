@@ -16,6 +16,10 @@ class EvoformerAttnBuilder(CUDAOpBuilder):
         name = self.NAME if name is None else name
         super().__init__(name=name)
         self.cutlass_path = os.environ.get('CUTLASS_PATH')
+        # Target GPU architecture
+        # Current useful values: >70, >75, >80, see gemm_kernel_utils.h
+        # For modern GPUs, >80 is obfiously the right value
+        self.gpu_arch = os.environ.get('DS_EVOFORMER_GPU_ARCH')
 
     def absolute_name(self):
         return f'deepspeed.ops.{self.NAME}_op'
@@ -32,14 +36,17 @@ class EvoformerAttnBuilder(CUDAOpBuilder):
 
     def nvcc_args(self):
         args = super().nvcc_args()
-        try:
-            import torch
-        except ImportError:
-            self.warning("Please install torch if trying to pre-compile kernels")
-            return args
-        major = torch.cuda.get_device_properties(0).major  #ignore-cuda
-        minor = torch.cuda.get_device_properties(0).minor  #ignore-cuda
-        args.append(f"-DGPU_ARCH={major}{minor}")
+        if not self.gpu_arch:
+            try:
+                import torch
+            except ImportError:
+                self.warning("Please install torch if trying to pre-compile kernels")
+                return args
+            major = torch.cuda.get_device_properties(0).major  #ignore-cuda
+            minor = torch.cuda.get_device_properties(0).minor  #ignore-cuda
+            args.append(f"-DGPU_ARCH={major}{minor}")
+        else:
+            args.append(f"-DGPU_ARCH={self.gpu_arch}")
         return args
 
     def is_compatible(self, verbose=False):
