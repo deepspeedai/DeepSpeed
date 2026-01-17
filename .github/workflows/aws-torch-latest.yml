@@ -131,7 +131,7 @@ jobs:
           # - zenflow: zenflow distributed tests timeout
           # - checkpoint/test_pipeline.py: pipeline checkpoint tests timeout
           # - runtime/test_multiple_models.py: multiple model tests timeout
-          pytest -x --instafail --timeout 600 --forked -n 1 unit/ \
+          pytest --instafail --timeout 600 --forked -n 4 unit/ \
             --ignore=unit/ops/aio \
             --ignore=unit/ops/lion \
             --ignore=unit/ops/adagrad \
