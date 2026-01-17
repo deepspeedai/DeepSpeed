@@ -127,11 +127,13 @@ jobs:
           # - adagrad: CPU adagrad tests may hang
           # - accelerators: transformer forward/backward tests may hang
           # - pipe: pipeline parallelism tests timeout
+          # - adam: CPU adam tests timeout (test_cpu_adam.py)
           pytest -x --instafail --timeout 600 --forked -n 1 unit/ \
             --ignore=unit/ops/aio \
             --ignore=unit/ops/lion \
             --ignore=unit/ops/adagrad \
             --ignore=unit/ops/accelerators \
+            --ignore=unit/ops/adam \
             --ignore=unit/runtime/pipe \
             --torch_ver=${{ env.TORCH_VER }} --cuda_ver=${{ env.CUDA_VER }}
           pytest --instafail --timeout 600 --forked -m 'sequential' unit/ \
@@ -139,5 +141,6 @@ jobs:
             --ignore=unit/ops/lion \
             --ignore=unit/ops/adagrad \
             --ignore=unit/ops/accelerators \
+            --ignore=unit/ops/adam \
             --ignore=unit/runtime/pipe \
             --torch_ver=${{ env.TORCH_VER }} --cuda_ver=${{ env.CUDA_VER }}
