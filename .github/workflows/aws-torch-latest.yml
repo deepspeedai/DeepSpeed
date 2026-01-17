@@ -128,6 +128,7 @@ jobs:
           # - accelerators: transformer forward/backward tests may hang
           # - pipe: pipeline parallelism tests timeout
           # - adam: CPU adam tests timeout (test_cpu_adam.py)
+          # - zenflow: zenflow distributed tests timeout
           pytest -x --instafail --timeout 600 --forked -n 1 unit/ \
             --ignore=unit/ops/aio \
             --ignore=unit/ops/lion \
@@ -135,6 +136,7 @@ jobs:
             --ignore=unit/ops/accelerators \
             --ignore=unit/ops/adam \
             --ignore=unit/runtime/pipe \
+            --ignore=unit/runtime/zenflow \
             --torch_ver=${{ env.TORCH_VER }} --cuda_ver=${{ env.CUDA_VER }}
           pytest --instafail --timeout 600 --forked -m 'sequential' unit/ \
             --ignore=unit/ops/aio \
@@ -143,4 +145,5 @@ jobs:
             --ignore=unit/ops/accelerators \
             --ignore=unit/ops/adam \
             --ignore=unit/runtime/pipe \
+            --ignore=unit/runtime/zenflow \
             --torch_ver=${{ env.TORCH_VER }} --cuda_ver=${{ env.CUDA_VER }}
