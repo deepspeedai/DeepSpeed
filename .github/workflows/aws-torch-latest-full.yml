@@ -1,0 +1,99 @@
+################################################################################
+# DeepSpeed CI - AWS L40S GPU Tests (PyTorch Latest - Full Unit Tests)
+#
+# Migrated from nv-torch-latest-v100.yml which ran on deprecated V100 cluster.
+# Runs the full unit test suite (tests/unit/) on AWS self-hosted runners.
+# Manual trigger only (workflow_dispatch).
+################################################################################
+
+name: aws-torch-latest-full
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  unit-tests:
+    name: Unit Tests (Full)
+    runs-on: [self-hosted, gpu-ci, gpu-l40s, l40s-4gpu, aws]
+    timeout-minutes: 60
+
+    container:
+      image: nvidia/cuda:12.6.3-devel-ubuntu22.04
+      options: --gpus all --shm-size "32G"
+
+    env:
+      TORCH_VER: "2.7"
+      CUDA_VER: "12.6"
+
+    steps:
+      - name: Install system dependencies
+        run: |
+          apt-get update && apt-get install -y git git-lfs libaio-dev python3 python3-pip
+          git lfs install
+          ln -sf /usr/bin/python3 /usr/bin/python
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          lfs: true
+
+      - name: Install PyTorch
+        run: |
+          pip install torch==2.7.1 torchvision==0.22.1 torchaudio==2.7.1 --index-url https://download.pytorch.org/whl/cu126
+
+      - name: Install transformers
+        run: |
+          git clone https://github.com/huggingface/transformers
+          cd transformers
+          # if needed switch to the last known good SHA until transformers@master is fixed
+          git checkout 981c276
+          git rev-parse --short HEAD
+          pip install .
+
+      - name: Install Python dependencies
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements/requirements.txt
+          pip install -r requirements/requirements-dev.txt
+          pip install -r requirements/requirements-deepcompile.txt
+          pip install pytest-timeout pytest-instafail
+
+      - name: Check environment
+        run: |
+          echo "=== GPU Information ==="
+          nvidia-smi
+          echo ""
+          echo "=== CUDA Version ==="
+          nvcc --version
+          echo ""
+          echo "=== Python/PyTorch Info ==="
+          python --version
+          python -c "import torch; print(f'PyTorch: {torch.__version__}')"
+          python -c "import torch; print(f'CUDA available: {torch.cuda.is_available()}')"
+          python -c "import torch; print(f'CUDA devices: {torch.cuda.device_count()}')"
+          python -c "import torch; print(f'BF16 support: {torch.cuda.is_bf16_supported()}')"
+
+      - name: Install DeepSpeed
+        run: |
+          # Initialize CUDA before install so setup.py can detect NCCL version
+          python -c "import torch; torch.cuda.init(); print(f'NCCL version: {torch.cuda.nccl.version()}')"
+          # Use --no-build-isolation so setup.py can access pre-installed PyTorch
+          pip install --no-build-isolation .[dev,1bit,autotuning,deepcompile]
+          ds_report
+          # Debug: Check captured torch_info values
+          python -c "from deepspeed.git_version_info import torch_info; print(f'torch_info: {torch_info}')"
+
+      - name: Python environment
+        run: |
+          pip list
+
+      - name: Unit tests
+        run: |
+          unset TORCH_CUDA_ARCH_LIST # only jit compile for current arch
+          cd tests
+          pytest -x --instafail --timeout 600 --forked -n 8 unit/ --torch_ver=${{ env.TORCH_VER }} --cuda_ver=${{ env.CUDA_VER }}
+          pytest --instafail --timeout 600 --forked -m 'sequential' unit/ --torch_ver=${{ env.TORCH_VER }} --cuda_ver=${{ env.CUDA_VER }}
