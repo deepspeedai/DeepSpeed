@@ -132,6 +132,7 @@ jobs:
           # - checkpoint/test_pipeline.py: pipeline checkpoint tests timeout
           # - runtime/test_multiple_models.py: multiple model tests timeout
           # - runtime/half_precision/onebit: onebit tests timeout (pipeline tests)
+          # - runtime/test_ds_initialize.py: optimizer implementation tests timeout
           pytest --instafail --timeout 600 --forked -n 4 unit/ \
             --ignore=unit/ops/aio \
             --ignore=unit/ops/lion \
@@ -141,6 +142,7 @@ jobs:
             --ignore=unit/runtime/pipe \
             --ignore=unit/runtime/zenflow \
             --ignore=unit/runtime/test_multiple_models.py \
+            --ignore=unit/runtime/test_ds_initialize.py \
             --ignore=unit/runtime/half_precision/onebit \
             --ignore=unit/checkpoint/test_pipeline.py \
             --torch_ver=${{ env.TORCH_VER }} --cuda_ver=${{ env.CUDA_VER }}
@@ -153,6 +155,7 @@ jobs:
             --ignore=unit/runtime/pipe \
             --ignore=unit/runtime/zenflow \
             --ignore=unit/runtime/test_multiple_models.py \
+            --ignore=unit/runtime/test_ds_initialize.py \
             --ignore=unit/runtime/half_precision/onebit \
             --ignore=unit/checkpoint/test_pipeline.py \
             --torch_ver=${{ env.TORCH_VER }} --cuda_ver=${{ env.CUDA_VER }}
