@@ -16,9 +16,11 @@ class EvoformerAttnBuilder(CUDAOpBuilder):
         name = self.NAME if name is None else name
         super().__init__(name=name)
         self.cutlass_path = os.environ.get("CUTLASS_PATH")
-        # Target GPU architecture
-        # Current useful values: >70, >75, >80, see gemm_kernel_utils.h
-        # For modern GPUs, >80 is obfiously the right value
+        # Target GPU architecture.
+        # Current useful values are: 70, 75, 80.
+        # For modern GPUs, 80 is the right value.
+        # No specializations of the kernel beyond Ampere are implemented
+        # See gemm_kernel_utils.h (also in cutlass example for fused attention) and cutlass/arch/arch.h
         self.gpu_arch = os.environ.get("DS_EVOFORMER_GPU_ARCH")
 
     def absolute_name(self):
