@@ -118,7 +118,7 @@ jobs:
 
       - name: Unit tests
         run: |
-          unset TORCH_CUDA_ARCH_LIST
+          export TORCH_CUDA_ARCH_LIST="8.9"
           cd tests
           # Debug: Use -n 1 to run tests sequentially
           pytest -x --instafail --timeout 600 --forked -n 1 unit/ --torch_ver=${{ env.TORCH_VER }} --cuda_ver=${{ env.CUDA_VER }}
