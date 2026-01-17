@@ -69,19 +69,21 @@ class EvoformerAttnBuilder(CUDAOpBuilder):
                             self.warning("Please use CUTLASS version >= 3.1.0")
                         return False
 
+        # Check CUDA and GPU capabilities
         cuda_okay = True
-        if not self.is_rocm_pytorch() and torch.cuda.is_available():  #ignore-cuda
-            sys_cuda_major, _ = installed_cuda_version()
-            torch_cuda_major = int(torch.version.cuda.split('.')[0])
-            cuda_capability = torch.cuda.get_device_properties(0).major  #ignore-cuda
-            if cuda_capability < 7:
-                if verbose:
-                    self.warning("Please use a GPU with compute capability >= 7.0")
-                cuda_okay = False
-            if torch_cuda_major < 11 or sys_cuda_major < 11:
-                if verbose:
-                    self.warning("Please use CUDA 11+")
-                cuda_okay = False
+        if not os.environ.get("DS_IGNORE_CUDA_DETECTION"):
+            if not self.is_rocm_pytorch() and torch.cuda.is_available():  #ignore-cuda
+                sys_cuda_major, _ = installed_cuda_version()
+                torch_cuda_major = int(torch.version.cuda.split('.')[0])
+                cuda_capability = torch.cuda.get_device_properties(0).major  #ignore-cuda
+                if cuda_capability < 7:
+                    if verbose:
+                        self.warning("Please use a GPU with compute capability >= 7.0")
+                    cuda_okay = False
+                if torch_cuda_major < 11 or sys_cuda_major < 11:
+                    if verbose:
+                        self.warning("Please use CUDA 11+")
+                    cuda_okay = False
         return super().is_compatible(verbose) and cuda_okay
 
     def include_paths(self):
