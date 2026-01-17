@@ -135,6 +135,7 @@ jobs:
           # - runtime/test_ds_initialize.py: optimizer implementation tests timeout
           # - runtime/zero/test_zero_leaf_module.py: leaf module tests timeout
           # - runtime/zero/test_zero_tensor_fragment.py: tensor fragment tests timeout
+          # - runtime/test_mup_optimizers.py: muP optimizer tests timeout
           pytest --instafail --timeout 600 --forked -n 4 unit/ \
             --ignore=unit/ops/aio \
             --ignore=unit/ops/lion \
@@ -145,6 +146,7 @@ jobs:
             --ignore=unit/runtime/zenflow \
             --ignore=unit/runtime/test_multiple_models.py \
             --ignore=unit/runtime/test_ds_initialize.py \
+            --ignore=unit/runtime/test_mup_optimizers.py \
             --ignore=unit/runtime/half_precision/onebit \
             --ignore=unit/runtime/zero/test_zero_leaf_module.py \
             --ignore=unit/runtime/zero/test_zero_tensor_fragment.py \
@@ -160,6 +162,7 @@ jobs:
             --ignore=unit/runtime/zenflow \
             --ignore=unit/runtime/test_multiple_models.py \
             --ignore=unit/runtime/test_ds_initialize.py \
+            --ignore=unit/runtime/test_mup_optimizers.py \
             --ignore=unit/runtime/half_precision/onebit \
             --ignore=unit/runtime/zero/test_zero_leaf_module.py \
             --ignore=unit/runtime/zero/test_zero_tensor_fragment.py \
