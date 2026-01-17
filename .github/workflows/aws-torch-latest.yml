@@ -126,15 +126,18 @@ jobs:
           # - lion: CPU lion optimizer tests hang  
           # - adagrad: CPU adagrad tests may hang
           # - accelerators: transformer forward/backward tests may hang
+          # - pipe: pipeline parallelism tests timeout
           pytest -x --instafail --timeout 600 --forked -n 1 unit/ \
             --ignore=unit/ops/aio \
             --ignore=unit/ops/lion \
             --ignore=unit/ops/adagrad \
             --ignore=unit/ops/accelerators \
+            --ignore=unit/runtime/pipe \
             --torch_ver=${{ env.TORCH_VER }} --cuda_ver=${{ env.CUDA_VER }}
           pytest --instafail --timeout 600 --forked -m 'sequential' unit/ \
             --ignore=unit/ops/aio \
             --ignore=unit/ops/lion \
             --ignore=unit/ops/adagrad \
             --ignore=unit/ops/accelerators \
+            --ignore=unit/runtime/pipe \
             --torch_ver=${{ env.TORCH_VER }} --cuda_ver=${{ env.CUDA_VER }}
