@@ -119,25 +119,58 @@ jobs:
         run: |
           pip list
 
-      - name: Unit tests
+      - name: Debug testRowParallel (5 seeds)
         run: |
           export TORCH_CUDA_ARCH_LIST="8.9"
           cd tests
-          # Skip tests requiring unavailable hardware or known issues:
-          # - nvme checkpointing: no nvme device
-          # - GDS tests: no GPUDirect Storage support
-          # - launcher user_args: pdsh requires SSH server
-          # - zenflow: Stage 3 tests have pre-existing bugs + CUDA/fork issues
+          echo "=== Running testRowParallel with 5 different seeds ==="
+          for seed in 12345 54321 99999 11111 77777; do
+            echo ""
+            echo "=========================================="
+            echo "SEED: $seed"
+            echo "=========================================="
+            rm -rf /mnt/aio/pytest
+            PYTHONHASHSEED=$seed pytest -v --forked --basetemp=/mnt/aio/pytest \
+              unit/model_parallelism/test_autotp_training.py::TestTpLayerFwdBwd::testRowParallel \
+              --torch_ver=${{ env.TORCH_VER }} --cuda_ver=${{ env.CUDA_VER }} \
+              || echo "FAILED with seed $seed"
+          done
+
+      - name: Sequential tests run 1 (seed 12345)
+        run: |
+          export TORCH_CUDA_ARCH_LIST="8.9"
+          cd tests
+          echo "=== Sequential tests - seed 12345 ==="
           rm -rf /mnt/aio/pytest
-          pytest --instafail --timeout 600 --forked -n 8 --basetemp=/mnt/aio/pytest unit/ \
+          PYTHONHASHSEED=12345 pytest --instafail --timeout 600 --forked -m 'sequential' --basetemp=/mnt/aio/pytest unit/ \
             --ignore=unit/runtime/zero/test_nvme_checkpointing.py \
             --ignore=unit/ops/aio/test_gds.py \
             --ignore=unit/launcher/test_user_args.py \
             --ignore=unit/runtime/zenflow \
             --ignore=unit/ops/adam/test_zf_torch_adam.py \
             --torch_ver=${{ env.TORCH_VER }} --cuda_ver=${{ env.CUDA_VER }}
+
+      - name: Sequential tests run 2 (seed 54321)
+        run: |
+          export TORCH_CUDA_ARCH_LIST="8.9"
+          cd tests
+          echo "=== Sequential tests - seed 54321 ==="
           rm -rf /mnt/aio/pytest
-          pytest --instafail --timeout 600 --forked -m 'sequential' --basetemp=/mnt/aio/pytest unit/ \
+          PYTHONHASHSEED=54321 pytest --instafail --timeout 600 --forked -m 'sequential' --basetemp=/mnt/aio/pytest unit/ \
+            --ignore=unit/runtime/zero/test_nvme_checkpointing.py \
+            --ignore=unit/ops/aio/test_gds.py \
+            --ignore=unit/launcher/test_user_args.py \
+            --ignore=unit/runtime/zenflow \
+            --ignore=unit/ops/adam/test_zf_torch_adam.py \
+            --torch_ver=${{ env.TORCH_VER }} --cuda_ver=${{ env.CUDA_VER }}
+
+      - name: Sequential tests run 3 (seed 99999)
+        run: |
+          export TORCH_CUDA_ARCH_LIST="8.9"
+          cd tests
+          echo "=== Sequential tests - seed 99999 ==="
+          rm -rf /mnt/aio/pytest
+          PYTHONHASHSEED=99999 pytest --instafail --timeout 600 --forked -m 'sequential' --basetemp=/mnt/aio/pytest unit/ \
             --ignore=unit/runtime/zero/test_nvme_checkpointing.py \
             --ignore=unit/ops/aio/test_gds.py \
             --ignore=unit/launcher/test_user_args.py \
