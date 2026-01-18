@@ -130,7 +130,7 @@ jobs:
           # - zenflow: distributed tests timeout
           # Use /mnt/aio/pytest as basetemp for O_DIRECT support in aio tests
           rm -rf /mnt/aio/pytest
-          pytest --instafail --timeout 600 --forked -n 4 --basetemp=/mnt/aio/pytest unit/ \
+          pytest --instafail --timeout 600 --forked -n 8 --basetemp=/mnt/aio/pytest unit/ \
             --ignore=unit/runtime/zero/test_nvme_checkpointing.py \
             --ignore=unit/ops/aio/test_gds.py \
             --ignore=unit/runtime/zenflow \
