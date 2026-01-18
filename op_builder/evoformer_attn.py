@@ -62,7 +62,8 @@ class EvoformerAttnBuilder(CUDAOpBuilder):
         if self.cutlass_path is None:
             if verbose:
                 self.warning("Please specify CUTLASS location directory as environment variable CUTLASS_PATH")
-                self.warning("Possible values are: a path, DS_IGNORE_CUTLASS_DETECTION and DS_USE_CUTLASS_PYTHON_BINDINGS")
+                self.warning(
+                    "Possible values are: a path, DS_IGNORE_CUTLASS_DETECTION and DS_USE_CUTLASS_PYTHON_BINDINGS")
             return False
 
         if self.cutlass_path != "DS_IGNORE_CUTLASS_DETECTION":
@@ -105,9 +106,7 @@ class EvoformerAttnBuilder(CUDAOpBuilder):
                 import cutlass_library
                 cutlass_path = Path(cutlass_library.__file__).parent / "source"
             except ImportError:
-                self.warning(
-                    "Please pip install nvidia-cutlass (note that this is deprecated and likely outdated)"
-                )
+                self.warning("Please pip install nvidia-cutlass (note that this is deprecated and likely outdated)")
                 raise
         # Use hardcoded path in CUTLASS_PATH
         else:
