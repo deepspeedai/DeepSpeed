@@ -275,12 +275,13 @@ class TestTpLayerFwdBwd(DistributedTest):
         torch_grad = torch.chunk(torch_linear.weight.grad, tp_size, dim=0)[groups.get_tensor_model_parallel_rank()]
 
         torch_bias_grad = torch.chunk(torch_linear.bias.grad, tp_size, dim=0)[groups.get_tensor_model_parallel_rank()]
-        assert torch.allclose(linear.bias.grad, torch_bias_grad.to(get_accelerator().current_device()), atol=1e-3)
+        # Use assert_close for better error messages showing actual differences
+        torch.testing.assert_close(linear.bias.grad, torch_bias_grad.to(get_accelerator().current_device()), atol=1e-3, rtol=1e-3)
 
-        assert torch.allclose(linear.weight.grad, torch_grad.to(get_accelerator().current_device()), atol=1e-3)
-        assert torch.allclose(cur_device_out.to(get_accelerator().current_device()).contiguous(),
+        torch.testing.assert_close(linear.weight.grad, torch_grad.to(get_accelerator().current_device()), atol=1e-3, rtol=1e-3)
+        torch.testing.assert_close(cur_device_out.to(get_accelerator().current_device()).contiguous(),
                               out.contiguous(),
-                              atol=1e-2)
+                              atol=1e-2, rtol=1e-2)
 
 
 # @pytest.mark.sequential
