@@ -173,6 +173,11 @@ class TestTensorFragmentGet(DistributedTest):
             "bf16": {
                 "enabled": True
             },
+            # Use fp32 gradient accumulation to ensure BF16_Optimizer is used
+            # (bf16 model + bf16 grad_accum uses FP16_Optimizer which doesn't support tensor fragment APIs)
+            "data_types": {
+                "grad_accum_dtype": "fp32"
+            },
             "zero_optimization": {
                 "stage": 0,
             }
