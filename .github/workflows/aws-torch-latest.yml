@@ -124,17 +124,20 @@ jobs:
           export TORCH_CUDA_ARCH_LIST="8.9"
           cd tests
           # Run full test suite with DS_DISABLE_REUSE_DIST_ENV=1 to prevent pool worker hangs
-          # Skip tests requiring unavailable hardware:
+          # Skip tests requiring unavailable hardware or known timeouts:
           # - nvme checkpointing: no nvme device
           # - GDS tests: no GPUDirect Storage support
+          # - zenflow: distributed tests timeout
           # Use /mnt/aio/pytest as basetemp for O_DIRECT support in aio tests
           rm -rf /mnt/aio/pytest
           pytest --instafail --timeout 600 --forked -n 4 --basetemp=/mnt/aio/pytest unit/ \
             --ignore=unit/runtime/zero/test_nvme_checkpointing.py \
             --ignore=unit/ops/aio/test_gds.py \
+            --ignore=unit/runtime/zenflow \
             --torch_ver=${{ env.TORCH_VER }} --cuda_ver=${{ env.CUDA_VER }}
           rm -rf /mnt/aio/pytest
           pytest --instafail --timeout 600 --forked -m 'sequential' --basetemp=/mnt/aio/pytest unit/ \
             --ignore=unit/runtime/zero/test_nvme_checkpointing.py \
             --ignore=unit/ops/aio/test_gds.py \
+            --ignore=unit/runtime/zenflow \
             --torch_ver=${{ env.TORCH_VER }} --cuda_ver=${{ env.CUDA_VER }}
