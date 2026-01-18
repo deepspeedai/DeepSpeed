@@ -2934,6 +2934,11 @@ class DeepSpeedEngine(Module):
             if not param.requires_grad:
                 continue
 
+            # Skip empty parameters (numel=0) as they contribute nothing to gradient reduction
+            # and cause issues with flatten/unflatten operations
+            if param.numel() == 0:
+                continue
+
             if param.grad is None:
                 # In cases where there is an imbalance of empty grads across
                 # ranks we must create empty grads, this will ensure that every
