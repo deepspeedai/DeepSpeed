@@ -133,11 +133,9 @@ jobs:
           pytest --instafail --timeout 600 --forked -n 8 --basetemp=/mnt/aio/pytest unit/ \
             --ignore=unit/runtime/zero/test_nvme_checkpointing.py \
             --ignore=unit/ops/aio/test_gds.py \
-            --ignore=unit/runtime/zenflow \
             --torch_ver=${{ env.TORCH_VER }} --cuda_ver=${{ env.CUDA_VER }}
           rm -rf /mnt/aio/pytest
           pytest --instafail --timeout 600 --forked -m 'sequential' --basetemp=/mnt/aio/pytest unit/ \
             --ignore=unit/runtime/zero/test_nvme_checkpointing.py \
             --ignore=unit/ops/aio/test_gds.py \
-            --ignore=unit/runtime/zenflow \
             --torch_ver=${{ env.TORCH_VER }} --cuda_ver=${{ env.CUDA_VER }}
