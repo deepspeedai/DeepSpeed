@@ -63,7 +63,7 @@ class NoGatherHandle:
 
         if hasattr(param.ds_tensor, "ds_quant_scale"):
             param.data = Init.quantizer_module.dequantize(param.ds_tensor.data, param.ds_tensor.ds_quant_scale).to(
-                device=get_accelerator().current_device_name(), non_blocking=True).view(param.ds_shape)
+                device=get_accelerator().current_device_name(), non_blocking=True).view(param.ds_shape).to(param.ds_tensor.dtype)
         else:
             param.data = param.ds_tensor.data.to(device=get_accelerator().current_device_name(),
                                                  non_blocking=True).view(param.ds_shape)
@@ -86,7 +86,8 @@ class NoGatherCoalescedHandle:
                 raise RuntimeError(f"expected param {param.ds_summary()} to not be available")
             if hasattr(param.ds_tensor, "ds_quant_scale"):
                 param.data = Init.quantizer_module.dequantize(param.ds_tensor.data, param.ds_tensor.ds_quant_scale).to(
-                    device=get_accelerator().current_device_name(), non_blocking=True).view(param.ds_shape)
+                    device=get_accelerator().current_device_name(),
+                    non_blocking=True).view(param.ds_shape).to(param.ds_tensor.dtype)
             else:
                 param.data = param.ds_tensor.data.to(device=get_accelerator().current_device_name(),
                                                      non_blocking=True).view(param.ds_shape)
@@ -697,7 +698,8 @@ class AllGatherHandle:
         elif self.__quantization:
             instrument_w_nvtx(self.__quantization.quant_handle.wait)()
             self.__param.data = self.__quantization.backend.dequantize(
-                self.__quantization.quantized_param, self.__quantization.scale_buffer).to(self.__param.device)
+                self.__quantization.quantized_param,
+                self.__quantization.scale_buffer).to(self.__original_dtype).to(self.__param.device)
         self.__param.ds_status = ZeroParamStatus.AVAILABLE
 
 
@@ -713,6 +715,7 @@ class AllGatherCoalescedHandle:
         world_size: int,
         use_secondary_tensor=False,
         quantization=None,
+        original_dtype=None,
     ) -> None:
         self.allgather_handle = allgather_handle
         self.params = params
@@ -721,6 +724,7 @@ class AllGatherCoalescedHandle:
         self.use_secondary_tensor = use_secondary_tensor
         self.complete = False
         self.quantization = quantization
+        self.original_dtype = original_dtype
 
         for param in self.params:
             if param.ds_status != ZeroParamStatus.INFLIGHT:
@@ -735,8 +739,13 @@ class AllGatherCoalescedHandle:
 
         if self.quantization:
             instrument_w_nvtx(self.quantization.quant_handle.wait)()
-            flat_tensor = self.quantization.backend.dequantize(
-                self.quantization.quantized_param, self.quantization.scale_buffer).to(self.params[0].device)
+            # Fix for issue #7775: convert dequantized tensor back to original dtype (e.g., bf16)
+            # to prevent dtype mismatch when zero_quantized_weights is used with bf16
+            dequantized = self.quantization.backend.dequantize(
+                self.quantization.quantized_param, self.quantization.scale_buffer)
+            if self.original_dtype is not None:
+                dequantized = dequantized.to(self.original_dtype)
+            flat_tensor = dequantized.to(self.params[0].device)
 
             self.partitions: List[Parameter] = []
             for i in range(self.world_size):
@@ -1378,7 +1387,7 @@ class Init(InsertPostInitMethodToModuleSubClasses):
                     quant_info.backend = self.quantizer_module
                     quant_info.quant_handle = quant_handle
                     quant_info.scale_buffer = quant_scale_buffer
-                    return AllGatherHandle(handle, param, quantization=quant_info)
+                    return AllGatherHandle(handle, param, quantization=quant_info, original_dtype=original_dtype)
 
             else:
                 if self.use_all_reduce_for_fetch_params and not quantize and not use_secondary_tensor:
@@ -1469,6 +1478,8 @@ class Init(InsertPostInitMethodToModuleSubClasses):
                         quant_info.scale_buffer = quant_scale_buffer
                         quant_info.partition_sz = partition_sz
                         quant_info.world_size = world_size
+                        # Get the original dtype from param's ds_tensor for proper dtype restoration after dequantization
+                        original_dtype = params[0].ds_tensor.dtype if params else None
                         return AllGatherCoalescedHandle(
                             allgather_handle=handle,
                             params=params,
@@ -1476,6 +1487,7 @@ class Init(InsertPostInitMethodToModuleSubClasses):
                             world_size=world_size,
                             use_secondary_tensor=use_secondary_tensor,
                             quantization=quant_info,
+                            original_dtype=original_dtype,
                         )
 
         def partition(param_list=None, hierarchy=0, has_been_updated=False, free_data=True):
@@ -1976,7 +1988,7 @@ class Init(InsertPostInitMethodToModuleSubClasses):
             gathered_tensor = allgather_params[i]
             if quantize:
                 gathered_tensor = self.quantizer_module.dequantize(gathered_tensor, allgather_quantize_scale[i])
-            param.data = gathered_tensor.narrow(0, 0, param.ds_numel).view(param.ds_shape).data
+            param.data = gathered_tensor.narrow(0, 0, param.ds_numel).view(param.ds_shape).to(param.ds_tensor.dtype).data
 
         # guarantee the communication to be completed
         if not get_accelerator().resolves_data_dependency():
@@ -2060,7 +2072,7 @@ class Init(InsertPostInitMethodToModuleSubClasses):
             param_offset += param.ds_tensor.ds_numel
             if hasattr(param_list[0], 'ds_quant_scale'):
                 replicated_tensor = self.quantizer_module.dequantize(replicated_tensor, flat_scale_tensor)
-            param.data = replicated_tensor.data
+            param.data = replicated_tensor.to(param.ds_tensor.dtype).data
 
         return None
 
