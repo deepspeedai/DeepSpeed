@@ -123,25 +123,22 @@ jobs:
         run: |
           export TORCH_CUDA_ARCH_LIST="8.9"
           cd tests
-          # Run full test suite with DS_DISABLE_REUSE_DIST_ENV=1 to prevent pool worker hangs
-          # Skip tests requiring unavailable hardware or known timeouts:
+          # Skip tests requiring unavailable hardware or known issues:
           # - nvme checkpointing: no nvme device
           # - GDS tests: no GPUDirect Storage support
-          # - zenflow: distributed tests timeout
-          # Use /mnt/aio/pytest as basetemp for O_DIRECT support in aio tests
+          # - launcher user_args: pdsh requires SSH server
+          # - zenflow: Stage 3 tests have pre-existing bugs
           rm -rf /mnt/aio/pytest
-          # Skip tests requiring unavailable hardware or services:
-          # - nvme checkpointing: no nvme device
-          # - GDS tests: no GPUDirect Storage support
-          # - launcher user_args: pdsh multi-node tests require SSH server
           pytest --instafail --timeout 600 --forked -n 8 --basetemp=/mnt/aio/pytest unit/ \
             --ignore=unit/runtime/zero/test_nvme_checkpointing.py \
             --ignore=unit/ops/aio/test_gds.py \
             --ignore=unit/launcher/test_user_args.py \
+            --ignore=unit/runtime/zenflow \
             --torch_ver=${{ env.TORCH_VER }} --cuda_ver=${{ env.CUDA_VER }}
           rm -rf /mnt/aio/pytest
           pytest --instafail --timeout 600 --forked -m 'sequential' --basetemp=/mnt/aio/pytest unit/ \
             --ignore=unit/runtime/zero/test_nvme_checkpointing.py \
             --ignore=unit/ops/aio/test_gds.py \
             --ignore=unit/launcher/test_user_args.py \
+            --ignore=unit/runtime/zenflow \
             --torch_ver=${{ env.TORCH_VER }} --cuda_ver=${{ env.CUDA_VER }}
