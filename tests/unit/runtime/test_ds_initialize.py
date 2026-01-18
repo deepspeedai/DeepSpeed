@@ -231,6 +231,7 @@ class TestOptimizerImplementation(DistributedTest):
         # BF16 Wrapper
         is_supported[(None, 'bf16', 'bf16')] = True
         is_supported[(None, 'bf16', None)] = True
+        is_supported[(None, 'bf16', 'fp32')] = True
         # No Wrapper
         is_supported[(None, 'fp32', None)] = True
         is_supported[(None, 'fp32', 'fp32')] = True
