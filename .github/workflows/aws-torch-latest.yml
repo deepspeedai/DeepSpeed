@@ -107,15 +107,13 @@ jobs:
 
       - name: Install DeepSpeed
         run: |
-          # Initialize CUDA before install so setup.py can detect NCCL version
-          python -c "import torch; torch.cuda.init(); print(f'NCCL version: {torch.cuda.nccl.version()}')"
           # Use --no-build-isolation so setup.py can access pre-installed PyTorch
+          # Avoid initializing CUDA here to prevent fork issues in tests
           pip install --no-build-isolation .
           ds_report
-          # Verify Evoformer op is now compatible
-          python -c "from deepspeed.ops.op_builder import EvoformerAttnBuilder; print(f'Evoformer compatible: {EvoformerAttnBuilder().is_compatible(verbose=True)}')"
 
       - name: Run Evoformer tests
         run: |
-          # Temporarily run only Evoformer tests to validate CUTLASS integration
-          pytest -v --forked tests/unit/ops/deepspeed4science/test_DS4Sci_EvoformerAttention.py --torch_ver=${{ env.TORCH_VER }} --cuda_ver=${{ env.CUDA_VER }}
+          # Run Evoformer tests without --forked to avoid CUDA re-initialization issues
+          # The test will initialize CUDA fresh in the main process
+          pytest -v tests/unit/ops/deepspeed4science/test_DS4Sci_EvoformerAttention.py --torch_ver=${{ env.TORCH_VER }} --cuda_ver=${{ env.CUDA_VER }}
