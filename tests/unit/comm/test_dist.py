@@ -147,6 +147,7 @@ class TestDistInferenceAllReduce(DistributedTest):
         assert torch.all(x == result)
 
 
+@pytest.mark.sequential
 @pytest.mark.parametrize("dist_init_required", [True, False, None])
 class TestDistInit(DistributedTest):
     init_distributed = False
@@ -167,6 +168,7 @@ class TestDistInit(DistributedTest):
                                            dist_init_required=dist_init_required)
 
 
+@pytest.mark.sequential
 class TestDistInitNoEnv(DistributedTest):
     world_size = 1
     init_distributed = False
@@ -181,6 +183,7 @@ class TestDistInitNoEnv(DistributedTest):
         deepspeed.init_distributed(get_accelerator().communication_backend_name(), auto_mpi_discovery=True)
 
 
+@pytest.mark.sequential
 @pytest.mark.parametrize("dist_init_required", [True, False])
 class TestDistInitWithModel(DistributedTest):
     init_distributed = False
