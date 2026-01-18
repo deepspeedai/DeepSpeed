@@ -62,7 +62,7 @@ jobs:
     steps:
       - name: Install system dependencies
         run: |
-          apt-get update && apt-get install -y git git-lfs libaio-dev python3 python3-pip
+          apt-get update && apt-get install -y git git-lfs libaio-dev pdsh python3 python3-pip
           git lfs install
           ln -sf /usr/bin/python3 /usr/bin/python
 
