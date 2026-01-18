@@ -130,7 +130,7 @@ jobs:
             echo "SEED: $seed"
             echo "=========================================="
             rm -rf /mnt/aio/pytest
-            PYTHONHASHSEED=$seed pytest -v --forked --basetemp=/mnt/aio/pytest \
+            PYTHONHASHSEED=$seed pytest -v --forked -m sequential --basetemp=/mnt/aio/pytest \
               unit/model_parallelism/test_autotp_training.py::TestTpLayerFwdBwd::testRowParallel \
               --torch_ver=${{ env.TORCH_VER }} --cuda_ver=${{ env.CUDA_VER }} \
               || echo "FAILED with seed $seed"
