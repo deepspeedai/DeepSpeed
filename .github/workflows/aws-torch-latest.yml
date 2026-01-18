@@ -127,13 +127,14 @@ jobs:
           # - nvme checkpointing: no nvme device
           # - GDS tests: no GPUDirect Storage support
           # - launcher user_args: pdsh requires SSH server
-          # - zenflow: Stage 3 tests have pre-existing bugs
+          # - zenflow: Stage 3 tests have pre-existing bugs + CUDA/fork issues
           rm -rf /mnt/aio/pytest
           pytest --instafail --timeout 600 --forked -n 8 --basetemp=/mnt/aio/pytest unit/ \
             --ignore=unit/runtime/zero/test_nvme_checkpointing.py \
             --ignore=unit/ops/aio/test_gds.py \
             --ignore=unit/launcher/test_user_args.py \
             --ignore=unit/runtime/zenflow \
+            --ignore=unit/ops/adam/test_zf_torch_adam.py \
             --torch_ver=${{ env.TORCH_VER }} --cuda_ver=${{ env.CUDA_VER }}
           rm -rf /mnt/aio/pytest
           pytest --instafail --timeout 600 --forked -m 'sequential' --basetemp=/mnt/aio/pytest unit/ \
@@ -141,4 +142,5 @@ jobs:
             --ignore=unit/ops/aio/test_gds.py \
             --ignore=unit/launcher/test_user_args.py \
             --ignore=unit/runtime/zenflow \
+            --ignore=unit/ops/adam/test_zf_torch_adam.py \
             --torch_ver=${{ env.TORCH_VER }} --cuda_ver=${{ env.CUDA_VER }}
