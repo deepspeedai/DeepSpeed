@@ -445,7 +445,7 @@ class ParallelState:
         world_size: int = dist.get_world_size()
         rank = dist.get_rank()
 
-        model_size = tensor_model_parallel_size * pipeline_model_parallel_size * context_parallel_size
+        model_size = tensor_model_parallel_size * pipeline_model_parallel_size * context_parallel_size * sequence_parallel_size
         if world_size % model_size != 0:
             raise RuntimeError(f"world_size ({world_size}) is not divisible by {model_size}")
 
@@ -471,7 +471,7 @@ class ParallelState:
             cp=context_parallel_size,
             order=order,
             rank_offset=0,
-            sp=1,
+            sp=sequence_parallel_size,
         )
 
         # Build expert rank generator
@@ -831,12 +831,14 @@ class ParallelState:
                 raise RuntimeError(
                     f"world_size ({world_size}) is not divisible by sequence_parallel_size ({sequence_parallel_size})")
 
-            sp_data_parallel_size = world_size // sequence_parallel_size
-            sequence_and_data_parallel_size = sequence_parallel_size * sp_data_parallel_size
-            num_sequence_parallel_groups = world_size // sequence_parallel_size
-            num_sequence_and_data_parallel_groups = world_size // sequence_and_data_parallel_size
+            # SP groups use consecutive ranks
+            # Number of SP groups = data_parallel_size (each DP rank has its own SP group)
+            num_sequence_parallel_groups = data_parallel_size
+            sequence_and_data_parallel_size = world_size
+            num_sequence_and_data_parallel_groups = 1
 
-            # Build the sequence parallel groups
+            # Build the sequence parallel groups using consecutive ranks
+            # SP uses consecutive rank grouping, not orthogonal grouping like TP/PP/CP
             for i in range(num_sequence_parallel_groups):
                 ranks = list(range(i * sequence_parallel_size, (i + 1) * sequence_parallel_size))
                 group = self._create_group(
