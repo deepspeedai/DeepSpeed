@@ -703,7 +703,7 @@ def initialize_parallel_state_from_config(
             "expert_model_parallel_size": 1,
             "expert_tensor_parallel_size": 1,
             "virtual_pipeline_model_parallel_size": null,
-            "pipeline_model_parallel_comm_backend": null, ##不要加入config中，保留加载逻辑
+            "pipeline_model_parallel_comm_backend": null,
             "num_distributed_optimizer_instances": 1,
             "nccl_communicator_config_path": null,
             "distributed_timeout_minutes": 30,
