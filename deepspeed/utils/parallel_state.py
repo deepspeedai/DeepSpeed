@@ -326,6 +326,9 @@ class ParallelState:
         group_desc=None,
     ):
         """Creates a ProcessGroup."""
+        # Use torch.distributed directly for new_group as deepspeed.comm.new_group only supports ranks parameter
+        import torch.distributed as torch_dist
+        
         kwargs = {
             "ranks": ranks,
             "timeout": timeout,
@@ -339,7 +342,7 @@ class ParallelState:
             if timeout is None:
                 kwargs.pop("timeout")
 
-        group = dist.new_group(**kwargs)
+        group = torch_dist.new_group(**kwargs)
         if self.global_process_group_list is None:
             self.global_process_group_list = [None]
         if dist.get_rank() in ranks:
