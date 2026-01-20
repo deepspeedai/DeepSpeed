@@ -91,13 +91,12 @@ DeepSpeed has been integrated with several different popular open-source DL fram
 
 | Description | Status |
 | ----------- | ------ |
-| NVIDIA | [![nv-torch-latest-v100](https://github.com/deepspeedai/DeepSpeed/actions/workflows/nv-torch-latest-v100.yml/badge.svg?branch=master)](https://github.com/deepspeedai/DeepSpeed/actions/workflows/nv-torch-latest-v100.yml)  [![nv-inference](https://github.com/deepspeedai/DeepSpeed/actions/workflows/nv-inference.yml/badge.svg?branch=master)](https://github.com/deepspeedai/DeepSpeed/actions/workflows/nv-inference.yml) [![nv-nightly](https://github.com/deepspeedai/DeepSpeed/actions/workflows/nv-nightly.yml/badge.svg?branch=master)](https://github.com/deepspeedai/DeepSpeed/actions/workflows/nv-nightly.yml) |
+| NVIDIA | [![nv-pre-compile-ops](https://github.com/deepspeedai/DeepSpeed/actions/workflows/nv-pre-compile-ops.yml/badge.svg)](https://github.com/deepspeedai/DeepSpeed/actions/workflows/nv-pre-compile-ops.yml) [![aws-torch-latest](https://github.com/deepspeedai/DeepSpeed/actions/workflows/aws-torch-latest.yml/badge.svg)](https://github.com/deepspeedai/DeepSpeed/actions/workflows/aws-torch-latest.yml) |
 | AMD | [![amd-mi200](https://github.com/deepspeedai/DeepSpeed/actions/workflows/amd-mi200.yml/badge.svg?branch=master)](https://github.com/deepspeedai/DeepSpeed/actions/workflows/amd-mi200.yml) |
 | CPU | [![torch-latest-cpu](https://github.com/deepspeedai/DeepSpeed/actions/workflows/cpu-torch-latest.yml/badge.svg?branch=master)](https://github.com/deepspeedai/DeepSpeed/actions/workflows/cpu-torch-latest.yml) |
 | Intel Gaudi | [![hpu-gaudi2](https://github.com/deepspeedai/DeepSpeed/actions/workflows/hpu-gaudi2.yml/badge.svg?branch=master)](https://github.com/deepspeedai/DeepSpeed/actions/workflows/hpu-gaudi2.yml) |
 | Intel XPU | [![xpu-max1100](https://github.com/deepspeedai/DeepSpeed/actions/workflows/xpu-max1100.yml/badge.svg?branch=master)](https://github.com/deepspeedai/DeepSpeed/actions/workflows/xpu-max1100.yml) |
-| PyTorch Nightly | [![nv-torch-nightly-v100](https://github.com/deepspeedai/DeepSpeed/actions/workflows/nv-torch-nightly-v100.yml/badge.svg?branch=master)](https://github.com/deepspeedai/DeepSpeed/actions/workflows/nv-torch-nightly-v100.yml) |
-| Integrations | [![nv-transformers-v100](https://github.com/deepspeedai/DeepSpeed/actions/workflows/nv-transformers-v100.yml/badge.svg?branch=master)](https://github.com/deepspeedai/DeepSpeed/actions/workflows/nv-transformers-v100.yml) [![nv-lightning-v100](https://github.com/deepspeedai/DeepSpeed/actions/workflows/nv-lightning-v100.yml/badge.svg?branch=master)](https://github.com/deepspeedai/DeepSpeed/actions/workflows/nv-lightning-v100.yml) [![nv-accelerate-v100](https://github.com/deepspeedai/DeepSpeed/actions/workflows/nv-accelerate-v100.yml/badge.svg?branch=master)](https://github.com/deepspeedai/DeepSpeed/actions/workflows/nv-accelerate-v100.yml) [![nv-mii](https://github.com/deepspeedai/DeepSpeed/actions/workflows/nv-mii.yml/badge.svg?branch=master)](https://github.com/deepspeedai/DeepSpeed/actions/workflows/nv-mii.yml) [![nv-ds-chat](https://github.com/deepspeedai/DeepSpeed/actions/workflows/nv-ds-chat.yml/badge.svg?branch=master)](https://github.com/deepspeedai/DeepSpeed/actions/workflows/nv-ds-chat.yml) [![nv-sd](https://github.com/deepspeedai/DeepSpeed/actions/workflows/nv-sd.yml/badge.svg)](https://github.com/deepspeedai/DeepSpeed/actions/workflows/nv-sd.yml) |
+| Integrations | [![aws-accelerate](https://github.com/deepspeedai/DeepSpeed/actions/workflows/aws-accelerate.yml/badge.svg)](https://github.com/deepspeedai/DeepSpeed/actions/workflows/aws-accelerate.yml) |
 | Misc | [![Formatting](https://github.com/deepspeedai/DeepSpeed/actions/workflows/formatting.yml/badge.svg?branch=master)](https://github.com/deepspeedai/DeepSpeed/actions/workflows/formatting.yml) [![pages-build-deployment](https://github.com/deepspeedai/DeepSpeed/actions/workflows/pages/pages-build-deployment/badge.svg)](https://github.com/deepspeedai/DeepSpeed/actions/workflows/pages/pages-build-deployment) [![Documentation Status](https://readthedocs.org/projects/deepspeed/badge/?version=latest)](https://deepspeed.readthedocs.io/en/latest/?badge=latest)[![python](https://github.com/deepspeedai/DeepSpeed/actions/workflows/python.yml/badge.svg?branch=master)](https://github.com/deepspeedai/DeepSpeed/actions/workflows/python.yml) |
 | Huawei Ascend NPU | [![Huawei Ascend NPU](https://github.com/Ascend/Ascend-CI/actions/workflows/deepspeed.yaml/badge.svg?branch=main)](https://github.com/Ascend/Ascend-CI/actions/workflows/deepspeed.yaml) |
 
@@ -184,16 +183,15 @@ Thanks so much to all of our amazing contributors!
   <img src="https://contrib.rocks/image?repo=microsoft/DeepSpeed&r="  width="800px"/>
 </a>
 
-## Contributor License Agreement
+## Developer Certificate of Origin
 This project welcomes contributions and suggestions. Most contributions require you to
-agree to a Contributor License Agreement (CLA) declaring that you have the right to, and
-actually do, grant us the rights to use your contribution. For details, visit
-https://cla.opensource.microsoft.com.
+agree to a Developer Certificate of Origin [DCO](https://wiki.linuxfoundation.org/dco)
+stating that they agree to the terms published at https://developercertificate.org for
+that *particular* contribution.
 
-When you submit a pull request, a CLA bot will automatically determine whether you need
-to provide a CLA and decorate the PR appropriately (e.g., status check, comment). Simply
-follow the instructions provided by the bot. You will only need to do this once across
-all repos using our CLA.
+DCOs are per-commit, so each commit needs to be signed off.  These can be signed in
+the commit by adding the `-s` flag.  DCO enforcement can also be signed off in the PR
+itself by clicking on the DCO enforcement check.
 
 ## Code of Conduct
 This project has adopted the [Microsoft Open Source Code of

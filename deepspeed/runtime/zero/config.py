@@ -26,6 +26,7 @@ ZeRO optimization should be enabled as:
     "stage3_module_granularity_threshold": 0,
     "allgather_partitions": [true|false],
     "use_multi_rank_bucket_allreduce": [true|false],
+    "stage3_allgather_sequential": [true|false],
     "allgather_bucket_size": 500000000,
     "reduce_scatter": [true|false],
     "contiguous_gradients" : [true|false]
@@ -266,6 +267,14 @@ class DeepSpeedZeroConfig(DeepSpeedConfigModel):
     """
     Use all_reduce op when fetching module parameters at stage3. This improves performance by reducing
     the overhead of concatenation and slicing on the host.
+    """
+
+    allgather_sequential: bool = Field(default=False, alias="stage3_allgather_sequential")
+    """
+    Performs allgather on individual parameters sequentially, bypassing the standard parameter bucketing
+    mechanism in stage3. This significantly reduces data copy overhead (eliminating copy-to-bucket operations)
+    and lowers peak memory usage by avoiding the allocation of large temporary flattening buffers.
+    Recommended for scenarios with high memory pressure.
     """
 
     stage3_gather_fp16_weights_on_model_save: bool = Field(False,

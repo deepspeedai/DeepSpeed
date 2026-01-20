@@ -8,6 +8,7 @@ import torch
 import deepspeed.comm as dist
 from deepspeed.accelerator import get_accelerator
 from deepspeed.ops.op_builder import PackbitsBuilder
+from deepspeed.runtime.comm.utils import check_and_handle_empty_buffer
 
 
 class CompressedBackend(object):
@@ -62,6 +63,9 @@ class CompressedBackend(object):
         # align size of original_buffer and error
         original_size = buffer_m.numel()
         worker_error_size = worker_error.numel()
+        result = check_and_handle_empty_buffer(buffer_m, original_shape, original_size, worker_error, server_error)
+        if result is not None:
+            return result
         if original_size != worker_error_size:
             empty_tensor = torch.zeros(worker_error_size - original_size, device=buffer_m.device)
             buffer_m = torch.cat([buffer_m, empty_tensor])

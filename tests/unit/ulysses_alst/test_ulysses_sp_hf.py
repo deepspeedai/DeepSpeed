@@ -228,7 +228,7 @@ class TestUlyssesSPHFPEFT(DistributedTest):
         assert mpu is not None
 
         # Verify that the sequence parallel groups are initialized
-        sp_group = groups._get_sequence_parallel_group()
+        sp_group = mpu.get_sequence_parallel_group()
         assert sp_group is not None
-        sp_world_size = groups._get_sequence_parallel_world_size()
+        sp_world_size = mpu.get_sequence_parallel_world_size()
         assert sp_world_size == sequence_parallel_size

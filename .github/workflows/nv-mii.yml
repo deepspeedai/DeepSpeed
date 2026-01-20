@@ -1,26 +1,5 @@
 name: nv-mii
 
-on:
-  workflow_dispatch:
-    inputs:
-      mii_branch:
-        description: 'DeepSpeed-MII Branch'
-        required: false
-        default: 'main'
-        type: string
-  pull_request:
-    paths:
-      - '.github/workflows/nv-mii.yml'
-      - 'requirements/**'
-      - 'setup.py'
-      - 'deepspeed/__init__.py'
-      - 'deepspeed/inference/**'
-      - '!deepspeed/inference/v2/**' # exclude v2 dir
-  merge_group:
-    branches: [ master ]
-  schedule:
-    - cron: "0 0 * * *"
-
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true

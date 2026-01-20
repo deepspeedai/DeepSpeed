@@ -457,6 +457,9 @@ class DeepSpeedEngine(Module):
         self._is_compiled_autograd_enabled = False
         self._compile_kwargs = {}
 
+        if self.dist_backend is None:
+            self.enable_backward_allreduce = False
+
     def _optimized_linear_offload_setup(self):
         self.optimized_linear_base_weight_sharding = False
         self.optimized_linear_lora_enabled = False
@@ -1117,6 +1120,9 @@ class DeepSpeedEngine(Module):
     def zero_log_trace_cache_warnings(self):
         return self._config.zero_config.log_trace_cache_warnings
 
+    def zero_allgather_sequential(self):
+        return self._config.zero_config.allgather_sequential
+
     def is_sanity_checks_enabled(self):
         return self._config.zero_config.enable_sanity_checks
 
@@ -1309,6 +1315,8 @@ class DeepSpeedEngine(Module):
                 f'Client Optimizer (type = {type(self.client_optimizer)} is not instantiated but Client LR Scheduler is instantiated'
 
     def _broadcast_model(self):
+        if self.dist_backend is None:
+            return
 
         def is_replicated(p):
             if hasattr(p, "ds_status") and p.ds_status is not ZeroParamStatus.AVAILABLE:
@@ -1891,6 +1899,10 @@ class DeepSpeedEngine(Module):
                 if mics_shard_size > 0:
                     return self._return_mics_optimizer(optimizer, timers)
 
+                if self.zero_allgather_sequential():
+                    log_dist(f"If zero_allgather_sequential is True, set prefetch_bucket_size to 1", ranks=[0])
+                    self._config.zero_config.prefetch_bucket_size = 1
+
                 log_dist(f'Creating {model_dtype} ZeRO stage {zero_stage} optimizer', ranks=[0])
                 from deepspeed.runtime.zero.stage3 import DeepSpeedZeroOptimizer_Stage3
                 from deepspeed.runtime.superoffload.superoffload_stage3 import SuperOffloadOptimizer_Stage3
@@ -2220,6 +2232,11 @@ class DeepSpeedEngine(Module):
             *inputs: Variable length input list
             **kwargs: variable length keyword arguments
         """
+        # Clear the backward seen flag at the start of each forward pass.
+        # This is used to track multiple gradient hook phases with reentrant checkpointing.
+        if isinstance(self.optimizer, ZeROOptimizer):
+            self.optimizer.clear_backward_seen_flag()
+
         if self.autotuning_profile_model_info():
             ma = get_ma_status()
 
@@ -2335,6 +2352,7 @@ class DeepSpeedEngine(Module):
         if isinstance(self.optimizer, ZeROOptimizer):
             self.optimizer.backward_prologue()
             self.optimizer.enter_backward()
+            self.optimizer.queue_post_backward_callback()
 
         if self.zenflow and self.auto_update:
             self.optimizer.zenflow_state ^= 1
@@ -3409,7 +3427,7 @@ class DeepSpeedEngine(Module):
             if self.optimizer is not None and hasattr(self.optimizer, 'refresh_fp32_params'):
                 self.optimizer.refresh_fp32_params()
         else:
-            has_zero_optimizer_state = self.zero_optimization() or self.bfloat16_enabled()
+            has_zero_optimizer_state = self.zero_optimization()
             if load_optimizer_states and self.optimizer is not None and not has_zero_optimizer_state:
                 if self.has_moe_layers:
                     largest_group_name = groups._get_max_expert_size_name()
@@ -3878,7 +3896,7 @@ class DeepSpeedEngine(Module):
 
         save_path = self._get_ckpt_name(save_dir, tag)
 
-        zero_optimizer_state = self.zero_optimization() or self.bfloat16_enabled()
+        zero_optimizer_state = self.zero_optimization()
 
         save_frozen_param = self.zero_optimization_partition_gradients() and not exclude_frozen_parameters
 
