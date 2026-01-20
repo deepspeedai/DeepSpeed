@@ -120,9 +120,10 @@ class TestDistAllReduce(DistributedTest):
         world_size = [1]
 
     def test(self):
-        x = torch.ones(1, 3).to(get_accelerator().device_name()) * (dist.get_rank() + 1)
+        num_elements = 128
+        x = torch.ones(1, num_elements).to(get_accelerator().device_name()) * (dist.get_rank() + 1)
         sum_of_ranks = (dist.get_world_size() * (dist.get_world_size() + 1)) // 2
-        result = torch.ones(1, 3).to(get_accelerator().device_name()) * sum_of_ranks
+        result = torch.ones(1, num_elements).to(get_accelerator().device_name()) * sum_of_ranks
         dist.all_reduce(x)
         assert torch.all(x == result)
 
@@ -138,9 +139,10 @@ class TestDistInferenceAllReduce(DistributedTest):
         world_size = [1]
 
     def test(self, dtype):
-        x = torch.ones(1, 3).to(get_accelerator().device_name()) * (dist.get_rank() + 1)
+        num_elements = 128
+        x = torch.ones(1, num_elements).to(get_accelerator().device_name()) * (dist.get_rank() + 1)
         sum_of_ranks = (dist.get_world_size() * (dist.get_world_size() + 1)) // 2
-        result = torch.ones(1, 3).to(get_accelerator().device_name()) * sum_of_ranks
+        result = torch.ones(1, num_elements).to(get_accelerator().device_name()) * sum_of_ranks
         result = result.to(dtype)
         x = x.to(dtype)
         dist.inference_all_reduce(x)
