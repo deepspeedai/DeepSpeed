@@ -2505,9 +2505,9 @@ class DeepSpeedEngine(Module):
 
         # TODO: handle these scaling with direct calls to loss.backward()
         if isinstance(self.optimizer, ZeROOptimizer):
-            gas_scaled_loss = self.optimizer.scale_if_loss(gas_scaled_loss)
+            loss = self.optimizer.scale_if_loss(loss)
         elif self.torch_autocast_z0_gradscaler:
-            gas_scaled_loss = self.torch_autocast_z0_gradscaler.scale(gas_scaled_loss)
+            loss = self.torch_autocast_z0_gradscaler.scale(loss)
 
         with compiled_autograd(self._is_compiled_autograd_enabled, self._compile_kwargs):
             # ZenFlow requires exclusive control over the backward pass to manage its
