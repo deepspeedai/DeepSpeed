@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 # DeepSpeed Team
+from typing import Optional, Callable
 
 import torch
 from deepspeed import comm as dist
@@ -630,6 +631,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
             self._create_optimizer_mapping()
 
         self.offloaded_states: Set[OffloadStateTypeEnum] = set()
+        self._all_reduce_hook: Optional[Callable[[torch.Tensor], None]] = None
 
     def destroy(self):
         for i, _ in enumerate(self.optimizer.param_groups):
@@ -1500,6 +1502,10 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
         #print(f"Grad norm after copy to contiguous_buffer {param.grad.data.norm()}")
         self.grads_in_partition_offset += param.numel()
 
+    def all_reduce_hook(self, tensor):
+        if self._all_reduce_hook:
+            self._all_reduce_hook(tensor)
+
     def reduce_ipg_grads(self):
         for comm_dtype in sort_dtypes(self.ipg_buckets.keys()):
             bucket = self.ipg_buckets[comm_dtype]
@@ -1536,6 +1542,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
             stream = get_accelerator().current_stream()
 
         with get_accelerator().stream(stream):
+            grad_buffers = []
             for comm_dtype in sort_dtypes(self.ipg_buckets.keys()):
                 bucket = self.ipg_buckets[comm_dtype]
 
@@ -1556,12 +1563,22 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
                                 self.previous_reduced_grads[comm_dtype].append(param)
                             else:
                                 self.clear_grad_attribute(param)
-                        elif self.contiguous_gradients:
-                            self.copy_grads_in_partition(param)
+                        else:
+                            if self.contiguous_gradients:
+                                self.copy_grads_in_partition(param)
+                            grad_buffers.append(self.get_gradient_for_reduction(param))
                     else:  # zero stage 1 - partition only optimizer state
-                        if self.contiguous_gradients and self.is_param_in_current_partition[param_id]:
-                            self.copy_grads_in_partition(param)
+                        if self.is_param_in_current_partition[param_id]:
+                            if self.contiguous_gradients:
+                                self.copy_grads_in_partition(param)
+                            grad_buffers.append(self.get_gradient_for_reduction(param))
+
                 bucket.clear()
+
+            if self._all_reduce_hook:
+                for grad_buffer in grad_buffers:
+                    if grad_buffer is not None:
+                        self.all_reduce_hook(grad_buffer)
         #####################################################################
 
     def process_gradients(self, param, i):
