@@ -29,6 +29,8 @@ import torch
 
 from deepspeed.accelerator import get_accelerator
 import deepspeed.comm as dist
+from deepspeed.utils.torch import required_torch_version
+
 
 logger = logging.getLogger(__name__)
 
@@ -324,25 +326,30 @@ class ParallelState:
         pg_options=None,
         use_local_synchronization=False,
         group_desc=None,
-    ):
+    ):         
         """Creates a ProcessGroup."""
-        # Use torch.distributed directly for new_group as deepspeed.comm.new_group only supports ranks parameter
-        import torch.distributed as torch_dist
-        
+        if backend is not None and backend != "nccl":
+            logger.warning(f"{backend} backend is not supported for new_group. Using torch.distributed directly.")
+            return None
+
+        # TODO: Currently using deepspeed.comm.new_group() which only supports 'ranks' parameter.
+        # The following parameters are commented out and will be enabled once DeepSpeed's
+        # comm interface supports them:
+        # - timeout: Timeout for process group operations
+        # - backend: Communication backend (e.g., 'nccl', 'gloo')
+        # - pg_options: Process group options
+        # - use_local_synchronization: Enable local synchronization
+        # - group_desc: Group description for debugging (requires PyTorch >= 2.4)
         kwargs = {
             "ranks": ranks,
-            "timeout": timeout,
-            "backend": backend,
-            "pg_options": pg_options,
-            "use_local_synchronization": use_local_synchronization,
-            "group_desc": group_desc,
+            # "timeout": timeout,
+            # "backend": backend,
+            # "pg_options": pg_options,
+            # "use_local_synchronization": use_local_synchronization,
+            # "group_desc": group_desc,
         }
-        if not is_torch_min_version("2.4.0"):
-            kwargs.pop("group_desc")
-            if timeout is None:
-                kwargs.pop("timeout")
 
-        group = torch_dist.new_group(**kwargs)
+        group = dist.new_group(**kwargs)
         if self.global_process_group_list is None:
             self.global_process_group_list = [None]
         if dist.get_rank() in ranks:
