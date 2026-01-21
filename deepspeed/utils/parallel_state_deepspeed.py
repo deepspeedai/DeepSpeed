@@ -633,6 +633,70 @@ def is_initialized(name: Optional[str] = None):
 
 
 # ============================================================================
+# All-to-All Groups for ZeRO++ Quantized Gradients
+# ============================================================================
+
+
+def initialize_all_to_all_groups(name: Optional[str] = None):
+    """Initialize All-to-All groups for quantized gradient communication.
+
+    Creates local and global All-to-All groups based on node topology.
+    Used by ZeRO++ when zero_quantized_gradients is enabled.
+
+    Args:
+        name: Optional name of the parallel state instance. If None, uses current active instance.
+
+    Returns:
+        Dictionary of All-to-All groups
+
+    Example:
+        # Initialize for default instance
+        all_to_all_groups = initialize_all_to_all_groups()
+
+        # Initialize for named instance (RL scenario)
+        actor_groups = initialize_all_to_all_groups("actor")
+        critic_groups = initialize_all_to_all_groups("critic")
+
+    DeepSpeed-compatible interface.
+    """
+    return get_parallel_state(name).initialize_all_to_all_groups()
+
+
+def get_all_to_all_groups(name: Optional[str] = None):
+    """Get All-to-All groups dictionary.
+
+    Args:
+        name: Optional name of the parallel state instance. If None, uses current active instance.
+
+    Returns:
+        Dictionary of All-to-All groups
+
+    DeepSpeed-compatible interface.
+    """
+    return get_parallel_state(name).get_all_to_all_groups()
+
+
+def _get_local_all_to_all_group(name: Optional[str] = None):
+    """Get All-to-All groups for current rank (backward compatible with groups.py).
+
+    This function provides backward compatibility with the groups.py interface.
+    It returns all All-to-All groups (both local and global).
+
+    Args:
+        name: Optional name of the parallel state instance. If None, uses current active instance.
+
+    Returns:
+        Dictionary of All-to-All groups
+
+    Note:
+        This is a compatibility wrapper. New code should use get_all_to_all_groups() instead.
+
+    DeepSpeed-compatible interface.
+    """
+    return get_parallel_state(name).get_all_to_all_groups()
+
+
+# ============================================================================
 # Configuration-based Initialization
 # ============================================================================
 

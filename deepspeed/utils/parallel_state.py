@@ -265,6 +265,10 @@ class ParallelState:
         self.intra_partial_expert_data_parallel_group_gloo = None
         self.inter_partial_expert_data_parallel_group = None
 
+        # All-to-All groups for ZeRO++ quantized gradients
+        self.all_to_all_groups = {}
+        self.all_to_all_initialized = False
+
         # Global ranks lists
         self.embedding_global_ranks = None
         self.position_embedding_global_ranks = None
@@ -326,7 +330,7 @@ class ParallelState:
         pg_options=None,
         use_local_synchronization=False,
         group_desc=None,
-    ):         
+    ):
         """Creates a ProcessGroup."""
         if backend is not None and backend != "nccl":
             logger.warning(f"{backend} backend is not supported for new_group. Using torch.distributed directly.")
@@ -1040,6 +1044,68 @@ class ParallelState:
     def is_initialized(self):
         """Check if parallel state has been initialized"""
         return self.data_parallel_group is not None
+
+    def initialize_all_to_all_groups(self):
+        """Initialize All-to-All groups for quantized gradient communication.
+
+        Creates local and global All-to-All groups based on node topology:
+        - Local groups: intra-node communication (NVLink/NVSwitch)
+        - Global groups: inter-node communication (cross-node)
+
+        Used by ZeRO++ when zero_quantized_gradients is enabled.
+
+        Returns:
+            Dictionary of All-to-All groups
+        """
+        if self.all_to_all_initialized:
+            return self.all_to_all_groups
+
+        assert dist.is_initialized(), 'dist is not initialized'
+
+        device_per_node = get_accelerator().device_count()
+        world_size = dist.get_world_size()
+        num_nodes = world_size // device_per_node
+
+        if num_nodes == 0 and world_size > 0:
+            # Single incomplete node
+            assert world_size >= 1, 'num_gpus must >=1, cannot initialize All-To-All'
+            ranks = list(range(world_size))
+            self.all_to_all_groups['local_0'] = self._create_group(ranks)
+
+        elif num_nodes == 1:
+            # Exactly one node
+            assert world_size == device_per_node, 'num_gpus not equal to device per node, cannot initialize All-To-All'
+            ranks = list(range(device_per_node))
+            self.all_to_all_groups['local_0'] = self._create_group(ranks)
+
+        else:
+            # Multiple nodes: create both local and global groups
+            assert world_size > device_per_node, 'num_nodes<2 cannot initialize All-To-All'
+
+            # Local groups (intra-node)
+            for node_id in range(num_nodes):
+                local_ranks = [j + device_per_node * node_id for j in range(device_per_node)]
+                self.all_to_all_groups[f"local_{node_id}"] = self._create_group(local_ranks)
+
+            # Global groups (inter-node)
+            for device_id in range(device_per_node):
+                global_ranks = [device_id + j * device_per_node for j in range(num_nodes)]
+                self.all_to_all_groups[f"global_{device_id}"] = self._create_group(global_ranks)
+
+        self.all_to_all_initialized = True
+        return self.all_to_all_groups
+
+    def get_all_to_all_groups(self):
+        """Get All-to-All groups dictionary.
+
+        Initializes the groups if not already initialized.
+
+        Returns:
+            Dictionary of All-to-All groups
+        """
+        if not self.all_to_all_initialized:
+            self.initialize_all_to_all_groups()
+        return self.all_to_all_groups
 
     def get_global_memory_buffer(self):
         """Return the global GlobalMemoryBuffer object"""
