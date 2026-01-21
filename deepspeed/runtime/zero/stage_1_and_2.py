@@ -878,15 +878,40 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
                         device=get_accelerator().current_device_name(),
                         param_group_idx=i,
                         return_tensor_list=True)
+                    # Clear all_grad_tensors after use. With reentrant checkpointing,
+                    # the epilogue may run multiple times per backward pass. Each time,
+                    # we read the cumulative grad_accum (which PyTorch naturally accumulates)
+                    # and the final phase will have all gradients.
                     self.all_grad_tensors[i] = None
 
         self._release_ipg_buffers()
 
-        # No need to keep the gradients anymore.
-        # All gradients required by the step
-        # are in self.averaged_gradients
-        self.zero_grad(set_to_none=True)
+        # Clear param.grad so safe_get_full_grad() goes through the proper _hp_mapping
+        # path (which does all_reduce for ZeRO-2). Keep grad_accum intact for reentrant
+        # checkpointing where gradients need to accumulate across multiple phases.
+        # grad_accum is cleared in clear_backward_seen_flag() at the start of next forward.
+        self._clear_param_grad_only()
+        self._epilogue_ran_this_backward = True
+
         see_memory_usage("End ipg_epilogue")
+
+    def clear_backward_seen_flag(self):
+        """Clear the backward seen flag and do deferred cleanup.
+
+        With reentrant gradient checkpointing, the epilogue may run multiple times
+        per backward pass (once per phase). We defer clearing grad_accum until here
+        (called at the start of the next forward) to ensure all phases have completed.
+
+        Note: param.grad is cleared in the epilogue via _clear_param_grad_only() to
+        ensure safe_get_full_grad() works correctly. Only grad_accum is deferred.
+        """
+        if self._epilogue_ran_this_backward:
+            # Clear grad_accum for next step. param.grad is already cleared in epilogue.
+            for group in self.bit16_groups:
+                for p in group:
+                    p.grad_accum = None
+
+        super().clear_backward_seen_flag()
 
     # resets all partition to no reduced
     # sets remaining grads to the total number of grads in each partition
@@ -999,15 +1024,10 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
                     def wrapper(param, i):
 
                         def grad_handling_hook(*notneeded):
-                            if self._remaining_grad_acc_hooks == 0:
-                                self._remaining_grad_acc_hooks = count_used_parameters_in_backward(
-                                    all_params_requiring_grad)
-
+                            self.reenter_backward_if_needed()
                             self.process_gradients(param, i)
-
-                            self._remaining_grad_acc_hooks -= 1
-                            if self._remaining_grad_acc_hooks == 0:
-                                self.run_grad_acc_post_hooks()
+                            current_expected = count_used_parameters_in_backward(all_params_requiring_grad)
+                            self.update_hook_state_and_maybe_run_epilogue(current_expected)
 
                         self._grad_acc_hooks.append(register_grad_hook(param, grad_handling_hook))
 
@@ -1813,6 +1833,18 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
                     if p.grad is not None:
                         p.grad.detach_()
                         p.grad.zero_()
+
+    def _clear_param_grad_only(self):
+        """Clear only param.grad but keep grad_accum intact.
+
+        This is used at the end of the epilogue to ensure safe_get_full_grad() goes
+        through the proper _hp_mapping path (which does all_reduce for ZeRO-2), while
+        preserving grad_accum for reentrant checkpointing where gradients need to
+        accumulate across multiple backward phases.
+        """
+        for group in self.bit16_groups:
+            for p in group:
+                p.grad = None
 
     def _model_parallel_all_reduce(self, tensor, op):
         """ Perform all reduce within model parallel group, if any.

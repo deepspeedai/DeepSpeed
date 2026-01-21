@@ -46,6 +46,7 @@ jobs:
     needs: check-paths
     if: needs.check-paths.outputs.should_run == 'true'
     runs-on: [self-hosted, gpu-ci, gpu-l40s, l40s-4gpu, aws]
+    timeout-minutes: 60
 
     container:
       image: nvidia/cuda:12.6.3-devel-ubuntu22.04

@@ -1,0 +1,136 @@
+################################################################################
+# DeepSpeed CI - AWS L40S GPU Full Tests (PyTorch Latest)
+#
+# Runs the full DeepSpeed unit test suite on AWS self-hosted runners.
+# Uses 4x NVIDIA L40S GPUs on g6e.12xlarge instances.
+#
+# This workflow runs:
+# - Parallel tests with pytest-xdist (-n 8)
+# - Sequential tests marked with @pytest.mark.sequential
+################################################################################
+
+name: aws-torch-latest-full
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  unit-tests:
+    name: Unit Tests (Full)
+    runs-on: [self-hosted, gpu-ci, gpu-l40s, l40s-4gpu, aws]
+    timeout-minutes: 180
+
+    container:
+      image: nvidia/cuda:12.6.3-devel-ubuntu22.04
+      # Mount /mnt/aio for async I/O tests (O_DIRECT requires native filesystem, not overlayfs)
+      options: --gpus all --shm-size "32G" -v /mnt/aio:/mnt/aio
+
+    env:
+      TORCH_VER: "2.7"
+      CUDA_VER: "12.6"
+      CUTLASS_PATH: /opt/cutlass
+      # Disable reuse_dist_env to prevent pool worker cleanup hangs in full test runs
+      DS_DISABLE_REUSE_DIST_ENV: "1"
+
+    steps:
+      - name: Install system dependencies
+        run: |
+          apt-get update && apt-get install -y git git-lfs libaio-dev pdsh python3 python3-pip
+          git lfs install
+          ln -sf /usr/bin/python3 /usr/bin/python
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          lfs: true
+
+      - name: Install CUTLASS
+        run: |
+          git clone --depth 1 --branch v3.5.1 https://github.com/NVIDIA/cutlass.git /opt/cutlass
+          echo "CUTLASS installed at /opt/cutlass"
+          ls -la /opt/cutlass/include/ | head -10
+
+      - name: Install PyTorch
+        run: |
+          pip install torch==2.7.1 torchvision==0.22.1 torchaudio==2.7.1 --index-url https://download.pytorch.org/whl/cu126
+
+      - name: Install transformers
+        run: |
+          git clone https://github.com/huggingface/transformers
+          cd transformers
+          git checkout 981c276
+          pip install .
+
+      - name: Install Python dependencies
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements/requirements.txt
+          pip install -r requirements/requirements-dev.txt
+          pip install -r requirements/requirements-deepcompile.txt
+          pip install pytest-timeout pytest-instafail
+
+      - name: Check environment
+        run: |
+          echo "=== GPU Information ==="
+          nvidia-smi
+          echo ""
+          echo "=== CUDA Version ==="
+          nvcc --version
+          echo ""
+          echo "=== Python/PyTorch Info ==="
+          python --version
+          python -c "import torch; print(f'PyTorch: {torch.__version__}')"
+          python -c "import torch; print(f'CUDA available: {torch.cuda.is_available()}')"
+          python -c "import torch; print(f'CUDA devices: {torch.cuda.device_count()}')"
+          python -c "import torch; print(f'BF16 support: {torch.cuda.is_bf16_supported()}')"
+          echo ""
+          echo "=== CUTLASS ==="
+          echo "CUTLASS_PATH: $CUTLASS_PATH"
+          ls -la $CUTLASS_PATH/include/ | head -5
+
+      - name: Install DeepSpeed
+        run: |
+          # Initialize CUDA before install so setup.py can detect NCCL version
+          python -c "import torch; torch.cuda.init(); print(f'NCCL version: {torch.cuda.nccl.version()}')"
+          # Use --no-build-isolation so setup.py can access pre-installed PyTorch
+          pip install --no-build-isolation .[dev,1bit,autotuning,deepcompile]
+          ds_report
+
+      - name: Python environment
+        run: |
+          pip list
+
+      - name: Unit tests (parallel)
+        run: |
+          export TORCH_CUDA_ARCH_LIST="8.9"
+          cd tests
+          # Skip tests requiring unavailable hardware or known issues:
+          # - nvme checkpointing: no nvme device
+          # - GDS tests: no GPUDirect Storage support
+          # - launcher user_args: pdsh requires SSH server
+          # - zenflow: Stage 3 tests have pre-existing bugs + CUDA/fork issues
+          rm -rf /mnt/aio/pytest
+          pytest --instafail --timeout 600 --forked -n 8 --basetemp=/mnt/aio/pytest unit/ \
+            --ignore=unit/runtime/zero/test_nvme_checkpointing.py \
+            --ignore=unit/ops/aio/test_gds.py \
+            --ignore=unit/launcher/test_user_args.py \
+            --ignore=unit/runtime/zenflow \
+            --ignore=unit/ops/adam/test_zf_torch_adam.py \
+            --torch_ver=${{ env.TORCH_VER }} --cuda_ver=${{ env.CUDA_VER }}
+
+      - name: Unit tests (sequential)
+        run: |
+          export TORCH_CUDA_ARCH_LIST="8.9"
+          cd tests
+          rm -rf /mnt/aio/pytest
+          pytest --instafail --timeout 600 --forked -m 'sequential' --basetemp=/mnt/aio/pytest unit/ \
+            --ignore=unit/runtime/zero/test_nvme_checkpointing.py \
+            --ignore=unit/ops/aio/test_gds.py \
+            --ignore=unit/launcher/test_user_args.py \
+            --ignore=unit/runtime/zenflow \
+            --ignore=unit/ops/adam/test_zf_torch_adam.py \
+            --torch_ver=${{ env.TORCH_VER }} --cuda_ver=${{ env.CUDA_VER }}
