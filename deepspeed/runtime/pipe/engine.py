@@ -548,8 +548,9 @@ class PipelineEngine(DeepSpeedEngine):
             else:
                 assert isinstance(outputs, (list, tuple))
                 reduced = [torch.zeros_like(o) for o in outputs[0]]
-                for idx, out in outputs:
-                    reduced[idx] += out
+                for outs in outputs:
+                    for idx, out in enumerate(outs):
+                        reduced[idx] += out
 
             # Average over the microbatches
             reduced = self._scale_loss_by_gas(reduced, eval_micro_batches=micro_batches)
