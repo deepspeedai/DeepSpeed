@@ -118,7 +118,6 @@ class IPGBucket:
         self.params.clear()
         self.grads.clear()
         self.elements = 0
-        self.index = 0
         self.has_moe_params = False
 
 
@@ -1052,11 +1051,8 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
         bucket = self.ipg_buckets[comm_dtype]
         if bucket.elements + param.numel() > self.reduce_bucket_size:
             self.report_ipg_memory_usage("In ipg_remove_grads before reduce_ipg_grads", param.numel())
-            self.reduce_ipg_grads()
+            self.reduce_ipg_grads(comm_dtype=comm_dtype)
             if self.contiguous_gradients and self.overlap_comm:
-                if not get_accelerator().resolves_data_dependency():
-                    self.reduction_stream.wait_stream(get_accelerator().current_stream())
-                    get_accelerator().current_stream().wait_stream(self.reduction_stream)
                 # Swap index between 0 and 1
                 bucket.index = 1 - bucket.index
             self.report_ipg_memory_usage("In ipg_remove_grads after reduce_ipg_grads", param.numel())
@@ -1500,8 +1496,11 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
         #print(f"Grad norm after copy to contiguous_buffer {param.grad.data.norm()}")
         self.grads_in_partition_offset += param.numel()
 
-    def reduce_ipg_grads(self):
-        for comm_dtype in sort_dtypes(self.ipg_buckets.keys()):
+    def reduce_ipg_grads(self, comm_dtype=None):
+        dtypes = sort_dtypes(self.ipg_buckets.keys())
+        if comm_dtype is not None:
+            dtypes = [comm_dtype]
+        for comm_dtype in dtypes:
             bucket = self.ipg_buckets[comm_dtype]
 
             if self.contiguous_gradients:
@@ -1536,7 +1535,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
             stream = get_accelerator().current_stream()
 
         with get_accelerator().stream(stream):
-            for comm_dtype in sort_dtypes(self.ipg_buckets.keys()):
+            for comm_dtype in dtypes:
                 bucket = self.ipg_buckets[comm_dtype]
 
                 for group_idx, param_idx_in_group, param_id in bucket.params:
