@@ -428,7 +428,7 @@ class ParallelState:
         order: str = "tp-ep-dp-pp",
         get_embedding_ranks: Optional[Callable[[List[int], Optional[int]], List[int]]] = None,
         get_position_embedding_ranks: Optional[Callable[[List[int], Optional[int]], List[int]]] = None,
-        create_gloo_process_groups: bool = True,
+        create_gloo_process_groups: bool = False,
     ) -> None:
         """Initialize model data parallel groups.
 
