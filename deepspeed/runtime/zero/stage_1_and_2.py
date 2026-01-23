@@ -1187,7 +1187,11 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
             stream = get_accelerator().current_stream()
 
         with get_accelerator().stream(stream):
-            if not self.reduce_scatter:
+            # Check if any parameter uses Muon optimizer (needs full gradient for orthogonalization)
+            uses_muon = any(getattr(param, 'use_muon', False) for group in self.bit16_groups for param in group)
+            
+            if not self.reduce_scatter or uses_muon:
+                # Force full all-reduce for Muon parameters even when reduce_scatter is enabled
                 self.gradient_reduction_w_predivide(tensor, communication_data_type)
                 return
 
