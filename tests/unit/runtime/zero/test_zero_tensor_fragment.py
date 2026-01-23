@@ -179,7 +179,7 @@ class TestTensorFragmentGet(DistributedTest):
                 "grad_accum_dtype": "fp32"
             },
             "zero_optimization": {
-                "stage": 0,
+                "stage": 1,
             }
         }
 
