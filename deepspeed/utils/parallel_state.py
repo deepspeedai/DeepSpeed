@@ -29,8 +29,6 @@ import torch
 
 from deepspeed.accelerator import get_accelerator
 import deepspeed.comm as dist
-from deepspeed.utils.torch import required_torch_version
-
 
 logger = logging.getLogger(__name__)
 
@@ -333,7 +331,7 @@ class ParallelState:
     ):
         """Creates a ProcessGroup."""
         if backend is not None and backend != "nccl":
-            logger.warning(f"{backend} backend is not supported for new_group. Using torch.distributed directly.")
+            logger.warning(f"{backend} backend is not supported for new_group. Using deepspeed.comm directly.")
             return None
 
         # TODO: Currently using deepspeed.comm.new_group() which only supports 'ranks' parameter.
@@ -829,29 +827,13 @@ class ParallelState:
                     self.intra_distributed_optimizer_instance_group = intra_dist_opt_instance_group
                 intra_dist_opt_ranks = []
 
-        # Build sequence parallel groups
+        # Build sequence parallel groups using RankGenerator
         if sequence_parallel_size > 1:
             assert self.sequence_parallel_group is None, "sequence parallel group is already initialized"
             assert self.sequence_and_data_parallel_group is None, "sequence and data parallel group is already initialized"
 
-            if world_size < sequence_parallel_size:
-                raise RuntimeError(
-                    f"world_size ({world_size}) is less than sequence_parallel_size ({sequence_parallel_size})")
-
-            if world_size % sequence_parallel_size != 0:
-                raise RuntimeError(
-                    f"world_size ({world_size}) is not divisible by sequence_parallel_size ({sequence_parallel_size})")
-
-            # SP groups use consecutive ranks
-            # Number of SP groups = data_parallel_size (each DP rank has its own SP group)
-            num_sequence_parallel_groups = data_parallel_size
-            sequence_and_data_parallel_size = world_size
-            num_sequence_and_data_parallel_groups = 1
-
-            # Build the sequence parallel groups using consecutive ranks
-            # SP uses consecutive rank grouping, not orthogonal grouping like TP/PP/CP
-            for i in range(num_sequence_parallel_groups):
-                ranks = list(range(i * sequence_parallel_size, (i + 1) * sequence_parallel_size))
+            # Build SP groups using RankGenerator
+            for ranks in self.decoder_rank_generator.get_ranks('sp'):
                 group = self._create_group(
                     ranks,
                     timeout=timeout,
@@ -861,9 +843,8 @@ class ParallelState:
                 if rank in ranks:
                     self.sequence_parallel_group = group
 
-            # Build the sequence and data parallel groups
-            for i in range(num_sequence_and_data_parallel_groups):
-                ranks = list(range(i * sequence_and_data_parallel_size, (i + 1) * sequence_and_data_parallel_size))
+            # Build SP+DP combined groups using RankGenerator
+            for ranks in self.decoder_rank_generator.get_ranks('sp-dp'):
                 group = self._create_group(
                     ranks,
                     timeout=timeout,
