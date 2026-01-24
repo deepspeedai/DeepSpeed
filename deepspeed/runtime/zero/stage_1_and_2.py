@@ -291,7 +291,10 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
             assert self.communication_data_type in valid_reduce_scatter_dtypes, f"{self.zero_stage_string} supports {valid_reduce_scatter_dtypes} communication_data_type with reduce scatter enabled. Got: '{self.communication_data_type}'"
             assert self.gradient_predivide_factor == 1.0, f"gradient_predivide_factor != 1.0 is not yet supported with {self.zero_stage_string} with reduce scatter enabled"
             assert self.postscale_gradients, f"pre-scale gradients is not yet supported with {self.zero_stage_string} with reduce scatter enabled"
-            assert not self.uses_muon, f"{self.zero_stage_string} with reduce_scatter=True is incompatible with Muon optimizer. Please disable reduce_scatter or use a different optimizer."
+            
+        # Check for Muon optimizer compatibility with reduce_scatter (applies to both ZeRO-1 and ZeRO-2)
+        if self.reduce_scatter and self.uses_muon:
+            assert False, f"{self.zero_stage_string} with reduce_scatter=True is incompatible with Muon optimizer. Please disable reduce_scatter or use a different optimizer."
 
         # param flattened by groups
         self.bit16_groups = []
