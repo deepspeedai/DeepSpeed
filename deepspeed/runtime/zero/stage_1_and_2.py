@@ -283,11 +283,15 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
 
         self.low_precision_master_weights_and_grads = self.master_weights_and_grads_dtype != torch.float32
 
+        # Check for Muon optimizer usage
+        self.uses_muon = any(getattr(param, 'use_muon', False) for group in self.optimizer.param_groups for param in group['params'])
+        
         if self.reduce_scatter and self.partition_gradients:
             valid_reduce_scatter_dtypes = (torch.float16, torch.bfloat16, torch.float32)
             assert self.communication_data_type in valid_reduce_scatter_dtypes, f"{self.zero_stage_string} supports {valid_reduce_scatter_dtypes} communication_data_type with reduce scatter enabled. Got: '{self.communication_data_type}'"
             assert self.gradient_predivide_factor == 1.0, f"gradient_predivide_factor != 1.0 is not yet supported with {self.zero_stage_string} with reduce scatter enabled"
             assert self.postscale_gradients, f"pre-scale gradients is not yet supported with {self.zero_stage_string} with reduce scatter enabled"
+            assert not self.uses_muon, f"{self.zero_stage_string} with reduce_scatter=True is incompatible with Muon optimizer. Please disable reduce_scatter or use a different optimizer."
 
         # param flattened by groups
         self.bit16_groups = []
@@ -1187,10 +1191,8 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
             stream = get_accelerator().current_stream()
 
         with get_accelerator().stream(stream):
-            # Check if any parameter uses Muon optimizer (needs full gradient for orthogonalization)
-            uses_muon = any(getattr(param, 'use_muon', False) for group in self.bit16_groups for param in group)
-            
-            if not self.reduce_scatter or uses_muon:
+            # Use pre-detected Muon flag from initialization
+            if not self.reduce_scatter or self.uses_muon:
                 # Force full all-reduce for Muon parameters even when reduce_scatter is enabled
                 self.gradient_reduction_w_predivide(tensor, communication_data_type)
                 return
