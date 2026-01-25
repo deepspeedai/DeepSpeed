@@ -59,6 +59,11 @@ class BF16_Optimizer(ZeROOptimizer):
                                   ], f"BF16Optimizer: Unsupported gradient accumulation data type: {grad_acc_dtype}"
         self.grad_acc_dtype = grad_acc_dtype
 
+        # BF16 doesn't use loss scaling, but these attributes are needed for API compatibility
+        self.custom_loss_scaler = False
+        self.external_loss_scale = None
+        self.torch_autocast_gradscaler = None
+
         self.immediate_grad_update = bfloat16_config.immediate_grad_update
 
         self.clip_grad = clip_grad

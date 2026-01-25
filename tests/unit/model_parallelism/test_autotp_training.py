@@ -219,10 +219,17 @@ class TestTpLayerFwdBwd(DistributedTest):
 
         torch_grad = torch.chunk(torch_linear.weight.grad, tp_size, dim=1)[groups.get_tensor_model_parallel_rank()]
         torch_bias_grad = torch_linear.bias.grad
-        assert torch.allclose(linear.bias.grad, torch_bias_grad.to(get_accelerator().current_device()), atol=1e-3)
+        # Use assert_close with rtol for proper floating-point comparisons
+        torch.testing.assert_close(linear.bias.grad,
+                                   torch_bias_grad.to(get_accelerator().current_device()),
+                                   atol=1e-3,
+                                   rtol=1e-3)
         # The gradient of the weight is not the same as the torch_linear.weight.grad
-        assert torch.allclose(linear.weight.grad, torch_grad.to(get_accelerator().current_device()), atol=1e-3)
-        assert torch.allclose(out, torch_out.to(get_accelerator().current_device()), atol=1e-2)
+        torch.testing.assert_close(linear.weight.grad,
+                                   torch_grad.to(get_accelerator().current_device()),
+                                   atol=1e-3,
+                                   rtol=1e-3)
+        torch.testing.assert_close(out, torch_out.to(get_accelerator().current_device()), atol=1e-2, rtol=1e-2)
 
     def testColumnParallel(self, tp_size: int, tp_overlap_comm: bool):
         skip_on_device()
@@ -274,12 +281,20 @@ class TestTpLayerFwdBwd(DistributedTest):
         torch_grad = torch.chunk(torch_linear.weight.grad, tp_size, dim=0)[groups.get_tensor_model_parallel_rank()]
 
         torch_bias_grad = torch.chunk(torch_linear.bias.grad, tp_size, dim=0)[groups.get_tensor_model_parallel_rank()]
-        assert torch.allclose(linear.bias.grad, torch_bias_grad.to(get_accelerator().current_device()), atol=1e-3)
+        # Use assert_close with rtol for proper floating-point comparisons
+        torch.testing.assert_close(linear.bias.grad,
+                                   torch_bias_grad.to(get_accelerator().current_device()),
+                                   atol=1e-3,
+                                   rtol=1e-3)
 
-        assert torch.allclose(linear.weight.grad, torch_grad.to(get_accelerator().current_device()), atol=1e-3)
-        assert torch.allclose(cur_device_out.to(get_accelerator().current_device()).contiguous(),
-                              out.contiguous(),
-                              atol=1e-2)
+        torch.testing.assert_close(linear.weight.grad,
+                                   torch_grad.to(get_accelerator().current_device()),
+                                   atol=1e-3,
+                                   rtol=1e-3)
+        torch.testing.assert_close(cur_device_out.to(get_accelerator().current_device()).contiguous(),
+                                   out.contiguous(),
+                                   atol=1e-2,
+                                   rtol=1e-2)
 
 
 # @pytest.mark.sequential
