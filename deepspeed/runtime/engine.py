@@ -565,17 +565,23 @@ class DeepSpeedEngine(Module):
                                                                             with_kwargs=True)
 
     def __del__(self):
-        self.destroy()
+        try:
+            self.destroy()
+        except Exception as exc:
+            # Avoid destructor-time exceptions for partially initialized engines.
+            logger.debug("DeepSpeedEngine.__del__ cleanup skipped: %s", exc, exc_info=True)
 
     def destroy(self):
-        if self.optimizer is not None and hasattr(self.optimizer, 'destroy'):
-            self.optimizer.destroy()
+        optimizer = getattr(self, "optimizer", None)
+        if optimizer is not None and hasattr(optimizer, 'destroy'):
+            optimizer.destroy()
         if self.is_deepcompile_active():
             get_deepcompile_handle().cleanup()
         debug_clear_module_and_param_names()
 
-        if self.checkpoint_engine is not None and self.checkpoint_engine.is_decoupled():
-            self.checkpoint_engine.cleanup()
+        checkpoint_engine = getattr(self, "checkpoint_engine", None)
+        if checkpoint_engine is not None and checkpoint_engine.is_decoupled():
+            checkpoint_engine.cleanup()
 
     def _get_model_parameters(self):
         if self.autotuning_profile_model_info():
@@ -4376,7 +4382,7 @@ class DeepSpeedEngine(Module):
         return self._config.compile_config.deepcompile
 
     def is_deepcompile_active(self) -> bool:
-        return self._deepcompile_active
+        return getattr(self, "_deepcompile_active", False)
 
     @property
     def is_compiled(self) -> bool:
