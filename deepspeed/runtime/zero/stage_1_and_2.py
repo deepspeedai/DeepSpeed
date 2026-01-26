@@ -1439,9 +1439,9 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
             stream = get_accelerator().current_stream()
 
         with get_accelerator().stream(stream):
-            # Use pre-detected Muon flag from initialization
-            if not self.reduce_scatter or self.uses_muon:
-                # Force full all-reduce for Muon parameters even when reduce_scatter is enabled
+            # Check if current configuration requires full all-reduce
+            if not self.reduce_scatter or any(self.group_uses_muon):
+                # Force full all-reduce for Muon parameters or when reduce_scatter is disabled
                 self.gradient_reduction_w_predivide(tensor, communication_data_type)
                 return
 
