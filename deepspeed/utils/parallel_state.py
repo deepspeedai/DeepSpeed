@@ -39,27 +39,6 @@ except ImportError:
     HAVE_EINOPS = False
 
 
-def is_torch_min_version(version: str, check_equality: bool = True) -> bool:
-    """Check if PyTorch version meets minimum requirement.
-
-    Args:
-        version: Version string to check (e.g., "2.4.0")
-        check_equality: If True, also check for equality
-
-    Returns:
-        True if version requirement is met
-    """
-    try:
-        from packaging.version import Version as PkgVersion
-        torch_version = PkgVersion(torch.__version__)
-        required_version = PkgVersion(version)
-        if check_equality:
-            return torch_version >= required_version
-        return torch_version > required_version
-    except Exception:
-        return False
-
-
 class GlobalMemoryBuffer:
     """Global buffer to avoid dynamic memory allocations."""
 
