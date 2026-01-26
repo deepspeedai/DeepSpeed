@@ -264,12 +264,12 @@ class TestUlyssesLossBackward(DistributedTest):
     def test_sp_loss_backward_stability(self, sp_size: int) -> None:
         """
         Regression test for Issue #7672.
-        Verifies that using all_reduce for loss aggregation is stable 
+        Verifies that using all_reduce for loss aggregation is stable
         when sequence_parallel_size < world_size, preventing IndexError.
         """
         skip_on_arch(min_arch=8)
-        
-        # Setup: 4 GPUs, SP=2 (This config triggers the bug if using all_gather)
+
+        # Setup
         dp_size = self.world_size // sp_size
         model = SimpleModel(4)
         ds_engine, _, _, _ = initialize(
@@ -280,30 +280,33 @@ class TestUlyssesLossBackward(DistributedTest):
                 "sequence_parallel_size": sp_size
             },
         )
-        
+
         sp_group = ds_engine.seq_parallel_group
-        
+
         # Simulate Loss on each rank
         rank = dist.get_rank()
         local_loss = torch.tensor(float(rank + 1), device=ds_engine.device, requires_grad=True)
-        
-        # THE FIX: Use all_reduce (Sum) instead of all_gather
-        # This is mathematically equivalent to gathering and summing, 
-        # but safe for all rank configurations.
-        dist_loss = local_loss.clone()
-        dist.all_reduce(dist_loss, op=dist.ReduceOp.SUM, group=sp_group)
-        # Average the loss (as is typical in training)
-        dist_loss = dist_loss / sp_size
-        
+        local_weight = torch.tensor(1.0, device=ds_engine.device)
+
+        # Numerator: Weighted Loss summation
+        weighted_loss = local_loss * local_weight
+        dist.all_reduce(weighted_loss, op=dist.ReduceOp.SUM, group=sp_group)
+
+        # B. Denominator: Sum of total weights
+        total_weight = local_weight.clone()
+        dist.all_reduce(total_weight, op=dist.ReduceOp.SUM, group=sp_group)
+
+        # C. Calculate the final loss
+        dist_loss = weighted_loss / total_weight
+
         # Backward Pass verification
-        # If the bug were present (or we used all_gather), this would crash here.
         try:
             dist_loss.backward()
         except IndexError as e:
             pytest.fail(f"Backward crashed with IndexError: {e}")
-            
+
         # Verify Gradients
-        # Loss = (L1 + L2) / 2  => dLoss/dL1 = 0.5
-        expected_grad = 1.0 / sp_size
+        # Loss = (L1*1 + L2*1) / 2 = 0.5*L1 + 0.5*L2
+        expected_grad = 0.5
         assert torch.allclose(local_loss.grad, torch.tensor(expected_grad, device=ds_engine.device)), \
             f"Gradient mismatch! Expected {expected_grad}, got {local_loss.grad}"
