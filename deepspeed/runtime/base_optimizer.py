@@ -355,7 +355,9 @@ class ZeROOptimizer(DeepSpeedOptimizer):
                 return self.external_loss_scale * value
             if self.torch_autocast_gradscaler:
                 return self.torch_autocast_gradscaler.scale(value)
-            return self.loss_scaler.scale_loss(value)
+            # Only call loss_scaler if it exists (not present in BF16_Optimizer)
+            if hasattr(self, 'loss_scaler') and self.loss_scaler is not None:
+                return self.loss_scaler.scale_loss(value)
 
         return value
 

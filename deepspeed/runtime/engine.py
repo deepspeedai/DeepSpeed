@@ -565,17 +565,23 @@ class DeepSpeedEngine(Module):
                                                                             with_kwargs=True)
 
     def __del__(self):
-        self.destroy()
+        try:
+            self.destroy()
+        except Exception as exc:
+            # Avoid destructor-time exceptions for partially initialized engines.
+            logger.debug("DeepSpeedEngine.__del__ cleanup skipped: %s", exc, exc_info=True)
 
     def destroy(self):
-        if self.optimizer is not None and hasattr(self.optimizer, 'destroy'):
-            self.optimizer.destroy()
+        optimizer = getattr(self, "optimizer", None)
+        if optimizer is not None and hasattr(optimizer, 'destroy'):
+            optimizer.destroy()
         if self.is_deepcompile_active():
             get_deepcompile_handle().cleanup()
         debug_clear_module_and_param_names()
 
-        if self.checkpoint_engine is not None and self.checkpoint_engine.is_decoupled():
-            self.checkpoint_engine.cleanup()
+        checkpoint_engine = getattr(self, "checkpoint_engine", None)
+        if checkpoint_engine is not None and checkpoint_engine.is_decoupled():
+            checkpoint_engine.cleanup()
 
     def _get_model_parameters(self):
         if self.autotuning_profile_model_info():
@@ -1481,8 +1487,6 @@ class DeepSpeedEngine(Module):
                 )
                 return BFLOAT16
             return FP16 if model_dtype == torch.float16 else DDP_BFLOAT16
-        elif model_dtype == torch.bfloat16 and grad_accum_dtype == torch.float32:
-            return BFLOAT16
         else:
             raise NotImplementedError(f"unsupported mix of {model_dtype=} and {grad_accum_dtype=}")
 
@@ -2947,6 +2951,11 @@ class DeepSpeedEngine(Module):
             if not param.requires_grad:
                 continue
 
+            # Skip empty parameters (numel=0) as they contribute nothing to gradient reduction
+            # and cause issues with flatten/unflatten operations
+            if param.numel() == 0:
+                continue
+
             if param.grad is None:
                 # In cases where there is an imbalance of empty grads across
                 # ranks we must create empty grads, this will ensure that every
@@ -4373,7 +4382,7 @@ class DeepSpeedEngine(Module):
         return self._config.compile_config.deepcompile
 
     def is_deepcompile_active(self) -> bool:
-        return self._deepcompile_active
+        return getattr(self, "_deepcompile_active", False)
 
     @property
     def is_compiled(self) -> bool:
