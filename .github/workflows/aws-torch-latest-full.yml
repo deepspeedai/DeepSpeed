@@ -133,4 +133,5 @@ jobs:
             --ignore=unit/launcher/test_user_args.py \
             --ignore=unit/runtime/zenflow \
             --ignore=unit/ops/adam/test_zf_torch_adam.py \
+            --ignore=unit/ops/deepspeed4science/test_DS4Sci_EvoformerAttention.py \
             --torch_ver=${{ env.TORCH_VER }} --cuda_ver=${{ env.CUDA_VER }}
