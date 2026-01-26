@@ -696,8 +696,8 @@ class AllGatherHandle:
                 self.__original_dtype).to(self.__param.device)
         elif self.__quantization:
             instrument_w_nvtx(self.__quantization.quant_handle.wait)()
-            dequantized = self.__quantization.backend.dequantize(
-                self.__quantization.quantized_param, self.__quantization.scale_buffer)
+            dequantized = self.__quantization.backend.dequantize(self.__quantization.quantized_param,
+                                                                 self.__quantization.scale_buffer)
             # Fix for issue #7775: convert dequantized tensor back to original dtype (e.g., bf16)
             if self.__original_dtype is not None:
                 dequantized = dequantized.to(self.__original_dtype)

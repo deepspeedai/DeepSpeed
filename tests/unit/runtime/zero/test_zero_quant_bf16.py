@@ -1,3 +1,4 @@
+# Copyright (c) Microsoft Corporation.
 # SPDX-License-Identifier: Apache-2.0
 
 # DeepSpeed Team
@@ -54,7 +55,8 @@ class TestZeroQuantBF16(DistributedTest):
 
             # Verify that param.data is indeed bfloat16 after all_gather
             for name, param in model.named_parameters():
-                assert param.data.dtype == torch.bfloat16, f"Parameter {name} data dtype is {param.data.dtype}, expected torch.bfloat16"
+                assert param.data.dtype == torch.bfloat16, \
+                    f"Parameter {name} data dtype is {param.data.dtype}, expected torch.bfloat16"
 
             model.backward(loss)
             model.step()
