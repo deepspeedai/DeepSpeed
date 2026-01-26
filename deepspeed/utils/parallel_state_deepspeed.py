@@ -772,7 +772,7 @@ def initialize_parallel_state_from_config(
             "nccl_communicator_config_path": null,
             "distributed_timeout_minutes": 30,
             "order": "tp-ep-dp-pp",
-            "create_gloo_process_groups": true,
+            "create_gloo_process_groups": false,
             "high_priority_stream_groups": null,
             "sequence_parallel_size": 1
           },
@@ -782,10 +782,10 @@ def initialize_parallel_state_from_config(
           // - "hierarchical_context_parallel_sizes": not supported
 
           // Sequence Parallel (SP) usage notes:
-          // - SP cannot be used together with TP, PP, or EP
-          // - When using SP, set tp=1, pp=1, ep=1
-          // - Example SP config: {"sequence_parallel_size": 4, "order": "sp-dp"}
-          // - SP can be combined with DP: {"sequence_parallel_size": 4, "data_parallel_size": 2, "order": "sp-dp"}
+          // - SP dimension is included in model_size calculation: model_size = tp * pp * cp * sp
+          // - Number of SP groups = data_parallel_size (each DP rank has its own SP group)
+          // - SP uses consecutive rank grouping, different from TP/PP/CP/EP orthogonal grouping
+          // - Example: world_size=16, tp=2, sp=2, pp=1, ep=1 => dp=4, and 4 SP groups
 
           "train_batch_size": 8,
           ...
