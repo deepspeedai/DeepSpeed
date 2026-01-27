@@ -246,6 +246,10 @@ class UlyssesSPAttentionHF(torch.nn.Module):
         # print_rank0(f"{key.shape=}")
         # print_rank0(f"{value.shape=}")
         # print_rank0(f"{self.required_input_shape=}")
+
+        if not module.training:
+            return self.attn(module, query, key, value, attention_mask, *args, **kwargs)
+
         if self.seq_length_is_variable:
             current_local_seq_length = query.shape[2]
             self.local_seq_length = current_local_seq_length
