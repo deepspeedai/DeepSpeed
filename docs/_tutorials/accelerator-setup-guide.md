@@ -47,7 +47,7 @@ This switch would automatically detect the number of CPU NUMA node on the host, 
 
 If a user wishes to have more control on the number of workers and specific cores that can be used by the workload, user can use the following command line switches.
 ```
-deepspeed --num_accelerators <number-of-workers> --bind_cores_to_rank --bind_core_list <comma-seperated-dash-range> <deepspeed-model-script>
+deepspeed --num_accelerators <number-of-workers> --bind_cores_to_rank --bind_core_list <comma-separated-dash-range> <deepspeed-model-script>
 ```
 For example:
 ```
@@ -94,7 +94,7 @@ Intel Extension for PyTorch compatible with DeepSpeed AutoTP tensor parallel inf
 ```
 ipex_model = ipex.llm.optimize(deepspeed_model)
 ```
-to get model optimzied by Intel Extension for PyTorch.
+to get model optimized by Intel Extension for PyTorch.
 
 ## More examples for using DeepSpeed on Intel CPU
 Refer to [LLM examples](https://github.com/intel/intel-extension-for-pytorch/tree/main/examples/cpu/llm) for more code samples of running inference with DeepSpeed on Intel CPU.
