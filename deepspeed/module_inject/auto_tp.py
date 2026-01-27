@@ -142,14 +142,22 @@ class Loading():
         ]
         return module.__class__ in load_layers or module._get_name() in load_layer_names
 
-    def load_buffer(module, state_dict, prefix):
+    def load_buffer(module, state_dict, prefix, mp_group=None):
         for name in module._buffers.keys():
             if module._buffers[name].data.is_meta:
                 module._buffers[name] = torch.nn.parameter.Parameter(
                     data=torch.empty_like(module._buffers[name].data, device="cpu"),
                     requires_grad=module._buffers[name].data.requires_grad)
             if prefix + name in state_dict.keys():
-                module._buffers[name].data.copy_(state_dict[prefix + name])
+                # Buffers are typically not sharded across devices, so we copy the full buffer
+                # to all devices. Ensure the buffer data is moved to the correct device.
+                buffer_data = state_dict[prefix + name]
+                if not buffer_data.is_meta:
+                    # Move buffer data to the same device as the module's buffer
+                    target_device = module._buffers[name].data.device
+                    if buffer_data.device != target_device:
+                        buffer_data = buffer_data.to(target_device)
+                    module._buffers[name].data.copy_(buffer_data)
 
     def load(module, state_dict, prefix, mp_group=None):
         mp_replace = ReplaceWithTensorSlicing(mp_group=mp_group)
@@ -461,7 +469,7 @@ class AutoTP():
                 else:
                     continue
             if len(child._buffers) != 0 and self.state_dict is not None:
-                Loading.load_buffer(child, self.state_dict, checking_key)
+                Loading.load_buffer(child, self.state_dict, checking_key, self.mp_group)
             if child.__class__ in self.linear_policies:
                 setattr(r_module, name, self.linear_policies[child.__class__](child, prev_name + '.' + name,
                                                                               self.conv_linear_layer))
