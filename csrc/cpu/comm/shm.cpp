@@ -14,6 +14,9 @@
 #if defined(__riscv)
 #define TARGET_RISCV 1
 #include "riscv64/shm.h"
+#elif defined(__aarch64__)
+#define TARGET_ARM 1
+#include "arm64/shm.h"
 #else
 #include "x86_64/shm.h"
 #endif
@@ -154,6 +157,9 @@ void reduce_bf16_buffers(int start_elements, int num_elements, char* to_buffer, 
 #if TARGET_RISCV
     size_t vl = __riscv_vsetvl_e16m1(num_elements);
     vector_length_in_bytes = vl * element_size;
+#elif TARGET_ARM
+    const int vl = full_precision_elements_in_fixed_vector;
+    vector_length_in_bytes = vl * element_size;
 #else
     const int vl = vector_length_in_bytes / element_size;
 #endif
@@ -214,6 +220,9 @@ void reduce_fp16_buffers(int start_elements, int num_elements, char* to_buffer, 
 #if TARGET_RISCV
     size_t vl = __riscv_vsetvl_e16m1(num_elements);
     vector_length_in_bytes = vl * element_size;
+#elif TARGET_ARM
+    const int vl = full_precision_elements_in_fixed_vector;
+    vector_length_in_bytes = vl * element_size;
 #else
     const int vl = vector_length_in_bytes / element_size;
 #endif
@@ -273,6 +282,9 @@ void reduce_fp32_buffers(int start_elements, int num_elements, char* to_buffer, 
     const int element_size = 4;
 #if TARGET_RISCV
     size_t vl = __riscv_vsetvl_e32m1(num_elements);
+    vector_length_in_bytes = vl * element_size;
+#elif TARGET_ARM
+    const int vl = full_precision_elements_in_fixed_vector;
     vector_length_in_bytes = vl * element_size;
 #else
     const int vl = vector_length_in_bytes / element_size;
