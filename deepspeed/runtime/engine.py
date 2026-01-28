@@ -1411,7 +1411,7 @@ class DeepSpeedEngine(Module):
         self.sequence_parallel_size = groups._get_sequence_parallel_world_size()
         if self.sequence_parallel_size > 1:
             # Inserted Warning for PyTorch < 2.3
-            if torch.__version__ < '2.3':
+            if not required_torch_version(min_version=2.3):
                 logger.warning(
                     "DeepSpeed Sequence Parallelism (Ulysses) with PyTorch < 2.3 may encounter "
                     "rank indexing errors during backward pass when sp_size < world_size. "
