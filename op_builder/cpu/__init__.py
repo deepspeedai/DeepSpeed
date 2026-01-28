@@ -7,5 +7,6 @@
 from .comm import CCLCommBuilder, ShareMemCommBuilder
 from .fused_adam import FusedAdamBuilder
 from .cpu_adam import CPUAdamBuilder
+from .zenflow_adam import ZenFlowAdamBuilder
 from .no_impl import NotImplementedBuilder
 from .async_io import AsyncIOBuilder
