@@ -40,6 +40,7 @@ def attention_reference(
     return o
 
 
+@pytest.mark.sequential
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 @pytest.mark.parametrize("tensor_shape", [(1, 256, 256, 4, 32), (1, 512, 256, 8, 8)])
 def test_DS4Sci_EvoformerAttention(dtype, tensor_shape):
