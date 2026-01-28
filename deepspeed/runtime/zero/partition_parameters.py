@@ -299,7 +299,13 @@ def get_all_subclasses(cls, include_root=True):
 @instrument_w_nvtx
 def free_param(param: Parameter) -> None:
     """Free underlying storage of a parameter."""
-    assert not param.ds_active_sub_modules, param.ds_summary()
+    if param.ds_active_sub_modules:
+        raise RuntimeError("Cannot free a ZeRO-3 parameter while it is still active in submodules. "
+                           "This can happen if: (1) submodules have not released the parameter, or "
+                           "(2) you modified parameters inside a `GatheredParameters` context with "
+                           "`modifier_rank=None`. For case (2), use `modifier_rank=<rank>` to broadcast "
+                           "updates consistently across ranks. "
+                           f"param={param.ds_summary()}")
     if get_accelerator().on_accelerator(param.data):
         # need to make sure that we don't free the parameter while it is still
         # being used for computation
@@ -2323,6 +2329,18 @@ class GatheredParameters:
         if self.src_rank is None:
             self.params[0].partition(param_list=self.params, has_been_updated=False)
             return
+
+        # Broadcast parameters from modifier_rank to all other ranks.
+        # NCCL backend requires tensors to be on GPU. If parameters have been moved to a different
+        # device (e.g., CPU) inside the context, broadcasting will fail. Users should use
+        # modifier_rank=None if they don't need to broadcast updates across ranks.
+        expected_device = torch.device(get_accelerator().current_device_name())
+        for p in self.params:
+            if p.data.device != expected_device:
+                raise RuntimeError(
+                    f"Parameter {p.ds_id} is on {p.data.device} but broadcast requires it to be on {expected_device}. "
+                    f"When using GatheredParameters with modifier_rank set, parameters must remain on "
+                    f"the accelerator device. If you don't need to broadcast updates, use modifier_rank=None.")
 
         handles = [dist.broadcast(p.data, self.src_rank, group=p.ds_process_group, async_op=True) for p in self.params]
         for h in handles:
