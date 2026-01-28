@@ -4,7 +4,12 @@
 # DeepSpeed Team
 
 from deepspeed import comm as dist
-global num_kv_heads
+
+# Defaults for optional TP globals. These can be overridden by setters.
+num_kv_heads = None
+num_attention_heads = None
+n_embd = None
+tp_grain_size = 1
 
 
 def set_num_kv_heads(num):

@@ -730,6 +730,96 @@ Configuring the asynchronous I/O module for offloading parameter and optimizer s
 | -------------------------------------------------------------------------------------------------------------- | ------- |
 | Submit requests to storage device in an overlapped fashion without waiting for completion of earlier requests. | `true`  |
 
+### Tensor Parallel (AutoTP)
+Configure AutoTP tensor parallelism for training via the DeepSpeed config and hybrid TP + ZeRO. AutoTP supports ZeRO stages 0, 1, and 2 (stage 3 is not supported). `deepspeed.tp_model_init()` remains supported for backward compatibility but is not required when `tensor_parallel` is set in the config.
+```json
+  "tensor_parallel": {
+    "autotp_size": 4,
+    "preset_model": "llama",
+    "tp_overlap_comm": false,
+    "partition_config": {
+      "use_default_specs": false,
+      "layer_specs": [
+        {
+          "patterns": [".*\\.o_proj\\.weight$", ".*\\.down_proj\\.weight$"],
+          "partition_type": "row"
+        }
+      ]
+    }
+  }
+```
+<i>**tensor_parallel**</i>: [dictionary]
+
+| Description                                                                                | Default |
+| ------------------------------------------------------------------------------------------ | ------- |
+| Enable AutoTP tensor parallelism and configure preset or custom partitioning rules.        | `{}`    |
+
+***autotp_size***: [integer]
+
+| Description                                                                 | Default |
+| --------------------------------------------------------------------------- | ------- |
+| Tensor-parallel degree. Set to `0` to disable AutoTP.                        | `0`     |
+
+***preset_model***: [string]
+
+| Description                                                                                           | Default |
+| ----------------------------------------------------------------------------------------------------- | ------- |
+| Built-in model presets: `llama`, `bloom`, `chatglm`, `mixtral`, `deepseek_v2`, `qwen2`, `phi3`.        | `null`  |
+
+***tp_overlap_comm***: [boolean]
+
+| Description                                                                                              | Default |
+| -------------------------------------------------------------------------------------------------------- | ------- |
+| Overlap tensor-parallel allreduce communication with computation (training only).                       | `false` |
+
+***partition_config***: [dictionary]
+
+| Description                                                                                                                     | Default |
+| ------------------------------------------------------------------------------------------------------------------------------- | ------- |
+| Custom AutoTP layer partitioning rules. Use with or without `preset_model` to customize sharding patterns.                    | `null`  |
+
+***use_default_specs***: [boolean]
+
+| Description                                                                                                          | Default |
+| -------------------------------------------------------------------------------------------------------------------- | ------- |
+| Merge custom `layer_specs` with preset defaults when `preset_model` is set; otherwise use only custom specs.        | `true`  |
+
+***layer_specs***: [list]
+
+| Description                                                                                                      | Default |
+| ---------------------------------------------------------------------------------------------------------------- | ------- |
+| Ordered list of pattern rules that define how to partition matching parameters.                                 | `[]`    |
+
+***patterns***: [list of strings]
+
+| Description                                                                                                      | Default |
+| ---------------------------------------------------------------------------------------------------------------- | ------- |
+| Regex patterns to match parameter names for this partition rule.                                                 | `[]`    |
+
+***partition_type***: [string]
+
+| Description                                                                  | Default |
+| ---------------------------------------------------------------------------- | ------- |
+| Partition type for matching parameters: `row`, `column`, or `skip`.           | `column` |
+
+***shape***: [list]
+
+| Description                                                                                                      | Default |
+| ---------------------------------------------------------------------------------------------------------------- | ------- |
+| Optional sub-parameter shape for fused weights before TP partitioning (e.g., `[2, -1]`).                          | `null`  |
+
+***partition_dim***: [integer]
+
+| Description                                                                                                      | Default |
+| ---------------------------------------------------------------------------------------------------------------- | ------- |
+| Dimension to split when `shape` is provided (e.g., `0` for fused QKV or gate/up).                                | `null`  |
+
+***model_types***: [list of strings]
+
+| Description                                                                                                      | Default |
+| ---------------------------------------------------------------------------------------------------------------- | ------- |
+| Optional model type filters (from `model.config.model_type`) for shared configs.                                | `null`  |
+
 ***ignore_unused_parameters***: [boolean]
 
 | Description                                                                                                                                                                                                                                                                                                                                                     | Default |

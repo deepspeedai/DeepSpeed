@@ -499,6 +499,7 @@ class DeepSpeedEngine(Module):
     def _configure_tensor_parallel(self, model, tp_config):
         self._configure_tensor_parallel_states(model)
         configure_tensor_parallel_runtime(tp_config)
+        self._apply_autotp_partitioning(model, tp_config)
 
     def _configure_tensor_parallel_states(self, model):
         """
@@ -563,6 +564,31 @@ class DeepSpeedEngine(Module):
         self.first_dataloader_check = self.module.register_forward_pre_hook(check_dataloader_inputs_same_across_ranks,
                                                                             prepend=True,
                                                                             with_kwargs=True)
+
+    def _apply_autotp_partitioning(self, model, tp_config):
+        if getattr(model, "ds_autotp_parsed", False):
+            return
+        if get_accelerator().is_available() and self.local_rank >= 0:
+            get_accelerator().set_device(self.local_rank)
+
+        tp_size = self.autotp_size()
+        if tp_config.tensor_parallel.tp_size not in (1, tp_size):
+            raise ValueError(f"tensor_parallel.tp.tp_size ({tp_config.tensor_parallel.tp_size}) "
+                             f"does not match tensor_parallel.autotp_size ({tp_size}).")
+        tp_config.tensor_parallel.tp_size = tp_size
+        if tp_config.tensor_parallel.tp_group is None:
+            tp_config.tensor_parallel.tp_group = groups.get_tensor_model_parallel_group()
+
+        model_config = getattr(model, "config", None)
+        from deepspeed.module_inject.auto_tp import AutoTP
+        from deepspeed.module_inject import replace_transformer_layer
+
+        parser_dict = AutoTP.tp_parser(model)
+        for client_module, injection_policy in parser_dict:
+            tp_config.injection_policy_tuple = injection_policy
+            replace_transformer_layer(client_module, model, None, tp_config, model_config)
+
+        setattr(model, "ds_autotp_parsed", True)
 
     def __del__(self):
         try:
