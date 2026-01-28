@@ -6,6 +6,7 @@
 from dataclasses import dataclass
 import collections
 from collections import UserDict
+import threading
 from typing import Deque, Set
 
 from deepspeed import comm as dist
@@ -139,6 +140,12 @@ class PartitionedParameterCoordinator:
         # this will improve fetch speed but will not break down leaf module parameters to alleviate memory pressure.
         self.fast_sharding_for_leaf_module = fast_sharding_for_leaf_module
 
+        # Thread synchronization for leaf module fetches.
+        # When autograd executes hooks in multiple threads (e.g., for modules returning multiple tensors),
+        # we need to ensure only one thread fetches parameters for a given leaf module at a time.
+        self.__ongoing_fetch_leaf_module_events = collections.defaultdict(threading.Event)
+        self.__leaf_module_lock = threading.Lock()
+
     """Tracing and Tracking
     TODO. consider performing trace before initializing PartitionedParameterCoordinator
     and passing trace results into constructor. This way all the code in here can
@@ -263,6 +270,8 @@ class PartitionedParameterCoordinator:
         self.__step_id = 0
         self.__n_available_params = 0
         self.__profiler.reset_events()
+        # Clear leaf module fetch events for clean state
+        self.__ongoing_fetch_leaf_module_events.clear()
 
     def _dump_params(self, tag, sub_module, params, step_id=None):
         if step_id is None:
@@ -288,16 +297,49 @@ class PartitionedParameterCoordinator:
         2. kick off fetch for next few parameters we will need later (prefetch)
         3. block on parameters in immediately required sub module
         """
+        # For leaf modules, autograd may trigger hooks from multiple threads concurrently
+        # (e.g., when a module returns multiple tensors). We need to serialize access
+        # to prevent race conditions in parameter state management.
+        is_leaf = z3_leaf_module(current_submodule)
+        if is_leaf:
+            event_to_wait = None
+            with self.__leaf_module_lock:
+                event = self.__ongoing_fetch_leaf_module_events.get(current_submodule.ds_id)
+                if event is not None:
+                    # Another thread is already fetching this leaf module, wait for it
+                    event_to_wait = event
+                else:
+                    # Mark that we're starting a fetch for this leaf module
+                    new_event = threading.Event()
+                    self.__ongoing_fetch_leaf_module_events[current_submodule.ds_id] = new_event
+
+            if event_to_wait is not None:
+                # Wait outside the lock to avoid deadlock
+                event_to_wait.wait()
+                return
+
+        try:
+            self._fetch_sub_module_impl(current_submodule, forward, is_leaf)
+        finally:
+            if is_leaf:
+                # Signal that we're done fetching this leaf module and remove the event
+                with self.__leaf_module_lock:
+                    event = self.__ongoing_fetch_leaf_module_events.pop(current_submodule.ds_id, None)
+                    if event is not None:
+                        event.set()
+
+    def _fetch_sub_module_impl(self, current_submodule: Module, forward: bool, is_leaf: bool) -> None:
+        """Implementation of fetch_sub_module, separated for thread synchronization."""
         if logger.isEnabledFor(logging.DEBUG):
             debug_rank0(
-                f"{self.__step_id}: M{current_submodule.ds_id}({type(current_submodule).__name__}) P{[p.ds_id for p in iter_params(current_submodule, recurse=z3_leaf_module(current_submodule))]} "
+                f"{self.__step_id}: M{current_submodule.ds_id}({type(current_submodule).__name__}) P{[p.ds_id for p in iter_params(current_submodule, recurse=is_leaf)]} "
                 + str({
                     "avail": f"{self.__n_available_params:.1e}",
                     "queue_sz": f"{len(self.__param_queue or [])}",
                     "inflight": [p.ds_id for p in self.__inflight_param_registry],
                 }))
 
-        params_to_fetch = set(iter_params(current_submodule, recurse=z3_leaf_module(current_submodule)))
+        params_to_fetch = set(iter_params(current_submodule, recurse=is_leaf))
         fetch_numel = sum(
             [p.partition_numel() for p in params_to_fetch if p.ds_status == ZeroParamStatus.NOT_AVAILABLE])
 
@@ -320,7 +362,7 @@ class PartitionedParameterCoordinator:
         wait_numel = 0
         wait_event_name = __class__.FORWARD_FETCH_WAIT if forward else __class__.BACKWARD_FETCH_WAIT
         self.__profiler.start_event(wait_event_name)
-        fast_fetch = self.fast_sharding_for_leaf_module and z3_leaf_module(current_submodule)
+        fast_fetch = self.fast_sharding_for_leaf_module and is_leaf
         # wait for parameters in the immediately needed submodule to become available
         for param in params_to_fetch:
             param.ds_active_sub_modules.add(current_submodule.ds_id)
