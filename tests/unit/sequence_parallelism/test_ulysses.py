@@ -255,3 +255,58 @@ class TestFPDTAttention(DistributedTest):
         assert torch.allclose(
             fpdt_output, baseline_output_shuffled, rtol=0.01, atol=0.1
         ), f"rank {dist.get_rank()}, sp size: {dist.get_world_size(spg)}, input_tensor: {input_tensor.shape}, fpdt_input_tensor: {fpdt_input_tensor.shape}, fpdt_output: {fpdt_output.shape},            baseline_output_shuffled: {baseline_output_shuffled.shape},{torch.max(torch.abs(fpdt_output - baseline_output_shuffled))}"
+
+
+@pytest.mark.parametrize("sp_size", [2])
+class TestUlyssesLossBackward(DistributedTest):
+    world_size = 4
+
+    def test_sp_loss_backward_stability(self, sp_size: int) -> None:
+        """
+        Regression test for Issue #7672.
+        Verifies that using all_reduce for loss aggregation is stable
+        when sequence_parallel_size < world_size, preventing IndexError.
+        """
+        skip_on_arch(min_arch=8)
+
+        # Setup
+        dp_size = self.world_size // sp_size
+        model = SimpleModel(4)
+        ds_engine, _, _, _ = initialize(
+            model=model,
+            config_params={
+                "train_batch_size": 8,
+                "data_parallel_size": dp_size,
+                "sequence_parallel_size": sp_size
+            },
+        )
+
+        sp_group = ds_engine.seq_parallel_group
+
+        # Simulate Loss on each rank
+        rank = dist.get_rank()
+        local_loss = torch.tensor(float(rank + 1), device=ds_engine.device, requires_grad=True)
+        local_weight = torch.tensor(1.0, device=ds_engine.device)
+
+        # Numerator: Weighted Loss summation
+        weighted_loss = local_loss * local_weight
+        dist.all_reduce(weighted_loss, op=dist.ReduceOp.SUM, group=sp_group)
+
+        # B. Denominator: Sum of total weights
+        total_weight = local_weight.clone()
+        dist.all_reduce(total_weight, op=dist.ReduceOp.SUM, group=sp_group)
+
+        # C. Calculate the final loss
+        dist_loss = weighted_loss / total_weight
+
+        # Backward Pass verification
+        try:
+            dist_loss.backward()
+        except IndexError as e:
+            pytest.fail(f"Backward crashed with IndexError: {e}")
+
+        # Verify Gradients
+        # Loss = (L1*1 + L2*1) / 2 = 0.5*L1 + 0.5*L2
+        expected_grad = 0.5
+        assert torch.allclose(local_loss.grad, torch.tensor(expected_grad, device=ds_engine.device)), \
+            f"Gradient mismatch! Expected {expected_grad}, got {local_loss.grad}"
