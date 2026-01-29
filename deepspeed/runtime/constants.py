@@ -144,7 +144,9 @@ BFLOAT16_OPTIMIZER_STATES = "bf16_optimizer_states"
 BFLOAT16_OPTIMIZER_STATES_DEFAULT = False
 
 # DDP variant of BFLOAT16
-DDP_BFLOAT16 = "bf16"
+# DDP variant: bf16 model with bf16 grad accumulation (uses FP16_Optimizer in bf16 mode)
+# Must be different from BFLOAT16 to allow proper optimizer selection
+DDP_BFLOAT16 = "ddp_bf16"
 
 #########################################
 # FP16 support

@@ -59,6 +59,11 @@ class BF16_Optimizer(ZeROOptimizer):
                                   ], f"BF16Optimizer: Unsupported gradient accumulation data type: {grad_acc_dtype}"
         self.grad_acc_dtype = grad_acc_dtype
 
+        # BF16 doesn't use loss scaling, but these attributes are needed for API compatibility
+        self.custom_loss_scaler = False
+        self.external_loss_scale = None
+        self.torch_autocast_gradscaler = None
+
         self.immediate_grad_update = bfloat16_config.immediate_grad_update
 
         self.clip_grad = clip_grad
@@ -103,6 +108,8 @@ class BF16_Optimizer(ZeROOptimizer):
         see_memory_usage('end bf16_ optimizer', force=True)
 
     def destroy(self):
+        if not self.using_real_optimizer:
+            return
         for i, _ in enumerate(self.optimizer.param_groups):
             for p in self.bf16_groups[i]:
                 if getattr(p, '_hp_mapping', None):
