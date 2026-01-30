@@ -259,7 +259,9 @@ class AutoTPConfig:
         if not matches:
             return None
         if len(matches) > 1:
-            warning_once(f"AutoTPConfig: parameter {param_name} matched multiple layer_specs; using the first match.")
+            matched_patterns = [spec.patterns for spec in matches]
+            warning_once(f"AutoTPConfig: parameter {param_name} matched multiple layer_specs {matched_patterns}; "
+                         "using the first match.")
         return matches[0]
 
     @classmethod
