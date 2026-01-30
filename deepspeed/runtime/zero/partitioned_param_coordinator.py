@@ -140,9 +140,10 @@ class PartitionedParameterCoordinator:
         # this will improve fetch speed but will not break down leaf module parameters to alleviate memory pressure.
         self.fast_sharding_for_leaf_module = fast_sharding_for_leaf_module
 
-        # Thread synchronization for leaf module fetches.
+        # Thread synchronization for leaf module fetches during backward pass.
         # When autograd executes hooks in multiple threads (e.g., for modules returning multiple tensors),
         # we need to ensure only one thread fetches parameters for a given leaf module at a time.
+        # This is only needed during backward pass; forward pass is single-threaded.
         self.__ongoing_fetch_leaf_module_events = collections.defaultdict(threading.Event)
         self.__leaf_module_lock = threading.Lock()
 
@@ -297,11 +298,13 @@ class PartitionedParameterCoordinator:
         2. kick off fetch for next few parameters we will need later (prefetch)
         3. block on parameters in immediately required sub module
         """
-        # For leaf modules, autograd may trigger hooks from multiple threads concurrently
-        # (e.g., when a module returns multiple tensors). We need to serialize access
-        # to prevent race conditions in parameter state management.
+        # For leaf modules during backward pass, autograd may trigger hooks from multiple
+        # threads concurrently (e.g., when a module returns multiple tensors). We need to
+        # serialize access to prevent race conditions in parameter state management.
+        # Forward pass is single-threaded, so no synchronization is needed there.
         is_leaf = z3_leaf_module(current_submodule)
-        if is_leaf:
+        needs_sync = is_leaf and not forward
+        if needs_sync:
             event_to_wait = None
             with self.__leaf_module_lock:
                 event = self.__ongoing_fetch_leaf_module_events.get(current_submodule.ds_id)
@@ -321,7 +324,7 @@ class PartitionedParameterCoordinator:
         try:
             self._fetch_sub_module_impl(current_submodule, forward, is_leaf)
         finally:
-            if is_leaf:
+            if needs_sync:
                 # Signal that we're done fetching this leaf module and remove the event
                 with self.__leaf_module_lock:
                     event = self.__ongoing_fetch_leaf_module_events.pop(current_submodule.ds_id, None)
