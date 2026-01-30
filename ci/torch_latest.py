@@ -11,7 +11,7 @@ ROOT_PATH = Path(__file__).parents[1]
 
 # yapf: disable
 image = (modal.Image
-         .from_registry("pytorch/pytorch:2.6.0-cuda12.4-cudnn9-devel", add_python="3.10")
+         .from_registry("pytorch/pytorch:2.9.1-cuda12.8-cudnn9-devel", add_python="3.10")
          .run_commands("apt update && apt install -y libaio-dev")
          .pip_install_from_requirements(ROOT_PATH / "requirements/requirements.txt", gpu="any")
          .pip_install_from_requirements(ROOT_PATH / "requirements/requirements-dev.txt", gpu="any")
@@ -34,7 +34,7 @@ app = modal.App("deepspeedai-torch-latest-ci", image=image)
 def pytest():
     import subprocess
     subprocess.run(
-        "pytest -n 4 --verbose tests/unit/v1/ --torch_ver=2.6 --cuda_ver=12.4".split(),
+        "pytest -n 4 --verbose tests/unit/v1/ --torch_ver=2.9 --cuda_ver=12.8".split(),
         check=True,
         cwd=ROOT_PATH / ".",
     )
