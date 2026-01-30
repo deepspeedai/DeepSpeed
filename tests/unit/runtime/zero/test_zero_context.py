@@ -107,6 +107,29 @@ class TestMiCSGatheredParametersFree(DistributedTest):
         assert model.l1.weight.numel() == 0, "outside of GatheredParameters the param should go back to be 0-sized"
 
 
+class TestZeroFreeParamActiveSubmodule(DistributedTest):
+    world_size = 2
+
+    def test(self):
+        config_dict = {"train_micro_batch_size_per_gpu": 1, "zero_optimization": {"stage": 3}}
+        hidden_dim = 10
+
+        class MyModel(torch.nn.Module):
+
+            def __init__(self, hidden_dim):
+                super(MyModel, self).__init__()
+                self.l1 = torch.nn.Linear(hidden_dim, hidden_dim)
+                self.l2 = torch.nn.Linear(hidden_dim, hidden_dim)
+
+        with deepspeed.zero.Init(config_dict_or_path=config_dict):
+            model = MyModel(hidden_dim)
+
+        with pytest.raises(RuntimeError, match="in-place modification"):
+            with deepspeed.zero.GatheredParameters([model.l1.weight, model.l2.weight], modifier_rank=None):
+                with torch.no_grad():
+                    model.l1.weight.add_(0.0)
+
+
 class TestSerialContext(DistributedTest):
     world_size = 1
     init_distributed = False
