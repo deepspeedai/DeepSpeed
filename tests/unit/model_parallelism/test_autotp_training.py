@@ -107,7 +107,14 @@ class TestTpParallelStates(DistributedTest):
         config_dict = {
             "train_micro_batch_size_per_gpu": 1,
             "tensor_parallel": {
-                "autotp_size": tp_size
+                "autotp_size": tp_size,
+                "partition_config": {
+                    "use_default_specs": False,
+                    "layer_specs": [{
+                        "patterns": [".*\\.weight$"],
+                        "partition_type": "skip",
+                    }],
+                }
             },
             "zero_optimization": {
                 "stage": 0
@@ -235,7 +242,14 @@ class TestTpDataloaderCorrectness(DistributedTest):
                 }
             },
             "tensor_parallel": {
-                "autotp_size": tp_size
+                "autotp_size": tp_size,
+                "partition_config": {
+                    "use_default_specs": False,
+                    "layer_specs": [{
+                        "patterns": [".*\\.weight$"],
+                        "partition_type": "skip",
+                    }],
+                }
             },
             "zero_optimization": {
                 "stage": 0,
@@ -314,6 +328,14 @@ def run_tp_layer_fwd_bwd(tp_size, tp_overlap_comm, column_parallel, use_tp_model
             "stage": 0,
         }
     }
+    partition_type = "column" if column_parallel else "row"
+    config_dict["tensor_parallel"]["partition_config"] = {
+        "use_default_specs": False,
+        "layer_specs": [{
+            "patterns": [".*\\.weight$"],
+            "partition_type": partition_type,
+        }],
+    }
     if preferred_dtype() is torch.float16:
         config_dict["fp16"] = {"enabled": True}
     elif preferred_dtype() is torch.bfloat16:
@@ -338,6 +360,8 @@ def run_tp_layer_fwd_bwd(tp_size, tp_overlap_comm, column_parallel, use_tp_model
                         device=get_accelerator().current_device())
     dist.broadcast(input, groups.get_tensor_model_parallel_src_rank(), group=groups.get_tensor_model_parallel_group())
 
+    # Note: correctness checks below use standalone TP wrappers and do not
+    # rely on the model's AutoTP-partitioned parameters.
     torch_linear, torch_out = process_linear_layer(hidden_dim, input)
     if column_parallel:
         linear = LinearLayer(deepcopy(torch_linear), groups.get_tensor_model_parallel_group())
@@ -414,7 +438,14 @@ class TestParamsGather(DistributedTest):
                 }
             },
             "tensor_parallel": {
-                "autotp_size": tp_size
+                "autotp_size": tp_size,
+                "partition_config": {
+                    "use_default_specs": False,
+                    "layer_specs": [{
+                        "patterns": [".*\\.weight$"],
+                        "partition_type": "skip",
+                    }],
+                }
             },
             "zero_optimization": {
                 "stage": 0,
@@ -479,6 +510,15 @@ class TestParamsGather(DistributedTest):
 def dummy_init_engine(config):
     # This is a dummy initialization function for the DeepSpeed engine.
     # We only need to use the config to initialize the distributed settings for the test.
+    # Add default partition_config for simple test models if not provided
+    if "tensor_parallel" in config and "partition_config" not in config["tensor_parallel"]:
+        config["tensor_parallel"]["partition_config"] = {
+            "use_default_specs": False,
+            "layer_specs": [{
+                "patterns": [".*\\.weight$"],
+                "partition_type": "skip",
+            }],
+        }
     model = SequentialLinearModel(hidden_dim=8)
     model, _, _, _ = deepspeed.initialize(model=model, model_parameters=model.parameters(), config=config)
 

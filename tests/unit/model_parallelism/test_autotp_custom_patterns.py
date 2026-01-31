@@ -53,6 +53,14 @@ def init_tp_engine(tp_size, partition_config=None):
     }
     if partition_config is not None:
         config_dict["tensor_parallel"]["partition_config"] = partition_config
+    else:
+        config_dict["tensor_parallel"]["partition_config"] = {
+            "use_default_specs": False,
+            "layer_specs": [{
+                "patterns": [".*\\.weight$"],
+                "partition_type": "skip",
+            }],
+        }
     if preferred_dtype() is torch.float16:
         config_dict["fp16"] = {"enabled": True}
     elif preferred_dtype() is torch.bfloat16:
@@ -122,6 +130,53 @@ class TestAutoTPCustomPatterns(DistributedTest):
         assert isinstance(model.linears[0], LinearAllreduce)
         assert isinstance(model.linears[1], LinearLayer)
         assert isinstance(model.linears[2], nn.Linear)
+
+    def test_custom_patterns_applied_via_config(self):
+        skip_on_device()
+        partition_config = {
+            "use_default_specs":
+            False,
+            "layer_specs": [
+                {
+                    "patterns": [".*linears\\.0\\.weight$"],
+                    "partition_type": "row",
+                },
+                {
+                    "patterns": [".*linears\\.1\\.weight$"],
+                    "partition_type": "column",
+                },
+                {
+                    "patterns": [".*linears\\.2\\.weight$"],
+                    "partition_type": "skip",
+                },
+            ],
+        }
+        config_dict = {
+            "train_micro_batch_size_per_gpu": 1,
+            "optimizer": {
+                "type": "Adam",
+                "params": {
+                    "lr": 1e-6
+                }
+            },
+            "tensor_parallel": {
+                "autotp_size": 2,
+                "partition_config": partition_config,
+            },
+            "zero_optimization": {
+                "stage": 0,
+            }
+        }
+        if preferred_dtype() is torch.float16:
+            config_dict["fp16"] = {"enabled": True}
+        elif preferred_dtype() is torch.bfloat16:
+            config_dict["bf16"] = {"enabled": True}
+
+        model = SequentialLinearModel(hidden_dim=16, nlayers=3)
+        engine, _, _, _ = deepspeed.initialize(model=model, model_parameters=model.parameters(), config=config_dict)
+        assert isinstance(engine.module.linears[0], LinearAllreduce)
+        assert isinstance(engine.module.linears[1], LinearLayer)
+        assert isinstance(engine.module.linears[2], nn.Linear)
 
     def test_first_match_precedence(self):
         skip_on_device()

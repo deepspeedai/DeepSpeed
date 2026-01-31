@@ -579,8 +579,32 @@ class DeepSpeedEngine(Module):
         if tp_config.tensor_parallel.tp_group is None:
             tp_config.tensor_parallel.tp_group = groups.get_tensor_model_parallel_group()
 
-        model_config = getattr(model, "config", None)
         from deepspeed.module_inject.auto_tp import AutoTP
+
+        partition_config = None
+        if hasattr(tp_config, "get_partition_config_object"):
+            partition_config = tp_config.get_partition_config_object()
+
+        if partition_config is not None:
+            autotp = AutoTP(module=model,
+                            all_reduce_linears=(),
+                            prefix="",
+                            state_dict=None,
+                            linear_layer_setting=(torch.nn.Linear, torch.nn.Embedding),
+                            orig_layer_impl=None,
+                            keep_module_on_host=tp_config.keep_module_on_host,
+                            partition_config=partition_config)
+            autotp.set_tensor_parallel_config(tp_size, tp_config.tensor_parallel.tp_group)
+            autotp.update_linear_policies()
+            autotp._replace_module(model)
+            setattr(model, "ds_autotp_parsed", True)
+            return
+
+        if tp_size <= 1:
+            setattr(model, "ds_autotp_parsed", True)
+            return
+
+        model_config = getattr(model, "config", None)
         from deepspeed.module_inject import replace_transformer_layer
 
         parser_dict = AutoTP.tp_parser(model)
