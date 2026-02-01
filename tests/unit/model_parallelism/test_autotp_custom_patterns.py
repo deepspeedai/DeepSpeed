@@ -35,6 +35,29 @@ class SequentialLinearModel(torch.nn.Module):
         return x
 
 
+class CustomLinearModule(torch.nn.Module):
+
+    def __init__(self, hidden_dim):
+        super(CustomLinearModule, self).__init__()
+        self.weight = torch.nn.Parameter(torch.empty(hidden_dim, hidden_dim))
+        self.bias = torch.nn.Parameter(torch.empty(hidden_dim))
+        torch.nn.init.uniform_(self.weight, -0.02, 0.02)
+        torch.nn.init.uniform_(self.bias, -0.02, 0.02)
+
+    def forward(self, x):
+        return torch.matmul(x, self.weight.transpose(-1, -2)) + self.bias
+
+
+class CustomLinearModel(torch.nn.Module):
+
+    def __init__(self, hidden_dim):
+        super(CustomLinearModel, self).__init__()
+        self.custom = CustomLinearModule(hidden_dim)
+
+    def forward(self, x):
+        return self.custom(x)
+
+
 def init_tp_engine(tp_size, partition_config=None):
     config_dict = {
         "train_micro_batch_size_per_gpu": 1,
@@ -177,6 +200,87 @@ class TestAutoTPCustomPatterns(DistributedTest):
         assert isinstance(engine.module.linears[0], LinearAllreduce)
         assert isinstance(engine.module.linears[1], LinearLayer)
         assert isinstance(engine.module.linears[2], nn.Linear)
+
+    def test_use_default_specs_false_skips_unmatched_layers(self):
+        skip_on_device()
+        # Verify unmatched layers remain unsharded when defaults are disabled.
+        partition_config = {
+            "use_default_specs":
+            False,
+            "layer_specs": [
+                {
+                    "patterns": [".*linears\\.0\\.weight$"],
+                    "partition_type": "row",
+                },
+                {
+                    "patterns": [".*linears\\.1\\.weight$"],
+                    "partition_type": "column",
+                },
+            ],
+        }
+        config_dict = {
+            "train_micro_batch_size_per_gpu": 1,
+            "optimizer": {
+                "type": "Adam",
+                "params": {
+                    "lr": 1e-6
+                }
+            },
+            "tensor_parallel": {
+                "autotp_size": 2,
+                "partition_config": partition_config,
+            },
+            "zero_optimization": {
+                "stage": 0,
+            }
+        }
+        if preferred_dtype() is torch.float16:
+            config_dict["fp16"] = {"enabled": True}
+        elif preferred_dtype() is torch.bfloat16:
+            config_dict["bf16"] = {"enabled": True}
+
+        model = SequentialLinearModel(hidden_dim=16, nlayers=3)
+        engine, _, _, _ = deepspeed.initialize(model=model, model_parameters=model.parameters(), config=config_dict)
+        assert isinstance(engine.module.linears[0], LinearAllreduce)
+        assert isinstance(engine.module.linears[1], LinearLayer)
+        assert isinstance(engine.module.linears[2], nn.Linear)
+
+    def test_custom_module_replacement_with_patterns(self):
+        skip_on_device()
+        # Verify custom linear-like modules are partitioned via patterns.
+        partition_config = {
+            "use_default_specs": False,
+            "layer_specs": [
+                {
+                    "patterns": [".*custom\\.weight$"],
+                    "partition_type": "column",
+                },
+            ],
+        }
+        config_dict = {
+            "train_micro_batch_size_per_gpu": 1,
+            "optimizer": {
+                "type": "Adam",
+                "params": {
+                    "lr": 1e-6
+                }
+            },
+            "tensor_parallel": {
+                "autotp_size": 2,
+                "partition_config": partition_config,
+            },
+            "zero_optimization": {
+                "stage": 0,
+            }
+        }
+        if preferred_dtype() is torch.float16:
+            config_dict["fp16"] = {"enabled": True}
+        elif preferred_dtype() is torch.bfloat16:
+            config_dict["bf16"] = {"enabled": True}
+
+        model = CustomLinearModel(hidden_dim=16)
+        engine, _, _, _ = deepspeed.initialize(model=model, model_parameters=model.parameters(), config=config_dict)
+        assert isinstance(engine.module.custom, LinearLayer)
 
     def test_first_match_precedence(self):
         skip_on_device()

@@ -424,12 +424,8 @@ class AutoTP():
             # No matching spec found
             if self.partition_config.strict_mode:
                 raise ValueError(f"No matching spec for {param_name}")
-            if not self.partition_config.use_default_specs:
-                # When use_default_specs is False, only partition layers explicitly
-                # specified in layer_specs. Skip unmatched layers.
-                return child
-            # Default: column parallel for Linear layers (when use_default_specs is True)
-            spec = TPLayerSpec(patterns=[], partition_type=PartitionType.COLUMN)
+            # With partition_config, rely only on explicit specs and skip unmatched layers.
+            return child
 
         setattr(child, "replaced", True)
 
@@ -443,6 +439,8 @@ class AutoTP():
 
     def _create_row_parallel_layer(self, module, spec: TPLayerSpec, name: str):
         """Create row-parallel layer (AllReduce after forward)."""
+        if self.conv_linear_layer:
+            return Conv_LinearALlreduce(module, self.mp_group, name=name)
         # Check for lm_head / embed_out
         if name == "lm_head" or name == 'embed_out':
             return LmHeadLinearAllreduce(module, self.mp_group)
@@ -459,6 +457,12 @@ class AutoTP():
 
     def _create_column_parallel_layer(self, module, spec: TPLayerSpec, name: str):
         """Create column-parallel layer (AllReduce in backward)."""
+        if self.conv_linear_layer:
+            return conv_LinearLayer(module, self.mp_group, name=name)
+        # Only use fused-QKV heuristics when no partition_config is provided.
+        elif self.partition_config is None and require_tp_fused_qkvw(name, self.mp_size):
+            # Check and handle fused qkv for TP
+            return fused_LinearLayer(module, self.mp_group, fused_module=self.module)
         if spec.shape is not None:
             return SubParamLinearLayer(
                 module,
@@ -561,11 +565,7 @@ class AutoTP():
             # instead of linear_policies. This keeps all pattern logic centralized here.
             if self.partition_config is not None:
                 full_name = prev_name + '.' + name if prev_name else name
-                if isinstance(child, nn.Linear):
-                    new_child = self._replace_with_config(child, full_name)
-                    if new_child is not None:
-                        setattr(r_module, name, new_child)
-                elif isinstance(child, nn.Embedding):
+                if isinstance(child, nn.Embedding):
                     # Check if embedding matches any pattern
                     param_name = full_name + ".weight"
                     model_type = self._get_model_type()
@@ -575,6 +575,10 @@ class AutoTP():
                         if new_child is not None:
                             setattr(r_module, name, new_child)
                     # If no pattern matched or skip, leave embedding unchanged
+                elif hasattr(child, "weight") and getattr(child.weight, "dim", lambda: 0)() == 2:
+                    new_child = self._replace_with_config(child, full_name)
+                    if new_child is not None:
+                        setattr(r_module, name, new_child)
                 else:
                     self.update_mp_params(child)
                     self._replace_module(child, name, class_name)
