@@ -493,20 +493,6 @@ class AutoTP():
         if getattr(child, "replaced", False) == True:
             return
 
-        # When using partition_config (custom patterns), only partition embeddings if
-        # explicitly specified in layer_specs. This is consistent with how _replace()
-        # handles Linear layers - unmatched layers should not be automatically partitioned.
-        if self.partition_config is not None:
-            param_name = name + ".weight" if not name.endswith(".weight") else name
-            model_type = self._get_model_type()
-            spec = self.partition_config.find_matching_spec(param_name, model_type)
-            if spec is None:
-                # No pattern matched - skip partitioning this embedding
-                return child
-            if spec.partition_type == PartitionType.SKIP:
-                return child
-            # If explicitly specified, proceed with partitioning
-
         mp_replace = ReplaceWithTensorSlicing(mp_group=self.mp_group)
 
         if hasattr(child.weight, 'ds_tensor'):
@@ -570,7 +556,30 @@ class AutoTP():
                     continue
             if len(child._buffers) != 0 and self.state_dict is not None:
                 Loading.load_buffer(child, self.state_dict, checking_key)
-            if child.__class__ in self.linear_policies:
+
+            # When using partition_config (custom patterns/presets), use pattern-based routing
+            # instead of linear_policies. This keeps all pattern logic centralized here.
+            if self.partition_config is not None:
+                full_name = prev_name + '.' + name if prev_name else name
+                if isinstance(child, nn.Linear):
+                    new_child = self._replace_with_config(child, full_name)
+                    if new_child is not None:
+                        setattr(r_module, name, new_child)
+                elif isinstance(child, nn.Embedding):
+                    # Check if embedding matches any pattern
+                    param_name = full_name + ".weight"
+                    model_type = self._get_model_type()
+                    spec = self.partition_config.find_matching_spec(param_name, model_type)
+                    if spec is not None and spec.partition_type != PartitionType.SKIP:
+                        new_child = self._slice_embedding(child, full_name, False)
+                        if new_child is not None:
+                            setattr(r_module, name, new_child)
+                    # If no pattern matched or skip, leave embedding unchanged
+                else:
+                    self.update_mp_params(child)
+                    self._replace_module(child, name, class_name)
+            # Traditional path: use linear_policies for type-based routing
+            elif child.__class__ in self.linear_policies:
                 setattr(r_module, name, self.linear_policies[child.__class__](child, prev_name + '.' + name,
                                                                               self.conv_linear_layer))
             elif any(isinstance(child, lp) for lp in self.linear_policies):
