@@ -424,7 +424,11 @@ class AutoTP():
             # No matching spec found
             if self.partition_config.strict_mode:
                 raise ValueError(f"No matching spec for {param_name}")
-            # Default: column parallel for Linear layers
+            if not self.partition_config.use_default_specs:
+                # When use_default_specs is False, only partition layers explicitly
+                # specified in layer_specs. Skip unmatched layers.
+                return child
+            # Default: column parallel for Linear layers (when use_default_specs is True)
             spec = TPLayerSpec(patterns=[], partition_type=PartitionType.COLUMN)
 
         setattr(child, "replaced", True)
@@ -488,6 +492,21 @@ class AutoTP():
     def _slice_embedding(self, child, name, conv_linear_layer):
         if getattr(child, "replaced", False) == True:
             return
+
+        # When using partition_config (custom patterns), only partition embeddings if
+        # explicitly specified in layer_specs. This is consistent with how _replace()
+        # handles Linear layers - unmatched layers should not be automatically partitioned.
+        if self.partition_config is not None:
+            param_name = name + ".weight" if not name.endswith(".weight") else name
+            model_type = self._get_model_type()
+            spec = self.partition_config.find_matching_spec(param_name, model_type)
+            if spec is None:
+                # No pattern matched - skip partitioning this embedding
+                return child
+            if spec.partition_type == PartitionType.SKIP:
+                return child
+            # If explicitly specified, proceed with partitioning
+
         mp_replace = ReplaceWithTensorSlicing(mp_group=self.mp_group)
 
         if hasattr(child.weight, 'ds_tensor'):
