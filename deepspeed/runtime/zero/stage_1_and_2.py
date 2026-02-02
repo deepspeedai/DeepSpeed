@@ -366,18 +366,36 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
             # not sure why apex was cloning the weights before flattening
             # removing cloning here
 
-            see_memory_usage(f"Before moving param group {i} to CPU")
-            # move all the parameters to cpu to free up GPU space for creating flat buffer
-
-            # Create temp CPU param copies, free accelerator tensors
-            orig_group_numel = 0
-            for param in self.bit16_groups[i]:
-                orig_group_numel += param.numel()
-                param.cpu_data = param.data.cpu()
-                param.data = torch.empty(1).to(param.device)
+            # Compute group size for VRAM check (need 2x model size on GPU to flatten in place: params + flat copy)
+            orig_group_numel = sum(param.numel() for param in self.bit16_groups[i])
+            alignment = self.nccl_start_alignment_factor * dist.get_world_size(
+                group=self.real_dp_process_group[i])
+            aligned_numel = ((orig_group_numel + alignment - 1) // alignment) * alignment
+            param_dtype = self.bit16_groups[i][0].dtype
+            element_size = torch.tensor([], dtype=param_dtype).element_size()
+            flat_buffer_bytes = aligned_numel * element_size
 
             empty_cache()
-            see_memory_usage(f"After moving param group {i} to CPU", force=False)
+            accelerator = get_accelerator()
+            available_vram = accelerator.available_memory() if accelerator.is_available() else 0
+            # Flatten on GPU only if we have enough VRAM for the flat buffer (2x = params already there + copy)
+            flatten_on_gpu = (
+                not self.cpu_offload
+                and accelerator.is_available()
+                and (available_vram >= flat_buffer_bytes))
+
+            if flatten_on_gpu:
+                # Keep params on GPU and flatten on accelerator
+                see_memory_usage(f"Flattening param group {i} on GPU (sufficient VRAM)")
+            else:
+                see_memory_usage(f"Before moving param group {i} to CPU")
+                # move all the parameters to cpu to free up GPU space for creating flat buffer
+                for param in self.bit16_groups[i]:
+                    param.cpu_data = param.data.cpu()
+                    param.data = torch.empty(1).to(param.device)
+
+                empty_cache()
+                see_memory_usage(f"After moving param group {i} to CPU", force=False)
 
             # Reorder group parameters for load balancing of gradient partitioning during backward among ranks.
             # This ensures that gradients are reduced in a fashion such that ownership round robins among the ranks.
@@ -396,24 +414,36 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
             # Create meta tensors list, ordered according to round_robin_tensors
             meta_tensors = []
             for param in round_robin_tensors:
-                meta_tensors.append(torch.zeros_like(param.cpu_data, device="meta"))
+                if flatten_on_gpu:
+                    meta_tensors.append(torch.zeros_like(param.data, device="meta"))
+                else:
+                    meta_tensors.append(torch.zeros_like(param.cpu_data, device="meta"))
             self.round_robin_bit16_meta.append(meta_tensors)
 
-            # create flat buffer in CPU
-            flattened_buffer = self.flatten_dense_tensors_aligned(
-                self.round_robin_bit16_groups[i],
-                self.nccl_start_alignment_factor * dist.get_world_size(group=self.real_dp_process_group[i]),
-                use_cpu_data=True)
+            if flatten_on_gpu:
+                # create flat buffer on GPU
+                flattened_buffer = self.flatten_dense_tensors_aligned(
+                    self.round_robin_bit16_groups[i],
+                    alignment,
+                    use_cpu_data=False)
+                self.bit16_groups_flat.append(flattened_buffer)
+                see_memory_usage(f"After flattening param group {i} on GPU", force=False)
+            else:
+                # create flat buffer in CPU
+                flattened_buffer = self.flatten_dense_tensors_aligned(
+                    self.round_robin_bit16_groups[i],
+                    alignment,
+                    use_cpu_data=True)
 
-            # free temp CPU params
-            for param in self.bit16_groups[i]:
-                del param.cpu_data
+                # free temp CPU params
+                for param in self.bit16_groups[i]:
+                    del param.cpu_data
 
-            # Move CPU flat tensor to the accelerator memory.
-            self.bit16_groups_flat.append(flattened_buffer.to(get_accelerator().current_device_name()))
-            del flattened_buffer
+                # Move CPU flat tensor to the accelerator memory.
+                self.bit16_groups_flat.append(flattened_buffer.to(get_accelerator().current_device_name()))
+                del flattened_buffer
 
-            see_memory_usage(f"After flattening and moving param group {i} to GPU", force=False)
+                see_memory_usage(f"After flattening and moving param group {i} to GPU", force=False)
 
             if dist.get_rank(group=self.real_dp_process_group[i]) == 0:
                 see_memory_usage(f"After Flattening and after emptying param group {i} cache", force=False)
