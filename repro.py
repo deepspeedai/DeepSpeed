@@ -1,4 +1,14 @@
-import sys, deepspeed, torch
+import os
+import sys
+
+# Ensure venv's bin (e.g. ninja) is on PATH when launched via deepspeed
+if sys.executable:
+    path_prepend = os.path.normpath(os.path.dirname(sys.executable))
+    if path_prepend not in os.environ.get("PATH", "").split(os.pathsep):
+        os.environ["PATH"] = path_prepend + os.pathsep + os.environ.get("PATH", "")
+
+import deepspeed
+import torch
 from transformers import AutoModel, AutoConfig
 
 num_gpus = max(1, torch.cuda.device_count())
