@@ -110,6 +110,7 @@ class TestDistributedFixture(DistributedTest):
         assert int(os.environ["WORLD_SIZE"]) == 1
 
 
+@pytest.mark.parametrize("num_elements", [128, 3])
 class TestDistAllReduce(DistributedTest):
     device_count = get_accelerator().device_count()
     if device_count >= 4:
@@ -119,8 +120,7 @@ class TestDistAllReduce(DistributedTest):
     else:
         world_size = [1]
 
-    def test(self):
-        num_elements = 128
+    def test(self, num_elements):
         x = torch.ones(1, num_elements).to(get_accelerator().device_name()) * (dist.get_rank() + 1)
         sum_of_ranks = (dist.get_world_size() * (dist.get_world_size() + 1)) // 2
         result = torch.ones(1, num_elements).to(get_accelerator().device_name()) * sum_of_ranks
@@ -129,6 +129,7 @@ class TestDistAllReduce(DistributedTest):
 
 
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16, torch.float16])
+@pytest.mark.parametrize("num_elements", [128, 3])
 class TestDistInferenceAllReduce(DistributedTest):
     device_count = get_accelerator().device_count()
     if device_count >= 4:
@@ -138,8 +139,7 @@ class TestDistInferenceAllReduce(DistributedTest):
     else:
         world_size = [1]
 
-    def test(self, dtype):
-        num_elements = 128
+    def test(self, dtype, num_elements):
         x = torch.ones(1, num_elements).to(get_accelerator().device_name()) * (dist.get_rank() + 1)
         sum_of_ranks = (dist.get_world_size() * (dist.get_world_size() + 1)) // 2
         result = torch.ones(1, num_elements).to(get_accelerator().device_name()) * sum_of_ranks

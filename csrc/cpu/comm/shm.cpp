@@ -160,7 +160,7 @@ void reduce_bf16_buffers(int start_elements, int num_elements, char* to_buffer, 
 #elif TARGET_ARM
     const int vl = full_precision_elements_in_fixed_vector;
     vector_length_in_bytes = vl * element_size;
-#else
+#else  // x86_64
     const int vl = vector_length_in_bytes / element_size;
 #endif
     int main_elements = num_elements - (num_elements % vl);
@@ -223,7 +223,7 @@ void reduce_fp16_buffers(int start_elements, int num_elements, char* to_buffer, 
 #elif TARGET_ARM
     const int vl = full_precision_elements_in_fixed_vector;
     vector_length_in_bytes = vl * element_size;
-#else
+#else  // x86_64
     const int vl = vector_length_in_bytes / element_size;
 #endif
     int main_elements = num_elements - (num_elements % vl);
@@ -286,7 +286,7 @@ void reduce_fp32_buffers(int start_elements, int num_elements, char* to_buffer, 
 #elif TARGET_ARM
     const int vl = full_precision_elements_in_fixed_vector;
     vector_length_in_bytes = vl * element_size;
-#else
+#else  // x86_64
     const int vl = vector_length_in_bytes / element_size;
 #endif
     int main_elements = num_elements - (num_elements % vl);
