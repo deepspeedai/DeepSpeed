@@ -369,8 +369,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
 
             # Compute group size for VRAM check (need 2x model size on GPU to flatten in place: params + flat copy)
             orig_group_numel = sum(param.numel() for param in self.bit16_groups[i])
-            alignment = self.nccl_start_alignment_factor * dist.get_world_size(
-                group=self.real_dp_process_group[i])
+            alignment = self.nccl_start_alignment_factor * dist.get_world_size(group=self.real_dp_process_group[i])
             aligned_numel = int(math.ceil(orig_group_numel / alignment)) * alignment
             param_dtype = self.bit16_groups[i][0].dtype
             element_size = torch.tensor([], dtype=param_dtype).element_size()
@@ -380,10 +379,8 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
             accelerator = get_accelerator()
             available_vram = accelerator.available_memory() if accelerator.is_available() else 0
             # Flatten on GPU only if we have enough VRAM for the flat buffer (2x = params already there + copy)
-            flatten_on_gpu = (
-                accelerator.is_available()
-                and (available_vram >= flat_buffer_bytes))
-            
+            flatten_on_gpu = (accelerator.is_available() and (available_vram >= flat_buffer_bytes))
+
             if flatten_on_gpu:
                 # Keep params on GPU and flatten on accelerator
                 logger.info(f"Flattening param group {i} on GPU (sufficient VRAM)")
@@ -422,17 +419,15 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
             self.round_robin_bit16_meta.append(meta_tensors)
 
             if flatten_on_gpu:
-                flattened_buffer = self.flatten_dense_tensors_aligned(
-                    self.round_robin_bit16_groups[i],
-                    alignment,
-                    use_cpu_data=False)
+                flattened_buffer = self.flatten_dense_tensors_aligned(self.round_robin_bit16_groups[i],
+                                                                      alignment,
+                                                                      use_cpu_data=False)
                 self.bit16_groups_flat.append(flattened_buffer)
                 see_memory_usage(f"After flattening param group {i} on GPU", force=False)
             else:
-                flattened_buffer = self.flatten_dense_tensors_aligned(
-                    self.round_robin_bit16_groups[i],
-                    alignment,
-                    use_cpu_data=True)
+                flattened_buffer = self.flatten_dense_tensors_aligned(self.round_robin_bit16_groups[i],
+                                                                      alignment,
+                                                                      use_cpu_data=True)
 
                 # free temp CPU params
                 for param in self.bit16_groups[i]:
