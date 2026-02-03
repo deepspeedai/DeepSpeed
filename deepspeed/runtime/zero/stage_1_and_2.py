@@ -381,11 +381,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
             # Flatten on GPU only if we have enough VRAM for the flat buffer (2x = params already there + copy)
             flatten_on_gpu = (accelerator.is_available() and (available_vram >= flat_buffer_bytes))
 
-            if flatten_on_gpu:
-                # Keep params on GPU and flatten on accelerator
-                logger.info(f"Flattening param group {i} on GPU (sufficient VRAM)")
-            else:
-                logger.info(f"Flattening param group {i} on CPU (insufficient VRAM)")
+            if not flatten_on_gpu:
                 see_memory_usage(f"Before moving param group {i} to CPU")
                 # move all the parameters to cpu to free up GPU space for creating flat buffer
                 for param in self.bit16_groups[i]:
@@ -419,12 +415,15 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
             self.round_robin_bit16_meta.append(meta_tensors)
 
             if flatten_on_gpu:
+                logger.info(f"Flattening param group {i} on GPU (sufficient VRAM)")
                 flattened_buffer = self.flatten_dense_tensors_aligned(self.round_robin_bit16_groups[i],
                                                                       alignment,
                                                                       use_cpu_data=False)
                 self.bit16_groups_flat.append(flattened_buffer)
                 see_memory_usage(f"After flattening param group {i} on GPU", force=False)
             else:
+                logger.info(f"Flattening param group {i} on CPU (insufficient VRAM)")
+
                 flattened_buffer = self.flatten_dense_tensors_aligned(self.round_robin_bit16_groups[i],
                                                                       alignment,
                                                                       use_cpu_data=True)
