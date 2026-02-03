@@ -1057,6 +1057,10 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
                 bucket.index = 1 - bucket.index
             self.report_ipg_memory_usage("In ipg_remove_grads after reduce_ipg_grads", param.numel())
 
+        # Don't modify reduction metadata when not ready
+        if not getattr(param, "ds_grad_is_ready", True):
+            return
+
         param_id = self.get_param_id(param)
         assert self.params_already_reduced[param_id] == False, \
             f"The parameter {debug_param2name(param)} has already been reduced. \
