@@ -1080,6 +1080,10 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
                 bucket.index = 1 - bucket.index
             self.report_ipg_memory_usage("In ipg_remove_grads after reduce_ipg_grads", param.numel())
 
+        # deal with a use-case of transient grads that will be generated in a loop for the same computation involving some model params - e.g. when performing a tiled memory calculation that shards the normal single sub-module call into a loop over a shards.
+        if not getattr(param, "ds_grad_is_ready", True):
+            return
+
         param_id = self.get_param_id(param)
         assert self.params_already_reduced[param_id] == False, \
             f"The parameter {debug_param2name(param)} has already been reduced. \
@@ -1103,10 +1107,8 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
 
         assert grad_reduc is not None, f"rank {dist.get_rank()} - Invalid to reduce Param {param_id} with None gradient"
 
-        # deal with a use-case of transient grads that will be generated in a loop for the same computation involving some model params - e.g. when performing a tiled memory calculation that shards the normal single sub-module call into a loop over a shards.
-        if getattr(param, "ds_grad_is_ready", True):
-            bucket.grads.append(grad_reduc)
-            bucket.params.append((i, param.param_idx_in_group, param_id))
+        bucket.grads.append(grad_reduc)
+        bucket.params.append((i, param.param_idx_in_group, param_id))
 
         #make sure the average tensor function knows how to average the gradients
         if is_moe_param(param):
