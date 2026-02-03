@@ -1057,7 +1057,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
                 bucket.index = 1 - bucket.index
             self.report_ipg_memory_usage("In ipg_remove_grads after reduce_ipg_grads", param.numel())
 
-        # Don't modify reduction metadata when not ready
+        # deal with a use-case of transient grads that will be generated in a loop for the same computation involving some model params - e.g. when performing a tiled memory calculation that shards the normal single sub-module call into a loop over a shards.
         if not getattr(param, "ds_grad_is_ready", True):
             return
 
@@ -1084,7 +1084,6 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
 
         assert grad_reduc is not None, f"rank {dist.get_rank()} - Invalid to reduce Param {param_id} with None gradient"
 
-        # deal with a use-case of transient grads that will be generated in a loop for the same computation involving some model params - e.g. when performing a tiled memory calculation that shards the normal single sub-module call into a loop over a shards.
         bucket.grads.append(grad_reduc)
         bucket.params.append((i, param.param_idx_in_group, param_id))
 
