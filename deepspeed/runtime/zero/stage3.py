@@ -124,6 +124,11 @@ class IPGBucketZ3:
         self.params.clear()
         self.elements = 0
 
+    def clear_params(self):
+        """Clear params and elements but keep buffer for reuse."""
+        self.params.clear()
+        self.elements = 0
+
 
 INITIAL_MICRO_STEP_ID = -1
 
@@ -170,6 +175,9 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
         clip_grad=0.0,
         gradient_accumulation_dtype=torch.float32,
         communication_data_type=torch.float16,
+        fp16_master_weights_and_gradients=False,
+        bf16_master_weights_and_gradients=False,
+        bf16_optimizer_states=False,
         postscale_gradients=True,
         gradient_predivide_factor=1.0,
         gradient_accumulation_steps=1,
@@ -269,6 +277,18 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
 
         self.persistent_parameters = self.parameter_offload.persistent_parameters
         self._configure_offloading(offload_optimizer_config, offload_param_config)
+
+        def _enforce_optimizer_offload():
+            assert self.offload_optimizer and type(self.optimizer) == DeepSpeedCPUAdam, \
+                "Master weights feature requires ZeRO-3 Offload with DeepSpeedCPUAdam. " \
+                f"Current ZeRO-3 Offload:{self.offload_optimizer} optimizer type {type(self.optimizer)}."
+
+        self.master_weights_and_grads_dtype = self._configure_master_weights(
+            fp16_master_weights_and_gradients=fp16_master_weights_and_gradients,
+            bf16_master_weights_and_gradients=bf16_master_weights_and_gradients,
+            bf16_optimizer_states=bf16_optimizer_states,
+            fp16_offload_validator=_enforce_optimizer_offload,
+            bf16_fp32_offload_validator=_enforce_optimizer_offload)
 
         # backup fused_adam optimizer init
         if self.offload_optimizer and self.partial_offload != 1.0:
@@ -702,7 +722,7 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
                                               optimizer=self.optimizer,
                                               largest_numel=max(self.fp16_partitioned_groups_flat_numel),
                                               device=self.device,
-                                              dtype=torch.float32,
+                                              dtype=self.master_weights_and_grads_dtype,
                                               timers=self.timers)
 
     def _move_to_flat_buffer(self, param_list, flat_buffer, avoid_copy=False):
@@ -930,7 +950,7 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
         nvme_fp16_partitions_info = []
         nvme_fp16_num_elems = []
         nvme_fp32_dest_tensors = []
-        fp32_element_size = torch.tensor([], dtype=torch.float32).element_size()
+        fp32_element_size = torch.tensor([], dtype=self.master_weights_and_grads_dtype).element_size()
 
         # Assign portion of subgroup to cpu, the other to gpu.
         if self.offload_optimizer:
@@ -951,7 +971,7 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
 
             # a partition of the fp32 master weights that will be updated by this process
             if self._swappable_optimizer_subgroup(i):
-                self.fp32_partitioned_groups_flat.append(torch.Tensor())
+                self.fp32_partitioned_groups_flat.append(torch.empty(0, dtype=self.master_weights_and_grads_dtype))
                 self.fp32_partitioned_groups_flat[i].ds_id = ds_id
                 nvme_memory_usage += (fp32_element_size * num_elements)
                 num_swappable_partitions += 1
@@ -966,7 +986,9 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
                         nvme_fp16_num_elems.append(num_elements)
                         nvme_fp32_dest_tensors.append(self.fp32_partitioned_groups_flat[i])
                     else:
-                        unpinned_fp32_buffer = torch.empty(num_elements, device=self.device, dtype=torch.float)
+                        unpinned_fp32_buffer = torch.empty(num_elements,
+                                                           device=self.device,
+                                                           dtype=self.master_weights_and_grads_dtype)
                         self._swap_in_sub_group_to_flat_buffer(unpinned_fp32_buffer, i)
                         self.optimizer_swapper.initialize_parameters(parameters=[self.fp32_partitioned_groups_flat[i]],
                                                                      src_tensors=[unpinned_fp32_buffer])
@@ -980,23 +1002,28 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
                 cpu_memory_sub_groups += 1
 
                 if self.params_in_nvme_and_cpu and tensor is None:
-                    unpinned_fp32_buffer = torch.empty(num_elements, device=self.device, dtype=torch.float)
+                    unpinned_fp32_buffer = torch.empty(num_elements,
+                                                       device=self.device,
+                                                       dtype=self.master_weights_and_grads_dtype)
                     self._swap_in_sub_group_to_flat_buffer(unpinned_fp32_buffer, i)
                     self.fp32_partitioned_groups_flat.append(unpinned_fp32_buffer)
                     self._create_momentum_buffer(num_elements, i, ds_id)
                 elif self.offload_optimizer:
-                    self.fp32_partitioned_groups_flat.append(self.fp16_partitioned_groups_flat[i].to(
-                        self.subgroup_to_device[i]).clone().float().detach())
+                    converted = self.fp16_partitioned_groups_flat[i].to(self.subgroup_to_device[i],
+                                                                        dtype=self.master_weights_and_grads_dtype)
+                    self.fp32_partitioned_groups_flat.append(converted.clone().detach())
                     self._create_momentum_buffer(num_elements, i, ds_id)
-                elif self.fp16_partitioned_groups_flat[i].dtype == torch.float32:
+                elif self.fp16_partitioned_groups_flat[i].dtype == self.master_weights_and_grads_dtype and \
+                        self.fp16_partitioned_groups_flat[i].device == self.device:
                     # When torch autocast is enabled, weights in the provided model (and thus groups in the so-called
                     # "fp16" partitioned groups) are already in and updated using fp32. In such cases we don't need
                     # another copy of the weights.
                     self.fp32_partitioned_groups_flat.append(self.fp16_partitioned_groups_flat[i])
                     self._create_momentum_buffer(num_elements, i, ds_id)
                 else:
-                    self.fp32_partitioned_groups_flat.append(self.fp16_partitioned_groups_flat[i].to(
-                        self.device).clone().float().detach())
+                    converted = self.fp16_partitioned_groups_flat[i].to(self.device,
+                                                                        dtype=self.master_weights_and_grads_dtype)
+                    self.fp32_partitioned_groups_flat.append(converted.clone().detach())
                     self._create_momentum_buffer(num_elements, i, ds_id)
                 self.fp32_partitioned_groups_flat[i].ds_id = ds_id
 
@@ -1250,12 +1277,13 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
                     self.__param_id_to_grad_partition[param.ds_id]
                     if param.requires_grad else torch.zeros_like(param.ds_tensor) for param in sub_group
                 ]
-        # this method gets called after every backward. need to increment
-        # here because if it gets incremented in backward() the micro step
-        # id will be off by one when we do the reduce and partition at the.
-        # start of this method.
-        # TODO. make this less error prone
-        self.micro_step_id += 1
+        # This method gets called after every backward. With reentrant gradient
+        # checkpointing, it may be called multiple times per backward pass (once per phase).
+        # We track that the epilogue ran this backward so we can increment micro_step_id
+        # at the start of the NEXT forward pass. This ensures all phases within a backward
+        # use the same micro_step_id value (copy semantics for all, not accumulate).
+        # The increment is deferred to clear_backward_seen_flag() which runs in forward().
+        self._epilogue_ran_this_backward = True
 
     def overlapping_partition_gradients_reduce_epilogue(self):
         self.independent_gradient_partition_epilogue()
@@ -1283,15 +1311,15 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
 
                         @instrument_w_nvtx
                         def reduce_partition_and_remove_grads(*notneeded):
-                            if self._remaining_grad_acc_hooks == 0:
-                                self._remaining_grad_acc_hooks = count_used_parameters_in_backward(
-                                    non_leaf_params_requiring_grad) + leaf_module_count
+                            # Re-enter backward for subsequent phases in reentrant checkpointing
+                            self.reenter_backward_if_needed()
 
                             self.reduce_ready_partitions_and_remove_grads(param)
 
-                            self._remaining_grad_acc_hooks -= 1
-                            if self._remaining_grad_acc_hooks == 0:
-                                self.run_grad_acc_post_hooks()
+                            # Update hook state and run epilogue if all expected hooks have fired
+                            current_expected = count_used_parameters_in_backward(
+                                non_leaf_params_requiring_grad) + leaf_module_count
+                            self.update_hook_state_and_maybe_run_epilogue(current_expected)
 
                         self._grad_acc_hooks.append(register_grad_hook(param, reduce_partition_and_remove_grads))
 
@@ -1307,9 +1335,7 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
             def make_hook(params):
 
                 def reduce_leaf_module_grads(module, grad_input, grad_output):
-                    if self._remaining_grad_acc_hooks == 0:
-                        self._remaining_grad_acc_hooks = count_used_parameters_in_backward(
-                            non_leaf_params_requiring_grad) + leaf_module_count
+                    self.reenter_backward_if_needed()
 
                     for param in params:
                         # this takes care of grads for MoE experts that didn't participate in the current iteration/layer
@@ -1317,9 +1343,9 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
                             param.grad = torch.zeros_like(param)
                         self.reduce_ready_partitions_and_remove_grads(param)
 
-                    self._remaining_grad_acc_hooks -= 1
-                    if self._remaining_grad_acc_hooks == 0:
-                        self.run_grad_acc_post_hooks()
+                    current_expected = count_used_parameters_in_backward(
+                        non_leaf_params_requiring_grad) + leaf_module_count
+                    self.update_hook_state_and_maybe_run_epilogue(current_expected)
 
                 return reduce_leaf_module_grads
 
@@ -1627,7 +1653,7 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
     def async_inplace_copy_grad_to_fp32_buffer_from_gpu(self, param, fp32_grad_tensor):
         with get_accelerator().stream(self.copy_grad_stream):
             param_id = self.get_param_id(param)
-            src_tensor = param.grad.view(-1).float()
+            src_tensor = param.grad.view(-1).to(dtype=self.master_weights_and_grads_dtype)
             #print(f"src_tensor {src_tensor.size()} and fp32 grad {fp32_grad_tensor.size()}")
             fp32_grad_tensor.copy_(src_tensor, non_blocking=True)
             param.grad = None
@@ -1700,12 +1726,12 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
                             offload_fp32_gradients[i] = []
                             offload_fp32_offsets[i] = []
 
-                        offload_fp32_gradients[i].append(grad_buffer.float())
+                        offload_fp32_gradients[i].append(grad_buffer.to(dtype=self.master_weights_and_grads_dtype))
                         offload_fp32_offsets[i].append(dest_offset)
                     else:
                         fp32_grad_tensor = self.fp32_partitioned_groups_flat[i].grad.narrow(
                             0, dest_offset, grad_buffer.numel())
-                        fp32_grad_tensor.copy_(grad_buffer.float())
+                        fp32_grad_tensor.copy_(grad_buffer.to(dtype=self.master_weights_and_grads_dtype))
 
             # free the gradient
             if not get_accelerator().is_synchronized_device():
@@ -1973,6 +1999,11 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
         Zero FP16 parameter grads.
         """
         self.micro_step_id = 0
+        # Reset the epilogue flag so the next forward doesn't increment micro_step_id.
+        # Without this, calling zero_grad() between backward and forward would cause
+        # micro_step_id to be incremented at the next forward, leading to incorrect
+        # gradient accumulation behavior.
+        self._epilogue_ran_this_backward = False
 
         # FP32 grad should never exist.
         # For speed, set model fp16 grad to None by default
@@ -1986,6 +2017,24 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
                     if p.grad is not None:
                         p.grad.detach_()
                         p.grad.zero_()
+
+    def clear_backward_seen_flag(self):
+        """Clear the backward seen flag and increment micro_step_id if epilogue ran.
+
+        This override defers the micro_step_id increment from the epilogue to here.
+        With reentrant gradient checkpointing, the epilogue may be called multiple
+        times per backward pass, but we only want to increment micro_step_id once
+        after the backward is complete. By incrementing here at the start of the
+        NEXT forward, all phases within a backward use the same micro_step_id value.
+        """
+        # Increment micro_step_id if the epilogue ran during the previous backward.
+        # This is deferred from independent_gradient_partition_epilogue() to ensure
+        # all phases within a backward use the same micro_step_id (copy semantics).
+        if self._epilogue_ran_this_backward:
+            self.micro_step_id += 1
+
+        # Call base class to reset flags (including _epilogue_ran_this_backward)
+        super().clear_backward_seen_flag()
 
     def _model_parallel_all_reduce(self, tensor, op):
         """ Perform all reduce within model parallel group, if any.
@@ -2106,6 +2155,10 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
 
     def _pre_step(self):
         self.micro_step_id = 0
+        # Also reset the epilogue flag so the next iteration starts fresh.
+        # Without this, the flag from the last backward before step() would cause
+        # an increment in the next forward(), which is wrong.
+        self._epilogue_ran_this_backward = False
 
         print_rank_0("Inside Step function")
         see_memory_usage("In step before checking overflow", force=False)
@@ -2114,6 +2167,13 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
         self._get_param_coordinator().hierarchy = 0
 
         print_rank_0("Finished Tracing at Beginning of Step")
+
+        # Clear any stale params from ipg_buckets. This is needed because with
+        # reentrant checkpointing (use_reentrant=True), the backward pass can
+        # leave params in the buckets that weren't properly processed, causing
+        # errors in the next iteration.
+        for bucket in self.ipg_buckets.values():
+            bucket.clear_params()
 
     @instrument_w_nvtx
     def _get_norm_groups(self):
@@ -2550,7 +2610,7 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
 
     def _fp32_state_allgather(self, param, fp32_state_partition):
         reduce_buffer = torch.empty(self.partition_count * fp32_state_partition.numel(),
-                                    dtype=torch.float32,
+                                    dtype=self.master_weights_and_grads_dtype,
                                     device=param.device)
         my_rank = dist.get_rank(group=self.dp_process_group)
         partition = reduce_buffer.narrow(0, fp32_state_partition.numel() * my_rank, fp32_state_partition.numel())
@@ -3176,6 +3236,7 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
         self._partition_all_parameters()
 
     def checkpoint_event_epilogue(self):
+        self.invalidate_secondary_tensor()
         if len(self.persistent_parameters) > 0:
             self.persistent_parameters[0].all_gather(self.persistent_parameters)
 

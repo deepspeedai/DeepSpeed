@@ -225,7 +225,8 @@ Example of <i>**scheduler**</i>
     "loss_scale_window": 1000,
     "hysteresis": 2,
     "consecutive_hysteresis": false,
-    "min_loss_scale": 1
+    "min_loss_scale": 1,
+    "fp16_master_weights_and_grads": false
 }
 ```
 
@@ -277,6 +278,20 @@ Example of <i>**scheduler**</i>
 | ----------------------------------------------------------------------------------------------------- | ------- |
 | <i>**min_loss_scale**</i> is  a **fp16** parameter representing the minimum dynamic loss scale value. | `1`     |
 
+<i>**fp16:fp16_master_weights_and_grads**</i>: [boolean]
+
+| Description | Default |
+| ----------- | ------- |
+| Keep master parameters/gradients in fp16 instead of fp32 for ZeRO optimizer state. Requires ZeRO Stage 2 or 3 with ZeRO-Offload and `DeepSpeedCPUAdam` so optimizer states can remain in fp32. | `false` |
+
+**Support matrix (fp16 master weights/gradients)**
+
+| ZeRO stage | Offload required? | Notes |
+| ---------- | ----------------- | ----- |
+| 0 | Not supported | |
+| 1/2/3 | Yes (`offload_optimizer` with `DeepSpeedCPUAdam`) | Optimizer states stay fp32 on CPU. |
+
+
 ### BFLOAT16 training options
 
 **Note:** this mode cannot be combined with the `amp` mode described below.
@@ -293,7 +308,9 @@ Example of <i>**scheduler**</i>
 
 ```json
 "bf16": {
-   "enabled": true
+   "enabled": true,
+   "bf16_master_weights_and_grads": true,
+   "bf16_optimizer_states": true
  }
 ```
 
@@ -303,6 +320,24 @@ Example of <i>**scheduler**</i>
 |--------------------------------------------------------------------| ------- |
 | <i>**enabled**</i> indicates whether BFLOAT16 training is enabled. | `false` |
 
+<i>**bf16:bf16_master_weights_and_grads**</i>: [boolean]
+
+| Description | Default |
+| ----------- | ------- |
+| Keep ZeRO master parameters/gradients in bf16 instead of fp32. Supported with ZeRO Stages 1, 2, or 3. If you leave optimizer states in fp32, ZeRO-Offload with `DeepSpeedCPUAdam` is required. | `false` |
+
+<i>**bf16:bf16_optimizer_states**</i>: [boolean]
+
+| Description | Default |
+| ----------- | ------- |
+| Keep optimizer states in bf16 as well. Requires `bf16_master_weights_and_grads=true`. Enabling this removes the offload requirement because optimizer states no longer stay fp32. | `false` |
+
+**Support matrix (bf16 master weights/gradients)**
+
+| ZeRO stage | bf16_optimizer_states=False | bf16_optimizer_states=True |
+| ---------- | --------------------------- | -------------------------- |
+| 0 | Not supported | Not supported |
+| 1/2/3 | Requires ZeRO-Offload + `DeepSpeedCPUAdam` (optimizer states stay fp32 on CPU) | Supported without offload; optimizer states kept in bf16 |
 
 ### Automatic mixed precision (AMP) training options
 
@@ -335,6 +370,29 @@ Example of <i>**scheduler**</i>
 | Description                                                                                                                                                                                                            | Default |
 | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------- |
 | Any parameters outside of "enabled" will be passed to AMP's initialize call, see the API and descriptions here at the [apex.amp.initialize documentation](https://nvidia.github.io/apex/amp.html#apex.amp.initialize). | None    |
+
+### PyTorch Automatic Mixed Precision (torch.autocast) training options
+
+<i>**torch_autocast**</i>: [dictionary]
+
+| Description                                                                                                                                                                                                                                                                                                                                                                                                     | Default |
+| --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------- |
+| Configuration for using PyTorch's native automatic mixed precision training via [torch.autocast](https://pytorch.org/docs/stable/amp.html). For detailed usage instructions, see the [Mixed Precision Training](https://deepspeed.readthedocs.io/en/latest/training.html#mixed-precision-training) documentation. | None    |
+
+```json
+"torch_autocast": {
+    "enabled": true,
+    "dtype": "bfloat16",
+    "lower_precision_safe_modules": ["torch.nn.Linear", "torch.nn.Conv2d"]
+}
+```
+
+| Parameter | Type | Default | Description |
+| --------- | ---- | ------- | ----------- |
+| **enabled** | boolean | `false` | Enable torch.autocast (no manual `torch.autocast` call needed in your code). |
+| **dtype** | string | `"bfloat16"` | Lower precision dtype (`"bfloat16"` or `"float16"`). Also used for gradient/parameter communication of `lower_precision_safe_modules`. |
+| **lower_precision_safe_modules** | list | `["torch.nn.Linear", "torch.nn.Conv1d", "torch.nn.Conv2d", "torch.nn.Conv3d"]` | Module types for lower-precision communication (all-reduce/all-gather). |
+
 
 ### Gradient Clipping
 
@@ -491,6 +549,7 @@ Enabling and configuring ZeRO memory optimizations
 | Consolidate the weights before saving the model by `save_16bit_model()`. Since the weights are partitioned across GPUs, they aren't part of `state_dict`, so this function automatically gathers the weights when this option is enabled and then saves the fp16 model weights. | `False` |
 
 ***stage3_module_granularity_threshold***: [integer]
+
 | Description                                                                                                                                                                                                                                                                    | Default |
 |--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------| ------- |
 | The granularity of a module is determined by the ratio of `parameter_count` / `(1 + descendant_count)`. ZeRO3 classifies modules with a granularity below the threshold as fine-grained, treating them as integral units during parameter fetching. This reduces host and communication overhead from separate hooks. | `0` |
@@ -670,6 +729,96 @@ Configuring the asynchronous I/O module for offloading parameter and optimizer s
 | Description                                                                                                    | Default |
 | -------------------------------------------------------------------------------------------------------------- | ------- |
 | Submit requests to storage device in an overlapped fashion without waiting for completion of earlier requests. | `true`  |
+
+### Tensor Parallel (AutoTP)
+Configure AutoTP tensor parallelism for training via the DeepSpeed config and hybrid TP + ZeRO. AutoTP supports ZeRO stages 0, 1, and 2 (stage 3 is not supported). `deepspeed.tp_model_init()` remains supported for backward compatibility but is not required when `tensor_parallel` is set in the config.
+```json
+  "tensor_parallel": {
+    "autotp_size": 4,
+    "preset_model": "llama",
+    "tp_overlap_comm": false,
+    "partition_config": {
+      "use_default_specs": false,
+      "layer_specs": [
+        {
+          "patterns": [".*\\.o_proj\\.weight$", ".*\\.down_proj\\.weight$"],
+          "partition_type": "row"
+        }
+      ]
+    }
+  }
+```
+<i>**tensor_parallel**</i>: [dictionary]
+
+| Description                                                                                | Default |
+| ------------------------------------------------------------------------------------------ | ------- |
+| Enable AutoTP tensor parallelism and configure preset or custom partitioning rules.        | `{}`    |
+
+***autotp_size***: [integer]
+
+| Description                                                                 | Default |
+| --------------------------------------------------------------------------- | ------- |
+| Tensor-parallel degree. Set to `0` to disable AutoTP.                        | `0`     |
+
+***preset_model***: [string]
+
+| Description                                                                                           | Default |
+| ----------------------------------------------------------------------------------------------------- | ------- |
+| Built-in model presets: `llama`, `bloom`, `chatglm`, `mixtral`, `deepseek_v2`, `qwen2`, `phi3`.        | `null`  |
+
+***tp_overlap_comm***: [boolean]
+
+| Description                                                                                              | Default |
+| -------------------------------------------------------------------------------------------------------- | ------- |
+| Overlap tensor-parallel allreduce communication with computation (training only).                       | `false` |
+
+***partition_config***: [dictionary]
+
+| Description                                                                                                                     | Default |
+| ------------------------------------------------------------------------------------------------------------------------------- | ------- |
+| Custom AutoTP layer partitioning rules. Use with or without `preset_model` to customize sharding patterns.                    | `null`  |
+
+***use_default_specs***: [boolean]
+
+| Description                                                                                                          | Default |
+| -------------------------------------------------------------------------------------------------------------------- | ------- |
+| Merge custom `layer_specs` with preset defaults when `preset_model` is set; otherwise use only custom specs.        | `true`  |
+
+***layer_specs***: [list]
+
+| Description                                                                                                      | Default |
+| ---------------------------------------------------------------------------------------------------------------- | ------- |
+| Ordered list of pattern rules that define how to partition matching parameters.                                 | `[]`    |
+
+***patterns***: [list of strings]
+
+| Description                                                                                                      | Default |
+| ---------------------------------------------------------------------------------------------------------------- | ------- |
+| Regex patterns to match parameter names for this partition rule.                                                 | `[]`    |
+
+***partition_type***: [string]
+
+| Description                                                                  | Default |
+| ---------------------------------------------------------------------------- | ------- |
+| Partition type for matching parameters: `row`, `column`, or `skip`.           | `column` |
+
+***shape***: [list]
+
+| Description                                                                                                      | Default |
+| ---------------------------------------------------------------------------------------------------------------- | ------- |
+| Optional sub-parameter shape for fused weights before TP partitioning (e.g., `[2, -1]`).                          | `null`  |
+
+***partition_dim***: [integer]
+
+| Description                                                                                                      | Default |
+| ---------------------------------------------------------------------------------------------------------------- | ------- |
+| Dimension to split when `shape` is provided (e.g., `0` for fused QKV or gate/up).                                | `null`  |
+
+***model_types***: [list of strings]
+
+| Description                                                                                                      | Default |
+| ---------------------------------------------------------------------------------------------------------------- | ------- |
+| Optional model type filters (from `model.config.model_type`) for shared configs.                                | `null`  |
 
 ***ignore_unused_parameters***: [boolean]
 

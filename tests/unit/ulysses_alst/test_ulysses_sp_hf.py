@@ -185,3 +185,119 @@ class TestUlyssesSPHF(DistributedTest):
             torch_assert_close(grad_a, grad_b, rtol=1.6e-02, atol=1e-03)
         else:
             torch_assert_close(grad_a, grad_b)
+
+
+class TestUlyssesSPHFPEFT(DistributedTest):
+    world_size = 2
+
+    def test_ulysses_sp_hf_with_peft_model(self):
+        """Test that UlyssesSPAttentionHF.register_with_transformers works with PEFT models.
+
+        PEFT models don't inherit from transformers.PreTrainedModel but have a config attribute.
+        This test verifies the duck-typing check for the config attribute works correctly.
+        """
+        model_name_or_path = 'hf-internal-testing/tiny-random-LlamaForCausalLM'
+        seq_length = 64
+        sequence_parallel_size = self.world_size
+        micro_batch_size = 1
+
+        # Create a mock PEFT model object that has config but doesn't inherit from PreTrainedModel
+        from transformers import AutoConfig
+        hf_config = AutoConfig.from_pretrained(model_name_or_path)
+
+        class MockPEFTModel:
+            """Mock PEFT model that simulates PeftModel behavior"""
+
+            def __init__(self, config):
+                self.config = config
+
+        mock_peft_model = MockPEFTModel(hf_config)
+
+        # Test that register_with_transformers works with PEFT-like model object
+        # This should not crash and should use the config attribute via duck-typing
+        mpu = UlyssesSPAttentionHF.register_with_transformers(
+            model_name_or_path=mock_peft_model,
+            core_attn_implementation="sdpa",
+            sequence_parallel_size=sequence_parallel_size,
+            micro_batch_size=micro_batch_size,
+            seq_length=seq_length,
+            seq_length_is_variable=True,
+        )
+
+        # Verify mpu is created successfully
+        assert mpu is not None
+
+        # Verify that the sequence parallel groups are initialized
+        sp_group = mpu.get_sequence_parallel_group()
+        assert sp_group is not None
+        sp_world_size = mpu.get_sequence_parallel_world_size()
+        assert sp_world_size == sequence_parallel_size
+
+
+class TestUlyssesSPHFDisableInEval(DistributedTest):
+    world_size = 2
+
+    def test_disable_in_eval(self):
+        """Test that disable_in_eval parameter controls SP behavior during evaluation.
+
+        When disable_in_eval=True, SP operations should be bypassed during eval mode,
+        allowing the user to pass full (non-sharded) sequences directly.
+        This should produce the same output as a model without SP registered.
+        """
+        from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
+
+        model_name_or_path = 'hf-internal-testing/tiny-random-LlamaForCausalLM'
+        seq_length = 64
+        sequence_parallel_size = self.world_size
+        micro_batch_size = 1
+
+        dtype = preferred_dtype()
+        rank = dist.get_rank()
+
+        # Full sequence input (not sharded) - this is what users would pass during eval
+        # when they want to bypass SP and process sequences independently per rank
+        input_ids = tensor([[1, 10, 10, 10, 2, 2]], device=f"cuda:{rank}")
+        position_ids = tensor([[0, 1, 2, 3, 4, 5]], device=f"cuda:{rank}")
+
+        # 1. Baseline: model without SP, processing full sequence
+        model_baseline = AutoModelForCausalLM.from_pretrained(model_name_or_path, torch_dtype=dtype)
+        model_baseline = model_baseline.to(f"cuda:{rank}")
+        model_baseline.eval()
+
+        # Save original attention function for comparison
+        original_sdpa = ALL_ATTENTION_FUNCTIONS["sdpa"]
+
+        with torch.no_grad():
+            outputs_baseline = model_baseline(input_ids=input_ids, position_ids=position_ids)
+            logits_baseline = outputs_baseline.logits.clone()
+
+        del model_baseline
+
+        # 2. Model with SP registered but disable_in_eval=True
+        # In eval mode, SP is bypassed so full sequence can be passed directly
+        mpu = UlyssesSPAttentionHF.register_with_transformers(
+            model_name_or_path=model_name_or_path,
+            core_attn_implementation="sdpa",
+            sequence_parallel_size=sequence_parallel_size,
+            micro_batch_size=micro_batch_size,
+            seq_length=seq_length,
+            seq_length_is_variable=True,
+            disable_in_eval=True,
+        )
+
+        # Verify that register_with_transformers actually registered the wrapper
+        assert mpu is not None, "mpu should not be None when sequence_parallel_size > 1"
+        assert ALL_ATTENTION_FUNCTIONS["sdpa"] is not original_sdpa, \
+            "register_with_transformers should have replaced the attention function"
+
+        model_sp = AutoModelForCausalLM.from_pretrained(model_name_or_path, torch_dtype=dtype)
+        model_sp = model_sp.to(f"cuda:{rank}")
+        model_sp.eval()
+
+        with torch.no_grad():
+            outputs_sp = model_sp(input_ids=input_ids, position_ids=position_ids)
+            logits_sp = outputs_sp.logits.clone()
+
+        # Verify: with disable_in_eval=True, full sequence input should produce
+        # the same output as baseline (SP is bypassed)
+        torch_assert_equal(logits_baseline, logits_sp)

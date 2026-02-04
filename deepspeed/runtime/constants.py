@@ -137,8 +137,16 @@ BFLOAT16_CHECK_OVERFLOW_DEFAULT = False
 BFLOAT16_IMMEDIATE_GRAD_UPDATE = "immediate_grad_update"
 BFLOAT16_IMMEDIATE_GRAD_UPDATE_DEFAULT = True
 
+# BFLOAT16 master weights and optimizer states options
+BFLOAT16_MASTER_WEIGHTS_AND_GRADS = "bf16_master_weights_and_grads"
+BFLOAT16_MASTER_WEIGHTS_AND_GRADS_DEFAULT = False
+BFLOAT16_OPTIMIZER_STATES = "bf16_optimizer_states"
+BFLOAT16_OPTIMIZER_STATES_DEFAULT = False
+
 # DDP variant of BFLOAT16
-DDP_BFLOAT16 = "bf16"
+# DDP variant: bf16 model with bf16 grad accumulation (uses FP16_Optimizer in bf16 mode)
+# Must be different from BFLOAT16 to allow proper optimizer selection
+DDP_BFLOAT16 = "ddp_bf16"
 
 #########################################
 # FP16 support

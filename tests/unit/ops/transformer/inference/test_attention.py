@@ -29,6 +29,8 @@ def ref_torch_attention(q, k, v, mask, sm_scale):
 def test_attention(BATCH, H, N_CTX, D_HEAD, causal, use_flash, dtype=torch.float16):
     if not deepspeed.get_accelerator().is_triton_supported():
         pytest.skip("triton is not supported on this system")
+    if not deepspeed.HAS_TRITON:
+        pytest.skip("triton is not installed")
 
     minus_inf = -65504.0
     dev = deepspeed.accelerator.get_accelerator().device_name()

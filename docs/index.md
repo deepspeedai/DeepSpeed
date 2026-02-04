@@ -8,6 +8,8 @@ title: "Latest News"
 
 <!-- NOTE: Maintain only the five latest releases in 'latest news' section -->
 
+* [2025/12] [DeepSpeed Core API updates: PyTorch-style backward and low-precision master states](https://github.com/deepspeedai/DeepSpeed/blob/master/blogs/core_api_update/README.md)
+
 * [2025/10] [SuperOffload: Unleashing the Power of Large-Scale LLM Training on Superchips](https://pytorch.org/blog/superoffload-unleashing-the-power-of-large-scale-llm-training-on-superchips/)
 
 * [2025/10] [Study of ZenFlow and ZeRO offload performance with DeepSpeed CPU core binding](https://github.com/deepspeedai/DeepSpeed/blob/master/blogs/zenflow-corebinding/README.md)
@@ -15,8 +17,6 @@ title: "Latest News"
 * [2025/08] [ZenFlow: Stall-Free Offloading Engine for LLM Training](https://pytorch.org/blog/zenflow-stall-free-offloading-engine-for-llm-training/)
 
 * [2025/06] [Arctic Long Sequence Training (ALST) with DeepSpeed: Scalable And Efficient Training For Multi-Million Token Sequences](https://www.snowflake.com/en/engineering-blog/arctic-long-sequence-training-multi-million-token-ai/)
-
-* [2025/06] [DeepNVMe: Affordable I/O scaling for Deep Learning Applications](https://github.com/deepspeedai/DeepSpeed/blob/master/blogs/deepnvme/06-2025/README.md)
 
 
 <!-- NOTE: we must use html for news items otherwise links will be broken in the 'more news' section -->
@@ -72,14 +72,13 @@ etc.
 
 ## Contributor License Agreement
 This project welcomes contributions and suggestions. Most contributions require you to
-agree to a Contributor License Agreement (CLA) declaring that you have the right to, and
-actually do, grant us the rights to use your contribution. For details, visit
-https://cla.opensource.microsoft.com.
+agree to a Developer Certificate of Origin (DCO)[https://wiki.linuxfoundation.org/dco]
+stating that they agree to the terms published at https://developercertificate.org for
+that *particular* contribution.
 
-When you submit a pull request, a CLA bot will automatically determine whether you need
-to provide a CLA and decorate the PR appropriately (e.g., status check, comment). Simply
-follow the instructions provided by the bot. You will only need to do this once across
-all repos using our CLA.
+DCOs are per-commit, so each commit needs to be signed off.  These can be signed in
+the commit by adding the `-s` flag.  DCO enforcement can also be signed off in the PR
+itself by clicking on the DCO enforcement check.
 
 ## Code of Conduct
 This project has adopted the [Microsoft Open Source Code of

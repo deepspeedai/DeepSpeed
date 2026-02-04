@@ -78,6 +78,9 @@ class UlyssesSPAttentionHF(torch.nn.Module):
         kv_head_count (int): total number of kv heads
         num_hidden_layers (int): total number of layers
         process_group (dist.ProcessGroup): Ulysses process group
+        disable_in_eval (bool): whether to disable sequence parallelism during evaluation (default: False).
+            When True, SP operations are bypassed during eval to avoid potential issues with frameworks
+            like HF Trainer that may run eval with different data distribution.
 
 
     Extras:
@@ -96,6 +99,7 @@ class UlyssesSPAttentionHF(torch.nn.Module):
         seq_length_is_variable: bool = False,
         local_seq_length: int = None,
         global_seq_length: int = None,
+        disable_in_eval: bool = False,
     ) -> None:
         super().__init__()
         self.attn = attn
@@ -107,6 +111,7 @@ class UlyssesSPAttentionHF(torch.nn.Module):
         self.seq_length_is_variable = seq_length_is_variable
         self.local_seq_length = local_seq_length
         self.global_seq_length = global_seq_length
+        self.disable_in_eval = disable_in_eval
 
         self.attn_head_size = attn_head_size
         self.attn_head_count = attn_head_count
@@ -246,6 +251,12 @@ class UlyssesSPAttentionHF(torch.nn.Module):
         # print_rank0(f"{key.shape=}")
         # print_rank0(f"{value.shape=}")
         # print_rank0(f"{self.required_input_shape=}")
+
+        # Skip SP operations during eval if disable_in_eval is True
+        # This avoids issues with frameworks like HF Trainer that may run eval with different data distribution
+        if not module.training and self.disable_in_eval:
+            return self.attn(module, query, key, value, attention_mask, *args, **kwargs)
+
         if self.seq_length_is_variable:
             current_local_seq_length = query.shape[2]
             self.local_seq_length = current_local_seq_length
@@ -350,6 +361,7 @@ class UlyssesSPAttentionHF(torch.nn.Module):
         micro_batch_size,
         seq_length=None,
         seq_length_is_variable=True,
+        disable_in_eval=False,
         # deprecated
         max_length=None,
     ):
@@ -364,6 +376,9 @@ class UlyssesSPAttentionHF(torch.nn.Module):
         - micro_batch_size (int): micro batch size
         - seq_length (int): set this argument if the sequence length is fixed in all batches
         - seq_length_is_variable (bool): whether global seqlen may change between batches an optimization flag - the default is `True`
+        - disable_in_eval (bool): whether to disable sequence parallelism during evaluation (default: False).
+            When True, SP operations are bypassed during eval to avoid issues with frameworks
+            like HF Trainer that may run eval with different data distribution.
         - max_length (int): actual global sequence length - this argument is deprecated - use `seq_length` instead
 
         """
@@ -389,8 +404,8 @@ class UlyssesSPAttentionHF(torch.nn.Module):
         mpu.initialize_sequence_parallel(sequence_parallel_size=sequence_parallel_size)
 
         from transformers import PreTrainedModel
-        if isinstance(model_name_or_path, PreTrainedModel):
-            # we already have the model
+        if hasattr(model_name_or_path, "config") or isinstance(model_name_or_path, PreTrainedModel):
+            # we already have the model (or a PEFT wrapper with config attribute)
             hf_model_config = model_name_or_path.config
         else:
             # if we don't have the model yet at this stage
@@ -431,6 +446,7 @@ class UlyssesSPAttentionHF(torch.nn.Module):
             seq_length_is_variable=seq_length_is_variable,
             local_seq_length=local_seq_length,
             global_seq_length=global_seq_length,
+            disable_in_eval=disable_in_eval,
         )
 
         def uattn_wrapper(

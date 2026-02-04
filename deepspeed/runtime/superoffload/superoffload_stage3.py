@@ -23,6 +23,7 @@ class SuperOffloadOptimizer_Stage3(DeepSpeedZeroOptimizer_Stage3):
         self,
         module,
         init_optimizer,
+        param_names,
         timers,
         ds_config,
         **kwargs,
@@ -34,7 +35,7 @@ class SuperOffloadOptimizer_Stage3(DeepSpeedZeroOptimizer_Stage3):
         self.async_cpuadam_num = 0
         self.max_grad_numel = 0
 
-        super().__init__(module, init_optimizer, timers, ds_config, **kwargs)
+        super().__init__(module, init_optimizer, param_names, timers, ds_config, **kwargs)
 
         optimizer_config = {
             "lr": self.optimizer.param_groups[0]["lr"],
@@ -175,7 +176,7 @@ class SuperOffloadOptimizer_Stage3(DeepSpeedZeroOptimizer_Stage3):
             for i in buffer_numel_min.keys():
                 fp32_grad_tensor = self.fp32_partitioned_groups_flat[i].grad.narrow(
                     0, buffer_numel_min[i], buffer_numel_max[i] - buffer_numel_min[i])
-                concatenated_buffer = torch.cat(device_buffers[i], dim=0).float()
+                concatenated_buffer = torch.cat(device_buffers[i], dim=0).to(dtype=self.master_weights_and_grads_dtype)
 
                 if self.subgroup_to_device[i] == 'cpu':
                     # Trigger asynchronous CPU optimization

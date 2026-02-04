@@ -118,7 +118,6 @@ class IPGBucket:
         self.params.clear()
         self.grads.clear()
         self.elements = 0
-        self.index = 0
         self.has_moe_params = False
 
 
@@ -166,6 +165,8 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
                  round_robin_gradients=False,
                  has_moe_layers=False,
                  fp16_master_weights_and_gradients=False,
+                 bf16_master_weights_and_gradients=False,
+                 bf16_optimizer_states=False,
                  elastic_checkpoint=False,
                  check_grad_overflow=True):
 
@@ -267,13 +268,20 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
         self.round_robin_gradients = round_robin_gradients
 
         self.extra_large_param_to_reduce: Dict[int, torch.Tensor] = {}
-        self.fp16_master_weights_and_gradients = fp16_master_weights_and_gradients
 
-        if self.fp16_master_weights_and_gradients:
+        def _enforce_cpu_offload():
             assert self.cpu_offload and type(self.optimizer) in [DeepSpeedCPUAdam], \
-            f"fp16_master_and_gradients requires optimizer to support keeping fp16 master and gradients while keeping the optimizer states in fp32."\
-            f"Currently only supported using ZeRO-Offload with DeepSpeedCPUAdam. But current setting is ZeRO-Offload:{self.cpu_offload} and optimizer type {type(self.optimizer)}." \
-            f"Either disable fp16_master_weights_and_gradients or enable {self.zero_stage_string} Offload with DeepSpeedCPUAdam."
+                f"Master weights feature requires {self.zero_stage_string} Offload with DeepSpeedCPUAdam. " \
+                f"Current ZeRO-Offload:{self.cpu_offload} optimizer type {type(self.optimizer)}."
+
+        self.master_weights_and_grads_dtype = self._configure_master_weights(
+            fp16_master_weights_and_gradients=fp16_master_weights_and_gradients,
+            bf16_master_weights_and_gradients=bf16_master_weights_and_gradients,
+            bf16_optimizer_states=bf16_optimizer_states,
+            fp16_offload_validator=_enforce_cpu_offload,
+            bf16_fp32_offload_validator=_enforce_cpu_offload)
+
+        self.low_precision_master_weights_and_grads = self.master_weights_and_grads_dtype != torch.float32
 
         if self.reduce_scatter and self.partition_gradients:
             valid_reduce_scatter_dtypes = (torch.float16, torch.bfloat16, torch.float32)
@@ -437,12 +445,8 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
             # A partition of the fp32 master weights that will be updated by this process.
             # Note that the params in single_partition_of_fp32_groups is cloned and detached
             # from the origin params of the model.
-            if not fp16_master_weights_and_gradients:
-                weights_partition = self.parallel_partitioned_bit16_groups[i][partition_id].to(
-                    self.device).clone().float().detach()
-            else:
-                weights_partition = self.parallel_partitioned_bit16_groups[i][partition_id].to(
-                    self.device).clone().half().detach()
+            weights_partition = self.parallel_partitioned_bit16_groups[i][partition_id].detach().clone().to(
+                device=self.device, dtype=self.master_weights_and_grads_dtype)
 
             if self.cpu_offload:
                 if self.cpu_offload_pin_memory:
@@ -873,15 +877,40 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
                         device=get_accelerator().current_device_name(),
                         param_group_idx=i,
                         return_tensor_list=True)
+                    # Clear all_grad_tensors after use. With reentrant checkpointing,
+                    # the epilogue may run multiple times per backward pass. Each time,
+                    # we read the cumulative grad_accum (which PyTorch naturally accumulates)
+                    # and the final phase will have all gradients.
                     self.all_grad_tensors[i] = None
 
         self._release_ipg_buffers()
 
-        # No need to keep the gradients anymore.
-        # All gradients required by the step
-        # are in self.averaged_gradients
-        self.zero_grad(set_to_none=True)
+        # Clear param.grad so safe_get_full_grad() goes through the proper _hp_mapping
+        # path (which does all_reduce for ZeRO-2). Keep grad_accum intact for reentrant
+        # checkpointing where gradients need to accumulate across multiple phases.
+        # grad_accum is cleared in clear_backward_seen_flag() at the start of next forward.
+        self._clear_param_grad_only()
+        self._epilogue_ran_this_backward = True
+
         see_memory_usage("End ipg_epilogue")
+
+    def clear_backward_seen_flag(self):
+        """Clear the backward seen flag and do deferred cleanup.
+
+        With reentrant gradient checkpointing, the epilogue may run multiple times
+        per backward pass (once per phase). We defer clearing grad_accum until here
+        (called at the start of the next forward) to ensure all phases have completed.
+
+        Note: param.grad is cleared in the epilogue via _clear_param_grad_only() to
+        ensure safe_get_full_grad() works correctly. Only grad_accum is deferred.
+        """
+        if self._epilogue_ran_this_backward:
+            # Clear grad_accum for next step. param.grad is already cleared in epilogue.
+            for group in self.bit16_groups:
+                for p in group:
+                    p.grad_accum = None
+
+        super().clear_backward_seen_flag()
 
     # resets all partition to no reduced
     # sets remaining grads to the total number of grads in each partition
@@ -994,15 +1023,10 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
                     def wrapper(param, i):
 
                         def grad_handling_hook(*notneeded):
-                            if self._remaining_grad_acc_hooks == 0:
-                                self._remaining_grad_acc_hooks = count_used_parameters_in_backward(
-                                    all_params_requiring_grad)
-
+                            self.reenter_backward_if_needed()
                             self.process_gradients(param, i)
-
-                            self._remaining_grad_acc_hooks -= 1
-                            if self._remaining_grad_acc_hooks == 0:
-                                self.run_grad_acc_post_hooks()
+                            current_expected = count_used_parameters_in_backward(all_params_requiring_grad)
+                            self.update_hook_state_and_maybe_run_epilogue(current_expected)
 
                         self._grad_acc_hooks.append(register_grad_hook(param, grad_handling_hook))
 
@@ -1027,14 +1051,15 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
         bucket = self.ipg_buckets[comm_dtype]
         if bucket.elements + param.numel() > self.reduce_bucket_size:
             self.report_ipg_memory_usage("In ipg_remove_grads before reduce_ipg_grads", param.numel())
-            self.reduce_ipg_grads()
+            self.reduce_ipg_grads(comm_dtype=comm_dtype)
             if self.contiguous_gradients and self.overlap_comm:
-                if not get_accelerator().resolves_data_dependency():
-                    self.reduction_stream.wait_stream(get_accelerator().current_stream())
-                    get_accelerator().current_stream().wait_stream(self.reduction_stream)
                 # Swap index between 0 and 1
                 bucket.index = 1 - bucket.index
             self.report_ipg_memory_usage("In ipg_remove_grads after reduce_ipg_grads", param.numel())
+
+        # deal with a use-case of transient grads that will be generated in a loop for the same computation involving some model params - e.g. when performing a tiled memory calculation that shards the normal single sub-module call into a loop over a shards.
+        if not getattr(param, "ds_grad_is_ready", True):
+            return
 
         param_id = self.get_param_id(param)
         assert self.params_already_reduced[param_id] == False, \
@@ -1059,10 +1084,8 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
 
         assert grad_reduc is not None, f"rank {dist.get_rank()} - Invalid to reduce Param {param_id} with None gradient"
 
-        # deal with a use-case of transient grads that will be generated in a loop for the same computation involving some model params - e.g. when performing a tiled memory calculation that shards the normal single sub-module call into a loop over a shards.
-        if getattr(param, "ds_grad_is_ready", True):
-            bucket.grads.append(grad_reduc)
-            bucket.params.append((i, param.param_idx_in_group, param_id))
+        bucket.grads.append(grad_reduc)
+        bucket.params.append((i, param.param_idx_in_group, param_id))
 
         #make sure the average tensor function knows how to average the gradients
         if is_moe_param(param):
@@ -1314,7 +1337,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
 
         #buffer for storing gradients for this parameter in CPU
         def buffer_to_accumulate_to_in_cpu():
-            if not self.fp16_master_weights_and_gradients:
+            if not self.low_precision_master_weights_and_grads:
                 buffer = torch.zeros(param.numel(), dtype=param.dtype, device=self.device)
                 return get_accelerator().pin_memory(buffer) if self.cpu_offload_pin_memory else buffer
             else:
@@ -1323,7 +1346,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
         #accumulate gradients into param.grad_accum or parts of it that belongs to this partition
         def accumulate_gradients():
             grad_accum = self.get_param_gradient_attribute(param)
-            if not self.fp16_master_weights_and_gradients:
+            if not self.low_precision_master_weights_and_grads:
                 dest_buffer.copy_(self.accumulated_grads_in_cpu[param_id].view(-1), non_blocking=True)
                 grad_accum.data.view(-1).add_(dest_buffer)
             else:
@@ -1336,7 +1359,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
         #move accumulated gradients back to CPU
         def copy_gradients_to_cpu():
             grad_accum = self.get_param_gradient_attribute(param)
-            if not self.fp16_master_weights_and_gradients:
+            if not self.low_precision_master_weights_and_grads:
                 self.accumulated_grads_in_cpu[param_id].data.copy_(grad_accum.data.view(-1), non_blocking=True)
             else:
                 self.accumulated_grads_in_cpu[param_id].data.copy_(grad_accum.data.view(-1).narrow(
@@ -1390,8 +1413,8 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
         assert grad_accum is not None
 
         src_tensor = grad_accum.view(-1).narrow(0, source_offset, num_elements)
-        if not self.fp16_master_weights_and_gradients:
-            src_tensor = src_tensor.float()
+        if src_tensor.dtype != self.master_weights_and_grads_dtype:
+            src_tensor = src_tensor.to(self.master_weights_and_grads_dtype)
 
         dest_tensor.copy_(src_tensor, non_blocking=True)
         self.clear_grad_attribute(param)  #offload only
@@ -1475,8 +1498,11 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
         #print(f"Grad norm after copy to contiguous_buffer {param.grad.data.norm()}")
         self.grads_in_partition_offset += param.numel()
 
-    def reduce_ipg_grads(self):
-        for comm_dtype in sort_dtypes(self.ipg_buckets.keys()):
+    def reduce_ipg_grads(self, comm_dtype=None):
+        dtypes = sort_dtypes(self.ipg_buckets.keys())
+        if comm_dtype is not None:
+            dtypes = [comm_dtype]
+        for comm_dtype in dtypes:
             bucket = self.ipg_buckets[comm_dtype]
 
             if self.contiguous_gradients:
@@ -1511,7 +1537,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
             stream = get_accelerator().current_stream()
 
         with get_accelerator().stream(stream):
-            for comm_dtype in sort_dtypes(self.ipg_buckets.keys()):
+            for comm_dtype in dtypes:
                 bucket = self.ipg_buckets[comm_dtype]
 
                 for group_idx, param_idx_in_group, param_id in bucket.params:
@@ -1809,6 +1835,18 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
                         p.grad.detach_()
                         p.grad.zero_()
 
+    def _clear_param_grad_only(self):
+        """Clear only param.grad but keep grad_accum intact.
+
+        This is used at the end of the epilogue to ensure safe_get_full_grad() goes
+        through the proper _hp_mapping path (which does all_reduce for ZeRO-2), while
+        preserving grad_accum for reentrant checkpointing where gradients need to
+        accumulate across multiple backward phases.
+        """
+        for group in self.bit16_groups:
+            for p in group:
+                p.grad = None
+
     def _model_parallel_all_reduce(self, tensor, op):
         """ Perform all reduce within model parallel group, if any.
         """
@@ -1890,6 +1928,13 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
                            device,
                            param_group_idx,
                            return_tensor_list=False):
+        if len(tensor_list) == 0:
+            # This condition can fire when we have small parameteters and many ranks.
+            zero_buffer = torch.zeros(int(partition_size), dtype=dtype, device=device)
+            if return_tensor_list:
+                return [zero_buffer]
+            return zero_buffer
+
         flat_tensor_list = []
         current_size = 0
         # find the flatten copy in the optimizer's state
