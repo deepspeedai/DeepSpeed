@@ -37,6 +37,7 @@ from deepspeed.runtime.swap_tensor.pipelined_optimizer_swapper import PipelinedO
 from deepspeed.checkpoint.constants import OPTIMIZER_STATE_DICT, FP32_FLAT_GROUPS, PARTITION_COUNT, ZERO_STAGE, LOSS_SCALER
 from deepspeed.accelerator import get_accelerator
 from deepspeed.runtime.zero.muon.original_muon import muon_update
+from deepspeed.runtime.zero.muon.muon_optimizer import MuonWithAuxAdam
 
 # Toggle this to true to enable correctness test
 # with gradient partitioning and without
@@ -311,7 +312,7 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
         self.all2all_process_group = all2all_process_group
 
         self.reduce_scatter = reduce_scatter
-        self.use_muon = 'muon' in self.optimizer.__class__.__name__.lower()
+        self.use_muon = isinstance(self.optimizer, MuonWithAuxAdam)
         self.save_muon_momentum_buffer_in_memory = ds_config.get('save_muon_momentum_buffer_in_memory', False)
         if self.use_muon and self.reduce_scatter:
             raise ValueError("Muon and reduce scatter cannot be used together")
@@ -1462,11 +1463,11 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
             if self._swappable_optimizer_subgroup(i) and not self.save_muon_momentum_buffer_in_memory:
                 self.optimizer_swapper.swap_in_optimizer_state(parameter=self.fp32_partitioned_groups_flat[i])
                 for idx, dest_offset in params_to_subgroup_maps[i]:
-                    momentum_buffer[idx] = self.optimizer.state[self.fp32_partitioned_groups_flat[i]]["momentum_buffer"].narrow(0, dest_offset, param.partition_numel()).clone()
+                    momentum_buffer[idx] = self.optimizer.state[self.fp32_partitioned_groups_flat[i]]["momentum_buffer"].narrow(0, dest_offset, use_muon_params[idx].partition_numel()).clone()
                 self.optimizer_swapper.swap_out_optimizer_state(parameter=self.fp32_partitioned_groups_flat[i])
             elif self.save_muon_momentum_buffer_in_memory:
                 for idx, dest_offset in params_to_subgroup_maps[i]:
-                    momentum_buffer[idx] = self.muon_momentum_buffer_partitioned_groups_flat[i].narrow(0, dest_offset, param.partition_numel()).clone()
+                    momentum_buffer[idx] = self.muon_momentum_buffer_partitioned_groups_flat[i].narrow(0, dest_offset, use_muon_params[idx].partition_numel()).clone()
             else:
                 raise ValueError("Invalid momentum buffer save mode, momentum buffer should be saved in memory or swapped in and out to nvme")
         # if there are parameters that need to be updated using muon
@@ -1485,8 +1486,8 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
                 params = [use_muon_params[idx] for idx, _ in params_to_subgroup_maps[i]]
                 gathered_momentums = [gathered_params_momentums[idx] for idx, _ in params_to_subgroup_maps[i]]
                 # params_pad = params + [torch.empty_like(params[-1])] * (world_sz - len(params) % world_sz)
-                grads_pad = [param.grad for param in params] + [torch.empty_like(params[-1].grad)] * (world_sz - len(params) % world_sz)
-                gathered_momentums_pad = gathered_momentums + [torch.empty_like(gathered_momentums[-1])] * (world_sz - len(gathered_momentums) % world_sz)
+                grads_pad = [param.grad for param in params] + [torch.empty_like(params[-1].grad)] * ((world_sz - len(params) % world_sz) % world_sz)
+                gathered_momentums_pad = gathered_momentums + [torch.empty_like(gathered_momentums[-1])] * ((world_sz - len(gathered_momentums) % world_sz) % world_sz)
                 for base_i in range(len(params))[::world_sz]:
                     if base_i + rank < len(params):
                         param = params[base_i + rank]
