@@ -107,7 +107,7 @@ class TestMiCSGatheredParametersFree(DistributedTest):
         assert model.l1.weight.numel() == 0, "outside of GatheredParameters the param should go back to be 0-sized"
 
 
-class TestZeroFreeParamActiveSubmodule(DistributedTest):
+class TestGatheredParametersAllRanksErrorOnModification(DistributedTest):
     world_size = 2
 
     def test(self):
