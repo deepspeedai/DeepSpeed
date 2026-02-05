@@ -2335,7 +2335,16 @@ class GatheredParameters:
                     p for p, data_ptr, version in self._param_versions
                     if p.data.data_ptr() != data_ptr or p._version != version
                 ]
-                if modified_params:
+                modified_local = bool(modified_params)
+                modified_global = modified_local
+                if dist.is_initialized():
+                    modified_flag = torch.tensor(
+                        int(modified_local),
+                        device=get_accelerator().current_device_name(),
+                    )
+                    dist.all_reduce(modified_flag, op=dist.ReduceOp.MAX, group=self.params[0].ds_process_group)
+                    modified_global = bool(modified_flag.item())
+                if modified_global:
                     self.params[0].partition(param_list=self.params, has_been_updated=False)
                     raise RuntimeError(
                         "Detected in-place modification of ZeRO-3 parameters inside GatheredParameters with "
