@@ -49,9 +49,9 @@ class TestMuonConfigs(DistributedTest):
         }
         if offload_optimizer:
             config_dict["zero_optimization"]["offload_optimizer"] = {
-                    "device": "cpu",
-                    "pin_memory": True,
-                }
+                "device": "cpu",
+                "pin_memory": True,
+            }
 
         # Perform a few training steps to ensure the optimizer works correctly
 
