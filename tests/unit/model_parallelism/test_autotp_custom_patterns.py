@@ -13,7 +13,7 @@ from torch import nn
 from unit.common import DistributedTest, preferred_dtype
 from deepspeed.accelerator import get_accelerator
 from deepspeed.utils import groups
-from deepspeed.module_inject.layers import (LinearAllreduce, LinearLayer, SubParamLinearLayer)
+from deepspeed.module_inject.layers import (LinearAllreduce, LinearLayer, SubParamLinearLayer, fused_LinearLayer)
 from deepspeed.module_inject.autotp_config import AutoTPConfig
 from deepspeed.module_inject.auto_tp import AutoTP
 
@@ -56,6 +56,26 @@ class CustomLinearModel(torch.nn.Module):
 
     def forward(self, x):
         return self.custom(x)
+
+
+class QKVLinearModule(torch.nn.Module):
+
+    def __init__(self, hidden_dim):
+        super(QKVLinearModule, self).__init__()
+        self.qkv_proj = torch.nn.Linear(hidden_dim, hidden_dim * 3)
+
+    def forward(self, x):
+        return self.qkv_proj(x)
+
+
+class QKVLinearModel(torch.nn.Module):
+
+    def __init__(self, hidden_dim):
+        super(QKVLinearModel, self).__init__()
+        self.self_attn = QKVLinearModule(hidden_dim)
+
+    def forward(self, x):
+        return self.self_attn(x)
 
 
 def init_tp_engine(tp_size, partition_config=None):
@@ -121,6 +141,15 @@ def gather_subparam_output(output, subparam_sizes, mp_group):
         dist.all_gather(gathered, chunk, group=mp_group)
         gathered_chunks.append(torch.cat(gathered, dim=-1))
     return torch.cat(gathered_chunks, dim=-1)
+
+
+def assert_close_for_preferred_dtype(actual, expected):
+    atol = 1e-3
+    rtol = 2e-2
+    if preferred_dtype() is torch.float32:
+        atol = 1e-5
+        rtol = 1e-5
+    torch.testing.assert_close(actual, expected, atol=atol, rtol=rtol)
 
 
 class TestAutoTPCustomPatterns(DistributedTest):
@@ -282,6 +311,69 @@ class TestAutoTPCustomPatterns(DistributedTest):
         engine, _, _, _ = deepspeed.initialize(model=model, model_parameters=model.parameters(), config=config_dict)
         assert isinstance(engine.module.custom, LinearLayer)
 
+    def test_custom_pattern_disables_fused_qkv_heuristic(self):
+        skip_on_device()
+        # Use a qkv_proj name that would trigger the fused-QKV heuristic, then
+        # verify custom patterns override that path and preserve correctness.
+        torch.manual_seed(1234)
+        hidden_dim = 16
+        qkv_sizes = (hidden_dim, hidden_dim, hidden_dim)
+        partition_config = {
+            "use_default_specs": False,
+            "layer_specs": [
+                {
+                    "patterns": [".*self_attn\\.qkv_proj\\.weight$"],
+                    "partition_type": "column",
+                    "shape": [list(qkv_sizes), -1],
+                    "partition_dim": 0,
+                },
+            ],
+        }
+        config_dict = {
+            "train_micro_batch_size_per_gpu": 1,
+            "optimizer": {
+                "type": "Adam",
+                "params": {
+                    "lr": 1e-6
+                }
+            },
+            "tensor_parallel": {
+                "autotp_size": 2,
+                "partition_config": partition_config,
+            },
+            "zero_optimization": {
+                "stage": 0,
+            }
+        }
+        if preferred_dtype() is torch.float16:
+            config_dict["fp16"] = {"enabled": True}
+        elif preferred_dtype() is torch.bfloat16:
+            config_dict["bf16"] = {"enabled": True}
+
+        model = QKVLinearModel(hidden_dim=hidden_dim)
+        baseline = deepcopy(model).to(get_accelerator().current_device(), dtype=preferred_dtype())
+        engine, _, _, _ = deepspeed.initialize(model=model, model_parameters=model.parameters(), config=config_dict)
+        qkv_layer = engine.module.self_attn.qkv_proj
+        # Custom pattern should force SubParamLinearLayer (shape-based path),
+        # and avoid the legacy fused-QKV heuristic despite the qkv_proj name.
+        assert isinstance(qkv_layer, SubParamLinearLayer)
+        assert not isinstance(qkv_layer, fused_LinearLayer)
+
+        assert qkv_layer.partition_dim == 0
+        assert qkv_layer._subparam_sizes == qkv_sizes
+        assert qkv_layer._orig_weight_shape == (hidden_dim * 3, hidden_dim)
+
+        qkv_layer.gather_params([qkv_layer.weight, qkv_layer.bias])
+        torch.testing.assert_close(qkv_layer.weight, baseline.self_attn.qkv_proj.weight)
+        if qkv_layer.bias is not None:
+            torch.testing.assert_close(qkv_layer.bias, baseline.self_attn.qkv_proj.bias)
+
+        torch.manual_seed(4321)
+        inputs = torch.randn(2, hidden_dim, dtype=preferred_dtype(), device=get_accelerator().current_device())
+        full_output = baseline(inputs)
+        tp_output = engine.module(inputs)
+        assert_close_for_preferred_dtype(tp_output, full_output)
+
     def test_first_match_precedence(self):
         skip_on_device()
         partition_config = {
@@ -398,9 +490,4 @@ class TestAutoTPFusedWeights(DistributedTest):
 
         gathered_output = gather_subparam_output(tp_output, (q_size, k_size, v_size),
                                                  groups.get_tensor_model_parallel_group())
-        atol = 1e-3
-        rtol = 2e-2
-        if preferred_dtype() is torch.float32:
-            atol = 1e-5
-            rtol = 1e-5
-        torch.testing.assert_close(gathered_output, full_output, atol=atol, rtol=rtol)
+        assert_close_for_preferred_dtype(gathered_output, full_output)
