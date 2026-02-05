@@ -2286,6 +2286,7 @@ class GatheredParameters:
         """
 
         self.enabled = enabled
+        self._param_versions = None
         if not enabled:
             return
 
@@ -2322,11 +2323,23 @@ class GatheredParameters:
         if not self.enabled:
             return
         self.params[0].all_gather(param_list=self.params)
+        if self.src_rank is None:
+            self._param_versions = [(p, p.data.data_ptr(), p._version) for p in self.params]
 
     def __exit__(self, *exc):
         if not self.enabled:
             return
         if self.src_rank is None:
+            if self._param_versions:
+                modified_params = [
+                    p for p, data_ptr, version in self._param_versions
+                    if p.data.data_ptr() != data_ptr or p._version != version
+                ]
+                if modified_params:
+                    self.params[0].partition(param_list=self.params, has_been_updated=False)
+                    raise RuntimeError(
+                        "Detected in-place modification of ZeRO-3 parameters inside GatheredParameters with "
+                        "modifier_rank=None. Use modifier_rank=<rank> to broadcast updates across ranks.")
             self.params[0].partition(param_list=self.params, has_been_updated=False)
             return
 
