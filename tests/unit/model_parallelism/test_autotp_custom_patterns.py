@@ -319,7 +319,8 @@ class TestAutoTPCustomPatterns(DistributedTest):
         hidden_dim = 16
         qkv_sizes = (hidden_dim, hidden_dim, hidden_dim)
         partition_config = {
-            "use_default_specs": False,
+            "use_default_specs":
+            False,
             "layer_specs": [
                 {
                     "patterns": [".*self_attn\\.qkv_proj\\.weight$"],
