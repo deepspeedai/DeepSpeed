@@ -165,19 +165,32 @@ class TestTpModelInitCompatibility(DistributedTest):
         with pytest.raises(ValueError, match="tensor_parallel.autotp_size"):
             deepspeed.initialize(model=model, model_parameters=model.parameters(), config=config_dict, mpu=DummyMPU())
 
-    def test_tp_model_init_requires_mpu_or_mesh_param(self):
+    def test_tp_model_init_autocreates_tp_group(self):
         skip_on_device()
         reset_tp_model_init_state()
+        # Verify tp_model_init creates TP groups when no mpu is provided.
         model = SimpleModel(hidden_dim=8)
-        deepspeed.tp_model_init(model, tp_size=1, dtype=preferred_dtype())
+        tp_size = 2
+        deepspeed.tp_model_init(model, tp_size=tp_size, dtype=preferred_dtype())
         config_dict = {
             "train_micro_batch_size_per_gpu": 1,
+            "tensor_parallel": {
+                "partition_config": {
+                    "use_default_specs": False,
+                    "layer_specs": [{
+                        "patterns": [".*\\.weight$"],
+                        "partition_type": "skip",
+                    }],
+                }
+            },
             "zero_optimization": {
                 "stage": 0,
             }
         }
-        with pytest.raises(ValueError, match="requires mpu or mesh_param"):
-            deepspeed.initialize(model=model, model_parameters=model.parameters(), config=config_dict)
+        engine, _, _, _ = deepspeed.initialize(model=model, model_parameters=model.parameters(), config=config_dict)
+        assert engine.autotp_size() == tp_size
+        assert groups.get_tensor_model_parallel_world_size() == tp_size
+        assert groups.get_data_parallel_world_size() == dist.get_world_size() // tp_size
 
     def test_tp_model_init_tp_group_rejects_mpu(self):
         skip_on_device()

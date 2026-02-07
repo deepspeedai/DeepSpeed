@@ -87,7 +87,9 @@ def merge_tp_model_init_into_config(config_dict: dict, mpu, mesh_param, dist_mod
     if tp_group is not None and mpu is not None:
         raise ValueError("tp_model_init provided tp_group; deepspeed.initialize must not receive mpu.")
     if tp_group is None and mpu is None and mesh_param is None:
-        raise ValueError("tp_model_init did not provide tp_group; deepspeed.initialize requires mpu or mesh_param.")
+        # Auto-create TP groups for compatibility with HF Trainer (mpu is not passed).
+        from deepspeed.utils import groups
+        groups._init_tp_mesh_device(tensor_model_parallel_size=tp_size)
 
     tp_section = config_dict.get("tensor_parallel")
     if tp_section is None:
