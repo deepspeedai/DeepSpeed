@@ -30,6 +30,8 @@ def get_annotations_from_namespace(namespace: Mapping[str, object]) -> Dict[str,
 
 def get_annotations(obj: Any) -> Dict[str, Any]:
     if annotationlib:
+        if not isinstance(obj, type):
+            obj = type(obj)
         return annotationlib.get_annotations(obj)
     try:
         return obj.__annotations__
