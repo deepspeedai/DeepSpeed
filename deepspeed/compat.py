@@ -6,7 +6,7 @@
 # DeepSpeed Team
 
 from typing import Mapping, Any, Dict
-
+from inspect import ismodule
 try:
     import annotationlib  # python >= 3.14
 except ImportError:
@@ -29,8 +29,16 @@ def get_annotations_from_namespace(namespace: Mapping[str, object]) -> Dict[str,
 
 
 def get_annotations(obj: Any) -> Dict[str, Any]:
+    """
+    Retrieves annotations from a Python object.
+
+    In python >=3.14 this is a thin wrapper around the `annotationlib.get_annotations` function
+    with the added convenience to automatically infer the type for non module, class, function
+    or customly annotated objects.
+    """
     if annotationlib:
-        if not isinstance(obj, type):
+        has_annotations = hasattr(obj, "__annotations__") or hasattr(obj, "__annotate__")
+        if not isinstance(obj, type) and not ismodule(object) and not callable(obj) and not has_annotations:
             obj = type(obj)
         return annotationlib.get_annotations(obj)
     try:
