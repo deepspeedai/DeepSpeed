@@ -36,4 +36,6 @@ class InferenceBuilder(SYCLOpBuilder):
             else:
                 return intel_extension_for_pytorch.xpu.deepspeed
         except ImportError:
-            raise ImportError("Please install intel-extension-for-pytorch >= 2.1.30 to include DeepSpeed kernels.")
+            raise ImportError(
+                "XPU transformer inference kernels require intel-extension-for-pytorch >= 2.1.30. "
+                "These pre-compiled kernels are not available with stock PyTorch alone.")
