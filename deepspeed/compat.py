@@ -38,7 +38,7 @@ def get_annotations(obj: Any) -> Dict[str, Any]:
     """
     if annotationlib:
         has_annotations = hasattr(obj, "__annotations__") or hasattr(obj, "__annotate__")
-        if not isinstance(obj, type) and not ismodule(object) and not callable(obj) and not has_annotations:
+        if not isinstance(obj, type) and not ismodule(obj) and not callable(obj) and not has_annotations:
             obj = type(obj)
         return annotationlib.get_annotations(obj)
     try:
