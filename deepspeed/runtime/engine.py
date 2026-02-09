@@ -1825,7 +1825,10 @@ class DeepSpeedEngine(Module):
                     has_moe_layers=self.has_moe_layers,
                 )
         else:
-            log_dist('Creating fp16 unfused optimizer with dynamic loss scale', ranks=[0])
+            if use_dynamic_loss_scale:
+                log_dist('Creating fp16 unfused optimizer with dynamic loss scale', ranks=[0])
+            else:
+                log_dist(f'Creating fp16 unfused optimizer with static loss scale: {static_loss_scale}', ranks=[0])
             optimizer = FP16_UnfusedOptimizer(
                 optimizer,
                 deepspeed=self,
