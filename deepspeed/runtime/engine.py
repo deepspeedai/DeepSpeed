@@ -1776,6 +1776,16 @@ class DeepSpeedEngine(Module):
         initial_dynamic_scale = self.initial_dynamic_scale()
         dynamic_loss_args = self.dynamic_loss_scale_args()
         clip_grad = self.gradient_clipping()
+        use_dynamic_loss_scale = self.dynamic_loss_scale()
+        static_loss_scale = self.loss_scale()
+
+        # bf16 has the same dynamic range as fp32 (8-bit exponent), so loss
+        # scaling is unnecessary.  Force static scale=1 to avoid the mismatch
+        # where engine.backward() does not apply the optimizer's loss scaling
+        # yet FP16_UnfusedOptimizer.step() divides gradients by cur_scale.
+        if low_precision_dtype == torch.bfloat16:
+            use_dynamic_loss_scale = False
+            static_loss_scale = 1
 
         if APEX_INSTALLED:
             fused_opts = (apex.optimizers.FusedAdam, FusedAdam)
@@ -1784,7 +1794,7 @@ class DeepSpeedEngine(Module):
 
         if isinstance(optimizer, fused_opts) \
                 or self.optimizer_name() in [ONEBIT_ADAM_OPTIMIZER, ZERO_ONE_ADAM_OPTIMIZER]:
-            if self.dynamic_loss_scale():
+            if use_dynamic_loss_scale:
                 log_dist('Creating fp16 optimizer with dynamic loss scale', ranks=[0])
                 timers = self.timers if self.wall_clock_breakdown() else NoopTimer()
                 optimizer = FP16_Optimizer(
@@ -1801,13 +1811,13 @@ class DeepSpeedEngine(Module):
                     has_moe_layers=self.has_moe_layers,
                 )
             else:
-                log_dist(f'Creating fp16 optimizer with static loss scale: {self.loss_scale()}', ranks=[0])
+                log_dist(f'Creating fp16 optimizer with static loss scale: {static_loss_scale}', ranks=[0])
                 timers = self.timers if self.wall_clock_breakdown() else NoopTimer()
                 optimizer = FP16_Optimizer(
                     optimizer,
                     deepspeed=self,
                     low_precision_dtype=low_precision_dtype,
-                    static_loss_scale=self.loss_scale(),
+                    static_loss_scale=static_loss_scale,
                     mpu=self.mpu,
                     clip_grad=clip_grad,
                     fused_adam_legacy=self.optimizer_legacy_fusion(),
@@ -1819,8 +1829,8 @@ class DeepSpeedEngine(Module):
             optimizer = FP16_UnfusedOptimizer(
                 optimizer,
                 deepspeed=self,
-                static_loss_scale=self.loss_scale(),
-                dynamic_loss_scale=self.dynamic_loss_scale(),
+                static_loss_scale=static_loss_scale,
+                dynamic_loss_scale=use_dynamic_loss_scale,
                 dynamic_loss_args=dynamic_loss_args,
                 mpu=self.mpu,
                 clip_grad=clip_grad,
@@ -2682,10 +2692,10 @@ class DeepSpeedEngine(Module):
         # the behavior that we want
         if self.bfloat16_enabled():
             # TODO: Temporary until bf16_optimizer and zero_optimizer are integrated
-            if self.zero_optimization() and hasattr(self.optimizer, "zero_grad"):
+            if hasattr(self.optimizer, "zero_grad"):
                 self.optimizer.zero_grad()
             else:
-                pass
+                self.zero_grad()
         elif self.zero_optimization() or self.fp16_enabled() or self.amp_enabled():
             self.optimizer.zero_grad()
         else:
