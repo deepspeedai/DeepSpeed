@@ -3,13 +3,12 @@
 
 // DeepSpeed Team
 
-#include <ipex.h>
+#include <c10/xpu/XPUStream.h>
 #include <torch/extension.h>
 #include <iostream>
 #include <sycl/sycl.hpp>
 
 using namespace sycl;
-using namespace xpu;
 
 void packbitskernel(const float* input, uint8_t* output, const int input_size, id<1> item_ct1)
 {
@@ -31,10 +30,8 @@ void unpackbitskernel(const uint8_t* input, float* output, id<1> item_ct1)
 
 sycl::queue get_current_queue(at::Device device)
 {
-    c10::impl::VirtualGuardImpl impl(device.type());
-    c10::Stream _stream = impl.getStreamFromGlobalPool(device, /*isHighPriority=*/false);
-    sycl::queue queue = xpu::get_queue_from_stream(_stream);
-    return queue;
+    c10::xpu::XPUStream stream = c10::xpu::getCurrentXPUStream(device.index());
+    return stream.queue();
 }
 
 /*

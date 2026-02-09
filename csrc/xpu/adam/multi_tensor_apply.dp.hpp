@@ -11,7 +11,6 @@ This file is adapted from fused adam in NVIDIA/apex, commit a109f85
 #include <ATen/ATen.h>
 #include <ATen/AccumulateType.h>
 #include <c10/xpu/XPUStream.h>
-#include <ipex.h>
 #include <sycl/sycl.hpp>
 #include "compat.h"
 
