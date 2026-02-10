@@ -33,25 +33,6 @@ def register_grad_hook(param, hook):
 
 
 def jit_script_compat(fn):
-    # Use compile for newer torch versions where JIT scripting APIs are deprecated.
-    if required_torch_version(min_version=2.0) and hasattr(torch, "compile"):
-        try:
-            with warnings.catch_warnings():
-                warnings.filterwarnings(
-                    "ignore",
-                    message=r"`torch\.jit\.script` is deprecated.*",
-                    category=DeprecationWarning,
-                )
-                warnings.filterwarnings(
-                    "ignore",
-                    message=r"`torch\.jit\.script_method` is deprecated.*",
-                    category=DeprecationWarning,
-                )
-                return torch.compile(fn)
-        except Exception:
-            # Fall back to scripted behavior if compile cannot wrap this function.
-            pass
-
     with warnings.catch_warnings():
         warnings.filterwarnings(
             "ignore",
