@@ -87,8 +87,7 @@ class SYCLOpBuilder(OpBuilder):
         import torch
         torch_lib_dir = os.path.join(os.path.dirname(torch.__file__), 'lib')
         flags = [
-            '-fPIC', '-fsycl', '-fsycl-targets=spir64',
-            '-fsycl-max-parallel-link-jobs=8', '-Wl,-export-dynamic',
+            '-fPIC', '-fsycl', '-fsycl-targets=spir64', '-Wl,-export-dynamic',
             f'-L{torch_lib_dir}', f'-Wl,-rpath,{torch_lib_dir}',
         ]
         # Link against the Python environment's libsycl.so to match the
@@ -101,7 +100,6 @@ class SYCLOpBuilder(OpBuilder):
     def fixed_aotflags(self):
         return [
             '-fsycl', '-fsycl-targets=spir64',
-            '-fsycl-max-parallel-link-jobs=8',
         ]
 
     def load(self, verbose=True):
