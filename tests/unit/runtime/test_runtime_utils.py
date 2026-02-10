@@ -7,6 +7,7 @@ import torch
 from torch._utils import _flatten_dense_tensors
 import deepspeed.comm as dist
 import pytest
+from typing import Dict
 
 import deepspeed.runtime.utils as ds_utils
 import deepspeed.utils.groups as groups
@@ -98,3 +99,25 @@ class TestCheckOverflow(DistributedTest):
             overflow_checker = ds_utils.CheckOverflow([parameters])
             overflow = overflow_checker.check()
         assert overflow
+
+
+@pytest.mark.skipif(not hasattr(torch.autograd.graph, "_get_grad_fn_or_grad_acc"),
+                    reason="requires torch.autograd.graph._get_grad_fn_or_grad_acc")
+def test_count_used_parameters_handles_grad_acc_attribute_error(monkeypatch):
+    """count_used_parameters_in_backward should skip params when grad-acc lookup fails."""
+    param = torch.nn.Parameter(torch.tensor([1.0], requires_grad=True))
+    seen: Dict[str, int] = {}
+
+    def _raise_attr_error(_):
+        raise AttributeError("mocked next_functions lookup failure")
+
+    monkeypatch.setattr(torch.autograd.graph, "_get_grad_fn_or_grad_acc", _raise_attr_error)
+
+    def _hook(grad):
+        seen["count"] = ds_utils.count_used_parameters_in_backward([param])
+        return grad
+
+    param.register_hook(_hook)
+    loss = (param * 2.0).sum()
+    loss.backward()
+    assert seen["count"] == 0
