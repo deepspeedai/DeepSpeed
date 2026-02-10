@@ -32,35 +32,26 @@ def register_grad_hook(param, hook):
         return grad_acc.register_hook(hook)
 
 
-def jit_script_compat(fn):
-    # Use compile for newer torch versions where JIT scripting APIs are deprecated.
-    if required_torch_version(min_version=2.0) and hasattr(torch, "compile"):
-        try:
-            with warnings.catch_warnings():
-                warnings.filterwarnings(
-                    "ignore",
-                    message=r"`torch\.jit\.script` is deprecated.*",
-                    category=DeprecationWarning,
-                )
-                warnings.filterwarnings(
-                    "ignore",
-                    message=r"`torch\.jit\.script_method` is deprecated.*",
-                    category=DeprecationWarning,
-                )
-                return torch.compile(fn)
-        except Exception:
-            # Fall back to scripted behavior if compile cannot wrap this function.
-            pass
+def _suppress_jit_deprecation_warnings():
+    warnings.filterwarnings(
+        "ignore",
+        message=r"`torch\.jit\.script` is deprecated.*",
+        category=DeprecationWarning,
+    )
+    warnings.filterwarnings(
+        "ignore",
+        message=r"`torch\.jit\.script_method` is deprecated.*",
+        category=DeprecationWarning,
+    )
 
+
+def jit_script_compat(fn):
+    # Prefer compile where supported, but fall back if this function cannot be compiled.
     with warnings.catch_warnings():
-        warnings.filterwarnings(
-            "ignore",
-            message=r"`torch\.jit\.script` is deprecated.*",
-            category=DeprecationWarning,
-        )
-        warnings.filterwarnings(
-            "ignore",
-            message=r"`torch\.jit\.script_method` is deprecated.*",
-            category=DeprecationWarning,
-        )
+        _suppress_jit_deprecation_warnings()
+        if required_torch_version(min_version=2.0) and hasattr(torch, "compile"):
+            try:
+                return torch.compile(fn)
+            except Exception:
+                pass
         return torch.jit.script(fn)
