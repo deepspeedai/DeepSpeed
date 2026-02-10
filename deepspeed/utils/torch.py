@@ -3,7 +3,6 @@
 
 # DeepSpeed Team
 
-import warnings
 from packaging import version as pkg_version
 
 import torch
@@ -32,26 +31,7 @@ def register_grad_hook(param, hook):
         return grad_acc.register_hook(hook)
 
 
-def _suppress_jit_deprecation_warnings():
-    warnings.filterwarnings(
-        "ignore",
-        message=r"`torch\.jit\.script` is deprecated.*",
-        category=DeprecationWarning,
-    )
-    warnings.filterwarnings(
-        "ignore",
-        message=r"`torch\.jit\.script_method` is deprecated.*",
-        category=DeprecationWarning,
-    )
-
-
 def jit_script_compat(fn):
-    # Prefer compile where supported, but fall back if this function cannot be compiled.
-    with warnings.catch_warnings():
-        _suppress_jit_deprecation_warnings()
-        if required_torch_version(min_version=2.0) and hasattr(torch, "compile"):
-            try:
-                return torch.compile(fn)
-            except Exception:
-                pass
-        return torch.jit.script(fn)
+    if required_torch_version(min_version=2.0) and hasattr(torch, "compile"):
+        return torch.compile(fn)
+    return torch.jit.script(fn)
