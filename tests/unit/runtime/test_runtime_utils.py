@@ -103,15 +103,19 @@ class TestCheckOverflow(DistributedTest):
 
 @pytest.mark.skipif(not hasattr(torch.autograd.graph, "_get_grad_fn_or_grad_acc"),
                     reason="requires torch.autograd.graph._get_grad_fn_or_grad_acc")
-def test_count_used_parameters_handles_grad_acc_attribute_error(monkeypatch):
-    """count_used_parameters_in_backward should skip params when grad-acc lookup fails."""
+def test_count_used_parameters_enables_grad_for_grad_acc_lookup(monkeypatch):
+    """count_used_parameters_in_backward should enable grad for grad-acc lookup."""
     param = torch.nn.Parameter(torch.tensor([1.0], requires_grad=True))
-    seen: Dict[str, int] = {}
+    seen: Dict[str, int] = {"lookup_calls": 0}
+    original_getter = torch.autograd.graph._get_grad_fn_or_grad_acc
 
-    def _raise_attr_error(_):
-        raise AttributeError("mocked next_functions lookup failure")
+    def _require_grad_enabled(t):
+        seen["lookup_calls"] += 1
+        if not torch.is_grad_enabled():
+            raise RuntimeError("grad mode must be enabled for grad-acc lookup")
+        return original_getter(t)
 
-    monkeypatch.setattr(torch.autograd.graph, "_get_grad_fn_or_grad_acc", _raise_attr_error)
+    monkeypatch.setattr(torch.autograd.graph, "_get_grad_fn_or_grad_acc", _require_grad_enabled)
 
     def _hook(grad):
         seen["count"] = ds_utils.count_used_parameters_in_backward([param])
@@ -120,4 +124,5 @@ def test_count_used_parameters_handles_grad_acc_attribute_error(monkeypatch):
     param.register_hook(_hook)
     loss = (param * 2.0).sum()
     loss.backward()
-    assert seen["count"] == 0
+    assert seen["lookup_calls"] > 0
+    assert "count" in seen
