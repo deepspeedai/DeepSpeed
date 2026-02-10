@@ -3,6 +3,7 @@
 
 # DeepSpeed Team
 
+import warnings
 from packaging import version as pkg_version
 
 import torch
@@ -29,3 +30,18 @@ def register_grad_hook(param, hook):
         param_tmp = param.expand_as(param)
         grad_acc = param_tmp.grad_fn.next_functions[0][0]
         return grad_acc.register_hook(hook)
+
+
+def jit_script_compat(fn):
+    with warnings.catch_warnings():
+        warnings.filterwarnings(
+            "ignore",
+            message=r"`torch\.jit\.script` is deprecated.*",
+            category=DeprecationWarning,
+        )
+        warnings.filterwarnings(
+            "ignore",
+            message=r"`torch\.jit\.script_method` is deprecated.*",
+            category=DeprecationWarning,
+        )
+        return torch.jit.script(fn)
