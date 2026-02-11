@@ -37,6 +37,7 @@ from deepspeed.runtime.zenflow.engine import (configure_zenflow, zenflow_step, i
                                               sync_zenflow_optimizer_lr)
 
 from deepspeed.runtime.fp16.fused_optimizer import FP16_Optimizer
+from deepspeed.runtime.fp16.loss_scaler import LossScaleConfig, LossScaleProfile
 from deepspeed.runtime.fp16.unfused_optimizer import FP16_UnfusedOptimizer
 from deepspeed.runtime.bf16_optimizer import BF16_Optimizer
 
@@ -1773,68 +1774,55 @@ class DeepSpeedEngine(Module):
         return quantizer
 
     def _configure_fp16_optimizer(self, optimizer, low_precision_dtype):
-        initial_dynamic_scale = self.initial_dynamic_scale()
         dynamic_loss_args = self.dynamic_loss_scale_args()
         clip_grad = self.gradient_clipping()
-        use_dynamic_loss_scale = self.dynamic_loss_scale()
-        static_loss_scale = self.loss_scale()
-
-        # bf16 has the same dynamic range as fp32 (8-bit exponent), so loss
-        # scaling is unnecessary.  Force static scale=1 to avoid the mismatch
-        # where engine.backward() does not apply the optimizer's loss scaling
-        # yet FP16_UnfusedOptimizer.step() divides gradients by cur_scale.
-        if low_precision_dtype == torch.bfloat16:
-            use_dynamic_loss_scale = False
-            static_loss_scale = 1
 
         if APEX_INSTALLED:
             fused_opts = (apex.optimizers.FusedAdam, FusedAdam)
         else:
             fused_opts = FusedAdam
 
-        if isinstance(optimizer, fused_opts) \
-                or self.optimizer_name() in [ONEBIT_ADAM_OPTIMIZER, ZERO_ONE_ADAM_OPTIMIZER]:
-            if use_dynamic_loss_scale:
+        use_fused_optimizer = isinstance(optimizer, fused_opts) \
+            or self.optimizer_name() in [ONEBIT_ADAM_OPTIMIZER, ZERO_ONE_ADAM_OPTIMIZER]
+        loss_scale_profile = LossScaleProfile.FUSED if use_fused_optimizer else LossScaleProfile.UNFUSED
+        initial_dynamic_scale = self.initial_dynamic_scale() if loss_scale_profile == LossScaleProfile.FUSED else None
+        loss_scale_config = LossScaleConfig(
+            low_precision_dtype=low_precision_dtype,
+            dynamic_loss_scale=self.dynamic_loss_scale(),
+            static_loss_scale=self.loss_scale(),
+            dynamic_loss_args=dynamic_loss_args,
+            profile=loss_scale_profile,
+            initial_dynamic_scale=initial_dynamic_scale,
+        )
+
+        if use_fused_optimizer:
+            if loss_scale_config.dynamic_loss_scale:
                 log_dist('Creating fp16 optimizer with dynamic loss scale', ranks=[0])
-                timers = self.timers if self.wall_clock_breakdown() else NoopTimer()
-                optimizer = FP16_Optimizer(
-                    optimizer,
-                    deepspeed=self,
-                    low_precision_dtype=low_precision_dtype,
-                    dynamic_loss_scale=True,
-                    initial_dynamic_scale=initial_dynamic_scale,
-                    dynamic_loss_args=dynamic_loss_args,
-                    mpu=self.mpu,
-                    clip_grad=clip_grad,
-                    fused_adam_legacy=self.optimizer_legacy_fusion(),
-                    timers=timers,
-                    has_moe_layers=self.has_moe_layers,
-                )
             else:
-                log_dist(f'Creating fp16 optimizer with static loss scale: {static_loss_scale}', ranks=[0])
-                timers = self.timers if self.wall_clock_breakdown() else NoopTimer()
-                optimizer = FP16_Optimizer(
-                    optimizer,
-                    deepspeed=self,
-                    low_precision_dtype=low_precision_dtype,
-                    static_loss_scale=static_loss_scale,
-                    mpu=self.mpu,
-                    clip_grad=clip_grad,
-                    fused_adam_legacy=self.optimizer_legacy_fusion(),
-                    timers=timers,
-                    has_moe_layers=self.has_moe_layers,
-                )
+                log_dist(f'Creating fp16 optimizer with static loss scale: {loss_scale_config.cur_scale}', ranks=[0])
+            timers = self.timers if self.wall_clock_breakdown() else NoopTimer()
+            optimizer = FP16_Optimizer(
+                optimizer,
+                deepspeed=self,
+                loss_scale_config=loss_scale_config,
+                low_precision_dtype=low_precision_dtype,
+                mpu=self.mpu,
+                clip_grad=clip_grad,
+                fused_adam_legacy=self.optimizer_legacy_fusion(),
+                timers=timers,
+                has_moe_layers=self.has_moe_layers,
+            )
         else:
-            if use_dynamic_loss_scale:
+            if loss_scale_config.dynamic_loss_scale:
                 log_dist('Creating fp16 unfused optimizer with dynamic loss scale', ranks=[0])
             else:
-                log_dist(f'Creating fp16 unfused optimizer with static loss scale: {static_loss_scale}', ranks=[0])
+                log_dist(f'Creating fp16 unfused optimizer with static loss scale: {loss_scale_config.cur_scale}',
+                         ranks=[0])
             optimizer = FP16_UnfusedOptimizer(
                 optimizer,
                 deepspeed=self,
-                static_loss_scale=static_loss_scale,
-                dynamic_loss_scale=use_dynamic_loss_scale,
-                dynamic_loss_args=dynamic_loss_args,
+                loss_scale_config=loss_scale_config,
+                low_precision_dtype=low_precision_dtype,
                 mpu=self.mpu,
                 clip_grad=clip_grad,
                 fused_lamb_legacy=self.optimizer_name() == LAMB_OPTIMIZER,
@@ -2770,8 +2758,8 @@ class DeepSpeedEngine(Module):
             if (self.eigenvalue_enabled() and (self.gas_boundary_ctr % self.eigenvalue_gas_boundary_resolution() == 0)
                     and self.quantizer.any_precision_switch()):
                 log_dist("computing eigenvalue...", ranks=[0])
-                self.block_eigenvalue = self.eigenvalue.compute_eigenvalue(self.module, self.device,
-                                                                           self.optimizer.cur_scale)
+                loss_scale = self._get_optimizer_loss_scale() or 1.0
+                self.block_eigenvalue = self.eigenvalue.compute_eigenvalue(self.module, self.device, loss_scale)
 
             if self.progressive_layer_drop:
                 self.progressive_layer_drop.update_state(self.global_steps)
@@ -2797,10 +2785,11 @@ class DeepSpeedEngine(Module):
                 if self.global_rank == 0:
                     self.summary_events = [("Train/Samples/lr", self.get_lr()[0], self.global_samples)]
 
-                    if self.fp16_enabled() and hasattr(self.optimizer, "cur_scale"):
+                    loss_scale = self._get_optimizer_loss_scale() if self.fp16_enabled() else None
+                    if loss_scale is not None:
                         self.summary_events.append((
                             "Train/Samples/loss_scale",
-                            self.optimizer.cur_scale,
+                            loss_scale,
                             self.global_samples,
                         ))
 
@@ -2942,6 +2931,13 @@ class DeepSpeedEngine(Module):
             else:
                 result.append(0.0)
         return result
+
+    def _get_optimizer_loss_scale(self):
+        if not self.optimizer:
+            return None
+        if hasattr(self.optimizer, "loss_scale_config"):
+            return self.optimizer.loss_scale_config.cur_scale
+        return getattr(self.optimizer, "cur_scale", None)
 
     def get_lr(self):
         return self._get_optimizer_param("lr")

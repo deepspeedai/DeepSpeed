@@ -282,8 +282,9 @@ class TestBf16ZeRO0UnfusedOptimizer(DistributedTest):
                                                optimizer=client_optimizer)
 
         assert isinstance(engine.optimizer, FP16_UnfusedOptimizer)
-        assert engine.optimizer.dynamic_loss_scale is False
-        assert engine.optimizer.cur_scale == 1
+        assert engine.optimizer.low_precision_dtype == torch.bfloat16
+        assert engine.optimizer.loss_scale_config.dynamic_loss_scale is False
+        assert engine.optimizer.loss_scale_config.cur_scale == 1
 
         data_loader = random_dataloader(model=engine,
                                         total_samples=1,
