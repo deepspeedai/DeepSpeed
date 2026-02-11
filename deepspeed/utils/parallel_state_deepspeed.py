@@ -894,14 +894,24 @@ def initialize_parallel_state_from_config(
 
     # Remove None values for optional parameters (except those that can be None)
     # Keep None for: virtual_pipeline_model_parallel_size, pipeline_model_parallel_comm_backend,
-    # hierarchical_context_parallel_sizes, expert_tensor_parallel_size, nccl_communicator_config_path,
-    # high_priority_stream_groups
+    # hierarchical_context_parallel_sizes, expert_tensor_parallel_size
+    # Note: nccl_communicator_config_path and high_priority_stream_groups are not supported by initialize_model_parallel
     filtered_kwargs = {}
+    supported_params = {
+        "tensor_model_parallel_size", "pipeline_model_parallel_size", "virtual_pipeline_model_parallel_size",
+        "pipeline_model_parallel_comm_backend", "context_parallel_size", "sequence_parallel_size",
+        "hierarchical_context_parallel_sizes", "expert_model_parallel_size", "num_distributed_optimizer_instances",
+        "expert_tensor_parallel_size", "distributed_timeout_minutes", "order", "create_gloo_process_groups"
+    }
+    
     for key, value in init_kwargs.items():
+        # Skip unsupported parameters
+        if key not in supported_params:
+            continue
+        # Keep None for parameters that can be None
         if value is not None or key in [
                 "virtual_pipeline_model_parallel_size", "pipeline_model_parallel_comm_backend",
-                "hierarchical_context_parallel_sizes", "expert_tensor_parallel_size", "nccl_communicator_config_path",
-                "high_priority_stream_groups"
+                "hierarchical_context_parallel_sizes", "expert_tensor_parallel_size"
         ]:
             filtered_kwargs[key] = value
 
