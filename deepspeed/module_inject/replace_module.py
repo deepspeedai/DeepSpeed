@@ -200,6 +200,7 @@ def replace_transformer_layer(orig_layer_impl, model, checkpoint_dict, config, m
     """
     # defining globals as internally defined functions inherit these everywhere
     quantize = (config.dtype == torch.int8)
+    quantize_groups = config.quant.weight.q_groups if quantize else 0
     # todo: Refactor later. In future, let's minimize the style used above and use config.** instead
 
     linear_layer_setting = None
@@ -244,7 +245,7 @@ def replace_transformer_layer(orig_layer_impl, model, checkpoint_dict, config, m
             _container.convert_to_required_dtype()
 
         # 5. Set the quantization config
-        quantizer = GroupQuantizer(q_int8=quantize)
+        quantizer = GroupQuantizer(q_int8=quantize, num_groups=quantize_groups)
         _container.set_quantization_config(quantizer)
 
         # 6. create a DS Inference config object
@@ -416,7 +417,7 @@ def replace_transformer_layer(orig_layer_impl, model, checkpoint_dict, config, m
     if not config.replace_with_kernel_inject:
         replaced_module = set_lm_head(replaced_module)
 
-    quantizer = GroupQuantizer(q_int8=quantize)
+    quantizer = GroupQuantizer(q_int8=quantize, num_groups=quantize_groups)
     world_size = dist.get_world_size() if dist.is_initialized() else 1
     rank = dist.get_rank() if dist.is_initialized() else 0
     if checkpoint_dict is not None and config.replace_with_kernel_inject:
