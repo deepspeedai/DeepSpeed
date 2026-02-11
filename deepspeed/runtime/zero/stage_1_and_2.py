@@ -76,7 +76,7 @@ def isclose(a, b, rtol=1e-09, atol=0.0):
 
 
 def lcm(x, y):
-    from fractions import gcd  # or can import gcd from `math` in Python 3
+    from math import gcd
     return x * y // gcd(x, y)
 
 
