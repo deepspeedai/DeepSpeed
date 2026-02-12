@@ -29,3 +29,9 @@ def register_grad_hook(param, hook):
         param_tmp = param.expand_as(param)
         grad_acc = param_tmp.grad_fn.next_functions[0][0]
         return grad_acc.register_hook(hook)
+
+
+def jit_script_compat(fn):
+    if required_torch_version(min_version=2.0) and hasattr(torch, "compile"):
+        return torch.compile(fn)
+    return torch.jit.script(fn)
