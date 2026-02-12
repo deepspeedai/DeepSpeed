@@ -10,6 +10,7 @@ from torch import Tensor
 from packaging import version
 import deepspeed.comm as dist
 from deepspeed.accelerator import get_accelerator
+from deepspeed.utils.torch import jit_script_compat
 
 try:
     import flash_attn
@@ -1040,12 +1041,12 @@ class FPDT_Attention(torch.nn.Module):
         return output, self.qkv_dense_bias if self.reture_bias else None
 
 
-@torch.jit.script
+@jit_script_compat
 def bias_gelu(x):
     return x * 0.5 * (1.0 + torch.tanh(0.79788456 * x * (1 + 0.044715 * x * x)))
 
 
-@torch.jit.script
+@jit_script_compat
 def bias_gelu_back(g, x):
     tanh_out = torch.tanh(0.79788456 * x * (1 + 0.044715 * x * x))
     # sqrt(2/pi) * 3 * 0.044715 -> 0.1070322243
