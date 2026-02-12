@@ -419,7 +419,7 @@ class TestZeroStaticScale(DistributedTest):
         model, optim, _, _ = deepspeed.initialize(config=config_dict, model=model, model_parameters=model.parameters())
 
         # Ensure the static scaler is configured.
-        assert optim.dynamic_loss_scale == False
+        assert optim.loss_scale_config.dynamic_loss_scale == False
         assert optim.loss_scaler.loss_scale == 138.
 
         # Now make sure things work..
