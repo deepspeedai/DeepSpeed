@@ -24,7 +24,7 @@ from typing import Callable, Dict, Union, Iterable, Container, List
 import deepspeed
 
 from deepspeed import comm as dist
-from deepspeed.runtime.utils import see_memory_usage, DummyOptim, register_output_backward_hooks, check_internal_apis_for_count_used_parameters
+from deepspeed.runtime.utils import see_memory_usage, DummyOptim, register_output_backward_hooks
 from .zero.offload_config import OffloadDeviceEnum, OffloadStateTypeEnum
 from deepspeed.runtime.base_optimizer import ZeROOptimizer
 from deepspeed.runtime.zero.stage_1_and_2 import DeepSpeedZeroOptimizer
@@ -431,16 +431,18 @@ class DeepSpeedEngine(Module):
             self.register_compile_pass(selective_gather.NAME, selective_gather.selective_gather)
             self.register_compile_pass(offload_adam_states.NAME, offload_adam_states.move_opt_states)
 
-        # We now support PyTorch style backward, but it relies on the counter in ZeRO optimizers.
-        # However, we need some internal APIs to count the number of only used parameters.
-        # So we only enable this feature when those internal APIs are available.
-        # Otherwise, we fallback to DeepSpeed style backward only.
+        # We now support PyTorch style backward, which relies on the counter in ZeRO optimizers.
+        # When the required internal PyTorch APIs are available (PyTorch >= 2.3), we use them
+        # for precise parameter counting.  When they are not available (older PyTorch builds),
+        # count_used_parameters_in_backward() falls back to a conservative count of all
+        # grad-requiring parameters, which is correct but may slightly delay the epilogue.
+        # Either way, the feature is safe to enable for all ZeRO optimizers.
         # See `count_used_parameters_in_backward` for more details.
         self._running_engine_backward = False
         self._support_torch_style_backward = False
         # Flag to control whether gradients should be scaled by gradient accumulation steps
         self._scale_wrt_gas = True
-        if isinstance(self.optimizer, ZeROOptimizer) and check_internal_apis_for_count_used_parameters():
+        if isinstance(self.optimizer, ZeROOptimizer):
             self._support_torch_style_backward = True
             # These hooks are used for non-scalar backward support, such as `out.backward(out_grad)`,
             # not for `engine.backward(loss)`. In this case, we need to ensure that the preprocessing
