@@ -101,40 +101,71 @@ Refer to [LLM examples](https://github.com/intel/intel-extension-for-pytorch/tre
 
 
 # Intel XPU
-DeepSpeed XPU accelerator supports Intel® Data Center GPU Max Series.
+DeepSpeed XPU accelerator supports Intel® discrete GPUs with XPU backend through stock PyTorch (2.8+).
 
 DeepSpeed has been verified on the following GPU products:
 * Intel® Data Center GPU Max 1100
 * Intel® Data Center GPU Max 1550
+* Intel® Arc Pro B60
 
 ## Installation steps for Intel XPU
 To install DeepSpeed on Intel XPU, use the following steps:
-1. Install oneAPI base toolkit \
-The Intel® oneAPI Base Toolkit (Base Kit) is a core set of tools and libraries, including an DPC++/C++ Compiler for building Deepspeed XPU kernels like fusedAdam and CPUAdam, high performance computation libraries demanded by IPEX, etc.
-For easy download, usage and more details, check [Intel oneAPI base-toolkit](https://www.intel.com/content/www/us/en/developer/tools/oneapi/base-toolkit.html).
-2. Install PyTorch, Intel extension for pytorch, Intel oneCCL Bindings for PyTorch. These packages are required in `xpu_accelerator` for torch functionality and performance, also communication backend on Intel platform. The recommended installation reference:
-https://intel.github.io/intel-extension-for-pytorch/index.html#installation?platform=gpu.
+
+1. Install PyTorch with XPU support \
+Install the XPU variant of PyTorch from the official PyTorch repository:
+```
+pip install torch --index-url https://download.pytorch.org/whl/xpu
+```
+
+2. Install the Intel® oneAPI DPC++/C++ Compiler (`icpx`) \
+The `icpx` compiler is required at runtime to JIT-compile DeepSpeed's SYCL kernels (e.g. FusedAdam).
+
+**Important: The `icpx` version must match the SYCL runtime version bundled with
+your PyTorch XPU wheel.** A mismatch between the compiler and runtime versions can
+cause symbol resolution errors (e.g. unresolved `__devicelib_*` symbols) or subtle
+ABI incompatibilities.
+
+To find out which SYCL runtime version your PyTorch was built with:
+```
+pip show intel-sycl-rt
+```
+Then install the **same version** of the Intel® oneAPI DPC++/C++ Compiler. For
+example, if `intel-sycl-rt` shows version `2025.3.1`, install oneAPI compiler
+version `2025.3`. For download and details, see the
+[Intel oneAPI DPC++/C++ Compiler](https://www.intel.com/content/www/us/en/developer/tools/oneapi/dpc-compiler.html)
+page, or install via the
+[Intel oneAPI Base Toolkit](https://www.intel.com/content/www/us/en/developer/tools/oneapi/base-toolkit.html).
 
 3. Install DeepSpeed \
 `pip install deepspeed`
 
 ## How to use DeepSpeed on Intel XPU
-DeepSpeed can be launched on Intel XPU with deepspeed launch command. Before that, user needs activate the oneAPI environment by: \
-`source <oneAPI installed path>/setvars.sh`
+DeepSpeed can be launched on Intel XPU with the `deepspeed` launch command. Before
+launching, activate the oneAPI environment so that `icpx` is on `PATH`:
+```
+source <oneAPI installed path>/setvars.sh
+```
+
+**Note:** If your system has a different oneAPI version installed than what PyTorch
+ships with, make sure the Python environment's libraries take precedence by placing
+them first in `LD_LIBRARY_PATH`:
+```
+export LD_LIBRARY_PATH=$CONDA_PREFIX/lib:$LD_LIBRARY_PATH
+```
 
 To validate the XPU availability and if the XPU accelerator is correctly chosen, here is an example:
 ```
 $ python
 >>> import torch; print('torch:', torch.__version__)
-torch: 2.3.0
->>> import intel_extension_for_pytorch; print('XPU available:', torch.xpu.is_available())
+torch: 2.10.0+xpu
+>>> print('XPU available:', torch.xpu.is_available())
 XPU available: True
 >>> from deepspeed.accelerator import get_accelerator; print('accelerator:', get_accelerator()._name)
 accelerator: xpu
 ```
 
 ## More examples for using DeepSpeed on Intel XPU
-Refer to [LLM examples](https://github.com/intel/intel-extension-for-pytorch/tree/xpu-main/examples/gpu/llm), [Megatron-DeepSpeed training examples](https://github.com/intel/intel-extension-for-deepspeed/tree/main/examples) for more code samples of running LLM with DeepSpeed on Intel XPU.
+Refer to [DeepSpeed Examples](https://github.com/deepspeedai/DeepSpeedExamples) for code samples of training and inference with DeepSpeed on Intel XPU.
 
 
 # Huawei Ascend NPU
