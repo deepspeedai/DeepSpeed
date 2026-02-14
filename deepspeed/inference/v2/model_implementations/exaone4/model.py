@@ -105,8 +105,7 @@ class Exaone4InferenceModel(DSTransformerModelBase):
             epsilon=getattr(self._config, "rms_norm_eps", 1e-5),
         )
 
-    def _apply_qk_norm(self, hidden_states: torch.Tensor,
-                       q_norm_gamma: torch.Tensor,
+    def _apply_qk_norm(self, hidden_states: torch.Tensor, q_norm_gamma: torch.Tensor,
                        k_norm_gamma: torch.Tensor) -> torch.Tensor:
         """
         Apply RMSNorm to Q and K projections independently per head.
