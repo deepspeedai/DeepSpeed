@@ -113,8 +113,10 @@ class Exaone4InferenceModel(DSTransformerModelBase):
         hidden_states shape: [tokens, (n_q + n_kv + n_kv) * head_size]
         """
         tokens = hidden_states.shape[0]
-        q_len = self.n_heads * self.head_size
-        kv_len = self.n_heads_kv * self.head_size
+        local_n_heads = self.n_heads // max(self.tp_size, 1)
+        local_n_heads_kv = self.n_heads_kv // max(self.tp_size, 1)
+        q_len = local_n_heads * self.head_size
+        kv_len = local_n_heads_kv * self.head_size
 
         q = hidden_states[:, :q_len].contiguous()
         k = hidden_states[:, q_len:q_len + kv_len].contiguous()
