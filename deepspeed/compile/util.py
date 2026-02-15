@@ -6,11 +6,13 @@
 import functools
 import operator
 from typing import List, Tuple, Dict, Optional
+from dataclasses import dataclass
 from collections import defaultdict
 
 import torch
-from torch.fx import Node, Graph
+from torch.fx import Node, Graph, GraphModule
 from torch.fx.node import map_aggregate, Argument, map_arg
+import torch.nn.functional as F
 
 try:
     from torch._subclasses.fake_tensor import unset_fake_temporarily
@@ -23,6 +25,11 @@ from deepspeed.accelerator import get_accelerator
 from deepspeed.utils.torch import required_torch_version
 from deepspeed.ops.op_builder.dc import DeepCompileBuilder
 
+from .fx import find_node_by_name, find_node_by_tag, get_node_shape_meta, replace_node_users
+
+INPUT_ID_KEY = "input_id"
+LABEL_ID_KEY = "label_id"
+POSITION_ID_KEY = "position_id"
 
 def is_deepcompile_supported() -> bool:
     return required_torch_version(min_version=2.6, max_version=2.9) and get_accelerator().device_name() == "cuda"
@@ -521,3 +528,92 @@ def pad_tensors(specs: List[Tuple[torch.Tensor, int, int]]) -> List[torch.Tensor
         padded.append(out)
 
     return padded
+
+@dataclass
+class ShardingConfig:
+    world_size: int
+    rank: int
+    
+    @classmethod
+    def from_distributed(cls) -> "ShardingConfig":
+        return cls(
+            world_size=dist.get_world_size(),
+            rank=dist.get_rank(),
+        )
+
+def get_sdpa_nodes(gm: GraphModule) -> List[Node]:
+    return list(gm.graph.find_nodes(
+        op="call_function",
+        target=F.scaled_dot_product_attention,
+    ))
+
+def get_input_id_node(gm: GraphModule) -> Node:
+    node = find_node_by_tag(gm, INPUT_ID_KEY)
+    if node is None:
+        raise RuntimeError("Failed to find a node for the input sequence.")
+    return node
+
+def get_label_id_node(gm: GraphModule) -> Node:
+    node = find_node_by_tag(gm, LABEL_ID_KEY)
+    if node is None:
+        raise RuntimeError("Failed to find a node for the label.")
+    return node
+
+def get_position_id_node(gm: GraphModule) -> Node:
+    node = find_node_by_tag(gm, POSITION_ID_KEY)
+    return node
+
+def create_shard_offsets(
+    gm: GraphModule, 
+    sym_seq_dim_node: Node, 
+    world_size: int,
+    rank: int
+) -> Tuple[Node, Node]:
+    with gm.graph.inserting_after(sym_seq_dim_node):
+        chunk_size_node = gm.graph.call_function(operator.floordiv, args=(sym_seq_dim_node, world_size))
+    with gm.graph.inserting_after(chunk_size_node):
+        start_node = gm.graph.call_function(operator.mul, args=(rank, chunk_size_node))
+    with gm.graph.inserting_after(start_node):
+        end_node = gm.graph.call_function(operator.add, args=(start_node, chunk_size_node))
+    
+    return start_node, end_node
+
+def create_symbolic_slice_indices(
+    gm: GraphModule, 
+    sym_seq_dim_node: Node, 
+    config: ShardingConfig
+) -> Tuple[Node, Node]:
+    start_node, end_node = create_shard_offsets(gm, sym_seq_dim_node, config.world_size, config.rank)
+    
+    with gm.graph.inserting_after(end_node):
+        slice_all = gm.graph.call_function(slice, args=(None, None, None))
+    with gm.graph.inserting_after(slice_all):
+        slice_range = gm.graph.call_function(slice, args=(start_node, end_node, None))
+    
+    return slice_all, slice_range
+
+def shard_tensor_node(
+    gm: GraphModule, 
+    tensor_node: Node, 
+    config: ShardingConfig
+):
+    val = get_node_shape_meta(tensor_node)
+    assert val is not None, f"Node {tensor_node.name} has no shape metadata"
+    
+    seq_len = val.shape[1]
+    
+    assert isinstance(seq_len, torch.SymInt), f"Expected sequence dimension to be `torch.SymInt` but instead found `{type(seq_len)}`"
+
+    symb_seq_int_node = find_node_by_name(gm, str(seq_len))
+    assert symb_seq_int_node, f"Unable to find symbolic placeholder for {seq_len}"
+    
+    slice_all, slice_range = create_symbolic_slice_indices(gm, symb_seq_int_node, config)
+    indices = (slice_all, slice_range)
+    
+    with gm.graph.inserting_after(tensor_node):
+        sliced_node = gm.graph.call_function(
+            operator.getitem,
+            args=(tensor_node, indices),
+        )
+
+    replace_node_users(tensor_node, sliced_node, exclude=[sliced_node])
