@@ -1289,7 +1289,9 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
                                 non_leaf_params_requiring_grad) + leaf_module_count
                             self.update_hook_state_and_maybe_run_epilogue(current_expected)
 
-                        self._grad_acc_hooks.append(register_grad_hook(param, reduce_partition_and_remove_grads))
+                        hook_handle = register_grad_hook(param, reduce_partition_and_remove_grads)
+                        if hook_handle is not None:
+                            self._grad_acc_hooks.append(hook_handle)
 
                     if not z3_leaf_parameter(param):
                         wrapper(param)
