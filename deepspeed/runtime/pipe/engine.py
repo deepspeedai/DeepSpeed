@@ -1230,8 +1230,9 @@ class PipelineEngine(DeepSpeedEngine):
 
         if self.global_rank == 0 and self.monitor.enabled:
             self.summary_events = [('Train/Samples/lr', self.get_lr()[0], self.global_samples)]
-            if self.fp16_enabled() and hasattr(self.optimizer, 'cur_scale'):
-                self.summary_events.append(('Train/Samples/loss_scale', self.optimizer.cur_scale, self.global_samples))
+            loss_scale = self._get_optimizer_loss_scale() if self.fp16_enabled() else None
+            if loss_scale is not None:
+                self.summary_events.append(('Train/Samples/loss_scale', loss_scale, self.global_samples))
             self.monitor.write_events(self.summary_events)
 
         if self.wall_clock_breakdown():
