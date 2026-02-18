@@ -57,22 +57,25 @@ public:
     inline void IncrementStep(size_t step, float beta1, float beta2)
     {
         if (beta1 != _betta1 || beta2 != _betta2) {
-            _step = step;
             _betta1 = beta1;
             _betta2 = beta2;
-            _betta1_t = std::pow(_betta1, step);
-            _betta2_t = std::pow(_betta2, step);
         } else {
-            _step++;
-            if (_step != step) {
-                _betta1_t = std::pow(_betta1, step);
-                _betta2_t = std::pow(_betta2, step);
+            if (step == _step) { return; }
+            if (step == _step + 1) {
                 _step = step;
-            } else {
                 _betta1_t *= _betta1;
                 _betta2_t *= _betta2;
+                return;
             }
         }
+
+        // Recompute moments from the explicit step when:
+        // - this is the first observed step for the native optimizer state,
+        // - betas changed, or
+        // - step progression is non-sequential (resume/rollback/reset or skipped updates).
+        _step = step;
+        _betta1_t = std::pow(_betta1, step);
+        _betta2_t = std::pow(_betta2, step);
     }
     inline void update_state(float lr, float epsilon, float weight_decay, bool bias_correction)
     {
