@@ -46,6 +46,14 @@ jobs:
         run: |
           pip list
 
+      
+      - name: Set environment for offline unit tests
+        run: |
+          echo "HF_HOME=${{ runner.temp }}/hf_home" >> $GITHUB_ENV
+          mkdir -p "${{ runner.temp }}/hf_home"
+          echo "HF_HUB_DISABLE_TELEMETRY=1" >> $GITHUB_ENV
+          echo "TRANSFORMERS_OFFLINE=1" >> $GITHUB_ENV
+
       - name: Unit tests
         run: |
           unset TORCH_CUDA_ARCH_LIST # only jit compile for current arch
