@@ -127,6 +127,7 @@ from deepspeed.compile.backend import register_compile_pass, opt_passes
 from deepspeed.compile.passes import zero3_compile, prefetch, selective_gather, offload_adam_states
 from deepspeed.compile.init_z1 import init_z1
 from deepspeed.compile.init_z3 import init_z3
+from deepspeed.compile.init_sp import init_autosp
 
 MEMORY_OPT_ALLREDUCE_SIZE = 500000000
 
@@ -4361,7 +4362,8 @@ class DeepSpeedEngine(Module):
         enable_deepcompile = self.is_deepcompile_enabled()
         if enable_deepcompile and self.zero_optimization_stage() != ZeroStageEnum.optimizer_states \
                 and self.zero_optimization_stage() != ZeroStageEnum.weights \
-                and self.zero_optimization_stage() != ZeroStageEnum.gradients:
+                and self.zero_optimization_stage() != ZeroStageEnum.gradients \
+                and self.zero_optimization_stage() != ZeroStageEnum.disabled:
             logger.info(
                 f"Currently DeepCompile supports ZeRO stage 1, 2, or 3 only, but ZeRO stage is set to {self.zero_optimization_stage()}. Falling back to the torch compiler."
             )
@@ -4396,6 +4398,8 @@ class DeepSpeedEngine(Module):
                         "DeepCompile with ZeRO stage 3 is not currently supported on PyTorch >= 2.9. "
                         "Please use ZeRO stage 1 or 2 with DeepCompile, or disable DeepCompile for ZeRO stage 3.")
                 backend = init_z3(self, backend, compile_config, compile_kwargs, schedule)
+            elif self.zero_optimization_stage() == ZeroStageEnum.disabled:
+                backend = init_autosp()
 
         # Hook state must align with whether DeepCompile is active.
         self._set_deepcompile_active(enable_deepcompile)

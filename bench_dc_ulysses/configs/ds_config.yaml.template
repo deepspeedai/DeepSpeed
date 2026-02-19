@@ -1,0 +1,19 @@
+compute_environment: LOCAL_MACHINE
+debug: false
+deepspeed_config:
+  deepspeed_multinode_launcher: standard
+  {%- if zero_stage == 3 %}
+  zero3_init_flag: true
+  {%- endif %}
+  deepspeed_config_file: configs/ds_config.json
+distributed_type: DEEPSPEED
+machine_rank: {{ machine_rank }}
+main_training_function: main
+num_machines: {{ num_machines }}
+num_processes: {{ num_processes }}
+rdzv_backend: static
+same_network: true
+tpu_env: []
+tpu_use_cluster: false
+tpu_use_sudo: false
+use_cpu: false

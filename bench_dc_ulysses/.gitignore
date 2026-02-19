@@ -1,0 +1,10 @@
+*.log
+*.pyc
+profiles
+results
+slurm_jobs
+slurm*
+experiments
+logs
+*.
+*.pt

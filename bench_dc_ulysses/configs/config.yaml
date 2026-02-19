@@ -1,0 +1,16 @@
+compute_environment: LOCAL_MACHINE
+debug: false
+deepspeed_config:
+  deepspeed_multinode_launcher: standard
+  deepspeed_config_file: configs/ds_config.json
+distributed_type: DEEPSPEED
+machine_rank: 1
+main_training_function: main
+num_machines: 1
+num_processes: 2
+rdzv_backend: static
+same_network: true
+tpu_env: []
+tpu_use_cluster: false
+tpu_use_sudo: false
+use_cpu: false

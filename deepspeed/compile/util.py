@@ -25,8 +25,6 @@ from deepspeed.accelerator import get_accelerator
 from deepspeed.utils.torch import required_torch_version
 from deepspeed.ops.op_builder.dc import DeepCompileBuilder
 
-from .fx import find_node_by_name, find_node_by_tag, get_node_shape_meta, replace_node_users
-
 INPUT_ID_KEY = "input_id"
 LABEL_ID_KEY = "label_id"
 POSITION_ID_KEY = "position_id"
@@ -548,18 +546,21 @@ def get_sdpa_nodes(gm: GraphModule) -> List[Node]:
     ))
 
 def get_input_id_node(gm: GraphModule) -> Node:
+    from .fx import find_node_by_tag
     node = find_node_by_tag(gm, INPUT_ID_KEY)
     if node is None:
         raise RuntimeError("Failed to find a node for the input sequence.")
     return node
 
 def get_label_id_node(gm: GraphModule) -> Node:
+    from .fx import find_node_by_tag
     node = find_node_by_tag(gm, LABEL_ID_KEY)
     if node is None:
         raise RuntimeError("Failed to find a node for the label.")
     return node
 
 def get_position_id_node(gm: GraphModule) -> Node:
+    from .fx import find_node_by_tag
     node = find_node_by_tag(gm, POSITION_ID_KEY)
     return node
 
@@ -597,6 +598,7 @@ def shard_tensor_node(
     tensor_node: Node, 
     config: ShardingConfig
 ):
+    from .fx import find_node_by_name, get_node_shape_meta, replace_node_users
     val = get_node_shape_meta(tensor_node)
     assert val is not None, f"Node {tensor_node.name} has no shape metadata"
     

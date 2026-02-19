@@ -1,0 +1,30 @@
+{
+    {% if fp16 %}
+    "fp16": {
+        "enabled": true,
+        "initial_scale_power": 8
+    },
+    {% else %}
+    "bf16": {
+        "enabled": true
+    },
+    {% endif %}
+    "zero_optimization":{
+        "stage": 0
+    },
+    "compile": {
+        "deepcompile": {{ deepcompile }},
+        "offload_activation": false,
+        "offload_opt_states": false,
+        "double_buffer": true,
+        "symmetric_memory": false,
+        "free_activation": false,
+        "dump_graphs": false
+    },
+    "gradient_accumulation_steps": {{ gradient_accumulation_steps }},
+    "gradient_clipping": "auto",
+    "steps_per_print": 2000,
+    "train_batch_size": "auto",
+    "train_micro_batch_size_per_gpu": "auto",
+    "wall_clock_breakdown": false
+}
