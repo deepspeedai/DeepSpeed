@@ -1066,6 +1066,10 @@ class Init(InsertPostInitMethodToModuleSubClasses):
         if _ds_config is not None and _ds_config.zero_config.zero_quantized_nontrainable_weights and not self.quantized_nontrainable_weights:
             self.quantized_nontrainable_weights = _ds_config.zero_config.zero_quantized_nontrainable_weights
 
+        self.enable_sanity_checks = get_config_default(DeepSpeedZeroConfig, "enable_sanity_checks")
+        if _ds_config is not None:
+            self.enable_sanity_checks = _ds_config.zero_config.enable_sanity_checks
+
         self.module = module
         if (self.quantized_weights or self.quantized_nontrainable_weights):
             self.quantizer_module = CUDAQuantizer()
@@ -1101,12 +1105,10 @@ class Init(InsertPostInitMethodToModuleSubClasses):
         if not self.use_all_gather_into_tensor:
             logger.info(f"all_gather_into_tensor API is not available in torch {torch.__version__}")
 
-        self.enable_sanity_checks = get_config_default(DeepSpeedZeroConfig, "enable_sanity_checks")
         self.use_all_reduce_for_fetch_params = get_config_default(DeepSpeedZeroConfig,
                                                                   "use_all_reduce_for_fetch_params")
         self.allgather_sequential = get_config_default(DeepSpeedZeroConfig, "allgather_sequential")
         if _ds_config is not None:
-            self.enable_sanity_checks = _ds_config.zero_config.enable_sanity_checks
             self.use_all_reduce_for_fetch_params = _ds_config.zero_config.use_all_reduce_for_fetch_params
             self.allgather_sequential = _ds_config.zero_config.allgather_sequential
 
