@@ -111,7 +111,13 @@ class TestGatheredParametersAllRanksErrorOnModification(DistributedTest):
     world_size = 2
 
     def test(self):
-        config_dict = {"train_micro_batch_size_per_gpu": 1, "zero_optimization": {"stage": 3}}
+        config_dict = {
+            "train_micro_batch_size_per_gpu": 1,
+            "zero_optimization": {
+                "stage": 3,
+                "enable_sanity_checks": True
+            }
+        }
         hidden_dim = 10
 
         class MyModel(torch.nn.Module):

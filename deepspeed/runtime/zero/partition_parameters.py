@@ -1101,10 +1101,12 @@ class Init(InsertPostInitMethodToModuleSubClasses):
         if not self.use_all_gather_into_tensor:
             logger.info(f"all_gather_into_tensor API is not available in torch {torch.__version__}")
 
+        self.enable_sanity_checks = get_config_default(DeepSpeedZeroConfig, "enable_sanity_checks")
         self.use_all_reduce_for_fetch_params = get_config_default(DeepSpeedZeroConfig,
                                                                   "use_all_reduce_for_fetch_params")
         self.allgather_sequential = get_config_default(DeepSpeedZeroConfig, "allgather_sequential")
         if _ds_config is not None:
+            self.enable_sanity_checks = _ds_config.zero_config.enable_sanity_checks
             self.use_all_reduce_for_fetch_params = _ds_config.zero_config.use_all_reduce_for_fetch_params
             self.allgather_sequential = _ds_config.zero_config.allgather_sequential
 
@@ -1202,6 +1204,7 @@ class Init(InsertPostInitMethodToModuleSubClasses):
 
         # The group that the parameter is scattered across.
         param.ds_process_group = self.ds_process_group
+        param.ds_enable_sanity_checks = self.enable_sanity_checks
 
         # Stores the secondary partitioned copy of the tensor
         param.ds_secondary_tensor = None
@@ -2306,6 +2309,7 @@ class GatheredParameters:
         self.params = sorted(
             set(self.params), key=lambda x: x.ds_id
         )  # remove the duplicates to prevent racing condition, we must also make sure the order is the same on all ranks otherwise we'll get deadlocks
+        self.enable_sanity_checks = getattr(self.params[0], "ds_enable_sanity_checks", False)
         self.src_rank = None
         if modifier_rank is not None:
             if self.params[0].ds_process_group == dist.get_world_group():
@@ -2323,7 +2327,7 @@ class GatheredParameters:
         if not self.enabled:
             return
         self.params[0].all_gather(param_list=self.params)
-        if self.src_rank is None:
+        if self.src_rank is None and self.enable_sanity_checks:
             self._param_versions = [(p, p.data.data_ptr(), p._version) for p in self.params]
 
     def __exit__(self, *exc):
