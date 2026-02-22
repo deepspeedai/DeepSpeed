@@ -4,7 +4,7 @@
 # DeepSpeed Team
 
 import sys
-from typing import Optional, Dict, Any
+from typing import List, Optional, Dict, Any
 from enum import Enum
 from pydantic import Field, model_validator
 from deepspeed.runtime.config_utils import get_scalar_param, pp_int, DeepSpeedConfigModel
@@ -345,6 +345,22 @@ class DeepSpeedZeroConfig(DeepSpeedConfigModel):
     memory_efficient_linear: bool = True
     """
     Use memory efficient linear implementation, for Stage 3.
+    """
+
+    fp32_pinned_parameters: List[str] = Field(default_factory=list)
+    """
+    List of parameter name patterns (sub-strings) whose data should be kept in
+    FP32 even when the engine is configured with bfloat16 or fp16.  Useful for
+    MoE router weights and other precision-sensitive parameters that must not be
+    cast to lower precision.
+
+    Example: ``"fp32_pinned_parameters": ["router.weight", "gate"]``
+
+    Any parameter whose fully-qualified name contains at least one of the listed
+    sub-strings will have ``param.ds_fp32_pinned = True`` set after model
+    initialisation, and its data will be kept (or re-cast) to ``torch.float32``.
+    The bf16/fp16 optimizer will place these parameters in a separate fp32 param
+    group so they are updated without mixed-precision loss.
     """
     """
     Whether force load checkpoint in pipeline mode, current only for Stage 3.

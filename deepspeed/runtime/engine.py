@@ -1838,6 +1838,12 @@ class DeepSpeedEngine(Module):
 
         log_dist('Creating BF16 optimizer', ranks=[0])
 
+        fp32_pinned = self._config.zero_config.fp32_pinned_parameters if self.zero_optimization() else []
+        if fp32_pinned:
+            log_dist(
+                f'BF16 optimizer: the following parameter name patterns will be kept in FP32: {fp32_pinned}',
+                ranks=[0])
+
         timers = self.timers if self.wall_clock_breakdown() else NoopTimer()
         optimizer = BF16_Optimizer(optimizer,
                                    self.param_names,

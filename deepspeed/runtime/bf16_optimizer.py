@@ -102,6 +102,11 @@ class BF16_Optimizer(ZeROOptimizer):
 
         self.group_paddings = []
         self.graph_harvesting = graph_harvesting
+
+        # Parameters marked ds_fp32_pinned bypass the bf16 path and remain fp32 throughout
+        # training.  They are tracked separately so flattening and dtype checks do not fail.
+        self.fp32_pinned_groups = []
+
         if self.using_real_optimizer:
             self._setup_for_real_optimizer()
 
@@ -143,7 +148,13 @@ class BF16_Optimizer(ZeROOptimizer):
             partition_id = dist.get_rank(group=self.real_dp_process_group[i])
 
             # grab the original list
-            trainable_parameters = [param for param in param_group['params'] if param.requires_grad]
+            all_trainable = [param for param in param_group['params'] if param.requires_grad]
+
+            # Separate params that must stay in fp32 from those that go through the bf16 path.
+            fp32_pinned_params = [p for p in all_trainable if getattr(p, 'ds_fp32_pinned', False)]
+            trainable_parameters = [p for p in all_trainable if not getattr(p, 'ds_fp32_pinned', False)]
+
+            self.fp32_pinned_groups.append(fp32_pinned_params)
             self.bf16_groups.append(trainable_parameters)
 
             # create flat bf16 params
@@ -206,6 +217,14 @@ class BF16_Optimizer(ZeROOptimizer):
             param_group['params'] = [self.fp32_groups_flat_partition[i]]
 
             see_memory_usage(f'after initializing group {i}', force=True)
+
+        # Add all fp32-pinned params as an additional group in the base optimizer so they
+        # receive fp32 optimizer-state updates alongside the regular groups.
+        all_fp32_pinned = [p for grp in self.fp32_pinned_groups for p in grp]
+        if all_fp32_pinned:
+            self.optimizer.param_groups.append({'params': all_fp32_pinned, '_fp32_pinned': True})
+            # Keep real_dp_process_group list aligned with optimizer param_groups length.
+            self.real_dp_process_group.append(self.real_dp_process_group[0])
 
         self._grad_acc_hooks = []
         if self.immediate_grad_update:
@@ -391,7 +410,10 @@ class BF16_Optimizer(ZeROOptimizer):
         all_grads_for_clip = []
 
         tensor_mp_rank = bwc_tensor_model_parallel_rank(mpu=self.mpu)
-        assert len(self.bf16_groups) == len(self.optimizer.param_groups)
+        # fp32_pinned params are added to the base optimizer as an extra group; exclude that
+        # extra group from the assertion so the count still matches the bf16 groups.
+        num_bf16_groups = len(self.bf16_groups)
+        assert num_bf16_groups <= len(self.optimizer.param_groups)
         for i, group in enumerate(self.bf16_groups):
             for j, lp in enumerate(group):
                 if not for_clipping:
@@ -417,6 +439,16 @@ class BF16_Optimizer(ZeROOptimizer):
                         non_expert_grads_for_norm.append(self.fp32_groups_gradients[i][j])
                 else:
                     all_grads_for_clip.append(self.fp32_groups_gradients[i][j])
+
+        # Include gradients from fp32-pinned params (already fp32, no hp/lp split needed).
+        for grp in self.fp32_pinned_groups:
+            for p in grp:
+                if p.grad is not None:
+                    if not for_clipping:
+                        non_expert_grads_for_norm.append(p.grad)
+                    else:
+                        all_grads_for_clip.append(p.grad)
+
         if not for_clipping:
             return non_expert_grads_for_norm, expert_grads_for_norm
         return all_grads_for_clip
@@ -448,7 +480,8 @@ class BF16_Optimizer(ZeROOptimizer):
             assert not set_to_none, "graph harvesting is incompatible with setting lp grads to None"
 
         zero_grads_list = []
-        for group in self.bf16_groups:
+        all_lp_groups = list(self.bf16_groups) + list(self.fp32_pinned_groups)
+        for group in all_lp_groups:
             for param in group:
                 if set_to_none:
                     param.grad = None

@@ -1066,6 +1066,11 @@ class Init(InsertPostInitMethodToModuleSubClasses):
         if _ds_config is not None and _ds_config.zero_config.zero_quantized_nontrainable_weights and not self.quantized_nontrainable_weights:
             self.quantized_nontrainable_weights = _ds_config.zero_config.zero_quantized_nontrainable_weights
 
+        # List of parameter name patterns that must remain in fp32 even when bf16/fp16 is enabled.
+        self.fp32_pinned_patterns: list = []
+        if _ds_config is not None:
+            self.fp32_pinned_patterns = _ds_config.zero_config.fp32_pinned_parameters
+
         self.module = module
         if (self.quantized_weights or self.quantized_nontrainable_weights):
             self.quantizer_module = CUDAQuantizer()
@@ -1128,6 +1133,15 @@ class Init(InsertPostInitMethodToModuleSubClasses):
                 continue
 
             param.data = param.data.to(self.local_device)
+
+            # If this parameter is pinned to fp32 (e.g. a MoE router weight),
+            # re-cast its data to float32 after it has been moved to device.
+            # The tensor-creation wrappers active inside the Init context may
+            # have already cast it to bf16/fp16; undoing that cast here ensures
+            # the parameter retains full precision when ds_fp32_pinned is set.
+            if getattr(param, "ds_fp32_pinned", False):
+                param.data = param.data.to(torch.float32)
+
             self._zero_init_param(param)
 
     def _validate_remote_device(self, remote_device, ds_config):
@@ -1157,6 +1171,12 @@ class Init(InsertPostInitMethodToModuleSubClasses):
             if not is_zero_param(param):
                 if not get_accelerator().on_accelerator(param):
                     param.data = param.data.to(self.local_device)
+
+                # Mark parameters whose names match any fp32_pinned_parameters pattern so
+                # that downstream code (partition, optimizer) can skip dtype downcasting.
+                if any(pattern in name for pattern in self.fp32_pinned_patterns):
+                    param.ds_fp32_pinned = True
+                    param.data = param.data.to(torch.float32)
 
                 if name == 'weight' and self.quantized_initialization and type(module) in WEIGHT_QUANTIZATION_LAYERS:
                     _quantize_param(param, self.quantized_initialization)
