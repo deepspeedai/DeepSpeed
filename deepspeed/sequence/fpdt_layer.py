@@ -20,7 +20,8 @@ except ImportError:
     _flash_attn_backward = None
 
 from einops import rearrange
-from .layer import single_all_to_all, apply_rotary_pos_emb
+from .layer import single_all_to_all, apply_rotary_pos_emb, DistributedAttention
+from deepspeed.utils.groups import _get_max_local_seq_len
 
 
 def _rotate_half_backward(x):
@@ -81,18 +82,36 @@ class FPDT_InputConstruct(torch.nn.Module):
     def __init__(self, tokens, labels, loss_mask, attention_mask, position_ids, args, sp_size, sp_rank) -> None:
 
         super(FPDT_InputConstruct, self).__init__()
-        self.tokens = tokens
-        self.labels = labels
-        self.loss_mask = loss_mask
-        self.attention_mask = attention_mask
-        self.position_ids = position_ids
-        global_seq_len = tokens.shape[1]
         batch_size = tokens.shape[0]
+        raw_global_seq_len = tokens.shape[1]
+
+        # Pad global sequence length to the nearest multiple of sp_size so that
+        # each rank gets an equal-sized slice and the all-to-all splits are uniform.
+        pad_to = (raw_global_seq_len + sp_size - 1) // sp_size * sp_size
+        if pad_to != raw_global_seq_len:
+            import torch.nn.functional as _F
+            pad_amount = pad_to - raw_global_seq_len
+            tokens = _F.pad(tokens, (0, pad_amount))
+            if labels is not None:
+                labels = _F.pad(labels, (0, pad_amount))
+            if loss_mask is not None:
+                loss_mask = _F.pad(loss_mask, (0, pad_amount))
+            if position_ids is not None:
+                position_ids = _F.pad(position_ids, (0, pad_amount))
+        global_seq_len = tokens.shape[1]
+        self.raw_global_seq_len = raw_global_seq_len  # kept for optional post-processing
+
         assert global_seq_len % sp_size == 0
         assert global_seq_len % args.ds_sequence_parallel_fpdt_chunk_size == 0
         num_chunk_per_gpu = global_seq_len // args.ds_sequence_parallel_fpdt_chunk_size
         local_seq_len = global_seq_len // sp_size
         assert local_seq_len % num_chunk_per_gpu == 0
+
+        self.tokens = tokens
+        self.labels = labels
+        self.loss_mask = loss_mask
+        self.attention_mask = attention_mask
+        self.position_ids = position_ids
 
         self.num_chunk_per_gpu = num_chunk_per_gpu
         self.chunk_size = local_seq_len // num_chunk_per_gpu
