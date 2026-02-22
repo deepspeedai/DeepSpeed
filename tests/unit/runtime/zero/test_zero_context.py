@@ -12,7 +12,7 @@ from deepspeed.runtime.zero.partition_parameters import ZeroParamStatus, partiti
 import deepspeed.comm as dist
 from deepspeed.accelerator import get_accelerator
 
-from unit.common import DistributedTest, preferred_dtype
+from unit.common import DistributedTest, preferred_dtype, reduce_boolean_flags
 from unit.simple_model import SimpleModel
 from utils import setup_serial_env
 
@@ -107,11 +107,17 @@ class TestMiCSGatheredParametersFree(DistributedTest):
         assert model.l1.weight.numel() == 0, "outside of GatheredParameters the param should go back to be 0-sized"
 
 
-class TestZeroFreeParamActiveSubmodule(DistributedTest):
+class TestGatheredParametersAllRanksErrorOnModification(DistributedTest):
     world_size = 2
 
     def test(self):
-        config_dict = {"train_micro_batch_size_per_gpu": 1, "zero_optimization": {"stage": 3}}
+        config_dict = {
+            "train_micro_batch_size_per_gpu": 1,
+            "zero_optimization": {
+                "stage": 3,
+                "enable_sanity_checks": True
+            }
+        }
         hidden_dim = 10
 
         class MyModel(torch.nn.Module):
@@ -124,10 +130,18 @@ class TestZeroFreeParamActiveSubmodule(DistributedTest):
         with deepspeed.zero.Init(config_dict_or_path=config_dict):
             model = MyModel(hidden_dim)
 
-        with pytest.raises(RuntimeError, match="in-place modification"):
+        error_local = False
+        try:
             with deepspeed.zero.GatheredParameters([model.l1.weight, model.l2.weight], modifier_rank=None):
                 with torch.no_grad():
                     model.l1.weight.add_(0.0)
+        except RuntimeError as exc:
+            if "in-place modification" in str(exc):
+                error_local = True
+
+        error_global = reduce_boolean_flags(error_local, all)
+        if not error_global:
+            raise AssertionError("Expected in-place modification error on all ranks.")
 
 
 class TestSerialContext(DistributedTest):
