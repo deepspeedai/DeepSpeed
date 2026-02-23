@@ -1,4 +1,0 @@
-MASTER_ADDR=""
-
-ds_ssh "cd /scratch/amlt_code/run_z3_graph_rewrite/accelerate; BLOB_BASE_DIR=/mnt/post-training-ppo bash ./run.sh ${MASTER_ADDR} 4 32 deepspeed 3 meta-llama/Meta-Llama-3-70B-Instruct 1  --batch_size 1 --seq_length 512 --activation_checkpointing  --bench_step 1000 --print_interval 1" 2>&1 | tee logs/debug_Meta-Llama-3-70B-Instruct_deepspeed_np32c0b1s512g1a1pALL.log
-ds_ssh "cd /scratch/amlt_code/run_z3_graph_rewrite/accelerate; BLOB_BASE_DIR=/mnt/post-training-ppo bash ./run.sh ${MASTER_ADDR} 4 32 deepspeed 3 meta-llama/Meta-Llama-3-70B-Instruct 1  --compile --batch_size 1 --seq_length 512 --activation_checkpointing --passes prefetch,selective_gather --bench_step 1000 --print_interval 1" 2>&1 | tee logs/debug_Meta-Llama-3-70B-Instruct_deepspeed_np32c1b1s512g1a1pprefetch_selective_gather.log
