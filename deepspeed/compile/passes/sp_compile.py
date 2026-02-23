@@ -20,10 +20,53 @@ from torch.fx import GraphModule, Node
 from torch.fx.passes.fake_tensor_prop import FakeTensorProp
 from torch.fx.experimental.symbolic_shapes import ShapeEnv
 
+from deepspeed.runtime import constants
 
 from ..custom_ops import all_to_all
 from ..fx import find_node_by_name, get_node_shape_meta
 from ..util import get_input_id_node, get_label_id_node, get_position_id_node, shard_tensor_node, get_sdpa_nodes, ShardingConfig
+
+def prepare_autosp_inputs(input_id: torch.Tensor, label_id: torch.Tensor, position_id: torch.Tensor = None, attention_mask: torch.Tensor = None, seq_dim: int = 1):
+    """
+    Prepare inputs for AutoSP by marking dynamic dimensions and tagging tensors.
+    
+    Args:
+        input_id: Token IDs tensor (required)
+        label_id: Label IDs tensor (required)
+        position_id: Position IDs tensor (optional)
+        attention_mask: Attention mask tensor (optional)
+        seq_dim: Sequence dimension index to mark as dynamic (default: 1)
+    """
+
+    if input_id is None:
+        raise ValueError("input_id is required")
+    if label_id is None:
+        raise ValueError("label_id is required")
+
+    if seq_dim < 0 or seq_dim >= input_id.ndim:
+        raise ValueError(f"seq_dim {seq_dim} must be a valid index for input_id with shape {input_id.shape}")
+
+    if position_id is not None:
+        if seq_dim >= position_id.ndim:
+            raise ValueError(f"seq_dim {seq_dim} is out of bounds for position_id with shape {position_id.shape}")
+
+    if attention_mask is not None:
+        if seq_dim >= attention_mask.ndim:
+            raise ValueError(f"seq_dim {seq_dim} is out of bounds for attention_mask with shape {attention_mask.shape}")
+    
+    torch._dynamo.decorators.mark_dynamic(input_id, seq_dim)
+    torch._dynamo.decorators.mark_dynamic(label_id, seq_dim)
+    if position_id is not None:
+        torch._dynamo.decorators.mark_dynamic(position_id, seq_dim)
+    if attention_mask is not None:
+        torch._dynamo.decorators.mark_dynamic(attention_mask, seq_dim)
+    
+    input_id.tag = constants.INPUT_ID_KEY
+    label_id.tag = constants.LABEL_ID_KEY
+    if position_id is not None:
+        position_id.tag = constants.POSITION_ID_KEY
+    
+    return input_id, label_id, position_id, attention_mask
 
 def pass_shard_seq_dim(gm: GraphModule, example_inputs):
     """

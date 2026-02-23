@@ -24,10 +24,7 @@ import deepspeed.comm as dist
 from deepspeed.accelerator import get_accelerator
 from deepspeed.utils.torch import required_torch_version
 from deepspeed.ops.op_builder.dc import DeepCompileBuilder
-
-INPUT_ID_KEY = "input_id"
-LABEL_ID_KEY = "label_id"
-POSITION_ID_KEY = "position_id"
+from deepspeed.runtime import constants
 
 def is_deepcompile_supported() -> bool:
     return required_torch_version(min_version=2.6, max_version=2.9) and get_accelerator().device_name() == "cuda"
@@ -547,21 +544,21 @@ def get_sdpa_nodes(gm: GraphModule) -> List[Node]:
 
 def get_input_id_node(gm: GraphModule) -> Node:
     from .fx import find_node_by_tag
-    node = find_node_by_tag(gm, INPUT_ID_KEY)
+    node = find_node_by_tag(gm, constants.INPUT_ID_KEY)
     if node is None:
         raise RuntimeError("Failed to find a node for the input sequence.")
     return node
 
 def get_label_id_node(gm: GraphModule) -> Node:
     from .fx import find_node_by_tag
-    node = find_node_by_tag(gm, LABEL_ID_KEY)
+    node = find_node_by_tag(gm, constants.LABEL_ID_KEY)
     if node is None:
         raise RuntimeError("Failed to find a node for the label.")
     return node
 
 def get_position_id_node(gm: GraphModule) -> Node:
     from .fx import find_node_by_tag
-    node = find_node_by_tag(gm, POSITION_ID_KEY)
+    node = find_node_by_tag(gm, constants.POSITION_ID_KEY)
     return node
 
 def create_shard_offsets(
