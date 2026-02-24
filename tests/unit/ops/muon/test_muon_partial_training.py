@@ -22,6 +22,7 @@ ensuring empty parameter groups are properly handled.
 
 import torch.nn as nn
 import deepspeed
+from unit.common import DistributedTest
 
 
 class PartialTrainableModel(nn.Module):
@@ -49,8 +50,12 @@ class PartialTrainableModel(nn.Module):
                 param.use_muon = False
 
 
-class TestMuonPartialModelTraining:
+class TestMuonPartialModelTraining(DistributedTest):
     """Test Muon optimizer with partial model training scenarios."""
+
+    world_size = 2
+    reuse_dist_env = True
+    requires_cuda_env = False
 
     def test_muon_with_all_trainable_params(self):
         """
@@ -62,8 +67,7 @@ class TestMuonPartialModelTraining:
         model = PartialTrainableModel()
 
         ds_config = {
-            "train_batch_size": 1,
-            "gradient_accumulation_steps": 1,
+            "train_micro_batch_size_per_gpu": 1,
             "optimizer": {
                 "type": "Muon",
                 "params": {
@@ -107,8 +111,7 @@ class TestMuonPartialModelTraining:
         # This would cause muon_params to be empty without the fix
 
         ds_config = {
-            "train_batch_size": 1,
-            "gradient_accumulation_steps": 1,
+            "train_micro_batch_size_per_gpu": 1,
             "optimizer": {
                 "type": "Muon",
                 "params": {
@@ -150,8 +153,7 @@ class TestMuonPartialModelTraining:
                 param.requires_grad = False
 
         ds_config = {
-            "train_batch_size": 1,
-            "gradient_accumulation_steps": 1,
+            "train_micro_batch_size_per_gpu": 1,
             "optimizer": {
                 "type": "Muon",
                 "params": {
