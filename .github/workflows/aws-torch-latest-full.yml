@@ -36,9 +36,11 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          default_branch="${{ github.event.repository.default_branch }}"
+
           # Get the HEAD SHA of the last successful run of this workflow
           last_sha=$(gh api \
-            "repos/${{ github.repository }}/actions/workflows/aws-torch-latest-full.yml/runs?status=success&branch=master&per_page=1" \
+            "repos/${{ github.repository }}/actions/workflows/aws-torch-latest-full.yml/runs?status=success&branch=${default_branch}&per_page=1" \
             --jq '.workflow_runs[0].head_sha // empty')
 
           current_sha="${{ github.sha }}"
