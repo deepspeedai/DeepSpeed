@@ -7,11 +7,15 @@
 # This workflow runs:
 # - Parallel tests with pytest-xdist (-n 8)
 # - Sequential tests marked with @pytest.mark.sequential
+#
+# Nightly schedule: skips if no new commits since last successful run.
 ################################################################################
 
 name: aws-torch-latest-full
 
 on:
+  schedule:
+    - cron: '0 8 * * *'   # Daily at 08:00 UTC (midnight PST)
   workflow_dispatch:
 
 concurrency:
@@ -19,8 +23,44 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  check-changes:
+    name: Check for new commits
+    runs-on: ubuntu-latest
+    # Only check on schedule; workflow_dispatch always runs
+    if: github.event_name == 'schedule'
+    outputs:
+      has_changes: ${{ steps.check.outputs.has_changes }}
+    steps:
+      - name: Check for commits since last successful run
+        id: check
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # Get the HEAD SHA of the last successful run of this workflow
+          last_sha=$(gh api \
+            "repos/${{ github.repository }}/actions/workflows/aws-torch-latest-full.yml/runs?status=success&branch=master&per_page=1" \
+            --jq '.workflow_runs[0].head_sha // empty')
+
+          current_sha="${{ github.sha }}"
+
+          if [ -z "$last_sha" ]; then
+            echo "No previous successful run found — running tests"
+            echo "has_changes=true" >> "$GITHUB_OUTPUT"
+          elif [ "$last_sha" = "$current_sha" ]; then
+            echo "No new commits since last successful run ($last_sha) — skipping"
+            echo "has_changes=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "New commits detected: $last_sha -> $current_sha — running tests"
+            echo "has_changes=true" >> "$GITHUB_OUTPUT"
+          fi
+
   unit-tests:
     name: Unit Tests (Full)
+    needs: [check-changes]
+    # Run if: (a) workflow_dispatch, or (b) schedule with new commits
+    if: |
+      always() &&
+      (github.event_name == 'workflow_dispatch' || needs.check-changes.outputs.has_changes == 'true')
     runs-on: [self-hosted, gpu-ci, gpu-l40s, l40s-4gpu, aws]
     timeout-minutes: 180
 
