@@ -120,7 +120,7 @@ class LLAMA2LayerPolicy(TransformerPolicy):
         try:
             import llama
             LLAMA2LayerPolicy._orig_layer_class = llama.model.TransformerBlock  # type: ignore
-        except:
+        except Exception:
             LLAMA2LayerPolicy._orig_layer_class = None
 
     def get_hidden_heads(self):

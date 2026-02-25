@@ -23,7 +23,7 @@ from ..ops.transformer.inference.op_binding.workspace import WorkspaceOp
 try:
     import transformers
     OPTLearnedPositionalEmbedding = transformers.models.opt.modeling_opt.OPTLearnedPositionalEmbedding
-except:
+except Exception:
     OPTLearnedPositionalEmbedding = None
 
 

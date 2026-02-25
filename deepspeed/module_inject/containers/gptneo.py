@@ -103,7 +103,7 @@ class HFGPTNEOLayerPolicy(TransformerPolicy):
         try:
             import transformers
             HFGPTNEOLayerPolicy._orig_layer_class = transformers.models.gpt_neo.modeling_gpt_neo.GPTNeoBlock
-        except:
+        except Exception:
             HFGPTNEOLayerPolicy._orig_layer_class = None
 
     def get_hidden_heads(self):
