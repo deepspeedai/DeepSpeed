@@ -855,6 +855,10 @@ class DeepSpeedEngine(Module):
     def get_model_parallel_rank(self):
         return groups.get_model_parallel_rank()
 
+    def get_parallel_world_sizes(self):
+        """Return a dict of parallel world sizes for data/tensor parallelism."""
+        return {"dp": groups.get_data_parallel_world_size(), "tp": groups.get_tensor_model_parallel_world_size()}
+
     def get_sequence_parallel_group(self):
         return self.seq_parallel_group
 
