@@ -2396,6 +2396,13 @@ class DeepSpeedEngine(Module):
     def _backward_prologue(self):
         self._start_timers(self.engine_timers.backward_timers)
 
+        # ZenFlow requires the use of engine.backward(loss) to manage its
+        # specialized backward pass and synchronization logic.
+        if self.zenflow and not self._running_engine_backward:
+            raise RuntimeError("Direct calls to loss.backward() are not currently supported when ZenFlow is enabled. "
+                               "Please use engine.backward(loss) instead to allow ZenFlow to manage "
+                               "selective updates and synchronization.")
+
         # When necessary internal APIs are not available, we disable direct calls to tensor.backward()
         # and limit to engine.backward(loss) only.
         if not self._support_torch_style_backward and not self._running_engine_backward:
@@ -2579,6 +2586,14 @@ class DeepSpeedEngine(Module):
             loss = self.torch_autocast_z0_gradscaler.scale(loss)
 
         with compiled_autograd(self._is_compiled_autograd_enabled, self._compile_kwargs):
+            # ZenFlow requires exclusive control over the backward pass to manage its
+            # selective parameter updates and synchronization boundaries.
+            if self.zenflow:
+                self.optimizer.backward(loss, **backward_kwargs)
+                self._backward_epilogue()
+                self._running_engine_backward = False
+                return gas_scaled_loss
+
             if self.zero_optimization() or not self.amp_enabled():
                 loss.backward(**backward_kwargs)
             elif self.amp_enabled():
