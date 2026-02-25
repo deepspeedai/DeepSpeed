@@ -14,14 +14,14 @@ class DeepSpeedCPUAdam(torch.optim.Optimizer):
     optimizer_id = 0
 
     def __init__(self,
-                 model_params,
+                 params,
                  lr=1e-3,
                  bias_correction=True,
                  betas=(0.9, 0.999),
                  eps=1e-8,
                  weight_decay=0,
                  amsgrad=False,
-                 adamw_mode=True,
+                 adam_w_mode=True,
                  fp32_optimizer_states=True):
         """Fast vectorized implementation of two variations of Adam optimizer on CPU:
 
@@ -51,7 +51,7 @@ class DeepSpeedCPUAdam(torch.optim.Optimizer):
 
 
         Arguments:
-            model_params (iterable): iterable of parameters to optimize or dicts defining
+            params (iterable): iterable of parameters to optimize or dicts defining
                 parameter groups.
             lr (float, optional): learning rate. (default: 1e-3)
             betas (Tuple[float, float], optional): coefficients used for computing
@@ -62,7 +62,7 @@ class DeepSpeedCPUAdam(torch.optim.Optimizer):
             amsgrad (boolean, optional): whether to use the AMSGrad variant of this
                 algorithm from the paper `On the Convergence of Adam and Beyond`_
                 (default: False) NOT SUPPORTED in DeepSpeed CPUAdam!
-            adamw_mode: select between Adam and AdamW implementations (default: AdamW)
+            adam_w_mode: select between Adam and AdamW implementations (default: AdamW)
             fp32_optimizer_states: creates momentum and variance in full precision regardless of
                         the precision of the parameters (default: True)
         """
@@ -73,7 +73,7 @@ class DeepSpeedCPUAdam(torch.optim.Optimizer):
                             weight_decay=weight_decay,
                             bias_correction=bias_correction,
                             amsgrad=amsgrad)
-        super(DeepSpeedCPUAdam, self).__init__(model_params, default_args)
+        super(DeepSpeedCPUAdam, self).__init__(params, default_args)
 
         cpu_info = get_cpu_info()
         self.cpu_vendor = cpu_info["vendor_id_raw"].lower() if "vendor_id_raw" in cpu_info else "unknown"
@@ -89,11 +89,11 @@ class DeepSpeedCPUAdam(torch.optim.Optimizer):
 
         self.opt_id = DeepSpeedCPUAdam.optimizer_id
         DeepSpeedCPUAdam.optimizer_id = DeepSpeedCPUAdam.optimizer_id + 1
-        self.adam_w_mode = adamw_mode
+        self.adam_w_mode = adam_w_mode
         self.fp32_optimizer_states = fp32_optimizer_states
         self.ds_opt_adam = CPUAdamBuilder().load()
 
-        self.ds_opt_adam.create_adam(self.opt_id, lr, betas[0], betas[1], eps, weight_decay, adamw_mode,
+        self.ds_opt_adam.create_adam(self.opt_id, lr, betas[0], betas[1], eps, weight_decay, adam_w_mode,
                                      should_log_le("info"))
 
     def __del__(self):
