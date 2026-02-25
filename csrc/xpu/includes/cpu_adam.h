@@ -69,14 +69,16 @@ public:
             _betta1_t = std::pow(_betta1, step);
             _betta2_t = std::pow(_betta2, step);
         } else {
-            _step++;
-            if (_step != step) {
-                _betta1_t = std::pow(_betta1, step);
-                _betta2_t = std::pow(_betta2, step);
-                _step = step;
-            } else {
+            if(step!=_step){
+                _step++;
+                if (_step != step) {
+                    _betta1_t = std::pow(_betta1, step);
+                    _betta2_t = std::pow(_betta2, step);
+                    _step = step;
+                } else {
                 _betta1_t *= _betta1;
                 _betta2_t *= _betta2;
+                }
             }
         }
     }
