@@ -215,6 +215,7 @@ class PartitionedParameterCoordinator:
         self.__submodule_order.append(sub_module)
         self.__step_id_module_fetched_for[sub_module.ds_id].append(self.__step_id)
 
+    @compiler.disable
     def record_parameters(self, sub_module: Module) -> None:
         if is_compiling():
             return
