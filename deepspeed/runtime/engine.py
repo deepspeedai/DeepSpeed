@@ -1486,7 +1486,6 @@ class DeepSpeedEngine(Module):
             summary += f"\t {self.sequence_parallel_size=}\n"
             summary += "***********************************************"
             logger.info(summary)
-
         if not (self.amp_enabled() or is_zero_init_model):
             self._broadcast_model()
 
@@ -1703,7 +1702,6 @@ class DeepSpeedEngine(Module):
             optimizer = MuSGD(model_parameters, **optimizer_parameters)
         elif self.optimizer_name() == MUON_OPTIMIZER:
             zero_stage = self.zero_optimization_stage()
-            assert zero_stage <= ZeroStageEnum.gradients, "Muon optimizer is not yet compatible with ZeRO Stage 3"
             if not all([hasattr(p, 'use_muon') for p in model_parameters]):
                 msg = "Muon optimizer is used, but the use_muon attribute is NOT configured for some of the model parameters, " \
                 "please set by `param.use_muon = True / False` for all params"
