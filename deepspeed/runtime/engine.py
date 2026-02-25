@@ -1363,8 +1363,9 @@ class DeepSpeedEngine(Module):
                     self.optimizer_name()), "{} is not a supported DeepSpeed Optimizer".format(self.optimizer_name())
 
         if (self.optimizer_name() == LAMB_OPTIMIZER or self.optimizer_name() == ONEBIT_LAMB_OPTIMIZER):
-            assert (self.dynamic_loss_scale()), "DeepSpeed {} optimizer requires dynamic loss scaling".format(
-                self.optimizer_name())
+            assert (self.dynamic_loss_scale()
+                    or not self.fp16_enabled()), "DeepSpeed {} optimizer requires dynamic loss scaling in fp16".format(
+                        self.optimizer_name())
 
         # Detect invalid combinations of client optimizer and client scheduler
         if isinstance(self.client_lr_scheduler, _LRScheduler):
