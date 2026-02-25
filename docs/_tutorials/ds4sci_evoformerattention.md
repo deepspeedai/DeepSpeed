@@ -30,6 +30,8 @@ The kernels will be compiled when `DS4Sci_EvoformerAttention` is called for the 
 The extension checks both requirements and fails if any is not met. To disable the check, for example for cross-compiling in a system without GPUs, you can set the environment variable ```DS_IGNORE_CUDA_DETECTION=TRUE```
 and the environment value ```DS_EVOFORMER_GPU_ARCH={70|75|80}```, which controls the target GPU (80 being the last supported and meaning NVIDIA Ampere and later).
 
+`TORCH_CUDA_ARCH_LIST` controls emitted CUDA fatbin targets (`-gencode`), while `DS_EVOFORMER_GPU_ARCH` controls the Evoformer kernel family (`-DGPU_ARCH`). For Evoformer builds, compute capabilities below the selected family floor are filtered out (for example, with `DS_EVOFORMER_GPU_ARCH=80`, `7.x` entries in `TORCH_CUDA_ARCH_LIST` are pruned). Make sure `TORCH_CUDA_ARCH_LIST` still includes your runtime architecture (or a compatible `+PTX` target), otherwise runtime can fail with `invalid device function`.
+
 ### 3.2 Unit test and benchmark
 
 The unit test and benchmark are available in the `tests` folder in DeepSpeed repo. You can use the following command to run the unit test and benchmark.
