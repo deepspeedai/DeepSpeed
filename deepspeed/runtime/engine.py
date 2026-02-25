@@ -3266,12 +3266,10 @@ class DeepSpeedEngine(Module):
 
         if checkpoint.get(FROZEN_PARAM_FRAGMENTS, None) is not None:
             saved_frozen_params = checkpoint[FROZEN_PARAM_FRAGMENTS]
-            for param in self.module.parameters():
+            for name, param in self.module.named_parameters():
                 if param.requires_grad:
                     continue
-                if param not in self.param_names:
-                    raise ValueError(f"failed to find frozen {param} in named params")
-                name = self.param_names[param]
+
                 if hasattr(param, 'ds_id'):
                     param.ds_tensor.data.copy_(saved_frozen_params[name].data)
                 else:
@@ -4041,12 +4039,9 @@ class DeepSpeedEngine(Module):
     def _get_zero_frozen_param_attributes(self, attr_func):
         frozen_param_fragments = OrderedDict()
 
-        for param in self.module.parameters():
+        for name, param in self.module.named_parameters():
             if param.requires_grad:
                 continue
-            if param not in self.param_names:
-                raise ValueError(f"failed to find frozen {param} in named params")
-            name = self.param_names[param]
             frozen_param_fragments[name] = attr_func(param)
 
         return frozen_param_fragments
