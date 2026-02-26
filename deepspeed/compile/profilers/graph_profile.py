@@ -67,7 +67,7 @@ def _get_mem_usage_out_of_torch():
 
         torch_alloc = get_accelerator().memory_allocated()
         adjust = info.used - torch_alloc
-    except:
+    except Exception:
         # pynvml not available
         pass
 
