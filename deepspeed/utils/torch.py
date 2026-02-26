@@ -3,9 +3,14 @@
 
 # DeepSpeed Team
 
+import logging
+import sys
+
 from packaging import version as pkg_version
 
 import torch
+
+_logger = logging.getLogger(__name__)
 
 
 def required_torch_version(min_version=None, max_version=None):
@@ -32,6 +37,27 @@ def register_grad_hook(param, hook):
 
 
 def jit_script_compat(fn):
-    if required_torch_version(min_version=2.0) and hasattr(torch, "compile"):
-        return torch.compile(fn)
-    return torch.jit.script(fn)
+    fn_name = getattr(fn, "__qualname__", getattr(fn, "__name__", repr(fn)))
+
+    can_try_compile = (required_torch_version(min_version=2.0) and hasattr(torch, "compile")
+                       and not (sys.version_info >= (3, 12) and not required_torch_version(min_version=2.4)))
+
+    if can_try_compile:
+        try:
+            return torch.compile(fn)
+        except Exception:
+            _logger.debug(
+                "torch.compile failed for %s, falling back to torch.jit.script",
+                fn_name,
+                exc_info=True,
+            )
+
+    try:
+        return torch.jit.script(fn)
+    except Exception:
+        _logger.debug(
+            "torch.jit.script failed for %s, returning unmodified function",
+            fn_name,
+            exc_info=True,
+        )
+        return fn
