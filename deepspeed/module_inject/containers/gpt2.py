@@ -32,7 +32,7 @@ class HFGPT2LayerPolicy(TransformerPolicy):
         try:
             import transformers
             HFGPT2LayerPolicy._orig_layer_class = transformers.models.gpt2.modeling_gpt2.GPT2Block
-        except:
+        except Exception:
             HFGPT2LayerPolicy._orig_layer_class = None
 
     def get_hidden_heads(self):

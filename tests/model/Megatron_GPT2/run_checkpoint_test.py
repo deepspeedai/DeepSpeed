@@ -455,7 +455,7 @@ class GPT2CheckpointTestCase(BaseTestCase):
             cmd = shlex.split(f"rm -rf {checkpoint_name}")
             print(f"{self.id()} cmd: {cmd}")
             subprocess.run(cmd, check=False, executable='/bin/bash')
-        except:
+        except Exception:
             print("No old checkpoint")
 
         if "cpu_optimizer" in test_config and test_config["cpu_optimizer"]:
@@ -477,7 +477,7 @@ class GPT2CheckpointTestCase(BaseTestCase):
         try:
             cmd = shlex.split(f"rm {base_file}")
             subprocess.run(cmd, check=False, executable='/bin/bash')
-        except:
+        except Exception:
             print(f"{self.id()} No old logs")
 
         print("{0}: Run for saving checkpoint".format(self.id()))
@@ -493,7 +493,7 @@ class GPT2CheckpointTestCase(BaseTestCase):
             cmd = shlex.split(f"echo {checkpoint_interval} > {checkpoint_name}/latest_checkpointed_iteration.txt")
             print(f"{self.id()} running cmd: {cmd}")
             subprocess.run(cmd, check=False, executable='/bin/bash')
-        except:
+        except Exception:
             print(f"{self.id()} Failed to update the checkpoint iteration file")
             return False
 
@@ -509,7 +509,7 @@ class GPT2CheckpointTestCase(BaseTestCase):
         try:
             cmd = shlex.split(f"rm {test_file}")
             subprocess.run(cmd, check=False, executable='/bin/bash')
-        except:
+        except Exception:
             print(f"{self.id()} no previous logs for")
         self.run_gpt2_test(test_config, test_file)
         return self.check_parity(base_file, test_file, r_tol)

@@ -184,7 +184,7 @@ def load_model_with_checkpoint(r_module,
             LlamaRMSNorm = transformers.models.llama.modeling_llama.LlamaRMSNorm
         else:
             LlamaRMSNorm = None
-    except:
+    except Exception:
         OPTLearnedPositionalEmbedding = None
     try:
         from fairscale.nn.model_parallel.layers import (
@@ -192,13 +192,13 @@ def load_model_with_checkpoint(r_module,
             ParallelEmbedding,
             RowParallelLinear,
         )
-    except:
+    except Exception:
         ColumnParallelLinear = None
         ParallelEmbedding = None
         RowParallelLinear = None
     try:
         from llama.model import RMSNorm
-    except:
+    except Exception:
         RMSNorm = None
     layer_policies = {
         nn.Linear: load,

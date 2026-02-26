@@ -98,7 +98,7 @@ class HFGPTJLayerPolicy(TransformerPolicy):
         try:
             import transformers
             HFGPTJLayerPolicy._orig_layer_class = transformers.models.gptj.modeling_gptj.GPTJBlock
-        except:
+        except Exception:
             HFGPTJLayerPolicy._orig_layer_class = None
 
     def get_hidden_heads(self):
