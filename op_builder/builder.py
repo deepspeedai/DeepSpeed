@@ -208,7 +208,7 @@ class OpBuilder(ABC):
         _is_sycl_enabled = False
         try:
             result = subprocess.run(["c2s", "--version"], capture_output=True)
-        except:
+        except Exception:
             pass
         else:
             _is_sycl_enabled = True
@@ -380,7 +380,7 @@ class OpBuilder(ABC):
         except LinkError:
             return False
 
-        except:
+        except Exception:
             return False
 
         finally:

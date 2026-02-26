@@ -109,7 +109,7 @@ class HFOPTLayerPolicy(TransformerPolicy):
         try:
             import transformers
             HFOPTLayerPolicy._orig_layer_class = transformers.models.opt.modeling_opt.OPTDecoderLayer
-        except:
+        except Exception:
             HFOPTLayerPolicy._orig_layer_class = None
 
         if hasattr(TransformerPolicy, "hf_model_config") and hasattr(TransformerPolicy.hf_model_config,
