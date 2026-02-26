@@ -35,7 +35,7 @@ class HFCLIPLayerPolicy(TransformerPolicy):
             try:
                 import transformers
                 HFCLIPLayerPolicy._orig_layer_class = transformers.models.clip.modeling_clip.CLIPEncoderLayer
-            except:
+            except Exception:
                 HFCLIPLayerPolicy._orig_layer_class = None
 
     def get_hidden_heads(self):
