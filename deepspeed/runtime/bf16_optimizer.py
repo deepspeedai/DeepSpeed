@@ -551,7 +551,9 @@ class BF16_Optimizer(ZeROOptimizer):
                         def accumulate_hp_grads_and_remove_lp(*notneeded):
                             self.accumulate_hp_grads_and_remove_lp(param, i, j)
 
-                        self._grad_acc_hooks.append(register_grad_hook(param, accumulate_hp_grads_and_remove_lp))
+                        hook_handle = register_grad_hook(param, accumulate_hp_grads_and_remove_lp)
+                        if hook_handle is not None:
+                            self._grad_acc_hooks.append(hook_handle)
 
                     wrapper(param, i, j)
 
