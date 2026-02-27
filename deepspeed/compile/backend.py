@@ -384,3 +384,10 @@ def make_backend(backend, compile_config, compile_kwargs={}):
         raise ValueError(f"Unsupported backend {backend}")
 
     return backend_fn
+
+
+def make_autosp_backend(backend, compile_kwargs={}, free_activation=False, debug_log=False, sp_size=2, dp_size=1):
+    def backend_fn(gm: GraphModule, real_inputs):
+        apply_autosp(gm, real_inputs, debug_log, sp_size=sp_size, dp_size=dp_size)    
+        return torch._inductor.compile(gm, real_inputs)
+    return backend_fn
