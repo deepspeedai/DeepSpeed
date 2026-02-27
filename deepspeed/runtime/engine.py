@@ -2382,7 +2382,7 @@ class DeepSpeedEngine(Module):
     def allreduce_gradients(self, bucket_size=MEMORY_OPT_ALLREDUCE_SIZE):
         # Skip gradient reduction when DeepCompile is enabled
         # DeepCompile handles its own gradient reduction through compiled graph operations
-        if self.is_deepcompile_active():
+        if self.is_deepcompile_active() and not self.compile_autosp():
             return
 
         # Pass (PP) gas boundary flag to optimizer (required for zero)
@@ -4392,8 +4392,7 @@ class DeepSpeedEngine(Module):
 
             compile_config = self._config.compile_config
             if self.compile_autosp():
-                backend = init_autosp(sp_size=self._config.compile_config.sp_size, dp_size=self._config.compile_config.dp_size)
-                #backend = init_ulysses(self, backend, compile_config, compile_kwargs, schedule, sp_size=self._config.compile_config.sp_size, dp_size=self._config.compile_config.dp_size)
+                backend = init_autosp(compile_config)
             else: ## By default then only zero-style DP should be triggered in dc. ##
                 if (("zero_optimization" in self.config and "offload_optimizer" in self.config["zero_optimization"]
                      and "offload_param" in self.config["zero_optimization"])
