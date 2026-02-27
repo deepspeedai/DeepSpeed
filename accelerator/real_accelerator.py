@@ -64,8 +64,7 @@ def get_accelerator():
                 assert hasattr(torch, 'xpu') and torch.xpu.is_available(), \
                     "XPU_Accelerator requires PyTorch with XPU support (torch.xpu)."
             except (ImportError, AssertionError) as e:
-                raise ValueError(
-                    f"XPU_Accelerator requires PyTorch with XPU support: {e}")
+                raise ValueError(f"XPU_Accelerator requires PyTorch with XPU support: {e}")
         elif accelerator_name == "cpu":
             pass
         elif accelerator_name == "npu":

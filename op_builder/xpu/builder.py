@@ -70,7 +70,14 @@ class SYCLOpBuilder(OpBuilder):
 
     def cxx_args(self):
         cxx_flags = [
-            '-fsycl', '-fsycl-targets=spir64', '-g', '-gdwarf-4', '-O3', '-std=c++17', '-fPIC', '-DMKL_ILP64',
+            '-fsycl',
+            '-fsycl-targets=spir64',
+            '-g',
+            '-gdwarf-4',
+            '-O3',
+            '-std=c++17',
+            '-fPIC',
+            '-DMKL_ILP64',
             '-fno-strict-aliasing',
         ]
         # Use SYCL headers from the Python environment so that compiled code
@@ -87,10 +94,14 @@ class SYCLOpBuilder(OpBuilder):
         import torch
         torch_lib_dir = os.path.join(os.path.dirname(torch.__file__), 'lib')
         flags = [
-            '-fPIC', '-fsycl', '-fsycl-targets=spir64',
+            '-fPIC',
+            '-fsycl',
+            '-fsycl-targets=spir64',
             '-Xs "-options -cl-intel-enable-auto-large-GRF-mode"',
-            '-fsycl-max-parallel-link-jobs=8', '-Wl,-export-dynamic',
-            f'-L{torch_lib_dir}', f'-Wl,-rpath,{torch_lib_dir}',
+            '-fsycl-max-parallel-link-jobs=8',
+            '-Wl,-export-dynamic',
+            f'-L{torch_lib_dir}',
+            f'-Wl,-rpath,{torch_lib_dir}',
         ]
         # Link against the Python environment's libsycl.so to match the
         # headers we compiled against (see cxx_args).
@@ -101,8 +112,7 @@ class SYCLOpBuilder(OpBuilder):
 
     def fixed_aotflags(self):
         return [
-            '-fsycl', '-fsycl-targets=spir64',
-            '-fsycl-max-parallel-link-jobs=8',
+            '-fsycl', '-fsycl-targets=spir64', '-fsycl-max-parallel-link-jobs=8',
             '-Xs "-options -cl-intel-enable-auto-large-GRF-mode"'
         ]
 
@@ -153,13 +163,12 @@ class SYCLOpBuilder(OpBuilder):
             os.environ['CPATH'] = f'{sycl_inc}:{cpath}' if cpath else sycl_inc
 
         try:
-            op_module = load(
-                name=self.name,
-                sources=self.strip_empty_entries(sources),
-                extra_include_paths=self.strip_empty_entries(extra_include_paths),
-                extra_cflags=self.strip_empty_entries(self.cxx_args()),
-                extra_ldflags=self.strip_empty_entries(self.extra_ldflags()),
-                verbose=verbose)
+            op_module = load(name=self.name,
+                             sources=self.strip_empty_entries(sources),
+                             extra_include_paths=self.strip_empty_entries(extra_include_paths),
+                             extra_cflags=self.strip_empty_entries(self.cxx_args()),
+                             extra_ldflags=self.strip_empty_entries(self.extra_ldflags()),
+                             verbose=verbose)
         finally:
             # Restore original environment
             for var, val in saved_env.items():
