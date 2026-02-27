@@ -22,9 +22,9 @@ from torch.fx.experimental.symbolic_shapes import ShapeEnv
 
 from deepspeed.runtime import constants
 
-from ..custom_ops import all_to_all
+from ..custom_ops import all_to_all, sp_dp_registry
 from ..fx import find_node_by_name, get_node_shape_meta
-from ..util import get_input_id_node, get_label_id_node, get_position_id_node, shard_tensor_node, get_sdpa_nodes, ShardingConfig
+from ..util import get_input_id_node, get_label_id_node, get_position_id_node, shard_tensor_node, get_sdpa_nodes 
 
 def prepare_autosp_inputs(input_id: torch.Tensor, label_id: torch.Tensor, position_id: torch.Tensor = None, attention_mask: torch.Tensor = None, seq_dim: int = 1):
     """
@@ -73,7 +73,7 @@ def pass_shard_seq_dim(gm: GraphModule, example_inputs):
     Finds all direct and indirect consumers of the input sequence, label and position ids.
     Shard the sequence dimension used by all such consumers.
     """
-    world_size = dist.get_world_size()
+    sp_size = sp_dp_registry.sp_size()
     
     input_ids_node = get_input_id_node(gm)
     val = get_node_shape_meta(input_ids_node)
@@ -88,7 +88,7 @@ def pass_shard_seq_dim(gm: GraphModule, example_inputs):
     with gm.graph.inserting_after(sym_seq_dim_node):
         sharded_node = gm.graph.call_function(
             operator.floordiv, 
-            args=(sym_seq_dim_node, world_size)
+            args=(sym_seq_dim_node, sp_size)
         )
     
     sharded_input_nodes = set()
@@ -128,23 +128,23 @@ def pass_shard_seq_dim(gm: GraphModule, example_inputs):
 
 
 def pass_shard_input_ids(gm: GraphModule, example_inputs):
-    config = ShardingConfig.from_distributed()
+    """Shard input_ids tensor across ranks."""
     input_ids_node = get_input_id_node(gm)
-    shard_tensor_node(gm, input_ids_node, config)
+    shard_tensor_node(gm, input_ids_node)
 
 
 def pass_shard_label_ids(gm: GraphModule, example_inputs):
-    config = ShardingConfig.from_distributed()
+    """Shard label_ids tensor across ranks."""
     label_ids_node = get_label_id_node(gm)
-    shard_tensor_node(gm, label_ids_node, config)
+    shard_tensor_node(gm, label_ids_node)
 
 def pass_shard_position_ids(gm: GraphModule, example_inputs):
-    config = ShardingConfig.from_distributed()
+    """Shard position_ids tensor across ranks."""
     position_ids_node = get_position_id_node(gm)
     if position_ids_node is None:
         print("[WARNING] position id node not found. Skipping sharding of position ids.")
         return
-    shard_tensor_node(gm, position_ids_node, config)
+    shard_tensor_node(gm, position_ids_node)
 
 
 def pass_insert_attention_all_to_all(gm: GraphModule, real_inputs):
@@ -162,7 +162,7 @@ def pass_insert_attention_all_to_all(gm: GraphModule, real_inputs):
         with gm.graph.inserting_after(node):
             a2a_node = gm.graph.call_function(
                 torch.ops.autosp.all_to_all.default,
-                args=(node, scatter_idx, gather_idx, world_size, name),
+                args=(node, scatter_idx, gather_idx, name),
             )
             a2a_node.name = f"a2a_{name}"
             node.replace_all_uses_with(a2a_node)
@@ -204,7 +204,22 @@ def apply_autosp(
     real_inputs, 
     debug: bool = False,
     passes: Optional[List[Callable]] = None,
+    sp_size: int = 2,
+    dp_size: int = 1
 ):
+    """
+    Apply AutoSP (Ulysses) transformation passes to the graph and setup either DP/SP (2D) or SP (1D) mesh.
+    
+    Args:
+        gm: GraphModule to transform
+        real_inputs: Example inputs for shape propagation
+        debug: If True, print graph before/after each pass
+        passes: Optional custom list of passes (default: DEFAULT_PASSES)
+    """
+    assert sp_size * dp_size <= torch.cuda.device_count(), 'Insufficient device count for mesh size'
+
+    sp_dp_registry.populate_registry(sp_size, dp_size)
+
     AUTOSP_PASSES = [
         pass_shard_seq_dim,
         pass_shard_input_ids,

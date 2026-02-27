@@ -3,8 +3,10 @@
 
 # DeepSpeed Team
 
+from typing import List, Optional, Literal 
 from deepspeed.runtime.config_utils import DeepSpeedConfigModel
 
+PassName = Literal["z1", "z3", "autosp"]
 
 class CompileConfig(DeepSpeedConfigModel):
     """ Configure compile settings """
@@ -53,3 +55,12 @@ class CompileConfig(DeepSpeedConfigModel):
 
     keep_all_input_tensors: bool = False
     """ Keep real values for all input tensors in InputStorage instead of using dummy values """
+
+    passes: Optional[List[PassName]] = None
+    """ Composes different optimizations. """
+
+    sp_size: int = 1
+    """ SP group-size """
+
+    dp_size: int = 1
+    """ DP group-size """

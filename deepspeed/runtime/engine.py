@@ -1005,6 +1005,14 @@ class DeepSpeedEngine(Module):
     def zero_optimization_stage(self):
         return self._config.zero_optimization_stage
 
+    def compile_zero_optimization_stage(self):
+        """Determines if zero-pass is set in deepcompile's passes attributes."""
+        return "z1" in self._config.compile_config.passes or "z3" in self._config.compile_config.passes
+
+    def compile_autosp(self):
+        """Determines if AutoSP is set in deepcompile's passes attributes."""
+        return "autosp" in self._config.compile_config.passes
+
     def mics_shard_size(self):
         return self._config.mics_shard_size
 
@@ -4383,23 +4391,21 @@ class DeepSpeedEngine(Module):
             assert backend in ['inductor', 'eager'], f"Backend {backend} is not supported for DeepCompile."
 
             compile_config = self._config.compile_config
-            if (("zero_optimization" in self.config and "offload_optimizer" in self.config["zero_optimization"]
-                 and "offload_param" in self.config["zero_optimization"])
-                    and self._config.zero_config.offload_param.device == "cpu"
-                    and self._config.zero_config.offload_optimizer.device == "cpu"):
-                compile_config.offload_parameters = True
-            if self.zero_optimization_stage() == ZeroStageEnum.optimizer_states:
-                backend = init_z1(self, backend, compile_config, compile_kwargs, schedule)
-            elif self.zero_optimization_stage() == ZeroStageEnum.gradients:
-                backend = init_z1(self, backend, compile_config, compile_kwargs, schedule, use_z2=True)
-            elif self.zero_optimization_stage() == ZeroStageEnum.weights:
-                if required_torch_version(min_version=2.9):
-                    raise RuntimeError(
-                        "DeepCompile with ZeRO stage 3 is not currently supported on PyTorch >= 2.9. "
-                        "Please use ZeRO stage 1 or 2 with DeepCompile, or disable DeepCompile for ZeRO stage 3.")
-                backend = init_z3(self, backend, compile_config, compile_kwargs, schedule)
-            elif self.zero_optimization_stage() == ZeroStageEnum.disabled:
-                backend = init_autosp()
+            if self.compile_autosp():
+                backend = init_autosp(sp_size=self._config.compile_config.sp_size, dp_size=self._config.compile_config.dp_size)
+                #backend = init_ulysses(self, backend, compile_config, compile_kwargs, schedule, sp_size=self._config.compile_config.sp_size, dp_size=self._config.compile_config.dp_size)
+            else: ## By default then only zero-style DP should be triggered in dc. ##
+                if (("zero_optimization" in self.config and "offload_optimizer" in self.config["zero_optimization"]
+                     and "offload_param" in self.config["zero_optimization"])
+                        and self._config.zero_config.offload_param.device == "cpu"
+                        and self._config.zero_config.offload_optimizer.device == "cpu"):
+                    compile_config.offload_parameters = True
+                if self.zero_optimization_stage() == ZeroStageEnum.optimizer_states:
+                    backend = init_z1(self, backend, compile_config, compile_kwargs, schedule)
+                elif self.zero_optimization_stage() == ZeroStageEnum.gradients:
+                    backend = init_z1(self, backend, compile_config, compile_kwargs, schedule, use_z2=True)
+                elif self.zero_optimization_stage() == ZeroStageEnum.weights:
+                    backend = init_z3(self, backend, compile_config, compile_kwargs, schedule)
 
         # Hook state must align with whether DeepCompile is active.
         self._set_deepcompile_active(enable_deepcompile)
