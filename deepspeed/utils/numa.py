@@ -25,7 +25,7 @@ def get_numa_cores():
     ret = []
     try:
         output = subprocess.check_output(['numactl', '--hardware']).decode("utf-8")
-    except:
+    except Exception:
         return []
     lines = output.split('\n')
     for line in lines:

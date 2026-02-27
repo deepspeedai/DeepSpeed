@@ -18,6 +18,7 @@ The file has been adapted from two fairscale files:
 from deepspeed.utils.timer import SynchronizedWallClockTimer
 from deepspeed.utils import logger
 from deepspeed.utils.bwc import bwc_tensor_model_parallel_world_size
+from deepspeed.utils.torch import jit_script_compat
 from typing import Callable, Dict, TYPE_CHECKING, Any, Optional, Tuple, Union
 
 import torch
@@ -46,7 +47,7 @@ try:
     #   python3 -m pip install --user --upgrade git+https://github.com/deepspeedai/tutel@v0.1.x
     from tutel import moe as tutel_moe
     TUTEL_INSTALLED = True
-except:
+except Exception:
     # Fail silently so we don't spam logs unnecessarily if user isn't using tutel
     TUTEL_INSTALLED = False
     pass
@@ -157,7 +158,7 @@ def einsum(rule, a, b):
 # includes stateful caching logic which is incompatible with ONNX.
 
 
-@torch.jit.script
+@jit_script_compat
 def _capacity(gates: Tensor, capacity_factor: Tensor, min_capacity: Tensor) -> Tensor:
     # gates has shape of SE
     num_tokens = gates.shape[0]
@@ -170,12 +171,12 @@ def _capacity(gates: Tensor, capacity_factor: Tensor, min_capacity: Tensor) -> T
     return capacity
 
 
-@torch.jit.script
+@jit_script_compat
 def _top_idx(source, k):
     return torch.topk(source, k=k, dim=0)[1]
 
 
-@torch.jit.script
+@jit_script_compat
 def _one_hot_to_float(x, num_classes):
     return F.one_hot(x, num_classes=num_classes).float()
 

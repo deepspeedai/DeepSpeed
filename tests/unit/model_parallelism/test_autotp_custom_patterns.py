@@ -1,0 +1,494 @@
+# Copyright (c) Microsoft Corporation.
+# SPDX-License-Identifier: Apache-2.0
+
+# DeepSpeed Team
+
+import pytest
+import torch
+import deepspeed.comm as dist
+import deepspeed
+from copy import deepcopy
+from torch import nn
+
+from unit.common import DistributedTest, preferred_dtype
+from deepspeed.accelerator import get_accelerator
+from deepspeed.utils import groups
+from deepspeed.module_inject.layers import (LinearAllreduce, LinearLayer, SubParamLinearLayer, fused_LinearLayer)
+from deepspeed.module_inject.autotp_config import AutoTPConfig
+from deepspeed.module_inject.auto_tp import AutoTP
+
+
+def skip_on_device():
+    if get_accelerator().device_name() == 'xpu':
+        pytest.skip("XPU requires a higher version for test")
+
+
+class SequentialLinearModel(torch.nn.Module):
+
+    def __init__(self, hidden_dim, nlayers=1):
+        super(SequentialLinearModel, self).__init__()
+        self.linears = torch.nn.ModuleList([torch.nn.Linear(hidden_dim, hidden_dim) for _ in range(nlayers)])
+
+    def forward(self, x):
+        for layer in self.linears:
+            x = layer(x)
+        return x
+
+
+class CustomLinearModule(torch.nn.Module):
+
+    def __init__(self, hidden_dim):
+        super(CustomLinearModule, self).__init__()
+        self.weight = torch.nn.Parameter(torch.empty(hidden_dim, hidden_dim))
+        self.bias = torch.nn.Parameter(torch.empty(hidden_dim))
+        torch.nn.init.uniform_(self.weight, -0.02, 0.02)
+        torch.nn.init.uniform_(self.bias, -0.02, 0.02)
+
+    def forward(self, x):
+        return torch.matmul(x, self.weight.transpose(-1, -2)) + self.bias
+
+
+class CustomLinearModel(torch.nn.Module):
+
+    def __init__(self, hidden_dim):
+        super(CustomLinearModel, self).__init__()
+        self.custom = CustomLinearModule(hidden_dim)
+
+    def forward(self, x):
+        return self.custom(x)
+
+
+class QKVLinearModule(torch.nn.Module):
+
+    def __init__(self, hidden_dim):
+        super(QKVLinearModule, self).__init__()
+        self.qkv_proj = torch.nn.Linear(hidden_dim, hidden_dim * 3)
+
+    def forward(self, x):
+        return self.qkv_proj(x)
+
+
+class QKVLinearModel(torch.nn.Module):
+
+    def __init__(self, hidden_dim):
+        super(QKVLinearModel, self).__init__()
+        self.self_attn = QKVLinearModule(hidden_dim)
+
+    def forward(self, x):
+        return self.self_attn(x)
+
+
+def init_tp_engine(tp_size, partition_config=None):
+    config_dict = {
+        "train_micro_batch_size_per_gpu": 1,
+        "optimizer": {
+            "type": "Adam",
+            "params": {
+                "lr": 1e-6
+            }
+        },
+        "tensor_parallel": {
+            "autotp_size": tp_size,
+        },
+        "zero_optimization": {
+            "stage": 0,
+        }
+    }
+    if partition_config is not None:
+        config_dict["tensor_parallel"]["partition_config"] = partition_config
+    else:
+        config_dict["tensor_parallel"]["partition_config"] = {
+            "use_default_specs": False,
+            "layer_specs": [{
+                "patterns": [".*\\.weight$"],
+                "partition_type": "skip",
+            }],
+        }
+    if preferred_dtype() is torch.float16:
+        config_dict["fp16"] = {"enabled": True}
+    elif preferred_dtype() is torch.bfloat16:
+        config_dict["bf16"] = {"enabled": True}
+
+    model = SequentialLinearModel(hidden_dim=8)
+    deepspeed.initialize(model=model, model_parameters=model.parameters(), config=config_dict)
+
+
+def apply_autotp_with_partition_config(model, tp_size, partition_config):
+    groups._init_tp_mesh_device(tensor_model_parallel_size=tp_size)
+    autotp_config = AutoTPConfig.from_dict(partition_config)
+    autotp = AutoTP(module=model,
+                    all_reduce_linears=[],
+                    prefix="",
+                    state_dict=None,
+                    linear_layer_setting=None,
+                    orig_layer_impl=None,
+                    keep_module_on_host=False,
+                    partition_config=autotp_config)
+    autotp.set_tensor_parallel_config(tp_size, groups.get_tensor_model_parallel_group())
+    autotp.update_linear_policies()
+    autotp._replace_module(model)
+    return model
+
+
+def gather_subparam_output(output, subparam_sizes, mp_group):
+    tp_world_size = dist.get_world_size(group=mp_group)
+    local_sizes = [size // tp_world_size for size in subparam_sizes]
+    output_chunks = torch.split(output, local_sizes, dim=-1)
+    gathered_chunks = []
+    for chunk in output_chunks:
+        chunk = chunk.contiguous()
+        gathered = [torch.empty_like(chunk) for _ in range(tp_world_size)]
+        dist.all_gather(gathered, chunk, group=mp_group)
+        gathered_chunks.append(torch.cat(gathered, dim=-1))
+    return torch.cat(gathered_chunks, dim=-1)
+
+
+def assert_close_for_preferred_dtype(actual, expected):
+    atol = 1e-3
+    rtol = 2e-2
+    if preferred_dtype() is torch.float32:
+        atol = 1e-5
+        rtol = 1e-5
+    torch.testing.assert_close(actual, expected, atol=atol, rtol=rtol)
+
+
+class TestAutoTPCustomPatterns(DistributedTest):
+    world_size = 2
+    reuse_dist_env = False
+
+    def test_custom_pattern_replacement(self):
+        skip_on_device()
+        partition_config = {
+            "use_default_specs":
+            False,
+            "layer_specs": [
+                {
+                    "patterns": [".*linears\\.0\\.weight$"],
+                    "partition_type": "row",
+                },
+                {
+                    "patterns": [".*linears\\.1\\.weight$"],
+                    "partition_type": "column",
+                },
+                {
+                    "patterns": [".*linears\\.2\\.weight$"],
+                    "partition_type": "skip",
+                },
+            ],
+        }
+        model = SequentialLinearModel(hidden_dim=16, nlayers=3)
+        model = apply_autotp_with_partition_config(model, tp_size=2, partition_config=partition_config)
+
+        assert isinstance(model.linears[0], LinearAllreduce)
+        assert isinstance(model.linears[1], LinearLayer)
+        assert isinstance(model.linears[2], nn.Linear)
+
+    def test_custom_patterns_applied_via_config(self):
+        skip_on_device()
+        partition_config = {
+            "use_default_specs":
+            False,
+            "layer_specs": [
+                {
+                    "patterns": [".*linears\\.0\\.weight$"],
+                    "partition_type": "row",
+                },
+                {
+                    "patterns": [".*linears\\.1\\.weight$"],
+                    "partition_type": "column",
+                },
+                {
+                    "patterns": [".*linears\\.2\\.weight$"],
+                    "partition_type": "skip",
+                },
+            ],
+        }
+        config_dict = {
+            "train_micro_batch_size_per_gpu": 1,
+            "optimizer": {
+                "type": "Adam",
+                "params": {
+                    "lr": 1e-6
+                }
+            },
+            "tensor_parallel": {
+                "autotp_size": 2,
+                "partition_config": partition_config,
+            },
+            "zero_optimization": {
+                "stage": 0,
+            }
+        }
+        if preferred_dtype() is torch.float16:
+            config_dict["fp16"] = {"enabled": True}
+        elif preferred_dtype() is torch.bfloat16:
+            config_dict["bf16"] = {"enabled": True}
+
+        model = SequentialLinearModel(hidden_dim=16, nlayers=3)
+        engine, _, _, _ = deepspeed.initialize(model=model, model_parameters=model.parameters(), config=config_dict)
+        assert isinstance(engine.module.linears[0], LinearAllreduce)
+        assert isinstance(engine.module.linears[1], LinearLayer)
+        assert isinstance(engine.module.linears[2], nn.Linear)
+
+    def test_use_default_specs_false_skips_unmatched_layers(self):
+        skip_on_device()
+        # Verify unmatched layers remain unsharded when defaults are disabled.
+        partition_config = {
+            "use_default_specs":
+            False,
+            "layer_specs": [
+                {
+                    "patterns": [".*linears\\.0\\.weight$"],
+                    "partition_type": "row",
+                },
+                {
+                    "patterns": [".*linears\\.1\\.weight$"],
+                    "partition_type": "column",
+                },
+            ],
+        }
+        config_dict = {
+            "train_micro_batch_size_per_gpu": 1,
+            "optimizer": {
+                "type": "Adam",
+                "params": {
+                    "lr": 1e-6
+                }
+            },
+            "tensor_parallel": {
+                "autotp_size": 2,
+                "partition_config": partition_config,
+            },
+            "zero_optimization": {
+                "stage": 0,
+            }
+        }
+        if preferred_dtype() is torch.float16:
+            config_dict["fp16"] = {"enabled": True}
+        elif preferred_dtype() is torch.bfloat16:
+            config_dict["bf16"] = {"enabled": True}
+
+        model = SequentialLinearModel(hidden_dim=16, nlayers=3)
+        engine, _, _, _ = deepspeed.initialize(model=model, model_parameters=model.parameters(), config=config_dict)
+        assert isinstance(engine.module.linears[0], LinearAllreduce)
+        assert isinstance(engine.module.linears[1], LinearLayer)
+        assert isinstance(engine.module.linears[2], nn.Linear)
+
+    def test_custom_module_replacement_with_patterns(self):
+        skip_on_device()
+        # Verify custom linear-like modules are partitioned via patterns.
+        partition_config = {
+            "use_default_specs": False,
+            "layer_specs": [
+                {
+                    "patterns": [".*custom\\.weight$"],
+                    "partition_type": "column",
+                },
+            ],
+        }
+        config_dict = {
+            "train_micro_batch_size_per_gpu": 1,
+            "optimizer": {
+                "type": "Adam",
+                "params": {
+                    "lr": 1e-6
+                }
+            },
+            "tensor_parallel": {
+                "autotp_size": 2,
+                "partition_config": partition_config,
+            },
+            "zero_optimization": {
+                "stage": 0,
+            }
+        }
+        if preferred_dtype() is torch.float16:
+            config_dict["fp16"] = {"enabled": True}
+        elif preferred_dtype() is torch.bfloat16:
+            config_dict["bf16"] = {"enabled": True}
+
+        model = CustomLinearModel(hidden_dim=16)
+        engine, _, _, _ = deepspeed.initialize(model=model, model_parameters=model.parameters(), config=config_dict)
+        assert isinstance(engine.module.custom, LinearLayer)
+
+    def test_custom_pattern_disables_fused_qkv_heuristic(self):
+        skip_on_device()
+        # Use a qkv_proj name that would trigger the fused-QKV heuristic, then
+        # verify custom patterns override that path and preserve correctness.
+        torch.manual_seed(1234)
+        hidden_dim = 16
+        qkv_sizes = (hidden_dim, hidden_dim, hidden_dim)
+        partition_config = {
+            "use_default_specs":
+            False,
+            "layer_specs": [
+                {
+                    "patterns": [".*self_attn\\.qkv_proj\\.weight$"],
+                    "partition_type": "column",
+                    "shape": [list(qkv_sizes), -1],
+                    "partition_dim": 0,
+                },
+            ],
+        }
+        config_dict = {
+            "train_micro_batch_size_per_gpu": 1,
+            "optimizer": {
+                "type": "Adam",
+                "params": {
+                    "lr": 1e-6
+                }
+            },
+            "tensor_parallel": {
+                "autotp_size": 2,
+                "partition_config": partition_config,
+            },
+            "zero_optimization": {
+                "stage": 0,
+            }
+        }
+        if preferred_dtype() is torch.float16:
+            config_dict["fp16"] = {"enabled": True}
+        elif preferred_dtype() is torch.bfloat16:
+            config_dict["bf16"] = {"enabled": True}
+
+        model = QKVLinearModel(hidden_dim=hidden_dim)
+        baseline = deepcopy(model).to(get_accelerator().current_device(), dtype=preferred_dtype())
+        engine, _, _, _ = deepspeed.initialize(model=model, model_parameters=model.parameters(), config=config_dict)
+        qkv_layer = engine.module.self_attn.qkv_proj
+        # Custom pattern should force SubParamLinearLayer (shape-based path),
+        # and avoid the legacy fused-QKV heuristic despite the qkv_proj name.
+        assert isinstance(qkv_layer, SubParamLinearLayer)
+        assert not isinstance(qkv_layer, fused_LinearLayer)
+
+        assert qkv_layer.partition_dim == 0
+        assert qkv_layer._subparam_sizes == qkv_sizes
+        assert qkv_layer._orig_weight_shape == (hidden_dim * 3, hidden_dim)
+
+        qkv_layer.gather_params([qkv_layer.weight, qkv_layer.bias])
+        torch.testing.assert_close(qkv_layer.weight, baseline.self_attn.qkv_proj.weight)
+        if qkv_layer.bias is not None:
+            torch.testing.assert_close(qkv_layer.bias, baseline.self_attn.qkv_proj.bias)
+
+        torch.manual_seed(4321)
+        inputs = torch.randn(2, hidden_dim, dtype=preferred_dtype(), device=get_accelerator().current_device())
+        full_output = baseline(inputs)
+        tp_output = engine.module(inputs)
+        assert_close_for_preferred_dtype(tp_output, full_output)
+
+    def test_first_match_precedence(self):
+        skip_on_device()
+        partition_config = {
+            "use_default_specs":
+            False,
+            "layer_specs": [
+                {
+                    "patterns": [".*linears\\.0\\.weight$"],
+                    "partition_type": "skip",
+                },
+                {
+                    "patterns": [".*linears\\.0\\.weight$"],
+                    "partition_type": "column",
+                },
+            ],
+        }
+        model = SequentialLinearModel(hidden_dim=16, nlayers=1)
+        model = apply_autotp_with_partition_config(model, tp_size=2, partition_config=partition_config)
+
+        assert isinstance(model.linears[0], nn.Linear)
+
+
+def test_invalid_custom_shape_rejected():
+    bad_config = {
+        "layer_specs": [{
+            "patterns": [".*"],
+            "partition_type": "column",
+            "shape": [2, [1, 1]],
+        }]
+    }
+    with pytest.raises(ValueError, match="nested tuple only allowed at partition_dim"):
+        AutoTPConfig.from_dict(bad_config)
+
+
+class TestAutoTPFusedWeights(DistributedTest):
+    world_size = 2
+    reuse_dist_env = False
+
+    def test_gate_up_fused_weight_partition(self):
+        skip_on_device()
+        init_tp_engine(tp_size=2)
+
+        hidden_dim = 8
+        torch.manual_seed(42)
+        linear = nn.Linear(hidden_dim,
+                           hidden_dim * 2,
+                           bias=True,
+                           dtype=preferred_dtype(),
+                           device=get_accelerator().current_device())
+        full_weight = deepcopy(linear.weight.data)
+        full_bias = deepcopy(linear.bias.data)
+
+        layer = SubParamLinearLayer(deepcopy(linear),
+                                    groups.get_tensor_model_parallel_group(),
+                                    shape=(2, -1),
+                                    partition_dim=0,
+                                    name="mlp.gate_up_proj")
+        assert layer._subparam_sizes == (hidden_dim, hidden_dim)
+        assert layer.weight.shape == (hidden_dim, hidden_dim)
+
+        layer.gather_params([layer.weight, layer.bias])
+        torch.testing.assert_close(layer.weight.data, full_weight)
+        torch.testing.assert_close(layer.bias.data, full_bias)
+
+    def test_gqa_uneven_qkv_fused_weight_partition(self):
+        skip_on_device()
+        init_tp_engine(tp_size=2)
+
+        hidden_dim = 8
+        q_size, k_size, v_size = 8, 4, 4
+        torch.manual_seed(123)
+        linear = nn.Linear(hidden_dim,
+                           q_size + k_size + v_size,
+                           bias=True,
+                           dtype=preferred_dtype(),
+                           device=get_accelerator().current_device())
+        full_weight = deepcopy(linear.weight.data)
+        full_bias = deepcopy(linear.bias.data)
+
+        layer = SubParamLinearLayer(deepcopy(linear),
+                                    groups.get_tensor_model_parallel_group(),
+                                    shape=((q_size, k_size, v_size), -1),
+                                    partition_dim=0,
+                                    name="self_attn.qkv_proj")
+        assert layer._subparam_sizes == (q_size, k_size, v_size)
+        assert layer.weight.shape == ((q_size + k_size + v_size) // 2, hidden_dim)
+
+        layer.gather_params([layer.weight, layer.bias])
+        torch.testing.assert_close(layer.weight.data, full_weight)
+        torch.testing.assert_close(layer.bias.data, full_bias)
+
+    def test_gqa_uneven_qkv_fused_forward(self):
+        skip_on_device()
+        groups._init_tp_mesh_device(tensor_model_parallel_size=2)
+
+        hidden_dim = 8
+        q_size, k_size, v_size = 8, 4, 4
+        torch.manual_seed(321)
+        linear = nn.Linear(hidden_dim,
+                           q_size + k_size + v_size,
+                           bias=True,
+                           dtype=preferred_dtype(),
+                           device=get_accelerator().current_device())
+        layer = SubParamLinearLayer(deepcopy(linear),
+                                    groups.get_tensor_model_parallel_group(),
+                                    shape=((q_size, k_size, v_size), -1),
+                                    partition_dim=0,
+                                    name="self_attn.qkv_proj")
+
+        torch.manual_seed(42)
+        inputs = torch.randn(2, hidden_dim, dtype=preferred_dtype(), device=get_accelerator().current_device())
+        full_output = linear(inputs)
+        tp_output = layer(inputs)
+
+        gathered_output = gather_subparam_output(tp_output, (q_size, k_size, v_size),
+                                                 groups.get_tensor_model_parallel_group())
+        assert_close_for_preferred_dtype(gathered_output, full_output)

@@ -32,7 +32,7 @@ def to_device(batch, device):
     for k, v in batch.items():
         try:
             output[k] = v.to(device)
-        except:
+        except Exception:
             output[k] = v
     return output
 
@@ -66,7 +66,7 @@ class LinearLayer_LoRA(torch.nn.Module):
         try:
             # for zero stage 3
             rows, columns = weight.ds_shape
-        except:
+        except Exception:
             rows, columns = weight.shape
         self.lora_right_weight = torch.nn.Parameter(torch.zeros(
             columns, lora_dim))  # apply transpose so in forward we do not need to transpose again
