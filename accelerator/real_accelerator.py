@@ -120,7 +120,7 @@ def get_accelerator():
         try:
             import torch
 
-            # Detect XPU via stock PyTorch
+            # Detect XPU via PyTorch
             if hasattr(torch, 'xpu'):
                 if torch.xpu.is_available():
                     accelerator_name = "xpu"

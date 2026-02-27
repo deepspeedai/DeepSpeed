@@ -51,7 +51,7 @@ class SYCLOpBuilder(OpBuilder):
     def _sycl_env_paths(self):
         """Find the SYCL include and lib directories from the Python environment.
 
-        When using stock PyTorch XPU wheels, libsycl.so and SYCL headers are
+        When using PyTorch XPU wheels, libsycl.so and SYCL headers are
         installed into the Python environment (e.g. conda env).  The system
         ``icpx`` compiler ships its own (potentially newer) SYCL headers and
         runtime.  To avoid ABI mismatches we must compile and link against the
@@ -136,7 +136,7 @@ class SYCLOpBuilder(OpBuilder):
 
         # Set CXX to icpx (Intel oneAPI DPC++ compiler) so that .cpp/.dp.cpp
         # files containing SYCL code are compiled with the SYCL-aware compiler.
-        # Stock PyTorch's cpp_extension only routes .sycl files to icpx by default.
+        # PyTorch's cpp_extension only routes .sycl files to icpx by default.
         saved_env = {}
         for var in ('CXX', 'LIBRARY_PATH', 'CPATH'):
             saved_env[var] = os.environ.get(var)
