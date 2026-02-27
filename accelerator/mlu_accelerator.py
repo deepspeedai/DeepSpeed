@@ -162,11 +162,6 @@ class MLU_Accelerator(DeepSpeedAccelerator):
         return supported_dtypes
 
     # Misc
-    def amp(self):
-        if hasattr(torch.mlu, 'amp'):
-            return torch.mlu.amp
-        return None
-
     def is_available(self):
         return torch.mlu.is_available()
 

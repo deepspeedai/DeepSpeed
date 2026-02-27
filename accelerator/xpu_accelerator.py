@@ -166,9 +166,6 @@ class XPU_Accelerator(DeepSpeedAccelerator):
         return self.total_memory(device_index) - self.memory_allocated(device_index)
 
     # Misc
-    def amp(self):
-        return torch.xpu.amp
-
     def is_available(self):
         return torch.xpu.is_available()
 

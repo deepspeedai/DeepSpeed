@@ -173,9 +173,6 @@ class HPU_Accelerator(DeepSpeedAccelerator):
         return supported_dtypes
 
     # Misc
-    def amp(self):
-        return None
-
     def is_available(self):
         return self.hpu.is_available()
 

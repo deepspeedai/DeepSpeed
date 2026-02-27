@@ -156,9 +156,6 @@ class MPS_Accelerator(DeepSpeedAccelerator):
         return [torch.float]
 
     # Misc
-    def amp(self):
-        return
-
     def is_available(self):
         return hasattr(torch.backends, "mps") and torch.backends.mps.is_available()
 
