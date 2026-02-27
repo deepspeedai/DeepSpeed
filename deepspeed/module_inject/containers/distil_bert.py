@@ -41,7 +41,7 @@ class HFDistilBertLayerPolicy(TransformerPolicy):
                 HFDistilBertLayerPolicy._orig_layer_class = [
                     transformers.models.distilbert.modeling_distilbert.TransformerBlock,
                 ]
-            except:
+            except Exception:
                 HFDistilBertLayerPolicy._orig_layer_class = None
 
     def get_hidden_heads(self):

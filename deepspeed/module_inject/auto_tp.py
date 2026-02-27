@@ -68,7 +68,7 @@ class ReplaceWithTensorSlicing:
             if src_shape[outer_dim] == dst_shape[self.out_dim]:
                 try:
                     dst = dst.reshape(-1).data.copy_(src.data.reshape(-1)).reshape(src.shape)
-                except:
+                except Exception:
                     print(dst.shape, src.shape)
                     exit()
                 dst = torch.nn.parameter.Parameter(dst, requires_grad=False)
@@ -424,8 +424,8 @@ class AutoTP():
             # No matching spec found
             if self.partition_config.strict_mode:
                 raise ValueError(f"No matching spec for {param_name}")
-            # Default: column parallel for Linear layers
-            spec = TPLayerSpec(patterns=[], partition_type=PartitionType.COLUMN)
+            # With partition_config, rely only on explicit specs and skip unmatched layers.
+            return child
 
         setattr(child, "replaced", True)
 
@@ -439,6 +439,8 @@ class AutoTP():
 
     def _create_row_parallel_layer(self, module, spec: TPLayerSpec, name: str):
         """Create row-parallel layer (AllReduce after forward)."""
+        if self.conv_linear_layer:
+            return Conv_LinearALlreduce(module, self.mp_group, name=name)
         # Check for lm_head / embed_out
         if name == "lm_head" or name == 'embed_out':
             return LmHeadLinearAllreduce(module, self.mp_group)
@@ -455,6 +457,12 @@ class AutoTP():
 
     def _create_column_parallel_layer(self, module, spec: TPLayerSpec, name: str):
         """Create column-parallel layer (AllReduce in backward)."""
+        if self.conv_linear_layer:
+            return conv_LinearLayer(module, self.mp_group, name=name)
+        # Only use fused-QKV heuristics when no partition_config is provided.
+        elif self.partition_config is None and require_tp_fused_qkvw(name, self.mp_size):
+            # Check and handle fused qkv for TP
+            return fused_LinearLayer(module, self.mp_group, fused_module=self.module)
         if spec.shape is not None:
             return SubParamLinearLayer(
                 module,
@@ -488,6 +496,7 @@ class AutoTP():
     def _slice_embedding(self, child, name, conv_linear_layer):
         if getattr(child, "replaced", False) == True:
             return
+
         mp_replace = ReplaceWithTensorSlicing(mp_group=self.mp_group)
 
         if hasattr(child.weight, 'ds_tensor'):
@@ -551,7 +560,30 @@ class AutoTP():
                     continue
             if len(child._buffers) != 0 and self.state_dict is not None:
                 Loading.load_buffer(child, self.state_dict, checking_key)
-            if child.__class__ in self.linear_policies:
+
+            # When using partition_config (custom patterns/presets), use pattern-based routing
+            # instead of linear_policies. This keeps all pattern logic centralized here.
+            if self.partition_config is not None:
+                full_name = prev_name + '.' + name if prev_name else name
+                if isinstance(child, nn.Embedding):
+                    # Check if embedding matches any pattern
+                    param_name = full_name + ".weight"
+                    model_type = self._get_model_type()
+                    spec = self.partition_config.find_matching_spec(param_name, model_type)
+                    if spec is not None and spec.partition_type != PartitionType.SKIP:
+                        new_child = self._slice_embedding(child, full_name, False)
+                        if new_child is not None:
+                            setattr(r_module, name, new_child)
+                    # If no pattern matched or skip, leave embedding unchanged
+                elif hasattr(child, "weight") and getattr(child.weight, "dim", lambda: 0)() == 2:
+                    new_child = self._replace_with_config(child, full_name)
+                    if new_child is not None:
+                        setattr(r_module, name, new_child)
+                else:
+                    self.update_mp_params(child)
+                    self._replace_module(child, name, class_name)
+            # Traditional path: use linear_policies for type-based routing
+            elif child.__class__ in self.linear_policies:
                 setattr(r_module, name, self.linear_policies[child.__class__](child, prev_name + '.' + name,
                                                                               self.conv_linear_layer))
             elif any(isinstance(child, lp) for lp in self.linear_policies):

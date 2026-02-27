@@ -115,7 +115,7 @@ class EvoformerAttnBuilder(CUDAOpBuilder):
         if not cutlass_path.is_dir():
             raise RuntimeError(f"CUTLASS_PATH {cutlass_path} does not exist")
         include_dirs = cutlass_path / "include", cutlass_path / "tools" / "util" / "include"
-        include_dirs = [include_dir for include_dir in include_dirs if include_dir.is_dir()]
+        include_dirs = [str(include_dir) for include_dir in include_dirs if include_dir.is_dir()]
         if not include_dirs:
             raise RuntimeError(f"CUTLASS_PATH {cutlass_path} does not contain any include directories")
         return include_dirs
