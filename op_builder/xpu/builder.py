@@ -88,7 +88,7 @@ class SYCLOpBuilder(OpBuilder):
         torch_lib_dir = os.path.join(os.path.dirname(torch.__file__), 'lib')
         flags = [
             '-fPIC', '-fsycl', '-fsycl-targets=spir64',
-            '-Xs "-options -cl-poison-unsupported-fp64-kernels,cl-intel-enable-auto-large-GRF-mode"',
+            '-Xs "-options -cl-intel-enable-auto-large-GRF-mode"',
             '-fsycl-max-parallel-link-jobs=8', '-Wl,-export-dynamic',
             f'-L{torch_lib_dir}', f'-Wl,-rpath,{torch_lib_dir}',
         ]
@@ -103,7 +103,7 @@ class SYCLOpBuilder(OpBuilder):
         return [
             '-fsycl', '-fsycl-targets=spir64',
             '-fsycl-max-parallel-link-jobs=8',
-            '-Xs "-options -cl-poison-unsupported-fp64-kernels,cl-intel-enable-auto-large-GRF-mode"'
+            '-Xs "-options -cl-intel-enable-auto-large-GRF-mode"'
         ]
 
     def load(self, verbose=True):
